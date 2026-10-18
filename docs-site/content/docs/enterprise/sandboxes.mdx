@@ -252,12 +252,14 @@ this release, so:
   `guardrail.llm.api_key`, `guardrail.judge.llm.api_key`,
   `scanners.mcp_scanner.llm.api_key`, `scanners.skill_scanner.llm.api_key`,
   `scanners.plugin_llm.api_key`, `cisco_ai_defense.api_key` and
-  `gateway.token`. It also refuses literal webhook URLs, all provider
-  `llm.extra_headers` values, and credential-bearing observability destination
-  headers. Use a protected credential
-  reference such as `{credential: NAME}` for destination headers. Managed
-  webhooks cannot use a literal URL; use a credential-backed observability
-  destination instead.
+  `gateway.token`. New administrator input also refuses credential-bearing
+  provider headers in every `llm.extra_headers` block and literal credential
+  headers on observability destinations. Routing and version headers without
+  credentials remain valid. Use `{credential: NAME}` for destination headers.
+  Webhook URLs remain supported because they have no URL reference form; keep
+  their secrets in `secret_env` where the notifier supports it. An installed
+  1.0.2 config with literals still loads. `status` and `verify` name the
+  paths to review and advise `{credential: NAME}` where supported.
 - `ensure`, `status` and `verify` count the enrolled accounts in the group
   (`docker_group_members`, a number, no names), and
   `defenseclaw sandbox doctor` tells such a person what the membership means.

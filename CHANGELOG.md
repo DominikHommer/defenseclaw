@@ -10,6 +10,10 @@ for current behavior.
 
 ## [Unreleased] — 1.0.2: managed sandbox telemetry
 
+### Upgrade note for 1.0.3
+
+- Existing managed standalone 1.0.2 configurations with webhook URLs or literal provider and destination credential headers continue to load after upgrade. `status` and `verify` warn with the affected paths and credential-reference guidance. New administrator input refuses credential-bearing headers; non-secret provider headers and webhook URLs remain supported.
+
 ### Fixed
 
 - **A recovered hook evaluation error fails closed on a standalone managed device.** Before this fix an internal evaluator error followed the configured guardrail mode and fail mode, so on a standalone managed device a tool or prompt call was allowed in observe mode, or with `hook_fail_mode: open` (guardrail or `application_protection`) for every agent except Codex, Claude Code and Devin. It now gets the agent's native deny there in every guardrail mode and whatever `hook_fail_mode` says, as when the gateway gives no verdict; a stop or session-end event keeps its neutral allow. Per-user installs and the Secure Client profile are unchanged.

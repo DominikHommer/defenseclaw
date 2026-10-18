@@ -1341,7 +1341,6 @@ func standaloneInlineSecrets(cfg *Config) []string {
 	var inline []string
 	for _, field := range []struct{ key, value string }{
 		{"llm.api_key", cfg.LLM.APIKey},
-		{"inspect_llm.api_key", cfg.InspectLLM.APIKey},
 		{"guardrail.llm.api_key", cfg.Guardrail.LLM.APIKey},
 		{"guardrail.judge.llm.api_key", cfg.Guardrail.Judge.LLM.APIKey},
 		{"scanners.mcp_scanner.llm.api_key", cfg.Scanners.MCPScanner.LLM.APIKey},
@@ -1354,31 +1353,92 @@ func standaloneInlineSecrets(cfg *Config) []string {
 			inline = append(inline, field.key)
 		}
 	}
-	for index, webhook := range cfg.Webhooks {
-		if strings.TrimSpace(webhook.URL) != "" {
-			inline = append(inline, fmt.Sprintf("webhooks[%d].url", index))
-		}
-	}
-	// Provider extra_headers has only scalar values today, with no reference
-	// form. A benign-looking name can still carry a credential, so a managed
-	// config cannot safely accept any of these literal values.
-	if len(cfg.LLM.ExtraHeaders) > 0 {
-		inline = append(inline, "llm.extra_headers")
-	}
 	return inline
 }
 
-// managedCredentialHeader refuses literal authentication headers without
-// inspecting or repeating their values in an error or log.
+// managedCredentialHeader identifies literal authentication headers without
+// repeating their values in an error or log.
 func managedCredentialHeader(name, value string) bool {
 	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), "_", "-"))
-	for _, part := range []string{"authorization", "api-key", "token", "secret", "password", "cookie", "auth"} {
+	for _, part := range []string{"authorization", "api-key", "apikey", "token", "secret", "password", "cookie", "auth"} {
 		if strings.Contains(normalized, part) {
 			return true
 		}
 	}
 	parts := strings.Fields(value)
 	return len(parts) > 1 && (strings.EqualFold(parts[0], "bearer") || strings.EqualFold(parts[0], "basic"))
+}
+
+// ManagedStandaloneLiteralPaths names credentials introduced by 1.0.3's
+// candidate rule. Installed 1.0.2 configs may still contain these values;
+// callers use the same paths for an upgrade advisory instead of rejecting a
+// runtime load. Webhook URLs have no reference form, so they are advisory only.
+func ManagedStandaloneLiteralPaths(cfg *Config, raw []byte) []string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	var paths []string
+	if strings.TrimSpace(cfg.InspectLLM.APIKey) != "" {
+		paths = append(paths, "inspect_llm.api_key")
+	}
+	for _, block := range []struct {
+		path string
+		llm  LLMConfig
+	}{
+		{"llm", cfg.LLM},
+		{"guardrail.llm", cfg.Guardrail.LLM},
+		{"guardrail.judge.llm", cfg.Guardrail.Judge.LLM},
+		{"scanners.mcp_scanner.llm", cfg.Scanners.MCPScanner.LLM},
+		{"scanners.skill_scanner.llm", cfg.Scanners.SkillScanner.LLM},
+		{"scanners.plugin_llm", cfg.Scanners.PluginScannerLLM},
+	} {
+		for name, value := range block.llm.ExtraHeaders {
+			if managedCredentialHeader(name, value) {
+				paths = append(paths, block.path+".extra_headers")
+				break
+			}
+		}
+	}
+	var envelope observabilityV8ConfigEnvelope
+	if err := yaml.Unmarshal(raw, &envelope); err == nil && envelope.Observability != nil {
+		for index, destination := range envelope.Observability.Destinations {
+			for name, header := range destination.Headers {
+				if header.Static != nil && managedCredentialHeader(name, *header.Static) {
+					paths = append(paths, fmt.Sprintf("observability.destinations[%d].headers", index))
+					break
+				}
+			}
+		}
+	}
+	return paths
+}
+
+// ManagedStandaloneUpgradeAdvisories includes literal webhook URLs, which
+// remain supported until a URL reference form exists.
+func ManagedStandaloneUpgradeAdvisories(cfg *Config, raw []byte) []string {
+	paths := ManagedStandaloneLiteralPaths(cfg, raw)
+	if cfg != nil && cfg.StandaloneEnterprise() {
+		for index, webhook := range cfg.Webhooks {
+			if strings.TrimSpace(webhook.URL) != "" {
+				paths = append(paths, fmt.Sprintf("webhooks[%d].url", index))
+			}
+		}
+	}
+	return paths
+}
+
+// ValidateManagedStandaloneLiteralCandidate applies the new rule only before
+// administrator input is installed. Runtime readers retain the upgrade path.
+func ValidateManagedStandaloneLiteralCandidate(cfg *Config, raw []byte) error {
+	paths := ManagedStandaloneLiteralPaths(cfg, raw)
+	if len(paths) == 0 {
+		return nil
+	}
+	return &V8SemanticError{
+		Path:    "$." + paths[0],
+		Summary: "a managed standalone candidate holds a literal credential at " + strings.Join(paths, ", "),
+		Action:  "use {credential: NAME} or {env: NAME} where supported; store provider keys as protected credentials",
+	}
 }
 
 func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {

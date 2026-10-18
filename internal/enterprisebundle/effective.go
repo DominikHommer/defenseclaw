@@ -185,6 +185,9 @@ func loadConfigAtPath(b *Bundle, root, configPath, dataDir, platform string) (*c
 	if err != nil {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
 	}
+	if err := config.ValidateManagedStandaloneLiteralCandidate(cfg, rendered); err != nil {
+		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
+	}
 	return cfg, rendered, nil
 }
 

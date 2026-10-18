@@ -897,7 +897,7 @@ func TestValidateCandidateRejectsManagedJudgeInlineKey(t *testing.T) {
 	}
 }
 
-func TestManagedStandaloneRefusesAdditionalInlineSecrets(t *testing.T) {
+func TestManagedStandaloneCandidateLiteralPaths(t *testing.T) {
 	base := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
 	for _, tc := range []struct {
 		name string
@@ -905,21 +905,30 @@ func TestManagedStandaloneRefusesAdditionalInlineSecrets(t *testing.T) {
 		path string
 	}{
 		{"legacy inspect key", func(c *Config) { c.InspectLLM.APIKey = "example-sensitive-value" }, "inspect_llm.api_key"},
-		{"webhook URL", func(c *Config) { c.Webhooks = []WebhookConfig{{URL: "https://example.test/hook"}} }, "webhooks[0].url"},
 		{"provider authorization", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"Authorization": "example-sensitive-value"} }, "llm.extra_headers"},
 		{"provider bearer", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"X-Route": "Bearer example-sensitive-value"} }, "llm.extra_headers"},
-		{"provider opaque header", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"X-Route": "example-sensitive-value"} }, "llm.extra_headers"},
+		{"judge authorization", func(c *Config) {
+			c.Guardrail.Judge.LLM.ExtraHeaders = map[string]string{"Authorization": "example-sensitive-value"}
+		}, "guardrail.judge.llm.extra_headers"},
+		{"scanner bearer", func(c *Config) {
+			c.Scanners.MCPScanner.LLM.ExtraHeaders = map[string]string{"X-Route": "Bearer example-sensitive-value"}
+		}, "scanners.mcp_scanner.llm.extra_headers"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := base
 			tc.set(&cfg)
-			err := validateEnterpriseConfig(&cfg)
+			err := ValidateManagedStandaloneLiteralCandidate(&cfg, nil)
 			if err == nil || !strings.Contains(err.Error(), tc.path) ||
 				strings.Contains(err.Error(), "example-sensitive-value") || strings.Contains(err.Error(), "https://example.test/hook") ||
 				!strings.Contains(err.Error(), "{credential: NAME}") {
 				t.Fatalf("validation = %v, want redacted %s refusal with credential guidance", err, tc.path)
 			}
 		})
+	}
+	base.LLM.ExtraHeaders = map[string]string{"X-Route": "region-west"}
+	base.Webhooks = []WebhookConfig{{URL: "https://example.test/hook"}}
+	if err := ValidateManagedStandaloneLiteralCandidate(&base, nil); err != nil {
+		t.Fatalf("benign headers and supported webhook refused: %v", err)
 	}
 }
 
@@ -928,12 +937,55 @@ func TestManagedStandaloneRefusesLiteralDestinationCredentialHeader(t *testing.T
 		raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
 			"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: true\n" +
 			"    endpoint: https://example.test/events\n    headers:\n      " + header + "\n")
-		_, err := ParseCompileObservabilityV8(filepath.Join(t.TempDir(), "config.yaml"), raw,
-			ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()})
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		_, err := ParseCompileObservabilityV8(path, raw, ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("installed header stopped compiling: %v", err)
+		}
+		err = ValidateCandidate(path, raw)
 		if err == nil || !strings.Contains(err.Error(), "observability.destinations[0].headers") ||
 			strings.Contains(err.Error(), "example-sensitive-value") || !strings.Contains(err.Error(), "{credential: NAME}") {
 			t.Fatalf("header %q: validation = %v", header, err)
 		}
+	}
+}
+
+func TestInstalledManagedV102LiteralsStillLoadAndCompile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), DefaultConfigName)
+	raw := []byte(`config_version: 9
+deployment_mode: managed_enterprise
+enterprise:
+  profile: standalone
+webhooks:
+  - url: https://example.test/hook
+    type: generic
+observability:
+  destinations:
+    - name: archive
+      kind: http_jsonl
+      enabled: false
+      endpoint: https://example.test/events
+      headers:
+        Authorization: provided by administrator
+`)
+	loaded, err := LoadRuntimeV8InspectionCandidateFromBytes(path, raw)
+	if err != nil {
+		t.Fatalf("installed config failed to load: %v", err)
+	}
+	if _, err := ParseCompileObservabilityV8(path, raw, ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()}); err != nil {
+		t.Fatalf("installed config failed to compile: %v", err)
+	}
+	paths := strings.Join(ManagedStandaloneUpgradeAdvisories(loaded, raw), ",")
+	for _, want := range []string{"webhooks[0].url", "observability.destinations[0].headers"} {
+		if !strings.Contains(paths, want) {
+			t.Fatalf("advisories %q omit %q", paths, want)
+		}
+	}
+	if strings.Contains(paths, "provided by administrator") {
+		t.Fatal("advisory exposed a literal value")
+	}
+	if err := ValidateCandidate(path, raw); err == nil || !strings.Contains(err.Error(), "observability.destinations[0].headers") {
+		t.Fatalf("new candidate was not refused at destination header: %v", err)
 	}
 }
 
