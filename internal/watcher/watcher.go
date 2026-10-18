@@ -617,6 +617,16 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 	if err != nil {
 		return
 	}
+	if !firstCycle {
+		// The issue of a server no longer configured is forgotten: only
+		// admission cleared one, so a removed project left status and
+		// verify warning about it (GAP-0134).
+		listed := make(map[string]bool, len(servers))
+		for _, server := range servers {
+			listed[MCPEventPath(server)] = true
+		}
+		w.state.forgetMCPIssuesNotListed(listed)
+	}
 	var added []string
 	for _, server := range servers {
 		if strings.TrimSpace(server.Name) == "" || server.Bundled {

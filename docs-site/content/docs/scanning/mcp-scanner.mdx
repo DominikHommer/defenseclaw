@@ -290,7 +290,13 @@ until they sign in. See
     an upgrade from 0.8.x: the servers the earlier release already ran are
     scanned once to record their baseline and keep running, so findings raise
     alerts and a server the scanner cannot start shows `scan failed` instead
-    of being blocked. A server on a block list stays blocked.
+    of being blocked. A server on a block list stays blocked. Until a new
+    server's admission has a verdict, the Claude Code and Codex hooks refuse
+    its tool calls with "is not scanned yet ... try again in a minute" and the
+    gateway admits it at once; Claude Code may already have started the
+    server's process when it opened the project, but no call reaches it
+    before the verdict. With `gateway.watcher.mcp.take_action: false` nothing
+    is refused.
   </Step>
   <Step>
     **Act on the verdict.** The top severity maps through `admission.mcp` (below):

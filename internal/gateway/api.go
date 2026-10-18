@@ -101,6 +101,10 @@ type APIServer struct {
 	// of that task.
 	hermesTasks hermesTaskSessions
 
+	// mcpAdmissionPending names an MCP server the install watcher admits
+	// but has not admitted yet (GAP-0112). Set once before serving.
+	mcpAdmissionPending func(connector, server, home, cwd string) (string, bool)
+
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
 	// process and data-home identity. shutdownOnce keeps retries idempotent.
@@ -1021,6 +1025,15 @@ func (a *APIServer) SetShutdownRequester(request func()) {
 		return
 	}
 	a.shutdownRequester = request
+}
+
+// SetMCPAdmissionPending wires the install watcher's pending-admission
+// check (GAP-0112). Call it before the server starts.
+func (a *APIServer) SetMCPAdmissionPending(pending func(connector, server, home, cwd string) (string, bool)) {
+	if a == nil {
+		return
+	}
+	a.mcpAdmissionPending = pending
 }
 
 func (a *APIServer) runtimeConfigSnapshot() *config.Config {
