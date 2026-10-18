@@ -3976,10 +3976,13 @@ function New-WizardAgentFixtures([string]$Root) {
         [pscustomobject]@{
             Path = $codexPath
             ClassName = 'CodexVersionFixture'
-            # The wizard contract installs the complete ten-event matrix, whose
-            # first truthful minimum is Codex 0.133.0. Older supported tiers are
-            # covered independently by boundary and real-client compatibility
-            # probes instead of being mislabeled as full-matrix certification.
+            # The wizard contract installs the complete ten-event matrix
+            # (Codex 0.133.0 and later), and setup selects Codex only from
+            # 0.136.0, the first release with app-server --stdio
+            # (CODEX_APP_SERVER_STDIO_MIN_VERSION), so the fixture reports
+            # that floor. Older supported tiers are covered independently by
+            # boundary and real-client compatibility probes instead of being
+            # mislabeled as full-matrix certification.
             Source = @"
 using System;
 public static class CodexVersionFixture {
@@ -3999,7 +4002,7 @@ public static class CodexVersionFixture {
             }
             return 0;
         }
-        Console.WriteLine("codex-cli 0.133.0");
+        Console.WriteLine("codex-cli 0.136.0");
         return 0;
     }
 }
@@ -4111,7 +4114,7 @@ public static class OpenCodeVersionFixture {
             }
         }
         $codexVersion = Invoke-WindowsNativeProcess $codexPath @('--version') -TimeoutSeconds 30
-        if ($codexVersion.StdOut.Trim() -ne 'codex-cli 0.133.0') {
+        if ($codexVersion.StdOut.Trim() -ne 'codex-cli 0.136.0') {
             throw "Codex fixture returned an unexpected version: $($codexVersion.StdOut)"
         }
         $claudeVersion = Invoke-WindowsNativeProcess $claudePath @('--version') -TimeoutSeconds 30

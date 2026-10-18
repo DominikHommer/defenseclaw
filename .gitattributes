@@ -60,6 +60,11 @@ internal/gateway/testdata/secure_client_evaluation/** text eol=lf
 # checkout changed the digest. Keep them LF on Windows checkouts too.
 policies/kernel/** text eol=lf
 
+# The shipped managed config templates are signed into bundles and matched
+# by digest (internal/gateway TestOfflineSignShippedTemplateMatchesDeviceDigest
+# edits them by exact LF text); a CRLF checkout broke that test on Windows.
+testdata/enterprise-configs/*.yaml text eol=lf
+
 # The sandbox golden texts are compared byte-for-byte; keep them LF on
 # Windows checkouts too.
 internal/config/testdata/*.golden text eol=lf

@@ -37,6 +37,21 @@ ROOT = Path(__file__).resolve().parents[2]
 _FIND_COSIGN = upgrade_shim._cosign
 
 
+@pytest.fixture(autouse=True)
+def shim_os(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """The shim's own view of ``os``.
+
+    Tests pretend a platform (``os.name``) and stub ``execv``/``chdir`` for
+    the shim only. Patching the real module leaked the pretence into the
+    config writer the shim calls: on a Windows runner a pretend POSIX host
+    fsynced the config folder, which Windows refuses (GAP-0273).
+    """
+    view = types.ModuleType("os")
+    view.__dict__.update(vars(os))
+    monkeypatch.setattr(upgrade_shim, "os", view)
+    return view
+
+
 @pytest.fixture()
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     data = tmp_path / "home" / ".defenseclaw"
@@ -843,7 +858,7 @@ def test_downgrade_sets_aside_the_keys_the_older_release_lacks(
     assert "trusted_ca_bundle" not in (config.get("openshell") or {})
     record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
     assert record == {"version": 1, "for": "1.0.2", "keys": {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem"}}
-    # The execs fixture sets os.name to posix; the platform says what the file system is.
+    # The execs fixture sets the shim's os.name to posix; the platform says what the file system is.
     if sys.platform != "win32":
         assert _set_aside(home).stat().st_mode & 0o777 == 0o600
 
