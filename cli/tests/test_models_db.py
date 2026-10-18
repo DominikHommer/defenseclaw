@@ -1026,6 +1026,8 @@ def test_scan_result_readers_use_exact_time_and_rowid(tmp_path):
     store.init()
     try:
         store.db.execute("ALTER TABLE scan_results ADD COLUMN retention_timestamp_unix_nano INTEGER")
+        store.db.execute("ALTER TABLE scan_results ADD COLUMN exit_code INTEGER")
+        store.db.execute("ALTER TABLE scan_results ADD COLUMN error TEXT")
         rows = [
             ("short", "2026-10-13T12:00:00.12345Z", 1, 0),
             ("long", "2026-10-13T12:00:00.123451Z", 2, 0),
