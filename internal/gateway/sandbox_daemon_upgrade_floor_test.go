@@ -45,7 +45,7 @@ const rc1RegistrationJSON = `{"v":1,"registrations":[{
 "AllowYolo":null,"AllowMount":null,"AllowHostPorts":null,"AllowUnblock":null,"AllowLearnMode":null,
 "AllowedHarnesses":null,"EgressBlock":null,"EgressAllowOnly":null,"BlockLargeUploads":false,
 "RequireCopyFor":null,"MaxResources":{"CPU":"","Memory":""},"Locked":null,"Allowed":null,
-"RequiredFor":null,"WhenUnavailable":"","UserApprovals":"","AllowedCredentials":null,
+"RequiredFor":null,"WhenUnavailable":"","UserApprovals":"","AllowedCredentials":["*"],
 "OnSilence":"","MaxSilenceAfter":"","ProcessTree":null,"ForeignSandboxes":"",
 "AllowUpstreamTelemetry":null,"DeleteStoppedAfter":"","RequestAccess":"it-help@example.com",
 "DriverFallback":""},
@@ -60,6 +60,7 @@ func upgradeFloorFixture(t *testing.T, rc1 bool) (*sandboxDaemonFixture, *manage
 	gate := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
 	gate.setGroups(upgradeFloorPeer, "dc-sbx-devs")
 	gate.cfg.OpenShell.Admin = closedFloorRegFloor
+	gate.cfg.OpenShell.Admin.AllowedCredentials = []string{"none"}
 	resp := gate.live(upgradeFloorPeer, 1)
 	id := resp.Registration.ID
 	var answer bool
@@ -91,7 +92,9 @@ func upgradeFloorFixture(t *testing.T, rc1 bool) (*sandboxDaemonFixture, *manage
 				t.Fatal(err)
 			}
 		} else {
-			current := daemonRegistration{ID: id, Sandbox: "dc-claude-1", Profile: "engineering", Floor: closedFloorRegFloor,
+			cached := closedFloorRegFloor
+			cached.AllowedCredentials = []string{"*"}
+			current := daemonRegistration{ID: id, Sandbox: "dc-claude-1", Profile: "engineering", Floor: cached,
 				Generation: 3, Driver: "docker", DriverReason: "configured", UpdatedAt: time.Now().UTC()}
 			writer := &daemonRegistrations{path: registrationsPath, byName: map[string]daemonRegistration{}}
 			if err := writer.put(current); err != nil {
@@ -116,7 +119,7 @@ func upgradeFloorFixture(t *testing.T, rc1 bool) (*sandboxDaemonFixture, *manage
 		return cp, nil
 	}
 	reg, ok := f.d.regs.get("dc-claude-1")
-	if !ok || reg.ID != id || reg.Confirmed || reg.Revoked || reg.Floor.MinProfile != "balanced" {
+	if !ok || reg.ID != id || reg.Confirmed || reg.Revoked || reg.Floor.MinProfile != "" {
 		t.Fatalf("loaded registration = %+v, present %v", reg, ok)
 	}
 	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
@@ -127,6 +130,9 @@ func assertUpgradeFloorView(t *testing.T, f *sandboxDaemonFixture, ctl *managedS
 	t.Helper()
 	if f.d.floorClosed() {
 		t.Fatal("the gateway confirmed the registration, but the floor stayed closed")
+	}
+	if got := f.d.config().OpenShell.Admin.AllowedCredentials; !slices.Equal(got, []string{"none"}) {
+		t.Fatalf("credentials floor came from the account cache: %v", got)
 	}
 	if got := f.relay.reported(); !slices.Contains(got, f.d.regs.list()[0].ID+"=stopped") {
 		t.Fatalf("reports = %v, want a stopped-state report", got)

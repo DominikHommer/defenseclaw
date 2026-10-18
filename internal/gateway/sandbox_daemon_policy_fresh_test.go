@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -97,7 +98,7 @@ func TestSandboxDaemonEgressConfirmsTheChangedPolicyFirst(t *testing.T) {
 
 	// Tightened: the relayed hook before the clone named another generation.
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 3)
 	if changed, off := f.confirm(); !changed || off != nil {
 		t.Fatalf("tightened: changed %v off %v", changed, off)
@@ -124,7 +125,7 @@ func TestSandboxDaemonEgressConfirmsTheChangedPolicyFirst(t *testing.T) {
 	// No hook before the connection: the lease runs out and the connection
 	// confirms the policy itself.
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 11, Digest: "sha256:v4",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	time.Sleep(sandboxEgressLease + 50*time.Millisecond)
 	if changed, off := f.confirm(); !changed || off != nil || !f.floorBlocks("github.com") {
 		t.Fatalf("after the lease: changed %v off %v floor %+v", changed, off, f.d.floor)
@@ -192,7 +193,7 @@ func TestSandboxDaemonEgressBurstDuringAdoption(t *testing.T) {
 		return map[string]string{"dc-a": "ready"}, true
 	}
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 3)
 	calls := f.calls.Load()
 	var wg sync.WaitGroup
@@ -238,7 +239,7 @@ func TestSandboxDaemonEgressAdoptsAChangeAppliedElsewhere(t *testing.T) {
 	calls := f.calls.Load()
 	r2, _ := f.d.regs.get("dc-b")
 	if !f.d.regs.applyOrdered(r2, f.d.regs.nextSeq(), sandboxrelay.CurrentPolicy{V: 1, Generation: 4, Digest: "sha256:v2",
-		UpdatedAt: time.Now(), Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}) {
+		UpdatedAt: time.Now(), Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}) {
 		t.Fatal("the change was not applied")
 	}
 	if changed, off := f.confirm(); !changed || off != nil || !f.floorBlocks("github.com") {
@@ -249,7 +250,8 @@ func TestSandboxDaemonEgressAdoptsAChangeAppliedElsewhere(t *testing.T) {
 	}
 	// Sandboxes that can't be listed leave the change out of force: refused.
 	f.d.opts.listPhases = func(context.Context) (map[string]string, bool) { return nil, false }
-	f.d.regs.applyLive("dc-b", sandboxrelay.CurrentPolicy{V: 1, Generation: 5, Digest: "sha256:v3", UpdatedAt: time.Now()})
+	f.d.regs.applyLive("dc-b", sandboxrelay.CurrentPolicy{V: 1, Generation: 5, Digest: "sha256:v3", UpdatedAt: time.Now(),
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"gitlab.com"}}})
 	if _, off := f.confirm(); off == nil || off.Reason != sandboxEgressPolicyChanging {
 		t.Fatalf("unlisted: off %+v", off)
 	}
@@ -264,7 +266,7 @@ func TestSandboxDaemonRegistrationsDropAnOlderAnswer(t *testing.T) {
 	r, _ := f.d.regs.get("dc-a")
 	older, newer := f.d.regs.nextSeq(), f.d.regs.nextSeq()
 	block := sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}
 	if !f.d.regs.applyOrdered(r, newer, block) {
 		t.Fatal("the newer answer was not applied")
 	}
@@ -352,7 +354,7 @@ func TestSandboxDaemonEgressLeaseRenewsAfterTheAdoption(t *testing.T) {
 		return map[string]string{"dc-a": "ready"}, true
 	}
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 3)
 	done := make(chan struct{})
 	go func() { f.confirm(); close(done) }()
@@ -383,7 +385,7 @@ func TestSandboxDaemonEgressPollRenewsAfterTheAdoption(t *testing.T) {
 		return f.d.currentSettings(), nil
 	}
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2", UpdatedAt: time.Now(),
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 3)
 	pollDone := make(chan struct{})
 	go func() { f.d.pollRegistrations(context.Background(), true); close(pollDone) }()
@@ -426,7 +428,7 @@ func TestSandboxDaemonEgressRetriesALeaseAfterAFailedConfirmationEnded(t *testin
 func TestSandboxDaemonEgressAConnectionAfterTheChangeWaitsForANewerConfirmation(t *testing.T) {
 	f := newFreshFixture(t)
 	newA := sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
 		if f.calls.Add(1) == 1 {
 			time.Sleep(300 * time.Millisecond)
@@ -464,7 +466,7 @@ func TestSandboxDaemonEgressInFlightAnswerAfterChangeIsRetried(t *testing.T) {
 			return sandboxrelay.CurrentPolicy{V: 1, Generation: 7, Digest: "sha256:v1"}, nil
 		}
 		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
-			Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil
+			Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}, nil
 	}
 	done := make(chan *egress.Decision, 1)
 	go func() {

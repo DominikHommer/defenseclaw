@@ -2860,8 +2860,17 @@ service-owned) that the daemon binds to the sandbox; a registration holds the
 `subject_key` (an HMAC of `v1|uid|account|sid`, so directory facts never turn a
 create into `sandbox_subject_changed`) and a `facts_digest` whose change
 triggers a re-match. Lookups are scoped to the caller's uid, so another uid's id
-behaves as unknown, and tombstones keep a deleted binding from registering
-again.
+behaves as unknown. Binding and sandbox IDs are reserved across accounts;
+tombstones keep a deleted ID from registering again. A confirmed registration's
+`policy/current` response supplies the complete organization floor. The daemon
+replaces its cached floor with that response and keeps an incomplete response
+unconfirmed. Every daemon call states the daemon's floor contract
+(`X-DefenseClaw-Sandbox-Daemon-Contract`). A daemon that states none or an
+older one, such as a 1.0.2 daemon still running after a package upgrade, gets
+`sandbox_daemon_outdated` (403) on new sandboxes, binds, running reports,
+`policy/current` and relayed calls; revocations, stopped reports, deletions,
+settings and events still reach it. It restarts on the new version once its
+sandboxes stop.
 
 A hook in a sandbox goes to the daemon's ingress as before. In managed mode the
 daemon has no local evaluation path: it forwards the body unchanged to

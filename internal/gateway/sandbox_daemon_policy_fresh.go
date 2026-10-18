@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -301,6 +302,13 @@ func (d *SandboxDaemon) askPolicy(ctx context.Context, r daemonRegistration, rep
 	}
 	if cp.Revoked {
 		markGone(cp.RevokedReason)
+		return ans
+	}
+	if cp.Floor == nil {
+		ans.err = errors.New("managed gateway omitted the complete sandbox policy floor")
+		return ans
+	}
+	if ans.err = useCurrentPack(cp); ans.err != nil {
 		return ans
 	}
 	ans.moved = cp.Generation != 0 && cp.Generation != r.Generation

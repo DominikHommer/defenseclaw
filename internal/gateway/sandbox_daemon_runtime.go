@@ -315,9 +315,8 @@ func NewSandboxDaemon(opts SandboxDaemonOptions) (*SandboxDaemon, error) {
 		d.openShell = newAccountOpenShell(runtime.GOOS, uid, d.home, opts.Logf)
 	}
 	d.settingsAt.Store(time.Now().UnixNano())
-	// The registrations file is the user's own: its floors are adopted only
-	// after the managed gateway confirmed the registration (Run's
-	// revalidate). Until then the manager reads the strictest floor.
+	// The registrations file is the user's own. Until the managed gateway
+	// confirms a complete floor, the manager reads the strictest floor.
 	d.cfg.Store(d.buildConfig())
 	d.touch()
 	if exe := opts.Executable; exe != "-" {
@@ -481,6 +480,20 @@ func useAuthorityPack(resp sandboxrelay.ResolveResponse, floor config.OpenShellA
 		err = packs.UseAuthorityPack(floor, pack)
 	}
 	return pack, err
+}
+
+// useCurrentPack installs only content delivered with a confirmed gateway
+// policy answer. A registrations.json pack is a user claim, including when
+// its declared digest appears to match the floor.
+func useCurrentPack(cp sandboxrelay.CurrentPolicy) error {
+	if cp.Floor == nil {
+		return errors.New("managed gateway omitted the complete sandbox policy floor")
+	}
+	pack, err := packs.AuthorityPack(nil, cp.RequiredPack, *cp.Floor)
+	if err != nil {
+		return err
+	}
+	return packs.UseAuthorityPack(*cp.Floor, pack)
 }
 
 // managedResolveFloor reads the organization floor F of a resolve answer:
@@ -992,7 +1005,7 @@ func sandboxDaemonRestartNeeded(prev, next sandboxrelay.DaemonSettings) bool {
 
 // pollLoop polls policy/current for every live registration: a revoked
 // one stops its sandbox, a newer generation refreshes the settings, and
-// the live fields switch at once.
+// the confirmed floor is applied at once.
 func (d *SandboxDaemon) pollLoop(ctx context.Context) {
 	t := time.NewTicker(d.opts.PollInterval)
 	defer t.Stop()
@@ -1015,7 +1028,7 @@ func (d *SandboxDaemon) pollOnce(ctx context.Context) {
 // pollRegistrations asks policy/current for every live registration. A
 // registration the gateway no longer knows, revoked or expired, or whose
 // subject changed, is marked revoked and returned (its sandbox is to be
-// stopped); one it answers is confirmed and takes the live fields, each in
+// stopped); one it answers is confirmed and takes the complete floor, each in
 // the registration's turn (askPolicy), and with adopt the floor of the
 // sandboxes that run becomes the manager's (adoptRunningFloor). A generation
 // that moved reads the managed settings again and re-resolves the policies.
@@ -1083,11 +1096,10 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 // adoptRunningFloor makes the floor of the registrations of the sandboxes
 // that run now (phases, from the manager's list) the one the manager
 // resolves against, when it differs from the current one. Only a running
-// sandbox's floor is adopted. A stopped sandbox's registration keeps the
-// floor it was created under (an earlier profile's required pack, say)
-// while its live fields follow every configuration change; adopting it on
-// such a change put a sandbox created since under the stopped one's pack
-// and approvals (GAP-0693). A stopped sandbox's floor becomes the manager's
+// sandbox's floor is adopted. A stopped sandbox's registration takes its
+// current floor, but adopting that floor while stopped could put a sandbox
+// created under another profile under the stopped sandbox's pack and
+// approvals (GAP-0693). A stopped sandbox's floor becomes the manager's
 // when it starts again (Start); floorConflicts keeps the floors of the
 // running sandboxes the same.
 //
@@ -1211,9 +1223,8 @@ const revalidateTimeout = 15 * time.Second
 // file names and adopts the floor of the newest confirmed one whose sandbox
 // runs, or of the newest confirmed one when none runs (GAP-0693); it
 // returns the revoked ones. The file is the user's own: an edited floor is
-// never adopted for a registration the gateway does not answer for. The
-// non-live floor fields still come from the file (CurrentPolicy carries only
-// the live ones).
+// never adopted for a registration the gateway does not answer for. A
+// confirmation replaces the entire cached floor with the gateway's floor.
 func (d *SandboxDaemon) revalidate(ctx context.Context) []daemonRegistration {
 	ctx, cancel := context.WithTimeout(ctx, revalidateTimeout)
 	defer cancel()
@@ -1369,7 +1380,7 @@ func (d *SandboxDaemon) floorConflicts(ctx context.Context, floor config.OpenShe
 			continue
 		}
 		r, ok := d.regs.get(sb.Name)
-		if !ok || !reflect.DeepEqual(r.Floor, floor) {
+		if !ok || !r.Confirmed || !reflect.DeepEqual(r.Floor, floor) {
 			return true
 		}
 	}
@@ -1945,9 +1956,8 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 		}
 	}
 	floor, err := managedResolveFloor(resp)
-	var requiredPack *packs.Pack
 	if err == nil {
-		requiredPack, err = useAuthorityPack(resp, floor)
+		_, err = useAuthorityPack(resp, floor)
 	}
 	if err != nil {
 		d.logf("the managed gateway's policy answer can't be applied: %v", err)
@@ -1985,7 +1995,7 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 	if err == nil {
 		err = d.regs.put(daemonRegistration{
 			ID: reg, Sandbox: sb.Name, Profile: resp.Banner.Profile, Provisional: resp.Banner.Provisional,
-			Digest: resp.Banner.PolicyDigest, Generation: resp.Generation, Floor: floor, RequiredPack: requiredPack, UpdatedAt: time.Now().UTC(),
+			Digest: resp.Banner.PolicyDigest, Generation: resp.Generation, Floor: floor, UpdatedAt: time.Now().UTC(),
 			Driver: string(choice.Driver), DriverReason: choice.Reason, Confirmed: true,
 		})
 	}
@@ -2049,6 +2059,12 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 		d.regs.markRevoked(name, cp.RevokedReason)
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
 			Message: "your organization's policy no longer covers sandbox " + name + "; delete it and start it again with defenseclaw sandbox run"}
+	}
+	if cp.Floor == nil {
+		return nil, managedPolicyUnloadable(errors.New("managed gateway omitted the complete sandbox policy floor"))
+	}
+	if err := useCurrentPack(cp); err != nil {
+		return nil, managedPolicyUnloadable(err)
 	}
 	d.regs.applyOrdered(r, seq, cp)
 	r, _ = d.regs.get(name)
@@ -2453,10 +2469,6 @@ type daemonRegistration struct {
 	Digest      string                      `json:"digest,omitempty"`
 	Generation  uint64                      `json:"generation,omitempty"`
 	Floor       config.OpenShellAdminConfig `json:"floor"`
-	// RequiredPack is the floor's required pack as the managed gateway's
-	// answer carried it, which a restarted daemon installs again
-	// (packs.UseAuthorityPack): the account cannot read the pack's file.
-	RequiredPack *packs.Pack `json:"required_pack,omitempty"`
 	// Driver and DriverReason are the compute driver the sandbox was
 	// created on and why (openshell.DriverReason*); it never switches.
 	Driver        string    `json:"driver,omitempty"`
@@ -2504,10 +2516,10 @@ func loadDaemonRegistrations(path string) (*daemonRegistrations, error) {
 	}
 	for _, reg := range doc.Registrations {
 		if reg.ID != "" && reg.Sandbox != "" {
+			// The file belongs to the account. Keep only the registration
+			// identity until policy/current confirms its complete floor.
+			reg.Floor = config.OpenShellAdminConfig{}
 			r.byName[reg.Sandbox] = reg
-			// A pack off the floor's pin is not installed: the resolve then
-			// fails closed.
-			_ = packs.UseAuthorityPack(reg.Floor, reg.RequiredPack)
 		}
 	}
 	return r, nil
@@ -2611,10 +2623,10 @@ func (r *daemonRegistrations) markRevoked(name, reason string) {
 	_ = r.saveLocked()
 }
 
-// applyLive switches the live fields of name's floor (plan §5.2 "live")
-// from a policy/current answer, marks the registration confirmed, and
-// reports whether anything changed (a first confirmation included). The
-// registration's UpdatedAt becomes the answer's policy time, so the status
+// applyLive replaces the floor from a policy/current answer, marks the
+// registration confirmed, and reports whether anything changed (a first
+// confirmation included). The registration's UpdatedAt becomes the answer's
+// policy time, so the status
 // shows when the policy last changed, also for a change of a field that is
 // not live (GAP-0690); that alone is not a change the floor adopts.
 func (r *daemonRegistrations) applyLive(name string, cp sandboxrelay.CurrentPolicy) bool {
@@ -2669,10 +2681,10 @@ func (r *daemonRegistrations) pruneApplied(regs []daemonRegistration) {
 // applyLiveLocked is applyLive under r.mu.
 func (r *daemonRegistrations) applyLiveLocked(name string, cp sandboxrelay.CurrentPolicy) bool {
 	reg, ok := r.byName[name]
-	if !ok {
+	if !ok || cp.Floor == nil {
 		return false
 	}
-	live, digest := cp.Live, cp.Digest
+	digest := cp.Digest
 	confirmed := !reg.Confirmed
 	reg.Confirmed = true
 	policyAt := cp.UpdatedAt.UTC()
@@ -2680,17 +2692,13 @@ func (r *daemonRegistrations) applyLiveLocked(name string, cp sandboxrelay.Curre
 	if moved {
 		reg.UpdatedAt = policyAt
 	}
-	// The generation the live fields are now of, which a relayed answer's is
+	// The generation the confirmed floor is now of, which a relayed answer's is
 	// compared with (observeGeneration).
 	if cp.Generation != 0 && cp.Generation != reg.Generation {
 		reg.Generation, moved = cp.Generation, true
 	}
 	before := reg.Floor
-	f := &reg.Floor
-	f.EgressBlock, f.EgressAllowOnly, f.BlockLargeUploads = live.EgressBlock, live.EgressAllowOnly, live.BlockLargeUploads
-	f.AllowUnblock, f.AllowLearnMode, f.UserApprovals = live.AllowUnblock, live.AllowLearnMode, live.UserApprovals
-	f.OnSilence, f.MaxSilenceAfter, f.ProcessTree = live.OnSilence, live.MaxSilenceAfter, live.ProcessTree
-	f.ForeignSandboxes, f.DeleteStoppedAfter, f.RequestAccess = live.ForeignSandboxes, live.DeleteStoppedAfter, live.RequestAccess
+	reg.Floor = *cp.Floor
 	// The profile of the same match as the digest: a regroup re-matched the
 	// registration (#1199).
 	profile := strings.TrimSpace(cp.Profile)
