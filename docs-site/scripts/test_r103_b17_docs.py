@@ -22,6 +22,19 @@ class R103B17DocsTest(unittest.TestCase):
         self.assertNotIn("the pkg install still completes", text)
         self.assertIn("records no package receipt", text)
         self.assertIn("which records no package receipt", text)
+        self.assertIn("prints a generic postinstall failure", text)
+        self.assertIn("`/var/log/install.log`", text)
+        self.assertIn("`enterprise macos status --json` also reports the holder", text)
+
+    def test_group_test_macos_output_matches_documented_forms(self):
+        macos = page("enterprise/macos.mdx")
+        identity = page("enterprise/identity-and-authentication.mdx")
+        self.assertIn("installed managed `defenseclaw` launcher offers only `sandbox` commands", macos)
+        self.assertIn("command forms exit `2`", macos)
+        self.assertIn("separate per-user CLI, if present, exits `3`", macos)
+        self.assertIn("Its JSON output shows the resolved subject and groups", identity)
+        self.assertIn("When profiles are configured, the explanation can also include a cache refresh note", identity)
+        self.assertNotIn('The output says "explain refreshed', identity)
 
     def test_1101_windows_event_ids(self):
         text = page("enterprise/operations.mdx")
