@@ -174,14 +174,30 @@ type ProvidersFold struct {
 	// Conflicts are the providers whose fields config.yaml and the file set
 	// to different values.
 	Conflicts []ProviderConflict `json:"conflicts,omitempty"`
+	// Repeated are the providers the file names more than once with
+	// different values for an extra_headers key.
+	Repeated []ProviderConflict `json:"repeated,omitempty"`
+	// HeadersAfterFold are the extra_headers the gateway sends only once the
+	// file is no longer a live input: before 1.0.3 a same-name merge dropped
+	// them, and the gateway keeps that rule while the file is one (GAP-0184).
+	HeadersAfterFold []ProviderFields `json:"headers_after_fold,omitempty"`
 	// Notes are this fold's migration notes.
 	Notes []string `json:"notes,omitempty"`
 }
 
 // ProviderConflict is a provider config.yaml and the legacy overlay both
-// name, with the fields they set to different values (names only: a header
-// value may be a credential).
+// name (or the overlay names twice), with the fields they set to different
+// values (names only: a header value may be a credential). InUse says, per
+// field, whose value the gateway uses while the file is a live input:
+// "config.yaml", "custom-providers.json" or "none" (a header not sent).
 type ProviderConflict struct {
+	Provider string            `json:"provider"`
+	Fields   []string          `json:"fields"`
+	InUse    map[string]string `json:"in_use,omitempty"`
+}
+
+// ProviderFields is a provider with field names (never values).
+type ProviderFields struct {
 	Provider string   `json:"provider"`
 	Fields   []string `json:"fields"`
 }
@@ -3486,11 +3502,14 @@ const ProvidersOverlayFile = "custom-providers.json"
 // domains, env keys and settings (GAP-0709). A provider llm_providers.custom
 // already has takes the overlay's other list items, map keys and the fields
 // it leaves unset: the gateway applies llm_providers over the overlay, so
-// config's values were the ones in use. When the overlay sets a field to a
-// value other than config's, nothing is folded (GAP-0163): config.yaml and
-// the file stay as they are, the gateway keeps merging the file, and m.fold
-// names each provider and field, so no value is dropped unless the operator
-// chooses it.
+// config's values were the ones in use, except extra_headers, which a
+// same-name merge dropped before 1.0.3 (configs.ApplyLegacyOverlay). When the
+// overlay sets a field to a value other than config's, or names a provider
+// twice with different values for a header, nothing is folded (GAP-0163):
+// config.yaml and the file stay as they are, the gateway keeps merging the
+// file with the rule it had (GAP-0184), and m.fold names each provider and
+// field and whose value is in use, so no value in use changes and none is
+// dropped unless the operator chooses it.
 func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 	if m.in.InMemory {
 		return
@@ -3617,17 +3636,87 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 			conflicts = append(conflicts, ProviderConflict{Provider: yamlScalarValue(v8YAMLMapValue(into, "name")), Fields: fields})
 		}
 	}
-	if len(conflicts) > 0 {
-		named := make([]string, 0, len(conflicts))
-		for _, c := range conflicts {
-			named = append(named, fmt.Sprintf("%s (%s)", c.Provider, strings.Join(c.Fields, ", ")))
+	var repeated []ProviderConflict
+	for _, name := range twice {
+		var fields []string
+		for _, field := range shadowed[name] {
+			if strings.HasPrefix(field, v9HeaderField) {
+				fields = append(fields, field)
+			}
 		}
-		m.fold = &ProvidersFold{Overlay: path, Conflicts: conflicts, Refused: fmt.Sprintf(
-			"%s and llm_providers.custom in config.yaml set different values for %s; config.yaml's values are the "+
-				"ones in use. Neither file was changed, and the gateway keeps merging %s with config.yaml. Keep the "+
-				"value you want in config.yaml (defenseclaw setup provider, or defenseclaw config set "+
-				"llm_providers.custom), remove the other values or the file, then run `defenseclaw migrate` again",
-			path, strings.Join(named, "; "), ProvidersOverlayFile)}
+		if len(fields) > 0 {
+			repeated = append(repeated, ProviderConflict{Provider: name, Fields: fields})
+		}
+	}
+	// The headers the gateway sends now (the legacy merge rule, while the
+	// file is a live input) and once config.yaml is the only input.
+	overlayHeaders, configHeaders := v9OverlayHeaderProviders(overlay.Providers), v9ConfigHeaderProviders(v9SeqItems(list))
+	live := v9RegistryHeaders(overlayHeaders, configHeaders, true)
+	configValues := map[string]map[string]string{}
+	for _, p := range configHeaders {
+		if key := strings.ToLower(p.Name); configValues[key] == nil {
+			configValues[key] = p.ExtraHeaders
+		}
+	}
+	unsettled := map[string]bool{}
+	for i := range conflicts {
+		c := &conflicts[i]
+		c.InUse = make(map[string]string, len(c.Fields))
+		for _, field := range c.Fields {
+			c.InUse[field] = v9InUseConfig
+			if header, ok := strings.CutPrefix(field, v9HeaderField); ok {
+				unsettled[strings.ToLower(c.Provider)+"\x00"+header] = true
+				value, sent := live.get(c.Provider, header)
+				switch config, set := configValues[strings.ToLower(c.Provider)][header]; {
+				case !sent:
+					c.InUse[field] = v9InUseNone
+				case !set || config != value:
+					c.InUse[field] = ProvidersOverlayFile
+				}
+			}
+		}
+	}
+	for i := range repeated {
+		c := &repeated[i]
+		c.InUse = make(map[string]string, len(c.Fields))
+		for _, field := range c.Fields {
+			header := strings.TrimPrefix(field, v9HeaderField)
+			unsettled[strings.ToLower(c.Provider)+"\x00"+header] = true
+			c.InUse[field] = ProvidersOverlayFile
+			if _, sent := live.get(c.Provider, header); !sent {
+				c.InUse[field] = v9InUseNone
+			}
+		}
+	}
+	after := v9HeadersAfterFold(live, v9RegistryHeaders(overlayHeaders, configHeaders, false), unsettled)
+	var sentLater string
+	if len(after) > 0 {
+		named := make([]string, 0, len(after))
+		for _, p := range after {
+			named = append(named, fmt.Sprintf("%s (%s)", p.Provider, strings.Join(p.Fields, ", ")))
+		}
+		sentLater = strings.Join(named, "; ")
+	}
+	if len(conflicts) > 0 || len(repeated) > 0 {
+		var reasons []string
+		for _, c := range conflicts {
+			reasons = append(reasons, "config.yaml and the file set different values for "+v9ConflictText(c, "the file's value is in use"))
+		}
+		for _, c := range repeated {
+			reasons = append(reasons, "the file names "+c.Provider+" more than once with different values for "+
+				v9ConflictText(c, "the first entry's value is in use"))
+		}
+		then := ""
+		if sentLater != "" {
+			then = "; the gateway then also sends extra_headers it does not send now: " + sentLater
+		}
+		m.fold = &ProvidersFold{Overlay: path, Conflicts: conflicts, Repeated: repeated, HeadersAfterFold: after, Refused: fmt.Sprintf(
+			"%s was not folded into config.yaml: %s. Neither file was changed, and the gateway keeps merging %s with "+
+				"config.yaml as the release before did, so no value in use changed. Keep the value you want in "+
+				"config.yaml (defenseclaw setup provider, or defenseclaw config set llm_providers.custom), remove the "+
+				"other values or the file, then run `defenseclaw migrate` again: it moves the file's providers into "+
+				"llm_providers.custom and retires the file, and config.yaml's value is then in use for every field%s",
+			path, strings.Join(reasons, "; "), ProvidersOverlayFile, then)}
 		m.note("%s", m.fold.Refused)
 		return
 	}
@@ -3702,8 +3791,140 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 			m.foldChanged = true
 		}
 	}
+	if sentLater != "" {
+		m.note("%s: once the file is no longer a live input, the gateway also sends %s, which it did not send while "+
+			"it was one (before 1.0.3 a provider entry named like a built-in provider or like an earlier entry lost its "+
+			"extra_headers); remove them from llm_providers.custom if they are not wanted", path, sentLater)
+	}
 	m.providersOverlay = path
-	m.fold = &ProvidersFold{Overlay: path, Folded: names}
+	m.fold = &ProvidersFold{Overlay: path, Folded: names, HeadersAfterFold: after}
+}
+
+// The sides v9ProviderConflicts' fields can be in use from, besides
+// ProvidersOverlayFile.
+const (
+	v9InUseConfig = "config.yaml"
+	v9InUseNone   = "none"
+	v9HeaderField = "extra_headers."
+)
+
+// v9ConflictText is "<provider> (<fields>: <whose value is in use>; ...)",
+// field names only. fileInUse words a field whose value from the file is in
+// use.
+func v9ConflictText(c ProviderConflict, fileInUse string) string {
+	var parts []string
+	for _, side := range []string{v9InUseConfig, ProvidersOverlayFile, v9InUseNone} {
+		var fields []string
+		for _, field := range c.Fields {
+			if c.InUse[field] == side {
+				fields = append(fields, field)
+			}
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		in := "config.yaml's value is in use"
+		switch side {
+		case ProvidersOverlayFile:
+			in = fileInUse
+		case v9InUseNone:
+			in = "no value is in use, the header is not sent"
+		}
+		parts = append(parts, strings.Join(fields, ", ")+": "+in)
+	}
+	return c.Provider + " (" + strings.Join(parts, "; ") + ")"
+}
+
+// v9Headers is the extra_headers of each provider of a registry, by
+// lower-case name, with the name the registry gives it.
+type v9Headers map[string]configs.Provider
+
+func (h v9Headers) get(provider, header string) (string, bool) {
+	value, ok := h[strings.ToLower(provider)].ExtraHeaders[header]
+	return value, ok
+}
+
+// v9RegistryHeaders is the extra_headers the gateway's registry holds when it
+// merges the built-in providers, then overlay, then custom (llm_providers),
+// with the legacy header rule (configs.ApplyLegacyOverlay, while the overlay
+// is a live input) or the current one (configs.ApplyOverlay; for the
+// fields no conflict holds, the registry once the overlay is folded).
+func v9RegistryHeaders(overlay, custom []configs.Provider, legacy bool) v9Headers {
+	reg, err := configs.LoadEmbeddedProviders()
+	if err != nil || reg == nil {
+		reg = &configs.ProvidersConfig{}
+	}
+	apply := configs.ApplyOverlay
+	if legacy {
+		apply = configs.ApplyLegacyOverlay
+	}
+	for _, providers := range [][]configs.Provider{overlay, custom} {
+		cloned := make([]configs.Provider, 0, len(providers))
+		for _, p := range providers {
+			cloned = append(cloned, configs.Provider{Name: p.Name, ExtraHeaders: maps.Clone(p.ExtraHeaders)})
+		}
+		apply(reg, configs.ProvidersConfig{Providers: cloned})
+	}
+	out := make(v9Headers, len(reg.Providers))
+	for _, p := range reg.Providers {
+		out[strings.ToLower(p.Name)] = configs.Provider{Name: p.Name, ExtraHeaders: p.ExtraHeaders}
+	}
+	return out
+}
+
+// v9OverlayHeaderProviders is the name and extra_headers of each overlay
+// entry, as the gateway reads them.
+func v9OverlayHeaderProviders(in []configs.Provider) []configs.Provider {
+	out := make([]configs.Provider, 0, len(in))
+	for _, p := range in {
+		out = append(out, configs.Provider{Name: p.Name, ExtraHeaders: p.ExtraHeaders})
+	}
+	return out
+}
+
+// v9ConfigHeaderProviders is the name and extra_headers of each
+// llm_providers.custom item.
+func v9ConfigHeaderProviders(items []*yaml.Node) []configs.Provider {
+	var out []configs.Provider
+	for _, item := range items {
+		name := yamlScalarValue(v8YAMLMapValue(item, "name"))
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		var headers map[string]string
+		if node := v8YAMLMapValue(item, "extra_headers"); node != nil && node.Kind == yaml.MappingNode {
+			if err := node.Decode(&headers); err != nil {
+				headers = nil
+			}
+		}
+		out = append(out, configs.Provider{Name: name, ExtraHeaders: headers})
+	}
+	return out
+}
+
+// v9HeadersAfterFold names, per provider in name order, the extra_headers
+// (as "extra_headers.<key>", key order) that resolved sends and live does not
+// send, or sends with another value, leaving out the unsettled keys
+// ("<lower-case provider>\x00<key>") a conflict holds: their outcome is the
+// operator's choice.
+func v9HeadersAfterFold(live, resolved v9Headers, unsettled map[string]bool) []ProviderFields {
+	var out []ProviderFields
+	for _, key := range slices.Sorted(maps.Keys(resolved)) {
+		p := resolved[key]
+		var fields []string
+		for _, header := range slices.Sorted(maps.Keys(p.ExtraHeaders)) {
+			if unsettled[key+"\x00"+header] {
+				continue
+			}
+			if value, sent := live.get(key, header); !sent || value != p.ExtraHeaders[header] {
+				fields = append(fields, v9HeaderField+header)
+			}
+		}
+		if len(fields) > 0 {
+			out = append(out, ProviderFields{Provider: p.Name, Fields: fields})
+		}
+	}
+	return out
 }
 
 // v9MergeOverlayProvider folds src, a later overlay entry, into dst, an

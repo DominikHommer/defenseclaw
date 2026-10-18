@@ -172,12 +172,21 @@ type ProvidersConfig struct {
 //   - Overlay parse errors are logged to stderr (same surface as the
 //     gateway's runtime alerts) but do not fail the load.
 func LoadProviders() (*ProvidersConfig, error) {
+	cfg, _, err := LoadProvidersWithOverlay()
+	return cfg, err
+}
+
+// LoadProvidersWithOverlay is LoadProviders, and whether it merged a legacy
+// operator overlay. While one is a live input (its fold into config.yaml was
+// refused, or has not run yet), the gateway merges llm_providers with
+// ApplyLegacyOverlay as well, so the registry is the one releases before
+// 1.0.3 built from the same files (GAP-0184).
+func LoadProvidersWithOverlay() (*ProvidersConfig, bool, error) {
 	cfg, err := LoadEmbeddedProviders()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	mergeCustomProviders(cfg)
-	return cfg, nil
+	return cfg, mergeCustomProviders(cfg), nil
 }
 
 // LoadEmbeddedProviders returns the built-in registry without reading a
@@ -217,12 +226,13 @@ func customProvidersPath() (path string, fallback bool) {
 	return filepath.Join(home, ".defenseclaw", "custom-providers.json"), true
 }
 
-// mergeCustomProviders applies the operator overlay in place.
+// mergeCustomProviders applies the operator overlay in place, with the
+// header rule of ApplyLegacyOverlay, and reports whether it merged one.
 // Exported through LoadProviders; split for testability.
-func mergeCustomProviders(cfg *ProvidersConfig) {
+func mergeCustomProviders(cfg *ProvidersConfig) bool {
 	path, fallback := customProvidersPath()
 	if path == "" {
-		return
+		return false
 	}
 	f, err := os.Open(path) // #nosec G304 — path is a fixed per-user overlay, documented.
 	if err != nil {
@@ -236,7 +246,7 @@ func mergeCustomProviders(cfg *ProvidersConfig) {
 		if !os.IsNotExist(err) && !(fallback && os.IsPermission(err)) {
 			fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay open error: %v\n", err)
 		}
-		return
+		return false
 	}
 	defer f.Close()
 	// Read one extra byte so we can detect (and reject) oversize
@@ -246,29 +256,45 @@ func mergeCustomProviders(cfg *ProvidersConfig) {
 	data, err := io.ReadAll(io.LimitReader(f, maxOverlayBytes+1))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay read error: %v\n", err)
-		return
+		return false
 	}
 	if len(data) > maxOverlayBytes {
 		fmt.Fprintf(os.Stderr,
 			"[defenseclaw] custom-providers overlay rejected: exceeds %d-byte cap (got at least %d bytes)\n",
 			maxOverlayBytes, len(data))
-		return
+		return false
 	}
 	var overlay ProvidersConfig
 	if err := json.Unmarshal(data, &overlay); err != nil {
 		fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay parse error: %v\n", err)
-		return
+		return false
 	}
 	if overlay.DerivedFrom != "" {
-		return
+		return false
 	}
-	ApplyOverlay(cfg, overlay)
+	ApplyLegacyOverlay(cfg, overlay)
+	return true
 }
 
 // ApplyOverlay merges overlay into base with the overlay merge rules of
 // LoadProviders (same-name providers union their lists, scalars from the
-// overlay win, ollama ports union).
+// overlay win, the string maps take the overlay's keys, ollama ports union).
 func ApplyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
+	applyOverlay(base, overlay, true)
+}
+
+// ApplyLegacyOverlay is ApplyOverlay with the extra_headers rule of releases
+// before 1.0.3: a same-name merge keeps the earlier entry's headers and drops
+// the later entry's (GAP-0361). The gateway uses it while a legacy
+// custom-providers.json is a live input, so an upgrade whose fold of that
+// file was refused changes no header in use (GAP-0184). ApplyOverlay's rule
+// applies once config.yaml is the only input. Kept while the gateway reads a
+// legacy overlay (with the 0.8.x bridge, until 1.1.0).
+func ApplyLegacyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
+	applyOverlay(base, overlay, false)
+}
+
+func applyOverlay(base *ProvidersConfig, overlay ProvidersConfig, mergeHeaders bool) {
 	if base == nil {
 		return
 	}
@@ -333,14 +359,17 @@ func ApplyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 			// The string maps take the overlay's keys. A same-name entry
 			// (an llm_providers.custom provider named like a built-in, or a
 			// provider named twice) kept its path overrides but lost its
-			// extra headers (GAP-0361). Both maps are rebuilt, so the merge
-			// never writes into a map the overlay or an earlier entry owns.
+			// extra headers (GAP-0361); the legacy rule still does. Both
+			// maps are rebuilt, so the merge never writes into a map the
+			// overlay or an earlier entry owns.
 			base.Providers[idx].RequestPathOverrides = mergeStringMaps(
 				base.Providers[idx].RequestPathOverrides, op.RequestPathOverrides,
 			)
-			base.Providers[idx].ExtraHeaders = mergeStringMaps(
-				base.Providers[idx].ExtraHeaders, op.ExtraHeaders,
-			)
+			if mergeHeaders {
+				base.Providers[idx].ExtraHeaders = mergeStringMaps(
+					base.Providers[idx].ExtraHeaders, op.ExtraHeaders,
+				)
+			}
 			if op.TLS != nil {
 				base.Providers[idx].TLS = op.TLS
 			}

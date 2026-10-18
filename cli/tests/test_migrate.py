@@ -755,8 +755,8 @@ def test_the_fold_step_warns_and_changes_nothing_when_fields_disagree(
     config = _write_config(data_dir, "config_version: 9\n")
     overlay = _legacy_overlay(data_dir, {"providers": [{"name": "acme-gw", "base_url": "https://legacy.test"}]})
     refusal = (
-        f"{overlay} and llm_providers.custom in config.yaml set different values for acme-gw (base_url); "
-        "config.yaml's values are the ones in use. Neither file was changed"
+        f"{overlay} was not folded into config.yaml: config.yaml and the file set different values for "
+        "acme-gw (base_url: config.yaml's value is in use). Neither file was changed"
     )
     calls: list[str] = []
 
@@ -764,7 +764,8 @@ def test_the_fold_step_warns_and_changes_nothing_when_fields_disagree(
         calls.append(config_path)
         return {"migrated": False, "dry_run": False, "written": [], "record": {"from_version": 9},
                 "providers_fold": {"overlay": str(overlay), "refused": refusal,
-                                   "conflicts": [{"provider": "acme-gw", "fields": ["base_url"]}]}}
+                                   "conflicts": [{"provider": "acme-gw", "fields": ["base_url"],
+                                                  "in_use": {"base_url": "config.yaml"}}]}}
 
     monkeypatch.setattr(config_inspect, "migrate_config_v9", go_migrate)
 
@@ -773,7 +774,7 @@ def test_the_fold_step_warns_and_changes_nothing_when_fields_disagree(
     assert calls == [str(config)]
     assert result.applied == [migrations._PROVIDERS_FOLD_STEP_NAME]
     out = capsys.readouterr().out
-    assert "acme-gw (base_url)" in out
+    assert "acme-gw (base_url: config.yaml's value is in use)" in out
     assert "Neither file was changed" in out
     assert "moved provider(s)" not in out
 

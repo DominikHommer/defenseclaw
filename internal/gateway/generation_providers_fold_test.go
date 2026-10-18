@@ -31,8 +31,11 @@ import (
 
 // GAP-0163: folding a legacy custom-providers.json into a config_version 9
 // config.yaml keeps the provider registry the gateway built from both files:
-// the same domains, keys, path overrides and headers for the same-name
-// provider, the overlay's new provider and its Ollama port.
+// the same domains, keys and path overrides for the same-name provider, the
+// overlay's new provider and its Ollama port. The headers change only as the
+// fold reports (GAP-0184): while the file was an input, config.yaml's
+// headers of a same-name entry were dropped as before 1.0.3; once it is
+// folded, they are sent (GAP-0361).
 func TestFoldedLegacyOverlayKeepsTheGenerationRegistry(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
@@ -85,6 +88,10 @@ observability: {}
 	if result.ProvidersFold == nil || result.ProvidersFold.Retired == "" {
 		t.Fatalf("ProvidersFold = %+v, want the overlay folded and retired", result.ProvidersFold)
 	}
+	wantLater := []config.ProviderFields{{Provider: "ACME-GW", Fields: []string{"extra_headers.X-B11-Config"}}}
+	if got := result.ProvidersFold.HeadersAfterFold; !reflect.DeepEqual(got, wantLater) {
+		t.Fatalf("headers after the fold = %+v, want %+v", got, wantLater)
+	}
 	if _, err := os.Stat(overlayPath); !os.IsNotExist(err) {
 		t.Fatalf("the overlay is still a live input: %v", err)
 	}
@@ -103,8 +110,15 @@ observability: {}
 		t.Fatalf("the registry has no %s provider", name)
 		return configs.Provider{}
 	}
+	if got := find(before, "acme-gw").ExtraHeaders; !reflect.DeepEqual(got, map[string]string{"X-B11-Legacy": "dummy-legacy"}) {
+		t.Errorf("acme-gw headers while the file is an input = %v, want the file's only (the rule before 1.0.3)", got)
+	}
 	for _, name := range []string{"acme-gw", "b11-new", "openai"} {
-		if got, want := find(after, name), find(before, name); !reflect.DeepEqual(got, want) {
+		got, want := find(after, name), find(before, name)
+		if name == "acme-gw" {
+			want.ExtraHeaders = map[string]string{"X-B11-Config": "dummy-config", "X-B11-Legacy": "dummy-legacy"}
+		}
+		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s after the fold =\n  %+v\nbefore\n  %+v", name, got, want)
 		}
 	}

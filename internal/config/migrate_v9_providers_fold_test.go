@@ -78,8 +78,19 @@ func TestMigrateV9RefusesAConflictingLegacyOverlayOnAV9Config(t *testing.T) {
 				if !reflect.DeepEqual(got, want) {
 					t.Errorf("dry run %v: conflicting fields = %v, want %v", dryRun, got, want)
 				}
-				for _, part := range []string{"acme-gw (", "config.yaml's values are the ones in use", "Neither file was changed",
-					"defenseclaw migrate"} {
+				wantInUse := map[string]string{"profile_id": "config.yaml", "base_url": "config.yaml",
+					"request_path_overrides.chat": "config.yaml", "extra_headers.X-B11-Config": "custom-providers.json"}
+				if got := fold.Conflicts[0].InUse; !reflect.DeepEqual(got, wantInUse) {
+					t.Errorf("dry run %v: in use = %v, want %v (1.0.2 sent the file's header, GAP-0184)", dryRun, got, wantInUse)
+				}
+				wantLater := []ProviderFields{{Provider: "openai", Fields: []string{"extra_headers.X-B11-A", "extra_headers.X-B11-B"}}}
+				if !reflect.DeepEqual(fold.HeadersAfterFold, wantLater) {
+					t.Errorf("dry run %v: headers after the fold = %+v, want %+v", dryRun, fold.HeadersAfterFold, wantLater)
+				}
+				for _, part := range []string{"acme-gw (", "config.yaml's value is in use",
+					"extra_headers.X-B11-Config: the file's value is in use", "Neither file was changed",
+					"no value in use changed", "defenseclaw migrate",
+					"the gateway then also sends extra_headers it does not send now: openai (extra_headers.X-B11-A, extra_headers.X-B11-B)"} {
 					if !strings.Contains(fold.Refused, part) {
 						t.Errorf("dry run %v: refusal %q does not say %q", dryRun, fold.Refused, part)
 					}
@@ -178,6 +189,18 @@ func TestMigrateV9FoldsALegacyOverlayIntoAV9Config(t *testing.T) {
 				return raw
 			}
 			first := fold("fold")
+			wantLater := []ProviderFields{
+				{Provider: "ACME-GW", Fields: []string{"extra_headers.X-B11-Config"}},
+				{Provider: "openai", Fields: []string{"extra_headers.X-B11-A", "extra_headers.X-B11-B"}},
+			}
+			if !reflect.DeepEqual(preview.ProvidersFold.HeadersAfterFold, wantLater) {
+				t.Errorf("headers after the fold = %+v, want %+v", preview.ProvidersFold.HeadersAfterFold, wantLater)
+			}
+			if !slices.ContainsFunc(preview.ProvidersFold.Notes, func(note string) bool {
+				return strings.Contains(note, "the gateway also sends ACME-GW (extra_headers.X-B11-Config); openai (")
+			}) {
+				t.Errorf("the fold notes %q do not name the headers sent from now on", preview.ProvidersFold.Notes)
+			}
 			cfg, err := LoadRuntimeV8FromBytes(configPath, first)
 			if err != nil {
 				t.Fatalf("load the folded config: %v\n%s", err, first)
@@ -263,6 +286,9 @@ func TestMigrateV9KeepsAConflictingOverlayOutOfAV8Migration(t *testing.T) {
 		!reflect.DeepEqual(slices.Sorted(slices.Values(fold.Conflicts[0].Fields)), []string{"base_url", "extra_headers.X-Team"}) {
 		t.Fatalf("ProvidersFold = %+v, want acme base_url and extra_headers.X-Team", fold)
 	}
+	if want := map[string]string{"base_url": "config.yaml", "extra_headers.X-Team": "custom-providers.json"}; !reflect.DeepEqual(fold.Conflicts[0].InUse, want) {
+		t.Errorf("in use = %v, want %v", fold.Conflicts[0].InUse, want)
+	}
 	if !slices.ContainsFunc(result.Record.Notes, func(note string) bool { return note == fold.Refused }) {
 		t.Errorf("the record notes %q lack the refusal %q", result.Record.Notes, fold.Refused)
 	}
@@ -312,5 +338,55 @@ func TestMigrateV9SameCABundleIsNoConflict(t *testing.T) {
 		if !tc.conflict && !strings.Contains(string(result.Migrated), "ca_cert_file: "+ca) {
 			t.Errorf("%s: config.yaml no longer names its CA file:\n%s", tc.pem, result.Migrated)
 		}
+	}
+}
+
+// GAP-0184: a provider the legacy overlay names twice with different values
+// for a header is not folded. Before 1.0.3 the gateway sent the first
+// entry's header (a same-name merge dropped the later entry's headers), and
+// the fold takes the later entry's values, so folding would change the
+// header in use. A provider named like a built-in sent neither.
+func TestMigrateV9RefusesAnOverlayHeaderNamedTwiceWithTwoValues(t *testing.T) {
+	for _, tc := range []struct{ name, inUse string }{{"acme", "custom-providers.json"}, {"openai", "none"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			configPath := filepath.Join(dir, "config.yaml")
+			source := "config_version: 9\ndata_dir: " + dir + "\nobservability: {}\n"
+			if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			overlay := `{"providers":[{"name":"` + tc.name + `","domains":["llm.acme.internal"],"extra_headers":{"X-Team":"sec"}},
+  {"name":"` + tc.name + `","extra_headers":{"X-Team":"platform","X-Route":"eu"}}]}`
+			overlayPath := filepath.Join(dir, ProvidersOverlayFile)
+			if err := os.WriteFile(overlayPath, []byte(overlay), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+			if err != nil {
+				t.Fatalf("MigrateV9: %v", err)
+			}
+			fold := result.ProvidersFold
+			want := []ProviderConflict{{Provider: tc.name, Fields: []string{"extra_headers.X-Team"},
+				InUse: map[string]string{"extra_headers.X-Team": tc.inUse}}}
+			if fold == nil || fold.Refused == "" || len(fold.Conflicts) != 0 || !reflect.DeepEqual(fold.Repeated, want) {
+				t.Fatalf("ProvidersFold = %+v, want the fold refused with %+v", fold, want)
+			}
+			if !strings.Contains(fold.Refused, "names "+tc.name+" more than once with different values for "+tc.name+" (extra_headers.X-Team: ") {
+				t.Errorf("refusal %q does not name the repeated header", fold.Refused)
+			}
+			for _, value := range []string{"sec", "platform"} {
+				if strings.Contains(fold.Refused, value) {
+					t.Errorf("refusal %q prints the value %q", fold.Refused, value)
+				}
+			}
+			if raw, err := os.ReadFile(configPath); err != nil || string(raw) != source {
+				t.Errorf("config.yaml changed: %q (%v)", raw, err)
+			}
+			if raw, err := os.ReadFile(overlayPath); err != nil || string(raw) != overlay {
+				t.Errorf("the overlay changed or moved: %q (%v)", raw, err)
+			}
+		})
 	}
 }
