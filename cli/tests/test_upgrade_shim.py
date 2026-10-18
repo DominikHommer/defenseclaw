@@ -843,7 +843,8 @@ def test_downgrade_sets_aside_the_keys_the_older_release_lacks(
     assert "trusted_ca_bundle" not in (config.get("openshell") or {})
     record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
     assert record == {"version": 1, "for": "1.0.2", "keys": {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem"}}
-    if os.name != "nt":
+    # The execs fixture sets os.name to posix; the platform says what the file system is.
+    if sys.platform != "win32":
         assert _set_aside(home).stat().st_mode & 0o777 == 0o600
 
 
