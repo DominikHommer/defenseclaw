@@ -12,6 +12,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 DASHBOARD_DIR = ROOT / "bundles/local_observability_stack/grafana/dashboards"
@@ -1283,14 +1284,19 @@ def test_sandboxes_board_scopes_to_one_computer() -> None:
     assert ['body_defenseclaw_sandbox_name=""' in e for e in health] == [False, True]
 
 
-# The shipped Loki (docker-compose.yml) takes OTLP natively and indexes only
-# its default resource attributes; every other resource or record attribute,
-# deployment.environment.name included, is structured metadata. A stream
-# selector on structured metadata matches nothing, so a shipped panel must
-# filter on it after the selector (GAP-0168). This is Loki 3.2's default
-# list, with dots read as underscores.
+# The shipped Loki (docker-compose.yml) takes OTLP natively and indexes its
+# default resource attributes plus the ones loki.yaml's otlp_config names;
+# every other resource or record attribute is structured metadata. A stream
+# selector on structured metadata matches nothing. A panel filters after the
+# selector, so it also works on a Loki that indexes only the defaults
+# (GAP-0168). A dashboard box (label_values variable) can list index labels
+# only, so the shipped config indexes what the boxes list (GAP-0221). This
+# is Loki 3.2's default list, with dots read as underscores.
 SHIPPED_LOKI_IMAGE = "grafana/loki:3.2.0"
-SHIPPED_LOKI_INDEX_LABELS = frozenset(
+SHIPPED_LOKI_CONFIGURED_INDEX_LABELS = frozenset(
+    {"deployment_environment_name", "host_name", "os_type", "defenseclaw_sandbox_name"}
+)
+LOKI_DEFAULT_INDEX_LABELS = frozenset(
     {
         "cloud_availability_zone",
         "cloud_region",
@@ -1311,6 +1317,7 @@ SHIPPED_LOKI_INDEX_LABELS = frozenset(
         "service_namespace",
     }
 )
+SHIPPED_LOKI_INDEX_LABELS = LOKI_DEFAULT_INDEX_LABELS | SHIPPED_LOKI_CONFIGURED_INDEX_LABELS
 _STREAM_SELECTOR = re.compile(r"(?<![{\w$])\{(?!\{)([^{}]*)\}(?!\})")
 _MATCHER = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:=~|!~|!=|=)")
 
@@ -1332,13 +1339,63 @@ def _loki_queries(node: object, datasource: object = None):
             yield from _loki_queries(item, datasource)
 
 
-def test_shipped_loki_indexes_only_its_default_labels() -> None:
+def test_shipped_loki_indexes_the_labels_the_boxes_list() -> None:
     stack = ROOT / "bundles/local_observability_stack"
     compose = (stack / "docker-compose.yml").read_text(encoding="utf-8")
-    assert f"image: {SHIPPED_LOKI_IMAGE}" in compose, "update SHIPPED_LOKI_INDEX_LABELS with the Loki image"
-    loki = (stack / "loki/loki.yaml").read_text(encoding="utf-8")
-    assert "otlp_config" not in loki, "add the configured index labels to SHIPPED_LOKI_INDEX_LABELS"
-    assert "deployment_environment_name" not in SHIPPED_LOKI_INDEX_LABELS
+    assert f"image: {SHIPPED_LOKI_IMAGE}" in compose, "update LOKI_DEFAULT_INDEX_LABELS with the Loki image"
+    loki = yaml.safe_load((stack / "loki/loki.yaml").read_text(encoding="utf-8"))
+    rules = loki["limits_config"]["otlp_config"]["resource_attributes"]
+    assert not rules.get("ignore_defaults"), "the default index labels must stay"
+    indexed = {
+        attribute.replace(".", "_")
+        for rule in rules["attributes_config"]
+        if rule["action"] == "index_label"
+        for attribute in rule["attributes"]
+    }
+    assert indexed == SHIPPED_LOKI_CONFIGURED_INDEX_LABELS
+    assert "deployment_environment_name" not in LOKI_DEFAULT_INDEX_LABELS
+    # The sandbox name is a record attribute; the Collector moves it onto the
+    # resource, the only place Loki indexes from.
+    collector = yaml.safe_load((stack / "otel-collector/config.yaml").read_text(encoding="utf-8"))
+    logs = collector["service"]["pipelines"]["logs"]["processors"]
+    assert logs.index("transform/sandbox-identity") < logs.index("groupbyattrs/sandbox-identity")
+    assert collector["processors"]["groupbyattrs/sandbox-identity"] == {"keys": ["defenseclaw.sandbox.name"]}
+
+
+# Dashboard boxes whose values live only in the JSON record body. Loki cannot
+# list them through label_values; they are tracked in GAP-0241.
+PENDING_BODY_BOXES = {
+    ("defenseclaw-activity.json", "session"),
+    ("defenseclaw-agent-360.json", "agent"),
+    ("defenseclaw-agent-360.json", "lifecycle"),
+    ("defenseclaw-agent-360.json", "execution"),
+    ("defenseclaw-blocked-events.json", "hook_event"),
+}
+_LABEL_VALUES = re.compile(r"^label_values\((\{[^{}|]*\}), ([A-Za-z_][A-Za-z0-9_]*)\)$")
+
+
+def test_loki_boxes_list_index_labels_with_a_matcher_only_selector() -> None:
+    # Grafana sends label_values(selector, label) to Loki's label API. Loki
+    # refuses a selector with a pipeline (HTTP 400, "only label matchers are
+    # supported") and returns no value for structured metadata, so such a box
+    # is empty: the Sandboxes Environment box listed no local-dev (GAP-0221).
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        for variable in board.get("templating", {}).get("list", []):
+            if (variable.get("datasource") or {}).get("type") != "loki" or variable.get("type") != "query":
+                continue
+            if (path.name, variable["name"]) in PENDING_BODY_BOXES:
+                continue
+            query = variable["query"]["query"] if isinstance(variable["query"], dict) else variable["query"]
+            match = _LABEL_VALUES.match(query)
+            assert match, f"{path.name} ${variable['name']}: {query} is not label_values(<matchers>, <label>)"
+            selector, label = match.groups()
+            assert variable.get("definition") == query, f"{path.name} ${variable['name']}"
+            assert label in SHIPPED_LOKI_INDEX_LABELS, f"{path.name} ${variable['name']}: {label}"
+            assert set(_MATCHER.findall(selector)) <= SHIPPED_LOKI_INDEX_LABELS, f"{path.name} ${variable['name']}"
+            checked += 1
+    assert checked == 6
 
 
 def test_loki_stream_selectors_use_only_shipped_index_labels() -> None:
@@ -1362,12 +1419,18 @@ def test_sandbox_board_filters_environment_after_the_selector() -> None:
     queries = list(_loki_queries(board))
     assert queries
     for where, query in queries:
-        if "deployment_environment_name" in query:
+        if "deployment_environment_name" in query and not query.startswith("label_values("):
             assert '{service_name="defenseclaw"} | deployment_environment_name' in query, where
-    environment = board["templating"]["list"][0]
-    assert environment["query"]["query"] == (
-        'label_values({service_name="defenseclaw"} | deployment_environment_name!="", deployment_environment_name)'
+    boxes = {variable["name"]: variable for variable in board["templating"]["list"]}
+    selector = 'service_name="defenseclaw", deployment_environment_name=~"$environment"'
+    assert boxes["environment"]["query"]["query"] == (
+        'label_values({service_name="defenseclaw"}, deployment_environment_name)'
     )
+    assert boxes["host"]["query"]["query"] == f"label_values({{{selector}}}, host_name)"
+    assert boxes["sandbox"]["query"]["query"] == (
+        f'label_values({{{selector}, host_name=~"$host"}}, defenseclaw_sandbox_name)'
+    )
+    assert boxes["os"]["query"]["query"] == f'label_values({{{selector}, host_name=~"$host"}}, os_type)'
 
 
 def test_ai_runtime_activity_panels_count_one_finding_once() -> None:

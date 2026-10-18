@@ -36,9 +36,9 @@
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\"} | host_name!=\"\", host_name)",
+        "definition": "label_values({service_name=\"defenseclaw\"}, host_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\"} | host_name!=\"\", host_name)",
+          "query": "label_values({service_name=\"defenseclaw\"}, host_name)",
           "refId": "LokiVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,

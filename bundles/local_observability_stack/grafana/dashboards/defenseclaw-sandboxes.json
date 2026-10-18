@@ -3166,9 +3166,9 @@
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\"} | deployment_environment_name!=\"\", deployment_environment_name)",
+        "definition": "label_values({service_name=\"defenseclaw\"}, deployment_environment_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\"} | deployment_environment_name!=\"\", deployment_environment_name)",
+          "query": "label_values({service_name=\"defenseclaw\"}, deployment_environment_name)",
           "refId": "LokiVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -3204,9 +3204,9 @@
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name!=\"\", host_name)",
+        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"}, host_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name!=\"\", host_name)",
+          "query": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"}, host_name)",
           "refId": "LokiVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -3274,15 +3274,15 @@
       {
         "name": "sandbox",
         "label": "Sandbox",
-        "description": "DefenseClaw sandbox name. Applies to the log panels; the panels marked (all names) ignore it. Populated from the defenseclaw.sandbox.name structured metadata the local collector adds to every record that names a sandbox, so listing sandboxes never parses log bodies. Sandbox identities are never metric labels. Defaults to All.",
+        "description": "DefenseClaw sandbox name. Applies to the log panels; the panels marked (all names) ignore it. Populated from the defenseclaw_sandbox_name Loki index label the local collector and the bundled Loki config add to every record that names a sandbox, so listing sandboxes never parses log bodies. Sandbox identities are never metric labels. Defaults to All.",
         "type": "query",
         "datasource": {
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\", host_name=~\"$host\"}, defenseclaw_sandbox_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+          "query": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\", host_name=~\"$host\"}, defenseclaw_sandbox_name)",
           "refId": "LokiVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -3318,9 +3318,9 @@
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type!=\"\", os_type)",
+        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\", host_name=~\"$host\"}, os_type)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | host_name=~\"$host\" | os_type!=\"\", os_type)",
+          "query": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\", host_name=~\"$host\"}, os_type)",
           "refId": "LokiVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,

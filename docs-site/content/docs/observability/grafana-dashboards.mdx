@@ -180,10 +180,18 @@ The **Sandboxes** board (`defenseclaw-sandboxes`) shows what the
   their titles: **Active (all names)**, **Active sandboxes by connector (all
   names)** and **Egress by source and decision (metric, all names)**.
 
-The Sandbox list and every log filter read `defenseclaw.sandbox.name` as Loki
-structured metadata. The local Collector copies the name from each record's body
-onto the record (`transform/sandbox-identity`), so no panel parses every log line
-to find a sandbox. A record that names no sandbox has no such metadata. The
+The local Collector copies the sandbox name from each record's body
+(`transform/sandbox-identity`) and moves it onto the record's resource
+(`groupbyattrs/sandbox-identity`), so no panel parses every log line to find a
+sandbox. A record that names no sandbox keeps its resource unchanged.
+
+The Environment, Host, Sandbox and OS boxes list Loki index labels. Grafana
+fills a Loki box through Loki's label API, which lists index labels only. The
+bundled Loki indexes `deployment.environment.name`, `host.name`, `os.type` and
+`defenseclaw.sandbox.name` (`otlp_config` in `loki/loki.yaml`). If you import the
+dashboards into your own Loki, add the same `index_label` rule there, or the
+boxes list no values. The panels filter on these fields after the stream
+selector, so they show data either way. The
 records behind the panels, and the health codes of the integration row, are
 listed in [Sandbox telemetry](/docs/observability/sandbox-telemetry).
 
