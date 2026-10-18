@@ -155,10 +155,12 @@ func (e *Env) stateTrees(account Account) []stateTree {
 				return stateMode{mode: 0o700, owner: service}
 			case rel == guardianStateFile:
 				return stateMode{mode: 0o640, owner: rootService} // the gateway reads it
-			case rel == guardianRepairsFile, rel == guardianRestoresFile, rel == guardianNoticesFile:
+			case rel == guardianRepairsFile, rel == guardianRestoresFile, rel == guardianNoticesFile,
+				rel == enterprisehooks.GuardianOwnedFilesFile:
 				// Root-only guardian records: verify failed on the restore record after
 				// the first restore, and ensure gave it to the service account
-				// (GAP-0499).
+				// (GAP-0499). The verified hook files record (GAP-0044) holds
+				// digests of hook tokens.
 				return stateMode{mode: 0o600, owner: rootService}
 			case rel == gatewayOpenClawConfig:
 				// The gateway writes it 0644 inside the 0700 data folder, so no
