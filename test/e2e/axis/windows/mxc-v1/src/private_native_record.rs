@@ -279,7 +279,7 @@ fn create(root: &OwnedHandle, user: &UserSid) -> PrivateResult<OwnedHandle> {
     let mut name: Vec<_> = NAME.encode_utf16().collect();
     let name = unicode(&mut name).map_err(|_| ())?;
     let mut attributes = attributes(handle(root), &name, 0x40 | 0x1000);
-    attributes.SecurityDescriptor = descriptor.0.0;
+    attributes.SecurityDescriptor = descriptor.0.0.cast_const().cast();
     let mut raw = HANDLE::default();
     let mut status = IO_STATUS_BLOCK::default();
     let created = unsafe {
