@@ -22,7 +22,7 @@ for package in "$@"; do
             if command -v bsdtar >/dev/null; then
                 bsdtar -xf "$package" -C "$work/extracted"
             else
-                (cd "$work/extracted" && rpm2cpio "$package" | cpio -id --quiet)
+                (cd "$work/extracted" && rpm2cpio "$package" | cpio -id --quiet --no-absolute-filenames)
             fi
             ;;
         *.pkg) pkgutil --expand-full "$package" "$work/extracted" ;;
