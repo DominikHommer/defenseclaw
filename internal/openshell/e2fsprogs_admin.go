@@ -71,8 +71,8 @@ func RegularFile(path string) bool {
 // trustedAdmin checks the chosen directory and both tool files by the same
 // managed rules used by the exec shim. A tool the account owns or a symlink
 // to one must not become a command on an administrator's PATH.
-// Without an administrator value, only the account's own build is used,
-// never a Homebrew keg (GAP-0004).
+// Without an administrator value, the account's own build wins before the
+// managed package fallback; a Homebrew keg is never selected (GAP-0004).
 func ManagedE2fsprogsToolDir(adminDir, home string, uid int, trustedAdmin func(path string, file bool) error) (dir, problem string) {
 	return managedE2fsprogsToolDir(adminDir, PackageE2fsprogsDir, home, uid, trustedAdmin)
 }

@@ -283,7 +283,8 @@ func (e *Env) userUnitPath(u userUnit, channel string) string {
 // userUnitBytes reads a unit's embedded definition: the user units under
 // packaging/systemd/user and the LaunchAgents under
 // packaging/launchd-standalone/agents, which the system units' embed globs do
-// not carry (UserUnitSource overrides it in tests).
+// not carry (UserUnitSource overrides it in tests). On a managed Mac, a
+// verified packaged gateway copy gets a content-addressed program path.
 func (e *Env) userUnitBytes(u userUnit) ([]byte, error) {
 	if e.UserUnitSource != nil {
 		return e.UserUnitSource(u.Source)
