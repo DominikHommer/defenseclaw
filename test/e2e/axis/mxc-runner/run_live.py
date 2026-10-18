@@ -18,6 +18,7 @@ from pathlib import Path
 CHECKS = {
     "private_home_and_environment",
     "allowed_writes",
+    "outer_mxc_canary_visible_before_guards",
     "ungranted_read_and_write_eacces",
     "readonly_write_denied",
     "ipv4_ipv6_tcp_udp_socket_eperm",
