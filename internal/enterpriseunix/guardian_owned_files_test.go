@@ -43,8 +43,12 @@ func TestStatusReportsHookFilesChangedSinceTheGuardianPass(t *testing.T) {
 	}
 	recordPath := filepath.Join(h.env.Layout.DataDir, enterprisehooks.GuardianOwnedFilesFile)
 	writeHostFile(t, h, recordPath, string(data))
+	// The guardian writes its records root-only.
+	if err := os.Chmod(h.env.P(recordPath), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if clean := h.run(Options{Action: ActionStatus}); !clean.SecurityComplete || hasWarning(clean, codeGuardianRepairPending) {
-		t.Fatalf("files as the guardian left them: security_complete=%v warnings=%v", clean.SecurityComplete, clean.Warnings)
+		t.Fatalf("files as the guardian left them: security_complete=%v warnings=%v errors=%v", clean.SecurityComplete, clean.Warnings, clean.Errors)
 	}
 	// Overwritten in place, mode kept.
 	if err := os.WriteFile(h.env.P(token), []byte("lane-made\n"), 0o644); err != nil {
@@ -69,6 +73,9 @@ func TestStatusReportsHookFilesChangedSinceTheGuardianPass(t *testing.T) {
 	}
 	// An unreadable record is not taken as clean.
 	writeHostFile(t, h, recordPath, "{not json")
+	if err := os.Chmod(h.env.P(recordPath), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if bad := h.run(Options{Action: ActionStatus}); bad.SecurityComplete || !strings.Contains(messagesOf(bad.Warnings, codeGuardianRepairPending), "cannot be read") {
 		t.Fatalf("invalid record: security_complete=%v warnings=%v", bad.SecurityComplete, bad.Warnings)
 	}
