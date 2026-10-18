@@ -22,11 +22,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// GAP-1205: after an enrolled account was deleted (home removed), status
-// said the guardian would remove its hook registration "once the home is
-// available", for a home that no longer exists. It now says the account was
-// deleted; a cleanup in a home that still exists keeps the old message.
-func TestGuardianCleanupOfADeletedHomeSaysTheAccountWasDeleted(t *testing.T) {
+// A missing recorded home can mean deletion or a move. Status must not
+// mislabel the latter and must show a current-home cleanup failure.
+func TestGuardianCleanupOfAMissingRecordedHomeNamesCurrentFailure(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	if err := os.MkdirAll(h.env.P("/Users/kept"), 0o755); err != nil {
@@ -35,6 +33,7 @@ func TestGuardianCleanupOfADeletedHomeSaysTheAccountWasDeleted(t *testing.T) {
 	ledger, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true, "target_count": 0, "success_count": 0, "failure_count": 0})
 	cleanup, _ := json.Marshal(map[string]any{"version": 1, "pending": []map[string]any{
 		{"connector": "kiro", "uid": 1001, "user": "gone", "user_home": "/Users/gone"},
+		{"connector": "opencode", "uid": 1003, "user": "moved", "user_home": "/Users/moved", "last_error": "enterprise hooks: edited plugin remains in /Users/moved-new/.config/opencode/plugins/defenseclaw.js"},
 		{"connector": "amp", "uid": 1002, "user": "kept", "user_home": "/Users/kept"},
 	}})
 	h.publishLedger(ledger)
@@ -44,11 +43,14 @@ func TestGuardianCleanupOfADeletedHomeSaysTheAccountWasDeleted(t *testing.T) {
 	result := h.run(Options{Action: ActionStatus})
 	requireOK(t, result)
 	got := messagesOf(result.Warnings, codeGuardianCleanupPending)
-	if !strings.Contains(got, "kiro for user gone: the home /Users/gone no longer exists (the account was deleted)") {
-		t.Fatalf("status does not say the account was deleted: %s", got)
+	if !strings.Contains(got, "kiro for user gone: the recorded home /Users/gone no longer exists") {
+		t.Fatalf("status omits the missing recorded home: %s", got)
 	}
-	if strings.Contains(got, "still in /Users/gone") {
-		t.Fatalf("status still promises a cleanup in the deleted home: %s", got)
+	if strings.Contains(got, "the account was deleted") || strings.Contains(got, "still in /Users/gone") {
+		t.Fatalf("status mislabels a missing recorded home: %s", got)
+	}
+	if !strings.Contains(got, "/Users/moved-new/.config/opencode/plugins/defenseclaw.js") {
+		t.Fatalf("status hides the current-home cleanup failure: %s", got)
 	}
 	if !strings.Contains(got, "amp for user kept is no longer enrolled, but DefenseClaw's hook registration is still in /Users/kept") {
 		t.Fatalf("the cleanup in an existing home lost its message: %s", got)
