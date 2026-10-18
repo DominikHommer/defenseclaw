@@ -100,7 +100,7 @@ def run(args):
         "version: 1\nname: defenseclaw-windows-claude-version\n"
         "runtime: {containment: process, provider: mxc}\n"
         "filesystem:\n  compatibility: hard_requirement\n"
-        f"  read_write: ['{{workspace}}', {yaml_path(home)}, {yaml_path(temporary)}]\n"
+        f"  read_write: ['{{workspace}}', {yaml_path(temporary)}]\n"
         "process:\n  max_processes: 0\n  max_memory_mb: 0\n  cpu_rate_percent: 0\n"
         "  timeout_sec: 10\nnetwork: {mode: block}\n",
     )
