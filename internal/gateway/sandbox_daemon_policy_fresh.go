@@ -305,6 +305,12 @@ func (d *SandboxDaemon) askPolicy(ctx context.Context, r daemonRegistration, rep
 	}
 	ans.moved = cp.Generation != 0 && cp.Generation != r.Generation
 	ans.changed = d.regs.applyOrdered(r, seq, cp)
+	if ans.moved || ans.changed {
+		// The managed gateway caps the saved decisions by the floor now: an
+		// allow the new floor no longer keeps leaves the running sandbox
+		// before its next connection is decided (GAP-0224).
+		d.rt.manager.ReloadDecisions(ctx, r.ID)
+	}
 	return ans
 }
 

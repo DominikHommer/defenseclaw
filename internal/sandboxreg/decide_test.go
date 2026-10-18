@@ -139,26 +139,10 @@ func TestCheckDecisionDirectRoutePastFloor(t *testing.T) {
 	}
 }
 
-// Saved decisions are capped by the floor at every resolve: a profile that
-// tightened takes back what it no longer allows, and keeps user blocks.
-func TestCapDecisions(t *testing.T) {
-	saved := []Decision{
-		{ID: "d1", Kind: sandboxrelay.DecisionEgressAllow, Host: "a.example.org", Scope: sandboxrelay.DecisionScopeAlways},
-		{ID: "d2", Kind: sandboxrelay.DecisionUnblock, Host: "b.example.org", Scope: sandboxrelay.DecisionScopeAlways},
-		{ID: "d3", Kind: sandboxrelay.DecisionEgressBlock, Host: "c.example.org", Scope: sandboxrelay.DecisionScopeAlways},
-	}
-	if got := CapDecisions(config.OpenShellAdminConfig{}, saved); len(got) != 3 {
-		t.Fatalf("an unset floor kept %d of 3", len(got))
-	}
-	got := CapDecisions(config.OpenShellAdminConfig{UserApprovals: config.OpenShellUserApprovalsSession}, saved)
-	if len(got) != 1 || got[0].ID != "d3" {
-		t.Fatalf("a session-only floor kept %+v, want only the user block", got)
-	}
-}
-
 // GAP-0198: under a strict floor nothing lasting is allowed or unblocked,
-// whatever profile a running sandbox registered under, and saved allows are
-// capped away; session answers and user blocks still pass.
+// whatever profile a running sandbox registered under; session answers and
+// user blocks still pass. The gateway's decisions route and the daemon cap
+// saved decisions with this check (GAP-0224 tests the reload).
 func TestCheckDecisionStrictFloorKeepsNothingForFutureSandboxes(t *testing.T) {
 	f := config.OpenShellAdminConfig{MinProfile: " Strict "}
 	for _, tc := range []struct {
@@ -182,13 +166,6 @@ func TestCheckDecisionStrictFloorKeepsNothingForFutureSandboxes(t *testing.T) {
 	if err := CheckApprovals(config.OpenShellAdminConfig{MinProfile: config.OpenShellProfileBalanced},
 		sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeAlways); err != nil {
 		t.Fatalf("a balanced floor refused an always allow: %v", err)
-	}
-	saved := []Decision{
-		{ID: "d1", Kind: sandboxrelay.DecisionEgressAllow, Host: "a.example.org", Scope: sandboxrelay.DecisionScopeAlways},
-		{ID: "d2", Kind: sandboxrelay.DecisionEgressBlock, Host: "c.example.org", Scope: sandboxrelay.DecisionScopeAlways},
-	}
-	if got := CapDecisions(f, saved); len(got) != 1 || got[0].ID != "d2" {
-		t.Fatalf("a strict floor kept %+v, want only the user block", got)
 	}
 }
 

@@ -823,6 +823,8 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
 		Live: sandboxLiveFields(floor), Digest: reg.EffectiveDigest, Profile: reg.Profile, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
+	minProfile := floor.MinProfile
+	current.MinProfile = &minProfile
 	if reg.State == sandboxreg.StateRevoked {
 		current.Revoked, current.RevokedReason = true, sandboxRevokedText(auth, reg)
 	}

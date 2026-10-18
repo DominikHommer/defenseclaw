@@ -27,7 +27,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -480,5 +482,80 @@ func TestSandboxDaemonEgressInFlightAnswerAfterChangeIsRetried(t *testing.T) {
 	}
 	if off == nil && f.calls.Load() != 2 {
 		t.Fatalf("admitted after %d policy requests, want a new confirmation", f.calls.Load())
+	}
+}
+
+// GAP-0224: the saved decisions of a running sandbox follow the floor the
+// managed gateway answers with now. An answer that moved the policy (and a
+// first confirmation) reloads the registration's decisions, which the
+// gateway caps by that floor, before the connection is decided; within the
+// lease, and for an answer that changed nothing, nothing is reloaded.
+func TestSandboxDaemonEgressReloadsSavedDecisionsWhenThePolicyMoves(t *testing.T) {
+	f := newFreshFixture(t)
+	var reloads atomic.Int32
+	f.relay.decisions = func(registration string) ([]sandboxrelay.Decision, error) {
+		if registration != "reg-1" {
+			t.Errorf("decisions of %q, want reg-1", registration)
+		}
+		reloads.Add(1)
+		return nil, nil
+	}
+	if _, off := f.confirm(); off != nil || reloads.Load() != 1 {
+		t.Fatalf("first confirmation: off %v reloads %d, want 1", off, reloads.Load())
+	}
+	if _, off := f.confirm(); off != nil || reloads.Load() != 1 {
+		t.Fatalf("within the lease: off %v reloads %d", off, reloads.Load())
+	}
+	time.Sleep(sandboxEgressLease + 50*time.Millisecond)
+	if _, off := f.confirm(); off != nil || reloads.Load() != 1 {
+		t.Fatalf("an unchanged answer reloaded: off %v reloads %d", off, reloads.Load())
+	}
+	strict := config.OpenShellProfileStrict
+	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 8, Digest: "sha256:v2", MinProfile: &strict}, nil)
+	f.d.observeGeneration("reg-1", 8)
+	if _, off := f.confirm(); off != nil || reloads.Load() != 2 {
+		t.Fatalf("a moved policy: off %v reloads %d, want 2", off, reloads.Load())
+	}
+	// The profile minimum is not live: the running sandbox keeps its own.
+	if r, _ := f.d.regs.get("dc-a"); r.Floor.MinProfile != "" {
+		t.Fatalf("a running sandbox's registration took min_profile %q", r.Floor.MinProfile)
+	}
+}
+
+// GAP-0224: a sandbox that starts again takes the profile minimum of the
+// floor now (policy/current's min_profile), persisted with its
+// registration, not the looser one it registered under. An answer without
+// one, or for another registration, changes nothing.
+func TestSandboxDaemonStartTakesTheCurrentMinProfile(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-a", Sandbox: "dc-a", UpdatedAt: time.Now(), Confirmed: true,
+		Floor: config.OpenShellAdminConfig{MinProfile: config.OpenShellProfileBalanced}}); err != nil {
+		t.Fatal(err)
+	}
+	f.d.regs.applyStartFloor("dc-a", "reg-a", sandboxrelay.CurrentPolicy{V: 1})
+	if r, _ := f.d.regs.get("dc-a"); r.Floor.MinProfile != config.OpenShellProfileBalanced {
+		t.Fatalf("an answer without min_profile changed it to %q", r.Floor.MinProfile)
+	}
+	strict := config.OpenShellProfileStrict
+	f.d.regs.applyStartFloor("dc-a", "reg-other", sandboxrelay.CurrentPolicy{V: 1, MinProfile: &strict})
+	if r, _ := f.d.regs.get("dc-a"); r.Floor.MinProfile != config.OpenShellProfileBalanced {
+		t.Fatalf("another registration's answer changed it to %q", r.Floor.MinProfile)
+	}
+
+	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 4, MinProfile: &strict}, nil
+	}
+	// No such sandbox in OpenShell: the start fails after the floor is taken.
+	_, _ = ctl.Start(context.Background(), "dc-a", sandboxapi.StartRequest{})
+	if r, _ := f.d.regs.get("dc-a"); r.Floor.MinProfile != config.OpenShellProfileStrict {
+		t.Fatalf("a start kept min_profile %q, want strict", r.Floor.MinProfile)
+	}
+	again, err := loadDaemonRegistrations(f.d.regs.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := again.get("dc-a"); r.Floor.MinProfile != config.OpenShellProfileStrict {
+		t.Fatalf("the persisted registration has min_profile %q, want strict", r.Floor.MinProfile)
 	}
 }

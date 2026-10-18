@@ -286,7 +286,9 @@ type fakeRelay struct {
 	explain  func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
 	test     func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
 	packs    func(registration, connector, name string) ([]sandboxrelay.PackView, error)
-	deleted  atomic.Int64
+	// decisions answers the saved-decisions list of a registration.
+	decisions func(registration string) ([]sandboxrelay.Decision, error)
+	deleted   atomic.Int64
 
 	eventsMu sync.Mutex
 	events   []sandboxrelay.EventBatch
@@ -369,7 +371,10 @@ func (f *fakeRelay) Pack(_ context.Context, registration, connector, name string
 func (f *fakeRelay) Decide(context.Context, sandboxrelay.DecisionRequest) (sandboxrelay.DecisionResult, error) {
 	return sandboxrelay.DecisionResult{}, nil
 }
-func (f *fakeRelay) Decisions(context.Context, string) ([]sandboxrelay.Decision, error) {
+func (f *fakeRelay) Decisions(_ context.Context, registration string) ([]sandboxrelay.Decision, error) {
+	if f.decisions != nil {
+		return f.decisions(registration)
+	}
 	return nil, nil
 }
 func (f *fakeRelay) Events(_ context.Context, batch sandboxrelay.EventBatch) error {

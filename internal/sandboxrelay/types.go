@@ -517,6 +517,11 @@ type CurrentPolicy struct {
 	// a regroup re-matched the registration, status and refusals name it,
 	// not the profile the sandbox was created under (#1199).
 	Profile string `json:"profile,omitempty"`
+	// MinProfile is the min_profile of the caller's floor now. It is not a
+	// live field: a running sandbox keeps the profile it started with, and
+	// a sandbox that starts again takes this one, never the looser one it
+	// registered under (GAP-0224). nil is an answer without it.
+	MinProfile *string `json:"min_profile,omitempty"`
 	// UpdatedAt is when the registration's policy last changed
 	// (sandboxreg.PolicyUpdatedAt), the age the daemon's status shows.
 	UpdatedAt time.Time `json:"updated_at,omitzero"`

@@ -146,20 +146,6 @@ func StrictFloor(f config.OpenShellAdminConfig) bool {
 	return strings.ToLower(strings.TrimSpace(f.MinProfile)) == config.OpenShellProfileStrict
 }
 
-// CapDecisions keeps the saved decisions f still allows: saved decisions
-// are capped by the floor at every resolve, so a tightened profile takes
-// back what it no longer allows without rewriting the store.
-func CapDecisions(f config.OpenShellAdminConfig, saved []Decision) []Decision {
-	out := make([]Decision, 0, len(saved))
-	for _, d := range saved {
-		req := sandboxrelay.DecisionRequest{V: sandboxrelay.WireVersion, Registration: d.Registration, Kind: d.Kind, Host: d.Host, Scope: d.Scope}
-		if CheckDecision(f, req) == nil {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
 func refused(rule, why string) *DecisionRefusedError {
 	return &DecisionRefusedError{Rule: rule, Message: sandboxapi.AdminMessage + ": " + why}
 }

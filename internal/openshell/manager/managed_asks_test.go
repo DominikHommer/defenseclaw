@@ -61,6 +61,9 @@ type fakeAuthority struct {
 	// no floor.
 	profile, gatewayOnly atomic.Pointer[config.OpenShellAdminConfig]
 	noFloor              atomic.Bool
+	// listFloor caps the saved decisions the gateway lists, as the
+	// gateway's decisions route caps them by the person's floor now.
+	listFloor atomic.Pointer[config.OpenShellAdminConfig]
 
 	mu      sync.Mutex
 	decided []sandboxrelay.DecisionRequest
@@ -140,7 +143,13 @@ func (a *fakeAuthority) Decisions(_ context.Context, registration string) ([]san
 	case a.gone[registration]:
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: "the managed gateway no longer knows this sandbox"}
 	}
-	return append([]sandboxrelay.Decision(nil), a.saved[registration]...), nil
+	out := append([]sandboxrelay.Decision(nil), a.saved[registration]...)
+	if f := a.listFloor.Load(); f != nil {
+		out = slices.DeleteFunc(out, func(d sandboxrelay.Decision) bool {
+			return sandboxreg.CheckDecision(*f, sandboxrelay.DecisionRequest{V: 1, Registration: registration, Kind: d.Kind, Host: d.Host, Scope: d.Scope}) != nil
+		})
+	}
+	return out, nil
 }
 
 func (a *fakeAuthority) Events(_ context.Context, batch sandboxrelay.EventBatch) error {
@@ -1455,5 +1464,62 @@ func TestManagedPolicyAllowRefusesDestinationsTheSandboxCannotUnblock(t *testing
 				t.Fatalf("refused allow reached the decision store: %+v", got)
 			}
 		})
+	}
+}
+
+// GAP-0224: a saved allow stayed in force in a running sandbox for minutes
+// after the organization raised the profile to strict, and again after a
+// restart, because the daemon kept the decisions it had loaded until the
+// next reconcile. A reload (the daemon asks for one when the gateway's
+// answer moved the policy, and at every start) follows the gateway's list,
+// which the floor now caps; a reload that fails keeps the user blocks only.
+func TestManagedReloadDecisionsFollowsTheCurrentFloor(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "keepbox"})
+	reg := e.register("keepbox")
+	if _, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "webhook.site", Sandbox: "keepbox", Always: true}); err != nil {
+		t.Fatalf("always unblock = %v", err)
+	}
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "blocked.example.org", Kind: "block", Sandbox: "keepbox"}); err != nil {
+		t.Fatalf("block = %v", err)
+	}
+	if !e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("the saved unblock does not reach the decider")
+	}
+	kept := func() []sandboxrelay.Decision {
+		st := e.m.managedSide()
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return slices.Clone(st.decisions[reg])
+	}
+
+	auth.listFloor.Store(&config.OpenShellAdminConfig{MinProfile: config.OpenShellProfileStrict})
+	e.m.ReloadDecisions(t.Context(), reg)
+	if e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("a saved unblock the strict floor no longer keeps still opens the host after the reload")
+	}
+	if got := kept(); len(got) != 1 || got[0].Kind != sandboxrelay.DecisionEgressBlock {
+		t.Fatalf("decisions after the strict reload = %+v, want the user block only", got)
+	}
+
+	auth.listFloor.Store(nil)
+	e.m.ReloadDecisions(t.Context(), reg)
+	if !e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("the floor loosened again, but the reload did not bring the saved unblock back")
+	}
+
+	auth.set(func(a *fakeAuthority) { a.down = true })
+	e.m.ReloadDecisions(t.Context(), reg)
+	if e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("a reload that failed kept a saved unblock")
+	}
+	if got := kept(); len(got) != 1 || got[0].Kind != sandboxrelay.DecisionEgressBlock || got[0].Host != "blocked.example.org" {
+		t.Fatalf("decisions after a failed reload = %+v, want the user block kept", got)
+	}
+
+	auth.set(func(a *fakeAuthority) { a.down, a.gone = false, map[string]bool{reg: true} })
+	e.m.ReloadDecisions(t.Context(), reg)
+	if got := kept(); len(got) != 0 {
+		t.Fatalf("a registration the gateway no longer knows kept %+v", got)
 	}
 }

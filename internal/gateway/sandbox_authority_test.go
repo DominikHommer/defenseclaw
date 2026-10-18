@@ -585,6 +585,53 @@ func TestSandboxAuthorityConfigChangeSwitchesLiveFields(t *testing.T) {
 	}
 }
 
+// GAP-0224: once the organization raises the profile to strict, the
+// saved allow of a sandbox registered under the looser one is left out of
+// its decisions list (the store keeps the record), a user block stays, and
+// policy/current names the strict min_profile a restart takes.
+func TestSandboxAuthorityStrictFloorCapsSavedDecisions(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
+	gen := &Generation{N: 1, Config: f.cfg, Profiles: f.api.guardrailProfileSet()}
+	var genMu sync.Mutex
+	f.api.SetGenerationSource(func() *Generation { genMu.Lock(); defer genMu.Unlock(); return gen })
+	resp := f.live(sbxAlice, 1)
+	for _, kind := range []string{sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionEgressBlock} {
+		rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathDecisions, sandboxrelay.DecisionRequest{
+			V: 1, Registration: resp.Registration.ID, Kind: kind, Host: kind + ".example.com", Scope: sandboxrelay.DecisionScopeAlways,
+		}, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("save %s: %d %s", kind, rec.Code, rec.Body.String())
+		}
+	}
+	list := func() []sandboxrelay.Decision {
+		rec := f.do(sbxAlice, http.MethodGet, sandboxrelay.PathDecisions+"?registration="+resp.Registration.ID, nil, nil)
+		var listed []sandboxrelay.Decision
+		if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil || rec.Code != http.StatusOK {
+			t.Fatalf("decisions: %d %s", rec.Code, rec.Body.String())
+		}
+		return listed
+	}
+	if got := list(); len(got) != 2 {
+		t.Fatalf("decisions under the loose floor = %+v", got)
+	}
+	if _, cur := f.current(sbxAlice, resp.Registration.ID); cur.MinProfile == nil || *cur.MinProfile == config.OpenShellProfileStrict {
+		t.Fatalf("min_profile before the change = %v", cur.MinProfile)
+	}
+	next := *f.cfg
+	next.OpenShell.Admin.MinProfile = config.OpenShellProfileStrict
+	genMu.Lock()
+	gen = &Generation{N: 2, Config: &next, Profiles: f.api.guardrailProfileSet()}
+	genMu.Unlock()
+	code, cur := f.current(sbxAlice, resp.Registration.ID)
+	if code != http.StatusOK || cur.MinProfile == nil || *cur.MinProfile != config.OpenShellProfileStrict {
+		t.Fatalf("current after the strict change: %d min_profile %v", code, cur.MinProfile)
+	}
+	if got := list(); len(got) != 1 || got[0].Kind != sandboxrelay.DecisionEgressBlock {
+		t.Fatalf("decisions under the strict floor = %+v, want the user block only", got)
+	}
+}
+
 // A decision past the floor is refused even sent directly; a user block is
 // always stored; a session allow is not.
 func TestSandboxAuthorityDecisions(t *testing.T) {
