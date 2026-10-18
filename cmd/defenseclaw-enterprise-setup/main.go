@@ -55,9 +55,6 @@ const (
 	// its own embedded manifest (hash_pinned trust).
 	standaloneFlavor         = "standalone"
 	standaloneUnsignedFlavor = "standalone-unsigned"
-	// standalonePayloadTrustName is the hash-pinned trust anchor staged
-	// next to an unsigned standalone payload.
-	standalonePayloadTrustName = "payload-trust.json"
 )
 
 // standaloneSetupArtifactName is the file name the standalone Setup ships

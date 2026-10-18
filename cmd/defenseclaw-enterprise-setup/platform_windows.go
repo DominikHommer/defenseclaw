@@ -33,6 +33,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
+// The hash-pinned trust anchor staged next to an unsigned standalone payload.
+const standalonePayloadTrustName = "payload-trust.json"
+
 // Keep the running Setup image open without write/delete sharing while the
 // trailer is decoded and its Authenticode signature is verified.
 func loadTrustedEnterprisePayload() (enterprisePayload, error) {
