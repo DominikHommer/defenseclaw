@@ -49,6 +49,10 @@ func TestWindowsStandaloneStatusAndVerifyReportUnprotectedAgents(t *testing.T) {
 	if status.SecurityComplete {
 		t.Fatal("status reports security_complete with an unprotected agent")
 	}
+	if status.CoverageComplete {
+		// GAP-0151: an agent with no hook contract has no DefenseClaw hook.
+		t.Fatal("status reports coverage_complete with an agent that has no hook contract")
+	}
 	found := false
 	for _, warning := range status.Warnings {
 		found = found || (warning.Code == enterprisehooks.UnprotectedCodeHookContractUnverified &&
