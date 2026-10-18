@@ -16,7 +16,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -65,7 +64,7 @@ func TestGenerationPacksKeepTheLastGoodPack(t *testing.T) {
 		t.Fatal("a later generation without the pack still used it")
 	}
 
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+	if os.Geteuid() == 0 {
 		return
 	}
 	if err := os.Chmod(filepath.Dir(file), 0o000); err != nil {
