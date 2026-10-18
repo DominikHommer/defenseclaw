@@ -119,6 +119,124 @@ emits a fixed JSON result; any unavailable capability or failed assertion is
 a failed experiment with no fallback. SDK policy or execution warnings also
 refuse the experiment.
 
+## One native Linux live job
+
+The reviewed combined lock is now committed with SHA-256
+`d6556677c6decd2d5d786ca082ac2bcdb37fc92130d45b7002a7e8bffe2154db`.
+The Linux locked build in [run 39107869070](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39107869070)
+passed, including compilation of the test binary and rustfmt. It did not run
+the probe. A separate, explicitly wired live job is still required.
+
+Keep that single live job on a fresh native `ubuntu-24.04` GitHub-hosted VM,
+under its ordinary unprivileged runner account. Do not use WSL as evidence for
+native Windows. Use the reviewed locked-build artifact, a clean source
+checkout at its exact build commit, and a separately reviewed SHA-256 of
+its PROVENANCE.json. Before executing anything from the artifact, run:
+
+```text
+python3 verify_live_artifact.py --artifact <download>/build-artifact \
+  --source-checkout <clean-checkout-at-build-commit> \
+  --provenance-sha256 <independently-reviewed-digest> \
+  --build-commit <exact-build-commit> --build-run <exact-build-run> \
+  --receipt <owned-evidence-directory>/artifact-verified.json
+```
+
+The verifier checks all 14 manifest file hashes, the exact inventory, both
+upstream source/lock identities, the committed combined lock, packaged source
+against the clean build checkout, locked-build status and workflow attribution.
+It rejects symlink inputs, extra files and lock-generation artifacts. It never
+executes the probe. Its receipt is verification evidence, not authorization to
+run unreviewed code. Helper tests, including tampered binaries and unreviewed
+artifacts, run with `python3 -m unittest discover -s . -p 'test_*.py'`.
+
+The job must install `bubblewrap` explicitly, check its version, record
+`uname -r`, the actual Landlock ABI and the original AppArmor userns knob, then
+probe the required namespaces as the unprivileged account. A suitable fixed
+readiness command is Bubblewrap with user/PID/IPC/UTS/network namespaces,
+`--die-with-parent`, read-only mounts of existing `/usr`, `/bin`, `/lib` and
+`/lib64`, fresh `/proc` and `/dev`, an empty environment and `/usr/bin/true`.
+It must have its own short outer deadline. Readiness failure is a failed live
+gate, with its bounded stderr retained.
+
+Use this exact readiness command with fixed system paths on the Ubuntu image:
+
+```bash
+env -i PATH=/usr/bin:/bin LANG=C \
+  /usr/bin/timeout --signal=TERM --kill-after=2s 10s \
+  /usr/bin/bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-uts \
+    --unshare-net --die-with-parent --ro-bind /usr /usr \
+    --ro-bind-try /bin /bin --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 \
+    --proc /proc --dev /dev --chdir / --clearenv \
+    --setenv PATH /usr/bin:/bin --setenv LANG C -- /usr/bin/true
+```
+
+Ubuntu hosted runners can have
+`kernel.apparmor_restrict_unprivileged_userns=1`. If the job explicitly opts
+into the upstream CI-only host preparation recipe, it may temporarily set
+**only that knob** to zero after recording its original value, retry the fixed
+readiness command, and restore the original value in an `EXIT` trap. Register
+restoration before attempting the write, check that restoration succeeded,
+and fail the job if it did not. Restrict this preparation to an explicitly
+authorized GitHub-hosted disposable CI VM. Record that the live result needed
+this host preparation; it does not establish support on an unmodified host.
+Do not change other namespace, firewall, LSM or kernel settings.
+
+The workflow's explicit CI preparation block should follow this shape, with
+the `evidence` directory created before registering the trap. No caller
+environment value can select a different sysctl or replacement command:
+
+```bash
+set -euo pipefail
+knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+original=absent
+if test -r "$knob"; then original="$(cat "$knob")"; fi
+changed=0
+restore_userns() {
+  result=$?
+  trap - EXIT
+  if test "$changed" = 1; then
+    if ! sudo -n /usr/sbin/sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$original" \
+      >evidence/userns-restore.log 2>&1; then result=1; fi
+    if test "$(cat "$knob")" != "$original"; then result=1; fi
+  fi
+  printf 'original=%s changed=%s current=%s\n' "$original" "$changed" \
+    "$(cat "$knob" 2>/dev/null || printf absent)" >evidence/userns-preparation.txt
+  exit "$result"
+}
+trap restore_userns EXIT
+# Run the fixed readiness command above and record its first outcome.
+# Only after a failed readiness check and explicit approval in this job:
+test "$GITHUB_ACTIONS" = true
+test "$RUNNER_ENVIRONMENT" = github-hosted
+test "$original" = 1
+changed=1  # register restoration before the first write attempt
+sudo -n /usr/sbin/sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+  >evidence/userns-prepare.log 2>&1
+# Retry the same fixed readiness command; failure still ends the job.
+```
+
+After verification and readiness, give the fixed binary execute permission,
+create a private outer HOME/tmp/evidence directory, then run it once with
+`env -i` and only fixed PATH, LANG, TERM, HOME and TMPDIR values. Use GNU
+`timeout --signal=TERM --kill-after=5s 60s` as the outer process owner. Capture
+bounded output, its exit code, the fixed JSON result, artifact receipt and
+host-preparation/restoration evidence. A timeout is a failed experiment.
+Require the result's explicit MXC Bubblewrap containment, hard filesystem
+requirement and every fixed check; do not accept a successful CLI exit alone.
+
+Snapshot only this probe's private `/tmp/dc-axis-mxc-*` fixtures before/after
+the run, and inspect remaining processes by the verified executable's exact
+device/inode and its fixed unique launch arguments. Report only matching probe
+processes, not a global command-line dump. Require no new owned fixture and
+no remaining exact artifact executable or command naming that artifact; preserve a failed result
+instead of claiming cleanup. Do not issue process-name kills or post-reap raw
+PID/group signals. The VM is disposable; unexpected leftovers fail the gate
+and remain diagnostic evidence. This scan cannot certify arbitrary descendants
+or helpers that exec another binary without retaining that path. Upload the
+transcript even on failure. `run_live.py` implements the bounded single-run
+driver; the separate `axis-mxc-v1-live.yml` workflow binds it to an independently
+reviewed locked artifact and restores the one CI preparation knob on exit.
+
 ## Remaining production gates
 
 Successful fixed probes would establish only this composition experiment.
