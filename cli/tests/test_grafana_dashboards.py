@@ -1017,7 +1017,7 @@ def test_static_audit_rejects_dashboard_semantic_contract_regressions(
     assert any("blank trace selection" in error for error in errors)
     assert any(error.startswith("semantic-fixture/Top hosts:") and "reduced by rows" in error for error in errors)
     assert any("scope_label must be defined before" in error for error in errors)
-    assert any("agent variable must enumerate" in error for error in errors)
+    assert any("agent variable must be a regex text box" in error for error in errors)
     assert any("persisted options must match" in error for error in errors)
 
 
@@ -2854,7 +2854,7 @@ def test_live_golden_executes_authored_agent360_target_semantics(
     assert any("span.defenseclaw.agent.root.id" in query for query in queries)
     assert any(
         "approval[.](requested|resolved)" in query
-        and f'|= "golden-agent-root-{stamp}" | json' in query
+        and f'|~ "golden-agent-root-{stamp}" | json' in query
         for query in queries
     )
     assert any(
