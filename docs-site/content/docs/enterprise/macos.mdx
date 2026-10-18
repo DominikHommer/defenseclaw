@@ -389,9 +389,10 @@ A macOS standalone install can run coding agents in OpenShell MicroVM sandboxes
 on Apple silicon, under the sandbox policy of each person's directory group.
 They are off until `openshell.enabled` is on. The pkg packages the `defenseclaw`
 launcher and the LaunchAgents, which stay in place while sandboxes are off and
-leave with `uninstall`; you provide OpenShell and, for the MicroVM
-driver, `e2fsprogs` in a root-owned directory (`enterprise.openshell.e2fsprogs_dir`),
-or let each person's daemon download OpenShell (`install: setup`). Docker
+leave with `uninstall`; you provide OpenShell or let each person's daemon
+download it (`install: setup`). The pkg supplies a MicroVM `e2fsprogs`
+fallback. Set the root-owned `enterprise.openshell.e2fsprogs_dir` to use
+your own host tools instead. Docker
 Desktop must run for the person, because the agent images are built there.
 An Intel Mac is refused with the reason `os_unsupported`. Write directory groups
 in the spelling macOS reports (`DOMAIN\group`) and check them with
