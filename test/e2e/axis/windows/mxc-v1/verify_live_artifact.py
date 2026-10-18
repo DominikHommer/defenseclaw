@@ -63,7 +63,7 @@ DLL_SCOPE = "fixed_windows_native_psec_dll_startup_diagnostic"
 CLAUDE_VARIANT = "standalone_std_fixed_signed_claude_version"
 CLAUDE_SCOPE = "fixed_windows_native_psec_signed_claude_version"
 IDENTITY_OVERLAY_SHA256 = "d2d3819325c3027f159d75d577dd02306d497234f99293df3c825fbeebddeeab"
-BOUNDARY_OVERLAY_SHA256 = "195bd35366bf99ddd2f66a10dd9c86090e16d078adeedcbf69ae219ea63d3a44"
+BOUNDARY_OVERLAY_SHA256 = "820484c5431d51f62466f07bd9fa4b670625fb4e6e6cb506d42e0ab8562b2e23"
 LITERAL_OVERLAY_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
 SDK_LOCK_SHA256 = "2d145ff3861cd19d1f50969083f8ac59e4d4fd50b030bef12f365a5fcc87afa0"
 SDK_TEST_GROUPS = {
@@ -83,6 +83,7 @@ SDK_TEST_GROUPS = {
     "backend_modules::process_container::common::base_container_runner::strict_windows_argv_tests": [
         "explicit_application_and_native_quoting_preserve_literal_values",
         "native_limit_and_invalid_application_fail_before_resource_creation",
+        "native_failure_diagnostics_are_numeric_bounded_and_ordered",
     ],
     "backend_modules::process_container::common::base_container_runner::strict_windows_path_tests": [
         "local_lexical_admission_accepts_only_unambiguous_drive_paths",
@@ -147,7 +148,7 @@ BOUNDARY_OVERLAY_FILES = {
         "5b23635df276e0743f9f9986f1ee4b63d9b0c71685b8e14bfa7b099023cfa210"
     ),
     "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs": (
-        "906df1a83f04d9c5668d7b68c968162b70d74ad1a18b580cf7fe032b2acec153"
+        "ced043d13810dd65360f79b81c30695fc7e51499c9fd54e8808e3b76ba268a53"
     ),
     "src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs": (
         "110534317bd4311b6ce1253126a7f6d507b7e98f381ad7945a63792e3297a13e"

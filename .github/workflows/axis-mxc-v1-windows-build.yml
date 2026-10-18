@@ -187,6 +187,7 @@ jobs:
               'backend_modules::process_container::common::base_container_runner::strict_windows_argv_tests': [
                   'explicit_application_and_native_quoting_preserve_literal_values',
                   'native_limit_and_invalid_application_fail_before_resource_creation',
+                  'native_failure_diagnostics_are_numeric_bounded_and_ordered',
               ],
               'backend_modules::process_container::common::base_container_runner::strict_windows_path_tests': [
                   'local_lexical_admission_accepts_only_unambiguous_drive_paths',
@@ -201,7 +202,7 @@ jobs:
           ]
           listing = build.command(cargo + ['--', '--list', '--format', 'terse'], cwd=sdk_workspace, capture=True)
           listed = re.findall(r'^(.+): test$', listing, re.MULTILINE)
-          if len(set(selected)) != 11 or any(listed.count(name) != 1 for name in selected):
+          if len(set(selected)) != 12 or any(listed.count(name) != 1 for name in selected):
               raise RuntimeError('The exact reviewed SDK regression tests are missing or duplicated')
           for name in selected:
               output = build.command(cargo + [name, '--', '--exact', '--test-threads=1'], cwd=sdk_workspace, capture=True)

@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import json
+import re
 import struct
 import tempfile
 import unittest
@@ -275,6 +277,18 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
                     self.run_verify()
                 self.admission[name] = original
 
+    def test_pre_diagnostic_sdk_admission_is_refused(self) -> None:
+        diagnostic = (
+            "backend_modules::process_container::common::base_container_runner::"
+            "strict_windows_argv_tests::native_failure_diagnostics_are_numeric_bounded_and_ordered"
+        )
+        self.assertIn(diagnostic, self.admission["tests"])
+        self.admission["tests"].remove(diagnostic)
+        self.admission["passed"] -= 1
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "SDK admission test evidence"):
+            self.run_verify()
+
     def test_boundary_requires_exact_native_directory_custody_evidence(self) -> None:
         for field, value in (
             ("native_directory_custody_tests", {}),
@@ -427,6 +441,17 @@ class BoundedFileTests(unittest.TestCase):
 
 
 class GitHubBuildAdmissionTests(unittest.TestCase):
+    def test_exact_sdk_test_inventory_matches_build_workflow(self) -> None:
+        workflow = Path(__file__).resolve().parents[5] / ".github/workflows/axis-mxc-v1-windows-build.yml"
+        source = workflow.read_text(encoding="utf-8")
+        groups = re.search(r"^          groups = (\{.*?^          \})\n          selected =", source, re.M | re.S)
+        self.assertIsNotNone(groups)
+        assert groups is not None
+        inventory = ast.literal_eval(groups[1])
+        selected = [group + "::" + name for group, names in inventory.items() for name in names]
+        self.assertEqual(selected, verify.SDK_TESTS)
+        self.assertEqual(len(selected), len(set(selected)))
+
     def test_isolated_branch_requires_explicit_boundary_dispatch(self) -> None:
         commit, digest = "a" * 40, "b" * 64
         artifact = {

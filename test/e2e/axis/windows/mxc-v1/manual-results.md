@@ -485,5 +485,59 @@ synthetic fixture remains under the private case10 evidence directory.
 | Root verification receipt | `f5627a068f45a5d25903c750d484556b1094b2c8e5173e2dc2bae401d9c4b3d2` |
 | Actual live result | `6f59697bb5bad56c6afa78a3975c1431c4f8e25dacdb4267e8114d0dc5044b9a` |
 
-Windows boundary and full Claude qualification remain incomplete. A separate
-fixed Claude version slice is source work; it has not executed under current PSEC.
+Windows boundary and full Claude qualification remained incomplete at this
+gate. The separate fixed Claude version slice had not yet executed.
+
+## Fixed signed Claude version: native process creation refuses
+
+[Locked build 39146773781](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39146773781)
+at `347735e54cffbe54f507e522f4cb11e28a1620fd` built the distinct fixed Claude
+version slice. Its 22 exact test passes comprised six pure environment tests,
+four pure DLL protocol tests, one native directory filesystem regression and
+eleven SDK tests. Independent reviews checked the 30 archive members, 26 manifest
+hashes, exact source/locks and all sixteen reconstructed SDK fingerprints. These
+were build and inert reviews; they did not execute PSEC or Claude.
+
+One fresh version-only attempt used that artifact and the independently reviewed,
+signed Claude Code 2.1.292 image. It failed when native `CreateProcessW` returned
+Win32 87 (`ERROR_INVALID_PARAMETER`) while attaching the PSEC environment. The
+payload produced no stdout. No Claude start, version output, child-side marker,
+environment, hook, credential or model behavior was observed. This is a process
+creation failure; it does not establish a DLL-initialization or runtime cause.
+No policy, Win32k restriction, filesystem grant or expected value was relaxed.
+
+The outer driver returned in 11.672 seconds; the probe observation took 4.911
+seconds. The owned Job was assigned before resume and ended empty with zero
+active processes. No deadline, overflow or stream-read error was reported. The
+fresh inner synthetic fixture was retained after refusal. No retry occurred.
+
+| Input | SHA256 |
+| --- | --- |
+| ZIP, artifact `12143867428` | `892053f72c45231645d2e8ed6186fea659c740b562ccba9b8b558016780367ed` |
+| Provenance | `5006ce09e43e8bb235210b4753fed796de18891e2ee4371bb4075b7ef050800a` |
+| Root verification receipt | `96374104298f058b9f739a066cef2ed357e968977bf3d7ba9a28c943436ba996` |
+| Fixed local image | `eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23` |
+| Local-image review receipt | `a9c38cec7b47197f04e6016eada1e9743e218f3b0ee8d77c1c913a5d2351fa3a` |
+| Go custody image | `32f21133e5037b4408fe6df89128e5b4e98014f4b4e5a7bb66ae130a9f13de77` |
+| Actual live result | `a62bad914905fcdb45c6aa1f281cf8dfbd7b514a73fd5b66eb24fea58f24676d` |
+
+The eight private environment values were requested configuration; the realized
+Claude environment remains unverified. The next source-only diagnostic captures
+the immediate native failure status and bounded structural counts under the same
+policy. It is not a cause claim or authorization to retry this artifact.
+
+## Read-only synthetic profile query: missing registered profile
+
+One separately reviewed query02 control ran outside PSEC with eight exact private
+environment values and an absent thread token. `SHGetKnownFolderPath` returned
+`S_OK`; `GetAppContainerFolderPath` for the fixed unregistered synthetic SID
+returned `0x80070002`. Path classes remained null. The attempt returned in 2.926
+seconds without deadline, overflow, stream-read or pin-close errors.
+
+The helper made no explicit profile-creation or filesystem-write calls. Its
+supervisor used the existing owned-Job runner and reported no full-tree or
+Job-empty qualification. This refusal neither classifies the Case10 path mismatch
+nor binds any expected path to its actual contained child. See the separate
+[control results](../profile-query-control/manual-results.md). The retained outer
+query result SHA256 is
+`e470d41ac2cf782c09131bdfd3258ec76f63cc2e2508ff58b4017e838e81f5fe`.

@@ -1,309 +1,9 @@
---- a/src/mxc-sdk/src/lib.rs
-+++ b/src/mxc-sdk/src/lib.rs
-@@ -347,26 +347,169 @@
-         options: SpawnOptions,
-     ) -> Result<MxcProcess, Error> {
-         if !matches!(request.containment, Containment::ProcessContainer(_)) {
--            return Err(crate::mxc_common::mxc_error::MxcError::unsupported_containment(
--                "strict Windows PSEC requires explicit ProcessContainer containment",
--            ).into());
-+            return Err(
-+                crate::mxc_common::mxc_error::MxcError::unsupported_containment(
-+                    "strict Windows PSEC requires explicit ProcessContainer containment",
-+                )
-+                .into(),
-+            );
-         }
-         let mut prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
-+        validate_windows_psec_filesystem(&request, &prepared)?;
-+        prepared.inner.policy.fallback.allow_dacl_mutation = false;
-+        crate::mxc_engine::spawn_windows_psec(&prepared.inner).map(MxcProcess::new)
-+    }
-+
-+    /// Contributor-only literal arguments in native PSEC. The command field
-+    /// must be empty; unsupported OS policy and every fallback remain refused.
-+    #[cfg(target_os = "windows")]
-+    pub fn spawn_windows_psec_argv(
-+        request: ContainerRequest,
-+        values: Vec<std::ffi::OsString>,
-+        options: SpawnOptions,
-+    ) -> Result<MxcProcess, Error> {
-+        let (prepared, argv) = prepare_windows_psec_argv(&request, values, options.telemetry)?;
-+        crate::mxc_engine::spawn_windows_psec_argv(&prepared.inner, &argv).map(MxcProcess::new)
-+    }
-+
-+    #[cfg(target_os = "windows")]
-+    fn prepare_windows_psec_argv(
-+        request: &ContainerRequest,
-+        values: Vec<std::ffi::OsString>,
-+        telemetry: Option<TelemetryConfig>,
-+    ) -> Result<
-+        (
-+            crate::policy::PreparedContainerRequest,
-+            crate::mxc_common::literal_argv::LiteralArgv,
-+        ),
-+        Error,
-+    > {
-+        if !matches!(request.containment, Containment::ProcessContainer(_)) {
-+            return Err(
-+                crate::mxc_common::mxc_error::MxcError::unsupported_containment(
-+                    "strict Windows literal argv requires explicit ProcessContainer containment",
-+                )
-+                .into(),
-+            );
-+        }
-+        let argv = crate::mxc_common::literal_argv::LiteralArgv::new(values)?;
-+        let mut prepared =
-+            crate::policy::prepare_literal_creation_request(request, &argv, telemetry)?;
-+        validate_windows_psec_filesystem(request, &prepared)?;
-+        prepared.inner.policy.fallback.allow_dacl_mutation = false;
-+        crate::mxc_engine::validate_contributor_psec_request(&prepared.inner)?;
-+        Ok((prepared, argv))
-+    }
-+
-+    #[cfg(target_os = "windows")]
-+    fn validate_windows_psec_filesystem(
-+        request: &ContainerRequest,
-+        prepared: &crate::policy::PreparedContainerRequest,
-+    ) -> Result<(), Error> {
-         let filesystem = request.filesystem.as_ref().ok_or_else(|| {
-             crate::mxc_common::mxc_error::MxcError::malformed_request(
-                 "contributor PSEC requires an explicit filesystem policy",
-             )
-         })?;
--        if filesystem.readwrite_paths.iter().any(|path| !prepared.inner.policy.readwrite_paths.contains(path))
--            || filesystem.readonly_paths.iter().any(|path| !prepared.inner.policy.readonly_paths.contains(path))
--            || filesystem.denied_paths.iter().any(|path| !prepared.inner.policy.denied_paths.contains(path))
-+        if filesystem
-+            .readwrite_paths
-+            .iter()
-+            .any(|path| !prepared.inner.policy.readwrite_paths.contains(path))
-+            || filesystem
-+                .readonly_paths
-+                .iter()
-+                .any(|path| !prepared.inner.policy.readonly_paths.contains(path))
-+            || filesystem
-+                .denied_paths
-+                .iter()
-+                .any(|path| !prepared.inner.policy.denied_paths.contains(path))
-         {
-             return Err(crate::mxc_common::mxc_error::MxcError::malformed_request(
-                 "contributor PSEC refuses normalization that drops explicit filesystem grants or denies",
-             ).into());
-         }
--        prepared.inner.policy.fallback.allow_dacl_mutation = false;
--        crate::mxc_engine::spawn_windows_psec(&prepared.inner).map(MxcProcess::new)
-+        Ok(())
-+    }
-+
-+    #[cfg(all(test, target_os = "windows"))]
-+    mod strict_windows_psec_argv_tests {
-+        use super::*;
-+        fn baseline() -> ContainerRequest {
-+            let mut request = ContainerRequest::new("");
-+            request.containment =
-+                Containment::ProcessContainer(configs::ProcessContainerConfig::default());
-+            request.filesystem = Some(FilesystemPolicy {
-+                readwrite_paths: vec![r"C:\fixed\workspace".into()],
-+                readonly_paths: vec![r"C:\fixed\child.exe".into()],
-+                denied_paths: vec![r"C:\fixed\workspace\outside.txt".into()],
-+                clear_policy_on_exit: Some(true),
-+            });
-+            request.network = Some(NetworkPolicy {
-+                egress: Some(NetworkEgressPolicy {
-+                    default: Some(NetworkAction::Deny),
-+                    ..Default::default()
-+                }),
-+                ingress: Some(NetworkIngressPolicy {
-+                    default: Some(NetworkAction::Deny),
-+                    host_loopback: Some(NetworkAction::Deny),
-+                }),
-+                runtime_config: None,
-+            });
-+            request.working_directory = Some(r"C:\fixed\workspace".into());
-+            request.environment = Some(Vec::new());
-+            request.inherit_default_environment = Some(false);
-+            request
-+        }
-+        fn values() -> Vec<std::ffi::OsString> {
-+            vec![r"C:\fixed\child.exe".into(), "".into(), "a b".into()]
-+        }
-+        #[test]
-+        fn preparation_preserves_literal_arguments_and_closed_native_options() {
-+            let (prepared, argv) = prepare_windows_psec_argv(&baseline(), values(), None).unwrap();
-+            assert!(prepared.inner.script_code.is_empty());
-+            assert!(!prepared.inner.policy.fallback.allow_dacl_mutation);
-+            assert!(!prepared.inner.inherit_default_env);
-+            assert_eq!(prepared.inner.env, Some(Vec::new()));
-+            assert_eq!(argv.values(), values());
-+            assert_eq!(
-+                prepared.inner.policy.denied_paths,
-+                [r"C:\fixed\workspace\outside.txt"]
-+            );
-+        }
-+        #[test]
-+        fn preparation_rejects_legacy_ambiguity_other_backend_and_missing_filesystem() {
-+            let mut request = baseline();
-+            request.command = "legacy command".into();
-+            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
-+            let mut request = baseline();
-+            request.containment = Containment::Bubblewrap;
-+            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
-+            let mut request = baseline();
-+            request.filesystem = None;
-+            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
-+        }
-+        #[test]
-+        fn preparation_refuses_network_allow_before_any_native_creation() {
-+            let mut request = baseline();
-+            request
-+                .network
-+                .as_mut()
-+                .unwrap()
-+                .egress
-+                .as_mut()
-+                .unwrap()
-+                .default = Some(NetworkAction::Allow);
-+            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
-+        }
-+        #[test]
-+        fn preparation_refuses_normalization_that_drops_a_covering_grant() {
-+            let mut request = baseline();
-+            let filesystem = request.filesystem.as_mut().unwrap();
-+            filesystem
-+                .readwrite_paths
-+                .push(r"C:\fixed\workspace\outside.txt".into());
-+            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
-+        }
-     }
- 
-     /// Spawn a [`ContainerRequest`] attached to a caller-controlled PTY.
---- a/src/mxc-sdk/src/core/mxc_engine/mod.rs
-+++ b/src/mxc-sdk/src/core/mxc_engine/mod.rs
-@@ -114,23 +114,54 @@
- /// Contributor-only native Windows PSEC path. Validation and spawn happen on
- /// the same direct backend; the fallback dispatcher is never called.
- #[cfg(target_os = "windows")]
--pub fn spawn_windows_psec(
-+pub fn spawn_windows_psec(request: &ExecutionRequest) -> Result<Box<dyn SandboxProcess>, Error> {
-+    validate_contributor_psec_request(request)?;
-+    spawn_execution_request_with_logger_and(
-+        request,
-+        Logger::new(Mode::Buffer),
-+        |request, logger| {
-+            use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
-+            crate::mxc_engine::run::log_policy_hash(request, logger);
-+            let mut native =
-+                crate::process_container_common::base_container_runner::BaseContainerRunner::new();
-+            // new() leaves request serviceability unconfirmed. SandboxBackend's
-+            // spawn() invokes native validation for this exact request before
-+            // entering spawn_validated(); construction itself is not validation.
-+            native
-+                .spawn(request, logger, StdioMode::Pipes)
-+                .map_err(dispatch::map_spawn_error)
-+        },
-+    )
-+}
-+
-+/// Explicit literal argv through the same strict native PSEC admission.
-+#[cfg(target_os = "windows")]
-+pub fn spawn_windows_psec_argv(
-     request: &ExecutionRequest,
-+    argv: &crate::mxc_common::literal_argv::LiteralArgv,
- ) -> Result<Box<dyn SandboxProcess>, Error> {
-     validate_contributor_psec_request(request)?;
--    spawn_execution_request_with_logger_and(request, Logger::new(Mode::Buffer), |request, logger| {
--        use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
--        crate::mxc_engine::run::log_policy_hash(request, logger);
--        let mut native = crate::process_container_common::base_container_runner::BaseContainerRunner::new();
--        // new() leaves request serviceability unconfirmed. SandboxBackend's
--        // spawn() invokes native validation for this exact request before
--        // entering spawn_validated(); construction itself is not validation.
--        native.spawn(request, logger, StdioMode::Pipes).map_err(dispatch::map_spawn_error)
--    })
-+    crate::mxc_common::validator::validate_argv_common(request, argv)
-+        .map_err(dispatch::map_spawn_error)?;
-+    spawn_execution_request_with_logger_and(
-+        request,
-+        Logger::new(Mode::Buffer),
-+        |request, logger| {
-+            use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
-+            crate::mxc_engine::run::log_policy_hash(request, logger);
-+            let mut native =
-+                crate::process_container_common::base_container_runner::BaseContainerRunner::new();
-+            native
-+                .spawn_argv(request, argv, logger, StdioMode::Pipes)
-+                .map_err(dispatch::map_spawn_error)
-+        },
-+    )
- }
- 
- #[cfg(target_os = "windows")]
--fn validate_contributor_psec_request(request: &ExecutionRequest) -> Result<(), MxcError> {
-+pub(crate) fn validate_contributor_psec_request(
-+    request: &ExecutionRequest,
-+) -> Result<(), MxcError> {
-     use crate::mxc_common::models::NetworkAction;
-     if !matches!(request.containment, ContainmentBackend::ProcessContainer)
-         || request.policy.fallback.allow_dacl_mutation
-@@ -140,13 +171,24 @@
-             "strict PSEC requires explicit ProcessContainer, no DACL fallback and a live request",
-         ));
-     }
--    let offline_egress = request.policy.network_egress.as_ref().is_some_and(|policy| {
--        policy.default == NetworkAction::Deny && policy.allow.is_empty() && policy.deny.is_empty()
--    });
--    let offline_ingress = request.policy.network_ingress.as_ref().is_some_and(|policy| {
--        policy.default == NetworkAction::Deny && policy.host_loopback == NetworkAction::Deny
--    });
--    if !offline_egress || !offline_ingress
-+    let offline_egress = request
-+        .policy
-+        .network_egress
-+        .as_ref()
-+        .is_some_and(|policy| {
-+            policy.default == NetworkAction::Deny
-+                && policy.allow.is_empty()
-+                && policy.deny.is_empty()
-+        });
-+    let offline_ingress = request
-+        .policy
-+        .network_ingress
-+        .as_ref()
-+        .is_some_and(|policy| {
-+            policy.default == NetworkAction::Deny && policy.host_loopback == NetworkAction::Deny
-+        });
-+    if !offline_egress
-+        || !offline_ingress
-         || request.policy.network_proxy.is_enabled()
-         || request.policy.runtime_network_proxy_specified
-         || request.policy.allowed_proxy_peer.is_some()
-@@ -199,9 +241,19 @@
-         request.policy.network_egress = Some(NetworkEgressPolicy::default());
-         request.policy.network_ingress = Some(NetworkIngressPolicy::default());
-         assert!(validate_contributor_psec_request(&request).is_ok());
--        request.policy.network_ingress.as_mut().unwrap().host_loopback = NetworkAction::Allow;
-+        request
-+            .policy
-+            .network_ingress
-+            .as_mut()
-+            .unwrap()
-+            .host_loopback = NetworkAction::Allow;
-         assert!(validate_contributor_psec_request(&request).is_err());
--        request.policy.network_ingress.as_mut().unwrap().host_loopback = NetworkAction::Deny;
-+        request
-+            .policy
-+            .network_ingress
-+            .as_mut()
-+            .unwrap()
-+            .host_loopback = NetworkAction::Deny;
-         request.policy.network_ingress.as_mut().unwrap().default = NetworkAction::Allow;
-         assert!(validate_contributor_psec_request(&request).is_err());
-         request.policy.network_ingress.as_mut().unwrap().default = NetworkAction::Deny;
+diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
+index e52aa2dfb69324da0d7432a494cc0b31bfd92439..a651b23085a4c0b38b5b243453603c775066b76c 100644
 --- a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
 +++ b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
-@@ -144,8 +144,7 @@
- 
+@@ -144,8 +144,7 @@ fn build_child_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>,
+
  const CAPTURE_API_AVAILABLE_LOG: &str =
      "captureDenials: learning-mode trace API available (processmodel.dll)";
 -const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str =
@@ -312,10 +12,91 @@
       and QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_ENUMERATE; this OS \
       build does not support that policy, and enumeration-only access cannot fall back to \
       AppContainer enforcement";
-@@ -277,6 +276,394 @@
-             capture_factory: Arc::new(RealCaptureSessionFactory),
-             request_serviceability_confirmed: false,
-         }
+@@ -280,6 +279,506 @@ impl Default for BaseContainerRunner {
+     }
+ }
+
++// Raw return-value calls are deliberately confined to the contributor literal
++// launch path. windows::Result conversion can format an error before the native
++// status is sampled, so capture both thread-local status values first.
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    #[link_name = "CreateProcessW"]
++    fn literal_create_process_w(
++        application: *const u16,
++        command: *mut u16,
++        process_attributes: *const c_void,
++        thread_attributes: *const c_void,
++        inherit_handles: i32,
++        creation_flags: u32,
++        environment: *const c_void,
++        current_directory: *const u16,
++        startup: *const STARTUPINFOW,
++        process: *mut PROCESS_INFORMATION,
++    ) -> i32;
++    #[link_name = "GetLastError"]
++    fn literal_get_last_error() -> u32;
++}
++
++#[link(name = "ntdll")]
++unsafe extern "system" {
++    #[link_name = "RtlGetLastNtStatus"]
++    fn literal_get_last_nt_status() -> i32;
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct NativeLaunchFailure {
++    win32: u32,
++    nt_status: i32,
++}
++
++fn capture_native_launch_failure(
++    win32: impl FnOnce() -> u32,
++    nt_status: impl FnOnce() -> i32,
++) -> NativeLaunchFailure {
++    let win32 = win32();
++    let nt_status = nt_status();
++    NativeLaunchFailure { win32, nt_status }
++}
++
++#[derive(Clone, Copy)]
++struct NativeLaunchShape {
++    lengths: [usize; 6],
++    capped: bool,
++}
++
++impl NativeLaunchShape {
++    fn bounded(lengths: [usize; 6]) -> Self {
++        // Diagnostic counts only: never allocate from a reported length or
++        // retain any argument, environment value or filesystem spelling.
++        const LIMIT: usize = 65_536;
++        Self {
++            capped: lengths.iter().any(|length| *length > LIMIT),
++            lengths: lengths.map(|length| length.min(LIMIT)),
++        }
++    }
++
++    fn describe(self, failure: NativeLaunchFailure) -> String {
++        let [
++            application,
++            command,
++            environment,
++            cwd,
++            argv_entries,
++            env_entries,
++        ] = self.lengths;
++        format!(
++            "native_launch_failure win32={} ntstatus=0x{:08x} application_utf16_units={} command_utf16_units={} environment_utf16_units={} cwd_utf16_units={} argv_entries={} environment_entries={} counts_capped={}",
++            failure.win32,
++            failure.nt_status as u32,
++            application,
++            command,
++            environment,
++            cwd,
++            argv_entries,
++            env_entries,
++            self.capped
++        )
 +    }
 +}
 +
@@ -695,6 +476,34 @@
 +    }
 +
 +    #[test]
++    fn native_failure_diagnostics_are_numeric_bounded_and_ordered() {
++        let calls = std::cell::RefCell::new(Vec::new());
++        let failure = capture_native_launch_failure(
++            || {
++                calls.borrow_mut().push("win32");
++                87
++            },
++            || {
++                calls.borrow_mut().push("ntstatus");
++                0xc000000du32 as i32
++            },
++        );
++        assert_eq!(calls.into_inner(), ["win32", "ntstatus"]);
++        assert_eq!(failure.win32, 87);
++        assert_eq!(failure.nt_status as u32, 0xc000000d);
++        let text = NativeLaunchShape::bounded([44, 55, 66, 77, 2, 8]).describe(failure);
++        assert_eq!(
++            text,
++            "native_launch_failure win32=87 ntstatus=0xc000000d application_utf16_units=44 command_utf16_units=55 environment_utf16_units=66 cwd_utf16_units=77 argv_entries=2 environment_entries=8 counts_capped=false"
++        );
++        let maximum = NativeLaunchShape::bounded([usize::MAX; 6]).describe(failure);
++        assert!(maximum.ends_with("counts_capped=true"));
++        assert_eq!(maximum.matches("=65536").count(), 6);
++        assert!(maximum.len() < 320);
++        assert!(!maximum.contains('\\'));
++    }
++
++    #[test]
 +    fn native_limit_and_invalid_application_fail_before_resource_creation() {
 +        let argv = LiteralArgv::new(vec![
 +            r"C:\fixed\child.exe".into(),
@@ -704,10 +513,13 @@
 +        assert!(windows_literal_argv_buffers(&argv).is_err());
 +        let argv = LiteralArgv::new(vec!["C:\\fixed\\bad\"name.exe".into()]).unwrap();
 +        assert!(windows_literal_argv_buffers(&argv).is_err());
-     }
- }
- 
-@@ -466,6 +853,8 @@
++    }
++}
++
+ impl BaseContainerRunner {
+     pub fn new() -> Self {
+         Self::default()
+@@ -466,6 +965,8 @@ impl BaseContainerRunner {
          request: &ExecutionRequest,
          logger: &mut Logger,
          capture: bool,
@@ -716,7 +528,7 @@
      ) -> Result<BaseChild, ScriptResponse> {
          let _ = writeln!(
              logger,
-@@ -548,8 +937,17 @@
+@@ -548,8 +1049,17 @@ impl BaseContainerRunner {
  
          let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Launch process");
  
@@ -736,7 +548,7 @@
  
          // Resolved via the shared helper so both Windows launch paths agree and
          // neither can pass a NULL cwd (see `working_directory`).
-@@ -631,19 +1029,19 @@
+@@ -631,19 +1141,19 @@ impl BaseContainerRunner {
                  h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
                      Ok(h) => h,
                      Err(e) => {
@@ -759,7 +571,7 @@
                      }
                  };
  
-@@ -736,7 +1134,15 @@
+@@ -736,7 +1246,15 @@ impl BaseContainerRunner {
                  0
              };
  
@@ -776,18 +588,124 @@
          let _ = writeln!(logger, "identity: {identity}");
  
          let current_env_ptr = env_ptr;
-@@ -882,7 +1288,9 @@
+@@ -880,24 +1398,78 @@ impl BaseContainerRunner {
+                 }
+             };
          let environment = (!current_env_ptr.is_null()).then_some(current_env_ptr);
-         let result = unsafe {
-             CreateProcessW(
+-        let result = unsafe {
+-            CreateProcessW(
 -                PCWSTR::null(),
-+                application_wide
-+                    .as_ref()
-+                    .map_or(PCWSTR::null(), |value| PCWSTR(value.as_ptr())),
-                 Some(PWSTR(cmd_wide.as_mut_ptr())),
-                 None,
-                 None,
-@@ -1223,7 +1631,34 @@
+-                Some(PWSTR(cmd_wide.as_mut_ptr())),
+-                None,
+-                None,
+-                !inherited_handles.is_empty(),
+-                PROCESS_CREATION_FLAGS(current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0),
+-                environment,
+-                PCWSTR(cwd_ptr),
+-                &extended_startup.startup_info().StartupInfo,
+-                &mut pi,
+-            )
+-        };
+-        let (success, last_error) = if result.is_ok() {
+-            (1, None)
++        // Freeze numeric shape before the native call. UTF-16 block lengths
++        // include their NUL terminators; counts never carry source values.
++        let launch_shape = literal_argv.map(|argv| {
++            NativeLaunchShape::bounded([
++                application_wide.as_ref().map_or(0, Vec::len),
++                cmd_wide.len(),
++                env_block.as_ref().map_or(0, Vec::len),
++                cwd_wide.len(),
++                argv.values().len(),
++                env_block.as_ref().map_or(0, |block| {
++                    block
++                        .split(|unit| *unit == 0)
++                        .filter(|entry| !entry.is_empty())
++                        .count()
++                }),
++            ])
++        });
++        let (success, last_error, native_failure) = if literal_argv.is_some() {
++            let created = unsafe {
++                literal_create_process_w(
++                    application_wide
++                        .as_ref()
++                        .map_or(ptr::null(), |value| value.as_ptr()),
++                    cmd_wide.as_mut_ptr(),
++                    ptr::null(),
++                    ptr::null(),
++                    i32::from(!inherited_handles.is_empty()),
++                    current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0,
++                    current_env_ptr,
++                    cwd_ptr,
++                    &extended_startup.startup_info().StartupInfo,
++                    &mut pi,
++                )
++            };
++            if created != 0 {
++                (1, None, None)
++            } else {
++                // These are the first API calls after the raw BOOL refusal.
++                // No windows::Result conversion, allocation or formatting runs
++                // before the two thread-local values have been copied.
++                let failure = capture_native_launch_failure(
++                    || unsafe { literal_get_last_error() },
++                    || unsafe { literal_get_last_nt_status() },
++                );
++                (
++                    0,
++                    Some(windows::Win32::Foundation::WIN32_ERROR(failure.win32)),
++                    Some(failure),
++                )
++            }
+         } else {
+-            (0, Some(unsafe { GetLastError() }))
++            let result = unsafe {
++                CreateProcessW(
++                    application_wide
++                        .as_ref()
++                        .map_or(PCWSTR::null(), |value| PCWSTR(value.as_ptr())),
++                    Some(PWSTR(cmd_wide.as_mut_ptr())),
++                    None,
++                    None,
++                    !inherited_handles.is_empty(),
++                    PROCESS_CREATION_FLAGS(current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0),
++                    environment,
++                    PCWSTR(cwd_ptr),
++                    &extended_startup.startup_info().StartupInfo,
++                    &mut pi,
++                )
++            };
++            if result.is_ok() {
++                (1, None, None)
++            } else {
++                (0, Some(unsafe { GetLastError() }), None)
++            }
+         };
+
+         if success == 0 {
+@@ -934,10 +1506,16 @@ impl BaseContainerRunner {
+                 )
+             });
+
+-            let mut extended_error = format!(
+-                "{CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API} failed: {err:?} (working directory: {})",
+-                working_directory.describe()
+-            );
++            let mut extended_error = match native_failure.zip(launch_shape) {
++                Some((failure, shape)) => format!(
++                    "{CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API} failed: {}",
++                    shape.describe(failure)
++                ),
++                None => format!(
++                    "{CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API} failed: {err:?} (working directory: {})",
++                    working_directory.describe()
++                ),
++            };
+             if let Some(cleanup_error) = capture_cleanup_error {
+                 let _ = write!(
+                     extended_error,
+@@ -1223,7 +1801,34 @@ impl SandboxBackend for BaseContainerRunner {
          // Pipes → capture pipes the caller drives; Inherit → the child inherits
          // the binary's own std handles / console (a TTY when the binary has one).
          let capture = stdio == StdioMode::Pipes;
@@ -823,9 +741,12 @@
          Ok(Box::new(BaseContainerSandboxProcess::from_child(
              child, logger,
          )))
+diff --git a/src/mxc-sdk/src/core/mxc_engine/dispatch.rs b/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
+index ad519ce38dd45a0bab013fbd8a3fd423fe61e269..5cf0d40e68c3e6f4330bddbbcf5142d197d85ec3 100644
 --- a/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
 +++ b/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
-@@ -148,7 +148,11 @@
+@@ -147,9 +147,13 @@ pub(super) fn spawn_argv_runner(
+                 .spawn_argv(request, argv, logger, stdio)
                  .map_err(map_spawn_error)
          }
 -        _ => Err(MxcError::unsupported_containment(
@@ -840,3 +761,310 @@
 +        }
      }
  }
+
+diff --git a/src/mxc-sdk/src/core/mxc_engine/mod.rs b/src/mxc-sdk/src/core/mxc_engine/mod.rs
+index f99706d1a02b26cfd6d50f15a4f503a6bde2c0f5..d57e56da37e54f3cf66018561092fdcd395c5932 100644
+--- a/src/mxc-sdk/src/core/mxc_engine/mod.rs
++++ b/src/mxc-sdk/src/core/mxc_engine/mod.rs
+@@ -114,23 +114,54 @@ pub fn spawn_execution_request(
+ /// Contributor-only native Windows PSEC path. Validation and spawn happen on
+ /// the same direct backend; the fallback dispatcher is never called.
+ #[cfg(target_os = "windows")]
+-pub fn spawn_windows_psec(
++pub fn spawn_windows_psec(request: &ExecutionRequest) -> Result<Box<dyn SandboxProcess>, Error> {
++    validate_contributor_psec_request(request)?;
++    spawn_execution_request_with_logger_and(
++        request,
++        Logger::new(Mode::Buffer),
++        |request, logger| {
++            use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
++            crate::mxc_engine::run::log_policy_hash(request, logger);
++            let mut native =
++                crate::process_container_common::base_container_runner::BaseContainerRunner::new();
++            // new() leaves request serviceability unconfirmed. SandboxBackend's
++            // spawn() invokes native validation for this exact request before
++            // entering spawn_validated(); construction itself is not validation.
++            native
++                .spawn(request, logger, StdioMode::Pipes)
++                .map_err(dispatch::map_spawn_error)
++        },
++    )
++}
++
++/// Explicit literal argv through the same strict native PSEC admission.
++#[cfg(target_os = "windows")]
++pub fn spawn_windows_psec_argv(
+     request: &ExecutionRequest,
++    argv: &crate::mxc_common::literal_argv::LiteralArgv,
+ ) -> Result<Box<dyn SandboxProcess>, Error> {
+     validate_contributor_psec_request(request)?;
+-    spawn_execution_request_with_logger_and(request, Logger::new(Mode::Buffer), |request, logger| {
+-        use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
+-        crate::mxc_engine::run::log_policy_hash(request, logger);
+-        let mut native = crate::process_container_common::base_container_runner::BaseContainerRunner::new();
+-        // new() leaves request serviceability unconfirmed. SandboxBackend's
+-        // spawn() invokes native validation for this exact request before
+-        // entering spawn_validated(); construction itself is not validation.
+-        native.spawn(request, logger, StdioMode::Pipes).map_err(dispatch::map_spawn_error)
+-    })
++    crate::mxc_common::validator::validate_argv_common(request, argv)
++        .map_err(dispatch::map_spawn_error)?;
++    spawn_execution_request_with_logger_and(
++        request,
++        Logger::new(Mode::Buffer),
++        |request, logger| {
++            use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
++            crate::mxc_engine::run::log_policy_hash(request, logger);
++            let mut native =
++                crate::process_container_common::base_container_runner::BaseContainerRunner::new();
++            native
++                .spawn_argv(request, argv, logger, StdioMode::Pipes)
++                .map_err(dispatch::map_spawn_error)
++        },
++    )
+ }
+
+ #[cfg(target_os = "windows")]
+-fn validate_contributor_psec_request(request: &ExecutionRequest) -> Result<(), MxcError> {
++pub(crate) fn validate_contributor_psec_request(
++    request: &ExecutionRequest,
++) -> Result<(), MxcError> {
+     use crate::mxc_common::models::NetworkAction;
+     if !matches!(request.containment, ContainmentBackend::ProcessContainer)
+         || request.policy.fallback.allow_dacl_mutation
+@@ -140,13 +171,24 @@ fn validate_contributor_psec_request(request: &ExecutionRequest) -> Result<(), M
+             "strict PSEC requires explicit ProcessContainer, no DACL fallback and a live request",
+         ));
+     }
+-    let offline_egress = request.policy.network_egress.as_ref().is_some_and(|policy| {
+-        policy.default == NetworkAction::Deny && policy.allow.is_empty() && policy.deny.is_empty()
+-    });
+-    let offline_ingress = request.policy.network_ingress.as_ref().is_some_and(|policy| {
+-        policy.default == NetworkAction::Deny && policy.host_loopback == NetworkAction::Deny
+-    });
+-    if !offline_egress || !offline_ingress
++    let offline_egress = request
++        .policy
++        .network_egress
++        .as_ref()
++        .is_some_and(|policy| {
++            policy.default == NetworkAction::Deny
++                && policy.allow.is_empty()
++                && policy.deny.is_empty()
++        });
++    let offline_ingress = request
++        .policy
++        .network_ingress
++        .as_ref()
++        .is_some_and(|policy| {
++            policy.default == NetworkAction::Deny && policy.host_loopback == NetworkAction::Deny
++        });
++    if !offline_egress
++        || !offline_ingress
+         || request.policy.network_proxy.is_enabled()
+         || request.policy.runtime_network_proxy_specified
+         || request.policy.allowed_proxy_peer.is_some()
+@@ -199,9 +241,19 @@ mod strict_psec_tests {
+         request.policy.network_egress = Some(NetworkEgressPolicy::default());
+         request.policy.network_ingress = Some(NetworkIngressPolicy::default());
+         assert!(validate_contributor_psec_request(&request).is_ok());
+-        request.policy.network_ingress.as_mut().unwrap().host_loopback = NetworkAction::Allow;
++        request
++            .policy
++            .network_ingress
++            .as_mut()
++            .unwrap()
++            .host_loopback = NetworkAction::Allow;
+         assert!(validate_contributor_psec_request(&request).is_err());
+-        request.policy.network_ingress.as_mut().unwrap().host_loopback = NetworkAction::Deny;
++        request
++            .policy
++            .network_ingress
++            .as_mut()
++            .unwrap()
++            .host_loopback = NetworkAction::Deny;
+         request.policy.network_ingress.as_mut().unwrap().default = NetworkAction::Allow;
+         assert!(validate_contributor_psec_request(&request).is_err());
+         request.policy.network_ingress.as_mut().unwrap().default = NetworkAction::Deny;
+diff --git a/src/mxc-sdk/src/lib.rs b/src/mxc-sdk/src/lib.rs
+index 8082b6720d8f357c452a2e45d8abc02c364c1c74..9ddb78a4546736b56da3318e26fba42356d9859e 100644
+--- a/src/mxc-sdk/src/lib.rs
++++ b/src/mxc-sdk/src/lib.rs
+@@ -347,26 +347,169 @@ pub mod v1 {
+         options: SpawnOptions,
+     ) -> Result<MxcProcess, Error> {
+         if !matches!(request.containment, Containment::ProcessContainer(_)) {
+-            return Err(crate::mxc_common::mxc_error::MxcError::unsupported_containment(
+-                "strict Windows PSEC requires explicit ProcessContainer containment",
+-            ).into());
++            return Err(
++                crate::mxc_common::mxc_error::MxcError::unsupported_containment(
++                    "strict Windows PSEC requires explicit ProcessContainer containment",
++                )
++                .into(),
++            );
+         }
+         let mut prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
++        validate_windows_psec_filesystem(&request, &prepared)?;
++        prepared.inner.policy.fallback.allow_dacl_mutation = false;
++        crate::mxc_engine::spawn_windows_psec(&prepared.inner).map(MxcProcess::new)
++    }
++
++    /// Contributor-only literal arguments in native PSEC. The command field
++    /// must be empty; unsupported OS policy and every fallback remain refused.
++    #[cfg(target_os = "windows")]
++    pub fn spawn_windows_psec_argv(
++        request: ContainerRequest,
++        values: Vec<std::ffi::OsString>,
++        options: SpawnOptions,
++    ) -> Result<MxcProcess, Error> {
++        let (prepared, argv) = prepare_windows_psec_argv(&request, values, options.telemetry)?;
++        crate::mxc_engine::spawn_windows_psec_argv(&prepared.inner, &argv).map(MxcProcess::new)
++    }
++
++    #[cfg(target_os = "windows")]
++    fn prepare_windows_psec_argv(
++        request: &ContainerRequest,
++        values: Vec<std::ffi::OsString>,
++        telemetry: Option<TelemetryConfig>,
++    ) -> Result<
++        (
++            crate::policy::PreparedContainerRequest,
++            crate::mxc_common::literal_argv::LiteralArgv,
++        ),
++        Error,
++    > {
++        if !matches!(request.containment, Containment::ProcessContainer(_)) {
++            return Err(
++                crate::mxc_common::mxc_error::MxcError::unsupported_containment(
++                    "strict Windows literal argv requires explicit ProcessContainer containment",
++                )
++                .into(),
++            );
++        }
++        let argv = crate::mxc_common::literal_argv::LiteralArgv::new(values)?;
++        let mut prepared =
++            crate::policy::prepare_literal_creation_request(request, &argv, telemetry)?;
++        validate_windows_psec_filesystem(request, &prepared)?;
++        prepared.inner.policy.fallback.allow_dacl_mutation = false;
++        crate::mxc_engine::validate_contributor_psec_request(&prepared.inner)?;
++        Ok((prepared, argv))
++    }
++
++    #[cfg(target_os = "windows")]
++    fn validate_windows_psec_filesystem(
++        request: &ContainerRequest,
++        prepared: &crate::policy::PreparedContainerRequest,
++    ) -> Result<(), Error> {
+         let filesystem = request.filesystem.as_ref().ok_or_else(|| {
+             crate::mxc_common::mxc_error::MxcError::malformed_request(
+                 "contributor PSEC requires an explicit filesystem policy",
+             )
+         })?;
+-        if filesystem.readwrite_paths.iter().any(|path| !prepared.inner.policy.readwrite_paths.contains(path))
+-            || filesystem.readonly_paths.iter().any(|path| !prepared.inner.policy.readonly_paths.contains(path))
+-            || filesystem.denied_paths.iter().any(|path| !prepared.inner.policy.denied_paths.contains(path))
++        if filesystem
++            .readwrite_paths
++            .iter()
++            .any(|path| !prepared.inner.policy.readwrite_paths.contains(path))
++            || filesystem
++                .readonly_paths
++                .iter()
++                .any(|path| !prepared.inner.policy.readonly_paths.contains(path))
++            || filesystem
++                .denied_paths
++                .iter()
++                .any(|path| !prepared.inner.policy.denied_paths.contains(path))
+         {
+             return Err(crate::mxc_common::mxc_error::MxcError::malformed_request(
+                 "contributor PSEC refuses normalization that drops explicit filesystem grants or denies",
+             ).into());
+         }
+-        prepared.inner.policy.fallback.allow_dacl_mutation = false;
+-        crate::mxc_engine::spawn_windows_psec(&prepared.inner).map(MxcProcess::new)
++        Ok(())
++    }
++
++    #[cfg(all(test, target_os = "windows"))]
++    mod strict_windows_psec_argv_tests {
++        use super::*;
++        fn baseline() -> ContainerRequest {
++            let mut request = ContainerRequest::new("");
++            request.containment =
++                Containment::ProcessContainer(configs::ProcessContainerConfig::default());
++            request.filesystem = Some(FilesystemPolicy {
++                readwrite_paths: vec![r"C:\fixed\workspace".into()],
++                readonly_paths: vec![r"C:\fixed\child.exe".into()],
++                denied_paths: vec![r"C:\fixed\workspace\outside.txt".into()],
++                clear_policy_on_exit: Some(true),
++            });
++            request.network = Some(NetworkPolicy {
++                egress: Some(NetworkEgressPolicy {
++                    default: Some(NetworkAction::Deny),
++                    ..Default::default()
++                }),
++                ingress: Some(NetworkIngressPolicy {
++                    default: Some(NetworkAction::Deny),
++                    host_loopback: Some(NetworkAction::Deny),
++                }),
++                runtime_config: None,
++            });
++            request.working_directory = Some(r"C:\fixed\workspace".into());
++            request.environment = Some(Vec::new());
++            request.inherit_default_environment = Some(false);
++            request
++        }
++        fn values() -> Vec<std::ffi::OsString> {
++            vec![r"C:\fixed\child.exe".into(), "".into(), "a b".into()]
++        }
++        #[test]
++        fn preparation_preserves_literal_arguments_and_closed_native_options() {
++            let (prepared, argv) = prepare_windows_psec_argv(&baseline(), values(), None).unwrap();
++            assert!(prepared.inner.script_code.is_empty());
++            assert!(!prepared.inner.policy.fallback.allow_dacl_mutation);
++            assert!(!prepared.inner.inherit_default_env);
++            assert_eq!(prepared.inner.env, Some(Vec::new()));
++            assert_eq!(argv.values(), values());
++            assert_eq!(
++                prepared.inner.policy.denied_paths,
++                [r"C:\fixed\workspace\outside.txt"]
++            );
++        }
++        #[test]
++        fn preparation_rejects_legacy_ambiguity_other_backend_and_missing_filesystem() {
++            let mut request = baseline();
++            request.command = "legacy command".into();
++            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
++            let mut request = baseline();
++            request.containment = Containment::Bubblewrap;
++            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
++            let mut request = baseline();
++            request.filesystem = None;
++            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
++        }
++        #[test]
++        fn preparation_refuses_network_allow_before_any_native_creation() {
++            let mut request = baseline();
++            request
++                .network
++                .as_mut()
++                .unwrap()
++                .egress
++                .as_mut()
++                .unwrap()
++                .default = Some(NetworkAction::Allow);
++            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
++        }
++        #[test]
++        fn preparation_refuses_normalization_that_drops_a_covering_grant() {
++            let mut request = baseline();
++            let filesystem = request.filesystem.as_mut().unwrap();
++            filesystem
++                .readwrite_paths
++                .push(r"C:\fixed\workspace\outside.txt".into());
++            assert!(prepare_windows_psec_argv(&request, values(), None).is_err());
++        }
+     }
+
+     /// Spawn a [`ContainerRequest`] attached to a caller-controlled PTY.
