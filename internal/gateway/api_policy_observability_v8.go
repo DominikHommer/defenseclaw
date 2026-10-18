@@ -539,8 +539,8 @@ func (a *APIServer) recordAPIPolicyReloadMetricV8(ctx context.Context, status st
 }
 
 func (a *APIServer) emitAPIPolicyReloadRejectedV8(ctx context.Context, reason string) error {
-	runtime, ok := a.observabilityV8RuntimeEmitter().(sidecarRuntimeEmitter)
-	if !ok || runtime == nil || ctx == nil {
+	runtime := a.observabilityV8RuntimeEmitter()
+	if runtime == nil || ctx == nil {
 		return errors.New("policy reload observability runtime is unavailable")
 	}
 	producerKey := observability.ProducerKey(audit.ActionPolicyReload)

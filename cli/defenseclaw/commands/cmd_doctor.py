@@ -3716,7 +3716,7 @@ def _check_kernel_sensor(
     info_path: str = _TETRAGON_INFO_PATH,
     os_name: str | None = None,
 ) -> None:
-    """The Kernel sensor (Tetragon) row of a per-user install: Linux, only where Tetragon runs.
+    """The Kernel sensor (Tetragon) row of a per-user Linux install.
 
     A per-user install never connects to Tetragon (its socket is root-only and
     grants kernel policy control), so the row says so, and warns when Tetragon
@@ -3733,6 +3733,14 @@ def _check_kernel_sensor(
         return
     info = _read_tetragon_info(info_path)
     if info is None:
+        _emit(
+            "skip",
+            _KERNEL_SENSOR_LABEL,
+            "Tetragon is not detected on this host; per-user DefenseClaw does not use a kernel sensor.",
+            r=r,
+            check_id=_KERNEL_SENSOR_CHECK_ID,
+            reason_code="tetragon-not-detected",
+        )
         return
     address = str(info.get("server_address") or "").strip()
     if address and not address.startswith("unix://"):

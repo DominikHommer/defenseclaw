@@ -48,7 +48,7 @@ const managedFactsTimeout = 5 * time.Second
 // and every error on any other computer, is returned as it is. An exit
 // status err carries is kept.
 func (a *App) ManagedError(ctx context.Context, err error) error {
-	if err == nil || !(a.ManagedHost() || onManagedHost()) {
+	if err == nil || (!(a.ManagedHost()) && !(onManagedHost())) {
 		return err
 	}
 	var silent *Silent
@@ -101,10 +101,10 @@ func shellDockerHostHint(lookupEnv func(string) (string, bool)) string {
 // (GAP-0595).
 func (a *App) accountOutage(ctx context.Context, err error) error {
 	var lookup *openshell.AccountLookupError
-	if err == nil || !(errors.As(err, &lookup) || strings.Contains(err.Error(), "ssh found no user for it")) {
+	if err == nil || (!(errors.As(err, &lookup)) && !(strings.Contains(err.Error(), "ssh found no user for it"))) {
 		return err
 	}
-	if !(a.ManagedHost() || onManagedHost() || a.managedSeen != nil) {
+	if (!(a.ManagedHost()) && !(onManagedHost())) && a.managedSeen == nil {
 		return errors.New("your account can't be looked up on this computer right now (ssh found no user for it); try again in a moment")
 	}
 	return errors.New(sandboxapi.AccountUnknownText + " " + accountOutageNote + " " + accountOutageContact(a.managedFacts(ctx).RequestAccess))

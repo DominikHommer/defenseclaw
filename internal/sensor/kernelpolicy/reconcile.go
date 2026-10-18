@@ -123,6 +123,7 @@ type known struct {
 type nativeAnchor struct {
 	loadTicks uint64
 	enforce   bool
+	policy    string
 }
 
 // Controller is the reconciler. One goroutine (Run) owns all state; the
@@ -912,7 +913,9 @@ func (c *Controller) refreshPending(publish bool) {
 		key := rootKey{root.PID, root.StartTicks}
 		live[key] = true
 		anchor := c.lastNative[root.UID][root.Exe]
-		binaryCovered := root.Native && (anchor.enforce || (anchor.loadTicks > 0 && root.StartTicks > anchor.loadTicks))
+		launch, launchCovered := c.lastNative[root.UID][root.Launch]
+		binaryCovered := root.Native && root.Launch != "" && launchCovered && anchor.policy == launch.policy &&
+			anchor.loadTicks > 0 && root.StartTicks > anchor.loadTicks
 		covered := c.lastPIDs[root.PID] || binaryCovered
 		eligible := c.cfg.Intent.Mode.LoadsPolicies()
 		if c.cfg.Intent.Mode == ModeEnforce {

@@ -503,7 +503,7 @@ func (adapter *aiRuntimeV8Adapter) emitKernelBlock(
 		identity := adapter.identityFields(runtimeIdentity{
 			UserID:          uidString(event.UID),
 			LoginID:         loginString(event.UID, event.AUID),
-			UserName:        event.User,
+			UserName:        kernelBlockUserName(event),
 			AgentIdentityID: kernelAgentIdentityID(event),
 		})
 		digest, generation := kernelGenerationFacts(helperPolicy)
@@ -550,6 +550,19 @@ func (adapter *aiRuntimeV8Adapter) emitKernelBlock(
 		return builder.BuildLogEnforcementBlockApplied(input)
 	})
 	return err
+}
+
+// kernelBlockUserName fills the sensor's missing name only from the kernel UID.
+// A failed account lookup stays unnamed; no process-provided guess is substituted.
+func kernelBlockUserName(event sensor.KernelEvent) string {
+	return kernelBlockUserNameWithLookup(event, kernelBlockUIDName)
+}
+
+func kernelBlockUserNameWithLookup(event sensor.KernelEvent, lookup func(int) string) string {
+	if event.User != "" || event.UID == nil {
+		return event.User
+	}
+	return lookup(*event.UID)
 }
 
 // kernelOccurrenceID is a stable occurrence id for one denial, so a

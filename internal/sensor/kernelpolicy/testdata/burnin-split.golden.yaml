@@ -204,7 +204,7 @@ spec:
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-4baa7c7c
+  name: defenseclaw-controls-014341ca
 spec:
   options:
     - name: policy-mode
@@ -242,6 +242,7 @@ spec:
         - matchBinaries:
             - operator: In
               values:
+                - /home/alice/.local/bin/claude
                 - /home/alice/.local/share/claude/versions/2.1.100
                 - /home/alice/.local/share/claude/versions/2.1.101
               followChildren: true
@@ -269,6 +270,7 @@ spec:
         - matchBinaries:
             - operator: In
               values:
+                - /home/alice/.local/bin/claude
                 - /home/alice/.local/share/claude/versions/2.1.100
                 - /home/alice/.local/share/claude/versions/2.1.101
               followChildren: true
@@ -313,6 +315,7 @@ spec:
         - matchBinaries:
             - operator: In
               values:
+                - /home/alice/.local/bin/claude
                 - /home/alice/.local/share/claude/versions/2.1.100
                 - /home/alice/.local/share/claude/versions/2.1.101
               followChildren: true

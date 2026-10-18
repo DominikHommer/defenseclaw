@@ -166,7 +166,7 @@ func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowSticky
 	}
 	const label = "hook API token path"
 	if mode := info.Mode().Perm(); mode&0o022 != 0 &&
-		!(allowStickyAncestor && info.Mode()&os.ModeSticky != 0 && stat.Uid == 0) {
+		((!(allowStickyAncestor) || info.Mode()&os.ModeSticky == 0) || stat.Uid != 0) {
 		if err := managed.RelaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
 			"%s has group/other writable mode %04o", path, mode,
 		)); err != nil {

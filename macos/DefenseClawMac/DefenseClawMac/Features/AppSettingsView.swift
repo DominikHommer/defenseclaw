@@ -402,3 +402,26 @@ private struct ConnectionSettings: View {
         }
     }
 }
+
+/// Shared by Settings and the main update banner. Consent is tied to the exact
+/// release and installation displayed when the user opens this confirmation.
+struct RuntimeSourceSwitchButton: View {
+    @Environment(AppState.self) private var appState
+    @State private var confirmation: AppState.SourceRuntimeSwitchRequest?
+
+    var body: some View {
+        Button("Switch to Published Runtime…") {
+            confirmation = appState.sourceRuntimeSwitchRequest
+        }
+        .disabled(appState.sourceRuntimeSwitchRequest == nil)
+        .help("Use a newer published 1.x runtime while preserving the source checkout. Custom environment selections must point to the release destination.")
+        .alert("Switch to Published Runtime?", isPresented: Binding(
+            get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }
+        ), presenting: confirmation) { request in
+            Button("Switch to \(request.release.version)") { appState.performSourceRuntimeSwitch(request) }
+            Button("Cancel", role: .cancel) { }
+        } message: { request in
+            Text("The runtime updater will install version \(request.release.version), replace the active CLI and gateway launchers, migrate data if needed, and restart runtime services. DefenseClawMac will then use the published runtime. Your checkout at \(request.plan.checkoutRoot) stays untouched. The updater owns backup and rollback. This also replaces any older release installation at \(request.context.homeRoot.path)/.venv.")
+        }
+    }
+}

@@ -49,7 +49,7 @@ import (
 // the person: the subject is always the hook-socket peer.
 
 // managedSandboxRecorders holds each API server's recorder of the managed
-// sandbox records, created on first use (like sandboxAuthorities).
+// sandbox records, created on first use (like APIServer.sandboxAuthority).
 var managedSandboxRecorders sync.Map // *APIServer -> *audit.SandboxRecorder
 
 // managedSandboxRecorder is a's recorder of the managed sandbox records.

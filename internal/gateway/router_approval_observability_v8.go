@@ -127,11 +127,12 @@ func (r *EventRouter) emitApprovalResolutionV8(
 		return eventRouterApprovalFailed
 	}
 	outcome := observability.OutcomeDenied
-	if observation.result == "approved" {
+	switch observation.result {
+	case "approved":
 		outcome = observability.OutcomeApproved
-	} else if observation.result == "cancelled" {
+	case "cancelled":
 		outcome = observability.OutcomeCancelled
-	} else if observation.result == "expired" {
+	case "expired":
 		outcome = observability.OutcomeTimedOut
 	}
 	input := observability.SpanApprovalResolveInput{

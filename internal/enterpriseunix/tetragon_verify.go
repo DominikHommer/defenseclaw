@@ -167,6 +167,7 @@ type TetragonUserReadiness struct {
 // Fleet phases of a user (TetragonUserReadiness.Phase).
 const (
 	phaseEnforcing   = "enforcing"
+	phaseArmed       = "armed"
 	phaseReady       = "ready"
 	phaseBurnIn      = "burn_in"
 	phaseReset       = "reset"
@@ -181,6 +182,8 @@ func userPhase(user TetragonUserReadiness, runsEnforce bool) string {
 	switch {
 	case user.State == kernelpolicy.UIDEnforcing:
 		return phaseEnforcing
+	case user.State == kernelpolicy.UIDArmed:
+		return phaseArmed
 	case user.MonitorOnly:
 		return phaseMonitorOnly
 	case user.Ready && runsEnforce:
@@ -796,7 +799,7 @@ func hasAnchoredAgent(user kernelpolicy.UIDStatus, record *kernelpolicy.UIDRecor
 	if user.State == kernelpolicy.UIDInactive && user.Reason == kernelpolicy.ReasonNoAnchors {
 		return false
 	}
-	if user.State == kernelpolicy.UIDEnforcing || user.AnchoredRoots > 0 || user.CoveredSeconds > 0 {
+	if kernelpolicy.Enforced(user.State) || user.AnchoredRoots > 0 || user.CoveredSeconds > 0 {
 		return true
 	}
 	return record != nil && (len(record.WouldBlock) > 0 || len(record.Blocked) > 0)
@@ -905,7 +908,7 @@ func readinessUsers(in tetragonInputs, now time.Time) []TetragonUserReadiness {
 		view := TetragonUserReadiness{
 			UID: user.UID, User: user.User, State: user.State, Reason: user.Reason, CoveredHours: roundHours(p.Covered),
 			NeededHours: roundHours(p.Needed), Percent: p.Percent,
-			Ready: (p.Ready || user.State == kernelpolicy.UIDEnforcing) && !p.MonitorOnly && !noDenyAnchor(user.State, user.Reason) &&
+			Ready: (p.Ready || kernelpolicy.Enforced(user.State)) && !p.MonitorOnly && !noDenyAnchor(user.State, user.Reason) &&
 				!burnInPaused(user.Reason),
 			Reset: p.Reset, Measuring: p.Measuring, MonitorOnly: p.MonitorOnly, Hits: hitDetails(record, user.UID),
 		}
@@ -954,7 +957,7 @@ func hitDetails(record *kernelpolicy.UIDRecord, uid int) []TetragonHitDetail {
 func finishedBurnIn(users []TetragonUserReadiness) int {
 	n := 0
 	for _, user := range users {
-		if user.Ready || (user.MonitorOnly && (user.Percent == 100 || user.State == kernelpolicy.UIDEnforcing)) {
+		if user.Ready || (user.MonitorOnly && (user.Percent == 100 || kernelpolicy.Enforced(user.State))) {
 			n++
 		}
 	}
@@ -1023,15 +1026,18 @@ func readinessNext(rep *TetragonReadiness, failed []string) []string {
 // denies for them: one who finished burn-in is held in monitor by a pause or
 // an operator's change to the controls policy, and is named so (GAP-0055).
 func enforceCounts(users []TetragonUserReadiness, would bool) string {
-	ready, monitorOnly, unanchored, held := 0, 0, 0, 0
+	ready, armed, monitorOnly, unanchored, held := 0, 0, 0, 0, 0
 	limitSet, heldSet := map[string]bool{}, map[string]bool{}
 	var holders []string
 	for _, user := range users {
-		if user.State == kernelpolicy.UIDEnforcing {
+		if kernelpolicy.Enforced(user.State) {
 			holders = append(holders, userName(kernelpolicy.UIDStatus{UID: user.UID, User: user.User}))
 		}
+		if user.State == kernelpolicy.UIDArmed && !would {
+			armed++
+		}
 		switch {
-		case user.Ready && !would && user.State != kernelpolicy.UIDEnforcing:
+		case user.Ready && !would && !kernelpolicy.Enforced(user.State):
 			held++
 			heldSet[defaultStr(monitorReasonWords[user.Reason], defaultStr(user.Reason, "see tetragon status"))] = true
 		case user.Ready:
@@ -1052,8 +1058,17 @@ func enforceCounts(users []TetragonUserReadiness, would bool) string {
 	case would && ready > 1:
 		text = fmt.Sprintf("%d of %d %s finished burn-in, and enforce denies for one of them (the lowest uid with a native agent"+
 			" install; the others stay in monitor, %s)", ready, len(users), plural(len(users), "user", "users"), kernelpolicy.WarnBinaryScopeLimited)
-	case len(users) > 0 && ready == len(users):
+	case len(users) > 0 && ready == len(users) && armed == 0:
 		return fmt.Sprintf("every enrolled user (%d) %s.", len(users), strings.Replace(verb, "are", "is", 1))
+	case len(users) > 0 && ready == len(users):
+		// Enforce is loaded for every user, but an armed user has no
+		// running agent session anchored: nothing is denied for them yet,
+		// so they are not called enforced (GAP-0166).
+		text = fmt.Sprintf("enforce is loaded for every enrolled user (%d); %d %s enforced and %d %s armed with no running agent session anchored yet",
+			len(users), ready-armed, plural(ready-armed, "is", "are"), armed, plural(armed, "is", "are"))
+	case armed > 0:
+		text = fmt.Sprintf("%d of %d %s %s (%d armed with no running agent session anchored yet)", ready, len(users),
+			plural(len(users), "user", "users"), verb, armed)
 	default:
 		text = fmt.Sprintf("%d of %d %s %s", ready, len(users), plural(len(users), "user", "users"), verb)
 	}
@@ -1450,7 +1465,7 @@ func progressOf(user kernelpolicy.UIDStatus, record *kernelpolicy.UIDRecord, now
 func nextReady(in tetragonInputs, now time.Time) (time.Duration, bool) {
 	best, found := time.Duration(0), false
 	for _, user := range in.State.UIDs {
-		if user.State == kernelpolicy.UIDEnforcing {
+		if kernelpolicy.Enforced(user.State) {
 			continue
 		}
 		p := progressFor(user, in.State.BurnIn.UIDs[strconv.Itoa(user.UID)], in, now)

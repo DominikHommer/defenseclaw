@@ -549,6 +549,7 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 				for _, binary := range p.Binaries {
 					c.lastNative[p.BinaryUID][binary] = nativeAnchor{
 						loadTicks: c.st.Applied[p.Name].LoadTicks, enforce: lp.Mode.Enforcing(),
+						policy: p.Name,
 					}
 				}
 			}
@@ -631,7 +632,8 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 		}
 	}
 	c.st.Roots = RootsStatus{OverLimit: compiled.OverLimit, Observed: append([]Observed(nil), c.roots.Observed...)}
-	for _, n := range compiled.Anchored {
+	anchored, _ := c.sessionCoverage()
+	for _, n := range anchored {
 		c.st.Roots.Anchored += n
 	}
 	allowed := func(connector string) bool {
@@ -710,7 +712,7 @@ func (c *Controller) notePredating(compiled Compiled) {
 	}
 	enforced := false
 	for _, user := range c.st.UIDs {
-		if user.UID == binaryUID && user.State == UIDEnforcing {
+		if user.UID == binaryUID && Enforced(user.State) {
 			enforced = true
 		}
 	}
@@ -760,6 +762,30 @@ func (c *Controller) rescanFromPolicies() {
 		}
 	}
 	c.alive = alive
+}
+
+// sessionCoverage counts each user's live agent sessions that a policy
+// Tetragon lists enabled actually covers. anchored: a pid anchor, a native
+// session started from one of a controls policy's binaries after Tetragon
+// loaded it (followChildren marks only those), or a session a retained
+// controls policy still denies for. denied: the anchored sessions an
+// enforce-mode controls policy denies for. A pid anchor never denies.
+func (c *Controller) sessionCoverage() (anchored, denied map[int]int) {
+	anchored, denied = map[int]int{}, map[int]int{}
+	for _, root := range c.roots.Roots {
+		anchor, ok := c.lastNative[root.UID][root.Exe]
+		launch, launchCovered := c.lastNative[root.UID][root.Launch]
+		marked := root.Native && root.Launch != "" && ok && launchCovered &&
+			anchor.policy == launch.policy && anchor.loadTicks > 0 && root.StartTicks > anchor.loadTicks
+		retained := c.retainedRoots[rootKey{root.PID, root.StartTicks}]
+		if c.lastPIDs[root.PID] || marked || retained {
+			anchored[root.UID]++
+		}
+		if (marked && anchor.enforce) || retained {
+			denied[root.UID]++
+		}
+	}
+	return anchored, denied
 }
 
 // hasAnchor reports whether uid has a native binary anchor in an enforcing
@@ -814,6 +840,7 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 		old[u.UID] = u.State
 	}
 	notEnforcing := c.controlsNotEnforcing()
+	anchored, denied := c.sessionCoverage()
 	c.tallyMu.Lock()
 	defer c.tallyMu.Unlock()
 	c.st.UIDs = nil
@@ -823,7 +850,7 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 			status = UIDStatus{UID: uid, User: c.enrollment.UserOf(uid), Connectors: c.enrollment.Connectors(uid),
 				State: UIDMonitor, Reason: "mode " + string(plan.Effective)}
 		}
-		status.AnchoredRoots = c.alive[uid]
+		status.AnchoredRoots = anchored[uid]
 		if c.pending[uid] > 0 {
 			status.State, status.Reason = UIDMonitor, pendingReason(c.waitingLoad[uid])
 		}
@@ -849,18 +876,25 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 			// enforcing (GAP-0042).
 			status.State, status.Reason = UIDMonitor, notEnforcing
 		}
+		if status.State == UIDEnforcing && denied[uid] == 0 {
+			// The controls deny for this user's anchored sessions only; with
+			// none running (or none Tetragon marked) nothing is denied now.
+			status.State = UIDArmed
+		}
 		status.CoveredSeconds = int64(c.burn.Covered(uid) / time.Second)
 		status.NeededSeconds = int64(c.cfg.Intent.BurnIn / time.Second)
 		status.WouldBlock = c.burn.Hits(uid)
 		c.st.UIDs = append(c.st.UIDs, status)
 		uid := uid
 		progress := Change{UID: &uid, CoveredSeconds: status.CoveredSeconds, NeededSeconds: status.NeededSeconds}
-		if prev, had := old[uid]; had && prev != status.State {
+		// Armed and enforcing are one rollout step: a session starting or
+		// ending moves a user between them without a change event.
+		if prev, had := old[uid]; had && Enforced(prev) != Enforced(status.State) {
 			switch {
-			case status.State == UIDEnforcing:
+			case Enforced(status.State):
 				progress.Event, progress.State = EventUIDReady, status.State
 				c.change(progress)
-			case prev == UIDEnforcing:
+			case Enforced(prev):
 				progress.Event, progress.State, progress.Reason = EventUIDBurnIn, status.State, status.Reason
 				c.change(progress)
 			}

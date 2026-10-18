@@ -310,10 +310,10 @@ func v8IdentityToken(value string, limit int, lowerSource, address bool) observa
 		alnum := c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 		switch {
 		case lowerSource:
-			if !(c >= 'a' && c <= 'z' || i > 0 && (c >= '0' && c <= '9' || c == '_')) {
+			if (c < 'a' || c > 'z') && (i <= 0 || ((c < '0' || c > '9') && c != '_')) {
 				return observability.Absent[string]()
 			}
-		case i == 0 && !alnum && !(address && strings.HasPrefix(value, "::")):
+		case i == 0 && !alnum && (!(address) || !(strings.HasPrefix(value, "::"))):
 			return observability.Absent[string]()
 		case !alnum && c != '.' && c != '_' && c != '-' && c != ':' && c != '/':
 			return observability.Absent[string]()

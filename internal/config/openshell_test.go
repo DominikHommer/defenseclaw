@@ -583,8 +583,7 @@ func TestPolicyConnectorsUnionsSandboxHarnesses(t *testing.T) {
 }
 
 func TestOpenShellProfileRank(t *testing.T) {
-	if !(OpenShellProfileRank("open") < OpenShellProfileRank("balanced") &&
-		OpenShellProfileRank("balanced") < OpenShellProfileRank("strict")) {
+	if OpenShellProfileRank("open") >= OpenShellProfileRank("balanced") || OpenShellProfileRank("balanced") >= OpenShellProfileRank("strict") {
 		t.Fatal("profile ranks must order open < balanced < strict")
 	}
 	if OpenShellProfileRank("") != -1 || OpenShellProfileRank("Strict") != -1 {
