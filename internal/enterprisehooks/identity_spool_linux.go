@@ -63,19 +63,22 @@ const (
 	infoPipeDomainOnline = "org.freedesktop.sssd.infopipe.Domains.Domain.IsOnline"
 )
 
-// directoryCachesHoldOutageAnswers is false on Linux: SSSD never lists an
-// account without the name of its primary group, so the return watch
-// (DirectoryCachesStale) has nothing to find. The reach check
-// (DirectoryAnswers) covers SSSD's outages.
-const directoryCachesHoldOutageAnswers = false
+// DirectoryCachesHoldOutageAnswers is false on Linux: SSSD never lists an
+// account without the name of its primary group, so the guardian starts no
+// return watch (DirectoryCachesStale). The reach check (DirectoryAnswers)
+// covers SSSD's outages.
+const DirectoryCachesHoldOutageAnswers = false
 
 // DirectoryAwayWithoutAnswer is true on Linux: SSSD itself reports a domain
 // offline, so a domain it reports offline is away also when the guardian
 // started during the outage.
 const DirectoryAwayWithoutAnswer = true
 
-// sssCacheTools are where sss_cache is installed.
-var sssCacheTools = []string{"/usr/sbin/sss_cache", "/sbin/sss_cache"}
+// sssCacheTool is where SSSD installs sss_cache on every supported
+// distribution. It writes the cache databases in /var/lib/sss/db and the
+// memory cache in /var/lib/sss/mc, which the guardian unit lists in its
+// ReadWritePaths (GAP-0208).
+var sssCacheTool = "/usr/sbin/sss_cache"
 
 // sssCacheTimeout bounds one sss_cache run.
 const sssCacheTimeout = 30 * time.Second
@@ -90,7 +93,7 @@ const sssCacheTimeout = 30 * time.Second
 // cached answers. The gateway's next lookup of an account then gets its
 // groups from the directory.
 func FlushDirectoryCaches(ctx context.Context) error {
-	tool := trustedIdentityTool(sssCacheTools...)
+	tool := trustedIdentityTool(sssCacheTool)
 	if tool == "" {
 		return errors.New("sss_cache is not installed as a root-owned tool")
 	}

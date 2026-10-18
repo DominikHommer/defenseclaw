@@ -134,14 +134,12 @@ func validDirectoryDomain(domain string) bool {
 // DirectoryCachesStale returns the domains of the enrolled Active Directory
 // accounts the operating system's directory caches list without their domain
 // groups now, each once and sorted; none when the caches list every
-// account's groups. Only a Mac answers so (SSSD names an account's primary
-// group from its cache; the reach check, DirectoryAnswers, covers its
+// account's groups. The guardian asks it only where
+// DirectoryCachesHoldOutageAnswers (a Mac: SSSD names an account's primary
+// group from its cache, and the reach check, DirectoryAnswers, covers its
 // outages); dir is the identity spool, whose records say which accounts are
 // Active Directory ones.
 func DirectoryCachesStale(dir string, accounts []IdentitySpoolAccount) []string {
-	if !directoryCachesHoldOutageAnswers {
-		return nil
-	}
 	return directoryCachesStale(dir, accounts, accountGroupsListed)
 }
 

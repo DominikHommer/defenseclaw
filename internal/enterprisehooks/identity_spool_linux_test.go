@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
 )
 
 // An SSSD domain that realmd did not join (for example a cloud directory's
@@ -84,14 +85,59 @@ func TestDirectoryAnswersAsksSSSD(t *testing.T) {
 
 // The return flush runs sss_cache only from a root-owned path.
 func TestFlushDirectoryCachesNeedsARootOwnedSSSCache(t *testing.T) {
-	orig := sssCacheTools
-	t.Cleanup(func() { sssCacheTools = orig })
+	orig := sssCacheTool
+	t.Cleanup(func() { sssCacheTool = orig })
 	tool := filepath.Join(t.TempDir(), "sss_cache")
 	if err := os.WriteFile(tool, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sssCacheTools = []string{tool, filepath.Join(t.TempDir(), "missing")}
+	sssCacheTool = tool
 	if err := FlushDirectoryCaches(context.Background()); err == nil || !strings.Contains(err.Error(), "root-owned") {
 		t.Fatalf("err = %v, want a refusal of a tool that is not root-owned", err)
+	}
+}
+
+// GAP-0208: sss_cache -E opens SSSD's config and cache databases read-write
+// and invalidates its memory cache. Under the guardian unit's
+// ProtectSystem=strict both directories must be listed in ReadWritePaths, or
+// the flush after an outage exits 5 ("Unable to open config database").
+// Nothing broader than those two is opened, and the rest of the sandbox stays.
+func TestTheGuardianUnitLetsSSSCacheFlush(t *testing.T) {
+	if sssCacheTool != "/usr/sbin/sss_cache" {
+		t.Fatalf("sss_cache path %q, want /usr/sbin/sss_cache", sssCacheTool)
+	}
+	data, err := systemdunits.ReadFile("defenseclaw-hook-guardian.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writable := map[string]bool{}
+	settings := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		settings[line] = true
+		if value, ok := strings.CutPrefix(line, "ReadWritePaths="); ok {
+			for _, path := range strings.Fields(value) {
+				writable[path] = true
+			}
+		}
+	}
+	for _, want := range []string{"-/var/lib/sss/db", "-/var/lib/sss/mc"} {
+		if !writable[want] {
+			t.Errorf("guardian ReadWritePaths lack %s, so sss_cache -E cannot flush SSSD's caches", want)
+		}
+	}
+	needed := map[string]bool{"/var/lib/sss/db": true, "/var/lib/sss/mc": true}
+	for path := range writable {
+		trimmed := strings.TrimPrefix(path, "-")
+		broader := trimmed == "/var" || trimmed == "/var/lib" || trimmed == "/var/lib/sss"
+		if broader || (strings.HasPrefix(trimmed, "/var/lib/sss/") && !needed[trimmed]) {
+			t.Errorf("guardian ReadWritePaths open %s; only /var/lib/sss/db and /var/lib/sss/mc are needed", path)
+		}
+	}
+	for _, want := range []string{"ProtectSystem=strict", "NoNewPrivileges=true", "PrivateDevices=true",
+		"CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID"} {
+		if !settings[want] {
+			t.Errorf("guardian unit lost %s", want)
+		}
 	}
 }

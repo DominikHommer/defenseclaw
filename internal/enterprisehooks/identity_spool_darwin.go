@@ -58,9 +58,10 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	}, nil
 }
 
-// directoryCachesHoldOutageAnswers: Open Directory keeps serving the answers
-// it gave while the domain controller was away (DirectoryCachesStale).
-const directoryCachesHoldOutageAnswers = true
+// DirectoryCachesHoldOutageAnswers: Open Directory keeps serving the answers
+// it gave while the domain controller was away, so the guardian watches for
+// them (DirectoryCachesStale).
+const DirectoryCachesHoldOutageAnswers = true
 
 // DirectoryAwayWithoutAnswer is false on a Mac: its own check cannot tell an
 // outage from a firewall in front of the LDAP port, so a domain whose

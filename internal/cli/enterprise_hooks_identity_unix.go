@@ -257,9 +257,13 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 }
 
 // startEnterpriseHookDirectoryReturnWatch starts the watch for the
-// directory's return (enterpriseHookWatchDirectoryReturn) unless one runs.
+// directory's return (enterpriseHookWatchDirectoryReturn) unless one runs,
+// on a system whose caches keep serving outage answers (a Mac).
 func startEnterpriseHookDirectoryReturnWatch(ctx context.Context, stderr io.Writer, dir string,
 	accounts []enterprisehooks.IdentitySpoolAccount) {
+	if !enterprisehooks.DirectoryCachesHoldOutageAnswers {
+		return
+	}
 	state := &enterpriseHookDirectoryReturnState
 	state.Lock()
 	if state.watching || len(accounts) == 0 {
