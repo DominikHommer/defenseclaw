@@ -1,0 +1,75 @@
+<!-- Copyright 2026 Cisco Systems, Inc. and its affiliates -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+# Private AXIS native peer: source-build slice
+
+This private, unqualified Linux x86_64 implementation is not connected to
+`defenseclaw sandbox run`, a customer configuration switch or a native launcher.
+It accepts exactly zero CLI arguments and uses only the existing private
+`bridgeproto` length-prefixed stdin/stdout contract. The Go host keeps full
+authority, credentials, artifact verification, policy generation and outer
+native process custody. Correlation digests do not grant authority.
+
+Preparation consumes the trusted **unprivileged** factory's inherited table:
+fd3 = immutable sealed static-musl Bubblewrap image, fd4 = sealed ELF payload,
+fd5 = held cwd directory, then read and write object descriptors in exact plan
+order. Every fd is close-on-exec before library preparation. No guest path label
+reopens a host source path. The cwd must be an exact grant naming the same held
+object. Images and grant objects stay held until their single-use launch.
+
+The initial sparse filesystem contract accepts explicit Bubblewrap, offline
+network, headless stdio and `/.defenseclaw/payload` as guest argv[0]. Deny masks,
+overlapping grants, synthetic `/dev`/`/proc` overlaps, root grants, terminal
+requests and other backends refuse. It never drops an unsupported component or
+claims that the full resolver projection was enforced. Future production
+translation must separately support or refuse every resolved policy component.
+
+The adapter validates an AXIS policy projection, exports AXIS's default-deny
+seccomp BPF with all socket creation denied (including Unix sockets), seals the
+filter and passes it to Bubblewrap. Bubblewrap applies it before executing the
+payload. Read/write mounts originate from owned descriptors through the new
+detached-mount seam; there is no host-root mount or path-source fallback. Payload
+dynamic interpreters/libraries must exist only within the explicitly admitted
+guest read mounts. No additional child plan contains host policy or bindings.
+
+The additive MXC seam executes the held static image via `execveat`, never PATH,
+and retains a pidfd for the exact Bubblewrap monitor. The private bwrap route
+uses `execv` and requires an absolute guest executable, with no shell fallback.
+Both static ELF structure and separate reviewed static-musl build provenance
+are mandatory. Static glibc or a missing interpreter entry alone cannot prove
+the loader closure. No static-musl/libcap runtime is supplied by this change.
+
+One polling owner serializes protocol admission, native state and frame output.
+Child pipes and protocol pipes are nonblocking; input is capped at 64KiB, output
+frames at 16KiB, and the outbound queue at eight frames. A stalled protocol
+writer refuses after 500ms without progress. Deadline/cancel/malformed input /
+backpressure stop the exact owned pidfd, with a two-second cleanup bound.
+Success needs native terminal observation and both output EOFs. `Destroy` has
+its own acknowledgement. Failed cleanup never becomes successful destruction;
+the Go host must independently stop/wait its exact helper custody on every
+failure. This source has not established namespace/descendant lifecycle proof.
+
+The dedicated build workflow uses exact AXIS fb5, MXC fda and Bubblewrap 0.9.0
+commits and pinned action SHAs. It starts from the already reviewed Linux probe
+lock. Before compilation, any registry package/version/checksum absent from
+that seed refuses. Discovery produces the new root lock for independent review;
+only a committed reviewed lock permits the later locked rebuild. Python 3.11+,
+Rust1.95, a C compiler, Meson, Ninja, pkg-config and libcap headers are build-only
+requirements on a disposable runner. Nothing installs an AXIS service/runtime.
+
+CI compiles the Rust peer and runs protocol/fake-process/owned inert-FD tests.
+It separately compiles the C extension using ordinary dynamic host libraries,
+without running it; that output is not an admitted runtime and is not packaged
+as one. Artifact evidence retains source overlays, exact licenses, upstream and
+combined locks, toolchain, checksums and explicit unqualified scope. A discovery
+artifact, green unit tests or a C compile do not authorize native execution.
+
+Before runtime use: independent source/artifact/lock review; reviewed static-musl
+Bubblewrap/libcap closure; native held-memfd mounting; no-host-root read and
+read/write boundaries; recursive submount attributes; source rename/replacement;
+no foreign namespace/source mutations; namespace/syscall refusal; complete
+nonstdio-FD closure; actual binary stdio/exit; parent EOF/death, timeout and
+descendant cleanup. This is a new enforcement posture and inherits none of the
+earlier Landlock contributor probe's successful boundary assertions. PTY,
+Windows/macOS peers, brokers, hooks, credentials and model traffic remain later
+gates. See [patch source contracts](patches/README.md).
