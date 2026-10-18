@@ -8,6 +8,14 @@ edition = "2024"
 rust-version = "1.95"
 publish = false
 
+[[bin]]
+name = "defenseclaw-axis-windows-psec-probe"
+path = "src/main.rs"
+
+[[bin]]
+name = "defenseclaw-axis-windows-psec-loader-child"
+path = "src/loader_child.rs"
+
 [workspace]
 resolver = "3"
 exclude = ["axis-source", "mxc-source"]

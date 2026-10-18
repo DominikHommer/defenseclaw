@@ -27,9 +27,10 @@ pub fn run() -> Result<i32> {
     if args.first().map(String::as_str) == Some("--fixed-child") {
         return child(&args[1..]);
     }
+    let loader_only = args.as_slice() == ["--loader-only"];
     ensure!(
-        args.is_empty(),
-        "no command, policy or path arguments are accepted"
+        args.is_empty() || loader_only,
+        "only the fixed --loader-only diagnostic selector is accepted"
     );
     let system = PathBuf::from(std::env::var("SystemRoot")?).canonicalize()?;
     let executable = std::env::current_exe()?.canonicalize()?;
@@ -62,12 +63,19 @@ pub fn run() -> Result<i32> {
         eprintln!("fixed contributor supervisor deadline exceeded");
         std::process::exit(124);
     });
-    let endpoints = Endpoints::new()?;
-    let ports = endpoints.ports();
-    run_case(&paths, &executable, "boundary", &ports)?;
-    endpoints.require_no_contained_delivery()?;
-    run_case(&paths, &executable, "exit23", &ports)?;
-    run_case(&paths, &executable, "timeout", &ports)?;
+    if loader_only {
+        let payload = executable
+            .with_file_name("defenseclaw-axis-windows-psec-loader-child.exe")
+            .canonicalize()?;
+        run_case(&paths, &payload, "loader", &[0; 4])?;
+    } else {
+        let endpoints = Endpoints::new()?;
+        let ports = endpoints.ports();
+        run_case(&paths, &executable, "boundary", &ports)?;
+        endpoints.require_no_contained_delivery()?;
+        run_case(&paths, &executable, "exit23", &ports)?;
+        run_case(&paths, &executable, "timeout", &ports)?;
+    }
     ensure!(
         fs::read(&paths.outside)? == SENTINEL,
         "outside canary changed"
@@ -82,6 +90,26 @@ pub fn run() -> Result<i32> {
     fs::remove_dir_all(&root)
         .context("remove verified owned fixture after all SDK handles stopped")?;
     ensure!(!root.exists(), "owned fixture remains");
+    let checks = if loader_only {
+        vec![
+            "separate_std_loader_marker",
+            "exit23",
+            "retained_direct_process_handles_signaled",
+            "owned_fixture_removed",
+        ]
+    } else {
+        vec![
+            "private_environment",
+            "allowed_write",
+            "outside_read_write_denied",
+            "readonly_write_denied",
+            "loopback_ipv4_ipv6_tcp_udp",
+            "exit23",
+            "timeout",
+            "retained_direct_process_handles_signaled",
+            "owned_fixture_removed",
+        ]
+    };
     println!(
         "{}",
         serde_json::json!({
@@ -89,10 +117,9 @@ pub fn run() -> Result<i32> {
             "mxc_commit": "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2",
             "translation_contract": "fixed-axis-hard-block-to-mxc-typed-1.0.0",
             "backend": "native_windows_psec_only", "production_qualification": false,
-            "checks": ["private_environment", "allowed_write", "outside_read_write_denied",
-                "readonly_write_denied", "loopback_ipv4_ipv6_tcp_udp", "exit23", "timeout",
-                "retained_direct_process_handles_signaled", "owned_fixture_removed"],
-            "scope": "fixed offline canaries; no terminal, proxy, credentials, model or general resource audit"
+            "loader_only_diagnostic": loader_only, "checks": checks,
+            "scope": if loader_only { "separate std loader marker and exit23 only; no boundary, network or customer qualification" }
+                else { "fixed offline canaries; no terminal, proxy, credentials, model or general resource audit" }
         })
     );
     Ok(0)
@@ -207,10 +234,15 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
         !executable.to_string_lossy().contains('"'),
         "invalid executable path"
     );
-    let mut request = ContainerRequest::new(format!(
-        "{quoted} --fixed-child {mode} {} {} {} {}",
-        ports[0], ports[1], ports[2], ports[3]
-    ));
+    let command = if mode == "loader" {
+        quoted
+    } else {
+        format!(
+            "{quoted} --fixed-child {mode} {} {} {} {}",
+            ports[0], ports[1], ports[2], ports[3]
+        )
+    };
+    let mut request = ContainerRequest::new(command);
     request.containment = Containment::ProcessContainer(ProcessContainerConfig::default());
     request.filesystem = Some(FilesystemPolicy {
         readwrite_paths: policy.filesystem.read_write.clone(),
@@ -268,6 +300,16 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
     ensure!(signaled, "retained direct process handle is not signaled");
     let outcome = outcome?;
     match mode {
+        "loader" => {
+            ensure!(
+                output == "FIXED_PSEC_LOADER_STARTED\n",
+                "separate loader marker missing: {output:?} {diagnostics}"
+            );
+            ensure!(
+                outcome == WaitResult::Exited(23),
+                "separate loader exit differs: {outcome:?}"
+            );
+        }
         "boundary" => {
             ensure!(
                 outcome == WaitResult::Exited(0),

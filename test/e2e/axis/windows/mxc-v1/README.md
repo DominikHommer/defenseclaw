@@ -19,6 +19,23 @@ not a general AXIS policy translator, and it does not forward the old AXIS
 uses `process.identity: backend_default` and allows child processes; no isolated
 identity intent or resource limit is silently dropped.
 
+The first locked native run (build `215f3e98936b34279e31670a4fed14d5f47542c2`)
+failed before its payload marker with `0xC0000142` (`DLL_INIT_FAILED`). Its outer
+Job was empty afterward and the failed fixture was retained. The SDK-bearing
+self-payload imports Shell32/COM and other libraries; a Win32k/import interaction
+is a hypothesis, not an established cause. No UI restriction or filesystem
+grant is relaxed to make the experiment pass.
+
+The distinct `separate_std_loader_diagnostic` artifact includes a second binary,
+`defenseclaw-axis-windows-psec-loader-child.exe`, whose source uses only Rust std
+and has no AXIS/SDK references. The parent requires the fixed `--loader-only`
+selector and computes that exact sibling path. It uses the same hard/block
+policy and native admission, then requires the unique marker and typed exit23.
+Its four checks cover that marker, exit, retained direct handle and owned fixture
+removal only; it never reports the nine boundary checks. Both image hashes and
+the diagnostic variant must be verified, and the child's imports inspected,
+before any separately reviewed native execution.
+
 ## Reviewed SDK overlay
 
 `patches/mxc-strict-windows-psec.patch` introduces a Windows-only public
@@ -96,7 +113,8 @@ installation; Git for Windows' Unix linker is not a compatible MSVC linker.
 
 ## Fixed live scope, after review
 
-The probe accepts no caller command, path, policy or environment flags. Its
+The probe accepts no caller command, path, policy or environment flags. Its only
+optional operator selector is the fixed `--loader-only` diagnostic. Its
 child selector accepts only fixed boundary, exit-23 and timeout cases. It
 clears the supervisor environment before invoking SDK code or creating threads;
 the child receives only explicit system/private state entries with environment

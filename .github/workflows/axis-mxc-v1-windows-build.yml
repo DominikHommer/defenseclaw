@@ -55,7 +55,7 @@ jobs:
           assert not subprocess.check_output(['git', '-C', str(checkout), 'status', '--porcelain'], text=True).strip()
           prefix = 'test/e2e/axis/windows/mxc-v1/'
           files = ['Cargo.toml', 'README.md', 'prepare_build.py', 'test_prepare_build.py',
-                   'src/main.rs', 'src/probe.rs', 'patches/mxc-strict-windows-psec.patch']
+                   'src/main.rs', 'src/probe.rs', 'src/loader_child.rs', 'patches/mxc-strict-windows-psec.patch']
           if (checkout / prefix / 'Cargo.lock').is_file(): files.append('Cargo.lock')
           root = Path('probe')
           root.mkdir()
@@ -130,6 +130,17 @@ jobs:
             python prepare_build.py generate-lock
           }
           if ($LASTEXITCODE -ne 0) { throw 'Pinned PSEC contributor build failed' }
+          # These SDK tests call only the pure pre-creation validator. The
+          # hosted image never executes PSEC or either contributor payload.
+          @'
+          import prepare_build as build
+          build.command([
+              'cargo', '+' + build.TOOLCHAIN, 'test', '--locked', '--release',
+              '-p', 'mxc-sdk', '--lib', '--no-default-features',
+              'strict_psec_tests', '--', '--test-threads=1',
+          ])
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Pure SDK native-admission regression tests failed' }
           @'
           import json
           import os

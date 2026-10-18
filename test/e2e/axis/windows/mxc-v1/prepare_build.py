@@ -20,6 +20,7 @@ AXIS_COMMIT = "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c"
 MXC_COMMIT = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 TOOLCHAIN = "1.95.0"
 BINARY = "defenseclaw-axis-windows-psec-probe.exe"
+LOADER_BINARY = "defenseclaw-axis-windows-psec-loader-child.exe"
 ROOT = Path(__file__).resolve().parent
 PATCH = ROOT / "patches" / "mxc-strict-windows-psec.patch"
 PATCHED_PATHS = {
@@ -155,14 +156,16 @@ def main() -> None:
         Path("README.md"),
         Path("src/main.rs"),
         Path("src/probe.rs"),
+        Path("src/loader_child.rs"),
         Path("patches/mxc-strict-windows-psec.patch"),
     ]
     for relative in files:
         target = artifact / "source" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
-    shutil.copyfile(ROOT / "target" / "release" / BINARY, artifact / "bin" / BINARY)
-    (artifact / "bin" / BINARY).chmod(0o755)
+    for binary in (BINARY, LOADER_BINARY):
+        shutil.copyfile(ROOT / "target" / "release" / binary, artifact / "bin" / binary)
+        (artifact / "bin" / binary).chmod(0o755)
     (artifact / "upstream").mkdir()
     for name, source, lock_path, license_name in [
         ("axis", axis, axis / "Cargo.lock", "LICENSE"),
@@ -173,6 +176,7 @@ def main() -> None:
     (artifact / "TOOLCHAIN.txt").write_text(toolchain + "\n" + cargo_version + "\n", encoding="utf-8")
     provenance = {
         "schema": "defenseclaw-contributor-axis-windows-psec-v1",
+        "variant": "separate_std_loader_diagnostic",
         "axis_commit": AXIS_COMMIT,
         "mxc_commit": MXC_COMMIT,
         "mxc_patch_sha256": digest(PATCH),
@@ -183,7 +187,7 @@ def main() -> None:
         "probe_executed": False,
         "human_lock_review_required_before_live_execution": True,
         "locked_rebuild": args.mode == "build-locked",
-        "scope": "fixed_windows_native_psec_only_headless",
+        "scope": "fixed_windows_native_psec_loader_diagnostic",
         "production_certification": False,
         "files": {
             path.relative_to(artifact).as_posix(): digest(path)

@@ -27,7 +27,7 @@
      let mut message = resp.error_message;
 --- a/src/mxc-sdk/src/core/mxc_engine/mod.rs
 +++ b/src/mxc-sdk/src/core/mxc_engine/mod.rs
-@@ -107,6 +107,95 @@
+@@ -107,6 +107,108 @@
      request: &ExecutionRequest,
  ) -> Result<Box<dyn SandboxProcess>, Error> {
      spawn_execution_request_with_logger(request, Logger::new(Mode::Buffer))
@@ -44,8 +44,9 @@
 +        use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
 +        crate::mxc_engine::run::log_policy_hash(request, logger);
 +        let mut native = crate::process_container_common::base_container_runner::BaseContainerRunner::new();
-+        // new(), unlike new_for_selected_request(), always performs the full
-+        // native host/serviceability validation before creating anything.
++        // new() leaves request serviceability unconfirmed. SandboxBackend's
++        // spawn() invokes native validation for this exact request before
++        // entering spawn_validated(); construction itself is not validation.
 +        native.spawn(request, logger, StdioMode::Pipes).map_err(dispatch::map_spawn_error)
 +    })
 +}
@@ -85,17 +86,29 @@
 +mod strict_psec_tests {
 +    use super::*;
 +
-+    #[test]
-+    fn strict_psec_refuses_fallback_dry_run_and_other_backends_before_spawn() {
++    fn offline_request() -> ExecutionRequest {
++        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
 +        let mut request = ExecutionRequest::default();
 +        request.containment = ContainmentBackend::ProcessContainer;
-+        assert!(spawn_windows_psec(&request).is_err());
 +        request.policy.fallback.allow_dacl_mutation = false;
++        request.policy.network_egress = Some(NetworkEgressPolicy::default());
++        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
++        request
++    }
++
++    #[test]
++    fn strict_psec_refuses_fallback_dry_run_and_other_backends_before_spawn() {
++        let baseline = offline_request();
++        assert!(validate_contributor_psec_request(&baseline).is_ok());
++        let mut request = baseline.clone();
++        request.policy.fallback.allow_dacl_mutation = true;
++        assert!(validate_contributor_psec_request(&request).is_err());
++        let mut request = baseline.clone();
 +        request.dry_run = true;
-+        assert!(spawn_windows_psec(&request).is_err());
-+        request.dry_run = false;
++        assert!(validate_contributor_psec_request(&request).is_err());
++        let mut request = baseline;
 +        request.containment = ContainmentBackend::Bubblewrap;
-+        assert!(spawn_windows_psec(&request).is_err());
++        assert!(validate_contributor_psec_request(&request).is_err());
 +    }
 +
 +    #[test]
