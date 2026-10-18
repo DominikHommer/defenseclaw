@@ -771,13 +771,6 @@ func writePathForms(path string, linkDepth int) ([]string, bool) {
 	return forms, ok
 }
 
-// commandLinks lists the links that ln, link and cp --link or
-// --symbolic-link create in command, in any order: a link made after a write
-// only makes the result more conservative.
-func commandLinks(command, cwd, home string) shellLinks {
-	return commandLinksWithFacts(command, cwd, home, nil, false)
-}
-
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
 	links := shellLinks{known: true}
 	file, parsed := parseShell(command)
