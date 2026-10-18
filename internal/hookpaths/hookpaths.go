@@ -232,9 +232,10 @@ func walkWritePath(base, path string, linkDepth int, collect bool) (string, []st
 		}
 		return true
 	}
-	// The stack records the status of components added after base. A link
-	// remains marked even after its target is resolved: the following ".."
-	// would otherwise erase the evidence of that hop.
+	// The stack records whether a component added after base is missing.
+	// A resolved link is a physical directory, so ".." ascends from its
+	// target. A missing component cannot be crossed: it may become a link
+	// before the command executes.
 	var crossed []bool
 	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
 		switch part {
@@ -262,6 +263,11 @@ func walkWritePath(base, path string, linkDepth int, collect bool) (string, []st
 			}
 			unknown := os.IsNotExist(err)
 			if err == nil && info.Mode()&os.ModeSymlink != 0 {
+				// The cwd proc link is interpreted by the process opening the
+				// operand. Resolving it in the hook would prove a different path.
+				if ProcCWDWriteOperand(candidate) {
+					return "", nil, linkDepth, false
+				}
 				link, err := os.Readlink(candidate)
 				if err != nil {
 					return "", nil, linkDepth, false
@@ -275,7 +281,11 @@ func walkWritePath(base, path string, linkDepth int, collect bool) (string, []st
 				}
 				linkDepth = nextDepth
 				forms = append(forms, extra...)
-				crossed = append(crossed, true)
+				_, err = os.Lstat(current)
+				if err != nil && !os.IsNotExist(err) {
+					return "", nil, linkDepth, false
+				}
+				crossed = append(crossed, os.IsNotExist(err))
 			} else {
 				current = candidate
 				crossed = append(crossed, unknown)
@@ -318,6 +328,21 @@ func ProtectedAuthorizedKeysPaths(home string) []string {
 // exist yet. ok is false when the target cannot be resolved.
 func ResolveWriteTarget(path string) (string, bool) {
 	return resolveWritePath(path, 0)
+}
+
+// ResolveProcSelfCWDTarget interprets the cwd alias using the event cwd, not
+// the hook or gateway process cwd. The suffix is walked before dot-dot is
+// removed so directory links keep their physical meaning.
+func ResolveProcSelfCWDTarget(path, cwd string) (string, bool) {
+	const prefix = "/proc/self/cwd/"
+	if !strings.HasPrefix(path, prefix) || !filepath.IsAbs(cwd) {
+		return "", false
+	}
+	physicalCWD, ok := ResolveWriteTarget(cwd)
+	if !ok {
+		return "", false
+	}
+	return ResolveWriteTarget(physicalCWD + "/" + strings.TrimPrefix(path, prefix))
 }
 
 // protectedFile is the identity of one of the user's authorized-keys files. A
@@ -460,6 +485,7 @@ func Resolve(payload []byte) string {
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				literalOperands = LiteralWriteOperands(command, cwd, home)
+				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
 				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
 				truncated = truncated || directoryUnknown
 				truncated = truncated || !parsed
@@ -499,14 +525,19 @@ func Resolve(payload []byte) string {
 			return
 		}
 		resolved, ok := "", false
-		if links.known {
-			resolved, ok = links.resolve(path, protected)
-		} else if safeRedirect {
-			if direct, directOK := resolveWritePath(path, 0); directOK {
+		resolutionPath := path
+		aliasKnown := true
+		if strings.HasPrefix(path, "/proc/self/cwd/") {
+			resolutionPath, aliasKnown = ResolveProcSelfCWDTarget(path, cwd)
+		}
+		if aliasKnown && links.known {
+			resolved, ok = links.resolve(resolutionPath, protected)
+		} else if aliasKnown && safeRedirect {
+			if direct, directOK := resolveWritePath(resolutionPath, 0); directOK {
 				resolved, ok = protected.target(direct)
 			}
-		} else if links.opaque && (!links.opaqueTarget(path) || !links.opaqueTargetExceptCopy(path, path) && slices.Contains(links.copyDestinations, path)) {
-			resolved, ok = links.resolve(path, protected)
+		} else if aliasKnown && links.opaque && (!links.opaqueTarget(resolutionPath) || !links.opaqueTargetExceptCopy(resolutionPath, resolutionPath) && slices.Contains(links.copyDestinations, resolutionPath)) {
+			resolved, ok = links.resolve(resolutionPath, protected)
 		}
 		if !ok {
 			resolved = ""
@@ -760,13 +791,6 @@ func writePathForms(path string, linkDepth int) ([]string, bool) {
 	return forms, ok
 }
 
-// commandLinks lists the links that ln, link and cp --link or
-// --symbolic-link create in command, in any order: a link made after a write
-// only makes the result more conservative.
-func commandLinks(command, cwd, home string) shellLinks {
-	return commandLinksWithFacts(command, cwd, home, nil, false)
-}
-
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
 	links := shellLinks{known: true}
 	file, parsed := parseShell(command)
@@ -820,6 +844,13 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				links.unknown(true)
 			}
 		case slices.Contains(copyPrograms, program):
+			if len(args) == 3 && !static[1] && static[2] &&
+				quotedDynamicCopySource(args[1]) && words[2] != "" && !strings.HasPrefix(words[2], "-") {
+				// A quoted source is one argv word. If it expands to an option,
+				// cp has no source and cannot write its fixed destination.
+				links.copyDestinations = append(links.copyDestinations, OperandPath(words[2], cwd))
+				return true
+			}
 			destination := cpDestination(words[1:], static[1:], cwd)
 			if destination != "" {
 				links.copyDestinations = append(links.copyDestinations, destination)
@@ -1165,6 +1196,122 @@ func copyLinkOptions(args []*syntax.Word, words []string, static []bool) (option
 	return option, dynamic
 }
 
+// quotedDynamicCopySource accepts only a single scalar shell parameter.
+// Double quoting makes its expansion one argv word, including when its value
+// contains spaces or starts with a dash.
+func quotedDynamicCopySource(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) != 1 {
+		return false
+	}
+	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok || len(quoted.Parts) != 1 {
+		return false
+	}
+	param, ok := quoted.Parts[0].(*syntax.ParamExp)
+	if !ok || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||
+		param.Index != nil || param.Slice != nil || param.Repl != nil || param.Names != 0 ||
+		param.Exp != nil || param.Flags != nil || param.NestedParam != nil || len(param.Modifiers) != 0 {
+		return false
+	}
+	name := param.Param.Value
+	if name == "" {
+		return false
+	}
+	for i, ch := range name {
+		if ch != '_' && (ch < 'A' || ch > 'Z') && (ch < 'a' || ch > 'z') &&
+			(i == 0 || ch < '0' || ch > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// QuotedDynamicCopyDestinations lists the fixed destinations of cp calls
+// whose only source is a quoted scalar parameter. The source is one argv
+// word; an option value cannot turn the fixed destination into a write
+// somewhere else because it leaves cp without a source operand.
+func QuotedDynamicCopyDestinations(command, cwd, home string) []string {
+	file, ok := parseShell(command)
+	if !ok {
+		return nil
+	}
+	var destinations []string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) != 3 || !quotedDynamicCopySource(call.Args[1]) {
+			return true
+		}
+		program, programOK := StaticWord(call.Args[0], home)
+		dest, destOK := StaticWord(call.Args[2], home)
+		if programOK && slices.Contains(copyPrograms, programBase(program)) &&
+			destOK && dest != "" && !strings.HasPrefix(dest, "-") {
+			destinations = append(destinations, OperandPath(dest, cwd))
+		}
+		return true
+	})
+	return destinations
+}
+
+// DynamicCopyProtectedBasename reports a copy whose source can expand to an
+// option that selects a directory while the final fixed word names a key file.
+func DynamicCopyProtectedBasename(command, home string) bool {
+	file, ok := parseShell(command)
+	if !ok {
+		return false
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 3 || found {
+			return !found
+		}
+		program, static := StaticWord(call.Args[0], home)
+		if !static || !slices.Contains(copyPrograms, programBase(program)) {
+			return true
+		}
+		last, static := StaticWord(call.Args[len(call.Args)-1], home)
+		if !static {
+			return true
+		}
+		base := filepath.Base(last)
+		if base != "authorized_keys" && base != "authorized_keys2" {
+			return true
+		}
+		for _, arg := range call.Args[1 : len(call.Args)-1] {
+			if _, static := StaticWord(arg, home); !static {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// ProcCWDWriteOperand identifies proc cwd aliases whose meaning depends on
+// the process opening the path.
+func ProcCWDWriteOperand(path string) bool {
+	if !strings.HasPrefix(path, "/proc/") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/proc/"), "/")
+	if len(parts) < 2 || parts[1] != "cwd" {
+		return false
+	}
+	if parts[0] == "self" {
+		return true
+	}
+	if parts[0] == "" {
+		return false
+	}
+	for _, ch := range parts[0] {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func copyDestination(args []string, static []bool, cwd string) string {
 	for i := len(args) - 1; i >= 0; i-- {
 		if !static[i] {
@@ -1259,7 +1406,7 @@ func cpOperands(args []string, static []bool) (sources []string, destination str
 					targetDir = value
 				}
 				j = len(arg)
-			case 'b', 'f', 'H', 'i', 'L', 'l', 'n', 'p', 's', 'T', 'u', 'v', 'x':
+			case 'b', 'c', 'f', 'H', 'i', 'L', 'l', 'n', 'N', 'p', 's', 'T', 'u', 'v', 'x', 'X', 'Z':
 			default:
 				return nil, "", true, false
 			}
@@ -1457,7 +1604,10 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, value, joined := strings.Cut(arg[2:], "=")
-			option, unique := longOption(name, []string{"directory", "dir", "cd", "one-top-level"})
+			option, unique := longOption(name, []string{
+				"directory", "dir", "cd", "one-top-level", "file", "strip-components",
+				"exclude", "zstd", "absolute-names", "get", "extract", "list", "create",
+			})
 			if !unique {
 				return "", false
 			}
@@ -1475,6 +1625,17 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				}
 			case "one-top-level":
 				if joined && !consume(value) {
+					return "", false
+				}
+			case "file", "strip-components", "exclude":
+				if !joined {
+					i++
+					if i >= len(args) || !static[i] || args[i] == "" {
+						return "", false
+					}
+				}
+			case "zstd", "absolute-names", "get", "extract", "list", "create":
+				if joined {
 					return "", false
 				}
 			default:
@@ -1515,7 +1676,7 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if !oldStyle {
 					j = len(cluster)
 				}
-			case 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U':
+			case 'a', 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U':
 			default:
 				// Unknown short options may consume a path.
 				return "", false

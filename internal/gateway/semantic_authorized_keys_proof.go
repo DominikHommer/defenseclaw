@@ -734,6 +734,61 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		_, ok := protected[canonicalSemanticPath(path)]
 		return ok
 	}
+	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
+		len(request.ResolvedWriteTargets) != 0 {
+		// Keep the client's positive protected-path evidence and inspected copy
+		// sources. A directory proof is relevant once the hook observed a
+		// different logical directory or a protected starting directory.
+		// Generic ordinary or unknown write targets do not override the
+		// established shell-ordering decision. The process-cwd alias needs
+		// its own client target to be provable.
+		changedDirectory := false
+		for key := range request.ResolvedWriteTargets {
+			if strings.HasPrefix(key, hookpaths.DirectoryFactPrefix) &&
+				key != hookpaths.DirectoryFactPrefix+facts.CWD {
+				changedDirectory = true
+				break
+			}
+		}
+		command := request.Input.Command
+		if command == "" {
+			command, _ = trustedBashCommandInput(request.Input)
+		}
+		_, _, dynamicRedirect := hookpaths.ShellWriteOperands(command, facts.CWD, facts.ActiveHome)
+		incompleteHeader := request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1"
+		home := filepath.Clean(facts.ActiveHome)
+		external := func(target string) bool {
+			return filepath.IsAbs(target) && filepath.Clean(target) != os.DevNull && target != home &&
+				!strings.HasPrefix(filepath.Clean(target), home+string(filepath.Separator))
+		}
+		preserveTruncated := len(request.ResolvedWriteTargets) <= 2
+		if dynamicRedirect {
+			for operand := range request.ResolvedWriteTargets {
+				if external(operand) {
+					preserveTruncated = true
+					break
+				}
+			}
+		}
+		var scoped map[string]string
+		for operand, resolved := range request.ResolvedWriteTargets {
+			directoryFact := strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix)
+			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
+				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
+				directoryFact && (changedDirectory ||
+					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
+				operand == hookpaths.CWDKey && changedDirectory ||
+				operand == hookpaths.TruncatedKey && preserveTruncated ||
+				resolved == "" && external(operand) && !incompleteHeader ||
+				isProtected(resolved) {
+				if scoped == nil {
+					scoped = make(map[string]string)
+				}
+				scoped[operand] = resolved
+			}
+		}
+		request.ResolvedWriteTargets = scoped
+	}
 	clientCWD := facts.CWD
 	if !filepath.IsAbs(clientCWD) {
 		if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; filepath.IsAbs(cwd) {
@@ -751,6 +806,23 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return false
 		}
 		target = hookpaths.OperandPath(target, clientCWD)
+		// Only the event cwd can interpret the process-dependent alias.
+		if hookpaths.ProcCWDWriteOperand(target) {
+			if !strings.HasPrefix(target, "/proc/self/cwd/") {
+				return true
+			}
+			if resolved, present := request.ResolvedWriteTargets[target]; present {
+				return resolved == "" || isProtected(resolved)
+			}
+			if cannotResolveLocally {
+				return true
+			}
+			mapped, ok := hookpaths.ResolveProcSelfCWDTarget(target, clientCWD)
+			if !ok {
+				return true
+			}
+			target = mapped
+		}
 		if isProtected(target) {
 			return true
 		}
@@ -837,6 +909,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
+	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
+		return true
+	}
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
@@ -853,6 +928,18 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if truncated && cannotResolveLocally && strings.Contains(input.Command, ">") && (!parsed || dynamic) {
 			return true
 		}
+		if dynamic && request.Connector == "claudecode" && request.ProtectedHomeHook &&
+			request.ResolvedWriteTargets != nil {
+			// A physical-directory fact can resolve a static write after cd,
+			// but it cannot prove a dynamic redirect target is ordinary.
+			// Preserve the conservative decision from the header-free walk.
+			_, unknown := hookpaths.ShellDirectoryWriteOperands(
+				input.Command, input.CWD, input.ActiveHome, nil, false, cannotResolveLocally,
+			)
+			if unknown {
+				return true
+			}
+		}
 		for i, operand := range operands {
 			safe := i < len(safeRedirects) && safeRedirects[i].Safe
 			if writeTarget(operand, safe, false) {
@@ -861,6 +948,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		for _, operand := range hookpaths.LiteralWriteOperands(input.Command, input.CWD, input.ActiveHome) {
 			if writeTarget(operand, false, false) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.QuotedDynamicCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand, false, true) {
 				return true
 			}
 		}
