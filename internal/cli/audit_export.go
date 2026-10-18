@@ -1008,21 +1008,8 @@ func validateAuditEventMap(ev map[string]any, v8Action bool) error {
 }
 
 func activityExportTimeOrder(db *sql.DB) string {
-	rows, err := db.Query("PRAGMA table_info(activity_events)")
-	if err != nil {
-		return "julianday(timestamp) ASC, rowid ASC"
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid, notNull, pk int
-		var name, kind string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &pk); err != nil {
-			break
-		}
-		if name == "retention_timestamp_unix_nano" {
-			return "retention_timestamp_unix_nano ASC, rowid ASC"
-		}
+	if exists, err := columnExists(db, "activity_events", "retention_timestamp_unix_nano"); err == nil && exists {
+		return "retention_timestamp_unix_nano ASC, rowid ASC"
 	}
 	return "julianday(timestamp) ASC, rowid ASC"
 }
