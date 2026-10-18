@@ -197,11 +197,22 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
         _ => return Err(io::Error::other("unsupported fixed child mode").into()),
     }
     let cwd = fixed_io("private cwd lookup", std::env::current_dir())?;
-    let canonical = cwd.canonicalize();
-    if canonical.is_err() {
-        canonicalize_diagnostic::report(&cwd);
+    // DOS final-path queries can be denied independently of the granted file
+    // operations. Record that compatibility result without making it a
+    // prerequisite for this fixed fixture's boundary checks. These path labels
+    // grant no authority: the native parent supplies the exact cwd and policy;
+    // the fixed seal, fixture shape and private environment are checked below.
+    match cwd.canonicalize() {
+        Ok(_) => eprintln!("FIXED_CANONICALIZE result=ok"),
+        Err(error) => {
+            eprintln!(
+                "FIXED_CANONICALIZE win32={}",
+                error.raw_os_error().unwrap_or(-1)
+            );
+            canonicalize_diagnostic::report(&cwd);
+        }
     }
-    let workspace = fixed_io("private cwd canonicalize", canonical)?;
+    let workspace = cwd;
     require(
         workspace
             .file_name()

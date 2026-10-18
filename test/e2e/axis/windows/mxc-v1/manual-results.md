@@ -167,3 +167,46 @@ exact synthetic fixture was retained under the private evidence directory
 `C:\Users\vnarajal\.codex\axis-manual-test\windows-current-psec-boundary-max-02`.
 No policy, grant, ACL or UI restriction was changed, and this failed artifact
 was not retried. Boundary qualification remains failed.
+
+## Call-specific diagnostic: DOS path query refused, direct read passed
+
+[Locked build 39123961008](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39123961008)
+at `a13bc3e8369c12b74eb616b1db4f5d537769780c` adds only read-only diagnostics
+after the same mandatory canonicalization error. Two independent reviews
+verified its 24 ZIP entries, 20 manifest files, exact source/lock/license bytes,
+three overlays and all 15 reconstructed SDK source fingerprints. One fresh
+native `--standalone-boundary` attempt passed literal argv, then failed the
+original mandatory canonicalization check. It was not retried.
+
+| Fixed diagnostic | Actual result |
+| --- | --- |
+| `CreateFileW` directory open, access 0 | success |
+| Normalized DOS final path on that handle | Win32 5, Access denied |
+| Opened DOS final path on that handle | Win32 5, Access denied |
+| Normalized NT final path on that handle | success, length 158 |
+| Closing the diagnostic handle | success |
+| Bounded direct fixture-seal read | success, exact public sentinel |
+
+No path contents or credentials were logged. These observations distinguish
+the DOS-query failure from the granted direct read; they do not establish why
+the kernel denied those queries or qualify the remaining boundary checks.
+
+| Input | SHA256 |
+| --- | --- |
+| ZIP, artifact `12134839210` | `0e4d8f495a99b1a40ccfa6b8c0d00c9376d321147451fff1e3be1785fa77025b` |
+| Provenance | `475bc2e3b83038a39f3f85369e79d994b445584ae1e58e44a6298484d241e58d` |
+| Root verification receipt | `67e926aa5e373e085729326a2d47dec1c258c7f98a3976ae0c59918137690c4f` |
+| Actual live result | `97ab772b1c6fa198f4dc2f823e9f6c053f48962264f450609fb6aca5562eee5b` |
+
+The wrapper exited 1 in 3.58 seconds without deadline, overflow or reader error.
+The owned outer Job was assigned before resume and ended empty. The exact
+synthetic fixture `dc-axis-windows-psec-vgwIwA` remains retained under private
+evidence `windows-current-psec-boundary-max-03`. No policy, grants, host ACL,
+firewall, UI restrictions or SDK code changed.
+
+The next fixed test records canonicalization as a compatibility result and
+uses its explicit current directory for the boundary operations. Fixture
+shape, private environment and seal assertions remain mandatory. This is a
+test correction, not broader filesystem permission or application support;
+applications requiring the denied DOS query remain unqualified. A new locked
+build, independent artifact review and native run are still required.

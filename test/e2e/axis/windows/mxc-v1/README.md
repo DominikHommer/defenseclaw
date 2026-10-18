@@ -187,3 +187,13 @@ support flags `0x3`: native filesystem deny is present, enumeration and ingress
 capabilities are absent. Runtime validation remains authoritative. Denial
 capture, ingress allowances, enumeration-only grants and proxy identity modes
 are outside this prototype; it must refuse requests it cannot represent.
+
+The fixed boundary child records its DOS-based Rust `canonicalize` result but
+uses its explicit current directory for the canary operations. A native run on
+this host opened that directory with access 0, obtained its NT final path and
+read its fixed seal, while both normalized and opened DOS final-path queries
+returned Access denied. The fixture shape, exact private environment and seal
+checks remain mandatory. This preserves the DOS-query compatibility limitation
+without confusing it with denial of a granted file operation; no grant or SDK
+policy is broadened. A passing canary run would not qualify applications that
+require the denied query.
