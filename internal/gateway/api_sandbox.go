@@ -87,6 +87,7 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 	mux.HandleFunc("GET "+sandboxapi.PathSandboxes+"/{name}", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
 		return c.Get(ctx, r.PathValue("name"))
 	}))
+	mux.HandleFunc("GET "+sandboxapi.PathSandboxes+"/{name}/attach", a.handleSandboxAttach)
 	mux.HandleFunc("GET "+sandboxapi.PathSandboxes+"/{name}/logs", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
 		lines, err := sandboxapi.ParseRunLogLines(r.URL.Query())
 		if err != nil {
