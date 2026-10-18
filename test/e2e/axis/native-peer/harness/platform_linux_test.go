@@ -213,3 +213,59 @@ func TestHeldFixtureNamesMustStillIdentifyOriginalRootAndOutside(t *testing.T) {
 		})
 	}
 }
+
+func TestInheritedFixtureInitializesOnlyFreshHeldRoot(t *testing.T) {
+	parentPath := t.TempDir()
+	parent, err := openDirectory(parentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	nonce := strings.Repeat("c", 32)
+	name := "dc-axis-native-peer-" + nonce
+	if err := unix.Mkdirat(int(parent.Fd()), name, 0700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := openRelative(parent, name, unix.O_RDONLY|unix.O_DIRECTORY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	f, err := initializeFixture(parent, root, parentPath, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.close()
+	if err := f.verify(false); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := initializeFixture(parent, root, parentPath, nonce); err == nil || again != nil {
+		t.Fatal("nonempty existing root was mutated/reused")
+	}
+}
+func TestInheritedFixtureRejectsLabelSelectingAnotherOwnedObject(t *testing.T) {
+	parentPath := t.TempDir()
+	parent, err := openDirectory(parentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	nonce := strings.Repeat("d", 32)
+	name := "dc-axis-native-peer-" + nonce
+	if err := unix.Mkdirat(int(parent.Fd()), name, 0700); err != nil {
+		t.Fatal(err)
+	}
+	otherPath := t.TempDir()
+	other, err := openDirectory(otherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if f, err := initializeFixture(parent, other, parentPath, nonce); err == nil || f != nil {
+		t.Fatal("display label selected different root")
+	}
+	entries, err := os.ReadDir(otherPath)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("mismatched held root was populated")
+	}
+}

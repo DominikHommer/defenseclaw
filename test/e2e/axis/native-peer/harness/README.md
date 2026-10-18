@@ -85,8 +85,11 @@ without the exact descriptors, or without the grant. No test exercises clone,
 prctl, the hidden worker or this death/cleanup behavior; it needs independent
 source/artifact review and actual native qualification.
 
-One fresh random `/tmp/dc-axis-native-peer-<32 lowercase hex>` fixture is created
-under the held root-owned sticky `/tmp`. Its owner-private root has distinct
+One fresh random `/tmp/dc-axis-native-peer-<32 lowercase hex>` root is created
+by the trusted host driver before its first user namespace clone. That creator
+checks held `/tmp` is root-owned and sticky. Held parent/root capabilities cross
+the trusted wrapper and worker; the worker does not infer root ownership from
+an unmapped UID or reopen a host source path. Its owner-private root has distinct
 `work`, `home`, `tmp`, `outside` directories, readonly file and fixed public
 canaries. Before launch the host proves outside read and write-open positives
 without changing bytes. Original canary file identities/bytes and grant modes
@@ -176,7 +179,7 @@ diagnostics. A future native run's actual result must be recorded separately.
 
 ## Private proc bootstrap source revision
 
-The next source revision adds a fresh mount namespace and a fixed sealed FD3
+The proc bootstrap source revision adds a fresh mount namespace and a fixed sealed FD3
 parent-identity proof to each owned child. Before READY/control/backend work,
 the child proves kernel ownership and single nonzero UID/GID mappings, makes
 mount propagation private, mounts matching procfs and clears startup capabilities.
@@ -189,3 +192,23 @@ This changes the private FD handoff. Existing e054 peer and d056 wrapper/c8d4
 driver artifacts remain historical evidence and cannot qualify this source.
 Fresh source-bound artifacts, registry pins and one separately reviewed runtime
 attempt are required. The two earlier native failures remain failures.
+
+## Host-created fixture capability revision
+
+The new driver bootstrap carries held `/tmp` and the fresh empty fixture root
+at FD8 and FD9 through its exact wrapper exec. The wrapper marks those borrowed
+originals CLOEXEC and supplies owned duplicates as worker FD7 and FD8 (proof3,
+grant4, ready5, sealed-self6 stay unchanged). The worker initializes the root only
+after private owner/mode, empty-directory and held parent-entry identity checks.
+Its bounded direct `/tmp/dc-axis-native-peer-<32hex>` display name is correlation
+metadata, never a source used to select an object. The driver retains its
+originally created label; the worker derives the current held-object label. A
+concurrent same-UID rename can make those labels differ, outside the declared
+sampled correlation guarantee. The parent/root remain held by the outside
+driver for failure evidence; no prior fixture is removed.
+
+Pre-peer refusal reports fixed `native_stage`/`native_errno` vocabulary. Fixed
+case failures also record protocol stage and validated closed peer failure codes,
+never arbitrary backend errors or diagnostics. These fields do not certify a
+payload start. The fixture revision needs fresh wrapper/driver artifacts and one
+separately reviewed native attempt; no peer or payload artifact changes.

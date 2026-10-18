@@ -240,9 +240,13 @@ func TestFixedProtocolRequiresByteStreamsExitAndSeparateNativeCleanup(t *testing
 func TestUnexpectedBindingExitTruncationOrBytesRefuse(t *testing.T) {
 	plan, _ := fixedPlan("exit23", "")
 	binding, _ := fixedBinding("fixed-session", "held-id", plan, syntheticRegistry(t).Receipt)
-	for _, kind := range []string{"binding", "request", "exit", "timeout", "truncated", "bytes", "failure"} {
+	for _, kind := range []string{"binding", "request", "exit", "timeout", "truncated", "bytes", "failure", "prepare-failure"} {
 		t.Run(kind, func(t *testing.T) {
 			owner := &fakeOwner{binding: binding, mode: "exit23", mutate: func(f *bridgeproto.Frame) {
+				if f.Kind == bridgeproto.Prepared && kind == "prepare-failure" {
+					f.Kind = bridgeproto.Failed
+					f.Failure = &bridgeproto.Failure{Code: "preparation_failed"}
+				}
 				if f.Kind == bridgeproto.Output && kind == "bytes" {
 					f.Data.Bytes = []byte("wrong fixed bytes")
 				}
@@ -266,8 +270,15 @@ func TestUnexpectedBindingExitTruncationOrBytesRefuse(t *testing.T) {
 					f.Failure = &bridgeproto.Failure{Code: "launch_failed"}
 				}
 			}}
-			if _, err := exercise(context.Background(), owner, binding, plan, "exit23"); err == nil {
+			result, err := exercise(context.Background(), owner, binding, plan, "exit23")
+			if err == nil {
 				t.Fatal("bad fixed result admitted")
+			}
+			if kind == "prepare-failure" && (result.ProtocolStage != "prepare_reply" || result.PeerFailure != "preparation_failed") {
+				t.Fatal("validated fixed failure diagnostic lost")
+			}
+			if kind == "failure" && result.PeerFailure != "launch_failed" {
+				t.Fatal("fixed execution failure code lost")
 			}
 		})
 	}

@@ -8,9 +8,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"debug/elf"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -309,32 +307,50 @@ func (f *fixedFixture) close() error {
 }
 
 func newFixture() (_ *fixedFixture, resultErr error) {
-	tmp, err := openDirectory("/tmp")
-	if err != nil {
-		return nil, err
+	parent, root := os.NewFile(7, "fixed-inherited-fixture-parent"), os.NewFile(8, "fixed-inherited-fixture-root")
+	defer parent.Close()
+	defer root.Close()
+	var st unix.Stat_t
+	if unix.Fstat(int(parent.Fd()), &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Mode&unix.S_ISVTX == 0 {
+		return nil, errors.New("fixed inherited fixture parent refused")
 	}
-	defer tmp.Close()
-	var stat unix.Stat_t
-	if unix.Fstat(int(tmp.Fd()), &stat) != nil || stat.Uid != 0 || stat.Mode&unix.S_ISVTX == 0 {
-		return nil, errors.New("fixed /tmp parent is not root-owned sticky directory")
+	var value [512]byte
+	n, err := unix.Readlink("/proc/self/fd/8", value[:])
+	if err != nil || n <= 0 || n >= len(value) {
+		return nil, errors.New("fixed fixture display refused")
 	}
-	var random [16]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		return nil, err
+	display := string(value[:n])
+	name := filepath.Base(display)
+	nonce := strings.TrimPrefix(name, "dc-axis-native-peer-")
+	if filepath.Dir(display) != "/tmp" || len(nonce) != 32 || strings.Trim(nonce, "0123456789abcdef") != "" || name != "dc-axis-native-peer-"+nonce {
+		return nil, errors.New("fixed fixture display refused")
 	}
-	return newFixtureUnder(tmp, "/tmp", hex.EncodeToString(random[:]))
+	return initializeFixture(parent, root, "/tmp", nonce)
 }
 
-// The private split permits inert filesystem tests below t.TempDir. The live
-// caller above exclusively supplies its held /tmp and random fixed identity.
-func newFixtureUnder(tmp *os.File, displayParent, nonce string) (_ *fixedFixture, resultErr error) {
+// Inert filesystem tests create their own private parent; live creation belongs
+// exclusively to the trusted outer driver before its first USER namespace clone.
+func newFixtureUnder(parent *os.File, displayParent, nonce string) (*fixedFixture, error) {
 	if len(nonce) != 32 || strings.Trim(nonce, "0123456789abcdef") != "" {
 		return nil, errors.New("fixed nonce refused")
 	}
 	name := "dc-axis-native-peer-" + nonce
-	if err := unix.Mkdirat(int(tmp.Fd()), name, 0700); err != nil {
+	if err := unix.Mkdirat(int(parent.Fd()), name, 0700); err != nil {
 		return nil, err
 	}
+	root, err := openRelative(parent, name, unix.O_RDONLY|unix.O_DIRECTORY)
+	if err != nil {
+		return nil, &fixtureSetupError{path: filepath.Join(displayParent, name), cause: err}
+	}
+	defer root.Close()
+	return initializeFixture(parent, root, displayParent, nonce)
+}
+
+func initializeFixture(parent, heldRoot *os.File, displayParent, nonce string) (_ *fixedFixture, resultErr error) {
+	if parent == nil || heldRoot == nil || len(nonce) != 32 || strings.Trim(nonce, "0123456789abcdef") != "" {
+		return nil, errors.New("fixed held fixture identity refused")
+	}
+	name := "dc-axis-native-peer-" + nonce
 	f := &fixedFixture{path: filepath.Join(displayParent, name), name: name}
 	accepted := false
 	defer func() {
@@ -342,18 +358,39 @@ func newFixtureUnder(tmp *os.File, displayParent, nonce string) (_ *fixedFixture
 			resultErr = &fixtureSetupError{path: f.path, cause: errors.Join(resultErr, f.close())}
 		}
 	}()
-	parentFD, err := unix.FcntlInt(tmp.Fd(), unix.F_DUPFD_CLOEXEC, 3)
+	parentFD, err := unix.FcntlInt(parent.Fd(), unix.F_DUPFD_CLOEXEC, 3)
 	if err != nil {
 		return nil, err
 	}
 	f.parent = os.NewFile(uintptr(parentFD), "fixed-held-fixture-parent")
-	root, err := openRelative(tmp, name, unix.O_RDONLY|unix.O_DIRECTORY)
+	rootFD, err := unix.FcntlInt(heldRoot.Fd(), unix.F_DUPFD_CLOEXEC, 3)
 	if err != nil {
 		return nil, err
 	}
+	root := os.NewFile(uintptr(rootFD), "fixed-held-fixture-root")
 	f.root = root
 	if err := privateDirectory(root); err != nil {
 		return nil, err
+	}
+	correlated, err := openRelative(parent, name, unix.O_RDONLY|unix.O_DIRECTORY)
+	if err != nil {
+		return nil, err
+	}
+	d, i, idErr := identity(correlated)
+	hd, hi, heldErr := identity(root)
+	if err := errors.Join(idErr, heldErr, correlated.Close()); err != nil || d != hd || i != hi {
+		return nil, errors.New("fixed fixture held identity differs")
+	}
+	// A fresh descriptor for "." avoids sharing an inherited directory offset.
+	// Only the already held, private, same-user root is traversed.
+	emptyFD, err := unix.Openat(int(root.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	empty := os.NewFile(uintptr(emptyFD), "fixed-fixture-empty-check")
+	entries, readErr := empty.Readdirnames(1)
+	if closeErr := empty.Close(); len(entries) != 0 || readErr != io.EOF || closeErr != nil {
+		return nil, errors.New("fixed fixture root is not fresh empty directory")
 	}
 	for _, item := range []struct {
 		name   string
@@ -472,6 +509,8 @@ func newEvidence(path string) (*os.File, error) {
 }
 
 func runNative(ctx context.Context, opts options, registry reviewedRegistry, record map[string]any, permit workerPermit, owner *cleanupOwner) (resultErr error) {
+	record["native_stage"] = "host_admission"
+	defer func() { record["native_errno"] = startErrnoClass(resultErr) }()
 	if !permit.granted || owner == nil {
 		return errors.New("owned outer namespace grant required")
 	}
@@ -481,6 +520,7 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 	if registry.validate() != nil {
 		return errUnreviewed
 	}
+	record["native_stage"] = "evidence_directory"
 	evidence, err := newEvidence(opts.evidence)
 	if err != nil {
 		return err
@@ -509,6 +549,7 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 		resultErr = errors.Join(resultErr, owner.retry())
 		record["pending_native_cleanup"] = len(owner.pending)
 	}()
+	record["native_stage"] = "artifact_admission"
 	receipt, admitted, err := admitImages(ctx, opts.receipt, registry)
 	if admitted != nil {
 		defer func() { resultErr = errors.Join(resultErr, admitted.close()) }()
@@ -517,6 +558,7 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 		return err
 	}
 	record["artifact_receipt_sha256"] = registry.ReceiptSHA
+	record["native_stage"] = "fixture_capability"
 	f, err := newFixture()
 	if err != nil {
 		var retained *fixtureSetupError
@@ -529,19 +571,24 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 	defer func() { resultErr = errors.Join(resultErr, f.close()) }()
 	record["fixture_retained"] = true
 	record["synthetic_fixture"] = f.path
+	record["native_stage"] = "fixture_identity"
 	fixtureID, err := f.bindingIdentity()
 	if err != nil {
 		return err
 	}
 	results := make([]caseResult, 0, len(fixedCases))
 	for _, mode := range fixedCases {
+		record["native_case"] = mode
+		record["native_stage"] = "host_canary_verification"
 		if err := f.verify(false); err != nil {
 			return err
 		}
+		record["native_stage"] = "fixed_plan"
 		plan, err := fixedPlan(mode, f.path+"/outside")
 		if err != nil {
 			return err
 		}
+		record["native_stage"] = "fixed_binding"
 		binding, err := fixedBinding(filepath.Base(f.path)+":"+mode, fixtureID, plan, receipt)
 		if err != nil {
 			return err
@@ -549,6 +596,7 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 		// Each fixed case reserves this complete unique identity until native
 		// Close returns. A refusal/cleanup error stops the loop permanently.
 		ownerCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		record["native_stage"] = "peer_start"
 		record["native_start_attempted"] = true
 		if record["execution_performed"] != true {
 			record["execution_performed"] = nil
@@ -562,6 +610,7 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 		}
 		result := caseResult{Mode: mode}
 		if startErr == nil && session != nil && session.Protocol != nil {
+			record["native_stage"] = "peer_protocol"
 			result, err = exercise(ownerCtx, session.Protocol, binding, plan, mode)
 		} else if startErr == nil {
 			err = errors.New("native factory returned no owned session")
@@ -591,6 +640,7 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 			return err
 		}
 	}
+	record["native_stage"] = "complete"
 	record["host_outside_read_and_write_positive_controls"] = true
 	record["original_canary_identities_and_bytes_preserved"] = true
 	return nil

@@ -89,12 +89,21 @@ type caseResult struct {
 	OutputBytes   int    `json:"output_bytes"`
 	StderrBytes   int    `json:"stderr_bytes"`
 	Error         string `json:"error,omitempty"`
+	ProtocolStage string `json:"protocol_stage,omitempty"`
+	PeerFailure   string `json:"peer_failure,omitempty"`
 }
+
+type fixedPeerFailure string
+
+func (e fixedPeerFailure) Error() string { return string(e) }
 
 func expectReply(ctx context.Context, owner protocolOwner, binding bridgeproto.Binding, request uint64, kind bridgeproto.Kind) error {
 	frame, err := owner.Receive(ctx)
 	if err != nil {
 		return err
+	}
+	if frame.Validate() == nil && frame.Binding == binding && frame.Request == request && frame.Kind == bridgeproto.Failed {
+		return fixedPeerFailure(frame.Failure.Code)
 	}
 	if frame.Validate() != nil || frame.Binding != binding || frame.Request != request || frame.Kind != kind {
 		return errors.New("fixed protocol reply or binding differed")
@@ -104,22 +113,33 @@ func expectReply(ctx context.Context, owner protocolOwner, binding bridgeproto.B
 
 func exercise(ctx context.Context, owner protocolOwner, binding bridgeproto.Binding, plan bridgeproto.Preparation, mode string) (result caseResult, resultErr error) {
 	result.Mode = mode
+	defer func() {
+		var failure fixedPeerFailure
+		if errors.As(resultErr, &failure) {
+			result.PeerFailure = string(failure)
+		}
+	}()
+	result.ProtocolStage = "prepare_send"
 	prepare, err := owner.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Prepare, Plan: &plan})
 	if err != nil {
 		return result, err
 	}
+	result.ProtocolStage = "prepare_reply"
 	if err := expectReply(ctx, owner, binding, prepare, bridgeproto.Prepared); err != nil {
 		return result, err
 	}
 	result.Prepared = true
+	result.ProtocolStage = "launch_send"
 	launch, err := owner.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Launch})
 	if err != nil {
 		return result, err
 	}
+	result.ProtocolStage = "launch_reply"
 	if err := expectReply(ctx, owner, binding, launch, bridgeproto.Started); err != nil {
 		return result, err
 	}
 	result.Started = true
+	result.ProtocolStage = "input_and_wait"
 	if mode == "stdio" {
 		if _, err := owner.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Input, Data: &bridgeproto.Data{Stream: "stdin", Bytes: []byte(fixedInput)}}); err != nil {
 			return result, err
@@ -131,6 +151,7 @@ func exercise(ctx context.Context, owner protocolOwner, binding bridgeproto.Bind
 	if _, err := owner.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Wait}); err != nil {
 		return result, err
 	}
+	result.ProtocolStage = "output_and_exit"
 	var stdout, stderr bytes.Buffer
 	exited := false
 	for count := 0; count < 256; count++ {
@@ -151,6 +172,8 @@ func exercise(ctx context.Context, owner protocolOwner, binding bridgeproto.Bind
 			} else {
 				_, _ = stderr.Write(frame.Data.Bytes)
 			}
+		case bridgeproto.Failed:
+			return result, fixedPeerFailure(frame.Failure.Code)
 		case bridgeproto.Exited:
 			result.ExitCode = frame.Result.ExitCode
 			if frame.Result.ExitCode != 23 || frame.Result.TimedOut || frame.Result.Truncated {
@@ -176,6 +199,7 @@ func exercise(ctx context.Context, owner protocolOwner, binding bridgeproto.Bind
 		return result, errors.New("fixed byte streams differed")
 	}
 	result.PayloadMarker = true
+	result.ProtocolStage = "destroy"
 	destroy, err := owner.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Destroy})
 	if err != nil {
 		return result, err
@@ -184,6 +208,7 @@ func exercise(ctx context.Context, owner protocolOwner, binding bridgeproto.Bind
 		return result, err
 	}
 	result.Destroyed = true
+	result.ProtocolStage = "complete"
 	return result, nil // native Close success remains independently mandatory
 }
 

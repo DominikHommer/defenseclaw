@@ -299,6 +299,17 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 	if runtime.GOARCH != "amd64" || os.Geteuid() == 0 || os.Getuid() != os.Geteuid() || os.Getgid() != os.Getegid() {
 		return errors.New("native unprivileged Linux amd64 required")
 	}
+	fixtureParent, fixtureRoot := os.NewFile(8, "fixed-inherited-host-tmp"), os.NewFile(9, "fixed-inherited-host-fixture")
+	defer fixtureParent.Close()
+	defer fixtureRoot.Close()
+	if err := privateDirectory(fixtureRoot); err != nil {
+		return err
+	}
+	for _, file := range []*os.File{fixtureParent, fixtureRoot} {
+		if _, err := unix.FcntlInt(file.Fd(), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+			return err
+		}
+	}
 	observeProcPIDView(record)
 	image, hash, err := sealedRunningImage()
 	if image != nil {
@@ -344,6 +355,18 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 	}
 	childImage := os.NewFile(uintptr(copyFD), "fixed-child-sealed-wrapper")
 	command.ExtraFiles[3] = childImage
+	childFiles := []*os.File{proof, grantRead, readyWrite, childImage}
+	for _, file := range []*os.File{fixtureParent, fixtureRoot} {
+		fd, err := unix.FcntlInt(file.Fd(), unix.F_DUPFD_CLOEXEC, 3)
+		if err != nil {
+			for _, held := range childFiles {
+				_ = held.Close()
+			}
+			return err
+		}
+		childFiles = append(childFiles, os.NewFile(uintptr(fd), "fixed-worker-fixture-capability"))
+	}
+	command.ExtraFiles = childFiles
 	owner := &outerCustodian{pidfd: -1, done: make(chan struct{}), exit: -1}
 	defer func() {
 		cleanupErr := retained.close(owner)
@@ -353,7 +376,7 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 		resultErr = errors.Join(resultErr, cleanupErr)
 	}()
 	record["owned_worker_start_attempted"] = true
-	if err := owner.start(ctx, command, &pidfd, []*os.File{proof, grantRead, readyWrite, childImage}); err != nil {
+	if err := owner.start(ctx, command, &pidfd, childFiles); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(10 * time.Second)
