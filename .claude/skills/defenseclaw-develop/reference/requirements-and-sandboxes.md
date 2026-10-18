@@ -26,6 +26,12 @@ owned resource handle; failed cleanup closes admission. The host controller
 still reserves unique session identities, aborts abandoned preparations and
 owns successful workloads. A gate is not adapter qualification or a session store.
 
+`internal/axis/bridgeproto` defines private bounded helper frames and conversation
+admission only. Digests correlate host-owned records; they grant no authority.
+Keep the resolver snapshot and provider credentials out of helper/child plans.
+Enforce native path custody, elapsed deadlines and owned teardown in the actual
+supervisor. A clean codec/state test is not a contained-process qualification.
+
 `internal/openshell/sandboxcli/session_transport.go` (`@sym:SessionTransport`)
 separates command execution from session orchestration. Bind the transport
 explicitly to the recorded target; pass literal argv without shell rendering.

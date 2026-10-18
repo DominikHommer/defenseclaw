@@ -6,8 +6,9 @@
 This is a contributor design, not an implemented execution path. The current
 product still refuses active AXIS configuration. The shared controller alias,
 selection/capability contracts and immutable execution-policy resolver exist;
-the router, AXIS adapter, bridge protocol and production qualification below
-do not. The offline probes are separate feasibility evidence.
+the router, AXIS adapter, native bridge peer/supervisor and production
+qualification below do not. The private Go frame codec/state machine now
+exists; the offline probes are separate feasibility evidence.
 
 ## Ownership boundaries
 
@@ -120,10 +121,13 @@ into a second provider would duplicate its authority and lifecycle behavior.
 
 ## Host bridge transport and launch data
 
-Use a versioned, length-bounded private pipe protocol between the owning Go
-process and its verified Rust child. Define explicit preparation, launch,
-stdin, resize, wait, cancellation and destroy messages, bounded responses,
-sequence/request IDs and exact session/policy identity. Do not introduce a
+`internal/axis/bridgeproto` now defines versioned, length-bounded private pipe
+frames, typed offline preparation and launch/I/O/resize/wait/cancel/destroy
+messages, exact correlation digests and a one-session state machine. Strict
+JSON validation refuses ambiguous keys/encodings; monotonic sequences,
+phase checks and aggregate output accounting close on invalid peer behavior.
+An independent binary preparation digest avoids Go/Rust JSON serializer drift.
+The Rust peer and actual native process supervisor are still required. Do not introduce a
 long-running listener or an unbounded queue. Closing the owner channel must
 revoke grants, kill and wait the owned SDK handle; helper/descendant behavior
 still needs separate platform qualification.
@@ -139,8 +143,8 @@ MXC V1 currently takes a string command. Bubblewrap appends `-- sh -c`; Seatbelt
 launches `/bin/sh -c`. The separate
 [literal-argv contributor patch](patches/mxc-literal-argv.patch) proposes an
 additive typed route while retaining existing public command-string APIs.
-That SDK patch now compiles on both Unix platforms and passes the selected
-pure tests; actual literal workload probes and production support remain pending.
+That SDK patch now compiles on both Unix platforms, passes the selected pure
+tests and passes fixed native literal workload probes. Production support remains pending.
 Unsupported backends must refuse the literal request without shell rendering
 or a generic fallback. A future bootstrap uses its actual admitted argv,
 not string interpolation into those legacy command paths.
@@ -171,9 +175,9 @@ upstream source, with explicit artifacts and no provider/tier fallback.
 
 ## Implementation order
 
-First review/build the literal-argv seam and finish discriminating platform
-probes. Next implement the private typed host protocol and synthetic offline
-adapter with no production activation. Then connect the common CLI transport,
+Finish the discriminating Windows literal-argv/platform probes. Next implement
+the Rust peer and owned native supervisor for the private typed host protocol,
+then a synthetic offline adapter with no production activation. Connect the common CLI transport,
 policy preparation/admission/launch serialization and owned workspace flow.
 Add authenticated hook and host broker/credential binding with real denial
 tests, followed by listener loss, parent/descendant cleanup and managed
