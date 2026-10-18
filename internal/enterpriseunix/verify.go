@@ -1079,6 +1079,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
+	l.describeChangedGuardianFiles()
 	l.describeGuardianCleanups()
 	l.describeDeletedEnrolledAccounts()
 	l.describeDiscoveryHomeDirs()

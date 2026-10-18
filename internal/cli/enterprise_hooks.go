@@ -2418,6 +2418,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// / WatchSharedFiles after each reconcile.
 	exclusiveOwned := map[string]struct{}{} // DC-only writers — any event triggers
 	sharedOwned := map[string]struct{}{}    // agent + DC writers — Create/Remove/Rename trigger
+	// ownedSnapshot is each owned file's fingerprint as the last reconcile
+	// left it. A Write or Chmod that the writer policy or the settle window
+	// drops still counts when the file no longer matches it.
+	ownedSnapshot := map[string]string{}
 	// Post-reconcile guards against the self-trigger loop. Every
 	// reconcile writes into watched dirs (chmod on hook configs and
 	// hook scripts inside hardenInstallFootprint, plus writing
@@ -2489,6 +2493,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		for _, f := range run.WatchSharedFiles {
 			sharedOwned[filepath.Clean(f)] = struct{}{}
 		}
+		takeEnterpriseHookOwnedSnapshot(ownedSnapshot, exclusiveOwned, sharedOwned, enterpriseHookOwnedFileFingerprint)
 		status := "ok"
 		if run.Failures > 0 || run.StateErr != nil {
 			status = "attention"
@@ -2657,9 +2662,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			//     ~/.codex/config.toml, ~/.claude/settings.json,
 			//     ~/.cursor/hooks.json): the agent itself constantly
 			//     rewrites these during normal use. Create, Remove,
-			//     and Rename are real tamper signals; Write and Chmod
-			//     are the agent doing its own thing
-			//     and the 5-min backstop handles any in-place stripping.
+			//     and Rename are real tamper signals; a Write or Chmod
+			//     counts only when the file's content or mode is no
+			//     longer what the last reconcile left there (an
+			//     in-place rewrite of the hooks waited for the interval
+			//     pass, GAP-0045).
 			//
 			// Events on unowned paths (agent session state, sqlite
 			// WAL churn, cache writes, workspace snapshots) are
@@ -2669,18 +2676,25 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// Empty maps means we haven't run a reconcile yet (only
 			// possible pre-startup); fall through so the startup
 			// reconcile flow is unaffected.
-			if !enterpriseHookWatchOwnedEventActionable(event, exclusiveOwned, sharedOwned) {
-				continue
-			}
-			// Drop Write/Chmod events observed inside the
-			// post-reconcile settle window: they are almost certainly
-			// the tail of writes the reconcile itself just made.
-			// Create/Remove/Rename must still reconcile because a
-			// user can atomically replace a protected path inside the
-			// settle window, leaving the destination present just like
-			// the guardian's own atomic rename tail.
-			if enterpriseHookWatchEventInSettleWindow(time.Now(), settleUntil, event.Op) {
-				droppedInSettle++
+			// Write/Chmod events observed inside the post-reconcile
+			// settle window are almost always the tail of writes the
+			// reconcile itself just made. Create/Remove/Rename must
+			// still reconcile because a user can atomically replace a
+			// protected path inside the settle window, leaving the
+			// destination present just like the guardian's own atomic
+			// rename tail.
+			actionable := enterpriseHookWatchOwnedEventActionable(event, exclusiveOwned, sharedOwned)
+			settling := actionable && enterpriseHookWatchEventInSettleWindow(time.Now(), settleUntil, event.Op)
+			// A Write or Chmod dropped by either rule still counts when
+			// the owned file no longer holds what the last reconcile left
+			// there: an in-place overwrite of the scoped token right after
+			// a pass waited for the interval pass (GAP-0044), as did an
+			// in-place rewrite of a shared agent config (GAP-0045).
+			if (!actionable || settling) &&
+				!enterpriseHookWatchOwnedFileChanged(event.Name, exclusiveOwned, sharedOwned, ownedSnapshot, enterpriseHookOwnedFileFingerprint) {
+				if settling {
+					droppedInSettle++
+				}
 				continue
 			}
 			// Log once when the first non-suppressed event lands after
@@ -3107,6 +3121,38 @@ func enterpriseHookWatchOwnedEventActionable(event fsnotify.Event, exclusiveOwne
 		return false
 	}
 	return event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0
+}
+
+// enterpriseHookOwnedFileFingerprint fingerprints an owned file for the
+// watch loop and the standalone Unix owned-files record; tests replace it.
+var enterpriseHookOwnedFileFingerprint = enterprisehooks.OwnedFileFingerprint
+
+// takeEnterpriseHookOwnedSnapshot replaces snapshot with the fingerprint of
+// every owned file as the reconcile that just finished left it.
+func takeEnterpriseHookOwnedSnapshot(snapshot map[string]string, exclusiveOwned, sharedOwned map[string]struct{}, fingerprint func(string) string) {
+	for path := range snapshot {
+		delete(snapshot, path)
+	}
+	for _, owned := range []map[string]struct{}{exclusiveOwned, sharedOwned} {
+		for path := range owned {
+			snapshot[path] = fingerprint(path)
+		}
+	}
+}
+
+// enterpriseHookWatchOwnedFileChanged reports whether path is an owned file
+// whose fingerprint is no longer the one the last reconcile left (snapshot).
+// An owned file without a snapshot entry counts as changed; an unowned path
+// never does.
+func enterpriseHookWatchOwnedFileChanged(path string, exclusiveOwned, sharedOwned map[string]struct{}, snapshot map[string]string, fingerprint func(string) string) bool {
+	cleaned := filepath.Clean(path)
+	_, exclusive := exclusiveOwned[cleaned]
+	_, shared := sharedOwned[cleaned]
+	if !exclusive && !shared {
+		return false
+	}
+	before, ok := snapshot[cleaned]
+	return !ok || fingerprint(cleaned) != before
 }
 
 func syncEnterpriseHookWatchDirs(fsw *fsnotify.Watcher, watched map[string]struct{}, dirs []string) error {

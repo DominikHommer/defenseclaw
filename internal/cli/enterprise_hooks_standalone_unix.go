@@ -577,6 +577,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
+	// ownedByRow is each dispatched target's exclusive-writer files, which
+	// the pass records the fingerprints of for status (GAP-0044).
+	ownedByRow := map[int][]string{}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -755,7 +758,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 				watchDirs[dir] = struct{}{}
 			}
 		}
+		var ownedExclusive []string
 		if own, filesErr := enterprisehooks.WatchOwnedFiles(opts); filesErr == nil {
+			ownedExclusive = own.ExclusiveWriter
 			for _, f := range own.ExclusiveWriter {
 				exclusiveFiles[f] = struct{}{}
 			}
@@ -764,6 +769,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			}
 		}
 		index := len(rows)
+		ownedByRow[index] = ownedExclusive
 		rows = append(rows, row)
 		slot := enterpriseHookStandaloneSlot{
 			key: key, account: account, inode: check.Inode, verifiable: previousProtection.PreviouslyProtected,
@@ -867,6 +873,15 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	}
 	if stateErr == nil && cleanupErr != nil {
 		stateErr = fmt.Errorf("persist the per-user cleanup ledger: %w", cleanupErr)
+	}
+	uids := make(map[int]int, len(slots))
+	for index, slot := range slots {
+		uids[index] = slot.account.UID
+	}
+	if err := writeEnterpriseHookGuardianOwnedFiles(enterpriseHookWorkerLog, cfg.DataDir, rows, uids, ownedByRow); err != nil && stateErr == nil {
+		// Status would compare the files with an earlier pass: retry with
+		// the repair backoff.
+		stateErr = fmt.Errorf("record the verified hook files: %w", err)
 	}
 	if err := writeEnterpriseHookCredentialAttestation(manifestSHA256, rows, slots, verified, stateErr == nil); err != nil && stateErr == nil {
 		stateErr = fmt.Errorf("publish the guardian credential attestation: %w", err)
