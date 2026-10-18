@@ -910,7 +910,10 @@ mod tests {
         assert_eq!(diagnostic["case"], "boundaries");
         assert_eq!(diagnostic["outcome"], "Exited(1)");
         assert_eq!(diagnostic["truncated"], true);
-        assert_eq!(diagnostic["stderr"].as_str().unwrap().len(), DIAGNOSTIC_LIMIT);
+        assert_eq!(
+            diagnostic["stderr"].as_str().unwrap().len(),
+            DIAGNOSTIC_LIMIT
+        );
         let encoded = diagnostic.to_string();
         assert!(encoded.contains("\\u0000"));
         assert!(!encoded.contains('\0'));

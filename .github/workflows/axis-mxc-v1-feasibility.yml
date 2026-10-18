@@ -84,12 +84,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo +"$RUST_TOOLCHAIN" fmt -- --check
           if test -f Cargo.lock; then
             python3 prepare_build.py build-locked
           else
             python3 prepare_build.py generate-lock
           fi
-          cargo +"$RUST_TOOLCHAIN" fmt -- --check
           python3 - <<'PY'
           import json
           import os
@@ -178,12 +178,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo +"$RUST_TOOLCHAIN" fmt -- --check
           if test -f Cargo.lock; then
             python3 prepare_build.py build-locked
           else
             python3 prepare_build.py generate-lock
           fi
-          cargo +"$RUST_TOOLCHAIN" fmt -- --check
           python3 - <<'PY'
           import json
           import os

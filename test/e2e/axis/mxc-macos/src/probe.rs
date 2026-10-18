@@ -626,7 +626,7 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16, strict: bo
         },
     )
     .context("explicit MXC Seatbelt pipe spawn refused")?;
-    let result = (|| {
+    let result: Result<()> = (|| -> Result<()> {
         let stdout = Capture::start(
             process.take_stdout().context("missing SDK stdout pipe")?,
             process.stdout_closer(),
@@ -726,7 +726,7 @@ fn run_pty(paths: &Paths, executable: &Path, port: u16, strict: bool) -> Result<
         },
     )
     .context("explicit MXC Seatbelt PTY spawn refused")?;
-    let result = (|| {
+    let result: Result<()> = (|| -> Result<()> {
         let reader = terminal.try_clone_reader()?;
         let output = Capture::start(reader, terminal.stdout_closer());
         let mut input = terminal.take_writer()?;
