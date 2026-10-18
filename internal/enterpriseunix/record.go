@@ -101,6 +101,12 @@ type Pending struct {
 	// plists instead) leaves it unset, and so does an intent written
 	// before the field existed.
 	EnabledRecorded bool `json:"enabled_recorded,omitempty"`
+	// Hot is set when the transaction changes only config.yaml keys the
+	// running gateway applies itself (hotConfigApply): the gateway and the
+	// sensor helper keep running through it, and through the rollback of
+	// the transaction when a later run finds it interrupted (GAP-0238). An
+	// intent written before the field existed rolls back with a restart.
+	Hot bool `json:"hot,omitempty"`
 }
 
 func (e *Env) deploymentPath() string {

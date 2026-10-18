@@ -149,6 +149,10 @@ type lifecycle struct {
 	env    *Env
 	opts   Options
 	result *enterprisestatus.Result
+	// keepThroughRollback names the units a rollback leaves running: the
+	// gateway and the sensor helper of an interrupted hot transaction
+	// (recoverInterrupted, GAP-0238).
+	keepThroughRollback map[string]bool
 	// serviceUID is the gateway account of the running transaction.
 	serviceUID int
 	// planned are the inputs the last transaction of this run applied.
@@ -1709,9 +1713,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		r.AddError(codeApply, err.Error())
 		return 0
 	}
+	// Decided before the intent is written, so a run killed at any phase of
+	// a hot change is rolled back without a gateway restart (GAP-0238).
+	hot := l.hotConfigApply(ctx, record, p, adopting)
 	pending := &Pending{
 		Action: l.opts.Action, StartedAt: env.Now().UTC().Format(time.RFC3339), SnapshotDir: snap.Dir, Phase: "quiesce",
 		PreviouslyActive: previouslyActive, PreviouslyEnabled: previouslyEnabled, EnabledRecorded: enabledRecorded,
+		Hot: hot,
 	}
 	if err := env.savePending(pending); err != nil {
 		env.discardSnapshot(snap)
@@ -1800,7 +1808,6 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 	}
 	keep := l.keepRunningDuringChange(p)
-	hot := l.hotConfigApply(ctx, record, p, adopting)
 	// The gateway that keeps running reloads config.yaml as soon as it is written.
 	l.generationExposed = hot
 	if gateway, ok := gatewayUnitOf(units); hot && ok {
@@ -2562,6 +2569,10 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 			// restored state (a no-op) or a change made meanwhile.
 			continue
 		}
+		if l.keepThroughRollback[unit.Name] {
+			// It reloads the restored config.yaml itself.
+			continue
+		}
 		_ = env.Services.Stop(ctx, unit)
 	}
 	// The helper is stopped now; the restored helper loads its own policies
@@ -2595,6 +2606,10 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 		// A queued apply run was left running; starting the oneshot again
 		// would wait for that run, which waits for this transaction's lock.
 		if contains(previouslyActive, unit.Name) && unit.Name != env.SelfUnit && unit.Name != unitApplyService {
+			if l.keepThroughRollback[unit.Name] && env.Services.Active(ctx, unit) {
+				// Kept running; launchd would restart a loaded job.
+				continue
+			}
 			if err := env.Services.Start(ctx, unit); err != nil {
 				startErrs = append(startErrs, err)
 			}
@@ -2767,6 +2782,16 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 		}
 		return true
 	}
+	// An interrupted hot change goes back the way it came: the gateway and
+	// the sensor helper keep running and the gateway reloads the restored
+	// config.yaml, so the retry applies the change hot again with the same
+	// gateway (GAP-0238, #1279 L3). A gateway that is not running is started
+	// as before.
+	l.keepThroughRollback = nil
+	if pending.Hot {
+		l.keepThroughRollback = hotRollbackKeep(ctx, env)
+		defer func() { l.keepThroughRollback = nil }()
+	}
 	// The files go back before any other service is touched: a restore
 	// that still fails (the disk is still full) then leaves the running
 	// services alone instead of stopping and restarting the gateway on every
@@ -2790,6 +2815,18 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 	_ = env.clearPending()
 	env.discardSnapshot(snap)
 	return true
+}
+
+// hotRollbackKeep names the running gateway and sensor helper, which an
+// interrupted hot transaction left running and its rollback leaves running.
+func hotRollbackKeep(ctx context.Context, env *Env) map[string]bool {
+	keep := map[string]bool{}
+	for _, unit := range env.Services.Units() {
+		if (unit.Kind == "gateway" || unit.Kind == "sensor_helper") && env.Services.Active(ctx, unit) {
+			keep[unit.Name] = true
+		}
+	}
+	return keep
 }
 
 // restoreUnchangedConfigMetadata puts back the managed mode and owner of an
