@@ -1362,9 +1362,10 @@ def test_shipped_loki_indexes_the_labels_the_boxes_list() -> None:
     assert collector["processors"]["groupbyattrs/sandbox-identity"] == {"keys": ["defenseclaw.sandbox.name"]}
 
 
-# Dashboard boxes whose values live only in the JSON record body. Loki cannot
-# list them through label_values; they are tracked in GAP-0241.
-PENDING_BODY_BOXES = {
+# Boxes whose values live only in the JSON record body. Loki's label API
+# cannot list them (GAP-0241), so they are regex text boxes whose default
+# matches every record that carries the field, as their All value did.
+BODY_FIELD_TEXT_BOXES = {
     ("defenseclaw-activity.json", "session"),
     ("defenseclaw-agent-360.json", "agent"),
     ("defenseclaw-agent-360.json", "lifecycle"),
@@ -1385,8 +1386,6 @@ def test_loki_boxes_list_index_labels_with_a_matcher_only_selector() -> None:
         for variable in board.get("templating", {}).get("list", []):
             if (variable.get("datasource") or {}).get("type") != "loki" or variable.get("type") != "query":
                 continue
-            if (path.name, variable["name"]) in PENDING_BODY_BOXES:
-                continue
             query = variable["query"]["query"] if isinstance(variable["query"], dict) else variable["query"]
             match = _LABEL_VALUES.match(query)
             assert match, f"{path.name} ${variable['name']}: {query} is not label_values(<matchers>, <label>)"
@@ -1396,6 +1395,23 @@ def test_loki_boxes_list_index_labels_with_a_matcher_only_selector() -> None:
             assert set(_MATCHER.findall(selector)) <= SHIPPED_LOKI_INDEX_LABELS, f"{path.name} ${variable['name']}"
             checked += 1
     assert checked == 6
+
+
+def test_loki_body_field_boxes_are_regex_text_boxes() -> None:
+    for name, variable_name in sorted(BODY_FIELD_TEXT_BOXES):
+        board = _dashboard(name)
+        variable = next(item for item in board["templating"]["list"] if item["name"] == variable_name)
+        assert variable["type"] == "textbox", (name, variable_name)
+        assert variable["query"] == variable["current"]["value"] == ".+", (name, variable_name)
+        assert "regex" in variable["description"].lower(), (name, variable_name)
+        reference = f'"${variable_name}"'
+        uses = [query for _, query in _loki_queries(board) if reference in query]
+        assert uses, (name, variable_name)
+        exact = re.compile(r'(?<![!|])\s*=\s*"\$' + variable_name + r'"')
+        for query in uses:
+            # A regex text box is read by regex matchers and line filters only.
+            assert not exact.search(query), (name, variable_name, query)
+            assert f"|= {reference}" not in query, (name, variable_name, query)
 
 
 def test_loki_stream_selectors_use_only_shipped_index_labels() -> None:
@@ -3432,12 +3448,9 @@ def test_activity_session_tree_drilldown_uses_canonical_root_identity() -> None:
     activity = _dashboard("defenseclaw-activity.json")
     variables = {item["name"]: item for item in activity["templating"]["list"]}
     session = variables["session"]
-    assert session["label"] == "Root session"
-    assert session["datasource"]["uid"] == "defenseclaw-loki"
-    assert '{service_name="defenseclaw"}' in session["definition"]
-    assert 'connector=~"$connector"' in session["definition"]
-    assert "body_defenseclaw_session_root_id" in session["definition"]
-    assert "gen_ai_client_token_usage_count" not in session["definition"]
+    assert session["label"] == "Root session ID regex"
+    assert session["type"] == "textbox"
+    assert "defenseclaw.session.root.id" in session["description"]
 
     token_panel = _panel(activity, "Reported tokens for selected session tree")
     assert token_panel["datasource"]["uid"] == "defenseclaw-loki"
@@ -3579,8 +3592,8 @@ def test_activity_root_session_all_value_and_timeline_are_truthful() -> None:
     session = next(
         item for item in activity["templating"]["list"] if item["name"] == "session"
     )
-    assert session["includeAll"] is True
-    assert session["allValue"] == ".+"
+    # The default matches every root session, as the box's All value did.
+    assert session["query"] == session["current"]["value"] == ".+"
 
     timeline = _panel(activity, "Ordered session-tree lifecycle and work timeline")
     expression = timeline["targets"][0]["expr"]

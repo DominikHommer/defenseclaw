@@ -131,6 +131,16 @@ Some panels stay fleet-wide, and the box text on each board names the Loki ones:
 - **Metric panels** have no per-user label, so they never change.
 - **Records without a user** feed Discovery runs (Agent identity), AI discovery summary log (AI discovery), Relationship warnings observed and Relationship evidence and conflict chronology (Agent360), and the policy update stream inside Recent OPA + egress events (Policy decisions).
 
+## ID and hook surface boxes
+
+Some boxes filter on fields that only the record body carries: **Root session
+ID regex** (Activity), **Agent or root ID regex**, **Lifecycle (drilldown)**
+and **Execution (drilldown)** (Agent360), and **Hook surface regex** (Blocked
+Events). Loki cannot list the values of such a field, so these are text boxes
+that take a regex, not lists. The default `.+` matches every record that has
+the field. The table links on Agent identity, Activity and Agent360 fill them in
+for you, or you can paste an ID or type a pattern such as `PreToolUse|PostToolUse`.
+
 ## Identity & Users board
 
 The **Identity & Users** board (`defenseclaw-identity`) answers who runs which

@@ -1103,39 +1103,22 @@
       },
       {
         "name": "hook_event",
-        "label": "Hook surface",
-        "type": "query",
-        "datasource": {
-          "type": "loki",
-          "uid": "defenseclaw-loki"
-        },
-        "definition": "label_values({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_hook_event!=\"\", body_defenseclaw_hook_event)",
-        "query": {
-          "query": "label_values({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_hook_event!=\"\", body_defenseclaw_hook_event)",
-          "refId": "hook-event-var"
-        },
-        "refresh": 2,
-        "sort": 1,
-        "multi": true,
-        "includeAll": true,
-        "allValue": ".+",
+        "label": "Hook surface regex",
+        "description": "Regex over the hook event the connector reported (for example PreToolUse|PostToolUse). .+ shows every hook surface.",
+        "type": "textbox",
+        "query": ".+",
         "current": {
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ],
+          "text": ".+",
+          "value": ".+",
           "selected": true
         },
         "options": [
           {
-            "text": "All",
-            "value": "$__all",
+            "text": ".+",
+            "value": ".+",
             "selected": true
           }
         ],
-        "skipUrlSync": false,
         "hide": 0
       },
       {
