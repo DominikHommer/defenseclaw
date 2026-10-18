@@ -5,10 +5,12 @@
 
 This is source for a separate Linux amd64 experiment. Its compiled registry
 admits only receipt SHA256
-`9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db`
-for the four fixed contributor cases and the exact reviewed aa215 peer,
-unchanged e054 static Bubblewrap closure, and d074 payload artifacts. No peer,
-Bubblewrap or payload execution has been performed by this harness. Nothing here activates a customer runtime.
+`6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6`
+for the four fixed contributor cases and the exact reviewed c914 build
+(byte-identical aa215 Rust peer and revised static Bubblewrap), with the
+unchanged d074 payload. This pinned Bubblewrap image and harness revision
+have not had a native attempt. Historical failed attempts remain recorded
+in the parent README. Nothing here activates a customer runtime.
 
 The separate `axis-native-harness-build.yml` workflow builds this fixed wrapper
 twice with Go1.26.5, `CGO_ENABLED=0` and independent build caches. It verifies the
@@ -212,3 +214,17 @@ case failures also record protocol stage and validated closed peer failure codes
 never arbitrary backend errors or diagnostics. These fields do not certify a
 payload start. The fixture revision needs fresh wrapper/driver artifacts and one
 separately reviewed native attempt; no peer or payload artifact changes.
+
+## Current namespace source-view revision
+
+The c914 Bubblewrap revision uses the identity-checked cached reopen's mount
+ID for the current namespace inventory. The incoming FD still supplies the
+held object and restrictive-flag authority; both namespace views still refuse
+nested mounts. This contract requires the trusted clone-only creator chain,
+not arbitrary foreign FDs with matching inode numbers. Its paired driver must
+verify current-namespace reachable source mounts with unique mount IDs and
+`statmount` basic attributes before the first clone, refusing ID-mapped or
+unsupported sources. The reviewed c914 build and combined receipt change only
+the Bubblewrap image/static closure and first build identity; peer bytes and
+the d074 payload remain unchanged. A fresh wrapper, paired driver and separately
+reviewed native attempt are required.
