@@ -132,11 +132,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Pinned PSEC contributor build failed' }
           # These SDK tests call only the pure pre-creation validator. The
           # hosted image never executes PSEC or either contributor payload.
+          # Dependency packages reject CLI feature flags; the contributor
+          # manifest already disables the SDK's default features.
           @'
           import prepare_build as build
           build.command([
               'cargo', '+' + build.TOOLCHAIN, 'test', '--locked', '--release',
-              '-p', 'mxc-sdk', '--lib', '--no-default-features',
+              '-p', 'mxc-sdk', '--lib',
               'strict_psec_tests', '--', '--test-threads=1',
           ])
           '@ | python -
