@@ -141,6 +141,9 @@ type SandboxDaemonOptions struct {
 	// sandboxes; tests replace them.
 	newRuntime   func(*SandboxDaemon) (*sandboxRuntime, error)
 	countRunning func(context.Context) (int, error)
+	// sweepForeign replaces the foreign-sandbox sweep before an idle
+	// gateway stops (SandboxDaemon.sweepForeign); tests only.
+	sweepForeign func(context.Context) (bool, error)
 	// listPhases is the phase of each sandbox by name (sandboxPhases: the
 	// manager's list when nil); tests replace it.
 	listPhases func(context.Context) (map[string]string, bool)
@@ -897,7 +900,7 @@ func (d *SandboxDaemon) check(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	d.releaseListeners()
-	d.stopIdleOpenShellLocked(ctx)
+	d.stopIdleOpenShellLocked(ctx, false)
 	if d.pendingRestart.Load() {
 		d.logf("no sandbox runs: restarting for the pending upgrade or setting change")
 		return true, ErrSandboxDaemonRestart

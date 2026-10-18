@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,6 +79,55 @@ func TestSandboxDaemonHandoverAfterLifecycle(t *testing.T) {
 	if n := f.os.stopped.Load(); n != 1 {
 		t.Fatalf("idle gateway was not handed over: %d", n)
 	}
+}
+
+// GAP-0237: a foreign sandbox that foreign_sandboxes: alert leaves running
+// keeps an idle gateway only while it runs: the daemon looks again soon and
+// stops the gateway once it ended. A stop or delete of the account's last
+// sandbox does not wait for it at all: the sweep records it and the gateway
+// stops with it, within the sweep's bound, so the next account can start.
+func TestSandboxDaemonForeignAlertSandboxDoesNotHoldTheHandover(t *testing.T) {
+	prev := foreignRecheckEvery
+	foreignRecheckEvery = 20 * time.Millisecond
+	t.Cleanup(func() { foreignRecheckEvery = prev })
+	var foreign atomic.Bool
+	var sweeps atomic.Int32
+	foreign.Store(true)
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.sweepForeign = func(context.Context) (bool, error) {
+			sweeps.Add(1)
+			return foreign.Load(), nil
+		}
+	})
+	f.run(t)
+	ctx := context.Background()
+	f.os.holder.Store(int64(os.Getuid()))
+	f.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())
+	if f.d.check(ctx); f.os.stopped.Load() != 0 || sweeps.Load() == 0 {
+		t.Fatalf("an idle check stopped the gateway of a running foreign sandbox: stopped %d, sweeps %d", f.os.stopped.Load(), sweeps.Load())
+	}
+	foreign.Store(false)
+	deadline := time.Now().Add(5 * time.Second)
+	for f.os.stopped.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if f.os.stopped.Load() != 1 {
+		t.Fatal("the gateway stayed up after the foreign sandbox ended")
+	}
+
+	foreign.Store(true)
+	f.os.holder.Store(int64(os.Getuid()))
+	f.d.openShellUsed.Store(time.Now().UnixNano())
+	f.d.stops.Store(1)
+	start := time.Now()
+	f.d.handoverOpenShell(ctx)
+	if n := f.os.stopped.Load(); n != 2 {
+		t.Fatalf("the hand-over kept the gateway for a foreign sandbox: stopped %d", n)
+	}
+	if took := time.Since(start); took > foreignSweepTimeout+15*time.Second {
+		t.Fatalf("the hand-over took %s", took)
+	}
+	f.d.stops.Store(0)
 }
 
 // A stop or delete of a kept sandbox starts the account's gateway the daemon
