@@ -23,7 +23,37 @@ cleanup retains the exact session and assets for retry. Asset release requires
 joined protocol workers and independent native wait success under a still-live
 cleanup context, not a `Destroyed` frame. A sticky protocol failure is reported
 even when that verified cleanup releases assets; the phase is `failed_closed`.
-An asset-close failure stays sticky and cannot become successful on retry.
+An exclusive file/image close failure stays sticky and cannot become successful
+on retry.
+
+`NewHostStageAssets` adds a custody handoff for an already prepared Windows
+host stage and an explicit MXC ProcessContainer session identity. It fills an
+empty CWD and `/work` slot with two
+independent, full-identity-checked, non-inheritable copies obtained through the
+stage's held root lease. It never reopens `TreePath`. The read/query handle
+rights and `/work` association do not grant guest write permission or qualify
+the Windows native bridge. Other supplied grants remain the trusted producer's
+responsibility; this handoff does not establish their confinement or lineage.
+
+A successful return transfers all inputs and stage custody. A nonnil result
+with an error owns only its allocated copies, lease and stage; the caller must
+close that cleanup-only result and keeps ownership of supplied images and
+other files. Cleanup-only assets cannot be bound. After independent native
+cleanup, every exclusive file/image must close successfully before lease
+release and stage deletion. Uncertain exclusive close keeps that barrier and
+reports a sticky failure. If another stage lease prevents deletion, no child
+is removed; explicit asset-close retry can finish after that consumer releases.
+
+The native Windows filesystem custody regression passed under the race
+detector, without executing an image, child process or sandbox:
+
+```powershell
+go test -race '-ldflags=-w -s' -p 1 ./internal/axis/backend -run '^TestHostStageAssetsWindowsHeldDuplicatesAndCleanupRetry$' -count=1
+```
+
+It verifies the full native identity, private/non-inheritable handles, two
+independent exclusive copies, retained child bytes during an in-use cleanup
+refusal, and successful release/retry without owned residue.
 
 The policy compiler refuses all incomplete components and emits no partial
 `PolicyReceipt`. Sparse filesystem/native offline canaries do not implement
@@ -55,7 +85,9 @@ does not erase the attachment's original failure. A peer exit event alone never
 releases assets. This source implementation does not qualify production streaming
 or activate a gateway manager route.
 
-Tests use private function injection over the existing concrete session and
-inert held files. They never execute images, clone namespaces, mount, change
-capabilities or call a native worker entry point. Fixed test qualification is
-never registered as production evidence.
+Lifecycle and transport tests use private function injection over the existing
+concrete session and inert held files. Stage handoff tests also cover partial
+allocation, cancellation, mismatched driver metadata and sticky close errors.
+These tests never execute images, clone namespaces, mount, change capabilities
+or call a native worker entry point. Fixed test qualification is never
+registered as production evidence.

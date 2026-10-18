@@ -30,10 +30,21 @@ slot and sticky error. Releasing the last lease does not implicitly clean up
 the stage; the owner must retry `HostStage.Close`.
 
 `RootLease.File` is borrowed and must not be closed or passed directly to
-`backend.NewAssets`, which consumes exclusive handles. A future adapter must
-make an independent duplicate, retain the lease through confirmed native
-cleanup and successful asset closure, then close the lease and stage in that
-order. This handoff does not activate a Windows runtime. Before preparation
+`backend.NewAssets`, which consumes exclusive handles. `RootLease.Duplicate`
+returns an independently owned copy through the same native validator. Pending
+duplication prevents lease release; if stage close wins during duplication,
+any allocated file is returned with an error for cleanup only. The trusted
+consumer must keep the lease until every returned copy has definitely closed,
+including copies returned with errors. This contract cannot stop a host
+consumer from releasing its lease prematurely.
+
+`backend.NewHostStageAssets` uses two such copies for CWD and the `/work`
+association and retains the lease through confirmed native cleanup and
+successful asset closure, then releases the lease and stage in that order.
+Its native Windows filesystem regression verifies full identity, private and
+non-inheritable handles, retained child bytes when another lease prevents
+cleanup, and successful explicit cleanup retry after release. This handoff
+does not activate a Windows runtime. Before preparation
 returns a stage, a producer-pin close failure prevents recursive deletion and
 can leave residue; that error path does not return a stage owner for retry.
 

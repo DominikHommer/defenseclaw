@@ -156,7 +156,7 @@ func (b *Backend) BindAssets(identity sandboxruntime.SessionIdentity, assets *As
 	assets.mu.Lock()
 	defer assets.mu.Unlock()
 	_, used := b.usedIDs[identity.ID]
-	if b.closed || b.owner.Err() != nil || len(b.entries) >= 64 || len(b.usedIDs) >= 4096 || used || assets.claimed || assets.closed || assets.identity != identity {
+	if b.closed || b.owner.Err() != nil || len(b.entries) >= 64 || len(b.usedIDs) >= 4096 || used || assets.cleanupOnly || assets.claimed || assets.closed || assets.identity != identity {
 		return ErrAssets
 	}
 	assets.claimed = true

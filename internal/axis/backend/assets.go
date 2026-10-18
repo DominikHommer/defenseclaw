@@ -27,6 +27,10 @@ type Assets struct {
 	claimed  bool
 	closed   bool
 	closeErr error
+	// A partial stage handoff owns only its newly created resources. It cannot
+	// be bound or used for execution, even when its identity is otherwise valid.
+	cleanupOnly  bool
+	releaseStage func() error
 }
 
 func NewAssets(identity sandboxruntime.SessionIdentity, inputs bridgeprocess.Inputs, read, write []string) (*Assets, error) {
@@ -77,19 +81,30 @@ func (a *Assets) Close() error {
 }
 
 func (a *Assets) closeLocked() error {
-	if a.closed {
+	if !a.closed {
+		a.closed = true
+		var errs []error
+		for _, image := range []*bridgeprocess.Image{a.inputs.Peer, a.inputs.Bubblewrap, a.inputs.Payload} {
+			errs = append(errs, image.Close())
+		}
+		for _, file := range append(append([]*os.File{a.inputs.CWD}, a.inputs.Read...), a.inputs.Write...) {
+			if file != nil {
+				errs = append(errs, file.Close())
+			}
+		}
+		a.closeErr = errors.Join(errs...)
+	}
+	// Uncertain exclusive-file/image closure is sticky and must never allow
+	// recursive stage cleanup. Stage in-use refusal is different: it performs
+	// no deletion, and can be retried after another consumer releases custody.
+	if a.closeErr != nil {
 		return a.closeErr
 	}
-	a.closed = true
-	var errs []error
-	for _, image := range []*bridgeprocess.Image{a.inputs.Peer, a.inputs.Bubblewrap, a.inputs.Payload} {
-		errs = append(errs, image.Close())
-	}
-	for _, file := range append(append([]*os.File{a.inputs.CWD}, a.inputs.Read...), a.inputs.Write...) {
-		if file != nil {
-			errs = append(errs, file.Close())
+	if a.releaseStage != nil {
+		if err := a.releaseStage(); err != nil {
+			return err
 		}
+		a.releaseStage = nil
 	}
-	a.closeErr = errors.Join(errs...)
-	return a.closeErr
+	return nil
 }

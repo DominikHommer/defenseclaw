@@ -79,6 +79,78 @@ func TestHostStageRootLeaseCloseBarrierWithInertHandles(t *testing.T) {
 	}
 }
 
+func TestHostStageRootLeaseDuplicateRetainsPendingCustody(t *testing.T) {
+	stage, cleaned := inertHostStageRoot(t)
+	lease := inertHostStageLease(t, stage)
+	entered, resume := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(resume) })
+	defer release()
+	allocated := new(os.File)
+	stage.duplicateRoot = func() (*os.File, error) {
+		close(entered)
+		<-resume
+		return allocated, nil
+	}
+	type result struct {
+		file *os.File
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() { file, err := lease.Duplicate(); done <- result{file, err} }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("duplicate never reached native barrier")
+	}
+	if err := lease.Close(); !errors.Is(err, ErrHostStageInUse) {
+		t.Fatal("lease released while a native duplicate was pending")
+	}
+	requireHostStageInUse(t, stage)
+	if *cleaned != 0 {
+		t.Fatal("cleanup began while duplication was pending")
+	}
+	release()
+	select {
+	case got := <-done:
+		if got.file != allocated || got.err == nil {
+			t.Fatal("close-winning duplicate lost allocated cleanup custody or became usable")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pending duplicate did not finish")
+	}
+	if file, err := lease.Duplicate(); file != nil || err == nil {
+		t.Fatal("close request admitted another exclusive duplicate")
+	}
+	// The returned fake File has no native handle. Its conceptual exclusive
+	// close is complete before the owning lease can be released here.
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stage.Close(); err != nil || *cleaned != 1 {
+		t.Fatal("explicit cleanup after duplication did not finish")
+	}
+}
+
+func TestHostStageRootLeaseDuplicateRefusesInvalidAndPartialLease(t *testing.T) {
+	stage, _ := inertHostStageRoot(t)
+	lease := inertHostStageLease(t, stage)
+	allocated := new(os.File)
+	failure := errors.New("fixed duplicate validation refusal")
+	stage.duplicateRoot = func() (*os.File, error) { return allocated, failure }
+	if file, err := lease.Duplicate(); file != allocated || !errors.Is(err, failure) {
+		t.Fatal("partial exclusive allocation lost cleanup custody")
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if file, err := lease.Duplicate(); file != nil || err == nil {
+		t.Fatal("released lease admitted exclusive duplication")
+	}
+	if file, err := (*RootLease)(nil).Duplicate(); file != nil || err == nil {
+		t.Fatal("nil lease admitted exclusive duplication")
+	}
+}
+
 func TestHostStageRootLeaseCloseFailureRetainsOwner(t *testing.T) {
 	stage, cleaned := inertHostStageRoot(t)
 	lease := inertHostStageLease(t, stage)

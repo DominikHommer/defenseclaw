@@ -50,6 +50,7 @@ type RootLease struct {
 	file      *os.File
 	closeFile func() error
 	pending   bool
+	copying   int
 	releasing bool
 	released  bool
 	admitErr  error
@@ -127,6 +128,46 @@ func (l *RootLease) File() (*os.File, error) {
 	return l.file, nil
 }
 
+// Duplicate returns an independently owned, limited-access, non-inheritable
+// handle to the same sanitized root, without reopening a display pathname.
+// The trusted caller must retain this lease until every returned file has
+// definitely closed, including a nonnil file returned with an error. Such a
+// file is cleanup custody only and must not be used after a refusal. The stage
+// cannot prevent a host consumer from breaking this ownership contract.
+func (l *RootLease) Duplicate() (*os.File, error) {
+	if l == nil || l.stage == nil {
+		return nil, errHostStageClosed
+	}
+	s := l.stage
+	s.mu.Lock()
+	if l.pending || l.releasing || l.released || l.file == nil || s.closeRequested {
+		s.mu.Unlock()
+		return nil, errHostStageClosed
+	}
+	if err := errors.Join(l.admitErr, l.closeErr); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	if l.copying >= maxHostStageRootLeases {
+		s.mu.Unlock()
+		return nil, ErrHostStageInUse
+	}
+	l.copying++
+	duplicate := s.duplicateRoot
+	s.mu.Unlock()
+	file, err := duplicate()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l.copying--
+	if file == nil && err == nil {
+		err = errors.New("workspace: host stage root duplication returned no custody")
+	}
+	if s.closeRequested {
+		err = errors.Join(err, errHostStageClosed)
+	}
+	return file, err
+}
+
 // Close releases only this lease, never the stage. A successful close permits a
 // later explicit HostStage.Close retry. Uncertain native close is sticky: its
 // slot and producer pins remain retained, even if the Go File appears closed.
@@ -136,7 +177,7 @@ func (l *RootLease) Close() error {
 	}
 	s := l.stage
 	s.mu.Lock()
-	if l.pending || l.releasing {
+	if l.pending || l.releasing || l.copying != 0 {
 		s.mu.Unlock()
 		return ErrHostStageInUse
 	}
