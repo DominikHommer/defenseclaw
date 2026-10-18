@@ -397,11 +397,13 @@ func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecis
 		}
 	}
 	if configured == "" {
-		if actionDecision {
-			configured = c.Guardrail.effectiveHookFailModeForMode(connector, "action")
-		} else {
-			configured = c.Guardrail.EffectiveHookFailModeFor(connector)
+		mode := "action"
+		if !actionDecision {
+			mode = c.Guardrail.EffectiveMode(connector)
 		}
+		// Only Secure Client keeps an observe-mode connector without a value
+		// of its own fail-open; everywhere else an unset value is closed.
+		configured = c.Guardrail.effectiveHookFailModeForMode(connector, mode, c.SecureClientIntegration())
 	}
 	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured, c.StandaloneEnterprise())
 }
@@ -410,13 +412,14 @@ func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecis
 // contract and every runtime consumer on the same fail-closed value. Native
 // Codex and Claude hooks are enforcement boundaries in managed enterprise
 // deployments; an observe-mode or legacy fail-open source config must not be
-// allowed to weaken their delivery/response behavior after installation. In
-// the standalone profile Devin runs the administrator-owned
-// `defenseclaw-hook --enterprise-managed`, which always fails closed, so the
-// config, the hook-contract lock and status report the same value.
+// allowed to weaken their delivery/response behavior after installation. On
+// a standalone managed host every connector fails closed: an explicit
+// `hook_fail_mode: open` is honored only on a per-user install (and under
+// Secure Client), so the config, the hook-contract lock and status report
+// the value the administrator-owned hooks enforce.
 func effectiveManagedEnterpriseHookFailMode(deploymentMode, connector, configured string, standalone bool) string {
 	name := normalizeConnectorKey(connector)
-	if managed.IsManagedEnterprise(deploymentMode) && (name == "codex" || name == "claudecode" || (standalone && name == "devin")) {
+	if managed.IsManagedEnterprise(deploymentMode) && (standalone || name == "codex" || name == "claudecode") {
 		return "closed"
 	}
 	if strings.EqualFold(strings.TrimSpace(configured), "open") {

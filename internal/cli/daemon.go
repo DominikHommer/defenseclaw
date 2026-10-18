@@ -264,10 +264,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 	lockWait := gatewayStartLockWait
 	if coldStart {
-		lockWait = hookColdStartLockWait
+		// Many hooks see the same restart at once and each starts the
+		// gateway: only the first takes the lock. The others end at once
+		// (GAP-0143); the start or restart that holds the lock brings the
+		// gateway up, and their hooks keep sending the call to it.
+		lockWait = 0
 	}
 	release, err := acquireGatewayStartLock(dataDir, lockWait)
 	if err != nil {
+		if coldStart {
+			return nil
+		}
 		return err
 	}
 	defer release()

@@ -259,6 +259,10 @@ type Env struct {
 	// or restarts that unit: doing so would kill its own transaction.
 	SelfUnit string
 
+	// Yield lowers the priority of the lifecycle run (yieldToHooks) before
+	// it does any work; tests leave it nil.
+	Yield func()
+
 	LockTimeout  time.Duration
 	ReadyTimeout time.Duration
 	PollInterval time.Duration
@@ -266,6 +270,15 @@ type Env struct {
 	// guardian's report on its targets.
 	GuardianReportTimeout time.Duration
 }
+
+// lifecycleNice is the nice value of a lifecycle run. A config or bundle
+// apply builds and verifies a policy generation, in this process and in a
+// gateway CLI it starts, while the gateway keeps answering hook calls; on
+// a small host that work competed with the gateway and with each hook
+// process for the CPU, and hook calls slowed down or timed out for seconds
+// during the apply (#1279). The run yields instead; it does not hold the
+// gateway up.
+const lifecycleNice = 10
 
 // NewEnv returns the production environment for goos.
 func NewEnv(goos, productVersion string) (*Env, error) {
@@ -278,6 +291,7 @@ func NewEnv(goos, productVersion string) (*Env, error) {
 		Layout:         layout,
 		Runner:         ExecRunner{},
 		ProductVersion: productVersion,
+		Yield:          yieldToHooks,
 	}
 	env.fillDefaults()
 	env.SelfUnit = selfUnitFromEnv(env.Services, os.Getenv(LifecycleUnitEnv))

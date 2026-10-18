@@ -2781,6 +2781,51 @@ def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path
     assert changed.agents["amp"].version == ""
 
 
+def test_a_refresh_that_cannot_find_an_unchanged_binary_keeps_its_version(monkeypatch, tmp_path):
+    """GAP-0231: the upgrade's discovery refresh ran with a PATH that lacked
+    the agents' folder, found no binary and erased the versions the gateway
+    needs, so every action-mode connector was skipped after the upgrade."""
+    binary = tmp_path / "claude"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    old = os.stat(binary).st_mtime - 600
+    os.utime(binary, (old, old))
+
+    def scan(found: bool):
+        def fake(name: str, **_kwargs) -> ad.AgentSignal:
+            if name != "claudecode":
+                return _signal(name)
+            if not found:
+                return ad.AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
+            return ad.AgentSignal(
+                name=name, installed=True, config_path="", binary_path=str(binary),
+                version="2.1.286 (Claude Code)", error="",
+            )
+        return fake
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan(True))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(ad, "_scan_agent", scan(False))
+    kept = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    signal = kept.agents["claudecode"]
+    assert (signal.version, signal.binary_path, signal.installed) == ("2.1.286 (Claude Code)", str(binary), True)
+    assert ad._read_cache(data_dir=tmp_path).agents["claudecode"].version == "2.1.286 (Claude Code)"
+
+    # Changed since the scan that probed it: its version is not known.
+    os.utime(binary, None)
+    assert ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["claudecode"].version == ""
+
+    # Removed: not installed.
+    os.utime(binary, (old, old))
+    monkeypatch.setattr(ad, "_scan_agent", scan(True))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    binary.unlink()
+    monkeypatch.setattr(ad, "_scan_agent", scan(False))
+    gone = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["claudecode"]
+    assert (gone.version, gone.installed) == ("", False)
+
+
 def test_cached_discovery_rechecks_config_files(monkeypatch, tmp_path):
     """GAP-1627: setup / setup remove change hook files after the cache was written."""
     _pin_home(monkeypatch, tmp_path)

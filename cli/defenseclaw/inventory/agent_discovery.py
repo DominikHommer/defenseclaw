@@ -1209,7 +1209,9 @@ def discover_agents(
             )
         )
     agents = {signal.name: signal for signal in signals}
-    _keep_versions_of_slow_unchanged_agents(agents, data_dir=data_dir)
+    _keep_versions_of_slow_unchanged_agents(
+        agents, data_dir=data_dir, require_trusted_binary_paths=require_trusted
+    )
     discovery = AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=False)
     if shared is not None:
         shared[shared_key] = discovery
@@ -1225,9 +1227,12 @@ def _keep_versions_of_slow_unchanged_agents(
     agents: dict[str, AgentSignal],
     *,
     data_dir: str | os.PathLike[str] | None = None,
+    require_trusted_binary_paths: bool = False,
 ) -> None:
     """Keep the last observed version of a CLI whose probe only timed out
-    or was not run (:func:`restrict_probes`).
+    or was not run (:func:`restrict_probes`), or whose binary this scan did
+    not find at all while the binary the last scan probed is still there,
+    unchanged (GAP-0231).
 
     Setup rescans every agent and republishes this cache, and the gateway
     reads each peer's version from it when it restarts. On a busy host one
@@ -1235,13 +1240,30 @@ def _keep_versions_of_slow_unchanged_agents(
     mode refused that peer and setup of an unrelated connector failed to
     converge (RHEL-U3-13). The old version is kept only for the same binary
     path, and only if that file has not changed since the earlier scan.
+
+    The upgrade refreshes discovery before the gateway starts. Run from an
+    environment whose PATH lacks the agents' folder (an MDM or ``sudo -u``
+    run, a service manager), the refresh found no binary and replaced the
+    versions the last scan recorded, so the upgraded gateway refused every
+    action-mode connector as "agent version not probed" (GAP-0231). A binary
+    this scan did not find keeps its version when the file the last scan
+    probed still exists, is unchanged since that scan and (when discovery
+    requires it) is under a trusted prefix; an agent that was removed has
+    no file there and is reported as not installed. Windows keeps its
+    protected selection rules.
     """
+    not_found = not _is_windows_host()
     slow = [
         signal
         for signal in agents.values()
-        if signal.binary_path
-        and not signal.version
-        and (VERSION_PROBE_TIMED_OUT in (signal.error or "") or signal.error == VERSION_NOT_PROBED)
+        if not signal.version
+        and (
+            (
+                signal.binary_path
+                and (VERSION_PROBE_TIMED_OUT in (signal.error or "") or signal.error == VERSION_NOT_PROBED)
+            )
+            or (not_found and not signal.binary_path and not signal.error)
+        )
     ]
     if not slow:
         return
@@ -1261,14 +1283,21 @@ def _keep_versions_of_slow_unchanged_agents(
         if not isinstance(previous, dict):
             continue
         version = str(previous.get("version") or "")
-        if not version or str(previous.get("binary_path") or "") != signal.binary_path:
+        previous_binary = str(previous.get("binary_path") or "")
+        if not version or not previous_binary or (signal.binary_path and previous_binary != signal.binary_path):
+            continue
+        if not signal.binary_path and (
+            not os.path.isfile(previous_binary)
+            or (require_trusted_binary_paths and not _is_trusted_binary_path(previous_binary, data_dir=data_dir))
+        ):
             continue
         try:
-            changed_at = os.stat(os.path.realpath(signal.binary_path)).st_mtime
+            changed_at = os.stat(os.path.realpath(previous_binary)).st_mtime
         except OSError:
             continue
         if changed_at >= previous_scan.timestamp():
             continue
+        signal.binary_path = previous_binary
         signal.version = version
         signal.error = ""
         signal.installed = True

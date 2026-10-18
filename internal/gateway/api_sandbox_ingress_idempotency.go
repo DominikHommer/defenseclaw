@@ -317,7 +317,8 @@ type idempotencyRecorder struct {
 }
 
 func (r *idempotencyRecorder) WriteHeader(status int) {
-	if !r.wrote {
+	// An informational response (a hook progress report) is not the answer.
+	if !r.wrote && status >= 200 {
 		r.status = status
 		r.wrote = true
 	}

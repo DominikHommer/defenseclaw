@@ -793,7 +793,8 @@ type acpSignedResponse struct {
 func (w *acpSignedResponse) Header() http.Header { return w.header }
 
 func (w *acpSignedResponse) WriteHeader(status int) {
-	if w.status == 0 {
+	// An informational response (a hook progress report) is not the answer.
+	if w.status == 0 && status >= 200 {
 		w.status = status
 	}
 }

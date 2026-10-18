@@ -533,8 +533,37 @@ gateway, and on a managed host they refuse, also when you run them as root;
 run as root, the refusal names the commands below. Restart the managed
 gateway through the service manager instead. On Linux
 systemd keeps the hook and API sockets open while the gateway restarts, so a
-hook that connects meanwhile waits; on macOS a hook that runs during the
-restart fails closed.
+hook that connects meanwhile waits for the gateway that starts. On every OS a
+managed hook that meets a restarting gateway (a refused or dropped
+connection, a stopped service) sends its call again for up to about 3 seconds
+from the start of the hook, so a quick restart is not visible to the agent:
+the new gateway answers from the policy it loads, the last one applied. A
+restart that lasts longer blocks each call within those 3 seconds. On Linux,
+where the call waits in the socket systemd holds, the block names
+`enterprise_managed_gateway_restarting`; on macOS and Windows, where nothing
+accepts the call, it is the usual `enterprise_managed_gateway_not_running`
+(or the hook's generic refusal when the connection failed another way). A
+hook never allows a call because the gateway was restarting.
+
+A hook for a tool call (`PreToolUse` and the like) also waits at most about 4
+seconds from its start for the gateway's decision, whatever holds it up: a
+restart, an upgrade, a rollback, a repair, a configuration change, or a
+gateway too busy to answer in time. After that it blocks the call with
+`enterprise_managed_gateway_no_answer`, so DefenseClaw never holds an agent's
+tool call for more than about 5 seconds. A decision that waits on Cisco AI
+Defense or the LLM judge gets a little longer: the gateway tells the hook,
+and the call waits up to about 4.5 seconds from its start for that verdict,
+then is blocked the same way. Prompts and session, stop and other events
+keep their whole budget.
+
+The 4 seconds count from the start of the command the agent runs (on Windows
+that includes the PowerShell bridge some registrations use), and they hold on
+a busy computer: the hook prepares its block as soon as it has read the call,
+before it loads its settings, and gives it at the deadline even when its own
+work is running late. Lifecycle runs
+(`install`, `upgrade`, `repair`, `ensure` and bundle applies) run at a lower
+CPU priority than the hooks on every OS, so a repair does not take the CPU the
+hooks need to answer in time.
 
 | OS | Restart the gateway | Re-apply the deployment and restart every service |
 | --- | --- | --- |
@@ -599,6 +628,17 @@ Uninstall does the following on every OS:
 - It removes DefenseClaw's entries from vendor machine policy. Your own policy
   entries stay. On Linux and macOS it restores the preimages it recorded.
 - It stops and removes the services.
+
+The registrations go before the hook binary and the runtime descriptor: up to
+that point a hook started from a registration gets the gateway's decision or
+is blocked. An agent session that started before the uninstall keeps the hook
+registration it read at its start until it is restarted. Once the uninstall
+has removed the hook binary, such a session runs that hook as a missing
+command, which the agent treats as a non-blocking hook error, so its tool calls
+run without DefenseClaw. Restart the agents after an uninstall. To go back to
+an older release without that window, use [Roll back](#roll-back)
+instead of an uninstall followed by an install: the rollback replaces the
+release in place and the hooks stay registered.
 
 On a standalone deployment it also removes the config, credentials, most
 machine state and logs, with the kept-sandbox exception below.

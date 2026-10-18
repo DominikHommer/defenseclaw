@@ -259,10 +259,25 @@ It starts when you run `defenseclaw quickstart`, `defenseclaw setup`, or
 `defenseclaw-gateway start`. The install adds no systemd unit, LaunchAgent, or
 login item. Instead, when the gateway is not running (after a reboot or a
 sign-out that ended your processes), the next agent hook call starts it with
-`defenseclaw-gateway start` and then sends its request. This applies to the
-shell hooks of Claude Code, Codex, Cursor, GitHub Copilot, Devin, Hermes, Kiro,
-OpenHands, and Antigravity. The OpenCode and Amp plugins and the OmniGent
-policy do not start it.
+`defenseclaw-gateway start` in the background and sends its request again
+while it starts. This applies to the shell hooks of Claude Code, Codex,
+Cursor, GitHub Copilot, Devin, Hermes, Kiro, OpenHands, and Antigravity. The
+OpenCode and Amp plugins and the OmniGent policy do not start it.
+
+A hook call that meets a gateway restart (`defenseclaw-gateway restart`, an
+upgrade, or the start above) is sent again for up to about 3 seconds after the
+hook started, so a short restart is answered by the gateway that comes up,
+from its policy. A restart or outage that lasts longer ends the call within
+those 3 seconds with `gateway restarting or not running` instead of holding it
+until the gateway is back: a fail-closed hook blocks it, never allows it. The
+same holds for the per-user hooks on Windows. On Windows a per-user hook for
+a tool call also waits at most about 4 seconds for the gateway's decision and
+then applies its fail mode (`gateway did not answer in time`); a call the
+gateway is checking with Cisco AI Defense or the LLM judge gets up to about
+4.5 seconds. During
+an install or upgrade, which stops the gateway and starts it again, the shell
+hooks treat the stop as a restart and say that an install or upgrade is
+under way, not that the gateway was stopped.
 
 A hook does not start the gateway:
 
@@ -272,9 +287,10 @@ A hook does not start the gateway:
 - for 60 seconds after a hook start failed (see `~/.defenseclaw/gateway.log`);
 - when `DEFENSECLAW_GATEWAY_AUTOSTART=0` is set in the agent's environment.
 
-While the gateway is not running, fail-closed hooks (the action profile) block
-agent calls, and fail-open hooks (the observe default) let them through with a
-`gateway unreachable` line on stderr. On Windows a hook also starts a stopped
+While the gateway is not running, fail-closed hooks block agent calls, in
+observe mode too, and only hooks you set to `hook_fail_mode: open` let them
+through with a `gateway unreachable` line on stderr (see
+[Fail modes](/docs/reference/fail-modes#which-value-applies)). On Windows a hook also starts a stopped
 gateway; see [Windows install lifecycle](/docs/get-started/windows/install-lifecycle#startup-behavior).
 
 When the watchdog runs (`gateway.watchdog.enabled`) and the gateway process

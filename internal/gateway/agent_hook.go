@@ -248,6 +248,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// A tool call's hook waits a few seconds for the decision; tell it
+		// when the decision waits on a remote scanner (hook_progress.go).
+		w, r, closeProgress := withHookProgress(w, r)
+		defer closeProgress()
 		// Resolve the identity-based guardrail profile once, after
 		// authentication, from the route's connector, the verified subject
 		// and the agent identity derived from both (never the payload).
