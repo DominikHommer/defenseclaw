@@ -65,6 +65,12 @@ policies/kernel/** text eol=lf
 # edits them by exact LF text); a CRLF checkout broke that test on Windows.
 testdata/enterprise-configs/*.yaml text eol=lf
 
+# The local observability bundle upgrade removes a retired or Fleet asset only
+# when its SHA-256 matches a shipped digest (bundle_refresh
+# _LOCAL_OBSERVABILITY_RETIRED_SHA256, taken over LF bytes); keep the bundle
+# LF on Windows checkouts too.
+bundles/local_observability_stack/** text eol=lf
+
 # The sandbox golden texts are compared byte-for-byte; keep them LF on
 # Windows checkouts too.
 internal/config/testdata/*.golden text eol=lf

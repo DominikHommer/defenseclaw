@@ -551,6 +551,7 @@ def test_notice_respects_the_windows_self_update_policy(home: Path, monkeypatch:
     )
     monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
     monkeypatch.setattr(update_notice.os, "name", "nt")
+    monkeypatch.setattr(upgrade_shim.os, "name", "nt")
 
     assert update_notice.available_message() is None
     # The managed-deployment marker is checked first; without it the
