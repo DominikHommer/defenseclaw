@@ -342,7 +342,7 @@ SELECT id, agent_id, agent_instance_id, scanner, rule_id, category, severity, ta
 FROM ranked
 WHERE primitive_rank = 1
 ORDER BY dc_instant DESC, dc_rowid DESC
-	LIMIT ?`, identityWhere, instant)
+	LIMIT ?`, instant, identityWhere)
 	queryArgs := append([]any(nil), identityArgs...)
 	queryArgs = append(queryArgs, "correlator", strings.ToLower(scanner.FindingTagDetectionOnly), candidateLimit, limit)
 	rows, err := s.db.Query(query, queryArgs...)
