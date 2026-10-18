@@ -207,6 +207,11 @@ func shellDirectoryWriteOperandsFile(command string, file *syntax.File, cwd, hom
 	change := func(call *syntax.CallExpr, s *shellDirectoryState) bool {
 		program, arg, ok := shellCommandWord(call, home)
 		if !ok {
+			if linked, known := shellAdjacentLinkProgram(file, call, home); known {
+				program, arg, ok = linked, 1, true
+			}
+		}
+		if !ok {
 			// A program word that is not static may be cd.
 			if len(call.Args) > 0 {
 				s.known, s.changed, s.stack = false, true, nil

@@ -751,6 +751,9 @@ func shellVariablePoisonForFile(file *syntax.File, home string) shellVariablePoi
 			}
 			program, static := shellStaticProgram(node, home)
 			if !static {
+				program, static = shellAdjacentLinkProgram(file, node, home)
+			}
+			if !static {
 				poison.all = true
 				return true
 			}
@@ -759,6 +762,45 @@ func shellVariablePoisonForFile(file *syntax.File, home string) shellVariablePoi
 		return true
 	})
 	return poison
+}
+
+// shellAdjacentLinkProgram handles a literal link command assigned immediately
+// before its use. No intervening command can change the variable, and every
+// other dynamic program keeps the conservative unknown result.
+func shellAdjacentLinkProgram(file *syntax.File, call *syntax.CallExpr, home string) (string, bool) {
+	if file == nil || call == nil || len(call.Args) == 0 {
+		return "", false
+	}
+	word := call.Args[0]
+	if len(word.Parts) != 1 {
+		return "", false
+	}
+	part := word.Parts[0]
+	if quoted, ok := part.(*syntax.DblQuoted); ok && len(quoted.Parts) == 1 {
+		part = quoted.Parts[0]
+	}
+	param, ok := part.(*syntax.ParamExp)
+	if !ok || param.Param == nil || !safePlainParam(param, param.Param.Value) {
+		return "", false
+	}
+	for i, stmt := range file.Stmts {
+		if stmt.Cmd != call || i == 0 {
+			continue
+		}
+		previous := file.Stmts[i-1]
+		if !shellStraightStmt(previous) || len(previous.Redirs) != 0 {
+			return "", false
+		}
+		assignment, ok := previous.Cmd.(*syntax.CallExpr)
+		if !ok || len(assignment.Args) != 0 || len(assignment.Assigns) != 1 ||
+			shellAssignName(assignment.Assigns[0]) != param.Param.Value ||
+			assignment.Assigns[0].Value == nil {
+			return "", false
+		}
+		program, static := StaticWord(assignment.Assigns[0].Value, home)
+		return program, static && slices.Contains(linkPrograms, programBase(program))
+	}
+	return "", false
 }
 
 type shellVariableCandidateSet struct {
@@ -876,6 +918,9 @@ func shellVariableCandidates(file *syntax.File, cwd, home string) shellVariableC
 				return true
 			}
 			program, static := shellStaticProgram(node, home)
+			if !static {
+				program, static = shellAdjacentLinkProgram(file, node, home)
+			}
 			if !static {
 				candidates.allUnknown = true
 				return true

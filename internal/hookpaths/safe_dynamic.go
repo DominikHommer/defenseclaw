@@ -129,21 +129,30 @@ func safeDynamicRedirectFile(file *syntax.File, cwd, home string, verifyFS bool)
 		return false
 	}
 	prefix, firstOK := quoted.Parts[0].(*syntax.Lit)
-	param, secondOK := quoted.Parts[1].(*syntax.ParamExp)
 	suffix, thirdOK := quoted.Parts[2].(*syntax.Lit)
-	if !firstOK || !secondOK || !thirdOK || !strings.HasSuffix(suffix.Value, ".log") ||
+	if !firstOK || !thirdOK || !strings.HasSuffix(suffix.Value, ".log") ||
 		strings.Contains(suffix.Value, "/") {
 		return false
 	}
 	if kind == "" {
-		if param.Param == nil || param.Param.Value != "RANDOM" && param.Param.Value != "$" {
+		switch part := quoted.Parts[1].(type) {
+		case *syntax.ParamExp:
+			if part.Param == nil || part.Param.Value != "RANDOM" && part.Param.Value != "$" ||
+				!safePlainParam(part, part.Param.Value) {
+				return false
+			}
+		case *syntax.CmdSubst:
+			if !safeDateDigitsSubstitution(part, home) {
+				return false
+			}
+		default:
 			return false
 		}
-		if !safePlainParam(param, param.Param.Value) {
+	} else {
+		param, ok := quoted.Parts[1].(*syntax.ParamExp)
+		if !ok || kind != "date-digits" || !safePlainParam(param, variable) {
 			return false
 		}
-	} else if kind != "date-digits" || !safePlainParam(param, variable) {
-		return false
 	}
 	dir := filepath.Dir(prefix.Value)
 	if dir == "." || strings.ContainsAny(dir, "$`*?[]") {
@@ -155,6 +164,24 @@ func safeDynamicRedirectFile(file *syntax.File, cwd, home string, verifyFS bool)
 		}
 	}
 	return !verifyFS || safeNumericDirectory(OperandPath(dir, cwd), home)
+}
+
+func safeDateDigitsSubstitution(sub *syntax.CmdSubst, home string) bool {
+	if sub == nil || len(sub.Stmts) != 1 {
+		return false
+	}
+	stmt := sub.Stmts[0]
+	if stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 {
+		return false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) != 2 {
+		return false
+	}
+	program, programOK := StaticWord(call.Args[0], home)
+	format, formatOK := StaticWord(call.Args[1], home)
+	return programOK && formatOK && program == "date" &&
+		(format == "+%s" || format == "+%Y%m%d")
 }
 
 func safePlainParam(param *syntax.ParamExp, name string) bool {

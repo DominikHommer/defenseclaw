@@ -144,6 +144,7 @@ func TestR103B07R2SafeDynamicProjectRows(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	for _, tc := range []struct{ id, command string }{
+		{"FG3-HOLD2-N0003", `printf ok > "tmp/run-$(date +%s).log"`},
 		{"FG3-HOLD2-N0017", `out=$(mktemp -d "$PWD/tmp/work.XXXXXX"); printf ok > "$out/entry.txt"`},
 		{"HOLD5-N0022", `out=$(mktemp "$PWD/tmp/out.XXXXXX"); printf ok > "$out"`},
 		{"FG3-HOLD2-N0021", `stamp=$(date +%s); printf ok > "tmp/run-$stamp.log"`},
@@ -192,5 +193,71 @@ func TestR103B07R2SafeDynamicHomeProtectedAlias(t *testing.T) {
 	targets, ok := Decode(Resolve(payload))
 	if !ok || targets[TruncatedKey] != "1" || targets[SafeDynamicKey] != "" {
 		t.Fatalf("unsafe target proof was accepted: targets=%v decode=%v", targets, ok)
+	}
+}
+
+func TestR103B07R2LinkAndDirectoryRows(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(cwd, "tmp"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	ids := []string{
+		"V-0028-A01", "V-0028-A02", "V-0028-A03", "V-0028-A04", "V-0028-A05",
+		"V-0382-A03", "V-0382-A04", "V-0382-A05",
+		"V-0409-A01", "V-0409-A03", "V-0409-A06",
+		"V-B-02-A01", "V-B-04-A01", "V-B-06-A01",
+	}
+	for index, id := range ids {
+		t.Run(id, func(t *testing.T) {
+			command := `L=ln; $L -s tmp alias; printf x > alias/entry.txt`
+			if index%2 == 1 {
+				command = `L=ln; "$L" -s "tmp" "alias"; printf x > "alias/entry.txt"`
+			}
+			payload, err := json.Marshal(map[string]any{
+				"tool_name": "Bash", "cwd": cwd,
+				"tool_input": map[string]string{"command": command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := Decode(Resolve(payload))
+			logical := filepath.Join(cwd, "alias", "entry.txt")
+			links := commandLinks(command, cwd, home)
+			if !ok || targets[TruncatedKey] != "" || targets[logical] != logical ||
+				!links.known || len(links.aliases) == 0 {
+				t.Fatalf("linked directory proof: target=%q, aliases=%v, all=%v, decode=%v", targets[logical], links.aliases, targets, ok)
+			}
+		})
+	}
+}
+
+func TestR103B07R2VariableLinkProtectedCompanion(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, []byte("marker\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	command := `L=ln; $L -s "$HOME/.ssh" alias; printf x > alias/authorized_keys`
+	payload, err := json.Marshal(map[string]any{
+		"tool_name": "Bash", "cwd": cwd,
+		"tool_input": map[string]string{"command": command},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, ok := Decode(Resolve(payload))
+	logical := filepath.Join(cwd, "alias", "authorized_keys")
+	if !ok || targets[logical] != keys {
+		t.Fatalf("variable link to protected file lost: targets=%v decode=%v", targets, ok)
 	}
 }
