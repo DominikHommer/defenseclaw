@@ -377,9 +377,10 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 }
 
 // GAP-0759: a standalone hook whose account's DefenseClaw folder is gone
-// refuses with enterprise_managed_runtime_home_missing; a folder that is
-// there, a failure that is not a missing file, and Secure Client keep
-// enterprise_managed_runtime_state_invalid. Every case fails closed.
+// refuses with enterprise_managed_runtime_home_missing, whatever step failed
+// on it (live, the failure did not always unwrap to a missing file); a folder
+// that is there and Secure Client keep enterprise_managed_runtime_state_invalid.
+// Every case fails closed.
 func TestWindowsManagedHookNamesAMissingRuntimeHome(t *testing.T) {
 	previousStandalone := standaloneEnterpriseHookCheck
 	t.Cleanup(func() { standaloneEnterpriseHookCheck = previousStandalone })
@@ -394,7 +395,8 @@ func TestWindowsManagedHookNamesAMissingRuntimeHome(t *testing.T) {
 	}{
 		{"missing folder", true, missing, fmt.Errorf("load bundle: %w", os.ErrNotExist), "enterprise_managed_runtime_home_missing"},
 		{"folder present", true, present, fmt.Errorf("load bundle: %w", os.ErrNotExist), "enterprise_managed_runtime_state_invalid"},
-		{"other failure", true, missing, errors.New("bundle hash mismatch"), "enterprise_managed_runtime_state_invalid"},
+		{"other failure, folder missing", true, missing, errors.New("selector entry unreadable"), "enterprise_managed_runtime_home_missing"},
+		{"other failure, folder present", true, present, errors.New("bundle hash mismatch"), "enterprise_managed_runtime_state_invalid"},
 		{"Secure Client", false, missing, fmt.Errorf("load bundle: %w", os.ErrNotExist), "enterprise_managed_runtime_state_invalid"},
 	} {
 		standalone := tc.standalone
