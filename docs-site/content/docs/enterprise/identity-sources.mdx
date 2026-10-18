@@ -486,9 +486,18 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
   domain controller of those domains answers. With accounts in more than one
   domain, each domain is checked on its own, so a domain that is still away
   does not hold up one that is back. The group profile then comes back within
-  about a minute of the domain controller's return, without a manual flush. Where the
-  Mac cannot reach TCP 389 on the domain controllers, flush the caches by
-  hand.
+  about a minute of the domain controller's return, without a manual flush.
+  Open Directory does not always list the node offline, and 20 minutes or so
+  into an outage it can list an account with its primary group still named
+  but without its other domain groups. So the root guardian also checks a
+  domain controller of each enrolled account's Active Directory domain about
+  once a minute, and every 15 seconds while none answers. A domain whose
+  domain controllers answered before and stopped answering is treated like an
+  offline node: its accounts' lookups fail, with the reason in
+  `profile-explain`, and the caches are flushed once a domain controller
+  answers again. A domain the guardian never reached since it started is not
+  treated as away. Where the Mac cannot reach TCP 389 on the domain
+  controllers, neither check works: flush the caches by hand after an outage.
 - **Some facts need the enterprise profile.** The UPN on
   Linux, the group list on Windows and the bound-Mac facts on macOS are read
   with privilege by the root guardian or enumerator, which a per-user install

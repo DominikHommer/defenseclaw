@@ -645,8 +645,13 @@ connection on the LDAP port (TCP 389), and flushes the Open Directory caches
 as soon as one does. For five minutes after the account was last seen without
 its groups, successful answers also refresh every 15 seconds, so the group
 profile returns within about a minute of the domain controller's return
-without a manual flush. Open Directory's own timing can add a few minutes to
-these intervals.
+without a manual flush. Open Directory can also keep the node `Online` and
+the primary group named while it drops the other domain groups, so the
+guardian also checks a domain controller of each enrolled account's domain
+about once a minute (every 15 seconds while none answers). While the domain
+controllers of a domain it reached before do not answer, that domain's
+lookups fail as above, and the caches are flushed when one answers again.
+Open Directory's own timing can add a few minutes to these intervals.
 
 ## IDE plugin inventory
 
