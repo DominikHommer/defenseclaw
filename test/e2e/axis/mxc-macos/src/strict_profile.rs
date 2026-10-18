@@ -39,7 +39,8 @@ pub fn runtime_read_paths() -> Result<Vec<String>> {
         metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
         "fixed shell selector is not an ordinary file"
     );
-    let canonical_selector = fs::canonicalize(selector).context("canonicalize fixed shell selector")?;
+    let canonical_selector =
+        fs::canonicalize(selector).context("canonicalize fixed shell selector")?;
     ensure!(
         canonical_selector.as_path() == selector,
         "fixed shell selector has an aliased path"

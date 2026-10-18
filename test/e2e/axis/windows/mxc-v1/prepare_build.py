@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+"""Build-only contributor artifact preparation. Never runs the probe binary."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+AXIS_COMMIT = "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c"
+MXC_COMMIT = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
+TOOLCHAIN = "1.95.0"
+BINARY = "defenseclaw-axis-windows-psec-probe.exe"
+ROOT = Path(__file__).resolve().parent
+PATCH = ROOT / "patches" / "mxc-strict-windows-psec.patch"
+PATCHED_PATHS = {
+    "src/mxc-sdk/src/lib.rs",
+    "src/mxc-sdk/src/core/mxc_engine/mod.rs",
+    "src/mxc-sdk/src/core/mxc_engine/dispatch.rs",
+    "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs",
+}
+
+
+def command(argv: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
+    # Build tooling is already provisioned by the disposable CI job. Do not
+    # forward tokens, loader overrides or caller Rust flags to build scripts.
+    environment = {
+        key: os.environ[key]
+        for key in (
+            "PATH",
+            "HOME",
+            "USERPROFILE",
+            "SYSTEMROOT",
+            "SystemRoot",
+            "WINDIR",
+            "TEMP",
+            "TMP",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+            "SSL_CERT_FILE",
+            "CARGO_HTTP_CAINFO",
+            "INCLUDE",
+            "LIB",
+            "LIBPATH",
+            "VCINSTALLDIR",
+            "VCToolsInstallDir",
+            "WindowsSdkDir",
+            "WindowsSDKVersion",
+        )
+        if key in os.environ
+    }
+    environment.update(CARGO_TERM_COLOR="never", CARGO_INCREMENTAL="0", CARGO_BUILD_JOBS="2")
+    result = subprocess.run(
+        argv,
+        cwd=cwd,
+        env=environment,
+        check=True,
+        shell=False,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
+        timeout=2400,
+    )
+    return result.stdout.strip() if capture else ""
+
+
+def verify_source(directory: str, expected: str) -> Path:
+    source = ROOT / directory
+    if source.is_symlink() or not source.is_dir():
+        raise RuntimeError(f"provision a fresh exact-commit checkout at {directory}")
+    if command(["git", "rev-parse", "HEAD"], cwd=source, capture=True) != expected:
+        raise RuntimeError(f"{directory} is not at the reviewed commit")
+    if command(["git", "status", "--porcelain", "--untracked-files=all"], cwd=source, capture=True):
+        raise RuntimeError(f"{directory} must be clean before the reviewed overlay is applied")
+    return source
+
+
+def verify_build_sources(axis: Path, mxc: Path) -> None:
+    """Reject source drift, index writes and new files around the build."""
+    for source, expected in ((axis, AXIS_COMMIT), (mxc, MXC_COMMIT)):
+        if command(["git", "rev-parse", "HEAD"], cwd=source, capture=True) != expected:
+            raise RuntimeError("an upstream source commit changed during the build")
+        status = command(["git", "status", "--porcelain", "--untracked-files=all"], cwd=source, capture=True)
+        # command() strips surrounding whitespace; strip each expected status
+        # line too, without accepting staged, added or untracked content.
+        actual = {line.strip() for line in status.splitlines()}
+        expected_status = {f"M {path}" for path in PATCHED_PATHS} if source == mxc else set()
+        if actual != expected_status:
+            raise RuntimeError("upstream source changes differ from the four reviewed MXC overlay paths")
+        staged = command(["git", "diff", "--cached", "--name-only"], cwd=source, capture=True)
+        if staged:
+            raise RuntimeError("upstream source staging is not permitted")
+
+
+def digest(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("generate-lock", "build-locked"))
+    args = parser.parse_args()
+    if sys.platform != "win32" or platform.machine().lower() not in {"amd64", "x86_64"}:
+        raise RuntimeError("build this contributor artifact on native Windows x86_64")
+    artifact = ROOT / "build-artifact"
+    if artifact.exists() or artifact.is_symlink():
+        raise RuntimeError("build-artifact already exists; use a fresh contributor staging directory")
+    lock = ROOT / "Cargo.lock"
+    if args.mode == "generate-lock" and (lock.exists() or lock.is_symlink()):
+        raise RuntimeError("generate-lock requires a fresh staging directory without Cargo.lock")
+    if args.mode == "build-locked" and (lock.is_symlink() or not lock.is_file()):
+        raise RuntimeError("build-locked requires the reviewed combined Cargo.lock")
+    axis = verify_source("axis-source", AXIS_COMMIT)
+    mxc = verify_source("mxc-source", MXC_COMMIT)
+    toolchain = command(["rustc", f"+{TOOLCHAIN}", "-Vv"], capture=True)
+    cargo_version = command(["cargo", f"+{TOOLCHAIN}", "--version"], capture=True)
+    if not toolchain.startswith(f"rustc {TOOLCHAIN} "):
+        raise RuntimeError("the already-installed Rust toolchain differs from the reviewed version")
+    upstream_locks = {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}
+    command(["git", "apply", "--check", str(PATCH)], cwd=mxc)
+    command(["git", "apply", str(PATCH)], cwd=mxc)
+    verify_build_sources(axis, mxc)
+    overlay_before = command(["git", "diff", "--no-ext-diff", "--binary"], cwd=mxc, capture=True)
+    if args.mode == "generate-lock":
+        command(["cargo", f"+{TOOLCHAIN}", "generate-lockfile"])
+    lock_before = digest(lock)
+    command(["cargo", f"+{TOOLCHAIN}", "build", "--locked", "--release"])
+    # Compile the probe's test target without executing any newly built code.
+    command(["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--no-run"])
+    if digest(lock) != lock_before:
+        raise RuntimeError("the combined dependency lock changed during the locked build")
+    if upstream_locks != {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}:
+        raise RuntimeError("an upstream lock changed during the build")
+    verify_build_sources(axis, mxc)
+    if command(["git", "diff", "--no-ext-diff", "--binary"], cwd=mxc, capture=True) != overlay_before:
+        raise RuntimeError("reviewed MXC overlay bytes changed during the build")
+
+    (artifact / "bin").mkdir(parents=True)
+    files = [
+        Path("Cargo.toml"),
+        Path("Cargo.lock"),
+        Path("prepare_build.py"),
+        Path("test_prepare_build.py"),
+        Path("README.md"),
+        Path("src/main.rs"),
+        Path("src/probe.rs"),
+        Path("patches/mxc-strict-windows-psec.patch"),
+    ]
+    for relative in files:
+        target = artifact / "source" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, target)
+    shutil.copyfile(ROOT / "target" / "release" / BINARY, artifact / "bin" / BINARY)
+    (artifact / "bin" / BINARY).chmod(0o755)
+    (artifact / "upstream").mkdir()
+    for name, source, lock_path, license_name in [
+        ("axis", axis, axis / "Cargo.lock", "LICENSE"),
+        ("mxc", mxc, mxc / "src" / "Cargo.lock", "LICENSE.md"),
+    ]:
+        shutil.copyfile(lock_path, artifact / "upstream" / f"{name}-Cargo.lock")
+        shutil.copyfile(source / license_name, artifact / "upstream" / f"{name}-LICENSE")
+    (artifact / "TOOLCHAIN.txt").write_text(toolchain + "\n" + cargo_version + "\n", encoding="utf-8")
+    provenance = {
+        "schema": "defenseclaw-contributor-axis-windows-psec-v1",
+        "axis_commit": AXIS_COMMIT,
+        "mxc_commit": MXC_COMMIT,
+        "mxc_patch_sha256": digest(PATCH),
+        "mxc_patched_paths": sorted(PATCHED_PATHS),
+        "combined_lock_sha256": lock_before,
+        "upstream_lock_sha256": upstream_locks,
+        "build_mode": args.mode,
+        "probe_executed": False,
+        "human_lock_review_required_before_live_execution": True,
+        "locked_rebuild": args.mode == "build-locked",
+        "scope": "fixed_windows_native_psec_only_headless",
+        "production_certification": False,
+        "files": {
+            path.relative_to(artifact).as_posix(): digest(path)
+            for path in sorted(artifact.rglob("*"))
+            if path.is_file()
+        },
+    }
+    (artifact / "PROVENANCE.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
+    print("Contributor build complete; probe was not executed.")
+    if args.mode == "generate-lock":
+        print(
+            "Review and commit source/Cargo.lock, then rebuild from fresh sources "
+            "in build-locked mode before any live execution."
+        )
+
+
+if __name__ == "__main__":
+    main()

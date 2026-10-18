@@ -1,0 +1,131 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS MXC V1 native Windows contributor build
+
+# Build-only: the hosted image is not a PSEC qualification host.
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths:
+      - .github/workflows/axis-mxc-v1-windows-build.yml
+      - test/e2e/axis/windows/mxc-v1/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-mxc-v1-windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: 1.95.0
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+
+jobs:
+  windows-build:
+    name: Build the strict native PSEC contributor probe without executing it
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the contributor source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          persist-credentials: false
+          sparse-checkout: test/e2e/axis/windows/mxc-v1
+
+      - name: Stage exact Git bytes independently of Windows checkout line endings
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import os
+          from pathlib import Path
+          import subprocess
+          head = os.environ['GITHUB_SHA']
+          checkout = Path('defenseclaw-source')
+          assert subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True).strip() == head
+          assert not subprocess.check_output(['git', '-C', str(checkout), 'status', '--porcelain'], text=True).strip()
+          prefix = 'test/e2e/axis/windows/mxc-v1/'
+          files = ['Cargo.toml', 'README.md', 'prepare_build.py', 'test_prepare_build.py',
+                   'src/main.rs', 'src/probe.rs', 'patches/mxc-strict-windows-psec.patch']
+          if (checkout / prefix / 'Cargo.lock').is_file(): files.append('Cargo.lock')
+          root = Path('probe')
+          root.mkdir()
+          for relative in files:
+              target = root / relative
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(subprocess.check_output(['git', '-C', str(checkout), 'show', head + ':' + prefix + relative]))
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Contributor source staging failed' }
+
+      - name: Check out reviewed AXIS policy source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ROCm/axis
+          ref: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: probe/axis-source
+          persist-credentials: false
+
+      - name: Check out reviewed MXC V1 source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: microsoft/mxc
+          ref: fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2
+          path: probe/mxc-source
+          persist-credentials: false
+
+      - name: Provision the pinned build toolchain and check formatting
+        timeout-minutes: 10
+        working-directory: probe
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component rustfmt --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned build toolchain provisioning failed' }
+          python -m unittest discover -s . -p 'test_*.py'
+          if ($LASTEXITCODE -ne 0) { throw 'Build-helper inert tests failed' }
+          cargo "+$env:RUST_TOOLCHAIN" fmt -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Contributor Rust formatting check failed' }
+
+      - name: Build without executing PSEC or the contributor probe
+        timeout-minutes: 30
+        working-directory: probe
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path -LiteralPath Cargo.lock -PathType Leaf) {
+            python prepare_build.py build-locked
+          } else {
+            python prepare_build.py generate-lock
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned PSEC contributor build failed' }
+          @'
+          import json
+          import os
+          from pathlib import Path
+          Path('build-artifact/WORKFLOW.json').write_text(json.dumps({
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'workflow_commit': os.environ['GITHUB_SHA'],
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'execution_performed': False,
+          }, indent=2) + '\n', encoding='utf-8')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Could not record workflow attribution' }
+
+      - name: Retain the combined lock and source-bound build evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-mxc-v1-windows-contributor-${{ github.sha }}
+          path: |
+            probe/build-artifact/**
+            probe/Cargo.lock
+          if-no-files-found: warn
+          retention-days: 7
