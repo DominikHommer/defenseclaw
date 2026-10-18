@@ -27,30 +27,33 @@ truncate or create an ungranted target if containment is broken. Fixed seal
 and read-only canary reads are bounded. Root writability and private device
 writes are distinct from access to an outside host file. The boundary selector
 requires the root mount's `ST_RDONLY` flag and writes positive canaries to all
-three explicit private read-write directory grants. Its process tree includes
-a grandchild in a separate session and fixed heartbeat
-files for bounded cleanup observations. It never selects a host executable,
+three explicit private read-write directory grants. Separate, unexecuted
+`tree-*` selectors include a grandchild in a separate session and fixed
+heartbeat files for future bounded cleanup observations. It never selects a host executable,
 PATH entry, credential or arbitrary path.
 
-The future trusted host harness must independently demonstrate host-positive
-filesystem and loopback controls, one-use preparation, stale/renamed grant
-refusal, timeout/cancel/EOF, parent death, and exact retained pidfd wait. The
+Beyond the four-case result below, the trusted host harness still needs
+separate loopback controls, one-use preparation and stale/renamed grant
+refusal, timeout/cancel/parent death, and descendant stress with exact retained
+pidfd wait. The
 heartbeat observation is supplemental; lack of writes alone does not prove
 arbitrary descendant containment. Nested PID-namespace behavior and terminal
 support require separate tests. Old Landlock/MXC probe pass results do not
 qualify this new mount and process-custody posture.
 
-No payload has been executed, and these files do not enable AXIS.
+The four fixed selectors passed on October 18 in the source-bound run recorded
+below. These files do not enable customer AXIS execution.
 
 The separate [fixed host harness](harness/README.md) supplies contributor-only
 artifact admission, held synthetic grants and actual factory/protocol wiring
 for the first argv/stdio/exit/boundary slice. Its compiled registry admits only
-the independently reviewed e054 peer/static-musl Bubblewrap and d074 fixed
-payload receipt. Tests inject unreviewed registries or fake supervisors and
+the independently reviewed c914 build (unchanged Rust peer bytes and revised
+static-musl Bubblewrap) and d074 fixed payload receipt. Tests inject unreviewed registries or fake supervisors and
 never inherit that native authority. The [outer driver](driver/README.md) and
 [fixed CI recipe](live/README.md) separately own the complete wrapper namespace
 and exact reviewed artifact inputs. Their source, build and inert artifact
-reviews establish no native runtime or production launch-gate qualification.
+reviews alone establish no native runtime or production launch-gate
+qualification. The result below is limited to its exact fixed cases.
 
 ## First native attempt: startup refusal, no payload evidence
 
@@ -102,3 +105,45 @@ Evidence artifact `12143636345` has 22,001 ZIP bytes and SHA256
 `4ddaab4d1ee5856a1b1e54d95bf17bd74fb20711730d77bff7bdc01f7f192626`.
 The next change must supply a reviewed coherent namespace/procfs bootstrap and
 preserve unprivileged host operation, native custody and policy enforcement.
+
+## First passing native attempt: four fixed offline cases
+
+The separately reviewed recipe at
+`2e494e16e75410903577f62fa07cb9a009711f70` ran once in
+[Actions run 39161504223](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39161504223)
+and passed. No earlier failure was retried unchanged or converted into a pass.
+The host was a disposable Ubuntu runner, kernel `6.17.0-1022-azure`, with the
+driver running as UID1001. The combined input receipt was
+`6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6`.
+
+| Reviewed input | Source | Build run | Artifact |
+| --- | --- | --- | --- |
+| Rust peer and static-musl Bubblewrap | `c914cb9a66d3e05a11d5eac4dcf4da7a8c0de139` | `39158759518` | `12148605722` |
+| Fixed static Go payload | `d07485c4cc8ecf8ab7db1a0121ac61a6a8b636f3` | `39134453264` | `12138953410` |
+| Fixed wrapper | `ae9f9e0c8cea430501f723bb79430955f76df013` | `39160365924` | `12148552547` |
+| Whole-wrapper outer driver | `5125d37fed95e3b7967c94edb3d1f9ddd59260c6` | `39160923199` | `12148188690` |
+
+All four cases (`argv`, `stdio`, `exit23`, `boundaries`) recorded `Prepared`,
+`Started`, the exact fixed payload marker, exit23, `Destroyed`, and successful
+native cleanup. They checked literal arguments (including empty, Unicode and
+shell metacharacters), private cwd and exact environment, binary stdin/EOF and
+separate stderr, read-only guest root, permitted writes in three explicit private
+grants, read-only and outside synthetic canary denial, and `EPERM` for IPv4,
+IPv6 and Unix stream/datagram socket creation plus Unix socketpair creation.
+The host-positive outside access controls and original held canary identities
+and bytes were preserved. Nine retained public fixture files totaled 288 bytes
+(13 collected members including directories).
+
+The separate native, worker and whole-wrapper cleanup owners all reported
+completion with zero pending custody; output was not truncated. The exact
+driver preclone current-mount/no-IDMAP check was observed. The disposable
+AppArmor user-namespace setting recorded original1, preparation0 and restored1.
+Evidence artifact `12148742045` contains 26,987 ZIP bytes with SHA256
+`b6c94089128c45c936217776663dcd8d175d58fdf07cefa7f232496c2334e0c8`.
+
+The `wait` and `tree-*` selectors did not run. Guest FD enumeration and guest
+namespace-ID assertions did not run; the parent/worker namespace bootstrap
+observations do not substitute for those tests. Timeout, cancellation, parent
+death and descendant stress, terminal behavior, actual Claude, hooks, credential
+relay and model traffic remain unqualified. The retained result explicitly has
+`common_launch_gate_qualified=false` and `production_certification=false`.

@@ -1,9 +1,10 @@
 # Fixed Linux native peer CI canary
 
-This is one contributor-only four-case attempt using the separately reviewed
+The pairing below completed one contributor-only four-case attempt using the
+separately reviewed
 c914 peer/revised static-musl Bubblewrap, d074 fixed payload, ae9 diagnostic
 wrapper, and 5125 outer driver. The cases check literal argv, binary stdin/EOF and stderr, exit
-23, and fixed offline filesystem/network/FD/namespace boundaries. This is not
+23, and fixed offline filesystem and socket-creation boundaries. This is not
 customer activation, PTY/Claude/model/hook qualification, or completion of the
 AXIS integration.
 
@@ -79,7 +80,36 @@ first clone, the driver requires current-namespace unique mount identity and
 ID-mapped or unsupported sources. The driver build passed 18 selected inert
 tests. The Rust peer and d074 payload bytes are unchanged; static Bubblewrap,
 its closure, wrapper/driver pins and combined receipt are revised. This pairing
-has not had a native attempt, and no earlier failure is converted into a pass.
+passed the fixed attempt recorded below; no earlier failure is converted into
+a pass.
+
+## Passing fixed attempt
+
+[Actions run 39161504223](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39161504223)
+at `2e494e16e75410903577f62fa07cb9a009711f70` passed once with the exact
+c914/ae9/5125/d074 pairing. All `argv`, `stdio`, `exit23` and `boundaries` records
+agree across the driver, wrapper result and owned worker stdout: Prepared,
+Started, fixed marker, Exited23, Destroyed and native cleanup. The private cwd
+and exact environment, binary input plus EOF and separate stderr, read-only
+guest root, explicit private writes, synthetic outside/read-only denials and
+IPv4/IPv6/Unix socket/socketpair `EPERM` checks passed. Host-positive synthetic
+access controls and original canary identities/bytes were preserved.
+
+All three cleanup owners completed with zero pending custody and no output
+truncation. The driver reported its current-mount/no-IDMAP preclone check.
+The disposable runner's setting recorded original1, preparation0 and restored1.
+Collection retained 13 synthetic members (nine public files, 288 bytes).
+Evidence artifact `12148742045` has 26,987 ZIP bytes and SHA256
+`b6c94089128c45c936217776663dcd8d175d58fdf07cefa7f232496c2334e0c8`.
+The exact input source/build/artifact table is in the
+[parent result](../README.md#first-passing-native-attempt-four-fixed-offline-cases).
+
+This did not execute `wait`, `tree-*`, guest FD enumeration or guest namespace-ID
+assertions. Parent/worker bootstrap observations are narrower. Timeout, cancel,
+parent-death/descendant stress, terminal, Claude, hooks, credentials and model
+traffic remain separate gates. Both production and common launch-gate
+qualification fields remain false. Earlier failures remain unchanged above.
+
 The trust assumptions documented in
 [`artifact-review.md`](../../../../../internal/axis/native/artifact-review.md)
 still apply.

@@ -8,9 +8,12 @@ admits only receipt SHA256
 `6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6`
 for the four fixed contributor cases and the exact reviewed c914 build
 (byte-identical aa215 Rust peer and revised static Bubblewrap), with the
-unchanged d074 payload. This pinned Bubblewrap image and harness revision
-have not had a native attempt. Historical failed attempts remain recorded
-in the parent README. Nothing here activates a customer runtime.
+unchanged d074 payload. The paired c914 Bubblewrap, ae9 wrapper and 5125 driver
+passed one [fixed four-case attempt](../README.md#first-passing-native-attempt-four-fixed-offline-cases)
+at source `2e494e16e75410903577f62fa07cb9a009711f70`. The `wait`/`tree-*`,
+guest FD/namespace-ID, terminal, Claude, hook and credential gates remain
+untested by that run. Historical failed attempts remain recorded in the parent
+README. Nothing here activates a customer runtime.
 
 The separate `axis-native-harness-build.yml` workflow builds this fixed wrapper
 twice with Go1.26.5, `CGO_ENABLED=0` and independent build caches. It verifies the
