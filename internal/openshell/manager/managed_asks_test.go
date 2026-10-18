@@ -1396,6 +1396,9 @@ func TestManagedPolicyAllowRefusesDestinationsTheSandboxCannotUnblock(t *testing
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e, auth := managedEnv(t, tc.edit)
+			if tc.pack == "team" {
+				e.setConfig(func(c *config.Config) { c.OpenShell.PackDir = writeTeamPack(t) })
+			}
 			req := sandboxapi.CreateRequest{Name: "allowbox", Pack: tc.pack}
 			if tc.pack == "strict" {
 				req.Project = e.otherProject("strict")
