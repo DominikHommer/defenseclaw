@@ -237,6 +237,77 @@ static void test_content_scan_blocks_secret_in_pipeline(void) {
     printf("  PASS: content scan blocks secret in pipeline\n");
 }
 
+static void reset_limits(void) {
+    extern void dclaw_ipc_rate_limit_reset(void);
+    dclaw_state_t *s = dclaw_get_state();
+    for (int i = 0; i < DCLAW_RATE_LIMITERS; i++)
+        s->rate_limiters[i].tokens = s->rate_limiters[i].bucket_size;
+    dclaw_ipc_rate_limit_reset();
+}
+
+static void set_severity_rule(uint8_t severity, uint8_t action) {
+    dclaw_policy_table_t *rt = &dclaw_get_state()->rt_policy;
+    for (size_t i = 0; i < rt->severity_rules_count; i++) {
+        if (rt->severity_rules[i].severity == severity) {
+            rt->severity_rules[i].action = action;
+            return;
+        }
+    }
+    assert(rt->severity_rules_count < DCLAW_RT_MAX_SEVERITY_RULES);
+    rt->severity_rules[rt->severity_rules_count].severity = severity;
+    rt->severity_rules[rt->severity_rules_count].action = action;
+    rt->severity_rules_count++;
+}
+
+/* Severity rules can tighten the content-scope threshold but never loosen it. */
+static void test_severity_rules_only_tighten(void) {
+    dclaw_policy_table_t *rt = &dclaw_get_state()->rt_policy;
+    size_t saved_count = rt->severity_rules_count;
+    uint8_t saved[DCLAW_RT_MAX_SEVERITY_RULES][2];
+    for (size_t i = 0; i < saved_count; i++) {
+        saved[i][0] = rt->severity_rules[i].severity;
+        saved[i][1] = rt->severity_rules[i].action;
+    }
+
+    /* An email address is a MEDIUM finding: TOOL_OUTPUT only warns. */
+    dclaw_tool_request_t req = make_request("read_data", DCLAW_CAP_READ_FS, NULL);
+    req.session_id = 120;
+    req.content = "contact: alice@example.com";
+    req.content_len = (uint16_t)strlen(req.content);
+    req.content_scope = DCLAW_CONTENT_SCOPE_TOOL_OUTPUT;
+    reset_limits();
+    dclaw_verdict_t v = dclaw_evaluate(&req);
+    assert(v.reason != DCLAW_REASON_CONTENT_BLOCK);
+
+    set_severity_rule(DCLAW_SEV_MEDIUM, DCLAW_ACTION_BLOCK);
+    reset_limits();
+    v = dclaw_evaluate(&req);
+    assert(v.action == DCLAW_ACTION_BLOCK && v.reason == DCLAW_REASON_CONTENT_BLOCK);
+
+    /* Unknown action byte fails closed. */
+    set_severity_rule(DCLAW_SEV_MEDIUM, 0xC8);
+    reset_limits();
+    v = dclaw_evaluate(&req);
+    assert(v.action == DCLAW_ACTION_BLOCK && v.reason == DCLAW_REASON_CONTENT_BLOCK);
+
+    /* Rules that try to allow MEDIUM/HIGH cannot lower the USER_INPUT
+     * threshold, which blocks MEDIUM findings. */
+    set_severity_rule(DCLAW_SEV_MEDIUM, DCLAW_ACTION_ALLOW);
+    set_severity_rule(DCLAW_SEV_HIGH, DCLAW_ACTION_ALLOW);
+    req.content_scope = DCLAW_CONTENT_SCOPE_USER_INPUT;
+    reset_limits();
+    v = dclaw_evaluate(&req);
+    assert(v.action == DCLAW_ACTION_BLOCK && v.reason == DCLAW_REASON_CONTENT_BLOCK);
+    (void)v;
+
+    rt->severity_rules_count = saved_count;
+    for (size_t i = 0; i < saved_count; i++) {
+        rt->severity_rules[i].severity = saved[i][0];
+        rt->severity_rules[i].action = saved[i][1];
+    }
+    printf("  PASS: severity rules tighten but never loosen content thresholds\n");
+}
+
 static void test_no_content_field_backward_compat(void) {
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));
@@ -289,10 +360,11 @@ int main(void) {
 #if DCLAW_CONTENT_SCAN
     test_content_scan_blocks_secret_in_pipeline();
     test_no_content_field_backward_compat();
+    test_severity_rules_only_tighten();
 #endif
     test_hash_mismatch_blocks();
 #if DCLAW_CONTENT_SCAN
-    printf("  ALL PASSED (13 tests)\n");
+    printf("  ALL PASSED (14 tests)\n");
 #else
     printf("  ALL PASSED (11 tests)\n");
 #endif

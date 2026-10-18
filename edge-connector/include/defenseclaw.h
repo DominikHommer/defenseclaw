@@ -203,7 +203,6 @@ typedef struct {
     uint8_t  cap_count;
     uint64_t started_at;
     uint64_t last_activity;
-    uint8_t  risk_score;
     bool     revoked;  /* a speculative call was later blocked by the gateway */
 } dclaw_session_t;
 

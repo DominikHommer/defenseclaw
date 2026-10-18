@@ -402,6 +402,19 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_infer_content_scope((dclaw_direction_t)req->direction);
         dclaw_content_scan(req->content, req->content_len, scope, &scan_ctx);
         dclaw_action_t scan_action = dclaw_content_scan_worst_action(&scan_ctx, scope);
+        /* Policy severity rules can only tighten the scope threshold: a
+         * finding whose rule says BLOCK blocks in any scope, but a rule can
+         * never let through what the threshold blocks. Unknown rule actions
+         * fail closed. */
+        for (uint8_t i = 0; i < scan_ctx.finding_count &&
+                            scan_action != DCLAW_ACTION_BLOCK; i++) {
+            dclaw_action_t rule = dclaw_policy_check_severity(
+                (dclaw_severity_t)scan_ctx.findings[i].severity);
+            if (rule != DCLAW_ACTION_ALLOW && rule != DCLAW_ACTION_WARN &&
+                rule != DCLAW_ACTION_ESCALATE) {
+                scan_action = DCLAW_ACTION_BLOCK;
+            }
+        }
         if (scan_action == DCLAW_ACTION_BLOCK) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                               target_hash, req->session_id);

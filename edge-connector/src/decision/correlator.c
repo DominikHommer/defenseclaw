@@ -176,12 +176,5 @@ dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags)
         }
     }
 
-    /* Accumulate risk */
-    if (worst == DCLAW_ACTION_BLOCK) {
-        sess->risk_score = (sess->risk_score > 200) ? 255 : sess->risk_score + 50;
-    } else if (worst == DCLAW_ACTION_WARN) {
-        sess->risk_score = (sess->risk_score > 240) ? 255 : sess->risk_score + 10;
-    }
-
     return worst;
 }
