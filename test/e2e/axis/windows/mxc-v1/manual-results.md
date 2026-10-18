@@ -141,3 +141,29 @@ retained. The next source adds fixed operation labels around early cwd,
 seal-read and permitted-write calls, without changing those operations or
 their grants. A fresh locked build and independent review are required before
 another native attempt. Customer Windows AXIS remains unavailable.
+
+## Fixed early-operation diagnostic: canonicalization refused
+
+[Locked build 39122262255](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39122262255)
+at `b405223cf9c26cc5ed76ac52025f5ca94e386dc1` retained the same policy,
+grants and child operations, adding only fixed early-operation labels. Two
+independent reviews verified the new artifact and exact source before one
+fresh `--standalone-boundary` run. The literal Windows argv case again passed.
+The boundary child completed its private cwd lookup, then exited 1 at
+`private cwd canonicalize: Access is denied. (os error 5)`. Seal read and the
+permitted-write checks were not reached. This label does not distinguish the
+directory open from the subsequent final-path query inside Rust's
+`canonicalize`.
+
+| Input | SHA256 |
+| --- | --- |
+| Root verification receipt | `df3f4256fddaad2f5e88754d25a47933ce7fd32e57f103a2993bbef902fe732f` |
+| Custody executable | `ab635640c1a6925854bd99f68b6a1d9d966dbb9e071b69cab704b544b4154b7d` |
+| Actual live result | `f66a8ebd7355c393079b40674ff08cb5979cd2dc2097c1947033a5ea6ab89626` |
+
+The owned outer Job was assigned before resume and ended empty with zero
+active processes. No deadline, output overflow or reader error occurred. One
+exact synthetic fixture was retained under the private evidence directory
+`C:\Users\vnarajal\.codex\axis-manual-test\windows-current-psec-boundary-max-02`.
+No policy, grant, ACL or UI restriction was changed, and this failed artifact
+was not retried. Boundary qualification remains failed.

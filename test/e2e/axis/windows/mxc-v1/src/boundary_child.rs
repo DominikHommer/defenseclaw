@@ -13,6 +13,115 @@ use std::time::Duration;
 
 const SENTINEL: &[u8] = b"fixed-public-synthetic-canary\n";
 
+mod canonicalize_diagnostic {
+    use super::SENTINEL;
+    use std::ffi::c_void;
+    use std::fs;
+    use std::io::Read;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use std::ptr;
+
+    type Handle = *mut c_void;
+    const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+    const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x0000_0007;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_NAME_OPENED: u32 = 0x0000_0008;
+    const VOLUME_NAME_NT: u32 = 0x0000_0002;
+    const PATH_BUFFER_UNITS: usize = 32_768;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "CreateFileW"]
+        fn create_file_w(
+            name: *const u16,
+            desired_access: u32,
+            share_mode: u32,
+            security_attributes: *const c_void,
+            creation_disposition: u32,
+            flags_and_attributes: u32,
+            template_file: Handle,
+        ) -> Handle;
+        #[link_name = "GetFinalPathNameByHandleW"]
+        fn get_final_path_name_by_handle_w(
+            file: Handle,
+            buffer: *mut u16,
+            buffer_length: u32,
+            flags: u32,
+        ) -> u32;
+        #[link_name = "CloseHandle"]
+        fn close_handle(handle: Handle) -> i32;
+        #[link_name = "GetLastError"]
+        fn get_last_error() -> u32;
+    }
+
+    fn name_query(handle: Handle, operation: &str, flags: u32) {
+        let mut buffer = [0u16; PATH_BUFFER_UNITS];
+        // Query the same held directory object; never display or retain its path.
+        let length = unsafe {
+            get_final_path_name_by_handle_w(handle, buffer.as_mut_ptr(), buffer.len() as u32, flags)
+        };
+        if length == 0 {
+            eprintln!("{operation} win32={}", unsafe { get_last_error() });
+        } else if length as usize >= buffer.len() {
+            eprintln!("{operation} result=oversize length={length}");
+        } else {
+            eprintln!("{operation} result=ok length={length}");
+        }
+    }
+
+    pub(super) fn report(cwd: &Path) {
+        let name: Vec<u16> = cwd.as_os_str().encode_wide().chain(Some(0)).collect();
+        if name.len() > PATH_BUFFER_UNITS {
+            eprintln!("FIXED_CANON_OPEN result=oversize");
+            return;
+        }
+        // Match Rust 1.95's canonicalize directory open: access 0, full sharing,
+        // OPEN_EXISTING and FILE_FLAG_BACKUP_SEMANTICS. No host path is printed.
+        let handle = unsafe {
+            create_file_w(
+                name.as_ptr(),
+                0,
+                FILE_SHARE_READ_WRITE_DELETE,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            eprintln!("FIXED_CANON_OPEN win32={}", unsafe { get_last_error() });
+        } else {
+            eprintln!("FIXED_CANON_OPEN result=ok");
+            name_query(handle, "FIXED_CANON_NORMALIZED_DOS", 0);
+            name_query(handle, "FIXED_CANON_OPENED_DOS", FILE_NAME_OPENED);
+            name_query(handle, "FIXED_CANON_NORMALIZED_NT", VOLUME_NAME_NT);
+            if unsafe { close_handle(handle) } == 0 {
+                eprintln!("FIXED_CANON_CLOSE win32={}", unsafe { get_last_error() });
+            } else {
+                eprintln!("FIXED_CANON_CLOSE result=ok");
+            }
+        }
+        let seal = fs::File::open(cwd.join("fixture-seal")).and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take((SENTINEL.len() + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            Ok(bytes)
+        });
+        match seal {
+            Ok(bytes) => eprintln!(
+                "FIXED_CANON_SEAL_READ result=ok match={}",
+                bytes.as_slice() == SENTINEL
+            ),
+            Err(error) => eprintln!(
+                "FIXED_CANON_SEAL_READ win32={}",
+                error.raw_os_error().unwrap_or(-1)
+            ),
+        }
+    }
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match run(&args) {
@@ -88,7 +197,11 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
         _ => return Err(io::Error::other("unsupported fixed child mode").into()),
     }
     let cwd = fixed_io("private cwd lookup", std::env::current_dir())?;
-    let workspace = fixed_io("private cwd canonicalize", cwd.canonicalize())?;
+    let canonical = cwd.canonicalize();
+    if canonical.is_err() {
+        canonicalize_diagnostic::report(&cwd);
+    }
+    let workspace = fixed_io("private cwd canonicalize", canonical)?;
     require(
         workspace
             .file_name()
