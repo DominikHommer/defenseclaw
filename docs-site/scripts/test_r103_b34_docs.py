@@ -46,6 +46,16 @@ class R103B34DocsTest(unittest.TestCase):
         text = (REPO / "docs-site/data/policy-scenarios.json").read_text()
         self.assertIn("alert threshold MEDIUM", text)
 
+    def test_gap_0046_standalone_uninstall_removes_lock(self):
+        text = page("enterprise/windows.mdx")
+        self.assertIn("A standalone Setup uninstall removes the administrator-only", text)
+        self.assertIn("The Secure Client profile keeps the lock unless `PURGE=1`", text)
+
+    def test_gap_0060_0061_macos_directory_steps(self):
+        text = page("enterprise/enrollment.mdx")
+        self.assertIn("sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile", text)
+        self.assertIn("For Hermes, create its config file", text)
+
 
 if __name__ == "__main__":
     unittest.main()

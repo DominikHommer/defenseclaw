@@ -358,11 +358,14 @@ gives the user a home under `/Users`, and the Mac must let that user sign in,
 for example over SSH when you test through a terminal). Then:
 
 1. Add the account to `include_users` when discovery does not list it, and run
-   `sudo defenseclaw-gateway enterprise macos reconcile` (or wait for the next cycle).
-2. Install the agent in the user's account. An agent whose runtime appears
-   only after its first start (Hermes) is found by the next cycle; to see it at once run
-   `reconcile` again after the install, and restart the agent so it loads
-   its per-user hooks.
+   `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile`
+   (or wait for the next cycle).
+2. Install the agent in the user's account. For Hermes, create its config file
+   with the agent's normal first-run setup before reconciling; an installed
+   binary alone has no hook config for DefenseClaw to protect. Then run
+   `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile`
+   again (or wait for the next cycle), and restart the agent so it loads its
+   per-user hooks.
 3. For a Bedrock model route, the user's own account needs working AWS
    credentials for the agent that calls Bedrock (for OpenCode, an AWS profile
    in the user's `~/.aws/config`, for example one with a `credential_process`).
