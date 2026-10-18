@@ -77,7 +77,7 @@ func TestManagedMacDoctorUsesTheGatewaysE2fsprogsSetting(t *testing.T) {
 		t.Fatalf("unknown administrator directory: %+v", got)
 	}
 	ta.daemon.status.Managed = nil
-	if got := row(); got == nil || got.Status != openshell.StatusFail || !strings.Contains(got.Detail, "rendered gateway configuration is unavailable") {
+	if got := row(); got == nil || got.Status != openshell.StatusFail || !strings.Contains(got.Detail, "cannot determine the applied sandbox driver") {
 		t.Fatalf("unknown daemon and rendered driver: %+v", got)
 	}
 }
