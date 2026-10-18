@@ -372,7 +372,7 @@ separate systemd service's environment through `defenseclaw doctor`.
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 132 test-only variables">
+<Accordion title="Show the 139 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -403,6 +403,13 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_GATEWAY_URL`<br/>Default: `unset` (in-process e2e server)<br/>Values: `http(s) base URL e.g. http://127.0.0.1:18970`, `unset`<br/>Managed host: `ignore` | Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E).<br/>**Read by:** `internal/gateway/security_suite_test.go` |
 | `DEFENSECLAW_HOOK_DELEGATED_ADMISSION_TEST_ROOT`<br/>Default: `unset`<br/>Values: `test-defined absolute directory path`, `unset`<br/>Managed host: `ignore` | Selects the isolated protected runtime root for the delegated hook-admission helper subprocess.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_HOOK_DELEGATION_TEST_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the isolated stable-hook delegation helper subprocess.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
+| `DEFENSECLAW_HOOK_FLOOD_ASSERT`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Enables the probe latency assertion.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
+| `DEFENSECLAW_HOOK_FLOOD_CALLS`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of hook calls in each probe flood.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
+| `DEFENSECLAW_HOOK_FLOOD_FLOODS`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of consecutive probe floods.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
+| `DEFENSECLAW_HOOK_FLOOD_IDLE`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets idle seconds after each probe flood.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
+| `DEFENSECLAW_HOOK_FLOOD_OUT`<br/>Default: `unset`<br/>Values: `temporary directory path`, `unset`<br/>Managed host: `ignore` | Selects the output directory for probe profiles.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
+| `DEFENSECLAW_HOOK_FLOOD_PROBE`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Enables the opt-in hook flood probe test.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
+| `DEFENSECLAW_HOOK_FLOOD_RATE`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets hook calls per second in the probe.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the connector hook-token cross-process lock fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_PATH`<br/>Default: `unset`<br/>Values: `absolute test lock path`, `unset`<br/>Managed host: `ignore` | Lock path passed to the connector hook-token cross-process fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_READY`<br/>Default: `unset`<br/>Values: `absolute test marker path`, `unset`<br/>Managed host: `ignore` | Ready-signal path shared with the connector hook-token cross-process fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |

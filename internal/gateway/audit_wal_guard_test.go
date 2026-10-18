@@ -4,63 +4,91 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
-	"errors"
-	"net/http"
-	"net/http/httptest"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
-// The audit store has one writer connection. The WAL guard must relinquish
-// that connection before a hook client's deadline even when a checkpoint
-// cannot complete on this pass.
-func TestAuditWALGuardReleasesWriterForHook(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{store: store, logger: logger}
-	entered := make(chan struct{})
-	checkpointDone := make(chan error, 1)
-	go func() {
-		checkpointDone <- checkpointAuditWALWithin(t.Context(), func(ctx context.Context) error {
-			// Reserve the same single writer connection that the real WAL
-			// checkpoint and hook correlation/audit share.
-			batch, err := store.BeginJudgeBatch(ctx)
-			if err != nil {
-				return err
-			}
-			defer batch.Rollback() //nolint:errcheck
-			close(entered)
-			<-ctx.Done()
-			return ctx.Err()
-		})
-	}()
-	select {
-	case <-entered:
-	case err := <-checkpointDone:
-		t.Fatalf("checkpoint did not reserve the audit writer: %v", err)
+type fakeWALCheckpointer struct {
+	deadline time.Duration
+	budget   time.Duration
+	limit    int64
+	result   audit.WALCheckpoint
+	err      error
+}
+
+func (f *fakeWALCheckpointer) CheckpointWALIfLarge(ctx context.Context, limit int64, budget time.Duration) (audit.WALCheckpoint, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		f.deadline = time.Until(deadline)
 	}
-	started := time.Now()
-	hookDone := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		response := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook",
-			strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"date"}}`))
-		api.handleAgentHook("claudecode").ServeHTTP(response, request)
-		hookDone <- response
-	}()
-	select {
-	case response := <-hookDone:
-		if response.Code != http.StatusOK || strings.Contains(response.Body.String(), `"deny"`) {
-			t.Fatalf("benign hook after writer release: status=%d body=%s", response.Code, response.Body.String())
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("hook waited more than 500ms for the checkpoint writer")
+	f.limit, f.budget = limit, budget
+	return f.result, f.err
+}
+
+// rel-1-0-2:GAP-0709: the guard ran the whole pass under the writer's 200 ms
+// budget. SQLite keeps a checkpoint's progress only when it finishes, so the
+// copy of a large log never finished and the log grew without bound. Only
+// the writer phase may have the short budget.
+func TestAuditWALGuardPassGivesTheCopyMoreThanTheWriterBudget(t *testing.T) {
+	fake := &fakeWALCheckpointer{}
+	var log bytes.Buffer
+	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
+	if fake.deadline < auditWALCopyTimeout-time.Second {
+		t.Fatalf("copy deadline = %s, want about %s", fake.deadline, auditWALCopyTimeout)
 	}
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("hook took %s, want under 500ms", elapsed)
+	if fake.budget != auditWALWriterBudget || fake.limit != auditWALLimitBytes {
+		t.Fatalf("writer budget %s, limit %d; want %s, %d", fake.budget, fake.limit, auditWALWriterBudget, int64(auditWALLimitBytes))
 	}
-	if err := <-checkpointDone; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("checkpoint error = %v, want deadline", err)
+	if log.Len() != 0 {
+		t.Fatalf("a clean pass logged %q", log.String())
+	}
+}
+
+func TestAuditWALGuardPassReportsAYieldedWriterPhase(t *testing.T) {
+	fake := &fakeWALCheckpointer{err: fmt.Errorf("audit: WAL checkpoint yielded the writer after 200ms: %w", context.DeadlineExceeded)}
+	var log bytes.Buffer
+	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
+	if !strings.Contains(log.String(), "audit WAL checkpoint yielded") {
+		t.Fatalf("log = %q", log.String())
+	}
+}
+
+func TestAuditWALGuardPassIsQuietAfterShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	fake := &fakeWALCheckpointer{err: context.Canceled, result: audit.WALCheckpoint{FileBytes: 2 * auditWALAlarmBytes}}
+	var log bytes.Buffer
+	auditWALGuardPass(ctx, fake, &auditWALAlarm{}, time.Now(), &log)
+	if log.Len() != 0 {
+		t.Fatalf("shutdown pass logged %q", log.String())
+	}
+}
+
+func TestAuditWALAlarmRaisesRepeatsAndClears(t *testing.T) {
+	var alarm auditWALAlarm
+	start := time.Now()
+	if line := alarm.observe(start, auditWALLimitBytes); line != "" {
+		t.Fatalf("under the bound: %q", line)
+	}
+	over := int64(auditWALAlarmBytes) + 1<<20
+	if line := alarm.observe(start, over); !strings.Contains(line, "WARNING: the audit WAL file is 1025 MiB, over its 1024 MiB bound") {
+		t.Fatalf("over the bound: %q", line)
+	}
+	if line := alarm.observe(start.Add(time.Minute), over); line != "" {
+		t.Fatalf("repeated within %s: %q", auditWALAlarmRepeat, line)
+	}
+	if line := alarm.observe(start.Add(auditWALAlarmRepeat), over); !strings.Contains(line, "WARNING") {
+		t.Fatalf("not repeated after %s: %q", auditWALAlarmRepeat, line)
+	}
+	if line := alarm.observe(start.Add(auditWALAlarmRepeat+time.Second), 0); !strings.Contains(line, "back under its 1024 MiB bound") {
+		t.Fatalf("cleared: %q", line)
+	}
+	if line := alarm.observe(start.Add(auditWALAlarmRepeat+2*time.Second), 0); line != "" {
+		t.Fatalf("cleared twice: %q", line)
 	}
 }

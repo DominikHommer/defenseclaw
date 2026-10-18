@@ -290,11 +290,15 @@ type APIServer struct {
 	codexPendingThreads               []codexPendingThread
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
-	hookPhaseStates                   map[string]hookPhaseState
-	hookPhaseStateOrder               []string
-	otlpMetricMu                      sync.Mutex
-	otlpMetricCumulative              map[string]otlpCumulativePoint
-	otlpMetricCumulativeOrder         []string
+	// hookLifecycleHistoryRead holds the session keys whose signed lifecycle
+	// history this process has read once (restoreHookSessionLifecycle).
+	hookLifecycleHistoryRead      map[string]struct{}
+	hookLifecycleHistoryReadOrder []string
+	hookPhaseStates               map[string]hookPhaseState
+	hookPhaseStateOrder           []string
+	otlpMetricMu                  sync.Mutex
+	otlpMetricCumulative          map[string]otlpCumulativePoint
+	otlpMetricCumulativeOrder     []string
 
 	// stepIdxMu guards stepIdxBySession, the per-session 1-indexed
 	// turn counter used to populate audit.Event.StepIdx. A "turn" is

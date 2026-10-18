@@ -39,6 +39,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import click
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_status
 from defenseclaw.commands.cmd_status import _print_agents
@@ -815,6 +816,51 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
         self.assertIn("Enforcement", result.output)
         self.assertIn("Blocked skills", result.output)
         self.assertNotIn("disk I/O error", result.output)
+
+
+class TestStatusMovedAuditStore(unittest.TestCase):
+    """rel-1-0-3:GAP-0105 and GAP-0106: status said nothing about a corrupt
+    store the gateway moved aside, and a file that only had an archive's name
+    must not take the archive's place."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _invoke(self):
+        with patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None):
+            return CliRunner().invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+    def test_status_names_the_archive_with_the_copy_first_hint(self):
+        from defenseclaw.commands import cmd_doctor
+
+        db = str(self.app.cfg.audit_db)
+        archive = Path(db + ".corrupt-20261018T021344Z-4bfc16b6-f3ca-490f-98a0-71b4f32de5ce")
+        others = [Path(db + ".corrupt-20261018T021344Z"), Path(db + ".corrupt-20261018T021513Z")]
+        for path in (archive, Path(str(archive) + "-wal"), Path(str(archive) + "-shm"), *others):
+            path.write_bytes(b"x")
+        Path(str(archive) + ".carryover.json").write_text(
+            '{"carried_over": 0, "error": "file is not a database"}', encoding="utf-8"
+        )
+
+        result = self._invoke()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        output = " ".join(click.unstyle(result.output).split())
+        self.assertIn(f"moved to {archive} together with its -wal and -shm files on ", output)
+        self.assertIn("0 entries were carried over and earlier blocks no longer apply", output)
+        self.assertIn(cmd_doctor._archive_recovery_hint(archive), output)
+        self.assertIn("write the SQLite header back on the copy, never on the archive", output)
+        self.assertNotIn(f"sqlite3 {archive} .recover", output)
+        for other in others:
+            self.assertNotIn(f"{other} ", output)
+
+    def test_status_is_quiet_without_a_moved_store(self):
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("moved to", result.output)
 
 
 class TestStatusHeaderAndConfigProblems(unittest.TestCase):
