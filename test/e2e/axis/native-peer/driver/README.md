@@ -1,26 +1,29 @@
 # Fixed Linux outer driver
 
 This contributor driver owns one closed baseline or lifecycle suite from the
-reviewed native peer wrapper in a separate user/mount/PID/network/IPC/UTS namespace. It does not activate
+reviewed native peer wrapper in a separate user/mount/PID/network/IPC/UTS
+namespace. It does not activate
 the AXIS customer provider or qualify the common launch gate.
 
-The fixed input wrapper was built at `52e4a071109d1522d3cadf53085c9537467ef9c7`
-in Actions run `39168692019`, artifact `12151861098`. Two independent inert
+The fixed input wrapper was built at `c76a05c3df66f43e76c6566b53aa2b3c1c7bca0b`
+in Actions run `39172460882`, artifact `12153515281`. Two independent inert
 reviews checked its source, dependency, archive, provenance and static image.
 The image SHA-256 is
-`70159109952811847fa4e16cc02fca1046d696ebcbb0ff3aa820e1562899dccb`
+`485aa37bf8fda4aa35f41247c802931fd73decfac28eda60ed8ea44577f63e87`
 (3,473,534 bytes); archive SHA-256 is
-`86d78d2aee702fbcbfb356a94b8bd654dc07b842f8c54b5531c744f434f59f5e`;
+`ce84ed94fce099b59bea6b0593f23d7e845c3734ab1e62ea9f794fb38faa6e68`;
 provenance SHA-256 is
-`7d4dad5aa155b47e932c61e88a72ff1f5d42bb00dca80c7fb2955d7add767d31`.
+`d84f37d59f7830eda86de0bd562acbb85a0ddb2d7c8e42132f019c0f4a434b60`.
 Its fixed combined peer/payload receipt is
-`8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b`.
+`6db10d2a73ee7860bb0d7ad8a6155166d2b59e7d504513e1222a634aac55c668`.
 These are compiled source pins. There is no caller-supplied image, digest,
 command, environment, backend or policy option.
 
 The outer driver itself still requires independent source/build/image review
-and explicit authorization for a bounded run. Its first lifecycle attempt is
-recorded [separately](../README.md#lifecycle-probe-revision-and-first-failed-attempt). The build workflow compiles two static copies, runs only
+and explicit authorization for a bounded run. The previous b38 driver's failed
+lifecycle attempt is [recorded separately](../README.md#lifecycle-probe-revision-and-first-failed-attempt);
+this corrected pairing has not executed. The build workflow compiles two static
+copies, runs only
 fake/inert unit tests, and retains exact Git sources and dependency evidence.
 
 The driver reads `REVIEWED-ARTIFACTS.json` and fixed member
@@ -105,9 +108,10 @@ Fresh source/artifact reviews and a new driver pin remain required before use.
 
 Historically, the c914 static Bubblewrap, d074 payload and combined receipt
 `6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6` passed
-one four-case attempt with the ae9 wrapper and 5125 driver. The new lifecycle
-pairing replaces only that payload with 3f295; Rust peer and c914 Bubblewrap
-bytes stay unchanged. Historical runs remain evidence for their exact earlier
+one four-case attempt with the ae9 wrapper and 5125 driver. The first lifecycle
+attempt replaced only that payload with 3f295; this corrected source now uses
+6a1 with an errno-checked raw group query. Rust peer and c914 Bubblewrap bytes
+stay unchanged. Historical runs remain evidence for their exact earlier
 source only. A fresh driver artifact review and separately reviewed native
 attempt are required.
 
@@ -122,8 +126,8 @@ result also requires verified ready files, live heartbeat progress and bounded
 stability before Destroy. The bounded public count snapshots must independently
 show progress in every fixed role and six stable post-terminal samples.
 Baseline and lifecycle evidence cannot replace one another. No new controller, arbitrary command, file selector or caller hash
-is introduced. This source pins the reviewed 52e4 wrapper, including its nine
-inert lifecycle unit-test passes. The reviewed b38 driver recorded twenty inert
+is introduced. This source pins the reviewed c76 wrapper, including its ten
+inert lifecycle/canonical-registry unit-test passes. The reviewed b38 driver recorded twenty inert
 passes before the first lifecycle attempt. That attempt failed overall: the
 two wait cases passed, but the tree precondition refused before cancellation
 or heartbeat observations. No descendant-cleanup result follows from it. The
