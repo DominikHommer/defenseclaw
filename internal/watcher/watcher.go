@@ -538,7 +538,7 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 	if err != nil || snap.ContentHash == baseline.ContentHash {
 		return
 	}
-	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil))
+	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil), "watch")
 }
 
 // queueAddedMCP queues name for the next admission pass without waking it.
@@ -617,8 +617,10 @@ func (w *InstallWatcher) mcpDiscoveryLoop(ctx context.Context) {
 	}
 }
 
-// DiscoverAddedMCPServers admits now every MCP server without a baseline. A
-// managed gateway calls it when its enrolled users servers change.
+// DiscoverAddedMCPServers admits now every MCP server without a baseline,
+// and admits again every server whose definition changed since its
+// baseline. A managed gateway calls it when its enrolled users servers
+// change.
 func (w *InstallWatcher) DiscoverAddedMCPServers() {
 	if w == nil || !w.admitNewMCP {
 		return
@@ -627,10 +629,13 @@ func (w *InstallWatcher) DiscoverAddedMCPServers() {
 }
 
 // discoverAddedMCPServers queues for admission the MCP servers that have no
-// baseline yet. It starts once the first rescan cycle listed the existing
-// servers, which that cycle baselines; it does not wait for the cycle to
-// end, which after an upgrade rescans every skill for many minutes
-// (GAP-0254).
+// baseline yet, and the servers whose definition changed since their
+// baseline: a verdict is for one definition, and only the rescan cycle used
+// to see a change, minutes later, while the hook kept allowing the changed
+// server's calls on the old verdict (GAP-0216). It starts once the first
+// rescan cycle listed the existing servers, which that cycle baselines; it
+// does not wait for the cycle to end, which after an upgrade rescans every
+// skill for many minutes (GAP-0254).
 func (w *InstallWatcher) discoverAddedMCPServers() {
 	firstCycle := !w.firstCycleDone.Load()
 	if (firstCycle && !w.mcpStartupListed.Load()) || w.store == nil {
@@ -659,9 +664,15 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 		if firstCycle && w.listedAtStartup(path) {
 			continue
 		}
-		if _, err := w.store.GetTargetSnapshot(string(InstallMCP), path); err != nil {
+		baseline, err := w.store.GetTargetSnapshot(string(InstallMCP), path)
+		if err != nil {
 			// A read error other than no rows is retried by admission,
 			// which says so.
+			added = append(added, server.Name)
+			continue
+		}
+		if !w.secureClientActive() && !mcpBaselineMatches(baseline, server) {
+			// Admitted again at once (readmitChangedMCPServer).
 			added = append(added, server.Name)
 		}
 	}
@@ -2040,7 +2051,7 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 				targetType, result.MaxSeverity(), scannerName, out.InstallAction, out.FileAction))
 
 		if w.takeActionFor(evt) {
-			blockReason := fmt.Sprintf("auto-block: watch detected %s findings (scanner=%s)", result.MaxSeverity(), scannerName)
+			blockReason := fmt.Sprintf(autoBlockReasonPrefix+"%s findings (scanner=%s)", result.MaxSeverity(), scannerName)
 			if !w.secureClientActive() {
 				// Name the findings that decided it, so the alert and skill
 				// info show why the skill was blocked (GAP-0418).
@@ -2369,6 +2380,72 @@ func (w *InstallWatcher) logAssetPolicyWouldBlock(ctx context.Context, evt Insta
 
 // recordScanFailureBlock journals the install block and runtime disable of
 // an asset whose scan failed, for the connector that holds it.
+// autoBlockReasonPrefix leads the journal reason of the block and runtime
+// disable the watcher writes for a rejected verdict (applyPostScanEnforcement).
+const autoBlockReasonPrefix = "auto-block: watch detected "
+
+// releaseSupersededMCPRejection lifts the install block and runtime disable
+// that the watcher's own rejection of an MCP server left, once admission
+// allowed a changed definition of that server. The rejection was for the
+// old definition; a restored benign server stayed refused with the old
+// reason after its clean admission (GAP-0266). Only the watcher's own
+// rejection of this server is lifted: an operator block, a row of another
+// server and a block written for a failed scan (releaseScanFailureBlock)
+// stay, and so does a bare-name row another listed server of the same name
+// shares (a release there could free that server's rejection). Secure
+// Client never readmits a changed server (issue #1092).
+func (w *InstallWatcher) releaseSupersededMCPRejection(evt InstallEvent, verdict Verdict) {
+	if evt.Type != InstallMCP || w.store == nil || w.secureClientActive() {
+		return
+	}
+	name := journalName(evt)
+	scope := w.journalScope(w.eventConnector(evt))
+	entry, err := w.store.GetActionForConnector(string(InstallMCP), name, scope)
+	if err != nil || entry == nil || entry.Actions.IsEmpty() || !strings.HasPrefix(entry.Reason, autoBlockReasonPrefix) ||
+		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
+		return
+	}
+	if name != evt.Path && w.mcpNameSharedByAnotherServer(evt) {
+		fmt.Fprintf(os.Stderr, "[watch] mcp %s: its changed definition was admitted (%s), but another server of that name shares its block, which stays\n",
+			evt.Name, verdict)
+		return
+	}
+	var cleared []string
+	for _, field := range []struct{ name, value string }{
+		{"file", entry.Actions.File}, {"install", entry.Actions.Install}, {"runtime", entry.Actions.Runtime},
+	} {
+		if field.value == "" {
+			continue
+		}
+		if err := w.store.ClearActionFieldForConnector(string(InstallMCP), name, scope, field.name); err == nil {
+			cleared = append(cleared, field.name+"="+field.value)
+		}
+	}
+	if len(cleared) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[watch] mcp %s: admission allowed its changed definition (%s); its earlier rejection no longer applies\n", evt.Name, verdict)
+	_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
+		fmt.Sprintf("type=mcp released: admission allowed its changed definition (verdict=%s); cleared %s connector=%s",
+			verdict, strings.Join(cleared, " "), scope))
+}
+
+// mcpNameSharedByAnotherServer reports whether another listed MCP server
+// has the name of evt, so a journal row kept under the bare name may hold
+// that server's verdict too. A listing that fails says so (fail closed).
+func (w *InstallWatcher) mcpNameSharedByAnotherServer(evt InstallEvent) bool {
+	servers, err := w.readMCPServers()
+	if err != nil {
+		return true
+	}
+	for _, server := range servers {
+		if server.Name == evt.Name && MCPEventPath(server) != evt.Path {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *InstallWatcher) recordScanFailureBlock(evt InstallEvent, targetType, reason string) {
 	if w.store == nil {
 		return

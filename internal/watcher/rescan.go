@@ -1064,7 +1064,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	}
 
 	if reason == "content-changed" && !w.secureClientActive() {
-		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint)
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
 	}
 
 	fmt.Fprintf(os.Stderr, "[rescan] scanning %s %s (%s)\n", evt.Type, evt.Name, reason)
@@ -1203,10 +1203,13 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 // new install would be. The rescan used to scan it and emit drift only, so
 // the rejected verdict was never acted on and the agents kept loading it
 // (GAP-1086). The drift alerts stay. A scan that failed or was cut off
-// leaves the old baseline (F-3188), so the next cycle admits it again.
-// Secure Client keeps main's rescan (issue #1092).
-func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint string) rescanOutcome {
-	fmt.Fprintf(os.Stderr, "[rescan] %s %s changed; running install admission\n", evt.Type, evt.Name)
+// leaves the old baseline (F-3188), so the next cycle admits it again. An
+// MCP server whose changed definition admission allows is released from the
+// watcher's own rejection of its old one (GAP-0266). source names what saw
+// the change in gateway.log: the rescan cycle, or the watch of the MCP
+// server list. Secure Client keeps main's rescan (issue #1092).
+func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint, source string) rescanOutcome {
+	fmt.Fprintf(os.Stderr, "[%s] %s %s changed; running install admission\n", source, evt.Type, evt.Name)
 	res := w.runAdmission(ctx, evt)
 	w.notifyAdmission(res)
 	if res.ScanID != "" {
@@ -1230,6 +1233,10 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 				scanID = baseline.ScanID
 			}
 			w.persistSnapshot(evt, snap, scanID, w.admissionFingerprint(res, fingerprint))
+			switch res.Verdict {
+			case VerdictClean, VerdictAllowed, VerdictWarning:
+				w.releaseSupersededMCPRejection(evt, res.Verdict)
+			}
 		}
 	}
 	return rescanScanned
@@ -1991,7 +1998,10 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 
 // mcpDefinitionHash is the content hash of an MCP server's baseline: every
 // field of its definition (command, arguments, folder, environment, URL,
-// account and project), so a verdict is for one definition, not a name.
+// headers, transport), so a verdict is for one definition, not a name. The
+// account and the project are not in the hash: they are in the baseline's
+// key (MCPEventPath), so each account's and each project's server has a
+// baseline of its own.
 func mcpDefinitionHash(entry config.MCPServerEntry) (string, error) {
 	raw, err := json.Marshal(entry)
 	if err != nil {
