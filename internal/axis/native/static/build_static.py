@@ -54,12 +54,12 @@ WARNINGS = (
 )
 
 
-def raw(path: Path, bound: int = 256 << 20) -> bytes:
+def raw(path: Path, bound: int = 256 << 20, *, allow_empty: bool = False) -> bytes:
     if not stat.S_ISREG(path.lstat().st_mode):
         raise RuntimeError(f"not a regular non-symlink file: {path}")
     with path.open("rb") as stream:
         data = stream.read(bound + 1)
-    if not data or len(data) > bound:
+    if (not data and not allow_empty) or len(data) > bound:
         raise RuntimeError(f"file exceeds bound or is empty: {path}")
     return data
 
@@ -68,8 +68,8 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def record(path: Path) -> dict[str, object]:
-    data = raw(path)
+def record(path: Path, *, allow_empty: bool = False) -> dict[str, object]:
+    data = raw(path, allow_empty=allow_empty)
     return {"sha256": digest(data), "size": len(data)}
 
 
@@ -644,7 +644,9 @@ def one_build(
     prefix_inventory = {}
     for path in sorted(prefix.rglob("*")):
         if path.is_file() and not path.is_symlink():
-            prefix_inventory[path.relative_to(prefix).as_posix()] = record(path)
+            # musl's admitted generic bits/hwcap.h is intentionally empty.
+            # Inventory its exact bytes without weakening source/image gates.
+            prefix_inventory[path.relative_to(prefix).as_posix()] = record(path, allow_empty=True)
         elif path.is_symlink():
             raise RuntimeError("unexpected link in private static musl prefix")
     write_json(run_evidence / "MUSL-PREFIX.json", prefix_inventory)

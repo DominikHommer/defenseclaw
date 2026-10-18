@@ -40,6 +40,19 @@ def image(ptype=1):
 
 
 class ClosureAdmissionTests(unittest.TestCase):
+    def test_empty_prefix_header_is_inventoried_only_with_explicit_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            header = Path(directory) / "inert-empty.h"
+            header.write_bytes(b"")
+            self.assertEqual(build.record(header, allow_empty=True), {"size": 0, "sha256": build.digest(b"")})
+            with self.assertRaises(RuntimeError):
+                build.record(header)
+            with self.assertRaises(RuntimeError):
+                build.raw(header)
+            header.write_bytes(b"oversized")
+            with self.assertRaises(RuntimeError):
+                build.raw(header, 4, allow_empty=True)
+
     def test_mount_compat_checks_libc_constants_before_selecting_uapi_spelling(self):
         header = build.mount_compat_header().decode()
         self.assertLess(header.index("#include <sys/mount.h>"), header.index("#if MS_NOUSER"))
