@@ -1,8 +1,8 @@
 # Fixed Linux native peer CI canary
 
 This is one contributor-only four-case attempt using the separately reviewed
-aa215 peer/unchanged static-musl Bubblewrap, d074 fixed payload, 9ea diagnostic
-wrapper, and 08c outer driver. The cases check literal argv, binary stdin/EOF and stderr, exit
+c914 peer/revised static-musl Bubblewrap, d074 fixed payload, ae9 diagnostic
+wrapper, and 5125 outer driver. The cases check literal argv, binary stdin/EOF and stderr, exit
 23, and fixed offline filesystem/network/FD/namespace boundaries. This is not
 customer activation, PTY/Claude/model/hook qualification, or completion of the
 AXIS integration.
@@ -12,7 +12,7 @@ caller-selected artifact, command, image digest, policy, environment or retry.
 The exact Actions source/run/attempt/workflow/branch/event and archive digest
 must match constants in `prepare.py`. Each ZIP/provenance manifest is checked
 in full with bounded readers, and every selected image/proof must match its
-fixed hash and size. The combined receipt bytes are pinned to `9e7c6f82...`.
+fixed hash and size. The combined receipt bytes are pinned to `6af34ded...`.
 The four archives already received two independent inert reviews of source,
 build, dependency and image evidence. CI preparation rechecks their exact
 byte identity; it does not repeat upstream source/toolchain reconstruction.
@@ -69,6 +69,17 @@ has ZIP SHA256
 No unchanged retry occurred. Source review is investigating inherited mount
 descriptors across namespace clones; this result alone does not establish that
 as the cause or qualify any boundary behavior.
+The new pairing uses the reviewed c914 static Bubblewrap source-view revision,
+ae9 wrapper and 5125 driver. The incoming held object and restrictive flags
+remain authority; a cached identity-checked reopen supplies the current
+namespace mount ID, and both current namespace inventories still refuse nested
+mounts. This is scoped to the trusted clone-only creator chain. Before the
+first clone, the driver requires current-namespace unique mount identity and
+`statmount` basic attributes for its held parent and fresh root, refusing
+ID-mapped or unsupported sources. The driver build passed 18 selected inert
+tests. The Rust peer and d074 payload bytes are unchanged; static Bubblewrap,
+its closure, wrapper/driver pins and combined receipt are revised. This pairing
+has not had a native attempt, and no earlier failure is converted into a pass.
 The trust assumptions documented in
 [`artifact-review.md`](../../../../../internal/axis/native/artifact-review.md)
 still apply.

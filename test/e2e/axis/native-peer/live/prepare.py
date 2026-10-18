@@ -21,17 +21,17 @@ from verify_native_artifact import manifest as peer_manifest  # noqa: E402
 from verify_native_artifact import record_matches, static_elf
 
 REPOSITORY = "cisco-ai-defense/defenseclaw"
-RECEIPT_SHA = "9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db"
+RECEIPT_SHA = "6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6"
 # Independently reviewed source/build/image inputs; no caller or API chooses a
 # pin. This source recipe needs its own review and explicit run authorization.
-DRIVER_PROVENANCE_SHA = "2656048c2508ea4a2044095f32d96fb68d2d2cf543f38288171dcac514939a4c"
+DRIVER_PROVENANCE_SHA = "2f7400d478f50338ea09068b82ea99663de6f88a0be9a42c006df0583bb056f4"
 PINS = {
     "peer": {
-        "commit": "aa21514cf1a1ce7c17ddd4a06d76efc001c7d5d7",
-        "run": 39148188923,
-        "artifact": 12144198239,
-        "archive": "14752d1506e9f206b5f2c0c5f227efe0fdccee5594530e9e0b7e3b06ba5405a3",
-        "provenance": "2223dd9576928daabfa41288c38810568215faf000cd161ec2a5bbf680d6a3e3",
+        "commit": "c914cb9a66d3e05a11d5eac4dcf4da7a8c0de139",
+        "run": 39158759518,
+        "artifact": 12148605722,
+        "archive": "68e5d232ed286cfbbbbcb212170cc6bf0aff4536cfbc98fb7129da1315a99085",
+        "provenance": "7d6fd05f40006e334921fa4efec58a033b3c2bbaf707d7be03b6322bc81ac59c",
         "workflow": ".github/workflows/axis-native-peer-build.yml",
         "stem": "axis-private-native-peer-linux-",
         "branch": "codex/axis-sandbox-feasibility",
@@ -49,21 +49,21 @@ PINS = {
         "event": "push",
     },
     "wrapper": {
-        "commit": "9ea21f6d9da3dacf60cb451d45cc8818ef9db3e9",
-        "run": 39156089152,
-        "artifact": 12147162086,
-        "archive": "3b8a43bc3db52f035b213e411704a982b58fe69e069476a955f6b68797e4bec3",
-        "provenance": "f7a74392af14379b22c92bc6391cc8dc8af3be8be01ad144dd58c52e622a792c",
+        "commit": "ae9f9e0c8cea430501f723bb79430955f76df013",
+        "run": 39160365924,
+        "artifact": 12148552547,
+        "archive": "4b938f0b5df48dbc05c5fc0d0eaec516abda29a226bd1a9eeb16927eb3b9ad30",
+        "provenance": "bd0fe0646543173ddb244a12a41396884ab7652e23809b66d99fa3bed5d03bd7",
         "workflow": ".github/workflows/axis-native-harness-build.yml",
         "stem": "axis-reviewed-native-harness-linux-",
         "branch": "codex/axis-sandbox-feasibility",
         "event": "workflow_dispatch",
     },
     "driver": {
-        "commit": "08c058e477e573a1213f08330536e81dae8ea3f2",
-        "run": 39156648968,
-        "artifact": 12146899428,
-        "archive": "befe31f9ab181c685456baca5351adaf5578491a05d41821ba4050e8cba6f151",
+        "commit": "5125d37fed95e3b7967c94edb3d1f9ddd59260c6",
+        "run": 39160923199,
+        "artifact": 12148188690,
+        "archive": "3569455f8880ee61e37d8dc3e763f90c5a53e08326c27b988bfcf996d4928817",
         "workflow": ".github/workflows/axis-native-driver-build.yml",
         "stem": "axis-fixed-native-outer-driver-linux-",
         "branch": "codex/axis-sandbox-feasibility",
@@ -255,8 +255,8 @@ def prepare(root, metadata_api=api, download=None):
             "peer",
             "build-artifact/static/bwrap-static-musl-repeat-a",
             images / "bwrap-static-musl",
-            "da4b55953dbc5843e712edf8f1603637926cfb1cd64e6fcb9a69d914b347e9e9",
-            194488,
+            "b4d1a59426c6a52e9f9a0d57d03d620e4dfc1beef976201a3afc0c1b492ee37d",
+            198584,
         ),
         (
             "payload",
@@ -269,14 +269,14 @@ def prepare(root, metadata_api=api, download=None):
             "wrapper",
             "bin/reviewed-harness",
             images / "reviewed-wrapper",
-            "4b64f27003027663af8bce1c2159daa9f8315635a6e3b5504f345178e9750455",
+            "97da655791b04a4983909b08a939bb8d4af444400c9868e1ac76e4fbfdbda818",
             3440766,
         ),
         (
             "driver",
             "bin/fixed-outer-driver",
             images / "fixed-driver",
-            "735aaa42286366a349dfe4cce1356a9848c63e6723265259d159ee7ff2b06946",
+            "ddc177532298d62d2f39af1d63c51ef982a778a123180dbf8f1ea6749289ec91",
             3207294,
         ),
     ]
@@ -291,7 +291,7 @@ def prepare(root, metadata_api=api, download=None):
             "peer",
             "build-artifact/static/STATIC-CLOSURE.json",
             proofs / "STATIC-CLOSURE.json",
-            "a28d984758b82397f371e4b7bb785d274005404d2546d606e2319dc0aaf33e56",
+            "e6ce4df2d0118cfa0b1a26f554e4dcbd039d1fa3b77ad0d7628d5a3d1ba9665b",
         ),
         ("peer", "build-artifact/PROVENANCE.json", proofs / "peer-PROVENANCE.json", PINS["peer"]["provenance"]),
         ("payload", "PROVENANCE.json", proofs / "payload-PROVENANCE.json", PINS["payload"]["provenance"]),
