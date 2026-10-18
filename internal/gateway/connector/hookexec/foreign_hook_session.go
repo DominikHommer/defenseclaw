@@ -71,7 +71,7 @@ func ExchangeForeignHookSession(ctx context.Context, opts Options, connector str
 	// counted from the invocation like the hook request after it: a gateway
 	// that accepted the exchange but gives no answer (it is stopping, starting
 	// or too busy) ends it in time, and the guard denies the call.
-	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, answerDeadline(opts, started))
+	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, answerDeadline(opts, started), nil)
 	defer releaseAnswer()
 	// A call queued in the socket systemd holds across a restart is ended
 	// at the restart budget, like the hook request (Linux).

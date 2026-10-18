@@ -97,6 +97,10 @@ func newHookCmd() *cobra.Command {
 			}
 			opts := buildHookOptionsForRuntime(connector, event, apiAddr, failMode, enterpriseManaged)
 			opts.StartedAt = hookInvocationStart()
+			// At the answer deadline of a tool call the hook writes its
+			// fail-closed answer and ends, even while its own work is held
+			// up (GAP-0155).
+			opts.Exit = func(code int) { hookProcessExit(code) }
 			opts.HookContractID = hookContractID
 			opts.HookSurface = strings.TrimSpace(hookSurface)
 			// Only the standalone binary explains an unenrolled account.

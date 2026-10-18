@@ -41,6 +41,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
@@ -237,6 +238,13 @@ type Options struct {
 	// answerBy is the answer deadline of a tool call (answerDeadline);
 	// doRequest sets it, and the request then asks for progress reports.
 	answerBy time.Time
+	// answerWatch is the answer watchdog of a tool call
+	// (startAnswerWatchdog); doRequest stands it down once the gateway's
+	// decision is in.
+	answerWatch *answerWatchdog
+	// requestFacts are the headers of a call that cost work to compute,
+	// computed once for all of its tries (doRequest).
+	requestFacts *hookRequestFacts
 	// HookContractID is the finite Setup-selected connector contract bound into
 	// the protected native Windows command. Codex uses it to prevent local
 	// failure paths from backfilling newer lifecycle controls into legacy tiers.
@@ -346,6 +354,12 @@ type Options struct {
 	// request budget must include (the standalone foreign-hook guard's scan
 	// runs before Run). Zero starts the budget when Run is called.
 	StartedAt time.Time
+	// Exit ends the hook process with a status. The answer watchdog of a
+	// tool call calls it after it wrote the call's fail-closed answer at the
+	// answer deadline, when the call's own work is still held up. Nil (a
+	// caller that runs Run in process) writes that answer and lets Run
+	// return it.
+	Exit func(int)
 	// AssetFacts renders the assetfacts.Header value for a payload: what the
 	// standalone gateway, a service account, cannot read in this user's
 	// home. It is sent by standalone managed hooks only.
@@ -473,6 +487,18 @@ func Run(ctx context.Context, opts Options) int {
 		// receive its documented fail-open result.
 		return failResponse(opts, sp, failMode, "missing or unsupported Copilot hook event binding")
 	}
+	if deadline := answerDeadline(opts, startedAt); !deadline.IsZero() {
+		// A tool call is answered by its answer deadline even when this
+		// process runs late (GAP-0155, GAP-0167).
+		watchdog := startAnswerWatchdog(&opts, sp, failMode, deadline)
+		return watchdog.finish(sendToGateway(ctx, opts, sp, failMode, payload, startedAt))
+	}
+	return sendToGateway(ctx, opts, sp, failMode, payload, startedAt)
+}
+
+// sendToGateway is Run once the call's payload and event are known: it
+// builds the gateway client, reads the token and sends the call.
+func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, startedAt time.Time) int {
 	requestTimeout := hookRequestTimeout(opts.Connector, opts.Event) - time.Since(startedAt)
 	if requestTimeout <= 0 {
 		return failUnreachable(opts, sp, failMode, "hook request budget exhausted before gateway contact")
@@ -674,26 +700,31 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// dials, a gateway that accepted the call but does not answer, and the
 	// resends below (hookAnswerBudget).
 	opts.answerBy = answerDeadline(opts, opts.StartedAt)
-	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy)
+	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, opts.answerWatch.answered)
 	defer releaseAnswer()
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
 	defer releaseWatch()
+	// The account, its session, the asset facts and the resolved write
+	// paths are computed once, for every try of this call.
+	opts.requestFacts = &hookRequestFacts{}
+	// A try that must have its connection within the restart budget
+	// (connectBy); the response is read under its context.
+	var releases []func()
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	sendConnectedBy := func() (*http.Response, error) {
+		tryCtx, release := connectBy(ctx, restartDeadline)
+		releases = append(releases, release)
+		resp, err := sendHookRequest(tryCtx, opts, sp, payload, token)
+		return resp, notConnectedError(tryCtx, err)
+	}
 	send := func() (*http.Response, error) { return sendHookRequest(ctx, opts, sp, payload, token) }
 	if !opts.ManagedEnterprise {
-		// Each try of a per-user hook must have its connection within the
-		// restart budget (connectBy); the response is read under its context.
-		var releases []func()
-		defer func() {
-			for _, release := range releases {
-				release()
-			}
-		}()
-		send = func() (*http.Response, error) {
-			tryCtx, release := connectBy(ctx, restartDeadline)
-			releases = append(releases, release)
-			resp, err := sendHookRequest(tryCtx, opts, sp, payload, token)
-			return resp, notConnectedError(tryCtx, err)
-		}
+		// Every try of a per-user hook.
+		send = sendConnectedBy
 	}
 	resp, err := send()
 	if !opts.ManagedEnterprise {
@@ -715,8 +746,17 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// one it accepted as it exits: send the call again, to the gateway that
 	// starts, until the restart budget ends. Every try verifies the peer
 	// again, and a call that never gets an answer still fails closed below.
+	// A try after such a failure must have its connection within the
+	// restart budget: one that began just before the budget ended and met a
+	// slow service manager held the not-running deny past the answer budget
+	// (GAP-0155, GAP-0167). It ends with the cause the gateway gave before.
 	for opts.ManagedEnterprise && err != nil && awaitGatewayRestart(ctx, restartDeadline, err) {
-		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+		cause := err
+		resp, err = sendConnectedBy()
+		if errors.Is(err, errGatewayNotConnected) && ctx.Err() == nil {
+			resp, err = nil, cause
+			break
+		}
 	}
 	stopWatch()
 	if errors.Is(err, errInvalidHookRequest) {
@@ -931,11 +971,6 @@ func sendHookRequest(
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DefenseClaw-Client", sp.hookName+"/1.0")
-	if opts.ManagedEnterprise && !opts.SecureClient && runtime.GOOS != "windows" {
-		if resolved := hookpaths.Resolve(payload); resolved != "" {
-			req.Header.Set(hookpaths.Header, resolved)
-		}
-	}
 	if opts.Connector == "codex" {
 		// These values come from Setup's protected, event-specific command.
 		// The bearer-authenticated gateway compares them with both the official
@@ -987,14 +1022,51 @@ func sendHookRequest(
 	if v := strings.TrimSpace(opts.TraceState); v != "" && validTracestate(v) {
 		req.Header.Set("tracestate", v)
 	}
-	setUserIdentityHeaders(req, opts)
-	if opts.AssetFacts != nil && opts.ManagedEnterprise && !secureClientHook(opts) {
-		if value := opts.AssetFacts(opts.Connector, payload); value != "" {
-			req.Header.Set(assetfacts.Header, value)
-		}
-	}
+	opts.requestFacts.set(req.Header, opts, payload)
 
 	return opts.HTTPClient.Do(req)
+}
+
+// hookRequestFacts are the headers of a hook call that cost work to
+// compute: the resolved write paths, the account and its session (system
+// calls; on Windows a call into the LSA) and the asset facts read from the
+// user's home. A call that waits for a restarting gateway sends its request
+// again every 200 ms, and on a host that was already slow computing them for
+// every try held the call past its answer budget (GAP-0155). They are
+// computed once, on the first try, and copied into every try after it.
+type hookRequestFacts struct {
+	once   sync.Once
+	header http.Header
+}
+
+// set adds the call's facts to header; a nil hookRequestFacts computes them
+// for this request alone.
+func (f *hookRequestFacts) set(header http.Header, opts Options, payload []byte) {
+	if f == nil {
+		setHookRequestFacts(header, opts, payload)
+		return
+	}
+	f.once.Do(func() {
+		f.header = make(http.Header)
+		setHookRequestFacts(f.header, opts, payload)
+	})
+	for name, values := range f.header {
+		header[name] = slices.Clone(values)
+	}
+}
+
+func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
+	if opts.ManagedEnterprise && !opts.SecureClient && runtime.GOOS != "windows" {
+		if resolved := hookpaths.Resolve(payload); resolved != "" {
+			header.Set(hookpaths.Header, resolved)
+		}
+	}
+	setUserIdentityHeaderValues(header, opts)
+	if opts.AssetFacts != nil && opts.ManagedEnterprise && !secureClientHook(opts) {
+		if value := opts.AssetFacts(opts.Connector, payload); value != "" {
+			header.Set(assetfacts.Header, value)
+		}
+	}
 }
 
 // setUserIdentityHeaders reports which end user this hook is running as.
@@ -1013,6 +1085,11 @@ func sendHookRequest(
 // so a hostile account name cannot smuggle a second header into every hook
 // call the endpoint makes.
 func setUserIdentityHeaders(req *http.Request, opts Options) {
+	setUserIdentityHeaderValues(req.Header, opts)
+}
+
+// setUserIdentityHeaderValues is setUserIdentityHeaders for a header set.
+func setUserIdentityHeaderValues(header http.Header, opts Options) {
 	// A Secure Client hook keeps its earlier requests: the account name as
 	// the system reports it and no session facts, so it runs no klist and
 	// writes nothing in the home of the user (issue #1092).
@@ -1020,10 +1097,10 @@ func setUserIdentityHeaders(req *http.Request, opts Options) {
 	useridentity.KeepQualifiedNames(secureClient)
 	identity := useridentity.Current()
 	if v := identity.ID; safeIdentityHeaderValue(v) {
-		req.Header.Set("X-DefenseClaw-User-Id", v)
+		header.Set("X-DefenseClaw-User-Id", v)
 	}
 	if v := identity.Name; safeIdentityHeaderValue(v) {
-		req.Header.Set("X-DefenseClaw-User-Name", v)
+		header.Set("X-DefenseClaw-User-Name", v)
 	}
 	// The session the hook runs in (SSH, logind, the Kerberos default
 	// principal): claimed facts the gateway uses for attribution only.
@@ -1032,7 +1109,7 @@ func setUserIdentityHeaders(req *http.Request, opts Options) {
 		return
 	}
 	if v := useridentity.CurrentSessionFactsHeader(); v != "" {
-		req.Header.Set(useridentity.SessionFactsHeader, v)
+		header.Set(useridentity.SessionFactsHeader, v)
 	}
 }
 

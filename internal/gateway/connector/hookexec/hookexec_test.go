@@ -2623,7 +2623,9 @@ func TestRunChargesWorkBeforeRunToTheRequestBudget(t *testing.T) {
 	if r.rt.requests != 0 {
 		t.Fatalf("a spent budget must not contact the gateway: %d requests", r.rt.requests)
 	}
-	if r.code == 0 || !strings.Contains(r.stderr, "budget exhausted") {
+	// A tool call whose answer budget is spent too gets the answer
+	// watchdog's no-answer block at once.
+	if r.code == 0 || (!strings.Contains(r.stderr, "budget exhausted") && !strings.Contains(r.stderr, perUserGatewayNoAnswerReason)) {
 		t.Fatalf("a spent budget must fail closed: code=%d stderr=%q", r.code, r.stderr)
 	}
 	if fresh := run(t, "cursor", ok(`{"action":"allow"}`), func(o *Options) { o.FailMode = "closed" }); fresh.rt.requests != 1 {

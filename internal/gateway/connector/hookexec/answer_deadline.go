@@ -108,14 +108,23 @@ func toolGateEvent(connector, event string) bool {
 // errGatewayNoAnswer at deadline unless the gateway answered (stop) or
 // reported that it waits on a remote scanner (a 102 response) by then. Call
 // stop once the final response headers are in, before reading the body, and
-// release when the request is done. A zero deadline returns ctx unchanged.
-func awaitAnswerBy(ctx context.Context, deadline time.Time) (watched context.Context, stop, release func()) {
+// release when the request is done. onAnswer, when set, runs once with the
+// first stop (the answer watchdog stands down). A zero deadline returns ctx
+// unchanged.
+func awaitAnswerBy(ctx context.Context, deadline time.Time, onAnswer func()) (watched context.Context, stop, release func()) {
 	if deadline.IsZero() {
 		return ctx, func() {}, func() {}
 	}
 	answered := make(chan struct{})
 	var once sync.Once
-	stop = func() { once.Do(func() { close(answered) }) }
+	stop = func() {
+		once.Do(func() {
+			close(answered)
+			if onAnswer != nil {
+				onAnswer()
+			}
+		})
+	}
 	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
 		if code == HookProgressStatus {
 			stop()
