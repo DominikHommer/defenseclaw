@@ -61,3 +61,30 @@ def test_relay_plan_needs_an_installed_relay(tmp_path: Path) -> None:
 
 def test_scanner_wrapper_has_no_relay_by_default() -> None:
     assert mcp.MCPScannerWrapper(MCPScannerConfig()).stdio_relay == ()
+
+
+def test_relay_startup_failure_names_the_relay_and_the_os_error(tmp_path: Path) -> None:
+    # GAP-0114: a failed start of the relay read "Windows npx wrapper startup
+    # failed" with no cause; it names the relay and the system error.
+    plan = mcp._as_user_relay_plan(MCPServerEntry(name="s", command="npx", args=["pkg"]), _relay(tmp_path))
+    message = str(mcp._classify_windows_stdio_error(PermissionError(13, "Access is denied"), plan, [], 0, 7))
+    assert "MCP as-user relay startup failed" in message
+    assert "npx wrapper" not in message
+    assert "PermissionError errno 13: Access is denied" in message
+
+
+def test_no_writable_temporary_folder_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0114: under the managed gateway token Python found no writable
+    # temporary folder, and the scan said the npx wrapper failed to start.
+    import asyncio
+    from types import SimpleNamespace
+
+    def refuse(*_args, **_kwargs):
+        raise FileNotFoundError(2, "No usable temporary directory found")
+
+    monkeypatch.setattr(mcp.tempfile, "TemporaryFile", refuse)
+    scanner = SimpleNamespace(_validate_analyzer_requirements=lambda _a: None, _analyze_tool=lambda *_a: None)
+    plan = mcp._StdioLaunchPlan("resolved", (), {}, "npx")
+    with pytest.raises(mcp.MCPStdioLaunchError, match="no writable temporary folder") as caught:
+        asyncio.run(mcp._scan_windows_stdio_tools(scanner, plan, ["fixture"]))
+    assert "No usable temporary directory found" in str(caught.value)

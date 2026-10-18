@@ -323,6 +323,8 @@ class _StdioLaunchPlan:
     env: dict[str, str]
     launcher: str
     cwd: str | None = None
+    # The gateway's as-user relay stands in for the server (#1164).
+    relay: bool = False
 
 
 class _ContainedWindowsProcess:
@@ -956,7 +958,7 @@ def _as_user_relay_plan(entry: MCPServerEntry, relay: tuple[str, ...]) -> _Stdio
         for key in ("SYSTEMROOT", "WINDIR")
         if (value := os.environ.get(key, ""))
     }
-    return _StdioLaunchPlan(executable, tuple(relay[1:]), env, launcher)
+    return _StdioLaunchPlan(executable, tuple(relay[1:]), env, launcher, relay=True)
 
 
 def _exception_leaves(exc: BaseException) -> Iterator[BaseException]:
@@ -977,6 +979,25 @@ def _protocol_error_was_logged(errors: list[tuple[str, str]]) -> bool:
         or "validation error" in message.lower()
         for _name, message in errors
     )
+
+
+def _os_error_text(leaves: list[BaseException]) -> str:
+    """The first OS error as Windows reported it: its type, code and system
+    message, never a path (GAP-0114: "startup failed" alone did not say
+    which call failed or why)."""
+    for item in leaves:
+        if not isinstance(item, OSError) or isinstance(item, ConnectionError):
+            continue
+        code = getattr(item, "winerror", None) or item.errno
+        message = (item.strerror or "").strip()
+        parts = [type(item).__name__]
+        if code:
+            parts.append(f"{'WinError' if getattr(item, 'winerror', None) else 'errno'} {code}")
+        text = " ".join(parts)
+        if message:
+            text += ": " + message[:160]
+        return f" ({text})"
+    return ""
 
 
 def _exit_code_text(code: int) -> str:
@@ -1036,10 +1057,13 @@ def _classify_windows_stdio_error(
     # first so the MCP library's canonical closed-stream exception is not
     # mislabeled as a CreateProcess/startup failure.
     if any(isinstance(item, OSError) for item in leaves):
-        stage = "Windows npx wrapper" if plan.launcher == "npx" else "launcher"
+        if plan.relay:
+            stage = "MCP as-user relay"
+        else:
+            stage = "Windows npx wrapper" if plan.launcher == "npx" else "launcher"
         return MCPStdioLaunchError(
             f"{stage} startup failed for MCP stdio launcher {plan.launcher!r}"
-            f"{stderr_note}"
+            f"{_os_error_text(leaves)}{stderr_note}"
         )
     return MCPStdioLaunchError(
         f"MCP stdio protocol failure for launcher {plan.launcher!r} during "
@@ -1100,7 +1124,15 @@ async def _scan_windows_stdio_tools(
 
     stderr_size = 0
     started: list[object] = []
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errlog:
+    try:
+        errlog_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        # GAP-0114: no writable temporary folder; the server never started.
+        raise MCPStdioLaunchError(
+            "the scanner has no writable temporary folder for the MCP server's stderr, "
+            f"so the server was not started{_os_error_text([exc])}"
+        ) from exc
+    with errlog_file as errlog:
         try:
             with anyio.fail_after(timeout_seconds):
                 params = StdioServerParameters(
