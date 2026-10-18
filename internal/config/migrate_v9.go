@@ -961,10 +961,14 @@ func (m *v9Migrator) migrateTelemetryAliases(root *yaml.Node) {
 
 // commit writes the migration under config.yaml.lock: the v8 backup, the
 // config (generation +1), the record, the data.json rename (not on a
-// managed host), the inline key move and finally the audit.db rows. A
-// failure before the config commit puts the .env back as it was, so the
-// moved scanner key is not left behind while the command reports that
-// nothing was migrated (GAP-0808).
+// managed host), the inline key move and finally the audit.db rows. The
+// inline key move holds .env.lock (after config.yaml.lock, the order every
+// writer takes) until the commit or its undo is done, so a credential that
+// keys set or setup saves meanwhile is never erased. A failure that leaves
+// the v8 config.yaml in place takes the moved key back out of .env, so the
+// command does not report that nothing was migrated while it is still there
+// (GAP-0808); while config.yaml may hold the v9 file, which reads the key
+// from .env, the key stays and the error says so.
 func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (written []string, err error) {
 	txn, err := cfgtxn.Begin(ctx, m.configPath, 0)
 	if err != nil {
@@ -1030,14 +1034,24 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 	}
 	if m.envKey != "" {
 		envPath := filepath.Join(m.dataDir(), ".env")
-		undo, appendErr := appendDotEnvKey(envPath, m.envKey, m.envValue)
-		if appendErr != nil {
-			return written, fmt.Errorf("config: move the inline scanner key to %s: %w", envPath, appendErr)
+		releaseEnv, lockErr := cfgtxn.LockFile(ctx, envPath, 0)
+		if lockErr != nil {
+			return written, fmt.Errorf("config: move the inline scanner key to %s: %w", envPath, lockErr)
 		}
-		written = append(written, envPath)
+		// Registered before the undo, so it runs after it.
+		defer releaseEnv()
+		undo, appendErr := appendDotEnvKey(envPath, m.envKey, m.envValue)
 		if undo != nil {
+			written = append(written, envPath)
 			defer func() {
 				if committed || err == nil {
+					return
+				}
+				// Commit puts the v8 bytes back when it fails, unless that
+				// restore fails too; anything else on disk may be the v9
+				// config, which reads the key from .env.
+				if onDisk, readErr := os.ReadFile(m.configPath); readErr != nil || !bytes.Equal(onDisk, current) {
+					err = fmt.Errorf("%w; %s keeps the moved scanner key because config.yaml may now read it from there", err, envPath)
 					return
 				}
 				if undoErr := undo(); undoErr != nil {
@@ -1046,6 +1060,9 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 				}
 				written = slices.DeleteFunc(written, func(path string) bool { return path == envPath })
 			}()
+		}
+		if appendErr != nil {
+			return written, fmt.Errorf("config: move the inline scanner key to %s: %w", envPath, appendErr)
 		}
 	}
 	// Provider CA files and the evidence record must exist before the
@@ -1091,7 +1108,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 		return written, err
 	}
 	written = append(written, recordPath)
-	if _, err := txn.Commit(current, migrated, exists, mode, cfgtxn.Writer{Actor: m.record.Actor, Reason: "config_version 9 migration"}); err != nil {
+	if _, err := commitV9Config(txn, current, migrated, exists, mode, cfgtxn.Writer{Actor: m.record.Actor, Reason: "config_version 9 migration"}); err != nil {
 		return written, err
 	}
 	committed = true
@@ -1217,9 +1234,21 @@ func migrationDataDir(configPath string, root *yaml.Node) string {
 	return filepath.Dir(configFile)
 }
 
+// commitV9Config is txn.Commit; tests replace it to fail the commit.
+var commitV9Config = func(txn *cfgtxn.Txn, expected, candidate []byte, expectedExists bool, mode os.FileMode, w cfgtxn.Writer) (cfgtxn.GenerationState, error) {
+	return txn.Commit(expected, candidate, expectedExists, mode, w)
+}
+
+// writeDotEnvDurable is cfgtxn.WriteFileDurable; tests replace it to fail
+// the .env write.
+var writeDotEnvDurable = cfgtxn.WriteFileDurable
+
 // appendDotEnvKey adds key=value to a private .env unless the key is already
-// defined there. When it changed the file, undo puts back the previous bytes,
-// or removes the file it created.
+// defined there; the caller holds .env.lock. undo is non-nil whenever the
+// file may have changed, also when the write reports an error after its
+// rename (a failed directory fsync). undo puts back the previous bytes or
+// removes the file the write created; it leaves a file that no longer holds
+// the bytes it wrote as it is and says so.
 func appendDotEnvKey(path, key, value string) (undo func() error, err error) {
 	existing, err := os.ReadFile(path)
 	existed := err == nil
@@ -1230,18 +1259,24 @@ func appendDotEnvKey(path, key, value string) (undo func() error, err error) {
 	if !changed {
 		return nil, nil
 	}
-	if err := cfgtxn.WriteFileDurable(path, updated, 0o600); err != nil {
-		return nil, err
-	}
-	return func() error {
-		if !existed {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
+	undo = func() error {
+		onDisk, readErr := os.ReadFile(path)
+		switch {
+		case errors.Is(readErr, os.ErrNotExist):
 			return nil
+		case readErr != nil:
+			return readErr
+		case existed && bytes.Equal(onDisk, existing):
+			return nil
+		case !bytes.Equal(onDisk, updated):
+			return fmt.Errorf("%s changed after the migration wrote it, so it was left as it is", path)
+		case existed:
+			return writeDotEnvDurable(path, existing, 0o600)
+		default:
+			return os.Remove(path)
 		}
-		return cfgtxn.WriteFileDurable(path, existing, 0o600)
-	}, nil
+	}
+	return undo, writeDotEnvDurable(path, updated, 0o600)
 }
 
 // DotEnvWithKey returns the .env bytes with a usable key. An existing
