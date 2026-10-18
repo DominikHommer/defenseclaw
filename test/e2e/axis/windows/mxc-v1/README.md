@@ -332,7 +332,7 @@ desktop, existing ACL or host namespace is changed here.
 
 ## Fixed signed Claude version slice
 
-The separate `claude-version-only` slice has one retained native creation refusal
+The separate `claude-version-only` slice has two retained native creation refusals
 described in [manual results](manual-results.md). It tests
 only the fixed, independently reviewed Anthropic Claude Code 2.1.292 Windows
 image with literal `--version`, closed stdin, a ten-second native deadline,
@@ -380,8 +380,9 @@ empty outer Job and owned-fixture cleanup. Timeouts, extra output, wrong images,
 receipt/mode mismatches and cleanup failures remain failures. No native run is
 authorized by this documentation or by a build-only artifact.
 
-The next source-only SDK overlay diagnostic keeps the same launch policy and
-literal argv. On native creation refusal it copies `GetLastError` and
+The SDK overlay diagnostic keeps the same launch policy and literal argv. One
+changed-source build and attempt are recorded in [manual results](manual-results.md).
+On native creation refusal it copies `GetLastError` and
 `RtlGetLastNtStatus` immediately after the raw BOOL return, before error wrappers
 or formatting can disturb thread-local status. It emits only those numbers and
 capped application/command/environment/cwd UTF-16 lengths plus argv/environment
@@ -391,4 +392,5 @@ command-string launch behavior is unchanged. The last NT status is a sampled
 thread value, not proof of which parameter or native operation caused failure.
 A separate exact pure SDK test
 checks capture order, numeric formatting and count bounds without launching a
-process; native compilation and a newly reviewed artifact are still required.
+process. The observed status samples do not establish a cause or authorize an
+unchanged retry, weaker policy, or production runtime activation.

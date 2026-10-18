@@ -499,8 +499,9 @@ hashes, exact source/locks and all sixteen reconstructed SDK fingerprints. These
 were build and inert reviews; they did not execute PSEC or Claude.
 
 One fresh version-only attempt used that artifact and the independently reviewed,
-signed Claude Code 2.1.292 image. It failed when native `CreateProcessW` returned
-Win32 87 (`ERROR_INVALID_PARAMETER`) while attaching the PSEC environment. The
+signed Claude Code 2.1.292 image. The existing wrapper reported Win32 87
+(`ERROR_INVALID_PARAMETER`) after `CreateProcessW` failed while attaching the PSEC
+environment. That wrapper did not sample the raw native status immediately. The
 payload produced no stdout. No Claude start, version output, child-side marker,
 environment, hook, credential or model behavior was observed. This is a process
 creation failure; it does not establish a DLL-initialization or runtime cause.
@@ -522,9 +523,64 @@ fresh inner synthetic fixture was retained after refusal. No retry occurred.
 | Actual live result | `a62bad914905fcdb45c6aa1f281cf8dfbd7b514a73fd5b66eb24fea58f24676d` |
 
 The eight private environment values were requested configuration; the realized
-Claude environment remains unverified. The next source-only diagnostic captures
-the immediate native failure status and bounded structural counts under the same
-policy. It is not a cause claim or authorization to retry this artifact.
+Claude environment remains unverified. A changed-source diagnostic was prepared
+to capture immediate status samples and bounded structural counts under the same
+policy, rather than retrying the unchanged artifact.
+
+## Changed-source Claude creation diagnostic: immediate status samples
+
+[Locked build 39150253860](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39150253860)
+at `ad643e9b5a85fc446316da8917a1d83ec8fc6bcf` passed 23 exact tests: six
+pure environment tests, four pure DLL protocol tests, one native directory
+filesystem regression and twelve SDK tests. The new pure SDK test checks status
+capture order and numeric count bounds without launching a process. Independent
+inert reviews checked 30 archive members, 26 manifest hashes, exact source/locks,
+all sixteen reconstructed SDK fingerprints and the linked native status import.
+
+One fresh version02 attempt used that changed diagnostic, the same fixed signed
+Claude Code 2.1.292 image and literal `--version`. It retained the same filesystem,
+offline and Win32k/UI policy. `CreateProcessW` failed before any Claude start was
+observed. Immediately after its raw BOOL refusal, the diagnostic copied
+`GetLastError` as 87 and sampled `RtlGetLastNtStatus` as `0xc0000034`.
+The last NT status can be stale; this sample does not establish a missing path,
+identify a parameter, or prove a filesystem or PSEC cause. Payload stdout was
+empty. No version, realized environment, hook, credential or model behavior passed.
+
+| Structural observation | Value |
+| --- | --- |
+| Application UTF-16 units | 199 |
+| Command UTF-16 units | 171 |
+| Environment-block UTF-16 units | 1144 |
+| CWD UTF-16 units | 175 |
+| Argv entries, including program | 2 |
+| Environment entries | 8 |
+| Any diagnostic count capped | false |
+
+UTF-16 lengths include terminating NULs. No argument, environment value, volume
+identifier or host path was emitted by this numeric diagnostic. The downstream
+literal adapter derives the explicit application path from its held executable
+handle using a volume-GUID name; argv[0] retains its separately quoted original
+path spelling. Their unequal lengths do not by themselves identify an error.
+
+The driver returned in 5.187 seconds; the probe observation took 4.8908274 seconds.
+The owned Job was assigned before resume and ended empty with zero active
+processes. No deadline, overflow or stream-read error was reported. The fresh
+inner synthetic fixture was retained after refusal. No policy was relaxed and
+no unchanged retry occurred.
+
+| Input | SHA256 |
+| --- | --- |
+| ZIP, artifact `12145046979` | `253f47827c78d6fbb51323e76ce56d45b8cd9cf38daa36d17a504dd471a1195f` |
+| Provenance | `83c1b606b6ba4ac1f7a03afb7d03ba095e4750aae4eec719967181546af2ee4d` |
+| Root verification receipt | `be08283bd701bd2e924ccad8b9c76db1a8c9eda3c9012bda0121a9de313229f1` |
+| Native probe image | `ad989718fcd8431f68d6fb9f8f4859e80f872c50b5cf4f816cfbca704a41b162` |
+| Actual live result | `83ed3da797c222a0a666256a2efbf0bb4ac10955cfd8f02522018a7e4580543f` |
+
+The evidence does not establish an upstream defect: this path uses reviewed
+downstream SDK overlays for literal argv, held executable custody and native
+process observation. A fixed comparison of the exact native launch parameters
+outside PSEC may help separate parameter/path compatibility from containment,
+but no such control is implemented or executed by this result.
 
 ## Read-only synthetic profile query: missing registered profile
 
