@@ -204,11 +204,16 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 	// Without a start, a refused call is still sent again for the restart
 	// budget (a restart or an upgrade may be under way), then reported.
 	const waited = "restarting or not running (no answer within 3 seconds); try again in a moment, or run `defenseclaw-gateway start`"
+	// An install or upgrade stops the gateway like an operator does and
+	// starts it again when it is done: a restart, not a stop (GAP-0140).
+	const installing = "DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done"
 	cases := map[string]struct {
 		prepare func(string)
 		env     []string
 		hint    string
 		retried bool
+		// notice is the systemMessage text, when it is not the start step.
+		notice string
 	}{
 		// The hook names the way back (SWEEP-16): an explicit stop is never
 		// undone by a hook, so the user has to start the gateway.
@@ -217,7 +222,11 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 		}, hint: "stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection"},
 		"install in progress": {prepare: func(dataDir string) {
 			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
-		}, hint: waited, retried: true},
+		}, hint: installing, retried: true, notice: "is being installed or upgraded for this account"},
+		"stopped by an upgrade in progress": {prepare: func(dataDir string) {
+			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
+			_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
+		}, hint: installing, retried: true, notice: "is being installed or upgraded for this account"},
 		"no configuration": {prepare: func(dataDir string) {
 			_ = os.Remove(filepath.Join(dataDir, "config.yaml"))
 		}, hint: waited, retried: true},
@@ -252,6 +261,12 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 			}
 			// Claude Code hides stderr of a hook that exits 0, so the next
 			// step is also on stdout as a systemMessage (GAP-0037).
+			if tc.notice != "" {
+				if !strings.Contains(run.stdout, tc.notice) || strings.Contains(run.stdout, "stopped with") {
+					t.Errorf("stdout = %q, want the notice %q and no operator-stop text", run.stdout, tc.notice)
+				}
+				return
+			}
 			assertGatewayDownNotice(t, run.stdout, tc.hint != "")
 		})
 	}

@@ -914,8 +914,9 @@ _dc_hook_elapsed_ms() {
 # an answer; otherwise the last curl status, and the caller fails as
 # unreachable within about 3 s instead of waiting for the restart to end:
 # blocked when the fail mode is closed, never allowed then. A timeout (28),
-# a gateway stopped with `defenseclaw-gateway stop`, and managed or socket
-# hooks are not sent again.
+# a gateway stopped with `defenseclaw-gateway stop` (unless an install or
+# upgrade, which stops it the same way, is in progress), and managed or
+# socket hooks are not sent again.
 defenseclaw_await_gateway() {
   local status="${1:-1}" post="${2:-}" launched="" tries=0
   local data="${DEFENSECLAW_HOME:-${DEFENSECLAW_AGENT_HOME:-${HOME}}/.defenseclaw}"
@@ -930,8 +931,10 @@ defenseclaw_await_gateway() {
       7|52|55|56) ;;
       *) return "$status" ;;
     esac
-    # An operator stop is not a restart: the fail mode applies at once.
-    [ ! -e "${data}/gateway.stopped" ] || return "$status"
+    # An operator stop is not a restart: the fail mode applies at once. An
+    # install or upgrade stops the gateway the same way and starts it again
+    # when it is done (.install.lock), so that one is (GAP-0140).
+    [ ! -e "${data}/gateway.stopped" ] || [ -e "${data}/.install.lock" ] || return "$status"
     if [ "$status" = 7 ] && [ -z "$launched" ]; then
       launched=1
       defenseclaw_gateway_cold_start || true
@@ -1105,7 +1108,9 @@ defenseclaw_unreachable_notice_json() {
   next="$(defenseclaw_unreachable_next_step)"
   [ -n "$next" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-  if [ -e "${data}/gateway.stopped" ]; then
+  if [ -e "${data}/.install.lock" ]; then
+    text='DefenseClaw is not checking this session: DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done. If it does not come back, run `defenseclaw-gateway start`.'
+  elif [ -e "${data}/gateway.stopped" ]; then
     text='DefenseClaw is not checking this session: the gateway was stopped with `defenseclaw-gateway stop`. Run `defenseclaw-gateway start` to resume protection.'
   elif [ -n "${_DC_GATEWAY_RESTART_WAITED:-}" ] && ! defenseclaw_own_config_invalid; then
     text='DefenseClaw is not checking this session: this account'"'"'s gateway is restarting or not running (no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection.'
@@ -1136,7 +1141,9 @@ defenseclaw_unreachable_next_step() {
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-  if [ -e "${data}/gateway.stopped" ]; then
+  if [ -e "${data}/.install.lock" ]; then
+    printf '%s' 'DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run `defenseclaw-gateway start` if it does not come back'
+  elif [ -e "${data}/gateway.stopped" ]; then
     printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection'
   elif defenseclaw_own_gateway_stopped && defenseclaw_own_config_invalid; then
     printf '%s' 'the gateway could not start because config.yaml does not load; run `defenseclaw config validate`, fix the file, then run `defenseclaw-gateway start`'
