@@ -653,6 +653,12 @@ controllers of a domain it reached before do not answer, that domain's
 lookups fail as above, and the caches are flushed when one answers again.
 Open Directory's own timing can add a few minutes to these intervals.
 
+**Linux outage timing.** On Linux the guardian asks SSSD itself whether it is
+online for each enrolled account's domain. While SSSD is offline, an account it
+lists without any membership beyond its primary group gets
+`default_lookup_failed`, and SSSD's caches are flushed once it is online
+again; see "While SSSD is offline" under [When Linux attributes a principal](/docs/enterprise/identity-sources#when-linux-attributes-a-principal).
+
 ## IDE plugin inventory
 
 DefenseClaw also lists every extension and plugin in each user's IDEs, with

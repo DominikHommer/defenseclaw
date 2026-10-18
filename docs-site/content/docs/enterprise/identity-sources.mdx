@@ -202,6 +202,22 @@ decides the domain of an SSSD account from its uid, not from its name:
   back. The gateway follows as soon as SSSD answers again. `sssctl
   domain-status` shows the state; `sudo systemctl kill -s SIGUSR2 sssd` makes
   SSSD go online at once.
+- **While SSSD is offline (standalone enterprise).** SSSD then answers from
+  its cache. An account whose memberships it never looked up (a first sign-in
+  during the outage, or a cleared cache) is listed in its primary group only,
+  which looks like an account in no other group. The root guardian therefore
+  asks SSSD over InfoPipe whether it is online for the SSSD domain of each
+  enrolled account (what `sssctl domain-status` reports), about once a minute
+  and every 15 seconds while it is offline. While it is offline, the lookup of
+  an account of that domain that SSSD lists in its primary group only (or only
+  in Domain Users, beside a private group) fails: the account gets the default
+  profile with `default_lookup_failed` (a new sandbox starts provisional), and
+  `status` and `verify` warn `directory_lookups_failing`. An account whose
+  memberships SSSD cached keeps them. When SSSD is online again, the guardian
+  runs `sss_cache -E` once (its memory cache included), and the account's
+  groups apply at its next lookup, within about 30 seconds. An account SSSD
+  lists in its primary group only is also looked up again every 2 minutes. A
+  host where InfoPipe does not answer is not put in an outage by this check.
 - **Standalone enterprise.** The root guardian asks InfoPipe which SSSD domain
   holds the uid (`Users.FindByID`, by uid, never by name) and reads the UPN of
   that user (`userPrincipalName`, listed in the `[ifp]` `user_attributes`).
