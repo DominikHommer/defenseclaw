@@ -733,16 +733,15 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
 		len(request.ResolvedWriteTargets) != 0 {
-		// Keep the client's positive protected-path evidence, inspected copy
-		// sources and directory facts. A generic ordinary or unknown write
+		// Keep the client's positive protected-path evidence and inspected copy
+		// sources. A generic ordinary or unknown write
 		// target does not override the established shell-ordering decision.
 		// The process-cwd alias needs its own client target to be provable.
 		var scoped map[string]string
 		for operand, resolved := range request.ResolvedWriteTargets {
 			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
 				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
-				strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix) ||
-				operand == hookpaths.CWDKey || isProtected(resolved) {
+				isProtected(resolved) {
 				if scoped == nil {
 					scoped = make(map[string]string)
 				}
