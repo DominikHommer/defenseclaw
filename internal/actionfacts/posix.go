@@ -303,12 +303,15 @@ func projectPOSIXStatement(
 				ID:              out.nextCommandID(),
 				ParentCommandID: parentID,
 				PipelineID:      pipelineID,
+				Kind:            CommandKindShellRedirect,
 				Dialect:         DialectPOSIX,
-				Effect:          EffectUncertain,
-				ArgvComplete:    false,
+				Effect:          EffectExecute,
+				ArgvComplete:    true,
 			}
 			projectPOSIXRedirects(stmt.Redirs, &command, out)
-			out.markPartial(IssueUnsupportedConstruct)
+			if !hasStaticRedirect(command.Redirects) {
+				out.markPartial(IssueUnsupportedConstruct)
+			}
 			return command, true
 		}
 		switch stmt.Cmd.(type) {
