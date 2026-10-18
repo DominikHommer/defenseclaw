@@ -33,7 +33,7 @@ jobs:
       - name: Check out the independently reviewed build source
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          ref: bc040eac4b721d7dbb0c0c5c35d6fdf0d0dc4a28
+          ref: 7c62a3cf6310c5f54f3635d13cec9ac376742bc3
           path: build-source
           persist-credentials: false
           sparse-checkout: |
@@ -55,19 +55,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir evidence
-          gh api repos/cisco-ai-defense/defenseclaw/actions/artifacts/12132548400 >evidence/artifact-api.json
+          gh api repos/cisco-ai-defense/defenseclaw/actions/artifacts/12133580892 >evidence/artifact-api.json
           python3 - <<'PY'
           import json
           from pathlib import Path
           item = json.loads(Path('evidence/artifact-api.json').read_text())
-          assert item['id'] == 12132548400 and item['expired'] is False
-          assert item['name'] == 'axis-mxc-v1-linux-contributor-bc040eac4b721d7dbb0c0c5c35d6fdf0d0dc4a28'
-          assert item['digest'] == 'sha256:238a3a0df5a07ddc7649bf6af09873749a77ec7399f233409256cfad9f9bd338'
-          assert item['workflow_run']['id'] == 39116926930
-          assert item['workflow_run']['head_sha'] == 'bc040eac4b721d7dbb0c0c5c35d6fdf0d0dc4a28'
+          assert item['id'] == 12133580892 and item['expired'] is False
+          assert item['name'] == 'axis-mxc-v1-linux-contributor-7c62a3cf6310c5f54f3635d13cec9ac376742bc3'
+          assert item['digest'] == 'sha256:7d7cf06eda40bad4b5b9d4dd4a17b23e6f1ffd9af2164cd41bf3bfa3cce3a81c'
+          assert item['workflow_run']['id'] == 39118099423
+          assert item['workflow_run']['head_sha'] == '7c62a3cf6310c5f54f3635d13cec9ac376742bc3'
           PY
-          gh run download 39116926930 --repo cisco-ai-defense/defenseclaw \
-            --name axis-mxc-v1-linux-contributor-bc040eac4b721d7dbb0c0c5c35d6fdf0d0dc4a28 --dir locked-artifact
+          gh run download 39118099423 --repo cisco-ai-defense/defenseclaw \
+            --name axis-mxc-v1-linux-contributor-7c62a3cf6310c5f54f3635d13cec9ac376742bc3 --dir locked-artifact
 
       - name: Verify every file before making the probe executable
         shell: bash
@@ -75,8 +75,8 @@ jobs:
           set -euo pipefail
           python3 live-source/test/e2e/axis/mxc-runner/verify_live_artifact.py \
             --artifact locked-artifact/build-artifact --source-checkout build-source \
-            --provenance-sha256 fb8159f997c84caec30e7e6ad2766b84952428f240533eb66597d7d2671a2885 \
-            --build-commit bc040eac4b721d7dbb0c0c5c35d6fdf0d0dc4a28 --build-run 39116926930 \
+            --provenance-sha256 095d08d042af01210b2fe796746599586ca374fc60b974fc7d33b9e6def12a1a \
+            --build-commit 7c62a3cf6310c5f54f3635d13cec9ac376742bc3 --build-run 39118099423 \
             --receipt evidence/artifact-verified.json
           python3 -m unittest discover -s live-source/test/e2e/axis/mxc-runner -p 'test_*.py'
 

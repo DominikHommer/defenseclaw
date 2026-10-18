@@ -399,13 +399,22 @@ fn verify_environment(paths: &Paths) -> Result<()> {
             "private environment value differs for {name}"
         );
     }
-    for (name, _) in std::env::vars_os() {
+    for (name, value) in std::env::vars_os() {
         let key = name.to_str().context("non-UTF8 environment key")?;
-        ensure!(
-            expected.iter().any(|(allowed, _)| key == allowed),
-            "unexpected environment key"
-        );
+        if !expected.iter().any(|(allowed, _)| key == allowed) {
+            verify_implicit_pwd(key, &value, &paths.workspace)?;
+        }
     }
+    Ok(())
+}
+
+fn verify_implicit_pwd(key: &str, value: &OsStr, private_cwd: &Path) -> Result<()> {
+    // Bubblewrap sets PWD to --chdir after --clearenv, even for literal argv.
+    ensure!(key == "PWD", "unexpected environment key");
+    ensure!(
+        value == private_cwd.as_os_str(),
+        "private PWD value differs"
+    );
     Ok(())
 }
 
@@ -1178,6 +1187,18 @@ fn contains(bytes: &[u8], needle: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn implicit_pwd_is_only_the_exact_private_cwd() {
+        let cwd = Path::new("/tmp/fixed-private/workspace");
+        assert!(
+            verify_implicit_pwd("PWD", OsStr::new("/tmp/fixed-private/workspace"), cwd).is_ok()
+        );
+        assert!(verify_implicit_pwd("PWD", OsStr::new("/tmp/other/workspace"), cwd).is_err());
+        for key in ["SHLVL", "_", "DC_AXIS_INHERIT_CANARY"] {
+            assert!(verify_implicit_pwd(key, cwd.as_os_str(), cwd).is_err());
+        }
+    }
 
     #[test]
     fn private_fixture_is_owner_only_before_payload_creation() {

@@ -568,14 +568,23 @@ fn verify_environment(paths: &Paths) -> Result<u16> {
             "private environment value differs for {name}"
         );
     }
-    for (name, _) in std::env::vars_os() {
+    for (name, value) in std::env::vars_os() {
         let key = name.to_str().context("non-UTF8 environment key")?;
-        ensure!(
-            expected.iter().any(|(allowed, _)| key == allowed),
-            "unexpected child environment key"
-        );
+        if !expected.iter().any(|(allowed, _)| key == allowed) {
+            verify_implicit_pwd(key, &value, &paths.work)?;
+        }
     }
     Ok(port)
+}
+
+fn verify_implicit_pwd(key: &str, value: &OsStr, private_cwd: &Path) -> Result<()> {
+    // Seatbelt's MXC runner sets PWD to the requested cwd after clearing env.
+    ensure!(key == "PWD", "unexpected child environment key");
+    ensure!(
+        value == private_cwd.as_os_str(),
+        "private PWD value differs"
+    );
+    Ok(())
 }
 
 fn fixed_child(case: Case) -> Result<i32> {
@@ -1068,6 +1077,18 @@ fn fixed_child_diagnostic(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn implicit_pwd_is_only_the_exact_private_cwd() {
+        let cwd = Path::new("/private/tmp/fixed-private/work");
+        assert!(
+            verify_implicit_pwd("PWD", OsStr::new("/private/tmp/fixed-private/work"), cwd).is_ok()
+        );
+        assert!(verify_implicit_pwd("PWD", OsStr::new("/private/tmp/other/work"), cwd).is_err());
+        for key in ["SHLVL", "_", SUPERVISOR_ONLY_ENV] {
+            assert!(verify_implicit_pwd(key, cwd.as_os_str(), cwd).is_err());
+        }
+    }
 
     #[test]
     fn private_fixture_is_owner_only_before_payload_creation() {
