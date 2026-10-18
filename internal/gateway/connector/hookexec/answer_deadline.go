@@ -53,6 +53,16 @@ const managedGatewayNoAnswerReason = "enterprise_managed_gateway_no_answer"
 // that render the reason themselves.
 const ManagedGatewayNoAnswerReason = managedGatewayNoAnswerReason
 
+// ErrManagedGatewayNoAnswer is wrapped by a managed hook transport error
+// (ExchangeForeignHookSession) that the answer budget ended.
+var ErrManagedGatewayNoAnswer = errGatewayNoAnswer
+
+// ManagedGatewayNoAnswer reports an error from a managed hook transport that
+// the answer budget of a tool call ended.
+func ManagedGatewayNoAnswer(err error) bool {
+	return errors.Is(err, errGatewayNoAnswer)
+}
+
 // perUserGatewayNoAnswerReason is the hook-failure reason of a per-user hook
 // whose gateway gave no decision within hookAnswerBudget.
 const perUserGatewayNoAnswerReason = "gateway did not answer in time"

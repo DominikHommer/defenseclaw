@@ -67,6 +67,12 @@ func ExchangeForeignHookSession(ctx context.Context, opts Options, connector str
 	if opts.ManagedStandalone && addr == "" {
 		addr = "127.0.0.1:1" // the Unix transport dials the socket
 	}
+	// The exchange of a tool call is held to the hook's answer budget,
+	// counted from the invocation like the hook request after it: a gateway
+	// that accepted the exchange but gives no answer (it is stopping, starting
+	// or too busy) ends it in time, and the guard denies the call.
+	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, answerDeadline(opts, started))
+	defer releaseAnswer()
 	// A call queued in the socket systemd holds across a restart is ended
 	// at the restart budget, like the hook request (Linux).
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
@@ -94,13 +100,15 @@ func ExchangeForeignHookSession(ctx context.Context, opts Options, connector str
 	}
 	stopWatch()
 	if err != nil {
-		// Keep why the watch ended the call: the caller denies with the
-		// restart named.
-		if cause := context.Cause(ctx); errors.Is(cause, errGatewayRestarting) || errors.Is(cause, errGatewayStartFailing) {
+		// Keep why the watch or the answer budget ended the call: the caller
+		// denies with the cause named.
+		if cause := context.Cause(ctx); errors.Is(cause, errGatewayRestarting) || errors.Is(cause, errGatewayStartFailing) ||
+			errors.Is(cause, errGatewayNoAnswer) {
 			return nil, fmt.Errorf("%w: %v", cause, err)
 		}
 		return nil, err
 	}
+	stopAnswer()
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("session gateway returned HTTP %d", response.StatusCode)

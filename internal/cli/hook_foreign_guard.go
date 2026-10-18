@@ -451,6 +451,10 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 			// The gateway was still restarting at the end of the restart
 			// budget, counted from the invocation (#1278).
 			reason = hookexec.ManagedGatewayRestartingReason
+		} else if hookexec.ManagedGatewayNoAnswer(err) {
+			// The gateway took the exchange of a tool call but gave no
+			// answer within the hook's answer budget.
+			reason = hookexec.ManagedGatewayNoAnswerReason
 		} else if hookexec.ManagedGatewayPortHeld(err) {
 			// The gateway service runs but another process answers on its
 			// port: say so, not that the session record is unavailable

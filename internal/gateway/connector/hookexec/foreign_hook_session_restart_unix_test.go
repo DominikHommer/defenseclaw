@@ -93,6 +93,59 @@ func TestForeignHookSessionExchangeFailsClosedWhenTheHookSocketStaysMissing(t *t
 	}
 }
 
+// B-01 review item 2: a gateway that accepted the foreign-hook session
+// exchange of a tool call but does not answer (stopping, starting, busy) ends
+// the exchange at the hook's answer budget, counted from the invocation, not
+// at the exchange's own deadline (up to twice the scan budget, 10 s). The
+// guard then denies. A session event keeps the exchange's whole deadline.
+func TestStalledForeignHookSessionExchangeEndsAtTheAnswerBudget(t *testing.T) {
+	shortAnswerBudget(t, 400*time.Millisecond)
+	previousProbe := standaloneGatewayServiceProbe
+	standaloneGatewayServiceProbe = func(context.Context) (gatewayServiceState, error) {
+		return gatewayServiceState{Active: "active", Sub: "running"}, nil
+	}
+	t.Cleanup(func() { standaloneGatewayServiceProbe = previousProbe })
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = io.WriteString(w, `{"deny":false}`)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { close(release); _ = server.Close() })
+
+	opts := standaloneExchangeOptions(socket, time.Now())
+	opts.Event = "PreToolUse"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	started := time.Now()
+	response, err := ExchangeForeignHookSession(ctx, opts, "claudecode", []byte(`{}`))
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("the stalled exchange of a tool call waited %s", elapsed)
+	}
+	if err == nil || response != nil || !ManagedGatewayNoAnswer(err) {
+		t.Fatalf("exchange = %q, error %v; want no answer and the no-answer cause", response, err)
+	}
+
+	// A session start is not a tool call: it keeps the exchange deadline.
+	opts = standaloneExchangeOptions(socket, time.Now())
+	opts.Event = "SessionStart"
+	short, cancelShort := context.WithTimeout(context.Background(), 900*time.Millisecond)
+	defer cancelShort()
+	if _, err := ExchangeForeignHookSession(short, opts, "claudecode", []byte(`{}`)); err == nil || ManagedGatewayNoAnswer(err) {
+		t.Fatalf("a session-start exchange ended with %v; want its own deadline, not the answer budget", err)
+	}
+}
+
 // #1278: on Linux systemd holds the hook socket across a restart, so the
 // exchange connects and waits for an answer no gateway gives yet. It ends
 // at the restart budget of the invocation, with the restart named, not at

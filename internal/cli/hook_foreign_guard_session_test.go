@@ -136,6 +136,14 @@ func TestForeignHookGuardDeniesWhenGatewaySessionStateIsUnavailable(t *testing.T
 	if invocation.Before(before) || invocation.After(time.Now()) || !restarting.StartedAt.Equal(invocation) || !scanDeadline.After(invocation) {
 		t.Fatalf("the exchange must get the invocation start: started %v, hook start %v, scan deadline %v", invocation, restarting.StartedAt, scanDeadline)
 	}
+	// B-01: a gateway that took the exchange of a tool call but gave no
+	// answer within the answer budget blocks with the no-answer reason.
+	hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+		return enterprisepolicy.GuardDecision{}, fmt.Errorf("session exchange: %w", hookexec.ErrManagedGatewayNoAnswer)
+	}
+	if silent := fixture.runEvent(t, "claudecode", "PreToolUse", "session_id", "s-4"); silent.ManagedRuntimeFailure != hookexec.ManagedGatewayNoAnswerReason {
+		t.Fatalf("a gateway that gives no answer must block with the no-answer reason: %q", silent.ManagedRuntimeFailure)
+	}
 }
 
 // A hook that appears after the session started denies the calls that find
