@@ -10,7 +10,10 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"golang.org/x/sys/unix"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -148,5 +151,49 @@ func TestStaticELFRejectsLoaderAndOutOfRangeEntryAsData(t *testing.T) {
 		if validateStaticELF(data) == nil {
 			t.Fatal("invalid image header admitted")
 		}
+	}
+}
+
+func TestHostFixtureParentNeverTreatsUnmappedUIDAsRootProof(t *testing.T) {
+	for _, uid := range []uint32{0, 1001, 65534} {
+		st := unix.Stat_t{Mode: unix.S_IFDIR | unix.S_ISVTX | 0777, Uid: uid}
+		if trustedTemporaryParent(st) != (uid == 0) {
+			t.Fatal("unmapped or user ownership became host-root proof")
+		}
+	}
+	if trustedTemporaryParent(unix.Stat_t{Mode: unix.S_IFDIR | 0777, Uid: 0}) {
+		t.Fatal("nonsticky host parent admitted")
+	}
+}
+func TestHostFixtureCreationRetainsExactHeldParentAndFreshRoot(t *testing.T) {
+	parentPath := t.TempDir()
+	parent, err := openDirectory(parentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	f, err := createHostFixtureUnder(parent, parentPath, strings.Repeat("a", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.close()
+	if err := privateDirectory(f.root); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := os.Open(filepath.Join(parentPath, "dc-axis-native-peer-"+strings.Repeat("a", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	a, err := opened.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := f.root.Stat()
+	if err != nil || !os.SameFile(a, b) {
+		t.Fatal("held root differs from fresh created object")
+	}
+	if again, err := createHostFixtureUnder(parent, parentPath, strings.Repeat("a", 32)); err == nil || again != nil {
+		t.Fatal("existing fixture reused")
 	}
 }

@@ -7,8 +7,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"debug/elf"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"golang.org/x/sys/unix"
 	"io"
 	"os"
@@ -141,4 +144,104 @@ func sealBytes(data []byte, expected string) (_ *os.File, resultErr error) {
 	}
 	accepted = true
 	return file, nil
+}
+
+// fixtureCapabilities are created by the trusted host driver before any USER
+// namespace clone. The parent owner check is never inferred from overflow UID.
+type fixtureCapabilities struct {
+	parent, root *os.File
+	path         string
+}
+
+func (f *fixtureCapabilities) close() error {
+	if f == nil {
+		return nil
+	}
+	var errs []error
+	if f.root != nil {
+		errs = append(errs, f.root.Close())
+	}
+	if f.parent != nil {
+		errs = append(errs, f.parent.Close())
+	}
+	return errors.Join(errs...)
+}
+func trustedTemporaryParent(st unix.Stat_t) bool {
+	return st.Mode&unix.S_IFMT == unix.S_IFDIR && st.Uid == 0 && st.Mode&unix.S_ISVTX != 0
+}
+func newHostFixture() (*fixtureCapabilities, error) {
+	parent, err := openDirectory("/tmp")
+	if err != nil {
+		return nil, err
+	}
+	defer parent.Close()
+	var st unix.Stat_t
+	if unix.Fstat(int(parent.Fd()), &st) != nil || !trustedTemporaryParent(st) {
+		return nil, errors.New("fixed host temporary parent refused")
+	}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return nil, err
+	}
+	return createHostFixtureUnder(parent, "/tmp", hex.EncodeToString(random[:]))
+}
+func createHostFixtureUnder(parent *os.File, displayParent, nonce string) (_ *fixtureCapabilities, resultErr error) {
+	if parent == nil || len(nonce) != 32 || strings.Trim(nonce, "0123456789abcdef") != "" {
+		return nil, errors.New("fixed fixture identity refused")
+	}
+	name := "dc-axis-native-peer-" + nonce
+	if err := unix.Mkdirat(int(parent.Fd()), name, 0700); err != nil {
+		return nil, err
+	}
+	f := &fixtureCapabilities{path: filepath.Join(displayParent, name)}
+	// A partial creation is returned for exact evidence and handle cleanup; the
+	// fresh task-created directory is retained on every outcome.
+	fd, err := unix.FcntlInt(parent.Fd(), unix.F_DUPFD_CLOEXEC, 3)
+	if err != nil {
+		return f, err
+	}
+	f.parent = os.NewFile(uintptr(fd), "fixed-held-host-tmp-parent")
+	f.root, err = openRelative(parent, name, unix.O_RDONLY|unix.O_DIRECTORY)
+	if err != nil {
+		return f, err
+	}
+	return f, privateDirectory(f.root)
+}
+func checkInheritedFixture(parent, root *os.File) error {
+	if parent == nil || root == nil || privateDirectory(root) != nil {
+		return errors.New("fixed held fixture root refused")
+	}
+	var st unix.Stat_t
+	if unix.Fstat(int(parent.Fd()), &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Mode&unix.S_ISVTX == 0 {
+		return errors.New("fixed held fixture parent refused")
+	}
+	// Display strings correlate retained objects only; never reopen through them.
+	var value [512]byte
+	n, err := unix.Readlink("/proc/self/fd/"+fmt.Sprint(root.Fd()), value[:])
+	if err != nil || n <= 0 || n >= len(value) {
+		return errors.New("fixed fixture display refused")
+	}
+	display := string(value[:n])
+	name := filepath.Base(display)
+	nonce := strings.TrimPrefix(name, "dc-axis-native-peer-")
+	if filepath.Dir(display) != "/tmp" || len(nonce) != 32 || strings.Trim(nonce, "0123456789abcdef") != "" || name != "dc-axis-native-peer-"+nonce {
+		return errors.New("fixed fixture display refused")
+	}
+	observed, err := openRelative(parent, name, unix.O_RDONLY|unix.O_DIRECTORY)
+	if err != nil {
+		return err
+	}
+	defer observed.Close()
+	a, err := observed.Stat()
+	if err != nil {
+		return err
+	}
+	b, err := root.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(a, b) {
+		return errors.New("fixed fixture held identity differs")
+	}
+	return nil
 }

@@ -1,18 +1,18 @@
 # Fixed Linux outer driver
 
 This contributor driver owns one run of the reviewed four-case native peer
-wrapper in a separate user/PID/network/IPC/UTS namespace. It does not activate
+wrapper in a separate user/mount/PID/network/IPC/UTS namespace. It does not activate
 the AXIS customer provider or qualify the common launch gate.
 
-The fixed input wrapper was built at `efc2c3b304690320447dee57f01a51fc6df25060`
-in Actions run `39150168377`, artifact `12144044675`. Two independent inert
+The fixed input wrapper was built at `6eec7b67ff8ff2d79dd32d362faa72e52efbac6c`
+in Actions run `39154280846`, artifact `12146611161`. Two independent inert
 reviews checked its source, dependency, archive, provenance and static image.
 The image SHA-256 is
-`cd72428ee90356d4a9febe41bc8a131386c92dff43ad07871d74ec9763085233`
+`fddd52c5ea5093de7e00128f85a5487d7fcce904ced5e6e669e1e4ea5127ff1c`
 (3,432,574 bytes); archive SHA-256 is
-`038fcd824a661d4ab81ccdc8b29ef3201cc47453f8b657ac7753750002084fc2`;
+`bd6a71983f51505617d95bf630fd5b89cd7f393c3835213689bfb8ea36b7b40f`;
 provenance SHA-256 is
-`46e190705132b0e1098e37ee84af2ab775fc0f92a581c4411c822f7ebc19b2d7`.
+`da1572b265ca1a81e913df1c5754122418ca03290cc0cf1db3b273a237603a45`.
 Its fixed combined peer/payload receipt is
 `9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db`.
 These are compiled source pins. There is no caller-supplied image, digest,
@@ -34,8 +34,9 @@ An atomic pidfd owns a new outer PID namespace. A retained creating OS thread
 waits for its init; the init installs `PR_SET_PDEATHSIG(SIGKILL)` before file
 inspection. READY precedes one exact GRANT; EOF before GRANT refuses execution
 and covers parent death before prctl. After GRANT the bootstrap execs the held
-sealed wrapper with an empty environment. All explicit non-stdio descriptors
-close on that exec. The creator-thread death caveat is availability: an early
+sealed wrapper with an empty environment. Only the fixed held fixture parent
+and root survive that trusted-wrapper exec as FD8/FD9; other explicit non-stdio
+descriptors close. No fixture parent/outside handle reaches a guest payload. The creator-thread death caveat is availability: an early
 unexpected thread death terminates the owned init. No raw PID/group/name lookup
 authorizes cleanup. An inability to obtain atomic custody never grants exec.
 
@@ -78,3 +79,18 @@ This changes the private FD handoff. Existing e054 peer and d056 wrapper/c8d4
 driver artifacts remain historical evidence and cannot qualify this source.
 Fresh source-bound artifacts, registry pins and one separately reviewed runtime
 attempt are required. The two earlier native failures remain failures.
+
+## Host fixture capability revision
+
+Before the first clone, the trusted driver opens held `/tmp` without links and
+requires its original host UID0 and sticky directory mode. It creates one fresh
+random `dc-axis-native-peer-<32hex>` directory with mode0700, verifies current-user
+ownership, and retains both directory handles. No unmapped/overflow UID is proof
+of host ownership. These two capabilities cross the trusted bootstrap/wrapper,
+then the wrapper gives worker-owned duplicates at fixed FD7/FD8. Label/inode
+correlation is checked without selecting a source through the display path.
+Fixtures, including partial creation, are retained on every outcome.
+
+This new handoff requires a newly reviewed wrapper and driver. The prior efc/742
+pair and failed native runs remain evidence for their exact earlier source only.
+The peer, static Bubblewrap, payload and combined receipt do not change here.

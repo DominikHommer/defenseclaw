@@ -65,6 +65,16 @@ func runDriver(ctx context.Context, opts options, admission wrapperAdmission, re
 	}
 	defer func() { resultErr = errors.Join(resultErr, self.Close()) }()
 	record["driver_self_image_sha256"], record["reviewed_wrapper_sha256"] = selfHash, admission.SHA
+	record["driver_stage"] = "host_fixture"
+	fixture, err := newHostFixture()
+	if fixture != nil {
+		record["synthetic_fixture"], record["fixture_retained"] = fixture.path, true
+		defer func() { resultErr = errors.Join(resultErr, fixture.close()) }()
+	}
+	if err != nil {
+		return err
+	}
+	record["host_fixture_parent_verified_before_clone"] = true
 	grantRead, grantWrite, err := os.Pipe()
 	if err != nil {
 		return err
@@ -77,7 +87,7 @@ func runDriver(ctx context.Context, opts options, admission wrapperAdmission, re
 	}
 	defer readyRead.Close()
 	var childFiles []*os.File
-	for _, image := range []*os.File{self, wrapper} {
+	for _, image := range []*os.File{self, wrapper, fixture.parent, fixture.root} {
 		fd, err := unix.FcntlInt(image.Fd(), unix.F_DUPFD_CLOEXEC, 3)
 		if err != nil {
 			_ = grantRead.Close()
@@ -118,6 +128,7 @@ func runDriver(ctx context.Context, opts options, admission wrapperAdmission, re
 		record["stdout_truncated"], record["stderr_truncated"] = stdoutOverflow, stderrOverflow
 		resultErr = errors.Join(resultErr, cleanupErr)
 	}()
+	record["driver_stage"] = "wrapper_namespace_start"
 	record["wrapper_namespace_start_attempted"] = true
 	if err := owner.start(ctx, command, &pidfd, childFiles); err != nil {
 		return err
@@ -200,6 +211,12 @@ func bootstrap(args []string, admission wrapperAdmission) (map[string]any, *clea
 		return record, owner, err
 	}
 	grant, ready, self, wrapper := os.NewFile(4, "fixed-outer-grant"), os.NewFile(5, "fixed-outer-ready"), os.NewFile(6, "fixed-outer-self"), os.NewFile(7, "fixed-outer-wrapper")
+	fixtureParent, fixtureRoot := os.NewFile(8, "fixed-host-fixture-parent"), os.NewFile(9, "fixed-host-fixture-root")
+	defer fixtureParent.Close()
+	defer fixtureRoot.Close()
+	if err := checkInheritedFixture(fixtureParent, fixtureRoot); err != nil {
+		return record, owner, err
+	}
 	defer grant.Close()
 	defer ready.Close()
 	defer self.Close()

@@ -35,7 +35,7 @@ type wrapperAdmission struct {
 // two reviewers. This admits only the fixed contributor wrapper as an input;
 // the driver needs its own build/image review before any run. No CLI/env override.
 var liveAdmission = wrapperAdmission{Reviewed: true,
-	SHA:  "cd72428ee90356d4a9febe41bc8a131386c92dff43ad07871d74ec9763085233",
+	SHA:  "fddd52c5ea5093de7e00128f85a5487d7fcce904ced5e6e669e1e4ea5127ff1c",
 	Size: 3432574,
 }
 
