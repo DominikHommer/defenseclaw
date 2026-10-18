@@ -324,7 +324,8 @@ var openShellExecDockerContext = func(ctx context.Context) (string, error) {
 // enterprise.openshell.e2fsprogs_dir that holds mke2fs and debugfs, found
 // by the rule ensure checks (openshell.AdminE2fsprogsToolDir, GAP-0506),
 // when it passes the managed trust check. Without an administrator value,
-// only the account's own build is used, never a Homebrew keg (GAP-0004).
+// the account's own build wins before the package fallback; a Homebrew keg
+// is never selected (GAP-0004).
 // The managed doctor calls the same selection rule.
 func openShellE2fsprogs(adminDir, home string) (string, error) {
 	dir, problem := openshell.ManagedE2fsprogsToolDir(adminDir, home, os.Getuid(),

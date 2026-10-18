@@ -23,9 +23,16 @@ the same driver; see [MicroVMs with KVM](/docs/sandboxes/linux#run-sandboxes-in-
 On a Mac your organization manages with a standalone enterprise install, an
 administrator sets the policy and provides OpenShell (or lets each user's
 daemon download it at the first sandbox), and `e2fsprogs` must come from the
-administrator's `enterprise.openshell.e2fsprogs_dir` or the user's own
-`~/.local/opt/e2fsprogs`. See
+administrator's `enterprise.openshell.e2fsprogs_dir`, the user's own
+`~/.local/opt/e2fsprogs`, or the managed package's bundled fallback. The
+administrator setting overrides both other sources. The managed setup mode
+does not need Homebrew or Xcode tools on the user's account. See
 [Sandboxes on managed computers](/docs/enterprise/sandboxes).
+The per-user MicroVM finder also checks the e2fsprogs kegs under
+`/opt/homebrew` and `/usr/local` directly, even when `brew` is absent from
+the shell's `PATH`. On a managed computer, use the explicit
+`enterprise.openshell.e2fsprogs_dir` override for an administrator-owned host
+install; managed setup never borrows another account's Homebrew keg.
 
 ## How it fits together
 
