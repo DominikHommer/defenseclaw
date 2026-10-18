@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -315,6 +316,56 @@ func TestOwnedPolicyViewsDistinguishProfiles(t *testing.T) {
 	ta.fresh()
 	ta.printStatus(&sandboxapi.Status{Managed: &sandboxapi.ManagedStatus{Profile: "engineering"}})
 	has(t, ta.output(), "Your policy", "organization profile engineering")
+}
+
+// #1199 (rel GAP-0168, GAP-0607): `sandbox status NAME` named the pack
+// alone, so after a regroup nothing said which organization profile the
+// sandbox now runs under; and a stop the organization's policy made had no
+// reason there.
+func TestSandboxStatusNamesTheCurrentProfileAndThePolicyStop(t *testing.T) {
+	ta := newTestApp(t, "")
+	sb := &sandboxapi.Sandbox{Name: "dc-a", Harness: "claudecode", Phase: "ready", Pack: "contractors", Profile: "balanced",
+		NetworkMode: "allowlist", Approvals: "triage", WorkdirMode: "copy", OrganizationProfile: "engineering",
+		PolicyDigest: "sha256:41a7a6cf0123456789abcdef"}
+	ta.printSandbox(sb)
+	out := ta.output()
+	has(t, out, "Your policy", "organization profile engineering", "(yours)", "policy explain", "pack contractors")
+	if strings.Contains(out, "Stopped") {
+		t.Fatalf("a running sandbox shows a stop:\n%s", out)
+	}
+	ta.fresh()
+	sb.Phase, sb.OrganizationProfile, sb.PolicyDigest = "stopped", "", ""
+	sb.StopReason = sandboxapi.ProfileStop("host ports", "claudecode", "it-help@example.com")
+	ta.printSandbox(sb)
+	has(t, ta.output(), "Stopped", "your profile no longer allows host ports")
+	if strings.Contains(ta.output(), "Your policy") {
+		t.Fatalf("a revoked sandbox names a current profile:\n%s", ta.output())
+	}
+}
+
+// GAP-0080: `sandbox status NAME` asks the daemon to confirm the running
+// sandbox's policy with the organization's gateway first; the other reads of
+// a sandbox do not.
+func TestSandboxStatusAsksForTheConfirmedPolicy(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.add(sandboxapi.Sandbox{Name: "dc-a", Harness: "claudecode", Phase: "ready", Pack: "balanced",
+		Profile: "balanced", NetworkMode: "allowlist", Approvals: "triage", WorkdirMode: "copy", OrganizationProfile: "contractors"})
+	if err := ta.Status(context.Background(), "dc-a", OutputText); err != nil {
+		t.Fatal(err)
+	}
+	calls := ta.daemon.callsTo(http.MethodGet, sandboxapi.PathSandboxes+"/dc-a")
+	if len(calls) == 0 || calls[0].Query != sandboxapi.QueryConfirm+"="+sandboxapi.ConfirmPolicy {
+		t.Fatalf("status reads = %+v, want the confirmed policy asked for", calls)
+	}
+	has(t, ta.output(), "organization profile contractors")
+	ta.fresh()
+	if _, err := ta.daemon.client().Get(context.Background(), "dc-a"); err != nil {
+		t.Fatal(err)
+	}
+	all := ta.daemon.callsTo(http.MethodGet, sandboxapi.PathSandboxes+"/dc-a")
+	if last := all[len(all)-1]; last.Query != "" {
+		t.Fatalf("a plain read asked for the confirmed policy: %+v", last)
+	}
 }
 
 func TestBannerShowsTheManagedPolicyLine(t *testing.T) {

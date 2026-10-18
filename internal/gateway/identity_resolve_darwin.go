@@ -58,7 +58,7 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 		spool = &record
 	}
 	if err := openDirectoryGroupsUnavailable(spool, own.Directory == useridentity.DirectoryLocal, account.Gid, primaryGroupNamed,
-		openDirectoryOffline, now); err != nil {
+		openDirectoryOffline, directoryUnreachable, now); err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
 	if ok {

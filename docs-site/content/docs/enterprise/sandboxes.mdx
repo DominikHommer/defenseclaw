@@ -1025,8 +1025,20 @@ connection picks the change up on its next poll.
 | Kind of field | What happens |
 | --- | --- |
 | Live fields (egress lists, approvals, `request_access`, silence, process tree, retention) | Switch at once, tighter or looser, and the person sees a status line |
-| Tighter create-time fields (for example mounts no longer allowed) | The violating sandbox is stopped; the notice begins "This sandbox was stopped: your profile no longer allows" and names the field and the command to start again. Only after a verified match, never on a failed lookup. |
+| Tighter create-time fields (for example mounts no longer allowed) | The violating sandbox is stopped; the notice begins "This sandbox was stopped: your profile no longer allows" and names the field and the command to start again. A sandbox started with `--host-port` under a profile that no longer allows host ports gets "no longer allows host ports" and the advice to start it again without `--host-port`. The agent's session ends with it, `sandbox activity` shows it, and `sandbox status NAME` repeats it on a `Stopped` row. Only after a verified match, never on a failed lookup. |
 | Looser create-time fields | Apply at the next run |
+
+`sandbox status NAME` shows the organization profile the sandbox's
+registration matches now on its `Your policy` row, with the digest of that
+same match, as `sandbox policy explain` names them. For a running sandbox,
+`sandbox status NAME` first asks your organization's gateway for the
+sandbox's current policy, so after a regroup it names the new profile at once,
+or shows the stop when the new profile no longer allows the sandbox; if the
+gateway does not answer within 2 seconds, it shows the policy DefenseClaw last
+confirmed. The `Policy` row above it keeps naming the policy pack and network
+profile the sandbox runs under. A sandbox the organization's policy stopped
+keeps showing the pack and network profile it ran with, also after the
+sandbox service restarts.
 
 A person whose group changes to one that no longer allows sandboxes sees this
 when the sandbox stops under them. The session summary says where the work is,
@@ -1040,7 +1052,9 @@ and then starts under `default_profile`, marked
 or failed group lookup never refuses a create or a hook. The computer must
 still know the account itself: OpenShell reaches every sandbox over ssh as the
 person, and ssh refuses an account the computer can't look up (on Linux, SSSD
-stopped, or no cached entry for the account). Then a new `sandbox run` stops
+stopped, or no cached entry for the account). A new `sandbox run` then waits
+up to 10 seconds for the computer to name the account again, and starts if it
+does (an SSSD restart, say). Otherwise it stops
 with "Your account can't be looked up on this computer right now. Try again in
 a moment.", says that this isn't the organization's sandbox policy and names
 the request-access contact for when it lasts, although `sandbox policy

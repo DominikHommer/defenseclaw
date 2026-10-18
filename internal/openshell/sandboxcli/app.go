@@ -58,6 +58,9 @@ type API interface {
 	Status(ctx context.Context) (*sandboxapi.Status, error)
 	List(ctx context.Context) ([]sandboxapi.Sandbox, error)
 	Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
+	// GetConfirmed is Get with the running sandbox's policy confirmed with
+	// the organization's gateway first, on a managed computer (status).
+	GetConfirmed(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
 	Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error)
 	Delete(ctx context.Context, name string, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error)
 	Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error)

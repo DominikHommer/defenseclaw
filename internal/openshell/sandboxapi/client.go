@@ -342,8 +342,30 @@ func (c *Client) List(ctx context.Context) ([]Sandbox, error) {
 
 // Get returns one sandbox.
 func (c *Client) Get(ctx context.Context, name string) (*Sandbox, error) {
+	return c.get(ctx, name, nil)
+}
+
+// QueryConfirm, with the value ConfirmPolicy, asks a managed computer's
+// sandbox daemon to confirm a running sandbox's policy with the
+// organization's gateway before it answers a Get (GetConfirmed). Other
+// daemons ignore it.
+const (
+	QueryConfirm  = "confirm"
+	ConfirmPolicy = "policy"
+)
+
+// GetConfirmed is Get for `sandbox status NAME`: on a managed computer the
+// daemon first asks the organization's gateway for the running sandbox's
+// current policy, so the status names the profile a regroup moved it to
+// as `sandbox policy explain` does, or shows the stop the new profile asked
+// for (GAP-0080). The daemon's 60 s poll otherwise decides when it learns.
+func (c *Client) GetConfirmed(ctx context.Context, name string) (*Sandbox, error) {
+	return c.get(ctx, name, url.Values{QueryConfirm: {ConfirmPolicy}})
+}
+
+func (c *Client) get(ctx context.Context, name string, query url.Values) (*Sandbox, error) {
 	var out Sandbox
-	if err := c.do(ctx, http.MethodGet, sandboxPath(name), nil, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, sandboxPath(name), query, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

@@ -819,9 +819,11 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 		return
 	}
+	provisional := reg.Provisional
 	current := sandboxrelay.CurrentPolicy{
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
-		Live: sandboxLiveFields(floor), Digest: reg.EffectiveDigest, Profile: reg.Profile, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
+		Live: sandboxLiveFields(floor), Digest: reg.EffectiveDigest, Profile: reg.Profile, Provisional: &provisional,
+		UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
 	minProfile := floor.MinProfile
 	current.MinProfile = &minProfile

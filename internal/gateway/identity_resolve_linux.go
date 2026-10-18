@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -45,7 +46,15 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
-	if record, ok := readIdentitySpoolFactsForAccount(key, account.Name, now); ok {
+	record, ok := readIdentitySpoolFactsForAccount(key, account.Name, now)
+	var spool *enterprisehooks.IdentitySpoolRecord
+	if ok {
+		spool = &record
+	}
+	if err := sssdGroupsUnavailable(spool, facts, directoryUnreachable, now); err != nil {
+		return useridentity.DirectoryFacts{}, err
+	}
+	if ok {
 		facts = mergeSpoolFacts(facts, record)
 	}
 	noteGroupDomains(facts.Groups)

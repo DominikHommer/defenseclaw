@@ -166,6 +166,22 @@ def test_windows_bundle_acl_contract_keeps_public_receipt_separate():
     assert "Set-DefenseClawPathAcl" in contract
 
 
+def test_systemd_guardian_can_flush_the_sssd_caches():
+    # When SSSD is online again after an outage the guardian runs
+    # sss_cache -E, which opens SSSD's databases read-write and invalidates its
+    # memory cache. Under ProtectSystem=strict both directories must be
+    # writable, or the flush exits 5 (GAP-0208). Nothing broader is opened.
+    lines = _unit("defenseclaw-hook-guardian.service")
+    assert "ProtectSystem=strict" in lines
+    writable = _unit_values(lines, "ReadWritePaths")
+    assert {"-/var/lib/sss/db", "-/var/lib/sss/mc"} <= writable
+    assert not writable & {"/var", "-/var", "/var/lib", "-/var/lib", "/var/lib/sss", "-/var/lib/sss"}
+    # Only the watching guardian flushes; the one-shot reconcile and the
+    # enumerator never write SSSD's caches.
+    for name in ("defenseclaw-hook-guardian-reconcile.service", "defenseclaw-hook-enumerator.service"):
+        assert not any("/var/lib/sss" in path for path in _unit_values(_unit(name), "ReadWritePaths")), name
+
+
 def test_systemd_enumerator_can_publish_refused_surfaces():
     # The enumerator writes refused-surfaces.json into the guardian data dir;
     # under ProtectSystem=strict that dir must be writable or every cycle

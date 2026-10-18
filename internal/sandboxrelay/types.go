@@ -522,6 +522,13 @@ type CurrentPolicy struct {
 	// a sandbox that starts again takes this one, never the looser one it
 	// registered under (GAP-0224). nil is an answer without it.
 	MinProfile *string `json:"min_profile,omitempty"`
+	// Provisional is whether the same match is provisional (the directory
+	// could not be asked, so the organization's default applies). Status
+	// shows it next to Profile and Digest, so a sandbox created during an
+	// outage stops saying the default applies once a re-match verified its
+	// groups, and says so again if a later match is provisional (#1199). Nil,
+	// from a gateway that does not say, leaves the daemon's flag as it is.
+	Provisional *bool `json:"provisional,omitempty"`
 	// UpdatedAt is when the registration's policy last changed
 	// (sandboxreg.PolicyUpdatedAt), the age the daemon's status shows.
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
