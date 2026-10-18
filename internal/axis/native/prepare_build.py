@@ -24,6 +24,7 @@ AXIS = "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c"
 MXC = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 BWRAP = "8e51677abd7e3338e4952370bf7d902e37d8cbb6"
 TOOLCHAIN = "1.95.0"
+NATIVE_TEST_COUNT = 16
 SEED_SHA256 = "d6556677c6decd2d5d786ca082ac2bcdb37fc92130d45b7002a7e8bffe2154db"
 PATCHES = {
     "patches/axis-offline-bpf.patch": "914b75d4ad1da26f4f9850886093fb3560ade14d9870dd604de20a33d2f179f2",
@@ -229,7 +230,7 @@ def main() -> None:
         ["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--lib", "--", "--list"], capture=True
     )
     listed = {line.removesuffix(": test") for line in listing.splitlines() if line.endswith(": test")}
-    if not expected_tests or listed != expected_tests:
+    if len(expected_tests) != NATIVE_TEST_COUNT or listed != expected_tests:
         raise RuntimeError("Rust unit-test inventory differs from reviewed native source")
     output = command(
         ["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--lib", "--", "--test-threads=1"], capture=True

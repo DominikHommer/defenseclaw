@@ -156,14 +156,18 @@ impl Active {
 
     fn tick(&mut self, now: Instant) -> Result<()> {
         if self.status.is_none() {
+            // A terminal result has no trusted exit timestamp. If the first
+            // observation is late, conservatively classify it as timeout even
+            // when try_wait can already return an exit status.
+            if now >= self.deadline {
+                self.stop(now, true)?;
+            }
             self.status = self.process.try_wait()?;
             if self.status.is_some() {
                 self.pipes.input.take();
                 self.input.clear();
                 self.input_bytes = 0;
                 self.cleanup_deadline.get_or_insert(now + CLEANUP_LIMIT);
-            } else if now >= self.deadline {
-                self.stop(now, true)?;
             }
         }
         if self.cleanup_deadline.is_some_and(|limit| now >= limit) && !self.complete() {
@@ -689,5 +693,22 @@ mod tests {
         assert_eq!(counts.stopped.load(Ordering::SeqCst), 1);
         active.tick(now + Duration::from_millis(3)).unwrap();
         assert_eq!(active.status, Some(23));
+    }
+
+    #[test]
+    fn first_terminal_observation_after_deadline_is_conservatively_timed_out() {
+        let counts = Arc::new(Counts::default());
+        let mut plan = plan(1024);
+        plan.timeout_ms = 1;
+        let now = Instant::now();
+        let mut process = FakeProcess::new(counts.clone());
+        // Make a terminal result immediately available, but give the owner no
+        // native evidence of an exit timestamp before its first late tick.
+        process.stopped = true;
+        let mut active = Active::new(Box::new(process), &plan, now).unwrap();
+        active.tick(now + Duration::from_millis(2)).unwrap();
+        assert_eq!(active.status, Some(23));
+        assert!(active.timed_out);
+        assert_eq!(counts.stopped.load(Ordering::SeqCst), 1);
     }
 }
