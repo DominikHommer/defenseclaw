@@ -45,17 +45,17 @@ func TestHookFloodProbe(t *testing.T) {
 		t.Skip("set DEFENSECLAW_HOOK_FLOOD_PROBE=1 to run the hook flood probe")
 	}
 	setting := func(name string, value int) int {
-		if raw := os.Getenv("DEFENSECLAW_HOOK_FLOOD_" + name); raw != "" {
+		if raw := os.Getenv(name); raw != "" {
 			parsed, err := strconv.Atoi(raw)
 			if err != nil || parsed < 0 {
-				t.Fatalf("DEFENSECLAW_HOOK_FLOOD_%s=%q is not a count", name, raw)
+				t.Fatalf("%s=%q is not a count", name, raw)
 			}
 			return parsed
 		}
 		return value
 	}
-	calls, rate := setting("CALLS", 6000), setting("RATE", 10)
-	floods, idle := setting("FLOODS", 1), setting("IDLE", 0)
+	calls, rate := setting("DEFENSECLAW_HOOK_FLOOD_CALLS", 6000), setting("DEFENSECLAW_HOOK_FLOOD_RATE", 10)
+	floods, idle := setting("DEFENSECLAW_HOOK_FLOOD_FLOODS", 1), setting("DEFENSECLAW_HOOK_FLOOD_IDLE", 0)
 	if calls < 600 || rate < 1 || floods < 1 {
 		t.Fatal("the probe needs at least 600 calls, a rate and one flood")
 	}
