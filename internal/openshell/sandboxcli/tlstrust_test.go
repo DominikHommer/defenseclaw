@@ -98,18 +98,33 @@ func TestTLSTrustCheck(t *testing.T) {
 	c = tlsApp(t, lab, "").tlsTrustCheck(ctx, false)
 	if c.Status != openshell.StatusFail || !strings.Contains(c.Detail, "TLS inspection") || !strings.Contains(c.Detail, `"Corp Inspection Root CA"`) ||
 		!strings.Contains(c.Detail, "unable to get local issuer certificate") || c.Fix == nil ||
-		c.Fix.Command != "defenseclaw config set openshell.trusted_ca_bundle /path/to/proxy-root-ca.pem" {
+		c.Fix.Command != "defenseclaw config set openshell.trusted_ca_bundle /path/to/proxy-root-ca.pem" ||
+		!strings.Contains(c.Fix.Summary, "exempt api.anthropic.com, api.openai.com, api.githubcopilot.com and the other model provider hosts") {
 		t.Fatalf("intercepted: %+v %+v", c, c.Fix)
 	}
 
-	// The CA named: sandboxes trust it, the row passes and says so.
+	// The CA named: programs in sandboxes trust it, but OpenShell's
+	// supervisor makes the model calls with its own store (GAP-0065,
+	// GAP-0066, GAP-0074), so the row still fails and asks for the
+	// providers to be exempt from inspection; no config command helps.
 	file := filepath.Join(t.TempDir(), "corp.pem")
 	if err := os.WriteFile(file, lab.corp.PEM, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c = tlsApp(t, lab, file).tlsTrustCheck(ctx, false)
-	if c.Status != openshell.StatusPass || !strings.Contains(c.Detail, "sandboxes also trust Corp Inspection Root CA from "+file) || c.Fix != nil {
-		t.Fatalf("CA named: %+v", c)
+	if c.Status != openshell.StatusFail || !strings.Contains(c.Detail, "sandboxes also trust Corp Inspection Root CA from "+file) ||
+		!strings.Contains(c.Detail, `api.anthropic.com, api.openai.com, api.githubcopilot.com present a certificate from "Corp Inspection Root CA"; programs in a sandbox trust it`) ||
+		!strings.Contains(c.Detail, "made by OpenShell's sandbox supervisor") || strings.Contains(c.Detail, "unable to get local issuer") ||
+		c.Fix == nil || c.Fix.Command != "" || !strings.Contains(c.Fix.Summary, "ask your IT department to exempt api.anthropic.com") {
+		t.Fatalf("CA named, providers inspected: %+v %+v", c, c.Fix)
+	}
+
+	// The CA named and the providers exempt from inspection: the row passes.
+	exempt := newTLSLab(t)
+	exempt.corp = lab.corp
+	if c = tlsApp(t, exempt, file).tlsTrustCheck(ctx, false); c.Status != openshell.StatusPass || c.Fix != nil ||
+		!strings.Contains(c.Detail, "verify with the roots sandboxes trust") || !strings.Contains(c.Detail, "sandboxes also trust Corp Inspection Root CA") {
+		t.Fatalf("CA named, providers exempt: %+v", c)
 	}
 
 	// A named file that cannot be used fails by name: no image builds.
@@ -181,9 +196,16 @@ func TestTLSTrustCheckManaged(t *testing.T) {
 	if c.Status != openshell.StatusFail || c.Fix == nil || c.Fix.Command != "" || !strings.Contains(c.Fix.Summary, "ask your administrator") {
 		t.Fatalf("managed, intercepted: %+v %+v", c, c.Fix)
 	}
-	if c = managedApp(string(lab.corp.PEM), "", true).tlsTrustCheck(ctx, true); c.Status != openshell.StatusPass ||
-		!strings.Contains(c.Detail, "your organization's openshell.trusted_ca_bundle") {
-		t.Fatalf("managed, CA relayed: %+v", c)
+	if !strings.Contains(c.Fix.Summary, "ask your administrator to exempt api.anthropic.com") || !strings.Contains(c.Fix.Summary, "and to set openshell.trusted_ca_bundle") {
+		t.Fatalf("managed, intercepted fix: %+v", c.Fix)
+	}
+	// The administrator's CA relayed: the inspected provider still fails
+	// the supervisor's model calls, so the fix is the exemption alone.
+	if c = managedApp(string(lab.corp.PEM), "", true).tlsTrustCheck(ctx, true); c.Status != openshell.StatusFail ||
+		!strings.Contains(c.Detail, "your organization's openshell.trusted_ca_bundle") || !strings.Contains(c.Detail, "OpenShell's sandbox supervisor") ||
+		c.Fix == nil || c.Fix.Command != "" || !strings.Contains(c.Fix.Summary, "ask your administrator to exempt api.anthropic.com") ||
+		strings.Contains(c.Fix.Summary, "and to set") {
+		t.Fatalf("managed, CA relayed: %+v %+v", c, c.Fix)
 	}
 	if c = managedApp("", "openshell.trusted_ca_bundle /etc/corp.pem: writable by group staff", true).tlsTrustCheck(ctx, true); c.Status != openshell.StatusFail ||
 		!strings.Contains(c.Detail, "your organization's trusted CAs cannot be used") || !strings.Contains(c.Fix.Summary, "administrator") {

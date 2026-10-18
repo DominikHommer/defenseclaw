@@ -144,11 +144,15 @@ func (a *App) trustedCASource(ctx context.Context, managed bool) (cas openshell.
 }
 
 // tlsTrustCheck is the Sandbox TLS trust row. It fails, by name, when a
-// CA file is named but cannot be used (no image builds), and when a
-// provider's certificate verifies with this computer's trust but not with
-// a sandbox's: a TLS-inspecting proxy whose root CA sandboxes are not
-// given. The probe runs once per command (setup runs the checks again and
-// again).
+// CA file is named but cannot be used (no image builds), when a provider's
+// certificate verifies with this computer's trust but not with a
+// sandbox's (a TLS-inspecting proxy whose root CA sandboxes are not
+// given), and when it verifies in a sandbox only through the trusted CAs:
+// an agent's model calls to a provider are made by OpenShell's sandbox
+// supervisor, which puts the credential in and verifies the provider with
+// its own store only, so an inspected provider host fails them whatever
+// the sandbox trusts (GAP-0065, GAP-0066, GAP-0074). The probe runs once
+// per command (setup runs the checks again and again).
 func (a *App) tlsTrustCheck(ctx context.Context, managed bool) openshell.Check {
 	a.tlsTrustOnce.Do(func() { a.tlsTrustRow = a.runTLSTrustCheck(ctx, managed) })
 	return a.tlsTrustRow
@@ -234,16 +238,23 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 	}
 	wg.Wait()
 
-	var ok, unreachable, intercepted, untrusted []string
+	// covered are the hosts that verify in a sandbox only through the
+	// trusted CAs: inspected, so an agent's model calls to them still fail.
+	var ok, covered, unreachable, intercepted, untrusted []string
 	// Issuers per classification, so each message names only its own.
-	var interceptedBy, untrustedBy issuerSet
+	var coveredBy, interceptedBy, untrustedBy issuerSet
 	for _, p := range probes {
 		if p.err != nil {
 			unreachable = append(unreachable, p.host)
 			continue
 		}
 		if verifyChain(p.host, p.chain, sandboxRoots, now) == nil {
-			ok = append(ok, p.host)
+			if !cas.Empty() && verifyChain(p.host, p.chain, public, now) != nil {
+				covered = append(covered, p.host)
+				coveredBy.add(chainIssuer(p.chain))
+			} else {
+				ok = append(ok, p.host)
+			}
 			continue
 		}
 		issuer := chainIssuer(p.chain)
@@ -260,16 +271,24 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 			"(a TLS-inspecting proxy whose root CA is not installed here either?)", strings.Join(untrusted, ", "), untrustedBy.String())
 	}
 	switch {
-	case len(intercepted) > 0:
+	case len(intercepted) > 0 || len(covered) > 0:
 		c.Status = openshell.StatusFail
-		setFix()
-		detail := fmt.Sprintf("TLS inspection: %s present a certificate from %s, which this computer trusts but sandboxes do not, "+
-			"so agents in a sandbox fail with \"unable to get local issuer certificate\"",
-			strings.Join(intercepted, ", "), interceptedBy.String())
-		if len(untrusted) > 0 {
-			detail += "; " + untrustedDetail()
+		var parts []string
+		if len(intercepted) > 0 {
+			parts = append(parts, fmt.Sprintf("TLS inspection: %s present a certificate from %s, which this computer trusts but sandboxes do not, "+
+				"so agents in a sandbox fail with \"unable to get local issuer certificate\"",
+				strings.Join(intercepted, ", "), interceptedBy.String()))
 		}
-		return finish(detail)
+		if len(covered) > 0 {
+			parts = append(parts, fmt.Sprintf("TLS inspection: %s present a certificate from %s; programs in a sandbox trust it through the trusted CAs, "+
+				"but an agent's model calls to these hosts are made by OpenShell's sandbox supervisor, which verifies them with its own store only, so they fail",
+				strings.Join(covered, ", "), coveredBy.String()))
+		}
+		if len(untrusted) > 0 {
+			parts = append(parts, untrustedDetail())
+		}
+		inspectedFix(&c, managed, append(append([]string(nil), intercepted...), covered...), len(intercepted) > 0)
+		return finish(strings.Join(parts, "; "))
 	case len(untrusted) > 0:
 		c.Status = openshell.StatusWarn
 		setFix()
@@ -285,6 +304,35 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 		detail += "; " + strings.Join(unreachable, ", ") + " did not answer"
 	}
 	return finish(detail)
+}
+
+// inspectedFix is the fix of a row that found inspected provider hosts.
+// They must be exempt from inspection on the proxy: OpenShell's sandbox
+// supervisor makes the agents' model calls and takes no added CA (an
+// explicit upstream proxy, OpenShell's https_proxy with proxy_ca_bundle,
+// is the one way it does). needCA adds the trusted CA key, which every
+// other connection from a sandbox needs.
+func inspectedFix(c *openshell.Check, managed bool, hosts []string, needCA bool) {
+	exempt := "exempt " + strings.Join(hosts, ", ") + " and the other model provider hosts your agents use from TLS inspection on the proxy " +
+		"(OpenShell's sandbox supervisor makes the agents' model calls and cannot be given a CA)"
+	if managed {
+		s := "ask your administrator to " + exempt
+		if needCA {
+			s += ", and to set " + openshell.TrustedCAKey + " in the managed configuration to the proxy's root CA for everything else sandboxes reach"
+		}
+		c.Fix = &openshell.Fix{Summary: s}
+		return
+	}
+	s := "ask your IT department to " + exempt
+	if !needCA {
+		c.Fix = &openshell.Fix{Summary: s}
+		return
+	}
+	c.Fix = &openshell.Fix{
+		Summary: s + "; for everything else sandboxes reach, save the proxy's root CA certificate as a PEM file and name it in " +
+			openshell.TrustedCAKey + " (sandbox images are rebuilt with it at the next run)",
+		Command: "defenseclaw config set " + openshell.TrustedCAKey + " /path/to/proxy-root-ca.pem",
+	}
 }
 
 // issuerSet is the distinct issuers of a classification, quoted, in first
