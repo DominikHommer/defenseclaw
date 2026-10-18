@@ -112,13 +112,14 @@ func TestHookFloodProbe(t *testing.T) {
 		}
 	}()
 
-	cpuSample := []metrics.Sample{{Name: "/cpu/classes/total:cpu-seconds"}}
+	// The runtime's estimate of the CPU time it used: every CPU class but idle.
+	cpuSample := []metrics.Sample{{Name: "/cpu/classes/total:cpu-seconds"}, {Name: "/cpu/classes/idle:cpu-seconds"}}
 	cpuSeconds := func() float64 {
 		metrics.Read(cpuSample)
-		if cpuSample[0].Value.Kind() != metrics.KindFloat64 {
+		if cpuSample[0].Value.Kind() != metrics.KindFloat64 || cpuSample[1].Value.Kind() != metrics.KindFloat64 {
 			return 0
 		}
-		return cpuSample[0].Value.Float64()
+		return cpuSample[0].Value.Float64() - cpuSample[1].Value.Float64()
 	}
 	fileSize := func(path string) int64 {
 		info, err := os.Stat(path)
