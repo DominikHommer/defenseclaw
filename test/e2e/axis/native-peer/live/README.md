@@ -1,7 +1,7 @@
 # Fixed Linux native peer CI canary
 
 This is one contributor-only four-case attempt using the separately reviewed
-e054 peer/static-musl Bubblewrap, d074 fixed payload, c0a fixed wrapper, and e891
+e054 peer/static-musl Bubblewrap, d074 fixed payload, d056 diagnostic wrapper, and c8d4
 outer driver. The cases check literal argv, binary stdin/EOF and stderr, exit
 23, and fixed offline filesystem/network/FD/namespace boundaries. This is not
 customer activation, PTY/Claude/model/hook qualification, or completion of the
