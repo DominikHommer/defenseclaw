@@ -263,3 +263,62 @@ func TestManagedHermesUnboundEventBlocksRefusedInput(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-3 GAP-0202: an in-cap managed Hermes input whose installed
+// command binds no event and whose top-level hook_event_name and event
+// fields disagree may be a tool call, so a managed hook outside Secure
+// Client blocks it with the Hermes directive, logs fail_mode closed and
+// does not ask the gateway. Agreeing fields, a bound event, per-user and
+// Secure Client hooks keep the gateway's verdict.
+func TestManagedHermesDisagreeingEventFieldsBlock(t *testing.T) {
+	// The 115-byte BW-03 case (e) input.
+	const disagree = `{"hook_event_name":"pre_tool_call","event":"pre_llm_call","tool_name":"terminal","tool_input":{"command":"echo x"}}`
+	const agree = `{"hook_event_name":"pre_tool_call","event":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo x"}}`
+	for _, tc := range []struct {
+		name                  string
+		stdin, event          string
+		managed, secureClient bool
+		blocks                bool
+	}{
+		{name: "managed, fields disagree", stdin: disagree, managed: true, blocks: true},
+		{name: "managed, fields disagree in the other order", stdin: `{"hook_event_name":"pre_llm_call","event":"pre_tool_call"}`, managed: true, blocks: true},
+		{name: "managed, fields agree", stdin: agree, managed: true},
+		{name: "managed, bound event", stdin: disagree, event: "pre_llm_call", managed: true},
+		{name: "managed Secure Client, fields disagree", stdin: disagree, managed: true, secureClient: true},
+		{name: "per-user, fields disagree", stdin: disagree},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var home string
+			gateway := ok(`{"action":"allow"}`)
+			result := run(t, "hermes", gateway, func(o *Options) {
+				o.Event = tc.event
+				o.FailMode = "open"
+				o.ManagedEnterprise = tc.managed
+				o.ExplainUnenrolledAccount = tc.managed
+				o.SecureClient = tc.secureClient
+				o.Stdin = strings.NewReader(tc.stdin)
+				home = o.Home
+			})
+			if result.code != 0 {
+				t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)
+			}
+			if !tc.blocks {
+				if strings.Contains(result.stdout, `"block"`) {
+					t.Fatalf("stdout %q, want the gateway's allow (neutral result)", result.stdout)
+				}
+				return
+			}
+			message := hermesBlockMessage(t, result.stdout)
+			if !strings.HasPrefix(message, "DefenseClaw blocked this tool call: its hook input names two different events") {
+				t.Fatalf("message %q, want the two-events tool-call block", message)
+			}
+			entry := lastHookFailure(t, home)
+			if entry["fail_mode"] != "closed" || entry["reason"] != managedHermesEventConflictReason {
+				t.Fatalf("hook failure %v, want fail_mode closed and the two-events reason", entry)
+			}
+			if gateway.requests != 0 {
+				t.Fatalf("gateway asked %d times, want 0", gateway.requests)
+			}
+		})
+	}
+}

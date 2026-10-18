@@ -45,15 +45,24 @@ func managedHermesPrefixEvent(opts Options, sp spec, prefix []byte) string {
 		return opts.Event
 	}
 	fields := payloadPrefixFields(prefix)
-	hookEventName := strings.TrimSpace(fields["hook_event_name"])
-	event := strings.TrimSpace(fields["event"])
-	if hookEventName != "" && event != "" && !strings.EqualFold(hookEventName, event) {
-		return ""
-	}
-	if hookEventName != "" {
-		return hookEventName
-	}
+	event, _ := pickHookEvent(fields["hook_event_name"], fields["event"])
 	return event
+}
+
+// managedHermesEventConflictReason is the logged reason of a managed Hermes
+// invocation whose input names two different events (rel-1-0-3 GAP-0202).
+const managedHermesEventConflictReason = "hook input names two different events"
+
+// failManagedHermesEventConflict blocks a managed Hermes invocation whose
+// installed command binds no event and whose input names two different
+// events: it may be a tool call, and which event it is cannot be told, so
+// a managed hook outside Secure Client fails closed with the Hermes block
+// directive and logs fail_mode closed (rel-1-0-3 GAP-0202). The gateway is
+// not asked: its verdict would be for an event Hermes may not be running.
+func failManagedHermesEventConflict(opts Options, sp spec) int {
+	logHookFailure(opts, sp, managedHermesEventConflictReason, "response", "closed")
+	code, _ := managedHermesFailClosed(opts, sp, "input", managedHermesEventConflictReason)
+	return code
 }
 
 // managedHermesAnswerUsable reports whether a gateway answer without a

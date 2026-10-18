@@ -457,7 +457,11 @@ func Run(ctx context.Context, opts Options) int {
 			return failResponse(opts, sp, "open", "missing or unsupported Antigravity hook event binding")
 		}
 	} else {
+		bound := strings.TrimSpace(opts.Event) != ""
 		opts.Event = resolveHookEvent(opts.Event, payload)
+		if !bound && managedHermesBlocks(opts, sp) && hookEventFieldsConflict(payload) {
+			return failManagedHermesEventConflict(opts, sp)
+		}
 	}
 	if opts.Connector == "copilot" && !validCopilotEventForOptions(opts) {
 		// Copilot's official camelCase stdin bodies do not identify the
@@ -2040,6 +2044,9 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	switch {
 	case layer == "oversized":
 		cause, advice = "it is too large for DefenseClaw to inspect", "Make it smaller and try again."
+	case layer == "input":
+		cause, advice = "its hook input names two different events, so DefenseClaw cannot tell what to check",
+			"Try again; if this continues, contact your administrator."
 	case layer == "response":
 		cause, advice = "the DefenseClaw gateway returned an answer DefenseClaw could not use",
 			"Try again; if this continues, contact your administrator."
@@ -2317,15 +2324,37 @@ func resolveHookEvent(explicit string, payload []byte) string {
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return ""
 	}
-	hookEventName := strings.TrimSpace(envelope.HookEventName)
-	event := strings.TrimSpace(envelope.Event)
+	event, _ := pickHookEvent(envelope.HookEventName, envelope.Event)
+	return event
+}
+
+// pickHookEvent names the event of an invocation whose command binds none
+// from the payload's two top-level fields: either one alone, or both when
+// they agree. Two fields that name different events name no event, and
+// conflict is true.
+func pickHookEvent(hookEventName, event string) (resolved string, conflict bool) {
+	hookEventName, event = strings.TrimSpace(hookEventName), strings.TrimSpace(event)
 	if hookEventName != "" && event != "" && !strings.EqualFold(hookEventName, event) {
-		return ""
+		return "", true
 	}
 	if hookEventName != "" {
-		return hookEventName
+		return hookEventName, false
 	}
-	return event
+	return event, false
+}
+
+// hookEventFieldsConflict reports a payload whose top-level hook_event_name
+// and event fields name different events (pickHookEvent).
+func hookEventFieldsConflict(payload []byte) bool {
+	var envelope struct {
+		HookEventName string `json:"hook_event_name"`
+		Event         string `json:"event"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return false
+	}
+	_, conflict := pickHookEvent(envelope.HookEventName, envelope.Event)
+	return conflict
 }
 
 func validateCodexInvocationBinding(
