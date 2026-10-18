@@ -15,10 +15,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
-// NewHostStageAssets transfers an already prepared Windows host stage into
+// NewHostStageAssets transfers an already prepared supported host stage into
 // exclusive asset custody without reopening TreePath. CWD and the one /work
 // Write entry must be nil; two independent held-root duplicates fill them.
-// /work labels this host-object association, not Windows guest permission.
+// /work labels this host-object association, not guest permission. Windows
+// requires MXC ProcessContainer; Linux requires MXC Bubblewrap. Native policy,
+// copied-root mount/no-IDMAP lineage and production admission stay independent.
 // The current Windows bridge and production catalog remain unavailable.
 //
 // On success, all inputs and the stage transfer exclusively. A nonnil result
@@ -30,10 +32,14 @@ func NewHostStageAssets(ctx context.Context, identity sandboxruntime.SessionIden
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if runtime.GOOS != "windows" {
+	if runtime.GOOS != "windows" && runtime.GOOS != "linux" {
 		return nil, workspace.ErrUnsupportedPlatform
 	}
-	if stage == nil || identity.Runtime.HostOS != "windows" || identity.Runtime.ExecutionOS != "windows" || identity.Runtime.Backend != "mxc" || identity.Runtime.Driver != "process_container" ||
+	driver := "process_container"
+	if runtime.GOOS == "linux" {
+		driver = "bubblewrap"
+	}
+	if stage == nil || identity.Runtime.HostOS != runtime.GOOS || identity.Runtime.ExecutionOS != runtime.GOOS || identity.Runtime.Backend != "mxc" || identity.Runtime.Driver != driver ||
 		validateHostStageInputs(identity, inputs, read, write) != nil {
 		return nil, ErrAssets
 	}

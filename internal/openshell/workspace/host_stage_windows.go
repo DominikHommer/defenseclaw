@@ -17,8 +17,6 @@ import (
 	"runtime"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf16"
 	"unicode/utf8"
 	"unsafe"
 
@@ -28,9 +26,6 @@ import (
 )
 
 const (
-	hostStageMaxEntries = 250_000
-	hostStageMaxDepth   = 128
-	hostStageDeadline   = 5 * time.Minute
 	hostStageVolumeGUID = 1 // GetFinalPathNameByHandle VOLUME_NAME_GUID
 )
 
@@ -400,32 +395,6 @@ func windowsHostStageCreatedIdentity(file *os.File, path string) (string, error)
 		return "", fmt.Errorf("workspace: cannot bind initial file identity; retained empty private directory %q: %w", path, err)
 	}
 	return identity, nil
-}
-
-func validateWindowsHostStageName(name string) error {
-	if name == "" || name == "." || name == ".." || !utf8.ValidString(name) || strings.ContainsRune(name, utf8.RuneError) ||
-		strings.ContainsAny(name, "\\/:*?\"<>|\x00") || strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") ||
-		!filepath.IsLocal(name) || len(utf16.Encode([]rune(name))) > 255 {
-		return errors.New("workspace: ambiguous or reserved Windows entry name")
-	}
-	base, _, _ := strings.Cut(name, ".")
-	base = strings.ToUpper(strings.TrimRight(base, " "))
-	switch base {
-	case "CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$":
-		return errors.New("workspace: reserved Windows device entry name")
-	}
-	for _, prefix := range []string{"COM", "LPT"} {
-		if suffix, ok := strings.CutPrefix(base, prefix); ok &&
-			(len(suffix) == 1 && suffix[0] >= '0' && suffix[0] <= '9' || suffix == "¹" || suffix == "²" || suffix == "³") {
-			return errors.New("workspace: reserved Windows device entry name")
-		}
-	}
-	for _, r := range name {
-		if unicode.IsControl(r) {
-			return errors.New("workspace: control character in Windows entry name")
-		}
-	}
-	return nil
 }
 
 // Each pathname component is opened from a held parent. Delete sharing is

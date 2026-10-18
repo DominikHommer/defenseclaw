@@ -1,13 +1,71 @@
 <!-- Copyright 2026 Cisco Systems, Inc. and its affiliates -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Captured Windows host staging
+# Captured host staging
 
 `stageCapturedSHA1` is a private host staging engine used by `PrepareHostStage`.
 It is not connected to `Stage`, a provider, a CLI flag, or agent execution. Its
 controlled native fixtures establish the behavior they assert; they do not
 qualify native Windows guest operations, AXIS, credentials, or a production
 workspace import/export lifecycle.
+
+## Linux held-root producer
+
+Linux host preparation reuses the same captured SHA1 decoder, sanitizer,
+history withholding and operator-setting rules; it does not execute Git.
+Its initial floor accepts only clean absolute paths on the process's root
+mount, using cached `openat2` lookups with beneath/no-symlink/no-magic-link/
+no-mount-crossing resolution. Separate mounts and bind aliases refuse, including
+otherwise ordinary separate home or data volumes. An unsupported kernel or
+cache-required lookup fails without an uncached or pathname fallback. The
+admitted local filesystem types are ext4, XFS, Btrfs, tmpfs and OverlayFS; this
+assumes the host's root mount and its backing configuration are trusted.
+
+The staging parent must already belong to the current effective UID with no
+group/other mode permissions. No permissions repair occurs. Fresh artifact,
+capture, sanitized and scratch objects are private and created relative to
+held parents. Only directories and single-link regular files enter capture;
+links, devices, sockets, FIFOs and mount traversal refuse before data opens.
+The entire source, including `.git` and later withheld files, is bounded to
+500 MiB, 250,000 entries, 128 levels and the existing component/path limits.
+Linux deliberately retains the conservative Windows-compatible name subset
+and refuses case-colliding entries. The normal sanitizer/object limits also
+apply. Tracked files whose working execute bit differs from their captured
+Git index refuse; the initial floor does not silently discard chmod-only
+changes. Accepted executable working files are materialized as private mode
+0700; other emitted working files are mode 0600.
+
+Original entries are pinned with `O_PATH` before type admission. Readable
+handles and `os.Root` adapters use only the exact numeric alias of a still-held
+descriptor under verified procfs, with matching PID view and before/after
+object, mount, type and private-mode checks. This intentional capability alias
+never selects an original display path or `TreePath`. The initial full source
+metadata snapshot must still match when capture starts. Source identity and
+size/mode/ctime/mtime are also sampled around each read and directory traversal;
+the retained private capture is then the sanitizer's only input. This is not
+an atomic multi-file snapshot or protection against a malicious same-UID host
+process mutating the private capture. Private producer custody is required.
+
+The sanitized root remains held, and consumer copies use
+`F_DUPFD_CLOEXEC` with checked object identity and private mode. The existing
+lease barrier prevents deletion or producer-root closure before consumers
+release. Cleanup traverses only the held private parent with bounded
+nonfollowing opens, sampled identity checks and `unlinkat`; it never calls
+`RemoveAll` or reopens a display path. Linux has no unlink-by-handle comparison:
+the final name check is a sample, not an immutable-parent guarantee against
+same-UID host renames. Failures report retained residue rather than selecting
+a fallback target. If Linux preparation cannot complete cleanup, it returns a
+nonnil cleanup-only `HostStage` with the error. The caller must retain that
+owner and call `Close`; it cannot acquire a root or expose `TreePath`. An
+uncertain native file or root close stays sticky, retains producer custody and
+prevents deletion. A known bounded-removal refusal permits explicit cleanup
+retry through the same owner.
+
+This producer and `backend.NewHostStageAssets` do not certify native source
+mount topology/no-IDMAP lineage, guest permission, runtime/harness images,
+policy translation or production launch. The adapter must independently check
+those requirements before its first namespace clone. Linux filesystem test
+source is present; actual execution and qualification remain pending review.
 
 ## Owned sanitized-root custody
 
@@ -44,7 +102,7 @@ successful asset closure, then releases the lease and stage in that order.
 Its native Windows filesystem regression verifies full identity, private and
 non-inheritable handles, retained child bytes when another lease prevents
 cleanup, and successful explicit cleanup retry after release. This handoff
-does not activate a Windows runtime. Before preparation
+does not activate a Windows runtime. For the Windows producer, before preparation
 returns a stage, a producer-pin close failure prevents recursive deletion and
 can leave residue; that error path does not return a stage owner for retry.
 

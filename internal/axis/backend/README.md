@@ -44,6 +44,14 @@ release and stage deletion. Uncertain exclusive close keeps that barrier and
 reports a sticky failure. If another stage lease prevents deletion, no child
 is removed; explicit asset-close retry can finish after that consumer releases.
 
+The same custody constructor accepts a Linux MXC Bubblewrap identity and a
+Linux host stage. It retains the same two exclusive descriptors and lease
+release order. It does not certify the copied root's current mount/no-IDMAP
+lineage, installation images, policy translation or native execution. Those
+remain independent admission checks; this addition does not open the catalog.
+A cleanup-only stage returned with a preparation error cannot issue the root
+lease required by this constructor; its caller retains cleanup ownership.
+
 The native Windows filesystem custody regression passed under the race
 detector, without executing an image, child process or sandbox:
 

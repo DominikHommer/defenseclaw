@@ -6,14 +6,12 @@
 package workspace
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
 	"path/filepath"
 	"strings"
 
-	gitconfig "github.com/go-git/go-git/v5/plumbing/format/config"
 	"golang.org/x/sys/windows"
 )
 
@@ -108,15 +106,4 @@ func readWindowsHostStageOptionalConfig(ctx context.Context, name string) ([]byt
 
 func windowsHostStageMissing(err error) bool {
 	return errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) || errors.Is(err, windows.STATUS_OBJECT_PATH_NOT_FOUND)
-}
-
-func parseCapturedGitConfig(data []byte) (*gitconfig.Config, error) {
-	if len(data) > 1<<20 || bytes.Count(data, []byte{'\n'}) > 10_000 || bytes.IndexByte(data, 0) >= 0 {
-		return nil, capturedRefuse("config_structure_limit")
-	}
-	cfg := gitconfig.New()
-	if err := gitconfig.NewDecoder(bytes.NewReader(data)).Decode(cfg); err != nil {
-		return nil, capturedRefuse("invalid_repository_config")
-	}
-	return cfg, nil
 }

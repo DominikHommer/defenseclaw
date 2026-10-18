@@ -23,6 +23,9 @@ type HostStage struct {
 	closed   bool
 	close    func() error
 	closeErr error
+	// A refused Linux preparation can still own exact residue and handles.
+	// It has cleanup authority only, never a borrowable sanitized artifact.
+	cleanupOnly bool
 	// Root acquisition and release reserve custody before doing native I/O.
 	// A close request blocks new borrowers without waiting for that I/O.
 	closeRequested bool
@@ -66,7 +69,7 @@ func (s *HostStage) AcquireRoot() (*RootLease, error) {
 		return nil, errHostStageClosed
 	}
 	s.mu.Lock()
-	if s.closed || s.closeRequested {
+	if s.closed || s.closeRequested || s.cleanupOnly {
 		s.mu.Unlock()
 		return nil, errHostStageClosed
 	}
@@ -239,7 +242,7 @@ func (s *HostStage) Summary() HostStageSummary {
 func (s *HostStage) TreePath() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.closeRequested {
+	if s.closed || s.closeRequested || s.cleanupOnly {
 		return "", errHostStageClosed
 	}
 	return s.record.Stage, nil
@@ -258,6 +261,13 @@ func (s *HostStage) Close() error {
 		}
 		return err
 	}
+	if s.cleanupOnly && !s.closed {
+		// The concrete partial owner distinguishes retryable bounded removal
+		// from uncertain native closes, which it latches without retrying.
+		s.closeErr = s.close()
+		s.closed = s.closeErr == nil
+		return s.closeErr
+	}
 	if !s.closed {
 		s.closed = true
 		s.closeErr = s.close()
@@ -271,8 +281,14 @@ func (s *HostStage) Close() error {
 // streams, hardlinks, case-sensitive directories or ambiguous Windows names.
 // Linked/external git metadata is refused. Stage and live-mount support are
 // unchanged; native Windows requires separate typed guest-operation tests.
+// Linux adds a conservative local-root-mount floor: no symbolic/magic links,
+// mount crossings, special files or hardlinks, already-private staging, and a
+// verified procfs capability alias. It copies through retained descriptors;
+// this is race-sampled capture, not an atomic snapshot across multiple files.
 // MaxBytes also bounds the initial complete source capture, including git
 // metadata and files that the later sanitizer would ignore or hold back.
+// A nonnil result with an error owns cleanup-only residue: callers must retain
+// it and call Close, and must not treat it as a prepared/borrowable stage.
 func PrepareHostStage(ctx context.Context, opts StageOptions) (*HostStage, error) {
 	if err := ValidateName(opts.Name); err != nil {
 		return nil, err

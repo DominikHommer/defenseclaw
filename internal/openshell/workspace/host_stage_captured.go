@@ -1,7 +1,7 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build windows
+//go:build windows || linux
 
 package workspace
 
@@ -16,6 +16,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -222,8 +223,28 @@ func stageCapturedSHA1(ctx context.Context, source, output, scratch *os.Root, op
 			return rec, err
 		}
 		mode := tracked[file.rel]
-		if mode == 0 {
+		if runtime.GOOS == "linux" {
+			info, err := source.Lstat(file.rel)
+			if err != nil {
+				return rec, err
+			}
+			workingMode := filemode.Regular
+			if info.Mode()&0o111 != 0 {
+				workingMode = filemode.Executable
+			}
+			if mode != 0 && mode != workingMode {
+				return rec, capturedRefuse("working_executable_mode_differs_from_index")
+			}
+			mode = workingMode
+		} else if mode == 0 {
 			mode = filemode.Regular
+		}
+		if runtime.GOOS == "linux" && mode == filemode.Executable {
+			// Linux materializes executable working files in its private copy.
+			// The preexisting Windows branch performs no additional I/O.
+			if err := output.Chmod(repo+"/"+file.rel, 0o700); err != nil {
+				return rec, err
+			}
 		}
 		baselineFiles[file.rel] = object.TreeEntry{Hash: h, Mode: mode, Name: path.Base(file.rel)}
 	}
