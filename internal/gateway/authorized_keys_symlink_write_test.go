@@ -174,6 +174,41 @@ func TestAuthorizedKeysSymlinkWriteStatementsAndClientResolution(t *testing.T) {
 	}
 }
 
+func TestR103B07TemporaryDirectoryCleanupRows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX temporary directories")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"HOLD2-N0017", "FG3-HOLD2-N0017"} {
+		t.Run(id, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "Bash", CWD: cwd, ActiveHome: home,
+				DialectHint: actionfacts.DialectPOSIX,
+				Command:     `tmp=$(mktemp -d); trap 'rm -rf $tmp' EXIT; echo x > $tmp/a`,
+			}
+			request := trustedActionRequest{Input: input, EnforcementCapable: true}
+			if trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+				t.Fatal("temporary directory cleanup was classified as an authorized-keys write")
+			}
+		})
+	}
+	for _, signal := range []string{"DEBUG", "ERR", "RETURN"} {
+		t.Run("active-"+signal, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "Bash", CWD: cwd, ActiveHome: home,
+				DialectHint: actionfacts.DialectPOSIX,
+				Command:     "trap 'cd ../.ssh' " + signal + "; echo x > authorized_keys",
+			}
+			request := trustedActionRequest{Input: input, EnforcementCapable: true}
+			if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+				t.Fatal("active trap could change the directory before a write")
+			}
+		})
+	}
+}
+
 func TestR103B07ProcCWDAliasRowA10238(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("/proc aliases are POSIX operands")

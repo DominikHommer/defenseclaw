@@ -218,8 +218,13 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		}
 		if program == "trap" {
 			// A DEBUG, RETURN or ERR action runs before or after later
-			// commands and may change the directory there. Only listing
-			// traps leaves the directory known.
+			// commands and may change the directory there. An EXIT-only
+			// action runs after the remaining commands, so it cannot change
+			// the directory of a later write.
+			if shellExitOnlyTrap(call.Args[arg:], home) {
+				return false
+			}
+			// Only listing traps leaves the directory known otherwise.
 			for _, word := range call.Args[arg:] {
 				if value, ok := StaticWord(word, home); !ok || value != "-p" && value != "-l" && value != "--" {
 					s.known, s.changed, s.stack = false, true, nil
@@ -490,6 +495,27 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 	}
 	walkList(file.Stmts, &state)
 	return operands, unknown
+}
+
+func shellExitOnlyTrap(args []*syntax.Word, home string) bool {
+	if len(args) > 0 {
+		if separator, ok := StaticWord(args[0], home); ok && separator == "--" {
+			args = args[1:]
+		}
+	}
+	if len(args) < 2 {
+		return false
+	}
+	if _, ok := StaticWord(args[0], home); !ok {
+		return false
+	}
+	for _, word := range args[1:] {
+		signal, ok := StaticWord(word, home)
+		if !ok || signal != "EXIT" && signal != "0" {
+			return false
+		}
+	}
+	return true
 }
 
 // shellCommandWord returns the program a call runs in this shell after builtin
