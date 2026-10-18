@@ -1190,18 +1190,19 @@ def test_linux_postinstall_does_nothing_after_a_refused_removal(tmp_path: Path, 
 # when the installed one fails, so an apt Pre-Install-Pkgs hook refuses the
 # downgrade before dpkg runs, unless the rollback marker exists.
 @pytest.mark.parametrize(
-    ("line", "marker", "exit_code"),
+    ("line", "marker", "backup", "exit_code"),
     [
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb < 1.0.47~SNAPSHOT-aaa f.deb", False, 0),
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.46~SNAPSHOT-aaa f.deb", False, 0),
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > - **REMOVE**", False, 0),
-        ("other-package 1.0.46 > 1.0.45 f.deb", False, 0),
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, 1),
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", True, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb < 1.0.47~SNAPSHOT-aaa f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.46~SNAPSHOT-aaa f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > - **REMOVE**", False, False, 0),
+        ("other-package 1.0.46 > 1.0.45 f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, False, 1),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, True, 1),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", True, False, 0),
     ],
 )
 def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
-    tmp_path: Path, line: str, marker: bool, exit_code: int
+    tmp_path: Path, line: str, marker: bool, backup: bool, exit_code: int
 ) -> None:
     host = _Host(tmp_path)
     host.state.mkdir()
@@ -1214,9 +1215,18 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
     allow = host.state / "allow-downgrade"
     if marker:
         allow.write_text("", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    previous_config = tmp_path / "config.yaml.v8.bak"
+    config.write_text("config_version: 8\n", encoding="utf-8")
+    if backup:
+        previous_config.write_text("config_version: 8\n", encoding="utf-8")
     script = _rooted(
         (LINUX / "apt-downgrade-guard.sh").read_text(encoding="utf-8"),
-        {"state=/var/lib/defenseclaw-enterprise": f"state={host.state}"},
+        {
+            "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+            "previous_config=/etc/defenseclaw/config.yaml.v8.bak": f"previous_config={previous_config}",
+            "config=/etc/defenseclaw/config.yaml": f"config={config}",
+        },
     )
     path = tmp_path / "guard.sh"
     path.write_text(script, encoding="utf-8")
@@ -1234,6 +1244,8 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
     if exit_code:
         assert "refusing to downgrade to 1.0.45~SNAPSHOT-aaa" in result.stderr
         assert f"sudo touch {allow}" in result.stderr
+        assert "postinstall applies it" in result.stderr
+        assert f"--config {previous_config if backup else config}" in result.stderr
 
 
 def test_enterprise_deb_ships_the_apt_downgrade_hook_and_rpm_does_not() -> None:
@@ -1383,7 +1395,8 @@ esac""",
     "dpkg-query": """[ -n "$DC_TEST_INSTALLED" ] || exit 1
 printf 'install ok installed %s' "$DC_TEST_INSTALLED\"""",
     "rpm": """case "$1" in
-    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *ARCH*) echo x86_64 ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    --eval) echo x86_64 ;;
     -q)
         if [ -z "$DC_TEST_INSTALLED" ]; then echo "package defenseclaw-enterprise is not installed"; exit 1; fi
         [ "$2" != --qf ] || printf '%s' "$DC_TEST_INSTALLED"
@@ -1681,7 +1694,7 @@ def test_unix_wrapper_stores_the_credential_before_it_applies_the_config(tmp_pat
     wrapper = (MDM / os_dir / "defenseclaw-enterprise.sh").read_text(encoding="utf-8")
     functions = "\n".join(
         _shell_function(wrapper, name)
-        for name in ("dc_run_lifecycle", "dc_run_lifecycle_retry", "dc_main")
+        for name in ("dc_run_lifecycle", "dc_run_lifecycle_retry", "dc_secret_json_error", "dc_store_secret", "dc_main")
     )
     log = tmp_path / "calls.log"
     gateway = tmp_path / "defenseclaw-gateway"
