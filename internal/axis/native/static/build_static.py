@@ -485,6 +485,24 @@ def stage_uapi(destination: Path, packages: Packages) -> dict[str, dict[str, obj
     return inventory
 
 
+def mount_compat_header():
+    # musl 1.2.6 and the pinned Linux UAPI spell three equivalent macros
+    # differently. Check their libc values before selecting the UAPI spelling;
+    # retain all -Werror gates and do not alter either admitted source tree.
+    return b"""#include <sys/mount.h>
+#if MS_NOUSER != (1U << 31) || MS_MGC_VAL != 0xc0ed0000
+#error Unexpected musl mount constants
+#endif
+#if MS_RMT_MASK != (MS_RDONLY | MS_SYNCHRONOUS | MS_MANDLOCK | MS_I_VERSION | MS_LAZYTIME)
+#error Unexpected musl mount mask
+#endif
+#undef MS_NOUSER
+#undef MS_RMT_MASK
+#undef MS_MGC_VAL
+#include <linux/mount.h>
+"""
+
+
 def one_build(
     root: Path,
     archives: dict[str, Path],
@@ -558,6 +576,8 @@ def one_build(
     objects.mkdir()
     config = objects / "config.h"
     config.write_bytes(b'#define PACKAGE_STRING "bubblewrap 0.9.0"\n')
+    mount_compat = objects / "mount-compat.h"
+    mount_compat.write_bytes(mount_compat_header())
     common = [
         str(wrapper),
         "-D_GNU_SOURCE",
@@ -565,6 +585,8 @@ def one_build(
         "-g0",
         "-fno-pie",
         "-fstack-protector-strong",
+        "-include",
+        str(mount_compat),
         *mapping.split(),
         f"-ffile-prefix-map={bwrap}=/dc-bwrap",
         f"-I{objects}",
@@ -611,6 +633,7 @@ def one_build(
     run_evidence.mkdir()
     for path in (
         config,
+        mount_compat,
         prefix / "lib/musl-gcc.specs",
         build / "config.mak",
         musl / "src/ldso/dlopen.c",

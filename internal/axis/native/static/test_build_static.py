@@ -40,6 +40,14 @@ def image(ptype=1):
 
 
 class ClosureAdmissionTests(unittest.TestCase):
+    def test_mount_compat_checks_libc_constants_before_selecting_uapi_spelling(self):
+        header = build.mount_compat_header().decode()
+        self.assertLess(header.index("#include <sys/mount.h>"), header.index("#if MS_NOUSER"))
+        self.assertLess(header.index("#error Unexpected musl mount constants"), header.index("#undef MS_NOUSER"))
+        self.assertLess(header.index("#undef MS_MGC_VAL"), header.index("#include <linux/mount.h>"))
+        self.assertEqual(header.count("#undef "), 3)
+        self.assertNotIn("pragma", header)
+
     def test_only_bounded_regular_entries_below_exact_prefix_admit(self):
         with archive([("fixed", tarfile.DIRTYPE), ("fixed/source.c", tarfile.REGTYPE)]) as value:
             self.assertEqual(len(build.tar_inventory(value, "fixed")), 2)
