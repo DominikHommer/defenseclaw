@@ -15,9 +15,9 @@ inheritance canary is added. Loader, DLL and Claude selectors retain their prior
 supervisor environment behavior.
 
 The child still receives the existing inner fixture's exact eight explicit
-values. Same-child SID/folder lookup, exact frozen caller-prefix/one-profile
-mapping, held NT-relative private directories and frame-plus-EOF assertions are
-retained. Original startup values are rechecked around the native queries and
+values. That recorded startup correction retained same-child SID/folder lookup,
+exact frozen caller-prefix/one-profile mapping, held NT-relative private
+directories and frame-plus-EOF assertions. Original startup values are rechecked around the native queries and
 directory binding. No extra native prefix, observed-child environment value,
 host profile grant, namespace change or fallback is accepted. This removes a
 parent context change after DLL imports. The separately reviewed d838 build
@@ -30,9 +30,9 @@ did not resolve this comparison or establish its cause. See
 The two snapshot/validation tests are mandatory only for this boundary
 slice. Its recorded build ran twenty-seven exact Rust tests and packaged three PEs plus
 the existing DLL protocol/child source used by compile and pure-test gates.
-Ordinary DLL/Claude builds retain twenty-five tests; the separate uncontained
-control retains twenty-six. Dependency locks and all SDK overlay fingerprints
-are unchanged.
+That recorded source used twenty-five tests for ordinary DLL/Claude builds and
+twenty-six for the separate uncontained control. The new mapping gates described
+below add three tests; dependency locks and SDK fingerprints remain unchanged.
 
 The changed source adds refusal-only classification of the already returned caller
 and same-child native folder strings. It emits only fixed categories and
@@ -43,7 +43,8 @@ equality. Invalid shape and failed
 ordinal comparison remain unknown. No raw strings, path hashes, lengths or
 identity values are printed. These are string relationships, without alias or
 object-identity equivalence. Diagnostics never feed admission: the exact
-prefix, same-child authority and held-directory requirements remain unchanged.
+diagnostic additions left prefix, same-child authority and held-directory
+requirements unchanged at that stage.
 A new pure callback test brings the boundary build requirement to twenty-eight
 Rust tests. The separately reviewed 3beb build passed all twenty-eight. One fresh
 Case12 then reported `unrecognized_suffix`, with exact and ordinal prefix
@@ -51,11 +52,11 @@ relationships both false. The caller known-folder base matched startup
 LOCALAPPDATA exactly; no native base could be derived under the assumed suffix
 grammar. Admission still refused before the boundary assertions. The API
 [reference](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-getappcontainerfolderpath)
-does not guarantee that textual suffix. The actual returned shape remains
-unknown; no extra prefix or suffix is admitted. See
+does not guarantee that textual suffix. At that point the actual returned shape remained
+unknown; no extra prefix or suffix was admitted. See
 [the recorded diagnostic](manual-results.md#refusal-classification-caller-context-matches-native-suffix-unrecognized).
 
-The next source-only diagnostic records both returned API strings only after
+The refusal-only diagnostic records both returned API strings only after
 that same strict mapping refusal. It creates the fixed
 `native-folder-refusal.private.bin` once, relative to the already held private
 fixture root, with a protected current-user and SYSTEM DACL at creation. The
@@ -70,11 +71,24 @@ Only a fixed availability boolean can enter stderr. Raw record contents are
 excluded from logs, result JSON, receipts and every admitted artifact inventory;
 the outer runner retains only the fixture pathname. The record remains in that
 owned private fixture for separate private inspection, with no automated upload.
-The boundary build now requires thirty exact Rust tests, including a pure binary
+The recorded private-record build required thirty exact Rust tests, including a pure binary
 format test and a separate synthetic NT-relative creation/DACL/link/collision
 test. The link test is mandatory: an unsupported host refuses the gate rather
-than skipping it. Ordinary DLL/Claude and control test counts remain unchanged.
-This source has not yet been compiled or used to capture native API paths.
+than skipping it. Those diagnostic-only additions left other slice counts unchanged.
+The corrected 783e build passed all thirty gates, including the synthetic
+private-file test. One fresh Case13 reported private-record availability and
+then preserved the same strict mapping refusal. Its outer Job ended empty and
+the failed fixture was retained. Separately reviewed read-only inspections later
+validated the complete protected record and emitted only closed metadata. The
+returned native base string differs from the frozen private caller base.
+Exact `Packages` and `AC`, nonempty profile and the existing 128-unit bound
+passed; the profile failed the probe's ASCII-only component predicate. These
+are independent comparison and grammar failures. No offending character or
+returned string was disclosed, and no new base or component was admitted.
+A further predicate-only inspection passed every proposed ordinary-component
+check while preserving those earlier failures. The changed mapper below remains
+source-only and does not qualify the boundary child.
+See [the actual result](manual-results.md#private-record-reported-available-boundary-still-refuses).
 
 ## Literal DOS application and held-image gate
 
@@ -135,14 +149,40 @@ CreateProcess handle. BaseContainer supplies that duplicate; other backends
 default to Unsupported, and a warning wrapper only delegates the same native
 object. The parent never reopens an integer PID. It queries TokenAppContainerSid
 from that same duplicate, bounds and validates the returned SID buffer, then
-uses GetAppContainerFolderPath. No child environment observation supplies an
-expectation. The probe currently requires the returned folder to match the caller's independently queried,
-unredirected `LocalAppData\Packages\<one bounded native-profile component>\AC`
-exactly. Only that same-SID profile component is re-rooted into the held fresh
-fixture; no caller profile directory is opened or mutated. A missing native
-identity, API failure, unexpected caller thread identity, mismatched prefix,
-missing private directory or unrecognized shape refuses before the fixed child
-can perform a mutation. The API queries create no AppContainer profile.
+uses GetAppContainerFolderPath. The capability's source-only upstream
+[proposal](https://github.com/microsoft/mxc/pull/1524) is separate from this
+contributor overlay and its qualification. No child environment observation
+supplies an expectation.
+
+The changed mapper also obtains TokenUser from that same held child token and
+requires exact validated SID equality with the caller's process token. Both
+opens request only TOKEN_QUERY; thread impersonation refuses. It calls
+[GetUserProfileDirectoryW](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-getuserprofiledirectoryw)
+with that same child token, using a fixed bounded result buffer. The native
+folder must match that independently queried OS root plus the explicit default
+`AppData\Local\Packages\<one safe component>\AC` branch exactly. Redirected or
+other bases refuse. The caller's known-folder query must independently equal
+its frozen controlled startup LOCALAPPDATA; it is not required to equal the OS
+profile base and does not authorize that base. Neither source path is opened.
+
+Only the same-SID component transfers into the held fresh fixture. It remains
+at most 128 UTF16 units and must be one well-formed ordinary Windows component.
+Traversal, separators, ADS, controls, reserved punctuation, trailing dot/space
+and DOS device/meta names refuse. Other literal Unicode, internal spaces and
+ordinary punctuation are preserved without normalization or expansion. The
+same predicate validates both the native suffix and the rebased private frame.
+The new pure component test runs in parent and child, and a separate pure test
+checks native profile-buffer count/NUL bounds. The boundary requires thirty-three
+selected gates, ordinary DLL/Claude twenty-eight and the separate control
+twenty-nine. Old test inventories cannot admit these changed sources.
+
+A missing native identity, different User SID, API failure, unexpected caller
+thread identity, mismatched default prefix, missing private directory or unsafe
+component refuses before the fixed child can perform a mutation. The parent
+opens every mapped private directory and Temp through existing held-relative
+custody; it creates none. These queries create no AppContainer profile and grant
+no access to the host profile. Compilation, artifact review and a fresh native
+boundary case remain pending for this mapper change.
 
 The resulting private expectation must match the fresh fixture's exact
 `home\AppData\Local\Packages\<one bounded native-profile component>\AC`
@@ -173,7 +213,7 @@ separate direct control; the parent never falls back to it. The std-only child
 imports no AXIS/SDK/native identity module or additional native API.
 
 The locked build records the fourth patch, every exact changed SDK source,
-the two new source modules, six exact pure parser/spelling/buffer tests and one
+the two original source modules and exact pure parser/spelling/buffer tests plus one
 new SDK Unsupported-default test. These tests perform no native token/profile
 query, process creation or PSEC execution. A separate native filesystem-only
 regression proves attribute-only rename remains possible, actual held directory

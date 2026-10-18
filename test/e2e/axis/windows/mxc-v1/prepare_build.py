@@ -109,12 +109,15 @@ PURE_ENVIRONMENT_TESTS = {
     "defenseclaw-axis-windows-psec-boundary-child": [
         "tests::private_environment_only_accepts_exact_local_disk_prefix_difference",
         "native_environment::tests::native_folder_requires_exact_private_branch_and_one_profile_component",
+        "native_environment::tests::ordinary_native_profile_component_confines_literal_windows_names",
         "native_environment::tests::native_environment_utf16_frame_roundtrips_and_refuses_tampering",
     ],
     "defenseclaw-axis-windows-psec-probe": [
         "probe::native_environment::tests::native_folder_requires_exact_private_branch_and_one_profile_component",
+        "probe::native_environment::tests::ordinary_native_profile_component_confines_literal_windows_names",
         "probe::native_environment::tests::native_environment_utf16_frame_roundtrips_and_refuses_tampering",
         "probe::native_identity::tests::returned_sid_pointer_and_body_must_fit_the_fixed_native_result",
+        "probe::native_identity::tests::profile_directory_query_requires_bounded_complete_native_result",
     ],
 }
 PURE_DLL_TESTS = {

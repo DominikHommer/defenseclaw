@@ -908,7 +908,129 @@ were preserved, with no retry or cleanup of the failed fixtures.
 | One-shot driver | `905c5556f52aea8d306736ac8f82137a3bf79fe18b7d1cf571ad1899e5999724` |
 | Actual live result | `d2ef6cf8819145b5aa92a4c5772d58ca1be70c0f2d871a81164a8757df9c9e2b` |
 
+## Private refusal record: first build stops at compilation
+
+The changed private-record diagnostic source at
+`6a1f7080a39fbdfa39b98f3ea7db02516910dc3d` reached its native Windows
+[build gate](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39171818814),
+then failed Rust type checking at the security-descriptor pointer assignment.
+No selected Rust test or native probe ran, and no returned API paths were
+captured. The correction explicitly casts the same still-owned descriptor to
+the const pointer type required by `OBJECT_ATTRIBUTES`; it changes no policy,
+admission, record format, dependency, SDK overlay or required test count.
+The changed-source replacement
+[build `39172760986`](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39172760986)
+at `783e7898baa0c839c2bb9d96eabb1220f921050e` passed compilation and all thirty
+selected Rust tests exactly once, including the binary format and synthetic
+NT-relative private-file/DACL/link/collision tests. Independent source, ZIP,
+lock, SDK and test-log reviews passed before the next native attempt. CI did
+not run PSEC or capture returned folder paths.
+
+## Private record reported available; boundary still refuses
+
+One fresh Case13 used the reviewed changed artifact once. The argv child
+completed `FIXED_ARGV_PASS`; the boundary parent then reported
+`native private path record available=true`, followed by the same
+`unrecognized_suffix` classifier and strict known-folder prefix refusal.
+Caller/startup equality remained true; no native base was derived. The driver
+finished in 7.510 seconds and the probe in 7.1893379 seconds, with exit one.
+The outer Job was assigned before resume and ended empty with active count
+zero. No outer deadline, output overflow or stream-read/driver error occurred.
+The failed owned fixture was retained.
+
+The record-availability boolean is a parent observation. The later read-only
+inspections below validated the private file separately; neither recorded folder
+string appears in the result or this document. The strict mapper still refused
+before the native environment frame, directory binding or boundary-child
+environment, write and socket assertions. No native retry, admitted prefix,
+existing host policy/ACL repair or production runtime activation was introduced.
+
+| Evidence | SHA-256 |
+| --- | --- |
+| ZIP, artifact `12153163904` | `cb0deb6f042d8d1073f64ff87d9584380ff8ade0860f4e26df6a222114078f7f` |
+| Provenance | `47b6ccdb35308ccc57ac1651f3b2234bc037986b9e0de9fbb0efef43c491d141` |
+| Root verification receipt | `40ff02a83763c27f00875b09bbd9c2e18e1615ec3208d6744d94e98303029e8c` |
+| Native probe | `dcb1a0d69f340f6fb60626b4c04b659f01d5c16494503fbfec8c45e6d80c6cf9` |
+| Actual live result | `c330464f6ec10dc2c63d25a8a268239df43de053b35b1bfeba0ff03676a54119` |
+
+
+## Private read isolates two independent mapper assumptions
+
+The first two separately reviewed inspector invocations refused before reading
+the record: attempt01 reported `fixed_ancestry`; attempt02 reported
+`ancestor_5_security_acl_header`. Both closed all owned handles. These stages do
+not identify an unexpected ACE or establish a privacy failure. Neither attempt
+changed an ACL, the record or the failed native fixture.
+
+The changed reader retained the fixed held nonfollowing ancestry, owner and
+full-file-identity checks, exact private-root security check, and protected
+current-user/SYSTEM record security. It required a regular single-link file,
+exclusive sharing, bounded complete format with exact EOF, identity/size
+rechecks, and successful handle closes. Attempts03 and04 completed in 0.160 and
+0.177 seconds, respectively, with all handles closed. They emitted only closed
+structure/grammar metadata; no raw API-returned values were logged or copied
+into this document, CI artifacts or the native result.
+
+The native returned path is an ordinary disk string with the fixed
+`AppData/Local/Packages/<one component>/AC` labels under a different base string
+from the frozen private caller query. These are lexical observations, not a
+proof that two paths identify different filesystem objects. Attempt04 confirmed
+exact `Packages` and `AC` spelling, four-way suffix split, base minimum, exactly
+two remainder components, a nonempty profile and the existing 128-unit bound.
+The ASCII-only profile predicate failed; canonical plain and braced GUID
+predicates also failed. The diagnostics reveal no particular rejected
+character. The base mismatch and component-grammar failure are independent;
+either still prevents the current mapper from admitting the environment.
+
+This is read-only diagnosis of the preserved Case13 refusal. It supplies no
+child-environment expectation, new accepted prefix, changed native policy or
+boundary qualification. No further native workload was run by these readers.
+
+A separately reviewed predicate-only inspection05 then completed in 0.175
+seconds with the same custody, complete-record, handle-close and process-wait
+checks. All nine proposed ordinary-component booleans passed: nonempty,
+existing bound, well-formed UTF16, no controls, no reserved characters, no
+traversal meta name, no trailing dot/space, no reserved device basename, and
+the combined predicate. The ASCII-only predicate and independent base-string
+mismatch remained unchanged. This reveals no particular name or rejected
+character and grants no mapping authority.
+
+The next mapper correction is source-only: it binds the native OS profile root
+to the actual held child token, requires caller/child TokenUser equality, and
+admits only the exact default AppData Local branch and one safe literal
+component. It independently keeps caller-knownfolder equality with the frozen
+private startup value. It neither opens the OS profile nor creates a missing
+private descendant. New pure gates and existing frame/custody tests must pass
+in CI; no new artifact or native result qualifies this change yet. The separate
+source-only native-handle [upstream proposal](https://github.com/microsoft/mxc/pull/1524)
+is not a released SDK or a production runtime qualification.
+
+| Closed metadata result | SHA-256 |
+| --- | --- |
+| Inspection03 | `2e2eb8ffda45967082dc3fe73cbc40b8cc2f6da3e2921dd7056235d06d458673` |
+| Inspection04 | `92582dcbece5ca751b4ae2c3f5bda06675368896a3427b6d9221fbb466c0c052` |
+| Inspection05 | `f827cbf092dcf65add35646ba21b81d771062d51cf51fa9abbbdd6bc3f915b1c` |
+
+## Separate Linux lifecycle contributor result
+
+Separately, Linux contributor run
+[39174025396](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39174025396)
+at `96c22c1fac0343aa5db1cfb06875bdd651b6c65c` passed the fixed wait-timeout,
+wait-cancel and tree-cancel cases. Each observed Prepared/Started, exact ready
+markers, expected `Exited(-1)`/timeout flag, Destroyed and independent native
+cleanup. Three known ordinary tree writers progressed from heartbeat counts
+`[1,1,1]` to `[2,2,2]` before Cancel and remained stable through six samples
+before Destroy. This is finite corroboration, without a universal descendant
+absence or separate-session proof. All three cleanup owners completed with
+pending zero; twelve public fixture files/291 bytes were retained, and the
+runner setting `1→0→1` was restored. Artifact `12153881045` is 29,088 bytes,
+with ZIP SHA-256
+`47c4d62d0530c1cd6710d5ea46d49a36f122f22324719ed4f59f48d4c0ed4cef`.
+The earlier Linux baseline-four pass and c9e tree failure remain separate.
+This grants no Windows, Claude/model, broker/hooks or common production
+qualification.
+
 This records a failed boundary qualification and narrower diagnostic facts.
-It establishes no new mapper, supported suffix, enforcement, full resource
+It establishes no qualified mapper, supported suffix, enforcement, full resource
 cleanup or customer-provider qualification. No native rerun or changed build is
 authorized by this record.

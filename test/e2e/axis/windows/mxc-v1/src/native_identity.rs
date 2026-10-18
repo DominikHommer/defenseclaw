@@ -20,7 +20,8 @@ use windows::Win32::Foundation::{
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::GetAppContainerFolderPath;
 use windows::Win32::Security::{
-    GetLengthSid, GetTokenInformation, IsValidSid, PSID, TOKEN_QUERY, TokenAppContainerSid,
+    GetLengthSid, GetTokenInformation, IsValidSid, PSID, TOKEN_QUERY, TOKEN_USER,
+    TokenAppContainerSid, TokenUser,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
@@ -29,7 +30,9 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::IO::IO_STATUS_BLOCK;
-use windows::Win32::System::Threading::{GetCurrentThread, OpenProcessToken, OpenThreadToken};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+};
 use windows::core::{GUID, HRESULT, PCWSTR, PWSTR};
 
 #[path = "private_native_record.rs"]
@@ -44,6 +47,12 @@ unsafe extern "system" {
         token: HANDLE,
         result: *mut PWSTR,
     ) -> HRESULT;
+}
+
+#[link(name = "userenv")]
+unsafe extern "system" {
+    #[link_name = "GetUserProfileDirectoryW"]
+    fn user_profile_directory(token: HANDLE, result: *mut u16, count: *mut u32) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -120,6 +129,7 @@ impl CallerEnvironment {
         // folder queries later run under these same original eight path values.
         startup.require_unchanged(std::env::vars_os(), false)?;
         let local_app_data = caller_local_app_data()?;
+        startup.require_caller_local_app_data(local_app_data.as_os_str())?;
         startup.require_unchanged(std::env::vars_os(), false)?;
         Ok(Self {
             startup,
@@ -161,13 +171,13 @@ unsafe fn bounded_wide(pointer: PWSTR, maximum: usize) -> Result<Vec<u16>> {
 
 // Validate every SID byte range before handing a returned in-buffer pointer to
 // IsValidSid/GetLengthSid. Null, forged offsets/counts and unknown shape refuse.
-fn sid_range(bytes: &[u8], address: usize) -> Result<std::ops::Range<usize>> {
+fn sid_range(bytes: &[u8], address: usize, header: usize) -> Result<std::ops::Range<usize>> {
     let start = bytes.as_ptr() as usize;
     let offset = address
         .checked_sub(start)
         .ok_or_else(|| anyhow::anyhow!("native SID pointer is outside result"))?;
     ensure!(
-        offset >= size_of::<usize>() && offset <= bytes.len().saturating_sub(8),
+        header >= size_of::<usize>() && offset >= header && offset <= bytes.len().saturating_sub(8),
         "native SID header is outside result"
     );
     ensure!(
@@ -221,12 +231,82 @@ fn caller_local_app_data() -> Result<OsString> {
     Ok(OsString::from_wide(&units?))
 }
 
-fn native_folder(process: &OwnedHandle) -> Result<OsString> {
+struct NativeProfile {
+    folder: OsString,
+    user_profile_root: OsString,
+}
+
+fn token_user_sid(token: &OwnedHandle) -> Result<Vec<u8>> {
+    let mut words = [0u64; 512];
+    let mut returned = 0u32;
+    unsafe {
+        GetTokenInformation(
+            handle(token),
+            TokenUser,
+            Some(words.as_mut_ptr().cast()),
+            size_of::<[u64; 512]>() as u32,
+            &mut returned,
+        )
+    }
+    .map_err(|_| anyhow::anyhow!("process User SID query refused"))?;
+    ensure!(
+        (size_of::<TOKEN_USER>()..=size_of::<[u64; 512]>()).contains(&(returned as usize)),
+        "process User SID query length differs"
+    );
+    let bytes =
+        unsafe { std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), returned as usize) };
+    let mut encoded_pointer = [0u8; size_of::<usize>()];
+    encoded_pointer.copy_from_slice(&bytes[..size_of::<usize>()]);
+    let address = usize::from_ne_bytes(encoded_pointer);
+    let range = sid_range(bytes, address, size_of::<TOKEN_USER>())?;
+    let sid = PSID(address as *mut _);
+    ensure!(
+        unsafe { IsValidSid(sid) }.as_bool()
+            && unsafe { GetLengthSid(sid) } as usize == range.len(),
+        "process User SID validation refused"
+    );
+    Ok(bytes[range].to_vec())
+}
+
+fn process_user_profile(token: &OwnedHandle) -> Result<OsString> {
+    // TOKEN_QUERY is sufficient. The explicit token is the same held child
+    // object used for TokenUser and AppContainerSID; no impersonation rights,
+    // environment expansion, host path open or allocation from OS length.
+    let mut buffer = [0u16; 2049];
+    let mut count = buffer.len() as u32;
+    ensure!(
+        unsafe { user_profile_directory(handle(token), buffer.as_mut_ptr(), &mut count) } != 0,
+        "same-child user profile root query refused"
+    );
+    profile_directory_result(&buffer, count as usize)
+}
+
+fn profile_directory_result(buffer: &[u16], count: usize) -> Result<OsString> {
+    ensure!(
+        buffer.len() == 2049
+            && (2..=buffer.len()).contains(&count)
+            && buffer[count - 1] == 0
+            && !buffer[..count - 1].contains(&0),
+        "same-child user profile root shape refused"
+    );
+    Ok(OsString::from_wide(&buffer[..count - 1]))
+}
+
+fn native_folder(process: &OwnedHandle) -> Result<NativeProfile> {
     require_process_identity_context()?;
     let mut raw_token = HANDLE::default();
     unsafe { OpenProcessToken(handle(process), TOKEN_QUERY, &mut raw_token) }
         .map_err(|_| anyhow::anyhow!("same-child token query refused"))?;
     let token = owned(raw_token)?;
+    let mut caller_token = HANDLE::default();
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut caller_token) }
+        .map_err(|_| anyhow::anyhow!("caller process token query refused"))?;
+    let caller_token = owned(caller_token)?;
+    ensure!(
+        token_user_sid(&token)? == token_user_sid(&caller_token)?,
+        "same-child User SID differs from caller"
+    );
+    let user_profile_root = process_user_profile(&token)?;
     let mut words = [0u64; 512]; // aligned, fixed 4096-byte result; no allocation from OS length
     let mut returned = 0u32;
     unsafe {
@@ -248,7 +328,7 @@ fn native_folder(process: &OwnedHandle) -> Result<OsString> {
     let mut encoded_pointer = [0u8; size_of::<usize>()];
     encoded_pointer.copy_from_slice(&bytes[..size_of::<usize>()]);
     let address = usize::from_ne_bytes(encoded_pointer);
-    let range = sid_range(bytes, address)?;
+    let range = sid_range(bytes, address, size_of::<usize>())?;
     let sid = PSID(address as *mut _);
     ensure!(
         unsafe { IsValidSid(sid) }.as_bool()
@@ -269,7 +349,10 @@ fn native_folder(process: &OwnedHandle) -> Result<OsString> {
     let units = unsafe { bounded_wide(folder, 2048) };
     unsafe { CoTaskMemFree(Some(folder.0.cast())) };
     require_process_identity_context()?;
-    Ok(OsString::from_wide(&units?))
+    Ok(NativeProfile {
+        folder: OsString::from_wide(&units?),
+        user_profile_root,
+    })
 }
 
 fn unicode(value: &mut [u16]) -> Result<UNICODE_STRING> {
@@ -461,23 +544,24 @@ pub(super) fn expected_from_child(
     caller: &CallerEnvironment,
 ) -> Result<NativeEnvironmentCustody> {
     caller.require_unchanged()?;
-    let folder = native_folder(process)?;
+    let native = native_folder(process)?;
+    let folder = &native.folder;
     caller.require_unchanged()?;
     let expected =
-        match ExpectedEnvironment::from_caller_profile(root, &caller.local_app_data, &folder) {
+        match ExpectedEnvironment::from_process_profile(root, &native.user_profile_root, folder) {
             Ok(expected) => expected,
             Err(error) => {
                 eprintln!(
                     "native private path record available={}",
                     fixture.directories.last().is_some_and(|root| {
-                        private_native_record::capture(root, &caller.local_app_data, &folder)
+                        private_native_record::capture(root, &caller.local_app_data, folder)
                     })
                 );
                 eprintln!(
                     "{}",
                     classify_profile_refusal(
                         &caller.local_app_data,
-                        &folder,
+                        folder,
                         caller.startup.local_app_data(),
                         ordinal_equal,
                     )
@@ -539,18 +623,58 @@ mod tests {
     }
 
     #[test]
+    fn profile_directory_query_requires_bounded_complete_native_result() {
+        let expected = OsString::from(r"C:\fixed-public-profile");
+        let units: Vec<_> = expected.encode_wide().collect();
+        let mut buffer = [0u16; 2049];
+        buffer[..units.len()].copy_from_slice(&units);
+        let count = units.len() + 1;
+        assert_eq!(profile_directory_result(&buffer, count).unwrap(), expected);
+        for invalid_count in [0, 1, 2050, usize::MAX] {
+            assert!(profile_directory_result(&buffer, invalid_count).is_err());
+        }
+        buffer[count - 1] = 65; // no terminating NUL in the reported result
+        assert!(profile_directory_result(&buffer, count).is_err());
+        buffer[count - 1] = 0;
+        buffer[4] = 0; // a shorter string cannot masquerade as the reported count
+        assert!(profile_directory_result(&buffer, count).is_err());
+        let mut maximum = [65u16; 2049];
+        maximum[2048] = 0;
+        assert_eq!(
+            profile_directory_result(&maximum, 2049)
+                .unwrap()
+                .encode_wide()
+                .count(),
+            2048
+        );
+        assert!(profile_directory_result(&maximum[..2048], 2049).is_err());
+    }
+
+    #[test]
     fn returned_sid_pointer_and_body_must_fit_the_fixed_native_result() {
         let mut bytes = [0u8; 96];
         bytes[16] = 1;
         bytes[17] = 2;
         let base = bytes.as_ptr() as usize;
-        assert_eq!(sid_range(&bytes, base + 16).unwrap(), 16..32);
+        assert_eq!(
+            sid_range(&bytes, base + 16, size_of::<usize>()).unwrap(),
+            16..32
+        );
+        assert_eq!(
+            sid_range(&bytes, base + 16, size_of::<TOKEN_USER>()).unwrap(),
+            16..32
+        );
+        // TokenUser's SID must not overlap the larger SID_AND_ATTRIBUTES header.
+        bytes[size_of::<usize>()] = 1;
+        bytes[size_of::<usize>() + 1] = 0;
+        assert!(sid_range(&bytes, base + size_of::<usize>(), size_of::<TOKEN_USER>()).is_err());
+        assert!(sid_range(&bytes, base + 16, 0).is_err());
         for pointer in [0, base, base + 95, base + bytes.len(), usize::MAX] {
-            assert!(sid_range(&bytes, pointer).is_err());
+            assert!(sid_range(&bytes, pointer, size_of::<usize>()).is_err());
         }
         bytes[17] = 16;
-        assert!(sid_range(&bytes, base + 16).is_err());
+        assert!(sid_range(&bytes, base + 16, size_of::<usize>()).is_err());
         bytes[17] = 15;
-        assert!(sid_range(&bytes[..32], base + 16).is_err());
+        assert!(sid_range(&bytes[..32], base + 16, size_of::<usize>()).is_err());
     }
 }

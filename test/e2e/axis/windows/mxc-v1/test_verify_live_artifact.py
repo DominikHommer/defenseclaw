@@ -366,7 +366,20 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
             self.assertEqual(build.native_directory_custody_tests(mode), verify.native_directory_custody_tests(mode))
         self.assertEqual(build.NATIVE_DIRECTORY_CUSTODY_TESTS, verify.NATIVE_DIRECTORY_CUSTODY_TESTS)
         self.assertEqual(sum(map(len, verify.NATIVE_DIRECTORY_CUSTODY_TESTS.values())), 1)
-        self.assertEqual(sum(map(len, verify.PURE_ENVIRONMENT_TESTS.values())), 6)
+        self.assertEqual(sum(map(len, verify.PURE_ENVIRONMENT_TESTS.values())), 9)
+
+    def test_prior_ascii_and_caller_base_inventory_cannot_admit_the_new_mapper(self) -> None:
+        current = self.provenance["pure_native_environment_tests"]
+        added = (
+            "ordinary_native_profile_component_confines_literal_windows_names",
+            "profile_directory_query_requires_bounded_complete_native_result",
+        )
+        previous = {binary: [name for name in names if not name.endswith(added)] for binary, names in current.items()}
+        self.assertEqual(sum(map(len, current.values())) - sum(map(len, previous.values())), 3)
+        self.provenance["pure_native_environment_tests"] = previous
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "pure native environment test evidence"):
+            self.run_verify()
 
     def test_private_native_record_cannot_enter_an_admitted_artifact(self) -> None:
         private = "native-folder-refusal.private.bin"

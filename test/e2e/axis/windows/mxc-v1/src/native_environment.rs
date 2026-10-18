@@ -122,6 +122,15 @@ impl StartupEnvironment {
         Ok(())
     }
 
+    pub(super) fn require_caller_local_app_data(&self, caller: &OsStr) -> io::Result<()> {
+        if caller != self.local_app_data() {
+            return Err(io::Error::other(
+                "caller known-folder differs from private startup",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn local_app_data(&self) -> &OsStr {
         &self.values["LOCALAPPDATA"]
     }
@@ -279,40 +288,74 @@ fn disk_units(value: &OsStr) -> io::Result<Vec<u16>> {
     Ok(value.to_vec())
 }
 
+fn ordinary_profile_component(component: &[u16]) -> bool {
+    // Preserve one literal ordinary Windows component. No Unicode folding,
+    // expansion, lossy conversion or path canonicalization supplies authority.
+    if component.is_empty()
+        || component.len() > 128
+        || component == [46]
+        || component == [46, 46]
+        || component.last().is_some_and(|unit| [32, 46].contains(unit))
+        || component
+            .iter()
+            .any(|unit| [92, 47, 58, 60, 62, 34, 124, 63, 42].contains(unit))
+        || !std::char::decode_utf16(component.iter().copied())
+            .all(|value| value.is_ok_and(|character| !character.is_control()))
+    {
+        return false;
+    }
+    // Device aliases remain special with an extension and with spaces before
+    // that extension. Conservatively include COM/LPT0 as the HostStage floor.
+    let mut stem = component.split(|unit| *unit == 46).next().unwrap();
+    while stem.last() == Some(&32) {
+        stem = &stem[..stem.len() - 1];
+    }
+    let stem: Vec<u16> = stem
+        .iter()
+        .map(|unit| {
+            if (65..=90).contains(unit) {
+                *unit + 32
+            } else {
+                *unit
+            }
+        })
+        .collect();
+    if ["con", "prn", "aux", "nul", "clock$", "conin$", "conout$"]
+        .iter()
+        .any(|name| stem.iter().copied().eq(name.encode_utf16()))
+    {
+        return false;
+    }
+    !(stem.len() == 4
+        && (stem[..3] == [99, 111, 109] || stem[..3] == [108, 112, 116])
+        && ((48..=57).contains(&stem[3]) || [0xb9, 0xb2, 0xb3].contains(&stem[3])))
+}
+
 fn profile_component(remainder: &[u16]) -> io::Result<&[u16]> {
     let parts: Vec<_> = remainder.split(|unit| *unit == 92).collect();
-    if parts.len() != 2
-        || parts[1] != [65, 67]
-        || parts[0].is_empty()
-        || parts[0].len() > 128
-        || !parts[0].iter().all(|unit| {
-            (48..=57).contains(unit)
-                || (65..=90).contains(unit)
-                || (97..=122).contains(unit)
-                || [45, 46, 95].contains(unit)
-        })
-    {
+    if parts.len() != 2 || parts[1] != [65, 67] || !ordinary_profile_component(parts[0]) {
         return Err(io::Error::other("native profile component shape refused"));
     }
     Ok(parts[0])
 }
 
 impl ExpectedEnvironment {
-    // GetAppContainerFolderPath binds the same-child SID to the CALLER's user
-    // profile. Require that exact trusted known-folder base; carry only its
-    // one validated profile component into the already held fresh fixture.
-    // Neither source path is opened here or accepted from a child environment.
-    pub(super) fn from_caller_profile(
+    // The caller validates the same retained child token's User SID against
+    // its own, then obtains this token's OS user profile root independently of
+    // environment values. Admit only the explicit default LocalAppData floor;
+    // redirected/other bases refuse. Carry one safe component, never a host
+    // path, into the held private fixture. No host profile path is opened.
+    pub(super) fn from_process_profile(
         root: &Path,
-        caller_local_app_data: &OsStr,
+        process_user_profile: &OsStr,
         native_folder: &OsStr,
     ) -> io::Result<Self> {
-        let mut prefix = disk_units(caller_local_app_data)?;
-        prefix.extend(r"\Packages\".encode_utf16());
+        let mut prefix = disk_units(process_user_profile)?;
+        prefix.extend(r"\AppData\Local\Packages\".encode_utf16());
         let native = disk_units(native_folder)?;
         let remainder = native
             .strip_prefix(prefix.as_slice())
-            .ok_or_else(|| io::Error::other("native profile caller known-folder base differs"))?;
+            .ok_or_else(|| io::Error::other("native process user-profile base differs"))?;
         let profile = profile_component(remainder)?;
         let mapped = root
             .join(r"home\AppData\Local\Packages")
@@ -484,11 +527,14 @@ mod tests {
         assert!(!text.contains("C:") && !text.contains("D:") && !text.contains("native-profile"));
         // Diagnostic classification never changes exact admission.
         let root = Path::new(r"C:\fixed-private\dc-axis-windows-psec-fixed");
-        assert!(ExpectedEnvironment::from_caller_profile(root, caller, exact).is_ok());
         assert!(
-            ExpectedEnvironment::from_caller_profile(
+            ExpectedEnvironment::from_process_profile(root, OsStr::new(r"C:\fixed-caller"), exact)
+                .is_ok()
+        );
+        assert!(
+            ExpectedEnvironment::from_process_profile(
                 root,
-                caller,
+                OsStr::new(r"C:\fixed-caller"),
                 OsStr::new(r"c:\FIXED-CALLER\appdata\local\Packages\native-profile_1\AC")
             )
             .is_err()
@@ -594,6 +640,23 @@ mod tests {
         let snapshot =
             StartupEnvironment::from_startup_entries(entries.clone(), &system, &cwd).unwrap();
         assert!(snapshot.require_unchanged(entries.clone(), false).is_ok());
+        assert!(
+            snapshot
+                .require_caller_local_app_data(snapshot.local_app_data())
+                .is_ok()
+        );
+        assert!(
+            snapshot
+                .require_caller_local_app_data(OsStr::new(r"C:\Users\fixed-OS-user\AppData\Local"))
+                .is_err()
+        );
+        assert!(
+            snapshot
+                .require_caller_local_app_data(OsStr::new(
+                    r"c:\FIXED-PRIVATE\psec-headless-01\home\AppData\Local"
+                ))
+                .is_err()
+        );
         assert!(snapshot.require_unchanged(entries.clone(), true).is_err());
         let mut with_canary = entries.clone();
         with_canary.push(("DC_AXIS_INHERIT_CANARY".into(), "fixed-public".into()));
@@ -648,61 +711,78 @@ mod tests {
         ] {
             assert!(ExpectedEnvironment::from_native_folder(root, OsStr::new(folder)).is_err());
         }
-        // Same native profile authority, different caller/private user roots.
-        // Only the SID-derived component transfers; host paths never do.
-        let caller = OsStr::new(r"C:\Users\fixed-caller\AppData\Local");
+        // OS root and native folder must agree exactly before a component
+        // transfers. Environment/caller-known-folder values are not authority.
+        let os_profile = OsStr::new(r"C:\Users\fixed-native-user");
         let native =
-            OsStr::new(r"C:\Users\fixed-caller\AppData\Local\Packages\native-profile_1\AC");
-        let mapped = ExpectedEnvironment::from_caller_profile(root, caller, native).unwrap();
+            OsStr::new(r"C:\Users\fixed-native-user\AppData\Local\Packages\native profile+λ_1\AC");
+        let mapped = ExpectedEnvironment::from_process_profile(root, os_profile, native).unwrap();
         assert_eq!(
             mapped.local_app_data,
-            root.join(r"home\AppData\Local\Packages\native-profile_1\AC")
+            root.join(r"home\AppData\Local\Packages\native profile+λ_1\AC")
         );
         assert_eq!(mapped.temporary, mapped.local_app_data.join("Temp"));
         assert_eq!(mapped.temporary_alias, mapped.temporary);
-        // A different mounted caller base is permissible only when BOTH
-        // independently queried native values match it exactly.
-        let unicode_base = OsStr::new(r"\\?\D:\fixed-λ-雪\local");
-        let unicode_native = OsStr::new(r"D:\fixed-λ-雪\local\Packages\native-profile_1\AC");
+        let unicode_root = OsStr::new(r"\\?\D:\fixed-λ-雪");
+        let unicode_native =
+            OsStr::new(r"D:\fixed-λ-雪\AppData\Local\Packages\native profile+λ_1\AC");
         assert_eq!(
-            ExpectedEnvironment::from_caller_profile(root, unicode_base, unicode_native).unwrap(),
+            ExpectedEnvironment::from_process_profile(root, unicode_root, unicode_native).unwrap(),
             mapped
         );
         for candidate in [
-            r"C:\Users\other-caller\AppData\Local\Packages\native-profile_1\AC",
-            r"C:\Users\fixed-caller\AppData\Local-extra\Packages\native-profile_1\AC",
-            r"C:\Users\fixed-caller\AppData\Local\Packages\native-profile_1\extra\AC",
-            r"C:\Users\fixed-caller\AppData\Local\Packages\native-profile_1\LocalCache",
-            r"C:\Users\fixed-caller\AppData\Local\Packages\..\AC",
-            r"C:\Users\fixed-caller\AppData\Local\Packages\native:ads\AC",
-            r"C:\Users\fixed-caller\AppData\Local\Packages\native-profile.\AC",
-            r"C:\Users\fixed-caller\AppData\Local\Packages\λ-雪\AC",
-            r"\\server\share\Packages\native-profile_1\AC",
+            r"C:\Users\other-user\AppData\Local\Packages\native profile+λ_1\AC",
+            r"C:\Users\fixed-native-user\AppData\Local-extra\Packages\native profile+λ_1\AC",
+            r"C:\Users\fixed-native-user\redirected-local\Packages\native profile+λ_1\AC",
+            r"C:\Users\fixed-native-user\AppData\Local\Packages\native\extra\AC",
+            r"C:\Users\fixed-native-user\AppData\Local\Packages\native\LocalCache",
+            r"C:\Users\fixed-native-user\AppData\Local\Packages\..\AC",
+            r"C:\Users\fixed-native-user\AppData\Local\Packages\native:ads\AC",
+            r"C:\Users\fixed-native-user\AppData\Local\Packages\native.\AC",
+            r"C:\Users\fixed-native-user\AppData\Local\Packages\CON .txt\AC",
+            r"\\server\share\Packages\native\AC",
         ] {
             assert!(
-                ExpectedEnvironment::from_caller_profile(root, caller, OsStr::new(candidate))
+                ExpectedEnvironment::from_process_profile(root, os_profile, OsStr::new(candidate))
                     .is_err()
             );
         }
         assert!(
-            ExpectedEnvironment::from_caller_profile(Path::new(r"\\server\share"), caller, native)
-                .is_err()
+            ExpectedEnvironment::from_process_profile(
+                Path::new(r"\\server\share"),
+                os_profile,
+                native
+            )
+            .is_err()
         );
         assert!(
-            ExpectedEnvironment::from_caller_profile(
+            ExpectedEnvironment::from_process_profile(
                 root,
-                OsStr::new(r"C:\Users\fixed-caller\AppData\Local\.."),
+                OsStr::new(r"C:\Users\fixed-native-user\.."),
+                native
+            )
+            .is_err()
+        );
+        // The startup/private caller base cannot replace the OS profile root.
+        assert!(
+            ExpectedEnvironment::from_process_profile(
+                root,
+                root.join(r"home\AppData\Local").as_os_str(),
                 native
             )
             .is_err()
         );
         let oversize_profile = format!(
-            r"C:\Users\fixed-caller\AppData\Local\Packages\{}\AC",
+            r"C:\Users\fixed-native-user\AppData\Local\Packages\{}\AC",
             "x".repeat(129)
         );
         assert!(
-            ExpectedEnvironment::from_caller_profile(root, caller, OsStr::new(&oversize_profile))
-                .is_err()
+            ExpectedEnvironment::from_process_profile(
+                root,
+                os_profile,
+                OsStr::new(&oversize_profile)
+            )
+            .is_err()
         );
         let mut frame = Vec::new();
         mapped.write_to(&mut frame).unwrap();
@@ -710,6 +790,101 @@ mod tests {
             ExpectedEnvironment::read_from(frame.as_slice(), root).unwrap(),
             mapped
         );
+    }
+
+    #[test]
+    fn ordinary_native_profile_component_confines_literal_windows_names() {
+        let root = Path::new(r"C:\fixed-private\dc-axis-windows-psec-fixed");
+        let maximum = "x".repeat(128);
+        let oversized = "x".repeat(129);
+        for name in [
+            "public space",
+            "public+$[fixture]",
+            "publicé",
+            "公開",
+            ".public",
+            maximum.as_str(),
+        ] {
+            let units: Vec<_> = name.encode_utf16().collect();
+            assert!(ordinary_profile_component(&units));
+            let folder = root
+                .join(r"home\AppData\Local\Packages")
+                .join(name)
+                .join("AC");
+            let expected =
+                ExpectedEnvironment::from_native_folder(root, folder.as_os_str()).unwrap();
+            assert_eq!(expected.local_app_data, folder); // preserve exact literal bytes
+            let mut frame = Vec::new();
+            expected.write_to(&mut frame).unwrap();
+            assert_eq!(
+                ExpectedEnvironment::read_from(frame.as_slice(), root).unwrap(),
+                expected
+            );
+        }
+        assert!(ordinary_profile_component(&[0xd83d, 0xde00]));
+        for name in [
+            "",
+            ".",
+            "..",
+            "public.",
+            "public ",
+            "public/child",
+            r"public\child",
+            "public:ads",
+            oversized.as_str(),
+        ] {
+            assert!(!ordinary_profile_component(
+                &name.encode_utf16().collect::<Vec<_>>()
+            ));
+            let folder = root
+                .join(r"home\AppData\Local\Packages")
+                .join(name)
+                .join("AC");
+            assert!(ExpectedEnvironment::from_native_folder(root, folder.as_os_str()).is_err());
+        }
+        for unit in (0u16..=31)
+            .chain(127..=159)
+            .chain([60, 62, 34, 124, 63, 42])
+        {
+            assert!(!ordinary_profile_component(&[65, unit, 66]));
+        }
+        for invalid in [
+            &[0xd800][..],
+            &[0xdc00][..],
+            &[0xd800, 65][..],
+            &[0xd800, 0xd800, 0xdc00][..],
+        ] {
+            assert!(!ordinary_profile_component(invalid));
+        }
+        let mut devices = vec![
+            "CON".to_owned(),
+            "prn".to_owned(),
+            "Aux".to_owned(),
+            "NUL".to_owned(),
+            "CLOCK$".to_owned(),
+            "CONIN$".to_owned(),
+            "CONOUT$".to_owned(),
+        ];
+        for prefix in ["COM", "LPT"] {
+            for suffix in [
+                '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '¹', '²', '³',
+            ] {
+                devices.push(format!("{prefix}{suffix}"));
+            }
+        }
+        for device in devices {
+            for ending in ["", ".public", " .public", "  .public.extra"] {
+                let name = format!("{device}{ending}");
+                assert!(!ordinary_profile_component(
+                    &name.encode_utf16().collect::<Vec<_>>()
+                ));
+                let folder = root
+                    .join(r"home\AppData\Local\Packages")
+                    .join(name)
+                    .join("AC");
+                assert!(ExpectedEnvironment::from_native_folder(root, folder.as_os_str()).is_err());
+            }
+        }
     }
 
     #[test]

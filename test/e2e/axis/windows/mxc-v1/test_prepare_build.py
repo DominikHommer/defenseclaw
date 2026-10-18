@@ -61,13 +61,13 @@ class BuildGuardTests(TestCase):
     def test_boundary_packages_three_images_and_adds_only_its_startup_test_gates(self) -> None:
         boundary = build.artifact_binaries("standalone-boundary")
         self.assertEqual(boundary, (build.BINARY, build.LOADER_BINARY, build.BOUNDARY_BINARY))
-        self.assertEqual(sum(map(len, build.pure_environment_tests("standalone-boundary").values())), 10)
+        self.assertEqual(sum(map(len, build.pure_environment_tests("standalone-boundary").values())), 13)
         self.assertEqual(sum(map(len, build.native_directory_custody_tests("standalone-boundary").values())), 2)
         for mode in ("dll-startup-only", "claude-version-only", "claude-create-control-only"):
             self.assertEqual(build.artifact_binaries(mode), boundary + (build.DLL_BINARY,))
             self.assertEqual(build.pure_environment_tests(mode), build.PURE_ENVIRONMENT_TESTS)
             self.assertEqual(build.native_directory_custody_tests(mode), build.NATIVE_DIRECTORY_CUSTODY_TESTS)
-        self.assertEqual(sum(map(len, build.PURE_ENVIRONMENT_TESTS.values())), 6)
+        self.assertEqual(sum(map(len, build.PURE_ENVIRONMENT_TESTS.values())), 9)
         with self.assertRaises(ValueError):
             build.artifact_binaries("unreviewed")
         with self.assertRaises(ValueError):
@@ -85,6 +85,28 @@ class BuildGuardTests(TestCase):
         for name in build.native_directory_custody_tests("standalone-boundary")["defenseclaw-axis-windows-psec-probe"]:
             if "private_native_record" in name:
                 self.assertRegex(source, r"#\[test\]\s*fn " + re.escape(name.rsplit("::", 1)[-1]) + r"\(")
+
+    def test_profile_component_and_token_root_gates_name_real_pure_tests(self) -> None:
+        root = Path(__file__).resolve().parent
+        source = "\n".join(
+            (root / name).read_text(encoding="utf-8")
+            for name in ("src/native_environment.rs", "src/native_identity.rs")
+        )
+        expected = {
+            "defenseclaw-axis-windows-psec-boundary-child": [
+                "native_environment::tests::ordinary_native_profile_component_confines_literal_windows_names",
+            ],
+            "defenseclaw-axis-windows-psec-probe": [
+                "probe::native_environment::tests::ordinary_native_profile_component_confines_literal_windows_names",
+                "probe::native_identity::tests::profile_directory_query_requires_bounded_complete_native_result",
+            ],
+        }
+        for mode in build.PROBE_SLICE_CONTRACTS:
+            inventory = build.pure_environment_tests(mode)
+            for binary, names in expected.items():
+                for name in names:
+                    self.assertIn(name, inventory[binary])
+                    self.assertRegex(source, r"#\[test\]\s*fn " + re.escape(name.rsplit("::", 1)[-1]) + r"\(")
 
     def test_source_identity_must_match_exact_commit(self) -> None:
         with (
