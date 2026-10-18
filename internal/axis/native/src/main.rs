@@ -10,6 +10,17 @@ use std::fs::File;
 use std::os::fd::FromRawFd;
 
 fn run() -> Result<(), ()> {
+    // The host creates this peer as init of a fresh outer PID namespace. Its
+    // parent is outside that namespace and is therefore reported as PID zero.
+    // Install parent-death handling here, rather than comparing a host PID in
+    // Go's post-clone hook. Protocol EOF still refuses the earlier host-death
+    // race; a creating-thread death may kill this peer early (availability).
+    // SAFETY: these queries and prctl affect only this single-threaded peer.
+    if unsafe { libc::getpid() != 1 || libc::getppid() != 0 }
+        || unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0
+    {
+        return Err(());
+    }
     if std::env::args_os().len() != 1 {
         return Err(());
     }

@@ -39,6 +39,14 @@ Both static ELF structure and separate reviewed static-musl build provenance
 are mandatory. Static glibc or a missing interpreter entry alone cannot prove
 the loader closure. No static-musl/libcap runtime is supplied by this change.
 
+The host must create the peer as PID1 of a fresh outer PID namespace. Before
+environment, descriptor or backend preparation, the peer requires PID1/parent0
+and installs its own `PR_SET_PDEATHSIG(SIGKILL)`. Go's post-clone host-PID check
+is incompatible with this namespace. Host protocol EOF refuses a host death
+before this prctl; Linux ties the signal to the creating thread, so an early
+thread death may stop the peer even while the host process survives. These
+availability and parent-death properties still need actual native clone tests.
+
 One polling owner serializes protocol admission, native state and frame output.
 Child pipes and protocol pipes are nonblocking; input is capped at 64KiB, output
 frames at 16KiB, and the outbound queue at eight frames. A stalled protocol
