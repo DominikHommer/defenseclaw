@@ -14,12 +14,30 @@ workspace import/export lifecycle.
 Linux host preparation reuses the same captured SHA1 decoder, sanitizer,
 history withholding and operator-setting rules; it does not execute Git.
 Its initial floor accepts only clean absolute paths on the process's root
-mount, using cached `openat2` lookups with beneath/no-symlink/no-magic-link/
-no-mount-crossing resolution. Separate mounts and bind aliases refuse, including
-otherwise ordinary separate home or data volumes. An unsupported kernel or
-cache-required lookup fails without an uncached or pathname fallback. The
+mount, using one existing path component per `openat2` call with
+beneath/no-symlink/no-magic-link/no-mount-crossing resolution. Each call uses
+`O_PATH|O_NOFOLLOW|O_CLOEXEC`, without `O_DIRECTORY`, trailing slash or multiple
+components. Before descending, its held object must be a directory on the same
+root mount and admitted local filesystem. Separate mounts and bind aliases
+refuse, including otherwise ordinary separate home or data volumes. An
+unsupported kernel or ambiguous lookup fails without a retry or pathname
+fallback. The
 admitted local filesystem types are ext4, XFS, Btrfs, tmpfs and OverlayFS; this
 assumes the host's root mount and its backing configuration are trusted.
+For an existing positive terminal dentry, Linux's `O_PATH` lookup does not
+trigger an unmounted automount point; an autofs object refuses before the next
+descent. The reviewed kernel paths are [O_PATH intent construction](https://github.com/torvalds/linux/blob/v6.14/fs/open.c#L1244)
+and [terminal automount handling](https://github.com/torvalds/linux/blob/v6.14/fs/namei.c#L1346).
+This is an existing local-directory floor, not support for arbitrary
+negative/dynamic automount dentries. The local filesystem calls can block in
+the kernel and are not hard-deadline-interruptible by context cancellation.
+
+The first host regression run, `39177612908` at `9406422c`, refused its positive
+Linux fixtures at the initial source lookup with `EAGAIN` under the earlier
+full-path `RESOLVE_CACHED` implementation. That run did not qualify Linux
+capture; Windows and macOS workspace/backend race and vet gates passed. The
+component-only correction retains the four confinement flags
+without a cached/uncached retry; its new filesystem execution gate is pending.
 
 The staging parent must already belong to the current effective UID with no
 group/other mode permissions. No permissions repair occurs. Fresh artifact,
@@ -64,8 +82,8 @@ retry through the same owner.
 This producer and `backend.NewHostStageAssets` do not certify native source
 mount topology/no-IDMAP lineage, guest permission, runtime/harness images,
 policy translation or production launch. The adapter must independently check
-those requirements before its first namespace clone. Linux filesystem test
-source is present; actual execution and qualification remain pending review.
+those requirements before its first namespace clone. The corrected component
+walk's filesystem assertions remain pending a fresh execution gate.
 
 ## Owned sanitized-root custody
 

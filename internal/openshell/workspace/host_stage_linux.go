@@ -158,14 +158,15 @@ func prepareHostStagePlatform(ctx context.Context, opts StageOptions) (stage *Ho
 		return nil, err
 	}
 	owner.created = true
-	owner.artifact, err = linuxHostOpen(owner.parent, owner.name, true)
+	owner.artifact, err = linuxHostOpen(owner.parent, owner.name)
 	if err != nil {
 		return nil, fmt.Errorf("workspace: retain unverified empty Linux staging residue: %w", err)
 	}
-	owner.artifactID, err = linuxHostInfo(owner.artifact, true)
-	if err != nil {
-		return nil, err
+	artifactID, err := linuxHostInfo(owner.artifact, true)
+	if err != nil || artifactID.mode&unix.S_IFMT != unix.S_IFDIR {
+		return nil, errors.Join(errors.New("workspace: Linux artifact is not a held private directory"), err)
 	}
+	owner.artifactID = artifactID // publish cleanup identity only after directory admission
 	owner.roots[0], err = access.heldRoot(owner.artifact, true)
 	if err != nil {
 		return nil, err
@@ -186,7 +187,7 @@ func prepareHostStagePlatform(ctx context.Context, opts StageOptions) (stage *Ho
 		if err := unix.Mkdirat(int(owner.artifact.Fd()), dir, 0o700); err != nil {
 			return nil, err
 		}
-		pin, err := linuxHostOpen(owner.artifact, dir, true)
+		pin, err := linuxHostOpen(owner.artifact, dir)
 		if err != nil {
 			return nil, err
 		}
@@ -242,11 +243,11 @@ func prepareHostStagePlatform(ctx context.Context, opts StageOptions) (stage *Ho
 			return nil, err
 		}
 	}
-	output, err := linuxHostOpen(owner.artifact, "sanitized", true)
+	output, err := linuxHostOpen(owner.artifact, "sanitized")
 	if err != nil {
 		return nil, err
 	}
-	owner.tree, err = linuxHostOpen(output, record.RepoName, true)
+	owner.tree, err = linuxHostOpen(output, record.RepoName)
 	if closeErr := access.closeFile(output); closeErr != nil {
 		owner.stickyErr = closeErr
 		return nil, errors.Join(err, closeErr)
@@ -255,8 +256,8 @@ func prepareHostStagePlatform(ctx context.Context, opts StageOptions) (stage *Ho
 		return nil, err
 	}
 	treeID, err := linuxHostInfo(owner.tree, true)
-	if err != nil {
-		return nil, err
+	if err != nil || treeID.mode&unix.S_IFMT != unix.S_IFDIR {
+		return nil, errors.Join(errors.New("workspace: Linux sanitized root is not a held private directory"), err)
 	}
 	record.Stage = filepath.Join(opts.DataDir, owner.name, "sanitized", record.RepoName)
 	stage = &HostStage{record: record, identity: sourceID.label(), close: owner.close, duplicateRoot: func() (*os.File, error) { return duplicateLinuxHostRoot(owner.tree, treeID) }}
@@ -365,7 +366,7 @@ func (a *linuxHostAccess) capture(ctx context.Context, source *os.File, expected
 					return errors.New("workspace: Linux captured entry name/count refused")
 				}
 				seen[strings.ToUpper(name)] = true
-				child, err := linuxHostOpen(readable, name, false)
+				child, err := linuxHostOpen(readable, name)
 				if err != nil {
 					return err
 				}

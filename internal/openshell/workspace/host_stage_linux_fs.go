@@ -21,10 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Linux UAPI include/uapi/linux/openat2.h: RESOLVE_CACHED (since 5.12).
-// The pinned x/sys version does not export this already reviewed flag.
-const linuxHostResolveCached = 0x20
-const linuxHostResolve = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV | linuxHostResolveCached
+const linuxHostResolve = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV
 
 type linuxHostIdentity struct {
 	dev, ino, mount uint64
@@ -178,14 +175,30 @@ func linuxHostAbsolute(name string) error {
 	return nil
 }
 
-func linuxHostOpen(parent *os.File, name string, directory bool) (*os.File, error) {
-	flags := unix.O_PATH | unix.O_CLOEXEC | unix.O_NOFOLLOW
-	if directory {
-		flags |= unix.O_DIRECTORY
+func linuxHostOpenHow(name string) (unix.OpenHow, error) {
+	if name == "" || name == "." || name == ".." || len(name) > 255 || !utf8.ValidString(name) || strings.ContainsRune(name, '/') {
+		return unix.OpenHow{}, errors.New("workspace: Linux held lookup requires one bounded component")
 	}
-	fd, err := unix.Openat2(int(parent.Fd()), name, &unix.OpenHow{Flags: uint64(flags), Resolve: linuxHostResolve})
+	for _, char := range name {
+		if unicode.IsControl(char) || char == utf8.RuneError {
+			return unix.OpenHow{}, errors.New("workspace: Linux held lookup contains unsupported characters")
+		}
+	}
+	// Each component is terminal: no slash, O_DIRECTORY or open/create intent.
+	// Linux fs/open.c sets O_PATH intent to zero; fs/namei.c follow_automount
+	// returns -EISDIR before d_automount when those lookup intents are absent.
+	// fstatfs then refuses an untriggered autofs object before descent.
+	return unix.OpenHow{Flags: unix.O_PATH | unix.O_CLOEXEC | unix.O_NOFOLLOW, Resolve: linuxHostResolve}, nil
+}
+
+func linuxHostOpen(parent *os.File, name string) (*os.File, error) {
+	how, err := linuxHostOpenHow(name)
 	if err != nil {
-		return nil, err // including EAGAIN: no uncached or pathname fallback
+		return nil, err
+	}
+	fd, err := unix.Openat2(int(parent.Fd()), name, &how)
+	if err != nil {
+		return nil, err // including a BENEATH-race EAGAIN: no retry or fallback
 	}
 	return os.NewFile(uintptr(fd), "host-staging-object"), nil
 }
@@ -194,7 +207,36 @@ func (a *linuxHostAccess) absolute(name string) (*os.File, error) {
 	if err := linuxHostAbsolute(name); err != nil {
 		return nil, err
 	}
-	return linuxHostOpen(a.root, strings.TrimPrefix(name, "/"), true)
+	components := strings.Split(strings.TrimPrefix(name, "/"), "/")
+	if len(components) > hostStageMaxDepth {
+		return nil, errors.New("workspace: Linux held source path exceeds its component bound")
+	}
+	rootID, err := linuxHostInfo(a.root, false)
+	if err != nil {
+		return nil, err
+	}
+	parent := a.root // borrowed; every later component is owned below
+	for _, component := range components {
+		pin, openErr := linuxHostOpen(parent, component)
+		var info linuxHostIdentity
+		if openErr == nil {
+			info, openErr = linuxHostInfo(pin, false)
+			if openErr == nil && (info.mode&unix.S_IFMT != unix.S_IFDIR || info.mount != rootID.mount) {
+				openErr = errors.New("workspace: Linux source component is not a directory on the held root mount")
+			}
+		}
+		if parent != a.root {
+			openErr = errors.Join(openErr, a.closeFile(parent))
+		}
+		if openErr != nil {
+			if pin != nil {
+				openErr = errors.Join(openErr, a.closeFile(pin))
+			}
+			return nil, openErr
+		}
+		parent = pin
+	}
+	return parent, nil
 }
 
 // Convert an O_PATH pin only after proving regular-file/directory type. Opening
@@ -271,7 +313,7 @@ func (a *linuxHostAccess) remove(ctx context.Context, parent *os.File, name stri
 	if *budget < 0 || depth > hostStageMaxDepth+8 || validateWindowsHostStageName(name) != nil {
 		return errors.New("workspace: bounded Linux owned cleanup refused")
 	}
-	pin, err := linuxHostOpen(parent, name, false)
+	pin, err := linuxHostOpen(parent, name)
 	if err != nil {
 		return err
 	}
@@ -294,7 +336,7 @@ func (a *linuxHostAccess) remove(ctx context.Context, parent *os.File, name stri
 				return readErr
 			}
 			for _, entry := range entries {
-				child, err := linuxHostOpen(directory, entry.Name(), false)
+				child, err := linuxHostOpen(directory, entry.Name())
 				if err != nil {
 					return err
 				}
@@ -317,7 +359,7 @@ func (a *linuxHostAccess) remove(ctx context.Context, parent *os.File, name stri
 	// unlinkat has no compare-by-handle operation. The retained private parent
 	// and pre-unlink identity sample are the stated trusted-producer contract;
 	// arbitrary same-UID host mutation is not an immutable-parent guarantee.
-	check, err := linuxHostOpen(parent, name, false)
+	check, err := linuxHostOpen(parent, name)
 	if err != nil {
 		return err
 	}

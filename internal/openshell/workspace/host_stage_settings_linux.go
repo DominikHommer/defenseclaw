@@ -66,7 +66,7 @@ func readLinuxHostStageOptionalConfig(ctx context.Context, access *linuxHostAcce
 		return nil, false, capturedRefuse("operator_config_parent_not_held")
 	}
 	defer func() { retErr = errors.Join(retErr, access.closeFile(parent)) }()
-	pin, err := linuxHostOpen(parent, filepath.Base(name), false)
+	pin, err := linuxHostOpen(parent, filepath.Base(name))
 	if linuxHostMissing(err) {
 		return nil, false, nil
 	}

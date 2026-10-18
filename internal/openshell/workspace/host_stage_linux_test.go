@@ -37,8 +37,7 @@ func linuxHostStageFixture(t *testing.T) StageOptions {
 		}
 	}
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
-	// Keep positive fixtures inside the explicit cached-lookup admission
-	// floor. Cold or otherwise unprovable optional config lookups refuse.
+	// Fixed optional config files make precedence independent of host settings.
 	writeLinuxHostFixture(t, home, ".gitconfig", "", 0o600)
 	writeLinuxHostFixture(t, home, "xdg/git/config", "", 0o600)
 	return StageOptions{Name: "linux-capture", Project: project, DataDir: data, Home: home, MaxBytes: 8 << 20, Masks: []string{".env"}}
@@ -291,6 +290,56 @@ func TestHostStageLinuxCanceledAndMountCrossingRefuse(t *testing.T) {
 	// Unsupported lookup is never reinterpreted as an absent config.
 	if linuxHostMissing(unix.ELOOP) || linuxHostMissing(unix.EXDEV) || linuxHostMissing(unix.EAGAIN) || !linuxHostMissing(fs.ErrNotExist) {
 		t.Fatal("unsupported config lookup was mislabeled absent")
+	}
+}
+
+func TestHostStageLinuxComponentWalkExistingTreeAndAncestorRefusals(t *testing.T) {
+	opts := linuxHostStageFixture(t)
+	access, err := newLinuxHostAccess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer access.close()
+	// Fresh ordinary directories need no cached-only preflight or cache warmup.
+	nested := filepath.Join(opts.Project, "fresh", "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := access.absolute(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(opts.Home, "linked-parent")
+	if err := os.Symlink(opts.Project, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{alias, filepath.Join(alias, "fresh", "nested"), "/proc", "/proc/self"} {
+		if pin, err := access.absolute(path); err == nil || pin != nil {
+			if pin != nil {
+				_ = pin.Close()
+			}
+			t.Fatal("held walk accepted a terminal/ancestor symlink or crossed a mount")
+		}
+	}
+	if pin, err := access.absolute(filepath.Join(opts.Project, "not-created")); pin != nil || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("missing component became a usable directory")
+	}
+}
+
+func TestHostStageLinuxComponentBoundaryRejectsTraversalBeforeIO(t *testing.T) {
+	for _, name := range []string{"", ".", "..", "/tmp", "parent/child", "child/", "a\x00b", strings.Repeat("a", 256)} {
+		// A nil parent is safe only because invalid names refuse before I/O.
+		if file, err := linuxHostOpen(nil, name); file != nil || err == nil {
+			t.Fatal("unsupported component reached the native open boundary")
+		}
+	}
+	how, err := linuxHostOpenHow("existing-child")
+	if err != nil || how.Mode != 0 || how.Flags != unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC ||
+		how.Resolve != unix.RESOLVE_BENEATH|unix.RESOLVE_NO_SYMLINKS|unix.RESOLVE_NO_MAGICLINKS|unix.RESOLVE_NO_XDEV {
+		t.Fatal("component open acquired directory/open intent or lost a confinement constraint")
 	}
 }
 
