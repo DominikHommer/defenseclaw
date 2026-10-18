@@ -64,6 +64,11 @@ const (
 	ReasonPolicyUnloadable      = "sandbox_policy_unloadable"
 	ReasonRelayFilesUnsupported = "sandbox_relay_files_unsupported"
 	ReasonDecisionRefused       = "sandbox_decision_refused"
+	// ReasonDaemonOutdated: the caller's daemon states a DaemonContract
+	// below the managed gateway's, so it cannot carry the complete floor.
+	// Its status is 403, which an older daemon treats as transient: it
+	// keeps its registrations and does not mark them confirmed.
+	ReasonDaemonOutdated = "sandbox_daemon_outdated"
 )
 
 // UnavailableSetupChanging is DaemonSettings.Unavailable while the
@@ -86,7 +91,7 @@ func ReasonStatus(reason string) int {
 		return http.StatusNotFound
 	case ReasonRegistrationRevoked, ReasonRegistrationExpired:
 		return http.StatusGone
-	case ReasonConnectorMismatch, ReasonNotAllowed, ReasonDecisionRefused, ReasonRegistrationStopped:
+	case ReasonConnectorMismatch, ReasonNotAllowed, ReasonDecisionRefused, ReasonRegistrationStopped, ReasonDaemonOutdated:
 		return http.StatusForbidden
 	case ReasonSubjectChanged:
 		return http.StatusConflict

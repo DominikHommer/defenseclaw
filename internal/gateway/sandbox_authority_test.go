@@ -166,6 +166,7 @@ func (f *sandboxFixture) do(peer managedHookPeer, method, path string, body any,
 	req := httptest.NewRequest(method, path, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+	req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 	for k, v := range header {
 		if v == "" {
 			req.Header.Del(k)
@@ -941,6 +942,7 @@ func FuzzSandboxRelayHeaders(f *testing.F) {
 		req := httptest.NewRequest(http.MethodPost, sandboxrelay.PathHookPrefix+"claudecode", strings.NewReader(`{"hook_event_name":"PreToolUse"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+		req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 		req.Header.Set(sandboxrelay.RegistrationHeader, registration)
 		if files != "" {
 			req.Header.Set(sandboxrelay.FilesHeader, files)

@@ -92,7 +92,20 @@ const (
 	// SandboxHeaderPrefix: every header the sandbox sends with this prefix
 	// is dropped by the relay.
 	SandboxHeaderPrefix = "X-DefenseClaw-Sandbox-"
+	// DaemonContractHeader carries the DaemonContract of the daemon on
+	// every call it makes, relayed calls included (the sandbox's own value
+	// is dropped with the rest of SandboxHeaderPrefix).
+	DaemonContractHeader = "X-DefenseClaw-Sandbox-Daemon-Contract"
 )
+
+// DaemonContract is what the daemon does with a CurrentPolicy, as
+// DaemonContractHeader states it. A daemon that sends no header (1.0.2 and
+// earlier) adopts only the live fields of the floor and marks the
+// registration confirmed; contract 2 adopts the complete Floor and
+// RequiredPack and refuses an answer without them. The managed gateway
+// refuses new sandboxes, renewals and policy confirmations to a daemon
+// below this contract with ReasonDaemonOutdated (GAP-0182).
+const DaemonContract = 2
 
 // ForwardHeaders is the allowlist of request headers the relay copies from
 // the sandbox's request to the gateway (canonical MIME form). Nothing else

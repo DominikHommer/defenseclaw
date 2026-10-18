@@ -516,6 +516,11 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	access := sandboxRequestAccess(floor)
+	if sandboxDaemonOutdated(r) {
+		logOutdatedSandboxDaemon(peer, sandboxrelay.PathPolicyResolve)
+		refuse(sandboxrelay.ReasonDaemonOutdated, sandboxTextDaemonOutdated, access)
+		return
+	}
 	// Where sandboxes can run for the caller, and on which driver: the
 	// gateway's view under the caller's floor (a profile's driver_fallback:
 	// none applies here), then the driver the daemon chose at sandbox start.
@@ -765,6 +770,14 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		}
 		reg = a.sandboxRematchIfDue(r.Context(), auth, peer, reg)
 	}
+	// A daemon below the floor contract gets a revocation and may report
+	// its sandbox stopped, which ends the lease at once; it never renews a
+	// running sandbox or confirms a floor it cannot carry (GAP-0182).
+	outdated := sandboxDaemonOutdated(r)
+	if outdated && reg.State != sandboxreg.StateRevoked && (!report || state.Running) {
+		refuseOutdatedSandboxDaemon(w, peer, r.URL.Path)
+		return
+	}
 	cfg := a.liveBaseConfig(r.Context())
 	floor, _, err := sandboxFloorFor(cfg, reg.Profile)
 	if err != nil {
@@ -810,8 +823,12 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		Floor: &floor, RequiredPack: requiredPack, Digest: reg.EffectiveDigest, Profile: reg.Profile,
 		UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
-	if reg.State == sandboxreg.StateRevoked {
+	switch {
+	case reg.State == sandboxreg.StateRevoked:
 		current.Revoked, current.RevokedReason = true, sandboxRevokedText(auth, reg)
+	case outdated:
+		refuseOutdatedSandboxDaemon(w, peer, r.URL.Path)
+		return
 	}
 	a.writeJSON(w, http.StatusOK, current)
 }
