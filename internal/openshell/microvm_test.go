@@ -94,7 +94,7 @@ const macTempDir = "/var/folders/1r/kq1tw76n1rv8s9wxygbgtglm0000gn/T/"
 // first start uses. Doctor and the start preflight share this floor.
 func TestMicroVMFirstStartDiskFloor(t *testing.T) {
 	for _, tc := range []struct {
-		imageBytes uint64
+		imageBytes       uint64
 		need, fail, warn uint64
 	}{
 		{0, 11 << 30, 12 << 30, 22 << 30},

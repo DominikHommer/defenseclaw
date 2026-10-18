@@ -36,8 +36,8 @@ import (
 // temporarily uses 9-11 GiB on the host, including disk preparation.
 const (
 	VMDiskFirstStartBytes = 11 << 30
-	VMDiskFailBytes      = 12 << 30
-	VMDiskWarnBytes      = 22 << 30
+	VMDiskFailBytes       = 12 << 30
+	VMDiskWarnBytes       = 22 << 30
 )
 
 // EnterprisePlatformName is the enterprise subcommand for a Go OS name.
