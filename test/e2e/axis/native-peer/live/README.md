@@ -1,6 +1,6 @@
 # Fixed Linux native peer CI canary
 
-The pairing below completed one contributor-only four-case attempt using the
+The historical baseline pairing below completed one contributor-only four-case attempt using the
 separately reviewed
 c914 peer/revised static-musl Bubblewrap, d074 fixed payload, ae9 diagnostic
 wrapper, and 5125 outer driver. The cases check literal argv, binary stdin/EOF and stderr, exit
@@ -13,7 +13,8 @@ caller-selected artifact, command, image digest, policy, environment or retry.
 The exact Actions source/run/attempt/workflow/branch/event and archive digest
 must match constants in `prepare.py`. Each ZIP/provenance manifest is checked
 in full with bounded readers, and every selected image/proof must match its
-fixed hash and size. The combined receipt bytes are pinned to `6af34ded...`.
+fixed hash and size. That baseline combined receipt is `6af34ded...`; the current
+lifecycle pairing and its separate result are recorded below.
 The four archives already received two independent inert reviews of source,
 build, dependency and image evidence. CI preparation rechecks their exact
 byte identity; it does not repeat upstream source/toolchain reconstruction.
@@ -151,7 +152,7 @@ native owner cleanup and zero pending custody remain mandatory. The unchanged
 offline filter must deny Setsid; only positive-group nonleader descendants
 substantiate that denial, and the parent result is consistency only.
 
-## Corrected group-query pairing: unrun
+## Corrected group-query pairing: passing lifecycle attempt
 
 The current fixed recipe retains `--suite lifecycle` and the same three cases,
 limits, cleanup and evidence collection. Its reviewed 6a1 payload queries raw
@@ -170,9 +171,32 @@ The source-bound inputs are payload run `39171740021`, artifact `12152816365`
 approved inert test passes respectively. Those tests do not execute a payload,
 query a real group, create a namespace or install a filter.
 
-This corrected pairing has not executed. The earlier c9e result stays failed,
-with only its two fixed wait cases passing. A new attempt requires exact-source
-review and a separate explicit one-shot dispatch; no retry occurs automatically.
+One [lifecycle attempt](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39174025396)
+at source `96c22c1fac0343aa5db1cfb06875bdd651b6c65c` passed all three cases.
+Each observed Prepared, Started, its exact ready marker set, Exited(-1),
+Destroyed and independent native cleanup. The timeout case reported
+`timed_out=true` without Cancel; wait-cancel and tree-cancel sent Cancel before
+the deadline and reported `timed_out=false`. Validated stdout lengths were
+24, 24 and 111 bytes respectively, with no stderr or truncation.
+
+The tree case verified all three held ready files and heartbeat counts
+`[1,1,1]` progressing to `[2,2,2]` before Cancel. After native terminal and
+before Destroy or outer cleanup, six bounded samples retained `[2,2,2]`.
+The copied heartbeat bytes were each `2`. This corroborates termination of the
+three known ordinary synthetic writers; it is not universal descendant-absence
+proof or a separate-session escape test. Setsid remained denied by the unchanged
+policy, with meaningful positive nonleader checks in the child and grandchild.
+
+Evidence artifact `12153881045` contains 33 bounded ZIP members, SHA256
+`47c4d62d0530c1cd6710d5ea46d49a36f122f22324719ed4f59f48d4c0ed4cef`
+(29,088 bytes). Driver, wrapper stdout, owned worker stdout and persisted case
+records agree. Native session, worker and whole-wrapper cleanup all completed
+with zero pending custody. The retained fixture has 12 public files totaling
+291 bytes (16 members including directories); original canary identities and
+bytes were preserved. The disposable runner setting was saved at 1, changed to
+0 and restored to 1. Production certification and common launch qualification
+remain false. The earlier c9e tree refusal stays failed; the historical baseline
+four-case pass remains a separate result. No automatic retry occurred.
 
 The trust assumptions documented in
 [`artifact-review.md`](../../../../../internal/axis/native/artifact-review.md)
