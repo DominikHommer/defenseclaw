@@ -132,6 +132,9 @@ type windowsEnterpriseLifecycleOptions struct {
 	// internal ensure that puts the last good config back.
 	bundle         *windowsBundleRun
 	bundleRollback bool
+	// bundleSettle is what a changing run that delivers no bundle settled
+	// of the receipts a killed bundle run left (GAP-1302).
+	bundleSettle *windowsBundleSettle
 	// codexTargetTransaction is set by the config apply path when the
 	// supplied config turns Codex protection on or off. The lifecycle
 	// transaction owns Codex's machine policy, so the change, a signed

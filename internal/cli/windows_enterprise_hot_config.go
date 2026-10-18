@@ -609,7 +609,7 @@ func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (s
 	if err != nil || windowsEnterpriseConfigParses(current) {
 		return "", nil
 	}
-	if _, err := os.Lstat(filepath.Join(filepath.Dir(layout.ConfigDir), "install", "pending.json")); err == nil {
+	if windowsBundleInstallTransactionPending(layout) {
 		return "", nil
 	}
 	if windowsEnterpriseHotConfigSourceCheck(supplied) != nil {

@@ -586,7 +586,9 @@ Exit 0.
   true`, with the warning `bundle_pending` that names the receipt and its
   delivery id; `ok` can stay true, because the current or last good bundle
   keeps enforcing. Status only reads the store; 4.6 ensure settles the
-  receipt (`failed` with `error_code` `interrupted`, or `confirmed`). While a
+  receipt (`failed` with `error_code` `interrupted` or `not_confirmed`, or
+  `confirmed`). On Windows that is the plain `enterprise windows ensure
+  --profile standalone --json` the warning names, with no `--bundle`. While a
   live apply holds the lock, Linux and macOS status is busy and Windows status
   does not count that run's receipt.
 - Exit: 0; 1 / 1603; 75 (Linux, macOS busy); 5 (Windows, not elevated).
@@ -642,8 +644,20 @@ Exit 0.
   The run recovers an interrupted transaction first, settles bundle receipts,
   then converges; on a healthy device it is a no-op. Enforcement stays on the
   current or last good bundle, never open.
+- Settled receipts: every receipt no run finished. `received`, `verified`
+  and `staged` end `failed` with `error_code` `interrupted` (warning
+  `bundle_interrupted`). An `applied` one whose config is installed is
+  `confirmed` when the gateway enforces it (warning
+  `bundle_confirmed_after_interrupt`), else `failed` (warning
+  `bundle_unconfirmed`) and the run installs the last good bundle again. After
+  the run, status reports no `bundle_pending` for them. Windows settles under
+  `bundle.lock` (try-lock): a live apply that holds it keeps its own receipt.
+  When an install transaction is pending, Windows recovers it first and
+  settles afterwards; the warning `bundle_settle_deferred` means it is still
+  pending, so run ensure again.
 - Privilege: root or SYSTEM. Lock: Linux and macOS `lifecycle.lock` with
-  `--lock-wait`; Windows the installer lock (1618).
+  `--lock-wait`; Windows the installer lock (1618), and `bundle.lock` (no
+  wait, skipped when held) only while it settles receipts.
 - Idempotency: converges; repeat freely. A recovered run may warn
   `recovered_interrupted_transaction`.
 - stdout: `lifecycle-result.schema.json` (`action: "ensure"`). Exit: 0;
@@ -1014,7 +1028,7 @@ Later bundles go through 5.2.
 | `bundle apply` | `lifecycle.lock`, `--lock-wait` | `bundle.lock` (`--lock-wait`; no wait on builds without `management_contract`), then the installer's `lifecycle.lock` (fixed 30 s, then 1618) |
 | `<os> status` | `lifecycle.lock` probe, fixed 5 s, then 75 | `bundle.lock` try-lock for settling; skipped when held |
 | `bundle status` | none (gateway digest from a read-only status) | as `<os> status` |
-| `<os> ensure` | `lifecycle.lock`, `--lock-wait` | the installer's `lifecycle.lock` (fixed 30 s); with `--bundle` or `--trust-anchors`, `bundle.lock` first (no wait) |
+| `<os> ensure` | `lifecycle.lock`, `--lock-wait` | the installer's `lifecycle.lock` (fixed 30 s); with `--bundle` or `--trust-anchors`, `bundle.lock` first (no wait); without them, a `bundle.lock` try-lock while it settles unfinished receipts, skipped when held |
 | `secret set` / `remove` | `lifecycle.lock`, `--lock-wait` | `bundle.lock` (`--lock-wait`), then `lifecycle.lock` (fixed 30 s); no lock on builds without `management_contract` |
 | `bundle anchors install` | `lifecycle.lock`, `--lock-wait` | not registered |
 

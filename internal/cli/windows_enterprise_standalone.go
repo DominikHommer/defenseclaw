@@ -512,7 +512,7 @@ func runWindowsEnterpriseStandaloneAction(
 	// bundle config, not an edit made outside the lifecycle (GAP-0114).
 	var bundleRestore windowsBundleRestore
 	if windowsBundleRestoreRequested(action, opts) {
-		if bundleRestore = restoreWindowsBundleConfig(ctx); bundleRestore.failed() {
+		if bundleRestore = restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts)); bundleRestore.failed() {
 			result := newWindowsEnterpriseStandaloneResult(action, opts)
 			bundleRestore.apply(result)
 			applyWindowsEnterpriseRecordedDeployment(result)
@@ -565,7 +565,8 @@ func runWindowsEnterpriseStandaloneAction(
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	applyWindowsEnterprisePolicy(ctx, result)
 	if action == "status" && report.Installed && len(unsettledBundles) > 0 {
-		// A receipt no live apply owns: ensure settles it (GAP-0028).
+		// A receipt no live apply owns: a plain ensure settles it (GAP-0028,
+		// GAP-1302).
 		result.TransactionPending = true
 		result.AddWarning(enterprisebundle.WarnBundlePending, enterprisebundle.UnsettledMessage(unsettledBundles, "enterprise windows ensure --profile standalone"))
 	}
@@ -2667,7 +2668,7 @@ func runWindowsEnterpriseStandaloneEnsure(
 	// starts the gateway on the installed config (GAP-0114). A restore that
 	// fails stops here, before any service starts on the edited file.
 	if windowsBundleRestoreRequested("ensure", opts) {
-		restore := restoreWindowsBundleConfig(ctx)
+		restore := restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts))
 		restore.apply(result)
 		if restore.failed() {
 			applyWindowsEnterpriseRecordedDeployment(result)
