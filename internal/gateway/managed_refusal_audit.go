@@ -15,13 +15,15 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/time/rate"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // managedRefusalAuditPath is the hook-socket route a standard user CLI
 // reports a refused policy write on. A standard user holds no gateway token,
 // so the token-authenticated CLI ingress (cliObservabilityV8Path) is closed
 // to it; the kernel-verified peer of this socket is its credential instead.
-const managedRefusalAuditPath = "/api/v1/managed/refusal"
+const managedRefusalAuditPath = managed.CommandRefusalPath
 
 const (
 	managedRefusalMaxBodyBytes    = 4 << 10
@@ -99,9 +101,10 @@ type managedRefusalRequest struct {
 // handleManagedRefusalAudit records, in the managed audit store, a policy
 // write that a local account attempted on a managed device and the CLI
 // refused. The caller is the kernel-verified peer of the hook socket, never
-// a name the request carries, and the row always reads outcome=refused
-// reason=managed_device plus one type= or command= field, so the route can
-// not be used to record anything else. Each account is rate limited.
+// a name the request carries, and the row always reads outcome=refused,
+// reason=managed_device (or not_root for a lifecycle command a standard
+// account ran) and one type= or command= field, so the route can not be
+// used to record anything else. Each account is rate limited.
 func (a *APIServer) handleManagedRefusalAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
