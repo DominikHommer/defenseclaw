@@ -108,6 +108,10 @@ endif()
 
 add_executable(bench_latency bench_latency.c)
 target_link_libraries(bench_latency PRIVATE dclaw_core)
+# Smoke run: fails if any benchmark path stops producing its expected verdict.
+add_test(NAME bench_latency_paths COMMAND bench_latency 1000)
+set_tests_properties(bench_latency_paths PROPERTIES
+    ENVIRONMENT "DCLAW_FLASH_PATH=${DCLAW_TEST_FLASH_DIR}/flash-bench.bin")
 
 if(DCLAW_CONTENT_SCAN)
     add_executable(test_content_scanner test_content_scanner.c)

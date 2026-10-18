@@ -52,6 +52,11 @@ static const char *get_flash_path(void) {
 }
 
 static int flash_fd = -1;
+static hal_flash_stats_t flash_stats;
+
+void hal_flash_get_stats(hal_flash_stats_t *out) {
+    if (out) *out = flash_stats;
+}
 
 uint64_t hal_tick_ms(void) {
     struct timespec ts;
@@ -70,12 +75,16 @@ int hal_flash_write(uint32_t offset, const void *buf, size_t len) {
     if (flash_fd < 0) return -1;
     if (offset > FLASH_TOTAL_SIZE || len > FLASH_TOTAL_SIZE - (size_t)offset) return -1;
     if (pwrite(flash_fd, buf, len, (off_t)offset) != (ssize_t)len) return -1;
+    flash_stats.writes++;
+    flash_stats.bytes_written += len;
     return 0;
 }
 
 int hal_flash_sync(void) {
     if (flash_fd < 0) return -1;
-    return fdatasync(flash_fd);
+    if (fdatasync(flash_fd) != 0) return -1;
+    flash_stats.syncs++;
+    return 0;
 }
 
 int hal_flash_erase_sector(uint32_t sector) {
@@ -83,7 +92,10 @@ int hal_flash_erase_sector(uint32_t sector) {
     if (offset + 4096 > FLASH_TOTAL_SIZE) return -1;
     uint8_t zeros[4096];
     memset(zeros, 0xFF, sizeof(zeros));
-    return hal_flash_write(offset, zeros, sizeof(zeros));
+    /* The file-backed erase is a 4 KiB write; it is also counted as one. */
+    if (hal_flash_write(offset, zeros, sizeof(zeros)) != 0) return -1;
+    flash_stats.erases++;
+    return 0;
 }
 
 int hal_ipc_socket_create(const char *path) {

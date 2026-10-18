@@ -35,6 +35,16 @@ int hal_flash_write(uint32_t offset, const void *buf, size_t len);
 int hal_flash_sync(void);   /* Flush OS page cache to durable storage */
 int hal_flash_erase_sector(uint32_t sector);
 
+/* Cumulative flash operation counters since hal_init(), for wear and
+ * benchmark accounting. Successful operations only. */
+typedef struct {
+    uint64_t writes;
+    uint64_t bytes_written;
+    uint64_t syncs;
+    uint64_t erases;
+} hal_flash_stats_t;
+void hal_flash_get_stats(hal_flash_stats_t *out);
+
 /* Flash partition offsets (configured per platform) */
 #define HAL_FLASH_POLICY_A_OFFSET   0x00000
 #define HAL_FLASH_POLICY_A_SIZE     4096
