@@ -9,6 +9,10 @@ rust-version = "1.95"
 publish = false
 
 [workspace]
+resolver = "3"
+# Each source checkout keeps its own workspace inheritance. Do not promote its
+# path dependencies into this contributor workspace as implicit members.
+exclude = ["axis-source", "mxc-source"]
 
 # These directories are fresh, exact-commit build inputs, not vendored sources.
 # prepare_build.py checks both identities before applying the reviewed patch.
