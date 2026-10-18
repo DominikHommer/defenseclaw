@@ -19,6 +19,10 @@ The crate uses the published `mxc_sdk::v1` typed API. AXIS's existing
 `0.6.0-alpha` JSON shape; that JSON is never submitted to MXC 1.0.1. The
 fixed bridge checks its selected Seatbelt platform, blocked network,
 filesystem lists and timeout before constructing `ContainerRequest`.
+The pinned `mxc-literal-argv.patch` adds an explicit MXC v1 literal-argv seam.
+AXIS admits a fixed inert command token for this composite experiment; the
+typed MXC request has an empty legacy command and executes only the fixed
+absolute probe path and OS argument vector, without a shell.
 
 ## Policy and test boundary
 
@@ -80,6 +84,8 @@ error. No external network service, credentials, Claude session, proxy,
 model or shell command supplied by a user is involved.
 
 Separate cases require a pipe echo on stdout and stderr with exit 23; an
+exact literal-argv acknowledgement after checking empty, spaced, quoted,
+metacharacter, Unicode and trailing-backslash arguments; an
 MXC-owned PTY with foreground/`isatty` checks, a readiness handshake,
 30x100 to 40x120 resize visible to the child, echo and exit 23; and an MXC
 typed timeout after a descendant announces readiness. A delayed descendant
@@ -102,6 +108,7 @@ this directory's source, plus clean full checkouts at the exact commits:
 mxc-macos/
   Cargo.toml
   prepare_build.py
+  mxc-literal-argv.patch  # exact reviewed copy from ../patches/
   src/
   axis-source/       # exact AXIS commit
   mxc-source/        # exact MXC commit
@@ -111,7 +118,8 @@ The build requires already-provisioned Rust 1.95.0, Python 3, Git and the
 upstream native build prerequisites. It may download Cargo dependency
 sources; no build step runs the probe. In the first staging directory run
 `python3 prepare_build.py generate-lock`. The helper verifies source Git
-identities and cleanliness, generates a combined `Cargo.lock`, builds with
+identities and cleanliness, applies the pinned MXC literal-argv patch, generates
+a combined `Cargo.lock`, builds with
 `--locked --release`, compiles tests with `--no-run`, and emits a
 `build-artifact/` with source, binary, upstream locks and licenses, toolchain
 record, SHA-256 manifest and provenance. Review and commit the generated
@@ -136,7 +144,7 @@ used.
 
 `verify_live_artifact.py` requires an independently reviewed provenance SHA256,
 the exact build commit/run and a clean checkout of that commit. It verifies all
-13 packaged files, source bytes, the committed combined lock, both upstream
+14 packaged files, source bytes, the committed combined lock, both upstream
 locks and workflow attribution before writing a verification-only receipt.
 Its tests use inert synthetic files and execute no artifact.
 

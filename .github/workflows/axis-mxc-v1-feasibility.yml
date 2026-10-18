@@ -12,6 +12,7 @@ on:
       - .github/workflows/axis-mxc-v1-feasibility.yml
       - test/e2e/axis/mxc-runner/**
       - test/e2e/axis/mxc-macos/**
+      - test/e2e/axis/patches/mxc-literal-argv.patch
   workflow_dispatch:
 
 permissions:
@@ -40,7 +41,9 @@ jobs:
           path: defenseclaw-source
           fetch-depth: 1
           persist-credentials: false
-          sparse-checkout: test/e2e/axis/mxc-runner
+          sparse-checkout: |
+            test/e2e/axis/mxc-runner
+            test/e2e/axis/patches
 
       - name: Stage the exact contributor source
         shell: bash
@@ -50,6 +53,7 @@ jobs:
           test -z "$(git -C defenseclaw-source status --porcelain)"
           mkdir probe
           cp -a defenseclaw-source/test/e2e/axis/mxc-runner/. probe/
+          cp defenseclaw-source/test/e2e/axis/patches/mxc-literal-argv.patch probe/mxc-literal-argv.patch
 
       - name: Check out the reviewed AXIS source
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -133,7 +137,9 @@ jobs:
           path: defenseclaw-source
           fetch-depth: 1
           persist-credentials: false
-          sparse-checkout: test/e2e/axis/mxc-macos
+          sparse-checkout: |
+            test/e2e/axis/mxc-macos
+            test/e2e/axis/patches
 
       - name: Stage the exact contributor source
         shell: bash
@@ -143,6 +149,7 @@ jobs:
           test -z "$(git -C defenseclaw-source status --porcelain)"
           mkdir probe
           cp -a defenseclaw-source/test/e2e/axis/mxc-macos/. probe/
+          cp defenseclaw-source/test/e2e/axis/patches/mxc-literal-argv.patch probe/mxc-literal-argv.patch
 
       - name: Check out the reviewed AXIS policy source
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -233,7 +240,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo +"$RUST_TOOLCHAIN" test --locked --release strict_profile::tests -- --test-threads=1
-          cargo +"$RUST_TOOLCHAIN" test --locked --release private_fixture_is_owner_only_before_payload_creation
+          cargo +"$RUST_TOOLCHAIN" test --locked --release probe::tests -- --test-threads=1
 
       - name: Upload build evidence and the combined lock for review
         if: ${{ always() }}

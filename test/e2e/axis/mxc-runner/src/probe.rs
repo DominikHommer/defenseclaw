@@ -9,6 +9,7 @@ use mxc_sdk::v1::{
     NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy, SpawnOptions,
     SpawnWithPtyOptions, StreamCloser, TelemetryConfig, WaitResult,
 };
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -30,18 +31,35 @@ const DIAGNOSTIC_LIMIT: usize = 8 * 1024;
 const PTY_GROUP_MARKER: &[u8] = b"PTY_GROUPS=";
 const PTY_PHASES: [&str; 3] = ["initial", "resized", "continued"];
 const PTY_SIGINT_ACK: &[u8] = b"PTY_SIGINT_ACK signal=SIGINT vintr=3 isig=true";
+const LITERAL_ARGUMENTS: [&str; 6] = [
+    "",
+    "literal spaces",
+    "quotes ' and \"",
+    "metachar $HOME ; * ? [ ] | &",
+    "unicode-λ-雪",
+    "trailing\\",
+];
 const SUPERVISOR_LIMIT: Duration = Duration::from_secs(15);
 static FIXED_SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 pub fn run() -> Result<i32> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.len() == 2 && args[0] == "--fixed-child" {
-        return match args[1].to_str() {
-            Some("boundaries") => fixed_child(Case::Boundaries),
-            Some("pty") => fixed_child(Case::Pty),
-            Some("timeout") => fixed_child(Case::Timeout),
+    if args
+        .first()
+        .is_some_and(|arg| arg.as_os_str() == OsStr::new("--fixed-child"))
+    {
+        let case = match args.get(1).and_then(|arg| arg.to_str()) {
+            Some("boundaries") => Case::Boundaries,
+            Some("argv") => Case::Argv,
+            Some("pty") => Case::Pty,
+            Some("timeout") => Case::Timeout,
             _ => bail!("unknown fixed child case"),
         };
+        ensure!(
+            args == fixed_child_arguments(case),
+            "fixed child argv differs"
+        );
+        return fixed_child(case);
     }
     ensure!(
         args.is_empty(),
@@ -63,6 +81,7 @@ pub fn run() -> Result<i32> {
     // from the supervisor too. No inherited environment is logged or retained.
     private_supervisor_environment(&paths)?;
     run_piped(&paths, &executable, Case::Boundaries)?;
+    run_piped(&paths, &executable, Case::Argv)?;
     let pty_groups = run_pty(&paths, &executable)?;
     run_piped(&paths, &executable, Case::Timeout)?;
     ensure!(
@@ -98,7 +117,7 @@ pub fn run() -> Result<i32> {
             "checks": ["private_home_and_environment", "allowed_writes", "outer_mxc_canary_visible_before_guards", "ungranted_read_and_write_eacces",
                 "readonly_write_denied", "ipv4_ipv6_tcp_udp_socket_eperm", "exit_23", "pty_isatty_and_foreground",
                 "pty_input_ack_and_resize", "pty_sigint_ack_and_continued_input", "typed_timeout", "direct_child_pidfd_exited",
-                "handle_kill_after_wait_idempotent", "owned_fixture_removed"],
+                "handle_kill_after_wait_idempotent", "owned_fixture_removed", "literal_argv_preserved_without_shell"],
             "scope": "fixed_benign_contributor_experiment", "production_or_claude_qualification": false,
             "proxy_or_descendant_cleanup_qualification": false
         })
@@ -109,6 +128,7 @@ pub fn run() -> Result<i32> {
 #[derive(Clone, Copy)]
 enum Case {
     Boundaries,
+    Argv,
     Pty,
     Timeout,
 }
@@ -117,10 +137,28 @@ impl Case {
     fn argument(self) -> &'static str {
         match self {
             Self::Boundaries => "boundaries",
+            Self::Argv => "argv",
             Self::Pty => "pty",
             Self::Timeout => "timeout",
         }
     }
+}
+
+fn fixed_child_arguments(case: Case) -> Vec<OsString> {
+    let mut arguments = vec![
+        OsString::from("--fixed-child"),
+        OsString::from(case.argument()),
+    ];
+    if matches!(case, Case::Argv) {
+        arguments.extend(LITERAL_ARGUMENTS.into_iter().map(OsString::from));
+    }
+    arguments
+}
+
+fn fixed_argv(executable: &Path, case: Case) -> Vec<OsString> {
+    let mut argv = vec![executable.as_os_str().to_owned()];
+    argv.extend(fixed_child_arguments(case));
+    argv
 }
 
 struct Paths {
@@ -259,13 +297,7 @@ impl Paths {
     }
 
     fn request(&self, executable: &Path, case: Case) -> Result<ContainerRequest> {
-        // The only shell operation is exec of this exact binary and a fixed case.
-        // MXC's public SDK currently accepts a shell command string rather than argv.
-        let command = format!(
-            "exec {} --fixed-child {}",
-            shell_quote(text(executable)?),
-            case.argument()
-        );
+        // The additive v1::argv seam requires an empty legacy command field.
         Ok(ContainerRequest {
             containment: Containment::Bubblewrap,
             filesystem: Some(FilesystemPolicy {
@@ -305,7 +337,7 @@ impl Paths {
             working_directory: Some(text(&self.workspace)?.into()),
             environment: Some(self.environment()?),
             inherit_default_environment: Some(false),
-            ..ContainerRequest::new(command)
+            ..ContainerRequest::new("")
         })
     }
 
@@ -367,24 +399,12 @@ fn verify_environment(paths: &Paths) -> Result<()> {
             "private environment value differs for {name}"
         );
     }
-    for (name, value) in std::env::vars_os() {
+    for (name, _) in std::env::vars_os() {
         let key = name.to_str().context("non-UTF8 environment key")?;
-        if expected.iter().any(|(allowed, _)| key == allowed) {
-            continue;
-        }
-        // /bin/sh may synthesize these after MXC --clearenv. None contains
-        // caller state: the supervisor's original environment was erased.
-        match key {
-            "PWD" => ensure!(value == paths.workspace.as_os_str(), "shell cwd differs"),
-            "SHLVL" => ensure!(
-                value
-                    .to_str()
-                    .is_some_and(|level| matches!(level, "0" | "1" | "2")),
-                "shell nesting differs"
-            ),
-            "_" => {}
-            _ => bail!("unexpected environment key"),
-        }
+        ensure!(
+            expected.iter().any(|(allowed, _)| key == allowed),
+            "unexpected environment key"
+        );
     }
     Ok(())
 }
@@ -420,6 +440,19 @@ fn fixed_child(case: Case) -> Result<i32> {
     seccomp::apply_offline_mxc_child_seccomp(&policy.process, matches!(case, Case::Pty))
         .map_err(|error| anyhow!(error))?;
     match case {
+        Case::Argv => {
+            ensure!(
+                fs::read(&paths.readonly)? == READONLY,
+                "argv granted read differs"
+            );
+            denied_errno(
+                fs::read(paths.ungranted.join("canary")),
+                &[libc::EACCES],
+                "argv ungranted read",
+            )?;
+            println!("LITERAL_ARGV_OK");
+            Ok(23)
+        }
         Case::Boundaries => {
             ensure!(
                 fs::read(&paths.readonly)? == READONLY,
@@ -667,8 +700,9 @@ fn terminal_state(rows: u16, cols: u16, phase: &'static str) -> Result<()> {
 }
 
 fn run_piped(paths: &Paths, executable: &Path, case: Case) -> Result<()> {
-    let mut process = v1::spawn(
+    let mut process = v1::argv::spawn(
         paths.request(executable, case)?,
+        fixed_argv(executable, case),
         SpawnOptions {
             telemetry: disabled_telemetry(),
         },
@@ -707,6 +741,16 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case) -> Result<()> {
         }
         ensure!(errors.is_empty(), "fixed child wrote stderr");
         match case {
+            Case::Argv => {
+                ensure!(
+                    matches!(outcome, WaitResult::Exited(23)),
+                    "literal argv child exit was not 23"
+                );
+                ensure!(
+                    contains(&output, b"LITERAL_ARGV_OK"),
+                    "literal argv acknowledgement missing"
+                );
+            }
             Case::Boundaries => {
                 ensure!(
                     matches!(outcome, WaitResult::Exited(23)),
@@ -747,8 +791,9 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case) -> Result<()> {
 }
 
 fn run_pty(paths: &Paths, executable: &Path) -> Result<serde_json::Value> {
-    let terminal = v1::spawn_with_pty(
+    let terminal = v1::argv::spawn_with_pty(
         paths.request(executable, Case::Pty)?,
+        fixed_argv(executable, Case::Pty),
         SpawnWithPtyOptions {
             telemetry: disabled_telemetry(),
             size: terminal_size(30, 100),
@@ -1130,10 +1175,6 @@ fn contains(bytes: &[u8], needle: &[u8]) -> bool {
     bytes.windows(needle.len()).any(|part| part == needle)
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1153,8 +1194,16 @@ mod tests {
     }
 
     #[test]
-    fn fixed_command_quotes_literal_shell_characters() {
-        assert_eq!(shell_quote("/tmp/a'b $x`id`~"), "'/tmp/a'\\''b $x`id`~'");
+    fn fixed_literal_argv_preserves_data_and_rejects_extra_arguments() {
+        let argv = fixed_argv(Path::new("/tmp/probe with ' quotes"), Case::Argv);
+        assert_eq!(argv[0], OsString::from("/tmp/probe with ' quotes"));
+        assert_eq!(argv[1], OsString::from("--fixed-child"));
+        assert_eq!(argv[2], OsString::from("argv"));
+        assert_eq!(
+            argv[3..].to_vec(),
+            LITERAL_ARGUMENTS.map(OsString::from).to_vec()
+        );
+        assert_eq!(fixed_child_arguments(Case::Boundaries).len(), 2);
     }
 
     #[test]

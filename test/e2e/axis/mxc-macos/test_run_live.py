@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path, PurePosixPath
@@ -15,6 +16,15 @@ import run_live
 
 
 class LiveRunnerGuardTests(TestCase):
+    def test_rust_success_check_inventory_matches_driver_without_duplicates(self):
+        source = Path(__file__).with_name("src").joinpath("probe.rs").read_text(encoding="utf-8")
+        inventories = re.findall(r'"checks":\s*(\[[^\]]*\])', source)
+        self.assertEqual(len(inventories), 1, "require one fixed Rust success-check inventory")
+        checks = json.loads(inventories[0])
+        self.assertTrue(all(isinstance(check, str) for check in checks))
+        self.assertEqual(len(checks), len(set(checks)), "Rust success-check inventory has duplicates")
+        self.assertEqual(set(checks), run_live.CHECKS)
+
     def test_matching_process_inspection_is_own_uid_and_exact_path(self) -> None:
         binary = PurePosixPath("/private/tmp/verified-probe")
         result = mock.Mock(

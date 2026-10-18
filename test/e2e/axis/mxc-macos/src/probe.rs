@@ -19,6 +19,7 @@ use mxc_sdk::v1::{
     configs::SeatbeltConfig,
 };
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -37,6 +38,14 @@ const READONLY: &[u8] = b"synthetic-readonly\n";
 const DENIED: &[u8] = b"synthetic-denied\n";
 const UNGRANTED: &[u8] = b"synthetic-ungranted\n";
 const SUPERVISOR_ONLY_ENV: &str = "DC_AXIS_PARENT_ONLY_CANARY";
+const LITERAL_ARGUMENTS: [&str; 6] = [
+    "",
+    "literal spaces",
+    "quotes ' and \"",
+    "metachar $HOME ; * ? [ ] | &",
+    "unicode-λ-雪",
+    "trailing\\",
+];
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const DIAGNOSTIC_INPUT_LIMIT: usize = 1200;
 const SUPERVISOR_LIMIT: Duration = Duration::from_secs(15);
@@ -83,16 +92,25 @@ fn private_fixture() -> Result<tempfile::TempDir> {
 
 pub fn run() -> Result<i32> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.len() == 2 && args[0] == "--fixed-child" {
-        return match args[1].to_str() {
-            Some("boundaries") => fixed_child(Case::Boundaries),
-            Some("boundaries-strict") => fixed_child(Case::StrictBoundaries),
-            Some("pipe") => fixed_child(Case::Pipe),
-            Some("pty") => fixed_child(Case::Pty),
-            Some("timeout") => fixed_child(Case::Timeout),
-            Some("delayed") => fixed_child(Case::Delayed),
+    if args
+        .first()
+        .is_some_and(|arg| arg.as_os_str() == OsStr::new("--fixed-child"))
+    {
+        let case = match args.get(1).and_then(|arg| arg.to_str()) {
+            Some("boundaries") => Case::Boundaries,
+            Some("boundaries-strict") => Case::StrictBoundaries,
+            Some("argv") => Case::Argv,
+            Some("pipe") => Case::Pipe,
+            Some("pty") => Case::Pty,
+            Some("timeout") => Case::Timeout,
+            Some("delayed") => Case::Delayed,
             _ => bail!("unknown fixed child case"),
         };
+        ensure!(
+            args == fixed_child_arguments(case),
+            "fixed child argv differs"
+        );
+        return fixed_child(case);
     }
     let strict = match args.as_slice() {
         [] => false,
@@ -139,6 +157,7 @@ pub fn run() -> Result<i32> {
         port,
         strict,
     )?;
+    run_piped(&paths, &executable, Case::Argv, port, strict)?;
     run_piped(&paths, &executable, Case::Pipe, port, strict)?;
     run_pty(&paths, &executable, port, strict)?;
     run_piped(&paths, &executable, Case::Timeout, port, strict)?;
@@ -186,6 +205,7 @@ pub fn run() -> Result<i32> {
             "checks": ["explicit_footprint_admission", "private_home_and_cwd", "denied_read_write_metadata",
                 "readonly_write_denied", "ungranted_read_denied", "loopback_network_denied_with_host_positive_control",
                 "pipe_echo_exit_23", "pty_echo_resize_exit_23", "typed_timeout", "descendant_marker_absent",
+                "literal_argv_preserved_without_shell",
                 "owned_fixture_removed"],
             "scope": "fixed_benign_composite_contributor_experiment",
             "production_or_defenseclaw_provider_qualification": false,
@@ -200,6 +220,7 @@ pub fn run() -> Result<i32> {
 enum Case {
     Boundaries,
     StrictBoundaries,
+    Argv,
     Pipe,
     Pty,
     Timeout,
@@ -211,12 +232,30 @@ impl Case {
         match self {
             Self::Boundaries => "boundaries",
             Self::StrictBoundaries => "boundaries-strict",
+            Self::Argv => "argv",
             Self::Pipe => "pipe",
             Self::Pty => "pty",
             Self::Timeout => "timeout",
             Self::Delayed => "delayed",
         }
     }
+}
+
+fn fixed_child_arguments(case: Case) -> Vec<OsString> {
+    let mut arguments = vec![
+        OsString::from("--fixed-child"),
+        OsString::from(case.argument()),
+    ];
+    if matches!(case, Case::Argv) {
+        arguments.extend(LITERAL_ARGUMENTS.into_iter().map(OsString::from));
+    }
+    arguments
+}
+
+fn fixed_argv(executable: &Path, case: Case) -> Vec<OsString> {
+    let mut argv = vec![executable.as_os_str().to_owned()];
+    argv.extend(fixed_child_arguments(case));
+    argv
 }
 
 struct Paths {
@@ -363,11 +402,9 @@ network: { mode: block }
             strict || !matches!(case, Case::StrictBoundaries),
             "strict boundary requires strict profile"
         );
-        let command = format!(
-            "exec {} --fixed-child {}",
-            shell_quote(text(executable)?),
-            case.argument()
-        );
+        // AXIS fb5 admits an inert fixed command token here; the executable
+        // and arguments are supplied only to MXC's typed literal-argv seam.
+        let command = "mxc-literal-policy-only-fixed";
         let policy = self.axis_policy(executable, strict)?;
         let environment: BTreeMap<_, _> = self.environment(port)?.into_iter().collect();
         // Host evidence is taken from MXC's read-only Seatbelt availability
@@ -376,10 +413,10 @@ network: { mode: block }
             .with_dependency(host_dependency::MXC_EXECUTOR, DependencyState::Present)
             .with_dependency(host_dependency::MACOS_SEATBELT, DependencyState::Present);
         let launch = ProcessLaunchOptions {
-            command: command.clone(),
+            command: command.into(),
             args: Vec::new(),
             working_dir: Some(text(&self.work)?.into()),
-            environment,
+            environment: environment.clone(),
             capture_output: true,
             timeout_sec: Some(if matches!(case, Case::Timeout) { 1 } else { 10 }),
         };
@@ -412,6 +449,10 @@ network: { mode: block }
         let wire = build_mxc_process_config(command, &spec, MxcProcessConfigOptions::default())
             .context("AXIS MXC process config admission refused")?;
         ensure!(
+            wire.process.command_line == command,
+            "AXIS command binding changed"
+        );
+        ensure!(
             wire.containment == MxcContainment::Seatbelt && wire.platform == MxcPlatform::Macos,
             "AXIS selected a different containment or platform"
         );
@@ -421,8 +462,17 @@ network: { mode: block }
             "AXIS emitted non-blocked network"
         );
         ensure!(
-            wire.process.timeout.is_some(),
-            "AXIS dropped the fixed timeout"
+            wire.process.timeout
+                == Some(if matches!(case, Case::Timeout) {
+                    1_000
+                } else {
+                    10_000
+                }),
+            "AXIS changed the fixed timeout"
+        );
+        ensure!(
+            wire.process.cwd.as_deref() == Some(text(&self.work)?),
+            "AXIS changed the private working directory"
         );
         ensure!(
             wire.filesystem.readwrite_paths == spec.filesystem.read_write
@@ -441,6 +491,11 @@ network: { mode: block }
                 Ok((name.to_owned(), value.to_owned()))
             })
             .collect::<Result<Vec<_>>>()?;
+        ensure!(
+            env.len() == environment.len()
+                && env.iter().cloned().collect::<BTreeMap<_, _>>() == environment,
+            "AXIS changed the private environment"
+        );
         let mut seatbelt = SeatbeltConfig::default();
         seatbelt.profile_override = if strict {
             Some(strict_profile::build_profile(
@@ -453,7 +508,7 @@ network: { mode: block }
         seatbelt.nested_pty = false;
         seatbelt.keychain_access = false;
         seatbelt.extra_mach_lookups.clear();
-        let mut request = ContainerRequest::new(wire.process.command_line);
+        let mut request = ContainerRequest::new("");
         request.containment = Containment::Seatbelt(seatbelt);
         request.filesystem = Some(FilesystemPolicy {
             readwrite_paths: wire.filesystem.readwrite_paths,
@@ -513,23 +568,12 @@ fn verify_environment(paths: &Paths) -> Result<u16> {
             "private environment value differs for {name}"
         );
     }
-    for (name, value) in std::env::vars_os() {
+    for (name, _) in std::env::vars_os() {
         let key = name.to_str().context("non-UTF8 environment key")?;
-        if expected.iter().any(|(allowed, _)| key == allowed) {
-            continue;
-        }
-        // /bin/sh may synthesize these after MXC clears the inherited block.
-        match key {
-            "PWD" => ensure!(value == paths.work.as_os_str(), "shell cwd differs"),
-            "SHLVL" => ensure!(
-                value
-                    .to_str()
-                    .is_some_and(|level| matches!(level, "0" | "1" | "2")),
-                "shell nesting differs"
-            ),
-            "_" => {}
-            _ => bail!("unexpected child environment key"),
-        }
+        ensure!(
+            expected.iter().any(|(allowed, _)| key == allowed),
+            "unexpected child environment key"
+        );
     }
     Ok(port)
 }
@@ -538,6 +582,15 @@ fn fixed_child(case: Case) -> Result<i32> {
     let paths = Paths::from_child()?;
     let port = verify_environment(&paths)?;
     match case {
+        Case::Argv => {
+            ensure!(
+                fs::read(&paths.readonly)? == READONLY,
+                "argv granted read differs"
+            );
+            denied_errno(fs::read(&paths.ungranted), "argv ungranted read")?;
+            println!("LITERAL_ARGV_OK");
+            Ok(23)
+        }
         Case::Boundaries | Case::StrictBoundaries => {
             ensure!(
                 fs::read(&paths.readonly)? == READONLY,
@@ -648,8 +701,9 @@ fn terminal_state(rows: u16, cols: u16) -> Result<()> {
 }
 
 fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16, strict: bool) -> Result<()> {
-    let mut process = v1::spawn(
+    let mut process = v1::argv::spawn(
         paths.request(executable, case, port, strict)?,
+        fixed_argv(executable, case),
         SpawnOptions {
             telemetry: disabled_telemetry(),
         },
@@ -683,6 +737,16 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16, strict: bo
         let errors = errors?;
         (|| -> Result<()> {
             match case {
+                Case::Argv => {
+                    ensure!(
+                        outcome == WaitResult::Exited(23),
+                        "literal argv child did not exit 23"
+                    );
+                    ensure!(
+                        contains(&output, b"LITERAL_ARGV_OK") && errors.is_empty(),
+                        "literal argv acknowledgement missing"
+                    );
+                }
                 Case::Boundaries => {
                     ensure!(
                         outcome == WaitResult::Exited(23),
@@ -747,8 +811,9 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16, strict: bo
 }
 
 fn run_pty(paths: &Paths, executable: &Path, port: u16, strict: bool) -> Result<()> {
-    let terminal = v1::spawn_with_pty(
+    let terminal = v1::argv::spawn_with_pty(
         paths.request(executable, Case::Pty, port, strict)?,
+        fixed_argv(executable, Case::Pty),
         SpawnWithPtyOptions {
             telemetry: disabled_telemetry(),
             size: terminal_size(30, 100),
@@ -1000,10 +1065,6 @@ fn fixed_child_diagnostic(bytes: &[u8]) -> String {
     }
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,5 +1081,18 @@ mod tests {
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         owned.close().unwrap();
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn fixed_literal_argv_preserves_data() {
+        let argv = fixed_argv(Path::new("/private/tmp/probe with ' quotes"), Case::Argv);
+        assert_eq!(argv[0], OsString::from("/private/tmp/probe with ' quotes"));
+        assert_eq!(argv[1], OsString::from("--fixed-child"));
+        assert_eq!(argv[2], OsString::from("argv"));
+        assert_eq!(
+            argv[3..].to_vec(),
+            LITERAL_ARGUMENTS.map(OsString::from).to_vec()
+        );
+        assert_eq!(fixed_child_arguments(Case::Boundaries).len(), 2);
     }
 }

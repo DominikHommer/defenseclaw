@@ -39,7 +39,8 @@ class ArtifactVerificationTests(TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(f"synthetic non-executable {name}\n".encode())
         for name in verify.SOURCE_FILES:
-            path = self.checkout / "test/e2e/axis/mxc-macos" / name
+            parent = "test/e2e/axis/patches" if name == "mxc-literal-argv.patch" else "test/e2e/axis/mxc-macos"
+            path = self.checkout / parent / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes((self.artifact / "source" / name).read_bytes())
         for base in [self.artifact / "source", self.checkout / "test/e2e/axis/mxc-macos"]:
@@ -47,10 +48,16 @@ class ArtifactVerificationTests(TestCase):
         for name, data in self.upstream.items():
             (self.artifact / f"upstream/{name}-Cargo.lock").write_bytes(data)
         (self.artifact / "TOOLCHAIN.txt").write_bytes(b"rustc 1.95.0 (synthetic fixture)\ncargo 1.95.0\n")
+        mock.patch.object(
+            verify,
+            "LITERAL_PATCH_SHA256",
+            verify.sha256((self.artifact / "source/mxc-literal-argv.patch").read_bytes()),
+        ).start()
         self.provenance = {
             "schema": "defenseclaw-contributor-axis-mxc-macos-probe-v1",
             "axis_commit": verify.AXIS_COMMIT,
             "mxc_commit": verify.MXC_COMMIT,
+            "mxc_literal_patch_sha256": verify.LITERAL_PATCH_SHA256,
             "combined_lock_sha256": verify.COMBINED_LOCK_SHA256,
             "upstream_lock_sha256": verify.UPSTREAM_LOCK_SHA256,
             "build_mode": "build-locked",
@@ -87,11 +94,20 @@ class ArtifactVerificationTests(TestCase):
         self.git.assert_called_once_with(self.checkout, self.commit)
         self.assertTrue(result["verified"])
         self.assertFalse(result["execution_performed"])
-        self.assertEqual(result["verified_file_count"], 13)
+        self.assertEqual(result["verified_file_count"], 14)
 
     def test_independent_manifest_digest_required(self) -> None:
         with self.assertRaisesRegex(ValueError, "independently reviewed digest"):
             verify.verify(self.artifact, self.checkout, "0" * 64, self.commit, self.run_id)
+
+    def test_shared_literal_patch_cannot_be_replaced_by_rehashed_manifest(self) -> None:
+        changed = b"synthetic unreviewed literal patch\n"
+        (self.artifact / "source/mxc-literal-argv.patch").write_bytes(changed)
+        (self.checkout / "test/e2e/axis/patches/mxc-literal-argv.patch").write_bytes(changed)
+        self.provenance["files"]["source/mxc-literal-argv.patch"] = verify.sha256(changed)
+        self.write_provenance()
+        with self.assertRaisesRegex(ValueError, "literal-argv patch content differs"):
+            self.check()
 
     def test_generated_lock_build_cannot_be_admitted(self) -> None:
         self.provenance["build_mode"] = "generate-lock"

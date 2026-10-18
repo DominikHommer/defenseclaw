@@ -75,3 +75,18 @@ class BuildGuardTests(TestCase):
         self.assertNotIn("ANTHROPIC_API_KEY", arguments["env"])
         self.assertNotIn("LD_PRELOAD", arguments["env"])
         self.assertNotIn("RUSTFLAGS", arguments["env"])
+
+    def test_literal_patch_requires_reviewed_regular_bytes(self) -> None:
+        patch = Path(__file__).parent.parent / "patches" / "mxc-literal-argv.patch"
+        with mock.patch.object(build, "LITERAL_PATCH", patch):
+            build.verify_literal_patch()
+            with (
+                mock.patch.object(build, "digest", return_value="0" * 64),
+                self.assertRaisesRegex(RuntimeError, "differs from the reviewed bytes"),
+            ):
+                build.verify_literal_patch()
+            with (
+                mock.patch.object(Path, "is_symlink", return_value=True),
+                self.assertRaisesRegex(RuntimeError, "missing or linked"),
+            ):
+                build.verify_literal_patch()

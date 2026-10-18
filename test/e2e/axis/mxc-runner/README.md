@@ -20,6 +20,10 @@ adds the existing terminal process-group/thread-signal options only for the
 interactive case. The caller explicitly sets `PR_SET_NO_NEW_PRIVS` before
 applying AXIS Landlock and seccomp. Existing AXIS backend behavior is unchanged.
 This export is a reviewed build overlay; it is not an upstream release API.
+The separately pinned `mxc-literal-argv.patch` adds an explicit MXC v1
+`argv::spawn`/`argv::spawn_with_pty` seam for Bubblewrap and Seatbelt. This
+probe supplies a fixed absolute executable and OS argument vector; the
+legacy shell-command field is empty. Unsupported backends refuse this seam.
 
 ## Requirements
 
@@ -50,13 +54,14 @@ mxc-runner/
   prepare_build.py
   src/
   patches/
+  mxc-literal-argv.patch  # exact reviewed copy from ../patches/
   axis-source/       # exact AXIS commit, full checkout
   mxc-source/        # exact MXC commit, full checkout
 ```
 
 Run `python3 prepare_build.py generate-lock` in the first build. The helper
-checks both Git identities and clean status, applies only the bundled AXIS
-export patch, generates a combined Cargo.lock with Cargo, builds with
+checks both Git identities and clean status, applies the bundled AXIS export
+and pinned MXC literal-argv patches, generates a combined Cargo.lock with Cargo, builds with
 `--locked`, compiles helper tests with `--no-run`, and assembles `build-artifact/`.
 It never executes the resulting probe. The artifact includes the binary,
 combined and original upstream locks, source, patch, licenses, exact toolchain
@@ -80,11 +85,15 @@ separate, with the lock review between them.
 ## Fixed live contract, after the lock gate
 
 The binary accepts no user command, policy, path or environment flags. Its
-internal child selector accepts only `boundaries`, `pty` and `timeout`; paths
+internal child selector accepts only `boundaries`, `argv`, `pty` and `timeout`; paths
 come from an owned private fixture, validated by the child. The supervisor
 clears inherited environment before calling the SDK or creating threads, and
 the SDK request supplies only a fixed allowlist. HOME, XDG state and temporary
 files are under that private fixture. No caller credential or proxy is passed.
+The `argv` child compares the exact OS arguments, including empty, spaced,
+quoted, metacharacter, Unicode and trailing-backslash values, then emits a
+marker and exits 23 after AXIS guards apply. A shell interpretation would not
+preserve those arguments. Pipe and PTY cases also use the literal-argv seam.
 
 MXC explicitly selects `Containment::Bubblewrap`, denies egress, ingress and
 host loopback, and owns the process handle, PTY and timeout. The request adds
@@ -151,7 +160,7 @@ python3 verify_live_artifact.py --artifact <download>/build-artifact \
   --receipt <owned-evidence-directory>/artifact-verified.json
 ```
 
-The verifier checks all 14 manifest file hashes, the exact inventory, both
+The verifier must check all 15 manifest file hashes, including the MXC patch, the exact inventory, both
 upstream source/lock identities, the committed combined lock, packaged source
 against the clean build checkout, locked-build status and workflow attribution.
 It rejects symlink inputs, extra files and lock-generation artifacts. It never
