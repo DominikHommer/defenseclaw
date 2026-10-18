@@ -707,3 +707,56 @@ def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path, v8_tar
     assert "not a release version" in result.output
     ok = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "1.0.1.dev3"])
     assert ok.exit_code == 0, ok.output
+
+
+# GAP-0137: a downgrade set openshell.trusted_ca_bundle aside (upgrade_shim);
+# this release puts it back unless config.yaml sets it again, and keeps the
+# keys of a later release for that release.
+def _set_aside_record(data_dir: Path, keys: dict) -> Path:
+    from defenseclaw.upgrade_shim import SET_ASIDE_FILE
+
+    path = data_dir / SET_ASIDE_FILE
+    path.write_text(json.dumps({"version": 1, "for": "1.0.2", "keys": keys}), encoding="utf-8")
+    return path
+
+
+def test_migrate_puts_back_the_keys_a_downgrade_set_aside(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import yaml
+
+    for name in ("_refresh_local_observability_bundle", "_refresh_guardrail_profiles", "_refresh_rego_policies"):
+        monkeypatch.setattr(migrations, name, lambda *_args: None)
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(data_dir, {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem"})
+
+    migrate(str(data_dir))
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["openshell"]["trusted_ca_bundle"] == "~/proxy-root-ca.pem"
+    assert not record.exists()
+
+
+def test_set_aside_keys_keep_a_value_set_again_and_a_later_release_key(data_dir: Path) -> None:
+    import yaml
+
+    config = _write_config(data_dir, "config_version: 9\nopenshell:\n  trusted_ca_bundle: /etc/corp/root.pem\n")
+    record = _set_aside_record(
+        data_dir, {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem", "openshell.future_key": True}
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["openshell"] == {"trusted_ca_bundle": "/etc/corp/root.pem"}
+    assert json.loads(record.read_text(encoding="utf-8"))["keys"] == {"openshell.future_key": True}
+
+
+def test_set_aside_key_that_cannot_be_put_back_is_named_with_its_command(
+    data_dir: Path, capsys: pytest.CaptureFixture
+) -> None:
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(data_dir, {"openshell.trusted_ca_bundle": "relative.pem"})
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    assert config.read_text(encoding="utf-8") == "config_version: 9\n"
+    assert record.exists()
+    captured = capsys.readouterr()
+    assert "defenseclaw config set openshell.trusted_ca_bundle relative.pem" in captured.out + captured.err

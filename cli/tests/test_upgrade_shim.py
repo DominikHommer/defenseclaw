@@ -815,3 +815,72 @@ def test_the_rollback_refusal_prints_a_normalized_path(
 
     assert upgrade_shim.run(["rollback", "--yes"]) == 1
     assert f"are in {home / 'previous'}\n" in capsys.readouterr().err
+
+
+# GAP-0137: the installer of a release older than a config key refuses a
+# config.yaml that sets it ("unknown field"), so a downgrade sets the key
+# aside, and a release that has it puts it back (test_migrate).
+_CA_CONFIG = "config_version: 9\nopenshell:\n  trusted_ca_bundle: ~/proxy-root-ca.pem\n"
+
+
+def _set_aside(home: Path) -> Path:
+    return home / upgrade_shim.SET_ASIDE_FILE
+
+
+def test_downgrade_sets_aside_the_keys_the_older_release_lacks(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.3")
+    (home / "config.yaml").write_text(_CA_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.2")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.2", "--yes"]) == 0
+
+    assert len(execs) == 1
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert "trusted_ca_bundle" not in (config.get("openshell") or {})
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record == {"version": 1, "for": "1.0.2", "keys": {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem"}}
+    if os.name != "nt":
+        assert _set_aside(home).stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(("installed", "target"), [("1.0.3", "1.0.4"), ("1.0.4", "1.0.3")])
+def test_upgrade_keeps_keys_the_target_release_has(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: str, target: str
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", installed)
+    (home / "config.yaml").write_text(_CA_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, target)))
+
+    assert upgrade_shim.run(["upgrade", "--version", target, "--yes"]) == 0
+
+    assert len(execs) == 1
+    assert (home / "config.yaml").read_text(encoding="utf-8") == _CA_CONFIG
+    assert not _set_aside(home).exists()
+
+
+def test_downgrade_stops_with_the_unset_command_when_the_key_cannot_be_set_aside(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from defenseclaw import config_writer
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.3")
+    (home / "config.yaml").write_text(_CA_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.2")))
+
+    def refuse(*_args, **_kwargs):
+        raise config_writer.ConfigWriteError("config.yaml is locked")
+
+    monkeypatch.setattr(config_writer, "apply", refuse)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.2", "--yes"]) == 1
+
+    assert execs == []
+    assert (home / "config.yaml").read_text(encoding="utf-8") == _CA_CONFIG
+    assert not _set_aside(home).exists()
+    err = capsys.readouterr().err
+    assert "defenseclaw config unset openshell.trusted_ca_bundle" in err
+    assert "Nothing was changed." in err
