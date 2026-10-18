@@ -58,8 +58,8 @@ from types import SimpleNamespace
 import click
 
 from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
-from defenseclaw.audit_time_order import audit_time_order
 from defenseclaw.audit_actions import ACTION_DOCTOR
+from defenseclaw.audit_time_order import audit_time_order
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACT_MANIFEST,
     HOOK_CONTRACTS,

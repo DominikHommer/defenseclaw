@@ -3,8 +3,8 @@
 import sqlite3
 
 from defenseclaw.audit_time_order import audit_time_order
-from defenseclaw.tui.panels.audit import _list_events_by_run_id, _list_events_by_target
 from defenseclaw.tui.panels.alerts import _list_events_by_target as alert_events_by_target
+from defenseclaw.tui.panels.audit import _list_events_by_run_id, _list_events_by_target
 
 
 class _Store:
