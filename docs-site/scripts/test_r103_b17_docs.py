@@ -29,10 +29,11 @@ class R103B17DocsTest(unittest.TestCase):
 
     def test_1101_admission_managed_alternative(self):
         text = (DOCS / "policies/admission.mdx").read_text()
-        self.assertIn("For a per-user installation, read the compiled result", text)
-        self.assertIn("installed `defenseclaw` launcher accepts only `sandbox` commands", text)
-        self.assertIn("The managed Windows CLI has no `config get`", text)
-        self.assertIn("A standard account is refused", text)
+        normalized = page("policies/admission.mdx")
+        self.assertIn("For a per-user installation, read the compiled result", normalized)
+        self.assertIn("installed `defenseclaw` launcher accepts only `sandbox` commands", normalized)
+        self.assertIn("The managed Windows CLI has no `config get`", normalized)
+        self.assertIn("A standard account is refused", normalized)
         self.assertIn("sudo /opt/defenseclaw/bin/defenseclaw-gateway policy evaluate --target-type skill --target-name risky-skill", text)
         self.assertIn("sudo /opt/defenseclaw/bin/defenseclaw-gateway policy show", text)
         self.assertNotIn("sudo defenseclaw-gateway policy", text)
