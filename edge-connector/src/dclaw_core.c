@@ -60,10 +60,13 @@ extern int dclaw_ipc_validate_request(const dclaw_tool_request_t *req);
 extern int dclaw_config_load_brokers(void);
 #if DCLAW_MQTT_ENABLED
 extern int dclaw_boot_counter_advance(void);
-extern void dclaw_canary_record_block(void);
+extern void dclaw_canary_record_policy_block(uint32_t target_hash, uint8_t reason);
 extern int dclaw_emergency_load_from_flash(void);
 #else
-static inline void dclaw_canary_record_block(void) { /* no-op: canary is part of OTA/MQTT */ }
+static inline void dclaw_canary_record_policy_block(uint32_t target_hash, uint8_t reason) {
+    /* no-op: canary is part of OTA/MQTT */
+    (void)target_hash; (void)reason;
+}
 #endif
 extern void dclaw_policy_tables_init(void);
 extern int dclaw_audit_ring_init(void);
@@ -317,7 +320,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, DCLAW_VERDICT_SYNC);
     }
 
@@ -343,7 +345,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, DCLAW_VERDICT_SYNC);
     }
     {
@@ -354,7 +355,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_MISMATCH,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
-            dclaw_canary_record_block();
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_MISMATCH, DCLAW_VERDICT_SYNC);
         }
     }
@@ -368,7 +368,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                             DCLAW_VERDICT_SYNC);
     }
@@ -397,7 +396,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_RATE_LIMIT,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
         in_eval = false;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_RATE_LIMIT, DCLAW_VERDICT_SYNC);
     }
@@ -415,6 +413,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
          * finding whose rule says BLOCK blocks in any scope, but a rule can
          * never let through what the threshold blocks. Unknown rule actions
          * fail closed. */
+        bool blocked_by_rule = false;
         for (uint8_t i = 0; i < scan_ctx.finding_count &&
                             scan_action != DCLAW_ACTION_BLOCK; i++) {
             dclaw_action_t rule = dclaw_policy_check_severity(
@@ -422,13 +421,17 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             if (rule != DCLAW_ACTION_ALLOW && rule != DCLAW_ACTION_WARN &&
                 rule != DCLAW_ACTION_ESCALATE) {
                 scan_action = DCLAW_ACTION_BLOCK;
+                blocked_by_rule = true;
             }
         }
         if (scan_action == DCLAW_ACTION_BLOCK) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
-            dclaw_canary_record_block();
+            /* Only the OTA severity rules are policy; the scope thresholds
+             * and patterns are compiled in. */
+            if (blocked_by_rule)
+                dclaw_canary_record_policy_block(target_hash, DCLAW_REASON_CONTENT_BLOCK);
             in_eval = false;
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                                 DCLAW_VERDICT_SYNC);
@@ -442,7 +445,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
-            dclaw_canary_record_block();
             in_eval = false;
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
                                 DCLAW_VERDICT_SYNC);
@@ -451,7 +453,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
-            dclaw_canary_record_block();
             in_eval = false;
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
                                 DCLAW_VERDICT_SYNC);
@@ -460,7 +461,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
-            dclaw_canary_record_block();
+            dclaw_canary_record_policy_block(target_hash, DCLAW_REASON_DEST_DENY);
             in_eval = false;
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY, DCLAW_VERDICT_SYNC);
         }
@@ -472,7 +473,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
+        dclaw_canary_record_policy_block(target_hash, DCLAW_REASON_CAP_SEQUENCE);
         in_eval = false;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, DCLAW_VERDICT_SYNC);
     }
@@ -486,7 +487,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_block();
         in_eval = false;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                             DCLAW_VERDICT_SYNC);
@@ -499,7 +499,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(cached.action, cached.reason, target_hash, req->session_id);
         switch (cached.action) {
             case DCLAW_ACTION_ALLOW:    g_state.eval_allowed_count++;   break;
-            case DCLAW_ACTION_BLOCK:    g_state.eval_denied_count++;  dclaw_canary_record_block(); break;
+            case DCLAW_ACTION_BLOCK:    g_state.eval_denied_count++;    break;
             case DCLAW_ACTION_WARN:     g_state.eval_warned_count++;    break;
             case DCLAW_ACTION_ESCALATE: g_state.eval_escalated_count++; break;
         }

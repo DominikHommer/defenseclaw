@@ -47,6 +47,7 @@ extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
 void dclaw_policy_rollback(void);
 void dclaw_canary_tick(void);
 void dclaw_canary_record_block(void);
+void dclaw_canary_record_policy_block(uint32_t target_hash, uint8_t reason);
 int dclaw_policy_reload_from_flash(void);
 int dclaw_emergency_persist(void);
 int dclaw_emergency_load_from_flash(void);
@@ -276,13 +277,51 @@ void dclaw_canary_tick(void) {
     dclaw_canary_tick_at(hal_tick_ms());
 }
 
-/* Record a BLOCK event for canary tracking */
+/* Record a BLOCK event for canary tracking (raw counter) */
 void dclaw_canary_record_block(void) {
     dclaw_state_t *s = dclaw_get_state();
     if (!s->canary.canary_active) return;
     if (s->canary.canary_minute < 10) {
         s->canary.canary_blocks[s->canary.canary_minute]++;
     }
+}
+
+/* Distinct (tool, reason) denials already counted in the current canary
+ * minute. A caller looping on one denial counts once per minute; when the
+ * set is full every further denial is counted, erring toward detection. */
+#define CANARY_DEDUPE_SLOTS 64
+static uint64_t s_canary_seen[CANARY_DEDUPE_SLOTS];
+static uint8_t  s_canary_seen_count;
+static uint8_t  s_canary_seen_minute = 0xFF;
+static uint64_t s_canary_seen_started_at;
+
+/*
+ * Record a denial that the active OTA policy can cause (severity rule,
+ * destination allowlist, sequence rule). Denials from compiled-in checks
+ * (input validation, hash binding, trusted classes, rate and flood limits,
+ * SSRF, truncation) and gateway verdicts are not counted: the pushed policy
+ * cannot cause them, and counting them would let any caller trigger a
+ * rollback of a good policy by sending junk.
+ */
+void dclaw_canary_record_policy_block(uint32_t target_hash, uint8_t reason) {
+    dclaw_state_t *s = dclaw_get_state();
+    if (!s->canary.canary_active) return;
+
+    if (s_canary_seen_minute != s->canary.canary_minute ||
+        s_canary_seen_started_at != s->canary.canary_started_at) {
+        s_canary_seen_count = 0;
+        s_canary_seen_minute = s->canary.canary_minute;
+        s_canary_seen_started_at = s->canary.canary_started_at;
+    }
+
+    uint64_t key = ((uint64_t)reason << 32) | target_hash;
+    for (uint8_t i = 0; i < s_canary_seen_count; i++) {
+        if (s_canary_seen[i] == key) return;
+    }
+    if (s_canary_seen_count < CANARY_DEDUPE_SLOTS) {
+        s_canary_seen[s_canary_seen_count++] = key;
+    }
+    dclaw_canary_record_block();
 }
 
 /* Rollback to previous policy partition */
