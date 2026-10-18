@@ -185,7 +185,6 @@ def _build_fixture(
     )
     _stub(bin_dir, "pkgbuild", pkgbuild)
     _stub(bin_dir, "productbuild", 'for last; do :; done; : >"$last"')
-    _stub(bin_dir, "shasum", "echo 0000")
     codesign_calls = tmp_path / "codesign-calls"
     codesign_calls.mkdir()
     _stub(
