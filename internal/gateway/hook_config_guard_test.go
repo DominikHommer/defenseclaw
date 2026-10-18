@@ -374,18 +374,21 @@ func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
 	live := config.DefaultConfig()
 	live.DataDir = root
 	live.Guardrail.Mode = "observe"
-	live.Guardrail.HookFailMode = "closed"
+	live.Guardrail.HookFailMode = "open"
 	sidecar.publishConfig(live)
 	before := setupCalls()
 	if err := guard.RefreshPolicy(ctx); err != nil || setupCalls() != before {
-		t.Fatalf("observe mode (fail open, as rendered): err=%v, Setup calls %d -> %d, want none", err, before, setupCalls())
+		t.Fatalf("explicit open (as rendered): err=%v, Setup calls %d -> %d, want none", err, before, setupCalls())
 	}
 
+	// Observe and action mode follow the configured fail mode alike: closing
+	// it re-renders the hooks.
 	action := cloneConfig(live)
 	action.Guardrail.Mode = "action"
+	action.Guardrail.HookFailMode = "closed"
 	sidecar.publishConfig(action)
 	if err := guard.RefreshPolicy(ctx); err != nil {
-		t.Fatalf("refresh after guardrail.mode action: %v", err)
+		t.Fatalf("refresh after guardrail.hook_fail_mode closed: %v", err)
 	}
 	if setupCalls() != before+1 {
 		t.Fatalf("Setup calls = %d, want %d (one re-render)", setupCalls(), before+1)

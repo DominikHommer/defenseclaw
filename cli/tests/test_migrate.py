@@ -450,7 +450,9 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
 
 
 def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[str]) -> None:
-    # 0.8.x sealed the global fail mode into observe-mode hooks.
+    # 0.8.x sealed the global fail mode into observe-mode hooks. From 1.0.3
+    # an observe-mode hook follows the global closed outside Secure Client,
+    # so the upgrade keeps it closed and says nothing about fail-open.
     _write_config(data_dir, "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: closed\n")
     lock = {"connectors": {"claudecode": {"hook_fail_mode": "closed"}, "codex": {"hook_fail_mode": "open"}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
@@ -458,8 +460,7 @@ def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[s
     result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4"])
 
     assert result.exit_code == 0, result.output
-    assert "claudecode hooks now fail open" in result.output
-    assert "defenseclaw setup claudecode --mode action" in result.output
+    assert "now fail open" not in result.output
     assert "codex" not in result.output
 
     # GAP-0276: a reinstall of a current config migrates nothing and says nothing.

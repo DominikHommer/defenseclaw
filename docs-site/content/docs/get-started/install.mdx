@@ -286,9 +286,10 @@ A hook does not start the gateway:
 - for 60 seconds after a hook start failed (see `~/.defenseclaw/gateway.log`);
 - when `DEFENSECLAW_GATEWAY_AUTOSTART=0` is set in the agent's environment.
 
-While the gateway is not running, fail-closed hooks (the action profile) block
-agent calls, and fail-open hooks (the observe default) let them through with a
-`gateway unreachable` line on stderr. On Windows a hook also starts a stopped
+While the gateway is not running, fail-closed hooks block agent calls, in
+observe mode too, and only hooks you set to `hook_fail_mode: open` let them
+through with a `gateway unreachable` line on stderr (see
+[Fail modes](/docs/reference/fail-modes#which-value-applies)). On Windows a hook also starts a stopped
 gateway; see [Windows install lifecycle](/docs/get-started/windows/install-lifecycle#startup-behavior).
 
 When the watchdog runs (`gateway.watchdog.enabled`) and the gateway process

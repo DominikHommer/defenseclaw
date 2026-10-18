@@ -206,10 +206,10 @@ func TestEffectiveResolvers_SafeFallbacks(t *testing.T) {
 	if got := g.EffectiveMode(""); got != "observe" {
 		t.Errorf("EffectiveMode empty = %q, want observe", got)
 	}
-	// An observe-only connector with no explicit override retains the
-	// historical fail-open behavior on every platform.
-	if got := g.EffectiveHookFailModeFor(""); got != "open" {
-		t.Errorf("EffectiveHookFailModeFor empty = %q, want open", got)
+	// Outside Secure Client a fail mode that is not set is closed, in
+	// observe mode too.
+	if got := g.EffectiveHookFailModeFor(""); got != "closed" {
+		t.Errorf("EffectiveHookFailModeFor empty = %q, want closed", got)
 	}
 	if got := g.EffectiveBlockMessage(""); got != "" {
 		t.Errorf("EffectiveBlockMessage empty = %q, want empty", got)
@@ -233,15 +233,55 @@ func TestEffectiveHookFailMode_ExplicitOverrideWinsInObserve(t *testing.T) {
 		Mode:         "observe",
 		HookFailMode: "closed",
 		Connectors: map[string]PerConnectorGuardrailConfig{
-			"codex":      {HookFailMode: "closed"},
+			"codex":      {HookFailMode: "open"},
 			"claudecode": {},
 		},
 	}
-	if got := g.EffectiveHookFailModeFor("codex"); got != "closed" {
-		t.Fatalf("explicit connector fail mode = %q, want closed", got)
+	if got := g.EffectiveHookFailModeFor("codex"); got != "open" {
+		t.Fatalf("explicit connector fail mode = %q, want open", got)
 	}
-	if got := g.EffectiveHookFailModeFor("claudecode"); got != "open" {
-		t.Fatalf("unoverridden observe connector fail mode = %q, want open", got)
+	// Observe mode no longer keeps a connector without its own value
+	// fail-open: the global value applies.
+	if got := g.EffectiveHookFailModeFor("claudecode"); got != "closed" {
+		t.Fatalf("unoverridden observe connector fail mode = %q, want the global closed", got)
+	}
+}
+
+// Owner rule (B-01, 1.0.3): hooks fail closed everywhere except under Secure
+// Client. An observe-mode connector whose fail mode is not set is closed on a
+// per-user install and on a standalone managed host; an explicit
+// `hook_fail_mode: open` is honored only on a per-user install; Secure Client
+// keeps its observe-mode fail-open contract.
+func TestUnsetHookFailModeIsClosedOutsideSecureClient(t *testing.T) {
+	for _, test := range []struct {
+		name, deployment, profile string
+		global, connector         string
+		want                      string
+	}{
+		{name: "per-user, nothing set", want: "closed"},
+		{name: "per-user, global open", global: "open", want: "open"},
+		{name: "per-user, connector open", connector: "open", want: "open"},
+		{name: "per-user, global open, connector closed", global: "open", connector: "closed", want: "closed"},
+		{name: "standalone, nothing set", deployment: "managed_enterprise", profile: "standalone", want: "closed"},
+		{name: "standalone, connector open", deployment: "managed_enterprise", profile: "standalone", connector: "open", want: "closed"},
+		{name: "standalone, global open", deployment: "managed_enterprise", profile: "standalone", global: "open", want: "closed"},
+		{name: "secure client, nothing set", deployment: "managed_enterprise", profile: "secure_client", want: "open"},
+		{name: "secure client, connector closed", deployment: "managed_enterprise", profile: "secure_client", connector: "closed", want: "closed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &Config{DeploymentMode: test.deployment}
+			cfg.Enterprise.Profile = test.profile
+			cfg.Guardrail.Mode = "observe"
+			cfg.Guardrail.HookFailMode = test.global
+			cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"opencode": {HookFailMode: test.connector}}
+			if got := cfg.EffectiveHookFailModeForConnector("opencode"); got != test.want {
+				t.Fatalf("observe-mode opencode fail mode = %q, want %q", got, test.want)
+			}
+			// An action decision a request profile selects resolves the same.
+			if got := cfg.EffectiveActionHookFailModeForConnector("opencode"); test.profile != "secure_client" && got != test.want {
+				t.Fatalf("action-decision opencode fail mode = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

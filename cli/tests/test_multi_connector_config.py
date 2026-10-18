@@ -217,7 +217,12 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_safe_fallbacks_when_unset(self):
         g = GuardrailConfig(mode="", hook_fail_mode="")
         self.assertEqual(g.effective_mode(""), "observe")
+        # Outside Secure Client a fail mode that is not set is closed, in
+        # observe mode too (mirrors Go EffectiveHookFailModeForConnector).
+        self.assertEqual(g.effective_hook_fail_mode(""), "closed")
+        g._secure_client_observe_open = True
         self.assertEqual(g.effective_hook_fail_mode(""), "open")
+        g._secure_client_observe_open = False
         self.assertEqual(g.effective_block_message(""), "")
         self.assertEqual(g.effective_rule_pack_dir(""), "")
 
@@ -231,7 +236,16 @@ class TestEffectiveResolvers(unittest.TestCase):
             },
         )
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+        # The global value applies in observe mode outside Secure Client.
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
+        g.hook_fail_mode = "open"
         self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+        # Under Secure Client an observe connector without its own value is open.
+        g.hook_fail_mode = "closed"
+        g._secure_client_observe_open = True
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
 
     def test_empty_map_equals_absent(self):
         with_empty = GuardrailConfig(mode="action", connectors={})
