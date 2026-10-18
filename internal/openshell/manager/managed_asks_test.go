@@ -1424,3 +1424,24 @@ func TestManagedAlwaysUnblockFindsThePersonsSandbox(t *testing.T) {
 		t.Fatalf("always unblock naming the sandbox = %v", err)
 	}
 }
+
+// A registration poll can replace the daemon's default floor while a new
+// managed create is in progress. Both resolution and the later create steps
+// must use the floor pinned to that create.
+func TestManagedCreateUsesPinnedFloorAfterDefaultChanges(t *testing.T) {
+	e := newEnv(t, nil)
+	strict := *e.config()
+	strict.OpenShell.Admin.AllowYolo = boolPtr(false)
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowYolo = boolPtr(true) })
+	ctx := WithCreateConfig(t.Context(), &strict)
+	sb, err := e.m.Create(ctx, sandboxapi.CreateRequest{
+		Name: "pinned-floor", Harness: "claudecode", Project: e.project, Yolo: true,
+	})
+	if err == nil {
+		if sb.Yolo {
+			t.Fatal("the create used the other registration's permissive floor")
+		}
+	} else if !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) {
+		t.Fatalf("create under the pinned floor: %v", err)
+	}
+}

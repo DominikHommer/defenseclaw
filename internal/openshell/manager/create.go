@@ -50,6 +50,22 @@ import (
 // the sandbox user, which cannot create /work.
 const copyWorkRoot = "/sandbox/work"
 
+type createConfigKey struct{}
+
+// WithCreateConfig pins the configuration used by one Create call. A managed
+// daemon supplies the resolved registration floor before other registrations
+// can change its default configuration during gateway preparation.
+func WithCreateConfig(ctx context.Context, cfg *config.Config) context.Context {
+	return context.WithValue(ctx, createConfigKey{}, cfg)
+}
+
+func (m *Manager) createConfig(ctx context.Context) *config.Config {
+	if cfg, ok := ctx.Value(createConfigKey{}).(*config.Config); ok && cfg != nil {
+		return cfg
+	}
+	return m.config()
+}
+
 // rollback undoes the completed steps of a failed create, newest first.
 type rollback struct {
 	steps []rollbackStep
@@ -84,7 +100,7 @@ func (r *rollback) run(m *Manager, sandbox string) {
 // Create creates a sandbox, waits until it is ready and returns it. Every
 // step it completed is rolled back when a later one fails.
 func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error) {
-	cfg := m.config()
+	cfg := m.createConfig(ctx)
 	if !cfg.OpenShell.Enabled {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)
 	}
@@ -240,7 +256,7 @@ type createInput struct {
 }
 
 func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInput, rb *rollback) (*sandboxapi.Sandbox, error) {
-	cfg := m.config()
+	cfg := m.createConfig(ctx)
 	eff, spec, name := in.eff, in.harness, in.name
 	egressDec, err := m.egressDecider(cfg, eff)
 	if err != nil {

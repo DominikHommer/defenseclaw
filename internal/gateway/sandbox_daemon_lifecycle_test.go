@@ -20,6 +20,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -37,6 +38,40 @@ import (
 
 func refusingResolve(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error) {
 	return sandboxrelay.ResolveResponse{V: 1, Refusal: &sandboxrelay.Refusal{Reason: sandboxrelay.ReasonNotAllowed, Message: "not for you"}}, nil
+}
+
+// A poll can adopt a running registration's looser floor during a create,
+// after the new floor was chosen but before Manager.Create reads its config.
+func TestSandboxDaemonPollCanAdoptDuringCreate(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	runPastRevalidate(t, f)
+	yes := true
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-running", Sandbox: "running", Confirmed: true,
+		Floor: config.OpenShellAdminConfig{MinProfile: "open", AllowYolo: &yes}, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	f.relay.resolve = func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error) {
+		return sandboxrelay.ResolveResponse{V: 1, Registration: sandboxrelay.RegistrationView{ID: "reg-new"},
+			Effective: json.RawMessage(`{"profile":"strict","floor":{"min_profile":"strict","allow_yolo":false}}`)}, nil
+	}
+	polled, sawStrict := false, false
+	f.os.prepare = func(sandboxrelay.DaemonSettings) (bool, error) {
+		admin := f.d.config().OpenShell.Admin
+		sawStrict = admin.AllowYolo != nil && !*admin.AllowYolo
+		f.d.adoptMu.Lock()
+		polled = f.d.adoptRunningFloor(map[string]string{"running": "ready"})
+		f.d.adoptMu.Unlock()
+		return true, nil
+	}
+	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	_, _ = ctl.Create(t.Context(), sandboxapi.CreateRequest{Harness: "claudecode", Project: t.TempDir(), Yolo: true})
+	if !sawStrict || !polled || f.os.prepared.Load() == 0 {
+		t.Fatal("the poll did not run between the floor change and Manager.Create")
+	}
+	admin := f.d.config().OpenShell.Admin
+	if admin.AllowYolo == nil || !*admin.AllowYolo {
+		t.Fatalf("the poll did not restore the running floor: %+v", admin)
+	}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {

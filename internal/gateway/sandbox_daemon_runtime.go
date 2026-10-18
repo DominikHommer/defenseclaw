@@ -192,8 +192,8 @@ type SandboxDaemon struct {
 	adoptMu sync.Mutex
 	adopted atomic.Uint64
 
-	// floorMu guards floor, the organization floor the manager resolves
-	// against: the floor of the registrations of running sandboxes.
+	// floorMu guards the default floor for new runs and no-run views. Existing
+	// sandboxes resolve against their own confirmed registration floors.
 	floorMu sync.Mutex
 	floor   *config.OpenShellAdminConfig
 
@@ -206,7 +206,7 @@ type SandboxDaemon struct {
 	// lifecycle (capacity 1) serializes managed creates and starts with
 	// each other and with the release of the listeners: a create holds it
 	// from the resolve through the registration, so no release closes the
-	// listeners under it and no other create swaps the floor it reads.
+	// listeners under it. Each create pins the floor it reads.
 	lifecycle chan struct{}
 	// conns counts the open CLI connections; lastActive is the last CLI
 	// activity (UnixNano).
@@ -1879,9 +1879,9 @@ func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Statu
 // against the floor it answered and binds the registration to it. Any
 // failure after the gateway registered the run deletes what was made.
 //
-// Managed creates and starts run one at a time (the lifecycle): the daemon
-// resolves every sandbox against one floor, which a create sets, and the
-// supervision must not release the listeners while one is under way.
+// Managed creates and starts run one at a time (the lifecycle), so the
+// supervision cannot release the listeners while one is under way. A create
+// pins its own floor because a registration poll can change the default floor.
 func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.CreateRequest) (_ *sandboxapi.Sandbox, err error) {
 	d := c.d
 	if err := d.lockLifecycle(ctx); err != nil {
@@ -1957,7 +1957,7 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 
 	// The user's OpenShell gateway must run the chosen driver (the manager
 	// refuses the create otherwise); the record keeps the reason.
-	createCtx := withManagedMCPJudge(manager.WithDriverChoice(ctx, choice),
+	createCtx := withManagedMCPJudge(manager.WithCreateConfig(manager.WithDriverChoice(ctx, choice), d.configWithFloor(floor)),
 		fixedMCPJudge(resolveMCPDecision(resolveReq.Harness, mcp, resp)))
 	sb, err := c.Manager.Create(createCtx, req)
 	if err != nil {
@@ -2094,11 +2094,11 @@ func (c *managedSandboxController) Delete(ctx context.Context, name string, req 
 	c.d.stops.Add(1)
 	defer c.d.stops.Add(-1)
 	ready := c.d.openShellForKept(ctx, true)
-	if ready != nil {
-		return nil, ready
-	}
 	resp, err := c.Manager.Delete(ctx, name, req)
 	if err != nil {
+		if ready != nil {
+			return nil, ready
+		}
 		return resp, err
 	}
 	if r, ok := c.d.regs.get(name); ok {

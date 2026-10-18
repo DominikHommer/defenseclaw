@@ -117,6 +117,27 @@ func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
 	}
 }
 
+// A deleted sandbox with only a retained snapshot needs no gateway. A
+// different account can hold the shared port while its record is removed.
+func TestSandboxDaemonDeleteRetainedWhileOtherAccountHoldsGateway(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		seedSandboxRecord(t, o.StateDir, "retained", map[string]any{"retained": true})
+	})
+	f.run(t)
+	f.os.holder.Store(4242)
+	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	resp, err := ctl.Delete(t.Context(), "retained", sandboxapi.DeleteRequest{})
+	if err != nil || resp == nil || !resp.Deleted {
+		t.Fatalf("delete retained with another account's gateway: %+v, %v", resp, err)
+	}
+	if f.os.prepared.Load() != 0 {
+		t.Fatal("readied a gateway to delete only a retained snapshot")
+	}
+	if _, err := ctl.Manager.Get(t.Context(), "retained"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("retained record survived: %v", err)
+	}
+}
+
 // A second OpenShell gateway the account starts writes its own client
 // certificates into the registration of the default name; the next ready
 // registers the managed gateway again (GAP-0495).
