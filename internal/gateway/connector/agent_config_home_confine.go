@@ -17,15 +17,19 @@ import (
 // GAP-0206).
 var ErrAgentConfigOutsideHome = errors.New("agent config leads outside the home")
 
-// AgentConfigOutsideHomeError names the agent config and the place outside
-// the home it leads to.
+// AgentConfigOutsideHomeError names the agent config, the place outside the
+// home it leads to and, when known, what that file still holds.
 type AgentConfigOutsideHomeError struct {
-	Path, Target string
+	Path, Target, Detail string
 }
 
 func (e *AgentConfigOutsideHomeError) Error() string {
-	return fmt.Sprintf("%s leads outside the home, to %s; DefenseClaw changed neither the link nor that file: "+
-		"remove DefenseClaw's entries from that file, or replace the link with that file, then rerun", e.Path, e.Target)
+	detail := ""
+	if e.Detail != "" {
+		detail = ", " + e.Detail
+	}
+	return fmt.Sprintf("%s leads outside the home, to %s%s; DefenseClaw changed neither the link nor that file: "+
+		"remove DefenseClaw's entries from that file, or replace the link with that file, then rerun", e.Path, e.Target, detail)
 }
 
 func (e *AgentConfigOutsideHomeError) Unwrap() error { return ErrAgentConfigOutsideHome }
@@ -55,7 +59,7 @@ func AgentConfigOutsideHome(home, path string) (string, bool, error) {
 	if !inside(absolute) {
 		return "", false, nil
 	}
-	resolved, err := resolveAtomicWritePathUnconfined(absolute)
+	resolved, err := resolveAtomicWritePath(absolute)
 	if err != nil {
 		return "", false, err
 	}
@@ -70,12 +74,15 @@ func AgentConfigOutsideHome(home, path string) (string, bool, error) {
 	return physical, true, nil
 }
 
-// confineAtomicWritePath refuses to follow path out of the account home the
-// enterprise per-user code bound with WithUserHomeDir. A teardown that
-// restores or removes an agent config writes through a symlinked config;
-// one that leads out of the home must leave that file alone, whoever owns
-// it. Windows validates reparse points separately and is not confined
-// here; with no bound home nothing changes.
+// confineAtomicWritePath refuses a change through path when it leads out of
+// the account home the enterprise per-user code bound with WithUserHomeDir.
+// A teardown that restores or removes an agent config writes through a
+// symlinked config; one that leads out of the home must leave that file
+// alone, whoever owns it. The writers call it only for a change: a write
+// or transform that would leave the file as it is still passes, so a file
+// the account cleaned by hand does not keep its cleanup failing. Windows
+// validates reparse points separately and is not confined here; with no
+// bound home nothing changes.
 func confineAtomicWritePath(path string) error {
 	if runtime.GOOS == "windows" {
 		return nil

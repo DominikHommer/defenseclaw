@@ -607,7 +607,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			// alone, link and file, whoever owns that file: the removal
 			// fails with the remedy and no teardown runs (rel-1-0-3
 			// GAP-0206). The connector writes refuse it as well.
-			if err = enterpriseHookWorkerOutsideHomeConfig(opts.UserHome, outcome.CleanedPaths); err != nil {
+			if err = enterpriseHookWorkerOutsideHomeConfig(opts.UserHome, setupOpts.DataDir, outcome.CleanedPaths); err != nil {
 				restorePreviousHome()
 				break
 			}
@@ -774,18 +774,48 @@ func enterpriseHookWorkerRemovePaths(opts enterprisehooks.InstallOptions, conn c
 
 // enterpriseHookWorkerOutsideHomeConfig refuses a removal while one of the
 // agent config paths in the home leads out of it through a symlink (the
-// config, or a folder on the way), also to a file that does not exist. The
-// worker runs as the user, but a file outside the home is not DefenseClaw's
-// to restore or delete, even when the user may change it (rel-1-0-3
-// GAP-0206). A link chain that cannot be followed is refused too.
-func enterpriseHookWorkerOutsideHomeConfig(home string, paths []string) error {
+// config, or a folder on the way) to a file that still holds DefenseClaw's
+// entries, or that cannot be checked as the account. A teardown would have
+// restored or deleted that file: the worker runs as the user, but a file
+// outside the home is not DefenseClaw's to change, whoever owns it
+// (rel-1-0-3 GAP-0206). Once the account removes those entries, the
+// teardown leaves that file as it is and the removal goes on. A dangling
+// link changes nothing outside; the check after the teardown reports it.
+func enterpriseHookWorkerOutsideHomeConfig(home, dataDir string, paths []string) error {
+	const maxConfigBytes = 4 << 20
+	customDataDir := ""
+	if filepath.Clean(dataDir) != filepath.Join(home, ".defenseclaw") {
+		customDataDir = filepath.Clean(dataDir)
+	}
 	for _, path := range paths {
 		target, outside, err := connector.AgentConfigOutsideHome(home, path)
 		if err != nil {
 			return fmt.Errorf("%s: the agent config link cannot be followed (%v); DefenseClaw left it alone: replace the link with the file it names, then rerun", path, err)
 		}
-		if outside {
-			return &connector.AgentConfigOutsideHomeError{Path: path, Target: target}
+		if !outside {
+			continue
+		}
+		refuse := func(detail string) error {
+			return &connector.AgentConfigOutsideHomeError{Path: path, Target: target, Detail: detail}
+		}
+		info, err := os.Stat(target)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || !info.Mode().IsRegular() {
+			return refuse("which cannot be checked as the account")
+		}
+		file, err := os.Open(target)
+		if err != nil {
+			return refuse("which cannot be read as the account")
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, maxConfigBytes+1))
+		_ = file.Close()
+		if readErr != nil || len(data) > maxConfigBytes {
+			return refuse("which could not be checked within the read limit")
+		}
+		if line, marker := enterpriseHookWorkerConfigReferenceLine(data, customDataDir); line != 0 {
+			return refuse(fmt.Sprintf("and that file still holds DefenseClaw's %s (line %d)", marker, line))
 		}
 	}
 	return nil
@@ -873,10 +903,11 @@ func enterpriseHookWorkerRemainingConfigReference(home, dataDir string, paths []
 		target := path
 		if info.Mode()&os.ModeSymlink != 0 {
 			// A dotfile manager links the agent config to a file elsewhere
-			// in the home (~/.codex/config.toml -> ~/dotfiles/codex.toml).
-			// The worker runs as the user and checks that file; a link out
-			// of the home stays unverified (GAP-0642).
-			resolved, problem := enterpriseHookWorkerConfigLinkTarget(home, path)
+			// (~/.codex/config.toml -> ~/dotfiles/codex.toml). The worker
+			// runs as the user and reads that file, also one outside the
+			// home, which the removal never changes (GAP-0642, rel-1-0-3
+			// GAP-0206).
+			resolved, problem := enterpriseHookWorkerConfigLinkTarget(path)
 			if problem != "" {
 				return path + ": " + problem
 			}
@@ -904,21 +935,12 @@ func enterpriseHookWorkerRemainingConfigReference(home, dataDir string, paths []
 	return ""
 }
 
-// enterpriseHookWorkerConfigLinkTarget resolves a symlinked agent config.
-// It returns the target when it is inside the cleaned home (both resolved,
-// so a home under a linked folder compares the same), else why it is not
-// checked.
-func enterpriseHookWorkerConfigLinkTarget(home, path string) (string, string) {
+// enterpriseHookWorkerConfigLinkTarget resolves a symlinked agent config,
+// or says why it cannot.
+func enterpriseHookWorkerConfigLinkTarget(path string) (string, string) {
 	target, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", "agent config is a symlink that cannot be resolved; remove DefenseClaw's entries from the file it names, or replace the link with that file"
-	}
-	resolvedHome, err := filepath.EvalSymlinks(home)
-	if err != nil {
-		resolvedHome = home
-	}
-	if !enterpriseHookWorkerPathWithin(resolvedHome, target) {
-		return "", "agent config is a symlink to a file outside the home, which is not checked; remove DefenseClaw's entries from the file it names, or replace the link with that file"
 	}
 	return target, ""
 }

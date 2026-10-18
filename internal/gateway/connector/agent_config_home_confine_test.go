@@ -68,6 +68,18 @@ func TestAtomicWritesNeverFollowALinkOutOfTheBoundHome(t *testing.T) {
 	}
 	refused(t, "removal", bound(func() error { return atomicTransformFileWithStateDir(link, stateDir, 0o600, removal) }))
 	outsideUnchanged(t, "removal")
+	// What would change nothing passes: a file the account cleaned by hand
+	// does not keep its cleanup failing.
+	if err := bound(func() error { return atomicWriteFile(link, original, 0o600) }); err != nil {
+		t.Fatalf("an unchanged write through the outside link = %v", err)
+	}
+	keep := func(raw []byte, exists bool) (atomicTransformResult, error) {
+		return atomicTransformResult{Data: append([]byte(nil), raw...)}, nil
+	}
+	if err := bound(func() error { return atomicTransformFileWithStateDir(link, stateDir, 0o600, keep) }); err != nil {
+		t.Fatalf("an unchanged transform through the outside link = %v", err)
+	}
+	outsideUnchanged(t, "an unchanged write")
 
 	// The same for a file the account cannot change (as a root-owned
 	// file in a folder it cannot write): nothing is even tried.

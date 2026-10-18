@@ -111,7 +111,7 @@ func TestEnterpriseHookWorkerRemoveLeavesAnOutsideHomeConfigLinkAlone(t *testing
 			if len(results) != 2 {
 				t.Fatalf("worker answered %d targets: %+v", len(results), results)
 			}
-			if results[0].OK || !strings.Contains(results[0].Error, "leads outside the home, to "+outside) ||
+			if results[0].OK || !strings.Contains(results[0].Error, "leads outside the home, to "+outside+", and that file still holds DefenseClaw's") ||
 				!strings.Contains(results[0].Error, "DefenseClaw changed neither the link nor that file") ||
 				!strings.HasSuffix(results[0].Error, "then rerun") {
 				t.Fatalf("remove of an outside-home link = %+v", results[0])
@@ -130,6 +130,28 @@ func TestEnterpriseHookWorkerRemoveLeavesAnOutsideHomeConfigLinkAlone(t *testing
 				t.Fatalf("teardown through an outside-home link = %v", err)
 			}
 			unchanged(t, "the teardown")
+
+			// The account follows the remedy and removes DefenseClaw's
+			// entries from the outside file: the removal then goes on and
+			// leaves that file and the link as they are.
+			if readOnly {
+				if err := os.Chmod(outsideDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(outside, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cleaned := []byte("model = \"gpt-5\"\n")
+			if err := os.WriteFile(outside, cleaned, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			installed = cleaned
+			results = runEnterpriseHookWorkerApply(context.Background(), request).Targets
+			if len(results) != 2 || !results[0].OK || !results[0].PathsReported || results[0].Remaining != "" || !results[1].OK {
+				t.Fatalf("removal after the outside file was cleaned = %+v", results)
+			}
+			unchanged(t, "the removal after the account cleaned the file")
 		})
 	}
 }

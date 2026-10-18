@@ -1336,7 +1336,11 @@ running sandbox counts again within the next minute.
   again, for example) starts in `defenseclaw-managed`, because one gateway
   serves one namespace: the 1.0.1 sandboxes then report "not found", the
   gateway's log names the cause, and they start again once no sandbox is left
-  in `defenseclaw-managed` (pull, then delete each). The user's kept
+  in `defenseclaw-managed` (pull, then delete each). Pull and delete the
+  sandboxes in `defenseclaw-managed` before a downgrade to 1.0.1: a 1.0.1
+  gateway does not know that namespace, and such a sandbox can come back in
+  OpenShell's error state (ComputeResourceMissing), with its work no longer
+  readable. The user's kept
   sandboxes list, start, connect and pull as before, running or stopped, and
   the upgrade is a plain
   restart ("pending restart" while a sandbox runs), not a switch. A user who

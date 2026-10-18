@@ -67,6 +67,16 @@ func atomicWriteFileWithPublisher(
 	if err != nil {
 		return err
 	}
+	// In an account home bound for the enterprise per-user code, a path
+	// that leads out of the home is never changed, nor a folder created
+	// there; a write that would change nothing is still fine (rel-1-0-3
+	// GAP-0206).
+	if err := confineAtomicWritePath(path); err != nil {
+		if atomicFileAlreadyMatches(writePath, data, perm) {
+			return nil
+		}
+		return err
+	}
 
 	dir := filepath.Dir(writePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -195,18 +205,7 @@ func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
 	return err == nil && pathInfo.Mode()&os.ModeSymlink == 0 && os.SameFile(openedInfo, pathInfo)
 }
 
-// resolveAtomicWritePath is the file a write to path changes: the end of
-// its symlink chain. In an account home bound with WithUserHomeDir (the
-// enterprise per-user install and cleanup on Unix), a path in that home
-// that leads out of it is refused (rel-1-0-3 GAP-0206).
 func resolveAtomicWritePath(path string) (string, error) {
-	if err := confineAtomicWritePath(path); err != nil {
-		return "", err
-	}
-	return resolveAtomicWritePathUnconfined(path)
-}
-
-func resolveAtomicWritePathUnconfined(path string) (string, error) {
 	cur := path
 	for i := 0; i < 16; i++ {
 		info, err := os.Lstat(cur)

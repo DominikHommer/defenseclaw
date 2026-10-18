@@ -375,4 +375,25 @@ func TestEnterpriseHookWorkerConfigScanFollowsLinksInsideTheHome(t *testing.T) {
 	if got := enterpriseHookWorkerRemainingConfigReference(home, dataDir, []string{path}); !strings.Contains(got, "cannot be resolved") {
 		t.Fatalf("a dangling link was treated as clean: %q", got)
 	}
+	// A link out of the home is read as the account, never changed: a
+	// clean file passes and an entry in it is reported (rel-1-0-3 GAP-0206).
+	outside := filepath.Join(t.TempDir(), "codex.toml")
+	if err := os.WriteFile(outside, []byte("model = 'sample'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Fatal(err)
+	}
+	if got := enterpriseHookWorkerRemainingConfigReference(home, dataDir, []string{path}); got != "" {
+		t.Fatalf("a clean outside-home linked config stayed unverified: %s", got)
+	}
+	if err := os.WriteFile(outside, []byte("notify = ['"+filepath.Join(dataDir, "hooks", "codex-hook.sh")+"']\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := enterpriseHookWorkerRemainingConfigReference(home, dataDir, []string{path}); !strings.Contains(got, path+":1: DefenseClaw data-dir path remains") {
+		t.Fatalf("an entry in the outside-home linked config was not reported: %q", got)
+	}
 }
