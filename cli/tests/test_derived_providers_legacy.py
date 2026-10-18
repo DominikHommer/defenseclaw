@@ -70,8 +70,12 @@ def test_write_keeps_a_legacy_overlay_config_does_not_hold(tmp_path: Path, legac
 def test_write_replaces_a_legacy_overlay_config_already_holds(tmp_path: Path, absorbed: bool) -> None:
     cfg = _cfg(tmp_path)
     path = tmp_path / "custom-providers.json"
-    legacy = {"providers": [{"name": "ACME-GW", "domains": ["b11-acme.example.test"],
-                             "extra_headers": {"X-B11-Config": "dummy-config"}}], "ollama_ports": [11434]}
+    legacy = {
+        "providers": [
+            {"name": "ACME-GW", "domains": ["b11-acme.example.test"], "extra_headers": {"X-B11-Config": "dummy-config"}}
+        ],
+        "ollama_ports": [11434],
+    }
     if absorbed:
         # Seeded into llm_providers by an edit command: the save replaces it.
         legacy["providers"].append({"name": "removed-gw", "domains": ["removed.example.test"]})
