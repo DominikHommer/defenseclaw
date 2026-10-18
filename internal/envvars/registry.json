@@ -7280,6 +7280,30 @@
       "security_note": "Skips recovery of a pending transaction, so it is honoured only in the environment the signed, elevated lifecycle CLI builds for the installer and cleared before any child starts."
     },
     {
+      "name": "DEFENSECLAW_STANDALONE_COLLECT_RUNTIME_GENERATIONS",
+      "category": "upgrade_internal",
+      "purpose": "Asks the standalone Windows installer's Verify, run by an elevated ensure that found the deployment compliant, to collect the old managed hook runtime copies a retire left and to name each per-user DefenseClaw folder still untrusted. It is not an installer parameter because the installer parameter set is the Secure Client command line. The installer reads it only for a Verify and clears it so no child process inherits it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/windows_enterprise_standalone.go",
+          "description": "Sets it in the strict installer environment only for the Verify of an elevated ensure that found the deployment compliant"
+        },
+        {
+          "location": "packaging/windows/install-enterprise.ps1",
+          "description": "Reads and clears it, and passes CollectRuntimeGenerations to the lifecycle only for the Verify action"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
       "name": "DCLAW_FLEET_API_TOKEN",
       "category": "fleet",
       "purpose": "Opaque bearer token for the Fleet management API; the CLI generator uses URL-safe random text.",

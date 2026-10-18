@@ -345,7 +345,11 @@ DefenseClaw's whenever it holds `true`, recorded or not (a build before
 1.0.0 wrote it without a record): the guardian removes it from a host where
 it is not wanted, and uninstall, with or without `PURGE=1`, removes it, then
 the settings file and the folder DefenseClaw created for it once nothing
-else is in them. DefenseClaw writes the files as the user.
+else is in them. On a computer that no longer has an enterprise deployment
+(one removed by a build before 1.0.0), nothing is left to remove the key:
+as an administrator, delete the `defenseclaw@defenseclaw` entry from
+`enabledPlugins` in that file, or the file when nothing else is in it.
+DefenseClaw writes the files as the user.
 The Local hook file is DefenseClaw's own: the hook guardian rewrites it when a
 user deletes or edits it (a directory or link at that name is replaced too),
 status and verify fail while it is missing or modified, and uninstall removes

@@ -126,21 +126,34 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 	}
 	if path := strings.TrimSpace(opts.configPath); path != "" {
 		configured, err := readWindowsEnterpriseConfigProfile(path)
+		var content windowsEnterpriseConfigContentError
+		if err != nil && errors.As(err, &content) && requested == "" && windowsEnterpriseStandaloneRecordedOnly(opts) {
+			// The file cannot name its profile, but this host runs only the
+			// standalone profile, where no Secure Client config applies: it
+			// is the standalone profile's refusal (1639), not a Secure
+			// Client preflight failure (1603, GAP-0103).
+			requested = managed.ProfileStandalone
+		}
 		if err != nil {
-			var content windowsEnterpriseConfigContentError
-			if requested == managed.ProfileStandalone && errors.As(err, &content) {
-				// A file that does not parse (a tab-indented line, GAP-0607),
-				// is not UTF-8 or is too large is the administrator's to fix: refuse it as invalid
-				// arguments (1639) with the gateway compiler's explanation,
-				// as every other config refusal (GAP-0562, GAP-0571).
-				if compiled := windowsEnterpriseStandaloneConfigPreflight(path); compiled != nil {
-					err = compiled
-				}
+			if requested != managed.ProfileStandalone || !errors.As(err, &content) {
+				return err
+			}
+			// A file that does not parse (a tab-indented line, GAP-0607),
+			// is not UTF-8 or is too large is the administrator's to fix: refuse it as invalid
+			// arguments (1639) with the gateway compiler's explanation,
+			// as every other config refusal (GAP-0562, GAP-0571).
+			if compiled := windowsEnterpriseStandaloneConfigPreflight(path); compiled != nil {
+				err = compiled
+			}
+			if !windowsEnterpriseSuppliedConfigRefusalAction(action) {
 				return fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
 			}
-			return err
-		}
-		if configured != "" {
+			// The lifecycle refuses it once the installer is found and
+			// trusted, so the refusal reports the running deployment, its
+			// advisories and policy labelled, not only the recorded
+			// deployment (GAP-0103).
+			opts.suppliedConfigRefusal = err
+		} else if configured != "" {
 			if requested != "" && requested != configured {
 				return windowsEnterpriseInvalidArguments("--profile %s conflicts with enterprise.profile %s in %s", requested, configured, path)
 			}
@@ -370,6 +383,12 @@ func windowsEnterpriseRequestedAttestations(opts *windowsEnterpriseLifecycleOpti
 
 func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterpriseLifecycleOptions) (windowsEnterpriseConfiguredTrust, error) {
 	path := strings.TrimSpace(opts.configPath)
+	if opts.suppliedConfigRefusal != nil {
+		// The supplied config does not parse, and the run is refused before
+		// it changes anything; until then the installed config's trust
+		// applies, as for a run without one.
+		path = ""
+	}
 	supplied := path != ""
 	if !supplied {
 		// Read-only actions and uninstall bring no payload, so the installed
@@ -539,6 +558,37 @@ func readWindowsEnterpriseConfigProfile(path string) (string, error) {
 		return "", windowsEnterpriseInvalidArguments("enterprise.profile %q in %s is not %s or %s", document.Enterprise.Profile, path, managed.ProfileSecureClient, managed.ProfileStandalone)
 	}
 	return profile, nil
+}
+
+// windowsEnterpriseSuppliedConfigRefusalAction reports an action the
+// lifecycle refuses for a supplied config the gateway cannot load
+// (refuseWindowsEnterpriseStandaloneSuppliedConfig): every action that
+// applies a --config.
+func windowsEnterpriseSuppliedConfigRefusalAction(action string) bool {
+	return windowsEnterpriseMutationAction(action)
+}
+
+// windowsEnterpriseStandaloneRecordedOnly reports a production host whose
+// recorded deployment is the standalone profile's and not Secure Client's,
+// as profile detection reads them.
+func windowsEnterpriseStandaloneRecordedOnly(opts *windowsEnterpriseLifecycleOptions) bool {
+	if windowsEnterpriseCertificationScope(opts) {
+		return false
+	}
+	live := func(profile string) (bool, error) {
+		deployment, err := windowsEnterpriseDeploymentInspector(profile)
+		if err != nil {
+			return false, err
+		}
+		return deployment.State == winpath.EnterpriseDeploymentInstalled ||
+			deployment.State == winpath.EnterpriseDeploymentUnknown, nil
+	}
+	standalone, err := live(managed.ProfileStandalone)
+	if err != nil || !standalone {
+		return false
+	}
+	secureClient, err := live(managed.ProfileSecureClient)
+	return err == nil && !secureClient
 }
 
 // windowsEnterpriseStandalonePowerShellArgs are the installer arguments only

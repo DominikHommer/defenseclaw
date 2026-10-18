@@ -145,6 +145,28 @@ func TestStandaloneGatewayConfigCheckRefusesAJSONLFolderTheServiceCannotWrite(t 
 	}
 }
 
+// GAP-0027: when the destination's folder does not exist yet, the grant names
+// the nearest folder that does (icacls fails on a missing one, rc 2); the
+// gateway creates the rest below it.
+func TestStandaloneGatewayConfigCheckGrantsOnAnExistingFolder(t *testing.T) {
+	folder := t.TempDir()
+	sink := filepath.Join(folder, "missing", "deeper", "events.jsonl")
+	body := standaloneGatewayCheckConfig + "observability:\n  destinations:\n" +
+		"    - name: local-copy\n      kind: jsonl\n      path: '" + sink + "'\n"
+	const account = `NT SERVICE\DefenseClawGateway`
+	t.Setenv(managed.WindowsServiceAccountEnv, account)
+	restore := standaloneServiceCanWriteFile
+	t.Cleanup(func() { standaloneServiceCanWriteFile = restore })
+	standaloneServiceCanWriteFile = func(path, serviceAccount string) error {
+		return errors.New("the gateway service account " + serviceAccount + " cannot create a folder in " + folder)
+	}
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), `icacls "`+folder+`" /grant "`+account+`:(OI)(CI)M"`) ||
+		strings.Contains(err.Error(), `icacls "`+filepath.Join(folder, "missing")) {
+		t.Fatalf("jsonl folder that does not exist yet = %v", err)
+	}
+}
+
 // GAP-0039: a connector that inherits the selected custom pack is not the key
 // a refusal names, and a custom_packs entry nothing selects is not loaded.
 func TestStandaloneGatewayRulePackDirsNameTheKeysTheAdminWrote(t *testing.T) {
