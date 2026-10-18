@@ -370,7 +370,7 @@ func (a *APIServer) stampHookEnvelopeIdentity(ctx context.Context, connectorName
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
-	if snapshot, ok := a.hookPhaseSnapshot(meta); ok {
+	if snapshot, ok := a.hookDeliveryPhaseSnapshot(meta, req.Payload); ok {
 		env.AgentPhase = snapshot.Phase
 		env.AgentPreviousPhase = snapshot.PreviousPhase
 		env.AgentSequence = snapshot.Sequence
