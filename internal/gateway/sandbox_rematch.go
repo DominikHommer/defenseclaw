@@ -37,7 +37,9 @@ import (
 //
 //   - The profile, match, digests and provisional flag are rewritten in
 //     place; live fields switch at once because every answer reads the
-//     floor of the current profile.
+//     registration's floor: the current profile's, tightened by the floor
+//     of the profile the sandbox was created under, so a re-match never
+//     loosens a running sandbox (sandboxRegistrationFloor, GAP-0242).
 //   - Facts that have not resolved (a slow or failed lookup) never change
 //     the match and never refuse anything: the registration keeps its
 //     profile, and only the floor of that profile under the new
@@ -96,6 +98,12 @@ func (a *APIServer) sandboxRematchIfDue(ctx context.Context, auth *sandboxAuthor
 		return reg
 	}
 	next := reg
+	if next.CreateProfile == nil && !reg.Provisional {
+		// Made before floors were pinned at create (GAP-0242): the profile
+		// it was last matched under stands for the one it was created under.
+		created := reg.Profile
+		next.CreateProfile = &created
+	}
 	next.Generation = a.sandboxHostGeneration(ctx)
 	if match.resolved {
 		next.Profile, next.ProfileMatch, next.MatchedGroup = match.decision.Name, match.decision.Match, match.decision.MatchedGroup
@@ -103,7 +111,13 @@ func (a *APIServer) sandboxRematchIfDue(ctx context.Context, auth *sandboxAuthor
 	} else if digest, ok := a.sandboxProfileDigest(ctx, reg.Profile); ok {
 		next.ProfileDigest = digest
 	}
-	floor, floorDigest, err := sandboxFloorFor(cfg, next.Profile)
+	if next.CreateProfile == nil && match.resolved && !next.Provisional {
+		// Created under a provisional match: the first verified match is
+		// the person's profile, and it pins the floor from now on.
+		created := next.Profile
+		next.CreateProfile = &created
+	}
+	floor, floorDigest, err := sandboxRegistrationFloor(cfg, next)
 	if err != nil {
 		// Keep the registration and its policy key: the next call retries.
 		fmt.Fprintf(os.Stderr, "[sandbox-authority] re-match uid=%d registration=%s: %v\n", peer.UID, reg.ID, err)
