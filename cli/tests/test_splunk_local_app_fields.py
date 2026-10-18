@@ -65,7 +65,7 @@ def _ai_runtime_query(title: str) -> str:
     return query
 
 
-def test_ai_runtime_activity_counts_distinct_findings_without_collapsing_unknown_ids() -> None:
+def test_ai_runtime_activity_counts_distinct_required_finding_ids() -> None:
     macros = _conf("macros.conf")
     fields = macros["defenseclaw_demo_ai_runtime_fields"]["definition"]
     assert re.search(r'runtime_finding_id=coalesce\([^\n]+, "\(unknown\)"\)', fields)
@@ -78,13 +78,12 @@ def test_ai_runtime_activity_counts_distinct_findings_without_collapsing_unknown
         query = _ai_runtime_query(title)
         commands = [command.strip() for command in query.split(" | ")]
         assert filter_field in commands[1], title
-        assert commands[2] == "streamstats count as runtime_event_row", title
-        assert commands[3] == (
-            'eval runtime_activity_key=if(runtime_finding_id="(unknown)" OR runtime_finding_id="", '
-            '"event:" . runtime_event_row, "finding:" . runtime_finding_id)'
-        ), title
-        assert commands[4] == f"dedup host runtime_activity_key {distinct_field}", title
-        assert commands[5].startswith(aggregation), title
+        next_command = 2
+        if aggregation == "timechart":
+            assert commands[next_command] == "sort 0 + _time", title
+            next_command += 1
+        assert commands[next_command] == f"dedup host runtime_finding_id {distinct_field}", title
+        assert commands[next_command + 1].startswith(aggregation), title
 
     assert _ai_runtime_query("Would-block (monitor mode)") == (
         '`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.plane_health" '

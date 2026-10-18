@@ -27,6 +27,23 @@ STANDALONE_ENV = {
 }
 
 
+def test_managed_package_recipes_exclude_fleet_compiler():
+    release = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    for archive in release["archives"]:
+        assert not any("policy_compiler.py" in entry for entry in archive.get("files", [])), archive["id"]
+    for package in release["nfpms"]:
+        assert not any("policy_compiler.py" in entry.get("src", "") or
+                       "policy_compiler.py" in entry.get("dst", "")
+                       for entry in package.get("contents", [])), package["id"]
+    mac_recipe = (ROOT / "scripts/build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
+    windows_recipe = (ROOT / "packaging/windows/standalone/build-setup.sh").read_text(encoding="utf-8")
+    windows_layout = (ROOT / "packaging/windows/DefenseClawEnterprise.psm1").read_text(encoding="utf-8")
+    assert "BUNDLED_COMPILER" not in mac_recipe
+    assert 'install -m 0644 "$compiler_src"' not in mac_recipe
+    assert "policy_compiler.py" not in windows_recipe
+    assert "$layout['CompilerPath']" not in windows_layout
+
+
 def _unit(name: str) -> list[str]:
     return (SYSTEMD / name).read_text(encoding="utf-8").splitlines()
 
