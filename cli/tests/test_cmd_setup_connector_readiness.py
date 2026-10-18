@@ -700,6 +700,38 @@ def test_opencode_writable_plugin_folder_is_named_before_restart(monkeypatch, tm
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode check")
+@pytest.mark.parametrize("batch", [False, True])
+def test_opencode_preflight_precedes_config_write(monkeypatch, tmp_path: Path, batch: bool) -> None:
+    from defenseclaw import connector_paths
+    from defenseclaw.context import AppContext
+
+    folder = tmp_path / "plugins"
+    folder.mkdir(mode=0o775)
+    folder.chmod(0o775)
+    monkeypatch.setattr(
+        connector_paths, "connector_config_files", lambda _name: [str(folder / "defenseclaw.js")]
+    )
+    cfg = _config(tmp_path)
+    writes = []
+    cfg.save = lambda: writes.append(True)
+    app = AppContext()
+    app.cfg = cfg
+    if batch:
+        ctx = click.Context(cmd_setup.setup, obj=app)
+        with ctx, pytest.raises(click.ClickException, match="group/other writable"):
+            cmd_setup._apply_setup_batch(
+                ctx, app, ["opencode"], mode="action", restart=True,
+                prompt_per_connector=False,
+            )
+    else:
+        with pytest.raises(click.ClickException, match="group/other writable"):
+            cmd_setup._apply_hook_connector_setup(
+                app, connector="opencode", mode="action", restart=True,
+            )
+    assert writes == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode check")
 @pytest.mark.parametrize(
     "restart_kwargs",
     [{"teardown": True}, {"title": cmd_setup._ROLLBACK_RESTART_TITLE}],

@@ -323,7 +323,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
                 err=True,
             )
     # One path style: keys remove prints os.path.join too (GAP-1297).
-    ux.ok(f"Saved {env_name} = {mask(value)} to {dotenv_path}", indent="  ")
+    ux.ok(f"Saved {env_name} to {dotenv_path} (value hidden)", indent="  ")
     _emit_bound_endpoint_hint(spec, app.cfg, indent="    ")
     _emit_gateway_restart_hint(app.cfg, env_name)
 

@@ -159,6 +159,8 @@ class KeysProvenanceCliTests(unittest.TestCase):
                 )
                 self.assertEqual(saved.exit_code, 0, msg=saved.output)
                 self.assertNotIn(secret, saved.output)
+                self.assertNotIn(secret[-4:], saved.output)
+                self.assertIn("value hidden", saved.output)
                 # ``keys set`` updates its current process environment.
                 # Ending that process leaves only the persisted dotenv value.
                 os.environ.pop("VIRUSTOTAL_API_KEY", None)

@@ -16,6 +16,24 @@ from defenseclaw.commands import cmd_config
 from defenseclaw.config_inspect import ConfigInspectError, ConfigV8WireResult
 
 
+def test_unreadable_config_set_confirms_file_unchanged(tmp_path: Path) -> None:
+    from defenseclaw import config as config_module
+    from defenseclaw.main import cli
+
+    path = tmp_path / "config.yaml"
+    original = b"config_version: 8\n"
+    path.write_bytes(original)
+    with (
+        patch.object(config_module, "config_path", return_value=path),
+        patch.object(config_module, "load", side_effect=PermissionError("Permission denied")),
+    ):
+        result = CliRunner().invoke(cli, ["config", "set", "gateway.token_env", "TEST_TOKEN"])
+    assert result.exit_code != 0
+    assert "config.yaml was not changed" in result.output
+    assert "Traceback" not in result.output
+    assert path.read_bytes() == original
+
+
 def _wire(kind: str, *, effective: dict | None = None) -> ConfigV8WireResult:
     return ConfigV8WireResult(
         wire_version=1,

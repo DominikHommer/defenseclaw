@@ -5600,6 +5600,7 @@ def _check_connector_version_supported_for_setup(
     data_dir: str | os.PathLike[str] | None = None,
     _allow_prompt: bool = True,
     _trusted_prompt_cache: dict[str, bool] | None = None,
+    _discovery: Any = None,
 ) -> bool:
     """Verify the selected connector's installed version before setup.
 
@@ -5620,7 +5621,7 @@ def _check_connector_version_supported_for_setup(
     action_mode = (mode or "").strip().lower() == "action"
     allow_drift = envvars.lookup("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1"
     try:
-        disc = agent_discovery.discover_with_probes([connector],
+        disc = _discovery if _discovery is not None else agent_discovery.discover_with_probes([connector],
             use_cache=False,
             refresh=True,
             data_dir=data_dir,
@@ -7477,8 +7478,10 @@ def setup_guardrail(
 # alias commands here updates the hint just like the installer would.
 _PICKED_CONNECTOR_FILENAME = "picked_connector"
 _AGENT_SELECTION_FILENAME = "agent_selection.json"
+_AGENT_DISCOVERY_FILENAME = "agent_discovery.json"
 _HOOK_CONTRACT_LOCK_FILENAME = "hook_contract_lock.json"
 _AGENT_SELECTION_MAX_BYTES = 64 << 10
+_AGENT_DISCOVERY_MAX_BYTES = 4 << 20
 _HOOK_CONTRACT_LOCK_MAX_BYTES = 16 << 20
 _SETUP_CONFIG_MAX_BYTES = 16 << 20
 _ACTIVE_CONNECTOR_STATE_MAX_BYTES = 64 << 10
@@ -7571,6 +7574,9 @@ class _SetupConfigSnapshot:
     agent_selection_existed: bool
     agent_selection_bytes: bytes
     agent_selection_generation: tuple[int, int, int, int] | None
+    agent_discovery_existed: bool
+    agent_discovery_bytes: bytes
+    agent_discovery_generation: tuple[int, int, int, int] | None
     hook_contract_lock_existed: bool
     hook_contract_lock_bytes: bytes
     hook_contract_lock_generation: tuple[int, int, int, int] | None
@@ -8293,6 +8299,9 @@ def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
     selection_existed = False
     selection_body = b""
     selection_generation = None
+    discovery_existed = False
+    discovery_body = b""
+    discovery_generation = None
     lock_existed = False
     lock_body = b""
     lock_generation = None
@@ -8301,6 +8310,11 @@ def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
             os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_SELECTION_FILENAME),
             _AGENT_SELECTION_MAX_BYTES,
             "agent_selection.json",
+        )
+        discovery_existed, discovery_body, discovery_generation = _capture_protected_setup_file(
+            os.path.join(os.path.abspath(os.fspath(data_dir)), _AGENT_DISCOVERY_FILENAME),
+            _AGENT_DISCOVERY_MAX_BYTES,
+            "agent_discovery.json",
         )
         lock_existed, lock_body, lock_generation = _capture_protected_setup_file(
             os.path.join(os.path.abspath(os.fspath(data_dir)), _HOOK_CONTRACT_LOCK_FILENAME),
@@ -8318,6 +8332,9 @@ def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
         agent_selection_existed=selection_existed,
         agent_selection_bytes=selection_body,
         agent_selection_generation=selection_generation,
+        agent_discovery_existed=discovery_existed,
+        agent_discovery_bytes=discovery_body,
+        agent_discovery_generation=discovery_generation,
         hook_contract_lock_existed=lock_existed,
         hook_contract_lock_bytes=lock_body,
         hook_contract_lock_generation=lock_generation,
@@ -8336,6 +8353,9 @@ def _setup_snapshot_authority_fence(snapshot: _SetupConfigSnapshot) -> tuple[Any
         snapshot.agent_selection_existed,
         snapshot.agent_selection_generation,
         hashlib.sha256(snapshot.agent_selection_bytes).digest(),
+        snapshot.agent_discovery_existed,
+        snapshot.agent_discovery_generation,
+        hashlib.sha256(snapshot.agent_discovery_bytes).digest(),
         snapshot.hook_contract_lock_existed,
         snapshot.hook_contract_lock_generation,
         hashlib.sha256(snapshot.hook_contract_lock_bytes).digest(),
@@ -8392,6 +8412,10 @@ def _restore_setup_config_snapshot(
             _restore_setup_agent_selection_snapshot(cfg, snapshot)
         except Exception as exc:  # noqa: BLE001 — report exact protected-receipt failure.
             restore_errors.append(f"agent_selection.json [{_setup_runtime_ref(type(exc).__name__)}]")
+        try:
+            _restore_setup_agent_discovery_snapshot(cfg, snapshot)
+        except Exception as exc:  # noqa: BLE001 — keep prior verified peer versions for restart.
+            restore_errors.append(f"agent_discovery.json [{_setup_runtime_ref(type(exc).__name__)}]")
         if restore_hook_contract_lock:
             try:
                 _restore_setup_hook_contract_lock_snapshot(cfg, snapshot)
@@ -8447,6 +8471,17 @@ def _restore_setup_agent_selection_snapshot(cfg, snapshot: _SetupConfigSnapshot)
         atomic_write_private_bytes(selection_path, snapshot.agent_selection_bytes)
     elif os.path.lexists(selection_path):
         delete_file_durable(selection_path)
+
+
+def _restore_setup_agent_discovery_snapshot(cfg, snapshot: _SetupConfigSnapshot) -> None:
+    """Restore peer versions that the prior guarded runtime used at startup."""
+    if not cfg.data_dir:
+        return
+    path = os.path.join(os.path.abspath(os.fspath(cfg.data_dir)), _AGENT_DISCOVERY_FILENAME)
+    if snapshot.agent_discovery_existed:
+        atomic_write_private_bytes(path, snapshot.agent_discovery_bytes)
+    elif os.path.lexists(path):
+        delete_file_durable(path)
 
 
 def _restore_setup_hook_contract_lock_snapshot(cfg, snapshot: _SetupConfigSnapshot) -> None:
@@ -8625,6 +8660,13 @@ def _verify_restored_setup_persistence(
             _AGENT_SELECTION_MAX_BYTES,
             snapshot.agent_selection_existed,
             snapshot.agent_selection_bytes,
+        ),
+        (
+            "agent_discovery.json",
+            os.path.join(root, _AGENT_DISCOVERY_FILENAME),
+            _AGENT_DISCOVERY_MAX_BYTES,
+            snapshot.agent_discovery_existed,
+            snapshot.agent_discovery_bytes,
         ),
     ]
     if include_lock:
@@ -9885,6 +9927,9 @@ def _apply_hook_connector_setup(
         )
         return False
 
+    if connector == "opencode":
+        _preflight_opencode_plugin_folder()
+
     # Normalize mode at the boundary. Anything other than the literal
     # ``action`` sentinel is downgraded to ``observe`` because failing-
     # safe on a typo is strictly less surprising than enforcing on one.
@@ -9912,7 +9957,7 @@ def _apply_hook_connector_setup(
             # second discovery/probe whose answer can drift within the same
             # setup transaction.  OpenCode is the strict exception: unknown
             # versions are refused in both modes and never reach this fallback.
-            if desired_mode == "action" and _downgrade_refused_action and connector != "opencode":
+            if desired_mode == "action" and _downgrade_refused_action and connector not in {"opencode", "codex"}:
                 label = _CONNECTOR_META.get(connector, {}).get("label", connector)
                 ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
                 desired_mode = "observe"
@@ -11431,6 +11476,9 @@ def _apply_setup_batch(
         capture_runtime=_windows_runtime_rollback(restart),
     )
 
+    if "opencode" in connectors:
+        _preflight_opencode_plugin_folder()
+
     resolved_connector_modes = {
         connector_name: (connector_modes or {}).get(connector_name, default_mode)
         for connector_name in connectors
@@ -11483,6 +11531,16 @@ def _apply_setup_batch(
     # Resolve every contract before replacing the desired roster. A selected
     # connector that cannot be set up must leave the exact prior roster intact,
     # rather than becoming desired state that the gateway can never apply.
+    # One batch scan probes every selected version and publishes one coherent
+    # cache. Per-connector scans replace the cache with unprobed peers; the
+    # gateway would then restart against an empty Cursor version.
+    batch_discovery = None
+    if platform_support.host_os() != "windows":
+        batch_discovery = agent_discovery.discover_with_probes(
+            list(connectors), use_cache=False, refresh=True,
+            data_dir=getattr(app.cfg, "data_dir", None),
+            persist_cache=False,
+        )
     for connector_name in connectors:
         connector_mode = resolved_connector_modes[connector_name]
         if _windows_opencode_requires_exact_selection(connector_name):
@@ -11493,10 +11551,12 @@ def _apply_setup_batch(
             "data_dir": getattr(app.cfg, "data_dir", None),
             "_allow_prompt": False,
         }
+        if batch_discovery is not None:
+            preflight_kwargs["_discovery"] = batch_discovery
         if trusted_prompt_cache is not None:
             preflight_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector_name, **preflight_kwargs):
-            if (connector_mode or "").strip().lower() == "action" and connector_name != "opencode":
+            if (connector_mode or "").strip().lower() == "action" and connector_name not in {"opencode", "codex"}:
                 label = _CONNECTOR_META.get(connector_name, {}).get("label", connector_name)
                 ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
                 resolved_connector_modes[connector_name] = "observe"
@@ -11505,6 +11565,12 @@ def _apply_setup_batch(
             raise click.ClickException(
                 f"connector {connector_name!r} did not pass setup preflight; prior roster was not changed"
             )
+
+    if batch_discovery is not None and not agent_discovery._write_cache(
+        batch_discovery, data_dir=app.cfg.data_dir
+    ):
+        _restore_setup_config_snapshot(app, setup_snapshot)
+        raise click.ClickException("connector versions could not be saved for gateway restart; prior roster was not changed")
 
     if protected_selection is not None:
         try:
@@ -14402,6 +14468,17 @@ def _gateway_runtime_generation_before_restart(data_dir: str) -> _GatewayRuntime
     return _GatewayRuntimeGeneration(pid_marker, started_at, time.time())
 
 
+def _preflight_opencode_plugin_folder() -> None:
+    """Reject an unsafe OpenCode plugin folder before setup writes config."""
+    from defenseclaw.connector_paths import connector_config_files, opencode_writable_plugin_folder
+
+    if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):
+        raise click.ClickException(
+            f"OpenCode plugin folder {loose} is group/other writable; "
+            f"run `chmod go-w {shlex.quote(loose)}` and retry setup. No changes made."
+        )
+
+
 def _restart_services(
     data_dir: str,
     oc_host: str = "127.0.0.1",
@@ -14477,13 +14554,7 @@ def _restart_services(
 
     must_converge = required_connectors or frozenset({normalize_connector(connector)})
     if wait_for_connector_ready and not teardown and title != _ROLLBACK_RESTART_TITLE and "opencode" in must_converge:
-        from defenseclaw.connector_paths import connector_config_files, opencode_writable_plugin_folder
-
-        if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):
-            raise click.ClickException(
-                f"OpenCode plugin folder {loose} is group/other writable; "
-                f"run `chmod go-w {shlex.quote(loose)}` and retry setup. No changes made."
-            )
+        _preflight_opencode_plugin_folder()
 
     gateway_restarted = (
         _restart_defense_gateway(
@@ -17098,7 +17169,7 @@ def setup_splunk(
                 parts.append("s3_export=enabled")
         if did_enterprise:
             parts.append("enterprise=enabled")
-        app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
+        _log_setup_action(app, ACTION_SETUP_SPLUNK, " ".join(parts), allow_offline=True)
 
 
 # Register `defenseclaw setup splunk dashboards` (Terraform-backed dashboard
@@ -17249,7 +17320,7 @@ def _interactive_splunk_setup(
             parts.append("logs=enabled")
         if did_enterprise:
             parts.append("enterprise=enabled")
-        app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
+        _log_setup_action(app, ACTION_SETUP_SPLUNK, " ".join(parts), allow_offline=True)
 
 
 def _interactive_o11y(
@@ -18626,7 +18697,7 @@ def _disable_splunk(
             parts.append("logs=disabled")
         if disable_both or enterprise_only:
             parts.append("enterprise=disabled")
-        app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
+        _log_setup_action(app, ACTION_SETUP_SPLUNK, " ".join(parts), allow_offline=True)
 
 
 def _stop_bridge(data_dir: str, *, gateway_token_env: str = "") -> None:

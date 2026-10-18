@@ -68,6 +68,71 @@ from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabili
 from tests.helpers import cleanup_app, make_app_context, record_test_setup_agent_selections
 
 
+def test_unsupported_codex_batch_refuses_without_roster_change():
+    app, root, db_path = make_app_context()
+    try:
+        before = tuple(app.cfg.active_connectors())
+        ctx = click.Context(setup_group, obj=app)
+        with (
+            ctx,
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=False,
+            ),
+            patch.object(app.cfg, "save") as save,
+            pytest.raises(click.ClickException, match="did not pass setup preflight"),
+        ):
+            cmd_setup._apply_setup_batch(
+                ctx, app, ["codex"], mode="action", restart=False,
+                prompt_per_connector=False,
+            )
+        save.assert_not_called()
+        assert tuple(app.cfg.active_connectors()) == before
+    finally:
+        cleanup_app(app, db_path, root)
+
+
+def test_batch_probes_all_selected_versions_in_one_cache_publication():
+    app, root, db_path = make_app_context()
+    try:
+        ctx = click.Context(setup_group, obj=app)
+        with (
+            ctx,
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="linux"),
+            patch("defenseclaw.commands.cmd_setup.agent_discovery.discover_with_probes") as discover,
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=False,
+            ) as check,
+            pytest.raises(click.ClickException, match="did not pass setup preflight"),
+        ):
+            cmd_setup._apply_setup_batch(
+                ctx, app, ["codex", "cursor"], mode="action", restart=False,
+                prompt_per_connector=False,
+            )
+        discover.assert_called_once()
+        assert discover.call_args.args[0] == ["codex", "cursor"]
+        assert check.call_args.kwargs["_discovery"] is discover.return_value
+    finally:
+        cleanup_app(app, db_path, root)
+
+
+def test_batch_rollback_restores_prior_cursor_discovery_version():
+    app, root, db_path = make_app_context()
+    try:
+        cache = os.path.join(root, "agent_discovery.json")
+        prior = b'{"agents":{"cursor":{"version":"2026.10.01-14929f9"}}}\n'
+        atomic_write_private_bytes(cache, prior)
+        snapshot = cmd_setup._capture_setup_config_snapshot(app.cfg)
+        atomic_write_private_bytes(cache, b'{"agents":{"cursor":{"version":""}}}\n')
+        cmd_setup._restore_setup_config_snapshot(app, snapshot)
+        with open(cache, "rb") as source:
+            assert source.read() == prior
+    finally:
+        cleanup_app(app, db_path, root)
+
+
 def _invoke(args, app):
     runner = CliRunner()
     return runner.invoke(setup_group, args, obj=app, catch_exceptions=False)

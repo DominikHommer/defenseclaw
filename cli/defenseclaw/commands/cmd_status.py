@@ -1737,6 +1737,18 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             rows["omnigent"]["readiness_detail"] = readiness_detail
     cursor = rows.get("cursor")
     if cursor is not None:
+        if cursor.get("enabled") and cursor.get("state") == "running":
+            lock_path = Path(str(getattr(cfg, "data_dir", "") or ""), "hook_contract_lock.json")
+            try:
+                if lock_path.stat().st_size <= 4 << 20:
+                    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+                    entry = (lock.get("connectors") or {}).get("cursor")
+                    if isinstance(entry, dict) and entry.get("contract_id"):
+                        version = entry.get("raw_agent_version")
+                        if isinstance(version, str) and version.strip():
+                            cursor["agent_version"] = version.strip()
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         cursor["priority_conflict_detection"] = {
             "status": "unavailable",
             "conflict_inferred": False,
