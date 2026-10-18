@@ -15,31 +15,47 @@ import (
 	"strings"
 )
 
-// managedHermesBlocks reports a Hermes pre_tool_call of a managed hook
-// outside Secure Client. Hermes has no fail-closed hook contract of its own
-// (failOpenOnly: a timeout, a spawn error or an empty answer lets the call
-// run), but it blocks a tool call whose hook prints its block directive. A
-// managed deployment outside Secure Client fails closed (owner rule
-// 2026-10-14), so there the native hook prints that directive whenever it
-// cannot get a verdict, as the Linux and macOS shell hook does
-// (rel-1-0-2 GAP-0423). The installed Windows command binds no event: it
-// comes from the payload, so an invocation whose event is unknown (input too
-// large or unreadable before the event was read, a payload that names none)
-// may be a tool call and blocks too. Per-user and Secure Client hooks, and
-// every other named Hermes event, keep the neutral result.
-func managedHermesBlocks(opts Options, sp spec) bool {
-	if sp.connector != "hermes" || !managedNativeDecision(opts) {
-		return false
-	}
-	event := strings.TrimSpace(opts.Event)
+// hermesBlocksFailures reports a Hermes pre_tool_call whose native hook
+// blocks when DefenseClaw cannot check it (hermesFailsClosed). Hermes has no
+// fail-closed hook contract of its own (failOpenOnly: a timeout, a spawn
+// error or an empty answer lets the call run), but it blocks a tool call
+// whose hook prints its block directive, so the native hook prints that
+// directive whenever it cannot get a verdict, as the Linux and macOS shell
+// hook does in fail mode closed. The installed Windows command binds no
+// event: it comes from the payload, so an invocation whose event is unknown
+// (input too large or unreadable before the event was read, a payload that
+// names none) may be a tool call and blocks too. Every other named Hermes
+// event keeps the neutral result.
+func hermesBlocksFailures(opts Options, sp spec) bool {
+	return sp.connector == "hermes" && hermesFailsClosed(opts) && hermesToolCallEvent(opts.Event)
+}
+
+// hermesToolCallEvent reports a Hermes pre_tool_call, or an invocation whose
+// event is unknown and so may be one.
+func hermesToolCallEvent(event string) bool {
+	event = strings.TrimSpace(event)
 	return event == "" || strings.EqualFold(event, "pre_tool_call")
+}
+
+// hermesFailsClosed reports a Hermes hook that fails closed. Only Secure
+// Client fails open (owner rule 2026-10-14): a managed hook outside Secure
+// Client always fails closed (rel-1-0-2 GAP-0423), and a per-user hook fails
+// closed unless its fail mode is explicitly open, so a per-user fail mode
+// that is closed or not set blocks a tool call during a gateway outage on
+// Windows as on Linux and macOS (rel-1-0-3 GAP-0269, GAP-0150). Strict
+// availability closes it too.
+func hermesFailsClosed(opts Options) bool {
+	if opts.ManagedEnterprise {
+		return managedNativeDecision(opts)
+	}
+	return opts.StrictAvailability || !strings.EqualFold(strings.TrimSpace(opts.FailMode), "open")
 }
 
 // managedHermesPrefixEvent names the event of a Hermes invocation whose input
 // was refused before its event was resolved, from the top-level fields of the
 // bounded prefix the hook read (payloadPrefixFields), with resolveHookEvent's
 // rule: two fields that disagree name no event. An empty result keeps the
-// invocation a possible tool call (managedHermesBlocks).
+// invocation a possible tool call (hermesBlocksFailures).
 func managedHermesPrefixEvent(opts Options, sp spec, prefix []byte) string {
 	if sp.connector != "hermes" || strings.TrimSpace(opts.Event) != "" {
 		return opts.Event
@@ -49,24 +65,25 @@ func managedHermesPrefixEvent(opts Options, sp spec, prefix []byte) string {
 	return event
 }
 
-// managedHermesEventConflictReason is the logged reason of a managed Hermes
+// managedHermesEventConflictReason is the logged reason of a Hermes
 // invocation whose input names two different events (rel-1-0-3 GAP-0202).
 const managedHermesEventConflictReason = "hook input names two different events"
 
-// failManagedHermesEventConflict blocks a managed Hermes invocation whose
-// installed command binds no event and whose input names two different
-// events: it may be a tool call, and which event it is cannot be told, so
-// a managed hook outside Secure Client fails closed with the Hermes block
-// directive and logs fail_mode closed (rel-1-0-3 GAP-0202). The gateway is
-// not asked: its verdict would be for an event Hermes may not be running.
-func failManagedHermesEventConflict(opts Options, sp spec) int {
+// failHermesEventConflict blocks a Hermes invocation that fails closed
+// (hermesBlocksFailures) whose installed command binds no event and whose
+// input names two different events: it may be a tool call, and which event
+// it is cannot be told, so the hook prints the Hermes block directive and
+// logs fail_mode closed (rel-1-0-3 GAP-0202). The gateway is not asked: its
+// verdict would be for an event Hermes may not be running.
+func failHermesEventConflict(opts Options, sp spec) int {
 	logHookFailure(opts, sp, managedHermesEventConflictReason, "response", "closed")
-	code, _ := managedHermesFailClosed(opts, sp, "input", managedHermesEventConflictReason)
+	code, _ := hermesFailClosed(opts, sp, "input", managedHermesEventConflictReason)
 	return code
 }
 
 // managedHermesAnswerUsable reports whether a gateway answer without a
-// hook_output directive is a verdict a managed Hermes tool call may run on:
+// hook_output directive is a verdict a Hermes tool call that fails closed
+// (hermesBlocksFailures) may run on:
 // an allow, an advisory alert, or a confirm (Hermes has no ask; the gateway
 // records the downgraded finding). A block needs its directive, and a
 // missing or unknown action is no verdict.
@@ -78,21 +95,27 @@ func managedHermesAnswerUsable(action string) bool {
 	return false
 }
 
-// managedHermesFailClosed blocks a managed Hermes tool call DefenseClaw
-// could not check (managedHermesBlocks) with Hermes' native block directive
-// and the plain text of managedStandaloneFailClosedText for layer, so Hermes
-// says why: for example that the DefenseClaw gateway service is not
-// running. handled is false for every other invocation.
-func managedHermesFailClosed(opts Options, sp spec, layer, reason string) (int, bool) {
-	if !managedHermesBlocks(opts, sp) {
+// hermesFailClosed blocks a Hermes tool call DefenseClaw could not check
+// (hermesBlocksFailures) with Hermes' native block directive and a plain
+// text for layer, so Hermes says why: for example that the DefenseClaw
+// gateway service is not running (a managed hook,
+// managedStandaloneFailClosedText) or that this account's gateway is not
+// running and how to start it (a per-user hook, perUserHermesFailClosedText).
+// handled is false for every other invocation.
+func hermesFailClosed(opts Options, sp spec, layer, reason string) (int, bool) {
+	if !hermesBlocksFailures(opts, sp) {
 		return 0, false
 	}
-	event := opts.Event
-	if strings.TrimSpace(event) == "" {
+	if strings.TrimSpace(opts.Event) == "" {
 		// An unknown event blocks as a possible tool call; say so.
-		event = "pre_tool_call"
+		opts.Event = "pre_tool_call"
 	}
-	text := managedStandaloneFailClosedText(event, layer, reason)
+	if !opts.ManagedEnterprise {
+		fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s (fail mode closed): %s\n", sp.subject, reason)
+		fmt.Fprintln(opts.Stdout, `{"action":"block","message":`+mustJSONString(perUserHermesFailClosedText(opts, layer, reason))+`}`)
+		return 0, true
+	}
+	text := managedStandaloneFailClosedText(opts.Event, layer, reason)
 	switch reason {
 	case managedSIDUnregisteredReason, managedEnrollmentPendingReason:
 		text = "DefenseClaw blocked this tool call: " + unenrolledAccountExplanation + "."
@@ -104,10 +127,36 @@ func managedHermesFailClosed(opts Options, sp spec, layer, reason string) (int, 
 	return 0, true
 }
 
+// perUserHermesFailClosedText is what a per-user Hermes hook that fails
+// closed shows as the reason the tool call did not run: why, in plain words,
+// and the next step, as hermes-hook.sh does on Linux and macOS
+// (hermes_block_message).
+func perUserHermesFailClosedText(opts Options, layer, reason string) string {
+	const lead = "DefenseClaw blocked this tool call: "
+	switch layer {
+	case "oversized":
+		return lead + "it is too large for DefenseClaw to inspect. Make it smaller and try again."
+	case "input":
+		return lead + "its hook input names two different events, so DefenseClaw cannot tell what to check. " +
+			"Run `defenseclaw doctor` to see why."
+	case "response":
+		if opts.gatewayRefusal != "" {
+			return opts.gatewayRefusal
+		}
+		return lead + "the DefenseClaw gateway returned an answer DefenseClaw could not use. " +
+			"Run `defenseclaw doctor` to see why."
+	}
+	if text := perUserGatewayDownText(opts, reason); text != "" {
+		return text
+	}
+	return lead + "the DefenseClaw gateway is not available (fail mode closed). " +
+		"Run `defenseclaw doctor` to see why, then try again."
+}
+
 // failOpenOnlyCloses reports whether a connector without a fail-closed hook
 // contract (failOpenOnly) still blocks this failed invocation: a managed
 // Copilot tool call or permission request (managedCopilotFailClosed) or a
-// managed Hermes tool call (managedHermesBlocks). The hook-failure log
+// Hermes tool call that fails closed (hermesBlocksFailures). The hook-failure log
 // records that outcome, not the configured fail mode, so a call that ran
 // fail-open is reported as one (rel-1-0-2 GAP-0446).
 func failOpenOnlyCloses(opts Options, sp spec) bool {
@@ -121,7 +170,7 @@ func failOpenOnlyCloses(opts Options, sp spec) bool {
 		}
 		return opts.Event == "preToolUse" || opts.Event == "permissionRequest"
 	case "hermes":
-		return managedHermesBlocks(opts, sp)
+		return hermesBlocksFailures(opts, sp)
 	}
 	return false
 }

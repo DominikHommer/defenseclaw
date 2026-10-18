@@ -459,8 +459,8 @@ func Run(ctx context.Context, opts Options) int {
 	} else {
 		bound := strings.TrimSpace(opts.Event) != ""
 		opts.Event = resolveHookEvent(opts.Event, payload)
-		if !bound && managedHermesBlocks(opts, sp) && hookEventFieldsConflict(payload) {
-			return failManagedHermesEventConflict(opts, sp)
+		if !bound && hermesBlocksFailures(opts, sp) && hookEventFieldsConflict(payload) {
+			return failHermesEventConflict(opts, sp)
 		}
 	}
 	if opts.Connector == "copilot" && !validCopilotEventForOptions(opts) {
@@ -1240,13 +1240,15 @@ func decideHermes(opts Options, sp spec, fields map[string]json.RawMessage) int 
 	}
 	rawOutput, present := fields[sp.outputField]
 	if !present || strings.TrimSpace(string(rawOutput)) == "null" {
-		if managedHermesBlocks(opts, sp) && !managedHermesAnswerUsable(action) {
-			// A managed block without its directive, or an answer with no
-			// usable verdict, would let the call run.
+		if hermesToolCallEvent(opts.Event) && !managedHermesAnswerUsable(action) {
+			// A block without its directive, or an answer with no usable
+			// verdict, would let the call run: a hook that fails closed
+			// blocks it (hermesFailClosed), one in fail mode open lets it
+			// run and logs that it did.
 			if action == "block" {
-				return failResponse(opts, sp, "closed", "Hermes gateway block without a hook_output directive")
+				return failResponse(opts, sp, managedDecisionFailMode(opts), "Hermes gateway block without a hook_output directive")
 			}
-			return failResponse(opts, sp, "closed", "invalid or missing action in Hermes gateway response")
+			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid or missing action in Hermes gateway response")
 		}
 		return 0
 	}
@@ -1334,19 +1336,20 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	return emitHookResult(opts, sp, sp.openAllow)
 }
 
+// handleUnavailableHome answers a per-user hook whose DefenseClaw home is
+// missing or disabled: an operator-requested no-op unless strict
+// availability is set. Run blocks a managed hook's missing or disabled home
+// itself, so a managed hook never gets here.
 func handleUnavailableHome(opts Options, sp spec, reason string) int {
-	closes := !sp.failOpenOnly && (opts.StrictAvailability || opts.ManagedEnterprise)
+	closes := !sp.failOpenOnly && opts.StrictAvailability
 	if closes && failClosedStopEvent(opts, sp) {
 		return allowFailClosedStop(opts, sp, reason, "transport")
-	}
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
-		return code
 	}
 	if closes {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
 		} else {
-			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (strict availability)\n", reason, sp.subject)
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
@@ -1375,7 +1378,7 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 		return failManagedStandaloneClosed(opts, sp, sp.oversizedClosed, "oversized", "stdin body exceeded cap")
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
-	if code, handled := managedHermesFailClosed(opts, sp, "oversized", "stdin body exceeded cap"); handled {
+	if code, handled := hermesFailClosed(opts, sp, "oversized", "stdin body exceeded cap"); handled {
 		return code
 	}
 	if code, handled := managedCopilotFailClosed(opts, sp, "stdin body exceeded cap"); handled {
@@ -1724,7 +1727,7 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 		return failManagedStandaloneClosed(opts, sp, sp.responseClosed, "response", reason)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
-	if code, handled := managedHermesFailClosed(opts, sp, "response", reason); handled {
+	if code, handled := hermesFailClosed(opts, sp, "response", reason); handled {
 		return code
 	}
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
@@ -1753,12 +1756,12 @@ func responseFailureReason(reason string) string {
 // deny for preToolUse and permissionRequest and uses it. Other events cannot
 // block and keep the fail-open result.
 //
-// The same transport failure paths give a managed Hermes tool call its block
-// (managedHermesFailClosed): Hermes too has no fail-closed hook contract and
-// blocks only through its native directive.
+// The same transport failure paths give a Hermes tool call that fails closed
+// its block (hermesFailClosed): Hermes too has no fail-closed hook contract
+// and blocks only through its native directive.
 func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) {
 	if sp.connector == "hermes" {
-		return managedHermesFailClosed(opts, sp, "transport", reason)
+		return hermesFailClosed(opts, sp, "transport", reason)
 	}
 	if !opts.ManagedEnterprise || sp.connector != "copilot" {
 		return 0, false

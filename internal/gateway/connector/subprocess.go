@@ -1547,8 +1547,9 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 // closed (managedStandaloneRender): its hooks block a call they cannot check
 // through the connector's native deny, as the owner rule for managed
 // deployments outside Secure Client requires (config.ManagedHooksFailClosed).
+// The per-user Hermes hook keeps closed too (hookBlocksItsOwnFailures).
 func CapableHookFailMode(opts SetupOpts, conn Connector, mode string) string {
-	if mode != "closed" || managedStandaloneRender(opts) {
+	if mode != "closed" || managedStandaloneRender(opts) || hookBlocksItsOwnFailures(opts, conn) {
 		return mode
 	}
 	if provider, ok := conn.(HookCapabilityProvider); ok && !provider.HookCapabilities(opts).SupportsFailClosed {

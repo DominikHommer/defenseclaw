@@ -124,12 +124,17 @@ func TestManagedHermesNativeRuntimeFailureNamesTheCause(t *testing.T) {
 	}
 }
 
-// Per-user and Secure Client Hermes hooks, and Hermes events that cannot
-// block, keep the neutral result; the log says the call ran fail-open
-// (rel-1-0-2 GAP-0446 item 5: a closed configured mode was logged before).
+// Secure Client Hermes hooks, a per-user hook whose fail mode is explicitly
+// open, and Hermes events that cannot block keep the neutral result; the log
+// says the call ran fail-open (rel-1-0-2 GAP-0446 item 5: a closed
+// configured mode was logged before). A per-user hook in fail mode closed or
+// with none set blocks (TestPerUserHermesToolCallFailsClosedUnlessOpen).
 func TestHermesNeutralResultOutsideManagedToolCalls(t *testing.T) {
 	for name, mutate := range map[string]func(*Options){
-		"per-user": func(o *Options) {},
+		"per-user open": func(o *Options) {
+			o.FailMode = "open"
+			o.StrictAvailability = false
+		},
 		"secure client": func(o *Options) {
 			o.ManagedEnterprise = true
 			o.SecureClient = true

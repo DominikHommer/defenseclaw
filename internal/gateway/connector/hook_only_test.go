@@ -3861,7 +3861,7 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 		{name: "cursor_observe_forces_fail_open", connector: NewCursorConnector(), guardrailMode: "observe", wantFailMode: "open"},
 		{name: "devin_supports_fail_closed", connector: NewDevinConnector(), wantFailMode: "closed"},
 		{name: "openhands_supports_fail_closed", connector: NewOpenHandsConnector(), wantFailMode: "closed"},
-		{name: "hermes_downgrades_to_fail_open", connector: NewHermesConnector(), wantFailMode: "open"},
+		{name: "hermes_per_user_keeps_fail_closed", connector: NewHermesConnector(), wantFailMode: "closed"},
 		{name: "copilot_downgrades_to_fail_open", connector: NewCopilotConnector(), wantFailMode: "open"},
 	}
 

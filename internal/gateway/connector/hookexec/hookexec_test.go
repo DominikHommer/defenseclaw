@@ -776,12 +776,14 @@ func TestHermesMalformedOrMismatchedGatewayOutputFailsOpen(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// A per-user hook in fail mode open: these answers never block.
+			// In fail mode closed a tool call blocks instead
+			// (TestPerUserHermesToolCallFailsClosedUnlessOpen).
 			input := fmt.Sprintf(`{"event":%q}`, tc.event)
 			result := run(t, "hermes", ok(tc.response), func(opts *Options) {
 				opts.Event = ""
 				opts.Stdin = strings.NewReader(input)
-				opts.FailMode = "closed"
-				opts.StrictAvailability = true
+				opts.FailMode = "open"
 			})
 			if result.code != 0 || result.stdout != "" {
 				t.Fatalf(
