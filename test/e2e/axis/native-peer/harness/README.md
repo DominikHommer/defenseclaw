@@ -9,6 +9,14 @@ before reading an artifact, creating a fixture, sealing a memfd or starting a
 peer. No peer, Bubblewrap or payload execution has been performed by this
 harness. Nothing here activates a customer runtime.
 
+The separate `axis-native-harness-build.yml` workflow builds this closed wrapper
+twice with Go1.26.5, `CGO_ENABLED=0` and independent build caches. It verifies the
+complete committed source inventory before dependency/build commands, retains
+the exact x/sys module archive and notices, and checks static ELF structure and
+identical output bytes. The wrapper is never executed there. Source, toolchain,
+dependency and run evidence must be independently admitted before any later
+native invocation; a build artifact does not populate the registry.
+
 The first slice connects the actual `bridgeprocess` factory and Rust protocol
 to four fixed payload cases: literal argv, binary stdin plus EOF and separate
 stderr, exit23, and filesystem/offline-socket boundaries. Tests use fake owners,
