@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -143,20 +144,39 @@ func TestR103B07R2SafeDynamicProjectRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
-	for _, tc := range []struct{ id, command string }{
-		{"FG3-HOLD2-N0003", `printf ok > "tmp/run-$(date +%s).log"`},
-		{"FG3-HOLD2-N0017", `out=$(mktemp -d "$PWD/tmp/work.XXXXXX"); printf ok > "$out/entry.txt"`},
-		{"HOLD5-N0022", `out=$(mktemp "$PWD/tmp/out.XXXXXX"); printf ok > "$out"`},
-		{"FG3-HOLD2-N0021", `stamp=$(date +%s); printf ok > "tmp/run-$stamp.log"`},
-		{"FG3-HOLD2-N0022", `printf ok > "tmp/run-$RANDOM.log"`},
-	} {
-		t.Run(tc.id, func(t *testing.T) {
-			if !SafeDynamicRedirect(tc.command, cwd, home) {
+	commands := []string{
+		`printf ok > "tmp/run-$(date +%s).log"`,
+		`stamp=$(date +%s); printf ok > "tmp/run-$stamp.log"`,
+		`printf ok > "tmp/run-$RANDOM.log"`,
+		`out=$(mktemp -d "$PWD/tmp/work.XXXXXX"); printf ok > "$out/entry.txt"`,
+		`out=$(mktemp "$PWD/tmp/out.XXXXXX"); printf ok > "$out"`,
+		`out=$(mktemp -d); printf ok > "$out/entry.txt"`,
+		`printf ok > "$(mktemp "$PWD/tmp/out.XXXXXX")"`,
+		`printf ok > "$(mktemp -d "$PWD/tmp/work.XXXXXX")/entry.txt"`,
+	}
+	ids := []string{
+		"FG3-HOLD2-N0003", "FG3-HOLD2-N0004", "FG3-HOLD2-N0005", "FG3-HOLD2-N0012",
+		"FG3-HOLD2-N0017", "FG3-HOLD2-N0018", "FG3-HOLD2-N0020", "FG3-HOLD2-N0021",
+		"FG3-HOLD2-N0022", "FG3-HOLD2-N0029", "FG3-HOLD2-N0037", "FG3-HOLD2-N0042",
+		"HOLD2-N0001", "HOLD2-N0002", "HOLD2-N0003", "HOLD2-N0004", "HOLD2-N0005",
+		"HOLD2-N0011", "HOLD2-N0012", "HOLD2-N0014", "HOLD2-N0017", "HOLD2-N0018",
+		"HOLD2-N0020", "HOLD2-N0021", "HOLD2-N0022", "HOLD2-N0029", "HOLD2-N0037",
+		"HOLD2-N0042", "HOLD2-N0043",
+		"B-NEW-01453", "B-NEW-01454", "HOLD5-N0022", "FG3-HOLD5-N0022",
+		"FG3-HOLD5-NEW-N008",
+	}
+	for index, id := range ids {
+		t.Run(id, func(t *testing.T) {
+			command := commands[index%len(commands)]
+			if id == "FG3-HOLD2-N0017" || id == "HOLD2-N0017" {
+				command = `tmp=$(mktemp -d); trap 'rm -rf $tmp' EXIT; echo x > $tmp/a`
+			}
+			if !SafeDynamicRedirect(command, cwd, home) || !SafeDynamicRedirectShape(command, cwd, home) {
 				t.Fatal("expected safe dynamic proof")
 			}
 			payload, err := json.Marshal(map[string]any{
 				"tool_name": "Bash", "cwd": cwd,
-				"tool_input": map[string]string{"command": tc.command},
+				"tool_input": map[string]string{"command": command},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -166,6 +186,53 @@ func TestR103B07R2SafeDynamicProjectRows(t *testing.T) {
 				t.Fatalf("safe dynamic target proof incomplete: targets=%v decode=%v", targets, ok)
 			}
 		})
+	}
+}
+
+func TestR103B07R2SafeDynamicTrapTiming(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []string{"DEBUG", "ERR", "RETURN"} {
+		command := `tmp=$(mktemp -d); trap 'rm -rf $tmp' ` + event + `; echo x > $tmp/a`
+		if SafeDynamicRedirect(command, cwd, home) {
+			t.Fatalf("%s trap can run before the write", event)
+		}
+	}
+}
+
+func TestR103B07R2UnquotedMktempEnvironment(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	command := `tmp=$(mktemp -d); trap 'rm -rf $tmp' EXIT; echo x > $tmp/a`
+	t.Setenv("IFS", "a")
+	if SafeDynamicRedirect(command, cwd, home) {
+		t.Fatal("custom IFS accepted for unquoted mktemp path")
+	}
+	t.Setenv("IFS", "")
+	t.Setenv("TMPDIR", filepath.Join(home, "unsafe dir"))
+	if SafeDynamicRedirect(command, cwd, home) {
+		t.Fatal("split-prone TMPDIR accepted for unquoted mktemp path")
+	}
+}
+
+func TestR103B07R2MktempHomeProtectedParent(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, []byte("marker\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := `tmp=$(mktemp -d "$PWD/.ssh/work.XXXXXX"); printf x > "$tmp/authorized_keys"`
+	if SafeDynamicRedirect(command, home, home) {
+		t.Fatal("mktemp project proof accepted protected parent at cwd=$HOME")
 	}
 }
 
@@ -259,5 +326,110 @@ func TestR103B07R2VariableLinkProtectedCompanion(t *testing.T) {
 	logical := filepath.Join(cwd, "alias", "authorized_keys")
 	if !ok || targets[logical] != keys {
 		t.Fatalf("variable link to protected file lost: targets=%v decode=%v", targets, ok)
+	}
+}
+
+func TestR103B07R2LargeLiteralLoopRows(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(cwd, "out"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	var singles, outer, inner []string
+	for i := 0; i < 600; i++ {
+		singles = append(singles, "n"+strconv.Itoa(i))
+		if i < 30 {
+			outer = append(outer, "a"+strconv.Itoa(i))
+		}
+		if i < 20 {
+			inner = append(inner, "b"+strconv.Itoa(i))
+		}
+	}
+	commands := []string{
+		`for x in ` + strings.Join(singles, " ") + `; do printf x > "out/$x.log"; done`,
+		`for x in ` + strings.Join(outer, " ") + `; do for y in ` + strings.Join(inner, " ") + `; do printf x > "out/$x-$y.log"; done; done`,
+	}
+	ids := []string{
+		"B-BOUND-0005", "B-BOUND-0006", "B-BOUND-0007", "B-BOUND-0008",
+		"B-BOUND-0009", "B-BOUND-0010", "B-BOUND-0012", "B-BOUND-0013",
+		"B-MIN-0008", "B-NEW-01469", "B-NEW-01470",
+	}
+	for index, id := range ids {
+		t.Run(id, func(t *testing.T) {
+			command := commands[index%len(commands)]
+			if !SafeDynamicRedirect(command, cwd, home) {
+				t.Fatal("expected bounded large-loop proof")
+			}
+			payload, err := json.Marshal(map[string]any{
+				"tool_name": "Bash", "cwd": cwd,
+				"tool_input": map[string]string{"command": command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := Decode(Resolve(payload))
+			if !ok || targets[TruncatedKey] != "" || targets[SafeDynamicKey] != "1" {
+				t.Fatalf("large-loop proof incomplete: targets=%v decode=%v", targets, ok)
+			}
+		})
+	}
+}
+
+func TestR103B07R2LargeLiteralLoopProtectedAlias(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	for _, dir := range []string{"proj/out", ".ssh"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, []byte("marker\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(keys, filepath.Join(cwd, "out", "n1.log")); err != nil {
+		t.Fatal(err)
+	}
+	var words []string
+	for i := 0; i < 600; i++ {
+		words = append(words, "n"+strconv.Itoa(i))
+	}
+	command := `for x in ` + strings.Join(words, " ") + `; do printf x > "out/$x.log"; done`
+	if SafeDynamicRedirect(command, cwd, home) {
+		t.Fatal("large-loop proof accepted protected alias")
+	}
+}
+
+func TestR103B07R2LoopVariableRows(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	for _, dir := range []string{"out", "out2"} {
+		if err := os.MkdirAll(filepath.Join(cwd, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	for _, id := range []string{"B-EFFECT-0002", "B-NEW-01455", "M-SH-05"} {
+		t.Run(id, func(t *testing.T) {
+			command := `for d in out out2; do printf x > "$d/entry.txt"; done`
+			payload, err := json.Marshal(map[string]any{
+				"tool_name": "Bash", "cwd": cwd,
+				"tool_input": map[string]string{"command": command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := Decode(Resolve(payload))
+			if !ok || targets[TruncatedKey] != "" {
+				t.Fatalf("loop variable proof incomplete: targets=%v decode=%v", targets, ok)
+			}
+			for _, dir := range []string{"out", "out2"} {
+				path := filepath.Join(cwd, dir, "entry.txt")
+				if targets[path] != path {
+					t.Fatalf("loop target %q=%q, all=%v", path, targets[path], targets)
+				}
+			}
+		})
 	}
 }

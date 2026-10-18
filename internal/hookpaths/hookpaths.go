@@ -1937,6 +1937,10 @@ func Resolve(payload []byte) string {
 						// The one unresolved redirect is covered by the
 						// client proof. Its target cannot name any protected
 						// file, so the operand map is complete for this command.
+						// A large literal loop can also contain more than the
+						// header's exact-target limit; the proof covers every
+						// combination without sending a partial candidate set.
+						dynamicOperands = nil
 						dynamicUnknown = false
 					}
 				}
