@@ -474,6 +474,9 @@ fn fixed_child(case: Case) -> Result<i32> {
             println!("PTY_READY isatty=true foreground=true rows=30 cols=100");
             io::stdout().flush()?;
             require_fixed_sigint(&FIXED_SIGINT_RECEIVED, Duration::from_secs(3))?;
+            // ECHOCTL can echo ^C without a newline. Begin the next owned
+            // evidence record on its own line without changing terminal flags.
+            println!();
             terminal_state(40, 120, "resized")?;
             require_terminal_interrupt_settings()?;
             println!("PTY_SIGINT_ACK signal=SIGINT vintr=3 isig=true");
@@ -1223,6 +1226,26 @@ mod tests {
                 .concat();
             assert_eq!(pty_group_evidence(output.as_bytes()).is_ok(), accepted);
         }
+    }
+
+    #[test]
+    fn pty_group_records_require_a_line_boundary_after_terminal_echo() {
+        let records = PTY_PHASES.map(|phase| {
+            format!(
+                "PTY_GROUPS={}\r\n",
+                serde_json::json!({
+                    "phase": phase, "isatty": 1,
+                    "foreground_pgrp": 2, "process_pgrp": 2
+                })
+            )
+        });
+        // The real terminal echoed ^C immediately before the resized record.
+        // Preserve strict record parsing: the fixed child must delimit its own
+        // output rather than accepting arbitrary leading terminal data.
+        let undelimited = format!("{}^C{}{}", records[0], records[1], records[2]);
+        assert!(pty_group_evidence(undelimited.as_bytes()).is_err());
+        let delimited = format!("{}^C\r\n{}{}", records[0], records[1], records[2]);
+        assert!(pty_group_evidence(delimited.as_bytes()).is_ok());
     }
 
     #[test]
