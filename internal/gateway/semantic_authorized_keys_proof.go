@@ -720,6 +720,22 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {
 		return false
 	}
+	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
+		len(request.ResolvedWriteTargets) != 0 {
+		// Claude's newly carried header is needed for process-cwd writes.
+		// Preserve the established decision for all other operands until
+		// their header and shell ordering can be proved together.
+		var cwdTargets map[string]string
+		for operand, resolved := range request.ResolvedWriteTargets {
+			if strings.HasPrefix(operand, "/proc/self/cwd/") {
+				if cwdTargets == nil {
+					cwdTargets = make(map[string]string)
+				}
+				cwdTargets[operand] = resolved
+			}
+		}
+		request.ResolvedWriteTargets = cwdTargets
+	}
 	// One list for the path, hard-link and missing-final-file checks, the
 	// same files the direct-write rule protects (GAP-1370).
 	protectedPaths := hookpaths.ProtectedAuthorizedKeysPaths(facts.ActiveHome)

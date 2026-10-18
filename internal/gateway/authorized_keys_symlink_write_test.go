@@ -228,6 +228,39 @@ func TestR103B36ProcCWDAliasRemainsUnknown(t *testing.T) {
 	}
 }
 
+func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	protected := filepath.Join(home, ".ssh", "authorized_keys")
+	ordinary := filepath.Join(cwd, "report.txt")
+	for _, tc := range []struct {
+		name, command, operand, resolved string
+		blocked                          bool
+	}{
+		{"ordinary header claim", "printf marker > report.txt", ordinary, protected, false},
+		{"protected header claim", "printf marker > ../.ssh/authorized_keys", protected, ordinary, true},
+		{"proc ordinary", "printf marker > /proc/self/cwd/report.txt", "/proc/self/cwd/report.txt", ordinary, false},
+		{"proc protected", "printf marker > /proc/self/cwd/../.ssh/authorized_keys", "/proc/self/cwd/../.ssh/authorized_keys", protected, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			request := trustedActionRequest{Input: input, Connector: "claudecode", ProtectedHomeHook: true,
+				ResolvedWriteTargets: map[string]string{tc.operand: tc.resolved}}
+			if got := trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)); got != tc.blocked {
+				t.Fatalf("managed Claude decision blocked=%v, want %v", got, tc.blocked)
+			}
+		})
+	}
+}
+
 func TestR103B36DynamicCopyOptionRemainsUnknown(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
