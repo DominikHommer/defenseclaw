@@ -272,12 +272,12 @@ type fakeRelay struct {
 	// unchanged answers Settings when settings is nil: the managed
 	// gateway's settings as the daemon holds them (a create reads them).
 	unchanged func() sandboxrelay.DaemonSettings
-	resolve  func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error)
-	current  func(string) (sandboxrelay.CurrentPolicy, error)
-	explain  func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
-	test     func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
-	packs    func(registration, connector, name string) ([]sandboxrelay.PackView, error)
-	deleted  atomic.Int64
+	resolve   func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error)
+	current   func(string) (sandboxrelay.CurrentPolicy, error)
+	explain   func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
+	test      func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
+	packs     func(registration, connector, name string) ([]sandboxrelay.PackView, error)
+	deleted   atomic.Int64
 
 	eventsMu sync.Mutex
 	events   []sandboxrelay.EventBatch
