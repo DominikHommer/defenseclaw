@@ -610,9 +610,10 @@ none of these facts.
 ### Refresh a managed macOS account
 
 `enterprise macos profile-explain` refreshes the named account's cached
-identity facts when its lookup succeeds. The output says "explain refreshed
-this account's cached identity facts"; that account's hooks use the explained
-profile from their next call, without restarting the gateway.
+identity facts when its lookup succeeds. Its JSON output shows the resolved
+subject and groups. When profiles are configured, the explanation can also
+include a cache refresh note. That account's hooks use the explained profile
+from their next call, without restarting the gateway.
 
 Open Directory keeps its own membership cache. After a directory group
 change, flush the Open Directory caches with the commands the explain output

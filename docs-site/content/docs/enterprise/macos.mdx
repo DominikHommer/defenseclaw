@@ -423,17 +423,23 @@ Add `--all` to also delete `~/.defenseclaw`. See
 [Uninstall](/docs/get-started/install#uninstall).
 
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy
-the device enforces. `defenseclaw config get`, `guardrail`, `status` and the
-other per-user commands exit `3` and name it instead of answering from it, and
-`doctor` reports the device as managed. `defenseclaw uninstall --all --binaries
---yes` removes it.
+the device enforces. The installed managed `defenseclaw` launcher offers only
+`sandbox` commands. Its `config get`, `guardrail`, `status` and other per-user
+command forms exit `2` and name the managed computer. A separate per-user CLI,
+if present, exits `3` for these commands and `doctor` reports the device as
+managed. `defenseclaw uninstall --all --binaries --yes` removes that per-user
+installation.
 
 A per-user gateway that is still running holds the managed gateway port,
 `127.0.0.1:18970`, unless its user moved it to another port. The install then
-stops before it changes anything: it fails with `api_port_held`, which names
-the process and gives the `kill` command (the pkg install still completes, and
-`last-package-result.json` has the error). Stop that gateway, or move it to
-another port, then run `defenseclaw-gateway enterprise macos ensure --from-package`.
+stops before it changes anything: it fails with `api_port_held`.
+`installer -pkg` prints a generic postinstall failure and records no package
+receipt, so detection reports the computer as not installed. The process and `kill` command
+appear in `/var/log/install.log` and the error in `last-package-result.json`;
+`enterprise macos status --json` also reports the holder. Stop that gateway,
+or move it to another port, then run
+`installer -pkg` again (or `defenseclaw-gateway enterprise macos ensure --from-package`,
+which records no package receipt).
 A per-user gateway on another port keeps running until it is stopped. The
 install, `status` and `verify` name each such account with the
 `per_user_gateway_running` warning and the `kill` command that stops it.
