@@ -74,6 +74,7 @@ func runDriver(ctx context.Context, opts options, admission wrapperAdmission, re
 	if err != nil {
 		return err
 	}
+	record["host_fixture_source_no_idmap_verified_before_clone"] = true
 	record["host_fixture_parent_verified_before_clone"] = true
 	grantRead, grantWrite, err := os.Pipe()
 	if err != nil {

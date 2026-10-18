@@ -111,9 +111,9 @@ jobs:
               source_hashes[name] = hashlib.sha256(raw).hexdigest()
           admission = Path('test/e2e/axis/native-peer/driver/main.go').read_bytes()
           admission_sha = hashlib.sha256(admission).hexdigest()
-          if admission_sha != '54df8b155e0a5adf348d766b1096d390785819021c79db01006fefe6f008117c':
+          if admission_sha != '7c3ed517d539d4d160b26052750bb9b6f118c9812cbf3ccece3ef26fd0afa24c':
               raise SystemExit('exact reviewed fixed-wrapper admission source required')
-          (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'admission_source_sha256': admission_sha, 'wrapper_image_sha256': '4b64f27003027663af8bce1c2159daa9f8315635a6e3b5504f345178e9750455', 'wrapper_image_size': 3440766, 'reviewed_registry_receipt_sha256': '9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db', 'go_embed_or_native_inputs': False, 'driver_wrapper_or_sandbox_execution': False}, indent=2) + '\n')
+          (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'admission_source_sha256': admission_sha, 'wrapper_image_sha256': '97da655791b04a4983909b08a939bb8d4af444400c9868e1ac76e4fbfdbda818', 'wrapper_image_size': 3440766, 'reviewed_registry_receipt_sha256': '6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6', 'go_embed_or_native_inputs': False, 'driver_wrapper_or_sandbox_execution': False}, indent=2) + '\n')
           PY
       - name: Verify exact dependency closure without running the outer driver
         shell: bash
@@ -228,6 +228,7 @@ jobs:
               'TestStaticELFRejectsLoaderAndOutOfRangeEntryAsData',
               'TestHostFixtureParentNeverTreatsUnmappedUIDAsRootProof',
               'TestHostFixtureCreationRetainsExactHeldParentAndFreshRoot',
+              'TestCreatorMountStatusRefusesMissingForeignAndIDMappedSources',
           }
           raw = Path('driver-artifact/INERT-TESTS.jsonl').read_bytes()
           if len(raw) > 1024 * 1024:

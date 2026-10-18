@@ -25,6 +25,44 @@ func TestClosedBootstrapRefusesBeforeNativeOperations(t *testing.T) {
 	}
 }
 
+func TestCreatorMountStatusRefusesMissingForeignAndIDMappedSources(t *testing.T) {
+	valid := func() []byte {
+		value := make([]byte, 512)
+		binary.LittleEndian.PutUint32(value[:4], 512)
+		binary.LittleEndian.PutUint64(value[8:16], 2) // STATMOUNT_MNT_BASIC
+		binary.LittleEndian.PutUint64(value[40:48], 42)
+		binary.LittleEndian.PutUint64(value[64:72], unix.MOUNT_ATTR_NOSUID|unix.MOUNT_ATTR_NODEV)
+		return value
+	}
+	if err := fixtureMountStatus(unix.STATX_MNT_ID_UNIQUE, 42, valid()); err != nil {
+		t.Fatal("complete same-creator non-idmapped status refused", err)
+	}
+	for _, kind := range []string{"unique-mask", "zero-id", "truncated", "size-small", "size-large", "basic-mask", "foreign-id", "idmapped"} {
+		value, mask, id := valid(), uint32(unix.STATX_MNT_ID_UNIQUE), uint64(42)
+		switch kind {
+		case "unique-mask":
+			mask = unix.STATX_MNT_ID
+		case "zero-id":
+			id = 0
+		case "truncated":
+			value = value[:71]
+		case "size-small":
+			binary.LittleEndian.PutUint32(value[:4], 64)
+		case "size-large":
+			binary.LittleEndian.PutUint32(value[:4], 513)
+		case "basic-mask":
+			binary.LittleEndian.PutUint64(value[8:16], 0)
+		case "foreign-id":
+			binary.LittleEndian.PutUint64(value[40:48], 43)
+		case "idmapped":
+			binary.LittleEndian.PutUint64(value[64:72], unix.MOUNT_ATTR_IDMAP)
+		}
+		if err := fixtureMountStatus(mask, id, value); err == nil {
+			t.Fatal("incomplete or idmapped source admission succeeded", kind)
+		}
+	}
+}
+
 type failedReady struct{}
 
 func (failedReady) Write([]byte) (int, error) { return 0, errors.New("fixed readiness failure") }

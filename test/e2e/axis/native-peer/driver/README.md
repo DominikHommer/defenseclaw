@@ -4,17 +4,17 @@ This contributor driver owns one run of the reviewed four-case native peer
 wrapper in a separate user/mount/PID/network/IPC/UTS namespace. It does not activate
 the AXIS customer provider or qualify the common launch gate.
 
-The fixed input wrapper was built at `9ea21f6d9da3dacf60cb451d45cc8818ef9db3e9`
-in Actions run `39156089152`, artifact `12147162086`. Two independent inert
+The fixed input wrapper was built at `ae9f9e0c8cea430501f723bb79430955f76df013`
+in Actions run `39160365924`, artifact `12148552547`. Two independent inert
 reviews checked its source, dependency, archive, provenance and static image.
 The image SHA-256 is
-`4b64f27003027663af8bce1c2159daa9f8315635a6e3b5504f345178e9750455`
+`97da655791b04a4983909b08a939bb8d4af444400c9868e1ac76e4fbfdbda818`
 (3,440,766 bytes); archive SHA-256 is
-`3b8a43bc3db52f035b213e411704a982b58fe69e069476a955f6b68797e4bec3`;
+`4b938f0b5df48dbc05c5fc0d0eaec516abda29a226bd1a9eeb16927eb3b9ad30`;
 provenance SHA-256 is
-`f7a74392af14379b22c92bc6391cc8dc8af3be8be01ad144dd58c52e622a792c`.
+`bd0fe0646543173ddb244a12a41396884ab7652e23809b66d99fa3bed5d03bd7`.
 Its fixed combined peer/payload receipt is
-`9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db`.
+`6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6`.
 These are compiled source pins. There is no caller-supplied image, digest,
 command, environment, backend or policy option.
 
@@ -91,6 +91,19 @@ then the wrapper gives worker-owned duplicates at fixed FD7/FD8. Label/inode
 correlation is checked without selecting a source through the display path.
 Fixtures, including partial creation, are retained on every outcome.
 
-This new handoff requires a newly reviewed wrapper and driver. The prior efc/742
-pair and failed native runs remain evidence for their exact earlier source only.
-The peer, static Bubblewrap, payload and combined receipt do not change here.
+The revised host preflight also requires `STATX_MNT_ID_UNIQUE` and
+current-namespace `statmount(STATMOUNT_MNT_BASIC)` before the first clone. The
+held parent and fresh empty root must belong to that same reachable mount,
+with required status fields present and `MOUNT_ATTR_IDMAP` unset. Unsupported
+or ambiguous queries refuse; there is no less strict fallback. This adds a
+Linux 6.8 capability floor to this fixed contributor recipe. Unit tests use
+synthetic response bytes only and never perform a mount or statmount call.
+The kernel's clone-only private namespace chain then preserves that source
+mapping; only reserved `/proc` is replaced before native source admission.
+This is not provenance admission for arbitrary foreign production inputs.
+Fresh source/artifact reviews and a new driver pin remain required before use.
+
+This pairing uses the revised c914 static Bubblewrap image and combined receipt
+pinned above. The Rust peer bytes and d074 payload remain unchanged. Historical
+failed runs remain evidence for their exact earlier source only. A fresh driver
+artifact review and separately reviewed native attempt are required.

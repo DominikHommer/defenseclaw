@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"debug/elf"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -16,7 +17,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"unsafe"
 )
 
 // All paths below this helper are fixed artifact members or newly generated
@@ -169,6 +172,50 @@ func (f *fixtureCapabilities) close() error {
 func trustedTemporaryParent(st unix.Stat_t) bool {
 	return st.Mode&unix.S_IFMT == unix.S_IFDIR && st.Uid == 0 && st.Mode&unix.S_ISVTX != 0
 }
+
+// fixtureMountStatus validates only the stable statmount MNT_BASIC prefix.
+// Missing fields, an unrelated mount, or an ID mapping are refusals. This is a
+// fixed contributor host-floor check, not proof for arbitrary foreign FDs.
+func fixtureMountStatus(statxMask uint32, mountID uint64, response []byte) error {
+	if statxMask&unix.STATX_MNT_ID_UNIQUE == 0 || mountID == 0 || len(response) < 72 ||
+		binary.LittleEndian.Uint32(response[:4]) < 72 || uint64(binary.LittleEndian.Uint32(response[:4])) > uint64(len(response)) ||
+		binary.LittleEndian.Uint64(response[8:16])&2 == 0 || // STATMOUNT_MNT_BASIC
+		binary.LittleEndian.Uint64(response[40:48]) != mountID ||
+		binary.LittleEndian.Uint64(response[64:72])&unix.MOUNT_ATTR_IDMAP != 0 {
+		return errors.New("fixed creator-namespace non-idmapped source proof refused")
+	}
+	return nil
+}
+
+func verifyCreatorMount(file *os.File) (uint64, error) {
+	if file == nil {
+		return 0, errors.New("fixed source mount capability absent")
+	}
+	var identity unix.Statx_t
+	if err := unix.Statx(int(file.Fd()), "", unix.AT_EMPTY_PATH|unix.AT_NO_AUTOMOUNT, unix.STATX_MNT_ID_UNIQUE, &identity); err != nil {
+		return 0, err
+	}
+	if identity.Mask&unix.STATX_MNT_ID_UNIQUE == 0 || identity.Mnt_id == 0 {
+		return 0, errors.New("fixed source unique mount identity unavailable")
+	}
+	// Linux's version0 request is 24 bytes. An unset namespace selector means
+	// this creator's CURRENT mount namespace; no foreign lookup or setns occurs.
+	request := struct {
+		Size, Spare uint32
+		Mount, Mask uint64
+	}{Size: 24, Mount: identity.Mnt_id, Mask: 2} // STATMOUNT_MNT_BASIC
+	var response [512]byte
+	_, _, errno := unix.Syscall6(unix.SYS_STATMOUNT, uintptr(unsafe.Pointer(&request)), uintptr(unsafe.Pointer(&response[0])), uintptr(len(response)), 0, 0, 0)
+	runtime.KeepAlive(file)
+	if errno != 0 {
+		return 0, errno
+	}
+	if err := fixtureMountStatus(identity.Mask, identity.Mnt_id, response[:]); err != nil {
+		return 0, err
+	}
+	return identity.Mnt_id, nil
+}
+
 func newHostFixture() (*fixtureCapabilities, error) {
 	parent, err := openDirectory("/tmp")
 	if err != nil {
@@ -179,11 +226,23 @@ func newHostFixture() (*fixtureCapabilities, error) {
 	if unix.Fstat(int(parent.Fd()), &st) != nil || !trustedTemporaryParent(st) {
 		return nil, errors.New("fixed host temporary parent refused")
 	}
+	parentMount, err := verifyCreatorMount(parent)
+	if err != nil {
+		return nil, err
+	}
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return nil, err
 	}
-	return createHostFixtureUnder(parent, "/tmp", hex.EncodeToString(random[:]))
+	fixture, err := createHostFixtureUnder(parent, "/tmp", hex.EncodeToString(random[:]))
+	if err != nil {
+		return fixture, err
+	}
+	rootMount, err := verifyCreatorMount(fixture.root)
+	if err != nil || rootMount != parentMount {
+		return fixture, errors.Join(errors.New("fixed fresh root mount differs from creator parent"), err)
+	}
+	return fixture, nil
 }
 func createHostFixtureUnder(parent *os.File, displayParent, nonce string) (_ *fixtureCapabilities, resultErr error) {
 	if parent == nil || len(nonce) != 32 || strings.Trim(nonce, "0123456789abcdef") != "" {
