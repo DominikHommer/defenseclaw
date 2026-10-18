@@ -12,8 +12,8 @@ launcher is covered by internal/cli/launcher_test.go; the install lane
 (scripts/test-enterprise-unix-install.sh) checks a real install.
 """
 
-import os
 import hashlib
+import os
 import plistlib
 import shlex
 import shutil
