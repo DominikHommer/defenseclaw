@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -97,7 +98,19 @@ func prepareHostStagePlatform(ctx context.Context, opts StageOptions) (_ *HostSt
 	var root *os.Root
 	var capture, sanitized, scratch *os.Root
 	var lock *os.File
+	var treeParent, treePin *os.File
 	cleanup := func() error {
+		// A consumer lease blocks entry to cleanup altogether. Once consumers
+		// release, uncertain producer-pin close must still stop before any
+		// recursive deletion. Successfully closed pins are never closed twice.
+		for _, pin := range []**os.File{&treePin, &treeParent} {
+			if *pin != nil {
+				if err := (*pin).Close(); err != nil {
+					return fmt.Errorf("workspace: retain host stage after uncertain root pin close: %w", err)
+				}
+				*pin = nil
+			}
+		}
 		for _, held := range []*os.Root{capture, sanitized, scratch} {
 			if held != nil {
 				_ = held.Close()
@@ -239,9 +252,91 @@ func prepareHostStagePlatform(ctx context.Context, opts StageOptions) (_ *HostSt
 	rec.Stage = filepath.Join(artifactPath, "sanitized", rec.RepoName)
 	// Preserve original source custody and policy identity in the summary.
 	rec.Project = source.path
-	stage := &HostStage{record: rec, identity: identity, close: cleanup}
+	// Retain a native object chain for handoff. Display paths never select the
+	// sanitized root, including when a caller later changes drive aliases.
+	treeParent, err = openWindowsHostStageChild(artifactPin, "sanitized", windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateWindowsHostStageLeaseDirectory(treeParent); err != nil {
+		return nil, err
+	}
+	treePin, err = openWindowsHostStageChild(treeParent, rec.RepoName, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateWindowsHostStageLeaseDirectory(treePin); err != nil {
+		return nil, err
+	}
+	treeID, err := windowsHostStageIdentity(treePin)
+	if err != nil {
+		return nil, err
+	}
+	stage := &HostStage{record: rec, identity: identity, close: cleanup, duplicateRoot: func() (*os.File, error) {
+		return duplicateWindowsHostStageRoot(treePin, treeID)
+	}}
 	keepOutput, succeeded = true, true
 	return stage, nil
+}
+
+func validateWindowsHostStageLeaseDirectory(file *os.File) error {
+	if _, err := windowsHostStageInfo(file, true); err != nil {
+		return err
+	}
+	if err := windowsHostStageNoStreams(file); err != nil {
+		return err
+	}
+	return safefile.ValidatePrivateHandle(windows.Handle(file.Fd()))
+}
+
+var hostStageGetHandleInformation = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetHandleInformation")
+
+func windowsHostStageLeaseHandleFlags(file *os.File) (uint32, error) {
+	if err := hostStageGetHandleInformation.Find(); err != nil {
+		return 0, err
+	}
+	var flags uint32
+	ok, _, _ := hostStageGetHandleInformation.Call(file.Fd(), uintptr(unsafe.Pointer(&flags)))
+	runtime.KeepAlive(file)
+	if ok == 0 {
+		return 0, errors.New("workspace: query Windows root lease handle flags refused")
+	}
+	return flags, nil
+}
+
+// The source was opened with read/query access, without delete sharing. Handle
+// access is not a guest policy: relative child access still uses caller tokens.
+// A nonnil duplicate transfers cleanup to the tracked lease even on validation
+// failure, so a failed close cannot erase custody of an allocated handle.
+func duplicateWindowsHostStageRoot(source *os.File, expectedID string) (*os.File, error) {
+	if err := validateWindowsHostStageLeaseDirectory(source); err != nil {
+		return nil, err
+	}
+	id, err := windowsHostStageIdentity(source)
+	if err != nil || id != expectedID {
+		return nil, errors.New("workspace: held Windows sanitized root identity changed")
+	}
+	var handle windows.Handle
+	if err := windows.DuplicateHandle(windows.CurrentProcess(), windows.Handle(source.Fd()),
+		windows.CurrentProcess(), &handle, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(handle), "host-stage-root-lease")
+	if err := validateWindowsHostStageLeaseDirectory(file); err != nil {
+		return file, err
+	}
+	id, err = windowsHostStageIdentity(file)
+	if err != nil || id != expectedID {
+		return file, errors.New("workspace: Windows sanitized root duplicate identity differs")
+	}
+	flags, err := windowsHostStageLeaseHandleFlags(file)
+	if err != nil {
+		return file, err
+	}
+	if flags&windows.HANDLE_FLAG_INHERIT != 0 {
+		return file, errors.New("workspace: Windows root lease unexpectedly inheritable")
+	}
+	return file, nil
 }
 
 func validateWindowsHostStagePrivateRoot(root *os.Root, expectedID string) error {

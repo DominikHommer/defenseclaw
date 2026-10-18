@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"os"
 	"slices"
 	"sync"
 )
@@ -22,6 +23,148 @@ type HostStage struct {
 	closed   bool
 	close    func() error
 	closeErr error
+	// Root acquisition and release reserve custody before doing native I/O.
+	// A close request blocks new borrowers without waiting for that I/O.
+	closeRequested bool
+	duplicateRoot  func() (*os.File, error)
+	rootLeases     map[*RootLease]struct{}
+}
+
+const maxHostStageRootLeases = 64
+
+var (
+	// ErrHostStageInUse means consumer custody must be released before cleanup.
+	ErrHostStageInUse  = errors.New("workspace: host stage still has root consumer custody")
+	errHostStageClosed = errors.New("workspace: host stage is closing or closed")
+)
+
+// RootLease owns one limited-access, non-inheritable directory handle. File is
+// borrowed: callers must not close it or transfer it to an exclusive owner.
+// A lease is custody only, not guest filesystem permission or runtime admission.
+// The current AXIS NewAssets consumes exclusive handles and cannot consume this
+// borrowed File directly. A future factory must make its own independent copy,
+// retain this lease through native cleanup AND successful Assets closure, then
+// close this lease before retrying HostStage.Close.
+type RootLease struct {
+	stage     *HostStage
+	file      *os.File
+	closeFile func() error
+	pending   bool
+	releasing bool
+	released  bool
+	admitErr  error
+	closeErr  error
+}
+
+// AcquireRoot duplicates the already-held sanitized tree, never TreePath. No
+// acquisition may begin after a close request. A nonnil lease owns cleanup even
+// when err is nonnil (for example, close won during native validation); File
+// refuses such a lease. A consumer must explicitly release it.
+func (s *HostStage) AcquireRoot() (*RootLease, error) {
+	if s == nil {
+		return nil, errHostStageClosed
+	}
+	s.mu.Lock()
+	if s.closed || s.closeRequested {
+		s.mu.Unlock()
+		return nil, errHostStageClosed
+	}
+	if s.duplicateRoot == nil {
+		s.mu.Unlock()
+		return nil, ErrUnsupportedPlatform
+	}
+	if len(s.rootLeases) >= maxHostStageRootLeases {
+		s.mu.Unlock()
+		return nil, ErrHostStageInUse
+	}
+	lease := &RootLease{stage: s, pending: true}
+	if s.rootLeases == nil {
+		s.rootLeases = make(map[*RootLease]struct{})
+	}
+	s.rootLeases[lease] = struct{}{}
+	duplicate := s.duplicateRoot
+	s.mu.Unlock()
+
+	file, err := duplicate()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lease.pending = false
+	if file == nil {
+		delete(s.rootLeases, lease)
+		if err == nil {
+			err = errors.New("workspace: host stage root duplication returned no custody")
+		}
+		return nil, err
+	}
+	lease.file, lease.closeFile = file, file.Close
+	if s.closeRequested || s.closed {
+		err = errors.Join(err, errHostStageClosed)
+	}
+	lease.admitErr = err
+	return lease, err
+}
+
+// File returns a borrowed handle to the exact sanitized tree. Limited handle
+// access does not prevent relative child opens under the caller's token and
+// must never be treated as guest read-only enforcement. No new borrow is issued
+// after a close request; previously borrowed handles remain owned by the lease
+// until its consumer finishes and explicitly closes it.
+func (l *RootLease) File() (*os.File, error) {
+	if l == nil || l.stage == nil {
+		return nil, errHostStageClosed
+	}
+	l.stage.mu.Lock()
+	defer l.stage.mu.Unlock()
+	if l.pending || l.releasing {
+		return nil, ErrHostStageInUse
+	}
+	if l.released || l.file == nil || l.stage.closeRequested {
+		return nil, errHostStageClosed
+	}
+	if err := errors.Join(l.admitErr, l.closeErr); err != nil {
+		return nil, err
+	}
+	return l.file, nil
+}
+
+// Close releases only this lease, never the stage. A successful close permits a
+// later explicit HostStage.Close retry. Uncertain native close is sticky: its
+// slot and producer pins remain retained, even if the Go File appears closed.
+func (l *RootLease) Close() error {
+	if l == nil || l.stage == nil {
+		return nil
+	}
+	s := l.stage
+	s.mu.Lock()
+	if l.pending || l.releasing {
+		s.mu.Unlock()
+		return ErrHostStageInUse
+	}
+	if l.released || l.closeErr != nil {
+		err := l.closeErr
+		s.mu.Unlock()
+		return err
+	}
+	l.releasing = true
+	closeFile := l.closeFile
+	s.mu.Unlock()
+	var err error
+	if closeFile == nil {
+		err = errors.New("workspace: host stage root lease has no native closer")
+	} else {
+		err = closeFile()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l.releasing = false
+	if err != nil {
+		l.closeErr = err
+		return err
+	}
+	l.released = true
+	l.file = nil
+	delete(s.rootLeases, l)
+	return nil
 }
 
 // HostStageSummary describes host staging only. It is not a persisted copy
@@ -55,8 +198,8 @@ func (s *HostStage) Summary() HostStageSummary {
 func (s *HostStage) TreePath() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
-		return "", errors.New("workspace: host stage is closed")
+	if s.closed || s.closeRequested {
+		return "", errHostStageClosed
 	}
 	return s.record.Stage, nil
 }
@@ -66,6 +209,14 @@ func (s *HostStage) TreePath() (string, error) {
 func (s *HostStage) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closeRequested = true
+	if len(s.rootLeases) != 0 {
+		err := ErrHostStageInUse
+		for lease := range s.rootLeases {
+			err = errors.Join(err, lease.closeErr)
+		}
+		return err
+	}
 	if !s.closed {
 		s.closed = true
 		s.closeErr = s.close()

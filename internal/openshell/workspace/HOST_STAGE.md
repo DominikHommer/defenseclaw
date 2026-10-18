@@ -9,6 +9,47 @@ controlled native fixtures establish the behavior they assert; they do not
 qualify native Windows guest operations, AXIS, credentials, or a production
 workspace import/export lifecycle.
 
+## Owned sanitized-root custody
+
+`HostStage.AcquireRoot` returns a tracked `RootLease` for the already-held
+sanitized tree. Windows acquires it through the held artifact, `sanitized`
+directory and repository directory handles; `TreePath` is never reopened.
+Each duplicate retains the same native identity, private-handle checks and
+non-inheritable read/query access. Those handle rights are custody limits,
+not guest read-only enforcement: relative child access still uses the
+caller's token and requires separate native filesystem policy.
+
+At most 64 acquisitions can be pending or held. `HostStage.Close` blocks new
+acquisitions, `TreePath` and new `RootLease.File` borrows, then refuses with
+`ErrHostStageInUse` before deleting any child or closing producer pins while
+consumer custody remains. Previously borrowed files remain owned by their
+leases. Acquisition and release perform native I/O outside the stage mutex;
+pending operations keep their tracked slots. A nonnil lease returned with an
+error still requires explicit release. An uncertain lease close retains its
+slot and sticky error. Releasing the last lease does not implicitly clean up
+the stage; the owner must retry `HostStage.Close`.
+
+`RootLease.File` is borrowed and must not be closed or passed directly to
+`backend.NewAssets`, which consumes exclusive handles. A future adapter must
+make an independent duplicate, retain the lease through confirmed native
+cleanup and successful asset closure, then close the lease and stage in that
+order. This handoff does not activate a Windows runtime. Before preparation
+returns a stage, a producer-pin close failure prevents recursive deletion and
+can leave residue; that error path does not return a stage owner for retry.
+
+The native Windows custody regression passed under the race detector:
+
+```powershell
+go test -race '-ldflags=-w -s' -p 1 ./internal/openshell/workspace -run '^TestHostStageWindowsRootLeaseHeldObjectAndCleanupBarrier$' -count=1
+```
+
+It verifies a decoy display path cannot select the tree, two duplicate native
+identities are non-inheritable, child bytes survive premature cleanup, and
+explicit release followed by cleanup removes the owned fixture. Separate
+fake-only tests cover pending acquisition/release, the 64-lease bound, partial
+allocation and sticky close failure. No child program or sandbox is launched
+by these custody tests.
+
 The caller must retain the private captured-source, output and scratch
 `os.Root` handles and clean them up on every refusal. The source has already
 passed the NTFS/local-drive, private DACL, held-source, reparse/stream/hardlink,
