@@ -13,6 +13,7 @@ launcher is covered by internal/cli/launcher_test.go; the install lane
 """
 
 import os
+import hashlib
 import plistlib
 import shlex
 import shutil
@@ -33,7 +34,7 @@ LAUNCHD = ROOT / "packaging" / "launchd-standalone"
 LAUNCHD_AGENTS = LAUNCHD / "agents"
 BUILDER = ROOT / "scripts" / "build-macos-enterprise-pkg.sh"
 E2FSPROGS_TOOLS = ("mke2fs", "debugfs", "e2fsck")
-E2FSPROGS_LICENSES = ("NOTICE", "e2fsprogs-1.47.3.tar.xz", "README.txt")
+E2FSPROGS_LICENSES = ("NOTICE", "e2fsprogs-1.47.4.tar.xz", "README.txt")
 
 USER_UNITS = (
     "defenseclaw-sandbox.socket",
@@ -249,9 +250,13 @@ def test_macos_pkg_payload_carries_the_launcher_and_the_launch_agents(tmp_path: 
         assert _mode(agent) == 0o644, label
         launchd = plistlib.loads(agent.read_bytes())
         assert launchd["Label"] == label
-        # Both user jobs execute the signed gateway in bin. The e2fsprogs
-        # payload must not change their program to a helper under share.
-        assert launchd["ProgramArguments"][0] == "/opt/cisco/defenseclaw/bin/defenseclaw-gateway"
+        gateway = root / "opt" / "cisco" / "defenseclaw" / "bin" / "defenseclaw-gateway"
+        digest = hashlib.sha256(gateway.read_bytes()).hexdigest()
+        program = f"/opt/cisco/defenseclaw/bin/launch-agents/{digest}/defenseclaw-gateway"
+        assert launchd["ProgramArguments"][0] == program
+        agent_binary = root / program.lstrip("/")
+        assert agent_binary.read_bytes() == gateway.read_bytes()
+        assert _mode(agent_binary) == 0o755
 
     # launchd and every account must be able to reach what the payload lays
     # down, whatever umask the builder has.

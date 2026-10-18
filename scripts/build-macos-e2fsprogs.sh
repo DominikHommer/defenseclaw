@@ -14,8 +14,8 @@ if [ "$(uname -m)" != arm64 ]; then
 fi
 out=$1
 export MACOSX_DEPLOYMENT_TARGET=13.0
-version=1.47.3
-sha=857e6ef800feaa2bb4578fbc810214be5d3c88b072ea53c5384733a965737329
+version=1.47.4
+sha=fd5bf388cbdbe006a3d3b318d983b2948382440acc85a87f1e7d108653e8db0b
 url="https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${version}/e2fsprogs-${version}.tar.xz"
 work=$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-e2fsprogs.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT

@@ -289,7 +289,24 @@ func (e *Env) userUnitBytes(u userUnit) ([]byte, error) {
 		return e.UserUnitSource(u.Source)
 	}
 	if e.GOOS == "darwin" {
-		return launchdstandalone.ReadAgentPlist(strings.TrimSuffix(u.Source, ".plist"))
+		data, err := launchdstandalone.ReadAgentPlist(strings.TrimSuffix(u.Source, ".plist"))
+		if err != nil {
+			return nil, err
+		}
+		gateway := filepath.Join(e.Layout.BinDir, binGateway)
+		digest, err := sha256File(e.P(gateway))
+		if err != nil {
+			return data, nil // A fresh non-package payload has not installed the gateway yet.
+		}
+		program := filepath.Join(e.Layout.BinDir, "launch-agents", digest, binGateway)
+		copyDigest, err := sha256File(e.P(program))
+		if os.IsNotExist(err) {
+			return data, nil // Older and non-package installations use the canonical path.
+		}
+		if err != nil || copyDigest != digest {
+			return nil, fmt.Errorf("the packaged LaunchAgent gateway differs from %s", gateway)
+		}
+		return []byte(strings.Replace(string(data), gateway, program, 1)), nil
 	}
 	return systemdunits.ReadUserUnit(u.Source)
 }

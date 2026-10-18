@@ -187,6 +187,37 @@ func replaceMacOSPackageBinaries(t *testing.T, h *osHost, version string) {
 	}
 }
 
+func TestMacOSPackageLaunchAgentUsesContentAddressedGateway(t *testing.T) {
+	h, _, _ := newLaunchdTestHost(t)
+	unit := h.env.userUnits()[0]
+	canonical := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
+	digest, err := sha256File(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyPath := h.env.P(filepath.Join(h.env.Layout.BinDir, "launch-agents", digest, binGateway))
+	if err := os.MkdirAll(filepath.Dir(copyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copyPath, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plist, err := h.env.userUnitBytes(unit)
+	if err != nil || !strings.Contains(string(plist), "/launch-agents/"+digest+"/"+binGateway) {
+		t.Fatalf("packaged plist points elsewhere: %v %s", err, plist)
+	}
+	if err := os.WriteFile(copyPath, []byte("different signed program"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.env.userUnitBytes(unit); err == nil {
+		t.Fatal("mismatched LaunchAgent program accepted")
+	}
+}
+
 func TestMacOSLaunchAgentRepairDecision(t *testing.T) {
 	for _, tc := range []struct {
 		name, state, reason, code string
@@ -222,6 +253,9 @@ func TestMacOSLaunchAgentRepairDecision(t *testing.T) {
 			}
 			if tc.wantError && !strings.Contains(messagesOf(r.Errors, codeSandboxUserState), h.alice.Name) {
 				t.Fatalf("failed repair did not name the user and label: %+v", r.Errors)
+			}
+			if tc.wantError && (strings.Contains(messagesOf(r.Errors, codeSandboxUserState), "run `"+h.env.lifecycleCommand(ActionRepair)+"`") || !strings.Contains(messagesOf(r.Errors, codeSandboxUserState), "reinstall a signed DefenseClaw package")) {
+				t.Fatalf("failed repair recommended retrying itself: %+v", r.Errors)
 			}
 		})
 	}
