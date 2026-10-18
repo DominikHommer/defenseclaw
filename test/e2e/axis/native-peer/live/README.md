@@ -55,6 +55,20 @@ The new 9ea wrapper retains validated bounded stream lengths even on failed
 exits, and reports only a closed first-line stderr reason/OS-text category.
 The 08c driver pins that exact reviewed wrapper. This is a diagnostic source
 change; policy, fixture capabilities, native peer and payload remain unchanged.
+One [diagnostic attempt](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39157247895)
+at `05d7aa0c` again reached `Prepared` and `Started`, then argv exited 1 before
+the payload marker. This time the validated counts were stdout 0 and stderr 68,
+with closed category `bwrap_owned_source` and OS-text category `none`. That
+category covers the original source's cached reopen, held-object identity,
+mount-ID and mount-topology admission; it does not identify the failed condition.
+No `Destroyed` reply or later case passed. All three cleanup owners completed
+with zero pending custody and the runner setting was restored. Ten retained
+synthetic fixture members totaled 192 bytes. Evidence artifact `12147416204`
+has ZIP SHA256
+`131301b4623c7462ddf6cae32a6a803a0c414e3b464276d784d0d90fce785ccc`.
+No unchanged retry occurred. Source review is investigating inherited mount
+descriptors across namespace clones; this result alone does not establish that
+as the cause or qualify any boundary behavior.
 The trust assumptions documented in
 [`artifact-review.md`](../../../../../internal/axis/native/artifact-review.md)
 still apply.
