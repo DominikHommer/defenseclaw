@@ -1,13 +1,14 @@
 <!-- Copyright 2026 Cisco Systems, Inc. and its affiliates -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Private native peer live gate, in preparation
+# Private native peer contributor live gate
 
 This directory is contributor test source, with no product caller. Its fixed
 Go payload must be built using the pinned Go toolchain with `CGO_ENABLED=0`,
 reviewed as a static ELF artifact, and launched only after the native peer,
 static-musl Bubblewrap closure and held-object mount seam pass independent
-source and artifact admission. No live harness is enabled by this source.
+source and artifact admission. The separate fixed contributor harness does not
+enable customer AXIS execution.
 
 The payload accepts only fixed canary selectors and, for `boundaries`, a strict
 `/tmp/dc-axis-native-peer-<32 lowercase hex digits>/outside` fixture path. The
@@ -41,9 +42,39 @@ qualify this new mount and process-custody posture.
 
 No payload has been executed, and these files do not enable AXIS.
 
-The separate [fixed host harness](harness/README.md) now supplies contributor-only
+The separate [fixed host harness](harness/README.md) supplies contributor-only
 artifact admission, held synthetic grants and actual factory/protocol wiring
-for the first argv/stdio/exit/boundary slice. Its source-controlled artifact
-registry is closed pending independent peer/static-musl/payload artifact review;
-default or explicit invocation cannot execute while it is closed. Its fake and
-inert tests establish no native runtime or production launch-gate qualification.
+for the first argv/stdio/exit/boundary slice. Its compiled registry admits only
+the independently reviewed e054 peer/static-musl Bubblewrap and d074 fixed
+payload receipt. Tests inject unreviewed registries or fake supervisors and
+never inherit that native authority. The [outer driver](driver/README.md) and
+[fixed CI recipe](live/README.md) separately own the complete wrapper namespace
+and exact reviewed artifact inputs. Their source, build and inert artifact
+reviews establish no native runtime or production launch-gate qualification.
+
+## First native attempt: startup refusal, no payload evidence
+
+On October 18, the first separately reviewed fixed recipe at source
+`ba2eb7124c4bba1403b96b36e8aceb83e099beb5` ran in
+[Actions run 39143689390](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39143689390).
+It failed; the four payload cases did not pass. There was no automatic retry.
+
+| Stage | Actual retained observation |
+| --- | --- |
+| Host | Disposable Ubuntu runner, kernel `6.17.0-1022-azure`; unprivileged driver. |
+| Driver | Atomic outer custody reached bootstrap READY/GRANT and executed the exact reviewed wrapper. |
+| Wrapper | Exited 1 after recording its inner worker start attempt, before worker READY/GRANT or fixture/native peer/payload evidence. |
+| Cause | Start, post-start custody, or early worker admission remains unresolved; the generic failure record cannot distinguish them. Nested namespace support is a hypothesis. |
+| Cleanup | Driver whole-namespace and wrapper outer cleanup both reported success, with zero pending owners; stderr was empty and output was not truncated. |
+| Host restoration | The specific disposable-runner AppArmor knob recorded original `1`, changed `1`, current `1`. |
+
+Exact evidence artifact ID `12141999966` contains 21,877 ZIP bytes with SHA256
+`f984380f4548345580932fe70f7487cb9f0810573fefd8f8886d157725ba34cc`.
+The admitted driver image was
+`df678a3fd138907554e5a551cee0c4152eecf1357c264b7d1502153366cb9553`;
+the wrapper was
+`2017f419020e862b7d5bc77d01b76c522655c07eab2bbb7918869c51e6cc2e03`.
+Both independent reviews checked the evidence without executing an image.
+Next work is bounded stage/errno diagnostics and a new reviewed build before a
+separate attempt. This failure qualifies neither the payload boundary nor the
+complete provider, Claude, terminal, hooks, model traffic or credentials.
