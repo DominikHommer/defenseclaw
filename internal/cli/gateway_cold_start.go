@@ -45,7 +45,6 @@ const (
 
 	hookColdStartBackoff          = 60 * time.Second
 	hookColdStartReadinessTimeout = 30 * time.Second
-	hookColdStartLockWait         = hookColdStartReadinessTimeout + 10*time.Second
 	gatewayStartLockWait          = startReadinessProgressFactor*defaultStartReadinessTimeout + 15*time.Second
 )
 
