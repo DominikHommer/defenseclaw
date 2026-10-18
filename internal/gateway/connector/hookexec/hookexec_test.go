@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1068,24 +1067,19 @@ func TestAColdStartThatOutlastsTheRestartBudgetDoesNotHoldTheCall(t *testing.T) 
 // comes up for the next call. It keeps the registered hook deadline as its
 // bound.
 func TestPerUserColdStartOutlivesTheCall(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
+	fastRestartRetries(t)
 	startCtx := make(chan context.Context, 1)
-	r := run(t, "claudecode", &stubRT{}, func(opts *Options) {
+	release := make(chan struct{})
+	r := run(t, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		opts.Event = "MessageDisplay"
-		opts.APIAddr = addr
-		opts.HTTPClient = nil
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 200*time.Millisecond)
 		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
 			startCtx <- ctx
-			return errors.New("test stops before gateway start")
+			<-release // still starting when the call ends
+			return nil
 		}
 	})
+	defer close(release)
 	if r.code != 0 {
 		t.Fatalf("MessageDisplay fail-open code=%d stderr=%q", r.code, r.stderr)
 	}
