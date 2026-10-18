@@ -31,6 +31,7 @@ SYSTEMD_USER = SYSTEMD / "user"
 LAUNCHD = ROOT / "packaging" / "launchd-standalone"
 LAUNCHD_AGENTS = LAUNCHD / "agents"
 BUILDER = ROOT / "scripts" / "build-macos-enterprise-pkg.sh"
+PACKAGE_CHECK = ROOT / "scripts" / "test-managed-package-no-fleet-compiler.sh"
 
 USER_UNITS = (
     "defenseclaw-sandbox.socket",
@@ -141,6 +142,7 @@ def _build_fixture(
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
     shutil.copy(BUILDER, repo / "scripts" / BUILDER.name)
+    shutil.copy(PACKAGE_CHECK, repo / "scripts" / PACKAGE_CHECK.name)
     launchd = repo / "packaging" / "launchd-standalone" / "agents"
     launchd.mkdir(parents=True)
     for label in agents:
@@ -171,6 +173,7 @@ def _build_fixture(
     )
     _stub(bin_dir, "pkgbuild", pkgbuild)
     _stub(bin_dir, "productbuild", 'for last; do :; done; : >"$last"')
+    _stub(bin_dir, "pkgutil", f'mkdir -p "$3"; cp -R -P "{captured}/." "$3/"')
     _stub(bin_dir, "shasum", "echo 0000")
     return repo, payload, bin_dir, captured
 
@@ -234,19 +237,16 @@ def test_macos_pkg_payload_carries_the_launcher_and_the_launch_agents(tmp_path: 
     ):
         assert _mode(directory) & 0o755 == 0o755, directory
     assert _mode(root / "opt" / "cisco" / "defenseclaw" / "bin" / "defenseclaw-gateway") == 0o755
-    compiler = root / "opt" / "cisco" / "defenseclaw" / "share" / "fleet" / "policy_compiler.py"
-    assert compiler.read_bytes() == (ROOT / "edge-connector" / "tools" / "policy_compiler.py").read_bytes()
-    assert not (root / "opt" / "cisco" / "defenseclaw" / "lib" / "defenseclaw" / "policy_compiler.py").exists()
-    assert _mode(compiler) == 0o644
-    assert _mode(compiler.parent) == 0o755
+    assert not list(root.rglob("policy_compiler.py"))
+    assert not (root / "opt" / "cisco" / "defenseclaw" / "share" / "fleet").exists()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")
 @pytest.mark.parametrize("compiler_kind", ["missing", "symlink"])
-def test_macos_pkg_rejects_missing_or_symlink_compiler(tmp_path: Path, compiler_kind: str):
-    result, _ = _run_builder(tmp_path, compiler_kind=compiler_kind)
-    assert result.returncode == 1
-    assert "payload lacks a regular policy compiler" in result.stderr
+def test_macos_pkg_omits_optional_compiler_regardless_of_source(tmp_path: Path, compiler_kind: str):
+    result, root = _run_builder(tmp_path, compiler_kind=compiler_kind)
+    assert result.returncode == 0, result.stderr
+    assert not list(root.rglob("policy_compiler.py"))
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")

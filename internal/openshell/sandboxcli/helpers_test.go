@@ -21,6 +21,7 @@ package sandboxcli
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -295,6 +296,27 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			msg = "unblocked " + req.Host + " for every sandbox of yours (kept by your organization's DefenseClaw gateway)"
 		}
 		reply(sandboxapi.UnblockResponse{Host: req.Host, Sandbox: req.Sandbox, Scope: scope, Message: msg})
+	case path == sandboxapi.PathPolicyDecision:
+		var req sandboxapi.PolicyDecisionRequest
+		_ = json.Unmarshal(body, &req)
+		if !d.managed {
+			fail(sandboxapi.CodeInvalid, "this command is for a managed computer")
+			return
+		}
+		if req.Sandbox == "" {
+			for name := range d.sandboxes {
+				if req.Sandbox != "" {
+					fail(sandboxapi.CodeInvalid, "name one sandbox with --sandbox NAME")
+					return
+				}
+				req.Sandbox = name
+			}
+		}
+		if req.Sandbox == "" {
+			fail(sandboxapi.CodeInvalid, "start a sandbox first")
+			return
+		}
+		reply(sandboxapi.PolicyDecisionResponse(req))
 	case path == sandboxapi.PathActivity:
 		var out []sandboxapi.ActivityEvent
 		events := d.events
@@ -1049,6 +1071,8 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 		},
 		// Never the developer's own git identity.
 		GitConfig: func(_ context.Context, _, key string) string { return ta.gitConfig[key] },
+		// Never the network: the Sandbox TLS trust row is skipped.
+		TLSTrust: TLSTrust{Chain: func(context.Context, string) ([]*x509.Certificate, error) { return nil, errors.New("offline") }},
 	}
 	for _, sb := range sandboxes {
 		ta.daemon.add(sb)

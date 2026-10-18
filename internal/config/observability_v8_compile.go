@@ -1747,11 +1747,22 @@ func compileObservabilityV8Warnings(
 				}
 			}
 		}
-		if destination.Transport.TLS != nil && (destination.Transport.TLS.Insecure || destination.Transport.TLS.InsecureSkipVerify) {
+		if destination.Transport.TLS != nil && (destination.Transport.TLS.Insecure || destination.Transport.TLS.InsecureSkipVerify) &&
+			!strings.HasPrefix(strings.ToLower(strings.TrimSpace(destination.Transport.Endpoint)), "http://") {
 			warnings = append(warnings, ObservabilityV8Warning{
 				Code: "tls_verification_disabled", Path: base + ".tls",
 				Summary: "destination transport uses an explicitly unsafe TLS mode",
 			})
+		}
+		if endpoint, err := url.Parse(destination.Transport.Endpoint); err == nil && endpoint.Scheme == "http" {
+			host := endpoint.Hostname()
+			ip := net.ParseIP(host)
+			if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+				warnings = append(warnings, ObservabilityV8Warning{
+					Code: "plaintext_transport", Path: base + ".endpoint",
+					Summary: "destination sends telemetry over plaintext HTTP to a non-loopback endpoint",
+				})
+			}
 		}
 		if destination.Transport.NetworkSafety != nil && destination.Transport.NetworkSafety.AllowPrivateNetworks {
 			warnings = append(warnings, ObservabilityV8Warning{

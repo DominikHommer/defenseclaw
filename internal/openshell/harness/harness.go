@@ -178,9 +178,10 @@ unset dc_var
 
 // launcherPreamble is the environment set-up every launcher runs first: the
 // loader variables are dropped (launcherLoaderScrub), system directories
-// lead PATH, Node's compile cache is off, and the egress proxy is exported
-// (egressEnvScript, which the sandbox's login shells and `sandbox exec`
-// commands run too; see shellenv.go). It also defines dc_launch, which
+// lead PATH, Node's compile cache is off, and the egress proxy and the
+// trusted CA bundle are exported (egressEnvScript and trustedCAScript, which
+// the sandbox's login shells and `sandbox exec` commands run too; see
+// shellenv.go). It also defines dc_launch, which
 // launcherExec starts the harness with (launcherJobControl).
 //
 // Node keeps its compile cache wherever NODE_COMPILE_CACHE (or a harness's
@@ -195,7 +196,7 @@ export PATH
 # root-owned harness sources.
 NODE_DISABLE_COMPILE_CACHE=1
 export NODE_DISABLE_COMPILE_CACHE
-` + egressEnvScript + timeZoneScript + launcherJobControl
+` + egressEnvScript + trustedCAScript + timeZoneScript + launcherJobControl
 
 // launcherJobControl defines dc_launch COMMAND..., which every launcher
 // ends with: it execs COMMAND, except in a terminal session, where nothing

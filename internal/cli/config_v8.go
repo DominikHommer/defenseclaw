@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
 
@@ -98,7 +100,7 @@ var configV8ValidateCmd = &cobra.Command{
 			PlanDigest:        loaded.compiled.Plan.Digest(),
 			NetworkValidation: "offline_syntax_and_literal_policy_only",
 			Valid:             &valid,
-			Warnings:          gateway.ConfigHILTWarnings(loaded.runtime),
+			Warnings:          append(gateway.ConfigHILTWarnings(loaded.runtime), configV8InstalledAdvisories(loaded)...),
 		}
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetEscapeHTML(false)
@@ -119,10 +121,60 @@ func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
 	if err == nil {
 		err = checkJSONLDestinationPaths(loaded.compiled, "")
 	}
+	if err == nil && !configV8IsInstalledConfig(loaded.source) {
+		// The managed lifecycle refuses these literals in a new candidate
+		// (ensure --config, Setup, bundle apply); validate must agree, or an
+		// administrator is told a file is valid that ensure then refuses
+		// (GAP-0138). The installed config keeps loading for the upgrade
+		// path; configV8InstalledAdvisories reports it instead.
+		err = config.ValidateManagedStandaloneLiteralCandidate(loaded.runtime, loaded.raw)
+	}
 	if err != nil {
 		return nil, &configV8SourceError{version: loaded.runtime.ConfigVersion, err: err}
 	}
 	return loaded, nil
+}
+
+// configV8IsInstalledConfig reports whether source is the config.yaml this
+// host runs: the per-user default or the standalone enterprise layout's.
+func configV8IsInstalledConfig(source string) bool {
+	candidates := []string{config.ConfigPath()}
+	if layout, err := managed.StandaloneLayoutFor(runtime.GOOS); err == nil && layout.ConfigPath != "" {
+		candidates = append(candidates, layout.ConfigPath)
+	}
+	resolved := configV8ResolvedPath(source)
+	for _, candidate := range candidates {
+		if resolved != "" && resolved == configV8ResolvedPath(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func configV8ResolvedPath(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	if real, err := filepath.EvalSymlinks(absolute); err == nil {
+		return real
+	}
+	return filepath.Clean(absolute)
+}
+
+// configV8InstalledAdvisories names the literals an installed managed
+// standalone config still carries from 1.0.2, the same advisory enterprise
+// status and verify print. It never names a value.
+func configV8InstalledAdvisories(loaded *loadedConfigV8File) []string {
+	if loaded == nil || !configV8IsInstalledConfig(loaded.source) {
+		return nil
+	}
+	paths := config.ManagedStandaloneUpgradeAdvisories(loaded.runtime, loaded.raw)
+	if len(paths) == 0 {
+		return nil
+	}
+	return []string{"managed_literal_credentials: installed config uses literals at " + strings.Join(paths, ", ") +
+		"; use {credential: NAME} or {env: NAME} where supported; webhook URLs remain supported"}
 }
 
 func configV8ValidationFailure(err error) configV8WireFailure {

@@ -118,6 +118,15 @@ type DirectoryFacts struct {
 	// The gateway refreshes these facts soon and uses the default profile
 	// for group-dependent decisions (GAP-0243).
 	GroupsPartial bool `json:"groups_partial,omitempty"`
+	// OnlyPrimaryGroup marks the facts of an SSSD account that SSSD listed in
+	// its primary group only (or only Domain Users, when SSSD gives it a
+	// private group), besides the /etc/group groups that list it. While SSSD
+	// cannot reach the directory, that is its answer for an account whose
+	// memberships it never looked up, as for one in no other group
+	// (GAP-0191). The gateway refreshes such facts sooner, and takes them as
+	// a failed lookup while the guardian finds SSSD offline for the account's
+	// domain. Never emitted or stored.
+	OnlyPrimaryGroup bool `json:"-"`
 	// Source is the OS facility that resolved these facts, one of the
 	// Source* constants (defenseclaw.user.identity.source).
 	Source string `json:"source,omitempty"`

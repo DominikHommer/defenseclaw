@@ -216,6 +216,12 @@ def test_off_and_busy_states_are_neutral_on_a_managed_computer() -> None:
     assert "your organization manages this setting" in off and "Setup" not in off
     gone = _model({**STATUS, "available": False, "managed": {**MANAGED, "unavailable": "OpenShell is not installed"}}).headline()
     assert gone.startswith("Sandboxes aren't available on this computer: OpenShell is not installed.")
+    # GAP-0187: the temporary setup-change notice says to retry, with no contact-IT line.
+    changing = _model(
+        {**STATUS, "available": False, "managed": {**MANAGED, "unavailable": sandbox_state.SETUP_CHANGING_NOTICE}}
+    ).headline()
+    assert changing == f"Sandboxes aren't available on this computer: {sandbox_state.SETUP_CHANGING_NOTICE}."
+    assert "exception" not in changing and "it-security@example.com" not in changing
     # Unmanaged computers keep their own advice.
     plain = SandboxesPanelModel()
     plain.set_snapshot({"enabled": False}, [], [], now=NOW)

@@ -209,6 +209,19 @@ func TestManagedConfigNamesTheMalformedAgentIdentity(t *testing.T) {
 	}
 }
 
+// GAP-0760 (#1099): a severity override the composer would refuse (INFO) is
+// refused by the schema check with the value and the words it takes, the
+// ones block_at takes, in any case.
+func TestManagedConfigNamesTheSeverityOverrideWords(t *testing.T) {
+	h := newTestHost(t, "linux")
+	raw := string(DefaultConfig(h.env.Layout)) + "  rules:\n    severity_overrides:\n      SEC-AWS-SECRET: INFO\n"
+	got := installMessage(t, h, raw)
+	if !strings.Contains(got, "severity_overrides") || !strings.Contains(got, `is "INFO"`) ||
+		!strings.Contains(got, "one of CRITICAL, HIGH, MEDIUM, LOW in any case") {
+		t.Fatalf("severity override: %s", got)
+	}
+}
+
 // GAP-0917: an administrator-created file can pass the path check while the
 // unprivileged gateway cannot append to it.
 func TestManagedConfigRefusesJSONLFileOwnedByAnotherAccount(t *testing.T) {

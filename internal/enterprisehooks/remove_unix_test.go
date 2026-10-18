@@ -97,7 +97,7 @@ func TestRemoveUserHooksKeepsTheUsersOwnConfig(t *testing.T) {
 	}
 	purge := opts
 	purge.UserHome = linked
-	if err := PurgeUserState(context.Background(), purge); err == nil {
+	if _, err := PurgeUserState(context.Background(), purge); err == nil {
 		t.Fatal("PurgeUserState followed a linked ~/.defenseclaw")
 	}
 	if _, err := os.Stat(notes); err != nil {

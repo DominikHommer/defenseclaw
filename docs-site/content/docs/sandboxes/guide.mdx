@@ -60,9 +60,9 @@ the last `pull --apply`.
 | --- | --- |
 | DefenseClaw | Installed and initialized (`defenseclaw init`, see the [quickstart](/docs/get-started/quickstart)), with the daemon running (`defenseclaw-gateway start`). Run everything as your own user. |
 | Docker | On Linux, a rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group, which can enter every container on the machine: see [one OpenShell gateway per machine](/docs/sandboxes/linux#one-openshell-gateway-per-machine)). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. On a Mac, Docker Desktop running: DefenseClaw builds the harness images in Docker, and OpenShell's MicroVM driver reads them from it. Either way docker needs its buildx plugin, which builds the images with BuildKit: Docker Desktop provides it, and on Linux it is the `docker-buildx-plugin` package from Docker's repository. |
-| Linux kernel | Landlock ABI 3 or newer (kernel 6.2 or newer), enabled in the kernel's `lsm=` list. Without it OpenShell refuses to start a sandbox. On a Mac each MicroVM boots OpenShell's own Linux kernel, which has Landlock (Docker Desktop's VM kernel has none, see [macOS](#macos)). |
+| Linux kernel | Landlock ABI 3 or newer, enabled in the kernel's `lsm=` list. Upstream kernels have ABI 3 from 6.2; a distribution kernel with a backport (RHEL 9 lists `landlock` in `lsm=` on its 5.14 kernel) can have it too, so the kernel version alone does not decide it: `defenseclaw sandbox doctor` reads the ABI the running kernel reports and is the check to trust. Without it OpenShell refuses to start a sandbox. On a Mac each MicroVM boots OpenShell's own Linux kernel, which has Landlock (Docker Desktop's VM kernel has none, see [macOS](#macos)). |
 | Mac | Apple silicon, [Homebrew](https://brew.sh), and Homebrew's `e2fsprogs`, which the MicroVM driver formats its disks with. Setup offers to install it. |
-| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. On a Mac, the MicroVM driver also keeps a prepared disk of about 5 GB for each image it has started, in `~/.local/state/openshell/vm-driver`, until `sandbox image prune`, `sandbox image rm` or teardown removes that image. Claude Code and Codex start a run image of their own for each run configuration (the `--env`, credentials and model provider a run passes), so a run with other ones prepares another disk of about 5 GB. |
+| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. On a Mac, a MicroVM image's first start uses about 11 GiB of free host space while preparing its disk: the VM volume needs at least 12 GiB free (22 GiB recommended). The driver then keeps a prepared disk of about 5 GB for each image it has started, in `~/.local/state/openshell/vm-driver`, until `sandbox image prune`, `sandbox image rm` or teardown removes that image. Claude Code and Codex start a run image of their own for each run configuration (the `--env`, credentials and model provider a run passes), so a run with other ones prepares another disk. |
 | Linux login | `sudo loginctl enable-linger $USER` is recommended, so the OpenShell gateway keeps running after you log out. |
 
 You don't need OpenShell installed beforehand: setup offers to install it.
@@ -651,10 +651,14 @@ for a pack with `observe.process_tree: true`; see
 `defenseclaw sandbox ps NAME --tree` lists the sandbox's processes under
 their parents, with the values of arguments that name secrets replaced. With
 the tree on, the BINARY column of `destinations` shows the program that
-connected together with its parents, and the TUI's sandbox details list the
-tree. The daemon samples every 5 seconds (every 15 seconds on a Mac when
+connected together with its parents when the tree identifies one process,
+including a refused connection. With the optional Linux sandbox kernel feed,
+this includes a long-running Python interpreter launched through a virtual
+environment or `uv`. If several matching interpreters were running, the row
+has no lineage. The TUI's sandbox details list the tree. Without the kernel
+feed, the daemon samples every 5 seconds (every 15 seconds on a Mac when
 sampling its MicroVM is slow), so a process that starts and ends between two
-samples is not seen; the agent chooses its processes' names and arguments, so
+samples is not seen. The agent chooses its processes' names and arguments, so
 the tree is a view of what ran, not a control.
 
 <TerminalAnimation
@@ -1829,12 +1833,75 @@ on Linux (the login session on a Mac),
 the OpenShell service, CLI, ssh connection sharing, registration, mTLS
 files, version and driver, gateway-global policy, bind mounts, telemetry,
 the sandbox ports, the DefenseClaw daemon, the sandbox hooks, the harness
-images, the shell wrappers and your organization's policy. Every failed
-check names its fix.
+images, the shell wrappers, your organization's policy and sandbox TLS trust.
+Every failed check names its fix.
 `--fix` applies the fixes that need only your user (such as starting or
 restarting the gateway, or turning bind mounts on), after asking, and reports
 each one by the check's name, as its question does. It does not install
 OpenShell. The situations where `--fix` cannot help are below.
+
+### Behind a TLS-inspecting proxy
+
+On a network whose proxy decrypts TLS (a secure web gateway such as Cisco
+Secure Access, Umbrella or Zscaler), the proxy re-signs server certificates
+with your organization's root CA. Your computer trusts that CA; a sandbox
+does not. Two things are needed, because two different programs make a
+sandbox's connections:
+
+1. **The agent's model calls** (to Anthropic, OpenAI, GitHub Copilot or
+   Amazon Bedrock) are made by OpenShell's sandbox supervisor, which adds
+   the credential to each request. It verifies the provider with its own
+   trust store, and OpenShell does not let it trust another CA (except
+   for an explicit upstream proxy, OpenShell's `https_proxy` with
+   `proxy_ca_bundle`). Ask your IT department to exempt the model provider
+   hosts your agents use from TLS inspection (a "do not decrypt" rule), for
+   example `api.anthropic.com`, `api.openai.com`, `api.githubcopilot.com`
+   and `bedrock-mantle.<region>.api.aws`. Without that exemption the model
+   calls fail however the sandbox is set up.
+2. **Everything else in the sandbox** (package installs, git, MCP servers,
+   web fetches, the agent's own tools) trusts the CAs you name in
+   `openshell.trusted_ca_bundle`.
+
+The Sandbox TLS trust row of `defenseclaw sandbox doctor` connects to
+`api.anthropic.com`, `api.openai.com` and `api.githubcopilot.com` and fails
+by name while any of them is inspected:
+
+```text
+  ✗ Sandbox TLS trust          TLS inspection: api.anthropic.com, api.openai.com present a certificate from "Corp Root CA", which this computer trusts but sandboxes do not, …
+    → ask your IT department to exempt api.anthropic.com, api.openai.com and the other model provider hosts your agents use from TLS inspection on the proxy …; for everything else sandboxes reach, save the proxy's root CA certificate as a PEM file and name it in openshell.trusted_ca_bundle …: defenseclaw config set openshell.trusted_ca_bundle /path/to/proxy-root-ca.pem
+```
+
+Get the root CA from your IT department (or export it from your keychain as
+PEM), then name it:
+
+```bash
+defenseclaw config set openshell.trusted_ca_bundle ~/certs/proxy-root-ca.pem
+defenseclaw sandbox doctor        # passes once the provider hosts are exempt
+```
+
+The next run rebuilds the harness image with the CA in its system store.
+The build's own downloads (the agent's npm or Python package, curl) trust
+the CA too. Each sandbox points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+`CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS` and `DENO_CERT` at
+OpenShell's CA bundle plus your CAs, so Node, Python, Go, Rust, curl and git
+programs all trust them. Only the CAs in that file are added: DefenseClaw
+never imports your computer's whole trust store. On a managed computer your
+administrator sets the key in the managed configuration.
+
+A sandbox's model provider host is its model channel. OpenShell opens it
+only to the agent's own programs, for the model calls (for an npm or Python
+agent, its `node` or `python`), so other programs in the sandbox, such as a
+`curl` you run, cannot reach that host whatever the egress policy says.
+`defenseclaw sandbox unblock` and allow entries do not change that, and the
+unblock message says so. Every other host follows the egress policy and
+trusts the CAs above.
+
+DefenseClaw 1.0.2 does not have this key. `defenseclaw upgrade --version 1.0.2`
+sets it aside in `~/.defenseclaw/config-set-aside.json` before it installs
+1.0.2, and upgrading again to a release that has it puts it back (after a
+`defenseclaw rollback`, run `defenseclaw migrate`). If you run the 1.0.2
+installer yourself, remove the key first with
+`defenseclaw config unset openshell.trusted_ca_bundle`.
 
 ### No gateway service installed
 

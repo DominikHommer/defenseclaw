@@ -200,6 +200,12 @@ dc_log() {
 }
 
 dc_cleanup() {
+    # A failed or interrupted apply must leave the as-found trust anchors.
+    if ! dc_restore_anchors; then
+        # Keep the root-only backup for an administrator if restoration failed.
+        dc_log "kept $DC_STAGE because the previous trust anchor could not be restored"
+        return 0
+    fi
     if [ -n "$DC_STAGE" ] && [ -d "$DC_STAGE" ]; then
         rm -rf "$DC_STAGE"
     fi
@@ -209,7 +215,10 @@ dc_cleanup() {
 # so the command does not finish (or store a credential) after the run was
 # reported failed.
 dc_stop_child() {
-    [ -z "$DC_CHILD" ] || kill "$DC_CHILD" 2>/dev/null || true
+    [ -n "$DC_CHILD" ] || return 0
+    kill "$DC_CHILD" 2>/dev/null || true
+    wait "$DC_CHILD" 2>/dev/null || true
+    DC_CHILD=""
 }
 
 # dc_sweep_stages <parent>: remove the staging folders of earlier runs that
@@ -1360,17 +1369,28 @@ dc_install_anchors() {
 # never replaces the one that verified the bundle in force.
 dc_restore_anchors() {
     [ "$DC_ANCHORS_CHANGED" = 1 ] || return 0
-    DC_ANCHORS_CHANGED=0
     # A subshell: a restore that fails is logged, and the apply result stays
     # the document this run prints.
     if [ -n "$DC_ANCHORS_PREVIOUS" ]; then
         ( dc_put_anchors "$DC_ANCHORS_PREVIOUS" ) >/dev/null || {
             dc_log "could not restore the previous trust anchor file $DC_ANCHORS"
-            return 0
+            # The final trust check can fail after the previous file was put
+            # back. Otherwise invalidate the new file without removing the
+            # path: its presence keeps bundle mode on and refuses the file.
+            if [ ! -L "$DC_ANCHORS" ] &&
+                ! cmp -s "$DC_ANCHORS_PREVIOUS" "$DC_ANCHORS"; then
+                ( : >"$DC_ANCHORS" ) 2>/dev/null ||
+                    dc_log "could not invalidate the trust anchor file $DC_ANCHORS"
+            fi
+            return 1
         }
     else
-        rm -f "$DC_ANCHORS"
+        rm -f "$DC_ANCHORS" || {
+            dc_log "could not remove the newly installed trust anchor file $DC_ANCHORS"
+            return 1
+        }
     fi
+    DC_ANCHORS_CHANGED=0
     dc_log "restored the previous trust anchor file after the failed bundle apply"
 }
 
@@ -1579,6 +1599,7 @@ dc_main() {
     fi
     [ -z "$anchors" ] || dc_install_anchors "$anchors"
     if [ -z "$bundle" ]; then
+        DC_ANCHORS_CHANGED=0
         dc_annotate_package_step
         dc_emit_result
         return 0
@@ -1590,9 +1611,10 @@ dc_main() {
         dc_run_lifecycle_retry "$gateway" bundle apply --bundle "$bundle" --reason mdm --lock-wait 10m || status=$?
     fi
     if [ "$status" = 0 ]; then
+        DC_ANCHORS_CHANGED=0
         dc_annotate_package_step
     else
-        dc_restore_anchors
+        dc_restore_anchors || true
     fi
     dc_emit_result
     return "$status"

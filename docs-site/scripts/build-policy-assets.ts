@@ -598,7 +598,7 @@ function buildScenarios(): Scenario[] {
       id: 'guardrail-medium-completion',
       title: 'MEDIUM guardrail finding (completion)',
       domain: 'guardrail',
-      description: 'MEDIUM finding on completion. Default policy: alert. Strict: block.',
+      description: 'MEDIUM finding on completion. Default preset (alert threshold MEDIUM): alert. Strict: block. A policy whose alert threshold is raised to HIGH or above allows it.',
       expectedVerdict: 'alert',
       input: {
         direction: 'completion',

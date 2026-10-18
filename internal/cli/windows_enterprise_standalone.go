@@ -607,9 +607,19 @@ func runWindowsEnterpriseStandaloneAction(
 
 // appendWindowsEnterpriseStatusAdvisories adds the advisories status and
 // verify report for an installed deployment beyond its installer report: the
-// gateway's own warnings and the admission issues. A refused config reports
+// installed config's literal credentials, the gateway's own warnings and the
+// admission issues. A refused config reports
 // them too, as the running deployment's (GAP-0103).
 func appendWindowsEnterpriseStatusAdvisories(ctx context.Context, result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
+		if raw, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes); err == nil {
+			if installed, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw); err == nil {
+				if paths := config.ManagedStandaloneUpgradeAdvisories(installed, raw); len(paths) > 0 {
+					result.AddWarning("managed_literal_credentials", "installed config uses literals at "+strings.Join(paths, ", ")+"; use {credential: NAME} or {env: NAME} where supported; webhook URLs remain supported")
+				}
+			}
+		}
+	}
 	if report.CursorTargetEnabled {
 		result.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
 	}

@@ -26,6 +26,11 @@ except ModuleNotFoundError:  # direct ``python scripts/local_observability_v1.py
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = ROOT / "bundles/local_observability_stack"
 PACKAGED = ROOT / "cli/defenseclaw/_data/local_observability_stack"
+OPTIONAL_FLEET_FILES = {
+    Path("docker-compose.fleet.yml"),
+    Path("prometheus/examples/fleet.yml"),
+    Path("grafana/dashboards/defenseclaw-fleet.json"),
+}
 METRIC_MANIFEST = "schemas/telemetry/generated/compatibility/local-observability-v1.json"
 METRIC_EMITTER = ROOT / "internal/telemetry/metrics.go"
 FLEET_METRIC_EMITTER = ROOT / "internal/fleet/metrics.go"
@@ -636,6 +641,7 @@ def _bundle_parity_errors() -> list[str]:
         for path in BUNDLE.rglob("*")
         if path.is_file()
         and not _is_runtime_source_file(relative := path.relative_to(BUNDLE))
+        and relative not in OPTIONAL_FLEET_FILES
     }
     packaged_files = {path.relative_to(PACKAGED) for path in PACKAGED.rglob("*") if path.is_file()}
     if source_files != packaged_files:
