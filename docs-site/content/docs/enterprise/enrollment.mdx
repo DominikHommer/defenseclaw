@@ -600,8 +600,34 @@ removal that fails are recorded in an administrator-owned list and retried.
 `guardian_cleanup_pending` and do not fail on it. If a live account is
 re-homed to a trusted directory, the guardian cleans the current home as
 that user and, when its recorded home still exists and is trusted, cleans
-that home too. The record ends when the recorded home is definitely gone or
-both cleanups succeed; the guardian logs both homes once. If the recorded
+that home too. Each user's cleanup worker reports the agent config paths it
+found or edited. A copied backup receipt can first name a path in the other
+home; when removal succeeds, the guardian retries that home's cleanup once.
+The record ends only when every reported path lies in the home its worker
+cleaned, the current home has no DefenseClaw entries for that agent, and the
+recorded home is gone or its worker completed. An absent report, a path outside the home,
+or entries left in the current home keep the record. The warning names the
+path: remove DefenseClaw's entries from that agent's config in the current
+home, delete a stale copied receipt in its `.defenseclaw/connector_backups/`
+folder if it keeps naming the other home, and rerun. If a backup receipt is
+unreadable or invalid, removal still runs, but a re-homed record stays until
+the named receipt is corrected or removed. An operator-edited
+plugin left in the recorded home is left for the operator and does not alone
+keep the record after the current home is verified clean. A home moved by
+copying it and then emptying the old folder counts as moved: the copied
+receipts follow it. A home copied while the old one stays keeps its own
+copies: the copied receipts act on the files in the current home only, and
+a cleanup that fails keeps them for the retry. An agent config that is a
+symlink to a file in the same home is checked through the link, and the
+per-user install writes DefenseClaw's entries into that file and keeps the
+link. A link out of the home (the config, a folder on the way, or a link to
+a missing file) is never changed through: while the file it names still
+holds DefenseClaw's entries, the removal fails, DefenseClaw changes neither
+the link nor that file, and the record stays until you remove those entries
+from that file or replace the link with it. Uninstall runs this cleanup also when a
+`targets.yaml` row still names the re-homed account, and fails a removal that
+leaves a DefenseClaw entry the agent still loads. The guardian logs
+both homes once when cleanup completes. If the recorded
 home may still exist but cannot be trusted, the record stays and the warning
 names it. Uninstall warns and goes on: remove DefenseClaw's entries from
 that agent's config in the recorded home, delete that home if unused, or

@@ -147,7 +147,11 @@ func purgeUserFiles(home, dataDir string, uid int, summary *PurgeSummary) error 
 // ~/.local/bin (see RemoveUserBinaries) and DefenseClaw's entries in the
 // account's uv cache (see RemoveUserUVCacheEntries). The caller stops the
 // account's per-user gateway first. A home that no longer exists is not an
-// error.
+// error. The per-user worker runs it only after every Remove of the same job
+// was checked clean (GAP-0632), and it keeps the state while a connector
+// backup stays after the teardowns: that backup belongs to a file DefenseClaw
+// left for the account (rel-1-0-3 GAP-0258). That check runs before the
+// backup of the account's own install, which would move connector_backups.
 func PurgeUserState(ctx context.Context, opts InstallOptions) (PurgeSummary, error) {
 	var summary PurgeSummary
 	if err := refuseStandaloneRootInProcess("purge"); err != nil {
@@ -216,6 +220,9 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) (PurgeSummary, err
 			}
 			if len(failed) > 0 {
 				return fmt.Errorf("enterprise hooks: kept the per-user state for its backups: %w", errors.Join(failed...))
+			}
+			if err := keptManagedBackupsError(dataDir); err != nil {
+				return err
 			}
 			backedUp, err := backupPerUserInstall(home, dataDir, time.Now())
 			if err != nil {

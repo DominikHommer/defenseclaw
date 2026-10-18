@@ -614,10 +614,19 @@ store (`/var/lib/defenseclaw/sandbox` on Linux or
 file, and its key (`/var/lib/defenseclaw/redaction-correlation.key` or
 `/opt/cisco/defenseclaw/runtime/redaction-correlation.key`) stays if it is a
 regular file. They are root-owned while the service account is gone; the next
-`ensure` adopts them.
+`ensure` adopts them. The lifecycle directory then also keeps the root-only
+record of the sandbox setup those sandboxes were made under
+(`openshell-state.kept.json`), so the next `ensure` reports a driver or
+version switch for them and keeps the 1.0.1 upgrade bridge.
 The root-owned `lifecycle.lock` stays in its lifecycle directory so waiting
 runs keep using the same lock. Use `--purge` for a clean image or to remove the
-retained sandbox store and key. On Linux, the files in your policies folder,
+retained sandbox store and key, and the setup record. Purge in the first removal: a
+purge runs the deployment's own binary, which a payload uninstall, `apt
+remove`, `dnf remove` and the MDM removal scripts delete. After one of those,
+install the package or payload again and purge, or delete
+`/var/lib/defenseclaw` (macOS: `/opt/cisco/defenseclaw/runtime`) and the
+lifecycle directory by hand. A purge also deletes each enrolled account's
+sandboxes and any sandbox work not pulled yet. On Linux, the files in your policies folder,
 `/etc/defenseclaw/policies`, stay. The vendor policies in
 `/opt/defenseclaw/share/policies` and any policy folder left without a file
 go; `ensure` writes the vendor policies again. To turn the
@@ -639,7 +648,7 @@ to keep the machine state for a reinstall instead.
 - **Linux packages.** Removing the package runs the lifecycle `uninstall`
   first, without purge, which removes most machine state and the
   `defenseclaw` account; the kept sandbox store and key above
-  stay when an account keeps sandboxes. This also runs when a package install
+  stay when an account keeps sandboxes, with the setup record. This also runs when a package install
   failed and rolled back (then the rejected `config.yaml` goes too). `apt purge` also deletes what a failed uninstall
   left of `/etc/defenseclaw`, `/var/lib/defenseclaw` (including a kept sandbox
   store and key), `/var/lib/defenseclaw-hook-guardian`, and `/var/log/defenseclaw`;
@@ -676,8 +685,10 @@ to keep the machine state for a reinstall instead.
 - **macOS.** A pkg has no uninstaller. The lifecycle removes the binaries
   itself and forgets the package receipt (`com.cisco.defenseclaw.enterprise`).
 - **Registrations left, warning (Linux and macOS).** Each user's registrations
-  are removed as that user. If the user's home is unavailable, the directory
-  gives a removed account no home while its recorded home remains, or a
+  are removed as that user. If the user's home is unavailable, the recorded
+  home of a removed or re-homed account is gone (nothing is left to remove),
+  the directory gives a removed account no home while its recorded home
+  remains, or a
   re-homed account's current home was cleaned but its old home cannot be
   trusted, uninstall warns with `per_user_hooks_remaining` and goes on. The
   warning names what may remain. When the home is available, remove
