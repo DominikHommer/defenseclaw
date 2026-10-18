@@ -49,8 +49,6 @@ try {
                 $install = [IO.Path]::Combine($Root, $Name, 'DefenseClaw')
                 $bin = [IO.Path]::Combine($install, 'bin')
                 $libexec = [IO.Path]::Combine($install, 'libexec')
-                $compilerLib = [IO.Path]::Combine($install, 'lib')
-                $compilerDir = [IO.Path]::Combine($compilerLib, 'defenseclaw')
                 [void][IO.Directory]::CreateDirectory($bin)
                 [void][IO.Directory]::CreateDirectory($libexec)
                 $gateway = [IO.Path]::Combine($bin, 'defenseclaw-gateway.exe')
@@ -59,9 +57,6 @@ try {
                     InstallRoot = $install
                     BinDirectory = $bin
                     LibexecDirectory = $libexec
-                    CompilerLibDirectory = $compilerLib
-                    CompilerDirectory = $compilerDir
-                    CompilerPath = [IO.Path]::Combine($compilerDir, 'policy_compiler.py')
                     ManagedIPCDirectory = [IO.Path]::Combine($install, 'ipc')
                     GatewayPath = $gateway
                     BrokerPath = ''
@@ -162,26 +157,104 @@ try {
             # Removal with nothing installed is a no-op.
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $layout
 
-            # The Fleet compiler is the only Python source admitted under
-            # the protected lib tree. A sibling or link still aborts uninstall.
-            $layout = New-TestLayout 'compiler'
-            [void][IO.Directory]::CreateDirectory($layout.CompilerDirectory)
-            [IO.File]::WriteAllText($layout.CompilerPath, 'print("compiler")')
-            Test-Accepted 'standalone tree with Fleet compiler' $layout
-            $unexpectedCompiler = [IO.Path]::Combine($layout.CompilerDirectory, 'other.py')
-            [IO.File]::WriteAllText($unexpectedCompiler, 'print("unexpected")')
-            Test-Refused 'unexpected compiler sibling' {
-                Assert-DefenseClawManagedInstallTree -Layout $layout
-            } 'unexpected file'
-            [IO.File]::Delete($unexpectedCompiler)
-            $linkedCompiler = New-TestLayout 'linked-compiler'
-            [void][IO.Directory]::CreateDirectory($linkedCompiler.CompilerDirectory)
-            $compilerTarget = [IO.Path]::Combine($Root, 'outside-compiler.py')
-            [IO.File]::WriteAllText($compilerTarget, 'print("outside")')
-            if (New-TestLink $linkedCompiler.CompilerPath $compilerTarget) {
-                Test-Refused 'compiler reparse point' {
-                    Assert-DefenseClawManagedInstallTree -Layout $linkedCompiler
+            # GAP-0270: a 1.0.2 standalone install left lib\defenseclaw for
+            # the Fleet compiler this release no longer installs. Uninstall
+            # accepts the two directories only while they are empty, and a
+            # Fleet-off upgrade removes them. Any content stays refused and
+            # the retire deletes nothing but the old compiler.
+            function Get-RetiredLib([hashtable]$Layout) {
+                return [IO.Path]::Combine($Layout.InstallRoot, 'lib')
+            }
+            $absent = New-TestLayout 'retired-absent'
+            Test-Accepted 'tree without the retired lib directories' $absent
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $absent
+            if (-not [IO.File]::Exists($absent.GatewayPath)) {
+                $failures.Add('the retire with no lib tree touched bin')
+            }
+
+            $empty = New-TestLayout 'retired-empty'
+            $emptyLib = Get-RetiredLib $empty
+            $emptyChild = [IO.Path]::Combine($emptyLib, 'defenseclaw')
+            [void][IO.Directory]::CreateDirectory($emptyChild)
+            Test-Accepted 'tree with the empty retired lib\defenseclaw' $empty
+            try {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $empty
+            }
+            catch {
+                $failures.Add("standalone uninstall refused the empty retired lib tree: $($_.Exception.Message)")
+            }
+            [IO.Directory]::Delete($emptyChild)
+            Test-Accepted 'tree with only the empty retired lib' $empty
+            [void][IO.Directory]::CreateDirectory($emptyChild)
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $empty
+            if ([IO.Directory]::Exists($emptyLib)) {
+                $failures.Add('the Fleet-off retire left the empty lib tree')
+            }
+            if (-not [IO.File]::Exists($empty.GatewayPath)) {
+                $failures.Add('the Fleet-off retire touched bin')
+            }
+            Test-Accepted 'tree after the Fleet-off retire' $empty
+
+            $compiler = New-TestLayout 'retired-compiler'
+            $compilerChild = [IO.Path]::Combine((Get-RetiredLib $compiler), 'defenseclaw')
+            [void][IO.Directory]::CreateDirectory($compilerChild)
+            [IO.File]::WriteAllText([IO.Path]::Combine($compilerChild, 'policy_compiler.py'), 'print("compiler")')
+            Test-Refused 'retired lib\defenseclaw holding the old compiler (walk)' {
+                Assert-DefenseClawManagedInstallTree -Layout $compiler
+            } 'unexpected (file|directory) from managed install root'
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $compiler
+            if ([IO.Directory]::Exists((Get-RetiredLib $compiler))) {
+                $failures.Add('the Fleet-off retire left the compiler or its lib tree')
+            }
+            Test-Accepted 'tree after retiring the old compiler' $compiler
+
+            $kept = New-TestLayout 'retired-nonempty'
+            $keptChild = [IO.Path]::Combine((Get-RetiredLib $kept), 'defenseclaw')
+            [void][IO.Directory]::CreateDirectory($keptChild)
+            $keptCompiler = [IO.Path]::Combine($keptChild, 'policy_compiler.py')
+            $keptOther = [IO.Path]::Combine($keptChild, 'other.py')
+            [IO.File]::WriteAllText($keptCompiler, 'print("compiler")')
+            [IO.File]::WriteAllText($keptOther, 'print("unexpected")')
+            Test-Refused 'non-empty retired lib\defenseclaw (uninstall)' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $kept
+            } 'unexpected (file|directory) from managed install root: .*The uninstall stopped before it changed anything'
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $kept
+            if ([IO.File]::Exists($keptCompiler)) {
+                $failures.Add('the Fleet-off retire kept the old compiler beside other content')
+            }
+            if (-not [IO.File]::Exists($keptOther)) {
+                $failures.Add('the Fleet-off retire removed content DefenseClaw did not install')
+            }
+            Test-Refused 'non-empty retired lib\defenseclaw after the retire (walk)' {
+                Assert-DefenseClawManagedInstallTree -Layout $kept
+            } 'unexpected (file|directory) from managed install root'
+
+            $sibling = New-TestLayout 'retired-sibling'
+            $siblingDirectory = [IO.Path]::Combine((Get-RetiredLib $sibling), 'other')
+            [void][IO.Directory]::CreateDirectory($siblingDirectory)
+            Test-Refused 'unknown directory under the retired lib (walk)' {
+                Assert-DefenseClawManagedInstallTree -Layout $sibling
+            } 'unexpected directory from managed install root'
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $sibling
+            if (-not [IO.Directory]::Exists($siblingDirectory)) {
+                $failures.Add('the Fleet-off retire removed an unknown directory under lib')
+            }
+
+            $linked = New-TestLayout 'retired-linked'
+            [void][IO.Directory]::CreateDirectory((Get-RetiredLib $linked))
+            $linkedTarget = [IO.Path]::Combine($Root, 'outside-lib')
+            [void][IO.Directory]::CreateDirectory($linkedTarget)
+            [IO.File]::WriteAllText([IO.Path]::Combine($linkedTarget, 'policy_compiler.py'), 'print("outside")')
+            if (New-TestLink ([IO.Path]::Combine((Get-RetiredLib $linked), 'defenseclaw')) $linkedTarget) {
+                Test-Refused 'linked retired lib\defenseclaw (walk)' {
+                    Assert-DefenseClawManagedInstallTree -Layout $linked
                 } 'reparse point'
+                Test-Refused 'linked retired lib\defenseclaw (retire)' {
+                    Remove-DefenseClawRetiredStandaloneCompiler -Layout $linked
+                } 'reparse point'
+                if (-not [IO.File]::Exists([IO.Path]::Combine($linkedTarget, 'policy_compiler.py'))) {
+                    $failures.Add('the Fleet-off retire followed a link out of the install tree')
+                }
             }
 
             # Anything other than the exact leaves stays refused, and a
@@ -357,6 +430,9 @@ try {
             if (-not [IO.Directory]::Exists($secureClient.ManagedIPCDirectory)) {
                 $failures.Add('Secure Client ipc directory was removed by the standalone helper')
             }
+            $secureClient = New-TestLayout 'secure-client-lib'
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($secureClient.InstallRoot, 'lib', 'defenseclaw'))
+            Test-Refused 'Secure Client allow-list (retired lib)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected directory'
             $secureClient = New-TestLayout 'secure-client-share'
             $secureClientPlugin = New-Plugin $secureClient
             Test-Refused 'Secure Client allow-list (share)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected directory'

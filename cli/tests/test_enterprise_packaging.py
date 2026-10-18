@@ -44,6 +44,25 @@ def test_managed_package_recipes_exclude_fleet_compiler():
     assert "$layout['CompilerPath']" not in windows_layout
 
 
+def test_windows_standalone_retires_the_empty_compiler_tree():
+    # GAP-0270: 1.0.2 Setup created lib\defenseclaw for the Fleet compiler.
+    # The Fleet-off retire and every uninstall install-tree check use the same
+    # empty-only helper; no dead compiler layout key is read any more.
+    module = (ROOT / "packaging/windows/DefenseClawEnterprise.psm1").read_text(encoding="utf-8")
+    for key in ("CompilerLibDirectory", "CompilerDirectory"):
+        assert key not in module
+    retire = module[module.index("if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {"):]
+    assert retire.splitlines()[1].strip() == "Remove-DefenseClawRetiredStandaloneCompiler -Layout $Layout"
+    helper = module[module.index("function Get-DefenseClawEmptyRetiredCompilerDirectories {"):]
+    helper = helper[: helper.index("\n}\n")]
+    assert "ReparsePoint" in helper and "-notin $empty" in helper
+    for function in ("Assert-DefenseClawManagedInstallTree", "Remove-DefenseClawCommittedEmptyInstallRoot"):
+        body = module[module.index(f"function {function} {{"):]
+        body = body[: body.index("\nfunction ")]
+        assert "Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot" in body, function
+        assert "-Name CompilerPath" not in body, function
+
+
 def _unit(name: str) -> list[str]:
     return (SYSTEMD / name).read_text(encoding="utf-8").splitlines()
 
