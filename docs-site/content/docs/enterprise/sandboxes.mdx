@@ -220,7 +220,7 @@ contact.
 | --- | --- | --- | --- |
 | Hardware | Any supported host | KVM. On EC2, a nested-virtualization type (for example m8i) or a `.metal` size. Graviton needs metal. | Apple silicon |
 | Group membership | The user is in `docker` | The user is in `kvm` (and `/dev/kvm` is readable and writable for them) and in `docker`, because the agent images are built in Docker for each user | None |
-| Also needed | Docker Engine 28 or newer with BuildKit, Landlock (kernel 6.2 or newer) | `e2fsprogs` 1.43 or newer, a Docker socket for image builds | `e2fsprogs` (see below), and Docker Desktop running for the user: the agent images are built there, and `sandbox doctor` checks it |
+| Also needed | Docker Engine 28 or newer with BuildKit, Landlock ABI 3 or newer (kernel 6.2 upstream; a distribution kernel may carry a backport, and `sandbox doctor` reports the ABI of the running kernel) | `e2fsprogs` 1.43 or newer, a Docker socket for image builds | `e2fsprogs` (see below), and Docker Desktop running for the user: the agent images are built there, and `sandbox doctor` checks it |
 | Service settings | Rendered `gateway.toml`, run by DefenseClaw's user unit | Rendered `gateway.toml`, run by DefenseClaw's user unit (it sets the umask the driver needs) | Rendered `gateway.toml`, run by DefenseClaw's LaunchAgent |
 
 `ensure` never adds anyone to a group. Adding people to `docker` or `kvm` is
@@ -279,6 +279,15 @@ harness session. On macOS the user services run in the account's launchd
 `gui` domain when available, otherwise its `user` domain; logout that removes
 that domain also ends its services, so a detached run does not guarantee
 survival of logout.
+
+**Macs where a user only signs in over SSH (unsupported).** The sandbox
+services on macOS are LaunchAgents. An SSH-only session has no `gui` domain
+and does not load the account's LaunchAgents, so the sandbox daemon is not
+started for a user who never signs in at the Mac's desktop, and one that is
+started by hand in the `user` domain keeps running after the SSH session ends
+instead of stopping at the user's last logout. DefenseClaw does not support
+sandboxes for an SSH-only macOS account. Have the user sign in to the desktop
+session (the console or Screen Sharing) before they use `defenseclaw sandbox`.
 
 To preserve the same interactive terminal, launch inside your own tmux
 session (`tmux new -s sandbox`), detach with Ctrl-B then D, and reattach with

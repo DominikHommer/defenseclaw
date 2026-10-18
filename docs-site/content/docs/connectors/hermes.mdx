@@ -331,6 +331,13 @@ only in the image; nothing on your host changes.
     `defenseclaw-bedrock-mantle-openai-<region>`, through the image's managed
     `defenseclaw` provider (`--provider defenseclaw -m <model>`)
   - `defenseclaw-anthropic`, through Hermes' built-in `anthropic` provider
+- **Model limit.** The image's pinned Hermes Agent 0.19.0 sends `max_tokens`
+  for models it does not know. The Bedrock `gpt-5.6-luna` model refuses it
+  (HTTP 400, `unsupported_parameter`) and accepts `max_completion_tokens`, so
+  a sandboxed Hermes cannot complete a call on that model, while Hermes 0.21
+  on the host can. This is the harness version's request shape, not a
+  DefenseClaw or OpenShell block. Use another model of the profile in the
+  sandbox, or run Hermes on the host.
 - **Launch flags.** Skip-permissions mode adds `--yolo`. A run with `--safe`
   drops `--yolo` and every prefix Hermes accepts for it. A headless run is
   `hermes chat -q <prompt> -Q`; pass `-- chat -q "TEXT"` to `sandbox run`
