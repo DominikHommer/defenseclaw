@@ -116,9 +116,7 @@ def test_saved_search_sandbox_fields_match_shipped_telemetry_schema() -> None:
         for match in re.findall(r"(?m)^- id: (defenseclaw\.[\w.]+)$", path.read_text(encoding="utf-8"))
     }
     referenced_fields = {
-        match
-        for search in searches.values()
-        for match in re.findall(r"record\.body\.(defenseclaw\.[\w.]+)", search)
+        match for search in searches.values() for match in re.findall(r"record\.body\.(defenseclaw\.[\w.]+)", search)
     }
     assert referenced_fields
     assert referenced_fields <= shipped_fields
