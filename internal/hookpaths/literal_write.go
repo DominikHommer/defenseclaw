@@ -30,6 +30,10 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 	if !ok {
 		return nil
 	}
+	return literalWriteOperandsFile(command, file, cwd, home)
+}
+
+func literalWriteOperandsFile(command string, file *syntax.File, cwd, home string) (operands []string) {
 	add := func(name, base string) {
 		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
 			return
@@ -235,6 +239,10 @@ func SedReplacedOperands(command, cwd, home string) map[string]bool {
 	if !ok {
 		return nil
 	}
+	return sedReplacedOperandsFile(file, cwd, home)
+}
+
+func sedReplacedOperandsFile(file *syntax.File, cwd, home string) map[string]bool {
 	replaced := map[string]bool{}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)

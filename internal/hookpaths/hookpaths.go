@@ -85,6 +85,11 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 	if !parsed {
 		return nil, false, false
 	}
+	operands, dynamic = shellWriteOperandsFile(file, cwd, home)
+	return operands, true, dynamic
+}
+
+func shellWriteOperandsFile(file *syntax.File, cwd, home string) (operands []string, dynamic bool) {
 	for _, occurrence := range shellWriteOccurrences(file, cwd, home) {
 		if !occurrence.Static {
 			dynamic = true
@@ -94,7 +99,7 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 			operands = append(operands, occurrence.Path)
 		}
 	}
-	return operands, true, dynamic
+	return operands, dynamic
 }
 
 type shellWriteOccurrence struct {
@@ -148,6 +153,10 @@ func ShellExtraWriteOperands(command, cwd, home string) []ExtraWriteOperand {
 	if !ok {
 		return nil
 	}
+	return shellExtraWriteOperandsFile(file, cwd, home)
+}
+
+func shellExtraWriteOperandsFile(file *syntax.File, cwd, home string) []ExtraWriteOperand {
 	var operands []ExtraWriteOperand
 	poison := shellVariablePoisonForFile(file, home)
 	states := shellWordStates(file, home, poison)
@@ -170,6 +179,10 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 	if !ok {
 		return nil, true
 	}
+	return shellDynamicWriteOperandsFile(file, cwd, home)
+}
+
+func shellDynamicWriteOperandsFile(file *syntax.File, cwd, home string) (operands []string, unknown bool) {
 	poison := shellVariablePoisonForFile(file, home)
 	states := shellWordStates(file, home, poison)
 	candidates := shellVariableCandidates(file, cwd, home)
@@ -205,17 +218,17 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 		if len(names) == 0 {
 			return true
 		}
-		// Count the Cartesian product before expanding it. A loop with more
-		// than sixteen literal values is still a bounded write when the total
-		// fits in the wire format; an excessive product must remain unknown.
-		product := 1
+		// Bound the Cartesian product before visiting candidates. A loop may
+		// have more than sixteen literal values when the total still fits.
+		combinations := 1
 		for _, name := range names {
 			values := candidates.values[name]
-			if len(values) == 0 || len(values) > MaxWriteTargets/product {
+			if candidates.unknown[name] || len(values) == 0 ||
+				combinations > MaxWriteTargets/len(values) {
 				unknown = true
 				return true
 			}
-			product *= len(values)
+			combinations *= len(values)
 		}
 		var expandCandidates func(int, shellVariables)
 		expandCandidates = func(index int, vars shellVariables) {
@@ -233,9 +246,6 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 			}
 			name := names[index]
 			values := candidates.values[name]
-			if candidates.unknown[name] {
-				unknown = true
-			}
 			for _, value := range values {
 				vars[name] = value
 				expandCandidates(index+1, vars)
@@ -397,6 +407,11 @@ func staticShellWord(
 	word *syntax.Word, env expand.Environ, haveHome bool, vars shellVariables, poison shellVariablePoison,
 ) (string, bool) {
 	if word == nil {
+		return "", false
+	}
+	// Fields expands braces eagerly. A word with more than one possible
+	// result is not a fixed pathname, so reject it before that expansion.
+	if braceWordCount(word, 1) > 1 {
 		return "", false
 	}
 	for i, part := range word.Parts {
@@ -1477,6 +1492,9 @@ func shellWordDynamicParamNames(word *syntax.Word, home string) ([]string, bool)
 	if word == nil {
 		return nil, true
 	}
+	if braceWordCount(word, 1) > 1 {
+		return nil, true
+	}
 	syntax.Walk(word, func(node syntax.Node) bool {
 		if unknown {
 			return false
@@ -1855,31 +1873,43 @@ func Resolve(payload []byte) string {
 				truncated = truncated || fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded
 				// A command over the analysis limits has no path facts, but
 				// the gateway still checks each literal redirect operand.
-				var parsed, dynamic, dynamicUnknown bool
-				operands, parsed, dynamic = ShellWriteOperands(command, cwd, home)
+				file, parsed := parseShell(command)
+				var dynamic, dynamicUnknown bool
+				if parsed {
+					operands, dynamic = shellWriteOperandsFile(file, cwd, home)
+				}
 				if dynamic {
-					dynamicOperands, dynamicUnknown = ShellDynamicWriteOperands(command, cwd, home)
-					if dynamicUnknown && SafeDynamicRedirect(command, cwd, home) {
+					dynamicOperands, dynamicUnknown = shellDynamicWriteOperandsFile(file, cwd, home)
+					if dynamicUnknown && safeDynamicRedirectFile(file, cwd, home, true) {
 						sourceFacts[SafeDynamicKey] = "1"
 					}
 				}
-				literalOperands = LiteralWriteOperands(command, cwd, home)
-				extraOperands = ShellExtraWriteOperands(command, cwd, home)
-				sedOperands = SedReplacedOperands(command, cwd, home)
+				if parsed {
+					literalOperands = literalWriteOperandsFile(command, file, cwd, home)
+					extraOperands = shellExtraWriteOperandsFile(file, cwd, home)
+					sedOperands = sedReplacedOperandsFile(file, cwd, home)
+				}
 				for path, safe := range sedOperands {
 					if !safe {
 						sourceFacts[SedRelinkFactPrefix+path] = "1"
 					}
 				}
-				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
+				if parsed {
+					directoryOperands, directoryUnknown = shellDirectoryWriteOperandsFile(command, file, cwd, home, sourceFacts, true, false)
+				}
 				truncated = truncated || directoryUnknown
 				truncated = truncated || !parsed || dynamicUnknown
+				if parsed && strings.Contains(command, "{") && oversizedBraceWords(file) {
+					truncated = true
+				}
 				// A link the command creates can make a later write a write
 				// to a protected file (GAP-1505). The command of an
 				// apply_patch tool is a patch envelope, not shell.
 				if !isApplyPatchToolName(tool) {
-					links = commandLinksWithFacts(command, cwd, home, sourceFacts, true)
-					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
+					links = commandLinksWithFactsFile(command, file, cwd, home, sourceFacts, true)
+					if parsed {
+						safeRedirects = safeShellRedirectOccurrencesWithFactsFile(command, file, cwd, home, sourceFacts)
+					}
 					truncated = truncated || !links.known
 				}
 				break
@@ -2200,16 +2230,27 @@ func commandLinks(command, cwd, home string) shellLinks {
 }
 
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
-	links := shellLinks{known: true}
 	file, parsed := parseShell(command)
 	if !parsed {
+		file = nil
+	}
+	return commandLinksWithFactsFile(command, file, cwd, home, facts, record)
+}
+
+func commandLinksWithFactsFile(command string, file *syntax.File, cwd, home string, facts map[string]string, record bool) shellLinks {
+	return commandLinksWithFactsFileText(command, command, file, cwd, home, facts, record)
+}
+
+func commandLinksWithFactsFileText(command, linkText string, file *syntax.File, cwd, home string, facts map[string]string, record bool) shellLinks {
+	links := shellLinks{known: true}
+	if file == nil {
 		// Resolve already marks a command that does not parse incomplete.
-		if opaqueLink.MatchString(command) {
+		if opaqueLink.MatchString(linkText) {
 			links.unknown(true)
 		}
 		return links
 	}
-	if opaqueLinkText(file, command, home) {
+	if opaqueLinkText(file, linkText, home) {
 		links.unknown(true)
 		return links
 	}
@@ -2469,6 +2510,10 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 	if !ok {
 		return nil
 	}
+	return safeShellRedirectOccurrencesWithFactsFile(command, file, cwd, home, facts)
+}
+
+func safeShellRedirectOccurrencesWithFactsFile(command string, file *syntax.File, cwd, home string, facts map[string]string) []RedirectOccurrence {
 	writeOccurrences := shellWriteOccurrences(file, cwd, home)
 	result := make([]RedirectOccurrence, 0, len(writeOccurrences))
 	for _, occurrence := range writeOccurrences {
@@ -2505,7 +2550,7 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 			seenLink = true
 			continue
 		}
-		site := commandLinksWithFacts(command[start:end], cwd, home, facts, false)
+		site := commandLinksWithFactsFileText(command, command[start:end], &syntax.File{Stmts: []*syntax.Stmt{stmt}}, cwd, home, facts, false)
 		seenLink = seenLink || !site.known || len(site.aliases) > 0
 	}
 	return result

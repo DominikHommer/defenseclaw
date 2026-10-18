@@ -34,7 +34,14 @@ func safeDynamicRedirect(command, cwd, home string, verifyFS bool) bool {
 		return false
 	}
 	file, ok := parseShell(command)
-	if !ok || len(file.Stmts) == 0 || len(file.Stmts) > 2 {
+	if !ok {
+		return false
+	}
+	return safeDynamicRedirectFile(file, cwd, home, verifyFS)
+}
+
+func safeDynamicRedirectFile(file *syntax.File, cwd, home string, verifyFS bool) bool {
+	if !filepath.IsAbs(cwd) || !filepath.IsAbs(home) || len(file.Stmts) == 0 || len(file.Stmts) > 2 {
 		return false
 	}
 	variable, kind := "", ""

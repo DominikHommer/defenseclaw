@@ -50,6 +50,13 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 	if !parsed || !filepath.IsAbs(cwd) {
 		return nil, false
 	}
+	return shellDirectoryWriteOperandsFile(command, file, cwd, home, directoryFacts, record, strict)
+}
+
+func shellDirectoryWriteOperandsFile(command string, file *syntax.File, cwd, home string, directoryFacts map[string]string, record, strict bool) (operands []RedirectOccurrence, unknown bool) {
+	if !filepath.IsAbs(cwd) {
+		return nil, false
+	}
 	physical := func(logical string) (string, bool) {
 		key := DirectoryFactPrefix + logical
 		if !record && directoryFacts != nil {
@@ -95,7 +102,7 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 	}
 	state := shellDirectoryState{logical: filepath.Clean(cwd)}
 	state.physical, state.known = physical(state.logical)
-	safety := SafeShellRedirectOccurrencesWithFacts(command, cwd, home, directoryFacts)
+	safety := safeShellRedirectOccurrencesWithFactsFile(command, file, cwd, home, directoryFacts)
 	safetyByOffset := make(map[int]bool, len(safety))
 	for _, occurrence := range safety {
 		safetyByOffset[occurrence.Offset] = occurrence.Safe
@@ -142,8 +149,13 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		if !s.changed {
 			return
 		}
-		literals := LiteralWriteOperands(statement, s.logical, home)
-		extras := ShellExtraWriteOperands(statement, s.logical, home)
+		statementFile, statementParsed := parseShell(statement)
+		var literals []string
+		var extras []ExtraWriteOperand
+		if statementParsed {
+			literals = literalWriteOperandsFile(statement, statementFile, s.logical, home)
+			extras = shellExtraWriteOperandsFile(statementFile, s.logical, home)
+		}
 		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home}
 		facts := actionfacts.Analyze(inner)
 		writes := append(make([]RedirectOccurrence, 0, len(redirects)+len(literals)+len(extras)), redirects...)
