@@ -3906,7 +3906,7 @@ func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
 			t.Fatalf("path=%s want /api/v1/openhands/hook", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"hook_output":{"decision":"deny","reason":"policy denied"}}`))
+		_, _ = w.Write([]byte(`{"action":"block","hook_output":{"decision":"deny","reason":"policy denied"}}`))
 	}))
 	defer server.Close()
 	addr := strings.TrimPrefix(server.URL, "http://")
@@ -3949,7 +3949,7 @@ func TestOpenHandsHookScript_RetriesBusyGateway(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":"rate_limited","retry_after_seconds":"1"}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"hook_output":{"decision":"allow"}}`))
+		_, _ = w.Write([]byte(`{"action":"allow","hook_output":{"decision":"allow"}}`))
 	}))
 	defer server.Close()
 	dir := t.TempDir()

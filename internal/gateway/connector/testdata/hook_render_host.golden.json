@@ -22,8 +22,8 @@
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 7365,
-      "sha256": "30ca208b3c1e4a1d175d3e50e9a6af2d53b8f896e15aeb2f623dc8650342d92e"
+      "size": 8569,
+      "sha256": "98b1e271281dd0dc8bd59bbdc03399fcc47ca51c600ff3eaeee7c33a606c133b"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -69,8 +69,8 @@
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 8404,
-      "sha256": "9ddd0a16de8710f05e0a3c748a69ab205eef03b018e0ab9e9b6917ab57295b89"
+      "size": 8477,
+      "sha256": "9ebaf3bee066ebb6afe5e036638d0e8b1c07f90d7323e8b567bdad47e0069063"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -962,8 +962,8 @@
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",
-      "size": 9179,
-      "sha256": "dc0ab4b49768476bbd24b7828ffd18db2676862a9c5a9a6ea7bd4a4269cf0149"
+      "size": 9875,
+      "sha256": "10b47d44d58cf49e633272c5d4685d9db0f9f6b4e4b6088530d422b60a4605eb"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1056,8 +1056,8 @@
     },
     "devin-hook.sh": {
       "mode": "-rwx------",
-      "size": 6788,
-      "sha256": "bda64a7191e98f991011c40efd5044510d8b0117b3fffa7b8900d35308c0f079"
+      "size": 7446,
+      "sha256": "711daee369d879c1db3392ba72b4dfedd91a5c78de443be52b3ebc9327bf207d"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1206,8 +1206,8 @@
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 9170,
-      "sha256": "b201081e99508f45aee238b18c787527b62aa9031e3d12cdb49f5101734c5cde"
+      "size": 10382,
+      "sha256": "2bdc5cf507d199bf3233d1fd79d257784e333d975da076c6ec2686d2e17314f9"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1253,8 +1253,8 @@
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 10217,
-      "sha256": "1a5d776d4a4aa92d6d04626f609a526e954a80828100ffe9d7e9df55035666eb"
+      "size": 10290,
+      "sha256": "bb5bd641aeade42b986db91b1f1625e82ac99cdf0c2da08e6722bb71b8740c28"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1320,8 +1320,8 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 7571,
-      "sha256": "f4a894331d59728f967542072d258b8866879d58888fc7603cd1754c743fc14e"
+      "size": 8161,
+      "sha256": "5306e82c3a7b398da8d432b315f7ee08c20e2a937a4c3716709b071dcefa48f5"
     }
   },
   "kiro/managed=1/scoped=1/fail=open": {
@@ -1394,8 +1394,8 @@
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 7168,
-      "sha256": "3bffbc0a71686beeeecabdd9f1ba83ae4226b47dc4ded9afdc343672da857333"
+      "size": 8372,
+      "sha256": "10d4d4bfcd335887836f554016920851ff9a7505a067666ef64d7507cf6578aa"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
@@ -1414,18 +1414,18 @@
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",
-      "size": 8995,
-      "sha256": "bb7aa1a646e878d9d7206cfdf224b0c58585233140658e101dc4f262302f07ad"
+      "size": 9691,
+      "sha256": "c7ae1299db4a38cb9f386b65245a657d23dbea85a594e9174c314a2cdb3a3b7a"
     },
     "devin-hook.sh": {
       "mode": "-rwx------",
-      "size": 6610,
-      "sha256": "82c624c12dbe62cc15c84c813fac7ed86eaa2afcbe89b5faa71d1ee0e1010b11"
+      "size": 7268,
+      "sha256": "0d9d661ca5d442c258d2c0a4e65e663bd620e1942b784f23c9b3bc4e2e4ac5ea"
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 8986,
-      "sha256": "9f6883bc3cf697a6254b22d49a6b36ad16bc1fed8ff3c4ed8b25f30f31752549"
+      "size": 10198,
+      "sha256": "fc01ad74bb1f1aad1fcdc9911cfc7b0933784ba7d71b3cd5066563570be0c3d3"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1449,13 +1449,13 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 7399,
-      "sha256": "d1760a062db05fd772a72a3f58f1e970787b81e87a9750fcdde79a0bf403b631"
+      "size": 7989,
+      "sha256": "328d13eb33502fc5bae3af728a0346dbb2ce9e09669e68795fdc38daaa68081b"
     },
     "openhands-hook.sh": {
       "mode": "-rwx------",
-      "size": 6256,
-      "sha256": "ffe301561219a500be86423b95559dc744890ed29d7ae0030c7a3b683e963d94"
+      "size": 7124,
+      "sha256": "6b02077bbc66d3cadfbeb91906a46acc86f609309b282384b425071ad3e18ad3"
     }
   },
   "legacy/all-scripts-no-token": {
@@ -1481,8 +1481,8 @@
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 7168,
-      "sha256": "de8cacc0297845782a8c9596f7da5bb3b99f8183ce1513487e4a7bbb7f82dfda"
+      "size": 8372,
+      "sha256": "38ac35eba017fe91c96bf33383be6fcece70a95950a9c8a827f5ebff249c6d56"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
@@ -1501,18 +1501,18 @@
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",
-      "size": 8995,
-      "sha256": "b528bce20cbfbf113401dc7cbaade47ade72d72afb983a75b82521dfcdbd2abb"
+      "size": 9691,
+      "sha256": "04c0cee040dfe965b2ee488eef330e1906ca1d10a6d030d53f2a9a315b12957b"
     },
     "devin-hook.sh": {
       "mode": "-rwx------",
-      "size": 6610,
-      "sha256": "1eab906e0fa80b8ff8f1f24908bf7d00f0490262ee8c184a12866cdc568fb342"
+      "size": 7268,
+      "sha256": "4d2319284d2a7657ccb79676c7f03148ee068ca75b0a5ef2e793fb9ca7aa22dc"
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 8986,
-      "sha256": "9f6f417074d529e943ce071e47d9c65f0a498aadf2364e68317f9af63a593592"
+      "size": 10198,
+      "sha256": "f1132e77229ebbd47cfdee5a7c15d5b9ebea2700fe66f08dce38dc78230dafcc"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1536,13 +1536,13 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 7399,
-      "sha256": "9556a992c98ebb7f392d7b2bb64eeee05bf7b79a02b442e2d5c0e6b9a85c8e1d"
+      "size": 7989,
+      "sha256": "48790a9360189a363af7934a668e5a94b29124309fbf63783832a37c79cceb46"
     },
     "openhands-hook.sh": {
       "mode": "-rwx------",
-      "size": 6256,
-      "sha256": "35a8d2d3fb6a0e002accfc65057f48adf563c4c5077bcc9d76e127977ceb0581"
+      "size": 7124,
+      "sha256": "a1eae5567f28a17233f03f6d7f6f8f9ca43ffb6de851b0b8c5a415a9b39d277b"
     }
   },
   "openhands/managed=0/scoped=1/fail=closed": {
@@ -1588,8 +1588,8 @@
     },
     "openhands-hook.sh": {
       "mode": "-rwx------",
-      "size": 6458,
-      "sha256": "e87d0b3c5170f264216f8f598da8216ce4710a838d2ff1d67a814c638f2fd69f"
+      "size": 7326,
+      "sha256": "613356cdb2ebacd55208c6c2cd2ebaf9cf2b7999aa97a7fc5078333e75afce86"
     }
   },
   "openhands/managed=1/scoped=1/fail=open": {

@@ -276,9 +276,10 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-{{if or .Sandbox (and .Managed (not .SecureClient))}}# Every DefenseClaw verdict names its action: an empty or unknown one is no
-# verdict, never an allow (a sandbox workload may have shaped it; a managed
-# hook outside Secure Client fails closed, rel-1-0-3 GAP-0037). A
+{{if or .Sandbox (not .SecureClient)}}# Every DefenseClaw verdict names its action: an empty or unknown one is no
+# verdict, never an allow (a sandbox workload may have shaped it; a hook in
+# fail mode closed blocks on it, open lets the call run: rel-1-0-3 GAP-0037,
+# GAP-0153; a Secure Client render keeps its own contract). A
 # block whose directive is missing or does not block still has to reach
 # Hermes as a block on stdout.
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {

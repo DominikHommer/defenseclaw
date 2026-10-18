@@ -63,7 +63,9 @@ func TestCursorHook_ObserveEmptyHookOutputEmitsAllow(t *testing.T) {
 	// Observe mode: the gateway has nothing to enforce and answers 200
 	// with no hook_output. This is the exact case that produced the
 	// original total lockout. The hook must emit an explicit allow.
-	addr := stubGatewayAddr(t, http.StatusOK, `{}`)
+	// The gateway always names its action (an answer without one is no
+	// verdict and fails closed, rel-1-0-3 GAP-0153).
+	addr := stubGatewayAddr(t, http.StatusOK, `{"action":"allow"}`)
 	stdout, stderr, err := runCursorHookAgainst(
 		t,
 		addr,
@@ -81,7 +83,7 @@ func TestCursorHook_GatewayAllowEnvelopePassedThrough(t *testing.T) {
 		t.Skip("shell scripts not supported on windows")
 	}
 	addr := stubGatewayAddr(t, http.StatusOK,
-		`{"hook_output":{"permission":"allow"}}`)
+		`{"action":"allow","hook_output":{"permission":"allow"}}`)
 	stdout, stderr, err := runCursorHookAgainst(
 		t,
 		addr,
@@ -101,7 +103,7 @@ func TestCursorHook_GatewayDenyEnvelopePassedThrough(t *testing.T) {
 	// A real block decision must still reach Cursor verbatim — the
 	// fail-open hardening must not swallow deny verdicts.
 	want := `{"permission":"deny","user_message":"blocked by policy","agent_message":"blocked by policy"}`
-	addr := stubGatewayAddr(t, http.StatusOK, `{"hook_output":`+want+`}`)
+	addr := stubGatewayAddr(t, http.StatusOK, `{"action":"block","hook_output":`+want+`}`)
 	stdout, _, err := runCursorHookAgainst(
 		t,
 		addr,
