@@ -82,6 +82,15 @@ IDs live only in `reference/checklist.md`. These rows add detail and carry no ID
 | Recognise an OpenShell installed outside the supported route and say DefenseClaw cannot manage its gateway; do not edit it. | A service the user owns must not be restarted or rewritten. | `go test ./internal/openshell -run DoctorOnReleaseBinaries` | `internal/openshell/doctor.go` (`@sym:OpenShellOutsideFormula`, `@sym:OpenShellOutsideUnit`) |
 | Probes read world-readable information only. Mark a fix that restarts the gateway (it stops running sandboxes). | Probes must not touch other users' state. | review the probe | `internal/openshell/doctor.go` (`Fix.RestartsGateway`), `cli/defenseclaw/commands/cmd_doctor.py` (`@sym:_check_kernel_sensor`) |
 
+The private AXIS source is not customer runtime availability. The bounded wire
+contract (`internal/axis/bridgeproto`), pipe owner (`internal/axis/bridgeowner`),
+and Linux factory (`internal/axis/bridgeprocess`) carry no resolver or credential
+authority. Keep the factory's `Session` after cleanup failure: it retains native
+custody independently of the protocol owner's single shutdown attempt. Its
+inert image/fake-custody tests do not qualify an executable bundle, namespace
+tree or a real agent. Runtime activation still needs the full common-policy,
+artifact, native boundary, broker, hook and application gates.
+
 ## Requirements: judges, local models, scanners
 
 IDs live only in `reference/checklist.md`. These rows add detail and carry no IDs.

@@ -1,0 +1,61 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS private peer host contract tests
+
+# Inert/fake-custody tests only. No downloaded peer or workload is executed.
+on:
+  push:
+    branches: [codex/axis-native-build, codex/axis-peer-experiments]
+    paths:
+      - .github/workflows/axis-peer-host-tests.yml
+      - internal/axis/bridgeproto/**
+      - internal/axis/bridgeowner/**
+      - internal/axis/bridgeprocess/**
+      - go.mod
+      - go.sum
+  workflow_dispatch:
+
+# The job reads pinned source and dependencies, without a write token.
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-peer-host-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            go.mod
+            go.sum
+            internal/axis/bridgeproto
+            internal/axis/bridgeowner
+            internal/axis/bridgeprocess
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: 1.26.5
+          cache: false
+      - name: Test real pipes, inert images and fake native custody
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          CGO_ENABLED: '1'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(go env GOVERSION)" = "go1.26.5"
+          go test -race -p 1 ./internal/axis/bridgeproto ./internal/axis/bridgeowner ./internal/axis/bridgeprocess -count=1 -timeout=120s
+          go vet -p 1 ./internal/axis/bridgeproto ./internal/axis/bridgeowner ./internal/axis/bridgeprocess
