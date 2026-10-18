@@ -42,6 +42,16 @@ owned native resources, retain failed cleanup responsibility and keep admission
 closed. This package starts no helper or runtime; fake-custody tests qualify only
 the actual pipe/state behavior they exercise.
 
+Private Windows host staging lives in `internal/openshell/workspace/host_stage.go`
+and `internal/openshell/workspace/HOST_STAGE.md`. Preserve held original source
+identity, policy and unmask paths while sanitizing captured bytes through held
+roots. Never rebind policy to a temporary capture or start stock Git from a
+drive-letter fallback. Unsupported Git formats and incomplete reads refuse.
+Frozen operator fallback facts plus the same captured local config select
+line-ending behavior. The pinned go-git plumbing dependency and exact license
+texts are recorded in `go.mod`, `NOTICE` and `THIRD_PARTY_LICENSES.txt`.
+Host staging alone grants no guest, runtime, credential or provider capability.
+
 `internal/openshell/sandboxcli/session_transport.go` (`@sym:SessionTransport`)
 separates command execution from session orchestration. Bind the transport
 explicitly to the recorded target; pass literal argv without shell rendering.

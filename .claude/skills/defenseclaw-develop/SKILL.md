@@ -28,7 +28,8 @@ agent hook / plugin / proxy / ACP
      telemetry (internal/observability), sandbox controller and runtime contracts (internal/sandboxruntime),
      private AXIS helper protocol, pipe owner and native custody (internal/axis/bridgeproto,
      internal/axis/bridgeowner, internal/axis/bridgeprocess),
-     OpenShell implementation (internal/openshell)
+     OpenShell implementation (internal/openshell), private held-source Windows host staging
+     (internal/openshell/workspace/host_stage.go; no provider activation)
 defenseclaw CLI + TUI (cli/defenseclaw): writes config.yaml only through the shared writer; doctor, setup, migrate
 managed hosts: lifecycle transaction (internal/enterpriseunix, packaging/windows), guardian and enumerator
   (internal/enterprisehooks), packages (.goreleaser.yaml, packaging/)
