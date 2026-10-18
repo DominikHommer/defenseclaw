@@ -540,8 +540,30 @@ func MovedCorruptStores(dbPath string) []MovedCorruptStore {
 		}
 		stores = append(stores, store)
 	}
-	sort.Slice(stores, func(i, j int) bool { return stores[i].MovedAt.Before(stores[j].MovedAt) })
+	// Glob returns the names sorted, so stores moved in the same second keep
+	// their name order.
+	sort.SliceStable(stores, func(i, j int) bool { return stores[i].MovedAt.Before(stores[j].MovedAt) })
 	return stores
+}
+
+// ReportedMovedCorruptStores keeps the stores that carry the note the gateway
+// writes next to every store it moves, oldest first. Only when none has one
+// are all stores kept: then they were moved by an earlier version that kept no
+// note. A file that only has an archive's name is no record of a move, and
+// start and status pointed recovery at such a file instead of the real
+// archive, which moved to a new name because that one was taken
+// (rel-1-0-3:GAP-0106).
+func ReportedMovedCorruptStores(stores []MovedCorruptStore) []MovedCorruptStore {
+	var recorded []MovedCorruptStore
+	for _, store := range stores {
+		if store.CarryOverKnown {
+			recorded = append(recorded, store)
+		}
+	}
+	if len(recorded) == 0 {
+		return stores
+	}
+	return recorded
 }
 
 func hasAuditDBSidecarSuffix(name string) bool {

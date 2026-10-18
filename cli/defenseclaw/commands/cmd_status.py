@@ -292,6 +292,50 @@ def _echo_wrapped(text: str, hang: int) -> None:
     ux.echo(line)
 
 
+def _print_moved_audit_store(db_path: str) -> None:
+    """Say when the gateway moved a corrupt audit store aside, with the
+    copy-first recovery hint, as ``defenseclaw-gateway status`` and doctor do.
+    Otherwise status showed the new, empty store as if nothing had happened
+    (rel-1-0-3:GAP-0105)."""
+    from defenseclaw.commands.cmd_doctor import (
+        _archive_recovery_hint,
+        _archived_sidecars,
+        _is_pre_1_0_archive,
+        _moved_aside_audit_stores,
+        _moved_store_block_allow_summary,
+        _reported_moved_stores,
+    )
+
+    moved = _reported_moved_stores(_moved_aside_audit_stores(db_path))
+    if not moved:
+        return
+    newest = moved[-1]
+    stamp = newest.name[len(Path(db_path).name + ".corrupt-") :][:16]
+    try:
+        when = datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).astimezone()
+        on = f" on {when.isoformat(timespec='seconds')}"
+    except ValueError:
+        on = ""
+    ux.echo()
+    if _is_pre_1_0_archive(newest):
+        ux.ok(
+            f"The audit store DefenseClaw 0.x wrote could not be upgraded and is kept as an archive in "
+            f"{newest}{_archived_sidecars(newest)}{on}; 1.0 starts a new audit history after a 0.x upgrade in "
+            "any case, and block/allow lists live in config.yaml, so they are not affected."
+        )
+        delete = "Delete the archive and its -wal, -shm and -journal files when you no longer need them."
+    else:
+        ux.warn(
+            f"The audit store was corrupt and was moved to {newest}{_archived_sidecars(newest)}{on} by the "
+            f"gateway, which {_moved_store_block_allow_summary(newest)}"
+        )
+        delete = "Delete the moved file and its -wal, -shm and -journal files when they are no longer needed."
+    if shutil.which("sqlite3") is None:
+        ux.subhead("sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html")
+    ux.subhead(_archive_recovery_hint(newest))
+    ux.subhead(delete)
+
+
 @click.command()
 @click.option(
     "--json",
@@ -433,6 +477,8 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
+
+    _print_moved_audit_store(str(getattr(cfg, "audit_db", "") or ""))
 
     # Canonical v8 collection, routing, redaction, and destination status.
     _print_observability_status(cfg, config_has_problems=bool(config_problems))

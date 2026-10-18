@@ -2302,6 +2302,43 @@ def _report_pre_1_0_audit_archive(archive: Path, r: _DoctorResult) -> None:
     )
 
 
+def _moved_aside_audit_stores(db_path: str) -> list[Path]:
+    """The files named like a store the gateway moved aside next to ``db_path``
+    (``<db>.corrupt-<UTC time>[-<id>]``), oldest first; doctor and status
+    report them (internal/audit/corrupt_store.go, ``MovedCorruptStores``)."""
+    if not db_path:
+        return []
+    try:
+        return sorted(
+            path
+            for path in Path(db_path).parent.glob(Path(db_path).name + ".corrupt-*")
+            if not path.name.endswith(("-wal", "-shm", "-journal", _CARRY_OVER_NOTE_SUFFIX)) and path.is_file()
+        )
+    except OSError:
+        return []
+
+
+def _reported_moved_stores(moved: list[Path]) -> list[Path]:
+    """Keep the stores with the note the gateway writes next to every store it
+    moves; only when none has one keep all of them (an earlier version moved
+    them). A file that only has an archive's name is no record of a move, and
+    reporting the newest such name pointed recovery away from the archive
+    (rel-1-0-3:GAP-0106; ``ReportedMovedCorruptStores`` in Go)."""
+    recorded = [path for path in moved if Path(str(path) + _CARRY_OVER_NOTE_SUFFIX).is_file()]
+    return recorded or moved
+
+
+def _archive_recovery_hint(archive: Path) -> str:
+    """The copy-first recovery hint the gateway's start warning and
+    ``defenseclaw-gateway status`` print (``audit.ArchiveRecoveryHint``). It
+    ends with the repair command, so callers print nothing after it."""
+    return (
+        f"To read its audit records, first copy {archive} together with its -wal, -shm and any -journal files "
+        "to a new folder and work only on the copy, because SQLite can change the files it opens. "
+        f"Then run sqlite3 <copy> .recover on the copy. {_archive_header_repair()}"
+    )
+
+
 def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     """Report audit stores the gateway moved aside as corrupt.
 
@@ -2309,20 +2346,11 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     starts a new one; only its log said so, so the reset audit history went
     unnoticed.
     """
-    if not db_path:
-        return
-    try:
-        moved = sorted(
-            path
-            for path in Path(db_path).parent.glob(Path(db_path).name + ".corrupt-*")
-            if not path.name.endswith(("-wal", "-shm", "-journal", _CARRY_OVER_NOTE_SUFFIX)) and path.is_file()
-        )
-    except OSError:
-        return
+    moved = _moved_aside_audit_stores(db_path)
     archives = [path for path in moved if _is_pre_1_0_archive(path)]
     if archives:
         _report_pre_1_0_audit_archive(archives[-1], r)
-    moved = [path for path in moved if path not in archives]
+    moved = _reported_moved_stores([path for path in moved if path not in archives])
     if not moved:
         return
     newest = moved[-1]

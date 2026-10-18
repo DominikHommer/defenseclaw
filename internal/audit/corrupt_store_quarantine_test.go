@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -264,5 +265,72 @@ func TestIsTransientSQLiteProbeError(t *testing.T) {
 		if got := isTransientSQLiteProbeError(codedProbeError(code)); got != want {
 			t.Errorf("isTransientSQLiteProbeError(code %d) = %v, want %v", code, got, want)
 		}
+	}
+}
+
+// rel-1-0-3:GAP-0106: files that only had archive names, one for the second of
+// the move and one later, made the start banner name the later file instead of
+// the archive. The store moved to a new name, and its note says so.
+func TestReportedMovedCorruptStoresNamesTheArchiveNotAFileWithAnArchiveName(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	file, err := os.OpenFile(dbPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open for damage: %v", err)
+	}
+	if _, err := file.WriteAt(make([]byte, 192), 0); err != nil {
+		t.Fatalf("damage header: %v", err)
+	}
+	_ = file.Close()
+	pinQuarantineClock(t, time.Date(2026, 10, 18, 2, 13, 44, 0, time.UTC))
+	others := []string{dbPath + ".corrupt-20261018T021344Z", dbPath + ".corrupt-20261018T021513Z"}
+	for _, name := range others {
+		if err := os.WriteFile(name, []byte("not an audit store"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	recovered, err := OpenDaemonStore(dbPath, &strings.Builder{})
+	if err != nil {
+		t.Fatalf("OpenDaemonStore: %v", err)
+	}
+	defer recovered.Close()
+
+	listed := MovedCorruptStores(dbPath)
+	if len(listed) != 3 {
+		t.Fatalf("MovedCorruptStores = %+v; want the archive and the two other files", listed)
+	}
+	reported := ReportedMovedCorruptStores(listed)
+	if len(reported) != 1 || !reported[0].CarryOverKnown || slices.Contains(others, reported[0].Path) ||
+		!strings.HasPrefix(reported[0].Path, others[0]+"-") {
+		t.Fatalf("ReportedMovedCorruptStores = %+v; want only the archive the start moved", reported)
+	}
+	for _, name := range others {
+		if got, err := os.ReadFile(name); err != nil || string(got) != "not an audit store" {
+			t.Fatalf("%s = %q, %v; want it unchanged", name, got, err)
+		}
+	}
+}
+
+// Stores an earlier version moved have no note; all of them stay reported.
+func TestReportedMovedCorruptStoresKeepsStoresAnEarlierVersionMoved(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "audit.db")
+	for _, stamp := range []string{"20261001T000000Z", "20261002T000000Z"} {
+		if err := os.WriteFile(db+".corrupt-"+stamp, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reported := ReportedMovedCorruptStores(MovedCorruptStores(db))
+	if len(reported) != 2 || reported[1].Path != db+".corrupt-20261002T000000Z" {
+		t.Fatalf("ReportedMovedCorruptStores = %+v; want both stores, newest last", reported)
 	}
 }

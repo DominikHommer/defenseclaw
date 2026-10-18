@@ -39,3 +39,38 @@ func TestPrintMovedCorruptAuditStoresRecoversFromACopyAndNamesTheSidecars(t *tes
 		t.Fatalf("status points SQLite at the archive:\n%s", out)
 	}
 }
+
+// rel-1-0-3:GAP-0106: the start banner named a file that only had an archive's
+// name (the newest stamp) instead of the archive, which moved to a new name
+// because the first one was taken. Only the archive has the gateway's note.
+func TestPrintMovedCorruptAuditStoresNamesTheArchiveNotAFileWithAnArchiveName(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "audit.db")
+	archive := db + ".corrupt-20261018T021344Z-4bfc16b6-f3ca-490f-98a0-71b4f32de5ce"
+	others := []string{db + ".corrupt-20261018T021344Z", db + ".corrupt-20261018T021513Z"}
+	for _, name := range append([]string{archive, archive + "-wal", archive + "-shm"}, others...) {
+		if err := os.WriteFile(name, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	note := `{"carried_over": 0, "error": "file is not a database"}`
+	if err := os.WriteFile(archive+".carryover.json", []byte(note), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	since := time.Date(2026, 10, 18, 2, 13, 43, 0, time.UTC)
+	out := captureStdout(t, func() { printMovedCorruptAuditStores(&config.Config{AuditDB: db}, since) })
+	for _, want := range []string{
+		"moved to " + archive + " together with its -wal and -shm files on ",
+		"0 entries were carried over",
+		audit.ArchiveRecoveryHint(archive),
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("start output lacks %q:\n%s", want, out)
+		}
+	}
+	for _, other := range others {
+		if strings.Contains(out, other+" ") || strings.Contains(out, other+"\n") {
+			t.Fatalf("start output names %s, which is no archive:\n%s", other, out)
+		}
+	}
+}

@@ -508,6 +508,7 @@ func printMovedCorruptAuditStores(cfg *config.Config, since time.Time) {
 			moved = append(moved, store)
 		}
 	}
+	moved = audit.ReportedMovedCorruptStores(moved)
 	if len(moved) == 0 {
 		return
 	}
