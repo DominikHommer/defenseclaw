@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -73,6 +75,79 @@ func applyWindowsEnterpriseGuardianTargetGaps(
 				"that agent's hook calls may not be inspected until the guardian puts them back on its next pass",
 			len(missing), account, connector, strings.Join(missing, ", ")))
 	}
+}
+
+// applyWindowsEnterpriseGuardianTargetsFrom applies the guardian's last pass
+// (loadState) to status and verify, with the hook files of each verified
+// target. Status and verify run without a loaded config (the enterprise
+// windows commands skip the config load), so the Copilot VS Code Local hook
+// file is decided from the installed config (loadInstalled), not from the
+// process's own: the guardian writes it from that file, and with the
+// process's config the check never listed it, so a deleted file left status
+// security-complete (GAP-0146). An unreadable or missing guardian state is
+// left to the guardian status, which fails on it.
+func applyWindowsEnterpriseGuardianTargetsFrom(
+	result *enterprisestatus.Result,
+	loadState func() (enterpriseHookGuardianState, bool, error),
+	loadInstalled func() (*config.Config, error),
+) {
+	state, exists, err := loadState()
+	if err != nil || !exists {
+		return
+	}
+	copilotHookFile := windowsEnterpriseCopilotVSCodeHookFileWantedBy(loadInstalled())
+	applyWindowsEnterpriseGuardianTargetGaps(result, state, windowsEnterpriseGuardianTargetHookFiles(copilotHookFile))
+}
+
+// windowsEnterpriseCopilotVSCodeHookFileWantedBy reports whether the
+// guardian writes each Copilot target's VS Code Local hook file under
+// installed, with the options the guardian builds from it. A config that
+// cannot be read or resolved counts as wanted (fail closed): a verified
+// Copilot target's absent file is then reported, not passed.
+func windowsEnterpriseCopilotVSCodeHookFileWantedBy(installed *config.Config, loadErr error) bool {
+	if loadErr != nil {
+		return true
+	}
+	opts, _, standalone, err := standaloneGuardianOptionsFor(installed)
+	if !standalone || err != nil {
+		return true
+	}
+	hookFile, _ := enterprisepolicy.CopilotVSCodeUserWant(opts)
+	return hookFile
+}
+
+// windowsEnterpriseGuardianTargetHookFiles lists, for each verified row, the
+// hook files status and verify look for: those the guardian recorded, and a
+// Copilot row's VS Code Local hook file when copilotVSCodeHookFile.
+func windowsEnterpriseGuardianTargetHookFiles(copilotVSCodeHookFile bool) func(enterpriseHookReconcileRow) []string {
+	return func(row enterpriseHookReconcileRow) []string {
+		var extra []string
+		home := strings.TrimSpace(row.UserHome)
+		if copilotVSCodeHookFile && home != "" &&
+			strings.EqualFold(strings.TrimSpace(row.Connector), enterprisepolicy.ConnectorCopilot) {
+			extra = []string{enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)}
+		}
+		return windowsEnterpriseGuardianRowHookFiles(row, extra)
+	}
+}
+
+// standaloneGuardianOptionsFor is the standalone guardian's machine policy
+// options and connectors for current; standalone is false when current is
+// not a standalone deployment's config.
+func standaloneGuardianOptionsFor(current *config.Config) (opts enterprisepolicy.Options, connectors []string, standalone bool, err error) {
+	if current == nil || !current.StandaloneEnterprise() {
+		return enterprisepolicy.Options{}, nil, false, nil
+	}
+	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return enterprisepolicy.Options{}, nil, true, err
+	}
+	opts, err = enterprisepolicy.StandaloneOptions(layout, programFiles, programData, current)
+	if err != nil {
+		return enterprisepolicy.Options{}, nil, true, err
+	}
+	opts.ClaudeMachineHookContract = standaloneClaudeMachineHookContract(layout)
+	return opts, enterprisepolicy.StandaloneConnectors(current), true, nil
 }
 
 // windowsEnterpriseGuardianRowAccount names a guardian row's account: user,
