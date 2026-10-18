@@ -933,7 +933,7 @@ func TestSessionSummary(t *testing.T) {
 					sb.StopReason = sandboxapi.ProfileStop("host ports", "claudecode", "it-security@example.com")
 				})
 			}
-		}, want: []string{"This sandbox was stopped: your profile no longer allows host ports. Start it again: defenseclaw sandbox run claude",
+		}, want: []string{"This sandbox was stopped: your profile no longer allows host ports. Start it again without --host-port: defenseclaw sandbox run claude",
 			"Sandbox kept (stopped) → delete: defenseclaw sandbox delete " + sbName},
 			not: []string{"was stopped from outside this session", "→ resume:"}},
 		// GAP-0202: the gateway was stopped (handed to another account)
