@@ -183,6 +183,9 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 }
 
 func shellDynamicWriteOperandsFile(file *syntax.File, cwd, home string) (operands []string, unknown bool) {
+	if positional, complete := shellPositionalWriteOperands(file, cwd, home); complete {
+		return positional, false
+	}
 	poison := shellVariablePoisonForFile(file, home)
 	states := shellWordStates(file, home, poison)
 	candidates := shellVariableCandidates(file, cwd, home)
