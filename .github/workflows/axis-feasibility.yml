@@ -1,0 +1,162 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS feasibility source build
+
+# Contributor artifacts only. This does not install AXIS, publish a release,
+# qualify a platform, or certify the upstream runtime's isolation boundary.
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths:
+      - .github/workflows/axis-feasibility.yml
+      - test/e2e/axis/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-feasibility-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AXIS_SOURCE_COMMIT: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+  RUST_TOOLCHAIN: 1.95.0
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+
+jobs:
+  linux-source-artifact:
+    name: Build pinned Linux contributor artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: axis-source
+    steps:
+      - name: Check out the reviewed AXIS source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ROCm/axis
+          ref: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: axis-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify source identity and install the pinned toolchain
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$AXIS_SOURCE_COMMIT"
+          test -z "$(git status --porcelain)"
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+
+      - name: Install build prerequisites on the disposable runner
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 install -y --no-install-recommends build-essential pkg-config ca-certificates
+
+      - name: Build the pinned core and Linux helper binaries
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          cargo +"$RUST_TOOLCHAIN" build --locked --release -p axis-cli -p axis-daemon -p axis-sandbox --bins
+          git diff --exit-code -- Cargo.lock Cargo.toml rust-toolchain.toml
+
+      - name: Assemble contributor payload and provenance
+        env:
+          BUILD_REPOSITORY: ${{ github.repository }}
+          BUILD_WORKFLOW_COMMIT: ${{ github.sha }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          payload="axis-source-linux-x86_64-$AXIS_SOURCE_COMMIT"
+          mkdir -p "dist/$payload/bin"
+          # Helpers remain ordinary executable files: no installation, setuid,
+          # capabilities, firewall changes, daemon startup, or MXC download.
+          for binary in axis axisd axis-seccomp-launcher axis-netns-helper axis-ssh-proxy; do
+            test -f "target/release/$binary"
+            test ! -L "target/release/$binary"
+            install -m 0755 "target/release/$binary" "dist/$payload/bin/$binary"
+          done
+          cp Cargo.lock rust-toolchain.toml Cargo.toml LICENSE "dist/$payload/"
+          rustc +"$RUST_TOOLCHAIN" -Vv > "dist/$payload/TOOLCHAIN.txt"
+          cargo +"$RUST_TOOLCHAIN" --version >> "dist/$payload/TOOLCHAIN.txt"
+          dpkg-query -W build-essential pkg-config ca-certificates libc6 > "dist/$payload/BUILD_PACKAGES.txt"
+          PAYLOAD_DIR="dist/$payload" python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import platform
+
+          root = pathlib.Path(os.environ["PAYLOAD_DIR"])
+          binaries = []
+          for path in sorted((root / "bin").iterdir()):
+              binaries.append({
+                  "path": path.relative_to(root).as_posix(),
+                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  "size_bytes": path.stat().st_size,
+              })
+          manifest = {
+              "schema_version": 1,
+              "purpose": "contributor_source_build_only",
+              "support_certification": False,
+              "source": {
+                  "repository": "https://github.com/ROCm/axis",
+                  "commit": os.environ["AXIS_SOURCE_COMMIT"],
+                  "cargo_lock_sha256": hashlib.sha256((root / "Cargo.lock").read_bytes()).hexdigest(),
+                  "toolchain_file_sha256": hashlib.sha256((root / "rust-toolchain.toml").read_bytes()).hexdigest(),
+              },
+              "build": {
+                  "toolchain": os.environ["RUST_TOOLCHAIN"],
+                  "command": "cargo +1.95.0 build --locked --release -p axis-cli -p axis-daemon -p axis-sandbox --bins",
+                  "runner_os": platform.platform(),
+                  "cargo_build_jobs": os.environ["CARGO_BUILD_JOBS"],
+                  "cargo_incremental": os.environ["CARGO_INCREMENTAL"],
+                  "workflow_repository": os.environ["BUILD_REPOSITORY"],
+                  "workflow_commit": os.environ["BUILD_WORKFLOW_COMMIT"],
+                  "run_id": os.environ["BUILD_RUN_ID"],
+                  "run_attempt": os.environ["BUILD_RUN_ATTEMPT"],
+              },
+              "limitations": [
+                  "No live AXIS or Claude execution is performed by this build.",
+                  "No MXC executor is bundled; the default auto/mxc provider is not provisioned.",
+                  "The native Linux backend requires separate host and policy qualification.",
+                  "The network helper is not installed or granted privilege.",
+                  "This manifest and checksums are evidence, not signed production provenance.",
+                  "Native Windows and its patched MXC executor require separate builds and qualification.",
+              ],
+              "binaries": binaries,
+          }
+          (root / "BUILD.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          lines = []
+          for path in sorted(root.rglob("*")):
+              if path.is_file():
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  lines.append(f"{digest}  {path.relative_to(root).as_posix()}\n")
+          (root / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
+          PY
+          (cd "dist/$payload" && sha256sum --check --strict SHA256SUMS)
+          tar -czf "dist/$payload.tar.gz" -C dist "$payload"
+          (cd dist && sha256sum "$payload.tar.gz" > "$payload.tar.gz.sha256")
+          cp "dist/$payload/BUILD.json" dist/BUILD.json
+          du -h "dist/$payload.tar.gz"
+
+      - name: Upload the source-bound contributor artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-source-linux-x86_64-fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: |
+            axis-source/dist/*.tar.gz
+            axis-source/dist/*.tar.gz.sha256
+            axis-source/dist/BUILD.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

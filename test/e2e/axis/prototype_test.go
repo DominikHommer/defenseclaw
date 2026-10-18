@@ -12,15 +12,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 )
 
 // This package is a contributor-only feasibility prototype. It is not imported
 // by DefenseClaw and does not constitute a supported AXIS runtime adapter.
-const researchedCommit = "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c"
-const researchedVersion = "axis 0.3.5"
 const maxBinaryBytes = 512 << 20
 const maxOutputBytes = 64 << 10
 
@@ -147,16 +144,6 @@ func (s *probeSession) arguments(command ...string) ([]string, error) {
 	// in AXIS 0.3.5. This is not a stable upstream standalone-mode API.
 	args := []string{"--socket", s.socket, "run", "--policy", s.policy, "--"}
 	return append(args, command...), nil
-}
-
-func (s *probeSession) preflight(pin runtimePin) error {
-	if err := requireLinux(runtime.GOOS); err != nil {
-		return err
-	}
-	if os.Geteuid() == 0 {
-		return errors.New("AXIS feasibility must run under a disposable unprivileged account")
-	}
-	return verifyRuntime(pin)
 }
 
 // Do not allow an unexpected runtime diagnostic to consume unbounded memory.

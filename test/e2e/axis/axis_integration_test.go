@@ -7,6 +7,7 @@ package axis
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -15,6 +16,19 @@ import (
 	"testing"
 	"time"
 )
+
+const researchedCommit = "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c"
+const researchedVersion = "axis 0.3.5"
+
+func (s *probeSession) preflight(pin runtimePin) error {
+	if err := requireLinux(runtime.GOOS); err != nil {
+		return err
+	}
+	if os.Geteuid() == 0 {
+		return errors.New("AXIS feasibility must run under a disposable unprivileged account")
+	}
+	return verifyRuntime(pin)
+}
 
 var axisPath = flag.String("axis-path", "", "absolute local AXIS executable reviewed for the feasibility source pin")
 var axisSHA256 = flag.String("axis-sha256", "", "independently reviewed SHA256 of that AXIS executable (64 hex digits)")

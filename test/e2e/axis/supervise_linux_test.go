@@ -13,24 +13,6 @@ import (
 	"time"
 )
 
-func (s *probeSession) run(ctx context.Context, pin runtimePin, command ...string) (executionResult, error) {
-	if err := s.preflight(pin); err != nil {
-		return executionResult{}, err
-	}
-	args, err := s.arguments(command...)
-	if err != nil {
-		return executionResult{}, err
-	}
-	return supervise(ctx, pin.path, args, s.workspace, s.environment())
-}
-
-func (s *probeSession) version(ctx context.Context, pin runtimePin) (executionResult, error) {
-	if err := s.preflight(pin); err != nil {
-		return executionResult{}, err
-	}
-	return supervise(ctx, pin.path, []string{"--version"}, s.workspace, s.environment())
-}
-
 func supervise(ctx context.Context, executable string, args []string, cwd string, env []string) (executionResult, error) {
 	var stdout, stderr boundedOutput
 	cmd := exec.CommandContext(ctx, executable, args...)

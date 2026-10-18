@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && axis_integration
 
 // Copyright 2026 Cisco Systems, Inc.
 // SPDX-License-Identifier: Apache-2.0
