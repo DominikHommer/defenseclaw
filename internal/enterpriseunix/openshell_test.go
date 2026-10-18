@@ -335,6 +335,51 @@ func TestSandboxOffInstallsNothingAndOffRemovesEverything(t *testing.T) {
 // launcher as a stale link), and an uninstall leaves neither behind.
 func TestMacOSPackageKeepsTheLauncherAndAgentsWithSandboxesOff(t *testing.T) {
 	h := newOSHost(t, "darwin")
+	agents := writeMacOSPackageFiles(t, h)
+	present := func(when string) {
+		t.Helper()
+		if got := h.link(h.env.launcherPath()); got != h.env.launcherTarget() {
+			t.Fatalf("%s: launcher points at %q, want %s", when, got, h.env.launcherTarget())
+		}
+		for _, path := range agents {
+			if !h.exists(path) {
+				t.Fatalf("%s: %s is gone", when, path)
+			}
+		}
+	}
+	ensure := func(cfg []byte) *enterprisestatus.Result {
+		t.Helper()
+		return ensureFromMacOSPackage(t, h, cfg)
+	}
+	off := sandboxConfig(t, "darwin", false, nil)
+	requireOK(t, ensure(off))
+	present("after the package install")
+	if r := ensure(off); !r.Noop {
+		t.Errorf("a second ensure changed %v", r.Changes)
+	}
+	// Sandboxes on and off again keep both.
+	requireOK(t, ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite"})))
+	requireOK(t, ensure(off))
+	present("after sandboxes were on and off")
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	for _, path := range append([]string{h.env.launcherPath()}, agents...) {
+		if h.exists(path) {
+			t.Errorf("%s stays after uninstall", path)
+		}
+	}
+}
+
+// ensureFromMacOSPackage runs the macOS pkg postinstall's ensure with cfg.
+func ensureFromMacOSPackage(t *testing.T, h *osHost, cfg []byte) *enterprisestatus.Result {
+	t.Helper()
+	return h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package", ConfigFile: writeTempConfig(t, cfg)})
+}
+
+// writeMacOSPackageFiles writes what the macOS pkg payload installs before
+// its postinstall runs: the binaries, both launch agents and the launcher
+// link. It returns the agents' paths.
+func writeMacOSPackageFiles(t *testing.T, h *osHost) []string {
+	t.Helper()
 	bin := h.env.P(h.env.Layout.BinDir)
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
@@ -362,37 +407,7 @@ func TestMacOSPackageKeepsTheLauncherAndAgentsWithSandboxesOff(t *testing.T) {
 	if err := os.Symlink(h.env.launcherTarget(), launcher); err != nil {
 		t.Fatal(err)
 	}
-	present := func(when string) {
-		t.Helper()
-		if got := h.link(h.env.launcherPath()); got != h.env.launcherTarget() {
-			t.Fatalf("%s: launcher points at %q, want %s", when, got, h.env.launcherTarget())
-		}
-		for _, path := range agents {
-			if !h.exists(path) {
-				t.Fatalf("%s: %s is gone", when, path)
-			}
-		}
-	}
-	ensure := func(cfg []byte) *enterprisestatus.Result {
-		t.Helper()
-		return h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package", ConfigFile: writeTempConfig(t, cfg)})
-	}
-	off := sandboxConfig(t, "darwin", false, nil)
-	requireOK(t, ensure(off))
-	present("after the package install")
-	if r := ensure(off); !r.Noop {
-		t.Errorf("a second ensure changed %v", r.Changes)
-	}
-	// Sandboxes on and off again keep both.
-	requireOK(t, ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite"})))
-	requireOK(t, ensure(off))
-	present("after sandboxes were on and off")
-	requireOK(t, h.run(Options{Action: ActionUninstall}))
-	for _, path := range append([]string{h.env.launcherPath()}, agents...) {
-		if h.exists(path) {
-			t.Errorf("%s stays after uninstall", path)
-		}
-	}
+	return agents
 }
 
 // A path that is not ours is never replaced by the launcher, and it does not
