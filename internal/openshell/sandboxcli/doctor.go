@@ -194,6 +194,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 			rep.Checks = append(rep.Checks, a.adminCheck())
 		}
 	}
+	if a.Cfg != nil || managed {
+		rep.Checks = append(rep.Checks, a.tlsTrustCheck(ctx, managed))
+	}
 	if managed && a.GOOS == "darwin" {
 		rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
 		// The per-user job is outside the root gateway's readiness report.

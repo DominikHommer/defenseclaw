@@ -388,6 +388,12 @@ type OperationalSettings struct {
 	LLM               string            `json:"llm,omitempty"`
 	KeepHeadless      bool              `json:"keep_headless,omitempty"`
 	UpstreamTelemetry bool              `json:"upstream_telemetry,omitempty"`
+	// TrustedCAs is the normalized PEM of the administrator's
+	// openshell.trusted_ca_bundle, read by the managed gateway (the
+	// account cannot name a CA of its own); TrustedCAError says why the
+	// gateway could not use the file, and the daemon then builds no image.
+	TrustedCAs     string `json:"trusted_cas,omitempty"`
+	TrustedCAError string `json:"trusted_ca_error,omitempty"`
 }
 
 // ImageSettings mirrors openshell.image.

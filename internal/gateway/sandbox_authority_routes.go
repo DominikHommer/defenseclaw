@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"io"
 	"maps"
 	"net/http"
@@ -187,7 +188,7 @@ func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellA
 
 func sandboxOperational(cfg *config.Config, floor config.OpenShellAdminConfig) sandboxrelay.OperationalSettings {
 	o := cfg.OpenShell
-	return sandboxrelay.OperationalSettings{
+	out := sandboxrelay.OperationalSettings{
 		IngressPort:      cfg.OpenShellIngressPort(),
 		EgressPort:       cfg.OpenShellEgressPort(),
 		GatewayName:      o.Gateway.Name,
@@ -205,6 +206,14 @@ func sandboxOperational(cfg *config.Config, floor config.OpenShellAdminConfig) s
 		// caller's floor allows it.
 		UpstreamTelemetry: o.UpstreamTelemetry && floor.AllowUpstreamTelemetry != nil && *floor.AllowUpstreamTelemetry,
 	}
+	// The administrator's trusted CAs, read here as the gateway's service
+	// account from an administrator-owned file.
+	if trusted, err := image.TrustedCAsFor(cfg); err != nil {
+		out.TrustedCAError = err.Error()
+	} else {
+		out.TrustedCAs = string(trusted)
+	}
+	return out
 }
 
 // sandboxEnterprise is enterprise.openshell as the caller's daemon runs
