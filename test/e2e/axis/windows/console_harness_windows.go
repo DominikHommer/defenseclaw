@@ -199,7 +199,7 @@ func run(v *verification, probe, root, mode string) (record map[string]any, resu
 		record["relay_overlays"] = v.ContributorRelayOverlays
 	}
 	record["mode"] = mode
-	if mode != "terminal" && mode != "terminal-basic" && mode != "parent-death" && mode != "timeout" && mode != "close-session" && mode != "outer-control" {
+	if mode != "terminal" && mode != "terminal-basic" && mode != "parent-death" && mode != "timeout" && mode != "close-session" && mode != "outer-control" && mode != "outer-control-interrupt" {
 		return record, errors.New("unsupported fixed terminal harness mode")
 	}
 	if !filepath.IsAbs(root) {
@@ -236,7 +236,7 @@ func run(v *verification, probe, root, mode string) (record map[string]any, resu
 		probeMode = "tree"
 	}
 	command := []string{filepath.Join(v.Payload, "bin", "axis.exe"), "--socket", "127.0.0.1:0", "run", "--policy", policyPath, "--", containedProbe, "-mode", probeMode, "-root", root}
-	if mode == "outer-control" {
+	if mode == "outer-control" || mode == "outer-control-interrupt" {
 		// An explicit positive host control qualifies only this fixed harness's
 		// ConPTY plumbing. It is never a runtime fallback or containment proof.
 		command = []string{containedProbe, "-mode", "console-control", "-root", root}
@@ -434,7 +434,7 @@ func run(v *verification, probe, root, mode string) (record map[string]any, resu
 		return record, nil
 	}
 	if err := waitFor(process.Process, &output, func(text string) bool {
-		contained := mode == "outer-control" || strings.Contains(text, `"ok":true,"probe":"terminal_token"`)
+		contained := strings.HasPrefix(mode, "outer-control") || strings.Contains(text, `"ok":true,"probe":"terminal_token"`)
 		return contained && strings.Contains(text, `"ok":true,"probe":"terminal_private_state"`) && strings.Contains(text, `"probe":"console_handles"`) && strings.Contains(text, `"detail":[true,true,true]`) && strings.Contains(text, `"columns":100`) && strings.Contains(text, `"rows":30`)
 	}, deadline); err != nil {
 		return record, fmt.Errorf("initial 100x30 console: %w", err)
@@ -459,7 +459,7 @@ func run(v *verification, probe, root, mode string) (record map[string]any, resu
 		return record, fmt.Errorf("resize to 160x40: %w", err)
 	}
 	record["resize_160x40"] = true
-	if mode == "terminal" {
+	if mode == "terminal" || mode == "outer-control-interrupt" {
 		before := strings.Count(output.text(), `"probe":"input_ack"`)
 		if _, err := input.Write([]byte{3}); err != nil {
 			return record, err
@@ -502,7 +502,7 @@ func main() {
 	probe := flag.String("probe", "", "reviewed fixed probe executable")
 	probeHash := flag.String("probe-sha256", "", "reviewed fixed probe SHA256")
 	root := flag.String("case-root", "", "fresh absolute task-owned case root")
-	mode := flag.String("mode", "terminal", "fixed case: terminal, terminal-basic, parent-death, timeout, close-session, outer-control")
+	mode := flag.String("mode", "terminal", "fixed case: terminal, terminal-basic, parent-death, timeout, close-session, outer-control, outer-control-interrupt")
 	flag.Parse()
 	v, err := checkedBundle(*verified, *probe, *probeHash)
 	if err != nil {

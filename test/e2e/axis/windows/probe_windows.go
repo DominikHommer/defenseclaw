@@ -117,28 +117,48 @@ func main() {
 		}
 		console()
 		interrupts := make(chan os.Signal, 1)
+		interruptAck := make(chan struct{}, 1)
 		signal.Notify(interrupts, os.Interrupt)
 		defer signal.Stop(interrupts)
 		go func() {
 			for range interrupts {
 				event("interrupt", true, "CTRL_C")
+				select {
+				case interruptAck <- struct{}{}:
+				default:
+				}
 			}
 		}()
-		input := bufio.NewScanner(os.Stdin)
-		for input.Scan() {
-			switch input.Text() {
-			case "hello":
-				event("input_ack", true, "hello")
-			case "dimensions":
-				console()
-			case "exit7":
-				os.Exit(7)
-			default:
-				event("unexpected_input", false, "only fixed probe commands are accepted")
+		for {
+			input := bufio.NewScanner(os.Stdin)
+			for input.Scan() {
+				switch input.Text() {
+				case "hello":
+					event("input_ack", true, "hello")
+				case "dimensions":
+					console()
+				case "exit7":
+					os.Exit(7)
+				default:
+					event("unexpected_input", false, "only fixed probe commands are accepted")
+				}
+			}
+			// Windows console Ctrl-C can return a zero-length read before
+			// os/signal delivers the interrupt. Resume only after an actual
+			// interrupt acknowledgement, with a bounded wait; ordinary EOF
+			// still closes this fixed probe's input.
+			if input.Err() != nil && !errors.Is(input.Err(), syscall.Errno(995)) {
+				event("input_closed", false, fmt.Sprint(input.Err()))
+				return
+			}
+			select {
+			case <-interruptAck:
+				continue
+			case <-time.After(500 * time.Millisecond):
+				event("input_closed", input.Err() == nil, fmt.Sprint(input.Err()))
+				return
 			}
 		}
-		event("input_closed", input.Err() == nil, fmt.Sprint(input.Err()))
-		return
 	case "boundary":
 	default:
 		event("mode", false, "unsupported fixed probe")
