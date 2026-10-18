@@ -62,6 +62,14 @@ DLL_VARIANT = "standalone_std_fixed_dll_startup_diagnostic"
 DLL_SCOPE = "fixed_windows_native_psec_dll_startup_diagnostic"
 CLAUDE_VARIANT = "standalone_std_fixed_signed_claude_version"
 CLAUDE_SCOPE = "fixed_windows_native_psec_signed_claude_version"
+CONTROL_VARIANT = "standalone_std_fixed_signed_claude_create_control"
+CONTROL_SCOPE = "fixed_windows_uncontained_claude_create_control"
+CONTROL_OVERLAY_SHA256 = "0cb98abddbd9cde1ced266d649a37c81c45bdc3fd347f480fc46c15abde7cc66"
+CONTROL_SDK_TEST = (
+    "backend_modules::process_container::common::base_container_runner::strict_windows_argv_tests::"
+    "fixed_control_compares_exact_buffers_flags_stdio_and_refuses_other_payloads"
+)
+CONTROL_PATH = "src/mxc-sdk/src/backends/process_container/common/secenv.rs"
 IDENTITY_OVERLAY_SHA256 = "d2d3819325c3027f159d75d577dd02306d497234f99293df3c825fbeebddeeab"
 BOUNDARY_OVERLAY_SHA256 = "820484c5431d51f62466f07bd9fa4b670625fb4e6e6cb506d42e0ab8562b2e23"
 LITERAL_OVERLAY_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
@@ -175,12 +183,30 @@ BOUNDARY_OVERLAY_FILES = {
 }
 
 
+CONTROL_OVERLAY_FILES = dict(BOUNDARY_OVERLAY_FILES)
+CONTROL_OVERLAY_FILES.update(
+    {
+        "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs": (
+            "41a89b229c4a39858940c483b63fc263928056675735afa2109bafe1fda26234"
+        ),
+        CONTROL_PATH: "3f6bb0972c5ddaa46eab77e8e28aea94f9310ecf168c13791ed9100cf4b551eb",
+    }
+)
+
+
 def artifact_contract(mode: str = "loader-only") -> dict:
-    if mode not in {"loader-only", "standalone-boundary", "dll-startup-only", "claude-version-only"}:
+    if mode not in {
+        "loader-only",
+        "standalone-boundary",
+        "dll-startup-only",
+        "claude-version-only",
+        "claude-create-control-only",
+    }:
         raise ValueError("unknown fixed artifact mode")
     boundary = mode != "loader-only"
     dll = mode == "dll-startup-only"
-    claude = mode == "claude-version-only"
+    control = mode == "claude-create-control-only"
+    claude = mode in {"claude-version-only", "claude-create-control-only"}
     sources = {name: SOURCE_PREFIX + name for name in SOURCE_FILES}
     binaries = (BINARY, LOADER_BINARY)
     files = set(FILES)
@@ -203,14 +229,38 @@ def artifact_contract(mode: str = "loader-only") -> dict:
             sources[name] = SOURCE_PREFIX + name
         binaries += (DLL_BINARY,)
         files |= {"source/" + name for name in sources} | {DLL_BINARY}
+    if control:
+        name = "patches/mxc-fixed-claude-create-control.patch"
+        sources[name] = SOURCE_PREFIX + name
+        files.add("source/" + name)
     return {
-        "variant": CLAUDE_VARIANT if claude else DLL_VARIANT if dll else BOUNDARY_VARIANT if boundary else VARIANT,
-        "scope": CLAUDE_SCOPE if claude else DLL_SCOPE if dll else BOUNDARY_SCOPE if boundary else SCOPE,
+        "variant": CONTROL_VARIANT
+        if control
+        else CLAUDE_VARIANT
+        if claude
+        else DLL_VARIANT
+        if dll
+        else BOUNDARY_VARIANT
+        if boundary
+        else VARIANT,
+        "scope": CONTROL_SCOPE
+        if control
+        else CLAUDE_SCOPE
+        if claude
+        else DLL_SCOPE
+        if dll
+        else BOUNDARY_SCOPE
+        if boundary
+        else SCOPE,
         "sources": sources,
         "binaries": binaries,
         "files": files,
         "all_files": files | extra,
-        "modified": BOUNDARY_MODIFIED_PATHS if boundary else PATCHED_PATHS,
+        "modified": (BOUNDARY_MODIFIED_PATHS | {CONTROL_PATH})
+        if control
+        else BOUNDARY_MODIFIED_PATHS
+        if boundary
+        else PATCHED_PATHS,
     }
 
 
@@ -328,7 +378,7 @@ def verify_github(
         and (
             run.get("head_branch") == "codex/axis-sandbox-feasibility"
             or (
-                mode in {"standalone-boundary", "dll-startup-only", "claude-version-only"}
+                mode in {"standalone-boundary", "dll-startup-only", "claude-version-only", "claude-create-control-only"}
                 and run.get("event") == "workflow_dispatch"
                 and run.get("head_branch") in {"codex/axis-native-build", "codex/axis-peer-experiments"}
             )
@@ -443,7 +493,7 @@ def verify(
         sha256(read("source/patches/mxc-strict-windows-psec.patch")) == provenance.get("mxc_patch_sha256"),
         "reviewed SDK overlay differs",
     )
-    if mode in {"standalone-boundary", "dll-startup-only", "claude-version-only"}:
+    if mode in {"standalone-boundary", "dll-startup-only", "claude-version-only", "claude-create-control-only"}:
         require(
             provenance.get("pure_native_environment_tests_passed") is True
             and provenance.get("pure_native_environment_tests") == PURE_ENVIRONMENT_TESTS,
@@ -458,10 +508,13 @@ def verify(
         )
         fingerprints = provenance.get("mxc_overlay_file_sha256")
         require(
-            isinstance(fingerprints, dict) and set(fingerprints) == BOUNDARY_MODIFIED_PATHS | BOUNDARY_ADDED_PATHS,
+            isinstance(fingerprints, dict) and set(fingerprints) == contract["modified"] | BOUNDARY_ADDED_PATHS,
             "SDK source fingerprint inventory differs",
         )
-        require(fingerprints == BOUNDARY_OVERLAY_FILES, "SDK source fingerprint digest differs")
+        require(
+            fingerprints == (CONTROL_OVERLAY_FILES if mode == "claude-create-control-only" else BOUNDARY_OVERLAY_FILES),
+            "SDK source fingerprint digest differs",
+        )
         require(
             sha256(read("source/patches/mxc-literal-argv.patch"))
             == LITERAL_OVERLAY_SHA256
@@ -492,21 +545,36 @@ def verify(
             and admission.get("sandbox_or_payload_execution") is False
             and admission
             == {
-                "tests": SDK_TESTS,
-                "passed": len(SDK_TESTS),
+                "tests": SDK_TESTS + ([CONTROL_SDK_TEST] if mode == "claude-create-control-only" else []),
+                "passed": len(SDK_TESTS) + int(mode == "claude-create-control-only"),
                 "sandbox_or_payload_execution": False,
                 "native_file_fixture_tests": 1,
                 "upstream_lock_sha256": SDK_LOCK_SHA256,
             },
             "exact SDK admission test evidence differs",
         )
-    if mode == "claude-version-only":
+    if mode in {"claude-version-only", "claude-create-control-only"}:
         require(provenance.get("probe_slice") == mode, "fixed Claude build slice differs")
-    if mode in {"dll-startup-only", "claude-version-only"}:
+    if mode in {"dll-startup-only", "claude-version-only", "claude-create-control-only"}:
         require(
             provenance.get("pure_dll_startup_tests_passed") is True
             and provenance.get("pure_dll_startup_tests") == PURE_DLL_TESTS,
             "fixed pure DLL startup test evidence differs",
+        )
+    if mode == "claude-create-control-only":
+        require(
+            sha256(read("source/patches/mxc-fixed-claude-create-control.patch"))
+            == CONTROL_OVERLAY_SHA256
+            == provenance.get("mxc_fixed_create_control_patch_sha256")
+            and provenance.get("psec_attribute_attached_to_payload") is False
+            and provenance.get("control_reference_plan_executed") is False
+            and provenance.get("probe_cargo_features") == ["fixed-claude-create-control"],
+            "separate fixed uncontained control overlay evidence differs",
+        )
+    else:
+        require(
+            "mxc_fixed_create_control_patch_sha256" not in provenance,
+            "ordinary PSEC artifact cannot contain the uncontained control overlay",
         )
     toolchain = read("TOOLCHAIN.txt")
     require(
@@ -540,6 +608,7 @@ def verify(
     verify_archive(archive, artifact, archive_sha256, contract["all_files"])
     verify_github(artifact_id, run_id, build_commit, archive_sha256, mode)
     return {
+        **({"probe_cargo_features": ["fixed-claude-create-control"]} if mode == "claude-create-control-only" else {}),
         "verified": True,
         "execution_performed": False,
         "scope": required["scope"],
@@ -572,7 +641,13 @@ def main() -> None:
     parser.add_argument("--artifact-id", type=int, required=True)
     parser.add_argument(
         "--variant",
-        choices=("loader-only", "standalone-boundary", "dll-startup-only", "claude-version-only"),
+        choices=(
+            "loader-only",
+            "standalone-boundary",
+            "dll-startup-only",
+            "claude-version-only",
+            "claude-create-control-only",
+        ),
         default="loader-only",
     )
     args = parser.parse_args()

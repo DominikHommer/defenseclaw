@@ -122,17 +122,25 @@ func TestNativeIdentityReceiptMatchesVerifierAuthority(t *testing.T) {
 }
 
 func TestModesRequireExactlyOneExplicitChoice(t *testing.T) {
-	for _, choice := range [][4]bool{{false, false, false, false}, {true, true, false, false}, {true, false, true, false}, {false, true, true, false}, {true, true, true, false}, {true, false, false, true}, {false, true, false, true}, {false, false, true, true}, {true, true, true, true}} {
-		if _, err := selectedMode(choice[0], choice[1], choice[2], choice[3]); err == nil {
-			t.Fatal("ambiguous fixed mode accepted")
+	for mask := 0; mask < 32; mask++ {
+		var flags [5]bool
+		count := 0
+		for bit := range flags {
+			flags[bit] = mask&(1<<bit) != 0
+			if flags[bit] {
+				count++
+			}
 		}
-	}
-	for _, choice := range []struct {
-		loader, boundary, dll, claude bool
-		mode                          string
-	}{{true, false, false, false, "loader-only"}, {false, true, false, false, "standalone-boundary"}, {false, false, true, false, "dll-startup-only"}, {false, false, false, true, "claude-version-only"}} {
-		if mode, err := selectedMode(choice.loader, choice.boundary, choice.dll, choice.claude); err != nil || mode != choice.mode {
-			t.Fatal("explicit mode differs")
+		got, err := selectedMode(flags[0], flags[1], flags[2], flags[3], flags[4])
+		if (err == nil) != (count == 1) {
+			t.Fatalf("mode selection mask %d: %q %v", mask, got, err)
+		}
+		if count == 1 {
+			for index, name := range []string{"loader-only", "standalone-boundary", "dll-startup-only", "claude-version-only", "claude-create-control-only"} {
+				if flags[index] && got != name {
+					t.Fatalf("mode %d differs: %q", index, got)
+				}
+			}
 		}
 	}
 }
@@ -372,5 +380,58 @@ func TestClaudeReceiptHasSeparateAuthorityAndKeepsCIBinaryBounds(t *testing.T) {
 	if _, held, err := checkedReceipt(path, pin, "claude-version-only"); err == nil {
 		held.Close()
 		t.Fatal("local large-image exception widened the CI artifact bound")
+	}
+}
+
+func TestUncontainedCreateControlReceiptNeverCrossAdmitsPSEC(t *testing.T) {
+	source, err := os.ReadFile("verify_live_artifact.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"CONTROL_VARIANT": claudeControlVariant, "CONTROL_SCOPE": claudeControlScope} {
+		m := regexp.MustCompile(`(?m)^`+name+` = "([^"\r\n]+)"\r?$`).FindAllSubmatch(source, -1)
+		if len(m) != 1 || string(m[0][1]) != want {
+			t.Fatalf("control %s differs", name)
+		}
+	}
+	path, value := syntheticBoundaryReceipt(t)
+	if err := os.WriteFile(filepath.Join(value.Artifact, filepath.FromSlash(dllName)), []byte("synthetic bytes; never executed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	value.Binaries = append(value.Binaries, component{Path: dllName, SHA256: value.BinarySHA, Size: value.BinarySize})
+	value.Variant, value.Scope = claudeControlVariant, claudeControlScope
+	value.ProbeCargoFeatures = []string{"fixed-claude-create-control"}
+	pin := writeReceipt(t, path, value, nil)
+	_, held, err := checkedReceipt(path, pin, "claude-create-control-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, features := range [][]string{nil, {}, {"unreviewed"}, {"fixed-claude-create-control", "fixed-claude-create-control"}} {
+		changed := value
+		changed.ProbeCargoFeatures = features
+		changedPin := writeReceipt(t, path, changed, nil)
+		if _, images, err := checkedReceipt(path, changedPin, "claude-create-control-only"); err == nil {
+			images.Close()
+			t.Fatal("control without exact feature evidence admitted")
+		}
+	}
+	pin = writeReceipt(t, path, value, nil)
+	for _, mode := range []string{"loader-only", "standalone-boundary", "dll-startup-only", "claude-version-only"} {
+		if _, held, err := checkedReceipt(path, pin, mode); err == nil {
+			held.Close()
+			t.Fatalf("control admitted as %s", mode)
+		}
+	}
+	for _, identity := range [][2]string{{claudeArtifactVariant, claudeArtifactScope}, {claudeControlVariant, claudeArtifactScope}, {claudeArtifactVariant, claudeControlScope}} {
+		changed := value
+		changed.Variant, changed.Scope = identity[0], identity[1]
+		pin := writeReceipt(t, path, changed, nil)
+		if _, held, err := checkedReceipt(path, pin, "claude-create-control-only"); err == nil {
+			held.Close()
+			t.Fatal("PSEC or mixed identity admitted as control")
+		}
 	}
 }

@@ -24,6 +24,9 @@ path = "src/boundary_child.rs"
 name = "defenseclaw-axis-windows-psec-dll-child"
 path = "src/dll_startup_child.rs"
 
+[features]
+fixed-claude-create-control = []
+
 [workspace]
 resolver = "3"
 exclude = ["axis-source", "mxc-source"]

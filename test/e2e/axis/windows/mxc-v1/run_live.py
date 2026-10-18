@@ -53,6 +53,13 @@ CLAUDE_CHECKS = {
     "retained_direct_process_handles_signaled",
     "owned_fixture_removed",
 }
+CONTROL_CHECKS = CLAUDE_CHECKS | {"constructed_launch_inputs_equal_except_psec_attribute"}
+CONTROL_INPUT_EVIDENCE = {
+    "fixed_create_control_inputs_equal": True,
+    "psec_attribute_attached": False,
+    "constructed_psec_attribute_count": 2,
+    "selected_attribute_count": 1,
+}
 CLAUDE_IMAGE_SHA256 = "eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23"
 CLAUDE_IMAGE_SIZE = 254858400
 CLAUDE_PRODUCT_VERSION = "2.1.292.0"
@@ -162,13 +169,30 @@ def close_finished_stream(stream, reader, errors: list[str]) -> None:
 def valid_observations(
     record: object, receipt: dict, mode: str = "loader-only", local_receipt_sha256: str | None = None
 ) -> bool:
-    if mode not in {"loader-only", "standalone-boundary", "dll-startup-only", "claude-version-only"}:
+    if mode not in {
+        "loader-only",
+        "standalone-boundary",
+        "dll-startup-only",
+        "claude-version-only",
+        "claude-create-control-only",
+    }:
         return False
     contract = artifact_verifier.artifact_contract(mode)
     boundary = mode == "standalone-boundary"
     dll = mode == "dll-startup-only"
-    claude = mode == "claude-version-only"
-    checks = CLAUDE_CHECKS if claude else DLL_CHECKS if dll else BOUNDARY_CHECKS if boundary else CHECKS
+    control = mode == "claude-create-control-only"
+    claude = mode in {"claude-version-only", "claude-create-control-only"}
+    checks = (
+        CONTROL_CHECKS
+        if control
+        else CLAUDE_CHECKS
+        if claude
+        else DLL_CHECKS
+        if dll
+        else BOUNDARY_CHECKS
+        if boundary
+        else CHECKS
+    )
     if not isinstance(record, dict):
         return False
     if not {"binary_sha256", "build_commit", "build_run", "combined_lock_sha256", "artifact_id"} <= receipt.keys():
@@ -193,6 +217,11 @@ def valid_observations(
         }.items()
     ):
         return False
+    if control and (
+        receipt.get("probe_cargo_features") != ["fixed-claude-create-control"]
+        or record.get("probe_cargo_features") != ["fixed-claude-create-control"]
+    ):
+        return False
     if claude:
         if not isinstance(local_receipt_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", local_receipt_sha256) is None:
             return False
@@ -212,6 +241,15 @@ def valid_observations(
         lines = [json.loads(line) for line in record["stdout"].splitlines() if line]
     except (KeyError, ValueError, TypeError, AttributeError):
         return False
+    if control:
+        if (
+            not lines
+            or not isinstance(lines[0], dict)
+            or lines[0] != CONTROL_INPUT_EVIDENCE
+            or any(type(lines[0].get(key)) is not type(value) for key, value in CONTROL_INPUT_EVIDENCE.items())
+        ):
+            return False
+        lines = lines[1:]
     dll_all_loaded = False
     if dll:
         # A returned nonzero loader error is an observation, not compatibility
@@ -285,12 +323,23 @@ def valid_observations(
         final.get("axis_commit") == artifact_verifier.AXIS_COMMIT
         and final.get("mxc_commit") == artifact_verifier.MXC_COMMIT
         and final.get("translation_contract") == "fixed-axis-hard-block-to-mxc-typed-1.0.0"
-        and final.get("backend") == "native_windows_psec_only"
+        and final.get("backend") == ("uncontained_fixed_create_control" if control else "native_windows_psec_only")
         and final.get("production_qualification") is False
         and final.get("loader_only_diagnostic") is (mode == "loader-only")
         and (
             not claude
-            or (final.get("claude_version_only") is True and final.get("dll_startup_only_diagnostic") is False)
+            or (
+                final.get("claude_version_only") is (not control)
+                and final.get("dll_startup_only_diagnostic") is False
+                and (
+                    not control
+                    or (
+                        final.get("claude_create_control_only") is True
+                        and final.get("psec_attribute_attached") is False
+                        and final.get("control_reference_plan_executed") is False
+                    )
+                )
+            )
         )
         and (
             not dll
@@ -337,6 +386,7 @@ def main() -> None:
     modes.add_argument("--standalone-boundary", action="store_true")
     modes.add_argument("--dll-startup-only", action="store_true")
     modes.add_argument("--claude-version-only", action="store_true")
+    modes.add_argument("--claude-create-control-only", action="store_true")
     parser.add_argument("--custody", type=Path, required=True)
     parser.add_argument("--custody-sha256", type=artifact_verifier.digest_argument, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
@@ -345,13 +395,15 @@ def main() -> None:
     parser.add_argument("--local-image-receipt", type=Path)
     parser.add_argument("--local-image-receipt-sha256", type=artifact_verifier.digest_argument)
     args = parser.parse_args()
-    if args.claude_version_only:
+    if args.claude_version_only or args.claude_create_control_only:
         if args.local_image_receipt is None or args.local_image_receipt_sha256 is None:
             parser.error("the fixed Claude case requires both independent local-image receipt pins")
     elif args.local_image_receipt is not None or args.local_image_receipt_sha256 is not None:
         parser.error("local-image receipt options require the fixed Claude case")
     mode = (
-        "claude-version-only"
+        "claude-create-control-only"
+        if args.claude_create_control_only
+        else "claude-version-only"
         if args.claude_version_only
         else "dll-startup-only"
         if args.dll_startup_only
@@ -376,7 +428,9 @@ def main() -> None:
         or receipt.get("scope") != contract["scope"]
     ):
         raise ValueError("an independently verified non-executing receipt is required")
-    if args.claude_version_only:
+    if args.claude_create_control_only and receipt.get("probe_cargo_features") != ["fixed-claude-create-control"]:
+        raise ValueError("the separate uncontained build feature receipt is required")
+    if args.claude_version_only or args.claude_create_control_only:
         local_raw = artifact_verifier.ordinary_file(args.local_image_receipt.absolute(), 64 * 1024)
         if hashlib.sha256(local_raw).hexdigest() != args.local_image_receipt_sha256:
             raise ValueError("the independently reviewed local-image receipt differs")
@@ -405,7 +459,7 @@ def main() -> None:
         "-case-root",
         str(evidence / "psec-headless-01"),
     ]
-    if args.claude_version_only:
+    if args.claude_version_only or args.claude_create_control_only:
         command += [
             "-local-image-receipt",
             str(args.local_image_receipt.absolute()),
@@ -500,9 +554,16 @@ def main() -> None:
         "production_or_claude_qualification": False,
         "local_image_review_receipt_sha256": args.local_image_receipt_sha256,
         "fixed_claude_version_smoke_only": args.claude_version_only,
+        "fixed_uncontained_create_control_only": args.claude_create_control_only,
         "mode": mode,
         "scope": (
-            "fixed independently reviewed signed Claude --version only; eight private values requested, "
+            "UNCONTAINED fixed signed Claude --version creation control; PSEC object constructed but not attached; "
+            "exact constructed input equality except security-environment attribute; "
+            "eight private values requested; "
+            "realized Claude environment unverified; no filesystem/network/UI policy enforcement "
+            "or runtime qualification"
+            if args.claude_create_control_only
+            else "fixed independently reviewed signed Claude --version only; eight private values requested, "
             "realized Claude environment unverified; offline/default UI configured; "
             "no authentication, model, hooks, terminal or general Claude/runtime qualification"
             if args.claude_version_only

@@ -511,5 +511,84 @@ class GitHubBuildAdmissionTests(unittest.TestCase):
                 verify.verify_github(456, 123, commit, digest, "standalone-boundary")
 
 
+class FixedControlArtifactTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = ClaudeArtifactVerificationTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        f = self.fixture
+        f.mode = "claude-create-control-only"
+        self.control_contract = verify.artifact_contract(f.mode)
+        name = "patches/mxc-fixed-claude-create-control.patch"
+        data = b"synthetic fifth overlay; never applied"
+        f.files["source/" + name] = data
+        f.sources[verify.SOURCE_PREFIX + name] = data
+        patch_sha = verify.sha256(data)
+        mock.patch.object(verify, "CONTROL_OVERLAY_SHA256", patch_sha).start()
+        f.provenance.update(
+            variant=verify.CONTROL_VARIANT,
+            scope=verify.CONTROL_SCOPE,
+            probe_slice=f.mode,
+            mxc_fixed_create_control_patch_sha256=patch_sha,
+            psec_attribute_attached_to_payload=False,
+            control_reference_plan_executed=False,
+            probe_cargo_features=["fixed-claude-create-control"],
+            mxc_patched_paths=sorted(self.control_contract["modified"]),
+            mxc_overlay_file_sha256=dict(verify.CONTROL_OVERLAY_FILES),
+        )
+        f.admission["tests"] = [*verify.SDK_TESTS, verify.CONTROL_SDK_TEST]
+        f.admission["passed"] = len(f.admission["tests"])
+        f.write_artifact()
+
+    def test_separate_control_is_admitted_and_old_mode_refused(self) -> None:
+        self.assertEqual(self.fixture.run_verify()["scope"], verify.CONTROL_SCOPE)
+        with self.assertRaisesRegex(ValueError, "build contract"):
+            self.fixture.run_verify("claude-version-only")
+        self.assertEqual(len(verify.CONTROL_OVERLAY_FILES), 17)
+        self.assertEqual(len(verify.BOUNDARY_OVERLAY_FILES), 16)
+
+    def test_fifth_patch_scope_reference_and_exact_sdk_inventory_are_required(self) -> None:
+        f = self.fixture
+        changes = [
+            ("mxc_fixed_create_control_patch_sha256", "0" * 64),
+            ("psec_attribute_attached_to_payload", True),
+            ("control_reference_plan_executed", True),
+            ("probe_slice", "claude-version-only"),
+            ("probe_cargo_features", []),
+        ]
+        for key, changed in changes:
+            original = f.provenance[key]
+            f.provenance[key] = changed
+            f.write_artifact()
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                f.run_verify()
+            f.provenance[key] = original
+        f.admission["tests"] = list(verify.SDK_TESTS)
+        f.admission["passed"] = len(verify.SDK_TESTS)
+        f.write_artifact()
+        with self.assertRaisesRegex(ValueError, "SDK admission"):
+            f.run_verify()
+
+    def test_original_fingerprints_or_cross_slice_fifth_overlay_refuse(self) -> None:
+        f = self.fixture
+        f.provenance["mxc_overlay_file_sha256"] = dict(verify.BOUNDARY_OVERLAY_FILES)
+        f.write_artifact()
+        with self.assertRaisesRegex(ValueError, "fingerprint"):
+            f.run_verify()
+
+    def test_workflow_build_verifier_share_exact_extra_test_and_closed_slice(self) -> None:
+        workflow = (
+            Path(__file__)
+            .resolve()
+            .parents[5]
+            .joinpath(".github/workflows/axis-mxc-v1-windows-build.yml")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn("claude-create-control-only", workflow)
+        self.assertIn("mxc-fixed-claude-create-control.patch", workflow)
+        self.assertIn(verify.CONTROL_SDK_TEST.rsplit("::", 1)[-1], workflow)
+        self.assertIn("(13 if control else 12)", workflow)
+
+
 if __name__ == "__main__":
     unittest.main()

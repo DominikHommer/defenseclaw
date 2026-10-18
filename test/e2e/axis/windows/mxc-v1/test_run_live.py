@@ -304,7 +304,7 @@ class ClaudeObservationTests(ObservationTests):
 
     def test_fixed_rust_success_checks_match_driver(self) -> None:
         source = Path(__file__).with_name("src").joinpath("probe.rs").read_text(encoding="utf-8")
-        blocks = re.findall(r"let checks = if claude_only \{(.*?)\} else", source, re.DOTALL)
+        blocks = re.findall(r"\} else if claude_only \{\s*vec!\[(.*?)\]", source, re.DOTALL)
         self.assertEqual(len(blocks), 1)
         names = re.findall(r'"([a-z0-9_]+)"', blocks[0])
         self.assertEqual(len(names), len(set(names)))
@@ -462,6 +462,73 @@ class CustodyPinTests(unittest.TestCase):
             custody.write_bytes(b"pin released after bounded wait")
             result = json.loads((root / "evidence" / "live-result.json").read_text())
             self.assertTrue(result["passed"])
+
+
+class FixedControlObservationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        fixture = ClaudeObservationTests()
+        fixture.setUp()
+        self.receipt, self.local_receipt = fixture.receipt, fixture.local_receipt
+        self.record = fixture.record
+        self.mode = "claude-create-control-only"
+        self.receipt["probe_cargo_features"] = ["fixed-claude-create-control"]
+        self.record["probe_cargo_features"] = ["fixed-claude-create-control"]
+        contract = live.artifact_verifier.artifact_contract(self.mode)
+        self.record.update(mode=self.mode, variant=contract["variant"], scope=contract["scope"])
+        self.rows = [live.CONTROL_INPUT_EVIDENCE.copy(), *map(json.loads, self.record["stdout"].splitlines())]
+        self.rows[-1].update(
+            backend="uncontained_fixed_create_control",
+            claude_version_only=False,
+            claude_create_control_only=True,
+            psec_attribute_attached=False,
+            control_reference_plan_executed=False,
+            checks=sorted(live.CONTROL_CHECKS),
+        )
+        self.encode()
+
+    def encode(self) -> None:
+        self.record["stdout"] = "\n".join(json.dumps(row) for row in self.rows)
+
+    def test_exact_control_passes_but_never_as_psec(self) -> None:
+        self.assertTrue(live.valid_observations(self.record, self.receipt, self.mode, self.local_receipt))
+        self.assertFalse(live.valid_observations(self.record, self.receipt, "claude-version-only", self.local_receipt))
+
+    def test_equality_marker_types_counts_omissions_and_duplicates_refuse(self) -> None:
+        for field, changed in [
+            ("fixed_create_control_inputs_equal", 1),
+            ("psec_attribute_attached", 0),
+            ("constructed_psec_attribute_count", True),
+            ("selected_attribute_count", 2),
+        ]:
+            with self.subTest(field=field):
+                rows = copy.deepcopy(self.rows)
+                self.rows[0][field] = changed
+                self.encode()
+                self.assertFalse(live.valid_observations(self.record, self.receipt, self.mode, self.local_receipt))
+                self.rows = rows
+        for rows in [self.rows[1:], [self.rows[0], *self.rows], [*self.rows, self.rows[0]]]:
+            self.record["stdout"] = "\n".join(map(json.dumps, rows))
+            self.assertFalse(live.valid_observations(self.record, self.receipt, self.mode, self.local_receipt))
+
+    def test_false_containment_or_reference_execution_claim_refuses(self) -> None:
+        for key, value in [
+            ("backend", "native_windows_psec_only"),
+            ("psec_attribute_attached", True),
+            ("control_reference_plan_executed", True),
+        ]:
+            rows = copy.deepcopy(self.rows)
+            self.rows[-1][key] = value
+            self.encode()
+            self.assertFalse(live.valid_observations(self.record, self.receipt, self.mode, self.local_receipt))
+            self.rows = rows
+
+    def test_control_rust_success_checks_match_driver(self) -> None:
+        source = Path(__file__).with_name("src").joinpath("probe.rs").read_text(encoding="utf-8")
+        blocks = re.findall(r"let checks = if create_control_only \{(.*?)\} else", source, re.DOTALL)
+        self.assertEqual(len(blocks), 1)
+        names = re.findall(r'"([a-z0-9_]+)"', blocks[0])
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(set(names), live.CONTROL_CHECKS)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,10 @@ LOADER_BINARY = "defenseclaw-axis-windows-psec-loader-child.exe"
 BOUNDARY_BINARY = "defenseclaw-axis-windows-psec-boundary-child.exe"
 DLL_BINARY = "defenseclaw-axis-windows-psec-dll-child.exe"
 PROBE_SLICE_CONTRACTS = {
+    "claude-create-control-only": (
+        "standalone_std_fixed_signed_claude_create_control",
+        "fixed_windows_uncontained_claude_create_control",
+    ),
     "dll-startup-only": (
         "standalone_std_fixed_dll_startup_diagnostic",
         "fixed_windows_native_psec_dll_startup_diagnostic",
@@ -39,6 +43,10 @@ PATCH = ROOT / "patches" / "mxc-strict-windows-psec.patch"
 LITERAL_PATCH = ROOT / "patches" / "mxc-literal-argv.patch"
 WINDOWS_ARGV_PATCH = ROOT / "patches" / "mxc-windows-literal-argv.patch"
 IDENTITY_PATCH = ROOT / "patches" / "mxc-windows-process-identity.patch"
+CONTROL_PATCH = ROOT / "patches" / "mxc-fixed-claude-create-control.patch"
+CONTROL_PATCH_SHA256 = "0cb98abddbd9cde1ced266d649a37c81c45bdc3fd347f480fc46c15abde7cc66"
+CONTROL_PATH = "src/mxc-sdk/src/backends/process_container/common/secenv.rs"
+CONTROL_PATCH_PATHS = {CONTROL_PATH, "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs"}
 LITERAL_PATCH_SOURCE = "test/e2e/axis/patches/mxc-literal-argv.patch"
 LITERAL_PATCH_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
 WINDOWS_ARGV_PATCH_PATHS = {
@@ -160,7 +168,7 @@ def verify_source(directory: str, expected: str) -> Path:
     return source
 
 
-def verify_build_sources(axis: Path, mxc: Path) -> None:
+def verify_build_sources(axis: Path, mxc: Path, *, control: bool = False) -> None:
     """Reject source drift, index writes and new files around the build."""
     for source, expected in ((axis, AXIS_COMMIT), (mxc, MXC_COMMIT)):
         if command(["git", "rev-parse", "HEAD"], cwd=source, capture=True) != expected:
@@ -170,7 +178,10 @@ def verify_build_sources(axis: Path, mxc: Path) -> None:
         # line too, without accepting staged, added or untracked content.
         actual = {line.strip() for line in status.splitlines()}
         expected_status = (
-            {f"M {path}" for path in PATCHED_PATHS} | {f"?? {path}" for path in ADDED_PATHS} if source == mxc else set()
+            {f"M {path}" for path in (PATCHED_PATHS | ({CONTROL_PATH} if control else set()))}
+            | {f"?? {path}" for path in ADDED_PATHS}
+            if source == mxc
+            else set()
         )
         if actual != expected_status:
             raise RuntimeError("upstream source changes differ from the reviewed MXC overlay paths")
@@ -187,10 +198,10 @@ def digest(path: Path) -> str:
     return result.hexdigest()
 
 
-def overlay_fingerprints(mxc: Path) -> dict[str, str]:
+def overlay_fingerprints(mxc: Path, *, control: bool = False) -> dict[str, str]:
     """Include newly added files: Git's unstaged diff does not contain them."""
     result = {}
-    for relative in sorted(PATCHED_PATHS | ADDED_PATHS):
+    for relative in sorted(PATCHED_PATHS | ADDED_PATHS | ({CONTROL_PATH} if control else set())):
         path = mxc / relative
         metadata = path.lstat()
         if (
@@ -225,12 +236,27 @@ def verify_identity_patch_paths(mxc: Path) -> None:
         raise RuntimeError("Windows identity overlay must touch exactly its four reviewed source paths")
 
 
+def verify_control_patch_paths(mxc: Path) -> None:
+    if digest(CONTROL_PATCH) != CONTROL_PATCH_SHA256:
+        raise RuntimeError("fixed uncontained control overlay differs")
+    rows = command(["git", "apply", "--numstat", str(CONTROL_PATCH)], cwd=mxc, capture=True).splitlines()
+    fields = [row.split("\t") for row in rows]
+    if (
+        len(fields) != 2
+        or any(len(row) != 3 or not row[0].isdigit() or not row[1].isdigit() for row in fields)
+        or {row[2] for row in fields} != CONTROL_PATCH_PATHS
+    ):
+        raise RuntimeError("fixed control overlay must touch exactly its two reviewed source paths")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("generate-lock", "build-locked"))
     parser.add_argument("--probe-slice", choices=tuple(PROBE_SLICE_CONTRACTS), default="dll-startup-only")
     args = parser.parse_args()
     variant, scope = PROBE_SLICE_CONTRACTS[args.probe_slice]
+    control = args.probe_slice == "claude-create-control-only"
+    feature_args = ["--features", "fixed-claude-create-control"] if control else []
     if sys.platform != "win32" or platform.machine().lower() not in {"amd64", "x86_64"}:
         raise RuntimeError("build this contributor artifact on native Windows x86_64")
     artifact = ROOT / "build-artifact"
@@ -255,21 +281,37 @@ def main() -> None:
     for patch in (PATCH, LITERAL_PATCH, WINDOWS_ARGV_PATCH, IDENTITY_PATCH):
         command(["git", "apply", "--check", str(patch)], cwd=mxc)
         command(["git", "apply", str(patch)], cwd=mxc)
-    verify_build_sources(axis, mxc)
-    overlay_before = overlay_fingerprints(mxc)
+    if control:
+        verify_control_patch_paths(mxc)
+        command(["git", "apply", "--check", str(CONTROL_PATCH)], cwd=mxc)
+        command(["git", "apply", str(CONTROL_PATCH)], cwd=mxc)
+    verify_build_sources(axis, mxc, control=control)
+    overlay_before = overlay_fingerprints(mxc, control=control)
     if args.mode == "generate-lock":
         command(["cargo", f"+{TOOLCHAIN}", "generate-lockfile"])
     lock_before = digest(lock)
-    command(["cargo", f"+{TOOLCHAIN}", "build", "--locked", "--release"])
+    command(["cargo", f"+{TOOLCHAIN}", "build", "--locked", "--release", *feature_args])
     # Compile the probe's test target without executing any newly built code.
-    command(["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--no-run"])
+    command(["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", *feature_args, "--no-run"])
     # Run only these exact pure parser/spelling/buffer tests. They perform no
     # filesystem query, environment lookup, process creation or PSEC operation.
     pure_tests = PURE_ENVIRONMENT_TESTS
     for binary, names in [*pure_tests.items(), *PURE_DLL_TESTS.items()]:
         for name in names:
             output = command(
-                ["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--bin", binary, name, "--", "--exact"],
+                [
+                    "cargo",
+                    f"+{TOOLCHAIN}",
+                    "test",
+                    "--locked",
+                    "--release",
+                    *feature_args,
+                    "--bin",
+                    binary,
+                    name,
+                    "--",
+                    "--exact",
+                ],
                 capture=True,
             )
             print(output)
@@ -283,7 +325,19 @@ def main() -> None:
     for binary, names in NATIVE_DIRECTORY_CUSTODY_TESTS.items():
         for name in names:
             output = command(
-                ["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--bin", binary, name, "--", "--exact"],
+                [
+                    "cargo",
+                    f"+{TOOLCHAIN}",
+                    "test",
+                    "--locked",
+                    "--release",
+                    *feature_args,
+                    "--bin",
+                    binary,
+                    name,
+                    "--",
+                    "--exact",
+                ],
                 capture=True,
             )
             print(output)
@@ -296,8 +350,8 @@ def main() -> None:
         raise RuntimeError("the combined dependency lock changed during the locked build")
     if upstream_locks != {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}:
         raise RuntimeError("an upstream lock changed during the build")
-    verify_build_sources(axis, mxc)
-    if overlay_fingerprints(mxc) != overlay_before:
+    verify_build_sources(axis, mxc, control=control)
+    if overlay_fingerprints(mxc, control=control) != overlay_before:
         raise RuntimeError("reviewed MXC overlay bytes changed during the build")
 
     (artifact / "bin").mkdir(parents=True)
@@ -320,6 +374,8 @@ def main() -> None:
         Path("patches/mxc-windows-literal-argv.patch"),
         Path("patches/mxc-windows-process-identity.patch"),
     ]
+    if control:
+        files.append(Path("patches/mxc-fixed-claude-create-control.patch"))
     for relative in files:
         target = artifact / "source" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -346,7 +402,7 @@ def main() -> None:
         "mxc_literal_argv_patch_source": LITERAL_PATCH_SOURCE,
         "mxc_windows_argv_patch_sha256": digest(WINDOWS_ARGV_PATCH),
         "mxc_windows_process_identity_patch_sha256": digest(IDENTITY_PATCH),
-        "mxc_patched_paths": sorted(PATCHED_PATHS),
+        "mxc_patched_paths": sorted(PATCHED_PATHS | ({CONTROL_PATH} if control else set())),
         "mxc_added_paths": sorted(ADDED_PATHS),
         "mxc_overlay_file_sha256": overlay_before,
         "combined_lock_sha256": lock_before,
@@ -370,6 +426,11 @@ def main() -> None:
             if path.is_file()
         },
     }
+    if control:
+        provenance["mxc_fixed_create_control_patch_sha256"] = digest(CONTROL_PATCH)
+        provenance["psec_attribute_attached_to_payload"] = False
+        provenance["control_reference_plan_executed"] = False
+        provenance["probe_cargo_features"] = ["fixed-claude-create-control"]
     (artifact / "PROVENANCE.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     print("Contributor build complete; probe was not executed.")
     if args.mode == "generate-lock":

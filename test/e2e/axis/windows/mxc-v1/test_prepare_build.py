@@ -23,7 +23,7 @@ _SPEC.loader.exec_module(build)
 
 
 class BuildGuardTests(TestCase):
-    def test_probe_slice_accepts_only_the_two_reviewed_fixed_contracts(self) -> None:
+    def test_probe_slice_accepts_only_reviewed_distinct_fixed_contracts(self) -> None:
         self.assertEqual(
             build.PROBE_SLICE_CONTRACTS,
             {
@@ -34,6 +34,10 @@ class BuildGuardTests(TestCase):
                 "claude-version-only": (
                     "standalone_std_fixed_signed_claude_version",
                     "fixed_windows_native_psec_signed_claude_version",
+                ),
+                "claude-create-control-only": (
+                    "standalone_std_fixed_signed_claude_create_control",
+                    "fixed_windows_uncontained_claude_create_control",
                 ),
             },
         )
@@ -213,3 +217,40 @@ class BuildGuardTests(TestCase):
                 self.assertRaisesRegex(RuntimeError, "four reviewed source paths"),
             ):
                 build.verify_identity_patch_paths(Path("mxc"))
+
+
+class FixedControlBuildTests(TestCase):
+    def test_fifth_overlay_accepts_only_exact_two_paths_and_digest(self) -> None:
+        rows = "\n".join("1\t1\t" + name for name in sorted(build.CONTROL_PATCH_PATHS))
+        with (
+            mock.patch.object(build, "digest", return_value=build.CONTROL_PATCH_SHA256),
+            mock.patch.object(build, "command", return_value=rows),
+        ):
+            build.verify_control_patch_paths(Path("mxc"))
+        for changed in [rows + "\n1\t1\tCargo.toml", rows.replace("secenv.rs", "other.rs")]:
+            with (
+                mock.patch.object(build, "digest", return_value=build.CONTROL_PATCH_SHA256),
+                mock.patch.object(build, "command", return_value=changed),
+                self.assertRaisesRegex(RuntimeError, "two reviewed"),
+            ):
+                build.verify_control_patch_paths(Path("mxc"))
+        with (
+            mock.patch.object(build, "digest", return_value="0" * 64),
+            mock.patch.object(build, "command") as command,
+            self.assertRaisesRegex(RuntimeError, "differs"),
+        ):
+            build.verify_control_patch_paths(Path("mxc"))
+        command.assert_not_called()
+
+    def test_control_patch_source_hash_matches_registry_without_running_git(self) -> None:
+        self.assertEqual(build.digest(build.CONTROL_PATCH), build.CONTROL_PATCH_SHA256)
+
+    def test_control_feature_and_selector_are_bound_before_fixture_setup(self) -> None:
+        import tomllib
+
+        cargo = tomllib.loads(build.ROOT.joinpath("Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(cargo["features"], {"fixed-claude-create-control": []})
+        source = build.ROOT.joinpath("src/probe.rs").read_text(encoding="utf-8")
+        gate = source.index('create_control_only == cfg!(feature = "fixed-claude-create-control")')
+        self.assertLess(gate, source.index("let system = PathBuf::from"))
+        self.assertLess(gate, source.index("let owned = tempfile::Builder::new()"))

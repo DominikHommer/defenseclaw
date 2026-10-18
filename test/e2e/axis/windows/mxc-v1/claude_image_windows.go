@@ -30,6 +30,12 @@ const claudeSignerThumbprint = "0D7581D2C51C59DF686C3000C70BF543F9F6C6CB"
 const claudeSiblingName = "claude-reviewed.exe"
 const claudeArtifactVariant = "standalone_std_fixed_signed_claude_version"
 const claudeArtifactScope = "fixed_windows_native_psec_signed_claude_version"
+const claudeControlVariant = "standalone_std_fixed_signed_claude_create_control"
+const claudeControlScope = "fixed_windows_uncontained_claude_create_control"
+
+func isClaudeMode(mode string) bool {
+	return mode == "claude-version-only" || mode == "claude-create-control-only"
+}
 
 // An independent reviewer records signature/version facts for the fixed image.
 // Its SHA256/size below are source-pinned authority; receipt fields cannot admit

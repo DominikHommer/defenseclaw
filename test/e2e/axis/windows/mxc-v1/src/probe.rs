@@ -33,10 +33,16 @@ pub fn run() -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let loader_only = args.as_slice() == ["--loader-only"];
     let dll_only = args.as_slice() == ["--dll-startup-only"];
-    let claude_only = args.as_slice() == ["--claude-version-only"];
+    let claude_version_only = args.as_slice() == ["--claude-version-only"];
+    let create_control_only = args.as_slice() == ["--claude-create-control-only"];
+    let claude_only = claude_version_only || create_control_only;
     ensure!(
         args.is_empty() || loader_only || dll_only || claude_only,
         "only a fixed contributor mode selector is accepted"
+    );
+    ensure!(
+        create_control_only == cfg!(feature = "fixed-claude-create-control"),
+        "fixed build feature and contributor selector differ"
     );
     let system = PathBuf::from(std::env::var("SystemRoot")?).canonicalize()?;
     let executable = std::env::current_exe()?.canonicalize()?;
@@ -137,7 +143,14 @@ pub fn run() -> Result<i32> {
     fs::remove_dir_all(&root)
         .context("remove verified owned fixture after all SDK handles stopped")?;
     ensure!(!root.exists(), "owned fixture remains");
-    let checks = if claude_only {
+    let checks = if create_control_only {
+        vec![
+            "constructed_launch_inputs_equal_except_psec_attribute",
+            "fixed_signed_claude_version_output",
+            "retained_direct_process_handles_signaled",
+            "owned_fixture_removed",
+        ]
+    } else if claude_only {
         vec![
             "fixed_signed_claude_version_output",
             "retained_direct_process_handles_signaled",
@@ -177,12 +190,16 @@ pub fn run() -> Result<i32> {
             "axis_commit": "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c",
             "mxc_commit": "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2",
             "translation_contract": "fixed-axis-hard-block-to-mxc-typed-1.0.0",
-            "backend": "native_windows_psec_only", "production_qualification": false,
+            "backend": if create_control_only { "uncontained_fixed_create_control" } else { "native_windows_psec_only" }, "production_qualification": false,
             "loader_only_diagnostic": loader_only, "checks": checks,
             "dll_startup_only_diagnostic": dll_only,
-            "claude_version_only": claude_only,
+            "claude_version_only": claude_version_only,
+            "claude_create_control_only": create_control_only,
+            "psec_attribute_attached": !create_control_only,
+            "control_reference_plan_executed": false,
             "dll_initialization_all_succeeded": dll_initialization_all_succeeded,
-            "scope": if claude_only { "fixed reviewed signed local Claude 2.1.292 --version only; no authentication, model, hook, terminal or customer runtime qualification" }
+            "scope": if create_control_only { "UNCONTAINED fixed signed Claude --version creation control; PSEC constructed but not attached; constructed input equality only; no offline/UI/filesystem enforcement or runtime qualification" }
+                else if claude_only { "fixed reviewed signed local Claude 2.1.292 --version only; no authentication, model, hook, terminal or customer runtime qualification" }
                 else if dll_only { "three fixed System32 DLL initialization observations; returned load errors are not compatibility success; no UI, boundary or customer qualification" }
                 else if loader_only { "separate std loader marker and exit23 only; no boundary, network or customer qualification" }
                 else { "fixed offline canaries; no terminal, proxy, credentials, model or general resource audit" }

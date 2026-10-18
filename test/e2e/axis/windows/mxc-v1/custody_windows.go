@@ -46,6 +46,7 @@ var shaPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 type receipt struct {
+	ProbeCargoFeatures      []string    `json:"probe_cargo_features,omitempty"`
 	Verified                bool        `json:"verified"`
 	ExecutionPerformed      *bool       `json:"execution_performed"`
 	ProductionCertification *bool       `json:"production_certification"`
@@ -147,6 +148,9 @@ func checkedReceipt(path, expectedSHA, mode string) (*receipt, pinnedImages, err
 	} else if mode == "dll-startup-only" {
 		variant, scope = dllVariant, dllScope
 		seen[boundaryName], seen[dllName] = false, false
+	} else if mode == "claude-create-control-only" {
+		variant, scope = claudeControlVariant, claudeControlScope
+		seen[boundaryName], seen[dllName] = false, false
 	} else if mode == "claude-version-only" {
 		variant, scope = claudeArtifactVariant, claudeArtifactScope
 		seen[boundaryName], seen[dllName] = false, false
@@ -186,6 +190,13 @@ func checkedReceipt(path, expectedSHA, mode string) (*receipt, pinnedImages, err
 		!shaPattern.MatchString(value.Archive) || !shaPattern.MatchString(value.Provenance) ||
 		!shaPattern.MatchString(value.BinarySHA) || value.BinarySize <= 0 || value.BinarySize > 64*1024*1024 {
 		return nil, nil, errors.New("the reviewed locked Windows PSEC verification receipt is required")
+	}
+	if mode == "claude-create-control-only" {
+		if len(value.ProbeCargoFeatures) != 1 || value.ProbeCargoFeatures[0] != "fixed-claude-create-control" {
+			return nil, nil, errors.New("fixed control build feature evidence differs")
+		}
+	} else if len(value.ProbeCargoFeatures) != 0 {
+		return nil, nil, errors.New("ordinary PSEC receipt cannot admit the uncontained build feature")
 	}
 	if len(value.Binaries) != len(seen) {
 		return nil, nil, errors.New("all exact fixed-mode binaries are required")
@@ -292,7 +303,8 @@ func childPipe() (windows.Handle, *os.File, error) {
 func run(value *receipt, root, mode string, runtimeImages pinnedImages, localImage fixedLocalImage) (record map[string]any, resultErr error) {
 	record = map[string]any{"passed": false, "production_certification": false, "scope": value.Scope,
 		"variant": value.Variant, "mode": mode,
-		"binary_sha256": value.BinarySHA, "build_commit": value.BuildCommit, "build_run": value.BuildRun,
+		"probe_cargo_features": value.ProbeCargoFeatures,
+		"binary_sha256":        value.BinarySHA, "build_commit": value.BuildCommit, "build_run": value.BuildRun,
 		"combined_lock_sha256": value.Lock, "artifact_id": value.ArtifactID}
 	if !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(root), "psec-headless-") {
 		return record, errors.New("absolute fresh psec-headless-* case directory required")
@@ -300,7 +312,7 @@ func run(value *receipt, root, mode string, runtimeImages pinnedImages, localIma
 	if err := noReparse(filepath.Dir(root)); err != nil {
 		return record, err
 	}
-	if mode == "claude-version-only" {
+	if isClaudeMode(mode) {
 		if created, err := safefile.CreatePrivateDirectory(root); err != nil || !created {
 			return record, errors.Join(errors.New("fresh private Claude case required"), err)
 		}
@@ -315,7 +327,7 @@ func run(value *receipt, root, mode string, runtimeImages pinnedImages, localIma
 		}
 	}
 	binary := filepath.Join(value.Artifact, filepath.FromSlash(binaryName))
-	if mode == "claude-version-only" {
+	if isClaudeMode(mode) {
 		staged, held, err := stageClaudeVersionImages(value, runtimeImages, localImage, root)
 		if err != nil {
 			return record, err
@@ -408,8 +420,8 @@ func run(value *receipt, root, mode string, runtimeImages pinnedImages, localIma
 		command = append(command, "--loader-only")
 	} else if mode == "dll-startup-only" {
 		command = append(command, "--dll-startup-only")
-	} else if mode == "claude-version-only" {
-		command = append(command, "--claude-version-only")
+	} else if isClaudeMode(mode) {
+		command = append(command, "--"+mode)
 	} else if mode != "standalone-boundary" {
 		return record, errors.New("unknown fixed mode")
 	}
@@ -506,15 +518,18 @@ func run(value *receipt, root, mode string, runtimeImages pinnedImages, localIma
 	return record, nil
 }
 
-func selectedMode(loader, boundary, dll, claude bool) (string, error) {
+func selectedMode(loader, boundary, dll, claude, control bool) (string, error) {
 	choices := 0
-	for _, selected := range []bool{loader, boundary, dll, claude} {
+	for _, selected := range []bool{loader, boundary, dll, claude, control} {
 		if selected {
 			choices++
 		}
 	}
 	if choices != 1 {
 		return "", errors.New("exactly one fixed mode is required")
+	}
+	if control {
+		return "claude-create-control-only", nil
 	}
 	if claude {
 		return "claude-version-only", nil
@@ -533,19 +548,20 @@ func main() {
 	boundary := flag.Bool("standalone-boundary", false, "explicit fixed std-only boundary and literal argv cases")
 	dll := flag.Bool("dll-startup-only", false, "explicit fixed System32 DLL startup observations")
 	claude := flag.Bool("claude-version-only", false, "explicit fixed signed Claude 2.1.292 --version")
+	control := flag.Bool("claude-create-control-only", false, "explicit UNCONTAINED fixed Claude creation discriminator")
 	localReceipt := flag.String("local-image-receipt", "", "independently reviewed fixed local-image receipt")
 	localReceiptSHA := flag.String("local-image-receipt-sha256", "", "independent local-image receipt SHA256")
 	receiptPath := flag.String("receipt", "", "absolute independently verified receipt")
 	receiptSHA := flag.String("receipt-sha256", "", "reviewed receipt SHA256")
 	caseRoot := flag.String("case-root", "", "absolute fresh psec-headless-* case path")
 	flag.Parse()
-	mode, modeErr := selectedMode(*loaderOnly, *boundary, *dll, *claude)
+	mode, modeErr := selectedMode(*loaderOnly, *boundary, *dll, *claude, *control)
 	if flag.NArg() != 0 || modeErr != nil {
 		fmt.Fprintln(os.Stderr, "exactly one fixed mode is required; no workload arguments accepted")
 		os.Exit(2)
 	}
-	if (mode == "claude-version-only") != (*localReceipt != "" && *localReceiptSHA != "") ||
-		(mode != "claude-version-only" && (*localReceipt != "" || *localReceiptSHA != "")) {
+	if isClaudeMode(mode) != (*localReceipt != "" && *localReceiptSHA != "") ||
+		(!isClaudeMode(mode) && (*localReceipt != "" || *localReceiptSHA != "")) {
 		fmt.Fprintln(os.Stderr, "only the fixed Claude mode accepts its separate local-image receipt")
 		os.Exit(2)
 	}
@@ -560,7 +576,7 @@ func main() {
 		}
 	}()
 	var localImage fixedLocalImage
-	if mode == "claude-version-only" {
+	if isClaudeMode(mode) {
 		localImage, err = checkLocalClaudeReceipt(*localReceipt, *localReceiptSHA)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -569,7 +585,7 @@ func main() {
 	}
 	started := time.Now()
 	record, err := run(value, *caseRoot, mode, image, localImage)
-	if mode == "claude-version-only" {
+	if isClaudeMode(mode) {
 		err = errors.Join(err, localImage.held.Close(), image.Close())
 		image = nil
 		record["local_image_review_receipt_sha256"] = *localReceiptSHA

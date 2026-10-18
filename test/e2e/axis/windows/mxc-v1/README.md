@@ -394,3 +394,61 @@ A separate exact pure SDK test
 checks capture order, numeric formatting and count bounds without launching a
 process. The observed status samples do not establish a cause or authorize an
 unchanged retry, weaker policy, or production runtime activation.
+
+
+## Fixed uncontained native-create discriminator (source only)
+
+`claude-create-control-only` is a separate contributor build/receipt and closed
+runtime selector. It has not been built or run. It asks whether the same fixed
+Claude 2.1.292 `--version` creation inputs work when the process security-
+environment attribute is omitted. It is **uncontained**, supplies no PSEC
+filesystem/network/Win32k enforcement, and cannot qualify a sandbox or act as a
+runtime fallback. No existing Claude, DLL or boundary receipt admits this mode.
+
+The dependency-free `fixed-claude-create-control` Cargo feature binds the binary
+to this one selector before any fixture or API call. Ordinary binaries refuse
+the control selector; the control binary refuses every ordinary selector.
+Only this build slice applies `patches/mxc-fixed-claude-create-control.patch`
+after the four existing overlays. The original slices retain their sixteen
+reviewed SDK fingerprints and twelve SDK tests. The control binds seventeen
+SDK fingerprints and a thirteenth pure comparison/admission test; no dependency,
+upstream lock, CI executable-size limit or local-image authority is changed.
+
+The SDK still constructs and owns the requested strict PSEC object and the
+normal startup attribute list, without executing that reference plan. A second
+list carries only the exact same three inherited pipe handles. Before its one
+raw `CreateProcessW` call, the control compares complete bounded UTF-16
+application, mutable command-line, environment and cwd buffers byte for byte,
+creation flags, handle inheritance, all `STARTUPINFOW` fields individually
+(excluding padding), and the actual three handle values. It publishes only a
+fixed equality boolean and attribute counts, never the private values. The
+reference is constructed in this attempt; it is not an equality assertion about
+the differently named fixtures retained from earlier attempts.
+
+The selected call retains the held-image volume-GUID application spelling,
+separately quoted original program/`--version`, eight explicit private values,
+NULL process/thread security attributes, `CREATE_SUSPENDED`, `CREATE_NO_WINDOW`,
+`CREATE_UNICODE_ENVIRONMENT`, `EXTENDED_STARTUPINFO_PRESENT`, cwd and pipe setup.
+Only the PSEC attachment and its attribute-list storage/count differ between the
+two constructed plans. The fixed patch refuses legacy command strings, other
+program basenames, other arguments, inherited/default environments, non-capture
+stdio, non-eight-name environments and capture-denial requests before creation.
+The existing independently pinned local Claude image and all retained native
+image/ancestor handles remain required. There is no arbitrary command/path/hash
+selector in this control.
+
+The SDK Job must receive the suspended process before resume; the independent
+outer Go kill-on-close Job and retained direct handles remain in force. Stdin
+is closed, native wait is ten seconds, the Rust supervisor is twenty seconds,
+the Go wrapper waits thirty seconds, and the Python owner waits fifty-five
+seconds. Outer deadlines are also required around prelaunch host I/O; these
+waits do not independently bound filesystem syscalls. A result needs the exact
+equality record, exact version stdout, empty Claude stderr, exit zero, direct
+handle signal, empty outer Job and owned fixture cleanup. Success would isolate
+a difference in this downstream call path; it would not identify the failing
+PSEC parameter, prove an upstream defect, observe Claude's realized environment,
+or qualify authentication, models, hooks, terminal or production use.
+
+Source, fresh CI artifact, host wrapper and one-shot recipe need independent
+review before a separately authorized native attempt. This text authorizes no
+execution or retry of an existing artifact.

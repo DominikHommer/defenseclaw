@@ -21,6 +21,7 @@ on:
         options:
           - dll-startup-only
           - claude-version-only
+          - claude-create-control-only
 
 permissions:
   contents: read
@@ -55,6 +56,8 @@ jobs:
             test/e2e/axis/patches
 
       - name: Stage exact Git bytes independently of Windows checkout line endings
+        env:
+          AXIS_WINDOWS_FIXED_PROBE_SLICE: ${{ inputs.fixed_probe_slice || 'dll-startup-only' }}
         run: |
           $ErrorActionPreference = 'Stop'
           @'
@@ -62,6 +65,8 @@ jobs:
           from pathlib import Path
           import subprocess
           head = os.environ['GITHUB_SHA']
+          fixed_slice = os.environ['AXIS_WINDOWS_FIXED_PROBE_SLICE']
+          assert fixed_slice in ('dll-startup-only', 'claude-version-only', 'claude-create-control-only')
           checkout = Path('defenseclaw-source')
           assert subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True).strip() == head
           assert not subprocess.check_output(['git', '-C', str(checkout), 'status', '--porcelain'], text=True).strip()
@@ -72,6 +77,8 @@ jobs:
                    'src/dll_startup_child.rs', 'src/dll_startup_protocol.rs',
                    'patches/mxc-strict-windows-psec.patch', 'patches/mxc-windows-literal-argv.patch',
                    'patches/mxc-windows-process-identity.patch']
+          if fixed_slice == 'claude-create-control-only':
+              files.append('patches/mxc-fixed-claude-create-control.patch')
           if (checkout / prefix / 'Cargo.lock').is_file(): files.append('Cargo.lock')
           root = Path('probe')
           root.mkdir()
@@ -120,7 +127,7 @@ jobs:
           AXIS_WINDOWS_FIXED_PROBE_SLICE: ${{ inputs.fixed_probe_slice || 'dll-startup-only' }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:AXIS_WINDOWS_FIXED_PROBE_SLICE -cnotin @('dll-startup-only', 'claude-version-only')) {
+          if ($env:AXIS_WINDOWS_FIXED_PROBE_SLICE -cnotin @('dll-startup-only', 'claude-version-only', 'claude-create-control-only')) {
             throw 'Unknown fixed contributor probe slice'
           }
           # Initialize installed native tools in this same process. Otherwise
@@ -161,6 +168,7 @@ jobs:
           # Keep its reviewed upstream lock separate from the contributor lock.
           @'
           import json
+          import os
           import re
           import prepare_build as build
           sdk_workspace = build.ROOT / 'mxc-source' / 'src'
@@ -195,6 +203,12 @@ jobs:
               ],
           }
           selected = [group + '::' + name for group, names in groups.items() for name in names]
+          control = os.environ['AXIS_WINDOWS_FIXED_PROBE_SLICE'] == 'claude-create-control-only'
+          if control:
+              selected.append(
+                  'backend_modules::process_container::common::base_container_runner::strict_windows_argv_tests::'
+                  'fixed_control_compares_exact_buffers_flags_stdio_and_refuses_other_payloads'
+              )
           cargo = [
               'cargo', '+' + build.TOOLCHAIN, 'test', '--locked', '--release',
               '--target-dir', str(build.ROOT / 'target'),
@@ -202,7 +216,7 @@ jobs:
           ]
           listing = build.command(cargo + ['--', '--list', '--format', 'terse'], cwd=sdk_workspace, capture=True)
           listed = re.findall(r'^(.+): test$', listing, re.MULTILINE)
-          if len(set(selected)) != 12 or any(listed.count(name) != 1 for name in selected):
+          if len(set(selected)) != (13 if control else 12) or any(listed.count(name) != 1 for name in selected):
               raise RuntimeError('The exact reviewed SDK regression tests are missing or duplicated')
           for name in selected:
               output = build.command(cargo + [name, '--', '--exact', '--test-threads=1'], cwd=sdk_workspace, capture=True)
@@ -212,7 +226,7 @@ jobs:
                   raise RuntimeError('An exact SDK regression test did not report one non-ignored pass')
           if build.digest(sdk_lock) != expected_sdk_lock:
               raise RuntimeError('SDK regression tests changed the upstream lock')
-          build.verify_build_sources(build.ROOT / 'axis-source', build.ROOT / 'mxc-source')
+          build.verify_build_sources(build.ROOT / 'axis-source', build.ROOT / 'mxc-source', control=control)
           (build.ROOT / 'build-artifact' / 'SDK-ADMISSION-TESTS.json').write_text(json.dumps({
               'tests': selected,
               'passed': len(selected),
