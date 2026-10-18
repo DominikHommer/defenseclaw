@@ -575,22 +575,30 @@ func runWindowsEnterpriseStandaloneAction(
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	applyWindowsEnterprisePolicy(ctx, result)
 	if (action == "status" || action == "verify") && report.Installed {
-		if report.CursorTargetEnabled {
-			result.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
-		}
-		// Readiness, not the probe: another process on the port answers
-		// /health too (GAP-1029).
-		if result.Readiness.Gateway {
-			if body, err := enterprisestatus.SettledGatewayHealth(ctx, windowsStandaloneGatewayHealth, 500*time.Millisecond, 8); err == nil {
-				appendStandaloneGatewayWarnings(result, body, windowsStandaloneGatewayStatus())
-			}
-		}
-		if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
-			appendAdmissionIssueWarnings(result, layout.DataDir, layout.GuardianAuthDir)
-		}
+		appendWindowsEnterpriseStatusAdvisories(ctx, result, report)
 	}
 	addWindowsEnterpriseNothingInstalledError(result, report, action)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// appendWindowsEnterpriseStatusAdvisories adds the advisories status and
+// verify report for an installed deployment beyond its installer report: the
+// gateway's own warnings and the admission issues. A refused config reports
+// them too, as the running deployment's (GAP-0103).
+func appendWindowsEnterpriseStatusAdvisories(ctx context.Context, result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if report.CursorTargetEnabled {
+		result.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
+	}
+	// Readiness, not the probe: another process on the port answers
+	// /health too (GAP-1029).
+	if result.Readiness.Gateway {
+		if body, err := enterprisestatus.SettledGatewayHealth(ctx, windowsStandaloneGatewayHealth, 500*time.Millisecond, 8); err == nil {
+			appendStandaloneGatewayWarnings(result, body, windowsStandaloneGatewayStatus())
+		}
+	}
+	if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
+		appendAdmissionIssueWarnings(result, layout.DataDir, layout.GuardianAuthDir)
+	}
 }
 
 // windowsEnterprisePolicyDigest runs the installed CLI with `policy digest`
@@ -2185,6 +2193,12 @@ func finishWindowsEnterpriseStandalone(
 			"%d local block/allow entries in audit.db are ignored; the administrator config is the policy",
 			opts.localEnforcementEntriesIgnored))
 	}
+	if opts.runningDeploymentLabel {
+		// The refused config changed nothing: each advisory is the running
+		// deployment's, except those about this request (GAP-0564, GAP-0103).
+		result.LabelRunningDeployment(opts.runningDeploymentWarningsFrom,
+			windowsEnterpriseHealthNotChecked, "installer_pipe_wait_delayed")
+	}
 	exitCode := result.Finish("windows", failureCode)
 	result.LogPath = windowsEnterpriseStandaloneObserver(result, opts)
 	unknownProfile := windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0
@@ -2303,15 +2317,22 @@ func writeWindowsEnterpriseStandaloneConfigRefusal(
 	cause error,
 ) error {
 	return writeWindowsEnterpriseStandaloneRefusal(cmd, action, opts, cause, func(result *enterprisestatus.Result) {
-		before := len(result.Warnings)
-		defer func() { result.LabelRunningDeployment(before, windowsEnterpriseHealthNotChecked) }()
+		// The finish labels every warning from here on, its own (credential,
+		// scanner and agent advisories) included (GAP-0103).
+		opts.runningDeploymentLabel = true
+		opts.runningDeploymentWarningsFrom = len(result.Warnings)
 		status, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
 			windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 		if err != nil || status.probeFailed {
 			applyWindowsEnterpriseRecordedDeployment(result)
 			return
 		}
+		// The host as status reports it: its policy and its advisories.
 		applyWindowsEnterpriseInstallerReport(result, opts, status, run)
+		applyWindowsEnterprisePolicy(ctx, result)
+		if status.Installed {
+			appendWindowsEnterpriseStatusAdvisories(ctx, result, status)
+		}
 		result.Errors = []enterprisestatus.Message{}
 	})
 }
@@ -2333,7 +2354,12 @@ func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 	opts *windowsEnterpriseLifecycleOptions,
 	script string,
 ) (bool, error) {
-	err := windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
+	// A config profile resolution found unparseable is refused with the
+	// gateway's reason it already has (GAP-0103).
+	err := opts.suppliedConfigRefusal
+	if err == nil {
+		err = windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
+	}
 	if err != nil && (action == "ensure" || action == "upgrade") && windowsEnterpriseStandaloneTransactionPending() {
 		recovery := *opts
 		recovery.jsonOutput = true
@@ -2342,7 +2368,9 @@ func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 		// nothing: a recovery that failed leaves transaction_pending there.
 		_, _, _ = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
 			windowsEnterprisePowerShellArgs("repair", windowsEnterpriseRepairRecordingOptions("repair", &recovery)))
-		err = windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
+		if opts.suppliedConfigRefusal == nil {
+			err = windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
+		}
 	}
 	if err == nil {
 		return false, nil

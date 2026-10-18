@@ -164,9 +164,17 @@ func TestWindowsEnterpriseProfileFromConfig(t *testing.T) {
 	if err := os.WriteFile(latin1, []byte("# caf\xe9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: latin1, profile: "standalone"})
+	// An action that applies the file is refused later, once its installer
+	// is trusted, so the refusal reports the running deployment (GAP-0103);
+	// any other action is refused here.
+	deferred := &windowsEnterpriseLifecycleOptions{configPath: latin1, profile: "standalone"}
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", deferred); err != nil || deferred.resolvedProfile != "standalone" ||
+		!strings.Contains(fmt.Sprint(deferred.suppliedConfigRefusal), "save the file as UTF-8") {
+		t.Fatalf("Latin-1 standalone config: %v, deferred refusal %v", err, deferred.suppliedConfigRefusal)
+	}
+	err := resolveWindowsEnterpriseLifecycleProfile("status", &windowsEnterpriseLifecycleOptions{configPath: latin1, profile: "standalone"})
 	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "save the file as UTF-8") {
-		t.Fatalf("Latin-1 standalone config: %v", err)
+		t.Fatalf("Latin-1 standalone config, status: %v", err)
 	}
 	// GAP-0607: a tab-indented config is refused 1639 (invalid arguments)
 	// with the line, like every other config the gateway cannot load;
@@ -175,13 +183,28 @@ func TestWindowsEnterpriseProfileFromConfig(t *testing.T) {
 	if err := os.WriteFile(tabbed, []byte("deployment_mode: managed_enterprise\nguardrail:\n\tconnectors: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: tabbed, profile: "standalone"})
-	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "line 3") {
-		t.Fatalf("standalone tab-indented config: %v", err)
+	deferred = &windowsEnterpriseLifecycleOptions{configPath: tabbed, profile: "standalone"}
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", deferred); err != nil ||
+		!strings.Contains(fmt.Sprint(deferred.suppliedConfigRefusal), "line 3") {
+		t.Fatalf("standalone tab-indented config: %v, deferred refusal %v", err, deferred.suppliedConfigRefusal)
 	}
 	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: tabbed}); err == nil ||
 		errors.Is(err, errWindowsEnterpriseInvalidArguments) {
 		t.Fatalf("Secure Client tab-indented config: %v", err)
+	}
+	// GAP-0103: without --profile, on a host that runs only the standalone
+	// profile the file is that profile's refusal too (1639, not a 1603
+	// Secure Client preflight failure); a Secure Client host keeps its result.
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
+	deferred = &windowsEnterpriseLifecycleOptions{configPath: tabbed}
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", deferred); err != nil || deferred.resolvedProfile != "standalone" ||
+		!strings.Contains(fmt.Sprint(deferred.suppliedConfigRefusal), "line 3") {
+		t.Fatalf("tab-indented config on a standalone host: %v, profile %q, deferred refusal %v", err, deferred.resolvedProfile, deferred.suppliedConfigRefusal)
+	}
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"secure_client": winpath.EnterpriseDeploymentInstalled})
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: tabbed}); err == nil ||
+		errors.Is(err, errWindowsEnterpriseInvalidArguments) {
+		t.Fatalf("tab-indented config on a Secure Client host: %v", err)
 	}
 }
 
@@ -719,20 +742,58 @@ func TestWindowsEnterpriseConfigRefusalLabelsTheRunningDeploymentAdvisories(t *t
 	var stdout bytes.Buffer
 	command.SetOut(&stdout)
 	cause := fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, errors.New("the gateway cannot load the config"))
-	_ = writeWindowsEnterpriseStandaloneConfigRefusal(context.Background(), command, "ensure", ensureTestOptions(), `C:\stage\install-enterprise.ps1`, cause)
+	opts := ensureTestOptions()
+	// An advisory the finish adds after the probe is labelled too: the
+	// live refusal printed the finish's advisories unlabelled (GAP-0103).
+	opts.localEnforcementEntriesIgnored = 2
+	_ = writeWindowsEnterpriseStandaloneConfigRefusal(context.Background(), command, "ensure", opts, `C:\stage\install-enterprise.ps1`, cause)
 	var result enterprisestatus.Result
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	labelled := false
+	labelled, finishLabelled := false, false
 	for _, warning := range result.Warnings {
 		if !strings.HasPrefix(warning.Message, enterprisestatus.RunningDeploymentPrefix) {
 			t.Fatalf("warning %s is not labelled as the running deployment's: %q", warning.Code, warning.Message)
 		}
 		labelled = labelled || warning.Code == "security_incomplete"
+		finishLabelled = finishLabelled || warning.Code == config.LocalEnforcementEntriesIgnored
 	}
-	if !labelled || len(result.Errors) != 1 || strings.HasPrefix(result.Errors[0].Message, enterprisestatus.RunningDeploymentPrefix) {
+	if !labelled || !finishLabelled || len(result.Errors) != 1 || strings.HasPrefix(result.Errors[0].Message, enterprisestatus.RunningDeploymentPrefix) {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+// GAP-0103: a config profile resolution found unparseable (a YAML syntax
+// error) is refused with the gateway's reason it already has, after the
+// status probe, so the refusal reports the running deployment like a refused
+// config that parses: not the recorded deployment alone with
+// health_not_checked, zero targets and no advisories.
+func TestWindowsEnterpriseUnparseableConfigRefusalReportsTheRunningDeployment(t *testing.T) {
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	opts := ensureTestOptions()
+	opts.suppliedConfigRefusal = errors.New("the gateway cannot load bad.yaml at line 63: [yaml_syntax_invalid] invalid YAML")
+	refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(context.Background(), command, "ensure", opts, `C:\stage\install-enterprise.ps1`)
+	if !refused || commandExitCode(err) != 1639 || len(stub.calls) != 1 || stub.calls[0][1] != "Status" {
+		t.Fatalf("refused=%v exit %d, installer runs %q", refused, commandExitCode(err), stub.calls)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Installed || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+		!strings.Contains(result.Errors[0].Message, "yaml_syntax_invalid") ||
+		windowsBundleHasCode(result.Warnings, windowsEnterpriseHealthNotChecked) {
+		t.Fatalf("result %+v", result)
+	}
+	for _, warning := range result.Warnings {
+		if !strings.HasPrefix(warning.Message, enterprisestatus.RunningDeploymentPrefix) {
+			t.Fatalf("warning %s is not labelled as the running deployment's: %q", warning.Code, warning.Message)
+		}
 	}
 }
 

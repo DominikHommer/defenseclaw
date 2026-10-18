@@ -110,6 +110,18 @@ type windowsEnterpriseLifecycleOptions struct {
 	payloadManifest string
 	allowedSigners  []string
 	productVersion  string
+	// suppliedConfigRefusal is why the supplied --config cannot be loaded
+	// when profile resolution found it unparseable. An install, ensure,
+	// upgrade or repair is refused with it once its installer is found and
+	// trusted, so the refusal reports the running deployment as a refused
+	// config that parses does (GAP-0103).
+	suppliedConfigRefusal error
+	// runningDeploymentLabel marks a run that refused its config before it
+	// changed anything: every warning from index
+	// runningDeploymentWarningsFrom on, those the finish adds included, is
+	// the running deployment's (GAP-0564, GAP-0103).
+	runningDeploymentLabel        bool
+	runningDeploymentWarningsFrom int
 	// payloadPins are the payload manifest's SHA-256 pins, read when a
 	// hash_pinned run verifies its installer. The scanner runtime the
 	// lifecycle installs itself is admitted by them too.
