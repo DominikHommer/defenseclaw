@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -389,12 +390,28 @@ func openShellExecBridgeFor(configPath, home string) string {
 	}
 	stateHome := filepath.Join(home, ".local", "state")
 	if !openshell.DockerNamespaceInUse(stateHome, openshell.DefaultDockerNamespace) ||
-		openshell.DockerNamespaceInUse(stateHome, openshell.ManagedDockerNamespace) ||
 		!openShellExecDefaultNamespaceSandboxKept(stateHome) {
+		return configPath
+	}
+	if openshell.DockerNamespaceInUse(stateHome, openshell.ManagedDockerNamespace) {
+		// Sandboxes in both namespaces (after a downgrade to 1.0.1 and an
+		// upgrade again, say): one gateway serves one namespace, and the
+		// managed one wins. Without this line the kept 1.0.1 sandboxes only
+		// answered "not found" (rel-1-0-3:GAP-0164).
+		fmt.Fprintf(openShellExecWarn, "defenseclaw: the 1.0.1 upgrade bridge is off for this account: it keeps sandboxes in both OpenShell docker namespaces, %q "+
+			"(the sandboxes kept under 1.0.1) and %q, and one gateway serves one; the gateway starts in %q, so the sandboxes kept under 1.0.1 "+
+			"report not found until no sandbox is left in %q (bring back the work of each with `defenseclaw sandbox pull NAME`, then "+
+			"`defenseclaw sandbox delete NAME`; their folders are under %s), and the gateway's next start then uses the bridge\n",
+			openshell.DefaultDockerNamespace, openshell.ManagedDockerNamespace, openshell.ManagedDockerNamespace, openshell.ManagedDockerNamespace,
+			filepath.Join(stateHome, "openshell", "docker-sandbox-tokens", openshell.ManagedDockerNamespace))
 		return configPath
 	}
 	return bridgePath
 }
+
+// openShellExecWarn takes the shim's notices: the gateway unit's journal.
+// Tests replace it.
+var openShellExecWarn io.Writer = os.Stderr
 
 // openShellExecDefaultNamespaceSandboxKept reports whether a sandbox folder
 // of the docker driver in OpenShell's default namespace names a sandbox

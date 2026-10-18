@@ -1331,8 +1331,14 @@ running sandbox counts again within the next minute.
   compatibility bridge: `ensure` also renders the 1.0.1 docker configuration
   (`gateway-docker-default-namespace.toml`, next to `gateway.toml`), and a
   user's gateway keeps starting on it, in the `default` namespace, while that
-  user still keeps a sandbox there. The user's kept sandboxes list, start,
-  connect and pull as before, running or stopped, and the upgrade is a plain
+  user still keeps a sandbox there and none in `defenseclaw-managed`. A user
+  who keeps sandboxes in both (after a downgrade to 1.0.1 and an upgrade
+  again, for example) starts in `defenseclaw-managed`, because one gateway
+  serves one namespace: the 1.0.1 sandboxes then report "not found", the
+  gateway's log names the cause, and they start again once no sandbox is left
+  in `defenseclaw-managed` (pull, then delete each). The user's kept
+  sandboxes list, start, connect and pull as before, running or stopped, and
+  the upgrade is a plain
   restart ("pending restart" while a sandbox runs), not a switch. A user who
   never ran sandboxes moves straight to `defenseclaw-managed`, and so does a
   user at the gateway's next start once their last 1.0.1 sandbox is deleted
@@ -1367,7 +1373,7 @@ running sandbox counts again within the next minute.
   the kept record, so a driver or version change is a switch that waits for
   running sandboxes, and it keeps the 1.0.1 upgrade bridge. The kept sandboxes
   then start, review and pull as before, the sandboxes kept under 1.0.1
-  included. Only
+  included, on the bridge's terms above. Only
   `--purge` runs each user's teardown as that user and removes the daemon
   state, MicroVM disks, images, both stores and the rendered `gateway.toml`;
   it also removes the kept registrations, decisions and key, and the kept

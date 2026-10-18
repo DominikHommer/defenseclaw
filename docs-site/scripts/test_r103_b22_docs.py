@@ -71,6 +71,16 @@ class R103B22DocsTest(unittest.TestCase):
             "Uninstall runs this cleanup also when a `targets.yaml` row still names the re-homed account",
         )
 
+    def test_sandboxes_bridge_needs_no_managed_sandbox(self):
+        # rel-1-0-3:GAP-0164, rel-1-0-2:GAP-0675
+        self.assert_phrases(
+            "enterprise/sandboxes.mdx",
+            "while that user still keeps a sandbox there and none in `defenseclaw-managed`",
+            "starts in `defenseclaw-managed`, because one gateway serves one namespace",
+            "the gateway's log names the cause, and they start again once no sandbox is left in `defenseclaw-managed`",
+            "the sandboxes kept under 1.0.1 included, on the bridge's terms above",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
