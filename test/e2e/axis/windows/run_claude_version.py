@@ -26,7 +26,17 @@ def run(args):
     if claude.name.lower() != "claude.exe" or claude.stat().st_size != CLAUDE_SIZE or sha(claude) != CLAUDE_SHA256:
         raise ValueError("only the reviewed Claude 2.1.292 binary is accepted")
     system = pathlib.Path(os.environ["SystemRoot"])
+    if not system.is_absolute():
+        raise ValueError("absolute Windows system directory required")
     shell = system / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    # Windows PowerShell must load its own security module, even when this
+    # contributor script was launched from PowerShell 7. Do not inherit caller
+    # module paths or credential-bearing environment into the verifier either.
+    signature_environment = {
+        "SYSTEMROOT": str(system),
+        "WINDIR": str(system),
+        "PSModulePath": str(system / "System32/WindowsPowerShell/v1.0/Modules"),
+    }
     literal = "'" + str(claude).replace("'", "''") + "'"
     signature_command = (
         "$ErrorActionPreference='Stop'; $s=Get-AuthenticodeSignature -LiteralPath "
@@ -36,7 +46,10 @@ def run(args):
     )
     signature = json.loads(
         subprocess.check_output(
-            [str(shell), "-NoProfile", "-NonInteractive", "-Command", signature_command], text=True, timeout=15
+            [str(shell), "-NoProfile", "-NonInteractive", "-Command", signature_command],
+            env=signature_environment,
+            text=True,
+            timeout=15,
         )
     )
     if signature["status"] != "Valid" or 'O="Anthropic, PBC"' not in signature["subject"]:
