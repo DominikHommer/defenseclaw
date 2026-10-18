@@ -8,7 +8,9 @@ admits only receipt SHA256
 `8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b`
 for the closed baseline/lifecycle suites and the exact reviewed c914 build
 (byte-identical aa215 Rust peer and revised static Bubblewrap), with the
-3f295 payload. This new pairing has not executed. Historically, the c914
+3f295 payload. Its first lifecycle attempt passed the two fixed wait cases but
+failed the tree precondition; see the [actual result](../README.md#lifecycle-probe-revision-and-first-failed-attempt).
+Historically, the c914
 Bubblewrap, d074 payload, ae9 wrapper and 5125 driver
 passed one [fixed four-case attempt](../README.md#first-passing-native-attempt-four-fixed-offline-cases)
 at source `2e494e16e75410903577f62fa07cb9a009711f70`. The `wait`/`tree-*`,
@@ -233,7 +235,7 @@ the Bubblewrap image/static closure and first build identity; peer bytes and
 the d074 payload remain unchanged. A fresh wrapper, paired driver and separately
 reviewed native attempt are required.
 
-## Fixed lifecycle suite: source only
+## Fixed lifecycle suite
 
 The explicit `--suite lifecycle` selector adds three bounded experiments while
 the default `--suite baseline` retains the four original cases. It requires a
@@ -246,8 +248,9 @@ filter denies. Payload build run `39167683927`, artifact `12151291706`, binds
 image `ff14f6e2bbce3c35566326ba98cec890b500b6032df3c3ee2b408c9a494128f2`
 (1,929,342 bytes) and source SHA256
 `80c64fb6138218c40ebbfe646c6225d098e3734be2ca5e0c1ca020c386f4b8fb`.
-No lifecycle attempt has executed for this new source; historical receipts and
-run evidence remain unchanged.
+The first attempt at this pairing failed the tree precondition after the two
+fixed wait cases passed. It did not observe tree cancellation or stability;
+historical receipts and run evidence remain unchanged.
 
 `wait-timeout` requires the fixed payload's ready marker before its five-second
 native plan deadline, then a Launch-correlated `Exited(-1)` with `timed_out`

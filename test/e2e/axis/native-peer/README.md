@@ -27,15 +27,16 @@ truncate or create an ungranted target if containment is broken. Fixed seal
 and read-only canary reads are bounded. Root writability and private device
 writes are distinct from access to an outside host file. The boundary selector
 requires the root mount's `ST_RDONLY` flag and writes positive canaries to all
-three explicit private read-write directory grants. Separate, unexecuted
-`tree-*` selectors include a grandchild in a separate session and fixed
-heartbeat files for future bounded cleanup observations. It never selects a host executable,
+three explicit private read-write directory grants. The separate `tree-*`
+selectors require session-creation denial, then create normal descendants and
+fixed heartbeat files for bounded cleanup observations. It never selects a host executable,
 PATH entry, credential or arbitrary path.
 
 Beyond the four-case result below, the trusted host harness still needs
 separate loopback controls, one-use preparation and stale/renamed grant
-refusal, timeout/cancel/parent death, and descendant stress with exact retained
-pidfd wait. The
+refusal, parent death, and descendant stress with exact retained pidfd wait.
+The two fixed timeout/cancel cases passed in the lifecycle attempt below; that
+does not qualify arbitrary workload lifecycle behavior. The
 heartbeat observation is supplemental; lack of writes alone does not prove
 arbitrary descendant containment. Nested PID-namespace behavior and terminal
 support require separate tests. Old Landlock/MXC probe pass results do not
@@ -48,7 +49,8 @@ The separate [fixed host harness](harness/README.md) supplies contributor-only
 artifact admission, held synthetic grants and actual factory/protocol wiring
 for the first argv/stdio/exit/boundary slice. Its compiled registry admits only
 the independently reviewed c914 build (unchanged Rust peer bytes and revised
-static-musl Bubblewrap) and d074 fixed payload receipt. Tests inject unreviewed registries or fake supervisors and
+static-musl Bubblewrap) and 3f295 fixed payload receipt. The historical four-case
+result used d074. Tests inject unreviewed registries or fake supervisors and
 never inherit that native authority. The [outer driver](driver/README.md) and
 [fixed CI recipe](live/README.md) separately own the complete wrapper namespace
 and exact reviewed artifact inputs. Their source, build and inert artifact
@@ -148,7 +150,7 @@ death and descendant stress, terminal behavior, actual Claude, hooks, credential
 relay and model traffic remain unqualified. The retained result explicitly has
 `common_launch_gate_qualified=false` and `production_certification=false`.
 
-## Next lifecycle probe revision: source only
+## Lifecycle probe revision and first failed attempt
 
 The historical d074 tree selector requests setsid for a grandchild; the pinned
 offline filter denies that syscall. The new fixed tree source instead requires
@@ -157,9 +159,41 @@ grandchild chain. Only the child and grandchild substantiate filter denial:
 both require a positive process-group ID different from their own PID before
 the syscall. The parent's EPERM is consistency only, since a group leader
 can receive that error naturally. The filter, peer and static Bubblewrap are
-unchanged. A new
-payload artifact, combined receipt and paired wrapper/driver reviews are
-required before the separate wait-timeout, wait-cancel and tree-cancel suite
-can run. The earlier four-case success and its exact historical artifacts stay
-unchanged. No lifecycle, terminal or customer runtime qualification follows
-from this source revision.
+unchanged. The reviewed 3f295 payload, c914 peer/Bubblewrap, 52e4 wrapper and
+b38 driver were paired under receipt
+`8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b`.
+The earlier four-case success and its exact historical artifacts stay unchanged.
+
+The sole [lifecycle attempt](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39170295582)
+at source `c9e657b9c87ed3464cc1b3a7f339ea56ec805395` failed overall.
+`wait-timeout` and `wait-cancel` each observed their ready marker, the expected
+Launch-correlated `Exited(-1)` and timeout flag, separate `Destroyed`, and
+successful native cleanup. The cancel case recorded an explicit Cancel; the
+timeout case recorded `timed_out=true`.
+
+`tree-cancel` prepared and started, then refused with the fixed
+`payload_tree_setsid_precondition` diagnostic before Cancel, all three markers,
+heartbeat progress or stability. Only the parent ready file and an empty parent
+heartbeat were retained; no tree descendant-cleanup result or terminal exit code
+was observed. The reported zero exit-code field is its unobserved default.
+Pinned x/sys `Getpgrp()` calls `Getpgid(0)` and discards its error; that syscall
+is absent from the offline allowlist, while raw amd64 `getpgrp` (111) is allowed.
+This source mismatch explains a possible failed precondition; no syscall trace
+was captured to attribute the exact runtime return.
+
+The separate native, worker and whole-wrapper cleanup owners completed with
+zero pending custody. Collection retained eight public files totaling 224 bytes
+(12 members including directories), and the runner setting was restored to 1.
+Evidence artifact `12152376279` contains 27,726 ZIP bytes, SHA256
+`b2fa7afcf79a02bb6a5574deba17210616335a5fe7bc68cd571f21c46929ba6c`.
+There was no automatic retry or policy change. The tree gate, parent death,
+terminals, Claude, hooks, credentials and customer/common launch qualification
+remain open; both production qualification fields stayed false.
+
+The next source revision queries raw amd64 `SYS_GETPGRP` directly, checks errno
+before interpreting its result, and still requires a positive nonleader group
+for each descendant. An injected-function unit test checks the selected syscall
+and arguments plus errno, zero, leader and invalid-result refusals without any
+real syscall. This is a source/build correction only; the historical failure
+remains unchanged and a fresh reviewed payload/receipt/wrapper/driver chain is
+required before another attempt. The policy and native peer stay unchanged.

@@ -1,7 +1,7 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build linux
+//go:build linux && amd64
 
 // This fixed contributor payload is compiled with CGO_ENABLED=0. It is never
 // installed or selected by customer execution. No arbitrary command or host
@@ -205,16 +205,25 @@ func writeNew(path string, content []byte) error {
 	return errors.Join(writeErr, file.Close())
 }
 
+// Pinned x/sys Getpgrp calls Getpgid(0) and discards its error. That is syscall
+// 121 on amd64, outside the unchanged offline allowlist. Use allowed syscall 111
+// directly and retain the errno in this precondition. The injected function is
+// exercised only by inert tests; actual descendants supply unix.RawSyscall.
+func fixedTreeGroup(raw func(uintptr, uintptr, uintptr, uintptr) (uintptr, uintptr, unix.Errno), pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	group, _, errno := raw(unix.SYS_GETPGRP, 0, 0, 0)
+	return errno == 0 && group > 0 && group <= uintptr(1<<31-1) && group != uintptr(pid)
+}
+
 func tree(mode string) (int, error) {
 	// Require EPERM without relaxing the pinned session-creation filter.
 	// A group leader can also get EPERM naturally. Only the new positive-group,
 	// nonleader descendants substantiate filter denial; parent EPERM is a
 	// consistency check and is not counted as independent denial evidence.
-	if mode != "tree-parent" {
-		group := unix.Getpgrp()
-		if group <= 0 || group == os.Getpid() {
-			return refuse("tree_setsid_precondition")
-		}
+	if mode != "tree-parent" && !fixedTreeGroup(unix.RawSyscall, os.Getpid()) {
+		return refuse("tree_setsid_precondition")
 	}
 	if _, err := unix.Setsid(); !errors.Is(err, unix.EPERM) {
 		return refuse("tree_setsid_denial")

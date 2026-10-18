@@ -19,8 +19,8 @@ These are compiled source pins. There is no caller-supplied image, digest,
 command, environment, backend or policy option.
 
 The outer driver itself still requires independent source/build/image review
-and explicit authorization for a bounded run. No runtime result is claimed by
-this source batch. The build workflow compiles two static copies, runs only
+and explicit authorization for a bounded run. Its first lifecycle attempt is
+recorded [separately](../README.md#lifecycle-probe-revision-and-first-failed-attempt). The build workflow compiles two static copies, runs only
 fake/inert unit tests, and retains exact Git sources and dependency evidence.
 
 The driver reads `REVIEWED-ARTIFACTS.json` and fixed member
@@ -111,7 +111,7 @@ bytes stay unchanged. Historical runs remain evidence for their exact earlier
 source only. A fresh driver artifact review and separately reviewed native
 attempt are required.
 
-## Lifecycle suite handoff: source only
+## Lifecycle suite handoff
 
 The closed `--suite lifecycle` selector is passed unchanged through the existing
 owned bootstrap into the reviewed wrapper; omitted `--suite` remains baseline.
@@ -123,8 +123,10 @@ stability before Destroy. The bounded public count snapshots must independently
 show progress in every fixed role and six stable post-terminal samples.
 Baseline and lifecycle evidence cannot replace one another. No new controller, arbitrary command, file selector or caller hash
 is introduced. This source pins the reviewed 52e4 wrapper, including its nine
-inert lifecycle unit-test passes. It still needs its own driver build and
-artifact reviews before one separately authorized lifecycle attempt. The
+inert lifecycle unit-test passes. The reviewed b38 driver recorded twenty inert
+passes before the first lifecycle attempt. That attempt failed overall: the
+two wait cases passed, but the tree precondition refused before cancellation
+or heartbeat observations. No descendant-cleanup result follows from it. The
 new fixed payload requires EPERM from Setsid in every role and uses normal
 descendants; it does not change the offline filter or admit session creation.
 Only the positive-group, nonleader child/grandchild checks substantiate filter

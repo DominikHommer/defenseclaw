@@ -51,7 +51,7 @@ jobs:
           import subprocess
 
           package = Path('test/e2e/axis/native-peer/payload')
-          expected = ['main_linux.go', 'main_other.go']
+          expected = ['main_linux.go', 'main_linux_test.go', 'main_other.go']
           if sorted(path.name for path in package.iterdir()) != expected:
               raise SystemExit('additional compiler or embedded input refused')
           if any(not path.is_file() or path.is_symlink() for path in package.iterdir()):
@@ -80,6 +80,21 @@ jobs:
           test "$(go env GOVERSION)" = "go1.26.5"
           mkdir payload-build-one payload-build-two payload-artifact
           mkdir payload-artifact/bin
+          # This unit test injects the raw syscall function; it never queries a
+          # real process group, executes main, spawns, or installs a filter.
+          go test -mod=readonly -p 1 -json ./test/e2e/axis/native-peer/payload -run '^TestTreeGroupUsesAllowedRawSyscallAndPreservesError$' -count=1 -timeout=15s > payload-artifact/INERT-SYSCALL-TESTS.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          raw = Path('payload-artifact/INERT-SYSCALL-TESTS.jsonl').read_bytes()
+          if len(raw) > 1024 * 1024:
+              raise SystemExit('inert syscall test output exceeds bound')
+          rows = [json.loads(line) for line in raw.splitlines()]
+          passed = [row['Test'] for row in rows if row.get('Action') == 'pass' and 'Test' in row]
+          if passed != ['TestTreeGroupUsesAllowedRawSyscallAndPreservesError'] or any(row.get('Action') in ('skip', 'fail') for row in rows) or not any(row.get('Action') == 'pass' and 'Test' not in row for row in rows):
+              raise SystemExit('exact inert syscall test inventory refused')
+          Path('payload-artifact/INERT-SYSCALL-TESTS.json').write_text(json.dumps({'passed': passed, 'count': 1, 'raw_syscall_function_injected': True, 'actual_group_query_or_sandbox_execution': False}, indent=2) + '\n')
+          PY
           go build -trimpath -buildvcs=false -ldflags='-w -s -buildid=' -p 1 -o payload-build-one/payload ./test/e2e/axis/native-peer/payload
           go build -trimpath -buildvcs=false -ldflags='-w -s -buildid=' -p 1 -o payload-build-two/payload ./test/e2e/axis/native-peer/payload
           cmp payload-build-one/payload payload-build-two/payload
@@ -103,6 +118,7 @@ jobs:
               'go.mod', 'go.sum', '.github/workflows/axis-native-payload-build.yml',
               'test/e2e/axis/native-peer/README.md',
               'test/e2e/axis/native-peer/payload/main_linux.go',
+              'test/e2e/axis/native-peer/payload/main_linux_test.go',
               'test/e2e/axis/native-peer/payload/main_other.go',
           ]
           source_hashes = {}
@@ -161,6 +177,7 @@ jobs:
               'go_version': 'go1.26.5', 'tool_sha256': tool_hashes,
               'source_sha256': source_hashes, 'files': files,
               'static_elf': True, 'two_builds_byte_identical': True,
+              'inert_syscall_tests': json.loads((artifact / 'INERT-SYSCALL-TESTS.json').read_text(encoding='utf-8')),
               'payload_or_sandbox_execution': False, 'production_certification': False,
           }
           (artifact / 'PROVENANCE.json').write_text(json.dumps(provenance, indent=2) + '\n', encoding='utf-8')

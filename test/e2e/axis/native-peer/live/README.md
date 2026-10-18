@@ -110,7 +110,7 @@ parent-death/descendant stress, terminal, Claude, hooks, credentials and model
 traffic remain separate gates. Both production and common launch-gate
 qualification fields remain false. Earlier failures remain unchanged above.
 
-## Lifecycle pairing: source only
+## Lifecycle pairing: first attempt failed
 
 The checked-in recipe now selects `--suite lifecycle`, retaining the wrapper's
 baseline default and the historical four-case evidence above. The new pairing
@@ -125,9 +125,20 @@ image `70159109952811847fa4e16cc02fca1046d696ebcbb0ff3aa820e1562899dccb`
 (3,473,534 bytes). Payload run `39167683927`, artifact `12151291706`, binds
 image `ff14f6e2bbce3c35566326ba98cec890b500b6032df3c3ee2b408c9a494128f2`
 (1,929,342 bytes). The wrapper recorded nine approved inert test passes and the
-driver recorded twenty. These are source/build gates; no lifecycle result is
-claimed here. Final source/artifact review and a separate explicit one-attempt
-authorization remain mandatory before dispatch.
+driver recorded twenty. The sole actual run `39170295582` at source
+`c9e657b9c87ed3464cc1b3a7f339ea56ec805395` failed overall: wait-timeout and
+wait-cancel passed their ready/terminal/Destroyed/native-cleanup assertions;
+tree-cancel refused with `payload_tree_setsid_precondition` after only its
+parent marker. Cancel, heartbeat progress/stability and descendant cleanup were
+not observed for that tree. No terminal tree exit code was observed.
+
+Evidence artifact `12152376279` has ZIP SHA256
+`b2fa7afcf79a02bb6a5574deba17210616335a5fe7bc68cd571f21c46929ba6c`
+(27,726 bytes). All three cleanup owners completed with zero pending custody;
+eight public fixture files totaled 224 bytes (12 members including directories),
+and the runner setting was restored to 1. There was no automatic retry. See the
+[parent record](../README.md#lifecycle-probe-revision-and-first-failed-attempt)
+for the source-level syscall mismatch and remaining gates.
 
 The three cases are `wait-timeout`, `wait-cancel`, and `tree-cancel`. Timeout
 requires the live ready marker before the five-second deadline; cancel requires
