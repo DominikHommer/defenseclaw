@@ -987,6 +987,17 @@ class Store:
         direction = "DESC" if newest else "ASC"
         return f"{instant} {direction}, {prefix}rowid {direction}"
 
+    def _scan_result_order(self, alias: str = "") -> str:
+        """Newest scan by parsed instant, then insertion order."""
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(scan_results)")}
+        prefix = f"{alias}." if alias else ""
+        instant = (
+            f"{prefix}retention_timestamp_unix_nano"
+            if "retention_timestamp_unix_nano" in columns
+            else f"julianday({prefix}timestamp)"
+        )
+        return f"{instant} DESC, {prefix}rowid DESC"
+
     @staticmethod
     def _sql_string_values(values: tuple[str, ...]) -> str:
         """Render a fixed internal vocabulary as SQL string literals."""
@@ -1391,7 +1402,7 @@ class Store:
                      SELECT candidate.rowid FROM scan_results candidate
                      WHERE candidate.scanner = sr.scanner
                        AND candidate.target = sr.target{succeeded}
-                     ORDER BY candidate.timestamp DESC, candidate.rowid DESC
+                     ORDER BY {self._scan_result_order("candidate")}
                      LIMIT 1
                  )""",
             (scanner_name,),
@@ -1433,7 +1444,7 @@ class Store:
                  AND sr.rowid = (
                      SELECT candidate.rowid FROM scan_results candidate
                      WHERE candidate.scanner = sr.scanner AND candidate.target = sr.target
-                     ORDER BY candidate.timestamp DESC, candidate.rowid DESC
+                     ORDER BY {self._scan_result_order("candidate")}
                      LIMIT 1
                  )""",
             (scanner_name,),
@@ -1450,13 +1461,13 @@ class Store:
     ) -> dict[str, int]:
         """Return {severity: count} from the most recent scan for target+scanner."""
         cur = self.db.execute(
-            """SELECT f.severity, COUNT(*) as cnt
+            f"""SELECT f.severity, COUNT(*) as cnt
                FROM findings f
                INNER JOIN scan_results sr ON f.scan_id = sr.id
                WHERE sr.id = (
                    SELECT id FROM scan_results
                    WHERE target = ? AND scanner = ?
-                   ORDER BY timestamp DESC, rowid DESC LIMIT 1
+                   ORDER BY {self._scan_result_order()} LIMIT 1
                )
                GROUP BY f.severity""",
             (target, scanner),
@@ -1470,13 +1481,13 @@ class Store:
     ) -> list[dict[str, Any]]:
         """Return findings from the most recent scan for target+scanner."""
         cur = self.db.execute(
-            """SELECT f.severity, f.title, f.location
+            f"""SELECT f.severity, f.title, f.location
                FROM findings f
                INNER JOIN scan_results sr ON f.scan_id = sr.id
                WHERE sr.id = (
                    SELECT id FROM scan_results
                    WHERE target = ? AND scanner = ?
-                   ORDER BY timestamp DESC, rowid DESC LIMIT 1
+                   ORDER BY {self._scan_result_order()} LIMIT 1
                )
                ORDER BY CASE f.severity
                    WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2

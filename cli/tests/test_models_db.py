@@ -1019,3 +1019,43 @@ class ModelsDbTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_scan_result_readers_use_exact_time_and_rowid(tmp_path):
+    store = Store(str(tmp_path / "audit.db"))
+    store.init()
+    try:
+        store.db.execute("ALTER TABLE scan_results ADD COLUMN retention_timestamp_unix_nano INTEGER")
+        rows = [
+            ("short", "2026-10-13T12:00:00.12345Z", 1, 0),
+            ("long", "2026-10-13T12:00:00.123451Z", 2, 0),
+            ("tie-first", "2026-10-13T12:00:01Z", 3, 0),
+            ("tie-second", "2026-10-13T12:00:01Z", 3, 1),
+            ("offset", "2026-10-13T14:00:02+02:00", 4, 0),
+        ]
+        for scan_id, stamp, instant, exit_code in rows:
+            store.db.execute(
+                """INSERT INTO scan_results
+                   (id, scanner, target, timestamp, retention_timestamp_unix_nano,
+                    finding_count, exit_code, error)
+                   VALUES (?, 'scan', 'target', ?, ?, 1, ?, '')""",
+                (scan_id, stamp, instant, exit_code),
+            )
+            store.db.execute(
+                """INSERT INTO findings (id, scan_id, severity, title, scanner)
+                   VALUES (?, ?, 'HIGH', ?, 'scan')""",
+                ("finding-" + scan_id, scan_id, scan_id),
+            )
+        store.db.commit()
+        assert store.latest_scans_by_scanner("scan")[0]["id"] == "offset"
+        assert store.latest_failed_scans_by_scanner("scan") == []
+        assert store.get_severity_counts_for_target("target", "scan") == {"HIGH": 1}
+        assert store.get_findings_for_target("target", "scan")[0]["title"] == "offset"
+        store.db.execute(
+            "UPDATE scan_results SET exit_code = 1, error = 'failed' WHERE id = 'offset'"
+        )
+        store.db.commit()
+        assert store.latest_failed_scans_by_scanner("scan")[0]["target"] == "target"
+        assert store.latest_scans_by_scanner("scan")[0]["id"] == "tie-first"
+    finally:
+        store.close()

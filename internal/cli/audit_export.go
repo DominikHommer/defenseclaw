@@ -1007,6 +1007,26 @@ func validateAuditEventMap(ev map[string]any, v8Action bool) error {
 	return nil
 }
 
+func activityExportTimeOrder(db *sql.DB) string {
+	rows, err := db.Query("PRAGMA table_info(activity_events)")
+	if err != nil {
+		return "julianday(timestamp) ASC, rowid ASC"
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &pk); err != nil {
+			break
+		}
+		if name == "retention_timestamp_unix_nano" {
+			return "retention_timestamp_unix_nano ASC, rowid ASC"
+		}
+	}
+	return "julianday(timestamp) ASC, rowid ASC"
+}
+
 func exportActivityLines(db *sql.DB, out io.Writer, prov version.Provenance, window auditExportWindow) error {
 	exists, err := tableExists(db, "activity_events")
 	if err != nil || !exists {
@@ -1016,7 +1036,7 @@ func exportActivityLines(db *sql.DB, out io.Writer, prov version.Provenance, win
 	rows, err := db.Query(`
 SELECT timestamp, actor, action, target_type, target_id, reason,
        before_json, after_json, diff_json, version_from, version_to
-FROM activity_events`+where+` ORDER BY timestamp ASC`, args...)
+FROM activity_events`+where+` ORDER BY `+activityExportTimeOrder(db), args...)
 	if err != nil {
 		return fmt.Errorf("audit export: activity query: %w", err)
 	}
