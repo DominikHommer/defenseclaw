@@ -51,14 +51,15 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	}
 	binary, isBinary := file.Stmts[0].Cmd.(*syntax.BinaryCmd)
 	colonAnd := isBinary && binary.Op == syntax.AndStmt
+	var inert []bool
 	if len(file.Stmts) != 1 || trustedHomeInertGroup(file.Stmts[0]) || colonAnd {
 		var ok bool
-		source, ok = normalizeTrustedHomeInertList(file)
+		source, inert, ok = normalizeTrustedHomeInertList(file)
 		if !ok {
 			return trustedPOSIXHomeRewrite{}, false
 		}
 		file, err = syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(source), "")
-		if err != nil {
+		if err != nil || len(file.Stmts) != len(inert) {
 			return trustedPOSIXHomeRewrite{}, false
 		}
 	}
@@ -101,8 +102,8 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 		}
 	}
 	targets := 0
-	for _, stmt := range file.Stmts {
-		if trustedHomeInertColon(stmt) {
+	for index, stmt := range file.Stmts {
+		if index < len(inert) && inert[index] {
 			continue
 		}
 		if !collect(stmt, false) {
@@ -158,9 +159,10 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	return rewrite, true
 }
 
-// Only a colon with no arguments can be discarded as an inert list member.
-// Static redirects remain in the normalized source so their writes are still
-// analyzed. Dynamic redirects cannot be proven safe by this rewrite.
+// Only the GAP-0651 shapes count as inert list members: a bare ":" with no
+// arguments, optionally with a static ">" or ">>" redirect, which stays in the
+// normalized source so its write is still analyzed. "true" and every other
+// command keep their own analysis, so "true && ..." stays a conditional flow.
 func trustedHomeInertColon(stmt *syntax.Stmt) bool {
 	if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown {
 		return false
@@ -170,10 +172,13 @@ func trustedHomeInertColon(stmt *syntax.Stmt) bool {
 		return false
 	}
 	program := projectPOSIXWord(call.Args[0])
-	if program.Expands || program.Value != ":" && program.Value != "true" {
+	if program.Expands || program.Value != ":" {
 		return false
 	}
 	for _, redirect := range stmt.Redirs {
+		if redirect.Op != syntax.RdrOut && redirect.Op != syntax.AppOut {
+			return false
+		}
 		if target := projectPOSIXWord(redirect.Word); target.Expands {
 			return false
 		}
@@ -198,8 +203,11 @@ func trustedHomeInertGroup(stmt *syntax.Stmt) bool {
 // A colon succeeds unconditionally, so a colon AND target executes exactly
 // like a list. Braces and subshells containing only a colon have no state to
 // carry into the target command. Keep every other construct out of this proof.
-func normalizeTrustedHomeInertList(file *syntax.File) (string, bool) {
+// Inert members are written as "true" (a known no-op command for the parse);
+// the returned mask marks them, one entry per statement of the result.
+func normalizeTrustedHomeInertList(file *syntax.File) (string, []bool, bool) {
 	var parts []string
+	var inert []bool
 	targets := 0
 	printStmt := func(stmt *syntax.Stmt) (string, bool) {
 		var buf bytes.Buffer
@@ -210,41 +218,51 @@ func normalizeTrustedHomeInertList(file *syntax.File) (string, bool) {
 	}
 	for _, stmt := range file.Stmts {
 		if trustedHomeInertGroup(stmt) {
-			parts = append(parts, "true")
+			parts, inert = append(parts, "true"), append(inert, true)
 			continue
 		}
 		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok &&
 			binary.Op == syntax.AndStmt && len(stmt.Redirs) == 0 &&
 			trustedHomeInertColon(binary.X) && len(binary.X.Redirs) == 0 {
 			stmt = binary.Y
-			parts = append(parts, "true")
+			parts, inert = append(parts, "true"), append(inert, true)
 		}
-		if !trustedHomeInertColon(stmt) {
+		colon := trustedHomeInertColon(stmt)
+		if !colon {
 			if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok ||
 				stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown {
-				return "", false
+				return "", nil, false
 			}
 			targets++
 		}
 		segment, ok := printStmt(stmt)
-		if !ok {
-			return "", false
+		if !ok || strings.Contains(segment, "\n") {
+			return "", nil, false
 		}
-		if trustedHomeInertColon(stmt) && strings.HasPrefix(segment, ":") {
+		if colon {
+			if !strings.HasPrefix(segment, ":") {
+				return "", nil, false
+			}
 			segment = "true" + segment[1:]
 		}
-		parts = append(parts, segment)
+		parts, inert = append(parts, segment), append(inert, colon)
 	}
 	if targets != 1 {
-		return "", false
+		return "", nil, false
 	}
-	return strings.Join(parts, "; "), true
+	source := strings.Join(parts, "; ")
+	// The mask must line up with the statements the result parses into.
+	reparsed, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(source), "")
+	if err != nil || len(reparsed.Stmts) != len(inert) {
+		return "", nil, false
+	}
+	return source, inert, true
 }
 
-func normalizeTrustedHomeInertListSource(source string) (string, bool) {
+func normalizeTrustedHomeInertListSource(source string) (string, []bool, bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(source), "")
 	if err != nil || file == nil || len(file.Stmts) == 0 {
-		return "", false
+		return "", nil, false
 	}
 	return normalizeTrustedHomeInertList(file)
 }

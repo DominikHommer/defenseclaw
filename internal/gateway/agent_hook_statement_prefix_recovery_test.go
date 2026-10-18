@@ -52,14 +52,27 @@ func TestAgentHookStatementPrefixRecovery(t *testing.T) {
 					response := postDecisionForTest(t, api, "claudecode", "PreToolUse", prefix.text+target.command)
 					wantAction := "allow"
 					wantResult := "ok"
-					if target.protected && prefix.text == "" && mode.decisionMode == "action" {
+					if prefix.text != "" {
+						wantResult = "panic" // rel/1.0.2 evaluator recovery
+						if mode.decisionMode == "action" && mode.failMode == "closed" {
+							wantAction = "block"
+						}
+					} else if target.protected && mode.decisionMode == "action" {
 						wantAction = "block"
 					}
 					if response["action"] != wantAction || response["mode"] != mode.decisionMode {
 						t.Fatalf("action/mode=%v/%v, want %s/%s", response["action"], response["mode"], wantAction, mode.decisionMode)
 					}
+					if prefix.text != "" && wantAction == "allow" && response["would_block"] != true {
+						t.Fatalf("recovered allow would_block=%v, want true", response["would_block"])
+					}
 					if got := decisionIsDenied(response["claude_code_output"]); got != (wantAction == "block") {
 						t.Fatalf("harness denial=%v, want %v, output=%v", got, wantAction == "block", response["claude_code_output"])
+					}
+					if prefix.text != "" && mode.decisionMode == "action" && mode.failMode == "closed" && !target.protected {
+						if reason, _ := response["reason"].(string); !strings.Contains(reason, "internal evaluator error") {
+							t.Fatalf("benign recovery reason=%q, want internal error", reason)
+						}
 					}
 					row := soleHookDecisionForTest(t, store)
 					if row.Structured["result"] != wantResult {

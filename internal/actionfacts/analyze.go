@@ -212,10 +212,10 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			// only runs on its partial analysis, never on the rewrite below.
 			*capture = parsed.redirectTargets
 		}
-		homeCommand := command
 		if parsed.status == StatusPartial && dialect == DialectPOSIX {
-			if normalized, ok := normalizeTrustedHomeInertListSource(command); ok {
-				homeCommand = normalized
+			// GAP-0651: inert ":" list members are set aside so the
+			// command they accompany is analyzed on its own.
+			if normalized, _, ok := normalizeTrustedHomeInertListSource(command); ok {
 				if simplified := parse(normalized); simplified.status == StatusComplete {
 					parsed = simplified
 				}
@@ -225,7 +225,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			// A trusted ActiveHome makes a lone command's "~/" operands
 			// exact; the rewrite is kept only when nothing else is dynamic.
 			home, _ := normalizeActiveHome(input.ActiveHome)
-			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(homeCommand, home); ok {
+			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
 				if resolved := parse(rewrite.source); resolved.status == StatusComplete {
 					parsed = resolved
 					// A Windows drive home (GAP-0912) keeps its rewritten
