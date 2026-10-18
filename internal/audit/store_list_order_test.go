@@ -125,7 +125,7 @@ func TestActivityAndScanReadersUseExactTimeAndInsertTies(t *testing.T) {
 		if err := store.InsertActivityEvent(ActivityEventRow{ID: item.id, Timestamp: item.ts, Actor: "operator", Action: "change", TargetType: "policy", TargetID: item.id}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.db.Exec(`INSERT INTO scan_results (id, scanner, target, timestamp, finding_count) VALUES (?, 'scan', 'same', ?, 1)`, item.id, item.ts.Format(time.RFC3339Nano)); err != nil {
+		if _, err := store.db.Exec(`INSERT INTO scan_results (id, scanner, target, timestamp, duration_ms, finding_count) VALUES (?, 'scan', 'same', ?, 0, 1)`, item.id, item.ts.Format(time.RFC3339Nano)); err != nil {
 			t.Fatal(err)
 		}
 	}
