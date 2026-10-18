@@ -2067,7 +2067,7 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 	}
 	d.adoptFloor(name)
 	// Its saved decisions as the floor now keeps them (GAP-0224).
-	c.Manager.ReloadDecisions(ctx, r.ID)
+	c.ReloadDecisions(ctx, r.ID)
 	return c.Manager.Start(withManagedMCPJudge(ctx, d.startMCPJudge(r.ID)), name, req)
 }
 

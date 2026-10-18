@@ -486,10 +486,10 @@ func TestSandboxDaemonEgressInFlightAnswerAfterChangeIsRetried(t *testing.T) {
 }
 
 // GAP-0224: the saved decisions of a running sandbox follow the floor the
-// managed gateway answers with now. An answer that moved the policy (and a
-// first confirmation) reloads the registration's decisions, which the
-// gateway caps by that floor, before the connection is decided; within the
-// lease, and for an answer that changed nothing, nothing is reloaded.
+// managed gateway answers with now. An answer that moved the policy reloads
+// the registration's decisions, which the gateway caps by that floor,
+// before the connection is decided; within the lease, and for an answer
+// that changed nothing, nothing is reloaded.
 func TestSandboxDaemonEgressReloadsSavedDecisionsWhenThePolicyMoves(t *testing.T) {
 	f := newFreshFixture(t)
 	var reloads atomic.Int32
@@ -500,21 +500,21 @@ func TestSandboxDaemonEgressReloadsSavedDecisionsWhenThePolicyMoves(t *testing.T
 		reloads.Add(1)
 		return nil, nil
 	}
-	if _, off := f.confirm(); off != nil || reloads.Load() != 1 {
-		t.Fatalf("first confirmation: off %v reloads %d, want 1", off, reloads.Load())
-	}
-	if _, off := f.confirm(); off != nil || reloads.Load() != 1 {
-		t.Fatalf("within the lease: off %v reloads %d", off, reloads.Load())
+	if _, off := f.confirm(); off != nil || reloads.Load() != 0 {
+		t.Fatalf("an unchanged answer reloaded: off %v reloads %d", off, reloads.Load())
 	}
 	time.Sleep(sandboxEgressLease + 50*time.Millisecond)
-	if _, off := f.confirm(); off != nil || reloads.Load() != 1 {
-		t.Fatalf("an unchanged answer reloaded: off %v reloads %d", off, reloads.Load())
+	if _, off := f.confirm(); off != nil || reloads.Load() != 0 {
+		t.Fatalf("an unchanged answer after the lease reloaded: off %v reloads %d", off, reloads.Load())
 	}
 	strict := config.OpenShellProfileStrict
 	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 8, Digest: "sha256:v2", MinProfile: &strict}, nil)
 	f.d.observeGeneration("reg-1", 8)
-	if _, off := f.confirm(); off != nil || reloads.Load() != 2 {
-		t.Fatalf("a moved policy: off %v reloads %d, want 2", off, reloads.Load())
+	if _, off := f.confirm(); off != nil || reloads.Load() != 1 {
+		t.Fatalf("a moved policy: off %v reloads %d, want 1", off, reloads.Load())
+	}
+	if _, off := f.confirm(); off != nil || reloads.Load() != 1 {
+		t.Fatalf("within the lease: off %v reloads %d", off, reloads.Load())
 	}
 	// The profile minimum is not live: the running sandbox keeps its own.
 	if r, _ := f.d.regs.get("dc-a"); r.Floor.MinProfile != "" {
