@@ -1,8 +1,8 @@
 # Fixed Linux native peer CI canary
 
 This is one contributor-only four-case attempt using the separately reviewed
-aa215 peer/unchanged static-musl Bubblewrap, d074 fixed payload, 6eec wrapper, and 90cd
-outer driver. The cases check literal argv, binary stdin/EOF and stderr, exit
+aa215 peer/unchanged static-musl Bubblewrap, d074 fixed payload, 9ea diagnostic
+wrapper, and 08c outer driver. The cases check literal argv, binary stdin/EOF and stderr, exit
 23, and fixed offline filesystem/network/FD/namespace boundaries. This is not
 customer activation, PTY/Claude/model/hook qualification, or completion of the
 AXIS integration.
@@ -51,6 +51,10 @@ were collected. Evidence artifact `12146776297` has ZIP SHA256
 The recorded zero stdout/stderr counts are inconclusive: the harness returns on
 an unexpected exit before assigning captured buffer lengths. No payload, runner
 or Bubblewrap cause is established, and no unchanged retry was performed.
+The new 9ea wrapper retains validated bounded stream lengths even on failed
+exits, and reports only a closed first-line stderr reason/OS-text category.
+The 08c driver pins that exact reviewed wrapper. This is a diagnostic source
+change; policy, fixture capabilities, native peer and payload remain unchanged.
 The trust assumptions documented in
 [`artifact-review.md`](../../../../../internal/axis/native/artifact-review.md)
 still apply.
