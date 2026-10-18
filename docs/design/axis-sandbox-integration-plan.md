@@ -165,6 +165,7 @@ work. They do not establish production certification.
 | Terminal | Linux has a PTY bridge, but it opens fixed 24 by 80 geometry without an evident resize protocol. | Prove resize, raw input, signals, prompt interaction, and terminal restoration; contribute upstream support if needed. |
 | Environment | The CLI collects a restricted environment, dropping arbitrary `DEFENSECLAW_*` keys and raw provider credentials. | Deliver derived hook configuration through protected files or a reviewed entrypoint/API. Do not rely on inherited variables. |
 | Model authentication | Host injection is limited to supported local HTTP inference targets; external HTTPS CONNECT does not provide equivalent credential injection or HTTP path enforcement. | Validate a scoped host model relay, including Anthropic streaming. API-key and OAuth paths need separate acceptance. |
+| Filesystem confidentiality | The default filesystem compatibility is `best_effort`. The pinned MXC Bubblewrap translation acknowledges a read-only host-root substrate in that mode and refuses a strict default-deny policy without a root-read grant. | Require `filesystem.compatibility: hard_requirement` without granting read access to `/`. A private HOME is state setup, not proof of read confinement. Treat an incompatible MXC launch as a failed feasibility gate; qualify another explicitly selected AXIS backend separately. |
 | Agent state | Recognized home directories can be copied, backed up, and temporarily redirected during preparation. | Give each session a private HOME and sanitized state; do not expose the customer's real Claude state or credential stores. |
 | Network | Strict Linux proxy mode requires enforceable namespace/firewall support or the optional privileged helper. | Doctor must probe the requested policy and fail before launch when enforcement is unavailable. Proxy environment variables alone are insufficient. |
 | Audit | Standalone execution bypasses daemon lifecycle handling; the proxy constructs an audit log without an evident export sink hookup. | DefenseClaw owns its lifecycle and policy events. Validate AXIS denial-event export before claiming complete runtime audit coverage. |
@@ -177,6 +178,8 @@ Pinned upstream sources:
 - [Environment collection](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/crates/axis-core/src/sandbox_env.rs#L6-L99)
 - [Provider inference targets](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/docs/agent-provider-inference-targets.md#L29-L68)
 - [Agent state lifecycle](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/docs/agent-state-containment.md#L46-L66)
+- [Filesystem compatibility defaults](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/crates/axis-core/src/policy.rs)
+- [MXC filesystem substrate and strict refusal](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/crates/axis-sandbox/src/linux/mxc.rs)
 - [Linux enforcement prerequisites](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/docs/linux-setup.md)
 - [Proxy audit construction](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/crates/axis-proxy/src/proxy.rs#L237-L285)
 - [Windows terminal rejection](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/crates/axis-sandbox/src/windows/mxc.rs#L454-L463)
@@ -188,6 +191,14 @@ administrator constraints, then runtime capability admission. Render AXIS
 enforcement configuration from that result. Keep AXIS OPA evaluation aligned
 with DefenseClaw decisions; it must not become another editable source of policy.
 Policy explanation shows runtime-specific clamps and refusals.
+
+Filesystem read confinement is mandatory as well as write confinement. Require
+`hard_requirement` compatibility and no host-root read grant. A read-only host
+view is not equivalent to an allowlist of readable files. Validate with synthetic
+canaries outside the allowed workspace and HOME; never inspect real credentials
+to prove the boundary. At the pinned source, the MXC process backend cannot
+satisfy this policy and must be refused. An explicit `axis_native` candidate
+requires its own reviewed policy and live qualification, not automatic fallback.
 
 Require an enforced network boundary that permits only the scoped services
 needed for the session. General web traffic must reach DefenseClaw destination
@@ -312,7 +323,7 @@ checks for each implementation PR.
 | Lifecycle and terminal | Interactive/headless exit status; streams; resize; Ctrl+C/Ctrl+D; terminal restoration; timeout; parent death; descendant cleanup; teardown; concurrency; restart reconciliation. Unsupported persistence/detach modes refuse clearly. |
 | Hooks and policy | Real hook-fire allow/block probe; hostile settings; tamper/silence detection; authenticated ingress; effective admin clamps; no direct control-API access; unsupported resource policy refused before launch. |
 | Credentials and egress | Raw secret absence in guest environment, files, logs, and telemetry; API-key and OAuth independently; Anthropic streaming; expiry/revocation; HTTPS required before credential attachment; credentialed redirects refused, including unapproved-host and downgrade targets, with no target connection or credential disclosure; direct network bypass blocked; DNS/non-HTTP paths; approvals and policy refresh. |
-| Workspace and ownership | Private HOME; no real Claude state migration; secret masks; copied project review/pull/undo; archive/path safety; two simultaneous sessions; recovery preserving user changes; operations restricted to owned instances. |
+| Workspace and ownership | Private HOME; no real Claude state migration; denied reads of synthetic canaries outside approved paths under hard filesystem compatibility; no host-root read grant; secret masks; copied project review/pull/undo; archive/path safety; two simultaneous sessions; recovery preserving user changes; operations restricted to owned instances. |
 | Deployment and UI | AXIS-only installation; both providers installed; disabled runtime has no background cost; missing prerequisites; config save/load and managed controls; correct TUI runtime arguments and action availability; uninstall cleans only owned artifacts. |
 | Managed execution | Per-user daemon identity; gateway registration and policy authority; generation/revocation; relay failures; cross-user refusal/privacy; upgrade and rollback against supported prior configurations. |
 
@@ -339,6 +350,10 @@ Claude's review should resolve these design decisions before implementation:
    configuration without weakening existing image evidence?
 5. Are initial platforms, deployment modes, authentication profiles, and
    unsupported capabilities explicit enough for accurate customer claims?
+6. Which explicitly selected AXIS backend can enforce strict read confinement?
+   The pinned MXC process backend is incompatible with this requirement; assess
+   upstream changes or a separately qualified native backend without weakening
+   the policy to make a feasibility probe pass.
 
 Record the review outcome and any amendments on this draft PR. A positive
 review authorizes starting the implementation sequence; it does not certify
