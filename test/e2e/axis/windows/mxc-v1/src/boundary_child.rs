@@ -13,6 +13,8 @@ use std::time::Duration;
 
 const SENTINEL: &[u8] = b"fixed-public-synthetic-canary\n";
 
+mod native_environment;
+
 mod canonicalize_diagnostic {
     use super::SENTINEL;
     use std::ffi::c_void;
@@ -312,7 +314,7 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
             thread::sleep(Duration::from_secs(30));
             return Ok(44);
         }
-        Some("boundary") => {}
+        Some("boundary" | "boundary-native-env") => {}
         _ => return Err(io::Error::other("unsupported fixed child mode").into()),
     }
     let cwd = fixed_io("private cwd lookup", std::env::current_dir())?;
@@ -354,17 +356,36 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
         )? == SENTINEL,
         "fixture seal missing",
     )?;
+    // No observation of the child's environment supplies these expectations.
+    // The new selector blocks on an exact bounded parent frame and EOF before
+    // its first environment assertion or mutation. The old selector retains
+    // the original six strict fixture expectations for its distinct control.
+    let native = if mode == Some("boundary-native-env") {
+        Some(native_environment::ExpectedEnvironment::read_from(
+            io::stdin().lock(),
+            root,
+        )?)
+    } else {
+        None
+    };
+    let temporary = native
+        .as_ref()
+        .map_or_else(|| root.join("tmp"), |value| value.temporary.clone());
+    let temporary_alias = native
+        .as_ref()
+        .map_or_else(|| root.join("tmp"), |value| value.temporary_alias.clone());
+    let local_app_data = native.as_ref().map_or_else(
+        || root.join("home").join("AppData").join("Local"),
+        |value| value.local_app_data.clone(),
+    );
     let mut environment_matches = true;
     for (key, expected) in [
         ("HOME", root.join("home")),
         ("USERPROFILE", root.join("home")),
-        ("TEMP", root.join("tmp")),
-        ("TMP", root.join("tmp")),
+        ("TEMP", temporary),
+        ("TMP", temporary_alias),
         ("APPDATA", root.join("home").join("AppData").join("Roaming")),
-        (
-            "LOCALAPPDATA",
-            root.join("home").join("AppData").join("Local"),
-        ),
+        ("LOCALAPPDATA", local_app_data),
     ] {
         let actual =
             std::env::var_os(key).ok_or_else(|| io::Error::other("private env missing"))?;
@@ -381,6 +402,9 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
         }
     }
     require(environment_matches, "private environment differs")?;
+    if native.is_some() {
+        println!("FIXED_NATIVE_ENV_BINDING_PASS");
+    }
     require(
         std::env::var_os("OPENAI_API_KEY").is_none()
             && std::env::var_os("ANTHROPIC_API_KEY").is_none(),

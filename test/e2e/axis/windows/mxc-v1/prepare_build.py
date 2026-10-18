@@ -27,12 +27,19 @@ ROOT = Path(__file__).resolve().parent
 PATCH = ROOT / "patches" / "mxc-strict-windows-psec.patch"
 LITERAL_PATCH = ROOT / "patches" / "mxc-literal-argv.patch"
 WINDOWS_ARGV_PATCH = ROOT / "patches" / "mxc-windows-literal-argv.patch"
+IDENTITY_PATCH = ROOT / "patches" / "mxc-windows-process-identity.patch"
 LITERAL_PATCH_SOURCE = "test/e2e/axis/patches/mxc-literal-argv.patch"
 LITERAL_PATCH_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
 WINDOWS_ARGV_PATCH_PATHS = {
     "src/mxc-sdk/src/lib.rs",
     "src/mxc-sdk/src/core/mxc_engine/mod.rs",
     "src/mxc-sdk/src/core/mxc_engine/dispatch.rs",
+    "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs",
+}
+IDENTITY_PATCH_PATHS = {
+    "src/mxc-sdk/src/sandbox.rs",
+    "src/mxc-sdk/src/core/mxc_common/sandbox_process.rs",
+    "src/mxc-sdk/src/core/mxc_engine/mod.rs",
     "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs",
 }
 PATCHED_PATHS = {
@@ -48,6 +55,7 @@ PATCHED_PATHS = {
     "src/mxc-sdk/src/core/mxc_common/validator.rs",
     "src/mxc-sdk/src/policy.rs",
     "src/mxc-sdk/src/policy/exact/mod.rs",
+    "src/mxc-sdk/src/sandbox.rs",
 }
 ADDED_PATHS = {
     "src/mxc-sdk/src/core/mxc_common/literal_argv.rs",
@@ -55,6 +63,19 @@ ADDED_PATHS = {
     "src/mxc-sdk/src/literal_argv.rs",
 }
 
+
+PURE_ENVIRONMENT_TESTS = {
+    "defenseclaw-axis-windows-psec-boundary-child": [
+        "tests::private_environment_only_accepts_exact_local_disk_prefix_difference",
+        "native_environment::tests::native_folder_requires_exact_private_branch_and_one_profile_component",
+        "native_environment::tests::native_environment_utf16_frame_roundtrips_and_refuses_tampering",
+    ],
+    "defenseclaw-axis-windows-psec-probe": [
+        "probe::native_environment::tests::native_folder_requires_exact_private_branch_and_one_profile_component",
+        "probe::native_environment::tests::native_environment_utf16_frame_roundtrips_and_refuses_tampering",
+        "probe::native_identity::tests::returned_sid_pointer_and_body_must_fit_the_fixed_native_result",
+    ],
+}
 
 def command(argv: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
     # Build tooling is already provisioned by the disposable CI job. Do not
@@ -165,6 +186,17 @@ def verify_windows_patch_paths(mxc: Path) -> None:
         raise RuntimeError("Windows argv overlay must touch exactly its four reviewed source paths")
 
 
+def verify_identity_patch_paths(mxc: Path) -> None:
+    rows = command(["git", "apply", "--numstat", str(IDENTITY_PATCH)], cwd=mxc, capture=True).splitlines()
+    fields = [row.split("\t") for row in rows]
+    if (
+        len(fields) != len(IDENTITY_PATCH_PATHS)
+        or any(len(row) != 3 or not row[0].isdigit() or not row[1].isdigit() for row in fields)
+        or {row[2] for row in fields} != IDENTITY_PATCH_PATHS
+    ):
+        raise RuntimeError("Windows identity overlay must touch exactly its four reviewed source paths")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("generate-lock", "build-locked"))
@@ -189,7 +221,8 @@ def main() -> None:
     if not LITERAL_PATCH.is_file() or digest(LITERAL_PATCH) != LITERAL_PATCH_SHA256:
         raise RuntimeError("stage the exact reviewed shared literal-argv patch from Git before building")
     verify_windows_patch_paths(mxc)
-    for patch in (PATCH, LITERAL_PATCH, WINDOWS_ARGV_PATCH):
+    verify_identity_patch_paths(mxc)
+    for patch in (PATCH, LITERAL_PATCH, WINDOWS_ARGV_PATCH, IDENTITY_PATCH):
         command(["git", "apply", "--check", str(patch)], cwd=mxc)
         command(["git", "apply", str(patch)], cwd=mxc)
     verify_build_sources(axis, mxc)
@@ -200,29 +233,21 @@ def main() -> None:
     command(["cargo", f"+{TOOLCHAIN}", "build", "--locked", "--release"])
     # Compile the probe's test target without executing any newly built code.
     command(["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--no-run"])
-    # Run only this exact pure spelling test outside a sandbox. It performs no
+    # Run only these exact pure parser/spelling/buffer tests. They perform no
     # filesystem query, environment lookup, process creation or PSEC operation.
-    spelling_test = "tests::private_environment_only_accepts_exact_local_disk_prefix_difference"
-    spelling_output = command(
-        [
-            "cargo",
-            f"+{TOOLCHAIN}",
-            "test",
-            "--locked",
-            "--release",
-            "--bin",
-            "defenseclaw-axis-windows-psec-boundary-child",
-            spelling_test,
-            "--",
-            "--exact",
-        ],
-        capture=True,
-    )
-    if (
-        f"test {spelling_test} ... ok" not in spelling_output
-        or "test result: ok. 1 passed; 0 failed; 0 ignored;" not in spelling_output
-    ):
-        raise RuntimeError("fixed private environment spelling test did not pass exactly once")
+    pure_tests = PURE_ENVIRONMENT_TESTS
+    for binary, names in pure_tests.items():
+        for name in names:
+            output = command(
+                ["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--bin", binary, name, "--", "--exact"],
+                capture=True,
+            )
+            print(output)
+            if (
+                output.splitlines().count(f"test {name} ... ok") != 1
+                or "test result: ok. 1 passed; 0 failed; 0 ignored;" not in output
+            ):
+                raise RuntimeError("fixed pure native environment test did not pass exactly once")
     if digest(lock) != lock_before:
         raise RuntimeError("the combined dependency lock changed during the locked build")
     if upstream_locks != {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}:
@@ -242,9 +267,12 @@ def main() -> None:
         Path("src/probe.rs"),
         Path("src/loader_child.rs"),
         Path("src/boundary_child.rs"),
+        Path("src/native_environment.rs"),
+        Path("src/native_identity.rs"),
         Path("patches/mxc-strict-windows-psec.patch"),
         Path("patches/mxc-literal-argv.patch"),
         Path("patches/mxc-windows-literal-argv.patch"),
+        Path("patches/mxc-windows-process-identity.patch"),
     ]
     for relative in files:
         target = artifact / "source" / relative
@@ -263,13 +291,14 @@ def main() -> None:
     (artifact / "TOOLCHAIN.txt").write_text(toolchain + "\n" + cargo_version + "\n", encoding="utf-8")
     provenance = {
         "schema": "defenseclaw-contributor-axis-windows-psec-v1",
-        "variant": "standalone_std_boundary_literal_argv",
+        "variant": "standalone_std_boundary_native_identity_environment",
         "axis_commit": AXIS_COMMIT,
         "mxc_commit": MXC_COMMIT,
         "mxc_patch_sha256": digest(PATCH),
         "mxc_literal_argv_patch_sha256": digest(LITERAL_PATCH),
         "mxc_literal_argv_patch_source": LITERAL_PATCH_SOURCE,
         "mxc_windows_argv_patch_sha256": digest(WINDOWS_ARGV_PATCH),
+        "mxc_windows_process_identity_patch_sha256": digest(IDENTITY_PATCH),
         "mxc_patched_paths": sorted(PATCHED_PATHS),
         "mxc_added_paths": sorted(ADDED_PATHS),
         "mxc_overlay_file_sha256": overlay_before,
@@ -278,9 +307,11 @@ def main() -> None:
         "build_mode": args.mode,
         "probe_executed": False,
         "pure_private_environment_spelling_test_passed": True,
+        "pure_native_environment_tests": pure_tests,
+        "pure_native_environment_tests_passed": True,
         "human_lock_review_required_before_live_execution": True,
         "locked_rebuild": args.mode == "build-locked",
-        "scope": "fixed_windows_native_psec_boundary_literal_argv",
+        "scope": "fixed_windows_native_psec_boundary_native_identity_environment",
         "production_certification": False,
         "files": {
             path.relative_to(artifact).as_posix(): digest(path)

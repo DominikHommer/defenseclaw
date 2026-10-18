@@ -174,3 +174,15 @@ class BuildGuardTests(TestCase):
                 self.assertRaisesRegex(RuntimeError, "four reviewed source paths"),
             ):
                 build.verify_windows_patch_paths(Path("mxc"))
+
+    def test_native_identity_overlay_cannot_add_an_unreviewed_sdk_path(self) -> None:
+        rows = ["1\t0\t" + path for path in sorted(build.IDENTITY_PATCH_PATHS)]
+        with mock.patch.object(build, "command", return_value="\n".join(rows)):
+            build.verify_identity_patch_paths(Path("mxc"))
+        for changed in [rows[:-1], rows + ["1\t0\tunreviewed.rs"], rows[:-1] + [rows[0]]]:
+            with (
+                self.subTest(rows=changed),
+                mock.patch.object(build, "command", return_value="\n".join(changed)),
+                self.assertRaisesRegex(RuntimeError, "four reviewed source paths"),
+            ):
+                build.verify_identity_patch_paths(Path("mxc"))

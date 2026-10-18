@@ -11,12 +11,17 @@ use mxc_sdk::v1::{
 use std::fs;
 use std::io::{self, Read};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+use windows::Win32::System::Threading::WaitForSingleObject;
+
+#[path = "native_environment.rs"]
+mod native_environment;
+#[path = "native_identity.rs"]
+mod native_identity;
 
 const PREFIX: &str = "dc-axis-windows-psec-";
 const SENTINEL: &[u8] = b"fixed-public-synthetic-canary\n";
@@ -249,9 +254,16 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
         );
     } else if mode != "loader" {
         argv.extend(
-            ["--fixed-child", mode]
-                .into_iter()
-                .map(std::ffi::OsString::from),
+            [
+                "--fixed-child",
+                if mode == "boundary" {
+                    "boundary-native-env"
+                } else {
+                    mode
+                },
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
         );
         argv.extend(
             ports
@@ -288,6 +300,12 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
     request.working_directory = Some(paths.workspace.to_string_lossy().into_owned());
     request.environment = Some(paths.environment());
     request.inherit_default_environment = Some(false);
+    let fixed_root = paths.home.parent().context("fixed home parent missing")?;
+    let fixture_custody = if mode == "boundary" {
+        Some(native_identity::pin_fixture_root(fixed_root)?)
+    } else {
+        None
+    };
     let mut process = v1::spawn_windows_psec_argv(
         request,
         argv,
@@ -297,15 +315,37 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
             }),
         },
     )?;
-    // Hold the actual direct process handle before wait/reap; never signal an inferred PID.
-    let observed = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, process.id()) }?;
-    // SAFETY: OpenProcess returned a new owned handle. Transfer it immediately
-    // so early pipe/wait errors close it once; never adopt the SDK's handle.
-    let observed = unsafe { OwnedHandle::from_raw_handle(observed.0) };
+    // Duplicate read/query+synchronize rights from the SDK's retained native
+    // CreateProcess object. No integer PID lookup or token fallback is allowed.
+    let observed = process.duplicate_query_process_handle()?;
+    let native = if let Some(fixture) = &fixture_custody {
+        Some(native_identity::expected_from_child(
+            &observed, fixture, fixed_root,
+        )?)
+    } else {
+        None
+    };
     let stdout = process.take_stdout().context("stdout pipe missing")?;
     let stderr = process.take_stderr().context("stderr pipe missing")?;
     let out = thread::spawn(move || bounded(stdout));
     let err = thread::spawn(move || bounded(stderr));
+    // The new fixed child waits here before its first environment assertion or
+    // mutation. Values originate solely from this same held child's native SID.
+    let control = if let Some(native) = &native {
+        (|| -> Result<()> {
+            let mut stdin = process.take_stdin().context("identity stdin missing")?;
+            native.expected.write_to(&mut stdin)?;
+            drop(stdin); // exact frame followed by EOF
+            Ok(())
+        })()
+    } else {
+        Ok(())
+    };
+    let control_kill = if control.is_err() {
+        process.kill()
+    } else {
+        Ok(())
+    };
     let outcome = process.wait();
     let signaled =
         unsafe { WaitForSingleObject(HANDLE(observed.as_raw_handle()), 1000) } == WAIT_OBJECT_0;
@@ -316,6 +356,8 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
         .join()
         .map_err(|_| anyhow::anyhow!("stderr reader panic"))??;
     ensure!(signaled, "retained direct process handle is not signaled");
+    control?;
+    control_kill?;
     let outcome = outcome?;
     match mode {
         "argv" => {
@@ -346,6 +388,13 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
             ensure!(
                 output.lines().any(|line| line == "FIXED_BOUNDARIES_PASS"),
                 "boundary observations missing"
+            );
+            ensure!(
+                native.is_some()
+                    && output
+                        .lines()
+                        .any(|line| line == "FIXED_NATIVE_ENV_BINDING_PASS"),
+                "same-child native environment assertion missing"
             );
         }
         "exit23" => {

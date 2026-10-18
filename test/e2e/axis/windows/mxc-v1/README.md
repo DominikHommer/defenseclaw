@@ -3,6 +3,61 @@
 
 # Native Windows current-MXC PSEC contributor probe
 
+## Current source-only native environment binding
+
+The new `standalone_std_boundary_native_identity_environment` variant follows
+the separately recorded Case07 lexical observations. It has not been built or
+executed. It changes no filesystem grant, network/UI restriction, SDK fallback,
+host ACL, profile registration or production provider. Existing argv, exit23,
+timeout and loader payload behavior remains unchanged.
+
+A fourth overlay, `patches/mxc-windows-process-identity.patch`, adds an owned
+read/query+synchronize duplicate from the SDK's actual retained native
+CreateProcess handle. BaseContainer supplies that duplicate; other backends
+default to Unsupported, and a warning wrapper only delegates the same native
+object. The parent never reopens an integer PID. It queries TokenAppContainerSid
+from that same duplicate, bounds and validates the returned SID buffer, then
+uses GetAppContainerFolderPath. No child environment observation supplies an
+expectation. A missing native identity, API failure, host-user profile path,
+missing directory or unrecognized result refuses before the fixed child can
+perform a mutation. The API query does not create an AppContainer profile.
+
+The returned folder must match the fresh fixture's exact
+`home\AppData\Local\Packages\<one bounded native-profile component>\AC`
+shape. Only `Temp` is appended to obtain TEMP/TMP. Before native child creation,
+the parent pins the original fixture directory through a direct NT device
+volume and held-relative directory opens. After the native folder query, it
+extends that same root capability to each profile directory and Temp; it never
+rebinds authority to a DOS, GLOBALROOT or observed child path. Opens request only
+attributes/synchronize access, refuse reparse points and deny write/delete
+sharing while the case runs. The effective drive must equal its queried global
+mount, the target must be a local HarddiskVolume with NTFS, and mapping samples
+must remain unchanged. These checks do not claim qualification against arbitrary
+same-user concurrent namespace changes. No existing path or namespace is repaired.
+
+The parent sends three bounded UTF16 paths on the owned stdin pipe and closes
+it. The distinct fixed `boundary-native-env` selector requires the exact frame
+and EOF before its first environment assertion or write. It compares
+LOCALAPPDATA/TEMP/TMP against those native-derived values, using only the
+previously admitted exact optional verbatim-disk-prefix difference. HOME,
+USERPROFILE and APPDATA must still equal their original fixture locations.
+The old `boundary` selector retains its original strict expectations for the
+separate direct control; the parent never falls back to it. The std-only child
+imports no AXIS/SDK/native identity module or additional native API.
+
+The locked build records the fourth patch, every exact changed SDK source,
+the two new source modules, six exact pure parser/spelling/buffer tests and one
+new SDK Unsupported-default test. These tests perform no native token/profile
+query, process creation or PSEC execution. New source, compiler/imports, artifact
+identity and one fresh native run require independent review. Old Case07 and
+direct-control results do not qualify this new variant.
+
+The relevant primary API contracts are Microsoft's
+[GetTokenInformation](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation)
+and [GetAppContainerFolderPath](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-getappcontainerfolderpath).
+The latter may resolve a path for the parent's user identity, so a successful
+API result alone cannot authorize a host profile outside the fixed fixture.
+
 This separate, headless experiment investigates AXIS policy validation with
 the current typed MXC SDK. It does not activate a DefenseClaw provider, replace
 the old paired executor, or certify a customer runtime. No WSL, host fallback,

@@ -189,9 +189,11 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
         self.files[verify.BOUNDARY_BINARY] = self.files[verify.BINARY]
         literal = verify.sha256(self.files["source/patches/mxc-literal-argv.patch"])
         windows = verify.sha256(self.files["source/patches/mxc-windows-literal-argv.patch"])
+        identity = verify.sha256(self.files["source/patches/mxc-windows-process-identity.patch"])
         sdk_lock = verify.sha256(self.files["upstream/mxc-Cargo.lock"])
         mock.patch.object(verify, "LITERAL_OVERLAY_SHA256", literal).start()
         mock.patch.object(verify, "BOUNDARY_OVERLAY_SHA256", windows).start()
+        mock.patch.object(verify, "IDENTITY_OVERLAY_SHA256", identity).start()
         mock.patch.object(verify, "SDK_LOCK_SHA256", sdk_lock).start()
         self.provenance.update(
             variant=verify.BOUNDARY_VARIANT,
@@ -202,10 +204,13 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
             mxc_literal_argv_patch_sha256=literal,
             mxc_literal_argv_patch_source="test/e2e/axis/patches/mxc-literal-argv.patch",
             mxc_windows_argv_patch_sha256=windows,
+            mxc_windows_process_identity_patch_sha256=identity,
+            pure_native_environment_tests_passed=True,
+            pure_native_environment_tests=verify.PURE_ENVIRONMENT_TESTS,
         )
         self.admission = {
             "tests": list(verify.SDK_TESTS),
-            "passed": 10,
+            "passed": len(verify.SDK_TESTS),
             "sandbox_or_payload_execution": False,
             "native_file_fixture_tests": 1,
             "upstream_lock_sha256": sdk_lock,
@@ -269,6 +274,28 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
         self.write_artifact()
         with self.assertRaisesRegex(ValueError, "SDK source fingerprint digest"):
             self.run_verify()
+
+    def test_native_identity_overlay_is_independently_pinned(self) -> None:
+        self.provenance["mxc_windows_process_identity_patch_sha256"] = "0" * 64
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "native identity overlay differs"):
+            self.run_verify()
+
+    def test_native_environment_pure_tests_cannot_be_omitted(self) -> None:
+        self.provenance["pure_native_environment_tests_passed"] = False
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "pure native environment test evidence"):
+            self.run_verify()
+
+    def test_native_environment_pure_inventory_matches_build_source(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "fixed_native_environment_build", Path(__file__).with_name("prepare_build.py")
+        )
+        assert spec is not None and spec.loader is not None
+        build = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(build)
+        self.assertEqual(build.PURE_ENVIRONMENT_TESTS, verify.PURE_ENVIRONMENT_TESTS)
+        self.assertEqual(sum(map(len, verify.PURE_ENVIRONMENT_TESTS.values())), 6)
 
     def test_third_image_change_is_refused(self) -> None:
         (self.artifact / verify.BOUNDARY_BINARY).write_bytes(b"changed third image")

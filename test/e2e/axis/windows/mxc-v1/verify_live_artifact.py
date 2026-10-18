@@ -55,12 +55,16 @@ FILES = {"source/" + name for name in SOURCE_FILES} | {
 }
 ALL_FILES = FILES | {"PROVENANCE.json", "WORKFLOW.json"}
 BOUNDARY_BINARY = "bin/defenseclaw-axis-windows-psec-boundary-child.exe"
-BOUNDARY_VARIANT = "standalone_std_boundary_literal_argv"
-BOUNDARY_SCOPE = "fixed_windows_native_psec_boundary_literal_argv"
+BOUNDARY_VARIANT = "standalone_std_boundary_native_identity_environment"
+BOUNDARY_SCOPE = "fixed_windows_native_psec_boundary_native_identity_environment"
+IDENTITY_OVERLAY_SHA256 = "d2d3819325c3027f159d75d577dd02306d497234f99293df3c825fbeebddeeab"
 BOUNDARY_OVERLAY_SHA256 = "56e2597f8a01a62ddbac1417f08a38dc8ec5c33b806861e46ea0ad73cbac3e77"
 LITERAL_OVERLAY_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
 SDK_LOCK_SHA256 = "2d145ff3861cd19d1f50969083f8ac59e4d4fd50b030bef12f365a5fcc87afa0"
 SDK_TEST_GROUPS = {
+    "core_modules::mxc_common::sandbox_process::runner_tests": [
+        "native_query_process_handle_defaults_to_unsupported_without_os_calls",
+    ],
     "core_modules::mxc_engine::strict_psec_tests": [
         "strict_psec_refuses_fallback_dry_run_and_other_backends_before_spawn",
         "contributor_psec_admission_only_accepts_fixed_offline_posture",
@@ -81,7 +85,20 @@ SDK_TEST_GROUPS = {
     ],
 }
 SDK_TESTS = [group + "::" + name for group, names in SDK_TEST_GROUPS.items() for name in names]
+PURE_ENVIRONMENT_TESTS = {
+    "defenseclaw-axis-windows-psec-boundary-child": [
+        "tests::private_environment_only_accepts_exact_local_disk_prefix_difference",
+        "native_environment::tests::native_folder_requires_exact_private_branch_and_one_profile_component",
+        "native_environment::tests::native_environment_utf16_frame_roundtrips_and_refuses_tampering",
+    ],
+    "defenseclaw-axis-windows-psec-probe": [
+        "probe::native_environment::tests::native_folder_requires_exact_private_branch_and_one_profile_component",
+        "probe::native_environment::tests::native_environment_utf16_frame_roundtrips_and_refuses_tampering",
+        "probe::native_identity::tests::returned_sid_pointer_and_body_must_fit_the_fixed_native_result",
+    ],
+}
 BOUNDARY_MODIFIED_PATHS = PATCHED_PATHS | {
+    "src/mxc-sdk/src/sandbox.rs",
     "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs",
     "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_runner.rs",
     "src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs",
@@ -98,8 +115,10 @@ BOUNDARY_ADDED_PATHS = {
 }
 
 
-# Exact reviewed fda source with the three pinned overlays, including the typed flag fix.
+# Exact fda source with the four contributor overlays. This source registry
+# remains subject to independent review before a new artifact/live admission.
 BOUNDARY_OVERLAY_FILES = {
+    "src/mxc-sdk/src/sandbox.rs": "530bb8fbbaf97715fdc6efbdfe28706b333e3140cca4456641759fdb30ca62b1",
     "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs": (
         "a13934345597bd3fcaa66353b37ed5a9f54e643d234a620257970035b6212abc"
     ),
@@ -107,7 +126,7 @@ BOUNDARY_OVERLAY_FILES = {
         "5b23635df276e0743f9f9986f1ee4b63d9b0c71685b8e14bfa7b099023cfa210"
     ),
     "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs": (
-        "7d82f2a5c8a69594fbbdb511b4bb6f508846d70223d279a87ddfabba572ffdbf"
+        "989a66fa07d156266f9b039626ef8b766eabd28955ef2e3ce711e70be43c450e"
     ),
     "src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs": (
         "110534317bd4311b6ce1253126a7f6d507b7e98f381ad7945a63792e3297a13e"
@@ -117,7 +136,7 @@ BOUNDARY_OVERLAY_FILES = {
     ),
     "src/mxc-sdk/src/core/mxc_common/mod.rs": ("42bb9328a9beb5f5217a55f11f5a4341fc36f8dbda9cf72729aeb767f7d92289"),
     "src/mxc-sdk/src/core/mxc_common/sandbox_process.rs": (
-        "755c9809a0ea450dca815c41fab438ffe251beba2174c4e5806d0866b34b7293"
+        "4ad92632273e3f26ad902c7611edd13146bc96911a69c915954b84b398ae1508"
     ),
     "src/mxc-sdk/src/core/mxc_common/validator.rs": (
         "a7487090a1693fb237acedd81f4e1c66b64d907c77e46824cc81a9f571c92191"
@@ -126,7 +145,7 @@ BOUNDARY_OVERLAY_FILES = {
     "src/mxc-sdk/src/core/mxc_engine/literal_argv.rs": (
         "c35bb7f302e84fbca74c62d4d8d12bb142002a6f69f12476f386c7a858b5f719"
     ),
-    "src/mxc-sdk/src/core/mxc_engine/mod.rs": ("67ff4af0b57c1e3adb51e638ec56796981d46daa75a3f2d6d7d6b7bbcd7e2cf5"),
+    "src/mxc-sdk/src/core/mxc_engine/mod.rs": ("1561b879ebe6bfee5d4db6d84e112aa0b97f8395e1cbf4bc3be41c3cfd9a60fe"),
     "src/mxc-sdk/src/lib.rs": ("4f9c1e49c52ffad33864fee9e83a22dfa30b26034386024fdf930534e46556b4"),
     "src/mxc-sdk/src/literal_argv.rs": ("3e5884c316403be2ad82052492f1d3fd9dbd7ea2500ccbb7c716a64a29602cd5"),
     "src/mxc-sdk/src/policy.rs": ("43680b63e9e7d4c9351cee1936e791be1b4b877cfcee368b07429e22c355de9c"),
@@ -143,7 +162,10 @@ def artifact_contract(mode: str = "loader-only") -> dict:
     files = set(FILES)
     extra = {"PROVENANCE.json", "WORKFLOW.json"}
     if boundary:
-        for name in ("src/boundary_child.rs", "patches/mxc-windows-literal-argv.patch"):
+        for name in (
+            "src/boundary_child.rs", "src/native_environment.rs", "src/native_identity.rs",
+            "patches/mxc-windows-literal-argv.patch", "patches/mxc-windows-process-identity.patch",
+        ):
             sources[name] = SOURCE_PREFIX + name
         sources["patches/mxc-literal-argv.patch"] = "test/e2e/axis/patches/mxc-literal-argv.patch"
         binaries += (BOUNDARY_BINARY,)
@@ -390,6 +412,11 @@ def verify(
         "reviewed SDK overlay differs",
     )
     if mode == "standalone-boundary":
+        require(
+            provenance.get("pure_native_environment_tests_passed") is True
+            and provenance.get("pure_native_environment_tests") == PURE_ENVIRONMENT_TESTS,
+            "fixed pure native environment test evidence differs",
+        )
         require(upstream_hashes["mxc"] == SDK_LOCK_SHA256, "SDK admission upstream lock differs")
         require(provenance.get("mxc_added_paths") == sorted(BOUNDARY_ADDED_PATHS), "added SDK paths differ")
         fingerprints = provenance.get("mxc_overlay_file_sha256")
@@ -414,6 +441,12 @@ def verify(
             == provenance.get("mxc_windows_argv_patch_sha256"),
             "Windows literal overlay differs",
         )
+        require(
+            sha256(read("source/patches/mxc-windows-process-identity.patch"))
+            == IDENTITY_OVERLAY_SHA256
+            == provenance.get("mxc_windows_process_identity_patch_sha256"),
+            "Windows native identity overlay differs",
+        )
         admission = json.loads(read("SDK-ADMISSION-TESTS.json"))
         require(
             isinstance(admission, dict)
@@ -423,7 +456,7 @@ def verify(
             and admission
             == {
                 "tests": SDK_TESTS,
-                "passed": 10,
+                "passed": len(SDK_TESTS),
                 "sandbox_or_payload_execution": False,
                 "native_file_fixture_tests": 1,
                 "upstream_lock_sha256": SDK_LOCK_SHA256,
