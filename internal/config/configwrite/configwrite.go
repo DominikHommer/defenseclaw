@@ -532,7 +532,6 @@ var restartKeys = []string{
 	"guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
 	"claw", "agent", "routing", "plugin_dir",
 	"deployment_mode", "enterprise.profile", "enterprise.network", "enterprise.openshell",
-	"sandbox.enabled", "sandbox.runtimes", "sandbox.ingress_port", "sandbox.egress_port",
 	"environment", "tenant_id", "workspace_id", "discovery_source",
 	// Fleet keys that require a restart (MQTT connections, signing keys).
 	// Hot-reloadable fleet keys: auto_register, allow_key_over_http,

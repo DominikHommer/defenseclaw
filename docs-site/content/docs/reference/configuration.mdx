@@ -872,9 +872,10 @@ field name. Existing administrator restrictions remain in force.
 
 Keep OpenShell binary, gateway, image, telemetry and credential-delivery settings
 under `openshell:`. Common sandbox configuration is unavailable with the frozen
-Secure Client integration. Changes to common enablement, adapter enablement and
-listener ports require a gateway restart; new-session default and policy changes
-follow the normal policy-generation path.
+Secure Client integration. Common enablement, adapter enablement, listener ports,
+new-session defaults and policy changes apply through the normal policy-generation
+path. Listener changes rebind in process without restarting the gateway process,
+as equivalent OpenShell listener changes do.
 
 ## OpenShell sandbox settings
 

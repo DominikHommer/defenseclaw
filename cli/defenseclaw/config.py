@@ -4319,6 +4319,7 @@ class Config:
                 " — run 'defenseclaw migrate' first."
             )
         existing = _existing_document_for_save(path, current)
+        _assert_sandbox_save_authority(existing, dataclass_data, baseline)
         # Lists are replaced as a unit by the modeled delta. If another
         # process changed registry sources after this Config was loaded, a
         # whole-list save would silently discard that process's source.
@@ -5100,6 +5101,46 @@ def _baseline_keeping_migrated_llm_slots(current: dict[str, Any], baseline: dict
             if isinstance(parent, dict):
                 parent.pop(unified[-1], None)
     return baseline if adjusted is None else adjusted
+
+
+def _assert_sandbox_save_authority(
+    existing: dict[str, Any],
+    current: dict[str, Any],
+    baseline: dict[str, Any],
+) -> None:
+    """Refuse stale or legacy policy edits under the config writer's lock."""
+    from defenseclaw.config_writer import ConfigConflictError
+
+    if ("sandbox" in existing) != ("sandbox" in baseline) and (
+        current.get("sandbox", _V8_MISSING) != baseline.get("sandbox", _V8_MISSING)
+    ):
+        raise ConfigConflictError(
+            "sandbox authority changed since load; reload config.yaml and retry the sandbox change"
+        )
+    if not any("sandbox" in document for document in (existing, current, baseline)):
+        return
+
+    def changed_path(before: Any, after: Any, path: str) -> str | None:
+        if before == after:
+            return None
+        if isinstance(before, dict) and isinstance(after, dict):
+            for key in sorted(set(before) | set(after)):
+                changed = changed_path(before.get(key, _V8_MISSING), after.get(key, _V8_MISSING), f"{path}.{key}")
+                if changed:
+                    return changed
+        return path
+
+    before = baseline.get("openshell", {})
+    after = current.get("openshell", {})
+    for item in fields(SandboxConfig):
+        if item.name in {"runtime", "runtimes"}:
+            continue
+        suffix = changed_path(before.get(item.name, _V8_MISSING), after.get(item.name, _V8_MISSING), item.name)
+        if suffix:
+            raise ConfigConflictError(
+                f"sandbox.{suffix} owns this setting; change sandbox.{suffix} instead of openshell.{suffix}, "
+                "then reload config.yaml and retry"
+            )
 
 
 def _merge_v8_modeled_changes(
@@ -6667,6 +6708,8 @@ def _merge_sandbox(
 ) -> SandboxConfig | None:
     if raw is None:
         return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("sandbox: expected a configuration mapping")
     shared = {item.name for item in fields(SandboxConfig)} - {"runtime", "runtimes", "enabled"}
     previous = {key: value for key, value in _openshell_mapping(legacy).items() if key in shared}
     policy = _merge_openshell(_sandbox_merge_admin_sources(previous, raw), data_dir)

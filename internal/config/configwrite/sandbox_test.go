@@ -37,11 +37,13 @@ func TestCommonSandboxWriterRefusesUnqualifiedAXISWithoutChangingGeneration(t *t
 	}
 }
 
-func TestCommonSandboxRestartClassification(t *testing.T) {
-	got := RestartRequired([]string{"sandbox.enabled", "sandbox.runtime", "sandbox.runtimes.axis.enabled",
-		"sandbox.ingress_port", "sandbox.egress_port", "sandbox.egress.block", "sandbox.admin.allowed"})
-	want := "sandbox.enabled,sandbox.runtimes.axis.enabled,sandbox.ingress_port,sandbox.egress_port"
-	if strings.Join(got, ",") != want {
-		t.Fatalf("RestartRequired = %v, want %s", got, want)
+func TestCommonSandboxChangesApplyWithoutProcessRestart(t *testing.T) {
+	changed := []string{"sandbox.enabled", "sandbox.runtime", "sandbox.runtimes.axis.enabled",
+		"sandbox.ingress_port", "sandbox.egress_port", "sandbox.egress.block", "sandbox.admin.allowed"}
+	if got := RestartRequired(changed); len(got) != 0 {
+		t.Fatalf("RestartRequired = %v; common sandbox listeners rebind in process", got)
+	}
+	if got := ManagedRestartRequired(changed); len(got) != 0 {
+		t.Fatalf("ManagedRestartRequired = %v; common sandbox settings do not restart the process", got)
 	}
 }

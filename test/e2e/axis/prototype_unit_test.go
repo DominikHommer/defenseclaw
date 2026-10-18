@@ -6,16 +6,23 @@ package axis
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestRuntimePinRefusesBeforeExecution(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "axis")
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "axis")
 	content := []byte("inert fixture, never executed")
 	if err := os.WriteFile(path, content, 0700); err != nil {
 		t.Fatal(err)
@@ -32,8 +39,8 @@ func TestRuntimePinRefusesBeforeExecution(t *testing.T) {
 		{"missing digest", runtimePin{path, ""}, "reviewed 64-digit"},
 		{"malformed digest", runtimePin{path, strings.Repeat("z", 64)}, "reviewed 64-digit"},
 		{"mismatch", runtimePin{path, strings.Repeat("0", 64)}, "SHA256 mismatch"},
-		{"missing binary", runtimePin{filepath.Join(t.TempDir(), "missing"), valid}, "resolve"},
-		{"directory", runtimePin{t.TempDir(), valid}, "regular file"},
+		{"missing binary", runtimePin{filepath.Join(dir, "missing"), valid}, "resolve"},
+		{"directory", runtimePin{dir, valid}, "regular file"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := verifyRuntime(tc.pin); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -97,14 +104,88 @@ func TestPrivatePlanDropsInheritedEnvironment(t *testing.T) {
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("arguments changed: %#v", args)
 	}
-	if !strings.Contains(s.policyYAML(), "mode: block") || !strings.Contains(s.policyYAML(), "compatibility: hard_requirement") || strings.Contains(s.policyYAML(), "~") {
-		t.Fatal("policy must require exact filesystem enforcement, offline networking and explicit private paths")
+	if err := validateProbePolicy(s, s.policyYAML()); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(s.socket, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.arguments(payload); err == nil {
 		t.Fatal("existing socket path accepted by standalone workaround")
+	}
+}
+
+func validateProbePolicy(s *probeSession, policy string) error {
+	var doc struct {
+		Filesystem struct {
+			Compatibility string      `yaml:"compatibility"`
+			ReadOnly      []yaml.Node `yaml:"read_only"`
+			ReadWrite     []yaml.Node `yaml:"read_write"`
+		} `yaml:"filesystem"`
+		Network struct {
+			Mode string `yaml:"mode"`
+		} `yaml:"network"`
+	}
+	if err := yaml.Unmarshal([]byte(policy), &doc); err != nil {
+		return err
+	}
+	if doc.Network.Mode != "block" || doc.Filesystem.Compatibility != "hard_requirement" {
+		return errors.New("policy must require exact filesystem enforcement and offline networking")
+	}
+	paths := []string{s.workspace, s.home, s.temporary}
+	if len(doc.Filesystem.ReadWrite) != len(paths) {
+		return errors.New("policy must grant writes only to the explicit private paths")
+	}
+	for i, path := range paths {
+		if doc.Filesystem.ReadWrite[i].Value != path {
+			return errors.New("policy must grant writes only to the explicit private paths")
+		}
+		quoted, _ := json.Marshal(path)
+		if !strings.Contains(policy, string(quoted)) {
+			return errors.New("private policy paths must be quoted")
+		}
+	}
+	for _, paths := range [][]yaml.Node{doc.Filesystem.ReadOnly, doc.Filesystem.ReadWrite} {
+		for _, path := range paths {
+			// Inspect nodes so a bare YAML ~ cannot disappear as a null
+			// value during decoding. Tildes within absolute paths are literal.
+			if path.Kind != yaml.ScalarNode || path.Tag != "!!str" || path.Value == "" || strings.HasPrefix(path.Value, "~") {
+				return errors.New("policy must not grant tilde-based filesystem paths")
+			}
+		}
+	}
+	return nil
+}
+
+func TestPrivatePolicyAllowsLiteralTildePaths(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "literal~parent, ~quoted")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(key, parent)
+	}
+	s, err := newProbeSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := s.close(); err != nil {
+			t.Errorf("cleanup private session: %v", err)
+		}
+	})
+	if filepath.Dir(s.root) != parent {
+		t.Fatalf("fixture did not use literal-tilde temp parent: %q", s.root)
+	}
+	policy := s.policyYAML()
+	if err := validateProbePolicy(s, policy); err != nil {
+		t.Fatalf("quoted literal-tilde paths rejected: %v", err)
+	}
+	for _, pattern := range []string{"~", "~/private", "\"~/private\"", "~other/private"} {
+		invalid := strings.Replace(policy, "read_only: [", "read_only: ["+pattern+", ", 1)
+		if err := validateProbePolicy(s, invalid); err == nil {
+			t.Errorf("tilde-based filesystem pattern %q accepted", pattern)
+		}
 	}
 }
 

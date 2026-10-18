@@ -185,3 +185,177 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+  windows-source-artifact:
+    name: Build pinned native Windows contributor artifacts
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      MXC_SOURCE_COMMIT: 1736b48398c3fe4d1315b2311c0951cc893eb3ae
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the reviewed AXIS source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ROCm/axis
+          ref: fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: axis-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out the pinned MXC source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: microsoft/mxc
+          ref: 1736b48398c3fe4d1315b2311c0951cc893eb3ae
+          path: mxc-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify source identities and install the pinned toolchain
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $axisCommit = git -C axis-source rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $axisCommit -ne $env:AXIS_SOURCE_COMMIT) { throw 'AXIS source identity mismatch' }
+          $mxcCommit = git -C mxc-source rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $mxcCommit -ne $env:MXC_SOURCE_COMMIT) { throw 'MXC source identity mismatch' }
+          foreach ($source in @('axis-source', 'mxc-source')) {
+            $status = git -C $source status --porcelain
+            if ($LASTEXITCODE -ne 0 -or $status) { throw "Unexpected initial changes in $source" }
+          }
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain installation failed' }
+
+      - name: Apply the reviewed AXIS compatibility patches to MXC
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $patches = @(Get-ChildItem -LiteralPath axis-source/third_party/mxc/patches -File -Filter '*.patch' | Sort-Object Name)
+          $expected = @('0001-wxc-processcontainer-resource-limits.patch', '0002-wxc-job-list-resource-assignment.patch', '0003-axis-wfp-strict-proxy.patch')
+          if (($patches.Name -join ',') -ne ($expected -join ',')) { throw 'Unexpected AXIS MXC patch set' }
+          foreach ($patch in $patches) {
+            git -C mxc-source apply --whitespace=error $patch.FullName
+            if ($LASTEXITCODE -ne 0) { throw "MXC compatibility patch failed: $($patch.Name)" }
+          }
+
+      - name: Build the pinned AXIS and patched native Windows MXC binaries
+        timeout-minutes: 30
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo "+$env:RUST_TOOLCHAIN" build --locked --release --manifest-path axis-source/Cargo.toml -p axis-cli -p axis-daemon -p axis-sandbox --bins
+          if ($LASTEXITCODE -ne 0) { throw 'AXIS Windows source build failed' }
+          git -C axis-source diff --exit-code -- Cargo.lock Cargo.toml rust-toolchain.toml
+          if ($LASTEXITCODE -ne 0) { throw 'AXIS dependency or toolchain source changed during build' }
+          cargo "+$env:RUST_TOOLCHAIN" build --locked --release --manifest-path mxc-source/src/Cargo.toml -p wxc --no-default-features
+          if ($LASTEXITCODE -ne 0) { throw 'Patched MXC Windows executor build failed' }
+          git -C mxc-source diff --exit-code -- src/Cargo.lock
+          if ($LASTEXITCODE -ne 0) { throw 'MXC dependency lock changed during build' }
+
+      - name: Assemble Windows contributor payload and provenance
+        env:
+          BUILD_REPOSITORY: ${{ github.repository }}
+          BUILD_WORKFLOW_COMMIT: ${{ github.sha }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $payloadName = "axis-source-windows-x86_64-$env:AXIS_SOURCE_COMMIT"
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'windows-dist'
+          $payload = Join-Path $dist $payloadName
+          $bin = Join-Path $payload 'bin'
+          $axisMetadata = Join-Path $payload 'axis-source'
+          $mxcMetadata = Join-Path $payload 'mxc-source'
+          $patchMetadata = Join-Path $mxcMetadata 'patches'
+          New-Item -ItemType Directory -Path $bin, $axisMetadata, $patchMetadata | Out-Null
+          foreach ($name in @('axis.exe', 'axisd.exe')) {
+            Copy-Item -LiteralPath "axis-source/target/release/$name" -Destination $bin
+          }
+          Copy-Item -LiteralPath mxc-source/src/target/release/wxc-exec.exe -Destination $bin
+          foreach ($name in @('axis-ssh-proxy.exe', 'axis-wfp-broker.exe')) {
+            $source = "axis-source/target/release/$name"
+            if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $bin }
+          }
+          foreach ($name in @('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'LICENSE')) {
+            Copy-Item -LiteralPath "axis-source/$name" -Destination $axisMetadata
+          }
+          Copy-Item -LiteralPath mxc-source/src/Cargo.lock -Destination $mxcMetadata
+          Copy-Item -LiteralPath mxc-source/LICENSE.md -Destination $mxcMetadata
+          Get-ChildItem -LiteralPath axis-source/third_party/mxc/patches -File -Filter '*.patch' |
+            Sort-Object Name | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $patchMetadata }
+          $rustVersion = rustc "+$env:RUST_TOOLCHAIN" -Vv
+          if ($LASTEXITCODE -ne 0) { throw 'Could not record Rust compiler identity' }
+          $cargoVersion = cargo "+$env:RUST_TOOLCHAIN" --version
+          if ($LASTEXITCODE -ne 0) { throw 'Could not record Cargo identity' }
+          Set-Content -LiteralPath (Join-Path $payload 'TOOLCHAIN.txt') -Encoding utf8 -Value ($rustVersion + $cargoVersion)
+          function Get-PayloadFile([System.IO.FileInfo]$File) {
+            return [ordered]@{
+              path = [System.IO.Path]::GetRelativePath($payload, $File.FullName).Replace('\', '/')
+              sha256 = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              size_bytes = $File.Length
+            }
+          }
+          $manifest = [ordered]@{
+            schema_version = 1
+            purpose = 'contributor_source_build_only'
+            support_certification = $false
+            axis_source = [ordered]@{
+              repository = 'https://github.com/ROCm/axis'
+              commit = $env:AXIS_SOURCE_COMMIT
+              cargo_lock_sha256 = (Get-FileHash -LiteralPath (Join-Path $axisMetadata 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
+              toolchain_file_sha256 = (Get-FileHash -LiteralPath (Join-Path $axisMetadata 'rust-toolchain.toml') -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            mxc_source = [ordered]@{
+              repository = 'https://github.com/microsoft/mxc'
+              commit = $env:MXC_SOURCE_COMMIT
+              cargo_lock_sha256 = (Get-FileHash -LiteralPath (Join-Path $mxcMetadata 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
+              patches = @(Get-ChildItem -LiteralPath $patchMetadata -File | Sort-Object Name | ForEach-Object { Get-PayloadFile $_ })
+            }
+            build = [ordered]@{
+              toolchain = $env:RUST_TOOLCHAIN
+              toolchain_output_sha256 = (Get-FileHash -LiteralPath (Join-Path $payload 'TOOLCHAIN.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
+              axis_command = 'cargo +1.95.0 build --locked --release -p axis-cli -p axis-daemon -p axis-sandbox --bins'
+              mxc_command = 'cargo +1.95.0 build --locked --release -p wxc --no-default-features'
+              runner_os = [System.Environment]::OSVersion.VersionString
+              cargo_build_jobs = $env:CARGO_BUILD_JOBS
+              cargo_incremental = $env:CARGO_INCREMENTAL
+              workflow_repository = $env:BUILD_REPOSITORY
+              workflow_commit = $env:BUILD_WORKFLOW_COMMIT
+              run_id = $env:BUILD_RUN_ID
+              run_attempt = $env:BUILD_RUN_ATTEMPT
+            }
+            limitations = @(
+              'Build only: no live sandbox, Claude, daemon, helper or broker execution.'
+              'No installation, administrator actions, service registration or firewall changes.'
+              'Windows BaseContainer availability and isolation require separate host qualification.'
+              'Interactive BaseContainer ConPTY is explicitly unsupported by the pinned AXIS source.'
+              'Strict proxy networking requires an explicitly installed privileged AXIS WFP broker.'
+              'This manifest and checksums are evidence, not signed production provenance.'
+            )
+            binaries = @(Get-ChildItem -LiteralPath $bin -File | Sort-Object Name | ForEach-Object { Get-PayloadFile $_ })
+          }
+          $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $payload 'BUILD.json') -Encoding utf8
+          $sums = @(Get-ChildItem -LiteralPath $payload -File -Recurse | Sort-Object FullName | ForEach-Object {
+            $file = Get-PayloadFile $_
+            "$($file.sha256)  $($file.path)"
+          })
+          Set-Content -LiteralPath (Join-Path $payload 'SHA256SUMS') -Encoding utf8 -Value $sums
+          $archive = Join-Path $dist "$payloadName.zip"
+          Compress-Archive -LiteralPath $payload -DestinationPath $archive -CompressionLevel Optimal
+          $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "$archive.sha256" -Encoding utf8 -Value "$archiveHash  $payloadName.zip"
+          Copy-Item -LiteralPath (Join-Path $payload 'BUILD.json') -Destination (Join-Path $dist 'BUILD.json')
+          Get-Item -LiteralPath $archive | Select-Object Name, Length
+
+      - name: Upload the native Windows source-bound contributor artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-source-windows-x86_64-fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          path: |
+            windows-dist/*.zip
+            windows-dist/*.zip.sha256
+            windows-dist/BUILD.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

@@ -98,8 +98,6 @@ the old value until you restart it:
 - `claw`, `agent`, `routing` and `plugin_dir`
 - `deployment_mode`, `enterprise.profile`, `enterprise.network` and
   `enterprise.openshell`
-- common sandbox activation and listeners: `sandbox.enabled`,
-  `sandbox.runtimes`, `sandbox.ingress_port` and `sandbox.egress_port`
 - the resource-identity keys (`environment`, `tenant_id`, `workspace_id`,
   `discovery_source`)
 - `fleet.enabled`, `fleet.mqtt_broker_url`, `fleet.mqtt_require_tls`,
@@ -109,6 +107,11 @@ the old value until you restart it:
 The storage paths and `deployment_mode` can not be kept that way: after a
 change to one, the gateway refuses that reload, and every later one, until you
 restart it, and `/health` shows the error as `last_reload_error`.
+
+Common sandbox changes apply through the policy-generation path without a
+gateway process restart. Changes to `sandbox.enabled`, `sandbox.runtimes`,
+`sandbox.ingress_port` or `sandbox.egress_port` rebind the sandbox listeners in
+process, as the equivalent OpenShell listener changes do.
 
 Adding, removing, enabling or disabling a connector
 (`guardrail.connectors.<c>.enabled`) applies in place: the gateway sets up or

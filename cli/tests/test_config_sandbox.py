@@ -42,6 +42,21 @@ def test_absence_preserves_legacy_and_lane_defaults_are_off():
         assert getattr(common, field) == getattr(legacy, field)
 
 
+@pytest.mark.parametrize("raw", ["axis", [], 42, False])
+def test_non_mapping_common_config_is_an_actionable_value_error(tmp_path, monkeypatch, raw):
+    import defenseclaw.config as config_module
+
+    message = "sandbox: expected a configuration mapping"
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        _merge_sandbox(raw)
+
+    source = {"config_version": 9, "data_dir": str(tmp_path), "sandbox": raw}
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(source), encoding="utf-8")
+    monkeypatch.setattr(config_module, "default_data_path", lambda: tmp_path)
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        load()
+
+
 def test_common_round_trip_retains_false_and_vendor_settings():
     cfg = Config(sandbox=SandboxConfig(enabled=True, runtime="axis", yolo=False))
     cfg.sandbox.runtimes.axis.enabled = True

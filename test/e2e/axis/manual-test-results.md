@@ -8,7 +8,7 @@ or certify `defenseclaw sandbox run claude` with AXIS.
 Recorded 2026-10-18 on Windows 11 Enterprise, build 26200.9457, x86-64.
 Native Windows and Windows-hosted Linux are separate test routes.
 
-The isolated `DefenseClawAXISTest` WSL2 distribution uses Ubuntu 24.04 and
+The isolated `DefenseClawAXISTest` WSL2 distribution used Ubuntu 24.04 and
 kernel `6.18.40.1-microsoft-standard-WSL2`. The probe account is unprivileged;
 Windows drive automount and Windows process interoperability are disabled in
 this distribution. The Landlock version syscall returned ABI **7**.
@@ -51,13 +51,21 @@ contributor code, not an upstream runtime change.
 The overlay digest was compared with the committed source, and every packaged
 binary digest was checked before installation and execution.
 
+The final native Windows CLI checks used DefenseClaw source commit
+`6348d3594b3cb5a930dd6c1245ab0be28fcffd69`, compiled with debug symbols omitted
+(`go build -ldflags='-w -s'`). The executable SHA256 was
+`2c2ca05c2d66953b7bb41ae9137f39f1ddb1a9fc4fd11043c844c5d4ee5b7f27`.
+
 ## Observations
 
 | Case | Observed result | Meaning |
 | --- | --- | --- |
 | Native Windows `defenseclaw sandbox run claude` | Exit **3** with the existing platform refusal | The current product command does not run a Windows sandbox. |
+| Native Windows `config-v8 validate`, active AXIS | Exit **1**, path `$.sandbox.runtime`, explicit unavailable reason | Fail-closed activation with an actionable diagnostic; input bytes unchanged. |
+| Native Windows validator, stored AXIS choice with master off | Exit **0**, `valid: true` | Inactive configuration can be stored; this starts no runtime. Input bytes unchanged. |
+| Native Windows validator, conflicting explicit `yolo` policy | Exit **1**, path `$.sandbox.yolo`, explicit conflict reason | Conflicting authority is rejected; input bytes unchanged. |
 | Native Windows offline Go probe tests | Race tests passed | Harness validation only; AXIS was not executed on Windows. |
-| Linux Go probe unit tests executed inside WSL2 | All six top-level tests passed, including real supervisor exit and timeout | Linux helper execution, without AXIS. |
+| Linux Go probe unit tests at `9513714d` executed inside WSL2 | All six top-level tests passed, including real supervisor exit and timeout | Linux helper execution, without AXIS. |
 | Pinned CLI version | `axis 0.3.5`, entrypoint hash verified | Source identity comes from the build manifest, not this version string. |
 | Explicit MXC, strict filesystem, block networking | Both tagged lifecycle/timeout acceptance tests **failed**, exit **1** before payload | MXC feasibility remains failed. |
 | Manual MXC diagnostics using the same strict filesystem policy | Refused `/lib` resolving to `/usr/lib` because the distinct mount alias cannot be represented | This was the first observed refusal; the later host-root substrate restriction was not reached. |
@@ -113,6 +121,14 @@ timeout --signal=TERM --kill-after=2 30s \
 It returned **0** with the fixed JSON check list, Landlock ABI 7, and
 `claude_or_production_certification: false`. See the
 [runner source](runner/main.rs) for the exact payload and assertions.
+
+After testing, both verified contributor bundles were archived together and
+their eleven binary digests checked again. That archive's SHA256 is
+`d46903473ec5d9943de4da6b0c3bf2527b791a5d019da7e65ddfa7f5a101c34d`.
+The disposable WSL distribution was then unregistered to recover disk space
+for native validation. The archive contains contributor artifacts and
+provenance only; no HOME or credentials. Transcripts were retained separately.
+No test runtime is left installed as a customer option.
 
 ## Unqualified gates
 

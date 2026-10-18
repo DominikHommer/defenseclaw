@@ -12,6 +12,20 @@ independently before running it. The flags bind this probe to those local bytes;
 the version string alone does not establish the source commit. Never substitute
 an arbitrary artifact's freshly calculated hash for that review.
 
+## Requested platform targets
+
+The integration targets AXIS through MXC on each native host:
+
+| Native host | Required MXC executor | Evidence from this prototype |
+| --- | --- | --- |
+| Windows | `ProcessContainerWindows` | Not qualified; this Linux harness does not test native Windows. No WSL dependency or fallback. |
+| Linux | `BubblewrapLinux` | Not qualified; the pinned strict-filesystem live probe is blocked below. |
+| macOS | `Seatbelt` | Not qualified; verify the AXIS-to-MXC route and native behavior separately. AXIS's existing macOS dispatch is not evidence of an MXC route. |
+
+These are requested support targets, not current product availability. Each
+requires independent live qualification under the same DefenseClaw security
+contract. No AXIS platform is enabled by this prototype.
+
 ## Ordinary offline tests
 
 From the repository root:
@@ -48,8 +62,8 @@ not a passing negative test or permission to downgrade. See the pinned
 [substrate refusal](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/crates/axis-sandbox/src/linux/mxc.rs#L2911-L2921),
 and [compatibility default](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/crates/axis-core/src/policy.rs#L493-L507).
 The lifecycle/timeout probes remain acceptance targets until an independently
-reviewed upstream or backend decision resolves this blocker. This harness does
-not silently select AXIS-native execution.
+reviewed change resolves this blocker in the required MXC Bubblewrap route.
+This integration does not offer AXIS-native execution as an alternate backend.
 
 With the sample AXIS location below, reviewed `lxc-exec` and
 `axis-seccomp-launcher` may be installed beside it in `/usr/local/bin`. At the
@@ -109,14 +123,16 @@ teardown. That lifecycle limitation is another unresolved gate.
 
 ## Evidence and remaining gates
 
-The [manual test record](manual-test-results.md) includes actual Linux AXIS
-execution in an isolated WSL2 distribution on Windows. Explicit native offline
-file/socket boundary probes passed; MXC strict-policy acceptance and native
-interactive keyboard input failed. These are distinct provider experiments,
-with no automatic fallback. Passing ordinary tests or cross-compiling live
-tests is not live feasibility evidence. The separate
+The [manual test record](manual-test-results.md) includes historical Linux AXIS
+experiments in an isolated WSL2 distribution on Windows. Explicit AXIS-native
+offline file/socket boundary probes passed; MXC strict-policy acceptance and
+AXIS-native interactive keyboard input failed. Those experiments do not qualify
+native Windows, the required MXC route, or an alternate product backend. WSL is
+not a target or fallback for this integration. Passing ordinary tests or
+cross-compiling live tests is not live feasibility evidence. The separate
 [direct native runner](runner/README.md) uses the pinned Rust API for additional
-fixed offline probes, without the CLI's missing-socket workaround.
+fixed offline research probes, without the CLI's missing-socket workaround; it
+does not establish the requested MXC platform support.
 
 Even a successful live run proves only these benign offline probes. Before
 Stage 2 can pass, record the exact host/kernel, AXIS and dependency provenance,
@@ -133,6 +149,9 @@ artifact digests, commands, and observed results, then independently qualify:
 - Cross-session ownership, copied project review/pull/undo, crash recovery,
   all runtime-object cleanup and an immutable verified harness bundle.
 
-Native Windows, WSL2, macOS and managed deployment modes are not qualified here.
+Native Windows MXC ProcessContainerWindows, Linux MXC BubblewrapLinux, native
+macOS MXC Seatbelt, and managed deployment modes are not qualified here. Native
+Windows and macOS need their own live harnesses; this Linux prototype is only a
+subset of the required evidence.
 The [integration plan](../../../docs/design/axis-sandbox-integration-plan.md)
 remains the acceptance authority; this prototype does not complete its gates.
