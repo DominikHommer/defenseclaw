@@ -59,15 +59,18 @@ const RunDir = harness.RunDir
 
 // session is one harness session in a sandbox.
 type session struct {
-	app  *App
-	api  API
-	cli  openshell.CLI
-	spec *harness.Spec
-	sb   *sandboxapi.Sandbox
-	rm   bool
-	yes  bool
+	app *App
+	api API
+	cli openshell.CLI
+	// transport is bound explicitly when this session is created. cli remains
+	// only for the existing OpenShell workspace and state helpers.
+	transport SessionTransport
+	spec      *harness.Spec
+	sb        *sandboxapi.Sandbox
+	rm        bool
+	yes       bool
 	// cliErr holds the OpenShell CLI's own standard error of the session's
-	// interactive harness or shell (holdCLIErr).
+	// interactive harness or shell (holdTransportErr).
 	cliErr *heldOutput
 	// autoRm marks an rm the run did not ask for: a headless run's sandbox,
 	// which goes by the rules of --rm unless --keep or
@@ -215,14 +218,14 @@ type session struct {
 // once a copy-mode project is uploaded, so a probe there comes after the
 // upload.
 func (s *session) probe(ctx context.Context, workdir string) error {
-	inv, err := s.cli.Exec(s.sb.Name, []string{"true"}, openshell.CLIExecOptions{WorkDir: workdir, Timeout: probeTimeout})
+	execution, err := s.prepareExec(SessionExecRequest{Argv: []string{"true"}, WorkDir: workdir, Timeout: probeTimeout})
 	if err != nil {
 		return err
 	}
 	var last error
 	for i := 0; i < probeAttempts; i++ {
 		var out bytes.Buffer
-		code, err := s.app.Streamer.Stream(ctx, inv, &out, &out)
+		code, err := execution.Run(ctx, SessionStreams{Stdout: &out, Stderr: &out})
 		if err == nil && code == 0 {
 			return nil
 		}
@@ -255,7 +258,7 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	stop := s.beginSession(ctx)
 	defer stop()
 	if headless || !s.app.IO.TTY {
-		inv, err := s.cli.Exec(s.sb.Name, argv, openshell.CLIExecOptions{WorkDir: s.sb.Workdir})
+		execution, err := s.prepareExec(SessionExecRequest{Argv: argv, WorkDir: s.sb.Workdir})
 		if err != nil {
 			return -1, err
 		}
@@ -265,7 +268,7 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 		out, flushOut := sandboxOutput(s.app.IO.Out, s.app.IO.OutTTY)
 		errOut, flushErr := sandboxOutput(s.app.IO.Err, s.app.IO.ErrTTY)
 		tail := &outputTail{}
-		code, err := s.app.Streamer.Stream(runCtx, inv, io.MultiWriter(out, tail), io.MultiWriter(errOut, tail))
+		code, err := execution.Run(runCtx, SessionStreams{Stdout: io.MultiWriter(out, tail), Stderr: io.MultiWriter(errOut, tail)})
 		_, _ = flushOut(), flushErr()
 		s.harnessOutput = tail.String()
 		if interrupted() && ctx.Err() == nil {
@@ -277,11 +280,11 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 		s.harnessCode = code
 		return code, err
 	}
-	inv, err := s.cli.Exec(s.sb.Name, argv, openshell.CLIExecOptions{TTY: true, WorkDir: s.sb.Workdir})
+	execution, err := s.prepareExec(SessionExecRequest{Argv: argv, Terminal: true, WorkDir: s.sb.Workdir})
 	if err != nil {
 		return -1, err
 	}
-	code, err := s.app.Terminal.Run(ctx, s.holdCLIErr(inv))
+	code, err := execution.Run(ctx, SessionStreams{Diagnostics: s.holdTransportErr()})
 	if err != nil {
 		s.printCLIErr(false)
 	}
@@ -289,7 +292,7 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	return code, err
 }
 
-// maxHeldCLIErr bounds what holdCLIErr keeps of the OpenShell CLI's own
+// maxHeldCLIErr bounds what holdTransportErr keeps of the OpenShell CLI's own
 // standard error during a session.
 const maxHeldCLIErr = 64 << 10
 
@@ -316,16 +319,15 @@ func (h *heldOutput) take() string {
 	return out
 }
 
-// holdCLIErr has the OpenShell CLI's own standard error of an interactive
+// holdTransportErr has the OpenShell CLI's own standard error of an interactive
 // session held until the session ends (printCLIErr): written into the
 // harness's screen it corrupts it, and its relay error when the gateway
 // restarted ("Error: × code: The service is currently unavailable,
 // message: exec relay closed before the command reported an exit status")
 // came before DefenseClaw's account of what ended the session (GAP-0279).
-func (s *session) holdCLIErr(inv openshell.Invocation) openshell.Invocation {
+func (s *session) holdTransportErr() io.Writer {
 	s.cliErr = &heldOutput{}
-	inv.Stderr = s.cliErr
-	return inv
+	return s.cliErr
 }
 
 // printCLIErr prints what the OpenShell CLI wrote on its own standard
@@ -363,12 +365,12 @@ func (s *session) attachShell(ctx context.Context) (int, error) {
 	s.app.forgetStoppedCopy(s.sb.Name)
 	stop := s.beginSession(ctx)
 	defer stop()
-	inv, err := s.cli.Exec(s.sb.Name, loginShell, openshell.CLIExecOptions{TTY: true, WorkDir: s.sb.Workdir})
-	inv = s.holdCLIErr(inv)
+	execution, err := s.prepareOpenShellRecipe(SessionExecRequest{Argv: loginShell, Terminal: true, WorkDir: s.sb.Workdir})
+	diagnostics := s.holdTransportErr()
 	if err != nil {
 		return -1, err
 	}
-	return s.app.Terminal.Run(ctx, inv)
+	return execution.Run(ctx, SessionStreams{Diagnostics: diagnostics})
 }
 
 // beginSession reads the sandbox as the session starts (for the
@@ -838,13 +840,14 @@ func (s *session) detach(ctx context.Context, opts harness.LaunchOptions) error 
 	if err != nil {
 		return err
 	}
-	inv, err := s.cli.Exec(s.sb.Name, append([]string{"sh", "-c", detachScript, "sh", RunDir}, argv...),
-		openshell.CLIExecOptions{WorkDir: s.sb.Workdir, Timeout: time.Minute})
+	execution, err := s.prepareOpenShellRecipe(SessionExecRequest{
+		Argv: append([]string{"sh", "-c", detachScript, "sh", RunDir}, argv...), WorkDir: s.sb.Workdir, Timeout: time.Minute,
+	})
 	if err != nil {
 		return err
 	}
 	var out bytes.Buffer
-	code, err := s.app.Streamer.Stream(ctx, inv, &out, &out)
+	code, err := execution.Run(ctx, SessionStreams{Stdout: &out, Stderr: &out})
 	if err != nil {
 		return err
 	}
@@ -1352,15 +1355,16 @@ func (s *session) waitPhase(ctx context.Context, after *sandboxapi.Sandbox, wait
 }
 
 // answers reports whether the sandbox runs a trivial command now (one try,
-// within answerTimeout); a command that cannot be prepared counts as an
-// answer, which leaves the phase as OpenShell reports it.
+// within answerTimeout). OpenShell preparation errors leave its reported phase
+// unchanged; a missing or different transport's refusal is not readiness proof.
 func (s *session) answers(ctx context.Context) bool {
-	inv, err := s.cli.Exec(s.sb.Name, []string{"true"}, openshell.CLIExecOptions{Timeout: answerTimeout})
+	execution, err := s.prepareExec(SessionExecRequest{Argv: []string{"true"}, Timeout: answerTimeout})
 	if err != nil {
-		return true
+		legacy, ok := s.transport.(*openShellSessionTransport)
+		return ok && legacy != nil
 	}
 	var out bytes.Buffer
-	code, err := s.app.Streamer.Stream(ctx, inv, &out, &out)
+	code, err := execution.Run(ctx, SessionStreams{Stdout: &out, Stderr: &out})
 	return err == nil && code == 0
 }
 

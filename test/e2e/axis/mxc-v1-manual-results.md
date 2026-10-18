@@ -160,3 +160,43 @@ The next bootstrap establishes a positive process group and assigns the existing
 [Native Linux experiment 39113129947](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39113129947) passed the independently reviewed locked artifact from build `39112683483` at `d05ed40afa43a1c1812259554646b887ae9a9c58`. Its 13 fixed checks include the parent-only environment canary and positive outer-MXC pre-Landlock read/write control. Both initial and resized observations were `isatty=1`, foreground group `2`, process group `2`; input/resize and exit 23 passed. Landlock ABI was 7. The receipt recorded exit 0 in 1.073 seconds, empty stderr, no remaining matching processes and no new owned fixtures. The disposable runner restored its namespace sysctl.
 
 The fixed-artifact live harness was committed separately at `9a79e22213bc209e7fe19e3e775ea8c10121a7ba` on `codex/axis-platform-live` to keep the implementation PR head stable during review. Binary SHA256 was `6e3630a7b7a050e68d3584948e9fa47f9f60680c101a8bbdf9121eb416e78728`; reviewed provenance was `bb7d7943d0a3c62d115017ff1f6f366faa40985be997733eae760a3156284f65`. The live result artifact is `12130214822`, digest `f28e10c42886f761bb9a398eee1cc144ad44756d4d75748c123bb28e8aa6f27d`. This result still does not qualify foreground SIGINT or a real agent/broker flow; the new signal protocol needs its own reviewed build and live result.
+
+## Foreground SIGINT and continued input
+
+[Native Linux experiment 39115616638](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39115616638)
+passed all 14 fixed checks, including the real PTY control-byte SIGINT
+acknowledgement followed by continued input and exit 23. Initial, resized and
+continued observations each reported `isatty=1`, foreground group `2` and
+process group `2`. The owned terminal retained `ISIG` and `VINTR=3`; the
+supervisor wrote byte `0x03` to that PTY rather than signalling a numeric PID.
+The child signal handler only set an atomic flag, and normal child execution
+checked and acknowledged it. The result reported Landlock ABI 7, hard filesystem
+enforcement, blocked networking, exit 0 in 1.075 seconds and empty stderr.
+
+The exact locked build was [39115090877](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39115090877)
+at `8cea62c312e6563a9db2c898dc350485223368e0`. Root review independently
+verified the 14-file inventory, eight Git source blobs, upstream locks/licenses,
+unchanged combined lock, workflow/toolchain and exact external artifact digest
+before the live workflow executed it. The separate live harness was
+`08ac157da16ffac25bdc140f82f830054d970b30`.
+
+| Evidence | SHA256 |
+| --- | --- |
+| Build ZIP, artifact `12132405552` | `4227c8f06dc5d60b4874791420ddf7ba38754a88a324d8c39f077216ccc4f305` |
+| Build provenance | `53a94c44c15c775a01123c7259e72e01fb9b3053cab5d990714d7a33b1cc8c5b` |
+| Probe | `327e123d9343448e294d21e162db2548b855a3c2a040894ba36aa9fa95ef4228` |
+| Live result ZIP, artifact `12131663388` | `07bb7a6492ae9f9706bdc89a4e5468395aad601ca3691bab08ac69b40a957d3b` |
+
+The earlier [SIGINT attempt 39114952890](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39114952890)
+observed the same three positive groups, SIGINT acknowledgement and continued
+input but failed its strict record parser: the terminal echoed `^C` without
+a newline before the resized group record. The corrected child emits one
+newline before that record. A regression preserves rejection of the joined
+record and acceptance of the delimited record; terminal settings and the strict
+parser were not relaxed. That earlier attempt remains a failed qualification.
+
+Both attempts recorded no remaining matching probe processes and no new owned
+fixtures, and restored the disposable runner's AppArmor namespace knob with
+`original=1 changed=1 current=1`. This qualifies the fixed synthetic offline
+terminal protocol only. It does not establish arbitrary descendant custody,
+broker credentials, real Claude, general policy translation or product support.

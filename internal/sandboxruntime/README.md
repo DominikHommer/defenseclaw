@@ -29,6 +29,24 @@ Admission also compares the current trusted host authority binding. The caller
 must serialize authority rotation with admission and launch, or condition the
 launch on that generation; retaining an older policy handle grants no exception.
 
+`LaunchGate` supplies that serialization for the future adapter. It reads the
+owner's actual authority source at registration and dispatch, and rejects a
+binding that differs from the last successful transaction. Every writer must
+enter `Rotate` before changing those facts; checking a callback alone cannot
+close an unsynchronized writer's race. Rotation must revoke affected live
+grants/workloads and publish its new, increasing generation before success.
+An incomplete transition or failed owned cleanup closes the gate.
+
+Trusted preparation resources register a private one-use handle with copied
+runtime/receipt evidence and the complete launch specification. Dispatch checks
+admission again and passes the frozen literal argv, environment, workspace and
+broker binding to the trusted adapter. Cancellation, launch error or a different
+observed full session identity invokes bounded owned-handle cleanup. A copied
+or serialized handle cannot grant a second dispatch. The host controller must
+reserve session identities uniquely, abort abandoned preparations and own all
+successful workloads. These helpers do not yet wire a production AXIS adapter,
+establish private workspace custody or qualify a provider's actual enforcement.
+
 A receipt checks structural consistency. It grants no process launch,
 credential, workspace path or lifecycle authority. The controller must still
 enforce session ownership, current policy generation, credential binding and

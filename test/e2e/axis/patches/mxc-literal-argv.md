@@ -4,10 +4,22 @@
 # Contributor MXC literal argv seam
 
 This is an additive source proposal for MXC commit
-`fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2`. It has not been compiled or
-executed. It enables no DefenseClaw provider and establishes no platform
-qualification. Review the patch before building; execution requires a separate
-reviewed, pinned artifact and fixed platform probe.
+`fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2`. Its SDK compiled on native Linux
+and macOS, and the selected pure tests passed. It enables no DefenseClaw
+provider and establishes no workload/platform qualification. Execution still
+requires a separate reviewed, pinned artifact and fixed platform probe.
+
+[Compile/unit run 39115208856](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39115208856)
+at DefenseClaw `232ba9033d55e0b22e8db20045dcaa8decc06974` passed exactly ten
+reviewed Linux and eleven macOS tests, each selected with `--exact` and checked
+for one non-ignored pass. Independent root review verified all 58 Linux and 59
+macOS manifest files, reproduced all 14 patched Rust files from clean pinned
+upstream source, checked unchanged lock and exact toolchain/provenance, and
+matched the selected test names and results. No sandbox payload ran.
+The Linux artifact `12131707913` ZIP SHA256 is
+`bc5100ac4e4bbf3095232065566e6ed8ca09828089639a478ee5a865cc6d8011`;
+macOS artifact `12131978568` ZIP SHA256 is
+`5b6de79e2399563407e34ec82ba106d6424bc2fc1604a2fbfc9b68ecd45b9b55`.
 
 ## Public API and dispatch
 
