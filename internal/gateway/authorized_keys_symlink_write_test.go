@@ -253,8 +253,10 @@ func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
 				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			targets := map[string]string{hookpaths.CWDKey: cwd,
+				hookpaths.DirectoryFactPrefix + cwd: cwd, tc.operand: tc.resolved}
 			request := trustedActionRequest{Input: input, Connector: "claudecode", ProtectedHomeHook: true,
-				ResolvedWriteTargets: map[string]string{tc.operand: tc.resolved}}
+				ResolvedWriteTargets: targets}
 			if got := trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)); got != tc.blocked {
 				t.Fatalf("managed Claude decision blocked=%v, want %v", got, tc.blocked)
 			}

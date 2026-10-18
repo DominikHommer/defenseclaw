@@ -734,13 +734,27 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
 		len(request.ResolvedWriteTargets) != 0 {
 		// Keep the client's positive protected-path evidence and inspected copy
-		// sources. A generic ordinary or unknown write
-		// target does not override the established shell-ordering decision.
-		// The process-cwd alias needs its own client target to be provable.
+		// sources. A directory proof is relevant once the hook observed a
+		// different logical directory or a protected starting directory.
+		// Generic ordinary or unknown write targets do not override the
+		// established shell-ordering decision. The process-cwd alias needs
+		// its own client target to be provable.
+		changedDirectory := false
+		for key := range request.ResolvedWriteTargets {
+			if strings.HasPrefix(key, hookpaths.DirectoryFactPrefix) &&
+				key != hookpaths.DirectoryFactPrefix+facts.CWD {
+				changedDirectory = true
+				break
+			}
+		}
 		var scoped map[string]string
 		for operand, resolved := range request.ResolvedWriteTargets {
+			directoryFact := strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix)
 			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
 				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
+				directoryFact && (changedDirectory ||
+					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
+				operand == hookpaths.CWDKey && changedDirectory ||
 				isProtected(resolved) {
 				if scoped == nil {
 					scoped = make(map[string]string)
