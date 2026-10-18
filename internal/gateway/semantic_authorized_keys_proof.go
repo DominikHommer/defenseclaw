@@ -747,6 +747,25 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				break
 			}
 		}
+		command := request.Input.Command
+		if command == "" {
+			command, _ = trustedBashCommandInput(request.Input)
+		}
+		_, _, dynamicRedirect := hookpaths.ShellWriteOperands(command, facts.CWD, facts.ActiveHome)
+		home := filepath.Clean(facts.ActiveHome)
+		external := func(target string) bool {
+			return filepath.IsAbs(target) && target != home &&
+				!strings.HasPrefix(filepath.Clean(target), home+string(filepath.Separator))
+		}
+		preserveTruncated := len(request.ResolvedWriteTargets) <= 2
+		if dynamicRedirect {
+			for operand := range request.ResolvedWriteTargets {
+				if external(operand) {
+					preserveTruncated = true
+					break
+				}
+			}
+		}
 		var scoped map[string]string
 		for operand, resolved := range request.ResolvedWriteTargets {
 			directoryFact := strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix)
@@ -755,6 +774,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				directoryFact && (changedDirectory ||
 					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
 				operand == hookpaths.CWDKey && changedDirectory ||
+				operand == hookpaths.TruncatedKey && preserveTruncated ||
+				resolved == "" && external(operand) ||
 				isProtected(resolved) {
 				if scoped == nil {
 					scoped = make(map[string]string)

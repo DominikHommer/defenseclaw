@@ -240,6 +240,7 @@ func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
 	t.Setenv("HOME", home)
 	protected := filepath.Join(home, ".ssh", "authorized_keys")
 	ordinary := filepath.Join(cwd, "report.txt")
+	external := filepath.Join(t.TempDir(), "link")
 	for _, tc := range []struct {
 		name, command, operand, resolved string
 		blocked                          bool
@@ -249,6 +250,7 @@ func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
 		{"protected header claim", "printf marker > ../.ssh/authorized_keys", protected, ordinary, true},
 		{"proc ordinary", "printf marker > /proc/self/cwd/report.txt", "/proc/self/cwd/report.txt", ordinary, false},
 		{"proc protected", "printf marker > /proc/self/cwd/../.ssh/authorized_keys", "/proc/self/cwd/../.ssh/authorized_keys", protected, true},
+		{"unresolved external", "printf marker > " + external, external, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
@@ -261,6 +263,13 @@ func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
 				t.Fatalf("managed Claude decision blocked=%v, want %v", got, tc.blocked)
 			}
 		})
+	}
+	truncatedInput := actionfacts.Input{Tool: "Bash", Command: "printf marker > " + external,
+		CWD: cwd, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	truncatedRequest := trustedActionRequest{Input: truncatedInput, Connector: "claudecode", ProtectedHomeHook: true,
+		ResolvedWriteTargets: map[string]string{hookpaths.CWDKey: cwd, hookpaths.TruncatedKey: "1"}}
+	if !trustedExistingAuthorizedKeysSymlinkWrite(truncatedRequest, actionfacts.Analyze(truncatedInput)) {
+		t.Fatal("managed truncated proof made an unlisted external write safe")
 	}
 	if err := os.Symlink(protected, filepath.Join(cwd, "disklink")); err != nil {
 		t.Fatal(err)
