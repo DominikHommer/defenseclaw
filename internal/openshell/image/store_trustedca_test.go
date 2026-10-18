@@ -14,6 +14,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+// The image store refuses Windows hosts (lock_windows.go), as in image_test.go.
+
+//go:build !windows
+
 package image
 
 import (

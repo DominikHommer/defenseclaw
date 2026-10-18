@@ -71,6 +71,11 @@ testdata/enterprise-configs/*.yaml text eol=lf
 # LF on Windows checkouts too.
 bundles/local_observability_stack/** text eol=lf
 
+# The Windows standalone Setup build scripts run under bash on the release
+# runner, and cmd/defenseclaw-enterprise-setup build_contract_test.go reads
+# their multi-line commands by exact LF text; keep them LF on Windows too.
+packaging/windows/standalone/*.sh text eol=lf
+
 # The sandbox golden texts are compared byte-for-byte; keep them LF on
 # Windows checkouts too.
 internal/config/testdata/*.golden text eol=lf

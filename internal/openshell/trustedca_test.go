@@ -100,7 +100,9 @@ func TestParseTrustedCAsRefuses(t *testing.T) {
 
 func TestLoadTrustedCAs(t *testing.T) {
 	home := t.TempDir()
+	// os.UserHomeDir reads USERPROFILE on Windows and HOME elsewhere.
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	ca := openshelltest.NewCA(t, "Corp Root CA")
 	file := filepath.Join(home, "corp-root.pem")
 	if err := os.WriteFile(file, ca.PEM, 0o644); err != nil {
