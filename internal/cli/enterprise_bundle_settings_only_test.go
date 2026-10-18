@@ -20,41 +20,42 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
-// The digest bundle sign and the staged verifier compute (bundleDigester,
-// with a bundle root) equals the digest the device's gateway computes for the
-// installed settings-only config, which names no bundle file (GAP-0158). The
-// lifecycle confirms an apply only when these two agree.
+// The digest the staged verifier computes (bundleDigester, with the staging
+// copy as bundle root and the device layout) equals the digest the device's
+// gateway computes for the installed settings-only config, which names no
+// bundle file (GAP-0158). The lifecycle confirms an apply only when these two
+// agree.
 func TestBundleDigesterMatchesGatewayForSettingsOnlyBundle(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	packs := filepath.Join(filepath.Dir(file), "..", "..", "policies", "guardrail", "default")
 	if _, err := os.Stat(packs); err != nil {
 		t.Skipf("policies not found: %v", err)
 	}
-	dataDir := filepath.Join(t.TempDir(), "runtime")
+	configDir, dataDir := t.TempDir(), t.TempDir()
 	if err := os.CopyFS(filepath.Join(dataDir, "policies", "guardrail", "default"), os.DirFS(packs)); err != nil {
 		t.Fatal(err)
 	}
+	layout := enterprisebundle.DeviceLayout{ConfigPath: filepath.Join(configDir, "config.yaml"), DataDir: dataDir, PolicyDir: filepath.Join(dataDir, "policies")}
 	b := &enterprisebundle.Bundle{Files: map[string][]byte{enterprisebundle.ConfigName: []byte("config_version: 9\ndata_dir: " + dataDir +
 		"\nguardrail:\n  enabled: true\n  mode: action\n  block_at: MEDIUM\n  connectors:\n    codex: {}\n    claudecode: {}\n")}}
 
-	// Signer and staged verifier: a private working copy is the bundle root.
+	// Staged verifier: a private working copy is the bundle root.
 	stage, cleanup, err := stageBundle(b)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cleanup()
-	signCfg, signRaw, err := enterprisebundle.LoadConfig(b, stage)
+	stagedCfg, stagedRaw, err := enterprisebundle.LoadConfigForDeviceLayout(b, stage, runtime.GOOS, layout)
 	if err != nil {
 		t.Fatal(err)
 	}
-	signed, err := bundleDigester(context.Background(), signCfg, signRaw, "", stage)
+	signed, err := bundleDigester(context.Background(), stagedCfg, stagedRaw, runtime.GOOS, stage)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Device: apply renders config.yaml against the receipt's version
 	// directory and records the bundle in config.generation.json.
-	configDir := t.TempDir()
 	const bundleID, receiptID = "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z2A", "r-01J9ZK3Q4R5S6T7V8W9X0Y1Z2B"
 	versionDir := filepath.Join(configDir, enterprisebundle.BundlesDirName, enterprisebundle.VersionDirNameForReceipt(5, bundleID, receiptID))
 	if err := os.MkdirAll(versionDir, 0o700); err != nil {
@@ -64,21 +65,22 @@ func TestBundleDigesterMatchesGatewayForSettingsOnlyBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	configPath := filepath.Join(configDir, "config.yaml")
-	writeBundleTestFile(t, configPath, installed)
+	writeBundleTestFile(t, layout.ConfigPath, installed)
 	sum := sha256.Sum256(installed)
 	writeBundleTestFile(t, filepath.Join(configDir, "config.generation.json"), fmt.Appendf(nil,
 		`{"generation":4,"config_sha256":"%x","actor":"bundle:%s","written_at":"2026-10-18T00:00:00Z","bundle_id":%q,"bundle_version":5,"signer_key_id":"k1"}`,
 		sum, bundleID, bundleID))
-	deviceCfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes(configPath, installed)
+	deviceCfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, installed)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The running gateway and `policy digest` pass no bundle root.
 	live, err := gateway.ComputeEffectivePolicyFor(context.Background(), deviceCfg, gateway.EffectivePolicyOptions{Raw: installed})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if live.Digest != signed {
-		t.Fatalf("gateway digest %s != signed digest %s (components %v)", live.Digest, signed, live.Components)
+		staged, _ := gateway.ComputeEffectivePolicyFor(context.Background(), stagedCfg, gateway.EffectivePolicyOptions{GOOS: runtime.GOOS, BundleRoot: stage, Raw: stagedRaw})
+		t.Fatalf("gateway digest %s != staged digest %s\ngateway components %v\nstaged components  %v", live.Digest, signed, live.Components, staged.Components)
 	}
 }
