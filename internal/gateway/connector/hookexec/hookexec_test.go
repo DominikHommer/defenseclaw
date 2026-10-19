@@ -520,7 +520,7 @@ func TestDecisionGolden(t *testing.T) {
 		{
 			name:       "cursor allow echoes hook_output exit 0",
 			connector:  "cursor",
-			respBody:   `{"hook_output":{"permission":"allow"}}`,
+			respBody:   `{"action":"allow","hook_output":{"permission":"allow"}}`,
 			wantStdout: `{"permission":"allow"}` + "\n",
 			wantCode:   0,
 		},
@@ -534,35 +534,35 @@ func TestDecisionGolden(t *testing.T) {
 		{
 			name:       "cursor echoes hook_output exit 0",
 			connector:  "cursor",
-			respBody:   `{"hook_output":{"permission":"deny","user_message":"no","agent_message":"no"}}`,
+			respBody:   `{"action":"block","hook_output":{"permission":"deny","user_message":"no","agent_message":"no"}}`,
 			wantStdout: `{"permission":"deny","user_message":"no","agent_message":"no"}` + "\n",
 			wantCode:   0,
 		},
 		{
 			name:       "copilot allow echoes hook_output exit 0",
 			connector:  "copilot",
-			respBody:   `{"hook_output":{"permissionDecision":"allow"}}`,
+			respBody:   `{"action":"allow","hook_output":{"permissionDecision":"allow"}}`,
 			wantStdout: `{"permissionDecision":"allow"}` + "\n",
 			wantCode:   0,
 		},
 		{
 			name:       "copilot echoes hook_output exit 0",
 			connector:  "copilot",
-			respBody:   `{"hook_output":{"permissionDecision":"deny"}}`,
+			respBody:   `{"action":"block","hook_output":{"permissionDecision":"deny"}}`,
 			wantStdout: `{"permissionDecision":"deny"}` + "\n",
 			wantCode:   0,
 		},
 		{
 			name:       "openhands deny in hook_output exits 2",
 			connector:  "openhands",
-			respBody:   `{"hook_output":{"decision":"deny","reason":"no"}}`,
+			respBody:   `{"action":"block","hook_output":{"decision":"deny","reason":"no"}}`,
 			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
 			wantCode:   2,
 		},
 		{
 			name:       "openhands allow in hook_output exits 0",
 			connector:  "openhands",
-			respBody:   `{"hook_output":{"decision":"allow"}}`,
+			respBody:   `{"action":"allow","hook_output":{"decision":"allow"}}`,
 			wantStdout: `{"decision":"allow"}` + "\n",
 			wantCode:   0,
 		},
@@ -609,7 +609,7 @@ func TestDecisionGolden(t *testing.T) {
 		{
 			name:       "antigravity echoes hook_output deny exit 0",
 			connector:  "antigravity",
-			respBody:   `{"hook_output":{"decision":"deny","reason":"no"}}`,
+			respBody:   `{"action":"block","hook_output":{"decision":"deny","reason":"no"}}`,
 			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
 			wantCode:   0,
 		},
@@ -2849,7 +2849,7 @@ func TestManagedNativeDecisionRejectsMissingActionAndOutput(t *testing.T) {
 	}
 }
 
-func TestOSSNativeDecisionMissingActionAndOutputUnchanged(t *testing.T) {
+func TestOSSOpenNativeDecisionMissingActionUsesOpenFailure(t *testing.T) {
 	for _, tc := range []struct {
 		connector, event, body, wantOutput string
 	}{
@@ -2857,7 +2857,7 @@ func TestOSSNativeDecisionMissingActionAndOutputUnchanged(t *testing.T) {
 		{"copilot", "preToolUse", `{}`, ""},
 		{"devin", "PreToolUse", `{}`, ""},
 		{"kiro", "PreToolUse", `{}`, ""},
-		{"opencode", "tool.execute.before", `{}`, "{}\n"},
+		{"opencode", "tool.execute.before", `{}`, ""},
 		{"cursor", "beforeShellExecution", `{"action":"allow"}`, `{"permission":"allow"}` + "\n"},
 		{"copilot", "preToolUse", `{"action":"allow"}`, ""},
 		{"devin", "PreToolUse", `{"action":"allow"}`, ""},

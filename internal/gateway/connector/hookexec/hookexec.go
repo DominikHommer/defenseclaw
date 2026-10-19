@@ -1240,6 +1240,9 @@ func (sp spec) decide(opts Options, body []byte) int {
 	action, ok := rawString(fields, "action")
 	if !ok || (action != "allow" && action != "alert" && action != "block" && action != "confirm") {
 		lifecycle := managedNativeDecision(opts) && NeutralLifecycleEvent(sp.connector, opts.Event)
+		if opts.SecureClient && (sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr) {
+			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid or missing action in gateway response")
+		}
 		if !opts.SecureClient && !lifecycle {
 			return failNativeDecision(opts, sp, "invalid or missing action in gateway response")
 		}
@@ -1250,6 +1253,9 @@ func (sp spec) decide(opts Options, body []byte) int {
 	}
 	reason := rawStringOr(fields, "reason", "")
 	output := compactField(fields, sp.outputField)
+	if sp.style == stylePluginBridge {
+		output = compactField(fields, "hook_output")
+	}
 	if managedNativeDecision(opts) && managedNativeBlockableEvent(sp.connector, opts.Event) && output == "" &&
 		(action == "block" || action == "confirm" || (sp.connector == "cursor" && action == "allow")) &&
 		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) {
