@@ -32,6 +32,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
+// ownPeer is a managed peer of this test process's own account: the
+// managed gateway resolves a peer's run with the pack files that peer or
+// root owns, and a test cannot write a root-owned one.
+func ownPeer(t *testing.T) managedHookPeer {
+	t.Helper()
+	uid := os.Getuid()
+	if uid == 0 {
+		t.Skip("needs an account other than root as the sandbox user")
+	}
+	return managedHookPeer{UID: uid, Name: "test-own@directory.example"}
+}
+
 // writeRequiredPack writes the custom sandbox pack name (extending balanced)
 // under dir and returns its file.
 func writeRequiredPack(t *testing.T, dir, name string) string {
@@ -52,11 +64,12 @@ func writeRequiredPack(t *testing.T, dir, name string) string {
 // stricter pack stands in for it does. Before, both answered
 // policy_unloadable, and the daemon kept the floor of the sandbox's create.
 func TestSandboxCurrentCarriesTheRequiredPackTheSandboxRuns(t *testing.T) {
+	peer := ownPeer(t)
 	gate := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
-	gate.setGroups(sbxBob, "dc-sbx-devs")
+	gate.setGroups(peer, "dc-sbx-devs")
 	file := writeRequiredPack(t, t.TempDir(), "r103-pack")
 	gate.cfg.OpenShell.Admin.RequiredPack = file
-	resp := gate.live(sbxBob, 1)
+	resp := gate.live(peer, 1)
 	floor, err := managedResolveFloor(resp)
 	if err != nil || floor.RequiredPack != file {
 		t.Fatalf("resolve floor = %+v, %v", floor, err)
@@ -70,9 +83,9 @@ func TestSandboxCurrentCarriesTheRequiredPackTheSandboxRuns(t *testing.T) {
 		var code int
 		var cp sandboxrelay.CurrentPolicy
 		if report {
-			code, cp = gate.report(sbxBob, id, true)
+			code, cp = gate.report(peer, id, true)
 		} else {
-			code, cp = gate.current(sbxBob, id)
+			code, cp = gate.current(peer, id)
 		}
 		if code != http.StatusOK || cp.Floor == nil || cp.Floor.RequiredPack != file || len(cp.RequiredPack) == 0 {
 			t.Fatalf("report %v: %d floor %+v pack %d bytes", report, code, cp.Floor, len(cp.RequiredPack))
@@ -97,13 +110,14 @@ func TestSandboxCurrentCarriesTheRequiredPackTheSandboxRuns(t *testing.T) {
 // applies to it again: no create profile pins it stricter
 // (TestSandboxAuthorityForeignSandboxesOnlyTighten has that case).
 func TestSandboxDaemonForeignStopReachesALiveRegistration(t *testing.T) {
+	peer := ownPeer(t)
 	file := writeRequiredPack(t, t.TempDir(), "r103-pack")
-	f, _, gate, gateway := upgradeFloorFixtureWith(t, false, func(g *sandboxFixture) {
+	f, _, gate, gateway := upgradeFloorFixtureWith(t, false, peer, func(g *sandboxFixture) {
 		g.cfg.OpenShell.Admin.RequiredPack = file
 		g.cfg.OpenShell.Admin.ForeignSandboxes = config.OpenShellForeignSandboxesAlert
 	})
 	f.relay.settings = func() (sandboxrelay.DaemonSettings, error) {
-		rec := gate.do(upgradeFloorPeer, http.MethodGet, sandboxrelay.PathSettings, nil, nil)
+		rec := gate.do(peer, http.MethodGet, sandboxrelay.PathSettings, nil, nil)
 		if rec.Code != http.StatusOK {
 			return sandboxrelay.DaemonSettings{}, &sandboxrelay.Error{Status: rec.Code}
 		}
