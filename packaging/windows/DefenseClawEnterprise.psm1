@@ -5215,8 +5215,9 @@ function Get-DefenseClawPathAclVerdicts {
     }
     if (-not $AllowInheritance -and -not $acl.AreAccessRulesProtected) {
         $verdicts.Add([pscustomobject]@{
-            Kind   = 'Access'
-            Reason = "managed DACL inherits from an ancestor: $Path"
+            Kind     = 'Access'
+            Severity = 'Inheritance'
+            Reason   = "managed DACL inherits from an ancestor: $Path"
         })
     }
     $grantedBySID = @{}
@@ -5339,14 +5340,11 @@ function Assert-DefenseClawPathAcl {
         # with a different scoped service name) are repairable through
         # the same canonical re-stamp path as Contract/Rights verdicts.
         # The canonical descriptor built by New-DefenseClawCanonicalPathAcl
-        # excludes any SID outside the trusted writer set and the
-        # Set-DefenseClawPathAcl stamp (with the icacls /inheritance:r
-        # self-heal added above) forces SE_DACL_PROTECTED, so a re-stamp
-        # strips every untrusted ACE from both the explicit DACL and the
-        # inherited chain. Including 'Access' here means an install that
-        # finds orphan ACEs self-heals instead of refusing - matching the
-        # product invariant (canonical state after install, not
-        # refuse-on-drift).
+        # excludes any SID outside the trusted writer set and forces
+        # SE_DACL_PROTECTED, so a re-stamp that holds strips every untrusted
+        # ACE and the re-read below comes back clean. A re-stamp is a
+        # repair, never a pardon: what still fails the re-read is judged
+        # below exactly as if no repair had been attempted (GAP-0010).
         $repairable = @(
             $verdicts |
                 Microsoft.PowerShell.Core\Where-Object { $_.Kind -in @('Contract', 'Rights', 'Access') }
@@ -5392,35 +5390,34 @@ function Assert-DefenseClawPathAcl {
     $fatal = $null
     foreach ($verdict in $verdicts) {
         $downgradable = switch ($verdict.Kind) {
-            # Access verdicts (foreign SIDs on managed paths) downgrade
-            # EITHER when the caller passed -AdvisoryUntrustedAccess
-            # (ancestor-advisory posture, same as before) OR when the
-            # canonical re-stamp ran as part of this call OR, in
-            # non-strict managed_enterprise mode, specifically for
-            # Read-severity verdicts.
+            # Access verdicts (foreign SIDs on managed paths) downgrade only
+            # for drift a standard user cannot have created:
+            #   - the caller passed -AdvisoryUntrustedAccess (the state root,
+            #     which AVC re-ACLs inside the Secure Client tree);
+            #   - a Read-severity verdict in non-strict mode: Group Policy,
+            #     WDAC or a filesystem driver dropping SE_DACL_PROTECTED and
+            #     re-admitting an inherited BUILTIN\Users READ ACE. Adding
+            #     any ACE needs WRITE_DAC, which a standard user does not hold
+            #     on a managed path;
+            #   - an Inheritance verdict (SE_DACL_PROTECTED lost) that survived
+            #     the canonical re-stamp, in non-strict mode. Every inherited
+            #     ACE is still judged on its own: an inherited write grant to
+            #     an untrusted principal is a separate Write verdict.
             #
-            # The non-strict Read downgrade covers Group Policy / WDAC /
-            # filesystem drivers that silently drop SE_DACL_PROTECTED
-            # and re-admit an inherited BUILTIN\Users read ACE from the
-            # %ProgramData% default template. The trust envelope stays
-            # SYSTEM/Administrators at minimum; the alternative is
-            # leaving the endpoint unprotected because an inherited
-            # Users READ ACE sits on an admin-only file.
+            # Write-severity verdicts are FATAL on every profile, with or
+            # without the strict pin and whether or not the re-stamp ran: an
+            # untrusted principal with write-like access to a managed path can
+            # tamper with gateway state, inject hook commands, or replace the
+            # lifecycle lock contents (GAP-0010).
             #
-            # Write-severity verdicts stay FATAL even in non-strict
-            # mode: an untrusted principal with write-like access to a
-            # managed path is a security incident (foreign code could
-            # tamper with gateway state, inject hook commands, or
-            # replace the lifecycle lock contents). The lifecycle-lock
-            # smoke test and other security-critical surfaces rely on
-            # this strictness.
-            #
-            # Operators who want fail-closed posture for BOTH severities
-            # (restoring the pre-v13 behaviour) set
-            # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1.
+            # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 restores every
+            # refusal; it only tightens.
             'Access' {
-                $advisory -or $selfHealed -or
-                (-not $strict -and $verdict.Severity -eq 'Read')
+                $advisory -or
+                (-not $strict -and (
+                    [string]$verdict.Severity -ceq 'Read' -or
+                    ($selfHealed -and [string]$verdict.Severity -ceq 'Inheritance')
+                ))
             }
             'Contract' { $advisory -and $selfHealed }
             default { $false }
@@ -27745,10 +27742,10 @@ function Complete-DefenseClawStatePurge {
         # fallback above may fail to drain StateRoot if a handle is still
         # held (gateway service process didn't fully release, AV scan
         # racing). The install reconcile path has its own canonical ACL +
-        # file re-creation self-heal (see Set-DefenseClawPathAcl + the
-        # Assert-DefenseClawPathAcl Access verdict downgrade); the next
-        # uninstall or install will mop up what survived here. Refusing
-        # at this point strands the whole lifecycle.
+        # file re-creation self-heal (Set-DefenseClawPathAcl, re-read by
+        # Assert-DefenseClawPathAcl); the next uninstall or install will mop
+        # up what survived here. Refusing at this point strands the whole
+        # lifecycle.
         if (Test-DefenseClawTrustStrictAncestors) {
             throw 'StateRoot survived authenticated purge'
         }
@@ -28741,9 +28738,9 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         # Product posture (bulldoze): return ok:true so the AVC MSI treats
         # the uninstall as complete and does not block subsequent install
         # or upgrade attempts. The next install's reconcile branch bulldozes
-        # through any StateRoot residue via Set-DefenseClawPathAcl's icacls
-        # self-heal + Assert-DefenseClawPathAcl's post-restamp Access
-        # downgrade (fixing the specific orphan per-service SID symptom).
+        # through any StateRoot residue via Set-DefenseClawPathAcl's canonical
+        # re-stamp, which strips an orphan per-service SID; a write grant the
+        # re-stamp cannot remove still refuses that install (GAP-0010).
         # Operators who need strict refuse-on-drift reporting can set
         # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 to restore the
         # pre-bulldoze ok:false posture.
