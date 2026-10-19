@@ -12,6 +12,7 @@ from unittest.mock import Mock
 
 import pytest
 from defenseclaw import config as config_module
+from defenseclaw import file_permissions
 from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_version
 from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
 from defenseclaw.file_permissions import UnsafePathError
@@ -139,6 +140,10 @@ def test_doctor_reports_unreadable_dotenv_and_keeps_other_checks(
         return safe_read(path, max_bytes=max_bytes)
 
     monkeypatch.setattr(cmd_doctor, "read_regular_file_no_follow", refuse_dotenv)
+    if os.name == "nt":
+        # chmod does not define the Windows DACL; model a private file so this
+        # case tests an unreadable dotenv rather than an exposed one.
+        monkeypatch.setattr(file_permissions, "windows_acl_confidentiality_error", lambda _path: None)
     result = cmd_doctor._DoctorResult()
     cfg = SimpleNamespace(data_dir=os.fspath(tmp_path))
     cmd_doctor._check_private_file_exposure(cfg, result)
@@ -161,10 +166,19 @@ def test_doctor_still_fails_exposed_dotenv_when_safe_read_rejects_it(
         cmd_doctor, "read_regular_file_no_follow",
         Mock(side_effect=UnsafePathError("sensitive file exceeds read limit")),
     )
+    if os.name == "nt":
+        # POSIX mode bits cannot express Windows read exposure.
+        monkeypatch.setattr(
+            file_permissions,
+            "windows_acl_confidentiality_error",
+            lambda path: "another account can read" if os.fspath(path) == os.fspath(dotenv) else None,
+        )
     result = cmd_doctor._DoctorResult()
     cmd_doctor._check_private_file_exposure(SimpleNamespace(data_dir=os.fspath(tmp_path)), result)
     assert result.checks[0]["status"] == "fail"
-    assert "mode 0644" in result.checks[0]["detail"]
+    assert (
+        "unsafe Windows ACL" if os.name == "nt" else "mode 0644"
+    ) in result.checks[0]["detail"]
 
 
 def test_empty_data_dir_never_consumes_cwd_gateway_state(
