@@ -340,6 +340,40 @@ func (s *SQLiteStore) SaveDeviceRegistration(dev *manager.Device, key []byte, al
 	return nil
 }
 
+// RotateDeviceKey replaces the signing key of a registered device and saves
+// its record in one transaction. It fails, changing nothing, when the device
+// row is missing or the device has a decommission tombstone, so a rotation
+// racing a decommission cannot leave a key for a removed device.
+func (s *SQLiteStore) RotateDeviceKey(dev *manager.Device, key []byte) error {
+	if len(key) != 32 {
+		return fmt.Errorf("device key must be exactly 32 bytes, got %d", len(key))
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin device key rotation %d: %w", dev.DeviceID, err)
+	}
+	defer tx.Rollback()
+	var present int
+	err = tx.QueryRow(`SELECT 1 FROM devices WHERE device_id = ?
+		AND NOT EXISTS (SELECT 1 FROM decommissioned_devices WHERE device_id = ?)`, dev.DeviceID, dev.DeviceID).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("rotate device key %d: %w", dev.DeviceID, manager.ErrDeviceNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("check device %d before key rotation: %w", dev.DeviceID, err)
+	}
+	if err := saveDeviceWith(tx, dev); err != nil {
+		return err
+	}
+	if err := saveDeviceKeyWith(tx, dev.DeviceID, key); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit device key rotation %d: %w", dev.DeviceID, err)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*manager.Device, error) {
 	fullID := manager.ComposeID(tenantID, fleetID, deviceID)
 

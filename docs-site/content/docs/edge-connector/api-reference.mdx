@@ -185,7 +185,7 @@ Outside explicit unmanaged development mode (`DCLAW_DEV_MODE=ON`), the gateway a
 POST /api/v1/fleet/devices/{id}/rotate-key
 ```
 
-Generates and persists a replacement 32-byte device HMAC key. The response returns `device_id`, `device_key`, and `status: "rotated"`; store the key securely and provision it on the device before sending more signed messages. This endpoint is rate limited to one rotation per device per minute and requires a configured key store. A tenant-scoped token can rotate only a device in that tenant. Production key delivery requires HTTPS or a configured trusted TLS proxy. Missing devices return `404`; an unavailable key store returns `501`.
+Generates and persists a replacement 32-byte device HMAC key. The response returns `device_id`, `device_key`, and `status: "rotated"`; store the key securely and provision it on the device before sending more signed messages. This endpoint is rate limited to one rotation per device per minute and requires a configured key store. A tenant-scoped token can rotate only a device in that tenant. Production key delivery requires HTTPS or a configured trusted TLS proxy. Missing devices return `404`; an unavailable key store returns `501`, and `503` when the key store is not the Fleet device store that can rotate atomically. Rotation and decommission are mutually exclusive: the key and device record change in one transaction that re-checks the device and its decommission tombstone, so a device decommissioned while a rotation is in progress returns `404` and keeps no key.
 
 ### Rotate the Fleet API token
 

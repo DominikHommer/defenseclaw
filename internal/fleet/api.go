@@ -1403,6 +1403,11 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serialize with registration and decommission: a rotation must never
+	// recreate a key for a device that is being removed.
+	a.deviceMutationMu.Lock()
+	defer a.deviceMutationMu.Unlock()
+
 	dev, ok := a.manager.GetDevice(deviceID)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
@@ -1430,6 +1435,14 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// The key and device record must change in the manager's own store,
+	// in one transaction that re-checks the device and its tombstone.
+	rotationStore, hasRotationStore := a.keyStore.(manager.DeviceStore)
+	if _, atomicRotation := a.keyStore.(manager.DeviceKeyRotationStore); !hasRotationStore || !atomicRotation || !a.manager.StoreIs(rotationStore) {
+		a.rotationMu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "atomic key rotation store unavailable"})
+		return
+	}
 
 	newKey := make([]byte, 32)
 	if _, err := rand.Read(newKey); err != nil {
@@ -1449,8 +1462,12 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.keyStore.SaveDeviceKey(deviceID, newKey); err != nil {
+	if _, err := a.manager.RotateDeviceKey(deviceID, newKey); err != nil {
 		a.rotationMu.Unlock()
+		if errors.Is(err, manager.ErrDeviceNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
+			return
+		}
 		log.Printf("[fleet-api] failed to save device key for %d: %v", deviceID, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "failed to save device key",

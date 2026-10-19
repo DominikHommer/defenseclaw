@@ -196,3 +196,65 @@ func TestRegisterLiveDeviceRequiresForceAndIsRateLimited(t *testing.T) {
 		t.Fatalf("rotate-key right after forced re-registration: %d", rot.Code)
 	}
 }
+
+// decommissionOnKeyRotationAudit decommissions the device at the moment the
+// rotation is authorized, i.e. between the handler's existence check and the
+// key write.
+type decommissionOnKeyRotationAudit struct {
+	passingCredentialAudit
+	mgr *manager.FleetManager
+}
+
+func (a *decommissionOnKeyRotationAudit) LogAction(action, target, details string) error {
+	if action == auditKeyRotated {
+		if _, err := a.mgr.DecommissionDeviceAtomically(1, 1, 11); err != nil {
+			return err
+		}
+	}
+	return a.passingCredentialAudit.LogAction(action, target, details)
+}
+
+// A key rotation that races a decommission must not leave a key row for the
+// removed device or report success.
+func TestRotateKeyCannotRecreateKeyForDecommissionedDevice(t *testing.T) {
+	api, store, mgr, _ := hardeningAPI(t, FleetSettings{APIToken: "admin"}, "")
+	if c, _ := registerDeviceVia(t, api, "admin", 1, 1, 11, "", true); c != http.StatusCreated {
+		t.Fatalf("register: %d", c)
+	}
+	id := manager.ComposeID(1, 1, 11)
+	api.audit = &decommissionOnKeyRotationAudit{mgr: mgr}
+	rec := securityTestRequest(api, http.MethodPost, fmt.Sprintf("/devices/%d/rotate-key", id), "admin", "{}", true)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("rotation reported success for a decommissioned device: %s", rec.Body.String())
+	}
+	if key, err := store.LoadDeviceKey(id); err != nil || key != nil {
+		t.Fatalf("key row exists for decommissioned device: %v err=%v", key != nil, err)
+	}
+	if tomb, _ := store.IsDecommissioned(id); !tomb {
+		t.Fatal("tombstone missing")
+	}
+}
+
+// The store transaction itself refuses to write a key for a missing or
+// tombstoned device.
+func TestSQLiteRotateDeviceKeyRequiresLiveDevice(t *testing.T) {
+	_, store, mgr, _ := hardeningAPI(t, FleetSettings{APIToken: "admin"}, "")
+	dev := &manager.Device{DeviceID: manager.ComposeID(1, 1, 5), TenantID: 1, FleetID: 1}
+	key := make([]byte, 32)
+	key[0] = 1
+	if err := store.RotateDeviceKey(dev, key); err == nil {
+		t.Fatal("rotated key for a device with no row")
+	}
+	if _, err := mgr.RegisterDevice(1, 1, 5, "sbc", "1", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveDecommissioned(dev.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RotateDeviceKey(dev, key); err == nil {
+		t.Fatal("rotated key for a tombstoned device")
+	}
+	if k, _ := store.LoadDeviceKey(dev.DeviceID); k != nil {
+		t.Fatal("refused rotation wrote a key")
+	}
+}

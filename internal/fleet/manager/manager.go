@@ -142,6 +142,16 @@ type DeviceRegistrationStore interface {
 	SaveDeviceRegistration(dev *Device, key []byte, allowRecommission bool) error
 }
 
+// DeviceKeyRotationStore replaces a registered device's signing key and
+// persists its record in one transaction. It must fail, changing nothing,
+// when the device row is missing or the device has a decommission tombstone.
+type DeviceKeyRotationStore interface {
+	RotateDeviceKey(dev *Device, key []byte) error
+}
+
+// ErrDeviceNotFound is returned when an operation targets an unregistered device.
+const ErrDeviceNotFound = fleetError("device not found")
+
 // FleetManager is the core fleet management service.
 //
 // Locking: mu RWMutex protects the devices map; per-device mutations use
@@ -327,6 +337,33 @@ func (fm *FleetManager) RegisterDeviceWithCredential(tenantID, fleetID uint16, d
 	}
 	devCopy := *dev
 	return &devCopy, false, nil
+}
+
+// RotateDeviceKey replaces a registered device's signing key. It holds the
+// same device and map locks as decommission, so the two are mutually
+// exclusive, and the store transaction re-checks that the device still
+// exists and has no tombstone. It returns ErrDeviceNotFound for a device
+// that is not (or no longer) registered.
+func (fm *FleetManager) RotateDeviceKey(fullID uint64, key []byte) (*Device, error) {
+	store, ok := fm.store.(DeviceKeyRotationStore)
+	if !ok {
+		return nil, fmt.Errorf("atomic device key rotation store is unavailable")
+	}
+	shard := fullID % 256
+	fm.deviceLocks[shard].Lock()
+	defer fm.deviceLocks[shard].Unlock()
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	existing, found := fm.devices[fullID]
+	if !found {
+		return nil, ErrDeviceNotFound
+	}
+	updated := *existing
+	if err := store.RotateDeviceKey(&updated, key); err != nil {
+		return nil, fmt.Errorf("persist device key rotation %d: %w", fullID, err)
+	}
+	*existing = updated
+	return &updated, nil
 }
 
 func (fm *FleetManager) registerDevice(tenantID, fleetID uint16, deviceID uint32,

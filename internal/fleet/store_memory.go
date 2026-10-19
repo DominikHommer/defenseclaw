@@ -79,6 +79,22 @@ func (s *MemoryStore) SaveDevice(dev *manager.Device) error {
 	return nil
 }
 
+// RotateDeviceKey replaces a registered device's key and record under one lock.
+func (s *MemoryStore) RotateDeviceKey(dev *manager.Device, key []byte) error {
+	if len(key) != 32 {
+		return fmt.Errorf("device key must be exactly 32 bytes, got %d", len(key))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.devices[dev.DeviceID]; !ok {
+		return fmt.Errorf("rotate device key %d: %w", dev.DeviceID, manager.ErrDeviceNotFound)
+	}
+	copy := *dev
+	s.devices[dev.DeviceID] = &copy
+	s.deviceKeys[dev.DeviceID] = append([]byte(nil), key...)
+	return nil
+}
+
 // SaveDeviceRegistration updates the in-memory device and key under one lock.
 // MemoryStore has no tombstones; callers that need to clear one must use a
 // persistent store that supports the complete operation.
