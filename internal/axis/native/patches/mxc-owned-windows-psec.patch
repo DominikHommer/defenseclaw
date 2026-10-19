@@ -1803,10 +1803,10 @@ index 0000000..4cb3400
 +}
 diff --git a/src/mxc-sdk/src/owned_windows_root_security.rs b/src/mxc-sdk/src/owned_windows_root_security.rs
 new file mode 100644
-index 0000000..6b58ee0
+index 0000000..fcb00e7
 --- /dev/null
 +++ b/src/mxc-sdk/src/owned_windows_root_security.rs
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,383 @@
 +// Copyright 2026 Cisco Systems, Inc. and its affiliates
 +// SPDX-License-Identifier: MIT
 +
@@ -1872,6 +1872,47 @@ index 0000000..6b58ee0
 +        }
 +    }
 +}
++// Only these two native encodings represent this adapter's private floor.
++// Windows may split an inheritable full-control grant into a generic
++// INHERIT_ONLY template plus a file-specific effective ACE. This is an exact
++// shape check, not general generic-right mapping or additional SID admission.
++#[derive(Clone, Copy, Default)]
++struct PrivateRootAce {
++    flags: u8,
++    access: u32,
++    user: bool,
++    system: bool,
++}
++fn canonical_private_root_aces(aces: &[PrivateRootAce]) -> bool {
++    let split = aces.len() == 4;
++    if !split && aces.len() != 2 {
++        return false;
++    }
++    let mut seen = [false; 4]; // effective user/System; inherit-only user/System
++    for ace in aces {
++        let role = if split {
++            match (ace.flags, ace.access) {
++                (0, 0x001f01ff) => 0,
++                (0x0b, 0x10000000) => 2,
++                _ => return false,
++            }
++        } else {
++            if ace.flags & !3 != 0 || ace.access != 0x001f01ff {
++                return false;
++            }
++            0
++        };
++        if ace.user && !seen[role] {
++            seen[role] = true;
++        } else if ace.system && !seen[role + 1] {
++            seen[role + 1] = true;
++        } else {
++            return false;
++        }
++    }
++    seen[..if split { 4 } else { 2 }].iter().all(|value| *value)
++}
++
 +fn private_root(file: &File) -> io::Result<()> {
 +    use std::os::windows::io::FromRawHandle;
 +    let mut thread = HANDLE::default();
@@ -1963,10 +2004,10 @@ index 0000000..6b58ee0
 +        return Err(refused());
 +    }
 +    // GetSecurityInfo returns one complete self-relative descriptor. The OS
-+    // parser owns pointer bounds; the exact two ordinary allow ACEs are checked
-+    // before SID comparison, with no path- or SID-bearing error formatting.
++    // parser owns pointer bounds; only the exact two/four ordinary allow ACEs
++    // below are checked, with no path- or SID-bearing error formatting.
 +    let acl_header = unsafe { &*acl };
-+    if acl_header.revision != 2 || acl_header.count != 2 || acl_header.size < 8 {
++    if acl_header.revision != 2 || !matches!(acl_header.count, 2 | 4) || acl_header.size < 8 {
 +        return Err(refused());
 +    }
 +    let acl_start = acl as usize;
@@ -1975,11 +2016,10 @@ index 0000000..6b58ee0
 +        .ok_or_else(refused)?;
 +    // Native SID storage must retain DWORD alignment (this target is amd64).
 +    let system = [0x00000101u32, 0x05000000, 18];
-+    let mut user_seen = false;
-+    let mut system_seen = false;
-+    for index in 0..2 {
++    let mut facts = [PrivateRootAce::default(); 4];
++    for index in 0..acl_header.count {
 +        let mut ace = std::ptr::null_mut();
-+        if unsafe { GetAce(acl, index, &mut ace) } == 0 || ace.is_null() {
++        if unsafe { GetAce(acl, index as u32, &mut ace) } == 0 || ace.is_null() {
 +            return Err(refused());
 +        }
 +        let address = ace as usize;
@@ -1988,17 +2028,21 @@ index 0000000..6b58ee0
 +        }
 +        let a = unsafe { &*ace };
 +        if a.kind != 0
-+            || a.flags & !3 != 0
 +            || a.size < 16
 +            || a.size % 4 != 0
 +            || address
 +                .checked_add(a.size as usize)
 +                .is_none_or(|end| end > acl_end)
-+            || a.access != 0x1f01ff
 +        {
 +            return Err(refused());
 +        }
 +        let sid = unsafe { ace.cast::<u8>().add(8) }.cast::<c_void>();
++        // The entire SID must fit this already-bounded ACE before an API reads
++        // it or any principal fact reaches the pure shape validator.
++        let subauthorities = unsafe { *ace.cast::<u8>().add(9) } as usize;
++        if subauthorities > 15 || 8 + 4 * subauthorities != a.size as usize - 8 {
++            return Err(refused());
++        }
 +        if unsafe { IsValidSid(sid) } == 0 {
 +            return Err(refused());
 +        }
@@ -2006,16 +2050,143 @@ index 0000000..6b58ee0
 +        if !(8..=68).contains(&sid_length) || sid_length + 8 != a.size as usize {
 +            return Err(refused());
 +        }
-+        if unsafe { EqualSid(sid, user) } != 0 && !user_seen {
-+            user_seen = true;
-+        } else if unsafe { EqualSid(sid, system.as_ptr().cast()) } != 0 && !system_seen {
-+            system_seen = true;
-+        } else {
-+            return Err(refused());
-+        }
++        facts[index as usize] = PrivateRootAce {
++            flags: a.flags,
++            access: a.access,
++            user: unsafe { EqualSid(sid, user) } != 0,
++            system: unsafe { EqualSid(sid, system.as_ptr().cast()) } != 0,
++        };
 +    }
-+    if !user_seen || !system_seen {
++    if !canonical_private_root_aces(&facts[..acl_header.count as usize]) {
 +        return Err(refused());
 +    }
 +    Ok(())
++}
++
++#[cfg(test)]
++mod root_security_tests {
++    use super::*;
++
++    #[test]
++    fn canonical_private_directory_ace_shapes_are_closed() {
++        let user = PrivateRootAce {
++            flags: 0,
++            access: 0x001f01ff,
++            user: true,
++            system: false,
++        };
++        let system = PrivateRootAce {
++            user: false,
++            system: true,
++            ..user
++        };
++        let inherit_user = PrivateRootAce {
++            flags: 0x0b,
++            access: 0x10000000,
++            ..user
++        };
++        let inherit_system = PrivateRootAce {
++            user: false,
++            system: true,
++            ..inherit_user
++        };
++        // Preserve all old two-ACE inheritance combinations and both orders.
++        for user_flags in 0..=3 {
++            for system_flags in 0..=3 {
++                let a = PrivateRootAce {
++                    flags: user_flags,
++                    ..user
++                };
++                let b = PrivateRootAce {
++                    flags: system_flags,
++                    ..system
++                };
++                assert!(canonical_private_root_aces(&[a, b]));
++                assert!(canonical_private_root_aces(&[b, a]));
++            }
++        }
++        let split = [user, system, inherit_user, inherit_system];
++        // The OS/ACL builder's ordering supplies no authority.
++        for a in 0..4 {
++            for b in 0..4 {
++                for c in 0..4 {
++                    for d in 0..4 {
++                        if a != b && a != c && a != d && b != c && b != d && c != d {
++                            assert!(canonical_private_root_aces(&[
++                                split[a], split[b], split[c], split[d]
++                            ]));
++                        }
++                    }
++                }
++            }
++        }
++        for count in [0, 1, 3] {
++            assert!(!canonical_private_root_aces(&split[..count]));
++        }
++        assert!(!canonical_private_root_aces(&[
++            user,
++            system,
++            inherit_user,
++            inherit_system,
++            user
++        ]));
++        assert!(!canonical_private_root_aces(&[user, user]));
++        assert!(!canonical_private_root_aces(&[system, system]));
++        for index in 0..4 {
++            for replacement in [
++                PrivateRootAce {
++                    user: false,
++                    system: false,
++                    ..split[index]
++                },
++                PrivateRootAce {
++                    access: 0,
++                    ..split[index]
++                },
++                PrivateRootAce {
++                    access: split[index].access | 0x01000000,
++                    ..split[index]
++                },
++                PrivateRootAce {
++                    flags: split[index].flags | 0x10,
++                    ..split[index]
++                },
++                PrivateRootAce {
++                    flags: split[index].flags | 4,
++                    ..split[index]
++                },
++                // A generic effective grant or file-specific inherit template
++                // is not one of the two exact canonical representations.
++                PrivateRootAce {
++                    access: if index < 2 { 0x10000000 } else { 0x001f01ff },
++                    ..split[index]
++                },
++                PrivateRootAce {
++                    flags: 3,
++                    ..split[index]
++                },
++            ] {
++                let mut changed = split;
++                changed[index] = replacement;
++                assert!(!canonical_private_root_aces(&changed));
++            }
++        }
++        for (index, other) in [(0, 1), (1, 0), (2, 3), (3, 2)] {
++            let mut changed = split;
++            changed[index] = split[other];
++            assert!(!canonical_private_root_aces(&changed));
++        }
++        // A lone template cannot replace the required effective owner grant.
++        assert!(!canonical_private_root_aces(&[
++            inherit_user,
++            inherit_system
++        ]));
++        assert!(!canonical_private_root_aces(&[
++            PrivateRootAce {
++                access: 0x10000000,
++                ..user
++            },
++            system
++        ]));
++    }
 +}

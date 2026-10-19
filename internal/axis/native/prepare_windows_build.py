@@ -32,7 +32,7 @@ PATCHES = {
 # Reviewed owned-input adapter; never includes the uncontained control overlay.
 OWNED_PATCH = {
     "path": "patches/mxc-owned-windows-psec.patch",
-    "sha256": "81656d204eb07b4296a7a8640c99c488de4222b99934ef8be88d0faa9d28f451",
+    "sha256": "aa90d41a729916b156ba25f3a02591d1c229951a1261bb4aedff7d53e643307f",
 }
 SDK_OVERLAY_FILES = {
     "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs": (
@@ -64,7 +64,7 @@ SDK_OVERLAY_FILES = {
     "src/mxc-sdk/src/literal_argv.rs": "3e5884c316403be2ad82052492f1d3fd9dbd7ea2500ccbb7c716a64a29602cd5",
     "src/mxc-sdk/src/owned_windows_psec.rs": "f3cf4137c6de6c0f71b895acce834f3f831200928c167178476f7d3ade492e60",
     "src/mxc-sdk/src/owned_windows_root_security.rs": (
-        "e219d0a4c07a4e435e8ce3b4f319606bf23065b42337b277496552cc04915c04"
+        "a5ca83814ee9c5e471a2ed2ca91f445bd75d8a2be39ba0c3f712ded35c46f869"
     ),
     "src/mxc-sdk/src/policy.rs": "43680b63e9e7d4c9351cee1936e791be1b4b877cfcee368b07429e22c355de9c",
     "src/mxc-sdk/src/policy/exact/mod.rs": "da9ad3bd8cf1be1af225aa95c887718d67ce7efbb8270d2e7d578bab9dc87bb7",
@@ -86,6 +86,7 @@ INERT_TESTS = (
     "windows::tests::native_sdk_owned_stdio_accepts_only_the_fixed_sync_child_endpoints",
 )
 SDK_INERT_TESTS = (
+    "owned_windows_psec::root_security_tests::canonical_private_directory_ace_shapes_are_closed",
     "owned_windows_psec::tests::owned_access_requires_exact_role_rights_without_host_mutation_rights",
     "owned_windows_psec::stdio_tests::stdio_requires_synchronous_mode_and_direction_before_native_launch",
     "owned_windows_psec::native_access_tests::native_current_image_read_handle_cannot_be_promoted_to_execute_or_write",
@@ -182,7 +183,7 @@ def main():
         and len(INERT_TESTS) > 0
         and len(set(INERT_TESTS)) == len(INERT_TESTS)
         and isinstance(SDK_INERT_TESTS, tuple)
-        and len(SDK_INERT_TESTS) == len(set(SDK_INERT_TESTS)) == 8,
+        and len(SDK_INERT_TESTS) == len(set(SDK_INERT_TESTS)) == 9,
         "Windows source/test admission is closed",
     )
     require(

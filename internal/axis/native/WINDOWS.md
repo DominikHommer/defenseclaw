@@ -76,6 +76,20 @@ object is the exact sealed payload itself. CWD receives its own same-object NT
 empty-name, no-delete-share self pin even when no descendant is granted. This
 pins the supplied root, not its parents or the sealed image's ancestors. Other
 host grant layouts refuse.
+
+The held CWD's DACL must have the current user as owner, be protected and
+contain only current-user/SYSTEM ordinary allow ACEs. Two exact encodings are
+admitted: the existing two FILE_ALL_ACCESS ACEs with only OI/CI flags, or the
+canonical four-ACE form observed after Go's private-directory creation. That
+form has one effective flags-zero FILE_ALL_ACCESS ACE and one flags-0x0B
+(OI|CI|INHERIT_ONLY) GENERIC_ALL template for each principal, in any order.
+No generic-right normalization, extra principal/ACE, mixed encoding, other
+flag/mask or missing effective grant is accepted. The native parser still
+checks owner, protection, ordinary ACE type and complete ACE/SID bounds before
+the pure pattern check. Existing fixture ACLs and global safefile behavior are
+not rewritten. This corrects the downstream validator's `windows_cwd_privacy`
+refusal of that canonical representation; a changed artifact/native attempt
+still requires review before runtime qualification.
 PSEC still receives serialized path spellings. These pins and private scope do
 not establish a universal kernel object-binding guarantee for policy paths
 under concurrent host namespace mutation; no such qualification is claimed.
@@ -125,12 +139,17 @@ Peer exact roots (13 total including the five shared protocol roots):
 - windows_io::workload_tests::native_sync_workload_end_is_never_adopted_as_overlapped
 - windows::tests::native_sdk_owned_stdio_accepts_only_the_fixed_sync_child_endpoints
 
-SDK exact roots:
+SDK exact roots (nine, including the new pure DACL-shape gate):
 
 - owned_windows_psec::tests::owned_access_requires_exact_role_rights_without_host_mutation_rights
 - owned_windows_psec::stdio_tests::stdio_requires_synchronous_mode_and_direction_before_native_launch
 - owned_windows_psec::native_access_tests::native_current_image_read_handle_cannot_be_promoted_to_execute_or_write
 - owned_windows_psec::native_access_tests::native_relative_grant_pin_requires_the_exact_held_file_object
+- backend_modules::process_container::common::base_container_runner::owned_psec_query_tests::native_owned_psec_query_duplicate_is_noninheritable_and_independently_owned
+- backend_modules::process_container::common::base_container_runner::owned_psec_resume_tests::owned_resume_orders_live_identity_admission_and_fresh_custody_before_resume
+- backend_modules::process_container::common::base_container_runner::owned_psec_resume_tests::owned_resume_refuses_each_failed_gate_without_later_admission_or_resume
+- backend_modules::process_container::common::base_container_runner::owned_psec_resume_tests::owned_resume_attempt_is_one_shot_for_cancel_refusal_and_panic
+- owned_windows_psec::root_security_tests::canonical_private_directory_ace_shapes_are_closed
 
 Primary contracts: Microsoft ReadFile, GetOverlappedResult, CancelIoEx,
 GetQueuedCompletionStatus (event low-bit suppression), ConnectNamedPipe
