@@ -1005,10 +1005,13 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		return
 	}
 
-	// A lockdown device gets a signed BLOCK, but only for a request that
-	// passed the same authentication and rate limit as any other: the
-	// gateway must not sign responses over unauthenticated fields.
-	if dev.Status == manager.StatusLockdown {
+	// A device reporting tamper gets a signed BLOCK, but only for a request
+	// that passed the same authentication and rate limit as any other: the
+	// gateway must not sign responses over unauthenticated fields. An
+	// emergency lockdown (flag 0x40) is enforced by the device itself and is
+	// lifted there by RELEASE_LOCKDOWN, so it must not keep the gateway
+	// answering BLOCK until the next heartbeat.
+	if dev.Flags&manager.HeartbeatFlagTamperDetect != 0 {
 		b.logger.Printf("[mqtt-bridge] verdict request from lockdown device %d — returning BLOCK",
 			parts.DeviceID)
 		b.sendLockdownBlockResponse(parts, vr)

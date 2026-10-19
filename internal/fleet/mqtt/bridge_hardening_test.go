@@ -313,6 +313,34 @@ func TestLockdownBlockRequiresAuthenticatedRequest(t *testing.T) {
 	}
 }
 
+// An emergency lockdown reported in a heartbeat (flag 0x40) shows as status
+// lockdown but must not make the gateway answer BLOCK: the device enforces it
+// and may already have released it before its next heartbeat.
+func TestEmergencyLockdownFlagDoesNotForceGatewayBlock(t *testing.T) {
+	productionEnv(t)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 1, 0)
+	full := manager.ComposeID(1, 2, 42)
+	c := newMockClient()
+	b := NewBridge(c, fm, allowCache())
+	quietBridge(b)
+	b.SetDeviceKeyStore(&mapKeyStore{keys: map[uint64][]byte{full: key}})
+	b.SetHeartbeatRateLimit(0)
+	hbTopic := "defenseclaw/1/2/42/heartbeat"
+	b.handleHeartbeat(Message{Topic: hbTopic, Payload: signedHB(hbTopic, key, 42, 100, 1, 0x40)})
+	if d, _ := fm.GetDevice(full); d.Status != manager.StatusLockdown || !d.EmergencyLockdown {
+		t.Fatalf("setup: status=%s emergency_lockdown=%v", d.Status, d.EmergencyLockdown)
+	}
+	topic := "defenseclaw/1/2/42/verdict/req"
+	vr := newVR(0x2222, [16]byte{0xB0, 0x07}, [4]byte{1, 2, 3, 4})
+	b.handleVerdictRequest(Message{Topic: topic, Payload: signedVerdictReq(topic, key, vr)})
+	pubs := verdictPublishes(b, c)
+	if len(pubs) != 1 || pubs[0].Payload[2] != uint8(verdict.ActionAllow) {
+		t.Fatalf("emergency-lockdown device got %d responses (action % x), want the normal ALLOW", len(pubs), pubs)
+	}
+}
+
 // Outside development mode a signed verdict request without boot/request
 // nonces is rejected; one carrying both is answered.
 func TestProductionRejectsSignedVerdictRequestWithoutNonces(t *testing.T) {
