@@ -714,7 +714,9 @@ What to read in `status`:
 
 - **Users.** One row per enrolled user: whether they are `enforcing` (an
   agent session of theirs is anchored and denied), `armed` (enforce is loaded
-  for them and no running agent session is anchored yet), in
+  for them and no running agent session is anchored yet: none started from an
+  agent binary after the controls loaded, `no_anchored_session`, or Tetragon
+  did not report the start of the one that did, `kernel_unconfirmed`), in
   burn-in, reset by a hit, or monitor-only and why, and their burn-in as
   progress, percent and an estimate. The estimate appears after the window is
   24 hours old; before that it reads "measuring".
@@ -1339,7 +1341,7 @@ reports in its load-error or error state is the problem
 | An agent got `Operation not permitted` | One of the two kernel controls, or one of your own enforcing policies, denied an open | Follow [the help-desk runbook](#when-a-control-blocks-something) |
 | `status` says Tetragon is not reachable in `consume` | Plane C is off, the helper cannot reach the socket, or Tetragon is stopped | `tetragon verify --ready-for consume` names the failing check and prints the command that fixes it |
 | No would-block hit appears for a Claude Code, Codex, Cursor or Copilot CLI user | The CLI is not installed in the user's home or an administrator prefix; the user is not an eligible account of `enterprise.enrollment`; a disabled `targets.yaml` row for that user and connector; or the connector is in observe mode | `status` lists the users with no agent and the observed-but-not-enforced sessions with the reason, and marks the connectors enrolled through machine policy with `*`. Set `enterprise.enrollment.agent_prefixes` for a CLI under an administrator prefix |
-| Burn-in does not advance | Time accrues only while an anchored agent of that user is running, every live session of that user is in the controls policy, and the stream is connected. A new session waits a minute or two (`kernel_session_policy_pending`), more than eight live sessions pause it (`kernel_roots_over_limit`), a pause stops it, and a hit resets the window | Read the user's row and reason in `status` and the estimate in `verify --ready-for enforce`; end the extra sessions, or wait |
+| Burn-in does not advance | Time accrues only while an anchored agent of that user is running, every live session of that user is in the controls policy, and the stream is connected. A new session waits a minute or two (`kernel_session_policy_pending`), more than four live sessions pause it (`kernel_roots_over_limit`), a pause stops it, and a hit resets the window | Read the user's row and reason in `status` and the estimate in `verify --ready-for enforce`; end the extra sessions, or wait |
 | "Events lost" reads unknown | Tetragon's metrics listener is not on loopback, or Tetragon is 1.6.x | Set `metrics-server` to `127.0.0.1:2112` in [Harden Tetragon](#harden-tetragon) |
 | The ack went stale after an upgrade | The release changed a control, so the digest changed | Push the list form of `enforce_ack` with the old and the new digest |
 | Tetragon restarted and my own policies are gone | A restart drops policies added with `tetra` | Put the policies you keep in `/etc/tetragon/tetragon.tp.d` |
@@ -1487,15 +1489,19 @@ execution.
 
 Known limits of these controls:
 
-- At most eight running agent sessions are anchored in one monitor controls
+- At most four running agent sessions are anchored in one monitor controls
   policy. Further roots are reported as `kernel_roots_over_limit` (and that
   is the user's reason in `status` and `verify`, not
   `kernel_session_policy_pending`: they do not wait for a load, they do not
   fit); their user's covered burn-in time pauses until every live root is
-  measured. Eight roots
-  use two `file_open` hooks on the measured Tetragon 1.7.1 host. More roots
-  would load more hooks, and every extra hook adds to the cost of each open on
-  the computer ([Cost on the host](#cost-on-the-host)).
+  measured. Each DefenseClaw policy uses a single `file_open` hook: Tetragon
+  1.7.0 runs only the last entry of a hook that a policy lists twice, and one
+  hook holds five selectors, which fit one group of four process IDs.
+- A session counts as anchored only when Tetragon reported its start on the
+  event stream, which is where Tetragon marks it. A session that started while
+  the stream was down is not counted as denied
+  (`kernel_sessions_unconfirmed`; "Tetragon did not report its start" under
+  "Observed, not enforced" in `status`) until it restarts.
 - A new agent session may wait a minute or two for its process id to reach an enabled controls policy. The helper reports `kernel_session_policy_pending` and accrues no covered time for that user while it waits; the user's earlier covered time stays. If loading fails, the warning remains until the policy is repaired.
 - A control denies below an agent session that Tetragon saw start while the
   controls were loaded. A session that was already running when they loaded
