@@ -48,10 +48,18 @@ func TestContradictoryNativeBlockFailsClosed(t *testing.T) {
 }
 
 func TestPerUserClosedMissingHomeFailsClosed(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	opts := Options{Connector: "claudecode", Event: "PreToolUse", FailMode: "closed", Home: t.TempDir() + "/missing", Stdin: strings.NewReader(`{"hook_event_name":"PreToolUse"}`), Stdout: &stdout, Stderr: &stderr}
-	code := Run(context.Background(), opts)
-	if code == 0 && !strings.Contains(stdout.String(), "block") {
-		t.Fatalf("missing home allowed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	for _, tc := range []struct{ connector, event, payload string }{
+		{"claudecode", "PreToolUse", `{"hook_event_name":"PreToolUse"}`},
+		{"copilot", "preToolUse", `{}`},
+		{"hermes", "pre_tool_call", `{"event":"pre_tool_call"}`},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			opts := Options{Connector: tc.connector, Event: tc.event, FailMode: "closed", Home: t.TempDir() + "/missing", Stdin: strings.NewReader(tc.payload), Stdout: &stdout, Stderr: &stderr}
+			code := Run(context.Background(), opts)
+			if code == 0 && !strings.Contains(stdout.String(), "block") && !strings.Contains(stdout.String(), "deny") {
+				t.Fatalf("missing home allowed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+		})
 	}
 }

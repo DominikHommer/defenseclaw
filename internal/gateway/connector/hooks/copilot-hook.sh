@@ -58,7 +58,13 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   # A registered closed hook cannot treat missing local state as retirement.
   if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
-    exit 2
+    # Copilot CLI needs a native denial; an error status alone can allow.
+    case "${2:-}" in
+      preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
+      permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+      *) exit 2 ;;
+    esac
+    exit 0
   fi
   exit 0
 fi

@@ -1507,13 +1507,10 @@ func safeHookPanicResponse(connectorName, eventName string) agentHookResponse {
 // hookPanicResponse renders one fail-mode verdict for every recovery path.
 // Sandbox ingress has its own mandatory closed verdict and is rendered once.
 //
-// A recovered error produced no policy verdict. On a standalone managed
-// device it is answered like every other missing verdict there (gateway
-// unreachable, invalid response): the administrator-owned hook fails closed
-// whatever the guardrail mode or hook_fail_mode says, so a blockable tool or
-// prompt event gets the connector's native deny in observe mode too, and a
-// stop or session-end event keeps its neutral allow. Per-user installs and
-// the Secure Client profile keep the configured mode and fail mode.
+// A recovered error produced no policy verdict. A closed hook denies a
+// blockable tool or prompt event even when policy verdicts are observed.
+// Stop and session-end events keep their neutral allow; explicit per-user
+// open and Secure Client keep their open failure behavior.
 func (a *APIServer) hookPanicResponse(
 	ctx context.Context,
 	connectorName string,

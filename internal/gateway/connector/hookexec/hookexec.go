@@ -1594,11 +1594,21 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	return emitHookResult(opts, sp, sp.openAllow)
 }
 
-// handleUnavailableHome answers a per-user hook whose DefenseClaw home is
-// missing or disabled: an operator-requested no-op unless strict
-// availability is set. Run blocks a managed hook's missing or disabled home
-// itself, so a managed hook never gets here.
+// handleUnavailableHome refuses an unavailable registered per-user hook in
+// closed mode. Explicitly open hooks keep their no-op behavior. Run handles
+// managed hooks before this function.
 func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
+	if failMode == "closed" || opts.StrictAvailability {
+		if sp.connector == "hermes" {
+			if code, handled := hermesFailClosed(opts, sp, "transport", reason); handled {
+				return code
+			}
+		}
+		if sp.connector == "copilot" && managedNativeBlockableEvent(sp.connector, opts.Event) {
+			opts.FailMode = "closed"
+			return failNativeDecision(opts, sp, reason)
+		}
+	}
 	closes := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
 	if closes && failClosedStopEvent(opts, sp) {
 		return allowFailClosedStop(opts, sp, reason, "transport")
@@ -1607,7 +1617,11 @@ func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
 		} else {
-			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (strict availability)\n", reason, sp.subject)
+			basis := "fail mode closed"
+			if opts.StrictAvailability && failMode != "closed" {
+				basis = "strict availability"
+			}
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (%s)\n", reason, sp.subject, basis)
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}

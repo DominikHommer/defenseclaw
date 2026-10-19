@@ -44,7 +44,9 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   # A registered closed hook cannot treat missing local state as retirement.
   if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
-    exit 2
+    # Hermes acts on a synchronous JSON block, not on process status.
+    printf '%s\n' '{"action":"block","message":"DefenseClaw hook failed closed"}'
+    exit 0
   fi
   exit 0
 fi

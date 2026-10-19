@@ -77,12 +77,8 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     exit 2
   fi
-  # Disabling DefenseClaw (or an absent install) must fail OPEN for the
-  # agent. Cursor treats a failClosed:true hook entry that produces empty
-  # stdout as a hook failure and blocks the tool, so emit an explicit
-  # allow instead of exiting silently — otherwise dropping the .disabled
-  # marker would brick a fail-closed Cursor install with no way to
-  # self-recover.
+  # A configured open hook keeps its explicit Cursor allow shape if its
+  # installation has been removed.
   emit_cursor_allow
   exit 0
 fi

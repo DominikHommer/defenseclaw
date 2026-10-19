@@ -640,7 +640,7 @@ async function defenseclawLogFailOpen(reason, category) {
     if (out && (out.decision === "deny" || out.decision === "block")) {
       return { reason: out.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
-{{if not .SecureClient}}    if (data.action === "block") {
+{{if not .SecureClient}}    if (data.action === "block" || data.action === "confirm") {
       return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
     }
 {{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
