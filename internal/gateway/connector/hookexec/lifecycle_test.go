@@ -9,9 +9,12 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+var lifecycleFailOpenWarning = regexp.MustCompile(`(?m)^defenseclaw: WARNING hook fail-open; inspection bypassed \(connector=[a-z]+ hook=[a-z-]+ category=response\): "invalid or missing action in gateway response"\n`)
 
 func TestNeutralLifecycleEventsExactSets(t *testing.T) {
 	want := map[string][]string{
@@ -132,10 +135,16 @@ func TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes(t *testi
 			t.Fatalf("unknown golden profile %q", want.Profile)
 		}
 		code := sp.decide(opts, []byte(want.Body))
-		if code != want.Code || stdout.String() != want.Stdout || stderr.String() != want.Stderr {
+		gotStderr := stderr.String()
+		if want.Profile == "oss-open" {
+			// The fail-open warning (#1163) came after 6210dbcee; it is the
+			// only difference the per-user open rows may show.
+			gotStderr = lifecycleFailOpenWarning.ReplaceAllString(gotStderr, "")
+		}
+		if code != want.Code || stdout.String() != want.Stdout || gotStderr != want.Stderr {
 			t.Errorf("%s/%s %s body=%s:\n got code=%d stdout=%q stderr=%q\nwant code=%d stdout=%q stderr=%q",
 				want.Connector, want.Event, want.Profile, want.Body,
-				code, stdout.String(), stderr.String(), want.Code, want.Stdout, want.Stderr)
+				code, stdout.String(), gotStderr, want.Code, want.Stdout, want.Stderr)
 		}
 		covered[[3]string{want.Connector, want.Event, want.Profile}]++
 	}

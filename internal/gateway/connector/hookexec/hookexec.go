@@ -70,7 +70,8 @@ var (
 	errManagedGatewayPeerUnverified = errors.New("enterprise managed gateway peer unverified")
 	// errManagedGatewayNotRunning wraps a peer-verification failure whose
 	// cause is that the managed gateway service is not running (Windows SCM
-	// reports it stopped). The hook still fails closed.
+	// reports it stopped). The hook fails closed, except a Secure Client hook,
+	// which follows its fail mode (managedPeerFailMode).
 	errManagedGatewayNotRunning = errors.New("enterprise managed gateway service is not running")
 	// errManagedHookSocketSELinuxDenied wraps a Unix standalone peer failure
 	// where SELinux kept this account from the hook socket.
@@ -496,7 +497,7 @@ func Run(ctx context.Context, opts Options) int {
 				)
 			}
 			if err != nil {
-				return failUnreachable(opts, sp, "closed", managedPeerFailureReason(opts, err))
+				return failUnreachable(opts, sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 			}
 		} else {
 			opts.HTTPClient = defaultHTTPClient(requestTimeout)
@@ -733,11 +734,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			reason = errGatewayStartFailing.Error()
 		}
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
-			// Managed peer-verification failure must fail closed on the transport
-			// surface too, mirroring the up-front client-build path. A managed
+			// Managed peer-verification failure fails closed on the transport
+			// surface too, mirroring the up-front client-build path: a managed
 			// hook launched with FailMode="open" must not let an unverified
-			// gateway peer surface as an allow-by-default.
-			return failUnreachable(opts, sp, "closed", managedPeerFailureReason(opts, err))
+			// gateway peer surface as an allow-by-default. The one exception
+			// is a Secure Client gateway service that is not running (see
+			// managedPeerFailMode).
+			return failUnreachable(opts, sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
@@ -1299,11 +1302,12 @@ func exactJSONKeys(fields map[string]json.RawMessage, keys ...string) bool {
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	reason := "missing gateway token: " + tokenFile + " not found"
-	logHookFailure(opts, sp, reason, "transport", failMode)
+	blocked := opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed"))
+	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
-	if opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")) {
+	if blocked {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr,
 				"defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
@@ -1337,8 +1341,8 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 	if !sp.failOpenOnly && failMode == "closed" && managedStandaloneStopEvent(opts, sp) {
 		return allowManagedStandaloneStop(opts, sp, "stdin body exceeded cap", "transport")
 	}
-	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode)
 	closes := !sp.failOpenOnly && failMode == "closed"
+	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode, closes || managedCopilotFailsClosed(opts, sp))
 	if closes && managedPlainFailClosed(opts, sp) {
 		fields := payloadPrefixFields(prefix)
 		if strings.TrimSpace(opts.Event) == "" {
@@ -1369,11 +1373,15 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") && managedStandaloneStopEvent(opts, sp) {
 		return allowManagedStandaloneStop(opts, sp, reason, "transport")
 	}
-	logHookFailure(opts, sp, reason, "transport", failMode)
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
-		return code
+	blocked := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
+	copilotOpen := secureClientCopilotOpen(opts, sp, failMode)
+	logHookFailure(opts, sp, reason, "transport", failMode, blocked || (managedCopilotFailsClosed(opts, sp) && !copilotOpen))
+	if !copilotOpen {
+		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+			return code
+		}
 	}
-	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") {
+	if blocked {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr,
 				"defenseclaw: gateway unreachable, applying Antigravity's event-specific failure response: %s\n", reason)
@@ -1556,7 +1564,7 @@ const unenrolledAccountExplanation = "this account is not enrolled yet; restart 
 // failed-closed text.
 func failUnenrolled(opts Options, sp spec, reason string) int {
 	reportUnenrolledRefusal(opts, sp, reason)
-	logHookFailure(opts, sp, reason, "transport", "closed")
+	logHookFailure(opts, sp, reason, "transport", "closed", true)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
@@ -1670,13 +1678,16 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	if closes && managedStandaloneStopEvent(opts, sp) {
 		return allowManagedStandaloneStop(opts, sp, reason, "response")
 	}
-	logHookFailure(opts, sp, reason, "response", failMode)
+	copilotOpen := secureClientCopilotOpen(opts, sp, failMode)
+	logHookFailure(opts, sp, reason, "response", failMode, closes || (managedCopilotFailsClosed(opts, sp) && !copilotOpen))
 	if closes && managedPlainFailClosed(opts, sp) {
 		return failManagedStandaloneClosed(opts, sp, sp.responseClosed, "response", reason)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
-		return code
+	if !copilotOpen {
+		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+			return code
+		}
 	}
 	if sp.failOpenOnly || failMode == "open" {
 		return emitHookResult(opts, sp, sp.openAllow)
@@ -1694,6 +1705,32 @@ func responseFailureReason(reason string) string {
 	return reason
 }
 
+// managedCopilotFailsClosed reports, without emitting anything, whether
+// managedCopilotFailClosed would answer this event with a managed block. The
+// hook-failure log uses it to record the real outcome before the response.
+func managedCopilotFailsClosed(opts Options, sp spec) bool {
+	if !opts.ManagedEnterprise || sp.connector != "copilot" {
+		return false
+	}
+	switch opts.Event {
+	case "preToolUse", "permissionRequest":
+		return true
+	}
+	return sp.dialect == copilotVSCodeLocalSurface &&
+		copilotVSCodeLocalOutput(opts.Event, "block", "DefenseClaw") != ""
+}
+
+// secureClientCopilotOpen reports a Secure Client GitHub Copilot hook whose
+// authenticated delivery mode is open (#1163): a gateway it cannot reach and
+// a response it cannot read allow the call, as they do for every other Secure
+// Client connector, instead of the managed deny. A closed mode (configured,
+// strict availability, or another program on the gateway port) and the
+// enrollment and policy refusals still deny.
+func secureClientCopilotOpen(opts Options, sp spec, failMode string) bool {
+	return sp.connector == "copilot" && opts.SecureClient && secureClientHook(opts) &&
+		!opts.StrictAvailability && normalizeFailMode(failMode) == "open"
+}
+
 // managedCopilotFailClosed denies an administrator-managed Copilot tool call
 // when DefenseClaw itself cannot decide. Copilot has no fail-closed hook
 // contract (its own timeouts and non-JSON errors allow), so per-user Copilot
@@ -1709,9 +1746,9 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 		text = "DefenseClaw: " + unixUnenrolledAccountExplanation
 	}
 	if reason == managedGatewayNotRunningReason || reason == managedGatewayPortHeldReason {
-		// Only a standalone hook gets these reasons (managedPeerFailureReason,
-		// the foreign-hook guard); say the service is stopped and who starts
-		// it, or that another program holds its port.
+		// Say the service is stopped and who starts it, or that another
+		// program holds its port (managedPeerFailureReason, the foreign-hook
+		// guard).
 		text = managedStandaloneFailClosedText(opts.Event, "transport", reason)
 	}
 	message := mustJSONString(text)
@@ -1766,7 +1803,7 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 		}
 	}
 	if NeutralLifecycleEvent(sp.connector, opts.Event) {
-		logHookFailure(opts, sp, reason, "policy", "open")
+		logDeliberateAllow(opts, sp, reason, "policy")
 		fmt.Fprintf(opts.Stderr, "defenseclaw: not blocking the %s %s event (a block would keep the agent running); tool calls stay blocked: %s\n", sp.errLabel, strings.TrimSpace(opts.Event), reason)
 		return emitHookResult(opts, sp, sp.openAllow)
 	}
@@ -1776,11 +1813,11 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 		// "Trusting workspace..." with no message (GAP-1257). The session
 		// block is already recorded, so the first prompt or tool call gets
 		// the block and its reason.
-		logHookFailure(opts, sp, reason, "policy", "open")
+		logDeliberateAllow(opts, sp, reason, "policy")
 		fmt.Fprintf(opts.Stderr, "defenseclaw: not blocking the %s %s event (Cursor cannot show a block there); prompts and tool calls in this session stay blocked: %s\n", sp.errLabel, strings.TrimSpace(opts.Event), reason)
 		return emitHookResult(opts, sp, sp.openAllow)
 	}
-	logHookFailure(opts, sp, reason, "policy", "closed")
+	logHookFailure(opts, sp, reason, "policy", "closed", true)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
@@ -1842,11 +1879,22 @@ func managedStandaloneStopEvent(opts Options, sp spec) bool {
 	return opts.ManagedEnterprise && opts.ManagedStandalone && NeutralLifecycleEvent(sp.connector, opts.Event)
 }
 
+// logDeliberateAllow records a failure that a reviewed rule answers with the
+// connector's neutral allow (a stop/session-end event, or a Cursor event with
+// no block response). The record carries the fail_open outcome, but the
+// generic "inspection bypassed" warning is left out: the caller prints its own
+// explanation, which is the first line the agent shows.
+func logDeliberateAllow(opts Options, sp spec, reason, category string) {
+	quiet := opts
+	quiet.Stderr = io.Discard
+	logHookFailure(quiet, sp, reason, category, "open", false)
+}
+
 // allowManagedStandaloneStop answers a managed standalone stop event that
 // would have failed closed with the connector's neutral allow; the failure is
 // still logged, with the fail mode it got.
 func allowManagedStandaloneStop(opts Options, sp spec, reason, category string) int {
-	logHookFailure(opts, sp, reason, category, "open")
+	logDeliberateAllow(opts, sp, reason, category)
 	fmt.Fprintf(opts.Stderr,
 		"DefenseClaw is not blocking the %s event, because a block there would keep the agent running; prompts and tool calls stay blocked until DefenseClaw is available. (%s)\n",
 		strings.TrimSpace(opts.Event), reason)
@@ -1870,13 +1918,28 @@ func managedPlainFailClosed(opts Options, sp spec) bool {
 	return opts.ManagedEnterprise && opts.ExplainUnenrolledAccount && sp.connector != "copilot"
 }
 
+// managedPeerFailMode is the fail mode of a managed peer-verification
+// failure. A Secure Client hook whose gateway service is simply not running
+// (stopped, crashed, or held stopped while Setup services the deployment)
+// follows its own fail mode, as a refused connection already does on macOS:
+// the hook contacted no peer, so nothing unverified can answer it, and only
+// an administrator can stop the service. Every other peer failure (another
+// process on the gateway port, a service the hook cannot query) and every
+// standalone hook fail closed.
+func managedPeerFailMode(opts Options, failMode string, err error) string {
+	if secureClientHook(opts) && errors.Is(err, errManagedGatewayNotRunning) {
+		return failMode
+	}
+	return "closed"
+}
+
 // managedPeerFailureReason is the hook-failure reason of a managed
-// peer-verification failure: a standalone hook (Windows, or a Unix hook whose
-// socket is missing or refuses the connection) says when the gateway service
-// is simply not running; the Secure Client profile keeps
-// managedGatewayPeerUnverifiedReason.
+// peer-verification failure: every managed hook says when the gateway
+// service is simply not running (a stopped Windows service, or a Unix
+// standalone socket that is missing or refuses the connection); any other
+// Secure Client peer failure keeps managedGatewayPeerUnverifiedReason.
 func managedPeerFailureReason(opts Options, err error) string {
-	if (opts.ExplainUnenrolledAccount || managedStandaloneHook(opts)) && errors.Is(err, errManagedGatewayNotRunning) {
+	if errors.Is(err, errManagedGatewayNotRunning) {
 		return managedGatewayNotRunningReason
 	}
 	if managedStandaloneHook(opts) && errors.Is(err, errManagedHookSocketSELinuxDenied) {
