@@ -37,6 +37,13 @@ func TestHookColdStartRefusesAfterStopDuringInstallAndAfterAFailure(t *testing.T
 	if err := hookColdStartRefusal(dataDir, now); err == nil || !strings.Contains(err.Error(), "install") {
 		t.Fatalf("during install = %v, want the install refusal", err)
 	}
+	// GAP-0196: an install stops the gateway with the stop marker; the
+	// refusal names the install, not an operator stop.
+	markGatewayStopped(dataDir)
+	if err := hookColdStartRefusal(dataDir, now); err == nil || !strings.Contains(err.Error(), "install") || strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("during install with the stop marker = %v, want the install refusal", err)
+	}
+	clearGatewayColdStartState(dataDir)
 	if err := os.Remove(lock); err != nil {
 		t.Fatal(err)
 	}
@@ -152,5 +159,33 @@ func TestWatchdogColdStartWithExternalConfig(t *testing.T) {
 	t.Setenv("DEFENSECLAW_CONFIG", configPath)
 	if got := watchdogGatewayConfigPath(dataDir); got != configPath {
 		t.Fatalf("watchdog config path = %q, want %q", got, configPath)
+	}
+}
+
+// GAP-0143: every hook that meets a restart starts the gateway. Only the
+// first takes the start lock; a start that finds it held (a restart, or
+// another hook's start, is bringing the gateway up) ends at once instead of
+// waiting in line, so a restart does not leave a dozen start processes.
+func TestHookColdStartEndsAtOnceWhileAnotherStartRuns(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
+	release, err := acquireGatewayStartLock(dataDir, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := startCmd.Flags().Set(hookColdStartFlag, "true"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = startCmd.Flags().Set(hookColdStartFlag, "false") })
+	started := time.Now()
+	if err := runStart(startCmd, nil); err != nil {
+		t.Fatalf("hook start beside a running start = %v, want it to end quietly", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("hook start waited %s for the start lock, want it to end at once", elapsed)
+	}
+	if _, statErr := os.Stat(gatewayColdStartFailedPath(dataDir)); !os.IsNotExist(statErr) {
+		t.Fatalf("a hook start that ended beside another start recorded a failure: %v", statErr)
 	}
 }

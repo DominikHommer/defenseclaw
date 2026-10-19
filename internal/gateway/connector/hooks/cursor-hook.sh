@@ -271,9 +271,10 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/cursor/hook" "$PAYLOAD" \
 }{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
   fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
 fi
-# A refused connection means this account's gateway is not running (after
-# a reboot, for example): start it once and retry. See
-# defenseclaw_gateway_cold_start in _hardening.sh.
+# A refused or dropped connection means this account's gateway is
+# restarting or not running (after a reboot, for example): send the call
+# again for up to 3 seconds, starting the gateway after a refusal. See
+# defenseclaw_await_gateway in _hardening.sh.
 # defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
 # payload on descriptors, never on its command line.
 defenseclaw_hook_post() {
@@ -286,8 +287,7 @@ defenseclaw_hook_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
-  RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
+  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"
 }
 defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 

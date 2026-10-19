@@ -440,6 +440,11 @@ func runWindowsEnterpriseLifecycle(
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts,
 			errors.New("elevation_required: "+windowsEnterpriseStandardUserMutationAnswer(action, windowsEnterpriseRequestedAttestations(opts)...)))
 	}
+	if windowsEnterpriseMutationAction(action) {
+		// The run and the installer it starts leave the CPU to the hooks
+		// that must answer each tool call in time (GAP-0155).
+		windowsLifecycleYieldToHooks()
+	}
 	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
 		if windowsEnterpriseStandaloneRequested(opts) || windowsEnterpriseUnknownProfileRequested(opts) {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)

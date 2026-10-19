@@ -613,6 +613,8 @@ def test_raw_global_closed_observe_runtime_open_creates_scoped_override(
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "open", "codex": "open"})
     cfg.guardrail.hook_fail_mode = "closed"
     cfg.guardrail.connectors["claudecode"].hook_fail_mode = ""
+    # Only Secure Client keeps an observe connector without its own value open.
+    cfg.guardrail._secure_client_observe_open = True
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
     app = AppContext()
     app.cfg = cfg
@@ -891,10 +893,12 @@ def test_unix_registration_freshness_requires_current_script_path(
 def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_modes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # GAP-1370: observe connectors already run fail-open, and a mixed roster
-    # (hermes has no runtime registration) must not start a stopped gateway.
+    # GAP-1370: under Secure Client observe connectors already run fail-open,
+    # and a mixed roster (hermes has no runtime registration) must not start a
+    # stopped gateway.
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "hermes": ""})
     cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail._secure_client_observe_open = True
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()

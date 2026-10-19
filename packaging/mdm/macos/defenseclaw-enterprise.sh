@@ -129,6 +129,9 @@ LC_ALL=C
 export PATH LC_ALL
 unset IFS || true
 umask 077
+# Set by dc_trusted_path; empty until a check names an ACL entry. Messages
+# that a failed check reaches without running it read it too (GAP-0188).
+DC_TRUST_ACL=""
 
 readonly DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
 readonly DC_MAX_CONFIG_BYTES=1048576 DC_MAX_SECRET_BYTES=16384

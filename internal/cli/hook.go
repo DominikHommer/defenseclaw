@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -88,13 +90,33 @@ func newHookCmd() *cobra.Command {
 			if !enterpriseManaged && implicitEnterpriseManagedHook() {
 				enterpriseManaged = true
 			}
+			startedAt := hookInvocationStart()
+			// At the answer deadline of a tool call the hook writes its
+			// fail-closed answer and ends, even while its own work is held
+			// up (GAP-0155).
+			exit := func(code int) { hookProcessExit(code) }
+			// The watchdog is armed before the runtime resolution below,
+			// which can itself take seconds on a stalled host.
+			var stdin io.Reader
+			var watchdog *hookexec.AnswerWatchdog
+			if inputFile == "" {
+				stdin, watchdog = armHookAnswerWatchdog(connector, event, failMode, hookSurface, enterpriseManaged, startedAt, exit)
+			}
 			if enterpriseManaged && prepareEnterpriseManagedHookRuntime(connector) {
+				endHookBeforeRun(watchdog)
 				return nil
 			}
 			if copilotCLIRunsVSCodeLocalHook(connector, hookSurface, enterpriseManaged) {
+				endHookBeforeRun(watchdog)
 				return nil
 			}
 			opts := buildHookOptionsForRuntime(connector, event, apiAddr, failMode, enterpriseManaged)
+			opts.StartedAt = startedAt
+			opts.Exit = exit
+			opts.AnswerWatchdog = watchdog
+			if stdin != nil {
+				opts.Stdin = stdin
+			}
 			opts.HookContractID = hookContractID
 			opts.HookSurface = strings.TrimSpace(hookSurface)
 			// Only the standalone binary explains an unenrolled account.
@@ -186,6 +208,47 @@ func newHookSessionFactsCmd() *cobra.Command {
 			return err
 		},
 	}
+}
+
+// armHookAnswerWatchdog reads the call's payload and arms the answer
+// watchdog of a tool call before the hook resolves its runtime: the
+// descriptor, account and sidecar reads before Run count against the call's
+// budget too (GAP-0155). It returns the hook's stdin, the payload read
+// followed by the rest, so Run reads exactly what the agent wrote.
+func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
+	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, hookexec.DefaultMaxBody+1))
+	stdin := io.MultiReader(bytes.NewReader(payload), os.Stdin)
+	return stdin, hookexec.ArmAnswerWatchdog(hookexec.Options{
+		Connector:         connectorName,
+		Event:             event,
+		FailMode:          failMode,
+		HookSurface:       strings.TrimSpace(surface),
+		ManagedEnterprise: managed,
+		SecureClient:      managed && secureClientHost(),
+		StartedAt:         startedAt,
+		Exit:              exit,
+	}, payload)
+}
+
+// endHookBeforeRun ends a hook call that needs no answer (a retired launcher,
+// a hook another surface runs): it exits 0 unless the answer watchdog
+// already answered.
+func endHookBeforeRun(watchdog *hookexec.AnswerWatchdog) {
+	if watchdog != nil {
+		hookProcessExit(watchdog.Finish(0))
+	}
+}
+
+// hookInvocationStart is when this hook call began, which its time budgets
+// count from. A process the agent launched for the call (its first argument
+// is `hook`) began when the system created it: the launch and the runtime
+// resolution before Run can take seconds on a busy host (GAP-0155). Any
+// other caller (a test running the command in process) began now.
+func hookInvocationStart() time.Time {
+	if len(os.Args) > 1 && os.Args[1] == "hook" {
+		return hookexec.ProcessStartTime()
+	}
+	return time.Now()
 }
 
 // hookProcessExit ends the hook process with hookexec's connector-native

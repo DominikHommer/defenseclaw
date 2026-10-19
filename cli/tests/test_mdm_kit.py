@@ -613,6 +613,30 @@ echo extracted
     assert "FAIL mdm_staging_noexec" in result.stdout and "/var/tmp is mounted noexec" in result.stdout, result.stdout
 
 
+# GAP-0188: a --staging-dir that does not exist ended the wrapper with the
+# shell's "DC_TRUST_ACL: unbound variable" (set -u) instead of a result.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_names_a_missing_staging_folder(os_dir: str, tmp_path: Path) -> None:
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    assert '\nDC_TRUST_ACL=""\n' in text
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_trusted_path", "dc_stage_parent"))
+    missing = tmp_path / "missing-stage"
+    script = f"""
+set -eu
+DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"} DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_STAGING_DIR='{missing}'
+DC_TRUST_ACL=""
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+{functions}
+dc_stage_parent
+echo staged
+"""
+    result = subprocess.run(["sh", "-c", script], env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert f"FAIL mdm_staging_untrusted: the staging folder {missing} does not exist" in result.stdout, result.stdout
+    assert "unbound" not in result.stderr, result.stderr
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize("failure", ["disk_full", "downgrade", "busy", "empty_busy", "empty_free", "late_busy"])
 def test_macos_wrapper_names_why_the_package_step_failed(failure: str, tmp_path: Path) -> None:
