@@ -813,8 +813,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// incomplete or was rejected as malformed. Such evidence never
 			// proves a write ordinary, so a gateway that cannot resolve the
 			// operand itself fails closed, as for an absolute operand the
-			// bounded map omits.
-			return truncated && cannotResolveLocally
+			// bounded map omits. With a known cwd the shell operands are
+			// already absolute and a relative path fact adds nothing.
+			return truncated && cannotResolveLocally && !filepath.IsAbs(clientCWD)
 		}
 		target = hookpaths.OperandPath(target, clientCWD)
 		// Only the event cwd can interpret the process-dependent alias.
