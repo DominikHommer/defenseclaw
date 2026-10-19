@@ -166,6 +166,28 @@ def close_finished_stream(stream, reader, errors: list[str]) -> None:
             errors.append("custody stream close failed: " + type(error).__name__)
 
 
+def valid_boundary_diagnostic(value: object) -> bool:
+    """Accept only the fixed child's closed, path-free canonicalization report."""
+    if value == "FIXED_CANONICALIZE result=ok\n":
+        return True
+    if not isinstance(value, str):
+        return False
+    match = re.fullmatch(
+        r"FIXED_CANONICALIZE win32=5\n"
+        r"FIXED_CANON_OPEN result=ok\n"
+        r"FIXED_CANON_NORMALIZED_DOS win32=5\n"
+        r"FIXED_CANON_OPENED_DOS win32=5\n"
+        r"FIXED_CANON_NORMALIZED_NT result=ok length=([1-9][0-9]{0,4})\n"
+        r"FIXED_CANON_CLOSE result=ok\n"
+        r"FIXED_CANON_SEAL_READ result=ok match=true\n",
+        value,
+    )
+    # The Rust diagnostic uses a fixed 32,768-unit path buffer. Its success
+    # length excludes NUL and must fit that buffer. These compatibility labels
+    # never replace the child's separate environment and boundary assertions.
+    return match is not None and int(match[1]) < 32768
+
+
 def valid_observations(
     record: object, receipt: dict, mode: str = "loader-only", local_receipt_sha256: str | None = None
 ) -> bool:
@@ -298,7 +320,7 @@ def valid_observations(
         else (
             [
                 ("argv", "Exited(0)", "FIXED_ARGV_PASS\n"),
-                ("boundary", "Exited(0)", "FIXED_BOUNDARIES_PASS\n"),
+                ("boundary", "Exited(0)", "FIXED_NATIVE_ENV_BINDING_PASS\nFIXED_BOUNDARIES_PASS\n"),
                 ("exit23", "Exited(23)", "FIXED_EXIT23_STARTED\n"),
                 ("timeout", "TimedOut", "FIXED_TIMEOUT_STARTED\n"),
             ]
@@ -310,12 +332,17 @@ def valid_observations(
         if len(lines) != len(expected_cases) + 1 or not all(isinstance(line, dict) for line in lines):
             return False
         for observation, (case, outcome, marker) in zip(lines[:-1], expected_cases, strict=True):
+            diagnostic = ""
+            if boundary and case == "boundary":
+                diagnostic = observation.get("stderr")
+                if not valid_boundary_diagnostic(diagnostic):
+                    return False
             if observation.get("direct_handle_signaled") is not True or observation != {
                 "case": case,
                 "outcome": outcome,
                 "direct_handle_signaled": True,
                 "stdout": marker,
-                "stderr": "",
+                "stderr": diagnostic,
             }:
                 return False
     final = lines[-1]
@@ -326,6 +353,7 @@ def valid_observations(
         and final.get("backend") == ("uncontained_fixed_create_control" if control else "native_windows_psec_only")
         and final.get("production_qualification") is False
         and final.get("loader_only_diagnostic") is (mode == "loader-only")
+        and (not boundary or final.get("psec_attribute_attached") is True)
         and (
             not claude
             or (

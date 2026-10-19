@@ -28,6 +28,9 @@ type Image struct {
 	mu     sync.Mutex
 	file   *os.File
 	digest string
+	// A Windows owned copy also retains its image view and held-root cleanup.
+	// Linux images keep the existing file-only lifetime.
+	cleanup func() error
 }
 
 func (i *Image) Close() error {
@@ -36,6 +39,16 @@ func (i *Image) Close() error {
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if i.cleanup != nil {
+		// Close admission before potentially retryable native cleanup. A
+		// cleanup-only image never regains execution or duplication authority.
+		i.file, i.digest = nil, ""
+		err := i.cleanup()
+		if err == nil {
+			i.cleanup = nil
+		}
+		return err
+	}
 	if i.file == nil {
 		return nil
 	}

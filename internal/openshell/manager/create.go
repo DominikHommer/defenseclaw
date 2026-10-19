@@ -95,11 +95,10 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err != nil {
 		return nil, err
 	}
-	// This manager owns the current OpenShell execution route. Reject a native
-	// selection before listeners, project reads, bindings, credentials or a
-	// gateway lookup; config enablement alone is never adapter qualification.
-	if selected != sandboxruntime.OpenShell {
-		return nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "AXIS sandbox execution is not available: its native launch contract is still being qualified")
+	// Native execution uses the same reservation and lifecycle owner. Its nil
+	// or unqualified dependency refuses before listeners, paths or credentials.
+	if selected == sandboxruntime.Axis {
+		return m.createNative(ctx, req)
 	}
 	if !cfg.SandboxRuntimeEnabled(string(selected)) {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)
@@ -1141,6 +1140,12 @@ func (m *Manager) principal(bindingID, sandboxID, name string, d *egress.Decider
 // reserve claims name for a create.
 // reserve claims name for a create of project in the given workdir mode.
 func (m *Manager) reserve(name, project, mode string) (*box, error) {
+	return m.reserveExecution(name, project, mode, nil)
+}
+
+// reserveExecution publishes the provider owner with the name atomically. A
+// concurrent reader/reconciler must never mistake a new native box for OpenShell.
+func (m *Manager) reserveExecution(name, project, mode string, native *nativeSession) (*box, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if old, ok := m.boxes[name]; ok {
@@ -1150,7 +1155,7 @@ func (m *Manager) reserve(name, project, mode string) (*box, error) {
 		}
 		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "a sandbox named %s already exists", name)
 	}
-	b := &box{rec: record{Name: name, Project: project, WorkdirMode: mode}, creating: true, seenChunks: map[string]struct{}{}}
+	b := &box{rec: record{Name: name, Project: project, WorkdirMode: mode}, native: native, creating: true, seenChunks: map[string]struct{}{}}
 	m.boxes[name] = b
 	return b, nil
 }

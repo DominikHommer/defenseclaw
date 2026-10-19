@@ -1121,3 +1121,58 @@ native OS profile is opened, no existing host ACL is changed, and no runtime
 fallback is enabled. One added synthetic filesystem gate raises the boundary
 inventory to thirty-five. A reviewed new build and one native attempt are still
 required. Case14 and Case15 failures are preserved; no retry used their images.
+
+
+## Case16 native boundary canaries pass; saved parser contract corrected
+
+The fixture-correction build
+[39191897344](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39191897344)
+at `b95bf7274311ea7760244f70d9ee5176aeb8ad86` passed all thirty-five exact
+selected tests, including the new exclusive/private/pinned directory-tree
+filesystem regression. Independent inert reviews verified thirty ZIP members,
+twenty-six manifest hashes, eighteen Git sources, sixteen reconstructed SDK
+fingerprints, unchanged locks and three x64 console images. Artifact
+`12160164619` is 1,417,752 bytes, with ZIP SHA-256
+`a07e06a3365f6011eb352c168a44362411aa2ea7882c4140d4c3aed77388bb22`
+and provenance SHA-256
+`67ad20b09337e2bae0e5ea5a602774873d6fa32064f1f3cc403777143fb9b5ef`.
+
+ROOT executed Case16 once after source, artifact and fixed-recipe review.
+The native supervisor and owned Go custody exited zero. Literal argv passed;
+the boundary child emitted both `FIXED_NATIVE_ENV_BINDING_PASS` and
+`FIXED_BOUNDARIES_PASS` and exited zero. The fixed exit23 and timeout cases
+reported `Exited(23)` and `TimedOut`, and every retained direct handle was
+signaled. The final supervisor record reported all ten expected checks,
+native PSEC attachment and owned fixture removal. The outer Job was assigned
+before resume and observed empty with zero active processes. No fixture was
+retained; there was no outer deadline, output overflow, reader or custody
+error. Elapsed time was 8.754 seconds outside / 8.4591805 seconds in the probe.
+
+The unchanged original outer receipt nevertheless has `passed=false`: its
+exact-output parser expected only the old boundary stdout marker and empty
+child stderr. The already reviewed child also emits the native-environment
+marker and closed canonicalization diagnostic. Original receipt SHA-256 is
+`e66cb9720b44206e1c2d61a729eb499b2ac78afc90ce4b90068452c08f8400d2`.
+A separate data-only evaluation of that same saved receipt passed the corrected
+exact fixed-canary contract and refused five negative mutations, without
+altering the original receipt or running any native program again. Assessment
+SHA-256 is
+`10e4e7f51ea99a2dd141d1b04cdd7cdb600cd34e66e69aa39a61cfffbb3cecbd`;
+its corrected parser SHA-256 is
+`f7037d174c28b132b5dedb561c0ea7ff60a3340f5967924485639702cf9a466d`.
+
+The fixed canonicalization diagnostic observed Win32 access denial (5) for
+canonicalization and both DOS final-path query spellings; its directory open,
+NT final-path query, handle close and read of the public seal succeeded. No
+returned path was logged by that diagnostic. This records compatibility facts
+and does not make those path strings authority or resolve general CLI path
+compatibility. No image, filesystem/network policy, private environment
+expectation, native profile rule, UI restriction or SDK fallback was relaxed
+by the parser correction.
+
+This passes the recorded fixed native-environment, filesystem/loopback,
+exit/timeout and owned cleanup canaries on this host. Earlier failed cases and
+the separate successful Claude `--version` smoke remain preserved. It does not
+qualify a Windows native peer/bridge, interactive terminal, full Claude session,
+credentials, model, broker, hook or customer-provider runtime. No additional
+native execution is authorized by this result record.

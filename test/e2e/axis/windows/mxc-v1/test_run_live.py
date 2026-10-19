@@ -121,13 +121,15 @@ class BoundaryObservationTests(ObservationTests):
             {"case": case, "outcome": outcome, "direct_handle_signaled": True, "stdout": marker, "stderr": ""}
             for case, outcome, marker in [
                 ("argv", "Exited(0)", "FIXED_ARGV_PASS\n"),
-                ("boundary", "Exited(0)", "FIXED_BOUNDARIES_PASS\n"),
+                ("boundary", "Exited(0)", "FIXED_NATIVE_ENV_BINDING_PASS\nFIXED_BOUNDARIES_PASS\n"),
                 ("exit23", "Exited(23)", "FIXED_EXIT23_STARTED\n"),
                 ("timeout", "TimedOut", "FIXED_TIMEOUT_STARTED\n"),
             ]
         ]
+        cases[1]["stderr"] = "FIXED_CANONICALIZE result=ok\n"
         final = json.loads(self.record["stdout"].splitlines()[-1])
         final["loader_only_diagnostic"] = False
+        final["psec_attribute_attached"] = True
         final["checks"] = sorted(live.BOUNDARY_CHECKS)
         cases.append(final)
         self.record.update(
@@ -139,6 +141,56 @@ class BoundaryObservationTests(ObservationTests):
 
     def test_boundary_transcript_cannot_certify_loader_mode(self) -> None:
         self.assertFalse(live.valid_observations(self.record, self.receipt, "loader-only"))
+
+    def test_native_binding_and_attached_psec_are_required(self) -> None:
+        cases = [json.loads(line) for line in self.record["stdout"].splitlines()]
+        cases[1]["stdout"] = "FIXED_BOUNDARIES_PASS\n"
+        self.assertFalse(self.validate({**self.record, "stdout": "\n".join(json.dumps(case) for case in cases)}))
+        for value in (None, False, 1, "true"):
+            with self.subTest(value=value):
+                cases = [json.loads(line) for line in self.record["stdout"].splitlines()]
+                cases[-1]["psec_attribute_attached"] = value
+                self.assertFalse(
+                    self.validate({**self.record, "stdout": "\n".join(json.dumps(case) for case in cases)})
+                )
+
+    def test_closed_path_free_canonicalization_diagnostic(self) -> None:
+        template = (
+            "FIXED_CANONICALIZE win32=5\n"
+            "FIXED_CANON_OPEN result=ok\n"
+            "FIXED_CANON_NORMALIZED_DOS win32=5\n"
+            "FIXED_CANON_OPENED_DOS win32=5\n"
+            "FIXED_CANON_NORMALIZED_NT result=ok length={length}\n"
+            "FIXED_CANON_CLOSE result=ok\n"
+            "FIXED_CANON_SEAL_READ result=ok match=true\n"
+        )
+        for length in (1, 189, 32767):
+            with self.subTest(length=length):
+                cases = [json.loads(line) for line in self.record["stdout"].splitlines()]
+                cases[1]["stderr"] = template.format(length=length)
+                self.assertTrue(self.validate({**self.record, "stdout": "\n".join(json.dumps(case) for case in cases)}))
+        diagnostic = template.format(length=189)
+        invalid = [
+            "",
+            None,
+            True,
+            diagnostic + "unexpected\n",
+            diagnostic.replace("match=true", "match=false"),
+            diagnostic.replace("win32=5", "win32=2", 1),
+            diagnostic.replace("FIXED_CANON_CLOSE result=ok\n", ""),
+            diagnostic.replace("length=189", "path=fixed-public-path"),
+            *[template.format(length=value) for value in (0, -1, "+1", "01", 32768, 4294967295, "1\x00")],
+        ]
+        for value in invalid:
+            with self.subTest(value=value):
+                cases = [json.loads(line) for line in self.record["stdout"].splitlines()]
+                cases[1]["stderr"] = value
+                self.assertFalse(
+                    self.validate({**self.record, "stdout": "\n".join(json.dumps(case) for case in cases)})
+                )
+        cases = [json.loads(line) for line in self.record["stdout"].splitlines()]
+        cases[0]["stderr"] = diagnostic
+        self.assertFalse(self.validate({**self.record, "stdout": "\n".join(json.dumps(case) for case in cases)}))
 
     def test_every_fixed_payload_marker_and_typed_timeout_is_required(self) -> None:
         for index in range(4):

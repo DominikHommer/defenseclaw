@@ -792,7 +792,7 @@ func (m *Manager) scheduleForeignStop(name, bindingID string) {
 		defer m.tamperStops.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
 		defer cancel()
-		b, unlock, err := m.lockBox(name)
+		b, unlock, err := m.lockOwnedBox(name)
 		if err != nil {
 			m.logf("foreign rules: stop %s: %v", name, err)
 			return

@@ -519,6 +519,9 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	if err != nil {
 		return apiError(err)
 	}
+	if err := requireOpenShellOperation(sb, "connect"); err != nil {
+		return err
+	}
 	spec, err := ResolveHarness(sb.Harness)
 	if err != nil {
 		return err
@@ -687,6 +690,9 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
+	if err := requireOpenShellOperation(sb, "exec"); err != nil {
+		return err
+	}
 	if sb.Phase != "ready" {
 		return fmt.Errorf("%s is %s; start it with `%s start %s`", sb.Name, sb.Phase, CommandName, sb.Name)
 	}
@@ -795,8 +801,11 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
+	if err := requireLifecycleRuntime(sb, "stop"); err != nil {
+		return err
+	}
 	var copyAt *workspace.CopyStatus
-	if sb.Phase == "ready" {
+	if isOpenShellSandbox(sb) && sb.Phase == "ready" {
 		if gateway, err := a.gatewayName(ctx); err == nil {
 			cli := a.cli(gateway)
 			ok, idle, err := a.beforeStop(ctx, cli, sb, o.Yes)
@@ -1006,6 +1015,9 @@ func (a *App) Start(ctx context.Context, name string, o StartOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
+	if err := requireOpenShellOperation(sb, "start"); err != nil {
+		return err
+	}
 	if sb.Phase == "ready" {
 		a.ok(sb.Name + " is already running → attach with `" + CommandName + " connect " + sb.Name + "`")
 		return nil
@@ -1038,12 +1050,22 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 	var errs []error
 	for _, name := range o.Names {
 		question := "Delete sandbox " + name + " (its providers, credentials and, unless --keep-snapshot, its undo point)?"
+		native := false
+		knownLegacy := false
 		if sb, err := api.Get(ctx, name); err == nil {
+			if err := requireLifecycleRuntime(sb, "delete"); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", name, err))
+				continue
+			}
+			native = !isOpenShellSandbox(sb)
+			knownLegacy = !native
 			if sb.WorkdirMode == config.OpenShellWorkdirCopy {
 				// A copy has no undo point: the folder was never mounted.
 				question = "Delete sandbox " + name + " (its providers and credentials)?"
 			}
-			if lost := a.unhandedWork(ctx, sb); lost != "" {
+			if native {
+				question = "Delete sandbox " + name + " and discard its private workspace?"
+			} else if lost := a.unhandedWork(ctx, sb); lost != "" {
 				question = "Sandbox " + name + " " + lost + ". Delete it and discard that work?"
 				if o.Yes {
 					a.warn("sandbox " + name + " " + lost + "; deleting it discards that work (--yes)")
@@ -1052,7 +1074,11 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 				a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
 			}
 		}
-		if n := a.attachedSessions(name); n > 0 {
+		n := 0
+		if knownLegacy {
+			n = a.attachedSessions(name)
+		}
+		if n > 0 {
 			// Its sessions in other terminals end with it (GAP-0285).
 			what := attachedText(name, n) + "; deleting it ends " + them(n)
 			question = what + ". " + question
@@ -1073,7 +1099,9 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 			continue
 		}
 		a.ok("deleted " + res.Name)
-		a.forgetCLIState(name)
+		if knownLegacy {
+			a.forgetCLIState(name)
+		}
 		for _, w := range res.Warnings {
 			a.warn(w)
 		}
@@ -1087,7 +1115,7 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 // at; a stopped one is judged by its last pull, and by what its copy held
 // as it stopped.
 func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
-	if sb == nil || sb.WorkdirMode != config.OpenShellWorkdirCopy {
+	if sb == nil || !isOpenShellSandbox(sb) || sb.WorkdirMode != config.OpenShellWorkdirCopy {
 		return ""
 	}
 	var ex workspace.Execer
@@ -1161,6 +1189,9 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 	sb, err := api.Get(ctx, o.Name)
 	if err != nil {
 		return apiError(err)
+	}
+	if err := requireOpenShellOperation(sb, "logs"); err != nil {
+		return err
 	}
 	lines := o.Lines
 	if lines <= 0 {

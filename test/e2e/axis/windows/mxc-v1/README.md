@@ -137,9 +137,11 @@ customer provider remain unqualified. See the exact build and result pins in
 ## Current native environment binding
 
 The `standalone_std_boundary_native_identity_environment` variant follows the
-separately recorded Case07 lexical observations. Its later native attempts
-refused the environment binding before the boundary assertions; the successful
-Claude version smoke does not resolve that separate gate. It changes no
+separately recorded Case07 lexical observations. Earlier native attempts
+refused before the boundary assertions and remain recorded. Case16 later passed
+the native environment and fixed boundary canaries after the private fixture
+setup correction; its saved-output parser correction is recorded below. The
+separate Claude result remains a version smoke only. This variant changes no
 filesystem grant, network/UI restriction, SDK fallback,
 host ACL, profile registration or production provider. Existing argv, exit23,
 timeout and loader payload behavior remains unchanged.
@@ -206,6 +208,22 @@ required before it is qualified. The new synthetic filesystem test covers
 exclusive creation, private DACLs, rename custody/release, collisions, links and
 rejection of a forged branch before creation. See
 [Case15 evidence](manual-results.md#case15-identifies-missing-private-packages-fixture-directory).
+
+The reviewed b95 build passed all thirty-five selected gates. ROOT then ran
+Case16 once: native environment binding, filesystem and loopback canaries,
+exit23, timeout, retained handle waits and owned fixture removal all passed;
+the outer Job was empty. The original outer result remained false because its
+parser still expected only the former boundary stdout marker and no child
+stderr. The fixed child also emitted its native-environment marker and existing
+closed canonicalization diagnostic. A separately reviewed data-only assessment
+of that unchanged saved receipt accepted the corrected exact contract and
+refused five negative mutations, adding zero native executions. The diagnostic
+still observed DOS canonicalization access denial while NT final-path and seal
+reads succeeded; this is a compatibility observation, not authorization. See
+[Case16 evidence](manual-results.md#case16-native-boundary-canaries-pass-saved-parser-contract-corrected).
+This qualifies these fixed synthetic checks on the recorded host and policy;
+it supplies no Windows peer/bridge activation, terminal, broker, agent hook,
+authentication/model session, general resource limit or customer qualification.
 
 The resulting private expectation must match the fresh fixture's exact
 `home\AppData\Local\Packages\<one bounded native-profile component>\AC`

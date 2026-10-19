@@ -265,8 +265,11 @@ type CredentialGrant struct {
 // Sandbox is one DefenseClaw sandbox as the daemon sees it.
 type Sandbox struct {
 	Name string `json:"name"`
-	// ID is the OpenShell sandbox id.
-	ID      string `json:"id,omitempty"`
+	// ID is the OpenShell sandbox ID or the immutable host-owned native session
+	// ID. Runtime identifies its owner; a display name never selects a provider.
+	ID string `json:"id,omitempty"`
+	// Runtime is the owning execution runtime. Empty on older OpenShell daemons.
+	Runtime string `json:"runtime,omitempty"`
 	Harness string `json:"harness"`
 	// HarnessName is the display name (Claude Code).
 	HarnessName string `json:"harness_name,omitempty"`

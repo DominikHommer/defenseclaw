@@ -220,6 +220,9 @@ func managedGatewaySandboxNote(cfg *config.Config) string {
 // the per-user gateway (newSandboxRuntime) or a managed host's per-user
 // sandbox daemon (newSandboxDaemonRuntime).
 type sandboxRuntimeDeps struct {
+	// native is installed only by this host's qualified factory/publication
+	// owner. Nil is the default; configuration or API values never populate it.
+	native *manager.NativeExecution
 	// config is the configuration the manager reads: config.yaml for the
 	// per-user gateway, the managed gateway's settings for the daemon.
 	config func() *config.Config
@@ -287,6 +290,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 			openshell.ClientOptions{Workspace: cfg.OpenShell.Gateway.Workspace})
 	}
 	mgr, err := manager.New(manager.Options{
+		Native:  deps.native,
 		DataDir: dataDir,
 		Owner:   owner,
 		Config:  deps.config,

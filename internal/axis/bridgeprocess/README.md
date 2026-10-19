@@ -6,7 +6,28 @@
 This disconnected Linux x86_64 source creates the trusted private Rust peer,
 not a customer sandbox. No production caller, artifact registry, broker,
 provider capability claim or configuration activation is supplied here.
-Other hosts refuse before opening an image or starting a process.
+Ordinary `SealImage` and process `Start` refuse on other hosts. Windows has the
+separate held-root image constructor below; it supplies no process transport.
+
+Windows-only `SealImageIn` copies an already-open admitted artifact into one
+fresh protected directory beneath an explicit held private NTFS root. It retains
+a read-only `SEC_IMAGE_NO_EXECUTE` view before closing its sole writer, then
+acquires a strict read/execute pin without write/delete sharing and rechecks
+full file identity and digest. It never executes or loads the image. The source
+and root remain caller-owned; no ambient TEMP, path discovery or wire credential
+selects them. This constructor is private source, with no production caller.
+
+The owned Windows copy has independent cleanup through the same Image.Close.
+A consumer duplicate can postpone deletion; retain the Image and retry Close
+after that duplicate releases. A partial constructor can likewise return a
+nonnull cleanup-only Image with an error; its missing file/digest refuse
+launch or duplication. Uncertain native close/unmap errors remain sticky and
+are not blindly retried. Cleanup checks the full file ID, disposes only the
+fixed owned leaf and its empty held directory, and never recursively traverses
+unexpected children. A context bounds copy iterations, not synchronous
+filesystem calls; a separately bounded owner must supply a total deadline.
+The native image/view tests use copies as inert data and never execute a PE,
+create a child, or qualify Windows peer/PSEC transport or a customer runtime.
 
 The host must independently admit runtime and harness artifacts and obtain
 their digests from its trusted registry. `SealImage` copies an already-open
