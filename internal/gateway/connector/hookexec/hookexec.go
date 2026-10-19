@@ -1626,7 +1626,7 @@ func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
 			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
 		} else {
 			basis := "fail mode closed"
-			if opts.StrictAvailability && failMode != "closed" {
+			if opts.StrictAvailability {
 				basis = "strict availability"
 			}
 			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (%s)\n", reason, sp.subject, basis)

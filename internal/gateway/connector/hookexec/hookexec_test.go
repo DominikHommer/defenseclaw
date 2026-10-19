@@ -1454,7 +1454,7 @@ func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
 // Per-user Copilot hooks fail open on every DefenseClaw-side failure;
 // administrator-managed (standalone enterprise) Copilot hooks deny the tool
 // call with Copilot's native structured decision instead.
-func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
+func TestCopilotFailureContract(t *testing.T) {
 	type failureCase struct {
 		name   string
 		rt     *stubRT
@@ -1493,6 +1493,8 @@ func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
 				want := ""
 				if managedHook {
 					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw policy service is unavailable."}` + "\n"
+				} else if tc.name == "unavailable-home" {
+					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}` + "\n"
 				}
 				if result.code != 0 || result.stdout != want {
 					t.Fatalf(
@@ -1884,7 +1886,7 @@ func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
 			var out, errb bytes.Buffer
 			home := tc.home(t)
 			code := Run(context.Background(), Options{
-				Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home,
+				Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home, FailMode: "open",
 				HookDir: filepath.Join(home, "hooks"), Token: "t",
 				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
 				HTTPClient: &http.Client{Transport: rt},
@@ -2168,7 +2170,7 @@ func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
 			var out, errb bytes.Buffer
 			home := tc.home(t)
 			code := Run(context.Background(), Options{
-				Connector: "cursor", Home: home, HookDir: filepath.Join(home, "hooks"),
+				Connector: "cursor", Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "open",
 				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
 			})
 			if code != 0 {
