@@ -92,6 +92,10 @@ type Sidecar struct {
 	// installWatcher is the running install watcher, nil while none runs;
 	// a reload that changes a denied list asks it to rescan (GAP-0627).
 	installWatcher atomic.Pointer[watcher.InstallWatcher]
+	// enrolledMCPRefresh brings the running watcher's list of the enrolled
+	// users' MCP servers up to date before an MCP tool call is decided
+	// (managed Windows only, GAP-0216); nil while no such watcher runs.
+	enrolledMCPRefresh atomic.Pointer[enrolledMCPRefresher]
 	// projectSkills are the project skill folders the hooks report, which
 	// the install watcher watches next to the connectors' (GAP-1063).
 	projectSkills projectSkillRoots
@@ -3947,7 +3951,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	watcherDetail := ""
 	if skippedProfileRoots {
 		watcherState = StateDegraded
-		watcherDetail = "user-profile watch roots were skipped by the LocalSystem gateway"
+		watcherDetail = "skill and plugin folders inside user profiles are not watched by the LocalSystem gateway"
 	}
 	watcherDetails := func(details map[string]interface{}) map[string]interface{} {
 		if skippedProfileRoots {
@@ -4067,6 +4071,14 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		w.SetRootConnectors(enrolled.roots)
 		w.SetAssetOwners(enrolled.owners)
 		w.SetMCPServerSource(enrolled.live.list)
+		// Each account's MCP verdict is journaled under its own key; rows
+		// earlier versions kept under the bare name move to their account
+		// before the watcher runs (GAP-0216).
+		if moved, kept, err := watcher.MigrateAccountMCPJournal(s.store); err != nil {
+			fmt.Fprintf(os.Stderr, "[watcher] move MCP journal rows to their accounts: %v (bare rows stay and keep refusing by name)\n", err)
+		} else if moved > 0 || kept > 0 {
+			fmt.Fprintf(os.Stderr, "[watcher] moved %d MCP journal rows to their accounts; %d blocking rows stay by name\n", moved, kept)
+		}
 		// Retries a server whose admission could not run at the poll.
 		w.SetMCPDiscoveryPoll(true)
 	} else {
@@ -4130,7 +4142,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 
 	if skippedProfileRoots {
 		watcherState = StateDegraded
-		watcherDetail = "user-profile watch roots were skipped by the LocalSystem gateway"
+		watcherDetail = "skill and plugin folders inside user profiles are not watched by the LocalSystem gateway"
 	}
 	s.health.SetWatcher(watcherState, watcherDetail, watcherDetails(map[string]interface{}{
 		"skill_dirs":         len(skillDirs),
@@ -4142,6 +4154,9 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 
 	if enrolled != nil {
 		go s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, enrolledProjectRoots, w, changed)
+		refresher := s.newEnrolledMCPRefresher(reg, wcfg, enrolled.live)
+		s.enrolledMCPRefresh.Store(refresher)
+		defer s.enrolledMCPRefresh.CompareAndSwap(refresher, nil)
 	}
 	s.installWatcher.Store(w)
 	runErr := w.Run(watchCtx)
@@ -7872,6 +7887,12 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := apiListenAddr(s.currentConfig())
 	api := newAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
 	api.SetShutdownRequester(s.requestProcessShutdown)
+	api.SetMCPAdmissionPending(func(connector, server, home, cwd string) (string, bool) {
+		return s.installWatcher.Load().MCPAdmissionPending(watcher.MCPAdmissionQuery{
+			Connector: connector, Server: server, Home: home, CWD: cwd,
+		})
+	})
+	api.SetMCPRefreshBeforeCall(s.refreshEnrolledMCPBeforeCall)
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)
 		api.SetGenerationSource(s.Generation)

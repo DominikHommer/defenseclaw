@@ -84,15 +84,13 @@ type MCPServerEntry struct {
 	// Project is the project folder whose local or .mcp.json scope lists
 	// the server (never serialized); empty for a user-scope server.
 	Project string `json:"-"`
-	// WorkDir is the folder the server starts in, as the managed Windows
-	// enumerator checked it where the user profile is readable (GAP-1317):
-	// absolute, inside Project or the user home, no link or reparse point
-	// on the way, re-resolved after the check. WorkDirRefused is the folder
-	// it did not accept and why ("<folder>: <reason>"). Only the
-	// enumerator spool record sets them (never serialized), so no
-	// configuration file a user writes can name a vetted folder.
-	WorkDir        string `json:"-"`
-	WorkDirRefused string `json:"-"`
+	// RunAsSID is the Windows account whose own token starts the server for
+	// an admission scan on a managed Windows gateway: the hook enumerator
+	// published the server for that enrolled user, and starts it as the user
+	// (#1164). Only the gateway sets it, for servers it read from the
+	// enumerator record (never serialized), so no configuration file a user
+	// writes can name an account.
+	RunAsSID string `json:"-"`
 
 	// codexBuiltinShape records an exact parser-level match before the caller
 	// proves that the table came from a user-scope Codex config. It is never
@@ -493,10 +491,26 @@ func claudeCodeProjectMCPServers() []MCPServerEntry {
 	if json.Unmarshal(data, &state) != nil {
 		return nil
 	}
-	return claudeStateProjectServers(state, func(project string) ([]byte, error) {
+	servers, _ := claudeStateProjectServers(state, func(project string) ([]byte, error) {
 		return readGatewayMCPFile(filepath.Join(project, ".mcp.json"))
-	})
+	}, false)
+	return servers
 }
+
+// MCPFileParseError is an MCP server file that the managed Windows
+// enumerator found but could not parse: the servers it lists are unknown,
+// so none of the user's servers may be taken as the complete list.
+type MCPFileParseError struct {
+	Path string
+	Err  error
+}
+
+func (e *MCPFileParseError) Error() string { return fmt.Sprintf("parse %s: %v", e.Path, e.Err) }
+
+func (e *MCPFileParseError) Unwrap() error { return e.Err }
+
+// utf8BOM leads a file some Windows editors save; JSON has none.
+var utf8BOM = []byte("\xef\xbb\xbf")
 
 // ClaudeStateMCPServers lists the MCP servers a Claude Code state file
 // (~/.claude.json) names: the user scope, the local scope of each project,
@@ -504,23 +518,84 @@ func claudeCodeProjectMCPServers() []MCPServerEntry {
 // them). Entries are tagged claudecode; project servers carry their project.
 // The managed Windows enumerator, which runs as LocalSystem, reads the state
 // file for the gateway service, whose account cannot read it (GAP-0424).
+//
+// It is strict: a server list that does not parse (a .mcp.json that is not
+// JSON, a server whose fields have the wrong type) is an error, never an
+// empty list, so the enumerator records the user's state as unreadable and
+// the gateway refuses that user's servers instead of leaving one out of
+// admission (GAP-0219). A .mcp.json error is an *MCPFileParseError naming
+// the file. A UTF-8 byte order mark is ignored.
 func ClaudeStateMCPServers(data []byte, readProjectMCP func(project string) ([]byte, error)) ([]MCPServerEntry, error) {
 	var state map[string]any
-	if err := json.Unmarshal(data, &state); err != nil {
+	if err := json.Unmarshal(bytes.TrimPrefix(data, utf8BOM), &state); err != nil {
 		return nil, err
 	}
-	user, _ := readMCPFromAnyPaths(state, []string{"mcpServers"})
+	user, err := strictMCPServersAt(state, "mcpServers")
+	if err != nil {
+		return nil, fmt.Errorf("parse the user-scope mcpServers: %w", err)
+	}
 	out := make([]MCPServerEntry, 0, len(user))
-	for _, entry := range dedupMCPEntries(user) {
+	for _, entry := range user {
 		entry.Connector = "claudecode"
 		out = append(out, entry)
 	}
-	return append(out, claudeStateProjectServers(state, readProjectMCP)...), nil
+	projects, err := claudeStateProjectServers(state, readProjectMCP, true)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, projects...), nil
+}
+
+// strictMCPServersAt parses the server map (or array) at doc[key]; a
+// missing key is no servers, anything that does not parse is an error.
+func strictMCPServersAt(doc map[string]any, key string) ([]MCPServerEntry, error) {
+	value, ok := doc[key]
+	if !ok || value == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var parsed []MCPServerEntry
+	switch trimmed := bytes.TrimSpace(data); {
+	case len(trimmed) == 0:
+		return nil, nil
+	case trimmed[0] == '{':
+		parsed, err = parseMCPServersJSON(trimmed)
+	case trimmed[0] == '[':
+		parsed, err = parseMCPServersJSONArray(trimmed)
+	default:
+		return nil, fmt.Errorf("%s is not a list of servers", key)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return dedupMCPEntries(parsed), nil
+}
+
+// strictDotMCPServers parses an .mcp.json document strictly. A file of
+// whitespace only lists no servers.
+func strictDotMCPServers(data []byte) ([]MCPServerEntry, error) {
+	data = bytes.TrimSpace(bytes.TrimPrefix(data, utf8BOM))
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	if _, ok := raw["mcpServers"]; ok {
+		return strictMCPServersAt(raw, "mcpServers")
+	}
+	return strictMCPServersAt(map[string]any{"mcpServers": raw}, "mcpServers")
 }
 
 // claudeStateProjectServers lists the local-scope and .mcp.json servers of
-// every project in a decoded Claude Code state file.
-func claudeStateProjectServers(state map[string]any, readProjectMCP func(project string) ([]byte, error)) []MCPServerEntry {
+// every project in a decoded Claude Code state file. strict makes a server
+// list that does not parse an error (ClaudeStateMCPServers); otherwise it
+// is skipped, as the per-user reader always did.
+func claudeStateProjectServers(state map[string]any, readProjectMCP func(project string) ([]byte, error), strict bool) ([]MCPServerEntry, error) {
 	projectStates, _ := state["projects"].(map[string]any)
 	projects := make([]string, 0, len(projectStates))
 	for project := range projectStates {
@@ -532,7 +607,15 @@ func claudeStateProjectServers(state map[string]any, readProjectMCP func(project
 	var out []MCPServerEntry
 	for _, project := range projects {
 		if raw, ok := projectStates[project].(map[string]any); ok {
-			local, _ := readMCPFromAnyPaths(raw, []string{"mcpServers"})
+			var local []MCPServerEntry
+			if strict {
+				var err error
+				if local, err = strictMCPServersAt(raw, "mcpServers"); err != nil {
+					return nil, fmt.Errorf("parse the local-scope mcpServers of project %s: %w", project, err)
+				}
+			} else {
+				local, _ = readMCPFromAnyPaths(raw, []string{"mcpServers"})
+			}
 			for _, entry := range local {
 				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "local"
 				out = append(out, entry)
@@ -545,14 +628,20 @@ func claudeStateProjectServers(state map[string]any, readProjectMCP func(project
 		if err != nil {
 			continue
 		}
-		if shared, err := parseDotMCPJSON(data); err == nil {
-			for _, entry := range shared {
-				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "project"
-				out = append(out, entry)
+		var shared []MCPServerEntry
+		if strict {
+			if shared, err = strictDotMCPServers(data); err != nil {
+				return nil, &MCPFileParseError{Path: filepath.Join(filepath.Clean(project), ".mcp.json"), Err: err}
 			}
+		} else if shared, err = parseDotMCPJSON(bytes.TrimPrefix(data, utf8BOM)); err != nil {
+			continue
+		}
+		for _, entry := range shared {
+			entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "project"
+			out = append(out, entry)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // ReadUserMCPServersForConnector returns a sandbox harness's user-scope MCP

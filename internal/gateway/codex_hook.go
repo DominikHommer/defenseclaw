@@ -282,6 +282,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Direction:     "tool_call",
 			Connector:     "codex",
 			MCPServerName: a.codexMCPServerName(ctx, req),
+			callerCWD:     req.CWD,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
 		if command == nil {
