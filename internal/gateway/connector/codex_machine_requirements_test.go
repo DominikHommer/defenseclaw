@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -452,6 +453,74 @@ func TestWindowsCodexAdoptRequirementsKeepsIsolationControlsOnlyWithEvidence(t *
 			}
 			if keeps(adoption.preimage) {
 				t.Fatalf("isolation controls recorded as administrator settings without evidence: %s", adoption.preimage)
+			}
+		})
+	}
+}
+
+// windowsCodexAdoptThenReconcile mirrors ReconcileWindowsCodexMachineRequirements
+// with no ownership record: adopt, then reconcile the adopted base.
+func windowsCodexAdoptThenReconcile(t *testing.T, current []byte, opts WindowsCodexMachineRequirementsOptions) (windowsCodexAdoption, []byte, error) {
+	t.Helper()
+	adoption, err := windowsCodexAdoptRequirements(current, true, nil, opts)
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	rendered, _, err := reconcileWindowsCodexRequirements(adoption.base, opts)
+	return adoption, rendered, err
+}
+
+// GAP-0015: with no ownership record, an administrator's own
+// hooks.windows_managed_dir is refused, in strict and default trust modes,
+// never overwritten. Only a directory the file itself proves DefenseClaw's
+// (groups that run that directory's DefenseClaw hook launcher, left by a
+// prior install whose record is gone) is reclaimed, and strict mode refuses
+// even that.
+func TestWindowsCodexReconcileForeignManagedDirNeedsDefenseClawEvidence(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	opts.HookContractID = KnownHookContracts("codex")[0].ContractID
+	administrator := []byte("[hooks]\nwindows_managed_dir = 'C:\\CorpHooks'\n\n[[hooks.PreToolUse]]\nmatcher = \"corp\"\n\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = 'C:\\CorpHooks\\audit.exe'\ntimeout = 5\n")
+	scoped := testWindowsCodexScopedLayout()
+	scoped.HookContractID = opts.HookContractID
+	staleDefenseClaw, _, err := reconcileWindowsCodexRequirements([]byte("administrator_key = \"preserve\"\n"), scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		current   []byte
+		strict    string
+		reclaimed bool
+	}{
+		{name: "administrator dir", current: administrator},
+		{name: "administrator dir strict", current: administrator, strict: "1"},
+		{name: "stale DefenseClaw dir", current: staleDefenseClaw, reclaimed: true},
+		{name: "stale DefenseClaw dir strict", current: staleDefenseClaw, strict: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(managed.TrustStrictAncestorsEnv, tc.strict)
+			adoption, rendered, err := windowsCodexAdoptThenReconcile(t, tc.current, opts)
+			if !tc.reclaimed {
+				if err == nil || !strings.Contains(err.Error(), "conflicts with protected managed directory") {
+					t.Fatalf("foreign windows_managed_dir not refused (err=%v); rendered %d bytes", err, len(rendered))
+				}
+				if !bytes.Equal(adoption.preimage, tc.current) {
+					t.Fatalf("refused adoption changed the preimage:\n%s", adoption.preimage)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("stale DefenseClaw layout not reclaimed: %v", err)
+			}
+			if err := verifyWindowsCodexRequirementsBytes(rendered, opts); err != nil {
+				t.Fatalf("reclaimed requirements do not verify: %v", err)
+			}
+			if references, err := windowsCodexOwnedPathReferenceCount(rendered, scoped); err != nil || references != 0 {
+				t.Fatalf("reclaimed requirements keep %d stale references (%v)", references, err)
+			}
+			cfg := mustParseWindowsCodexRequirements(t, adoption.preimage)
+			if !adoption.preimageExisted || cfg["administrator_key"] != "preserve" || cfg["hooks"] != nil {
+				t.Fatalf("preimage keeps DefenseClaw content or lost the administrator's: %s", adoption.preimage)
 			}
 		})
 	}
