@@ -247,6 +247,26 @@ static void make_emergency_msg(uint8_t *buf, uint32_t seq, uint32_t prev,
     }
 }
 
+/* Lockdown must not drop the records that tie an unverified speculative call
+ * to its session; otherwise a late BLOCK can no longer revoke it. */
+static void test_lockdown_keeps_speculative_slots(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    memset(s->speculative, 0, sizeof(s->speculative));
+    s->speculative[0].session_id = 77;
+    s->speculative[0].request_id = 900;
+    uint8_t cmds[2] = {0x01 /* BLOCK_ALL */, 0x04 /* ENTER_LOCKDOWN */};
+    for (int i = 0; i < 2; i++) {
+        uint32_t cur = s->emergency.last_seen_seq;
+        uint8_t msg[112];
+        make_emergency_msg(msg, cur + 1, cur, cmds[i], true);
+        assert(dclaw_apply_emergency(msg, sizeof(msg)) == 0);
+        assert(s->emergency.block_all_active);
+        assert(s->speculative[0].request_id == 900 && s->speculative[0].session_id == 77);
+    }
+    memset(s->speculative, 0, sizeof(s->speculative));
+    printf("  PASS: BLOCK_ALL and ENTER_LOCKDOWN keep speculative slots\n");
+}
+
 static void test_emergency_valid_applies(void) {
     dclaw_state_t *s = dclaw_get_state();
     s->emergency.last_seen_seq = 0;
@@ -496,6 +516,7 @@ int main(void) {
     test_emergency_predecessor_gap();
     test_emergency_gap_detection();
     test_emergency_no_gap();
+    test_lockdown_keeps_speculative_slots();
     test_emergency_storage_fault_recovers();
     test_boot_counter_durability();
     printf("  ALL PASSED (13 tests)\n");

@@ -506,7 +506,9 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
         s->emergency.last_was_lockdown = true;
-        memset(s->speculative, 0, sizeof(s->speculative));
+        /* Keep speculative slots: they link an unverified call to its
+         * session, so a late gateway BLOCK or the speculative deadline can
+         * still revoke that session after the lockdown is released. */
         s->emergency.lockdown_timestamp = hal_tick_ms();
         break;
 
@@ -531,7 +533,9 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
         s->emergency.last_was_lockdown = true;
-        memset(s->speculative, 0, sizeof(s->speculative));
+        /* Keep speculative slots: they link an unverified call to its
+         * session, so a late gateway BLOCK or the speculative deadline can
+         * still revoke that session after the lockdown is released. */
         s->emergency.lockdown_timestamp = hal_tick_ms();
         break;
 
