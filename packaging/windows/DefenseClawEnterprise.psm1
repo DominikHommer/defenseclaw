@@ -4074,6 +4074,7 @@ function Assert-DefenseClawCanonicalRawPathAcl {
     $protectedFlag = [int](
         [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
     )
+    $unprotectedDacl = $false
     if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
         if (Test-DefenseClawTrustStrictAncestors) {
             # Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1):
@@ -4129,16 +4130,18 @@ function Assert-DefenseClawCanonicalRawPathAcl {
             # leave the endpoint without the DefenseClaw gateway
             # mediating agent traffic, which is strictly worse than
             # running on a path whose DACL inherits from a parent
-            # Administrators + SYSTEM own anyway. Warn and continue
-            # (product invariant: canonical state after install, not
-            # refuse-on-drift).
+            # Administrators + SYSTEM own anyway. Warn and continue,
+            # but only past the lost flag itself: the owner, the explicit
+            # ACEs and every inherited grant are still judged below
+            # (Assert-DefenseClawUnprotectedRawDACL), so a foreign owner or
+            # an inherited write grant to a standard user stays fatal.
             Write-DefenseClawAclSelfHealAdvisory `
                 -Path $Path `
                 -Reason (
                     'DACL could not be marked protected even after ' +
                     'icacls /inheritance:r - continuing with managed state'
                 )
-            return
+            $unprotectedDacl = $true
         }
     }
     $ownerSID = if ($null -eq $Actual.Owner) {
@@ -4172,9 +4175,95 @@ function Assert-DefenseClawCanonicalRawPathAcl {
             "descriptor after ACL replacement: $Path"
         )
     }
+    if ($unprotectedDacl) {
+        Assert-DefenseClawUnprotectedRawDACL `
+            -Path $Path `
+            -Actual $Actual `
+            -Expected $expectedDescriptor
+        return
+    }
     if (-not (Test-DefenseClawExactRawDACL `
         -Actual $Actual `
         -Expected $expectedDescriptor)) {
+        throw "managed path does not have the exact canonical DACL: $Path"
+    }
+}
+
+function Assert-DefenseClawUnprotectedRawDACL {
+    <#
+        Judges a managed DACL that lost SE_DACL_PROTECTED and could not get it
+        back (Group Policy or a filesystem driver re-enabling inheritance).
+        Clearing the flag needs WRITE_DAC, which a standard user does not hold
+        on a managed path, so the lost flag alone may continue with a warning.
+        What the lost flag lets in may not: the explicit ACEs must still be
+        exactly the canonical ones, and no inherited ACE may grant write-like
+        rights to a principal the canonical DACL does not already let write.
+        An inherited %ProgramData% "Users may create files" grant therefore
+        stays fatal, while an inherited Users read grant does not.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Actual,
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Expected
+    )
+    $actualDACL = $Actual.DiscretionaryAcl
+    $expectedDACL = $Expected.DiscretionaryAcl
+    if ($null -eq $actualDACL -or $null -eq $expectedDACL) {
+        throw "managed path has an absent or null DACL: $Path"
+    }
+    # WriteData/CreateFiles, AppendData/CreateDirectories, WriteEA,
+    # DeleteChild, WriteAttributes, Delete, WRITE_DAC, WRITE_OWNER, and
+    # GENERIC_ALL/GENERIC_WRITE: the rights Test-DefenseClawWriteLikeRights
+    # treats as write-like.
+    $writeLikeMask = [int64]0x500D0156
+    $inheritedFlag = [int][Security.AccessControl.AceFlags]::Inherited
+    $inheritOnlyFlag = [int][Security.AccessControl.AceFlags]::InheritOnly
+    $allowed = [Security.AccessControl.AceQualifier]::AccessAllowed
+    $trustedWriters = @{}
+    foreach ($ace in @($expectedDACL)) {
+        if ($ace -is [Security.AccessControl.CommonAce] -and
+            $ace.AceQualifier -eq $allowed -and
+            ((([int64]$ace.AccessMask) -band 0xffffffffL) -band $writeLikeMask) -ne 0) {
+            $trustedWriters[$ace.SecurityIdentifier.Value] = $true
+        }
+    }
+    $explicit = [Collections.Generic.List[object]]::new()
+    foreach ($ace in @($actualDACL)) {
+        if (([int]$ace.AceFlags -band $inheritedFlag) -eq 0) {
+            $explicit.Add($ace)
+            continue
+        }
+        if ($ace -isnot [Security.AccessControl.CommonAce]) {
+            throw "managed path inherits an unrecognized ACE: $Path"
+        }
+        if ($ace.AceQualifier -ne $allowed -or
+            ((([int64]$ace.AccessMask) -band 0xffffffffL) -band $writeLikeMask) -eq 0) {
+            continue
+        }
+        $sid = $ace.SecurityIdentifier.Value
+        if ($trustedWriters.ContainsKey($sid)) {
+            continue
+        }
+        # CREATOR OWNER / CREATOR GROUP templates grant nothing on this path,
+        # only to whoever creates a child, which already needs write access.
+        if ($sid -in @('S-1-3-0', 'S-1-3-1') -and
+            ([int]$ace.AceFlags -band $inheritOnlyFlag) -ne 0) {
+            continue
+        }
+        throw "untrusted principal $sid has inherited write-like access to managed path: $Path"
+    }
+    $canonical = @($expectedDACL)
+    $exact = $explicit.Count -eq $canonical.Count
+    for ($index = 0; $exact -and $index -lt $canonical.Count; $index++) {
+        $actualBytes = [byte[]]::new($explicit[$index].BinaryLength)
+        $expectedBytes = [byte[]]::new($canonical[$index].BinaryLength)
+        $explicit[$index].GetBinaryForm($actualBytes, 0)
+        $canonical[$index].GetBinaryForm($expectedBytes, 0)
+        $exact = [Convert]::ToBase64String($actualBytes) -ceq [Convert]::ToBase64String($expectedBytes)
+    }
+    if (-not $exact) {
         throw "managed path does not have the exact canonical DACL: $Path"
     }
 }
@@ -4208,6 +4297,21 @@ function Test-DefenseClawCanonicalRawPathAcl {
         -Expected $expectedDescriptor)
 }
 
+function Test-DefenseClawPathGoneError {
+    <#
+        True only when the error, or an exception it wraps, is the Win32
+        "file not found" or "path not found" error.
+    #>
+    param([Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord)
+    for ($exception = $ErrorRecord.Exception; $null -ne $exception; $exception = $exception.InnerException) {
+        if ($exception -is [ComponentModel.Win32Exception] -and
+            [int]$exception.NativeErrorCode -in @(2, 3)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Assert-DefenseClawCanonicalPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -4224,25 +4328,22 @@ function Assert-DefenseClawCanonicalPathAcl {
         $descriptorBytes = $nativeSecurity::GetFileSecurityDescriptor($Path)
     }
     catch {
-        # Bulldoze: the native CreateFileW with READ_CONTROL +
-        # FILE_FLAG_BACKUP_SEMANTICS can fail if a prior scoped uninstall
-        # left the file with a hostile DACL that denies even
-        # SeBackupPrivilege-mediated reads, or if the file was already
-        # deleted by a parallel uninstall step. For an uninstall validator
-        # that is about to delete the parent anyway, bubbling this up as
-        # a fatal error strands the lifecycle. Honor strict mode; otherwise
-        # warn and return - the caller treats the validator as "no drift
-        # observed" so uninstall can proceed to the state-root removal
-        # that drops the file regardless.
-        if (Test-DefenseClawTrustStrictAncestors) {
+        # A path a parallel uninstall step already deleted has no
+        # descriptor left to judge, so outside the strict pin that one
+        # case warns and returns. Every other failure refuses on every
+        # profile: a descriptor DefenseClaw cannot read - above all one
+        # that denies READ_CONTROL, which a standard user who owns the
+        # path can set - is drift it cannot see past, and treating it as
+        # "no drift observed" would wave the path through.
+        if ((Test-DefenseClawTrustStrictAncestors) -or
+            -not (Test-DefenseClawPathGoneError -ErrorRecord $_)) {
             throw
         }
         Write-DefenseClawAclSelfHealAdvisory `
             -Path $Path `
             -Reason (
-                "native security descriptor read failed, continuing " +
-                "bulldoze (likely file deleted mid-uninstall or DACL " +
-                "denies admin read_control): " + $_.Exception.Message
+                "native security descriptor read failed because the " +
+                "path is gone, continuing: " + $_.Exception.Message
             )
         return
     }
@@ -5215,8 +5316,9 @@ function Get-DefenseClawPathAclVerdicts {
     }
     if (-not $AllowInheritance -and -not $acl.AreAccessRulesProtected) {
         $verdicts.Add([pscustomobject]@{
-            Kind   = 'Access'
-            Reason = "managed DACL inherits from an ancestor: $Path"
+            Kind     = 'Access'
+            Severity = 'Inheritance'
+            Reason   = "managed DACL inherits from an ancestor: $Path"
         })
     }
     $grantedBySID = @{}
@@ -5318,7 +5420,12 @@ function Assert-DefenseClawPathAcl {
         [string]$SelfHealKind,
         [string]$SelfHealGatewayServiceSID
     )
-    $advisory = [bool]$AdvisoryUntrustedAccess -and -not (Test-DefenseClawTrustStrictAncestors)
+    # Only the Secure Client state root sits inside a tree AVC re-ACLs. The
+    # standalone state root (%ProgramData%\Cisco\DefenseClaw) has no other
+    # owner, so foreign access there is judged like any other managed path.
+    $advisory = [bool]$AdvisoryUntrustedAccess -and
+        -not (Test-DefenseClawTrustStrictAncestors) -and
+        -not (Test-DefenseClawStandaloneProfile)
     Assert-DefenseClawNoReparsePath -Path $Path
     $verdictArgs = @{
         Path                   = $Path
@@ -5339,14 +5446,11 @@ function Assert-DefenseClawPathAcl {
         # with a different scoped service name) are repairable through
         # the same canonical re-stamp path as Contract/Rights verdicts.
         # The canonical descriptor built by New-DefenseClawCanonicalPathAcl
-        # excludes any SID outside the trusted writer set and the
-        # Set-DefenseClawPathAcl stamp (with the icacls /inheritance:r
-        # self-heal added above) forces SE_DACL_PROTECTED, so a re-stamp
-        # strips every untrusted ACE from both the explicit DACL and the
-        # inherited chain. Including 'Access' here means an install that
-        # finds orphan ACEs self-heals instead of refusing - matching the
-        # product invariant (canonical state after install, not
-        # refuse-on-drift).
+        # excludes any SID outside the trusted writer set and forces
+        # SE_DACL_PROTECTED, so a re-stamp that holds strips every untrusted
+        # ACE and the re-read below comes back clean. A re-stamp is a
+        # repair, never a pardon: what still fails the re-read is judged
+        # below exactly as if no repair had been attempted (GAP-0010).
         $repairable = @(
             $verdicts |
                 Microsoft.PowerShell.Core\Where-Object { $_.Kind -in @('Contract', 'Rights', 'Access') }
@@ -5392,35 +5496,34 @@ function Assert-DefenseClawPathAcl {
     $fatal = $null
     foreach ($verdict in $verdicts) {
         $downgradable = switch ($verdict.Kind) {
-            # Access verdicts (foreign SIDs on managed paths) downgrade
-            # EITHER when the caller passed -AdvisoryUntrustedAccess
-            # (ancestor-advisory posture, same as before) OR when the
-            # canonical re-stamp ran as part of this call OR, in
-            # non-strict managed_enterprise mode, specifically for
-            # Read-severity verdicts.
+            # Access verdicts (foreign SIDs on managed paths) downgrade only
+            # for drift a standard user cannot have created:
+            #   - the caller passed -AdvisoryUntrustedAccess (the Secure Client
+            #     state root, which AVC re-ACLs; never the standalone profile);
+            #   - a Read-severity verdict in non-strict mode: Group Policy,
+            #     WDAC or a filesystem driver dropping SE_DACL_PROTECTED and
+            #     re-admitting an inherited BUILTIN\Users READ ACE. Adding
+            #     any ACE needs WRITE_DAC, which a standard user does not hold
+            #     on a managed path;
+            #   - an Inheritance verdict (SE_DACL_PROTECTED lost) that survived
+            #     the canonical re-stamp, in non-strict mode. Every inherited
+            #     ACE is still judged on its own: an inherited write grant to
+            #     an untrusted principal is a separate Write verdict.
             #
-            # The non-strict Read downgrade covers Group Policy / WDAC /
-            # filesystem drivers that silently drop SE_DACL_PROTECTED
-            # and re-admit an inherited BUILTIN\Users read ACE from the
-            # %ProgramData% default template. The trust envelope stays
-            # SYSTEM/Administrators at minimum; the alternative is
-            # leaving the endpoint unprotected because an inherited
-            # Users READ ACE sits on an admin-only file.
+            # Write-severity verdicts are FATAL on every profile, with or
+            # without the strict pin and whether or not the re-stamp ran: an
+            # untrusted principal with write-like access to a managed path can
+            # tamper with gateway state, inject hook commands, or replace the
+            # lifecycle lock contents (GAP-0010).
             #
-            # Write-severity verdicts stay FATAL even in non-strict
-            # mode: an untrusted principal with write-like access to a
-            # managed path is a security incident (foreign code could
-            # tamper with gateway state, inject hook commands, or
-            # replace the lifecycle lock contents). The lifecycle-lock
-            # smoke test and other security-critical surfaces rely on
-            # this strictness.
-            #
-            # Operators who want fail-closed posture for BOTH severities
-            # (restoring the pre-v13 behaviour) set
-            # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1.
+            # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 restores every
+            # refusal; it only tightens.
             'Access' {
-                $advisory -or $selfHealed -or
-                (-not $strict -and $verdict.Severity -eq 'Read')
+                $advisory -or
+                (-not $strict -and (
+                    [string]$verdict.Severity -ceq 'Read' -or
+                    ($selfHealed -and [string]$verdict.Severity -ceq 'Inheritance')
+                ))
             }
             'Contract' { $advisory -and $selfHealed }
             default { $false }
@@ -22772,6 +22875,27 @@ function Assert-DefenseClawRecordedArtifactHashes {
     }
 }
 
+function Add-DefenseClawNativeCleanupSource {
+    <#
+        Admits the uninstall-only native exact-scope cleanup executable (the
+        running defenseclaw.exe or Setup) by the payload trust in force when
+        it is called, and records it as the native_cleanup source.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [string]$NativeCleanupBinary,
+        [switch]$AllowUnsigned
+    )
+    if ([string]::IsNullOrWhiteSpace($NativeCleanupBinary)) {
+        return
+    }
+    $Sources['native_cleanup'] = Get-DefenseClawSourceDescriptor `
+        -Path $NativeCleanupBinary `
+        -Label 'native exact-scope cleanup executable' `
+        -Authenticode `
+        -AllowUnsigned:$AllowUnsigned
+}
+
 function Get-DefenseClawLifecycleSources {
     param(
         [Parameter(Mandatory)][string]$Action,
@@ -22794,13 +22918,10 @@ function Get-DefenseClawLifecycleSources {
         [switch]$DeferredConfig
     )
     $sources = @{}
-    if (-not [string]::IsNullOrWhiteSpace($NativeCleanupBinary)) {
-        $sources['native_cleanup'] = Get-DefenseClawSourceDescriptor `
-            -Path $NativeCleanupBinary `
-            -Label 'native exact-scope cleanup executable' `
-            -Authenticode `
-            -AllowUnsigned:$AllowUnsigned
-    }
+    Add-DefenseClawNativeCleanupSource `
+        -Sources $sources `
+        -NativeCleanupBinary $NativeCleanupBinary `
+        -AllowUnsigned:$AllowUnsigned
     if ($Action -notin @('Install', 'Upgrade', 'Repair')) {
         return $sources
     }
@@ -27745,10 +27866,10 @@ function Complete-DefenseClawStatePurge {
         # fallback above may fail to drain StateRoot if a handle is still
         # held (gateway service process didn't fully release, AV scan
         # racing). The install reconcile path has its own canonical ACL +
-        # file re-creation self-heal (see Set-DefenseClawPathAcl + the
-        # Assert-DefenseClawPathAcl Access verdict downgrade); the next
-        # uninstall or install will mop up what survived here. Refusing
-        # at this point strands the whole lifecycle.
+        # file re-creation self-heal (Set-DefenseClawPathAcl, re-read by
+        # Assert-DefenseClawPathAcl); the next uninstall or install will mop
+        # up what survived here. Refusing at this point strands the whole
+        # lifecycle.
         if (Test-DefenseClawTrustStrictAncestors) {
             throw 'StateRoot survived authenticated purge'
         }
@@ -28741,9 +28862,9 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         # Product posture (bulldoze): return ok:true so the AVC MSI treats
         # the uninstall as complete and does not block subsequent install
         # or upgrade attempts. The next install's reconcile branch bulldozes
-        # through any StateRoot residue via Set-DefenseClawPathAcl's icacls
-        # self-heal + Assert-DefenseClawPathAcl's post-restamp Access
-        # downgrade (fixing the specific orphan per-service SID symptom).
+        # through any StateRoot residue via Set-DefenseClawPathAcl's canonical
+        # re-stamp, which strips an orphan per-service SID; a write grant the
+        # re-stamp cannot remove still refuses that install (GAP-0010).
         # Operators who need strict refuse-on-drift reporting can set
         # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 to restore the
         # pre-bulldoze ok:false posture.
@@ -32636,6 +32757,41 @@ function Initialize-DefenseClawRecordedPayloadTrust {
     }
 }
 
+function Add-DefenseClawProductionUninstallNativeCleanupSource {
+    <#
+        A production uninstall authenticates its deployment metadata under the
+        lifecycle lock (after Repair-DefenseClawUninstallAdminFileAcl), not at
+        entry. A hash-pinned standalone deployment's payload, the installed
+        unsigned defenseclaw.exe included, is admitted by the SHA-256 pins
+        that metadata recorded, so those pins are loaded here, from metadata
+        that just passed authentication, before the native cleanup executable
+        is admitted (GAP-0023). Untrusted or absent metadata loads no pins:
+        the executable then needs a valid signature or the caller's own
+        payload manifest (Setup /uninstall passes its embedded one).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [AllowNull()]$Metadata,
+        [switch]$MetadataTrusted,
+        [string]$NativeCleanupBinary,
+        [string]$PayloadManifest,
+        [switch]$AllowUnsigned
+    )
+    if ((Test-DefenseClawStandaloneProfile) -and
+        $MetadataTrusted -and
+        $null -ne $Metadata -and
+        [string]::IsNullOrWhiteSpace($PayloadManifest)) {
+        Initialize-DefenseClawRecordedPayloadTrust `
+            -Metadata $Metadata `
+            -Layout $Layout
+    }
+    Add-DefenseClawNativeCleanupSource `
+        -Sources $Sources `
+        -NativeCleanupBinary $NativeCleanupBinary `
+        -AllowUnsigned:$AllowUnsigned
+}
+
 function Invoke-DefenseClawEnterpriseLifecycle {
     [CmdletBinding()]
     param(
@@ -33037,6 +33193,18 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -PathType Container)) {
         throw "$Action requires an existing managed StateRoot: $resolvedStateRoot"
     }
+    # A production uninstall skips the entry metadata read above, so a
+    # hash-pinned standalone deployment's recorded pins are not loaded yet.
+    # Its native cleanup executable (the installed, unsigned defenseclaw.exe)
+    # is admitted under the lifecycle lock instead, once the metadata is
+    # authenticated (GAP-0023); admitting it here would judge it by
+    # Authenticode alone and refuse it.
+    $entryNativeCleanupBinary = if ($recoverProductionUninstallAcl) {
+        ''
+    }
+    else {
+        $NativeCleanupBinary
+    }
     $sources = Get-DefenseClawLifecycleSources `
         -Action $Action `
         -BrokerBinary $BrokerBinary `
@@ -33047,7 +33215,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -SensorHelperBinary $SensorHelperBinary `
         -PolicyCompiler $PolicyCompiler `
         -CLIBinary $CLIBinary `
-        -NativeCleanupBinary $NativeCleanupBinary `
+        -NativeCleanupBinary $entryNativeCleanupBinary `
         -Config $Config `
         -Manifest $Manifest `
         -InstallerSource $InstallerSource `
@@ -33136,6 +33304,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         if ($recoverProductionUninstallAcl) {
             $untrustedEvidenceReason = ''
             $uninstallMetadataExists = $false
+            $uninstallMetadata = $null
             try {
                 # Authenticate ownership and repair only recoverable ACL
                 # drift under the lifecycle lock, before trusting metadata.
@@ -33168,6 +33337,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                         'deployment.json is missing from an existing StateRoot'
                 }
             }
+            Add-DefenseClawProductionUninstallNativeCleanupSource `
+                -Sources $sources `
+                -Layout $layout `
+                -Metadata $(if ($uninstallMetadataExists) { $uninstallMetadata } else { $null }) `
+                -MetadataTrusted:([string]::IsNullOrWhiteSpace($untrustedEvidenceReason)) `
+                -NativeCleanupBinary $NativeCleanupBinary `
+                -PayloadManifest $PayloadManifest `
+                -AllowUnsigned:$AllowUnsigned
             if (-not [string]::IsNullOrWhiteSpace(
                     $untrustedEvidenceReason)) {
                 return Invoke-DefenseClawUntrustedMetadataRecoveryPurge `
