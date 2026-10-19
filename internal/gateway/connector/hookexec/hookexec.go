@@ -1454,8 +1454,11 @@ func managedNativeBlockableEvent(connector, event string) bool {
 // agent. A complete gateway response can still contain an allow-shaped native
 // directive beside a block action; the native directive wins at the agent.
 func nativeOutputAgrees(sp spec, event, action, output string) bool {
-	if !managedNativeBlockableEvent(sp.connector, event) &&
-		!(sp.dialect == copilotVSCodeLocalSurface && (event == "PreToolUse" || event == "UserPromptSubmit")) {
+	blockable := managedNativeBlockableEvent(sp.connector, event)
+	if sp.dialect == copilotVSCodeLocalSurface && (event == "PreToolUse" || event == "UserPromptSubmit") {
+		blockable = true
+	}
+	if !blockable {
 		return true
 	}
 	var fields map[string]json.RawMessage
