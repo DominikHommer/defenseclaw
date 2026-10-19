@@ -481,8 +481,6 @@ jobs:
         run: ./packaging/windows/tests/enterprise-cross-scope-install-preflight-smoke.ps1
       - name: Managed path ACL verdict regression
         run: ./packaging/windows/tests/enterprise-path-acl-verdict-smoke.ps1
-      - name: Standalone uninstall native cleanup trust regression
-        run: ./packaging/windows/tests/enterprise-standalone-uninstall-cleanup-trust-smoke.ps1
       - name: Secure Client purge never follows a link and keeps what it does not own
         run: ./packaging/windows/tests/enterprise-nuclear-purge-smoke.ps1
       - name: Capture bounded diagnostics

@@ -111,4 +111,4 @@ finally {
 if ($failures.Count -gt 0) {
     throw ("enterprise-standalone-uninstall-cleanup-trust-smoke: FAIL`n" + ($failures -join "`n"))
 }
-Microsoft.PowerShell.Utility\Write-Host "enterprise-standalone-uninstall-cleanup-trust-smoke: PASS ($($cases.Count) cases)"
+Microsoft.PowerShell.Utility\Write-Output "enterprise-standalone-uninstall-cleanup-trust-smoke: OK ($($cases.Count) cases)"
