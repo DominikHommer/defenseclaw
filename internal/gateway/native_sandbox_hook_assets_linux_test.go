@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,13 +114,15 @@ func TestNativeHookAssetsLinuxHeldDirectoryAndNativeCleanupBarrier(t *testing.T)
 	}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	if status, _ := nativeHookPost(t, client, "/api/v1/claudecode/hook"); status != http.StatusOK {
+	const hookPath = "/api/v1/claude-code/hook"
+	// The empty event must reach the registered connector's existing parser.
+	if status, body := nativeHookPost(t, client, hookPath); status != http.StatusBadRequest || !strings.Contains(body, "hook event name is required") {
 		t.Fatalf("shared hook dispatch %d", status)
 	}
 	if err := owner.Close(lifetime); err == nil {
 		t.Fatal("uncertain native wait was released")
 	}
-	if status, _ := nativeHookPost(t, client, "/api/v1/claudecode/hook"); status != http.StatusServiceUnavailable {
+	if status, _ := nativeHookPost(t, client, hookPath); status != http.StatusServiceUnavailable {
 		t.Fatal("endpoint admission was not sealed before failed native cleanup")
 	}
 	if children, err := os.ReadDir(rootPath); err != nil || len(children) != 2 {
