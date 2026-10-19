@@ -870,6 +870,10 @@ func TestSessionSummary(t *testing.T) {
 			ta.term.hooks, ta.term.code = nil, 1
 		}, want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)"},
 			not: []string{"hooks are not reaching", "continue this conversation"}},
+		{name: "the OpenCode launcher refused the run", opts: RunOptions{Harness: "opencode"}, exit: harness.LauncherRefusedExitCode,
+			setup: func(ta *testApp) { noChanges(ta); ta.term.hooks, ta.term.code = nil, harness.LauncherRefusedExitCode },
+			want:  []string{"DefenseClaw refused to start OpenCode; see the launcher message above"},
+			not:   []string{"the harness itself failed", "hooks are not reaching"}},
 		// AG-MAC-F3: a harness that failed at start because localhost does
 		// not resolve is told apart, with what to do; the pull of a copy
 		// still runs, without its progress line.
@@ -915,6 +919,23 @@ func TestSessionSummary(t *testing.T) {
 		}, want: []string{"This sandbox was stopped: your profile no longer allows sandboxes. Request access: it-security@example.com.",
 			"Sandbox kept (stopped) → delete: defenseclaw sandbox delete " + sbName},
 			not: []string{"was stopped from outside this session", "Start it again", "→ resume:", "continue this conversation"}},
+		// #1199 (GAP-0560): a re-match stopped it for a create-time grant
+		// the profile no longer allows (host ports): the session ends with
+		// the organization's words, which the sandbox's view carries.
+		{name: "a re-match stopped it for its host ports", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
+			elsewhere(false)(ta)
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.explain.Managed = managedExplainFixture()
+			during := ta.term.during
+			ta.term.during = func() {
+				during()
+				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
+					sb.StopReason = sandboxapi.ProfileStop("host ports", "claudecode", "it-security@example.com")
+				})
+			}
+		}, want: []string{"This sandbox was stopped: your profile no longer allows host ports. Start it again without --host-port: defenseclaw sandbox run claude",
+			"Sandbox kept (stopped) → delete: defenseclaw sandbox delete " + sbName},
+			not: []string{"was stopped from outside this session", "→ resume:"}},
 		// GAP-0202: the gateway was stopped (handed to another account)
 		// under the session: not a stop from another terminal.
 		{name: "the gateway went away", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
@@ -1388,6 +1409,15 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 	if c := check(ta); c.Status != openshell.StatusPass || c.Detail != "no sandbox is running" {
 		t.Fatalf("no sandboxes: %+v", c)
 	}
+	silenced := sampleSandbox("silenced")
+	silenced.Phase = "stopped"
+	silenced.Hooks.Silent, silenced.Hooks.OnSilence = true, "stop"
+	ta.daemon.add(silenced)
+	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "silenced stopped after its harness worked without hooks reaching DefenseClaw") ||
+		c.Fix == nil || !strings.Contains(c.Fix.Summary, "delete it") {
+		t.Fatalf("silence-stopped sandbox: %+v", c)
+	}
+	ta = newTestApp(t, "")
 	ta.daemon.add(sampleSandbox("good"))
 	if c := check(ta); c.Status != openshell.StatusPass || !strings.Contains(c.Detail, "1 running sandbox reach") {
 		t.Fatalf("healthy: %+v", c)
@@ -1504,11 +1534,20 @@ func TestStatusSaysTheDetachedRunFinished(t *testing.T) {
 	runAnswers(ta, "run_started=1790000000\nrun=exited\nrun_exit=0\n", "")
 	ta.ok(t, ta.Status(bg, "bg1", OutputText))
 	has(t, ta.output(), "its detached run (started "+ta.clock(time.Unix(1790000000, 0))+") finished (exit status 0); `defenseclaw sandbox logs bg1` shows it.",
-		"bg1 keeps running until you stop it: `defenseclaw sandbox stop bg1`")
+		"bg1 keeps running until you stop it: `defenseclaw sandbox stop bg1`", "connect normally to start a new one")
 	ta.out.Reset()
 	runAnswers(ta, "run_started=1790000000\nrun=running\n", "")
 	ta.ok(t, ta.Status(bg, "bg1", OutputText))
 	has(t, ta.output(), "is still going; `defenseclaw sandbox logs bg1` -f follows it")
+}
+
+func TestContinueAfterDetachedRunFailureNamesRecovery(t *testing.T) {
+	ta := newTestApp(t, "")
+	sb := sampleSandbox("box")
+	s := session{app: ta.App, spec: harness.ClaudeCode, sb: &sb, harnessCode: 1, continueAfterDetached: true}
+	s.printHookReach(&sb, false)
+	has(t, ta.output(), "Claude Code could not continue the detached run; connect without --continue to start a new conversation")
+	lacks(t, ta.output(), "the harness itself failed")
 }
 
 func TestStopWithALiveDetachedRun(t *testing.T) {

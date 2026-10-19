@@ -6,6 +6,8 @@
 package enterprisehooks
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -16,6 +18,74 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+// A teardown may leave an edited plugin and its recovery receipt. The
+// standalone purge must keep both until the account resolves the edit.
+func TestPurgeWindowsUserStateKeepsConnectorBackup(t *testing.T) {
+	previous := windowsEnterpriseMutationIdentityCheck
+	windowsEnterpriseMutationIdentityCheck = func() error { return nil }
+	t.Cleanup(func() { windowsEnterpriseMutationIdentityCheck = previous })
+
+	home := filepath.Join(t.TempDir(), "home")
+	dataDir := filepath.Join(home, ".defenseclaw")
+	plugin := filepath.Join(home, ".config", "opencode", "plugins", "defenseclaw.js")
+	receipt := filepath.Join(dataDir, "connector_backups", "opencode", "config.json")
+	for _, path := range []string{plugin, receipt} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	edited := []byte("// edited OpenCode plugin\n")
+	if err := os.WriteFile(plugin, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := json.Marshal(map[string]any{
+		"version": 1, "connector": "opencode", "logical_name": "config",
+		"path": plugin, "pristine_sha256": "missing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receipt, backup, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	purge := func() error { return PurgeWindowsUserState(home, currentWindowsTestSID(t).String(), "") }
+	if err := purge(); err == nil || !strings.Contains(err.Error(), plugin) ||
+		!strings.Contains(err.Error(), "kept the per-user state for its backups") ||
+		!strings.Contains(err.Error(), "rerun the purge") {
+		t.Fatalf("purge with retained backup = %v", err)
+	}
+	for path, want := range map[string][]byte{plugin: edited, receipt: backup} {
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("purge changed %s: %v", path, err)
+		}
+	}
+	if err := os.WriteFile(receipt, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := purge(); err == nil || !strings.Contains(err.Error(), receipt) ||
+		!strings.Contains(err.Error(), "cannot be read") {
+		t.Fatalf("purge with unreadable backup = %v", err)
+	}
+	if _, err := os.Stat(dataDir); err != nil {
+		t.Fatalf("purge removed state with unreadable backup: %v", err)
+	}
+	// Removing the unneeded receipt is one remedy. A clean rerun then
+	// removes the state but leaves the account's edited plugin alone.
+	if err := os.Remove(receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := purge(); err != nil {
+		t.Fatalf("purge after removing the backup: %v", err)
+	}
+	if _, err := os.Lstat(dataDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state remains after clean purge: %v", err)
+	}
+	if got, err := os.ReadFile(plugin); err != nil || !bytes.Equal(got, edited) {
+		t.Fatalf("clean purge changed the account's plugin: %v", err)
+	}
+}
 
 // An uninstall with purge removes an account's whole per-user folder as
 // LocalSystem: hook scripts, per-user hook tokens and the account's
@@ -35,7 +105,6 @@ func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
 	for path, body := range map[string]string{
 		filepath.Join(dataDir, "hooks", "amp-hook.sh"):                         "#!/bin/sh\n# defenseclaw-managed-hook v5\nexec forward\n",
 		filepath.Join(dataDir, "hooks", ".hook-amp.token"):                     "token",
-		filepath.Join(dataDir, "connector_backups", "amp", "settings.json"):    "{}",
 		filepath.Join(dataDir, "foreign-hook-sessions", "record.json"):         "{}",
 		filepath.Join(dataDir, "foreign-hooks-backup", "amp", "settings.json"): "{}",
 		filepath.Join(dataDir, "agent_selection.json"):                         "{}",

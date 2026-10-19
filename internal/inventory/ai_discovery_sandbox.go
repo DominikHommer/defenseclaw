@@ -543,7 +543,51 @@ func (s *ContinuousDiscoveryService) lookPath(name string) (string, error) {
 		}
 		return "", exec.ErrNotFound
 	}
-	return exec.LookPath(name)
+	dirs := s.binaryFallbackDirs
+	if dirs == nil && runtime.GOOS == "darwin" {
+		dirs = macOSDiscoveryBinaryDirs(s.opts.HomeDir)
+	}
+	if found, err := exec.LookPath(name); err == nil {
+		if !s.userHomeScan || dirs == nil ||
+			evidenceInsideHome([]AIEvidence{{RawPath: found}}, []string{s.opts.HomeDir}) ||
+			evidenceInSystemBinaryDirs([]AIEvidence{{Type: "binary", RawPath: found}}, dirs) {
+			return found, nil
+		}
+	} else if dirs == nil {
+		return found, err
+	}
+	// launchd services inherit a sparse PATH. Probe the conventional macOS
+	// install locations and the scanned user's bins without changing PATH or
+	// executing the candidate. The sandbox branch above stays isolated.
+	return lookPathInDirs(name, dirs)
+}
+
+func macOSDiscoveryBinaryDirs(home string) []string {
+	return discoveryBinaryDirsWithHome(macOSDiscoverySystemBinaryDirs(), home)
+}
+
+func macOSDiscoverySystemBinaryDirs() []string {
+	return []string{"/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin", "/opt/dc-agents/bin"}
+}
+
+func discoveryBinaryDirsWithHome(systemDirs []string, home string) []string {
+	dirs := append([]string(nil), systemDirs...)
+	if home != "" {
+		dirs = append(dirs, filepath.Join(home, ".local", "bin"), filepath.Join(home, "bin"))
+	}
+	return dirs
+}
+
+func lookPathInDirs(name string, dirs []string) (string, error) {
+	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
+		return "", exec.ErrNotFound
+	}
+	for _, dir := range dirs {
+		if found, err := exec.LookPath(filepath.Join(dir, name)); err == nil {
+			return found, nil
+		}
+	}
+	return "", exec.ErrNotFound
 }
 
 // environment is the process environment as KEY=VALUE pairs; a sandbox

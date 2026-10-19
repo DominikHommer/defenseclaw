@@ -1693,6 +1693,49 @@ The builder renders a deterministic context (a Dockerfile plus files whose
 modes and owners are set in the tar headers) and streams it to
 `docker build --pull=false -t <tag> -`. The Dockerfile:
 
+0. With trusted CAs (`openshell.trusted_ca_bundle`, `BuildSpec.TrustedCAs`,
+   #1296), first, right after `USER root`: one root-owned 0644 file per
+   certificate in `/usr/local/share/ca-certificates/defenseclaw`
+   (`trusted-ca/defenseclaw-trusted-ca-NN.crt` in the context), then
+   `update-ca-certificates`, and a check that each one reached
+   `/etc/ssl/certs/ca-certificates.crt`. Then `ARG`s (build only, never
+   `ENV`) point `image.BuildCAEnv` (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+   `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS`,
+   `npm_config_cafile`, `PIP_CERT`, `DENO_CERT`) at that bundle, so the
+   build's own downloads trust them: npm, pip and uv do not read the system
+   store (GAP-0192). OpenShell's supervisor does not read that file: it makes the
+   workload's bundle (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+   `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`; `NODE_EXTRA_CA_CERTS` and
+   `DENO_CERT` name its CA alone) from its own store, a container of its own
+   image on the docker driver and the MicroVM's boot image on the vm driver
+   (OpenShell 0.1.1 to 0.1.4). So the launchers, the login-shell profile and
+   the `sandbox exec` wrapper of an image with the CA directory write
+   OpenShell's bundle plus the trusted CAs to
+   `/tmp/defenseclaw-ca-<uid>/ca-bundle.pem` (owner-only, at every start)
+   and point those six variables at it when they are unset or name
+   OpenShell's files; when it cannot be written they stay as OpenShell set
+   them (`trustedCAScript` in `harness/shellenv.go`). The first shell
+   records OpenShell's bundle in `DEFENSECLAW_SANDBOX_CA_BASE`, so a
+   `SSL_CERT_FILE` set before a nested login shell starts is kept. The supervisor's own
+   upstream TLS, for the endpoints whose credential it puts in (model
+   providers, `--credential` hosts), trusts only its store, and OpenShell
+   adds a CA to it only with an explicit upstream proxy (`https_proxy` with
+   `proxy_ca_bundle`); those hosts must not be inspected, which the doctor
+   row reports. The bundle is parsed and normalized
+   (`openshell.ParseTrustedCAs`: CA certificates only), its files are
+   build-context files (so the content hash and tag cover them, and an image
+   without trusted CAs is unchanged), the record keeps the PEM
+   (`Record.TrustedCAs`, stored in `images-trusted-cas.json` beside
+   `images.json`, whose records keep the fields DefenseClaw 1.0.2 reads) and
+   the image carries the `io.defenseclaw.trusted-cas` digest label. A file
+   that cannot be used
+   fails closed: no image is built or selected (`image.TrustedCAsFor`). On a
+   managed computer the managed gateway reads the administrator's file
+   (`managed.ValidateTrustedFilePath`) and relays the PEM in the daemon
+   settings (`OperationalSettings.TrustedCAs`); the account's own
+   configuration names none. The `tls-trust` doctor row (`doctor.sandbox.tls-trust`) compares
+   provider chains with the host's trust and the distribution's public roots,
+   and fails while a provider host is inspected, with or without the CA.
 1. Installs `jq` and `curl` if the base lacks them on the hook PATH
    (`/usr/bin:/bin:/usr/sbin:/sbin`). An image for the vm driver
    (`BuildSpec.MicroVM`) also installs `nss-myhostname`, asked right after
@@ -2860,8 +2903,17 @@ service-owned) that the daemon binds to the sandbox; a registration holds the
 `subject_key` (an HMAC of `v1|uid|account|sid`, so directory facts never turn a
 create into `sandbox_subject_changed`) and a `facts_digest` whose change
 triggers a re-match. Lookups are scoped to the caller's uid, so another uid's id
-behaves as unknown, and tombstones keep a deleted binding from registering
-again.
+behaves as unknown. Binding and sandbox IDs are reserved across accounts;
+tombstones keep a deleted ID from registering again. A confirmed registration's
+`policy/current` response supplies the complete organization floor. The daemon
+replaces its cached floor with that response and keeps an incomplete response
+unconfirmed. Every daemon call states the daemon's floor contract
+(`X-DefenseClaw-Sandbox-Daemon-Contract`). A daemon that states none or an
+older one, such as a 1.0.2 daemon still running after a package upgrade, gets
+`sandbox_daemon_outdated` (403) on new sandboxes, binds, running reports,
+`policy/current` and relayed calls; revocations, stopped reports, deletions,
+settings and events still reach it. It restarts on the new version once its
+sandboxes stop.
 
 A hook in a sandbox goes to the daemon's ingress as before. In managed mode the
 daemon has no local evaluation path: it forwards the body unchanged to

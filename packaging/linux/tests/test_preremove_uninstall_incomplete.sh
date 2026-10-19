@@ -17,6 +17,7 @@ run() {
     sed -e "s#/opt/defenseclaw/bin/defenseclaw-gateway#$work/gateway#g" \
         -e "s#/var/lib/defenseclaw-enterprise#$work/state#g" \
         -e "s#/run/systemd/system#$work/systemd#g" \
+        -e "s#user_runtime=/run/user#user_runtime=$work/run-user#" \
         "$source_script" >"$work/preremove.sh"
     TMPDIR="$work" sh "$work/preremove.sh" remove >"$work/stdout" 2>"$work/stderr"
 }

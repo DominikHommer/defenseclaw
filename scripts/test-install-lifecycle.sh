@@ -102,17 +102,8 @@ install_candidate() { bash "$1/install.sh" --local "$1" --yes; }
 # The documented one-liner pipes install.sh into bash; the script arrives on stdin.
 install_candidate_piped() { cat "$1/install.sh" | bash -s -- --local "$1" --yes; }
 
-# install_legacy: install LEGACY_VERSION with its own installer. Releases before
-# 0.8.5 published it only in the source tree.
-install_legacy() {
-    local installer="${ROOT}/install-${LEGACY_VERSION}.sh"
-    [[ -f "${installer}" ]] || curl -fsSL -o "${installer}" \
-        "https://github.com/cisco-ai-defense/defenseclaw/releases/download/${LEGACY_VERSION}/install.sh" \
-        || curl -fsSL -o "${installer}" \
-        "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${LEGACY_VERSION}/scripts/install.sh"
-    # The 0.8.4 installer refuses to run without cosign on PATH.
-    VERSION="${LEGACY_VERSION}" with_cosign bash "${installer}" --yes --no-openclaw
-}
+# Keep the legacy install step separately testable without running a release.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/install-legacy-lifecycle.sh"
 
 # init_and_start: create a config, move the gateway to a free port, start it.
 # Callers run it under "must", where errexit is off, so every step returns.

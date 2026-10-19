@@ -783,11 +783,11 @@ func (r *doctorRun) checkLandlock() {
 	case err != nil:
 		c.Status = StatusFail
 		c.Detail = "the kernel has no Landlock support: " + err.Error()
-		c.Fix = &Fix{Summary: fmt.Sprintf("use a Linux kernel 6.2 or newer with Landlock (ABI %d+)", MinLandlockABI), Sudo: true}
+		c.Fix = &Fix{Summary: fmt.Sprintf("use a kernel with Landlock ABI %d or newer (Linux 6.2 upstream or a distribution backport)", MinLandlockABI), Sudo: true}
 	case abi < MinLandlockABI:
 		c.Status = StatusFail
 		c.Detail = fmt.Sprintf("Landlock ABI %d; OpenShell needs ABI %d or newer", abi, MinLandlockABI)
-		c.Fix = &Fix{Summary: "upgrade to a Linux kernel 6.2 or newer", Sudo: true}
+		c.Fix = &Fix{Summary: fmt.Sprintf("use a kernel with Landlock ABI %d or newer (Linux 6.2 upstream or a distribution backport)", MinLandlockABI), Sudo: true}
 	default:
 		c.Status, c.Detail = StatusPass, fmt.Sprintf("ABI %d", abi)
 	}

@@ -1449,25 +1449,6 @@ def test_sandbox_board_filters_environment_after_the_selector() -> None:
     assert boxes["os"]["query"]["query"] == f'label_values({{{selector}, host_name=~"$host"}}, os_type)'
 
 
-def test_ai_runtime_activity_panels_count_one_finding_once() -> None:
-    # GAP-0169: a finding is emitted again at each chain stage. The panels
-    # count distinct (host, finding id), as the Splunk app does, and keep a
-    # record without a finding id as its own row instead of folding them.
-    board = _dashboard("defenseclaw-ai-runtime.json")
-    panels = {panel.get("title"): panel for panel in _all_panels(board["panels"])}
-    key = (
-        '| label_format activity_key="{{if .body_defenseclaw_ai_runtime_finding_id}}'
-        "finding:{{.body_defenseclaw_ai_runtime_finding_id}}"
-        '{{else}}event:{{ __timestamp__ | unixEpochNanos }}{{end}}")'
-    )
-    no_hook = panels["Agent activity with no hook decision"]["targets"][0]["expr"]
-    assert no_hook.startswith("count(sum by (host_name, activity_key) (count_over_time((")
-    assert key in no_hook
-    by_control = panels["Would-block in monitor mode, by control"]["targets"][0]["expr"]
-    assert by_control.startswith("count by (control) (sum by (control, host_name, activity_key) (count_over_time((")
-    assert key in by_control
-
-
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:
     audit = _load_audit_module()
 

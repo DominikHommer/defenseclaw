@@ -197,8 +197,14 @@ With `dry_run: true`:
   failing. It refuses `operation: legacy-channel`.
 - `build`, `macos-app`, `enterprise-windows` and `enterprise-macos` run outside
   the `release` environment with every secret blanked. The app is ad-hoc
-  signed, and the Setup, pkg and Linux packages are unsigned. Nothing is
-  Authenticode-signed, GPG-signed or sent to Apple for notarization.
+  signed, and the Setup, pkg and Linux packages are unsigned. Nothing that
+  ships is Authenticode-signed, GPG-signed or sent to Apple for notarization.
+- `enterprise-windows-signing-proof` runs only in a dry run. It builds the
+  Windows Setup once more through the signed path with a self-signed
+  certificate it creates and deletes
+  (`packaging/windows/standalone/prove-signing-path.sh`), so the signing step
+  is known to work before a certificate is configured. That Setup is never
+  uploaded, and `dry-run-assets` waits for the proof.
 - `sign` is skipped, because it writes to the public Sigstore log.
   `dry-run-assets` writes an unsigned `checksums.txt` instead.
 - `install-gate` runs the full install and upgrade lifecycle on the unsigned

@@ -405,6 +405,10 @@ def test_bundle_parity_covers_collector_rules_and_stateful_config(
     packaged = tmp_path / "packaged"
     shutil.copytree(compat.BUNDLE, source)
     shutil.copytree(compat.BUNDLE, packaged)
+    for relative in compat.OPTIONAL_FLEET_FILES:
+        # The wheel omits these templates; the separate Fleet asset carries them.
+        assert (source / relative).is_file()
+        (packaged / relative).unlink()
     target = packaged / "otel-collector/config.yaml"
     target.write_text(target.read_text(encoding="utf-8") + "\n# drift\n", encoding="utf-8")
     monkeypatch.setattr(compat, "BUNDLE", source)

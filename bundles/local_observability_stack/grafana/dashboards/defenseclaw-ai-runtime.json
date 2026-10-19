@@ -1660,7 +1660,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (host_name, activity_key) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_hook_seen=\"false\" | label_format activity_key=\"{{if .body_defenseclaw_ai_runtime_finding_id}}finding:{{.body_defenseclaw_ai_runtime_finding_id}}{{else}}event:{{ __timestamp__ | unixEpochNanos }}{{end}}\")[$__range]))) or vector(0)",
+          "expr": "count(sum by (host_name, body_defenseclaw_ai_runtime_finding_id, body_defenseclaw_ai_runtime_tactic) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_hook_seen=\"false\" | body_defenseclaw_ai_runtime_finding_id!=\"\")[$__range])) > 0) or vector(0)",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1853,9 +1853,9 @@
       }
     },
     {
-      "type": "timeseries",
+      "type": "bargauge",
       "title": "Would-block in monitor mode, by control",
-      "description": "What the controls would have denied while running in monitor mode (observe mode, and users still in burn-in).",
+      "description": "Distinct host-plane findings per control in the selected range while running in monitor mode.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -1868,8 +1868,10 @@
       },
       "targets": [
         {
-          "expr": "count by (control) (sum by (control, host_name, activity_key) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_kernel_outcome=\"would_block\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\" | label_format activity_key=\"{{if .body_defenseclaw_ai_runtime_finding_id}}finding:{{.body_defenseclaw_ai_runtime_finding_id}}{{else}}event:{{ __timestamp__ | unixEpochNanos }}{{end}}\")[$__interval])))",
+          "expr": "count by (control) (sum by (host_name, body_defenseclaw_ai_runtime_finding_id, control) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_kernel_outcome=\"would_block\" | body_defenseclaw_ai_runtime_finding_id!=\"\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\")[$__range])) > 0)",
           "refId": "A",
+          "instant": true,
+          "queryType": "instant",
           "datasource": {
             "type": "loki",
             "uid": "defenseclaw-loki"
@@ -1880,23 +1882,17 @@
       "fieldConfig": {
         "defaults": {
           "noValue": "No would-blocks in range",
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          }
+          "unit": "short"
         }
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
+        "showUnfilled": true
       }
     },
     {

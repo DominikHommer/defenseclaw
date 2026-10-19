@@ -2019,9 +2019,15 @@ func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
 		return fmt.Errorf("%s restore plugin backup: %w", c.name, err)
 	}
 	if !restored {
-		// The plugin was hand-edited after setup; leave it for the
-		// operator rather than clobbering their changes. Doctor surfaces
-		// the lingering managed plugin.
+		// The plugin was hand-edited after setup; leave it, and its
+		// receipt, for the operator rather than clobbering their changes.
+		// Doctor surfaces the lingering managed plugin. A plugin
+		// DefenseClaw created that is gone leaves nothing to restore.
+		if b, loadErr := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config")); loadErr == nil && !b.Existed {
+			if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
+				discardManagedFileBackup(opts.DataDir, c.name, "config")
+			}
+		}
 		return nil
 	}
 	discardManagedFileBackup(opts.DataDir, c.name, "config")
