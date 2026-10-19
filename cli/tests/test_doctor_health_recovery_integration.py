@@ -775,6 +775,10 @@ def test_audit_store_moved_aside_by_the_gateway_is_reported(tmp_path) -> None:
     assert f"sqlite3 {moved} .recover" not in notice["detail"]
     assert "any -journal files to a new folder" in notice["remediation"]
     assert f"sqlite3 {moved} .recover" not in notice["remediation"]
+    # GAP-0647: a zeroed header is repaired on the copy; GAP-0614: the archived sidecars are named.
+    assert "write the SQLite header back on the copy" in notice["detail"]
+    assert "zeroed SQLite header back on the copy" in notice["remediation"]
+    assert f"Older audit records stay in {moved} together with its -wal file (" in notice["detail"]
     assert "defenseclaw mcp list" in notice["detail"] and "kept the block/allow" not in notice["detail"]
 
 
@@ -813,6 +817,46 @@ def test_archived_0x_audit_store_is_not_reported_as_corrupt(tmp_path) -> None:
     assert "was corrupt" not in notice["detail"] and "carried over" not in notice["detail"]
     assert "Copy the archive together with its -wal, -shm and any -journal files to a new folder" in notice["detail"]
     assert "sqlite3 <copy> .recover" in notice["detail"] and f"sqlite3 {moved} .recover" not in notice["detail"]
+    assert "write the SQLite header back on the copy" in notice["detail"]
+
+
+def test_moved_audit_store_report_names_the_archive_not_a_file_with_an_archive_name(tmp_path) -> None:
+    # rel-1-0-3:GAP-0106: the newest file with an archive's name took the place of
+    # the archive, which moved to a new name because the first one was taken.
+    db = tmp_path / "audit.db"
+    archive = Path(str(db) + ".corrupt-20261018T021344Z-4bfc16b6-f3ca-490f-98a0-71b4f32de5ce")
+    others = [Path(str(db) + ".corrupt-20261018T021344Z"), Path(str(db) + ".corrupt-20261018T021513Z")]
+    for path in (archive, Path(str(archive) + "-wal"), *others):
+        path.write_bytes(b"x")
+    Path(str(archive) + ".carryover.json").write_text('{"carried_over": 2}', encoding="utf-8")
+
+    result = _DoctorResult()
+    cmd_doctor._check_moved_aside_audit_stores(str(db), result)
+
+    (notice,) = result.checks
+    assert notice["detail"].startswith("the audit store was corrupt and was moved aside")
+    assert f"Older audit records stay in {archive} together with its -wal file (" in notice["detail"]
+    assert all(f"{other} " not in notice["detail"] for other in others)
+    assert cmd_doctor._reported_moved_stores(others) == others
+
+
+def test_archive_header_repair_names_a_command_for_the_platform(monkeypatch) -> None:
+    # GAP-0647: the recovery hint repairs a zeroed header on the copy, with a command the host has.
+    monkeypatch.setattr(cmd_doctor.os, "name", "posix")
+    assert "dd of=<copy> bs=16 count=1 conv=notrunc" in cmd_doctor._archive_header_repair()
+    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    windows = cmd_doctor._archive_header_repair()
+    assert "PowerShell" in windows and "[IO.File]::OpenWrite('<copy>')" in windows and "dd of=" not in windows
+
+
+def test_archived_sidecars_are_named(tmp_path) -> None:
+    # GAP-0614: doctor lists the -wal, -shm and -journal files archived with a moved store.
+    archive = tmp_path / "audit.db.corrupt-20261014T214026Z"
+    archive.write_bytes(b"x")
+    assert cmd_doctor._archived_sidecars(archive) == ""
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(str(archive) + suffix).write_bytes(b"x")
+    assert cmd_doctor._archived_sidecars(archive) == " together with its -wal, -shm and -journal files"
 
 
 def test_moved_audit_store_with_one_carried_over_entry_uses_singular(tmp_path) -> None:

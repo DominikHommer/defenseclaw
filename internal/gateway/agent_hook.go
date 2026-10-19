@@ -949,11 +949,13 @@ func (a *APIServer) hookDecisionMeta(
 	meta = a.applyCursorToolEventOutcome(meta, req.HookEventName, req.Payload)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
-	if snapshot, ok := a.hookPhaseSnapshot(meta); ok {
-		// The lifecycle emitter advanced the execution cursor immediately
-		// before evaluation. Reuse its phase/sequence/operation identifiers
-		// so the decision nests beside that hook transition rather than
-		// looking like a second, synthetic phase change.
+	if snapshot, ok := a.hookDeliveryPhaseSnapshot(meta, req.Payload); ok {
+		// The lifecycle emitter recorded this delivery's transition
+		// immediately before evaluation. Reuse its phase/sequence/operation
+		// identifiers so the decision nests beside that hook transition
+		// rather than looking like a second, synthetic phase change. The
+		// transition is this request's own (by its tool-use id), never the
+		// session cursor's latest, which a concurrent hook may have advanced.
 		//
 		// Start events are the important exception to the ordinary merge
 		// rule: mergeHookSessionLifecycle intentionally preserves a newly

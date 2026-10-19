@@ -50,7 +50,7 @@ func persistCanonicalCorrelationObservation(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.RecordObservation(t.Context(), audit.CorrelationObservation{
+	if err := repo.RecordObservations(t.Context(), audit.CorrelationObservation{
 		RecordID:        "test-canonical-" + semanticEventID,
 		SemanticEventID: audit.SemanticEventID(semanticEventID),
 		Signal:          audit.CorrelationSignalLogs,

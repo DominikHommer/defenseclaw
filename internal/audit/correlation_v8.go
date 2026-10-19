@@ -1338,19 +1338,25 @@ func (tx *CorrelationTx) PutObservation(ctx context.Context, observation Correla
 	return putCorrelationObservationTx(ctx, tx.tx, tx.repo.store, observation)
 }
 
-// RecordObservation durably commits metadata for an already accepted
-// occurrence. Runtime trace and metric paths call this before handing a signal
-// to a provider/exporter, preserving commit-before-export without storing the
-// trace or metric payload in audit.db.
-func (repo *CorrelationRepository) RecordObservation(
+// RecordObservations durably commits metadata for already accepted
+// occurrences, all in one transaction. Runtime trace and metric paths call
+// this before handing a signal to a provider/exporter, preserving
+// commit-before-export without storing the trace or metric payload in
+// audit.db. A metric batch passes the observations of all its records, so it
+// costs one commit, not one per metric (B-26). Either every observation
+// commits or none does.
+func (repo *CorrelationRepository) RecordObservations(
 	ctx context.Context,
-	observation CorrelationObservation,
+	observations ...CorrelationObservation,
 ) error {
 	if repo == nil || repo.store == nil {
 		return errors.New("audit: correlation repository is not initialized")
 	}
 	if ctx == nil {
 		return errors.New("audit: correlation context is required")
+	}
+	if len(observations) == 0 {
+		return nil
 	}
 	release, err := repo.store.acquireReady()
 	if err != nil {
@@ -1366,8 +1372,10 @@ func (repo *CorrelationRepository) RecordObservation(
 			return fmt.Errorf("audit: begin correlation observation write: %w", beginErr)
 		}
 		defer tx.Rollback() //nolint:errcheck
-		if putErr := putCorrelationObservationTx(ctx, tx, repo.store, observation); putErr != nil {
-			return putErr
+		for _, observation := range observations {
+			if putErr := putCorrelationObservationTx(ctx, tx, repo.store, observation); putErr != nil {
+				return putErr
+			}
 		}
 		if commitErr := tx.Commit(); commitErr != nil {
 			return fmt.Errorf("audit: commit correlation observation: %w", commitErr)
