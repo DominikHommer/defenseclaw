@@ -75,7 +75,9 @@ readonly FAIL_MODE
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
+# DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
+FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="devin"
 DEFENSECLAW_HOOK_NAME="devin-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
