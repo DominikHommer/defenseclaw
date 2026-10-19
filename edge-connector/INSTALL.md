@@ -69,7 +69,7 @@ cmake .. -DDCLAW_PROFILE=EDGE      # for edge gateways
 
 | Variable | Description |
 |---|---|
-| `DCLAW_AUDIT_KEY` | Hex-encoded 32-byte HMAC key for tamper-evident audit chain |
+| `DCLAW_AUDIT_KEY` | Hex-encoded 32-byte HMAC key for the audit chain (verified off-device; the device does not check the chain) |
 | `DCLAW_OTA_HMAC_KEY` | Nonzero, hex-encoded 32-byte secret shared with the Fleet gateway's policy signer; requires `-DDCLAW_ALLOW_HMAC_OTA=ON` at build time |
 | `DCLAW_EMERGENCY_KEY` | Separate nonzero, hex-encoded 32-byte secret shared with the Fleet gateway for emergency commands |
 | `DCLAW_BROKER_URL` | `mqtts://` URL for the MQTT broker (TLS required in production) |
@@ -151,7 +151,7 @@ iot_extensions:
 
 ### Step 2: Check Built-In Inspection and Network Rules
 
-The C engine uses a built-in content scanner and an all-profile SSRF guard. The current policy compiler rejects `content_inspection`, `ssrf_protection`, custom regex patterns, `destination_denylist`, `rate_limits`, and `escalation_mode` in `iot_extensions`; signing them would imply runtime controls that OTA cannot apply. The compiled rate limit defaults are 60 tool calls, 30 network requests, and 10 actuations per minute. Production starts in strict synchronous escalation mode; `DCLAW_STRICT_MODE=0` explicitly permits speculative execution for undecided calls if that build enables it, including when MQTT publication fails. Network capabilities require a nonempty destination and permit only allowlisted canonical public IPv4 or bracketed globally scoped IPv6 literals. Hostnames, private or link-local IPs, and numeric aliases are blocked until an enforced egress resolver/proxy exists. Replace the illustrative public IP in the allowlist with the actual approved destination for your service.
+The C engine uses a built-in content scanner and an all-profile SSRF guard. The current policy compiler rejects `content_inspection`, `ssrf_protection`, custom regex patterns, `destination_denylist`, `rate_limits`, and `escalation_mode` in `iot_extensions`; signing them would imply runtime controls that OTA cannot apply. The compiled rate limit defaults are 60 tool calls, 30 network requests, and 10 actuations per minute. Production starts in strict synchronous escalation mode; `DCLAW_STRICT_MODE=0` explicitly permits speculative execution for undecided calls if that build enables it; a call whose verdict request could not be published is still blocked. Network capabilities require a nonempty destination and permit only allowlisted canonical public IPv4 or bracketed globally scoped IPv6 literals. Hostnames, private or link-local IPs, and numeric aliases are blocked until an enforced egress resolver/proxy exists. Replace the illustrative public IP in the allowlist with the actual approved destination for your service.
 
 ### Step 3: Compile the Policy (Optional — for custom policies)
 

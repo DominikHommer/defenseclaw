@@ -69,7 +69,7 @@ The current on-device SSRF check blocks hostname destinations across build profi
 
 ## Built-in rate and escalation behavior
 
-The C runtime has fixed token-bucket limits of 60 tool calls, 30 network requests, and 10 actuations per minute. Production uses synchronous Fleet escalation by default: an undecided call stays blocked when the gateway is unreachable. `DCLAW_STRICT_MODE=0` permits speculative execution on builds that support it, including on MQTT publication failure, so leave the production default enabled. OTA policy cannot change the rates or select per-capability escalation modes. The compiler rejects `iot_extensions.rate_limits` and `iot_extensions.escalation_mode` instead of signing controls that the receiver would ignore.
+The C runtime has fixed token-bucket limits of 60 tool calls, 30 network requests, and 10 actuations per minute. Production uses synchronous Fleet escalation by default: an undecided call stays blocked when the gateway is unreachable. `DCLAW_STRICT_MODE=0` permits speculative execution on builds that support it (a call whose verdict request could not be published is still blocked), so leave the production default enabled. OTA policy cannot change the rates or select per-capability escalation modes. The compiler rejects `iot_extensions.rate_limits` and `iot_extensions.escalation_mode` instead of signing controls that the receiver would ignore.
 
 ## Content inspection
 
