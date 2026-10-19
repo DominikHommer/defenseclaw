@@ -286,6 +286,37 @@ static void test_production_requires_device_key(void) {
     printf("  PASS: production startup requires a nonzero device key\n");
 }
 
+
+extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
+                             uint32_t target_hash, uint16_t session_id);
+
+static bool all_zero(const uint8_t *b, size_t n) {
+    for (size_t i = 0; i < n; i++) if (b[i]) return false;
+    return true;
+}
+
+/* Regression: the heartbeat's audit-head HMAC (bytes 22..29) was all zero
+ * whenever the RAM audit buffer was empty, i.e. after every BLOCK. */
+static void test_heartbeat_audit_head(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    uint8_t hb[64];
+    size_t len = 0;
+
+    dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, 0x1234, 5);
+    assert(s->audit_writer.count == 0);
+    dclaw_get_health(hb, &len, sizeof(hb));
+    assert(len == 40);
+    assert(!all_zero(hb + 22, 8));
+    assert(memcmp(hb + 22, s->audit_writer.prev_hmac, 8) == 0);
+
+    dclaw_audit_write(DCLAW_ACTION_WARN, DCLAW_REASON_CAP_SEQUENCE, 0x5678, 5);
+    assert(s->audit_writer.count > 0);
+    dclaw_get_health(hb, &len, sizeof(hb));
+    assert(memcmp(hb + 22, s->audit_writer.buffer[s->audit_writer.count - 1].hmac, 8) == 0);
+    (void)all_zero;
+    printf("  PASS: heartbeat carries the audit chain head after a BLOCK\n");
+}
+
 int main(void) {
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
@@ -311,7 +342,8 @@ int main(void) {
     test_max_content_request_encodes();
     test_reconnect_backoff_bounds();
     test_production_requires_device_key();
-    printf("  ALL PASSED (10 tests)\n");
+    test_heartbeat_audit_head();
+    printf("  ALL PASSED (11 tests)\n");
 
     dclaw_shutdown();
     return 0;

@@ -193,11 +193,12 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     }
     buf[pos++] = active;
 
-    /* audit_head_hmac (8 bytes) — first 8 bytes of last entry's 16-byte HMAC */
-    memset(buf + pos, 0, 8);
-    if (s->audit_writer.count > 0) {
-        memcpy(buf + pos, s->audit_writer.buffer[s->audit_writer.count - 1].hmac, 8);
-    }
+    /* audit_head_hmac (8 bytes) — first 8 bytes of the 16-byte HMAC of the
+     * newest audit entry: the last buffered one, or, when the RAM buffer is
+     * empty (after every BLOCK and every flush), the chain head on flash. */
+    memcpy(buf + pos, s->audit_writer.count > 0
+                      ? s->audit_writer.buffer[s->audit_writer.count - 1].hmac
+                      : s->audit_writer.prev_hmac, 8);
     pos += 8;
 
     /* flags (1 byte) */
