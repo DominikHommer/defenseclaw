@@ -204,7 +204,7 @@ mode, after `guardrail fail-mode closed --connector codex --yes`:
       - Claude Code (claudecode): open
       - Codex (codex): closed
 
-  Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors that are closed above; Hermes remains fail-open.
+  Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors that are closed above.
   ! Still fail-open: claudecode (observe mode keeps hooks fail-open). Switch to action with: defenseclaw guardrail mode action --connector <name>
   Switch to open:   defenseclaw guardrail fail-mode open
 ```

@@ -5508,7 +5508,7 @@ function Get-ConnectorHookLabel {
         'copilot' { 'Copilot hooks' }
         'cursor' { 'Cursor hooks' }
         'devin' { 'Devin hooks' }
-        'hermes' { 'Hermes hooks (fail-open)' }
+        'hermes' { 'Hermes hooks' }
         'antigravity' { 'Antigravity hooks' }
         'opencode' { 'OpenCode hooks' }
     }
