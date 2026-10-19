@@ -44,6 +44,17 @@ PATCHES = {
     "patches/bwrap-owned-fds.patch": "1563032b5bfbd74b56214119f1287de3a7e63c9054898b58c6cd9603948dd621",
     "mxc-literal-argv.patch": "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d",
 }
+# Windows-only inputs remain source evidence; Linux neither applies this
+# overlay nor derives compiled unit roots from these explicitly listed files.
+WINDOWS_SOURCE = {
+    "WINDOWS.md",
+    "prepare_windows_build.py",
+    "src/windows.rs",
+    "src/windows_bootstrap.rs",
+    "src/windows_io.rs",
+    "src/windows_transport.rs",
+    "patches/mxc-owned-windows-psec.patch",
+}
 SOURCES = {
     "Cargo.toml",
     "Cargo.lock",
@@ -69,7 +80,7 @@ SOURCES = {
     "static/musl-LICENSE",
     "static/libcap-LICENSE",
     "reviewed-linux-seed.lock",
-} | set(PATCHES)
+} | set(PATCHES) | WINDOWS_SOURCE
 C_TESTS = [
     "topology_refuses_nested_bind_mounts_and_malformed_inventory",
     "locator_refuses_deleted_traversal_and_unrepresentable_names",
@@ -361,18 +372,23 @@ def reconstruct(archive, root, commit, patches, scratch):
     return {name: sha(ordinary(scratch / name, 2 << 20)) for name in sorted(expected)}
 
 
-def unit_gates(archive):
-    peer = archive.object("build-artifact/RUST-UNIT-TESTS.json")
-    require(set(peer) == {"tests", "passed", "peer_execution_performed", "contained_payload_execution", "scope"})
-    require(peer["scope"] == "protocol_fake_processes_and_owned_inert_fds_only")
+def peer_test_inventory(archive):
     expected = set()
-    for name in SOURCES:
+    for name in SOURCES - WINDOWS_SOURCE:
         if name.startswith("src/") and name.endswith(".rs"):
             raw = archive.read("build-artifact/source/" + name).decode()
             expected.update(
                 f"{PurePosixPath(name).stem}::tests::{test}"
                 for test in re.findall(r"#\[test\]\s+fn ([A-Za-z_][A-Za-z_0-9]*)\(\)", raw)
             )
+    return expected
+
+
+def unit_gates(archive):
+    peer = archive.object("build-artifact/RUST-UNIT-TESTS.json")
+    require(set(peer) == {"tests", "passed", "peer_execution_performed", "contained_payload_execution", "scope"})
+    require(peer["scope"] == "protocol_fake_processes_and_owned_inert_fds_only")
+    expected = peer_test_inventory(archive)
     require(
         len(expected) == PEER_TEST_COUNT
         and peer.get("tests") == sorted(expected)

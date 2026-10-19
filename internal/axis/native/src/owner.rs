@@ -5,13 +5,17 @@
 
 use crate::conversation::{Conversation, Phase};
 use crate::transport::{Transport, nonblocking};
+#[cfg(target_os = "windows")]
+use crate::windows_io::Pipe;
 use crate::wire::{
     Binding, Completion, Data, Failure, FailureCode, Frame, Kind, MAX_DATA, Preparation,
     ProtocolError, Result, VERSION,
 };
 use std::collections::VecDeque;
-use std::fs::File;
+#[cfg(target_os = "linux")]
+use std::fs::File as Pipe;
 use std::io::{self, Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
@@ -29,9 +33,9 @@ pub trait Process {
 }
 
 pub struct Pipes {
-    pub input: Option<File>,
-    pub output: Option<File>,
-    pub error: Option<File>,
+    pub input: Option<Pipe>,
+    pub output: Option<Pipe>,
+    pub error: Option<Pipe>,
 }
 
 pub trait Prepared {
@@ -226,6 +230,7 @@ impl Active {
         self.status.is_some() && self.pipes.output.is_none() && self.pipes.error.is_none()
     }
 
+    #[cfg(target_os = "linux")]
     fn poll_descriptors(&self, read_output: bool) -> Vec<(i32, i16)> {
         let mut descriptors = Vec::with_capacity(3);
         if read_output {
@@ -242,6 +247,27 @@ impl Active {
             }
         }
         descriptors
+    }
+
+    #[cfg(target_os = "windows")]
+    fn poll_descriptors(&self, read_output: bool) -> Vec<crate::windows_io::Handle> {
+        let mut events = Vec::with_capacity(3);
+        if read_output {
+            for pipe in [&self.pipes.output, &self.pipes.error]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(event) = pipe.wait_handle() {
+                    events.push(event);
+                }
+            }
+        }
+        if !self.input.is_empty() {
+            if let Some(event) = self.pipes.input.as_ref().and_then(Pipe::wait_handle) {
+                events.push(event);
+            }
+        }
+        events
     }
 }
 
@@ -492,10 +518,11 @@ impl<E: Engine> Owner<E> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::wire::{Decoder, Encoder, Filesystem};
+    use std::fs::File;
     use std::os::fd::OwnedFd;
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;

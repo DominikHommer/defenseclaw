@@ -40,6 +40,17 @@ PATCHES = {
     "patches/bwrap-owned-fds.patch": "1563032b5bfbd74b56214119f1287de3a7e63c9054898b58c6cd9603948dd621",
     "mxc-literal-argv.patch": "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d",
 }
+# Windows-only inputs remain source evidence; Linux neither applies this
+# overlay nor derives compiled unit roots from these explicitly listed files.
+WINDOWS_SOURCE = {
+    "WINDOWS.md",
+    "prepare_windows_build.py",
+    "src/windows.rs",
+    "src/windows_bootstrap.rs",
+    "src/windows_io.rs",
+    "src/windows_transport.rs",
+    "patches/mxc-owned-windows-psec.patch",
+}
 SOURCE = {
     "Cargo.toml",
     "README.md",
@@ -63,7 +74,7 @@ SOURCE = {
     "static/test_build_static.py",
     "static/musl-LICENSE",
     "static/libcap-LICENSE",
-} | (set(PATCHES) - {"mxc-literal-argv.patch"})
+} | (set(PATCHES) - {"mxc-literal-argv.patch"}) | WINDOWS_SOURCE
 PATH_PACKAGES = {
     ("axis-core", "0.3.5"),
     ("axis-sandbox", "0.3.5"),
@@ -90,6 +101,17 @@ def sha(path: Path) -> str:
 def admit_c_test_output(output: str) -> None:
     if output.splitlines() != [*C_TESTS, C_TEST_SUMMARY]:
         raise RuntimeError("inert C unit-test inventory/pass output differs")
+
+
+def native_test_inventory() -> set[str]:
+    expected = set()
+    for name in sorted(SOURCE - WINDOWS_SOURCE):
+        if name.startswith("src/") and name.endswith(".rs"):
+            expected |= {
+                f"{Path(name).stem}::tests::{test}"
+                for test in re.findall(r"#\[test\]\s+fn ([A-Za-z_][A-Za-z_0-9]*)\(", ordinary(ROOT / name).decode())
+            }
+    return expected
 
 
 DEPENDENCY_TESTS = {
@@ -333,13 +355,7 @@ def main() -> None:
         raise RuntimeError("unexpected Rust toolchain identity")
     (artifact / "TOOLCHAIN.txt").write_text(toolchain, encoding="utf-8")
     command(["cargo", f"+{TOOLCHAIN}", "build", "--locked", "--release", "--bins"])
-    expected_tests = set()
-    for name in sorted(SOURCE):
-        if name.startswith("src/") and name.endswith(".rs"):
-            expected_tests |= {
-                f"{Path(name).stem}::tests::{test}"
-                for test in re.findall(r"#\[test\]\s+fn ([A-Za-z_][A-Za-z_0-9]*)\(", ordinary(ROOT / name).decode())
-            }
+    expected_tests = native_test_inventory()
     listing = command(
         ["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--lib", "--", "--list"], capture=True
     )

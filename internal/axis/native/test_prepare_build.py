@@ -25,6 +25,21 @@ def lock(*, version="1.0.0", checksum="a" * 64, source=None, paths=None):
 
 
 class BuildAdmissionTests(unittest.TestCase):
+    def test_windows_evidence_is_not_an_applied_linux_patch_or_native_test_input(self):
+        self.assertTrue(build.WINDOWS_SOURCE <= build.SOURCE)
+        self.assertFalse(build.WINDOWS_SOURCE & build.PATCHES.keys())
+        names = {"src/linux.rs", "src/windows.rs", "src/windows_future.rs"}
+
+        def read(path):
+            self.assertNotEqual(path.name, "windows.rs")
+            return b"#[test]\nfn fixed() {}\n"
+
+        with patch.object(build, "SOURCE", names), patch.object(build, "ordinary", side_effect=read) as source:
+            self.assertEqual(
+                build.native_test_inventory(), {"linux::tests::fixed", "windows_future::tests::fixed"}
+            )
+            self.assertEqual(source.call_count, 2)
+
     def test_same_reviewed_registry_and_exact_path_packages_admit(self):
         result = build.admit_lock(lock(), lock())
         self.assertEqual(result["registry_packages"], 1)

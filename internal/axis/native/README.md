@@ -10,6 +10,12 @@ It accepts exactly zero CLI arguments and uses only the existing private
 authority, credentials, artifact verification, policy generation and outer
 native process custody. Correlation digests do not grant authority.
 
+The additive Windows source path uses the same protocol and Owner with native
+PSEC and owned overlapped transport. Its separate build, held-capability floor,
+external ancestor/image leases and unverified runtime gates are documented in
+[the Windows source contract](WINDOWS.md). Linux keeps its existing overlay and
+native test inventories; Windows-only inputs are retained as source data.
+
 Preparation consumes the trusted **unprivileged** factory's inherited table:
 fd3 = sealed namespace bootstrap proof (consumed before control),
 fd4 = immutable sealed static-musl Bubblewrap image, fd5 = sealed ELF payload,

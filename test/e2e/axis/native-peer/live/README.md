@@ -255,7 +255,8 @@ wrapper run `39199601189`, artifact `12162799813`, image
 (3,244,158 bytes). The distinct receipt is
 `e24ee1736320e9df281e0ab7049b2df8cbacbf27d81d31fc46e21cef09b165b7`.
 These checks do not execute the images. The first real version attempt below
-failed before native peer admission.
+failed before native peer admission; the corrected pairing later passed its
+separately authorized finite version attempt.
 
 Preparation authenticates the four fixed Actions artifact identities and full
 ZIP/provenance inventories. The fixed musl
@@ -281,7 +282,7 @@ The collection `members` count includes every visited source entry, including
 the one excluded loader; `bytes` counts only copied public file bytes, and
 `excluded_loader` records the separately revalidated object.
 
-A future pass requires exactly `2.1.292 (Claude Code)\n` (22 stdout bytes), empty
+The recipe requires exactly `2.1.292 (Claude Code)\n` (22 stdout bytes), empty
 stderr, exit0, Destroyed and independently completed cleanup. Missing exact
 version output is not evidence that no execution occurred: a started child may
 have failed before producing it. This finite canary does not qualify an agent
@@ -313,5 +314,27 @@ loader identity, held-root and cleanup checks. The portable ordinary filesystem 
 eight race-test results on Windows with zero failures/skips. The corrected
 wrapper build passed 32 inert tests across 14 roots, including the Linux
 directory regression; the new driver recorded 28 inert passes across 25 roots.
-Both artifacts passed three inert reviews. This failed attempt is preserved
-and the corrected f9/e01 pairing has not run.
+Both artifacts passed three inert reviews. The failed b910 attempt remains
+preserved.
+
+One changed [version attempt](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39200679279)
+at source `1689fe5fcbd8a79533965598246ddf49bc91a18c`, with the f9 wrapper and
+e01 driver pinned above, passed. Its one `claude-version` case observed
+Prepared, Started, the reviewed wrapper's exact 22-byte stdout assertion,
+zero stderr, Exited(0) without timeout or truncation, and Destroyed. The case
+recorded native terminal and completed native cleanup before outer cleanup.
+Owned worker and whole-wrapper namespace cleanup also completed, with all
+reported pending native and loader-resource custody counts zero.
+
+Evidence artifact `12163736916` contains 31 bounded ZIP members (134,055 bytes),
+SHA256 `caa84c0f6e5076ca3d4c441f8595a6b9879f7208689310875be2767d9ba8d628`.
+Driver, wrapper stdout, owned worker stdout and persisted case records agree.
+The collector visited 11 fixture entries including the excluded registered
+loader and retained six unchanged 32-byte public sentinels, totaling 192 bytes.
+It revalidated the loader's full FileID and exact digest after cleanup, then
+excluded its bytes. Vendor image bytes were also absent from uploaded evidence.
+The disposable runner's AppArmor setting was saved at 1, changed to 0 and
+restored to 1. No unchanged retry occurred. This proves this fixed offline
+`--version` path on the reviewed Linux host floor. Agent sessions, arbitrary
+dlopen, all-connector hook enforcement and the production launch gate remain
+separate qualification requirements; certification fields remain false.

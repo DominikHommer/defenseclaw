@@ -283,10 +283,37 @@ class VerifierTests(unittest.TestCase):
             verify.SOURCES, prepare_build.SOURCE | {"Cargo.lock", "reviewed-linux-seed.lock", "mxc-literal-argv.patch"}
         )
         self.assertEqual(verify.PATCHES, prepare_build.PATCHES)
+        self.assertEqual(verify.WINDOWS_SOURCE, prepare_build.WINDOWS_SOURCE)
+        self.assertEqual(
+            verify.WINDOWS_SOURCE,
+            {
+                "WINDOWS.md",
+                "prepare_windows_build.py",
+                "src/windows.rs",
+                "src/windows_bootstrap.rs",
+                "src/windows_io.rs",
+                "src/windows_transport.rs",
+                "patches/mxc-owned-windows-psec.patch",
+            },
+        )
+        self.assertFalse(verify.WINDOWS_SOURCE & verify.PATCHES.keys())
         self.assertEqual(
             {name: spec["tests"] for name, spec in verify.DEPENDENCIES.items()},
             {name: sorted(spec["tests"]) for name, spec in prepare_build.DEPENDENCY_TESTS.items()},
         )
+
+    def test_linux_test_evidence_excludes_only_the_reviewed_windows_source_inventory(self):
+        names = {"src/linux.rs", "src/windows.rs", "src/windows_future.rs"}
+
+        def read(name):
+            self.assertNotEqual(name, "build-artifact/source/src/windows.rs")
+            return b"#[test]\nfn fixed() {}\n"
+
+        archive = SimpleNamespace(read=read)
+        with patch.object(verify, "SOURCES", names):
+            self.assertEqual(
+                verify.peer_test_inventory(archive), {"linux::tests::fixed", "windows_future::tests::fixed"}
+            )
 
     def test_existing_staging_is_refused_before_metadata_and_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
