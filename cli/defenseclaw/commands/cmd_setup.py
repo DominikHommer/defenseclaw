@@ -5556,8 +5556,20 @@ def _connector_contract_upgrade_guidance(
                     "then rerun setup."
                 )
     requirement_parts: list[str] = []
-    if contract.exact_agent_versions:
-        requirement_parts.append("one of " + ", ".join(contract.exact_agent_versions))
+    pins = contract.exact_agent_versions
+    if normalized_version:
+        # Name only the pins of the installed version's scheme: a release
+        # such as Hermes 0.17.0 is never one of its release-date pins.
+        def date_style(value: str) -> bool:
+            major = value.split(".", 1)[0]
+            return major.isdigit() and int(major) >= 1000
+
+        installed_date_style = date_style(normalized_version)
+        pins = tuple(
+            pin for pin in pins if date_style(normalize_agent_version(pin)) == installed_date_style
+        )
+    if pins:
+        requirement_parts.append("one of " + ", ".join(pins))
     range_requirement = ""
     if contract.min_agent_version and contract.max_agent_version:
         range_requirement = f">={contract.min_agent_version} and <{contract.max_agent_version}"

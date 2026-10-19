@@ -488,7 +488,7 @@ func TestStandaloneVerifyFollowsModeSwitchesInOneHome(t *testing.T) {
 	// An agent on an older hook contract installs in observe mode only, and
 	// verifies right after its install too.
 	for _, c := range []struct{ name, version, config string }{
-		{"hermes", "0.9.0", ".hermes/config.yaml"}, {"copilot", "1.0.3", ""},
+		{"hermes", "0.21.5", ".hermes/config.yaml"}, {"copilot", "1.0.3", ""},
 		{"devin", "2026.1.2", ".config/devin/config.json"}, {"amp", "0.0.170", ""}, {"opencode", "1.2.0", ""},
 	} {
 		home := standaloneOpenHandsHome(t)
