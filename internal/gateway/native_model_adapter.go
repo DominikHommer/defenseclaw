@@ -72,6 +72,14 @@ type nativeModelAdapter struct {
 	slots   chan struct{}
 	close   sync.Once
 	drained chan struct{}
+
+	// commitMu guards admission to downstream output calls. It is never held
+	// across authority checks, response writes, flushing or request completion.
+	commitMu       sync.Mutex
+	commitSealed   bool
+	commitActive   int
+	commitComplete bool
+	commitDone     chan struct{}
 }
 
 type nativeModelExchangeKey struct{}
@@ -127,7 +135,8 @@ func newNativeModelAdapter(owner context.Context, proxy *GuardrailProxy, store *
 	grant.Binding = matched // store returns an independent copy; caller slices cannot change the grant
 	ctx, cancel := context.WithCancel(owner)
 	adapter := &nativeModelAdapter{proxy: proxy, store: store, grant: grant,
-		ctx: ctx, cancel: cancel, slots: make(chan struct{}, nativeModelInFlight), drained: make(chan struct{})}
+		ctx: ctx, cancel: cancel, slots: make(chan struct{}, nativeModelInFlight),
+		drained: make(chan struct{}), commitDone: make(chan struct{})}
 	client := netguard.SafeHTTPClient(5 * time.Minute)
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
@@ -246,6 +255,9 @@ func (adapter *nativeModelAdapter) ServeHTTP(w http.ResponseWriter, incoming *ht
 		http.Error(w, "model unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	// This private route bypasses the shared listener's threshold middleware.
+	// Only the immutable authenticated host binding selects its connector scope.
+	ctx = withThresholdConnector(ctx, adapter.grant.Binding.Connector)
 	ctx = context.WithValue(ctx, nativeModelExchangeKey{}, &nativeModelExchange{adapter: adapter,
 		binding: adapter.grant.Binding, inspection: inspection, cancel: cancel})
 	request := &http.Request{Method: http.MethodPost, URL: &url.URL{Path: "/v1/messages"},
@@ -503,18 +515,43 @@ func nativeModelJSONValue(decoder *json.Decoder, depth int) bool {
 	}
 }
 
-// Close seals admission, cancels active model requests and drains them. The
-// enclosing native owner revokes this same sandboxauth binding and releases
-// the transport after all holders (including hook ingress) have closed.
-func (adapter *nativeModelAdapter) Close(ctx context.Context) error {
+// SealAndQuiesce permanently stops downstream commits, cancels requests, and
+// waits only for response-writer calls that entered before the seal. A future
+// publication owner must call it before revoking the shared binding. A timeout
+// leaves the adapter sealed and retained for another bounded cleanup attempt.
+// This does not synchronize independent FileStore writers that bypass that owner.
+func (adapter *nativeModelAdapter) SealAndQuiesce(ctx context.Context) error {
 	if adapter == nil || ctx == nil {
 		return errNativeModelAdapter
 	}
+	adapter.mu.Lock()
+	adapter.closing = true
+	adapter.mu.Unlock()
+	adapter.commitMu.Lock()
+	if !adapter.commitSealed {
+		adapter.commitSealed = true
+		if adapter.commitActive == 0 {
+			adapter.commitComplete = true
+			close(adapter.commitDone)
+		}
+	}
+	adapter.commitMu.Unlock()
+	adapter.cancel()
+	select {
+	case <-adapter.commitDone:
+		return nil
+	case <-ctx.Done():
+		return errors.Join(errNativeModelAdapter, ctx.Err())
+	}
+}
+
+// Close quiesces output before draining whole requests and releasing the idle
+// transport. It leaves the owner sealed on timeout so cleanup can be retried.
+func (adapter *nativeModelAdapter) Close(ctx context.Context) error {
+	if err := adapter.SealAndQuiesce(ctx); err != nil {
+		return err
+	}
 	adapter.close.Do(func() {
-		adapter.mu.Lock()
-		adapter.closing = true
-		adapter.mu.Unlock()
-		adapter.cancel()
 		adapter.client.CloseIdleConnections()
 		go func() { adapter.active.Wait(); close(adapter.drained) }()
 	})
@@ -524,6 +561,28 @@ func (adapter *nativeModelAdapter) Close(ctx context.Context) error {
 	case <-ctx.Done():
 		return errors.Join(errNativeModelAdapter, ctx.Err())
 	}
+}
+
+func (writer *nativeModelWriter) beginCommit() {
+	adapter := writer.adapter
+	adapter.commitMu.Lock()
+	if adapter.commitSealed {
+		adapter.commitMu.Unlock()
+		writer.cancel()
+		panic(http.ErrAbortHandler)
+	}
+	adapter.commitActive++
+	adapter.commitMu.Unlock()
+}
+
+func (adapter *nativeModelAdapter) endCommit() {
+	adapter.commitMu.Lock()
+	adapter.commitActive--
+	if adapter.commitSealed && adapter.commitActive == 0 && !adapter.commitComplete {
+		adapter.commitComplete = true
+		close(adapter.commitDone)
+	}
+	adapter.commitMu.Unlock()
 }
 
 type nativeModelWriter struct {
@@ -554,6 +613,8 @@ func (writer *nativeModelWriter) WriteHeader(status int) {
 	if writer.wrote {
 		return
 	}
+	writer.beginCommit()
+	defer writer.adapter.endCommit()
 	writer.wrote = true
 	if value := writer.header.Get("Content-Type"); len(value) <= 128 &&
 		(strings.HasPrefix(value, "application/json") || strings.HasPrefix(value, "text/event-stream")) {
@@ -578,6 +639,8 @@ func (writer *nativeModelWriter) Write(data []byte) (int, error) {
 		writer.WriteHeader(http.StatusOK)
 	}
 	writer.ensureCurrent()
+	writer.beginCommit()
+	defer writer.adapter.endCommit()
 	n, err := writer.target.Write(data)
 	writer.bytes += n
 	return n, err
@@ -590,6 +653,8 @@ func (writer *nativeModelWriter) Flush() {
 	}
 	writer.ensureCurrent()
 	if flush, ok := writer.target.(http.Flusher); ok {
+		writer.beginCommit()
+		defer writer.adapter.endCommit()
 		flush.Flush()
 	}
 }

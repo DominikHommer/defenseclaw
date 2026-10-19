@@ -205,6 +205,10 @@ jobs:
             TestNativeModelAdapterRequiresSelectedAnthropicAndPinnedModel
             TestNativeModelAdapterRevocationBeforeBufferedOutput
             TestNativeModelWriterAbortAfterRevocation
+            TestNativeModelAdapterSealQuiescesCurrentWrite
+            TestNativeModelAdapterQuiesceDeadlineRetainsSeal
+            TestNativeModelAdapterCommitPanicReleasesClaim
+            TestNativeModelAdapterQuiesceDoesNotWaitForInspection
             TestHeartbeatBypass_RawTextGate
             TestSessionStartupBypass_RawTextGate
           )

@@ -104,9 +104,29 @@ rules:
 				{Profile: "owner", Match: config.ProfileMatch{Users: []string{"1001"}}},
 				{Profile: "strict", Match: config.ProfileMatch{Connectors: []string{"claudecode"}}},
 			}
-			NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+			api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+			profiles := api.guardrailProfileSet()
+			if profiles == nil {
+				t.Fatal("native profile fixture did not compile its profile set")
+			}
+			generation := &Generation{N: 1, Config: cfg, Profiles: profiles,
+				Thresholds: buildThresholdTable(cfg, profiles)}
 			adapter, _, _, _ := nativeModelFixture(t)
+			adapter.proxy.generationSource = func() *Generation { return generation }
 			adapter.proxy.inspector = NewGuardrailInspector("local", nil, nil)
+			// A real generation must resolve the bound connector's HIGH level,
+			// while an omitted scope remains at the profile's global CRITICAL.
+			profileCtx := context.WithValue(context.Background(), nativeModelExchangeKey{},
+				&nativeModelExchange{adapter: adapter, binding: adapter.grant.Binding})
+			profileCtx = withPinnedGeneration(profileCtx, generation)
+			profileCtx = withGuardrailProfile(profileCtx, profiles, adapter.grant.Binding.Connector)
+			missingScope := requestThresholds(profileCtx)
+			boundScope := requestThresholds(withThresholdConnector(profileCtx, adapter.grant.Binding.Connector))
+			if thresholdConnectorFrom(profileCtx) != "" ||
+				missingScope.Block != guardrailSeverityRank("CRITICAL") ||
+				boundScope.Block != guardrailSeverityRank("HIGH") {
+				t.Fatal("profile fixture did not distinguish missing and bound threshold connector scopes")
+			}
 			called := 0
 			nativeModelSetTransport(t, adapter, nativeModelRoundTrip(func(*http.Request) (*http.Response, error) {
 				called++
