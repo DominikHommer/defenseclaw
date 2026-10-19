@@ -263,6 +263,12 @@ class _StdioUpstream:
         self._command = command
         self._proc: asyncio.subprocess.Process | None = None
         self._read_lock = asyncio.Lock()
+        self._stderr_task: asyncio.Task | None = None
+
+    # Upper bound on unrelated frames (notifications, stray replies) skipped
+    # while waiting for one reply, so a misbehaving upstream cannot spin us.
+    _MAX_SKIPPED_FRAMES = 10000
+    _STDOUT_LIMIT = 4 * 1024 * 1024
 
     async def start(self) -> None:
         self._proc = await asyncio.create_subprocess_exec(
@@ -270,19 +276,69 @@ class _StdioUpstream:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=self._STDOUT_LIMIT,
         )
+        # stderr must be read continuously: once the pipe buffer fills the
+        # upstream blocks on write and never answers.
+        self._stderr_task = asyncio.ensure_future(self._drain_stderr())
         logger.info("Upstream started (pid=%s)", self._proc.pid)
 
+    async def _drain_stderr(self) -> None:
+        """Discard upstream stderr; its contents may hold agent data."""
+        assert self._proc and self._proc.stderr
+        total = 0
+        try:
+            while True:
+                chunk = await self._proc.stderr.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+        except Exception:
+            pass
+        logger.debug("Upstream stderr closed (%d bytes discarded)", total)
+
+    async def _reject_server_request(self, frame: dict) -> None:
+        """Answer an upstream-initiated request so the upstream does not wait."""
+        assert self._proc and self._proc.stdin
+        self._proc.stdin.write(_encode(_make_error(
+            frame.get("id"), -32601, "Method not supported by proxy")))
+        await self._proc.stdin.drain()
+
     async def send(self, msg: dict) -> dict:
-        """Send a JSON-RPC message and wait for the response."""
+        """Send a JSON-RPC request and wait for the reply with the same id.
+
+        Upstream notifications, upstream-initiated requests and replies
+        carrying other ids are skipped, so they cannot be returned as the
+        answer to this request or shift later replies.
+        """
         assert self._proc and self._proc.stdin and self._proc.stdout
+        want = msg.get("id")
         async with self._read_lock:
             self._proc.stdin.write(_encode(msg))
             await self._proc.stdin.drain()
-            line = await self._proc.stdout.readline()
-            if not line:
-                raise ConnectionError("Upstream process closed stdout")
-            return json.loads(line)
+            for _ in range(self._MAX_SKIPPED_FRAMES):
+                line = await self._proc.stdout.readline()
+                if not line:
+                    raise ConnectionError("Upstream process closed stdout")
+                try:
+                    frame = json.loads(line)
+                except (ValueError, RecursionError):
+                    logger.warning("Skipping non-JSON upstream frame (%d bytes)", len(line))
+                    continue
+                if not isinstance(frame, dict):
+                    logger.warning("Skipping non-object upstream frame")
+                    continue
+                if "method" in frame:
+                    # Notification (no id) or server->client request.
+                    if "id" in frame and frame.get("id") is not None:
+                        await self._reject_server_request(frame)
+                    continue
+                rid = frame.get("id")
+                if (type(rid) is type(want) and rid == want
+                        and ("result" in frame or "error" in frame)):
+                    return frame
+                logger.warning("Skipping upstream reply for another request id")
+            raise ConnectionError("Upstream sent too many unrelated frames")
 
     async def stop(self) -> None:
         if self._proc and self._proc.returncode is None:
@@ -292,6 +348,9 @@ class _StdioUpstream:
             except asyncio.TimeoutError:
                 self._proc.kill()
             logger.info("Upstream stopped")
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            self._stderr_task = None
 
 
 class _HttpUpstream:
