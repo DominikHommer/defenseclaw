@@ -181,7 +181,13 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
-{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+{{if .Sandbox}}# Every DefenseClaw inspect verdict names its action: an empty or
+# action-less reply from the sandbox ingress is not a verdict.
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+  fail_response "failed to parse action from response"
+}
+[ -n "$ACTION" ] || fail_response "missing action in ingress response"
+{{else}}{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 {{else}}# Only a recognized string action is a usable gateway verdict.
@@ -192,7 +198,7 @@ case "$ACTION" in
   allow|alert|block|confirm) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
-{{end}}if [ "$ACTION" = "block" ]; then
+{{end}}{{end}}if [ "$ACTION" = "block" ]; then
   REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "blocked by DefenseClaw"' 2>/dev/null)
   echo "DefenseClaw: $REASON" >&2
   exit 2

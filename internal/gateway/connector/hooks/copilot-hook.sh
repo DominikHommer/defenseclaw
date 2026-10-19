@@ -62,7 +62,7 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
     case "${2:-}" in
       preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
       permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
-      *) exit 2 ;;
+      *) {{$failure}} ;;
     esac
     exit 0
   fi
