@@ -29,6 +29,11 @@ target_link_libraries(test_input_validation PRIVATE dclaw_core)
 add_test(NAME input_validation COMMAND test_input_validation)
 list(APPEND DCLAW_TEST_TARGETS test_input_validation)
 
+add_executable(test_hal_linux test_hal_linux.c)
+target_link_libraries(test_hal_linux PRIVATE dclaw_core)
+add_test(NAME hal_linux COMMAND test_hal_linux)
+list(APPEND DCLAW_TEST_TARGETS test_hal_linux)
+
 add_executable(test_policy_table test_policy_table.c)
 target_link_libraries(test_policy_table PRIVATE dclaw_core)
 add_test(NAME policy_table COMMAND test_policy_table)

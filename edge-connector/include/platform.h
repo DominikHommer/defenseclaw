@@ -44,6 +44,8 @@ typedef struct {
     uint64_t erases;
 } hal_flash_stats_t;
 void hal_flash_get_stats(hal_flash_stats_t *out);
+/* True when path is inside a directory production may use for flash. */
+bool hal_flash_path_is_provisioned(const char *path);
 
 /* Flash partition offsets (configured per platform) */
 #define HAL_FLASH_POLICY_A_OFFSET   0x00000

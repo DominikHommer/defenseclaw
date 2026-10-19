@@ -32,6 +32,21 @@
 
 #define FLASH_TOTAL_SIZE   (16 * 1024)
 
+/* Production flash files must live in a provisioned state directory. Each
+ * prefix includes its trailing '/', so "/var/lib/defenseclawX/..." does
+ * not match "/var/lib/defenseclaw/". */
+bool hal_flash_path_is_provisioned(const char *path) {
+    static const char *const prefixes[] = {
+        "/var/lib/defenseclaw/",
+        "/etc/defenseclaw/",
+    };
+    if (!path) return false;
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        if (strncmp(path, prefixes[i], strlen(prefixes[i])) == 0) return true;
+    }
+    return false;
+}
+
 static const char *get_flash_path(void) {
     const char *env = getenv("DCLAW_FLASH_PATH");
     if (env) {
@@ -41,7 +56,7 @@ static const char *get_flash_path(void) {
             return NULL;
         }
 #if !DCLAW_DEV_MODE
-        if (strncmp(env, "/var/lib/defenseclaw/", 20) != 0 && strncmp(env, "/etc/defenseclaw/", 17) != 0) {
+        if (!hal_flash_path_is_provisioned(env)) {
             fprintf(stderr, "[DCLAW] ERROR: DCLAW_FLASH_PATH must be under /var/lib/defenseclaw/ or /etc/defenseclaw/ in production\n");
             return NULL;
         }
