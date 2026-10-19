@@ -303,6 +303,14 @@ its machine-policy enforcement. If its trusted state is invalid, it may report
 | `enterprise_managed_overloaded` | all | HTTP 429: the gateway already holds as many hook requests as it can answer in time, across all accounts (16 per processor, at least 32), so it refuses the next one at once instead of letting every hook wait past its deadline. The hook treats it as a gateway failure, and a managed hook always fails closed, so the call is blocked whatever `hook_fail_mode` says. **Fix:** Retry; the places free up within seconds. If it repeats, many accounts are sending hooks at once (a login storm, a scripted run) and the host needs more processors for its peak |
 | `HOOK-PAYLOAD-TOO-LARGE` (rule ID) | all | The hook refused a prompt or tool call larger than its body cap (1 MiB; `DEFENSECLAW_HOOK_MAX_BODY` can only lower it) before it reached the gateway. The user sees "DefenseClaw blocked this prompt: it is too large for DefenseClaw to inspect. Make it smaller and try again." The audit has a `hook_decision` block with this rule ID, the connector, the user and the session, and none of the content. **Fix:** None is needed on the host; the user sends less at once |
 
+### Known limits for managed hooks
+
+A managed Claude Code or Codex shell command is blocked if it has more write
+targets than the hook can report: more than 512 targets or more than 64 KiB of
+target paths. The refusal says DefenseClaw blocked the action under your
+organization's policy and may name "SSH authorized keys mutation." Split the
+command into smaller calls. Per-user mode is not affected.
+
 ## Symptoms
 
 Sandbox symptoms (`openshell_prerequisite_missing`, `sandbox_subject_changed`, a
