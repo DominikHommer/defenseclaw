@@ -63,6 +63,107 @@ $cases = @(
 
 $failures = [Collections.Generic.List[string]]::new()
 try {
+    # Canonical-descriptor check of a DACL that lost SE_DACL_PROTECTED: the lost
+    # flag may continue outside the strict pin, the owner and every ACE are
+    # still judged. The path does not exist, so the icacls repair attempt and
+    # its native re-read fail and the descriptor under test is what is judged.
+    $user = 'S-1-5-21-1-2-3-1001'
+    $rawCases = @(
+        @{ name = 'protected canonical'; protected = $true; owner = ''; ace = $null; strict = ''; expect = '' }
+        @{ name = 'protected with an extra explicit ACE'; protected = $true; owner = ''; ace = @{ flags = 'None'; mask = 0x1200A9; sid = $user }; strict = ''; expect = 'managed path does not have the exact canonical DACL' }
+        @{ name = 'lost protected flag only'; protected = $false; owner = ''; ace = $null; strict = ''; expect = '' }
+        @{ name = 'lost protected flag, strict pin'; protected = $false; owner = ''; ace = $null; strict = '1'; expect = 'managed DACL is not protected after exact ACL replacement' }
+        @{ name = 'lost protected flag and a user owner'; protected = $false; owner = $user; ace = $null; strict = ''; expect = 'managed path owner/group do not match the exact canonical descriptor after ACL replacement' }
+        @{ name = 'lost protected flag and an explicit user write ACE'; protected = $false; owner = ''; ace = @{ flags = 'None'; mask = 0x116; sid = $user }; strict = ''; expect = 'managed path does not have the exact canonical DACL' }
+        @{ name = 'lost protected flag and an inherited Users write ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x116; sid = 'S-1-5-32-545' }; strict = ''; expect = 'untrusted principal S-1-5-32-545 has inherited write-like access to managed path' }
+        @{ name = 'lost protected flag and an inherited GENERIC_WRITE ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x40000000; sid = $user }; strict = ''; expect = "untrusted principal $user has inherited write-like access to managed path" }
+        @{ name = 'lost protected flag and an inherited Users read ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x1200A9; sid = 'S-1-5-32-545' }; strict = ''; expect = '' }
+        @{ name = 'lost protected flag and an inherited SYSTEM ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x1F01FF; sid = 'S-1-5-18' }; strict = ''; expect = '' }
+        @{ name = 'lost protected flag and an inherited CREATOR OWNER template'; protected = $false; owner = ''; ace = @{ flags = 'Inherited, InheritOnly, ObjectInherit'; mask = 0x10000000; sid = 'S-1-3-0' }; strict = ''; expect = '' }
+    )
+    foreach ($case in $rawCases) {
+        [Environment]::SetEnvironmentVariable($strictEnv, [string]$case['strict'], 'Process')
+        $observed = & $module {
+            param($Case, $Missing)
+            $expected = New-DefenseClawCanonicalPathAcl -IsDirectory:$false -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+            $raw = [Security.AccessControl.RawSecurityDescriptor]::new($expected.GetSecurityDescriptorBinaryForm(), 0)
+            if (-not [bool]$Case['protected']) {
+                $raw.SetFlags([Security.AccessControl.ControlFlags](
+                    [int]$raw.ControlFlags -band (-bnot [int][Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)
+                ))
+            }
+            if (-not [string]::IsNullOrEmpty([string]$Case['owner'])) {
+                $raw.Owner = [Security.Principal.SecurityIdentifier]::new([string]$Case['owner'])
+            }
+            $ace = $Case['ace']
+            if ($null -ne $ace) {
+                $raw.DiscretionaryAcl.InsertAce($raw.DiscretionaryAcl.Count, [Security.AccessControl.CommonAce]::new(
+                    [Security.AccessControl.AceFlags]([string]$ace['flags']),
+                    [Security.AccessControl.AceQualifier]::AccessAllowed,
+                    [int]$ace['mask'],
+                    [Security.Principal.SecurityIdentifier]::new([string]$ace['sid']),
+                    $false,
+                    $null
+                ))
+            }
+            try {
+                Assert-DefenseClawCanonicalRawPathAcl -Path $Missing -Actual $raw -Expected $expected -WarningAction SilentlyContinue
+                return ''
+            }
+            catch {
+                return [string]$_.Exception.Message
+            }
+        } $case ($fixture + '.missing')
+        $want = [string]$case['expect']
+        if (($want -eq '' -and $observed -ne '') -or
+            ($want -ne '' -and -not ([string]$observed).StartsWith($want, [StringComparison]::Ordinal))) {
+            $failures.Add("raw: $($case['name']): want '$want', got '$observed'")
+        }
+    }
+
+    # A descriptor that cannot be read is not "no drift observed": only a path
+    # that is gone may continue, and only outside the strict pin.
+    if (-not ('DcPathAclSmokeNativeSecurity' -as [type])) {
+        Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+public static class DcPathAclSmokeNativeSecurity
+{
+    public static int Code;
+    public static byte[] GetFileSecurityDescriptor(string path)
+    {
+        throw new System.ComponentModel.Win32Exception(Code, "open file for raw security query failed: " + path);
+    }
+}
+'@
+    }
+    $readCases = @(
+        @{ name = 'access denied'; code = 5; strict = ''; expect = 'refuse' }
+        @{ name = 'path gone'; code = 2; strict = ''; expect = '' }
+        @{ name = 'folder gone'; code = 3; strict = ''; expect = '' }
+        @{ name = 'path gone, strict pin'; code = 2; strict = '1'; expect = 'refuse' }
+    )
+    foreach ($case in $readCases) {
+        [Environment]::SetEnvironmentVariable($strictEnv, [string]$case['strict'], 'Process')
+        [DcPathAclSmokeNativeSecurity]::Code = [int]$case['code']
+        $observed = & $module {
+            param($Fixture)
+            function script:Initialize-DefenseClawNativeSecurity { return [DcPathAclSmokeNativeSecurity] }
+            $expected = New-DefenseClawCanonicalPathAcl -IsDirectory:$false -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+            try {
+                Assert-DefenseClawCanonicalPathAcl -Path $Fixture -Expected $expected -WarningAction SilentlyContinue
+                return ''
+            }
+            catch {
+                return 'refuse'
+            }
+            finally {
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:\Initialize-DefenseClawNativeSecurity -ErrorAction SilentlyContinue
+            }
+        } $fixture
+        if ([string]$observed -cne [string]$case['expect']) {
+            $failures.Add("read: $($case['name']): want '$($case['expect'])', got '$observed'")
+        }
+    }
+
     foreach ($case in $cases) {
         [Environment]::SetEnvironmentVariable($strictEnv, [string]$case.strict, 'Process')
         $heal = -not $case.ContainsKey('heal') -or [bool]$case.heal
@@ -121,4 +222,4 @@ finally {
 if ($failures.Count -gt 0) {
     throw ("enterprise-path-acl-verdict-smoke: FAIL`n" + ($failures -join "`n"))
 }
-Microsoft.PowerShell.Utility\Write-Host "enterprise-path-acl-verdict-smoke: PASS ($($cases.Count) cases)"
+Microsoft.PowerShell.Utility\Write-Host "enterprise-path-acl-verdict-smoke: PASS ($($cases.Count + $rawCases.Count + $readCases.Count) cases)"
