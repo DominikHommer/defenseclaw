@@ -48,15 +48,20 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
 	const block, allow = `{"action":"block"`, `{"action":"allow"`
+	body := func(t *testing.T, command string) []byte {
+		t.Helper()
+		return mustJSON(t, map[string]any{"session_id": "s", "hook_event_name": "PreToolUse", "cwd": project,
+			"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_fp",
+			"tool_input": map[string]any{"command": command, "description": "Run test fixture command"}})
+	}
+	var send func(t *testing.T, connector string, payload []byte, header string) string
 	post := func(t *testing.T, connector, command string, edit func(map[string]string)) string {
 		t.Helper()
 		if err := os.Chmod(homes, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		body := mustJSON(t, map[string]any{"session_id": "s", "hook_event_name": "PreToolUse", "cwd": project,
-			"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_fp",
-			"tool_input": map[string]any{"command": command, "description": "Run test fixture command"}})
-		header := hookpaths.Resolve(body)
+		payload := body(t, command)
+		header := hookpaths.Resolve(payload)
 		if edit != nil {
 			targets, ok := hookpaths.Decode(header)
 			if !ok {
@@ -65,6 +70,14 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 			edit(targets)
 			header = encodeTargets(t, targets)
 		}
+		return send(t, connector, payload, header)
+	}
+	postHeader := func(t *testing.T, connector, command, header string) string {
+		t.Helper()
+		return send(t, connector, body(t, command), header)
+	}
+	send = func(t *testing.T, connector string, payload []byte, header string) string {
+		t.Helper()
 		// The managed gateway's view: ProtectHome hides the user's home.
 		if err := os.Chmod(homes, 0); err != nil {
 			t.Fatal(err)
@@ -73,7 +86,7 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 		cfg.Guardrail.Mode = "action"
 		cfg.Guardrail.Connector = connector
 		api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(body)))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
 		req.Header.Set(hookpaths.Header, header)
 		if connector == "codex" {
 			setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
@@ -127,6 +140,29 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 				delete(targets, hookpaths.OpaqueScopeFactPrefix+report)
 			}); !strings.HasPrefix(got, block) {
 				t.Errorf("missing opaque-scope fact = %.300s, want block", got)
+			}
+			if got := post(t, connector, allowed[0], func(targets map[string]string) {
+				targets[hookpaths.OpaqueScopeFactPrefix+report] = "invalid"
+			}); !strings.HasPrefix(got, block) {
+				t.Errorf("malformed opaque-scope fact = %.300s, want block", got)
+			}
+			// Incomplete client evidence carries the cwd but no operand: the
+			// gateway cannot place or resolve the write, so it fails closed.
+			if got := post(t, connector, "echo hi > report.txt", func(targets map[string]string) {
+				for key := range targets {
+					delete(targets, key)
+				}
+				targets[hookpaths.CWDKey] = project
+				targets[hookpaths.TruncatedKey] = "1"
+			}); !strings.HasPrefix(got, block) {
+				t.Errorf("incomplete evidence = %.300s, want block", got)
+			}
+			// A header that does not decode at all is no better than one
+			// without the fact, also for a write after no extraction.
+			for _, command := range []string{allowed[0], "echo hi > report.txt"} {
+				if got := postHeader(t, connector, command, "not-base64!"); !strings.HasPrefix(got, block) {
+					t.Errorf("undecodable header %s = %.300s, want block", command, got)
+				}
 			}
 			// A fact cannot clear a name inside the extraction scope.
 			if got := post(t, connector, "tar -C unpack -xf keys.tar && echo k >> unpack/n1.txt", func(targets map[string]string) {

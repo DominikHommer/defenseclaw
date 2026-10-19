@@ -808,7 +808,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	var safeRedirects []hookpaths.RedirectOccurrence
 	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
 		if !filepath.IsAbs(target) {
-			return false
+			// No directory places this operand: the gateway cannot see the
+			// caller's cwd and the client evidence that would carry it is
+			// incomplete or was rejected as malformed. Such evidence never
+			// proves a write ordinary, so a gateway that cannot resolve the
+			// operand itself fails closed, as for an absolute operand the
+			// bounded map omits.
+			return truncated && cannotResolveLocally
 		}
 		target = hookpaths.OperandPath(target, clientCWD)
 		// Only the event cwd can interpret the process-dependent alias.
