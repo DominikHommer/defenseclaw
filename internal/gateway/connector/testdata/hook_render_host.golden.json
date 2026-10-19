@@ -1206,8 +1206,8 @@
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 10382,
-      "sha256": "2bdc5cf507d199bf3233d1fd79d257784e333d975da076c6ec2686d2e17314f9"
+      "size": 10567,
+      "sha256": "29280378036a7073b9c2853486f14238350bed96e6ad25d586c753548eb7b953"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1253,8 +1253,8 @@
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 10290,
-      "sha256": "bb5bd641aeade42b986db91b1f1625e82ac99cdf0c2da08e6722bb71b8740c28"
+      "size": 10475,
+      "sha256": "719329bc69a93a5213ee67cf2d5e422957021def0c92c2776a69bb86b20ed2ac"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1424,8 +1424,8 @@
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 10198,
-      "sha256": "fc01ad74bb1f1aad1fcdc9911cfc7b0933784ba7d71b3cd5066563570be0c3d3"
+      "size": 10383,
+      "sha256": "fd88068ce938eaf00e82132a697b7c1fb896766e4d7cd37236ee5f930f73fb1d"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1511,8 +1511,8 @@
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 10198,
-      "sha256": "f1132e77229ebbd47cfdee5a7c15d5b9ebea2700fe66f08dce38dc78230dafcc"
+      "size": 10383,
+      "sha256": "6acc7552292052dea9eeda00ba52940ab4cb651b117ba6af7aa35edbd741fbf7"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
