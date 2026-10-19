@@ -3,11 +3,12 @@
 
 # Private native process custody
 
-This disconnected Linux x86_64 source creates the trusted private Rust peer,
+This disconnected Linux and Windows x86_64 source owns a trusted private peer,
 not a customer sandbox. No production caller, artifact registry, broker,
 provider capability claim or configuration activation is supplied here.
-Ordinary `SealImage` and process `Start` refuse on other hosts. Windows has the
-separate held-root image constructor below; it supplies no process transport.
+Ordinary `SealImage` remains Linux-only. Windows requires the separate held-root
+image constructor below. `Start` refuses on other hosts. The matching Windows
+Rust peer/engine is unfinished, so its Go transport cannot yet run a session.
 
 Windows-only `SealImageIn` copies an already-open admitted artifact into one
 fresh protected directory beneath an explicit held private NTFS root. It retains
@@ -28,6 +29,42 @@ unexpected children. A context bounds copy iterations, not synchronous
 filesystem calls; a separately bounded owner must supply a total deadline.
 The native image/view tests use copies as inert data and never execute a PE,
 create a child, or qualify Windows peer/PSEC transport or a customer runtime.
+
+Windows `Start` uses the existing `Session` and protocol owner. Its cleanup owner
+exists before any allocation, including partial pipe, image, grant and Job
+setup. It creates only the admitted trusted peer with argv0, an explicit empty
+environment and no console. A single kill-on-close Job and the explicit inherited
+handle list are assigned atomically at suspended creation. Membership and the
+class44 comparison of the actual process image to the held peer must pass before
+resume. No PID, process-name lookup, NULL application or pathname fallback grants
+identity. Original images and grants remain caller-owned.
+
+The private command pipe first transfers a fixed capability prefix: 56-byte
+header, then at most 514 forty-byte records (20,616 bytes total). It contains
+version1, read/write counts, preparation digest, payload/CWD/read/write roles,
+inherited handles and full volume/FileID values; reserved bytes are zero. It
+contains no paths, argv, environment or credentials. The Windows peer must
+validate each actual object and correlate the next Prepare digest before the
+existing LaunchGate-controlled protocol can launch a workload.
+
+Both child pipe endpoints are explicitly overlapped; the ordinary private pipe
+constructor keeps its existing behavior. The new construction owner retains raw
+server/client/event handles and pinned OVERLAPPED storage on partial failure.
+Cancellation polls terminal completion without a blocking native wait; a timeout
+retains storage for retry. The Windows Rust transport must likewise own each
+buffer/event/OVERLAPPED through CancelIoEx and terminal GetOverlappedResult. It
+must not wrap these inherited endpoints in synchronous Rust File/stdin/stdout.
+
+Cancellation latches closed admission while native creation is pending. A late
+creator signals its exact Job/root before completing startup; cleanup requires
+both a signaled root and Job active count zero. A nonnil partial Session owns
+cleanup even when Start fails. Use StopAndWait for a cleanup-only Session without
+a Protocol; retain it after timeout or uncertain close. Native close uncertainty
+is sticky. Ordinary filesystem calls remain synchronous and need a separately
+bounded caller. Pure admission/bootstrap/custody tests do not establish actual
+Windows peer interoperability, descendant/parent-death behavior or PSEC policy.
+
+The remaining description concerns the Linux native path.
 
 The host must independently admit runtime and harness artifacts and obtain
 their digests from its trusted registry. `SealImage` copies an already-open
