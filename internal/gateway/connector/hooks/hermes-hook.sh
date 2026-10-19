@@ -79,7 +79,8 @@ hermes_sandbox_block() {
   echo "defenseclaw: hermes hook: $1, blocking (sandbox hooks fail closed)" >&2
   printf '{"action":"block","message":"%s"}\n' "$(defenseclaw_json_escape "DefenseClaw blocked this tool call because its policy check failed: $1")"
   exit 2
-}{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+}{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{if .Managed}}
+FAIL_MODE="{{.FailMode}}"{{end}}{{end}}
 
 # Bail early on missing token via the shared helper so the bypass is
 # logged to hook-failures.jsonl AND honors strict availability — the
@@ -113,9 +114,56 @@ fail_response() {
   defenseclaw_handle_missing_token hermes hermes-hook "hermes tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi
 
+# hermes_block_message is the message of a block this hook makes itself.
+# Hermes shows it as the reason the tool call did not run, so it says why
+# in plain words: a gateway that is not running and the next step, as the
+# native hook does (managedStandaloneFailClosedText). A managed hook keeps
+# its internal reasons in the hook-failures log; the Secure Client profile
+# keeps its text.
+hermes_block_message() {
+  local layer="$1" reason="$2" next=""
+  if defenseclaw_secure_client_hook; then
+    printf '%s' "DefenseClaw hook failed closed"
+    return 0
+  fi
+  case "$layer" in
+    oversized) reason="it is too large for DefenseClaw to inspect. Make it smaller and try again." ;;
+    response)
+      # The reason (an HTTP status, a refused token) goes to stderr and the
+      # hook-failures log; the message is the same for every one of them.
+      case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+        1) reason="the DefenseClaw gateway returned an answer DefenseClaw could not use. Try again; if this continues, contact your administrator." ;;
+        *) reason="the DefenseClaw gateway returned an answer DefenseClaw could not use. Run \`defenseclaw doctor\` to see why." ;;
+      esac
+      ;;
+    *)
+      [ "$reason" != "gateway unreachable" ] || next="$(defenseclaw_unreachable_next_step)"
+      if [ -n "$next" ]; then
+        reason="$next"
+      elif [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ]; then
+        case "$reason" in
+          "the DefenseClaw "*) ;;
+          *) reason="the DefenseClaw gateway is not available. Try again in a moment; if this continues, contact your administrator." ;;
+        esac
+      else
+        case "$reason" in
+          "the DefenseClaw "*) ;;
+          *) reason="the DefenseClaw gateway is unavailable. Run \`defenseclaw-gateway status\`." ;;
+        esac
+      fi
+      ;;
+  esac
+  printf 'DefenseClaw blocked this tool call: %s' "$reason"
+}
+
+hermes_block() {
+  printf '{"action":"block","message":"%s"}\n' "$(defenseclaw_json_escape "$(hermes_block_message "$1" "$2")")"
+}
+
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: hermes hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
+    hermes_block oversized "stdin body exceeded cap"
     exit 2
   fi
   exit 0
@@ -143,8 +191,7 @@ fail_unreachable() {
   defenseclaw_emit_unreachable_stderr "hermes tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
 {{if .SecureClient}}    printf '{"action":"block","message":"DefenseClaw hook failed closed"}\n'
-{{else if .Managed}}    printf '{"action":"block","message":"DefenseClaw gateway is unavailable. Ask your administrator to check its status."}\n'
-{{else}}    printf '{"action":"block","message":"DefenseClaw gateway is unavailable. Run defenseclaw-gateway status."}\n'
+{{else}}    hermes_block transport "$1"
 {{end}}    exit 2
   fi
   exit 0
@@ -156,7 +203,7 @@ fail_response() {
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
   fi
-  printf '{"action":"block","message":"DefenseClaw hook failed closed"}\n'
+  hermes_block response "$1"
   exit 0
 }
 {{end}}
@@ -235,16 +282,23 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-{{if .Sandbox}}# Every DefenseClaw verdict names its action: an empty or unknown one is a
-# reply the workload may have shaped, never an allow. A block without a
-# rendered directive still has to reach Hermes as one on stdout.
+{{if or .Sandbox (not .SecureClient)}}# Every DefenseClaw verdict names its action: an empty or unknown one is no
+# verdict, never an allow (a sandbox workload may have shaped it; a hook in
+# fail mode closed blocks on it, open lets the call run: rel-1-0-3 GAP-0037,
+# GAP-0153; a Secure Client render keeps its own contract). A
+# block whose directive is missing or does not block still has to reach
+# Hermes as a block on stdout.
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 case "$ACTION" in
   allow|alert|confirm|continue) ;;
   block)
-    if [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; then
+    OUTPUT_DECISION=""
+    if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+      OUTPUT_DECISION=$(echo "$OUTPUT" | _dc_jq -r '(.decision // .action) // empty' 2>/dev/null) || OUTPUT_DECISION=""
+    fi
+    if [ "$OUTPUT_DECISION" != "block" ]; then
       REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
       if [ -z "$REASON" ]; then
         REASON="Blocked by DefenseClaw Hermes policy."

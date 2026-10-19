@@ -315,7 +315,11 @@ func TestPerUserFailClosedStopEventsAllowWhileOtherEventsStayBlocked(t *testing.
 			for _, tc := range blocked {
 				name := profile.name + ", " + cause.name + ": " + tc.String()
 				r, _ := runEvent(profile, i, tc.sessionStopEvent)
-				if tc.stdout == "" && r.code != blockExit || tc.stdout != "" && !strings.Contains(r.stdout, tc.stdout) {
+				// A per-user Claude Code block for a down gateway is the
+				// structured deny, exit 0 (rel-1-0-2 GAP-0486, claudeBlocked).
+				claude := tc.connector == "claudecode" && tc.stdout == ""
+				if claude && !claudeBlocked(r) ||
+					!claude && (tc.stdout == "" && r.code != blockExit || tc.stdout != "" && !strings.Contains(r.stdout, tc.stdout)) {
 					t.Errorf("%s: want the fail-closed block, got code=%d stdout=%q stderr=%q", name, r.code, r.stdout, r.stderr)
 				}
 				if strings.Contains(r.stderr, "is not blocking") {

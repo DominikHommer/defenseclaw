@@ -21,5 +21,5 @@ import "github.com/defenseclaw/defenseclaw/internal/config"
 // fail closed, so status reports that value and never derives one from the
 // raw config.
 func ManagedHookFailMode(cfg *config.Config, connector string) string {
-	return renderedHookFailModeFor(connector, cfg.EffectiveHookFailModeForConnector(connector))
+	return renderedHookFailModeFor(cfg, connector, cfg.EffectiveHookFailModeForConnector(connector))
 }

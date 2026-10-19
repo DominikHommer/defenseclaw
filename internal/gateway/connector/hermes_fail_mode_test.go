@@ -8,22 +8,21 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
-
 package connector
 
 import (
-	"bytes"
+	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-// GAP-0150: a per-user Hermes hook with an unset hook_fail_mode resolves
-// closed outside Secure Client; only an explicit "open" renders open.
-func TestPerUserHermesHookKeepsTheResolvedFailMode(t *testing.T) {
+// rel-1-0-3 GAP-0269 (and GAP-0150): a per-user Hermes render keeps the
+// resolved fail mode. The Windows native Hermes hook reads it from .hookcfg,
+// so a closed or unset hook_fail_mode must be recorded as closed there, not
+// downgraded to open; only an explicit open is recorded open. Secure Client
+// keeps Hermes open (TestManagedStandaloneRenderKeepsClosed).
+func TestPerUserHermesRenderRecordsTheResolvedFailMode(t *testing.T) {
 	for _, tc := range []struct {
 		name, mode, want string
 	}{
@@ -34,72 +33,33 @@ func TestPerUserHermesHookKeepsTheResolvedFailMode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			opts := SetupOpts{
-				DataDir:       filepath.Join(dir, "dc"),
-				APIAddr:       "127.0.0.1:18970",
-				APIToken:      "tok-test",
-				HookFailMode:  tc.mode,
-				GuardrailMode: "action",
-				WorkspaceDir:  dir,
+				DataDir:      filepath.Join(dir, "dc"),
+				APIAddr:      "127.0.0.1:18970",
+				APIToken:     "tok-test",
+				HookFailMode: tc.mode,
+				WorkspaceDir: dir,
 			}
-			hookDir := filepath.Join(dir, "hooks")
-			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewHermesConnector()); err != nil {
-				t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
-			}
-			body, err := os.ReadFile(filepath.Join(hookDir, "hermes-hook.sh"))
-			if err != nil {
-				t.Fatalf("read hermes-hook.sh: %v", err)
-			}
-			if want := `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-` + tc.want + `}"`; !strings.Contains(string(body), want) {
-				t.Fatalf("hermes-hook.sh does not render %s", want)
-			}
-			flat, err := os.ReadFile(filepath.Join(hookDir, hookConfigSidecarName+".hermes"))
-			if err != nil {
-				t.Fatalf("read the Hermes runtime record: %v", err)
-			}
-			if want := "DEFENSECLAW_FAIL_MODE=" + tc.want + "\n"; !strings.Contains(string(flat), want) {
-				t.Fatalf("runtime record = %q, want %q", flat, want)
-			}
-			if got := HookFailClosed(opts, NewHermesConnector()); got != (tc.want == "closed") {
+			hermes := NewHermesConnector()
+			if got := HookFailClosed(opts, hermes); got != (tc.want == "closed") {
 				t.Fatalf("HookFailClosed = %v, want %v", got, tc.want == "closed")
 			}
+			hookDir := filepath.Join(dir, "hooks")
+			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, hermes); err != nil {
+				t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(hookDir, hookConfigSidecarName))
+			if err != nil {
+				t.Fatalf("read %s: %v", hookConfigSidecarName, err)
+			}
+			var sidecar struct {
+				FailModes map[string]string `json:"fail_modes"`
+			}
+			if err := json.Unmarshal(data, &sidecar); err != nil {
+				t.Fatalf("decode %s: %v", hookConfigSidecarName, err)
+			}
+			if got := sidecar.FailModes["hermes"]; got != tc.want {
+				t.Fatalf("%s fail_modes.hermes = %q, want %q", hookConfigSidecarName, got, tc.want)
+			}
 		})
-	}
-}
-
-// GAP-0150: with the gateway down, the per-user Hermes hook rendered with an
-// unset fail mode prints Hermes' block directive with the next step, so the
-// tool call does not run.
-func TestPerUserHermesHookBlocksAToolCallWhileTheGatewayIsDown(t *testing.T) {
-	if _, err := exec.LookPath("curl"); err != nil {
-		t.Skip("curl not available")
-	}
-	dir := t.TempDir()
-	hookDir := filepath.Join(dir, "hooks")
-	opts := SetupOpts{
-		DataDir:       filepath.Join(dir, "dc"),
-		APIAddr:       freeAPIAddr(t),
-		APIToken:      "tok-test",
-		GuardrailMode: "action",
-		WorkspaceDir:  dir,
-	}
-	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewHermesConnector()); err != nil {
-		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
-	}
-	home := t.TempDir()
-	cmd := exec.Command("bash", filepath.Join(hookDir, "hermes-hook.sh"))
-	cmd.Stdin = strings.NewReader(`{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo ok"}}`)
-	var env []string
-	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "DEFENSECLAW_") {
-			env = append(env, kv)
-		}
-	}
-	cmd.Env = append(env, "DEFENSECLAW_HOME="+home, "HOME="+home)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	_ = cmd.Run()
-	out := stdout.String()
-	if !strings.Contains(out, `"action":"block"`) || !strings.Contains(out, "defenseclaw-gateway status") {
-		t.Fatalf("stdout = %q (stderr %q), want a Hermes block directive that names defenseclaw-gateway status", out, stderr.String())
 	}
 }

@@ -37,9 +37,14 @@ func TestHermesOutageBlockExplainsRecoveryByProfile(t *testing.T) {
 		want string
 		omit string
 	}{
-		{"per-user", templateData{}, "Run defenseclaw-gateway status.", "Ask your administrator"},
-		{"managed", templateData{Managed: true}, "Ask your administrator to check its status.", "Run defenseclaw-gateway status."},
-		{"secure-client", templateData{Managed: true, SecureClient: true}, "DefenseClaw hook failed closed", "gateway is unavailable"},
+		// Per-user and managed outages print hermes_block_message, which names
+		// the cause and the next step at run time (per-user: defenseclaw-gateway
+		// start or status; managed: the gateway service and the administrator;
+		// TestPerUserHermesHookBlocksAToolCallWhileTheGatewayIsDown,
+		// TestManagedStandaloneHermesHookBlockSaysWhy).
+		{"per-user", templateData{}, "hermes_block transport \"$1\"", "DefenseClaw hook failed closed"},
+		{"managed", templateData{Managed: true}, "hermes_block transport \"$1\"", "DefenseClaw hook failed closed"},
+		{"secure-client", templateData{Managed: true, SecureClient: true}, "DefenseClaw hook failed closed", "hermes_block transport"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hook, err := renderTemplate(string(asset), tc.data)

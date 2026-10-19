@@ -6649,9 +6649,9 @@ _HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
 }
 
-# The Windows native Hermes hook fails open whatever is configured; the Linux
-# and macOS hook follows its fail mode (rel-1-0-3 GAP-0150).
-_HERMES_HOOKS_LABEL = "Hermes hooks (fail-open)" if os.name == "nt" else "Hermes hooks"
+# The Hermes hook follows its fail mode on every OS (rel-1-0-3 GAP-0150 on
+# Linux and macOS, GAP-0269 on Windows).
+_HERMES_HOOKS_LABEL = "Hermes hooks"
 
 _HOOK_HEALTH_LABELS = {
     "hermes": _HERMES_HOOKS_LABEL,
@@ -7421,8 +7421,13 @@ def _check_cursor_configured_runtime(
     mode = str(mode_resolver("cursor") if callable(mode_resolver) else "observe").strip().lower()
     fail_mode = str(fail_resolver("cursor") if callable(fail_resolver) else "open").strip().lower()
     mode = "action" if mode == "action" else "observe"
-    expected_fail_mode = "closed" if mode == "action" else "open"
-    expected_fail_closed = mode == "action"
+    # Cursor observe hooks fail open, except on a managed deployment outside
+    # Secure Client, where every hook fails closed and the Cursor
+    # registration carries failClosed in observe mode too (rel-1-0-3 GAP-0037).
+    managed_closed = getattr(cfg, "managed_hooks_fail_closed", None)
+    managed_fail_closed = callable(managed_closed) and managed_closed() is True
+    expected_fail_mode = "closed" if mode == "action" or managed_fail_closed else "open"
+    expected_fail_closed = expected_fail_mode == "closed"
     hilt = None
     hilt_resolver = getattr(guardrail, "effective_hilt", None)
     if callable(hilt_resolver):

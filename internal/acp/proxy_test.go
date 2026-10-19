@@ -739,8 +739,9 @@ func (rejectingEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error)
 
 // A revoked credential says so and points a managed user at the
 // administrator, not at a gateway that "did not answer" and a command the
-// host lacks; observe mode tells the user once that nothing is checked
-// (GAP-0354).
+// host lacks (GAP-0354). A standalone managed guard refuses the prompt in
+// observe mode too (rel-1-0-3 GAP-0037); a per-user observe guard tells the
+// user once that nothing is checked.
 func TestCopyFramesRejectedCredentialNamesTheRevocation(t *testing.T) {
 	prompt := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}`
 	for _, mode := range []Mode{ModeAction, ModeObserve} {
@@ -753,7 +754,21 @@ func TestCopyFramesRejectedCredentialNamesTheRevocation(t *testing.T) {
 		}
 		text := client.String()
 		if !strings.Contains(text, "revoked") || !strings.Contains(text, "administrator") ||
-			strings.Contains(text, "defenseclaw status") || strings.Contains(text, "did not answer") {
+			strings.Contains(text, "defenseclaw status") || strings.Contains(text, "did not answer") ||
+			strings.Contains(text, "not checking this session") || forwarded.Len() != 0 {
+			t.Fatalf("%s mode: the managed prompt was not refused with the revocation: client=%s agent=%s", mode, text, forwarded.String())
+		}
+	}
+	for _, mode := range []Mode{ModeObserve} {
+		var forwarded, client bytes.Buffer
+		state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+		opts := ProxyOptions{Mode: mode, Evaluator: rejectingEvaluator{}, SetupCommand: "defenseclaw acp setup --client zed --agent kiro", Stderr: io.Discard}
+		input := strings.NewReader(prompt + "\n" + strings.Replace(prompt, `"id":3`, `"id":4`, 1) + "\n")
+		if err := copyFrames(context.Background(), opts, state, ClientToAgent, input, &forwarded, &client); err != nil {
+			t.Fatal(err)
+		}
+		text := client.String()
+		if !strings.Contains(text, "did not accept the ACP token") || !strings.Contains(text, "defenseclaw acp setup") {
 			t.Fatalf("%s mode: the editor was not told the credential was refused: %s", mode, text)
 		}
 		if mode == ModeObserve && (strings.Count(text, "not checking this session") != 1 || strings.Count(forwarded.String(), "session/prompt") != 2) {

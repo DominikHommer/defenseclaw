@@ -17,11 +17,11 @@ import "github.com/defenseclaw/defenseclaw/internal/config"
 // ManagedHookFailMode is the fail mode the managed hook renderer writes into
 // connector's hooks for cfg. It delegates to the hook renderer resolver: the
 // Windows renderer wraps cfg.EffectiveHookFailModeForConnector in
-// windowsEnterpriseHookFailMode for every hook it writes and lowers closed
+// windowsEnterpriseHookFailMode for every hook it writes and, under Secure Client only, lowers closed
 // to open for an agent that cannot fail closed (Hermes), so status reports
 // that value and never derives one from the raw config (GAP-0001).
 func ManagedHookFailMode(cfg *config.Config, connector string) string {
-	return renderedHookFailModeFor(connector, windowsEnterpriseHookFailMode(connector, cfg.EffectiveHookFailModeForConnector(connector)))
+	return renderedHookFailModeFor(cfg, connector, windowsEnterpriseHookFailMode(connector, cfg.EffectiveHookFailModeForConnector(connector)))
 }
 
 // WindowsStandaloneMachinePolicyHook reports whether connector's DefenseClaw
