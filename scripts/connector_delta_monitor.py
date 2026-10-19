@@ -206,8 +206,11 @@ def conflicts(changes, contract, context, spec):
     for change in changes:
         path, before, after = change["path"], change["before"], change["after"]
         if path in spec.get("input_schemas", []) and before and after:
-            old_field = node(decode(before), ["tool_use_id"])
-            new_field = node(decode(after), ["tool_use_id"])
+            old_schema, new_schema = decode(before), decode(after)
+            if not all(isinstance(value, dict) and value.get("type") == "object" for value in (old_schema, new_schema)):
+                continue  # Property constraints on a non-object schema do not prove an incoming field type.
+            old_field = node(old_schema, ["tool_use_id"])
+            new_field = node(new_schema, ["tool_use_id"])
             local = re.sub(r"/\*[\s\S]*?\*/", "", context[spec["local_files"][0]])
             anchor = re.search(r"(?m)^\d+:\s*ToolUseID\s+string\s+`json:\"tool_use_id", local)
             if (

@@ -126,6 +126,8 @@ class MonitorTests(unittest.TestCase):
     def test_unknown_schema_ref_and_changed_local_type_are_not_proven(self):
         fake = Fake(after='{"properties":{"tool_use_id":{"$ref":"#/missing"}}}')
         self.assertEqual(self.run_fake(fake)[1][0]["decision"], "review_required")
+        fake = Fake(after='{"type":"string","properties":{"tool_use_id":{"type":"integer"}}}')
+        self.assertEqual(self.run_fake(fake)[1][0]["decision"], "review_required")
         spec = {**self.config["connectors"]["codex"], "name": "codex"}
         contract, context = m.local_context(spec, m.ROOT)
         context[spec["local_files"][0]] = 'ToolUseID int `json:"tool_use_id"`'
