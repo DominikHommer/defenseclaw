@@ -13,20 +13,32 @@ import "os"
 // verdict fatal. Owner, type and symlink verdicts never go through it.
 var ManagedModeAdvisory func(path, reason string) bool
 
-// groupOtherWrite is the part of a too-broad mode that is never an advisory:
-// a group or world write bit lets someone other than the owner change the
-// path, which is exactly what the private-path check exists to refuse.
+// ManagedWriteModeAdvisory, when set, names the paths where a group or world
+// write bit still goes to ManagedModeAdvisory: the Secure Client install,
+// which keeps its earlier rule (Secure Client is out of scope for GAP-0026).
+// The managed package installs it; nil keeps write bits fatal everywhere.
+var ManagedWriteModeAdvisory func(path string) bool
+
+// groupOtherWrite is the part of a too-broad mode that is never an advisory
+// outside ManagedWriteModeAdvisory: a group or world write bit lets someone
+// other than the owner change the path, which is exactly what the
+// private-path check exists to refuse.
 const groupOtherWrite os.FileMode = 0o022
 
 func relaxModeVerdict(path string, perm os.FileMode, verdict error) error {
 	if verdict == nil {
 		return nil
 	}
-	if perm&groupOtherWrite != 0 {
+	if perm&groupOtherWrite != 0 && !managedWriteModeAdvisory(path) {
 		return verdict
 	}
 	if hook := ManagedModeAdvisory; hook != nil && hook(path, verdict.Error()) {
 		return nil
 	}
 	return verdict
+}
+
+func managedWriteModeAdvisory(path string) bool {
+	hook := ManagedWriteModeAdvisory
+	return hook != nil && hook(path)
 }

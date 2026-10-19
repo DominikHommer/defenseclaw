@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -70,6 +71,12 @@ type WindowsCodexMachineRequirementsOptions struct {
 	// not carry both, so an unbound command never reaches the gateway. Both
 	// Windows profiles set it (WindowsCodexManagedHookContract).
 	HookContractID string
+	// SecureClient is set for the Secure Client profile, which keeps its
+	// earlier reconcile and adoption of hooks.windows_managed_dir: a stale
+	// directory is overwritten outside strict trust mode, and adoption strips
+	// the current directory with the current groups. Secure Client is out of
+	// scope for GAP-0015 and GAP-0022; every other caller gets their fixes.
+	SecureClient bool
 }
 
 // WindowsCodexManagedRuntimeTarget is the non-secret mapping a standard-user
@@ -236,6 +243,10 @@ type codexMachineRequirementsLayout struct {
 	samePath      func(left, right string) bool
 	groups        []codexHookGroup
 	handler       func(codexHookGroup) map[string]interface{}
+	// reclaimStaleManagedDir overwrites a managed directory that names
+	// another install instead of refusing it (Secure Client only, as before
+	// GAP-0015); TrustStrictAncestors restores the refusal.
+	reclaimStaleManagedDir bool
 	// owned, when set, recognizes a DefenseClaw group of any release that
 	// is not the exact one, so reconcile replaces it instead of adding the
 	// exact group next to it.
@@ -280,10 +291,11 @@ func windowsCodexMachineHandler(command string, timeout int) map[string]interfac
 
 func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) codexMachineRequirementsLayout {
 	layout := codexMachineRequirementsLayout{
-		managedDirKey: "windows_managed_dir",
-		managedDir:    opts.ManagedDir,
-		samePath:      sameWindowsCodexMachinePath,
-		groups:        codexHookGroups,
+		managedDirKey:          "windows_managed_dir",
+		managedDir:             opts.ManagedDir,
+		samePath:               sameWindowsCodexMachinePath,
+		groups:                 codexHookGroups,
+		reclaimStaleManagedDir: opts.SecureClient,
 		handler: func(group codexHookGroup) map[string]interface{} {
 			return windowsCodexMachineHandler(windowsCodexManagedHookCommandFor(opts, group.eventType), group.timeout)
 		},
@@ -428,12 +440,23 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 		// overwrite it (GAP-0015). windowsCodexAdoptRequirements strips a
 		// prior DefenseClaw layout's directory before reconcile runs.
 		if !l.samePath(value, l.managedDir) {
-			return fmt.Errorf(
-				"hooks.%s=%q conflicts with protected managed directory %q",
-				l.managedDirKey,
-				value,
-				l.managedDir,
-			)
+			if !l.reclaimStaleManagedDir || managed.TrustStrictAncestors() {
+				return fmt.Errorf(
+					"hooks.%s=%q conflicts with protected managed directory %q",
+					l.managedDirKey,
+					value,
+					l.managedDir,
+				)
+			}
+			// Secure Client keeps its earlier bulldoze: a prior unsigned
+			// certification install at a scoped path left the managed
+			// directory pointing at its (now stale) bin directory. The
+			// statement below overwrites it with the current install's
+			// canonical directory; log it so a DART review can find the
+			// recovery.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] reclaiming stale Codex hooks.%s = %q, overwriting with current install's canonical ManagedDir %q\n",
+				l.managedDirKey, value, l.managedDir)
 		}
 	}
 	hooks[l.managedDirKey] = l.managedDir
@@ -943,7 +966,7 @@ func windowsCodexAdoptRequirements(
 			adoption.base = base
 		}
 	}
-	if staleDir, staleBinary := windowsCodexUnrecordedStaleLayout(adoption.base, opts); staleDir != "" {
+	if staleDir, staleBinary := windowsCodexUnrecordedStaleLayout(adoption.base, opts); !opts.SecureClient && staleDir != "" {
 		base, stripped, err := stripWindowsCodexLayout(adoption.base, staleBinary, staleDir)
 		if err != nil {
 			return windowsCodexAdoption{}, fmt.Errorf("strip unrecorded prior Codex managed layout: %w", err)
@@ -961,8 +984,13 @@ func windowsCodexAdoptRequirements(
 	// windows_managed_dir equal to ManagedDir with no DefenseClaw group is the
 	// administrator's and stays in the verbatim preimage; when DefenseClaw
 	// groups are present, removeWindowsCodexRequirementsOwnedChanges decides
-	// whether the directory goes with them (GAP-0022).
-	withoutCurrent, strippedCurrent, err := stripWindowsCodexLayout(adoption.base, opts.HookBinary, "")
+	// whether the directory goes with them (GAP-0022). Secure Client keeps
+	// stripping the current directory here, as before.
+	currentDir := ""
+	if opts.SecureClient {
+		currentDir = opts.ManagedDir
+	}
+	withoutCurrent, strippedCurrent, err := stripWindowsCodexLayout(adoption.base, opts.HookBinary, currentDir)
 	if err != nil {
 		return windowsCodexAdoption{}, fmt.Errorf("strip current Codex managed layout: %w", err)
 	}

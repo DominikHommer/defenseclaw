@@ -76,8 +76,9 @@ readonly FAIL_MODE
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
-{{if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
-# DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
+{{if and .Managed (not .SecureClient)}}# Managed standalone hooks use the installer-owned delivery policy; an
+# inherited DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed
+# hook. Secure Client hooks keep the environment override.
 FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="kiro"
 DEFENSECLAW_HOOK_NAME="kiro-hook"
