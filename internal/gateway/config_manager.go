@@ -164,6 +164,7 @@ type configFileSnapshotReader func(string) (configFileSnapshot, error)
 type ConfigManager struct {
 	path          string
 	applySnapshot configSnapshotApplyFunc
+	afterReload   func(context.Context)
 	logger        *audit.Logger
 	health        *SidecarHealth
 	loadSnapshot  configSnapshotLoader
@@ -895,7 +896,15 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		}
 	}()
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		// The callback runs after every reload path, including watcher,
+		// explicit Reload/ReloadAssets, startup reconcile and rejection.
+		// It cannot convert a committed generation into a rejected reload.
+		if m.afterReload != nil {
+			m.afterReload(ctx)
+		}
+	}()
 
 	oldCfg := m.Current()
 	next, source, err := m.loadStableCandidate(ctx)

@@ -82,6 +82,17 @@ type nativeModelAdapter struct {
 	commitDone     chan struct{}
 }
 
+// nativeModelLeaseBinding is host-private custody data from the exact grant
+// used to construct this adapter. It cannot be selected by a guest request.
+func (a *nativeModelAdapter) nativeModelLeaseBinding() (
+	sandboxruntime.SessionIdentity, sandboxruntime.PolicyAuthorityBinding,
+) {
+	if a == nil {
+		return sandboxruntime.SessionIdentity{}, sandboxruntime.PolicyAuthorityBinding{}
+	}
+	return a.grant.Identity, a.grant.Authority
+}
+
 type nativeModelExchangeKey struct{}
 
 type nativeModelExchange struct {

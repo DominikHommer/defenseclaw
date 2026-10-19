@@ -209,6 +209,21 @@ jobs:
             TestNativeModelAdapterQuiesceDeadlineRetainsSeal
             TestNativeModelAdapterCommitPanicReleasesClaim
             TestNativeModelAdapterQuiesceDoesNotWaitForInspection
+            TestNativeModelCustodyPublicationOrder
+            TestNativeModelCustodyRegistrationRacesRotation
+            TestNativeModelCustodyDrainFailureRetainsAndRetries
+            TestNativeModelCustodyTimeoutClosesPublication
+            TestNativeModelCustodyRejectsForgedTerminalIdentity
+            TestNativeModelCustodyReloadDrainsAfterConfigUnlock
+            TestNativeModelCustodyPostcommitDrainFailureNeverRejectsGeneration
+            TestNativeModelCustodyRejectsMismatchedChannelBinding
+            TestNativeModelCustodyBeginRefusalClosesRegistration
+            TestNativeModelCustodyConcurrentReloadDuringTerminalDrain
+            TestNativeModelCustodyReentrantReloadDuringDrain
+            TestNativeModelCustodyTerminalCloseFailureQuarantines
+            TestNativeModelCustodyDurableRevokeCompletionBypassesDrainSlot
+            TestNativeModelCustodyPublicationBypassesTerminalDrain
+            TestNativeModelCustodyNoDeadlinePublicationBoundsQuiesce
             TestHeartbeatBypass_RawTextGate
             TestSessionStartupBypass_RawTextGate
           )

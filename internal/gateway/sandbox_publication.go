@@ -30,6 +30,7 @@ type sidecarSandboxLaunchOwner struct {
 	key     [32]byte
 	gate    *sandboxruntime.LaunchGate
 	revoke  func(context.Context) error
+	models  nativeModelRegistry
 }
 
 func (s *Sidecar) installSandboxLaunchOwner(revoke func(context.Context) error) (*sidecarSandboxLaunchOwner, error) {
@@ -113,13 +114,49 @@ func (o *sidecarSandboxLaunchOwner) resolve(flags packs.Flags, options sandboxru
 // changes before publishConfig and all work after publishGeneration. Candidate
 // rejection and asset no-ops occur before this method. The nil-owner path keeps
 // existing OpenShell behavior and starts no worker, timer or listener.
+//
+// Model leases are registered before any model listener or native workload is
+// exposed. The gate/config transaction seals output, waits for bounded
+// downstream commits, stops the owned native session and durably revokes its
+// binding. ConfigManager's afterReload hook drains model requests and endpoints
+// after its mutex is released. A cleanup failure retains the sealed lease;
+// publication may already have committed, so callers must not infer rollback.
 func (s *Sidecar) publishSandboxAuthority(ctx context.Context, commit func(context.Context) error) error {
 	owner := s.sandboxLaunchOwner.Load()
 	if owner == nil {
 		return commit(ctx)
 	}
-	return owner.gate.RotatePublished(ctx, func(ctx context.Context) (sandboxruntime.PolicyAuthorityBinding, error) {
-		if err := owner.revoke(ctx); err != nil {
+	// Queue registration happens before acquiring LaunchGate so a second
+	// publication cannot race a new model lease into its pending interval.
+	owner.models.mu.Lock()
+	owner.models.publishing++
+	owner.models.mu.Unlock()
+	var leases []*nativeModelLease
+	began := false
+	rotationErr := owner.gate.RotatePublished(ctx, func(ctx context.Context) (sandboxruntime.PolicyAuthorityBinding, error) {
+		var err error
+		leases, err = owner.beginNativeModelRotation()
+		if err != nil {
+			return sandboxruntime.PolicyAuthorityBinding{}, err
+		}
+		began = true
+		// The watcher and startup reloads may use a long-lived Run context.
+		// Bound all precommit model/native/host cleanup under the two
+		// publication locks; the actual config commit keeps its caller context.
+		cleanupCtx, cancelCleanup := context.WithTimeout(ctx, nativeModelPublicationLimit)
+		defer cancelCleanup()
+		var sealErr, nativeErr error
+		for _, lease := range leases {
+			// The channel seals before its bounded wait, including timeout.
+			sealErr = errors.Join(sealErr, lease.seal(cleanupCtx))
+		}
+		for _, lease := range leases {
+			// Every owned native stop/durable revoke is attempted even if an
+			// earlier quiesce failed. No full endpoint drain belongs here.
+			nativeErr = errors.Join(nativeErr, lease.revoke(cleanupCtx))
+		}
+		hostErr := owner.revoke(cleanupCtx)
+		if err := errors.Join(sealErr, nativeErr, hostErr, cleanupCtx.Err()); err != nil {
 			return sandboxruntime.PolicyAuthorityBinding{}, err
 		}
 		if err := ctx.Err(); err != nil {
@@ -130,4 +167,21 @@ func (s *Sidecar) publishSandboxAuthority(ctx context.Context, commit func(conte
 		}
 		return owner.current(), nil
 	})
+	owner.models.mu.Lock()
+	owner.models.publishing--
+	if began {
+		owner.models.rotating = false
+	}
+	// Even an early transition refusal closes LaunchGate. Keep registry
+	// admission closed after every such error, including a competing
+	// publication that could not begin its own snapshot.
+	if rotationErr != nil {
+		owner.models.failed = true
+	}
+	owner.models.mu.Unlock()
+	// ConfigManager.reload still holds its mutex here. Its deferred
+	// afterReload hook drains retained model and endpoint resources only
+	// after that mutex is released. A postcommit drain failure must never
+	// turn a committed generation into a reported rejected reload.
+	return rotationErr
 }

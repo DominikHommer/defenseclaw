@@ -1175,6 +1175,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		s.observabilityV8ActivePlanDigest(),
 		s.applyConfigReloadSnapshot,
 	)
+	s.configMgr.afterReload = s.drainNativeModelsAfterReload
 	s.configMgr.bindInitialObservabilityV8Plan(s.observabilityV8ActivePlan())
 	s.watchGenerationAssets()
 	s.configMgr.setStartupSource(s.bootConfigSourceName, s.bootConfigSource)
