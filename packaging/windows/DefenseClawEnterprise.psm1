@@ -30691,13 +30691,18 @@ function Remove-DefenseClawNoFollowTree {
         in Remaining, and so is anything that could not be removed. Each
         folder is held (OpenDirectoryPinNoFollow) while its entries go, so
         it cannot be replaced by a junction meanwhile. Returns whether Path
-        is gone.
+        is gone. With -RecoverAccess (the Secure Client purge, inside a root
+        an administrator owns) an entry that cannot be opened or removed gets
+        Administrators ownership and its inherited access back
+        (Reset-DefenseClawNuclearEntryAccess, that entry only, never
+        recursive) and is tried once more.
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][AllowEmptyCollection()]
         [Collections.Generic.List[string]]$Remaining,
-        [int]$Depth = 0
+        [int]$Depth = 0,
+        [switch]$RecoverAccess
     )
     try {
         $attributes = [IO.File]::GetAttributes($Path)
@@ -30713,20 +30718,29 @@ function Remove-DefenseClawNoFollowTree {
         $Remaining.Add("${Path}: a link or junction; left as found")
         return $false
     }
+    $attempts = 1
+    if ($RecoverAccess) {
+        $attempts = 2
+    }
     if (($attributes -band [IO.FileAttributes]::Directory) -eq 0) {
-        try {
-            if (($attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
-                [IO.File]::SetAttributes(
-                    $Path,
-                    [IO.FileAttributes]([int]$attributes -band (-bnot [int][IO.FileAttributes]::ReadOnly))
-                )
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                if (($attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
+                    [IO.File]::SetAttributes(
+                        $Path,
+                        [IO.FileAttributes]([int]$attributes -band (-bnot [int][IO.FileAttributes]::ReadOnly))
+                    )
+                }
+                [IO.File]::Delete($Path)
+                return $true
             }
-            [IO.File]::Delete($Path)
-            return $true
-        }
-        catch {
-            $Remaining.Add("${Path}: $($_.Exception.Message)")
-            return $false
+            catch {
+                if ($attempt -ge $attempts) {
+                    $Remaining.Add("${Path}: $($_.Exception.Message)")
+                    return $false
+                }
+                Reset-DefenseClawNuclearEntryAccess -Path $Path
+            }
         }
     }
     if ($Depth -ge 32) {
@@ -30734,37 +30748,207 @@ function Remove-DefenseClawNoFollowTree {
         return $false
     }
     $nativeSecurity = Initialize-DefenseClawNativeSecurity
-    $pin = [IntPtr]::Zero
     $complete = $true
-    try {
-        $pin = $nativeSecurity::OpenDirectoryPinNoFollow($Path)
-        foreach ($child in @([IO.Directory]::GetFileSystemEntries($Path))) {
-            if (-not (Remove-DefenseClawNoFollowTree `
-                    -Path ([string]$child) `
-                    -Remaining $Remaining `
-                    -Depth ($Depth + 1))) {
+    for ($attempt = 1; ; $attempt++) {
+        $pin = [IntPtr]::Zero
+        $listed = $false
+        $retry = $false
+        try {
+            $pin = $nativeSecurity::OpenDirectoryPinNoFollow($Path)
+            $children = @([IO.Directory]::GetFileSystemEntries($Path))
+            $listed = $true
+            foreach ($child in $children) {
+                if (-not (Remove-DefenseClawNoFollowTree `
+                        -Path ([string]$child) `
+                        -Remaining $Remaining `
+                        -Depth ($Depth + 1) `
+                        -RecoverAccess:$RecoverAccess)) {
+                    $complete = $false
+                }
+            }
+        }
+        catch {
+            if (-not $listed -and $attempt -lt $attempts) {
+                $retry = $true
+            }
+            else {
+                $Remaining.Add("${Path}: $($_.Exception.Message)")
                 $complete = $false
             }
         }
-    }
-    catch {
-        $Remaining.Add("${Path}: $($_.Exception.Message)")
-        $complete = $false
-    }
-    finally {
-        $nativeSecurity::CloseDirectoryPin($pin)
+        finally {
+            $nativeSecurity::CloseDirectoryPin($pin)
+        }
+        if (-not $retry) {
+            break
+        }
+        # The folder could not be opened or listed: recover its access, then
+        # open it again without following.
+        Reset-DefenseClawNuclearEntryAccess -Path $Path
     }
     if (-not $complete) {
         return $false
     }
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            # Non-recursive: a junction put here meanwhile goes as the link only.
+            [IO.Directory]::Delete($Path, $false)
+            return $true
+        }
+        catch {
+            if ($attempt -ge $attempts) {
+                $Remaining.Add("${Path}: $($_.Exception.Message)")
+                return $false
+            }
+            Reset-DefenseClawNuclearEntryAccess -Path $Path
+        }
+    }
+}
+
+function Assert-DefenseClawNuclearPathNoLink {
+    <#
+        Throws unless every component of Path that exists, from the volume
+        root down to Path itself, is a real folder or file and not a link or
+        junction. Each component is read without following it, so a dangling
+        junction is caught as well; a missing component ends the walk, as
+        nothing below it can exist.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $volume = [IO.Path]::GetPathRoot($full)
+    if ([string]::IsNullOrEmpty($volume) -or $full.Length -le $volume.TrimEnd('\').Length) {
+        throw "managed path has no folder below its volume root: $full"
+    }
+    $current = $volume
+    foreach ($part in $full.Substring($volume.Length).Split([char]'\')) {
+        if ([string]::IsNullOrEmpty($part)) {
+            continue
+        }
+        $current = [IO.Path]::Combine($current, $part)
+        try {
+            $attributes = [IO.File]::GetAttributes($current)
+        }
+        catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+            return
+        }
+        if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "reparse points are not allowed in managed path: $current"
+        }
+    }
+}
+
+function Test-DefenseClawNuclearTrustedOwner {
+    # Whether SYSTEM, Administrators or TrustedInstaller owns Path (checked
+    # not to be a link first), as every folder DefenseClaw's installer
+    # creates is. A folder a standard user created where DefenseClaw's would
+    # be is owned by that user.
+    param([Parameter(Mandatory)][string]$Path)
     try {
-        # Non-recursive: a junction put here meanwhile goes as the link only.
-        [IO.Directory]::Delete($Path, $false)
-        return $true
+        $owner = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path).GetOwner(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
     }
     catch {
-        $Remaining.Add("${Path}: $($_.Exception.Message)")
         return $false
+    }
+    return $owner -in @(
+        $script:SystemSID,
+        $script:AdministratorsSID,
+        $script:TrustedInstallerSID
+    )
+}
+
+function Reset-DefenseClawNuclearEntryAccess {
+    <#
+        Secure Client purge only: gives one entry Administrators ownership and
+        its inherited access list back so a DefenseClaw entry whose access
+        list drifted can be removed. Never recursive (no takeown /R, no
+        icacls /T) and never on a link: the entry is read again without
+        following just before, and icacls /L acts on a link itself.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $attributes = [IO.File]::GetAttributes($Path)
+    }
+    catch {
+        return
+    }
+    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        return
+    }
+    Invoke-DefenseClawNuclearSilentExec `
+        -File ([IO.Path]::Combine($script:System32, 'takeown.exe')) `
+        -Arguments @('/F', $Path, '/A')
+    Invoke-DefenseClawNuclearSilentExec `
+        -File $script:IcaclsExe `
+        -Arguments @($Path, '/reset', '/C', '/L')
+}
+
+function Remove-DefenseClawNuclearPath {
+    <#
+        Secure Client purge: removes one DefenseClaw path (a file or a folder
+        tree) below ProgramData or Program Files, never through a link. Every
+        component from the volume root down must be a real folder or file
+        (Assert-DefenseClawNuclearPathNoLink); the folders between that base
+        and the path are held open (OpenDirectoryPinNoFollow) while the path
+        goes, so none can be swapped for a junction meanwhile; and the tree
+        goes through Remove-DefenseClawNoFollowTree. Only a path SYSTEM,
+        Administrators or TrustedInstaller owns gets its drifted access
+        recovered (-RecoverAccess); one a standard user created where
+        DefenseClaw's would be is removed with that user's own access or left.
+        Returns whether the path is gone; what stays is added to Remaining.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyCollection()]
+        [Collections.Generic.List[string]]$Remaining
+    )
+    try {
+        $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+        Assert-DefenseClawNuclearPathNoLink -Path $full
+        if (-not (Test-DefenseClawPathPresentNoFollow -Path $full)) {
+            return $true
+        }
+    }
+    catch {
+        $Remaining.Add("${Path}: $($_.Exception.Message); left as found")
+        return $false
+    }
+    $base = $null
+    foreach ($candidate in @($script:ProgramData, $script:ProgramFiles)) {
+        $candidateFull = [IO.Path]::GetFullPath([string]$candidate).TrimEnd('\')
+        if ($full.StartsWith($candidateFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            $base = $candidateFull
+            break
+        }
+    }
+    if ($null -eq $base) {
+        $Remaining.Add("${full}: outside ProgramData and Program Files; left as found")
+        return $false
+    }
+    $recoverAccess = Test-DefenseClawNuclearTrustedOwner -Path $full
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $pins = [Collections.Generic.List[IntPtr]]::new()
+    try {
+        $parts = @($full.Substring($base.Length + 1).Split([char]'\'))
+        $current = $base
+        for ($index = 0; $index -lt $parts.Count - 1; $index++) {
+            $current = [IO.Path]::Combine($current, [string]$parts[$index])
+            $pins.Add($nativeSecurity::OpenDirectoryPinNoFollow($current))
+        }
+        return [bool](Remove-DefenseClawNoFollowTree `
+            -Path $full `
+            -Remaining $Remaining `
+            -RecoverAccess:$recoverAccess)
+    }
+    catch {
+        $Remaining.Add("${full}: $($_.Exception.Message); left as found")
+        return $false
+    }
+    finally {
+        foreach ($pin in $pins) {
+            $nativeSecurity::CloseDirectoryPin($pin)
+        }
     }
 }
 
@@ -31192,16 +31376,20 @@ function Invoke-DefenseClawNuclearUninstall {
             -Arguments @('delete', $name)
     }
 
-    # 1c. Short settle delay so NT closes the released handles before the
-    #     Remove-Item -Recurse starts walking the trees. 500 ms is enough
-    #     in practice; Remove-Item still retries up to 3 times below.
+    # 1e. Short settle delay so NT closes the released handles before the
+    #     trees are walked. 500 ms is enough in practice; each root is
+    #     still retried up to 3 times below.
     Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
 
-    # 2. Nuke InstallRoot + StateRoot + the protected lifecycle receipt
-    #    directory. Each path must pass the safe-root scope guard before
-    #    any takeown/icacls/delete runs. The bases come from the Secure
-    #    Client profile roots, never from the caller's Layout, so a caller
-    #    cannot subvert the hammer by passing an attacker-chosen Layout.
+    # 2. Remove InstallRoot + StateRoot + the protected lifecycle receipt
+    #    directory. Each path must pass the safe-root scope guard, and then
+    #    goes through Remove-DefenseClawNuclearPath: nothing is followed
+    #    through a link or junction (at the path, below it, or in any folder
+    #    above it), and access is recovered only entry by entry inside a
+    #    root an administrator owns (no takeown /R, no icacls /T). The bases
+    #    come from the Secure Client profile roots, never from the caller's
+    #    Layout, so a caller cannot subvert the hammer by passing an
+    #    attacker-chosen Layout.
     #    The -Lifecycle sibling is a separate tree outside StateRoot
     #    (install-rollback journal, purge intent, self-uninstall receipt,
     #    managed-hook cleanup receipt) and survived earlier nuclear sweeps -
@@ -31227,107 +31415,104 @@ function Invoke-DefenseClawNuclearUninstall {
             )
             continue
         }
-        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
-            continue
-        }
-        Invoke-DefenseClawNuclearSilentExec `
-            -File $takeownExe `
-            -Arguments @('/F', $path, '/A', '/R', '/D', 'Y')
-        Invoke-DefenseClawNuclearSilentExec `
-            -File $script:IcaclsExe `
-            -Arguments @($path, '/reset', '/T', '/C', '/L')
         for ($attempt = 1; $attempt -le 3; $attempt++) {
-            try {
-                Microsoft.PowerShell.Management\Remove-Item `
-                    -LiteralPath $path `
-                    -Recurse `
-                    -Force `
-                    -ErrorAction Stop
+            $remaining = [Collections.Generic.List[string]]::new()
+            if (Remove-DefenseClawNuclearPath -Path $path -Remaining $remaining) {
                 break
             }
-            catch {
-                if ($attempt -eq 3) {
-                    $warnings.Add(
-                        "nuclear uninstall could not remove $role $path after 3 attempts: $($_.Exception.Message)"
-                    )
+            # A link, junction or squatted folder stays as found however
+            # often it is tried; only a busy or locked entry is retried.
+            $transient = @(
+                $remaining | Microsoft.PowerShell.Core\Where-Object {
+                    -not ([string]$_).EndsWith('; left as found')
                 }
-                else {
-                    Microsoft.PowerShell.Utility\Start-Sleep `
-                        -Milliseconds (300 * $attempt)
+            )
+            if ($attempt -eq 3 -or $transient.Count -eq 0) {
+                foreach ($entry in $remaining) {
+                    $warnings.Add("nuclear uninstall could not remove $role ${path}: $entry")
                 }
+                break
             }
+            Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds (300 * $attempt)
         }
     }
 
-    # 3a. Unconditional-delete DefenseClaw-owned sidecar files inside
-    #     each agent config directory. These sidecars are our own
-    #     per-connector state/lock/receipt files - no other owner.
+    # 3a. Delete DefenseClaw-owned sidecar files inside each agent config
+    #     directory, through Remove-DefenseClawNuclearPath like the roots.
+    #     These sidecars are our own per-connector state/lock/receipt files.
     #     The hooks' runtime selector (state and lock) goes too: once
     #     StateRoot and its Guardian activation are gone, a selector left
     #     behind made the next install refuse ("legacy deployment has no
     #     Guardian activation but <connector> runtime selector is
     #     present") and a different build's Guardian report contract drift.
-    foreach ($fixedPath in @(
-        # Legacy production IPC dir (orphan NT SERVICE SIDs land here).
-        [string](Get-DefenseClawProfileRoots -EnterpriseProfile SecureClient).ManagedIPCDirectory,
-        # Claude Code managed hooks sidecars.
-        'C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json',
-        'C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-hooks.state',
-        'C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-hooks.lock',
-        'C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-runtime-selector.state',
-        'C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-runtime-selector.lock',
-        # Codex managed hooks sidecars.
-        'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.state',
-        'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.lock',
-        'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.receipt',
-        'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-runtime-selector.state',
-        'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-runtime-selector.lock',
-        # Cursor managed hooks sidecars + the adapter stub we drop.
-        'C:\ProgramData\Cursor\defenseclaw-hook.ps1',
-        'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.state',
-        'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.lock',
-        'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.receipt',
-        'C:\ProgramData\Cursor\.defenseclaw-managed-runtime-selector.state',
-        'C:\ProgramData\Cursor\.defenseclaw-managed-runtime-selector.lock',
-        # GitHub Copilot (the CLI and the GitHub Copilot app): DefenseClaw's
-        # policy.d drop-in and DefenseClaw's own enrollment and runtime
-        # selector folder beside it.
-        'C:\ProgramData\GitHub\Copilot\policy.d\90-defenseclaw.json',
-        'C:\ProgramData\GitHub\Copilot\DefenseClaw'
+    $claudePolicyDir = [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode', 'managed-settings.d')
+    $codexPolicyDir = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex')
+    $cursorPolicyDir = [IO.Path]::Combine($script:ProgramData, 'Cursor')
+    $copilotPolicyDir = [IO.Path]::Combine($script:ProgramData, 'GitHub', 'Copilot')
+    $fixedPaths = [Collections.Generic.List[string]]::new()
+    foreach ($leaf in @(
+        # Claude Code managed hooks drop-in and sidecars.
+        '90-defenseclaw.json',
+        '.defenseclaw-managed-hooks.state',
+        '.defenseclaw-managed-hooks.lock',
+        '.defenseclaw-managed-runtime-selector.state',
+        '.defenseclaw-managed-runtime-selector.lock'
     )) {
-        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $fixedPath)) {
-            continue
-        }
-        Invoke-DefenseClawNuclearSilentExec `
-            -File $takeownExe `
-            -Arguments @('/F', $fixedPath, '/A')
-        Invoke-DefenseClawNuclearSilentExec `
-            -File $script:IcaclsExe `
-            -Arguments @($fixedPath, '/reset', '/C', '/L')
-        try {
-            Microsoft.PowerShell.Management\Remove-Item `
-                -LiteralPath $fixedPath `
-                -Recurse `
-                -Force `
-                -ErrorAction Stop
-        }
-        catch {
-            $warnings.Add("nuclear uninstall could not remove fixed-path $fixedPath : $($_.Exception.Message)")
+        $fixedPaths.Add([IO.Path]::Combine($claudePolicyDir, $leaf))
+    }
+    foreach ($leaf in @(
+        # Codex managed hooks sidecars.
+        '.defenseclaw-managed-hooks.state',
+        '.defenseclaw-managed-hooks.lock',
+        '.defenseclaw-managed-hooks.receipt',
+        '.defenseclaw-managed-runtime-selector.state',
+        '.defenseclaw-managed-runtime-selector.lock'
+    )) {
+        $fixedPaths.Add([IO.Path]::Combine($codexPolicyDir, $leaf))
+    }
+    foreach ($leaf in @(
+        # Cursor managed hooks sidecars + the adapter stub we drop.
+        'defenseclaw-hook.ps1',
+        '.defenseclaw-managed-hooks.state',
+        '.defenseclaw-managed-hooks.lock',
+        '.defenseclaw-managed-hooks.receipt',
+        '.defenseclaw-managed-runtime-selector.state',
+        '.defenseclaw-managed-runtime-selector.lock'
+    )) {
+        $fixedPaths.Add([IO.Path]::Combine($cursorPolicyDir, $leaf))
+    }
+    # GitHub Copilot (the CLI and the GitHub Copilot app): DefenseClaw's
+    # policy.d drop-in and DefenseClaw's own enrollment and runtime selector
+    # folder beside it.
+    $fixedPaths.Add([IO.Path]::Combine($copilotPolicyDir, 'policy.d', '90-defenseclaw.json'))
+    $fixedPaths.Add([IO.Path]::Combine($copilotPolicyDir, 'DefenseClaw'))
+    foreach ($fixedPath in $fixedPaths) {
+        $remaining = [Collections.Generic.List[string]]::new()
+        if (-not (Remove-DefenseClawNuclearPath -Path $fixedPath -Remaining $remaining)) {
+            foreach ($entry in $remaining) {
+                $warnings.Add("nuclear uninstall could not remove fixed-path ${fixedPath}: $entry")
+            }
         }
     }
 
     # The Copilot policy folders hold nothing once DefenseClaw's files are
     # gone, unless an administrator added policy of their own; only empty
-    # ones are removed.
+    # ones are removed, and never through a link.
     foreach ($copilotFolder in @(
-        'C:\ProgramData\GitHub\Copilot\policy.d',
-        'C:\ProgramData\GitHub\Copilot',
-        'C:\ProgramData\GitHub'
+        [IO.Path]::Combine($copilotPolicyDir, 'policy.d'),
+        $copilotPolicyDir,
+        [IO.Path]::GetDirectoryName($copilotPolicyDir)
     )) {
-        if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $copilotFolder -PathType Container) -and
-            $null -eq (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $copilotFolder -Force -ErrorAction SilentlyContinue |
-                Microsoft.PowerShell.Utility\Select-Object -First 1)) {
-            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $copilotFolder -Force -ErrorAction SilentlyContinue
+        try {
+            Assert-DefenseClawNuclearPathNoLink -Path $copilotFolder
+            $attributes = [IO.File]::GetAttributes($copilotFolder)
+            if (($attributes -band [IO.FileAttributes]::Directory) -ne 0 -and
+                @([IO.Directory]::GetFileSystemEntries($copilotFolder)).Count -eq 0) {
+                [IO.Directory]::Delete($copilotFolder, $false)
+            }
+        }
+        catch {
+            continue
         }
     }
 
@@ -31345,24 +31530,14 @@ function Invoke-DefenseClawNuclearUninstall {
     #     metadata". Nuclear ("clean slate") - just delete, same scope
     #     invariant as step 3a.
     foreach ($agentConfigPath in @(
-        'C:\ProgramData\OpenAI\Codex\requirements.toml',
-        'C:\ProgramData\Cursor\hooks.json'
+        [IO.Path]::Combine($codexPolicyDir, 'requirements.toml'),
+        [IO.Path]::Combine($cursorPolicyDir, 'hooks.json')
     )) {
-        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $agentConfigPath)) {
-            continue
-        }
-        Invoke-DefenseClawNuclearSilentExec `
-            -File $takeownExe `
-            -Arguments @('/F', $agentConfigPath, '/A')
-        Invoke-DefenseClawNuclearSilentExec `
-            -File $script:IcaclsExe `
-            -Arguments @($agentConfigPath, '/reset', '/C', '/L')
-        try {
-            Microsoft.PowerShell.Management\Remove-Item `
-                -LiteralPath $agentConfigPath -Force -ErrorAction Stop
-        }
-        catch {
-            $warnings.Add("nuclear uninstall could not remove agent config $agentConfigPath : $($_.Exception.Message)")
+        $remaining = [Collections.Generic.List[string]]::new()
+        if (-not (Remove-DefenseClawNuclearPath -Path $agentConfigPath -Remaining $remaining)) {
+            foreach ($entry in $remaining) {
+                $warnings.Add("nuclear uninstall could not remove agent config ${agentConfigPath}: $entry")
+            }
         }
     }
 
