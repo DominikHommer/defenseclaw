@@ -237,6 +237,7 @@ typedef struct {
     dclaw_exec_stage_t stage;
     bool             verdict_received;
     dclaw_action_t   cloud_verdict;
+    uint64_t         revoke_deadline_ms; /* slot expires (session revoked) here */
 } dclaw_speculative_slot_t;
 
 /* === Rate Limiter === */

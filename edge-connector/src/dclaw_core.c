@@ -257,30 +257,25 @@ static bool is_sync_block_required(uint8_t cap_flags) {
                          DCLAW_CAP_WRITE_FS)) != 0;
 }
 
+extern void dclaw_speculative_expire(uint64_t now_ms);
+
 /* Claim a speculative slot so the gateway verdict can be traced back to the
- * session. A slot is free when empty or when its request is no longer
- * pending (the pending slot was reclaimed and the verdict can never be
- * matched). Returns false when no slot is free: the caller must wait. */
+ * session. A slot is held until the verdict arrives or the speculative
+ * deadline passes; expired slots are released (and their sessions revoked)
+ * by dclaw_speculative_expire. Returns false when no slot is free: the
+ * caller must wait. */
 static bool speculative_track(uint16_t session_id, uint16_t request_id, uint8_t cap_flags) {
+    uint64_t now = hal_tick_ms();
+    dclaw_speculative_expire(now);
     for (int i = 0; i < DCLAW_SPECULATIVE_SLOTS; i++) {
         dclaw_speculative_slot_t *slot = &g_state.speculative[i];
-        bool free_slot = slot->request_id == 0;
-        if (!free_slot) {
-            free_slot = true;
-            for (int p = 0; p < DCLAW_PENDING_SLOTS; p++) {
-                if (g_state.pending[p].request_id == slot->request_id &&
-                    !g_state.pending[p].resolved) {
-                    free_slot = false;
-                    break;
-                }
-            }
-        }
-        if (free_slot) {
+        if (slot->request_id == 0) {
             memset(slot, 0, sizeof(*slot));
             slot->session_id = session_id;
             slot->request_id = request_id;
             slot->cap_flags = cap_flags;
             slot->stage = DCLAW_EXEC_STAGE_STARTED;
+            slot->revoke_deadline_ms = now + DCLAW_SPECULATIVE_VERDICT_TIMEOUT_MS;
             return true;
         }
     }
@@ -305,6 +300,12 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     if (!req) return (dclaw_verdict_t){.action = DCLAW_ACTION_BLOCK, .reason = DCLAW_REASON_INVALID_INPUT};
 
     g_state.eval_count++;
+
+#if DCLAW_SPECULATIVE_EXECUTION && DCLAW_MQTT_ENABLED
+    /* Revoke sessions whose speculative call outlived its verdict deadline
+     * before this request is checked against the revocation list. */
+    dclaw_speculative_expire(hal_tick_ms());
+#endif
 
     /* SYSTEM scope should only be set internally (e.g., by content
      * scanners or the daemon itself), not from IPC callers.  Override

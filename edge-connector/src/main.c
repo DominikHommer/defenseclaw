@@ -51,6 +51,7 @@ extern int  dclaw_mqtt_poll(int timeout_ms);
 extern int  dclaw_mqtt_get_fd(void);
 extern bool dclaw_mqtt_has_pending_input(void);
 extern void dclaw_canary_tick(void);
+extern void dclaw_speculative_expire(uint64_t now_ms);
 #endif
 extern int  dclaw_ipc_parse_request(const char *json, size_t json_len,
                                     dclaw_tool_request_t *out);
@@ -556,6 +557,9 @@ int main(int argc, char *argv[]) {
         }
 #endif
         dclaw_deferred_expire(hal_tick_ms());
+#if DCLAW_MQTT_ENABLED && DCLAW_SPECULATIVE_EXECUTION
+        dclaw_speculative_expire(hal_tick_ms());
+#endif
 
         /* Periodic tasks */
 #if DCLAW_MQTT_ENABLED

@@ -144,7 +144,20 @@ static bool s_replay_requested = false;
 static uint64_t s_replay_deadline_ms = 0;
 #define DCLAW_RECONNECT_GRACE_MS 60000
 
+extern bool dclaw_verdict_backs_speculative(uint16_t request_id);
+
+_Static_assert(MQTT_PENDING_RING_SIZE > DCLAW_SPECULATIVE_SLOTS,
+               "the pending ring must always hold an entry that is not speculative");
+
 void dclaw_mqtt_pending_store(uint16_t request_id, const uint8_t *tool_hash) {
+    /* Never evict the entry of a speculatively allowed call: the gateway's
+     * verdict for it could no longer be matched, so a late BLOCK would be
+     * lost. The ring is larger than the number of speculative slots. */
+    for (int n = 0; n < MQTT_PENDING_RING_SIZE; n++) {
+        mqtt_pending_entry_t *e = &pending_ring[pending_ring_next];
+        if (!e->occupied || !dclaw_verdict_backs_speculative(e->request_id)) break;
+        pending_ring_next = (pending_ring_next + 1) % MQTT_PENDING_RING_SIZE;
+    }
     mqtt_pending_entry_t *slot = &pending_ring[pending_ring_next];
     if (slot->occupied) {
         fprintf(stderr, "[DCLAW] WARNING: pending verdict slot %d evicted (ring full) — "
@@ -159,7 +172,7 @@ void dclaw_mqtt_pending_store(uint16_t request_id, const uint8_t *tool_hash) {
     pending_ring_next = (pending_ring_next + 1) % MQTT_PENDING_RING_SIZE;
 }
 
-static const uint8_t *dclaw_mqtt_pending_lookup(uint16_t request_id) {
+const uint8_t *dclaw_mqtt_pending_lookup(uint16_t request_id) {
     for (int i = 0; i < MQTT_PENDING_RING_SIZE; i++) {
         if (pending_ring[i].occupied && pending_ring[i].request_id == request_id) {
             return pending_ring[i].tool_hash;
