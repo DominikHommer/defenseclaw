@@ -18,6 +18,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -43,7 +44,8 @@ func TestSandboxViewsNameTheRematchedProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.sandboxDaemonFixture.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:contractors", Profile: "contractors"}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:contractors", Profile: "contractors",
+			Floor: &closedFloorRegFloor}, nil
 	}
 	c.d.pollOnce(ctx)
 	for _, v := range c.statusAndList(t, "dc-a") {
@@ -53,6 +55,55 @@ func TestSandboxViewsNameTheRematchedProfile(t *testing.T) {
 	}
 	if profile, ok := c.d.decisionsClient().SandboxProfile("dc-a"); !ok || profile != "contractors" {
 		t.Fatalf("the refusals' profile = %q, %v", profile, ok)
+	}
+}
+
+// A real managed gateway of this release answers policy/current with the
+// complete floor. An answer without one (an older or broken gateway) is
+// never applied: it does not confirm a registration, does not change its
+// floor, and does not move the profile, digest or provisional state that
+// status and the refusals show, so it can neither loosen the sandbox nor
+// make its views claim a policy the daemon does not enforce.
+func TestSandboxDaemonIgnoresAnAnswerWithoutAFloor(t *testing.T) {
+	c := newClosedFloorFixture(t)
+	ctx := context.Background()
+	if err := c.d.regs.put(daemonRegistration{ID: "reg-1", Sandbox: "dc-a", Profile: "contractors", Digest: "sha256:contractors",
+		Provisional: true, Floor: closedFloorRegFloor, Generation: 3, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := c.d.regs.get("dc-a")
+	verified := false
+	noFloor := sandboxrelay.CurrentPolicy{V: 1, Generation: 9, Digest: "sha256:open", Profile: "open", Provisional: &verified}
+	if c.d.regs.applyLive("dc-a", noFloor) {
+		t.Fatal("an answer without a floor was applied")
+	}
+	// The fake relay passes the answer on as it is (rawCurrent), instead of
+	// completing it with an empty floor.
+	c.sandboxDaemonFixture.relay.rawCurrent = true
+	c.sandboxDaemonFixture.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) { return noFloor, nil }
+	c.d.pollOnce(ctx)
+	after, _ := c.d.regs.get("dc-a")
+	if !reflect.DeepEqual(after.Floor, before.Floor) || after.Profile != "contractors" || after.Digest != "sha256:contractors" ||
+		!after.Provisional || after.Generation != 3 {
+		t.Fatalf("an answer without a floor moved the registration: %+v", after)
+	}
+	for _, v := range c.statusAndList(t, "dc-a") {
+		if v.OrganizationProfile != "contractors" || v.PolicyDigest != "sha256:contractors" || !v.Provisional {
+			t.Fatalf("the views follow an answer without a floor: profile %q digest %q provisional %v",
+				v.OrganizationProfile, v.PolicyDigest, v.Provisional)
+		}
+	}
+
+	// A registration loaded from the account's file stays unconfirmed.
+	loaded, err := loadDaemonRegistrations(c.d.regs.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.applyLive("dc-a", noFloor) {
+		t.Fatal("an answer without a floor confirmed a loaded registration")
+	}
+	if r, _ := loaded.get("dc-a"); r.Confirmed || !reflect.DeepEqual(r.Floor, config.OpenShellAdminConfig{}) {
+		t.Fatalf("loaded registration after an answer without a floor: %+v", r)
 	}
 }
 
@@ -71,7 +122,8 @@ func TestSandboxViewsFollowTheProvisionalMatch(t *testing.T) {
 	}
 	answer := func(profile, digest string, provisional *bool) {
 		c.sandboxDaemonFixture.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
-			return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: digest, Profile: profile, Provisional: provisional}, nil
+			return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: digest, Profile: profile, Provisional: provisional,
+				Floor: &closedFloorRegFloor}, nil
 		}
 		c.d.pollOnce(ctx)
 	}
@@ -337,11 +389,13 @@ func newRunningRegroupFixture(t *testing.T, answer *atomic.Pointer[sandboxrelay.
 func TestSandboxStatusConfirmsTheRegroupedProfile(t *testing.T) {
 	var answer atomic.Pointer[sandboxrelay.CurrentPolicy]
 	var calls atomic.Int32
-	answer.Store(&sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:engineering", Profile: "engineering"})
+	answer.Store(&sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:engineering", Profile: "engineering",
+		Floor: &closedFloorRegFloor})
 	f, ctl := newRunningRegroupFixture(t, &answer, &calls)
 	ctx := context.Background()
 
-	answer.Store(&sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:contractors", Profile: "contractors"})
+	answer.Store(&sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:contractors", Profile: "contractors",
+		Floor: &closedFloorRegFloor})
 	before := calls.Load()
 	if sb, err := ctl.Get(ctx, "dc-a"); err != nil || sb.OrganizationProfile != "engineering" || calls.Load() != before {
 		t.Fatalf("a plain Get asked the gateway or moved: %+v %v (calls %d -> %d)", sb, err, before, calls.Load())
@@ -370,7 +424,8 @@ func TestSandboxStatusConfirmsTheRegroupedProfile(t *testing.T) {
 func TestSandboxStatusShowsTheRegroupStop(t *testing.T) {
 	var answer atomic.Pointer[sandboxrelay.CurrentPolicy]
 	var calls atomic.Int32
-	answer.Store(&sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:engineering", Profile: "engineering"})
+	answer.Store(&sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:engineering", Profile: "engineering",
+		Floor: &closedFloorRegFloor})
 	f, ctl := newRunningRegroupFixture(t, &answer, &calls)
 	ctx := context.Background()
 	stop := sandboxapi.ProfileStop("host ports", "codex", "it-help@example.com")

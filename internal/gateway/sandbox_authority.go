@@ -671,7 +671,7 @@ func (a *APIServer) sandboxPolicyKey(ctx context.Context, cfg *config.Config) st
 // never with another group's profile, which the host generation would
 // reveal. The daemon compares it for equality only.
 func (a *APIServer) sandboxViewGeneration(cfg *config.Config, reg sandboxreg.Registration) uint64 {
-	floor, floorDigest, err := sandboxFloorFor(cfg, reg.Profile)
+	floor, floorDigest, err := sandboxRegistrationFloor(cfg, reg)
 	if err != nil {
 		floorDigest = "unloadable"
 	}
@@ -690,6 +690,36 @@ func (a *APIServer) sandboxViewGeneration(cfg *config.Config, reg sandboxreg.Reg
 // sandbox_policy_unloadable.
 var sandboxFloorFor = func(cfg *config.Config, profile string) (config.OpenShellAdminConfig, string, error) {
 	return cfg.SandboxManagedFloor(profile)
+}
+
+// sandboxRegistrationFloor is the floor F of a registered sandbox and its
+// digest: the floor of the profile it is matched to now, tightened by the
+// floor of the profile it was created under when a profile-assignment
+// change has since moved it (Registration.CreateProfile). Floors are pinned
+// at create per sandbox: a re-match may tighten a running sandbox, never
+// loosen it, and the person's next sandbox takes the new profile alone
+// (GAP-0242). An administrator's edit of a profile's own settings applies
+// to both floors, so it still reaches a running sandbox. Floors that do not
+// combine (a contradiction, or a create profile no longer defined) fail
+// closed like any floor that does not load.
+func sandboxRegistrationFloor(cfg *config.Config, reg sandboxreg.Registration) (config.OpenShellAdminConfig, string, error) {
+	floor, digest, err := sandboxFloorFor(cfg, reg.Profile)
+	if err != nil || reg.CreateProfile == nil || *reg.CreateProfile == reg.Profile {
+		return floor, digest, err
+	}
+	created, createdDigest, err := sandboxFloorFor(cfg, *reg.CreateProfile)
+	if err != nil {
+		return config.OpenShellAdminConfig{}, "", fmt.Errorf("the floor of profile %q the sandbox was created under: %w", *reg.CreateProfile, err)
+	}
+	pinned, err := config.TightenOpenShellAdmin(floor, &created)
+	if err != nil {
+		return config.OpenShellAdminConfig{}, "", err
+	}
+	if access := strings.TrimSpace(floor.RequestAccess); access != "" {
+		// The contact of the profile the person is assigned to now.
+		pinned.RequestAccess = floor.RequestAccess
+	}
+	return pinned, sandboxDigestOf([]string{"create-pinned-v1", digest, createdDigest}), nil
 }
 
 // sandboxDigestOf is "sha256:" and the hex SHA-256 of v's JSON.

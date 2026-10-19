@@ -185,6 +185,20 @@ type lifecycle struct {
 	// gatewayKeptRunning is set when the gateway applied a config change
 	// itself (hotConfigApply) and was not restarted.
 	gatewayKeptRunning bool
+	// policyAssetsEdited is set when ensure found a policy asset the config
+	// names edited in place (policyAssetsChanged): the apply then records the
+	// next config_generation although config.yaml stayed the same.
+	policyAssetsEdited bool
+	// policyAssetRefusal is why the installed gateway binary refuses the
+	// policy of an up-to-date deployment (configRefusal), found by
+	// policyAssetsChanged: a policy asset the config names was edited in
+	// place into one that does not load. ensure applies nothing and reports
+	// it (GAP-0229).
+	policyAssetRefusal string
+	// noopPolicy is the policy ensureNoop computed for an up-to-date
+	// deployment, which the result's policy block reuses once
+	// (computePolicy) instead of building the generation again.
+	noopPolicy *computedPolicy
 	// failedInstallLeftovers is set when an uninstall removes what a failed
 	// first package install left, with no deployment committed.
 	failedInstallLeftovers bool
@@ -528,6 +542,9 @@ func (l *lifecycle) ensureInstalled(ctx context.Context, record *Deployment, app
 		r.Noop = !restored
 		if !restored {
 			r.NoopReason = reason
+		}
+		if refusal := l.policyAssetRefusal; refusal != "" {
+			r.AddError(codeConfigRefused, env.policyAssetRefusedMessage(refusal))
 		}
 		if err := env.sealHookBinary(record); err != nil {
 			r.AddWarning(codeHookBinaryNotRestored, "could not keep a copy of the hook binary to restore it from: "+err.Error())
@@ -2180,10 +2197,13 @@ func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Acc
 		// A bundle whose config is already installed is still recorded as
 		// the generation its principal installed.
 		bundleUnrecorded := l.bundle != nil && (state.BundleID != l.bundle.receipt.BundleID || state.BundleVersion != l.bundle.receipt.Version)
-		return changed[env.Layout.ConfigPath] || stateErr != nil || state.ConfigSHA256 != p.config.SHA || bundleUnrecorded, nil
+		return changed[env.Layout.ConfigPath] || stateErr != nil || state.ConfigSHA256 != p.config.SHA || bundleUnrecorded || l.policyAssetsEdited, nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	if l.policyAssetsEdited {
+		l.noteChange("recorded a policy asset the config names, changed in place, as the next config generation")
 	}
 	// The gateway service reads the generation record, as it reads config.yaml.
 	serviceGroup := fileOwner{UID: 0, GID: account.GID}
@@ -2879,6 +2899,7 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 // desired state. It never mutates the host.
 func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, string) {
 	env := l.env
+	l.noopPolicy, l.policyAssetsEdited, l.policyAssetRefusal = nil, false, ""
 	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
 	if err != nil || !ok || account.UID != record.ServiceUID || account.GID != record.ServiceGID {
 		return false, ""
@@ -2921,7 +2942,59 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	if l.machinePolicyDrift(p) {
 		return false, ""
 	}
+	if l.policyAssetsChanged(ctx, record, account) {
+		return false, ""
+	}
+	if l.policyAssetRefusal != "" {
+		return true, "policy_refused"
+	}
 	return true, "up_to_date"
+}
+
+// policyAssetsChanged reports whether the installed config computes to an
+// effective policy the running gateway does not report while config.yaml
+// and every file the lifecycle installs are as applied: a policy asset the
+// config names was edited in place (a sandbox pack under the policies
+// directory, whose folder the gateway does not watch). ensure then applies
+// again, which records the change as the next config_generation and loads it
+// into the gateway, instead of reporting a noop with applied false
+// (GAP-0133). A gateway that is down or not serving, that publishes no
+// digest (Secure Client), or that rejected its last reload, and a policy that
+// does not build, are not changes a run can apply; status and verify keep
+// reporting them, and ensure fails with the reason a policy does not build
+// (policyAssetRefusal).
+func (l *lifecycle) policyAssetsChanged(ctx context.Context, record *Deployment, account Account) bool {
+	if record.NoStart {
+		return false
+	}
+	env := l.env
+	gateway, ok := gatewayUnitOf(env.Services.Units())
+	if !ok || !env.Services.Active(ctx, gateway) {
+		return false
+	}
+	body, err := l.gatewayHealth(ctx, gateway, account.UID)
+	if err != nil {
+		return false
+	}
+	reported, reloadError := gatewayPolicyHealth(body)
+	if reported == "" || reloadError != "" {
+		return false
+	}
+	digest, generation, ok := l.computePolicy(ctx)
+	if !ok {
+		// A policy that does not build is no change ensure applies: the
+		// running gateway keeps the policy it loaded, and the run fails
+		// with the reason instead of restarting into a policy that does not
+		// load (GAP-0229).
+		l.policyAssetRefusal = l.configRefusal(ctx)
+		return false
+	}
+	if digest == reported {
+		l.noopPolicy = &computedPolicy{digest: digest, generation: generation}
+		return false
+	}
+	l.policyAssetsEdited = true
+	return true
 }
 
 func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {

@@ -273,7 +273,6 @@ func (m *Manager) triageSweep() {
 // credential carries, so a direct rule is approved only where the proxy
 // would let the sandbox through.
 func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
-	cfg := m.config()
 	m.mu.Lock()
 	d := b.decider
 	if b.eff != eff {
@@ -281,6 +280,10 @@ func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
 	}
 	rec := b.rec
 	m.mu.Unlock()
+	cfg := m.configForSandbox(rec.Name)
+	if cfg == nil {
+		return triage.Policy{} // Classify refuses an unresolved policy.
+	}
 	if d == nil {
 		d, _ = m.egressDeciderFor(cfg, eff, m.registrationOf(b))
 	}
@@ -971,6 +974,7 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 			m.mu.Unlock()
 		}
 	}()
+	m.confirmPolicy(ctx, a.sandbox)
 	eff, err := m.resolveBox(b)
 	if err != nil {
 		return nil, err

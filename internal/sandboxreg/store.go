@@ -962,8 +962,8 @@ func (s *FileStore) ListAll() ([]Registration, error) {
 
 // Update rewrites uid's registration r.ID in place (re-match). The id, uid,
 // subject, state, sandbox and times stay the store's but for a later
-// PolicyAt; only the match, digests, generation and provisional flag
-// change. Its run record stays.
+// PolicyAt, and a CreateProfile once set stays; only the match, digests,
+// generation and provisional flag change. Its run record stays.
 func (s *FileStore) Update(uid int, r Registration) error {
 	return s.UpdateRun(uid, r, nil)
 }
@@ -992,6 +992,11 @@ func (s *FileStore) UpdateRun(uid int, r Registration, run *Run) error {
 		have.Profile, have.ProfileMatch, have.MatchedGroup = r.Profile, r.ProfileMatch, r.MatchedGroup
 		have.ProfileDigest, have.EffectiveDigest, have.FactsDigest = r.ProfileDigest, r.EffectiveDigest, r.FactsDigest
 		have.Generation, have.Provisional = r.Generation, r.Provisional
+		if have.CreateProfile == nil && r.CreateProfile != nil {
+			// Set once: the profile a sandbox was created under never moves.
+			created := *r.CreateProfile
+			have.CreateProfile = &created
+		}
 		if r.PolicyAt.After(have.PolicyAt) {
 			have.PolicyAt = r.PolicyAt
 		}
