@@ -30,14 +30,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
-// CheckIDTLSTrust is the doctor row of sandbox TLS trust: whether provider
+// CheckIDTLSTrust is the doctor row of sandbox TLS trust: whether probed
 // certificates, as this network presents them, verify with what a sandbox
 // trusts (the image's public roots plus openshell.trusted_ca_bundle).
 const CheckIDTLSTrust = "tls-trust"
 
-// tlsTrustHosts are the provider endpoints the check connects to: the
-// ones a TLS-inspecting proxy was seen to re-sign (#1296).
-var tlsTrustHosts = []string{"api.anthropic.com", "api.openai.com", "api.githubcopilot.com"}
+// Probe a build download host as well as model providers: providers may be
+// exempt from inspection while package downloads still need the configured CA.
+const tlsTrustDownloadHost = "registry.npmjs.org"
+
+var tlsTrustHosts = []string{"api.anthropic.com", "api.openai.com", "api.githubcopilot.com", tlsTrustDownloadHost}
 
 // tlsTrustTimeout bounds the whole probe.
 const tlsTrustTimeout = 4 * time.Second
@@ -210,7 +212,7 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 		if c.Status == openshell.StatusPass {
 			c.Status = openshell.StatusSkip
 		}
-		return finish("provider certificates not checked: " + err.Error())
+		return finish("TLS certificates not checked: " + err.Error())
 	}
 	sandboxRoots := public.Clone()
 	for _, cert := range cas.Certs {
@@ -240,7 +242,7 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 
 	// covered are the hosts that verify in a sandbox only through the
 	// trusted CAs: inspected, so an agent's model calls to them still fail.
-	var ok, covered, unreachable, intercepted, untrusted []string
+	var ok, covered, unreachable, intercepted, providerIntercepted, untrusted []string
 	// Issuers per classification, so each message names only its own.
 	var coveredBy, interceptedBy, untrustedBy issuerSet
 	for _, p := range probes {
@@ -250,8 +252,12 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 		}
 		if verifyChain(p.host, p.chain, sandboxRoots, now) == nil {
 			if !cas.Empty() && verifyChain(p.host, p.chain, public, now) != nil {
-				covered = append(covered, p.host)
-				coveredBy.add(chainIssuer(p.chain))
+				if p.host == tlsTrustDownloadHost {
+					ok = append(ok, p.host)
+				} else {
+					covered = append(covered, p.host)
+					coveredBy.add(chainIssuer(p.chain))
+				}
 			} else {
 				ok = append(ok, p.host)
 			}
@@ -260,6 +266,9 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 		issuer := chainIssuer(p.chain)
 		if verifyChain(p.host, p.chain, hostRoots, now) == nil {
 			intercepted = append(intercepted, p.host)
+			if p.host != tlsTrustDownloadHost {
+				providerIntercepted = append(providerIntercepted, p.host)
+			}
 			interceptedBy.add(issuer)
 		} else {
 			untrusted = append(untrusted, p.host)
@@ -287,7 +296,12 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 		if len(untrusted) > 0 {
 			parts = append(parts, untrustedDetail())
 		}
-		inspectedFix(&c, managed, append(append([]string(nil), intercepted...), covered...), len(intercepted) > 0)
+		providerHosts := append(providerIntercepted, covered...)
+		if len(providerHosts) == 0 {
+			setFix()
+		} else {
+			inspectedFix(&c, managed, providerHosts, len(intercepted) > 0)
+		}
 		return finish(strings.Join(parts, "; "))
 	case len(untrusted) > 0:
 		c.Status = openshell.StatusWarn
@@ -297,7 +311,7 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 		if c.Status == openshell.StatusPass {
 			c.Status = openshell.StatusSkip
 		}
-		return finish("provider certificates not checked: " + strings.Join(unreachable, ", ") + " did not answer from this computer")
+		return finish("TLS certificates not checked: " + strings.Join(unreachable, ", ") + " did not answer from this computer")
 	}
 	detail := strings.Join(ok, ", ") + " verify with the roots sandboxes trust (" + source + ")"
 	if len(unreachable) > 0 {

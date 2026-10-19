@@ -37,6 +37,30 @@ ROOT = Path(__file__).resolve().parents[2]
 _FIND_COSIGN = upgrade_shim._cosign
 
 
+@pytest.fixture(autouse=True)
+def shim_os(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """The shim's own view of ``os``.
+
+    Tests pretend a platform (``os.name``) and stub ``execv``/``chdir`` for
+    the shim only. Patching the real module leaked the pretence into the
+    config writer the shim calls: on a Windows runner a pretend POSIX host
+    fsynced the config folder, which Windows refuses (GAP-0273).
+    """
+    view = types.ModuleType("os")
+    view.__dict__.update(vars(os))
+    monkeypatch.setattr(upgrade_shim, "os", view)
+    return view
+
+
+def test_platform_pretence_stays_in_the_shim(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0273: a pretend platform reaches only the shim, never the config
+    # writer and file helpers it calls; the environment stays shared.
+    real = os.name
+    monkeypatch.setattr(upgrade_shim.os, "name", "posix" if real == "nt" else "nt")
+    assert os.name == real
+    assert upgrade_shim.os.environ is os.environ
+
+
 @pytest.fixture()
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     data = tmp_path / "home" / ".defenseclaw"
@@ -340,8 +364,10 @@ def test_windows_rollback_over_ssh_gives_the_command_for_this_terminal(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # GAP-1993: the new window never appears in an SSH session; rc 0 hid the result.
+    from defenseclaw import __version__
+
     (home / "installer").mkdir()
-    (home / "installer" / "install.ps1").write_text("", encoding="utf-8")
+    (home / "installer" / "install.ps1").write_text(f'$DcVersion = "{__version__}"\n', encoding="utf-8")
     monkeypatch.setattr(upgrade_shim.os, "name", "nt")
     monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")
     started: list[object] = []
@@ -527,6 +553,7 @@ def test_notice_respects_the_windows_self_update_policy(home: Path, monkeypatch:
     )
     monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
     monkeypatch.setattr(update_notice.os, "name", "nt")
+    monkeypatch.setattr(upgrade_shim.os, "name", "nt")
 
     assert update_notice.available_message() is None
     # The managed-deployment marker is checked first; without it the
@@ -843,7 +870,7 @@ def test_downgrade_sets_aside_the_keys_the_older_release_lacks(
     assert "trusted_ca_bundle" not in (config.get("openshell") or {})
     record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
     assert record == {"version": 1, "for": "1.0.2", "keys": {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem"}}
-    # The execs fixture sets os.name to posix; the platform says what the file system is.
+    # The execs fixture sets the shim's os.name to posix; the platform says what the file system is.
     if sys.platform != "win32":
         assert _set_aside(home).stat().st_mode & 0o777 == 0o600
 

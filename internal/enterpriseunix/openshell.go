@@ -295,28 +295,41 @@ func (e *Env) userUnitBytes(u userUnit) ([]byte, error) {
 			return nil, err
 		}
 		gateway := filepath.Join(e.Layout.BinDir, binGateway)
-		digest, err := sha256File(e.P(gateway))
-		if os.IsNotExist(err) {
-			return data, nil // A fresh non-package payload has not installed the gateway yet.
-		}
+		program, err := e.launchAgentProgram()
 		if err != nil {
-			return nil, fmt.Errorf("identify the LaunchAgent gateway: %w", err)
-		}
-		program := filepath.Join(e.Layout.BinDir, "launch-agents", digest, binGateway)
-		info, err := os.Lstat(e.P(program))
-		if os.IsNotExist(err) {
-			return data, nil // Older and non-package installations use the canonical path.
-		}
-		if err != nil || !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("the packaged LaunchAgent gateway is not a regular file: %s", program)
-		}
-		copyDigest, err := sha256File(e.P(program))
-		if err != nil || copyDigest != digest {
-			return nil, fmt.Errorf("the packaged LaunchAgent gateway differs from %s", gateway)
+			return nil, err
 		}
 		return []byte(strings.Replace(string(data), gateway, program, 1)), nil
 	}
 	return systemdunits.ReadUserUnit(u.Source)
+}
+
+// launchAgentProgram is the gateway file both macOS LaunchAgents execute: the
+// package's content-addressed copy of the installed gateway when it is there,
+// else the gateway itself. A copy that is not a regular file or differs from
+// the gateway is refused.
+func (e *Env) launchAgentProgram() (string, error) {
+	gateway := filepath.Join(e.Layout.BinDir, binGateway)
+	digest, err := sha256File(e.P(gateway))
+	if os.IsNotExist(err) {
+		return gateway, nil // A fresh non-package payload has not installed the gateway yet.
+	}
+	if err != nil {
+		return "", fmt.Errorf("identify the LaunchAgent gateway: %w", err)
+	}
+	program := filepath.Join(e.Layout.BinDir, "launch-agents", digest, binGateway)
+	info, err := os.Lstat(e.P(program))
+	if os.IsNotExist(err) {
+		return gateway, nil // Older and non-package installations use the canonical path.
+	}
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("the packaged LaunchAgent gateway is not a regular file: %s", program)
+	}
+	copyDigest, err := sha256File(e.P(program))
+	if err != nil || copyDigest != digest {
+		return "", fmt.Errorf("the packaged LaunchAgent gateway differs from %s", gateway)
+	}
+	return program, nil
 }
 
 // wantsLinkFor is the symlink that enables the sandbox socket for every

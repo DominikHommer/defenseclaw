@@ -9,6 +9,7 @@ import plistlib
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1253,9 +1254,15 @@ def _macos_pkg_postinstall(host: _Host) -> str:
     builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
     match = re.search(r"cat >\"\$SCRIPTS/postinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)
     assert match, "the pkg postinstall heredoc was not found"
+    # The installed programs the postinstall gives new files before ensure.
+    prefix = host.tmp / "prefix"
+    (prefix / "bin").mkdir(parents=True)
+    for name in ("defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper"):
+        _write_stub(prefix / "bin", name, "exit 0")
     return _rooted(
         match.group(1) + "\n",
         {
+            "prefix=/opt/cisco/defenseclaw": f"prefix={prefix}",
             "gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
             "state=/opt/cisco/defenseclaw/lifecycle": f"state={host.state}",
         },
@@ -1809,7 +1816,7 @@ _USER_MANAGER_ANSWERS = {
 }
 
 
-@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.skipif(not sys.platform.startswith("linux") or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
 @pytest.mark.parametrize("answer", sorted(_USER_MANAGER_ANSWERS))
 def test_linux_preremove_stops_the_sandbox_user_units_in_every_user_manager(tmp_path: Path, answer: str) -> None:
     host = _Host(tmp_path)
@@ -1852,7 +1859,7 @@ case "$*" in {_USER_MANAGER_ANSWERS[answer]} esac""")
 # not skip a live user manager: its units stop as the uid and gid that own
 # its runtime directory, and a manager that then does not answer keeps the
 # package.
-@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.skipif(not sys.platform.startswith("linux") or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
 @pytest.mark.parametrize("answer", ["stopped", "no_answer"])
 def test_linux_preremove_stops_the_user_units_of_an_account_the_lookup_does_not_name(tmp_path: Path, answer: str) -> None:
     host = _Host(tmp_path)

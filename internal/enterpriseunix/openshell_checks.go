@@ -49,6 +49,10 @@ type prereqRow struct {
 	// Code is the warning code of a missing row ("" is
 	// openshell_prerequisite_missing).
 	Code string
+	// Version is the release an OpenShell part row read from the
+	// administrator's trusted copy, also when it is not one the pin allows
+	// ("" for other rows and when it could not be read).
+	Version string
 }
 
 // checkLauncher is a row only when the launcher path holds a file the
@@ -92,6 +96,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 				l.describePending(entry)
 			}
 		}
+		l.noteOpenShellCapability(ctx, settings, false, nil, nil)
 		return
 	}
 	row := func(name, state string) {
@@ -100,6 +105,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	row("openshell", fmt.Sprintf("enabled, install=%s driver=%s%s gateway=127.0.0.1:%d%s", settings.Install, settings.Driver,
 		fallbackNote(settings), settings.GatewayPort, versionNote(settings.Version)))
 	primary, fallback := env.checkOpenShellDrivers(ctx, settings)
+	l.noteOpenShellCapability(ctx, settings, true, primary, fallback)
 	fallbackReady := fallback != nil && rowsReady(fallback)
 	for _, check := range primary {
 		if check.OK {
@@ -414,10 +420,10 @@ func (e *Env) checkPrerequisiteMode(ctx context.Context, s openshellSettings) []
 		}
 		parts, releases[name] = append(parts, name), version
 		if ok, why := versionAllowed(s.Version, version); !ok {
-			rows = append(rows, prereqRow{Name: row, Detail: name + ": " + why, Fix: pinFix})
+			rows = append(rows, prereqRow{Name: row, Detail: name + ": " + why, Fix: pinFix, Version: version.String()})
 			return
 		}
-		rows = append(rows, prereqRow{Name: row, OK: true, Detail: fmt.Sprintf("%s (%s)", version, how)})
+		rows = append(rows, prereqRow{Name: row, OK: true, Detail: fmt.Sprintf("%s (%s)", version, how), Version: version.String()})
 	}
 	cli, refused := e.trustedAdminFile(e.binCandidates("openshell"))
 	part("openshell cli", "openshell", "openshell", cli, refused, installFix)
@@ -582,9 +588,12 @@ func (e *Env) checkKVM() prereqRow {
 	return prereqRow{Name: "kvm", OK: true, Detail: kvmDevice + " needs the kvm group or a read-write user ACL"}
 }
 
+// dockerSockets are where the Docker engine listens on Linux and macOS.
+var dockerSockets = []string{"/var/run/docker.sock", "/run/docker.sock"}
+
 func (e *Env) checkDocker() prereqRow {
 	cli := e.firstExisting(append(e.binCandidates("docker"), "/Applications/Docker.app/Contents/Resources/bin/docker"))
-	sock := e.firstExisting([]string{"/var/run/docker.sock", "/run/docker.sock"})
+	sock := e.firstExisting(dockerSockets)
 	switch {
 	case cli == "" && sock == "":
 		return prereqRow{Name: "docker", Detail: "Docker is not installed", Fix: "install Docker Engine (Docker Desktop on a Mac); the sandbox images are built and run through it"}

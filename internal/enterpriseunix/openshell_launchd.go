@@ -53,6 +53,30 @@ func (e *Env) gatewayFileIdentity() (string, error) {
 	return fmt.Sprintf("%d:%d", st.Dev, st.Ino), nil
 }
 
+// refreshLaunchAgentPrograms gives the gateway file the LaunchAgents execute
+// a new file with the same bytes (GAP-0049). macOS keeps the code signature
+// it checked with a file, so a program file rewritten in place can be killed
+// for code signing at every later start, and a bootout and bootstrap alone
+// start that same file again. The lifecycle has already checked the gateway
+// against the deployment record, and launchAgentProgram checks the package
+// copy against the gateway.
+func (e *Env) refreshLaunchAgentPrograms() error {
+	program, err := e.launchAgentProgram()
+	if err != nil {
+		return err
+	}
+	paths := []string{filepath.Join(e.Layout.BinDir, binGateway)}
+	if program != paths[0] {
+		paths = append(paths, program)
+	}
+	for _, path := range paths {
+		if err := e.refreshFile(e.P(path)); err != nil {
+			return fmt.Errorf("give %s a new file: %w", path, err)
+		}
+	}
+	return nil
+}
+
 type loadedLaunchAgent struct {
 	domain string
 	label  string
@@ -163,7 +187,8 @@ func (e *Env) reloadMacOSAgent(ctx context.Context, job loadedLaunchAgent, faile
 // reconcileMacOSAgents runs after the deployment commits or an ensure no-op.
 // The state holds the gateway inode seen at the last reload, so an old 1.0.1
 // state (no identity) and every pkg replacement reload once, while a second
-// ensure of the same inode leaves healthy jobs untouched.
+// ensure of the same inode leaves healthy jobs untouched. A job killed for
+// code signing first gets a new gateway file, then the same reload.
 func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellState) bool {
 	e := l.env
 	if e.GOOS != "darwin" || state.Applied == nil || !state.Applied.Enabled {
@@ -175,6 +200,7 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 		return false
 	}
 	changed := identity != state.GatewayIdentity
+	refreshed := false
 	for _, a := range e.sandboxOps().Accounts(ctx) {
 		if !e.usableSandboxAccount(a) {
 			continue
@@ -245,6 +271,14 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 		}
 		var failed error
 		for _, job := range needed {
+			if job.state.CodeSigningKilled() && !refreshed {
+				if err := e.refreshLaunchAgentPrograms(); err != nil {
+					failed = err
+					break
+				}
+				refreshed = true
+				l.openshellChange("gave the LaunchAgent gateway a new file after macOS killed %s of %s for code signing", job.label, a.Name)
+			}
 			if err := e.reloadMacOSAgent(ctx, job, job.state.Failure(job.label == labelOpenShellGateway && status.Running > 0) != ""); err != nil {
 				failed = err
 				break
@@ -260,6 +294,13 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 			l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("could not reload the LaunchAgent of %s: %v; %s", a.Name, failed, next))
 		} else {
 			delete(state.Pending, key)
+		}
+	}
+	if refreshed {
+		// Record the new file, so the next ensure does not reload the
+		// healthy jobs again.
+		if current, err := e.gatewayFileIdentity(); err == nil {
+			identity = current
 		}
 	}
 	state.GatewayIdentity = identity
@@ -299,10 +340,13 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 		for _, job := range jobs {
 			if why := job.state.Failure(job.label == labelOpenShellGateway && running > 0); why != "" {
 				next := "run `" + l.env.lifecycleCommand(ActionRepair) + "`"
+				if job.state.CodeSigningKilled() {
+					next += ": it gives the LaunchAgent gateway a new file and reloads the job"
+				}
 				if l.opts.Action == ActionRepair {
 					next = "reinstall a signed DefenseClaw package, then run status and verify; if it still fails, collect launchctl and codesign diagnostics"
 				}
-				message := fmt.Sprintf("LaunchAgent %s of %s (uid %d) in %s is %s; %s", job.label, a.Name, a.UID, job.domain, why, next)
+				message := fmt.Sprintf("LaunchAgent %s of %s (uid %d) in %s failed: %s; %s", job.label, a.Name, a.UID, job.domain, why, next)
 				l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox " + a.Name + " " + job.domain + "/" + job.label, Kind: sandboxRowKind, State: "failed: " + why})
 				l.result.SecurityComplete = false
 				if l.opts.Action == ActionEnsure && l.opts.FromPackage {
