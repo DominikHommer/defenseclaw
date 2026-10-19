@@ -1452,8 +1452,14 @@ func hookContractsIncompatible(previous, current connector.HookContractLockEntry
 // case) is open and every other non-empty value is closed. Unset policy is
 // open only under Secure Client (#1163) and closed for every other profile.
 func canonicalHookFailMode(mode string) string {
+	return canonicalHookFailModeFor(mode, secureClientHookDelivery())
+}
+
+// canonicalHookFailModeFor is canonicalHookFailMode for an explicit profile:
+// an unset mode is open only under Secure Client (#1163).
+func canonicalHookFailModeFor(mode string, secureClient bool) string {
 	trimmed := strings.TrimSpace(mode)
-	if strings.EqualFold(trimmed, "open") || (trimmed == "" && secureClientHookDelivery()) {
+	if strings.EqualFold(trimmed, "open") || (trimmed == "" && secureClient) {
 		return "open"
 	}
 	return "closed"
