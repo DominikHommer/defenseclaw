@@ -64,7 +64,15 @@ func TestWindowsCursorInactiveRestoreLeavesAnUntouchedAdministratorFile(t *testi
 	}
 	snapshot := windowsCursorManagedTeardownSnapshot(validated)
 
-	if err := RestoreWindowsCursorManagedPolicyTeardown(WindowsCursorManagedPolicyTeardownOptions{}, snapshot); err != nil {
+	// The body of RestoreWindowsCursorManagedPolicyTeardown, without the
+	// transaction lock, which needs a protected ProgramData folder.
+	current, err := snapshotWindowsCursorManagedArtifacts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreWindowsCursorManagedSnapshotUnlocked(
+		WindowsCursorManagedPolicyTeardownOptions{}, snapshot, current, true,
+	); err != nil {
 		t.Fatalf("rollback of an untouched inactive Cursor policy failed: %v", err)
 	}
 	if len(writes) != 0 {
