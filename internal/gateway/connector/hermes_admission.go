@@ -110,16 +110,16 @@ func validateHermesWindowsSetupAdmission(ctx context.Context, opts SetupOpts) er
 	}
 	authority, err := loadHermesExecutableAuthority(opts.DataDir)
 	if err != nil {
-		return fmt.Errorf("Hermes executable admission: %w", err)
+		return fmt.Errorf("Hermes executable admission: %w", err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if opts.AgentVersion != authority.rawVersion {
-		return errors.New("Hermes executable admission: selected raw version does not match protected evidence")
+		return errors.New("Hermes executable admission: selected raw version does not match protected evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if opts.HookContractID != "" && opts.HookContractID != authority.contractID {
-		return errors.New("Hermes executable admission: selected hook contract does not match protected evidence")
+		return errors.New("Hermes executable admission: selected hook contract does not match protected evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if err := validateHermesExecutableEvidence(ctx, opts.AgentExecutable, authority); err != nil {
-		return fmt.Errorf("Hermes executable admission: %w", err)
+		return fmt.Errorf("Hermes executable admission: %w", err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return nil
 }
@@ -137,11 +137,11 @@ func validateHermesWindowsLockPublication(
 		return nil
 	}
 	if !validSetupSelectedAgentExecutableEvidence(entry, "hermes") {
-		return errors.New("Hermes contract publication lacks valid setup-selected executable evidence")
+		return errors.New("Hermes contract publication lacks valid setup-selected executable evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	authority, err := loadHermesExecutableAuthority(dataDir)
 	if err != nil {
-		return fmt.Errorf("Hermes contract publication: %w", err)
+		return fmt.Errorf("Hermes contract publication: %w", err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if entry.RawAgentVersion != authority.rawVersion ||
 		entry.NormalizedAgentVersion != authority.normalizedVersion ||
@@ -149,10 +149,10 @@ func validateHermesWindowsLockPublication(
 		entry.CompatibilityStatus != HookCompatibilityKnown ||
 		!sameCodexExecutablePath(entry.AgentExecutable, authority.path) ||
 		!strings.EqualFold(entry.AgentExecutableSHA256, authority.digest) {
-		return errors.New("Hermes contract publication does not match protected executable evidence")
+		return errors.New("Hermes contract publication does not match protected executable evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if err := validateHermesExecutableEvidence(ctx, entry.AgentExecutable, authority); err != nil {
-		return fmt.Errorf("Hermes contract publication: %w", err)
+		return fmt.Errorf("Hermes contract publication: %w", err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return nil
 }

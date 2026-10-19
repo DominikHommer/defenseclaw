@@ -643,7 +643,7 @@ func adoptWindowsCodexOrphanedRequirements(
 	opts WindowsCodexMachineRequirementsOptions,
 ) ([]byte, bool, error) {
 	if strings.TrimSpace(opts.HookContractID) == "" {
-		return nil, false, errors.New("Codex requirements contain an exact DefenseClaw hook without protected ownership metadata")
+		return nil, false, errors.New("Codex requirements contain an exact DefenseClaw hook without protected ownership metadata") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	preimage, _, err := removeWindowsCodexRequirementsOwnedChanges(current, nil, opts)
 	if err != nil {
@@ -887,7 +887,7 @@ func marshalWindowsCodexMachineOwnership(state windowsCodexMachineOwnership) ([]
 	}
 	data = append(data, '\n')
 	if len(data) > windowsCodexMachineOwnershipLimit {
-		return nil, fmt.Errorf("Codex requirements ownership exceeds %d bytes", windowsCodexMachineOwnershipLimit)
+		return nil, fmt.Errorf("Codex requirements ownership exceeds %d bytes", windowsCodexMachineOwnershipLimit) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return data, nil
 }

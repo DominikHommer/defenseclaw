@@ -651,14 +651,14 @@ func parsePath(path string) ([]pathPart, error) {
 	i := 0
 	expectKey := true
 	for i < len(path) {
-		switch c := path[i]; {
-		case c == '.':
+		switch path[i] {
+		case '.':
 			if expectKey {
 				return nil, fmt.Errorf("configwrite: empty segment in path %q", path)
 			}
 			expectKey = true
 			i++
-		case c == '[':
+		case '[':
 			end := strings.IndexByte(path[i:], ']')
 			if end < 0 {
 				return nil, fmt.Errorf("configwrite: unclosed [ in path %q", path)

@@ -98,7 +98,7 @@ enum ConfigFieldValidation {
             if field.key.hasPrefix("openshell."), number < 0 {
                 return Result(severity: "error", message: "value must be zero or greater")
             }
-            if ["timeout", "interval", "retries", "max_"].contains(where: field.key.contains), number < 0 {
+            if (field.key.hasPrefix("openshell.") || ["timeout", "interval", "retries", "max_"].contains(where: field.key.contains)), number < 0 {
                 return Result(severity: "error", message: "value must be zero or greater")
             }
         }

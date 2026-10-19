@@ -943,7 +943,7 @@ func ValidateOpenShellCopyPattern(pattern string) error {
 	case strings.ContainsRune(p, 0):
 		return errors.New("pattern contains a NUL byte")
 	case !strings.HasPrefix(p, "/") && p != "~" && !strings.HasPrefix(p, "~/") && p != "**" &&
-		!strings.HasPrefix(p, "**/") && !(hasDriveLetter(p) && len(p) > 2 && (p[2] == '/' || p[2] == '\\')):
+		!strings.HasPrefix(p, "**/") && ((!(hasDriveLetter(p)) || len(p) <= 2) || (p[2] != '/' && p[2] != '\\')):
 		return fmt.Errorf("%q must be an absolute path glob or start with \"~/\"; a relative pattern would never match", pattern)
 	}
 	for _, segment := range strings.Split(p, "/") {

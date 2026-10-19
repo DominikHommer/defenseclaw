@@ -5,12 +5,14 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 DASHBOARD_DIR = ROOT / "bundles/local_observability_stack/grafana/dashboards"
@@ -32,6 +34,15 @@ def _dashboard(name: str) -> dict:
 
 def _panel(dashboard: dict, title: str) -> dict:
     return next(panel for panel in dashboard["panels"] if panel.get("title") == title)
+
+
+def test_kernel_denials_table_shows_verified_name_with_uid_fallback() -> None:
+    dashboard = _dashboard("defenseclaw-blocked-events.json")
+    panel = _panel(dashboard, "Kernel denials by control, connector, user and process")
+    query = panel["targets"][0]["expr"]
+    assert 'body_defenseclaw_user_name=~' in query
+    assert 'user="{{if .body_defenseclaw_user_name}}{{.body_defenseclaw_user_name}} ({{.body_user_id}}){{else}}{{.body_user_id}}{{end}}"' in query
+    assert panel["transformations"][1]["options"]["renameByName"]["user"] == "User (name and uid)"
 
 
 def test_grafana_dashboard_catalog_contract() -> None:
@@ -1006,7 +1017,7 @@ def test_static_audit_rejects_dashboard_semantic_contract_regressions(
     assert any("blank trace selection" in error for error in errors)
     assert any(error.startswith("semantic-fixture/Top hosts:") and "reduced by rows" in error for error in errors)
     assert any("scope_label must be defined before" in error for error in errors)
-    assert any("agent variable must enumerate" in error for error in errors)
+    assert any("agent variable must be a regex text box" in error for error in errors)
     assert any("persisted options must match" in error for error in errors)
 
 
@@ -1271,6 +1282,171 @@ def test_sandboxes_board_scopes_to_one_computer() -> None:
     health = [target["expr"] for target in _panel(board, "Health degraded")["targets"]]
     assert ['body_defenseclaw_sandbox_name=~"$sandbox"' in e for e in health] == [True, False]
     assert ['body_defenseclaw_sandbox_name=""' in e for e in health] == [False, True]
+
+
+# The shipped Loki (docker-compose.yml) takes OTLP natively and indexes its
+# default resource attributes plus the ones loki.yaml's otlp_config names;
+# every other resource or record attribute is structured metadata. A stream
+# selector on structured metadata matches nothing. A panel filters after the
+# selector, so it also works on a Loki that indexes only the defaults
+# (GAP-0168). A dashboard box (label_values variable) can list index labels
+# only, so the shipped config indexes what the boxes list (GAP-0221). This
+# is Loki 3.2's default list, with dots read as underscores.
+SHIPPED_LOKI_IMAGE = "grafana/loki:3.2.0"
+SHIPPED_LOKI_CONFIGURED_INDEX_LABELS = frozenset(
+    {"deployment_environment_name", "host_name", "os_type", "defenseclaw_sandbox_name"}
+)
+LOKI_DEFAULT_INDEX_LABELS = frozenset(
+    {
+        "cloud_availability_zone",
+        "cloud_region",
+        "container_name",
+        "deployment_environment",
+        "k8s_cluster_name",
+        "k8s_container_name",
+        "k8s_cronjob_name",
+        "k8s_daemonset_name",
+        "k8s_deployment_name",
+        "k8s_job_name",
+        "k8s_namespace_name",
+        "k8s_pod_name",
+        "k8s_replicaset_name",
+        "k8s_statefulset_name",
+        "service_instance_id",
+        "service_name",
+        "service_namespace",
+    }
+)
+SHIPPED_LOKI_INDEX_LABELS = LOKI_DEFAULT_INDEX_LABELS | SHIPPED_LOKI_CONFIGURED_INDEX_LABELS
+_STREAM_SELECTOR = re.compile(r"(?<![{\w$])\{(?!\{)([^{}]*)\}(?!\})")
+_MATCHER = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:=~|!~|!=|=)")
+
+
+def _loki_queries(node: object, datasource: object = None):
+    """Yield (where, query) for every Loki panel target and variable query."""
+    if isinstance(node, dict):
+        datasource = node.get("datasource", datasource)
+        is_loki = isinstance(datasource, dict) and datasource.get("type") == "loki"
+        for key, value in node.items():
+            if key == "expr" and isinstance(value, str) and is_loki:
+                yield node.get("refId", "?"), value
+            elif key == "query" and isinstance(value, dict) and is_loki and isinstance(value.get("query"), str):
+                yield node.get("name", "?"), value["query"]
+            else:
+                yield from _loki_queries(value, datasource)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _loki_queries(item, datasource)
+
+
+def test_shipped_loki_indexes_the_labels_the_boxes_list() -> None:
+    stack = ROOT / "bundles/local_observability_stack"
+    compose = (stack / "docker-compose.yml").read_text(encoding="utf-8")
+    assert f"image: {SHIPPED_LOKI_IMAGE}" in compose, "update LOKI_DEFAULT_INDEX_LABELS with the Loki image"
+    loki = yaml.safe_load((stack / "loki/loki.yaml").read_text(encoding="utf-8"))
+    rules = loki["limits_config"]["otlp_config"]["resource_attributes"]
+    assert not rules.get("ignore_defaults"), "the default index labels must stay"
+    indexed = {
+        attribute.replace(".", "_")
+        for rule in rules["attributes_config"]
+        if rule["action"] == "index_label"
+        for attribute in rule["attributes"]
+    }
+    assert indexed == SHIPPED_LOKI_CONFIGURED_INDEX_LABELS
+    assert "deployment_environment_name" not in LOKI_DEFAULT_INDEX_LABELS
+    # The sandbox name is a record attribute; the Collector moves it onto the
+    # resource, the only place Loki indexes from.
+    collector = yaml.safe_load((stack / "otel-collector/config.yaml").read_text(encoding="utf-8"))
+    logs = collector["service"]["pipelines"]["logs"]["processors"]
+    assert logs.index("transform/sandbox-identity") < logs.index("groupbyattrs/sandbox-identity")
+    assert collector["processors"]["groupbyattrs/sandbox-identity"] == {"keys": ["defenseclaw.sandbox.name"]}
+
+
+# Boxes whose values live only in the JSON record body. Loki's label API
+# cannot list them (GAP-0241), so they are regex text boxes whose default
+# matches every record that carries the field, as their All value did.
+BODY_FIELD_TEXT_BOXES = {
+    ("defenseclaw-activity.json", "session"),
+    ("defenseclaw-agent-360.json", "agent"),
+    ("defenseclaw-agent-360.json", "lifecycle"),
+    ("defenseclaw-agent-360.json", "execution"),
+    ("defenseclaw-blocked-events.json", "hook_event"),
+}
+_LABEL_VALUES = re.compile(r"^label_values\((\{[^{}|]*\}), ([A-Za-z_][A-Za-z0-9_]*)\)$")
+
+
+def test_loki_boxes_list_index_labels_with_a_matcher_only_selector() -> None:
+    # Grafana sends label_values(selector, label) to Loki's label API. Loki
+    # refuses a selector with a pipeline (HTTP 400, "only label matchers are
+    # supported") and returns no value for structured metadata, so such a box
+    # is empty: the Sandboxes Environment box listed no local-dev (GAP-0221).
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        for variable in board.get("templating", {}).get("list", []):
+            if (variable.get("datasource") or {}).get("type") != "loki" or variable.get("type") != "query":
+                continue
+            query = variable["query"]["query"] if isinstance(variable["query"], dict) else variable["query"]
+            match = _LABEL_VALUES.match(query)
+            assert match, f"{path.name} ${variable['name']}: {query} is not label_values(<matchers>, <label>)"
+            selector, label = match.groups()
+            assert variable.get("definition") == query, f"{path.name} ${variable['name']}"
+            assert label in SHIPPED_LOKI_INDEX_LABELS, f"{path.name} ${variable['name']}: {label}"
+            assert set(_MATCHER.findall(selector)) <= SHIPPED_LOKI_INDEX_LABELS, f"{path.name} ${variable['name']}"
+            checked += 1
+    assert checked == 6
+
+
+def test_loki_body_field_boxes_are_regex_text_boxes() -> None:
+    for name, variable_name in sorted(BODY_FIELD_TEXT_BOXES):
+        board = _dashboard(name)
+        variable = next(item for item in board["templating"]["list"] if item["name"] == variable_name)
+        assert variable["type"] == "textbox", (name, variable_name)
+        assert variable["query"] == variable["current"]["value"] == ".+", (name, variable_name)
+        assert "regex" in variable["description"].lower(), (name, variable_name)
+        reference = f'"${variable_name}"'
+        uses = [query for _, query in _loki_queries(board) if reference in query]
+        assert uses, (name, variable_name)
+        exact = re.compile(r'(?<![!|])\s*=\s*"\$' + variable_name + r'"')
+        for query in uses:
+            # A regex text box is read by regex matchers and line filters only.
+            assert not exact.search(query), (name, variable_name, query)
+            assert f"|= {reference}" not in query, (name, variable_name, query)
+
+
+def test_loki_stream_selectors_use_only_shipped_index_labels() -> None:
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        for where, query in _loki_queries(board):
+            for selector in _STREAM_SELECTOR.findall(query):
+                labels = set(_MATCHER.findall(selector))
+                assert labels, f"{path.name} {where}: empty selector in {query}"
+                assert labels <= SHIPPED_LOKI_INDEX_LABELS, (
+                    f"{path.name} {where}: {sorted(labels - SHIPPED_LOKI_INDEX_LABELS)} is not a Loki index label; "
+                    "filter on it after the stream selector"
+                )
+                checked += 1
+    assert checked > 250
+
+
+def test_sandbox_board_filters_environment_after_the_selector() -> None:
+    board = _dashboard("defenseclaw-sandboxes.json")
+    queries = list(_loki_queries(board))
+    assert queries
+    for where, query in queries:
+        if "deployment_environment_name" in query and not query.startswith("label_values("):
+            assert '{service_name="defenseclaw"} | deployment_environment_name' in query, where
+    boxes = {variable["name"]: variable for variable in board["templating"]["list"]}
+    selector = 'service_name="defenseclaw", deployment_environment_name=~"$environment"'
+    assert boxes["environment"]["query"]["query"] == (
+        'label_values({service_name="defenseclaw"}, deployment_environment_name)'
+    )
+    assert boxes["host"]["query"]["query"] == f"label_values({{{selector}}}, host_name)"
+    assert boxes["sandbox"]["query"]["query"] == (
+        f'label_values({{{selector}, host_name=~"$host"}}, defenseclaw_sandbox_name)'
+    )
+    assert boxes["os"]["query"]["query"] == f'label_values({{{selector}, host_name=~"$host"}}, os_type)'
 
 
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:
@@ -2659,7 +2835,7 @@ def test_live_golden_executes_authored_agent360_target_semantics(
     assert any("span.defenseclaw.agent.root.id" in query for query in queries)
     assert any(
         "approval[.](requested|resolved)" in query
-        and f'|= "golden-agent-root-{stamp}" | json' in query
+        and f'|~ "golden-agent-root-{stamp}" | json' in query
         for query in queries
     )
     assert any(
@@ -3253,12 +3429,9 @@ def test_activity_session_tree_drilldown_uses_canonical_root_identity() -> None:
     activity = _dashboard("defenseclaw-activity.json")
     variables = {item["name"]: item for item in activity["templating"]["list"]}
     session = variables["session"]
-    assert session["label"] == "Root session"
-    assert session["datasource"]["uid"] == "defenseclaw-loki"
-    assert '{service_name="defenseclaw"}' in session["definition"]
-    assert 'connector=~"$connector"' in session["definition"]
-    assert "body_defenseclaw_session_root_id" in session["definition"]
-    assert "gen_ai_client_token_usage_count" not in session["definition"]
+    assert session["label"] == "Root session ID regex"
+    assert session["type"] == "textbox"
+    assert "defenseclaw.session.root.id" in session["description"]
 
     token_panel = _panel(activity, "Reported tokens for selected session tree")
     assert token_panel["datasource"]["uid"] == "defenseclaw-loki"
@@ -3400,8 +3573,8 @@ def test_activity_root_session_all_value_and_timeline_are_truthful() -> None:
     session = next(
         item for item in activity["templating"]["list"] if item["name"] == "session"
     )
-    assert session["includeAll"] is True
-    assert session["allValue"] == ".+"
+    # The default matches every root session, as the box's All value did.
+    assert session["query"] == session["current"]["value"] == ".+"
 
     timeline = _panel(activity, "Ordered session-tree lifecycle and work timeline")
     expression = timeline["targets"][0]["expr"]

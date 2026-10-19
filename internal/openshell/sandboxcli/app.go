@@ -683,7 +683,7 @@ func violationMessage(v *sandboxapi.Violation, message, detail string, admin boo
 // managed computer, where it exits saying only the sandbox commands are
 // available (GAP-0590).
 func (a *App) tuiOffered() bool {
-	return !(a.ManagedHost() || onManagedHost() || a.managedSeen != nil)
+	return ((!(a.ManagedHost()) && !(onManagedHost())) && a.managedSeen == nil)
 }
 
 // violationText is violationMessage for a user on a managed computer: the

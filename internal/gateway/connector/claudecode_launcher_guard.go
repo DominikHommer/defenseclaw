@@ -176,7 +176,7 @@ func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, erro
 	settingsPath := claudeCodeSettingsPath()
 	readPath, err := claudeCodeUserSettingsReadPath(settingsPath)
 	if err != nil {
-		return 0, fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err)
+		return 0, fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	data, err := os.ReadFile(readPath)
 	if os.IsNotExist(err) {

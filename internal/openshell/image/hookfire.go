@@ -807,7 +807,7 @@ func resolveHookFireNet(opts HookFireOptions, ingressPort int) (hookFireNet, err
 		if n.bindHost == "" {
 			n.bindHost = "127.0.0.1"
 		}
-		if ip := net.ParseIP(n.bindHost); ip == nil || !(ip.IsLoopback() || ip.IsPrivate()) {
+		if ip := net.ParseIP(n.bindHost); ip == nil || (!(ip.IsLoopback()) && !(ip.IsPrivate())) {
 			return n, fmt.Errorf("openshell image: hook-fire sink host %q must be a loopback or private address in relay mode", n.bindHost)
 		}
 		n.containerHost = "host.docker.internal"

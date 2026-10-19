@@ -3,7 +3,7 @@
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-observe-45a62214
+  name: defenseclaw-observe-03acb3aa
 spec:
   lsmhooks:
     - hook: file_open
@@ -24,10 +24,15 @@ spec:
             - args: [0]
               operator: Equal
               values:
+                - /etc/shadow
                 - /home/alice/.aws/config
                 - /home/alice/.aws/credentials
+                - /home/alice/.claude/settings.json
+                - /home/alice/.claude/settings.local.json
+                - /home/alice/.codex/config.toml
                 - /home/alice/.config/gcloud/application_default_credentials.json
                 - /home/alice/.config/gcloud/credentials.db
+                - /home/alice/.cursor/mcp.json
                 - /home/alice/.docker/config.json
                 - /home/alice/.git-credentials
                 - /home/alice/.gnupg/secring.gpg
@@ -41,8 +46,12 @@ spec:
                 - /home/alice/.ssh/id_rsa
                 - /home/bob/.aws/config
                 - /home/bob/.aws/credentials
+                - /home/bob/.claude/settings.json
+                - /home/bob/.claude/settings.local.json
+                - /home/bob/.codex/config.toml
                 - /home/bob/.config/gcloud/application_default_credentials.json
                 - /home/bob/.config/gcloud/credentials.db
+                - /home/bob/.cursor/mcp.json
                 - /home/bob/.docker/config.json
                 - /home/bob/.git-credentials
                 - /home/bob/.gnupg/secring.gpg
@@ -65,30 +74,19 @@ spec:
                 - host_ns
           matchArgs:
             - args: [0]
-              operator: Equal
+              operator: Prefix
               values:
-                - /home/alice/.claude/settings.json
-                - /home/alice/.claude/settings.local.json
-                - /home/alice/.codex/config.toml
-                - /home/alice/.cursor/mcp.json
-                - /home/bob/.claude/settings.json
-                - /home/bob/.claude/settings.local.json
-                - /home/bob/.codex/config.toml
-                - /home/bob/.cursor/mcp.json
-          matchActions:
-            - action: Post
-              rateLimit: 1m
-              rateLimitScope: process
-        - matchNamespaces:
-            - namespace: Pid
-              operator: In
-              values:
-                - host_ns
-          matchArgs:
-            - args: [0]
-              operator: Equal
-              values:
-                - /etc/shadow
+                - /etc/sudoers.d/
+                - /home/alice/.claude/hooks/
+                - /home/alice/.claude/skills/
+                - /home/alice/.codex/skills/
+                - /home/alice/.cursor/rules/
+                - /home/alice/.gnupg/private-keys-v1.d/
+                - /home/bob/.claude/hooks/
+                - /home/bob/.claude/skills/
+                - /home/bob/.codex/skills/
+                - /home/bob/.cursor/rules/
+                - /home/bob/.gnupg/private-keys-v1.d/
           matchActions:
             - action: Post
               rateLimit: 1m
@@ -114,65 +112,6 @@ spec:
               operator: Mask
               values:
                 - "2"
-          matchActions:
-            - action: Post
-              rateLimit: 1m
-              rateLimitScope: process
-    - hook: file_open
-      args:
-        - index: 0
-          type: file
-        - index: 0
-          type: uint32
-          resolve: f_mode
-          label: f_mode
-      selectors:
-        - matchNamespaces:
-            - namespace: Pid
-              operator: In
-              values:
-                - host_ns
-          matchArgs:
-            - args: [0]
-              operator: Prefix
-              values:
-                - /home/alice/.gnupg/private-keys-v1.d/
-                - /home/bob/.gnupg/private-keys-v1.d/
-          matchActions:
-            - action: Post
-              rateLimit: 1m
-              rateLimitScope: process
-        - matchNamespaces:
-            - namespace: Pid
-              operator: In
-              values:
-                - host_ns
-          matchArgs:
-            - args: [0]
-              operator: Prefix
-              values:
-                - /home/alice/.claude/hooks/
-                - /home/alice/.claude/skills/
-                - /home/alice/.codex/skills/
-                - /home/alice/.cursor/rules/
-                - /home/bob/.claude/hooks/
-                - /home/bob/.claude/skills/
-                - /home/bob/.codex/skills/
-                - /home/bob/.cursor/rules/
-          matchActions:
-            - action: Post
-              rateLimit: 1m
-              rateLimitScope: process
-        - matchNamespaces:
-            - namespace: Pid
-              operator: In
-              values:
-                - host_ns
-          matchArgs:
-            - args: [0]
-              operator: Prefix
-              values:
-                - /etc/sudoers.d/
           matchActions:
             - action: Post
               rateLimit: 1m
@@ -204,7 +143,7 @@ spec:
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-4baa7c7c
+  name: defenseclaw-controls-3c9d992a
 spec:
   options:
     - name: policy-mode
@@ -242,6 +181,7 @@ spec:
         - matchBinaries:
             - operator: In
               values:
+                - /home/alice/.local/bin/claude
                 - /home/alice/.local/share/claude/versions/2.1.100
                 - /home/alice/.local/share/claude/versions/2.1.101
               followChildren: true
@@ -269,6 +209,7 @@ spec:
         - matchBinaries:
             - operator: In
               values:
+                - /home/alice/.local/bin/claude
                 - /home/alice/.local/share/claude/versions/2.1.100
                 - /home/alice/.local/share/claude/versions/2.1.101
               followChildren: true
@@ -297,22 +238,10 @@ spec:
             - action: Override
               argError: -1
             - action: Post
-    - hook: file_open
-      args:
-        - index: 0
-          type: file
-        - index: 0
-          type: uint32
-          resolve: f_mode
-          label: f_mode
-        - index: 0
-          type: uint32
-          resolve: f_cred.uid.val
-          label: opener_uid
-      selectors:
         - matchBinaries:
             - operator: In
               values:
+                - /home/alice/.local/bin/claude
                 - /home/alice/.local/share/claude/versions/2.1.100
                 - /home/alice/.local/share/claude/versions/2.1.101
               followChildren: true
@@ -345,7 +274,7 @@ spec:
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-burnin-8aa2b3a3
+  name: defenseclaw-controls-burnin-4500064d
 spec:
   options:
     - name: policy-mode
@@ -438,19 +367,6 @@ spec:
             - action: Override
               argError: -1
             - action: Post
-    - hook: file_open
-      args:
-        - index: 0
-          type: file
-        - index: 0
-          type: uint32
-          resolve: f_mode
-          label: f_mode
-        - index: 0
-          type: uint32
-          resolve: f_cred.uid.val
-          label: opener_uid
-      selectors:
         - matchPIDs:
             - operator: In
               followForks: true
