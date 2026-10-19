@@ -7,6 +7,17 @@ owned hook producer. It calls the producer directly: Manager.Create, LaunchGate
 and a common ExecutionPolicy receipt are outside this canary. The test adapter
 creates no policy receipt.
 
+The first actual Claude attempt, 39278231615 at 332ae56e, reached Prepared
+but not Started. Source review found that the canary supplied the assets
+factory's scoped context to the peer owner, while assets preparation cancels
+that context on return. The peer owner treats parent cancellation as a stop,
+so this is sufficient to stop the peer before Launch. The corrected canary
+starts the peer under a child of its retained 45-second session lifetime,
+forwards scoped cancellation during preparation, detaches that forwarding
+before successful handoff, and retains the child cancel through native cleanup.
+A fake host test covers successful handoff and canceled partial preparation.
+This changed canary source has not yet been built or run.
+
 The fixed fixture lists all twelve current connector schemas. Version strings
 select the existing parser contracts; the executable is a synthetic Go payload,
 not any vendor agent. The payload calls the existing hook client with literal

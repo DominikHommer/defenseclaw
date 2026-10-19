@@ -101,6 +101,82 @@ func (owner *containedCleanup) Close(ctx context.Context) error {
 }
 
 func TestFixedContainedHookCleanupRetainsUncertainOwnerWithoutNative(t *testing.T) {
+	// assets.prepare cancels its factory context at successful return. A
+	// child of the retained lifetime must outlive that operation context.
+	lifetime, cancelLifetime := context.WithCancel(context.Background())
+	defer cancelLifetime()
+	assets, spec := nativeHookAssetFake(t)
+	assets.lifetime = lifetime
+	var scoped, retained context.Context
+	closed := false
+	preparedProcess := &nativeHookAssetFakeProcess{
+		close: func(context.Context) error { closed = true; return nil },
+		launch: func(context.Context, sandboxruntime.Spec) (sandboxruntime.Instance, error) {
+			return sandboxruntime.Instance{Identity: spec.Identity, Phase: "started"}, nil
+		},
+	}
+	if _, err := assets.prepare(lifetime, spec, []string{bridgeproto.HookDirectory},
+		func(ctx context.Context, _ *os.File, _ *bridgeproto.Hook) (sandboxruntime.PreparedProcess, error) {
+			scoped = ctx
+			owned, cancelOwned, stopPrepare, err := containedSessionLifetime(ctx, lifetime)
+			if err != nil {
+				return preparedProcess, err
+			}
+			defer stopPrepare()
+			retained = owned
+			preparedProcess.close = func(context.Context) error {
+				cancelOwned()
+				closed = true
+				return nil
+			}
+			return preparedProcess, nil
+		}); err != nil {
+		t.Fatal("fake preparation refused owned lifetime")
+	}
+	if scoped == nil || scoped.Err() != context.Canceled || retained == scoped || retained.Err() != nil {
+		t.Fatal("peer owner inherited canceled preparation context")
+	}
+	if _, err := assets.Launch(lifetime, spec); err != nil {
+		t.Fatal("prepared fake could not launch after prepare returned")
+	}
+	if err := assets.Close(context.Background()); err != nil || !closed || retained.Err() != context.Canceled {
+		t.Fatal("fake native cleanup did not cancel retained session lifetime")
+	}
+
+	partialLifetime, cancelPartialLifetime := context.WithCancel(context.Background())
+	defer cancelPartialLifetime()
+	partialAssets, partialSpec := nativeHookAssetFake(t)
+	partialAssets.lifetime = partialLifetime
+	operation, cancelOperation := context.WithCancel(partialLifetime)
+	defer cancelOperation()
+	partialClosed := false
+	partialProcess := &nativeHookAssetFakeProcess{close: func(context.Context) error { partialClosed = true; return nil }}
+	if owner, err := partialAssets.prepare(operation, partialSpec, []string{bridgeproto.HookDirectory},
+		func(ctx context.Context, _ *os.File, _ *bridgeproto.Hook) (sandboxruntime.PreparedProcess, error) {
+			owned, cancelOwned, stopPrepare, setupErr := containedSessionLifetime(ctx, partialLifetime)
+			if setupErr != nil {
+				return partialProcess, setupErr
+			}
+			defer stopPrepare()
+			partialProcess.close = func(context.Context) error {
+				cancelOwned()
+				partialClosed = true
+				return nil
+			}
+			cancelOperation()
+			select {
+			case <-owned.Done():
+			case <-time.After(time.Second):
+				t.Fatal("canceled preparation did not stop retained native start")
+			}
+			return partialProcess, ctx.Err()
+		}); owner != partialAssets || !errors.Is(err, context.Canceled) || partialAssets.complete {
+		t.Fatal("canceled preparation escaped with a launchable process")
+	}
+	if err := partialAssets.Close(context.Background()); err != nil || !partialClosed {
+		t.Fatal("partial native process was not retained for cleanup")
+	}
+
 	// These facts are all that a failed actual launch may publish. The
 	// underlying error text and any uncorrelated failure payload stay private.
 	binding := bridgeproto.Binding{SessionID: "fixed"}
@@ -365,6 +441,7 @@ type containedHookProcess struct {
 	binding            bridgeproto.Binding
 	session            *bridgeprocess.Session
 	grant              *os.File
+	cancelSession      context.CancelFunc
 	launchRequest      uint64
 	launched, complete bool
 	output             []byte
@@ -386,6 +463,11 @@ func (process *containedHookProcess) Close(ctx context.Context) error {
 			process.cleanupObservation = containedCleanupObservation{Step: "native_stop_wait", OwnerError: containedKnownError(err)}
 			return err
 		}
+	}
+	// Cancel only after exact native cleanup. Canceling before Protocol.Close
+	// would itself turn an otherwise successful owner close into canceled.
+	if process.cancelSession != nil {
+		process.cancelSession()
 	}
 	if ctx.Err() != nil {
 		process.cleanupObservation = containedCleanupObservation{Step: "cleanup_context", OwnerError: containedKnownError(ctx.Err())}
@@ -467,6 +549,25 @@ func containedImage(ctx context.Context, root *os.File, leaf, digest string, hel
 	file := os.NewFile(uintptr(fd), "fixed-admitted-input")
 	*held = append(*held, file) // retain the raw input even if sealing fails
 	return bridgeprocess.SealImage(ctx, file, digest)
+}
+
+// The native peer must keep an execution lifetime after assets.prepare cancels
+// its scoped factory context. During preparation, cancellation still stops a
+// pending Start; after successful preparation the watcher is detached before
+// assets.prepare's deferred cancel. The returned cancel belongs to the
+// retained process and is canceled only after exact native cleanup succeeds.
+func containedSessionLifetime(preparing, lifetime context.Context) (context.Context, context.CancelFunc, func() bool, error) {
+	if preparing == nil || lifetime == nil || preparing.Err() != nil || lifetime.Err() != nil {
+		return nil, nil, nil, errors.New("fixed native owner lifetime unavailable")
+	}
+	owned, cancel := context.WithCancel(lifetime)
+	stop := context.AfterFunc(preparing, cancel)
+	if err := preparing.Err(); err != nil {
+		stop()
+		cancel()
+		return nil, nil, nil, err
+	}
+	return owned, cancel, stop, nil
 }
 
 // This is an opt-in finite contributor test, never a provider qualification.
@@ -731,7 +832,13 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 			Scope string
 			Plan  bridgeproto.Preparation
 		}{"fixed synthetic hook grant plan, no common policy receipt", plan}), RuntimeDigest: containedDigest(runtimeIdentity), HarnessDigest: containedDigest(harness), PreparationHash: preparation}
-		process.session, err = bridgeprocess.Start(ctx, process.binding, plan, bridgeprocess.Inputs{Peer: peer, Bubblewrap: bwrap, Payload: payload, CWD: workspace[0], Read: []*os.File{grant}, Write: workspace}, bridgeowner.Limits{WriteTimeout: 5 * time.Second, CleanupTimeout: 10 * time.Second})
+		owned, cancelOwned, stopPrepare, err := containedSessionLifetime(ctx, lifetime)
+		if err != nil {
+			return process, err
+		}
+		process.cancelSession = cancelOwned
+		defer stopPrepare()
+		process.session, err = bridgeprocess.Start(owned, process.binding, plan, bridgeprocess.Inputs{Peer: peer, Bubblewrap: bwrap, Payload: payload, CWD: workspace[0], Read: []*os.File{grant}, Write: workspace}, bridgeowner.Limits{WriteTimeout: 5 * time.Second, CleanupTimeout: 10 * time.Second})
 		if err != nil {
 			return process, err
 		}
