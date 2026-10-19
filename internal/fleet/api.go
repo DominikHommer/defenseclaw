@@ -599,6 +599,26 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "device credential store unavailable"})
 		return
 	}
+	// Re-keying a live device is a credential rotation: require explicit
+	// intent and share rotate-key's per-device window.
+	_, liveDevice := a.manager.GetDevice(fullID)
+	if liveDevice && !req.ForceReregister {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "device already registered — use POST /devices/{id}/rotate-key or set force_reregister=true to issue a new key",
+		})
+		return
+	}
+	if liveDevice {
+		a.rotationMu.Lock()
+		last, limited := a.deviceKeyRotations[fullID]
+		a.rotationMu.Unlock()
+		if limited && time.Since(last) < time.Minute {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{
+				"error": "device key rotation rate limited — try again in 1 minute",
+			})
+			return
+		}
+	}
 	if r.TLS == nil {
 		w.Header().Set("X-Security-Warning", "key-delivered-over-plaintext")
 	}
@@ -647,6 +667,9 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		a.bridge.ClearDecommissioned(dev.DeviceID)
 	}
 	if reregistered {
+		a.rotationMu.Lock()
+		a.deviceKeyRotations[fullID] = time.Now()
+		a.rotationMu.Unlock()
 		a.emitAudit(auditDeviceReregistered, fmt.Sprintf("%d", dev.DeviceID),
 			fmt.Sprintf("tenant:%d fleet:%d", req.TenantID, req.FleetID))
 		writeJSON(w, http.StatusOK, map[string]any{"device": dev, "device_key": hex.EncodeToString(deviceKey)})

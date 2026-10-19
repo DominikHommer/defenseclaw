@@ -167,3 +167,32 @@ func TestAllowKeyOverHTTPIgnoredOutsideDevMode(t *testing.T) {
 		}
 	})
 }
+
+// POST /devices for a live device does not silently issue a new key: it needs
+// force_reregister and shares rotate-key's per-device rate limit.
+func TestRegisterLiveDeviceRequiresForceAndIsRateLimited(t *testing.T) {
+	api, store, _, _ := hardeningAPI(t, FleetSettings{APIToken: "admin"}, "")
+	id := manager.ComposeID(1, 1, 9)
+	c, k1 := registerDeviceVia(t, api, "admin", 1, 1, 9, "", true)
+	if c != http.StatusCreated || k1 == "" {
+		t.Fatalf("initial registration: %d", c)
+	}
+	if c, k := registerDeviceVia(t, api, "admin", 1, 1, 9, "", true); c != http.StatusConflict || k != "" {
+		t.Fatalf("re-registration without force_reregister: %d key=%q", c, k)
+	}
+	stored, _ := store.LoadDeviceKey(id)
+	if fmt.Sprintf("%x", stored) != k1 {
+		t.Fatal("refused re-registration replaced the key")
+	}
+	c, k2 := registerDeviceVia(t, api, "admin", 1, 1, 9, `,"force_reregister":true`, true)
+	if c != http.StatusOK || k2 == "" || k2 == k1 {
+		t.Fatalf("forced re-registration: %d", c)
+	}
+	if c, _ := registerDeviceVia(t, api, "admin", 1, 1, 9, `,"force_reregister":true`, true); c != http.StatusTooManyRequests {
+		t.Fatalf("second forced re-registration within a minute: %d", c)
+	}
+	rot := securityTestRequest(api, http.MethodPost, fmt.Sprintf("/devices/%d/rotate-key", id), "admin", "{}", true)
+	if rot.Code != http.StatusTooManyRequests {
+		t.Fatalf("rotate-key right after forced re-registration: %d", rot.Code)
+	}
+}

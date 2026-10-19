@@ -93,7 +93,7 @@ Returns all registered devices with an aggregate fleet summary.
 POST /api/v1/fleet/devices
 ```
 
-Registers a new device with the fleet manager. Pre-register each production device with the authenticated API and provision its issued per-device key; MQTT auto-registration is limited to unmanaged local development. If a device with the same composite ID already exists, API re-registration returns `200 OK` instead of `201 Created` and replaces its device key. Provision the returned key on the device immediately. A decommissioned device additionally requires `force_reregister: true`. Registration fails closed if the credential store or mandatory pre-commit credential audit is unavailable. Moving a C device to a different tenant/fleet requires trusted flash reset and reprovisioning of its durable emergency state.
+Registers a new device with the fleet manager. Pre-register each production device with the authenticated API and provision its issued per-device key; MQTT auto-registration is limited to unmanaged local development. If a device with the same composite ID is already registered, the request returns `409 Conflict` unless it sets `force_reregister: true`; a forced re-registration returns `200 OK` instead of `201 Created`, replaces the device key, and shares the one-per-minute per-device limit of `rotate-key`. Provision the returned key on the device immediately. A decommissioned device also requires `force_reregister: true`. Registration fails closed if the credential store or mandatory pre-commit credential audit is unavailable. Moving a C device to a different tenant/fleet requires trusted flash reset and reprovisioning of its durable emergency state.
 
 **Request body**
 
@@ -106,7 +106,7 @@ Registers a new device with the fleet manager. Pre-register each production devi
 | `fw_version` | string | no | Firmware version string |
 | `policy_version` | uint16 | no | Highest accepted policy version (anti-rollback watermark); after a canary rollback this can exceed the active partition's version |
 | `capabilities` | uint8 | no | Capability bitmask the device supports |
-| `force_reregister` | bool | no | Required to re-enable a decommissioned device |
+| `force_reregister` | bool | no | Required to re-key an already registered device or to re-enable a decommissioned device |
 
 ```json
 {
@@ -146,7 +146,7 @@ Registers a new device with the fleet manager. Pre-register each production devi
 }
 ```
 
-**Response** `200 OK` (device already exists)
+**Response** `200 OK` (existing device, `force_reregister: true`)
 
 ```json
 {
@@ -170,11 +170,12 @@ Outside explicit unmanaged development mode (`DCLAW_DEV_MODE=ON`), the gateway a
 
 | Status | Condition |
 | --- | --- |
-| `200` | Device already exists (idempotent) |
+| `200` | Existing device re-registered with `force_reregister` (new key issued) |
 | `201` | Device created |
 | `400` | Missing `device_id` or malformed JSON |
 | `403` | Token is not authorized for the tenant, or credential delivery channel is not protected |
-| `409` | Device was decommissioned; `force_reregister` is required |
+| `409` | Device is already registered or was decommissioned; `force_reregister` is required |
+| `429` | Forced re-registration of a live device within a minute of its last key change |
 | `413` | Request body exceeds 1 MB |
 | `503` | Atomic credential/tombstone store or mandatory audit unavailable; existing registration and key are preserved so the request can be retried |
 

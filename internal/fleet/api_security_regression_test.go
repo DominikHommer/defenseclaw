@@ -398,7 +398,7 @@ func TestFleetCredentialAuditFailureBlocksRegistrationAndDecommission(t *testing
 	if err != nil || len(oldKey) != 32 {
 		t.Fatalf("registered key missing: %v", err)
 	}
-	newBody := `{"tenant_id":1,"fleet_id":1,"device_id":42,"fw_version":"new"}`
+	newBody := `{"tenant_id":1,"fleet_id":1,"device_id":42,"fw_version":"new","force_reregister":true}`
 	if got := securityTestRequest(api, http.MethodPost, "/devices", "admin-review", newBody, true); got.Code != http.StatusServiceUnavailable {
 		t.Fatalf("re-registration bypassed audit: status=%d body=%s", got.Code, got.Body.String())
 	}
