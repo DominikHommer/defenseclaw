@@ -32,13 +32,22 @@ const auditBusyTimeoutMillis = 5000
 // while the gateway was idle. A variable so tests can use a small file.
 var walIdleTrimBytes int64 = auditWALJournalSizeLimitBytes
 
-// walCopyPasses bounds the copy passes on the dedicated connection, and
-// walWriterCopyFrames is the backlog (about 8 MiB) left for the writer
-// connection to copy, which it does well inside its budget.
-const (
-	walCopyPasses       = 3
-	walWriterCopyFrames = 2048
-)
+// walCopyPasses bounds the copy passes on the dedicated connection. Each pass
+// copies what was written during the one before, so the backlog shrinks pass
+// by pass while the disk copies faster than the hooks write.
+const walCopyPasses = 6
+
+// walWriterCopyFrames is the largest backlog (about 8 MiB) a pass leaves for
+// the writer connection to copy. With a larger backlog the pass does not take
+// the writer, unless the log is past walForcedRestartFactor times the limit:
+// copying it there would hold the hooks for as long as the copy takes. A
+// variable so tests can force a large backlog.
+var walWriterCopyFrames = 2048
+
+// walForcedRestartFactor bounds the log when the copy cannot get the backlog
+// under walWriterCopyFrames: past this many times the limit the pass restarts
+// the log on the writer whatever the backlog.
+const walForcedRestartFactor = 2
 
 // Test seams: walCopyPhaseHook runs before each copy pass and
 // walWriterPhaseHook while the writer connection is held, so tests can hold
@@ -64,6 +73,10 @@ type WALCheckpoint struct {
 	// WriterHeld is how long the pass held the writer connection; zero when
 	// it did not need it.
 	WriterHeld time.Duration
+	// WriterDeferred is true when the log was over the limit but the copy left
+	// more than walWriterCopyFrames for the writer, so the pass left the
+	// restart to a later pass.
+	WriterDeferred bool
 }
 
 // CheckpointWALIfLarge keeps the write-ahead log bounded under sustained hook
@@ -101,8 +114,10 @@ type WALCheckpoint struct {
 // them, and the hook latency rose for the whole flood (rel-1-0-3 GAP-0247,
 // GAP-0136).
 //
-// The writer connection has no other writer to wait for, and its busy
-// timeout is zero for the statement. A reader on an older snapshot makes the
+// The writer copies only the backlog the copy passes left, at most
+// walWriterCopyFrames, unless the log is past walForcedRestartFactor times
+// the limit. The writer connection has no other writer to wait for, and its
+// busy timeout is zero for the statement. A reader on an older snapshot makes the
 // checkpoint busy; the next pass tries again.
 func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writerBudget time.Duration) (result WALCheckpoint, err error) {
 	if ctx == nil {
@@ -147,6 +162,10 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	long := int64(frames)*walFrameBytes > limitBytes
 	idleOversized := quiet && frames == copied && s.walFileBytes() > walIdleTrimBytes
 	if !long && !idleOversized {
+		return result, nil
+	}
+	if frames-copied > walWriterCopyFrames && int64(frames)*walFrameBytes <= walForcedRestartFactor*limitBytes {
+		result.WriterDeferred = true
 		return result, nil
 	}
 	mode := walCheckpointRestart

@@ -205,6 +205,30 @@ func TestCheckpointWALIfLargeRestartsALongLogUnderWrites(t *testing.T) {
 	}
 }
 
+// A long log whose copy left more than walWriterCopyFrames is not restarted
+// on the writer, which would hold the hooks for the whole copy, until it is
+// past walForcedRestartFactor times the limit.
+func TestCheckpointWALIfLargeHoldsTheWriterOnlyForASmallBacklog(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	logWALGuardEvents(t, store, 200)
+	original := walWriterCopyFrames
+	walWriterCopyFrames = -1 // every backlog is too large
+	t.Cleanup(func() { walWriterCopyFrames = original })
+	phases := countWriterPhases(t)
+	// No pass has copied the log yet, so it fills the file.
+	logBytes := walFileSize(t, store)
+	pass, err := store.CheckpointWALIfLarge(ctx, logBytes*2/3, testWALWriterBudget)
+	if err != nil || !pass.WriterDeferred || pass.Restarted || pass.WriterHeld != 0 || *phases != 0 {
+		t.Fatalf("long log with a large backlog: %+v, %v, writer phases %d; want the restart deferred", pass, err, *phases)
+	}
+	pass, err = store.CheckpointWALIfLarge(ctx, logBytes/3, testWALWriterBudget)
+	if err != nil || pass.WriterDeferred || !pass.Restarted || *phases != 1 {
+		t.Fatalf("log past %dx the limit: %+v, %v, writer phases %d; want the restart", walForcedRestartFactor, pass, err, *phases)
+	}
+}
+
 // rel-1-0-2:GAP-0709: the copy on the dedicated connection is not bounded by
 // the writer budget. A deadline loses all of a checkpoint's progress, so a
 // copy that takes longer than the budget must still finish.

@@ -118,8 +118,8 @@ func TestHookFloodFlatnessRule(t *testing.T) {
 
 // hookFloodGuardMinute sums the WAL guard passes that ended in one minute.
 type hookFloodGuardMinute struct {
-	passes, writer, restarted, truncated, failed int
-	held, heldMax, passMax                       time.Duration
+	passes, writer, deferred, restarted, truncated, failed int
+	held, heldMax, passMax                                 time.Duration
 }
 
 // TestHookFloodProbe drives the real Claude Code hook handler, audit store and
@@ -219,6 +219,9 @@ func TestHookFloodProbe(t *testing.T) {
 					minute.writer++
 					minute.held += result.WriterHeld
 					minute.heldMax = max(minute.heldMax, result.WriterHeld)
+				}
+				if result.WriterDeferred {
+					minute.deferred++
 				}
 				if result.Restarted {
 					minute.restarted++
@@ -384,11 +387,11 @@ func TestHookFloodProbe(t *testing.T) {
 			}
 			minutes = append(minutes, minute)
 			guard := guards[len(minutes)-1]
-			t.Logf("flood %d minute %d calls %d-%d average=%v p50=%v p99=%v max=%v guard passes=%d writer=%d restarted=%d truncated=%d failed=%d writer_held=%v writer_held_max=%v pass_max=%v",
+			t.Logf("flood %d minute %d calls %d-%d average=%v p50=%v p99=%v max=%v guard passes=%d writer=%d deferred=%d restarted=%d truncated=%d failed=%d writer_held=%v writer_held_max=%v pass_max=%v",
 				flood, len(minutes), first, first+segment,
 				minute.average.Round(time.Microsecond), minute.p50.Round(time.Microsecond),
 				minute.p99.Round(time.Microsecond), minute.max.Round(time.Microsecond),
-				guard.passes, guard.writer, guard.restarted, guard.truncated, guard.failed,
+				guard.passes, guard.writer, guard.deferred, guard.restarted, guard.truncated, guard.failed,
 				guard.held.Round(time.Millisecond), guard.heldMax.Round(time.Millisecond), guard.passMax.Round(time.Millisecond))
 		}
 		for _, violation := range hookFloodFlatnessViolations(minutes) {
