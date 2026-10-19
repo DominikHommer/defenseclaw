@@ -12,6 +12,12 @@ on:
       - test/e2e/axis/patches/mxc-literal-argv.patch
       - test/e2e/axis/mxc-runner/Cargo.lock
   workflow_dispatch:
+    inputs:
+      static_rust_musl_candidate:
+        description: Compile and inspect an unadmitted Rust musl peer candidate
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -85,6 +91,12 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 install -y --no-install-recommends build-essential gcc-13 pkg-config ca-certificates meson ninja-build libcap-dev linux-libc-dev
 
+      - name: Add the pinned musl Rust target for the optional manual candidate
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.static_rust_musl_candidate }}
+        timeout-minutes: 10
+        shell: bash
+        run: rustup target add --toolchain 1.95.0 x86_64-unknown-linux-musl
+
       - name: Validate and build without launching the peer or a sandbox
         timeout-minutes: 35
         working-directory: peer
@@ -93,10 +105,14 @@ jobs:
           set -euo pipefail
           rustfmt +1.95.0 --edition 2024 --check src/main.rs src/lib.rs
           python3 -m unittest -v test_prepare_build static.test_build_static
+          candidate_args=()
+          if test "${{ github.event_name }}" = workflow_dispatch && test "${{ inputs.static_rust_musl_candidate }}" = true; then
+            candidate_args+=(--static-rust-musl-candidate)
+          fi
           if test -f Cargo.lock; then
-            python3 prepare_build.py locked --dependency-unit-gates --static-musl
+            python3 prepare_build.py locked --dependency-unit-gates --static-musl "${candidate_args[@]}"
           else
-            python3 prepare_build.py discover --dependency-unit-gates --static-musl
+            python3 prepare_build.py discover --dependency-unit-gates --static-musl "${candidate_args[@]}"
           fi
 
       - name: Retain workflow identity even when a build refuses

@@ -122,5 +122,60 @@ class BuildAdmissionTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["timeout"], 1800)
 
 
+    @staticmethod
+    def musl_elf(*, dynamic: bool = False) -> bytearray:
+        data = bytearray(512)
+        data[:7] = bytes([127]) + b"ELF" + bytes([2, 1, 1])
+        build.struct.pack_into("<HHI", data, 16, 3 if dynamic else 2, 62, 1)
+        build.struct.pack_into("<QQ", data, 24, 0x400080, 64)
+        build.struct.pack_into("<HHH", data, 52, 64, 56, 3 if dynamic else 2)
+        build.struct.pack_into("<IIQQQQQQ", data, 64, 1, 5, 0, 0x400000, 0, 512, 512, 4096)
+        build.struct.pack_into("<IIQQQQQQ", data, 120, 0x6474E551, 6, 0, 0, 0, 0, 0, 16)
+        if dynamic:
+            build.struct.pack_into("<IIQQQQQQ", data, 176, 2, 4, 384, 0x400180, 0, 32, 32, 8)
+            build.struct.pack_into("<QQ", data, 384, 0x6FFFFFFB, 0)
+            build.struct.pack_into("<QQ", data, 400, 0, 0)
+        return data
+
+    def test_static_rust_musl_elf_accepts_only_bounded_candidate_shapes(self):
+        self.assertEqual(build.inspect_rust_musl_elf(bytes(self.musl_elf()))["kind"], "ET_EXEC_static")
+        result = build.inspect_rust_musl_elf(bytes(self.musl_elf(dynamic=True)))
+        self.assertEqual(result["kind"], "ET_DYN_static_PIE")
+        self.assertTrue(result["pt_dynamic"])
+        self.assertFalse(result["external_dependencies"])
+
+    def test_static_rust_musl_elf_refuses_loader_dynamic_dependencies_and_wx(self):
+        for tag in (1, 14, 15, 22, 29):
+            candidate = self.musl_elf(dynamic=True)
+            build.struct.pack_into("<QQ", candidate, 384, tag, 1)
+            with self.subTest(tag=tag), self.assertRaises(RuntimeError):
+                build.inspect_rust_musl_elf(bytes(candidate))
+        for offset, value in ((64, 3), (68, 7), (124, 7)):
+            candidate = self.musl_elf()
+            build.struct.pack_into("<I", candidate, offset, value)
+            with self.subTest(offset=offset), self.assertRaises(RuntimeError):
+                build.inspect_rust_musl_elf(bytes(candidate))
+        with self.assertRaises(RuntimeError):
+            build.inspect_rust_musl_elf(bytes(self.musl_elf())[:95])
+        entry_only_in_bss = self.musl_elf()
+        build.struct.pack_into("<Q", entry_only_in_bss, 96, 0x80)
+        with self.assertRaises(RuntimeError):
+            build.inspect_rust_musl_elf(bytes(entry_only_in_bss))
+        wrapped_address = self.musl_elf()
+        build.struct.pack_into("<Q", wrapped_address, 80, (1 << 64) - 0x100)
+        with self.assertRaises(RuntimeError):
+            build.inspect_rust_musl_elf(bytes(wrapped_address))
+
+    def test_static_rust_musl_toolchain_inventory_is_bounded_and_nonfollowing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rustlib = Path(directory) / "lib/rustlib" / build.MUSL_TARGET / "lib"
+            rustlib.mkdir(parents=True)
+            (rustlib / "libstd-fixed.rlib").write_bytes(b"fixed")
+            inventory = build.rust_musl_toolchain_inventory(Path(directory))
+            self.assertEqual(inventory["libstd-fixed.rlib"]["size"], 5)
+            (rustlib / "empty.rlib").write_bytes(b"")
+            with self.assertRaises(RuntimeError):
+                build.rust_musl_toolchain_inventory(Path(directory))
+
 if __name__ == "__main__":
     unittest.main()

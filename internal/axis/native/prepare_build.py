@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ AXIS = "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c"
 MXC = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 BWRAP = "8e51677abd7e3338e4952370bf7d902e37d8cbb6"
 TOOLCHAIN = "1.95.0"
+MUSL_TARGET = "x86_64-unknown-linux-musl"
 NATIVE_TEST_COUNT = 26
 C_TESTS = (
     "topology_refuses_nested_bind_mounts_and_malformed_inventory",
@@ -285,10 +287,176 @@ def admit_lock(seed: bytes, candidate: bytes) -> dict[str, object]:
     }
 
 
+
+def inspect_rust_musl_elf(data: bytes) -> dict[str, object]:
+    """Bounded ELF check for an unadmitted static-musl peer candidate."""
+    if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01":
+        raise RuntimeError("musl candidate must be ELF64 little-endian")
+    kind, machine, version = struct.unpack_from("<HHI", data, 16)
+    entry, phoff = struct.unpack_from("<QQ", data, 24)
+    header_size, phsize, phcount = struct.unpack_from("<HHH", data, 52)
+    if kind not in (2, 3) or machine != 62 or version != 1 or header_size != 64 or phsize != 56 or not 1 <= phcount <= 128:
+        raise RuntimeError("musl candidate ELF header differs")
+    if phoff < 64 or phoff + phsize * phcount > len(data):
+        raise RuntimeError("musl candidate program headers exceed file")
+    loads = 0
+    executable_entry = False
+    dynamic = []
+    stack = False
+    for index in range(phcount):
+        ptype, flags, offset, vaddr, _, size, memory, _ = struct.unpack_from("<IIQQQQQQ", data, phoff + index * phsize)
+        if offset + size > len(data) or size > memory or vaddr + memory > 1 << 64:
+            raise RuntimeError("musl candidate segment exceeds file, memory, or address space")
+        if ptype == 3:
+            raise RuntimeError("musl candidate has PT_INTERP")
+        if ptype == 1:
+            loads += 1
+            if flags & 3 == 3:
+                raise RuntimeError("musl candidate has writable executable LOAD")
+            executable_entry |= bool(flags & 1 and vaddr <= entry < vaddr + size)
+        if ptype == 2:
+            dynamic.append((offset, size))
+        if ptype == 0x6474E551:
+            stack = True
+            if flags & 1:
+                raise RuntimeError("musl candidate has executable stack")
+    if not loads or not executable_entry or not stack or len(dynamic) > 1:
+        raise RuntimeError("musl candidate lacks bounded executable/stack structure")
+    if dynamic and kind != 3:
+        raise RuntimeError("musl candidate PT_DYNAMIC is not static PIE")
+    tags = []
+    if dynamic:
+        offset, size = dynamic[0]
+        if not 16 <= size <= 65536 or size % 16:
+            raise RuntimeError("musl candidate PT_DYNAMIC size differs")
+        ended = False
+        forbidden = {1, 14, 15, 22, 29, 0x6FFFFEFA, 0x6FFFFEFB, 0x6FFFFEFC, 0x7FFFFFFD, 0x7FFFFFFF}
+        for position in range(offset, offset + size, 16):
+            tag, _ = struct.unpack_from("<QQ", data, position)
+            if tag == 0:
+                ended = True
+                break
+            if tag in forbidden:
+                raise RuntimeError("musl candidate has external loader or text-relocation tag")
+            tags.append(tag)
+        if not ended:
+            raise RuntimeError("musl candidate PT_DYNAMIC has no terminator")
+    return {
+        "elf": "ELF64_LE_X86_64",
+        "kind": "ET_DYN_static_PIE" if kind == 3 else "ET_EXEC_static",
+        "program_headers": phcount,
+        "load_segments": loads,
+        "pt_interp": False,
+        "pt_dynamic": bool(dynamic),
+        "dynamic_tags": tags,
+        "external_dependencies": False,
+        "writable_executable": False,
+        "executable_stack": False,
+    }
+
+
+def rust_musl_toolchain_inventory(sysroot: Path) -> dict[str, dict[str, object]]:
+    """Hash the installed target's actual Rust libraries and CRT inputs."""
+    directory = sysroot / "lib" / "rustlib" / MUSL_TARGET / "lib"
+    if directory.is_symlink() or not directory.is_dir():
+        raise RuntimeError("pinned Rust musl target is unavailable")
+    entries = {}
+    total = 0
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink():
+            raise RuntimeError("Rust musl target contains a link")
+        if path.is_dir():
+            continue
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0 or metadata.st_size > 128 << 20:
+            raise RuntimeError("Rust musl target input differs")
+        total += metadata.st_size
+        if len(entries) >= 1024 or total > 1 << 30:
+            raise RuntimeError("Rust musl target inventory exceeds bounds")
+        entries[path.relative_to(directory).as_posix()] = {"sha256": sha(path), "size": metadata.st_size}
+    if not any(name.startswith("libstd-") and name.endswith(".rlib") for name in entries):
+        raise RuntimeError("Rust musl standard library is missing")
+    return entries
+
+
+def build_rust_musl_candidate(artifact: Path) -> dict[str, object]:
+    """Compile only; no peer, test executable, or contained workload is run."""
+    sysroot_text = command(["rustc", f"+{TOOLCHAIN}", "--print", "sysroot"], capture=True).strip()
+    sysroot = Path(sysroot_text)
+    if not sysroot.is_absolute() or not sysroot.is_dir():
+        raise RuntimeError("Rust sysroot differs")
+    target_inputs = rust_musl_toolchain_inventory(sysroot)
+    (artifact / "RUST-MUSL-TOOLCHAIN.json").write_text(
+        json.dumps({"target": MUSL_TARGET, "rustc": command(["rustc", f"+{TOOLCHAIN}", "-Vv"], capture=True),
+                    "cc": command(["cc", "--version"], capture=True),
+                    "ld": command(["ld", "--version"], capture=True),
+                    "target_inputs": target_inputs}, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    for name, target in (("GNU", "x86_64-unknown-linux-gnu"), ("MUSL", MUSL_TARGET)):
+        tree = command(["cargo", f"+{TOOLCHAIN}", "tree", "--locked", "-e", "features",
+                        "--target", target, "-p", "defenseclaw-axis-native"], capture=True)
+        if not tree or len(tree.encode()) > 4 << 20:
+            raise RuntimeError("Rust feature graph exceeds bounds")
+        (artifact / f"RUST-{name}-FEATURES.txt").write_text(tree, encoding="utf-8")
+    link_map = artifact / "RUST-MUSL-LINK.map"
+    command(["cargo", f"+{TOOLCHAIN}", "rustc", "--locked", "--release", "--target", MUSL_TARGET,
+             "--bin", "defenseclaw-axis-peer", "--", "-C", f"link-arg=-Wl,-Map={link_map}"])
+    command(["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--target", MUSL_TARGET,
+             "--lib", "--no-run"])
+    test_outputs = []
+    for path in sorted((ROOT / "target" / MUSL_TARGET / "release" / "deps").glob("defenseclaw_axis_native-*")):
+        metadata = path.lstat()
+        if stat.S_ISREG(metadata.st_mode) and metadata.st_mode & stat.S_IXUSR and not path.suffix:
+            test_outputs.append(path)
+    if len(test_outputs) != 1:
+        raise RuntimeError("Rust musl unrun test executable inventory differs")
+    test_bytes = ordinary(test_outputs[0], 128 << 20)
+    test_elf = inspect_rust_musl_elf(test_bytes)
+    test_target = artifact / "bin" / "defenseclaw-axis-peer-musl-unit-tests-unrun"
+    shutil.copyfile(test_outputs[0], test_target)
+    map_bytes = ordinary(link_map, 64 << 20)
+    loads = re.findall(rb"^LOAD (.+)$", map_bytes, re.MULTILINE)
+    if not loads or len(loads) > 4096:
+        raise RuntimeError("Rust musl link map lacks bounded input list")
+    link_inputs = []
+    linked_total = 0
+    for item in loads:
+        recorded = item.decode("utf-8")
+        path = Path(recorded)
+        path = (path if path.is_absolute() else ROOT / path).resolve(strict=True)
+        metadata = path.stat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0 or metadata.st_size > 128 << 20:
+            raise RuntimeError("Rust musl link input differs")
+        linked_total += metadata.st_size
+        if linked_total > 2 << 30:
+            raise RuntimeError("Rust musl link closure exceeds bounds")
+        link_inputs.append({"link_map_name": recorded, "resolved_path": str(path),
+                            "size": metadata.st_size, "sha256": hashlib.sha256(ordinary(path, 128 << 20)).hexdigest()})
+    image = ROOT / "target" / MUSL_TARGET / "release" / "defenseclaw-axis-peer"
+    image_bytes = ordinary(image, 128 << 20)
+    elf = inspect_rust_musl_elf(image_bytes)
+    target = artifact / "bin" / "defenseclaw-axis-peer-musl-candidate"
+    shutil.copyfile(image, target)
+    return {
+        "target": MUSL_TARGET, "image": {"sha256": sha(target), "size": target.stat().st_size},
+        "elf": elf, "unrun_unit_test_image": {"sha256": sha(test_target), "size": test_target.stat().st_size,
+                                           "elf": test_elf},
+        "toolchain_inventory_sha256": sha(artifact / "RUST-MUSL-TOOLCHAIN.json"),
+        "gnu_features_sha256": sha(artifact / "RUST-GNU-FEATURES.txt"),
+        "musl_features_sha256": sha(artifact / "RUST-MUSL-FEATURES.txt"),
+        "link_map_sha256": sha(link_map),
+        "link_inputs": link_inputs,
+        "musl_tests_compiled_not_run": True,
+        "peer_or_sandbox_execution": False,
+        "runtime_admission": False,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("discover", "locked"))
     parser.add_argument("--static-musl", action="store_true", help="build two unexecuted static C closure candidates")
+    parser.add_argument("--static-rust-musl-candidate", action="store_true", help="compile an unexecuted, unadmitted Rust-musl peer candidate")
     parser.add_argument(
         "--dependency-unit-gates", action="store_true", help="run selected nonspawning dependency tests"
     )
@@ -480,6 +648,9 @@ def main() -> None:
         static_candidate = build(ROOT, bwrap, artifact)
     (artifact / "bin").mkdir()
     shutil.copyfile(ROOT / "target/release/defenseclaw-axis-peer", artifact / "bin/defenseclaw-axis-peer")
+    rust_musl_candidate = None
+    if options.static_rust_musl_candidate:
+        rust_musl_candidate = build_rust_musl_candidate(artifact)
     inventory = {
         path.relative_to(artifact).as_posix(): {"sha256": sha(path), "size": path.stat().st_size}
         for path in sorted(artifact.rglob("*"))
@@ -503,6 +674,8 @@ def main() -> None:
         "patch_sha256": PATCHES,
         "files": inventory,
     }
+    if rust_musl_candidate is not None:
+        provenance["static_rust_musl_candidate"] = rust_musl_candidate
     (artifact / "PROVENANCE.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
 
 
