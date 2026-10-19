@@ -222,10 +222,33 @@ if(Python3_Interpreter_FOUND)
              COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_adapter_destinations.py")
 endif()
 
-# Fuzz harness (requires sanitizer support for libFuzzer)
+# IPC parser fuzz target (LLVMFuzzerTestOneInput in fuzz_ipc_parser.c).
+# The libFuzzer binary is built in sanitizer builds when the compiler ships
+# the libFuzzer runtime (Apple's Xcode clang does not). The replay driver
+# runs the same entry point over the seed corpus in every build.
+add_executable(fuzz_ipc_parser_replay fuzz_ipc_parser.c fuzz_replay_main.c)
+target_link_libraries(fuzz_ipc_parser_replay PRIVATE dclaw_core)
+file(GLOB _ipc_corpus ${CMAKE_CURRENT_SOURCE_DIR}/fuzz_corpus/*)
+add_test(NAME fuzz_ipc_corpus COMMAND fuzz_ipc_parser_replay ${_ipc_corpus})
+set_tests_properties(fuzz_ipc_corpus PROPERTIES
+    ENVIRONMENT "DCLAW_FLASH_PATH=${DCLAW_TEST_FLASH_DIR}/flash-fuzz-ipc.bin")
+
 if(DCLAW_SANITIZE)
-    add_executable(fuzz_ipc_parser fuzz_ipc_parser.c)
-    target_link_libraries(fuzz_ipc_parser dclaw_core)
-    target_compile_options(fuzz_ipc_parser PRIVATE -fsanitize=fuzzer)
-    target_link_options(fuzz_ipc_parser PRIVATE -fsanitize=fuzzer)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-fsanitize=fuzzer")
+    check_c_source_compiles([=[
+#include <stddef.h>
+#include <stdint.h>
+int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) { (void)d; (void)n; return 0; }
+]=] DCLAW_HAVE_LIBFUZZER)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(DCLAW_HAVE_LIBFUZZER)
+        add_executable(fuzz_ipc_parser fuzz_ipc_parser.c)
+        target_link_libraries(fuzz_ipc_parser PRIVATE dclaw_core)
+        target_compile_options(fuzz_ipc_parser PRIVATE -fsanitize=fuzzer)
+        target_link_options(fuzz_ipc_parser PRIVATE -fsanitize=fuzzer)
+    else()
+        message(STATUS "libFuzzer runtime not available: fuzz_ipc_parser not built "
+                       "(fuzz_ipc_parser_replay still covers the corpus)")
+    endif()
 endif()
