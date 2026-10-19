@@ -24,6 +24,19 @@ func (custody *retryCustody) StopAndWait(context.Context) error {
 	return nil
 }
 
+func TestSessionClosesRetainedCustodyBeforeProtocolAdmission(t *testing.T) {
+	native := &retryCustody{}
+	session := &Session{native: native}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := session.Close(ctx); err == nil || errors.Is(err, ErrAdmission) || native.calls.Load() != 1 {
+		t.Fatalf("partial session lost native cleanup: calls=%d err=%v", native.calls.Load(), err)
+	}
+	if err := session.Close(ctx); err != nil || native.calls.Load() != 2 {
+		t.Fatalf("partial session lost retained retry: calls=%d err=%v", native.calls.Load(), err)
+	}
+}
+
 func TestSessionRetainsNativeCleanupAfterProtocolCleanupFailure(t *testing.T) {
 	var channels []bridgeowner.PrivatePipe
 	for _, direction := range []bridgeowner.Direction{bridgeowner.ToPeer, bridgeowner.FromPeer, bridgeowner.FromPeer} {

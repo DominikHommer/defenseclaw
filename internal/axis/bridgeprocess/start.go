@@ -91,8 +91,13 @@ func (session *Session) StopAndWait(ctx context.Context) error {
 }
 
 func (session *Session) Close(ctx context.Context) error {
-	if session == nil || session.Protocol == nil || session.native == nil {
+	if session == nil || session.native == nil {
 		return ErrAdmission
+	}
+	// Start retains native allocations before a protocol owner can exist.
+	// A refused partial session must close that same custody directly.
+	if session.Protocol == nil {
+		return session.StopAndWait(ctx)
 	}
 	return errors.Join(session.Protocol.Close(ctx), session.StopAndWait(ctx))
 }
