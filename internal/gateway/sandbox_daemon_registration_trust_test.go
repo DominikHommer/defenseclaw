@@ -57,6 +57,9 @@ func TestSandboxDaemonRestartTakesTheFloorFromTheGateway(t *testing.T) {
 	f.d.regs = loaded
 
 	// A managed gateway that answers without the floor confirms nothing.
+	// rawCurrent: the fake relay passes the answer on as it is, instead of
+	// completing it with an empty floor.
+	f.relay.rawCurrent = true
 	real := f.relay.current
 	f.relay.current = func(id string) (sandboxrelay.CurrentPolicy, error) {
 		cp, err := real(id)
@@ -70,7 +73,7 @@ func TestSandboxDaemonRestartTakesTheFloorFromTheGateway(t *testing.T) {
 		t.Fatalf("an answer without the floor confirmed the edited registration: %+v", reg)
 	}
 
-	f.relay.current = real
+	f.relay.current, f.relay.rawCurrent = real, false
 	f.d.revalidate(context.Background())
 	f.d.pollOnce(context.Background())
 	reg, _ := f.d.regs.get("dc-claude-1")

@@ -77,6 +77,9 @@ func TestSandboxDaemonIgnoresAnAnswerWithoutAFloor(t *testing.T) {
 	if c.d.regs.applyLive("dc-a", noFloor) {
 		t.Fatal("an answer without a floor was applied")
 	}
+	// The fake relay passes the answer on as it is (rawCurrent), instead of
+	// completing it with an empty floor.
+	c.sandboxDaemonFixture.relay.rawCurrent = true
 	c.sandboxDaemonFixture.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) { return noFloor, nil }
 	c.d.pollOnce(ctx)
 	after, _ := c.d.regs.get("dc-a")
