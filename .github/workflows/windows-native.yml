@@ -62,29 +62,32 @@ jobs:
     # One runner used to run the remaining packages one at a time (-p=1),
     # the stress loops, vet and the builds after its share of the gateway and
     # connector shards (~42 minutes). Each part now has its own runner:
-    # gateway-N runs internal shards N and N+8 of the gateway and connector
-    # packages, packages-N one of four timing-balanced parts of the remaining
-    # packages (still -p=1 within the part), native-checks the DACL,
-    # redaction, isolated connector tests, vet and builds, and native-stress
-    # the single-flight and executable lifecycle stress loops.
+    # gwN runs internal shards N and N+8 of the gateway and connector
+    # packages, pkN one of six timing-balanced parts of the remaining
+    # packages (still -p=1 within the part), checks the DACL, redaction,
+    # isolated connector tests, vet and builds, and stress the single-flight
+    # and executable lifecycle stress loops. Shard names stay short: they are
+    # part of the state path, and a Windows path test allows 260 characters.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { shard: gateway-0, kind: gateway, index: 0 }
-          - { shard: gateway-1, kind: gateway, index: 1 }
-          - { shard: gateway-2, kind: gateway, index: 2 }
-          - { shard: gateway-3, kind: gateway, index: 3 }
-          - { shard: gateway-4, kind: gateway, index: 4 }
-          - { shard: gateway-5, kind: gateway, index: 5 }
-          - { shard: gateway-6, kind: gateway, index: 6 }
-          - { shard: gateway-7, kind: gateway, index: 7 }
-          - { shard: packages-0, kind: packages, index: 0 }
-          - { shard: packages-1, kind: packages, index: 1 }
-          - { shard: packages-2, kind: packages, index: 2 }
-          - { shard: packages-3, kind: packages, index: 3 }
-          - { shard: native-checks, kind: checks, index: 0 }
-          - { shard: native-stress, kind: stress, index: 0 }
+          - { shard: gw0, kind: gateway, index: 0 }
+          - { shard: gw1, kind: gateway, index: 1 }
+          - { shard: gw2, kind: gateway, index: 2 }
+          - { shard: gw3, kind: gateway, index: 3 }
+          - { shard: gw4, kind: gateway, index: 4 }
+          - { shard: gw5, kind: gateway, index: 5 }
+          - { shard: gw6, kind: gateway, index: 6 }
+          - { shard: gw7, kind: gateway, index: 7 }
+          - { shard: pk0, kind: packages, index: 0 }
+          - { shard: pk1, kind: packages, index: 1 }
+          - { shard: pk2, kind: packages, index: 2 }
+          - { shard: pk3, kind: packages, index: 3 }
+          - { shard: pk4, kind: packages, index: 4 }
+          - { shard: pk5, kind: packages, index: 5 }
+          - { shard: checks, kind: checks, index: 0 }
+          - { shard: stress, kind: stress, index: 0 }
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -193,7 +196,7 @@ jobs:
           $matrixShard = [int]$env:GO_SUITE_INDEX
           $matrixShardCount = 8
           $nativeTestShardCount = 16
-          $remainingPackageShardCount = 4
+          $remainingPackageShardCount = 6
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
           $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
           if ($suiteKind -notin @('gateway', 'packages', 'checks')) {
