@@ -55,6 +55,7 @@ class PolicyCompilerExitTest(unittest.TestCase):
                 ('unsupported_canary', 'iot_extensions:\n  canary:\n    enabled: true\n', ()),
                 ('unsupported_rate', 'iot_extensions:\n  rate_limits:\n    tool_calls_per_minute: 1\n', ()),
                 ('unsupported_escalation', 'iot_extensions:\n  escalation_mode:\n    net_fetch: sync_block\n', ()),
+                ('missing_allowlist', 'iot_extensions:\n  canary:\n    baseline_blocks_per_min: 2\n', ()),
                 ('reserved_version', VALID.read_text(), ('--version', '65535')),
                 ('oversize', VALID.read_text(), ('--target-partition-size', '1')),
             ):

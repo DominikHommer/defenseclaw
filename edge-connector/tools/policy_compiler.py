@@ -354,7 +354,14 @@ def extract_sequence_rules(policy: dict) -> list:
 def extract_dest_allowlist(policy: dict) -> list:
     """Extract destination allowlist from iot_extensions."""
     iot_ext = policy.get("iot_extensions", {})
-    dest_list = iot_ext.get("destination_allowlist", [])
+    # A missing list used to compile as an empty allowlist, which makes every
+    # device deny every destination. Require it; [] is an explicit deny-all.
+    if "destination_allowlist" not in iot_ext:
+        raise ValueError("iot_extensions.destination_allowlist is required "
+                         "(use [] to deny all destinations)")
+    dest_list = iot_ext.get("destination_allowlist")
+    if dest_list is None:
+        dest_list = []
     for dest in dest_list:
         _validate_no_null_bytes(str(dest), "destination allowlist entry")
     return dest_list
