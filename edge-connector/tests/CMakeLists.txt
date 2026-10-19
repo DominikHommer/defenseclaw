@@ -205,6 +205,13 @@ foreach(_test IN LISTS _all_tests)
     endif()
 endforeach()
 
+# Hardening properties of the daemon binary (PIE, RELRO/now on ELF, stack
+# protector, _FORTIFY_SOURCE outside sanitizer builds).
+add_test(NAME hardening_flags
+         COMMAND ${CMAKE_COMMAND} -DBIN=$<TARGET_FILE:edge-connector>
+                 -DSANITIZE=${DCLAW_SANITIZE} -DSYSTEM=${CMAKE_SYSTEM_NAME}
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/check_hardening.cmake)
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME policy_compiler
