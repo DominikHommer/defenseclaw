@@ -17,7 +17,9 @@ import (
 // An unpinned administrator shell reading a standalone install sees closed
 // for every standalone per-user connector and for Codex, Claude Code and
 // Cursor; a Secure Client install keeps #1163 (unset is open) even from a
-// standalone-pinned process.
+// standalone-pinned process. Copilot reports the closed runtime the guardian
+// writes for it (windowsRuntimeOnlyRuntimeFailMode), as the live dcw-std1
+// .hookcfg showed; Hermes is lowered to open by its shell hook (GAP-0014).
 func TestWindowsManagedHookFailModeFollowsTheConfigProfile(t *testing.T) {
 	for _, tc := range []struct {
 		profile string
@@ -26,10 +28,10 @@ func TestWindowsManagedHookFailModeFollowsTheConfigProfile(t *testing.T) {
 	}{
 		{managed.ProfileStandalone, "", map[string]string{
 			"codex": "closed", "claudecode": "closed", "cursor": "closed",
-			"opencode": "closed", "copilot": "open", "amp": "closed", "hermes": "open",
+			"opencode": "closed", "copilot": "closed", "amp": "closed", "hermes": "open",
 		}},
 		{managed.ProfileStandalone, managed.ProfileStandalone, map[string]string{
-			"codex": "closed", "opencode": "closed", "amp": "closed",
+			"codex": "closed", "opencode": "closed", "amp": "closed", "copilot": "closed", "hermes": "open",
 		}},
 		{managed.ProfileSecureClient, managed.ProfileStandalone, map[string]string{
 			"codex": "open", "claudecode": "open", "opencode": "open",
