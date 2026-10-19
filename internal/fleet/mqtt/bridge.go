@@ -619,7 +619,8 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 
 	// Never allocate rate-limit state or spend a key lookup on an ID the
 	// manager would reject anyway.
-	if _, known := b.fleet.GetDevice(fullID); !known && !b.fleet.AutoRegister {
+	_, known := b.fleet.GetDevice(fullID)
+	if !known && !b.autoRegistrationAllowed() {
 		b.logger.Printf("[mqtt-bridge] rejected heartbeat from unregistered device %d (tenant=%d fleet=%d)",
 			parts.DeviceID, parts.TenantID, parts.FleetID)
 		b.incErrors()
@@ -676,6 +677,23 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		Capabilities:     hw.Capabilities,
 		LastEmergencySeq: hw.LastEmergencySeq,
 		Signed:           hw.Signed,
+	}
+
+	// ProcessHeartbeat auto-registers only when the manager's own AutoRegister
+	// is set; when auto-registration was enabled on the bridge instead,
+	// register the authenticated unknown device here first.
+	if !known && !b.fleet.AutoRegister {
+		_, regErr := b.fleet.RegisterDeviceIfAbsent(parts.TenantID, parts.FleetID, parts.DeviceID,
+			"auto-discovered", fmt.Sprintf("%d", hw.FWVersion), hw.PolicyVersion, hw.Capabilities)
+		if regErr != nil && regErr != manager.ErrDeviceExists {
+			b.logger.Printf("[mqtt-bridge] auto-register device %d from heartbeat: %v", parts.DeviceID, regErr)
+			b.incErrors()
+			return
+		}
+		if regErr == nil {
+			b.logger.Printf("[mqtt-bridge] device %d auto-registered from heartbeat (tenant=%d fleet=%d)",
+				parts.DeviceID, parts.TenantID, parts.FleetID)
+		}
 	}
 
 	if !b.fleet.ProcessHeartbeat(parts.TenantID, parts.FleetID, parts.DeviceID, hb) {
@@ -747,6 +765,15 @@ func (b *Bridge) runReplay(job replayJob) {
 		b.logger.Printf("[mqtt-bridge] OTA catch-up failed for device %d: %v", job.deviceID, err)
 		b.incErrors()
 	}
+}
+
+// autoRegistrationAllowed is the single predicate for registering an unknown
+// device from MQTT traffic (heartbeat or registration). Either the bridge's
+// AllowAutoRegistration (wired from fleet.auto_register by the gateway) or the
+// manager's AutoRegister enables it, and only in explicit unmanaged
+// development mode.
+func (b *Bridge) autoRegistrationAllowed() bool {
+	return (b.AllowAutoRegistration || b.fleet.AutoRegister) && !isProductionMode()
 }
 
 func (b *Bridge) finishReplay(fullID uint64) {
@@ -839,7 +866,7 @@ func (b *Bridge) handleRegistration(msg Message) {
 		return
 	}
 
-	if !existsAlready && (!b.AllowAutoRegistration || isProductionMode()) {
+	if !existsAlready && !b.autoRegistrationAllowed() {
 		b.logger.Printf("[mqtt-bridge] WARNING: auto-registration denied for unknown device %d (tenant=%d fleet=%d) — allowed only in explicit unmanaged development mode; register via CLI/API in production",
 			parts.DeviceID, parts.TenantID, parts.FleetID)
 		return
