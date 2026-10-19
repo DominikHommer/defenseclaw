@@ -4130,17 +4130,22 @@ function Assert-DefenseClawCanonicalRawPathAcl {
             # leave the endpoint without the DefenseClaw gateway
             # mediating agent traffic, which is strictly worse than
             # running on a path whose DACL inherits from a parent
-            # Administrators + SYSTEM own anyway. Warn and continue,
-            # but only past the lost flag itself: the owner, the explicit
-            # ACEs and every inherited grant are still judged below
-            # (Assert-DefenseClawUnprotectedRawDACL), so a foreign owner or
-            # an inherited write grant to a standard user stays fatal.
+            # Administrators + SYSTEM own anyway. Warn and continue. On
+            # standalone that is only past the lost flag itself: the owner,
+            # the explicit ACEs and every inherited grant are still judged
+            # below (Assert-DefenseClawUnprotectedRawDACL), so a foreign owner
+            # or an inherited write grant to a standard user stays fatal.
             Write-DefenseClawAclSelfHealAdvisory `
                 -Path $Path `
                 -Reason (
                     'DACL could not be marked protected even after ' +
                     'icacls /inheritance:r - continuing with managed state'
                 )
+            if (-not (Test-DefenseClawStandaloneProfile)) {
+                # Secure Client keeps its earlier check, which ends here
+                # (Secure Client is out of scope for this fix).
+                return
+            }
             $unprotectedDacl = $true
         }
     }
@@ -4330,20 +4335,36 @@ function Assert-DefenseClawCanonicalPathAcl {
     catch {
         # A path a parallel uninstall step already deleted has no
         # descriptor left to judge, so outside the strict pin that one
-        # case warns and returns. Every other failure refuses on every
-        # profile: a descriptor DefenseClaw cannot read - above all one
+        # case warns and returns. On standalone every other failure
+        # refuses: a descriptor DefenseClaw cannot read - above all one
         # that denies READ_CONTROL, which a standard user who owns the
         # path can set - is drift it cannot see past, and treating it as
-        # "no drift observed" would wave the path through.
+        # "no drift observed" would wave the path through. Secure Client
+        # keeps its earlier bulldoze for every read failure (Secure Client
+        # is out of scope for this fix).
+        $readError = $_
+        if (-not (Test-DefenseClawStandaloneProfile)) {
+            if (Test-DefenseClawTrustStrictAncestors) {
+                throw
+            }
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $Path `
+                -Reason (
+                    "native security descriptor read failed, continuing " +
+                    "bulldoze (likely file deleted mid-uninstall or DACL " +
+                    "denies admin read_control): " + $readError.Exception.Message
+                )
+            return
+        }
         if ((Test-DefenseClawTrustStrictAncestors) -or
-            -not (Test-DefenseClawPathGoneError -ErrorRecord $_)) {
+            -not (Test-DefenseClawPathGoneError -ErrorRecord $readError)) {
             throw
         }
         Write-DefenseClawAclSelfHealAdvisory `
             -Path $Path `
             -Reason (
                 "native security descriptor read failed because the " +
-                "path is gone, continuing: " + $_.Exception.Message
+                "path is gone, continuing: " + $readError.Exception.Message
             )
         return
     }
@@ -5448,9 +5469,10 @@ function Assert-DefenseClawPathAcl {
         # The canonical descriptor built by New-DefenseClawCanonicalPathAcl
         # excludes any SID outside the trusted writer set and forces
         # SE_DACL_PROTECTED, so a re-stamp that holds strips every untrusted
-        # ACE and the re-read below comes back clean. A re-stamp is a
-        # repair, never a pardon: what still fails the re-read is judged
-        # below exactly as if no repair had been attempted (GAP-0010).
+        # ACE and the re-read below comes back clean. On standalone a
+        # re-stamp is a repair, never a pardon: what still fails the re-read
+        # is judged below exactly as if no repair had been attempted
+        # (GAP-0010).
         $repairable = @(
             $verdicts |
                 Microsoft.PowerShell.Core\Where-Object { $_.Kind -in @('Contract', 'Rights', 'Access') }
@@ -5510,20 +5532,28 @@ function Assert-DefenseClawPathAcl {
             #     ACE is still judged on its own: an inherited write grant to
             #     an untrusted principal is a separate Write verdict.
             #
-            # Write-severity verdicts are FATAL on every profile, with or
-            # without the strict pin and whether or not the re-stamp ran: an
+            # Write-severity verdicts are FATAL on the standalone profile, with
+            # or without the strict pin and whether or not the re-stamp ran: an
             # untrusted principal with write-like access to a managed path can
             # tamper with gateway state, inject hook commands, or replace the
-            # lifecycle lock contents (GAP-0010).
+            # lifecycle lock contents (GAP-0010). Secure Client keeps its
+            # earlier rule, where a re-stamp downgrades every surviving Access
+            # verdict (Secure Client is out of scope for this fix).
             #
             # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 restores every
             # refusal; it only tightens.
             'Access' {
-                $advisory -or
-                (-not $strict -and (
-                    [string]$verdict.Severity -ceq 'Read' -or
-                    ($selfHealed -and [string]$verdict.Severity -ceq 'Inheritance')
-                ))
+                if (Test-DefenseClawStandaloneProfile) {
+                    $advisory -or
+                    (-not $strict -and (
+                        [string]$verdict.Severity -ceq 'Read' -or
+                        ($selfHealed -and [string]$verdict.Severity -ceq 'Inheritance')
+                    ))
+                }
+                else {
+                    $advisory -or $selfHealed -or
+                    (-not $strict -and [string]$verdict.Severity -ceq 'Read')
+                }
             }
             'Contract' { $advisory -and $selfHealed }
             default { $false }
@@ -28863,8 +28893,9 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         # the uninstall as complete and does not block subsequent install
         # or upgrade attempts. The next install's reconcile branch bulldozes
         # through any StateRoot residue via Set-DefenseClawPathAcl's canonical
-        # re-stamp, which strips an orphan per-service SID; a write grant the
-        # re-stamp cannot remove still refuses that install (GAP-0010).
+        # re-stamp, which strips an orphan per-service SID; on standalone a
+        # write grant the re-stamp cannot remove still refuses that install
+        # (GAP-0010).
         # Operators who need strict refuse-on-drift reporting can set
         # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 to restore the
         # pre-bulldoze ok:false posture.
@@ -33292,7 +33323,8 @@ function Add-DefenseClawProductionUninstallNativeCleanupSource {
         that just passed authentication, before the native cleanup executable
         is admitted (GAP-0023). Untrusted or absent metadata loads no pins:
         the executable then needs a valid signature or the caller's own
-        payload manifest (Setup /uninstall passes its embedded one).
+        payload manifest (Setup /uninstall passes its embedded one). Standalone
+        only: Secure Client admitted the executable at entry, as before.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Sources,
@@ -33303,8 +33335,10 @@ function Add-DefenseClawProductionUninstallNativeCleanupSource {
         [string]$PayloadManifest,
         [switch]$AllowUnsigned
     )
-    if ((Test-DefenseClawStandaloneProfile) -and
-        $MetadataTrusted -and
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    if ($MetadataTrusted -and
         $null -ne $Metadata -and
         [string]::IsNullOrWhiteSpace($PayloadManifest)) {
         Initialize-DefenseClawRecordedPayloadTrust `
@@ -33723,8 +33757,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     # Its native cleanup executable (the installed, unsigned defenseclaw.exe)
     # is admitted under the lifecycle lock instead, once the metadata is
     # authenticated (GAP-0023); admitting it here would judge it by
-    # Authenticode alone and refuse it.
-    $entryNativeCleanupBinary = if ($recoverProductionUninstallAcl) {
+    # Authenticode alone and refuse it. Secure Client still admits it here,
+    # as before (Secure Client is out of scope for this fix).
+    $entryNativeCleanupBinary = if ($recoverProductionUninstallAcl -and
+        (Test-DefenseClawStandaloneProfile)) {
         ''
     }
     else {

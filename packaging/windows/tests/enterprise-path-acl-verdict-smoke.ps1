@@ -6,10 +6,12 @@
 # Table test for the permission verdicts of Assert-DefenseClawPathAcl and the
 # canonical-descriptor checks it relies on. A verdict for drift a standard user
 # could have created (a write-like grant, a foreign owner, an unreadable
-# descriptor) stays fatal after the canonical re-stamp on every profile, with
-# and without DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS; only drift that
-# needs an administrator (a read grant, a lost protected flag) may continue
-# with a warning, and the strict pin restores those refusals too (GAP-0010).
+# descriptor) stays fatal after the canonical re-stamp on the standalone
+# profile, with and without DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS; only
+# drift that needs an administrator (a read grant, a lost protected flag) may
+# continue with a warning, and the strict pin restores those refusals too
+# (GAP-0010). Secure Client keeps its earlier rules and is not covered here
+# (Secure Client is out of scope for this fix).
 # The verdict reader and the re-stamp are replaced inside the module, so the
 # test touches no ACL on the machine.
 
@@ -57,9 +59,7 @@ $cases = @(
     @{ name = 'lost protected flag without a self-heal'; before = @($inherit); after = $null; heal = $false; strict = ''; expect = $inherit.Reason }
     @{ name = 'foreign owner survives'; before = @($owner); after = @($owner); stamp = 'noop'; strict = ''; expect = $owner.Reason }
     @{ name = 'missing rights survive'; before = @($rights); after = @($rights); stamp = 'noop'; strict = ''; expect = $rights.Reason }
-    @{ name = 'Secure Client state root advisory'; before = @($write); after = @($write); stamp = 'noop'; strict = ''; advisory = $true; profile = 'SecureClient'; expect = '' }
-    @{ name = 'standalone state root has no advisory'; before = @($write); after = @($write); stamp = 'noop'; strict = ''; advisory = $true; profile = 'Standalone'; expect = $write.Reason }
-    @{ name = 'Secure Client state root advisory, strict pin'; before = @($write); after = @($write); stamp = 'noop'; strict = '1'; advisory = $true; profile = 'SecureClient'; expect = $write.Reason }
+    @{ name = 'standalone state root has no advisory'; before = @($write); after = @($write); stamp = 'noop'; strict = ''; advisory = $true; expect = $write.Reason }
 )
 
 $failures = [Collections.Generic.List[string]]::new()
@@ -86,6 +86,7 @@ try {
         [Environment]::SetEnvironmentVariable($strictEnv, [string]$case['strict'], 'Process')
         $observed = & $module {
             param($Case, $Missing)
+            $script:DefenseClawEnterpriseProfile = 'Standalone'
             $expected = New-DefenseClawCanonicalPathAcl -IsDirectory:$false -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
             $raw = [Security.AccessControl.RawSecurityDescriptor]::new($expected.GetSecurityDescriptorBinaryForm(), 0)
             if (-not [bool]$Case['protected']) {
@@ -147,6 +148,7 @@ public static class DcPathAclSmokeNativeSecurity
         [DcPathAclSmokeNativeSecurity]::Code = [int]$case['code']
         $observed = & $module {
             param($Fixture)
+            $script:DefenseClawEnterpriseProfile = 'Standalone'
             function script:Initialize-DefenseClawNativeSecurity { return [DcPathAclSmokeNativeSecurity] }
             $expected = New-DefenseClawCanonicalPathAcl -IsDirectory:$false -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
             try {
@@ -169,10 +171,9 @@ public static class DcPathAclSmokeNativeSecurity
         [Environment]::SetEnvironmentVariable($strictEnv, [string]$case.strict, 'Process')
         $heal = -not $case.ContainsKey('heal') -or [bool]$case.heal
         $advisory = $case.ContainsKey('advisory') -and [bool]$case.advisory
-        $profileName = if ($case.ContainsKey('profile')) { [string]$case.profile } else { 'Standalone' }
         $observed = & $module {
-            param($Case, $Fixture, $Heal, $Advisory, $ProfileName)
-            $script:DefenseClawEnterpriseProfile = $ProfileName
+            param($Case, $Fixture, $Heal, $Advisory)
+            $script:DefenseClawEnterpriseProfile = 'Standalone'
             $script:VerdictReadings = [Collections.Generic.List[object]]::new()
             foreach ($reading in @($Case['before'], $Case['after'])) {
                 $script:VerdictReadings.Add([object[]]@(
@@ -208,7 +209,7 @@ public static class DcPathAclSmokeNativeSecurity
             catch {
                 return [string]$_.Exception.Message
             }
-        } $case $fixture $heal $advisory $profileName
+        } $case $fixture $heal $advisory
         if ([string]$observed -cne [string]$case.expect) {
             $want = if ($case.expect) { "refusal '$($case.expect)'" } else { 'pass' }
             $failures.Add("$($case.name): want $want, got '$observed'")

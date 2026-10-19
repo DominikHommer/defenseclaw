@@ -6357,10 +6357,15 @@ def test_production_uninstall_admits_native_cleanup_after_recorded_trust() -> No
     """GAP-0023: a production uninstall reads its deployment metadata only
     under the lifecycle lock, so the unsigned installed CLI it passes as the
     native cleanup executable is admitted there, after the hash-pinned trust
-    recorded in that metadata is loaded, and not by Authenticode at entry."""
+    recorded in that metadata is loaded, and not by Authenticode at entry.
+    Standalone only: Secure Client is out of scope and keeps the entry check."""
     module = read(MODULE)
     lifecycle = _module_function(module, "Invoke-DefenseClawEnterpriseLifecycle")
-    assert "$entryNativeCleanupBinary = if ($recoverProductionUninstallAcl) {" in lifecycle
+    # Secure Client keeps admitting it at entry (out of scope for GAP-0023).
+    assert (
+        "$entryNativeCleanupBinary = if ($recoverProductionUninstallAcl -and\n"
+        "        (Test-DefenseClawStandaloneProfile)) {"
+    ) in lifecycle
     entry = lifecycle.index("$sources = Get-DefenseClawLifecycleSources `")
     entry_call = lifecycle[entry : lifecycle.index("-DeferredConfig:$DeferredConfig", entry)]
     assert "-NativeCleanupBinary $entryNativeCleanupBinary `" in entry_call
