@@ -1253,7 +1253,7 @@ func putCorrelationMatchRelationships(
 			MatchedSemanticEventID: evidence.SemanticEventID,
 			LogicalEventID:         occurrence.LogicalEventID, Method: audit.CorrelationMethodReported,
 			RuleID: evidence.RuleID, RuleVersion: evidence.RuleVersion,
-			MergeAllowed: true, RelationshipType: audit.CorrelationSameAs, CandidateCount: 1,
+			MergeAllowed: true, RelationshipType: audit.CorrelationSameAs,
 		}
 		relationship, err := putCorrelationMatchRelationship(ctx, tx, semantic, occurrence, exactMatch, now)
 		if err != nil {

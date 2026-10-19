@@ -956,17 +956,7 @@ func (session *generatedTraceSession) recordGeneratedMetricBatch(
 		return nil, &GeneratedMetricError{code: GeneratedMetricUnavailable}
 	}
 	defer lease.Release()
-	results := make([]telemetry.V8MetricRecordResult, len(items))
-	for index, item := range items {
-		result, err := recordGeneratedMetricWithLease(
-			ctx, lease, session.store, item.Family, item.Builder, session.correlationDefaults,
-		)
-		results[index] = result
-		if err != nil {
-			return results, err
-		}
-	}
-	return results, nil
+	return recordGeneratedMetricsWithLease(ctx, lease, session.store, items, session.correlationDefaults)
 }
 
 // End builds and registers the exact generated agent record. Ending the root

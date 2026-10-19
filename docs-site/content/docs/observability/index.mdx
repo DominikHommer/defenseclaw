@@ -422,6 +422,17 @@ report them again. If the gateway cannot write the journal, the missing
 records are counted in memory only: `defenseclaw status` and
 `defenseclaw doctor` report it until the journal can be written again.
 
+The local history's write-ahead log (`audit.db-wal`) stays bounded under
+sustained hook traffic. Every two seconds the gateway copies the log into
+`audit.db` without holding up hook writes. Once the log holds more than
+256 MiB, or it is fully copied and its file is larger than 64 MiB, the gateway
+truncates the file. Under load the file peaks at 256 MiB plus about two
+seconds of writes. If it grows past 1 GiB, checkpoints are not keeping up,
+and the gateway log says `the audit WAL file is N MiB, over its 1024 MiB
+bound` every ten minutes until it is back under. A process that keeps
+`audit.db` open for reading can cause this. The
+`defenseclaw.sqlite.wal.bytes` metric reports the file size.
+
 Seven days is also the default when `retention_days` is omitted. The gateway
 runs the graph-aware SQLite reaper after startup readiness and every six hours;
 CLI-only writes are reaped the next time the gateway starts. Existing v8

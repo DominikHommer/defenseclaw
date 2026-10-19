@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -236,6 +237,14 @@ type Store struct {
 	// checkpoints. It is opened on first use and closed with the store.
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
+	// walGuardMu guards the checkpoint connection's data_version as of the
+	// previous WAL guard pass (CheckpointWALIfLarge).
+	walGuardMu      sync.Mutex
+	walGuardSeen    bool
+	walGuardVersion int64
+	// walPressure is true while the last WAL guard pass left the log over
+	// its limit; background writers wait for it (awaitWALHeadroom).
+	walPressure atomic.Bool
 
 	// plannerStatsRows is the history size at the last ANALYZE
 	// (RefreshPlannerStatistics).
@@ -317,10 +326,13 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //     returning SQLITE_BUSY, absorbing the
 //     vast majority of write contention.
 //   - wal_autocheckpoint=0      disables SQLite's connection-local commit
-//     hook. DefenseClaw checkpoints through the serialized Store connection
-//     in health and retention maintenance; running a second checkpoint from
+//     hook. DefenseClaw copies the log on a dedicated checkpoint connection
+//     (the WAL guard, health and retention maintenance); running a checkpoint from
 //     inside a commit can race a retiring sidecar process over the shared WAL
 //     mapping and terminate the gateway with SIGBUS.
+//   - journal_size_limit=64MiB  cuts the WAL file back to 64 MiB when a
+//     writer restarts the log, so a burst does not keep its disk space
+//     (rel-1-0-2:GAP-0709; see CheckpointWALIfLarge).
 //   - synchronous=NORMAL        the sweet spot for WAL: durable
 //     across crashes (loses only the last
 //     transaction on power loss) while ~3x
@@ -344,8 +356,9 @@ type auditIntegerPragma struct {
 }
 
 var auditMandatoryIntegerPragmas = [...]auditIntegerPragma{
-	{name: "busy_timeout", dsnValue: "5000", want: 5000},
+	{name: "busy_timeout", dsnValue: strconv.Itoa(auditBusyTimeoutMillis), want: auditBusyTimeoutMillis},
 	{name: "wal_autocheckpoint", dsnValue: "0", want: 0},
+	{name: "journal_size_limit", dsnValue: strconv.Itoa(auditWALJournalSizeLimitBytes), want: auditWALJournalSizeLimitBytes},
 	{name: "synchronous", dsnValue: "NORMAL", want: 1},
 	{name: "cache_size", dsnValue: "-20000", want: -20000},
 	{name: "temp_store", dsnValue: "MEMORY", want: 2},
@@ -1862,16 +1875,35 @@ func tableExists(ex dbExecer, table string) (bool, error) {
 
 // unreadAuditIndexes are audit_events indexes no query reads. Every hook
 // writes several audit rows, and each index is another B-tree page per row in
-// the write-ahead log (GAP-0246), so a store outside Secure Client drops them
-// after the migrations, which still create them as main does. The schema
+// the write-ahead log (GAP-0246, B-26), so a store outside Secure Client drops
+// them after the migrations, which still create them as main does. The schema
 // version does not move, so an older binary opened on the store after a
 // rollback runs without them.
+//
+// The readers of audit_events (the Go store, retention, export and alert
+// projection, the Python CLI and TUI, the evidence scripts) filter, join or
+// sort on id, timestamp, retention_timestamp_unix_nano, action, severity,
+// bucket, event_name, run_id, request_id, session_id, evaluation_id and
+// enforcement_action_id; their indexes stay. No reader filters on the columns
+// below: the session lifecycle lookup (connector, session_id, agent_id) uses
+// idx_audit_session_id, the scan-target join drives from the row id, and the
+// TUI filters connectors in memory. The last two are created by the Python
+// CLI, which no longer creates them (cli/defenseclaw/db.py); the gateway drops
+// what an older CLI left.
 var unreadAuditIndexes = []struct{ name, create string }{
 	{"idx_audit_policy_id", `CREATE INDEX IF NOT EXISTS idx_audit_policy_id ON audit_events(policy_id)`},
 	{"idx_audit_tool_name", `CREATE INDEX IF NOT EXISTS idx_audit_tool_name ON audit_events(tool_name)`},
 	{"idx_audit_generation", `CREATE INDEX IF NOT EXISTS idx_audit_generation ON audit_events(generation)`},
 	{"idx_audit_sidecar_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_sidecar_instance_id ON audit_events(sidecar_instance_id)`},
 	{"idx_audit_finding_id", `CREATE INDEX IF NOT EXISTS idx_audit_finding_id ON audit_events(finding_id)`},
+	{"idx_audit_trace_id", `CREATE INDEX IF NOT EXISTS idx_audit_trace_id ON audit_events(trace_id)`},
+	{"idx_audit_turn_id", `CREATE INDEX IF NOT EXISTS idx_audit_turn_id ON audit_events(turn_id)`},
+	{"idx_audit_agent_id", `CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_events(agent_id)`},
+	{"idx_audit_agent_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_agent_instance_id ON audit_events(agent_instance_id)`},
+	{"idx_audit_scan_id", `CREATE INDEX IF NOT EXISTS idx_audit_scan_id ON audit_events(scan_id)`},
+	{"idx_audit_source_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_source_timestamp ON audit_events(source, timestamp)`},
+	{"idx_audit_connector", `CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)`},
+	{"idx_audit_action_connector_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp ON audit_events(action, connector, timestamp DESC)`},
 }
 
 // trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client
