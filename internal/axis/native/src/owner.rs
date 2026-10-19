@@ -30,6 +30,11 @@ pub trait Process {
     fn take_pipes(&mut self) -> Result<Pipes>;
     fn try_wait(&mut self) -> Result<Option<i32>>;
     fn stop(&mut self) -> Result<()>;
+    // Default refusal preserves existing native backend behavior. Only the
+    // separately feature-gated diagnostic process implements console resize.
+    fn resize(&mut self, _size: crate::wire::Size) -> Result<()> {
+        Err(ProtocolError)
+    }
     // The Owner already retains this process before either callback is called.
     fn finish_launch(&mut self, _deadline: Instant) -> Result<()> {
         Ok(())
@@ -462,6 +467,12 @@ impl<E: Engine> Owner<E> {
                     active.stop(now, false)?;
                 }
             }
+            Kind::Resize if !was_exited => self
+                .active
+                .as_mut()
+                .ok_or(ProtocolError)?
+                .process
+                .resize(frame.size.ok_or(ProtocolError)?)?,
             Kind::Wait | Kind::Input | Kind::InputEof | Kind::Cancel => {}
             _ => return Err(ProtocolError),
         }

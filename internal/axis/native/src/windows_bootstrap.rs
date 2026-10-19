@@ -279,6 +279,13 @@ pub struct Capabilities {
 
 impl Capabilities {
     pub fn bind(&self, plan: &Preparation) -> Result<()> {
+        self.bind_inner(plan, false)
+    }
+    #[cfg(feature = "windows-conpty-diagnostic")]
+    pub(crate) fn bind_conpty_diagnostic(&self, plan: &Preparation) -> Result<()> {
+        self.bind_inner(plan, true)
+    }
+    fn bind_inner(&self, plan: &Preparation, diagnostic_terminal: bool) -> Result<()> {
         plan.validate()?;
         let hash = plan.hash()?;
         const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -292,7 +299,7 @@ impl Capabilities {
         if hash != expected
             || plan.backend != "windows_psec"
             || !plan.offline
-            || plan.terminal.is_some()
+            || (!diagnostic_terminal && plan.terminal.is_some())
             || !plan.filesystem.deny.is_empty()
             || plan.filesystem.read.len() != self.reads
             || plan.filesystem.write.len() != self.writes

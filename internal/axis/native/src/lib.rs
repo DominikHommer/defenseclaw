@@ -33,3 +33,6 @@ pub mod windows_io;
 pub mod windows_token_probe;
 #[cfg(target_os = "windows")]
 pub mod windows_token_probe_launch;
+
+#[cfg(all(target_os = "windows", feature = "windows-conpty-diagnostic"))]
+pub mod windows_conpty_diagnostic;

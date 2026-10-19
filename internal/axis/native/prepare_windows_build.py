@@ -34,6 +34,14 @@ OWNED_PATCH = {
     "path": "patches/mxc-owned-windows-psec.patch",
     "sha256": "aa90d41a729916b156ba25f3a02591d1c229951a1261bb4aedff7d53e643307f",
 }
+FEATURE_PATCH = {
+    "path": "patches/mxc-conpty-feature.patch",
+    "sha256": "4e2f4c43a264ca0989091821d78bb6a85ae1bd07fd8ffea42d83b67e2231f27a",
+}
+CONPTY_PATCH = {
+    "path": "patches/mxc-owned-conpty-diagnostic.patch",
+    "sha256": "2c6dc0c8499f8d0217b9da0a3874d63ec35649e889bc83f4382296b4038d868f",
+}
 SDK_OVERLAY_FILES = {
     "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs": (
         "a13934345597bd3fcaa66353b37ed5a9f54e643d234a620257970035b6212abc"
@@ -69,7 +77,52 @@ SDK_OVERLAY_FILES = {
     "src/mxc-sdk/src/policy.rs": "43680b63e9e7d4c9351cee1936e791be1b4b877cfcee368b07429e22c355de9c",
     "src/mxc-sdk/src/policy/exact/mod.rs": "da9ad3bd8cf1be1af225aa95c887718d67ce7efbb8270d2e7d578bab9dc87bb7",
     "src/mxc-sdk/src/sandbox.rs": "530bb8fbbaf97715fdc6efbdfe28706b333e3140cca4456641759fdb30ca62b1",
+    "src/mxc-sdk/Cargo.toml": "c0bc8bb05d096da08cc2b18f8dcc2618369a60a475e310ac901f64e6bbc12b17",
 }
+CONPTY_SDK_OVERLAY_FILES = {
+    "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs": (
+        "a13934345597bd3fcaa66353b37ed5a9f54e643d234a620257970035b6212abc"
+    ),
+    "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_runner.rs": (
+        "5b23635df276e0743f9f9986f1ee4b63d9b0c71685b8e14bfa7b099023cfa210"
+    ),
+    "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs": (
+        "9faff85d24c10b9570483bf4e473ddfe3cccda6f6b86674042c6865c1b76a8d1"
+    ),
+    "src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs": (
+        "110534317bd4311b6ce1253126a7f6d507b7e98f381ad7945a63792e3297a13e"
+    ),
+    "src/mxc-sdk/src/core/mxc_common/literal_argv.rs": (
+        "9a75fbca0fe9152abe4349ed37dd0a5db0d272e10ba89ecfbeb1f54bbd07d89d"
+    ),
+    "src/mxc-sdk/src/core/mxc_common/mod.rs": "42bb9328a9beb5f5217a55f11f5a4341fc36f8dbda9cf72729aeb767f7d92289",
+    "src/mxc-sdk/src/core/mxc_common/sandbox_process.rs": (
+        "4ad92632273e3f26ad902c7611edd13146bc96911a69c915954b84b398ae1508"
+    ),
+    "src/mxc-sdk/src/core/mxc_common/validator.rs": "a7487090a1693fb237acedd81f4e1c66b64d907c77e46824cc81a9f571c92191",
+    "src/mxc-sdk/src/core/mxc_engine/dispatch.rs": "e1fd28a30b19f04d6be4c6694f33ee6cbad005e02aad334a1085d2438808df49",
+    "src/mxc-sdk/src/core/mxc_engine/literal_argv.rs": (
+        "c35bb7f302e84fbca74c62d4d8d12bb142002a6f69f12476f386c7a858b5f719"
+    ),
+    "src/mxc-sdk/src/core/mxc_engine/mod.rs": "1561b879ebe6bfee5d4db6d84e112aa0b97f8395e1cbf4bc3be41c3cfd9a60fe",
+    "src/mxc-sdk/src/lib.rs": "0086d06c9810bf3a40c1e3b1de2fd7fa781d623b7ea88d7893fe094370a80f54",
+    "src/mxc-sdk/src/literal_argv.rs": "3e5884c316403be2ad82052492f1d3fd9dbd7ea2500ccbb7c716a64a29602cd5",
+    "src/mxc-sdk/src/owned_windows_psec.rs": "26b06eda85ab976e2220ce20e9dbadace1829e8ca247e3db6b712a9889e5a6d3",
+    "src/mxc-sdk/src/owned_windows_root_security.rs": (
+        "a5ca83814ee9c5e471a2ed2ca91f445bd75d8a2be39ba0c3f712ded35c46f869"
+    ),
+    "src/mxc-sdk/src/policy.rs": "43680b63e9e7d4c9351cee1936e791be1b4b877cfcee368b07429e22c355de9c",
+    "src/mxc-sdk/src/policy/exact/mod.rs": "da9ad3bd8cf1be1af225aa95c887718d67ce7efbb8270d2e7d578bab9dc87bb7",
+    "src/mxc-sdk/src/sandbox.rs": "530bb8fbbaf97715fdc6efbdfe28706b333e3140cca4456641759fdb30ca62b1",
+    "src/mxc-sdk/Cargo.toml": "c0bc8bb05d096da08cc2b18f8dcc2618369a60a475e310ac901f64e6bbc12b17",
+    "src/mxc-sdk/src/backends/process_container/common/secenv.rs": (
+        "e86863637fa6e8d50e7383cc1fa1c53a5d42d434f46c5cf1b23779c6a38592f7"
+    ),
+    "src/mxc-sdk/src/owned_windows_conpty_diagnostic.rs": (
+        "e351a3268f75600fe8571760756848a59e3c3bba2a628920358763b48ffee479"
+    ),
+}
+
 INERT_TESTS = (
     "owner::launch_tests::pending_pipe_refusal_retains_process_until_terminal_observation",
     "owner::launch_tests::callback_and_stop_refusal_leave_the_same_pending_process_owned",
@@ -99,11 +152,48 @@ SDK_INERT_TESTS = (
     "owned_windows_psec::stdio_tests::stdio_requires_synchronous_mode_and_direction_before_native_launch",
     "owned_windows_psec::native_access_tests::native_current_image_read_handle_cannot_be_promoted_to_execute_or_write",
     "owned_windows_psec::native_access_tests::native_relative_grant_pin_requires_the_exact_held_file_object",
-    "backend_modules::process_container::common::base_container_runner::owned_psec_query_tests::native_owned_psec_query_duplicate_is_noninheritable_and_independently_owned",
-    "backend_modules::process_container::common::base_container_runner::owned_psec_resume_tests::owned_resume_orders_live_identity_admission_and_fresh_custody_before_resume",
-    "backend_modules::process_container::common::base_container_runner::owned_psec_resume_tests::owned_resume_refuses_each_failed_gate_without_later_admission_or_resume",
-    "backend_modules::process_container::common::base_container_runner::owned_psec_resume_tests::owned_resume_attempt_is_one_shot_for_cancel_refusal_and_panic",
+    (
+        "backend_modules::process_container::common::base_container_runner::"
+        "owned_psec_query_tests::native_owned_psec_query_duplicate_is_noninheritable_and_independently_owned"
+    ),
+    (
+        "backend_modules::process_container::common::base_container_runner::"
+        "owned_psec_resume_tests::owned_resume_orders_live_identity_admission_and_fresh_custody_before_resume"
+    ),
+    (
+        "backend_modules::process_container::common::base_container_runner::"
+        "owned_psec_resume_tests::owned_resume_refuses_each_failed_gate_without_later_admission_or_resume"
+    ),
+    (
+        "backend_modules::process_container::common::base_container_runner::"
+        "owned_psec_resume_tests::owned_resume_attempt_is_one_shot_for_cancel_refusal_and_panic"
+    ),
 )
+
+
+CONPTY_TESTS = (
+    "windows_conpty_diagnostic::tests::console_selector_has_three_exact_cases_without_fallback",
+    "windows_conpty_diagnostic::tests::console_report_is_closed_and_first_failure_is_sticky",
+    "windows_conpty_diagnostic::tests::console_case_shape_binds_terminal_control_and_fixed_argv_before_prepare",
+    "windows_conpty_diagnostic::tests::console_token_observation_cannot_admit_a_different_user_or_session",
+)
+CONPTY_SDK_TESTS = (
+    "owned_windows_conpty_diagnostic::tests::console_controls_are_three_exact_nonfallback_cases",
+    "owned_windows_conpty_diagnostic::tests::console_dimensions_and_close_version_refuse_unbounded_shapes",
+    "owned_windows_conpty_diagnostic::tests::console_failure_has_closed_facts_and_no_native_error_text",
+    (
+        "backend_modules::process_container::common::secenv::conpty_diagnostic_tests::"
+        "diagnostic_attribute_cases_keep_hpc_value_distinct_from_psec_pointer"
+    ),
+)
+
+
+def diagnostic_selection(arguments):
+    if arguments == []:
+        return False
+    if arguments == ["--conpty-diagnostic"]:
+        return True
+    raise ValueError("fixed Windows build selector required")
 
 
 def require(value, message):
@@ -184,6 +274,25 @@ def pe(raw):
 
 
 def main():
+    diagnostic = diagnostic_selection(sys.argv[1:])
+    peer_tests = INERT_TESTS + (CONPTY_TESTS if diagnostic else ())
+    sdk_tests = SDK_INERT_TESTS + (CONPTY_SDK_TESTS if diagnostic else ())
+    require(
+        len(peer_tests) == len(set(peer_tests)) == (25 if diagnostic else 21)
+        and len(sdk_tests) == len(set(sdk_tests)) == (13 if diagnostic else 9),
+        "fixed selected inert inventory differs",
+    )
+    peer_features = ["--features", "windows-conpty-diagnostic"] if diagnostic else []
+    sdk_features = ["--features", "axis-conpty-diagnostic"] if diagnostic else []
+    if diagnostic:
+        require(
+            os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+            and os.environ.get("GITHUB_RUN_ATTEMPT") == "1"
+            and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+            and os.environ.get("GITHUB_REPOSITORY") == "cisco-ai-defense/defenseclaw"
+            and os.environ.get("GITHUB_REF") == "refs/heads/codex/axis-sandbox-feasibility",
+            "fixed first-attempt hosted manual diagnostic build required",
+        )
     require(
         isinstance(OWNED_PATCH, dict)
         and set(OWNED_PATCH) == {"path", "sha256"}
@@ -195,10 +304,12 @@ def main():
         "Windows source/test admission is closed",
     )
     require(
-        sys.argv[1:] == [] and sys.platform == "win32" and platform.machine().lower() in {"amd64", "x86_64"},
+        sys.platform == "win32" and platform.machine().lower() in {"amd64", "x86_64"},
         "fixed Windows build only",
     )
     staging = json.loads(ordinary(ROOT / "STAGING.json"))
+    if diagnostic:
+        require(staging["commit"] == os.environ.get("GITHUB_SHA"), "diagnostic source head differs")
     inputs = staging["files"]
     require(isinstance(inputs, dict) and 1 <= len(inputs) <= 256, "fixed staging inventory required")
     for name, expected in inputs.items():
@@ -219,6 +330,9 @@ def main():
     patches = dict(PATCHES)
     require(OWNED_PATCH["path"] not in patches, "duplicate owned overlay")
     patches[OWNED_PATCH["path"]] = OWNED_PATCH["sha256"]
+    patches[FEATURE_PATCH["path"]] = FEATURE_PATCH["sha256"]
+    if diagnostic:
+        patches[CONPTY_PATCH["path"]] = CONPTY_PATCH["sha256"]
     for name, expected in patches.items():
         raw = ordinary(ROOT / name)
         require(sha(raw) == expected, "reviewed overlay differs")
@@ -231,22 +345,23 @@ def main():
         require(name.startswith("src/mxc-sdk/") and ".." not in Path(name).parts, "overlay escaped SDK source")
         overlay[name] = ordinary(mxc / name)
     require(
-        {name: sha(value.replace(b"\r\n", b"\n")) for name, value in overlay.items()} == SDK_OVERLAY_FILES,
+        {name: sha(value.replace(b"\r\n", b"\n")) for name, value in overlay.items()}
+        == (CONPTY_SDK_OVERLAY_FILES if diagnostic else SDK_OVERLAY_FILES),
         "reviewed final SDK overlay inventory differs",
     )
     cargo = ["cargo", "+" + TOOLCHAIN]
-    command(cargo + ["build", "--locked", "--release", "--bins"])
-    listing = command(cargo + ["test", "--locked", "--release", "--lib", "--", "--list"])
+    command(cargo + ["build", "--locked", "--release", "--bins"] + peer_features)
+    listing = command(cargo + ["test", "--locked", "--release", "--lib"] + peer_features + ["--", "--list"])
     listed = [line[:-6] for line in listing.decode().splitlines() if line.endswith(": test")]
-    require(sorted(listed) == sorted(INERT_TESTS), "exact inert test inventory differs")
-    output = command(cargo + ["test", "--locked", "--release", "--lib", "--", "--test-threads=1"])
+    require(sorted(listed) == sorted(peer_tests), "exact inert test inventory differs")
+    output = command(cargo + ["test", "--locked", "--release", "--lib"] + peer_features + ["--", "--test-threads=1"])
     passed = re.findall(r"(?m)^test (\S+) \.\.\. ok\r?$", output.decode())
     require(
-        sorted(passed) == sorted(INERT_TESTS) and not re.search(rb"(?m)^test .*\.\.\. (?:FAILED|ignored)\r?$", output),
+        sorted(passed) == sorted(peer_tests) and not re.search(rb"(?m)^test .*\.\.\. (?:FAILED|ignored)\r?$", output),
         "exact inert tests did not pass",
     )
     sdk_outputs = {}
-    for name in SDK_INERT_TESTS:
+    for name in sdk_tests:
         sdk_output = command(
             cargo
             + [
@@ -259,6 +374,9 @@ def main():
                 "mxc-sdk",
                 "--lib",
                 "--no-default-features",
+            ]
+            + sdk_features
+            + [
                 name,
                 "--",
                 "--exact",
@@ -300,6 +418,10 @@ def main():
         "TOOLCHAIN.txt": toolchain,
         "STAGING.json": ordinary(ROOT / "STAGING.json"),
     }
+    if diagnostic:
+        terminal_image = ordinary(ROOT / "target/release/defenseclaw-axis-conpty-diagnostic.exe", 64 << 20)
+        pe(terminal_image)
+        retained["bin/defenseclaw-axis-conpty-diagnostic.exe"] = terminal_image
     retained.update({"source/" + name: ordinary(ROOT / name) for name in inputs})
     retained.update({"mxc-overlay/" + name: raw for name, raw in overlay.items()})
     for index, (name, log) in enumerate(sdk_outputs.items(), start=1):
@@ -316,6 +438,10 @@ def main():
         files[name] = {"sha256": sha(raw), "size": len(raw)}
     provenance = dict(
         scope="fixed_windows_native_peer_build_and_inert_tests_only",
+        conpty_diagnostic_build=diagnostic,
+        runtime_admission=False,
+        customer_terminal_activation=False,
+        conpty_or_psec_console_support_qualified=False,
         axis_commit=AXIS,
         mxc_commit=MXC,
         toolchain=TOOLCHAIN,

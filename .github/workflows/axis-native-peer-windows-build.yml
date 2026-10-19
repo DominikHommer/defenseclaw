@@ -11,6 +11,12 @@ on:
       - test/e2e/axis/windows/mxc-v1/patches/**
       - test/e2e/axis/patches/mxc-literal-argv.patch
   workflow_dispatch:
+    inputs:
+      conpty_diagnostic:
+        description: Build the unadmitted fixed console diagnostic; no workload execution
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -94,6 +100,8 @@ jobs:
           persist-credentials: false
       - name: Build and run only reviewed inert tests; never launch peer or PSEC
         working-directory: peer
+        env:
+          CONPTY_DIAGNOSTIC: ${{ github.event_name == 'workflow_dispatch' && inputs.conpty_diagnostic || false }}
         run: |
           $ErrorActionPreference = 'Stop'
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt --no-self-update
@@ -108,7 +116,11 @@ jobs:
           if (-not $env:LIB -or -not $env:INCLUDE) { throw 'Installed MSVC/SDK environment missing' }
           cargo +1.95.0 fmt -- --check
           if ($LASTEXITCODE -ne 0) { throw 'Peer formatting failed' }
-          python prepare_windows_build.py
+          if ($env:CONPTY_DIAGNOSTIC -eq 'true') {
+            python prepare_windows_build.py --conpty-diagnostic
+          } elseif ($env:CONPTY_DIAGNOSTIC -eq 'false') {
+            python prepare_windows_build.py
+          } else { throw 'Fixed diagnostic build selection differs' }
           if ($LASTEXITCODE -ne 0) { throw 'Windows peer source build failed' }
       - name: Preserve workflow identity on success or refusal
         if: ${{ always() }}

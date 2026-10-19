@@ -7,8 +7,14 @@ use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 
-const NS_GET_USERNS: libc::c_ulong = 0xb701;
-const NS_GET_NSTYPE: libc::c_ulong = 0xb703;
+// libc uses c_ulong for ioctl requests on GNU and c_int on musl.
+#[cfg(not(target_env = "musl"))]
+type NamespaceIoctlRequest = libc::c_ulong;
+#[cfg(target_env = "musl")]
+type NamespaceIoctlRequest = libc::c_int;
+
+const NS_GET_USERNS: NamespaceIoctlRequest = 0xb701;
+const NS_GET_NSTYPE: NamespaceIoctlRequest = 0xb703;
 const SEALS: i32 = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
 const ADMIN: u32 = 1 << 21;
 

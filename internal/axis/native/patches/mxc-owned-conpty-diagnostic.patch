@@ -1,0 +1,1207 @@
+--- a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
++++ b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
+@@ -1155,8 +1155,19 @@
+         literal_custody: Option<&LocalExecutableCustody>,
+         owned_stdio: Option<&crate::owned_windows_psec::OwnedWindowsStdio>,
+         defer_owned_resume: bool,
++        #[cfg(feature = "axis-conpty-diagnostic")] diagnostic: Option<
++            &crate::owned_windows_conpty_diagnostic::DiagnosticLaunch<'_>,
++        >,
+     ) -> Result<BaseChild, ScriptResponse> {
+-        if defer_owned_resume && (owned_stdio.is_none() || literal_argv.is_none() || capture) {
++        #[cfg(feature = "axis-conpty-diagnostic")]
++        let (conpty, psec_enabled) = diagnostic.map_or((false, true), |control| {
++            (control.case.uses_conpty(), control.case.uses_psec())
++        });
++        #[cfg(not(feature = "axis-conpty-diagnostic"))]
++        let (conpty, psec_enabled) = (false, true);
++        if defer_owned_resume
++            && ((owned_stdio.is_none() && !conpty) || literal_argv.is_none() || capture)
++        {
+             return Err(ScriptResponse::rejected(
+                 "suspended owned launch requires literal custody and owned stdio",
+             ));
+@@ -1180,12 +1191,24 @@
+         );
+ 
+         let psec_version = Self::choose_min_required_psec_version_for_request(request);
+-        let version_supported =
+-            secenv::supports_version(psec_version).map_err(|error| ScriptResponse {
+-                failure_phase: FailurePhase::BackendUnavailable,
+-                ..ScriptResponse::error(&format!(
+-                    "failed to query Process Security Environment contract support: {error}"
+-                ))
++        #[cfg(feature = "axis-conpty-diagnostic")]
++        if let Some(control) = diagnostic {
++            control.stage(
++                crate::owned_windows_conpty_diagnostic::OwnedWindowsDiagnosticStage::PsecVersion,
++            );
++        }
++        let version_supported = !psec_enabled
++            || secenv::supports_version(psec_version).map_err(|error| {
++                #[cfg(feature = "axis-conpty-diagnostic")]
++                if let Some(control) = diagnostic {
++                    control.api_error(&error);
++                }
++                ScriptResponse {
++                    failure_phase: FailurePhase::BackendUnavailable,
++                    ..ScriptResponse::error(&format!(
++                        "failed to query Process Security Environment contract support: {error}"
++                    ))
++                }
+             })?;
+         if !version_supported {
+             return Err(ScriptResponse::rejected(
+@@ -1211,8 +1234,11 @@
+             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
+         }
+ 
+-        let process_security_environment_spec =
+-            self.build_capture_aware_security_environment_spec(request, psec_version)?;
++        let process_security_environment_spec = if psec_enabled {
++            self.build_capture_aware_security_environment_spec(request, psec_version)?
++        } else {
++            Vec::new()
++        };
+         let _ = writeln!(
+             logger,
+             "process security environment spec built (PSEC {}.{}, {} bytes)",
+@@ -1281,10 +1307,11 @@
+         // In capture mode (`StdioMode::Pipes`) we always take the pipe
+         // path and wire the child to capture pipes that the streaming handle
+         // reads from.
+-        let pipe_mode = owned_stdio.is_some()
+-            || capture
+-            || !std::io::stdout().is_terminal()
+-            || !std::io::stderr().is_terminal();
++        let pipe_mode = !conpty
++            && (owned_stdio.is_some()
++                || capture
++                || !std::io::stdout().is_terminal()
++                || !std::io::stderr().is_terminal());
+ 
+         if pipe_mode {
+             if capture {
+@@ -1502,7 +1529,13 @@
+ 
+         let mut capture_session: Option<Box<dyn CaptureSessionOps>> = None;
+         let mut security_environment: Option<ProcessSecurityEnvironment> = None;
+-        {
++        #[cfg(feature = "axis-conpty-diagnostic")]
++        if let Some(control) = diagnostic {
++            control.stage(
++                crate::owned_windows_conpty_diagnostic::OwnedWindowsDiagnosticStage::PsecCreate,
++            );
++        }
++        if psec_enabled {
+             let psec_spec = process_security_environment_spec.as_slice();
+             if capture_denials.is_some() {
+                 match self
+@@ -1552,6 +1585,10 @@
+                         security_environment = Some(environment);
+                     }
+                     Err(error) => {
++                        #[cfg(feature = "axis-conpty-diagnostic")]
++                        if let Some(control) = diagnostic {
++                            control.api_error(&error);
++                        }
+                         let msg =
+                             format!("failed to create the process security environment: {error}");
+                         let _ = writeln!(logger, "Error: {msg}");
+@@ -1591,15 +1628,36 @@
+                 security_environment
+                     .as_ref()
+                     .map(ProcessSecurityEnvironment::raw)
+-            })
+-            .expect("PSEC environment owner is initialized before launch");
+-        let extended_startup = match SecurityEnvironmentStartupInfo::new(
++            });
++        #[cfg(feature = "axis-conpty-diagnostic")]
++        let startup_result = if let Some(control) = diagnostic {
++            control.stage(crate::owned_windows_conpty_diagnostic::OwnedWindowsDiagnosticStage::StartupAttributes);
++            SecurityEnvironmentStartupInfo::new_diagnostic(
++                si,
++                environment_handle,
++                &inherited_handles,
++                control.terminal.map(|terminal| terminal.raw()),
++            )
++        } else {
++            SecurityEnvironmentStartupInfo::new(
++                si,
++                environment_handle.expect("PSEC environment owner is initialized before launch"),
++                &inherited_handles,
++            )
++        };
++        #[cfg(not(feature = "axis-conpty-diagnostic"))]
++        let startup_result = SecurityEnvironmentStartupInfo::new(
+             si,
+-            environment_handle,
++            environment_handle.expect("PSEC environment owner is initialized before launch"),
+             &inherited_handles,
+-        ) {
++        );
++        let extended_startup = match startup_result {
+             Ok(startup) => startup,
+             Err(primary) => {
++                #[cfg(feature = "axis-conpty-diagnostic")]
++                if let Some(control) = diagnostic {
++                    control.api_error(&primary);
++                }
+                 let cleanup_error = capture_session
+                     .take()
+                     .map(|session| session.finish(None))
+@@ -1653,6 +1711,12 @@
+                 }),
+             ])
+         });
++        #[cfg(feature = "axis-conpty-diagnostic")]
++        if let Some(control) = diagnostic {
++            control.stage(
++                crate::owned_windows_conpty_diagnostic::OwnedWindowsDiagnosticStage::CreateProcess,
++            );
++        }
+         let (success, last_error, native_failure) = if literal_argv.is_some() {
+             let created = unsafe {
+                 literal_create_process_w(
+@@ -1711,6 +1775,10 @@
+         };
+ 
+         if success == 0 {
++            #[cfg(feature = "axis-conpty-diagnostic")]
++            if let (Some(control), Some(failure)) = (diagnostic, native_failure) {
++                control.native_failure(failure.win32, failure.nt_status as u32);
++            }
+             let err = last_error.unwrap_or_else(|| unsafe { GetLastError() });
+             // Clean up any partially-populated handles from the failed API call.
+             unsafe {
+@@ -1810,6 +1878,12 @@
+         //
+         // The child was created suspended (CREATE_SUSPENDED) and is resumed only
+         // after this assignment, so no descendant it spawns can escape the job.
++        #[cfg(feature = "axis-conpty-diagnostic")]
++        if let Some(control) = diagnostic {
++            control.stage(
++                crate::owned_windows_conpty_diagnostic::OwnedWindowsDiagnosticStage::JobAssignment,
++            );
++        }
+         let job = match UiJobObject::new().and_then(|job| {
+             // Pass the raw handle — `assign_process` borrows it and does not
+             // take ownership. Wrapping it in a temporary `OwnedHandle` here
+@@ -1872,6 +1946,10 @@
+         // Literal image identity is checked by admit_and_resume before and
+         // after host admission; this branch never calls ResumeThread.
+         if defer_owned_resume {
++            #[cfg(feature = "axis-conpty-diagnostic")]
++            if let Some(control) = diagnostic {
++                control.stage(crate::owned_windows_conpty_diagnostic::OwnedWindowsDiagnosticStage::ReturnedSuspended);
++            }
+             return Ok(BaseChild {
+                 process: OwnedHandle::new(pi.hProcess),
+                 thread: OwnedHandle::new(pi.hThread),
+@@ -2113,7 +2191,17 @@
+         // Pipes → capture pipes the caller drives; Inherit → the child inherits
+         // the binary's own std handles / console (a TTY when the binary has one).
+         let capture = stdio == StdioMode::Pipes;
+-        let child = self.spawn_base(request, logger, capture, None, None, None, false)?;
++        let child = self.spawn_base(
++            request,
++            logger,
++            capture,
++            None,
++            None,
++            None,
++            false,
++            #[cfg(feature = "axis-conpty-diagnostic")]
++            None,
++        )?;
+         Ok(Box::new(BaseContainerSandboxProcess::from_child(
+             child, logger,
+         )))
+@@ -2141,6 +2229,8 @@
+             Some(&custody),
+             None,
+             false,
++            #[cfg(feature = "axis-conpty-diagnostic")]
++            None,
+         )?;
+         drop(custody);
+         Ok(Box::new(BaseContainerSandboxProcess::from_child(
+@@ -4619,6 +4709,8 @@
+     _files: Vec<std::fs::File>,
+     stop_requested: bool,
+     code: Option<i32>,
++    #[cfg(feature = "axis-conpty-diagnostic")]
++    terminal: Option<crate::owned_windows_conpty_diagnostic::OwnedWindowsTerminal>,
+ }
+ #[repr(C)]
+ struct OwnedJobAccounting {
+@@ -4917,6 +5009,8 @@
+             return Ok(None);
+         }
+         self.child.security_environment.take();
++        #[cfg(feature = "axis-conpty-diagnostic")]
++        self.terminal.take(); // only after exact root signal + Job active0; EOF is observed by Owner
+         Ok(self.code)
+     }
+ }
+@@ -4974,6 +5068,8 @@
+             Some(&custody),
+             Some(&stdio),
+             defer_owned_resume,
++            #[cfg(feature = "axis-conpty-diagnostic")]
++            None,
+         )?;
+         Ok(OwnedPsecProcess {
+             child,
+@@ -4990,6 +5086,8 @@
+             _files: files,
+             stop_requested: false,
+             code: None,
++            #[cfg(feature = "axis-conpty-diagnostic")]
++            terminal: None,
+         })
+     }
+ }
+@@ -5218,3 +5316,75 @@
+         assert_eq!(running, OwnedPsecStart::Running);
+     }
+ }
++
++#[cfg(feature = "axis-conpty-diagnostic")]
++impl OwnedPsecProcess {
++    pub fn finish_diagnostic_console_attach(&mut self) -> std::io::Result<()> {
++        if let Some(terminal) = self.terminal.as_mut() {
++            terminal.attached()?;
++        }
++        Ok(())
++    }
++    pub fn resize_diagnostic_console(&mut self, rows: u16, columns: u16) -> std::io::Result<()> {
++        if self.start != OwnedPsecStart::Running || self.stop_requested || self.code.is_some() {
++            return Err(std::io::Error::other("console diagnostic is not running"));
++        }
++        self.terminal
++            .as_ref()
++            .ok_or_else(|| std::io::Error::other("console diagnostic absent"))?
++            .resize(rows, columns)
++    }
++}
++#[cfg(feature = "axis-conpty-diagnostic")]
++impl BaseContainerRunner {
++    pub(crate) fn spawn_owned_diagnostic_suspended(
++        &mut self,
++        request: ExecutionRequest,
++        argv: crate::mxc_common::literal_argv::LiteralArgv,
++        custody: LocalExecutableCustody,
++        files: Vec<std::fs::File>,
++        case: crate::owned_windows_conpty_diagnostic::OwnedWindowsDiagnosticCase,
++        io: crate::owned_windows_conpty_diagnostic::OwnedWindowsDiagnosticIo,
++    ) -> std::io::Result<OwnedPsecProcess> {
++        use crate::owned_windows_conpty_diagnostic::{DiagnosticLaunch, OwnedWindowsDiagnosticIo};
++        let (stdio, terminal) = match io {
++            OwnedWindowsDiagnosticIo::Headless(stdio) => (Some(stdio), None),
++            OwnedWindowsDiagnosticIo::Terminal(terminal) => (None, Some(terminal)),
++        };
++        let control = DiagnosticLaunch::new(case, terminal.as_ref())?;
++        let result = (|| {
++            crate::mxc_common::validator::validate_argv_common(&request, &argv)?;
++            if case.uses_psec() {
++                self.validate(&request)?;
++            }
++            windows_literal_argv_buffers(&argv)?;
++            if let Some(stdio) = stdio.as_ref() {
++                crate::owned_windows_psec::validate_stdio(stdio)
++                    .map_err(|_| ScriptResponse::rejected("fixed diagnostic stdio refused"))?;
++            }
++            let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
++            self.spawn_base(
++                &request,
++                &mut logger,
++                false,
++                Some(&argv),
++                Some(&custody),
++                stdio.as_ref(),
++                true,
++                Some(&control),
++            )
++        })();
++        let child = result
++            .map_err(|_private_sdk_response: ScriptResponse| control.failure.get().error())?;
++        drop(control);
++        Ok(OwnedPsecProcess {
++            child,
++            start: OwnedPsecStart::Suspended,
++            resume_custody: Some(custody),
++            _files: files,
++            stop_requested: false,
++            code: None,
++            terminal,
++        })
++    }
++}
+--- a/src/mxc-sdk/src/lib.rs
++++ b/src/mxc-sdk/src/lib.rs
+@@ -226,6 +226,11 @@
+ /// schema version.
+ ///
+ pub mod v1 {
++    #[cfg(all(windows, feature = "axis-conpty-diagnostic"))]
++    pub use crate::owned_windows_conpty_diagnostic::{
++        OwnedWindowsDiagnosticCase, OwnedWindowsDiagnosticFailure, OwnedWindowsDiagnosticIo,
++        OwnedWindowsDiagnosticStage, OwnedWindowsTerminal,
++    };
+     #[cfg(target_os = "windows")]
+     pub use crate::owned_windows_psec::{
+         OwnedWindowsPreparationStage, OwnedWindowsStdio, PreparedOwnedWindowsPsec,
+@@ -695,3 +700,6 @@
+ 
+ #[cfg(target_os = "windows")]
+ mod owned_windows_psec;
++
++#[cfg(all(windows, feature = "axis-conpty-diagnostic"))]
++mod owned_windows_conpty_diagnostic;
+--- a/src/mxc-sdk/src/backends/process_container/common/secenv.rs
++++ b/src/mxc-sdk/src/backends/process_container/common/secenv.rs
+@@ -37,13 +37,13 @@
+ 
+ use crate::mxc_common::api_set::is_api_set_implemented;
+ use crate::mxc_common::string_util;
+-use windows::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE, HMODULE};
++use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE, HMODULE};
+ use windows::Win32::System::LibraryLoader::{
+-    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
++    GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+ };
+ use windows::Win32::System::Threading::{
+-    DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
+-    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW, STARTUPINFOW,
++    DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
++    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute,
+ };
+ use windows_core::{HRESULT, PCSTR, PCWSTR};
+ 
+@@ -187,11 +187,42 @@
+ impl SecurityEnvironmentStartupInfo {
+     /// Add `environment` to an extended copy of `startup_info`.
+     pub fn new(
+-        mut startup_info: STARTUPINFOW,
++        startup_info: STARTUPINFOW,
+         environment: HANDLE,
+         inherited_handles: &[HANDLE],
+     ) -> Result<Self, LearningModeError> {
+-        let attribute_count = 1 + u32::from(!inherited_handles.is_empty());
++        Self::new_inner(startup_info, Some(environment), inherited_handles, None)
++    }
++
++    #[cfg(feature = "axis-conpty-diagnostic")]
++    pub(crate) fn new_diagnostic(
++        startup_info: STARTUPINFOW,
++        environment: Option<HANDLE>,
++        inherited_handles: &[HANDLE],
++        pseudoconsole: Option<isize>,
++    ) -> Result<Self, LearningModeError> {
++        if pseudoconsole.is_some_and(|value| value == 0 || value == -1)
++            || (environment.is_none() && pseudoconsole.is_none())
++        {
++            return Err(LearningModeError::ApiCall {
++                function: "fixed diagnostic startup shape",
++                code: windows::Win32::Foundation::ERROR_INVALID_PARAMETER.0,
++            });
++        }
++        Self::new_inner(startup_info, environment, inherited_handles, pseudoconsole)
++    }
++
++    fn new_inner(
++        mut startup_info: STARTUPINFOW,
++        environment: Option<HANDLE>,
++        inherited_handles: &[HANDLE],
++        pseudoconsole: Option<isize>,
++    ) -> Result<Self, LearningModeError> {
++        let attribute_count = diagnostic_attribute_count(
++            environment.is_some(),
++            !inherited_handles.is_empty(),
++            pseudoconsole.is_some(),
++        );
+         let mut byte_count = 0usize;
+         // SAFETY: the documented sizing call uses a null list and writes only
+         // the required byte count.
+@@ -225,21 +256,22 @@
+             code: last_error(),
+         })?;
+ 
+-        let environment_value = Box::new(environment);
++        let environment_value = Box::new(environment.unwrap_or_default());
+         // SAFETY: the attribute list is initialized, and the boxed HANDLE has
+         // a stable address that outlives every use of the list.
+-        if unsafe {
+-            UpdateProcThreadAttribute(
+-                attribute_list,
+-                0,
+-                PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT,
+-                Some((&raw const *environment_value).cast()),
+-                std::mem::size_of::<HANDLE>(),
+-                None,
+-                None,
+-            )
+-        }
+-        .is_err()
++        if environment.is_some()
++            && unsafe {
++                UpdateProcThreadAttribute(
++                    attribute_list,
++                    0,
++                    PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT,
++                    Some((&raw const *environment_value).cast()),
++                    std::mem::size_of::<HANDLE>(),
++                    None,
++                    None,
++                )
++            }
++            .is_err()
+         {
+             let code = last_error();
+             // SAFETY: balances the successful initialization above.
+@@ -272,6 +304,32 @@
+                 function: "UpdateProcThreadAttribute(HANDLE_LIST)",
+                 code,
+             });
++        }
++
++        if let Some(console) = pseudoconsole {
++            // Unlike SECURITY_ENVIRONMENT's pointer-to-HANDLE input, Microsoft
++            // specifies the HPCON value itself as lpValue. The terminal owner
++            // stays alive through CreateProcess and all attached child activity.
++            if unsafe {
++                UpdateProcThreadAttribute(
++                    attribute_list,
++                    0,
++                    22 | 0x0002_0000,
++                    Some(diagnostic_console_value(console)),
++                    std::mem::size_of::<isize>(),
++                    None,
++                    None,
++                )
++            }
++            .is_err()
++            {
++                let code = last_error();
++                unsafe { DeleteProcThreadAttributeList(attribute_list) };
++                return Err(LearningModeError::ApiCall {
++                    function: "UpdateProcThreadAttribute(PSEUDOCONSOLE)",
++                    code,
++                });
++            }
+         }
+ 
+         startup_info.cb = u32::try_from(std::mem::size_of::<STARTUPINFOEXW>()).map_err(|_| {
+@@ -744,8 +802,8 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use std::sync::Mutex;
+     use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+-    use std::sync::Mutex;
+     use windows::Win32::Foundation::{E_FAIL, S_OK};
+ 
+     static CLOSE_CALLS: AtomicUsize = AtomicUsize::new(0);
+@@ -891,21 +949,27 @@
+             close: Some("CloseProcessSecurityEnvironment"),
+         };
+ 
+-        assert!(!SecurityEnvironmentExportReport {
+-            create: None,
+-            ..complete
+-        }
+-        .is_complete());
+-        assert!(!SecurityEnvironmentExportReport {
+-            query_support: None,
+-            ..complete
+-        }
+-        .is_complete());
+-        assert!(!SecurityEnvironmentExportReport {
+-            close: None,
+-            ..complete
+-        }
+-        .is_complete());
++        assert!(
++            !SecurityEnvironmentExportReport {
++                create: None,
++                ..complete
++            }
++            .is_complete()
++        );
++        assert!(
++            !SecurityEnvironmentExportReport {
++                query_support: None,
++                ..complete
++            }
++            .is_complete()
++        );
++        assert!(
++            !SecurityEnvironmentExportReport {
++                close: None,
++                ..complete
++            }
++            .is_complete()
++        );
+         assert!(!SecurityEnvironmentExportReport::default().is_complete());
+     }
+ 
+@@ -919,45 +983,54 @@
+             SecurityEnvironmentSupport::FileSystemDeny as u64,
+             Ordering::SeqCst,
+         );
+-        assert!(api
+-            .query_support(SecurityEnvironmentSupport::FileSystemDeny)
+-            .unwrap());
+-        assert!(!api
+-            .query_support(SecurityEnvironmentSupport::FileSystemEnumerate)
+-            .unwrap());
+-        assert!(!api
+-            .query_support(SecurityEnvironmentSupport::NetworkIngress)
+-            .unwrap());
++        assert!(
++            api.query_support(SecurityEnvironmentSupport::FileSystemDeny)
++                .unwrap()
++        );
++        assert!(
++            !api.query_support(SecurityEnvironmentSupport::FileSystemEnumerate)
++                .unwrap()
++        );
++        assert!(
++            !api.query_support(SecurityEnvironmentSupport::NetworkIngress)
++                .unwrap()
++        );
+ 
+         reset_query_fakes();
+         QUERY_FLAGS.store(
+             SecurityEnvironmentSupport::FileSystemEnumerate as u64,
+             Ordering::SeqCst,
+         );
+-        assert!(!api
+-            .query_support(SecurityEnvironmentSupport::FileSystemDeny)
+-            .unwrap());
+-        assert!(api
+-            .query_support(SecurityEnvironmentSupport::FileSystemEnumerate)
+-            .unwrap());
+-        assert!(!api
+-            .query_support(SecurityEnvironmentSupport::NetworkIngress)
+-            .unwrap());
++        assert!(
++            !api.query_support(SecurityEnvironmentSupport::FileSystemDeny)
++                .unwrap()
++        );
++        assert!(
++            api.query_support(SecurityEnvironmentSupport::FileSystemEnumerate)
++                .unwrap()
++        );
++        assert!(
++            !api.query_support(SecurityEnvironmentSupport::NetworkIngress)
++                .unwrap()
++        );
+ 
+         reset_query_fakes();
+         QUERY_FLAGS.store(
+             SecurityEnvironmentSupport::NetworkIngress as u64,
+             Ordering::SeqCst,
+         );
+-        assert!(!api
+-            .query_support(SecurityEnvironmentSupport::FileSystemDeny)
+-            .unwrap());
+-        assert!(!api
+-            .query_support(SecurityEnvironmentSupport::FileSystemEnumerate)
+-            .unwrap());
+-        assert!(api
+-            .query_support(SecurityEnvironmentSupport::NetworkIngress)
+-            .unwrap());
++        assert!(
++            !api.query_support(SecurityEnvironmentSupport::FileSystemDeny)
++                .unwrap()
++        );
++        assert!(
++            !api.query_support(SecurityEnvironmentSupport::FileSystemEnumerate)
++                .unwrap()
++        );
++        assert!(
++            api.query_support(SecurityEnvironmentSupport::NetworkIngress)
++                .unwrap()
++        );
+     }
+ 
+     #[test]
+@@ -1018,12 +1091,14 @@
+         );
+         let api = fake_uncached_api();
+ 
+-        assert!(api
+-            .query_support(SecurityEnvironmentSupport::FileSystemDeny)
+-            .unwrap());
+-        assert!(api
+-            .query_support(SecurityEnvironmentSupport::FileSystemDeny)
+-            .unwrap());
++        assert!(
++            api.query_support(SecurityEnvironmentSupport::FileSystemDeny)
++                .unwrap()
++        );
++        assert!(
++            api.query_support(SecurityEnvironmentSupport::FileSystemDeny)
++                .unwrap()
++        );
+         // A test fake must never be memoized: both calls hit the underlying query.
+         assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 2);
+     }
+@@ -1042,15 +1117,42 @@
+             SecurityEnvironmentApi::from_raw_parts_cacheable(fake_create, fake_query, fake_close);
+         let cache = OnceLock::new();
+ 
+-        assert!(api
+-            .query_support_cached(SecurityEnvironmentSupport::FileSystemDeny, &cache)
+-            .unwrap());
+-        assert!(!api
+-            .query_support_cached(SecurityEnvironmentSupport::FileSystemEnumerate, &cache)
+-            .unwrap());
+-        assert!(!api
+-            .query_support_cached(SecurityEnvironmentSupport::NetworkIngress, &cache)
+-            .unwrap());
++        assert!(
++            api.query_support_cached(SecurityEnvironmentSupport::FileSystemDeny, &cache)
++                .unwrap()
++        );
++        assert!(
++            !api.query_support_cached(SecurityEnvironmentSupport::FileSystemEnumerate, &cache)
++                .unwrap()
++        );
++        assert!(
++            !api.query_support_cached(SecurityEnvironmentSupport::NetworkIngress, &cache)
++                .unwrap()
++        );
+         assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
+     }
+ }
++
++fn diagnostic_attribute_count(psec: bool, inherited: bool, console: bool) -> u32 {
++    u32::from(psec) + u32::from(inherited) + u32::from(console)
++}
++fn diagnostic_console_value(console: isize) -> *const c_void {
++    console as *const c_void
++}
++
++#[cfg(all(test, feature = "axis-conpty-diagnostic"))]
++mod conpty_diagnostic_tests {
++    use super::*;
++    #[test]
++    fn diagnostic_attribute_cases_keep_hpc_value_distinct_from_psec_pointer() {
++        assert_eq!(diagnostic_attribute_count(true, true, false), 2); // unchanged headless PSEC
++        assert_eq!(diagnostic_attribute_count(false, false, true), 1); // ordinary control
++        assert_eq!(diagnostic_attribute_count(true, false, true), 2); // exact combined case
++        let console: isize = 0x1234;
++        assert_eq!(diagnostic_console_value(console) as usize, 0x1234);
++        assert_ne!(
++            diagnostic_console_value(console),
++            (&console as *const isize).cast()
++        );
++    }
++}
+--- a/src/mxc-sdk/src/owned_windows_psec.rs
++++ b/src/mxc-sdk/src/owned_windows_psec.rs
+@@ -274,54 +274,59 @@
+         && access & (0x100000 | if writing { 2 } else { 1 })
+             == (0x100000 | if writing { 2 } else { 1 })
+ }
++pub(crate) fn validate_pipe_endpoint(handle: &OwnedHandle, writing: bool) -> io::Result<()> {
++    let mut flags = 0;
++    if unsafe { GetFileType(HANDLE(handle.as_raw_handle())) } != 3
++        || unsafe { GetHandleInformation(HANDLE(handle.as_raw_handle()), &mut flags) } == 0
++        || flags & 1 == 0
++    {
++        return Err(refused());
++    }
++    let mut mode = 0u32;
++    let mut status = Status {
++        status: 0,
++        information: 0,
++    };
++    let result = unsafe {
++        NtQueryInformationFile(
++            HANDLE(handle.as_raw_handle()),
++            &mut status,
++            (&mut mode as *mut u32).cast(),
++            4,
++            16,
++        )
++    };
++    if result as u32 == 0x103 {
++        unsafe { ExitProcess(70) }
++    }
++    let mut basic: Basic = unsafe { std::mem::zeroed() };
++    let mut used = 0;
++    if result != 0
++        || status.information != 4
++        || unsafe {
++            NtQueryObject(
++                HANDLE(handle.as_raw_handle()),
++                0,
++                (&mut basic as *mut Basic).cast(),
++                56,
++                &mut used,
++            )
++        } != 0
++        || used != 56
++        || !synchronous_stdio_mode(mode, basic.access, writing)
++    {
++        return Err(refused());
++    }
++    Ok(())
++}
++
+ pub(crate) fn validate_stdio(stdio: &OwnedWindowsStdio) -> io::Result<()> {
+     for (handle, writing) in [
+         (&stdio.stdin, false),
+         (&stdio.stdout, true),
+         (&stdio.stderr, true),
+     ] {
+-        let mut flags = 0;
+-        if unsafe { GetFileType(HANDLE(handle.as_raw_handle())) } != 3
+-            || unsafe { GetHandleInformation(HANDLE(handle.as_raw_handle()), &mut flags) } == 0
+-            || flags & 1 == 0
+-        {
+-            return Err(refused());
+-        }
+-        let mut mode = 0u32;
+-        let mut status = Status {
+-            status: 0,
+-            information: 0,
+-        };
+-        let result = unsafe {
+-            NtQueryInformationFile(
+-                HANDLE(handle.as_raw_handle()),
+-                &mut status,
+-                (&mut mode as *mut u32).cast(),
+-                4,
+-                16,
+-            )
+-        };
+-        if result as u32 == 0x103 {
+-            unsafe { ExitProcess(70) }
+-        }
+-        let mut basic: Basic = unsafe { std::mem::zeroed() };
+-        let mut used = 0;
+-        if result != 0
+-            || status.information != 4
+-            || unsafe {
+-                NtQueryObject(
+-                    HANDLE(handle.as_raw_handle()),
+-                    0,
+-                    (&mut basic as *mut Basic).cast(),
+-                    56,
+-                    &mut used,
+-                )
+-            } != 0
+-            || used != 56
+-            || !synchronous_stdio_mode(mode, basic.access, writing)
+-        {
+-            return Err(refused());
+-        }
++        validate_pipe_endpoint(handle, writing)?;
+     }
+     Ok(())
+ }
+@@ -535,6 +540,24 @@
+             .map_err(|_: ScriptResponse| refused())
+     }
+ 
++    /// Feature-gated contributor diagnostic only. OrdinaryConpty is explicitly
++    /// uncontained; it is never selected after a failed PSEC attempt.
++    #[cfg(feature = "axis-conpty-diagnostic")]
++    pub fn spawn_diagnostic_suspended(
++        self,
++        case: crate::owned_windows_conpty_diagnostic::OwnedWindowsDiagnosticCase,
++        io: crate::owned_windows_conpty_diagnostic::OwnedWindowsDiagnosticIo,
++    ) -> io::Result<OwnedPsecProcess> {
++        BaseContainerRunner::new().spawn_owned_diagnostic_suspended(
++            self.request.inner,
++            self.argv,
++            self.custody,
++            self.files,
++            case,
++            io,
++        )
++    }
++
+     pub fn spawn(self, stdio: OwnedWindowsStdio) -> io::Result<OwnedPsecProcess> {
+         let mut runner = BaseContainerRunner::new();
+         runner
+--- /dev/null
++++ b/src/mxc-sdk/src/owned_windows_conpty_diagnostic.rs
+@@ -0,0 +1,372 @@
++// Copyright 2026 Cisco Systems, Inc. and its affiliates
++// SPDX-License-Identifier: MIT
++
++//! Source-only fixed diagnostic. No customer terminal or fallback capability.
++//! The separate Cargo feature is off by default. OrdinaryConpty deliberately
++//! omits PSEC and must never be represented as a contained workload.
++use crate::owned_windows_psec::{OwnedWindowsStdio, validate_pipe_endpoint};
++use std::cell::Cell;
++use std::ffi::c_void;
++use std::io;
++use std::os::windows::io::{AsRawHandle, IntoRawHandle, OwnedHandle};
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum OwnedWindowsDiagnosticCase {
++    OrdinaryConpty,
++    HeadlessPsec,
++    ConptyPsec,
++}
++impl OwnedWindowsDiagnosticCase {
++    pub fn uses_psec(self) -> bool {
++        self != Self::OrdinaryConpty
++    }
++    pub fn uses_conpty(self) -> bool {
++        self != Self::HeadlessPsec
++    }
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum OwnedWindowsDiagnosticStage {
++    Input,
++    HostVersion,
++    ConsoleEndpoints,
++    ConsoleCreate,
++    PsecVersion,
++    PsecCreate,
++    StartupAttributes,
++    CreateProcess,
++    JobAssignment,
++    ReturnedSuspended,
++    ConsoleAttach,
++    ConsoleResize,
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct OwnedWindowsDiagnosticFailure {
++    pub stage: OwnedWindowsDiagnosticStage,
++    pub hresult: Option<i32>,
++    pub win32: Option<u32>,
++    pub nt_status: Option<u32>,
++}
++impl OwnedWindowsDiagnosticFailure {
++    pub(crate) fn at(stage: OwnedWindowsDiagnosticStage) -> Self {
++        Self {
++            stage,
++            hresult: None,
++            win32: None,
++            nt_status: None,
++        }
++    }
++    pub(crate) fn error(self) -> io::Error {
++        io::Error::other(self)
++    }
++    pub fn from_error(error: &io::Error) -> Option<Self> {
++        error.get_ref()?.downcast_ref::<Self>().copied()
++    }
++}
++impl std::fmt::Display for OwnedWindowsDiagnosticFailure {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter.write_str("owned Windows console diagnostic refused")
++    }
++}
++impl std::error::Error for OwnedWindowsDiagnosticFailure {}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct Coord {
++    x: i16,
++    y: i16,
++}
++#[repr(C)]
++struct Version {
++    size: u32,
++    major: u32,
++    minor: u32,
++    build: u32,
++    platform: u32,
++    service_pack: [u16; 128],
++}
++const _: () = assert!(std::mem::size_of::<Coord>() == 4);
++const _: () = assert!(std::mem::size_of::<Version>() == 276);
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    fn CreatePseudoConsole(
++        size: Coord,
++        input: *mut c_void,
++        output: *mut c_void,
++        flags: u32,
++        console: *mut isize,
++    ) -> i32;
++    fn ResizePseudoConsole(console: isize, size: Coord) -> i32;
++    fn ClosePseudoConsole(console: isize);
++    fn CloseHandle(handle: *mut c_void) -> i32;
++    fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> i32;
++    fn ExitProcess(code: u32) -> !;
++}
++#[link(name = "ntdll")]
++unsafe extern "system" {
++    fn RtlGetVersion(version: *mut Version) -> i32;
++}
++fn dimensions(rows: u16, columns: u16) -> io::Result<Coord> {
++    // Small fixed diagnostic frames, not a general terminal size API.
++    if !(1..=256).contains(&rows) || !(1..=256).contains(&columns) {
++        return Err(OwnedWindowsDiagnosticFailure::at(OwnedWindowsDiagnosticStage::Input).error());
++    }
++    Ok(Coord {
++        x: columns as i16,
++        y: rows as i16,
++    })
++}
++fn supported_close_version(major: u32, build: u32) -> bool {
++    major == 10 && build >= 26100
++}
++fn require_bounded_close_host() -> io::Result<()> {
++    let mut version: Version = unsafe { std::mem::zeroed() };
++    version.size = std::mem::size_of::<Version>() as u32;
++    if unsafe { RtlGetVersion(&mut version) } != 0
++        || !supported_close_version(version.major, version.build)
++    {
++        return Err(
++            OwnedWindowsDiagnosticFailure::at(OwnedWindowsDiagnosticStage::HostVersion).error(),
++        );
++    }
++    Ok(())
++}
++// Newly added native closures are checked. An uncertain close cannot become a
++// successful diagnostic; fatal private-peer exit leaves the outer Job in charge.
++struct Endpoint(Option<OwnedHandle>);
++impl Endpoint {
++    fn raw(&self) -> *mut c_void {
++        self.0
++            .as_ref()
++            .map_or(std::ptr::null_mut(), AsRawHandle::as_raw_handle)
++    }
++    fn close(&mut self) {
++        if let Some(handle) = self.0.take() {
++            if unsafe { CloseHandle(handle.into_raw_handle()) } == 0 {
++                unsafe { ExitProcess(70) }
++            }
++        }
++    }
++}
++impl Drop for Endpoint {
++    fn drop(&mut self) {
++        self.close();
++    }
++}
++pub struct OwnedWindowsTerminal {
++    console: isize,
++    input: Endpoint,
++    output: Endpoint,
++    attached: bool,
++}
++impl OwnedWindowsTerminal {
++    /// Accept only the existing reviewed synchronous workload pipe endpoints.
++    /// The host/peer end stays overlapped and serviced by the existing Owner.
++    pub fn new(
++        rows: u16,
++        columns: u16,
++        input: OwnedHandle,
++        output: OwnedHandle,
++    ) -> io::Result<Self> {
++        let mut terminal = Self {
++            console: 0,
++            input: Endpoint(Some(input)),
++            output: Endpoint(Some(output)),
++            attached: false,
++        };
++        let size = dimensions(rows, columns)?;
++        require_bounded_close_host()?;
++        if terminal.input.raw() == terminal.output.raw()
++            || validate_pipe_endpoint(terminal.input.0.as_ref().unwrap(), false).is_err()
++            || validate_pipe_endpoint(terminal.output.0.as_ref().unwrap(), true).is_err()
++        {
++            return Err(OwnedWindowsDiagnosticFailure::at(
++                OwnedWindowsDiagnosticStage::ConsoleEndpoints,
++            )
++            .error());
++        }
++        // These endpoints belong to ConPTY, never the child HANDLE_LIST.
++        for handle in [terminal.input.raw(), terminal.output.raw()] {
++            if unsafe { SetHandleInformation(handle, 1, 0) } == 0 {
++                return Err(OwnedWindowsDiagnosticFailure::at(
++                    OwnedWindowsDiagnosticStage::ConsoleEndpoints,
++                )
++                .error());
++            }
++        }
++        // flags0: no cursor query / asynchronous cursor responder is introduced.
++        let hr = unsafe {
++            CreatePseudoConsole(
++                size,
++                terminal.input.raw(),
++                terminal.output.raw(),
++                0,
++                &mut terminal.console,
++            )
++        };
++        if hr != 0 || terminal.console == 0 || terminal.console == -1 {
++            let mut facts =
++                OwnedWindowsDiagnosticFailure::at(OwnedWindowsDiagnosticStage::ConsoleCreate);
++            facts.hresult = Some(hr);
++            return Err(facts.error());
++        }
++        Ok(terminal)
++    }
++    pub(crate) fn raw(&self) -> isize {
++        self.console
++    }
++    pub(crate) fn attached(&mut self) -> io::Result<()> {
++        if self.attached || self.console == 0 {
++            return Err(OwnedWindowsDiagnosticFailure::at(
++                OwnedWindowsDiagnosticStage::ConsoleAttach,
++            )
++            .error());
++        }
++        // CreateProcess has succeeded, but Owner already retains the suspended
++        // child. Close our extra pipe references before querying/resuming it.
++        self.input.close();
++        self.output.close();
++        self.attached = true;
++        Ok(())
++    }
++    pub(crate) fn resize(&self, rows: u16, columns: u16) -> io::Result<()> {
++        if !self.attached || self.console == 0 {
++            return Err(OwnedWindowsDiagnosticFailure::at(
++                OwnedWindowsDiagnosticStage::ConsoleResize,
++            )
++            .error());
++        }
++        let hr = unsafe { ResizePseudoConsole(self.console, dimensions(rows, columns)?) };
++        if hr != 0 {
++            let mut facts =
++                OwnedWindowsDiagnosticFailure::at(OwnedWindowsDiagnosticStage::ConsoleResize);
++            facts.hresult = Some(hr);
++            return Err(facts.error());
++        }
++        Ok(())
++    }
++}
++impl Drop for OwnedWindowsTerminal {
++    fn drop(&mut self) {
++        // build>=26100 is checked before creating HPCON: Microsoft documents
++        // immediate ClosePseudoConsole there. Completion still requires Job0,
++        // the retained root, and output EOF; this call alone proves none of them.
++        if self.console != 0 && self.console != -1 {
++            let raw = std::mem::replace(&mut self.console, 0);
++            unsafe { ClosePseudoConsole(raw) };
++        }
++    }
++}
++pub enum OwnedWindowsDiagnosticIo {
++    Headless(OwnedWindowsStdio),
++    Terminal(OwnedWindowsTerminal),
++}
++pub(crate) struct DiagnosticLaunch<'a> {
++    pub(crate) case: OwnedWindowsDiagnosticCase,
++    pub(crate) terminal: Option<&'a OwnedWindowsTerminal>,
++    pub(crate) failure: Cell<OwnedWindowsDiagnosticFailure>,
++}
++impl<'a> DiagnosticLaunch<'a> {
++    pub(crate) fn new(
++        case: OwnedWindowsDiagnosticCase,
++        terminal: Option<&'a OwnedWindowsTerminal>,
++    ) -> io::Result<Self> {
++        if case.uses_conpty() != terminal.is_some() {
++            return Err(
++                OwnedWindowsDiagnosticFailure::at(OwnedWindowsDiagnosticStage::Input).error(),
++            );
++        }
++        Ok(Self {
++            case,
++            terminal,
++            failure: Cell::new(OwnedWindowsDiagnosticFailure::at(
++                OwnedWindowsDiagnosticStage::Input,
++            )),
++        })
++    }
++    pub(crate) fn stage(&self, stage: OwnedWindowsDiagnosticStage) {
++        self.failure.set(OwnedWindowsDiagnosticFailure::at(stage));
++    }
++    pub(crate) fn api_error(&self, error: &crate::learning_mode_windows::LearningModeError) {
++        let mut facts = self.failure.get();
++        match error {
++            crate::learning_mode_windows::LearningModeError::HResultCall { code, .. } => {
++                facts.hresult = Some(*code)
++            }
++            crate::learning_mode_windows::LearningModeError::ApiCall { code, .. } => {
++                facts.win32 = Some(*code)
++            }
++            _ => {}
++        }
++        self.failure.set(facts);
++    }
++    pub(crate) fn native_failure(&self, win32: u32, nt_status: u32) {
++        self.failure.set(OwnedWindowsDiagnosticFailure {
++            stage: OwnedWindowsDiagnosticStage::CreateProcess,
++            hresult: None,
++            win32: Some(win32),
++            nt_status: Some(nt_status),
++        });
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn console_controls_are_three_exact_nonfallback_cases() {
++        assert_eq!(
++            (
++                OwnedWindowsDiagnosticCase::OrdinaryConpty.uses_psec(),
++                OwnedWindowsDiagnosticCase::OrdinaryConpty.uses_conpty()
++            ),
++            (false, true)
++        );
++        assert_eq!(
++            (
++                OwnedWindowsDiagnosticCase::HeadlessPsec.uses_psec(),
++                OwnedWindowsDiagnosticCase::HeadlessPsec.uses_conpty()
++            ),
++            (true, false)
++        );
++        assert_eq!(
++            (
++                OwnedWindowsDiagnosticCase::ConptyPsec.uses_psec(),
++                OwnedWindowsDiagnosticCase::ConptyPsec.uses_conpty()
++            ),
++            (true, true)
++        );
++        assert!(DiagnosticLaunch::new(OwnedWindowsDiagnosticCase::ConptyPsec, None).is_err());
++        assert!(DiagnosticLaunch::new(OwnedWindowsDiagnosticCase::OrdinaryConpty, None).is_err());
++        assert!(DiagnosticLaunch::new(OwnedWindowsDiagnosticCase::HeadlessPsec, None).is_ok());
++    }
++    #[test]
++    fn console_dimensions_and_close_version_refuse_unbounded_shapes() {
++        for (rows, columns) in [(0, 80), (24, 0), (257, 80), (24, u16::MAX)] {
++            assert!(dimensions(rows, columns).is_err());
++        }
++        let size = dimensions(24, 80).unwrap();
++        assert_eq!((size.x, size.y), (80, 24));
++        assert!(!supported_close_version(10, 26099));
++        assert!(!supported_close_version(6, 99999));
++        assert!(supported_close_version(10, 26100));
++    }
++    #[test]
++    fn console_failure_has_closed_facts_and_no_native_error_text() {
++        let mut facts =
++            OwnedWindowsDiagnosticFailure::at(OwnedWindowsDiagnosticStage::CreateProcess);
++        facts.win32 = Some(6);
++        facts.nt_status = Some(0xc0000008);
++        let error = facts.error();
++        assert_eq!(
++            OwnedWindowsDiagnosticFailure::from_error(&error),
++            Some(facts)
++        );
++        assert_eq!(
++            error.to_string(),
++            "owned Windows console diagnostic refused"
++        );
++        assert!(
++            OwnedWindowsDiagnosticFailure::from_error(&io::Error::other("private path")).is_none()
++        );
++    }
++}

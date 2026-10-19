@@ -358,3 +358,14 @@ mod tests {
         );
     }
 }
+
+#[cfg(feature = "windows-conpty-diagnostic")]
+pub(crate) fn diagnostic_non_elevated() -> Result<()> {
+    no_thread_impersonation()?;
+    let token = Token::open(unsafe { GetCurrentProcess() })?;
+    if information(&token, 20, scalar)? != 0 {
+        return Err(Refused);
+    }
+    drop(token);
+    no_thread_impersonation()
+}

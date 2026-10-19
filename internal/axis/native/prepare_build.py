@@ -40,6 +40,7 @@ PATCHES = {
     "patches/axis-unix-hook-bpf.patch": "94c1ad86e706d71784356d4601d5df1cba3c2711d61e08a65f607fbfec5f7f35",
     "patches/axis-offline-bpf.patch": "914b75d4ad1da26f4f9850886093fb3560ade14d9870dd604de20a33d2f179f2",
     "patches/axis-musl-abi.patch": "1e508693bd498de3c7fa883378eba8ed92f8a0286c05aab31bdaab7d843237d9",
+    "patches/mxc-conpty-feature.patch": "4e2f4c43a264ca0989091821d78bb6a85ae1bd07fd8ffea42d83b67e2231f27a",
     "patches/mxc-owned-bubblewrap.patch": "422aff2de2719878e6fe10a6c097153c58dc3f58d3fa53ee97b2b1d1ea43d5e8",
     "patches/bwrap-owned-fds.patch": "1563032b5bfbd74b56214119f1287de3a7e63c9054898b58c6cd9603948dd621",
     "mxc-literal-argv.patch": "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d",
@@ -56,6 +57,10 @@ WINDOWS_SOURCE = {
     "src/windows_token_probe.rs",
     "src/windows_token_probe_launch.rs",
     "patches/mxc-owned-windows-psec.patch",
+    "patches/mxc-owned-conpty-diagnostic.patch",
+    "CONPTY-DIAGNOSTIC.md",
+    "src/windows_conpty_diagnostic.rs",
+    "src/bin/windows_conpty_diagnostic.rs",
 }
 SOURCE = (
     {
@@ -288,7 +293,6 @@ def admit_lock(seed: bytes, candidate: bytes) -> dict[str, object]:
     }
 
 
-
 def inspect_rust_musl_elf(data: bytes) -> dict[str, object]:
     """Bounded ELF check for an unadmitted static-musl peer candidate."""
     if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01":
@@ -296,7 +300,14 @@ def inspect_rust_musl_elf(data: bytes) -> dict[str, object]:
     kind, machine, version = struct.unpack_from("<HHI", data, 16)
     entry, phoff = struct.unpack_from("<QQ", data, 24)
     header_size, phsize, phcount = struct.unpack_from("<HHH", data, 52)
-    if kind not in (2, 3) or machine != 62 or version != 1 or header_size != 64 or phsize != 56 or not 1 <= phcount <= 128:
+    if (
+        kind not in (2, 3)
+        or machine != 62
+        or version != 1
+        or header_size != 64
+        or phsize != 56
+        or not 1 <= phcount <= 128
+    ):
         raise RuntimeError("musl candidate ELF header differs")
     if phoff < 64 or phoff + phsize * phcount > len(data):
         raise RuntimeError("musl candidate program headers exceed file")
@@ -388,22 +399,57 @@ def build_rust_musl_candidate(artifact: Path) -> dict[str, object]:
         raise RuntimeError("Rust sysroot differs")
     target_inputs = rust_musl_toolchain_inventory(sysroot)
     (artifact / "RUST-MUSL-TOOLCHAIN.json").write_text(
-        json.dumps({"target": MUSL_TARGET, "rustc": command(["rustc", f"+{TOOLCHAIN}", "-Vv"], capture=True),
-                    "cc": command(["cc", "--version"], capture=True),
-                    "ld": command(["ld", "--version"], capture=True),
-                    "target_inputs": target_inputs}, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(
+            {
+                "target": MUSL_TARGET,
+                "rustc": command(["rustc", f"+{TOOLCHAIN}", "-Vv"], capture=True),
+                "cc": command(["cc", "--version"], capture=True),
+                "ld": command(["ld", "--version"], capture=True),
+                "target_inputs": target_inputs,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
     for name, target in (("GNU", "x86_64-unknown-linux-gnu"), ("MUSL", MUSL_TARGET)):
-        tree = command(["cargo", f"+{TOOLCHAIN}", "tree", "--locked", "-e", "features",
-                        "--target", target, "-p", "defenseclaw-axis-native"], capture=True)
+        tree = command(
+            [
+                "cargo",
+                f"+{TOOLCHAIN}",
+                "tree",
+                "--locked",
+                "-e",
+                "features",
+                "--target",
+                target,
+                "-p",
+                "defenseclaw-axis-native",
+            ],
+            capture=True,
+        )
         if not tree or len(tree.encode()) > 4 << 20:
             raise RuntimeError("Rust feature graph exceeds bounds")
         (artifact / f"RUST-{name}-FEATURES.txt").write_text(tree, encoding="utf-8")
     link_map = artifact / "RUST-MUSL-LINK.map"
-    command(["cargo", f"+{TOOLCHAIN}", "rustc", "--locked", "--release", "--target", MUSL_TARGET,
-             "--bin", "defenseclaw-axis-peer", "--", "-C", f"link-arg=-Wl,-Map={link_map}"])
-    command(["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--target", MUSL_TARGET,
-             "--lib", "--no-run"])
+    command(
+        [
+            "cargo",
+            f"+{TOOLCHAIN}",
+            "rustc",
+            "--locked",
+            "--release",
+            "--target",
+            MUSL_TARGET,
+            "--bin",
+            "defenseclaw-axis-peer",
+            "--",
+            "-C",
+            f"link-arg=-Wl,-Map={link_map}",
+        ]
+    )
+    command(["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--target", MUSL_TARGET, "--lib", "--no-run"])
     test_outputs = []
     for path in sorted((ROOT / "target" / MUSL_TARGET / "release" / "deps").glob("defenseclaw_axis_native-*")):
         metadata = path.lstat()
@@ -431,17 +477,24 @@ def build_rust_musl_candidate(artifact: Path) -> dict[str, object]:
         linked_total += metadata.st_size
         if linked_total > 2 << 30:
             raise RuntimeError("Rust musl link closure exceeds bounds")
-        link_inputs.append({"link_map_name": recorded, "resolved_path": str(path),
-                            "size": metadata.st_size, "sha256": hashlib.sha256(ordinary(path, 128 << 20)).hexdigest()})
+        link_inputs.append(
+            {
+                "link_map_name": recorded,
+                "resolved_path": str(path),
+                "size": metadata.st_size,
+                "sha256": hashlib.sha256(ordinary(path, 128 << 20)).hexdigest(),
+            }
+        )
     image = ROOT / "target" / MUSL_TARGET / "release" / "defenseclaw-axis-peer"
     image_bytes = ordinary(image, 128 << 20)
     elf = inspect_rust_musl_elf(image_bytes)
     target = artifact / "bin" / "defenseclaw-axis-peer-musl-candidate"
     shutil.copyfile(image, target)
     return {
-        "target": MUSL_TARGET, "image": {"sha256": sha(target), "size": target.stat().st_size},
-        "elf": elf, "unrun_unit_test_image": {"sha256": sha(test_target), "size": test_target.stat().st_size,
-                                           "elf": test_elf},
+        "target": MUSL_TARGET,
+        "image": {"sha256": sha(target), "size": target.stat().st_size},
+        "elf": elf,
+        "unrun_unit_test_image": {"sha256": sha(test_target), "size": test_target.stat().st_size, "elf": test_elf},
         "toolchain_inventory_sha256": sha(artifact / "RUST-MUSL-TOOLCHAIN.json"),
         "gnu_features_sha256": sha(artifact / "RUST-GNU-FEATURES.txt"),
         "musl_features_sha256": sha(artifact / "RUST-MUSL-FEATURES.txt"),
@@ -457,7 +510,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("discover", "locked"))
     parser.add_argument("--static-musl", action="store_true", help="build two unexecuted static C closure candidates")
-    parser.add_argument("--static-rust-musl-candidate", action="store_true", help="compile an unexecuted, unadmitted Rust-musl peer candidate")
+    parser.add_argument(
+        "--static-rust-musl-candidate",
+        action="store_true",
+        help="compile an unexecuted, unadmitted Rust-musl peer candidate",
+    )
     parser.add_argument(
         "--dependency-unit-gates", action="store_true", help="run selected nonspawning dependency tests"
     )
@@ -491,7 +548,9 @@ def main() -> None:
                 "patches/axis-musl-abi.patch",
             ],
         ),
-        "mxc": apply(mxc, ["mxc-literal-argv.patch", "patches/mxc-owned-bubblewrap.patch"]),
+        "mxc": apply(
+            mxc, ["mxc-literal-argv.patch", "patches/mxc-conpty-feature.patch", "patches/mxc-owned-bubblewrap.patch"]
+        ),
         "bwrap": apply(bwrap, ["patches/bwrap-owned-fds.patch"]),
     }
     seed = ordinary(ROOT / "reviewed-linux-seed.lock")

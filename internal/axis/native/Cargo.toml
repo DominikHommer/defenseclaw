@@ -34,3 +34,13 @@ tempfile = "=3.27.0"
 [profile.release]
 debug = false
 strip = "debuginfo"
+
+# Unadmitted source-only diagnostic; never part of a default peer build.
+[features]
+default = []
+windows-conpty-diagnostic = ["mxc-sdk/axis-conpty-diagnostic"]
+
+[[bin]]
+name = "defenseclaw-axis-conpty-diagnostic"
+path = "src/bin/windows_conpty_diagnostic.rs"
+required-features = ["windows-conpty-diagnostic"]

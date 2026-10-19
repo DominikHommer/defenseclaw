@@ -36,13 +36,21 @@ struct WindowsProcess {
     pipes: Option<Pipes>,
     token_observation: Option<NativeTokenObservation>,
 }
-impl Engine for WindowsEngine {
-    fn preparation_failure_stage(&self) -> Option<NativePreparationStage> {
-        self.last_preparation_stage
-    }
-    fn prepare(&mut self, plan: &Preparation) -> Result<Box<dyn Prepared>> {
+impl WindowsEngine {
+    pub(crate) fn prepare_owned(
+        &mut self,
+        plan: &Preparation,
+        #[cfg(feature = "windows-conpty-diagnostic")] diagnostic: bool,
+    ) -> Result<PreparedOwnedWindowsPsec> {
         self.last_preparation_stage = Some(NativePreparationStage::WindowsCapabilityBinding);
         let capabilities = self.capabilities.take().ok_or(ProtocolError)?;
+        #[cfg(feature = "windows-conpty-diagnostic")]
+        if diagnostic {
+            capabilities.bind_conpty_diagnostic(plan)?;
+        } else {
+            capabilities.bind(plan)?;
+        }
+        #[cfg(not(feature = "windows-conpty-diagnostic"))]
         capabilities.bind(plan)?;
         self.last_preparation_stage = Some(NativePreparationStage::WindowsCapabilityObjects);
         let mut files = capabilities.into_objects().into_iter();
@@ -149,7 +157,20 @@ impl Engine for WindowsEngine {
             ProtocolError
         })?;
         self.last_preparation_stage = None;
-        Ok(Box::new(WindowsPrepared(prepared)))
+        Ok(prepared)
+    }
+}
+impl Engine for WindowsEngine {
+    fn preparation_failure_stage(&self) -> Option<NativePreparationStage> {
+        self.last_preparation_stage
+    }
+    fn prepare(&mut self, plan: &Preparation) -> Result<Box<dyn Prepared>> {
+        self.prepare_owned(
+            plan,
+            #[cfg(feature = "windows-conpty-diagnostic")]
+            false,
+        )
+        .map(|prepared| Box::new(WindowsPrepared(prepared)) as Box<dyn Prepared>)
     }
 }
 impl Prepared for WindowsPrepared {

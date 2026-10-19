@@ -1,0 +1,10 @@
+--- a/src/mxc-sdk/Cargo.toml
++++ b/src/mxc-sdk/Cargo.toml
+@@ -28,6 +28,7 @@
+ 
+ [features]
+ default = []
++axis-conpty-diagnostic = []
+ wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
+ link-wslcsdk = ["dep:zip"]
+ isolation_session = ["dep:windows-collections", "dep:windows-future"]

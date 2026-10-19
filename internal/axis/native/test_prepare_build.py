@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import prepare_build as build
+import prepare_windows_build as windows_build
 
 
 def lock(*, version="1.0.0", checksum="a" * 64, source=None, paths=None):
@@ -28,7 +29,13 @@ class BuildAdmissionTests(unittest.TestCase):
     def test_windows_evidence_is_not_an_applied_linux_patch_or_native_test_input(self):
         self.assertTrue(build.WINDOWS_SOURCE <= build.SOURCE)
         self.assertFalse(build.WINDOWS_SOURCE & build.PATCHES.keys())
-        names = {"src/linux.rs", "src/windows.rs", "src/windows_future.rs"}
+        names = {
+            "src/linux.rs",
+            "src/windows.rs",
+            "src/windows_future.rs",
+            "src/windows_conpty_diagnostic.rs",
+            "src/bin/windows_conpty_diagnostic.rs",
+        }
 
         def read(path):
             self.assertNotEqual(path.name, "windows.rs")
@@ -47,6 +54,22 @@ class BuildAdmissionTests(unittest.TestCase):
 
         with patch.object(build, "SOURCE", names), patch.object(build, "ordinary", side_effect=read):
             self.assertEqual(build.native_test_inventory(), {"owner::launch_tests::fixed"})
+
+    def test_conpty_build_selector_and_source_separation_stay_closed(self):
+        self.assertFalse(windows_build.diagnostic_selection([]))
+        self.assertTrue(windows_build.diagnostic_selection(["--conpty-diagnostic"]))
+        for arguments in (["auto"], ["--conpty-diagnostic", "extra"], ["--conpty-diagnostic", "--conpty-diagnostic"]):
+            with self.assertRaises(ValueError):
+                windows_build.diagnostic_selection(arguments)
+        self.assertIn("patches/mxc-conpty-feature.patch", build.PATCHES)
+        self.assertNotIn("patches/mxc-conpty-feature.patch", build.WINDOWS_SOURCE)
+        self.assertIn("patches/mxc-owned-conpty-diagnostic.patch", build.WINDOWS_SOURCE)
+        self.assertEqual(len(windows_build.INERT_TESTS), 21)
+        self.assertEqual(len(windows_build.SDK_INERT_TESTS), 9)
+        self.assertEqual(len(windows_build.CONPTY_TESTS), 4)
+        self.assertEqual(len(windows_build.CONPTY_SDK_TESTS), 4)
+        self.assertTrue(set(windows_build.INERT_TESTS).isdisjoint(windows_build.CONPTY_TESTS))
+        self.assertTrue(set(windows_build.SDK_INERT_TESTS).isdisjoint(windows_build.CONPTY_SDK_TESTS))
 
     def test_same_reviewed_registry_and_exact_path_packages_admit(self):
         result = build.admit_lock(lock(), lock())
@@ -121,7 +144,6 @@ class BuildAdmissionTests(unittest.TestCase):
             self.assertFalse(run.call_args.kwargs["shell"])
             self.assertEqual(run.call_args.kwargs["timeout"], 1800)
 
-
     @staticmethod
     def musl_elf(*, dynamic: bool = False) -> bytearray:
         data = bytearray(512)
@@ -176,6 +198,7 @@ class BuildAdmissionTests(unittest.TestCase):
             (rustlib / "empty.rlib").write_bytes(b"")
             with self.assertRaises(RuntimeError):
                 build.rust_musl_toolchain_inventory(Path(directory))
+
 
 if __name__ == "__main__":
     unittest.main()
