@@ -393,8 +393,16 @@ func postAction(rateLimit string) tpAction {
 func compileObserve(fsys FS, set kernel.Set, homes map[int]string) (tracingPolicy, Policy, []string) {
 	homeDirs := homeList(homes)
 	tp := basePolicy()
-	exactHook := tpLsm{Hook: "file_open", Args: fileArgs(false)}
-	prefixHook := tpLsm{Hook: "file_open", Args: fileArgs(false)}
+	// One selector per operator and access, all in one file_open hook:
+	// Tetragon 1.7.0 keeps only the last lsmhooks entry of a hook name in a
+	// policy (oneHookPerName), so a second file_open entry would silently
+	// replace the first.
+	type bucket struct {
+		operator string
+		write    bool
+	}
+	order := []bucket{{"Equal", false}, {"Prefix", false}, {"Equal", true}, {"Prefix", true}}
+	values := map[bucket][]string{}
 	var notes []string
 	for _, group := range set.Observe.Groups {
 		files, dirs, access := group.Files, group.Dirs, group.Access
@@ -411,28 +419,32 @@ func compileObserve(fsys FS, set kernel.Set, homes map[int]string) (tracingPolic
 			exact, prefixes, n = pathsFor(fsys, homeDirs, files, dirs, false)
 			notes = append(notes, n...)
 		}
-		selector := func(operator string, values []string) tpSelector {
+		write := access == kernel.AccessWrite
+		values[bucket{"Equal", write}] = append(values[bucket{"Equal", write}], exact...)
+		values[bucket{"Prefix", write}] = append(values[bucket{"Prefix", write}], prefixes...)
+	}
+	hook := tpLsm{Hook: "file_open", Args: fileArgs(false)}
+	for _, b := range order {
+		paths := dedupe(values[b])
+		// A very large enrollment splits a list rather than overflow one
+		// selector; more selectors than a hook takes fail lint, which drops
+		// the policy and says so.
+		for len(paths) > 0 {
+			n := min(len(paths), maxValues)
 			sel := tpSelector{
 				MatchNamespaces: hostNS(),
-				MatchArgs:       []tpMatchArg{{Args: []int{0}, Operator: operator, Values: values}},
+				MatchArgs:       []tpMatchArg{{Args: []int{0}, Operator: b.operator, Values: paths[:n]}},
 				MatchActions:    []tpAction{postAction(set.Observe.RateLimit)},
 			}
-			if access == kernel.AccessWrite {
+			if b.write {
 				sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Args: []int{1}, Operator: "Mask", Values: []string{writeMask}})
 			}
-			return sel
-		}
-		if len(exact) > 0 {
-			exactHook.Selectors = append(exactHook.Selectors, selector("Equal", exact))
-		}
-		if len(prefixes) > 0 {
-			prefixHook.Selectors = append(prefixHook.Selectors, selector("Prefix", prefixes))
+			hook.Selectors = append(hook.Selectors, sel)
+			paths = paths[n:]
 		}
 	}
-	for _, hook := range []tpLsm{exactHook, prefixHook} {
-		if len(hook.Selectors) > 0 {
-			tp.Spec.LsmHooks = append(tp.Spec.LsmHooks, hook)
-		}
+	if len(hook.Selectors) > 0 {
+		tp.Spec.LsmHooks = []tpLsm{hook}
 	}
 	return tp, Policy{}, notes
 }
@@ -457,12 +469,15 @@ func validBinary(p string) bool {
 
 // compileControls renders one controls-family policy.
 //
-// Equal and Prefix cannot share one matchArgs entry. Enforcing policies and
-// monitor policies with no live root use binary selectors in separate exact
-// and directory hooks. A monitor policy with live roots uses PID selectors
-// grouped four at a time, packed into repeated hooks of at most five
-// selectors. The SSH NoPost exemption precedes SSH key selectors in each
-// relevant hook.
+// Every selector shares one file_open hook: Tetragon 1.7.0 keeps only the
+// last lsmhooks entry of a hook name in a policy, so a second file_open entry
+// silently replaced the first, and the SSH key and shell profile selectors
+// never ran (GAP-0218, cilium/tetragon#4578). Equal and Prefix cannot share
+// one matchArgs entry, so the exact files and the directories are separate
+// selectors of that hook. An enforcing policy, or a monitor policy with no
+// live root, anchors on binaries; a monitor policy with live roots anchors on
+// one group of at most MaxPIDs pids instead. The SSH NoPost exemption comes
+// first. That is at most four selectors, within MaxSelectors.
 func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[int]string) (tracingPolicy, Policy, []string, []int) {
 	var notes []string
 	uidSet := map[int]bool{}
@@ -497,6 +512,11 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	}
 	for _, install := range in.Installs {
 		if uidSet[install.UID] && scope.allows(install.Connector) {
+			for _, native := range install.NativeLaunches {
+				addBin(install.UID, native)
+			}
+			// Native is part of NativeLaunches for a resolved install; it is
+			// added too so an Install that names no launch path still anchors.
 			for _, native := range install.Native {
 				addBin(install.UID, native)
 			}
@@ -510,6 +530,7 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		}
 		if root.Native {
 			addBin(root.UID, root.Exe)
+			addBin(root.UID, root.Launch)
 		} else {
 			pidOnly = true
 		}
@@ -597,9 +618,6 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		sel.MatchActions = []tpAction{{Action: "Override", ArgError: &eperm}, {Action: "Post"}}
 		return sel
 	}
-	// The first PID group shares the normal hooks. Later groups are packed
-	// into repeated hooks, with at most five selectors in each.
-	firstPIDs := pids[:min(len(pids), maxPIDsPerSelector)]
 	anchored := func(operator string, paths []string, write bool) []tpSelector {
 		if len(paths) == 0 {
 			return nil
@@ -608,84 +626,29 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		if len(binList) > 0 {
 			out = append(out, override("binaries", nil, operator, paths, write))
 		}
-		if len(firstPIDs) > 0 {
-			out = append(out, override("pids", firstPIDs, operator, paths, write))
+		if len(pids) > 0 {
+			out = append(out, override("pids", pids, operator, paths, write))
 		}
 		return out
 	}
 
-	exactHook := tpLsm{Hook: "file_open", Args: fileArgs(true)}
+	hook := tpLsm{Hook: "file_open", Args: fileArgs(true)}
 	sshSelectors := anchored("Equal", sshFiles, false)
 	exempt := resolveExempt(fsys, ssh.ExemptBinaries)
-	exemption := func() tpSelector {
+	if len(sshSelectors) > 0 && len(exempt) > 0 {
 		// The exemption comes first: a NoPost selector that matches wins over
 		// the Override selectors after it (exempt_order.out).
-		return tpSelector{
+		hook.Selectors = append(hook.Selectors, tpSelector{
 			MatchBinaries: []tpBinaries{{Operator: "In", Values: exempt}},
 			MatchArgs:     []tpMatchArg{{Args: []int{0}, Operator: "Equal", Values: sshFiles}},
 			MatchActions:  []tpAction{{Action: "NoPost"}},
-		}
+		})
 	}
-	if len(sshSelectors) > 0 && len(exempt) > 0 {
-		exactHook.Selectors = append(exactHook.Selectors, exemption())
-	}
-	exactHook.Selectors = append(exactHook.Selectors, sshSelectors...)
-	exactHook.Selectors = append(exactHook.Selectors, anchored("Equal", persistFiles, true)...)
-	prefixHook := tpLsm{Hook: "file_open", Args: fileArgs(true)}
-	prefixHook.Selectors = anchored("Prefix", persistDirs, true)
-	for _, hook := range []tpLsm{exactHook, prefixHook} {
-		if len(hook.Selectors) > 0 {
-			tp.Spec.LsmHooks = append(tp.Spec.LsmHooks, hook)
-		}
-	}
-	if len(pids) > maxPIDsPerSelector {
-		// Several selectors for the same path can share a hook. This keeps a
-		// policy to a small number of LSM instances while each PID
-		// selector remains inside Tetragon's effective four-value limit.
-		tp.Spec.LsmHooks = nil
-		groups := make([][]int, 0, (len(pids)+maxPIDsPerSelector-1)/maxPIDsPerSelector)
-		for i := 0; i < len(pids); i += maxPIDsPerSelector {
-			groups = append(groups, pids[i:min(i+maxPIDsPerSelector, len(pids))])
-		}
-		hook := tpLsm{Hook: "file_open", Args: fileArgs(true)}
-		flush := func() {
-			if len(hook.Selectors) > 0 {
-				tp.Spec.LsmHooks = append(tp.Spec.LsmHooks, hook)
-			}
-			hook = tpLsm{Hook: "file_open", Args: fileArgs(true)}
-		}
-		if len(sshFiles) > 0 {
-			for _, group := range groups {
-				if len(hook.Selectors) == 0 && len(exempt) > 0 {
-					hook.Selectors = append(hook.Selectors, exemption())
-				}
-				if len(hook.Selectors) == MaxSelectors {
-					flush()
-					if len(exempt) > 0 {
-						hook.Selectors = append(hook.Selectors, exemption())
-					}
-				}
-				hook.Selectors = append(hook.Selectors, override("pids", group, "Equal", sshFiles, false))
-			}
-		}
-		if len(persistFiles) > 0 {
-			for _, group := range groups {
-				if len(hook.Selectors) == MaxSelectors {
-					flush()
-				}
-				hook.Selectors = append(hook.Selectors, override("pids", group, "Equal", persistFiles, true))
-			}
-		}
-		flush()
-		if len(persistDirs) > 0 {
-			for _, group := range groups {
-				if len(hook.Selectors) == MaxSelectors {
-					flush()
-				}
-				hook.Selectors = append(hook.Selectors, override("pids", group, "Prefix", persistDirs, true))
-			}
-			flush()
-		}
+	hook.Selectors = append(hook.Selectors, sshSelectors...)
+	hook.Selectors = append(hook.Selectors, anchored("Equal", persistFiles, true)...)
+	hook.Selectors = append(hook.Selectors, anchored("Prefix", persistDirs, true)...)
+	if len(hook.Selectors) > 0 {
+		tp.Spec.LsmHooks = []tpLsm{hook}
 	}
 	if len(tp.Spec.LsmHooks) == 0 {
 		return tp, Policy{}, append(notes, ReasonNoAnchors), over

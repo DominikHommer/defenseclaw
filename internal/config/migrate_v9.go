@@ -38,7 +38,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/open-policy-agent/opa/ast"
+	"github.com/open-policy-agent/opa/ast" //nolint:staticcheck // The v8/v9 migration shares the legacy AST type with regodata until 1.1.
 	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 
@@ -2785,8 +2785,7 @@ func v9ProfileDigest(dir string) (string, error) {
 // Windows host without a policy_dir of its own (standaloneRulePackDefault);
 // everywhere else the implicit default pack is a folder.
 func (m *v9Migrator) embeddedPackDropped() bool {
-	return !(runtime.GOOS == "windows" && m.in.Managed &&
-		strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(m.root, "policy_dir"))) == "")
+	return ((runtime.GOOS != "windows" || !(m.in.Managed)) || strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(m.root, "policy_dir"))) != "")
 }
 
 // v9DirPosture is the posture the gateway gives a rule-pack directory: the

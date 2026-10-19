@@ -2674,7 +2674,7 @@ func hermesConfigPath(SetupOpts) string {
 
 func validateHermesWindowsConfigPath(configPath string) error {
 	if strings.TrimSpace(configPath) == "" {
-		return errors.New("Hermes config path is unavailable; current-user LocalAppData or an absolute HERMES_HOME is required; no changes made")
+		return errors.New("Hermes config path is unavailable; current-user LocalAppData or an absolute HERMES_HOME is required; no changes made") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if runtime.GOOS != "windows" {
 		return nil
@@ -2683,11 +2683,11 @@ func validateHermesWindowsConfigPath(configPath string) error {
 		strings.ContainsAny(configPath, "\x00\r\n") ||
 		!filepath.IsAbs(configPath) ||
 		filepath.Clean(configPath) != configPath {
-		return errors.New("Hermes config path is not an absolute normalized Windows path; no changes made")
+		return errors.New("Hermes config path is not an absolute normalized Windows path; no changes made") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	home := filepath.Dir(configPath)
 	if strings.TrimSpace(home) == "" || home == "." || !filepath.IsAbs(home) {
-		return errors.New("Hermes config home is not an absolute Windows path; no changes made")
+		return errors.New("Hermes config home is not an absolute Windows path; no changes made") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return nil
 }
@@ -2768,12 +2768,12 @@ func validateCopilotHookPolicy(opts SetupOpts, registrationPath string) error {
 		}
 	}
 	if disabled {
-		return fmt.Errorf("Copilot hooks are disabled by effective operator setting disableAllHooks=true at %s; refusing to overwrite operator policy", disabledSource)
+		return fmt.Errorf("Copilot hooks are disabled by effective operator setting disableAllHooks=true at %s; refusing to overwrite operator policy", disabledSource) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if value, present, err := readCopilotDisableAllHooks(registrationPath); err != nil {
 		return fmt.Errorf("cannot verify Copilot hook registration policy %s: %w", registrationPath, err)
 	} else if present && value {
-		return fmt.Errorf("Copilot hook registration is disabled by operator setting disableAllHooks=true at %s; refusing to overwrite operator policy", registrationPath)
+		return fmt.Errorf("Copilot hook registration is disabled by operator setting disableAllHooks=true at %s; refusing to overwrite operator policy", registrationPath) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return nil
 }
@@ -2855,7 +2855,7 @@ func stripJSONComments(input []byte) ([]byte, error) {
 		if current == '/' && i+1 < len(input) && input[i+1] == '*' {
 			i += 2
 			closed := false
-			for i+1 < len(input) && !(input[i] == '*' && input[i+1] == '/') {
+			for i+1 < len(input) && (input[i] != '*' || input[i+1] != '/') {
 				if input[i] == '\n' {
 					withoutComments = append(withoutComments, '\n')
 				}
@@ -3821,7 +3821,7 @@ func readHermesAllowlist(path string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("parse Hermes shell hook allowlist: %w", err)
 	}
 	if document == nil {
-		return nil, fmt.Errorf("Hermes shell hook allowlist is not a JSON object")
+		return nil, fmt.Errorf("Hermes shell hook allowlist is not a JSON object") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	// Hermes reads a document without approvals ({}) as no approvals, so
 	// repair adds DefenseClaw's to it instead of failing.
@@ -3831,7 +3831,7 @@ func readHermesAllowlist(path string) (map[string]interface{}, error) {
 		return document, nil
 	}
 	if _, ok := raw.([]interface{}); !ok {
-		return nil, fmt.Errorf("Hermes shell hook allowlist approvals is not an array")
+		return nil, fmt.Errorf("Hermes shell hook allowlist approvals is not an array") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return document, nil
 }
@@ -3920,7 +3920,7 @@ func checkHermesAllowlistRepairable(path, command string) error {
 
 func patchHermesAllowlist(path, command, executablePath string) error {
 	if strings.TrimSpace(command) == "" {
-		return fmt.Errorf("Hermes hook command is empty")
+		return fmt.Errorf("Hermes hook command is empty") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	document, err := readHermesAllowlist(path)
 	if err != nil {
@@ -3979,7 +3979,7 @@ func planHermesAllowlistApprovals(path string, approvals []interface{}, command 
 		_, recognized := recognizedCommands[entryCommand]
 		if owned {
 			if !recognized {
-				return nil, nil, fmt.Errorf("Hermes allowlist entry %q has a tampered DefenseClaw command; refusing non-exact repair", event)
+				return nil, nil, fmt.Errorf("Hermes allowlist entry %q has a tampered DefenseClaw command; refusing non-exact repair", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
 			if !requiredEvent || managedCurrent[event] {
 				// Remove exact DefenseClaw-owned stale events and duplicates.
@@ -3997,7 +3997,7 @@ func planHermesAllowlistApprovals(path string, approvals []interface{}, command 
 				// Adopted: a marked approval replaces it below.
 				continue
 			}
-			return nil, nil, fmt.Errorf("Hermes allowlist entry %q lost its DefenseClaw ownership marker; refusing ambiguous repair (remove the entries for DefenseClaw's hook from %s, then run 'defenseclaw setup hermes')", event, path)
+			return nil, nil, fmt.Errorf("Hermes allowlist entry %q lost its DefenseClaw ownership marker; refusing ambiguous repair (remove the entries for DefenseClaw's hook from %s, then run 'defenseclaw setup hermes')", event, path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		kept = append(kept, raw)
 	}
@@ -4077,7 +4077,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 		pair := event + "\x00" + entryCommand
 		if owned && requiredEvent && !pristinePairs[pair] {
 			if entryCommand != command {
-				return fmt.Errorf("Hermes allowlist entry %s has a tampered DefenseClaw command; refusing non-exact cleanup", event)
+				return fmt.Errorf("Hermes allowlist entry %s has a tampered DefenseClaw command; refusing non-exact cleanup", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
 			continue
 		}
@@ -4091,7 +4091,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 				// goes with the hook.
 				continue
 			}
-			return fmt.Errorf("Hermes allowlist entry %s lost its DefenseClaw ownership marker; refusing ambiguous cleanup", event)
+			return fmt.Errorf("Hermes allowlist entry %s lost its DefenseClaw ownership marker; refusing ambiguous cleanup", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		kept = append(kept, raw)
 	}
@@ -4145,7 +4145,7 @@ func writeHermesDirectNativeState(opts SetupOpts, command, status string) error 
 		return fmt.Errorf("invalid Hermes direct-native state %q", status)
 	}
 	if strings.TrimSpace(command) == "" {
-		return fmt.Errorf("Hermes direct-native command is empty")
+		return fmt.Errorf("Hermes direct-native command is empty") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	state := map[string]interface{}{
 		"schema_version":        hermesDirectNativeStateVersion,
@@ -4165,22 +4165,22 @@ func writeHermesDirectNativeState(opts SetupOpts, command, status string) error 
 func validateHermesSingleProfile(configPath string) error {
 	home := filepath.Clean(filepath.Dir(configPath))
 	if strings.EqualFold(filepath.Base(filepath.Dir(home)), "profiles") {
-		return fmt.Errorf("Hermes named profiles are unsupported by the single-HERMES_HOME connector; point HERMES_HOME at the default profile (run 'hermes profile use default') and retry; no changes made")
+		return fmt.Errorf("Hermes named profiles are unsupported by the single-HERMES_HOME connector; point HERMES_HOME at the default profile (run 'hermes profile use default') and retry; no changes made") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	activeProfile := filepath.Join(home, "active_profile")
 	if info, err := os.Lstat(activeProfile); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return fmt.Errorf("Hermes active_profile is not a regular non-symlink file")
+			return fmt.Errorf("Hermes active_profile is not a regular non-symlink file") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		if info.Size() > 4096 {
-			return fmt.Errorf("Hermes active_profile exceeds the bounded inspection limit")
+			return fmt.Errorf("Hermes active_profile exceeds the bounded inspection limit") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		data, readErr := os.ReadFile(activeProfile)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return fmt.Errorf("inspect Hermes active_profile: %w", readErr)
 		}
 		if profile := strings.TrimSpace(string(data)); profile != "" && !strings.EqualFold(profile, "default") {
-			return fmt.Errorf("Hermes active named profile %q is unsupported by the single-HERMES_HOME connector; switch back with 'hermes profile use default' and retry; no changes made", profile)
+			return fmt.Errorf("Hermes active named profile %q is unsupported by the single-HERMES_HOME connector; switch back with 'hermes profile use default' and retry; no changes made", profile) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect Hermes active_profile: %w", err)
@@ -4188,7 +4188,7 @@ func validateHermesSingleProfile(configPath string) error {
 	profilesDir := filepath.Join(home, "profiles")
 	if info, err := os.Lstat(profilesDir); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("Hermes profiles path is not a regular directory")
+			return fmt.Errorf("Hermes profiles path is not a regular directory") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		directory, openErr := os.Open(profilesDir)
 		if openErr != nil {
@@ -4204,11 +4204,11 @@ func validateHermesSingleProfile(configPath string) error {
 			return fmt.Errorf("close Hermes profiles directory: %w", closeErr)
 		}
 		if len(entries) > 256 {
-			return fmt.Errorf("Hermes profiles directory exceeds the bounded inspection limit")
+			return fmt.Errorf("Hermes profiles directory exceeds the bounded inspection limit") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		for _, entry := range entries {
 			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
-				return fmt.Errorf("Hermes named profile %q is unsupported by the single-HERMES_HOME connector; remove it with 'hermes profile delete %s' (or move it out of %s) and retry; no changes made", entry.Name(), entry.Name(), profilesDir)
+				return fmt.Errorf("Hermes named profile %q is unsupported by the single-HERMES_HOME connector; remove it with 'hermes profile delete %s' (or move it out of %s) and retry; no changes made", entry.Name(), entry.Name(), profilesDir) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
 		}
 	} else if !os.IsNotExist(err) {
@@ -4230,10 +4230,10 @@ func readHermesBoundedConfig(path string) (map[string]interface{}, error) {
 		return nil, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("Hermes config is not a regular non-symlink file")
+		return nil, fmt.Errorf("Hermes config is not a regular non-symlink file") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if info.Size() > hermesInventoryConfigMaxBytes {
-		return nil, fmt.Errorf("Hermes config exceeds the %d-byte inspection limit", hermesInventoryConfigMaxBytes)
+		return nil, fmt.Errorf("Hermes config exceeds the %d-byte inspection limit", hermesInventoryConfigMaxBytes) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return readYAMLObject(path)
 }
@@ -4458,7 +4458,7 @@ func preserveTrailingTopLevelYAMLTrivia(data []byte, start, end int) int {
 		}
 		line := data[previousStart:previousEnd]
 		trimmed := bytes.TrimSpace(line)
-		if len(trimmed) != 0 && !(bytes.HasPrefix(trimmed, []byte("#")) && len(line) == len(bytes.TrimLeft(line, " \t"))) {
+		if len(trimmed) != 0 && (!(bytes.HasPrefix(trimmed, []byte("#"))) || len(line) != len(bytes.TrimLeft(line, " \t"))) {
 			break
 		}
 		cursor = previousStart
@@ -4627,12 +4627,12 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 func validateHermesManagedBackupPristine(backup *managedFileBackup) error {
 	if !backup.Existed {
 		if backup.PristineSHA256 != managedBackupMissingHash || len(backup.PristineBytes) != 0 {
-			return fmt.Errorf("Hermes pristine custody for a missing file is inconsistent")
+			return fmt.Errorf("Hermes pristine custody for a missing file is inconsistent") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		return nil
 	}
 	if backup.PristineSHA256 != sha256Hex(backup.PristineBytes) {
-		return fmt.Errorf("Hermes pristine custody hash does not match its captured bytes")
+		return fmt.Errorf("Hermes pristine custody hash does not match its captured bytes") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return nil
 }
@@ -5304,7 +5304,7 @@ func removeCopilotHookReferencesProfile(path string, secureClient bool, hookScri
 			}
 		}
 	}
-	if !secureClient && reflect.DeepEqual(pruned, cfg) && !(strings.EqualFold(filepath.Base(path), "defenseclaw.json") && copilotHooksDocumentEmpty(pruned)) {
+	if !secureClient && reflect.DeepEqual(pruned, cfg) && (!(strings.EqualFold(filepath.Base(path), "defenseclaw.json")) || !(copilotHooksDocumentEmpty(pruned))) {
 		return nil
 	}
 	if strings.EqualFold(filepath.Base(path), "defenseclaw.json") && copilotHooksDocumentEmpty(pruned) {

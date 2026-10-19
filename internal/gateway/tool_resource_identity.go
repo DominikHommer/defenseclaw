@@ -267,8 +267,7 @@ func exactConnectorInstanceID(value string) bool {
 			continue
 		}
 		character := value[index]
-		if !(character >= '0' && character <= '9' ||
-			character >= 'a' && character <= 'f') {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
 			return false
 		}
 	}

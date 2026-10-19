@@ -64,7 +64,7 @@ func windowsLocationOrdinaryWriteTarget(target string) bool {
 	for i, part := range parts {
 		name := strings.TrimRight(part, ". ")
 		if part == ".." || strings.TrimRight(part, " ") == ".." || name == ".ssh" || strings.ContainsAny(part, "*?[]$%`") ||
-			(strings.Contains(part, ":") && !(i == 0 && len(part) == 2 && part[1] == ':')) {
+			(strings.Contains(part, ":") && ((i != 0 || len(part) != 2) || part[1] != ':')) {
 			return false
 		}
 		// A short Windows name can alias a protected basename or directory.

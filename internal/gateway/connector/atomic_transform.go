@@ -304,7 +304,7 @@ func readAtomicFileSnapshot(path string) (atomicFileSnapshot, error) {
 			return snapshot, fmt.Errorf("inspect open config hard-link count %s: %w", writePath, linkCountErr)
 		}
 		if runtime.GOOS == "windows" && linkCount != 1 {
-			return snapshot, fmt.Errorf("Windows config %s has %d hard links; refusing ambiguous replacement", writePath, linkCount)
+			return snapshot, fmt.Errorf("windows config %s has %d hard links; refusing ambiguous replacement", writePath, linkCount)
 		}
 		if identityErr != nil {
 			return snapshot, fmt.Errorf("identify open config %s: %w", writePath, identityErr)
@@ -1172,8 +1172,7 @@ func atomicTransformIntentCandidateBase(name string) (string, bool) {
 		return "", false
 	}
 	for _, char := range digest {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') ||
-			(runtime.GOOS == "windows" && char >= 'A' && char <= 'F')) {
+		if ((char < '0' || char > '9') && (char < 'a' || char > 'f')) && ((runtime.GOOS != "windows" || char < 'A') || char > 'F') {
 			return "", false
 		}
 	}
