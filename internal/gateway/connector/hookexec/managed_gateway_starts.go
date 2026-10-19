@@ -344,6 +344,28 @@ func connectBy(ctx context.Context, deadline time.Time) (tryCtx context.Context,
 	return tryCtx, func() { cancel(nil) }
 }
 
+// firstTryConnectWindow is the least time the first try of a per-user hook
+// has to connect to its gateway.
+const firstTryConnectWindow = time.Second
+
+// firstTryConnectDeadline is the connect deadline of a per-user hook's first
+// try at now. The restart budget counts from the start of the call, the
+// PowerShell adapter or bridge in front of a Windows hook included, so a
+// hook that started slowly could reach its first try with the budget spent
+// and fail without asking its running gateway: a Cursor sessionStart behind
+// a slow adapter answered locally and the gateway never saw it. A spent
+// budget ends the retries, not the first try. A tool call stays bounded by
+// its answer deadline.
+func firstTryConnectDeadline(restartDeadline, now time.Time) time.Time {
+	if restartDeadline.IsZero() {
+		return restartDeadline
+	}
+	if floor := now.Add(firstTryConnectWindow); restartDeadline.Before(floor) {
+		return floor
+	}
+	return restartDeadline
+}
+
 // notConnectedError keeps errGatewayNotConnected on the error of a try that
 // connectBy ended.
 func notConnectedError(tryCtx context.Context, err error) error {

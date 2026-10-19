@@ -745,8 +745,16 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			release()
 		}
 	}()
+	// A per-user hook's first try always gets a moment to connect
+	// (firstTryConnectDeadline); the managed first try is send below.
+	firstTry := !opts.ManagedEnterprise
 	sendConnectedBy := func() (*http.Response, error) {
-		tryCtx, release := connectBy(ctx, restartDeadline)
+		connectDeadline := restartDeadline
+		if firstTry {
+			firstTry = false
+			connectDeadline = firstTryConnectDeadline(restartDeadline, time.Now())
+		}
+		tryCtx, release := connectBy(ctx, connectDeadline)
 		releases = append(releases, release)
 		resp, err := sendHookRequest(tryCtx, opts, sp, payload, token)
 		return resp, notConnectedError(tryCtx, err)

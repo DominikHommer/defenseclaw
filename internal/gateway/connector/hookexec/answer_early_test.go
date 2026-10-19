@@ -176,7 +176,12 @@ func TestProgressReportWaitsNoLongerThanTheCeiling(t *testing.T) {
 		t.Fatalf("code=%d stdout=%q stderr=%q, want the managed no-answer block", result.code, result.stdout, result.stderr)
 	}
 
-	// The watchdog follows the ceiling too: the process ends there.
+	// The watchdog follows the ceiling too: had it kept the budget, it
+	// would have answered at 200 ms. At the ceiling either the watchdog
+	// ends the process or the request, ended by the same ceiling, gives the
+	// same block first and the watchdog stands down (on Windows the
+	// watchdog's kernel wait wakes a millisecond or so after the Go timer
+	// of the request).
 	answer := &firstWriteRecorder{}
 	exited := make(chan int, 1)
 	started := time.Now()
@@ -195,12 +200,13 @@ func TestProgressReportWaitsNoLongerThanTheCeiling(t *testing.T) {
 	t.Cleanup(func() { <-returned })
 	select {
 	case <-exited:
+	case <-returned:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the watchdog did not end the call at the ceiling")
+		t.Fatal("the call was not ended at the ceiling")
 	}
 	out, first := answer.read()
 	if late := first.Sub(started); late < ceiling-100*time.Millisecond || late > ceiling+500*time.Millisecond {
-		t.Fatalf("the watchdog answered %s after the start, want at the %s ceiling", late, ceiling)
+		t.Fatalf("the call was answered %s after the start, want at the %s ceiling", late, ceiling)
 	}
 	if !strings.Contains(out, managedGatewayNoAnswerReason) {
 		t.Fatalf("output %q, want the managed no-answer block", out)
