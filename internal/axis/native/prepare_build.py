@@ -39,6 +39,7 @@ SEED_SHA256 = "d6556677c6decd2d5d786ca082ac2bcdb37fc92130d45b7002a7e8bffe2154db"
 PATCHES = {
     "patches/axis-unix-hook-bpf.patch": "94c1ad86e706d71784356d4601d5df1cba3c2711d61e08a65f607fbfec5f7f35",
     "patches/axis-offline-bpf.patch": "914b75d4ad1da26f4f9850886093fb3560ade14d9870dd604de20a33d2f179f2",
+    "patches/axis-musl-abi.patch": "1e508693bd498de3c7fa883378eba8ed92f8a0286c05aab31bdaab7d843237d9",
     "patches/mxc-owned-bubblewrap.patch": "422aff2de2719878e6fe10a6c097153c58dc3f58d3fa53ee97b2b1d1ea43d5e8",
     "patches/bwrap-owned-fds.patch": "1563032b5bfbd74b56214119f1287de3a7e63c9054898b58c6cd9603948dd621",
     "mxc-literal-argv.patch": "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d",
@@ -482,7 +483,14 @@ def main() -> None:
     if upstream["bwrap-COPYING"] != ordinary(ROOT / "patches/bwrap-COPYING"):
         raise RuntimeError("pinned Bubblewrap license differs")
     overlays = {
-        "axis": apply(axis, ["patches/axis-offline-bpf.patch", "patches/axis-unix-hook-bpf.patch"]),
+        "axis": apply(
+            axis,
+            [
+                "patches/axis-offline-bpf.patch",
+                "patches/axis-unix-hook-bpf.patch",
+                "patches/axis-musl-abi.patch",
+            ],
+        ),
         "mxc": apply(mxc, ["mxc-literal-argv.patch", "patches/mxc-owned-bubblewrap.patch"]),
         "bwrap": apply(bwrap, ["patches/bwrap-owned-fds.patch"]),
     }

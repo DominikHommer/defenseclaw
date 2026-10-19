@@ -1,0 +1,212 @@
+--- a/crates/axis-sandbox/src/linux/mod.rs
++++ b/crates/axis-sandbox/src/linux/mod.rs
+@@ -21,6 +21,12 @@
+ use std::io;
+ use std::process::Child;
+ 
++// libc uses an unsigned resource on glibc and c_int on musl.
++#[cfg(not(target_env = "musl"))]
++type RlimitResource = libc::__rlimit_resource_t;
++#[cfg(target_env = "musl")]
++type RlimitResource = libc::c_int;
++
+ const CLOSED_FD: i32 = -1;
+ #[cfg(test)]
+ const PARENT_DEATH_GUARD_OWNER_DIED: u8 = 0;
+@@ -1389,7 +1395,7 @@
+     Ok(())
+ }
+ 
+-fn set_resource_limit(resource: libc::__rlimit_resource_t, value: libc::rlim_t) -> Result<(), i32> {
++fn set_resource_limit(resource: RlimitResource, value: libc::rlim_t) -> Result<(), i32> {
+     let limit = libc::rlimit {
+         rlim_cur: value,
+         rlim_max: value,
+--- a/crates/axis-sandbox/src/linux/netns.rs
++++ b/crates/axis-sandbox/src/linux/netns.rs
+@@ -2448,7 +2448,7 @@
+     Ok(())
+ }
+ 
+-const CGROUP2_SUPER_MAGIC: i64 = 0x6367_7270;
++const CGROUP2_SUPER_MAGIC: u64 = 0x6367_7270;
+ 
+ fn validate_cgroup_procs_fd(fd: RawFd, sandbox_id: SandboxId) -> Result<(), String> {
+     let mut statfs = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+@@ -2460,7 +2460,7 @@
+         ));
+     }
+     let statfs = unsafe { statfs.assume_init() };
+-    if statfs.f_type != CGROUP2_SUPER_MAGIC {
++    if statfs.f_type as u64 != CGROUP2_SUPER_MAGIC {
+         return Err(format!(
+             "cgroup procs fd {fd} must reference a cgroup v2 filesystem"
+         ));
+@@ -2872,7 +2872,7 @@
+     Ok(())
+ }
+ 
+-fn set_helper_resource_limit(resource: libc::__rlimit_resource_t, value: u64) -> Result<(), i32> {
++fn set_helper_resource_limit(resource: super::RlimitResource, value: u64) -> Result<(), i32> {
+     if u128::from(value) > libc::rlim_t::MAX as u128 {
+         return Err(libc::EINVAL);
+     }
+@@ -3916,7 +3916,7 @@
+ }
+ 
+ fn raise_helper_control_plane_rlimit(
+-    resource: libc::__rlimit_resource_t,
++    resource: super::RlimitResource,
+     minimum: libc::rlim_t,
+     label: &str,
+ ) -> Result<(), String> {
+@@ -3944,7 +3944,7 @@
+ }
+ 
+ fn set_helper_control_plane_rlimit_pair(
+-    resource: libc::__rlimit_resource_t,
++    resource: super::RlimitResource,
+     soft: libc::rlim_t,
+     hard: libc::rlim_t,
+     label: &str,
+--- a/crates/axis-sandbox/src/linux/connect_attribution.rs
++++ b/crates/axis-sandbox/src/linux/connect_attribution.rs
+@@ -19,12 +19,25 @@
+ const SYS_CONNECT: i32 = 42;
+ const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+ 
+-const SECCOMP_IOC_MAGIC: u64 = b'!' as u64;
+-const SECCOMP_IOCTL_NOTIF_RECV: libc::c_ulong =
+-    iowr(SECCOMP_IOC_MAGIC, 0, size_of::<SeccompNotif>() as u64);
+-const SECCOMP_IOCTL_NOTIF_SEND: libc::c_ulong =
+-    iowr(SECCOMP_IOC_MAGIC, 1, size_of::<SeccompNotifResp>() as u64);
+-const SECCOMP_IOCTL_NOTIF_ID_VALID: libc::c_ulong =
++// libc::ioctl takes c_ulong on glibc but c_int on musl. The kernel request
++// number is the same bounded 32-bit bit pattern on both targets.
++#[cfg(not(target_env = "musl"))]
++type SeccompIoctlRequest = libc::c_ulong;
++#[cfg(target_env = "musl")]
++type SeccompIoctlRequest = libc::c_int;
++
++// libc uses size_t for ancillary lengths on glibc and socklen_t on musl.
++#[cfg(not(target_env = "musl"))]
++type AncillaryLength = libc::size_t;
++#[cfg(target_env = "musl")]
++type AncillaryLength = libc::socklen_t;
++
++const SECCOMP_IOC_MAGIC: u64 = b'!' as u64;
++const SECCOMP_IOCTL_NOTIF_RECV: SeccompIoctlRequest =
++    iowr(SECCOMP_IOC_MAGIC, 0, size_of::<SeccompNotif>() as u64);
++const SECCOMP_IOCTL_NOTIF_SEND: SeccompIoctlRequest =
++    iowr(SECCOMP_IOC_MAGIC, 1, size_of::<SeccompNotifResp>() as u64);
++const SECCOMP_IOCTL_NOTIF_ID_VALID: SeccompIoctlRequest =
+     ior(SECCOMP_IOC_MAGIC, 2, size_of::<u64>() as u64);
+ 
+ const IOC_NRBITS: u64 = 8;
+@@ -37,17 +50,38 @@
+ const IOC_WRITE: u64 = 1;
+ const IOC_READ: u64 = 2;
+ 
+-const fn ior(type_: u64, nr: u64, size: u64) -> libc::c_ulong {
+-    (IOC_READ << IOC_DIRSHIFT | type_ << IOC_TYPESHIFT | nr << IOC_NRSHIFT | size << IOC_SIZESHIFT)
+-        as libc::c_ulong
+-}
+-
+-const fn iowr(type_: u64, nr: u64, size: u64) -> libc::c_ulong {
+-    ((IOC_READ | IOC_WRITE) << IOC_DIRSHIFT
+-        | type_ << IOC_TYPESHIFT
+-        | nr << IOC_NRSHIFT
+-        | size << IOC_SIZESHIFT) as libc::c_ulong
+-}
++const fn ioctl_request(bits: u64) -> SeccompIoctlRequest {
++    assert!(bits <= u32::MAX as u64);
++    bits as u32 as SeccompIoctlRequest
++}
++
++const fn ior(type_: u64, nr: u64, size: u64) -> SeccompIoctlRequest {
++    assert!(type_ < 1 << IOC_TYPEBITS && nr < 1 << IOC_NRBITS && size < 1 << IOC_SIZEBITS);
++    ioctl_request(
++        IOC_READ << IOC_DIRSHIFT
++            | type_ << IOC_TYPESHIFT
++            | nr << IOC_NRSHIFT
++            | size << IOC_SIZESHIFT,
++    )
++}
++
++const fn iowr(type_: u64, nr: u64, size: u64) -> SeccompIoctlRequest {
++    assert!(type_ < 1 << IOC_TYPEBITS && nr < 1 << IOC_NRBITS && size < 1 << IOC_SIZEBITS);
++    ioctl_request(
++        (IOC_READ | IOC_WRITE) << IOC_DIRSHIFT
++            | type_ << IOC_TYPESHIFT
++            | nr << IOC_NRSHIFT
++            | size << IOC_SIZESHIFT,
++    )
++}
++
++// The musl ioctl argument is signed; these assertions keep the kernel request
++// bit pattern identical to the GNU request when either ABI changes.
++const _: () = {
++    assert!(SECCOMP_IOCTL_NOTIF_RECV as u32 == 0xc050_2100);
++    assert!(SECCOMP_IOCTL_NOTIF_SEND as u32 == 0xc018_2101);
++    assert!(SECCOMP_IOCTL_NOTIF_ID_VALID as u32 == 0x8008_2102);
++};
+ 
+ #[repr(C)]
+ #[derive(Debug, Clone, Copy)]
+@@ -615,7 +649,7 @@
+     msg.msg_iov = &mut iov as *mut libc::iovec;
+     msg.msg_iovlen = 1;
+     msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+-    msg.msg_controllen = control.len();
++    msg.msg_controllen = control.len().try_into().map_err(|_| libc::EINVAL)?;
+ 
+     unsafe {
+         let cmsg = libc::CMSG_FIRSTHDR(&msg as *const libc::msghdr);
+@@ -624,7 +658,9 @@
+         }
+         (*cmsg).cmsg_level = libc::SOL_SOCKET;
+         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+-        (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<i32>() as libc::c_uint) as usize;
++        (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<i32>() as libc::c_uint)
++            .try_into()
++            .map_err(|_| libc::EINVAL)?;
+         std::ptr::write(libc::CMSG_DATA(cmsg) as *mut i32, fd_to_send);
+         msg.msg_controllen = (*cmsg).cmsg_len;
+         let ret = libc::sendmsg(socket_fd, &msg as *const libc::msghdr, 0);
+@@ -648,7 +684,12 @@
+     msg.msg_iov = &mut iov as *mut libc::iovec;
+     msg.msg_iovlen = 1;
+     msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+-    msg.msg_controllen = control.len();
++    msg.msg_controllen = control.len().try_into().map_err(|_| {
++        io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "listener fd control buffer too large",
++        )
++    })?;
+ 
+     let ret = unsafe {
+         libc::recvmsg(
+@@ -679,12 +720,21 @@
+         ));
+     }
+ 
++    let expected_cmsg_len: AncillaryLength =
++        unsafe { libc::CMSG_LEN(size_of::<i32>() as libc::c_uint) }
++            .try_into()
++            .map_err(|_| {
++                io::Error::new(
++                    io::ErrorKind::InvalidData,
++                    "invalid listener fd control length",
++                )
++            })?;
+     unsafe {
+         let cmsg = libc::CMSG_FIRSTHDR(&msg as *const libc::msghdr);
+         if cmsg.is_null()
+             || (*cmsg).cmsg_level != libc::SOL_SOCKET
+             || (*cmsg).cmsg_type != libc::SCM_RIGHTS
+-            || (*cmsg).cmsg_len != libc::CMSG_LEN(size_of::<i32>() as libc::c_uint) as usize
++            || (*cmsg).cmsg_len != expected_cmsg_len
+         {
+             return Err(io::Error::new(
+                 io::ErrorKind::InvalidData,
