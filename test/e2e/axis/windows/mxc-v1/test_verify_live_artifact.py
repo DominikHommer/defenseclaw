@@ -381,6 +381,24 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
         with self.assertRaisesRegex(ValueError, "pure native environment test evidence"):
             self.run_verify()
 
+    def test_boundary_requires_exact_directory_refusal_diagnostic_gate(self) -> None:
+        if self.mode != "standalone-boundary":
+            return
+        current = self.provenance["pure_native_environment_tests"]
+        prior = {
+            binary: [
+                name
+                for name in names
+                if not name.endswith("directory_open_refusal_contains_only_closed_gate_index_and_numeric_status")
+            ]
+            for binary, names in current.items()
+        }
+        self.assertEqual(sum(map(len, current.values())) - sum(map(len, prior.values())), 1)
+        self.provenance["pure_native_environment_tests"] = prior
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "pure native environment test evidence"):
+            self.run_verify()
+
     def test_private_native_record_cannot_enter_an_admitted_artifact(self) -> None:
         private = "native-folder-refusal.private.bin"
         for mode in ("standalone-boundary", "dll-startup-only", "claude-version-only", "claude-create-control-only"):

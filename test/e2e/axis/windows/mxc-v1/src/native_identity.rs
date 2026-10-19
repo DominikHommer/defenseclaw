@@ -388,7 +388,31 @@ fn attributes(root: HANDLE, name: &UNICODE_STRING, flags: u32) -> OBJECT_ATTRIBU
     }
 }
 
-fn open_directory(root: HANDLE, value: &mut [u16]) -> Result<OwnedHandle> {
+#[derive(Clone, Copy)]
+enum DirectoryGate {
+    FixtureRoot,
+    PrivateEnvironment,
+}
+
+fn directory_open_refusal(gate: DirectoryGate, component_index: usize, status: i32) -> String {
+    let gate = match gate {
+        DirectoryGate::FixtureRoot => "fixture_root",
+        DirectoryGate::PrivateEnvironment => "private_environment",
+    };
+    // Closed location metadata only. No name, path, SID, native error text or
+    // component bytes participate in this refusal or in admission.
+    format!(
+        "private native directory open refused: gate={gate} component_index={component_index} ntstatus=0x{:08x}",
+        status as u32
+    )
+}
+
+fn open_directory(
+    root: HANDLE,
+    value: &mut [u16],
+    gate: DirectoryGate,
+    component_index: usize,
+) -> Result<OwnedHandle> {
     let name = unicode(value)?;
     let attrs = attributes(root, &name, 0x40 | 0x1000); // CASE_INSENSITIVE | DONT_REPARSE
     let mut result = HANDLE::default();
@@ -397,19 +421,20 @@ fn open_directory(root: HANDLE, value: &mut [u16]) -> Result<OwnedHandle> {
     // effective directory-name pin. Share reads/writes to preserve normal
     // ancestor/content operations; directory contents and metadata are not
     // immutable. Refuse reparse points and never create a directory.
+    let native_status = unsafe {
+        NtOpenFile(
+            &mut result,
+            0x0010_0081,
+            &attrs,
+            &mut status,
+            3,
+            0x0020_0021,
+        )
+    };
     ensure!(
-        unsafe {
-            NtOpenFile(
-                &mut result,
-                0x0010_0081,
-                &attrs,
-                &mut status,
-                3,
-                0x0020_0021,
-            )
-        }
-        .0 >= 0,
-        "private native directory open refused"
+        native_status.0 >= 0,
+        "{}",
+        directory_open_refusal(gate, component_index, native_status.0)
     );
     let result = owned(result)?;
     let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
@@ -490,7 +515,12 @@ pub(super) fn pin_fixture_root(root: &Path) -> Result<FixtureCustody> {
         "fixed root drive shape differs"
     );
     let mut volume = effective_fixed_volume(root_units[0])?;
-    let mut handles = vec![open_directory(HANDLE::default(), &mut volume)?];
+    let mut handles = vec![open_directory(
+        HANDLE::default(),
+        &mut volume,
+        DirectoryGate::FixtureRoot,
+        0,
+    )?];
     let mut filesystem = [0u16; 32];
     unsafe {
         GetVolumeInformationByHandleW(
@@ -507,9 +537,14 @@ pub(super) fn pin_fixture_root(root: &Path) -> Result<FixtureCustody> {
         filesystem.split(|u| *u == 0).next() == Some(&[78, 84, 70, 83][..]),
         "private environment requires fixed NTFS volume"
     );
-    for part in root_units[3..].split(|unit| *unit == 92) {
+    for (index, part) in root_units[3..].split(|unit| *unit == 92).enumerate() {
         let mut part = part.to_vec();
-        handles.push(open_directory(handle(handles.last().unwrap()), &mut part)?);
+        handles.push(open_directory(
+            handle(handles.last().unwrap()),
+            &mut part,
+            DirectoryGate::FixtureRoot,
+            index + 1,
+        )?);
     }
     Ok(FixtureCustody {
         directories: handles,
@@ -530,15 +565,21 @@ fn pin_private_directories(
     let native: Vec<_> = expected.local_app_data.as_os_str().encode_wide().collect();
     let native = native.strip_prefix(&[92, 92, 63, 92]).unwrap_or(&native);
     let mut handles = Vec::new();
-    for part in native[fixture.root_units.len() + 1..]
+    for (index, part) in native[fixture.root_units.len() + 1..]
         .split(|unit| *unit == 92)
         .chain(std::iter::once(&[84, 101, 109, 112][..]))
+        .enumerate()
     {
         let mut part = part.to_vec();
         let parent = handles
             .last()
             .unwrap_or_else(|| fixture.directories.last().unwrap());
-        handles.push(open_directory(handle(parent), &mut part)?);
+        handles.push(open_directory(
+            handle(parent),
+            &mut part,
+            DirectoryGate::PrivateEnvironment,
+            index,
+        )?);
     }
     // Sample the effective/global mount again; no alias changes are performed.
     ensure!(
@@ -591,6 +632,33 @@ pub(super) fn expected_from_child(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_open_refusal_contains_only_closed_gate_index_and_numeric_status() {
+        assert_eq!(
+            directory_open_refusal(DirectoryGate::FixtureRoot, 0, 0xc0000034u32 as i32),
+            "private native directory open refused: gate=fixture_root component_index=0 ntstatus=0xc0000034"
+        );
+        assert_eq!(
+            directory_open_refusal(DirectoryGate::PrivateEnvironment, 4, 0xc0000022u32 as i32),
+            "private native directory open refused: gate=private_environment component_index=4 ntstatus=0xc0000022"
+        );
+        for gate in [
+            DirectoryGate::FixtureRoot,
+            DirectoryGate::PrivateEnvironment,
+        ] {
+            for status in [i32::MIN, -1, 0, i32::MAX] {
+                let message = directory_open_refusal(gate, usize::MAX, status);
+                assert!(message.is_ascii() && message.len() <= 160);
+                assert!(message.ends_with(&format!("ntstatus=0x{:08x}", status as u32)));
+                assert!(
+                    !message
+                        .chars()
+                        .any(|value| ['\\', '/', '\n', '\r', '\0'].contains(&value))
+                );
+            }
+        }
+    }
 
     // Native filesystem-only regression, deliberately separate from the six
     // pure parser tests. No child/token/profile/PSEC operation or ACL mutation.

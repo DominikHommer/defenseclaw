@@ -86,8 +86,9 @@ passed; the profile failed the probe's ASCII-only component predicate. These
 are independent comparison and grammar failures. No offending character or
 returned string was disclosed, and no new base or component was admitted.
 A further predicate-only inspection passed every proposed ordinary-component
-check while preserving those earlier failures. The changed mapper below remains
-source-only and does not qualify the boundary child.
+check while preserving those earlier failures. The changed mapper below built,
+but its first native boundary attempt refused at a private directory open.
+It does not qualify the boundary child.
 See [the actual result](manual-results.md#private-record-reported-available-boundary-still-refuses).
 
 ## Literal DOS application and held-image gate
@@ -133,7 +134,7 @@ filesystem/network boundaries, authentication, models, hooks, terminal and
 customer provider remain unqualified. See the exact build and result pins in
 [manual results](manual-results.md#native-psec-claude-version-smoke-passes-after-dos-image-binding).
 
-## Current source-only native environment binding
+## Current native environment binding
 
 The `standalone_std_boundary_native_identity_environment` variant follows the
 separately recorded Case07 lexical observations. Its later native attempts
@@ -172,17 +173,27 @@ and DOS device/meta names refuse. Other literal Unicode, internal spaces and
 ordinary punctuation are preserved without normalization or expansion. The
 same predicate validates both the native suffix and the rebased private frame.
 The new pure component test runs in parent and child, and a separate pure test
-checks native profile-buffer count/NUL bounds. The boundary requires thirty-three
-selected gates, ordinary DLL/Claude twenty-eight and the separate control
-twenty-nine. Old test inventories cannot admit these changed sources.
+checks native profile-buffer count/NUL bounds. The corrected mapper artifact
+passed thirty-three selected gates. The next refusal-diagnostic build adds one
+pure formatter gate, requiring thirty-four for the boundary; ordinary DLL/Claude
+remain twenty-eight and the separate control twenty-nine. Old test inventories
+cannot admit these changed sources.
 
 A missing native identity, different User SID, API failure, unexpected caller
 thread identity, mismatched default prefix, missing private directory or unsafe
 component refuses before the fixed child can perform a mutation. The parent
 opens every mapped private directory and Temp through existing held-relative
 custody; it creates none. These queries create no AppContainer profile and grant
-no access to the host profile. Compilation, artifact review and a fresh native
-boundary case remain pending for this mapper change.
+no access to the host profile. The corrected mapper build and independent inert
+artifact reviews passed. One Case14 attempt passed literal argv, then refused
+with `private native directory open refused`; its outer Job was observed empty.
+That shared error can arise while pinning the fixture before boundary creation
+or while opening mapped directories afterward, so it does not prove the mapper
+passed or identify a missing component. The next source-only diagnostic records
+only the closed `fixture_root`/`private_environment` gate, component index and
+exact failed NtOpenFile status. Access, sharing, open-only/no-reparse behavior and
+admission remain unchanged. It creates no missing directory. A fresh diagnostic
+artifact and reviewed native attempt remain required.
 
 The resulting private expectation must match the fresh fixture's exact
 `home\AppData\Local\Packages\<one bounded native-profile component>\AC`

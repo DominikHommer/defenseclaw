@@ -61,7 +61,7 @@ class BuildGuardTests(TestCase):
     def test_boundary_packages_three_images_and_adds_only_its_startup_test_gates(self) -> None:
         boundary = build.artifact_binaries("standalone-boundary")
         self.assertEqual(boundary, (build.BINARY, build.LOADER_BINARY, build.BOUNDARY_BINARY))
-        self.assertEqual(sum(map(len, build.pure_environment_tests("standalone-boundary").values())), 13)
+        self.assertEqual(sum(map(len, build.pure_environment_tests("standalone-boundary").values())), 14)
         self.assertEqual(sum(map(len, build.native_directory_custody_tests("standalone-boundary").values())), 2)
         for mode in ("dll-startup-only", "claude-version-only", "claude-create-control-only"):
             self.assertEqual(build.artifact_binaries(mode), boundary + (build.DLL_BINARY,))
@@ -77,7 +77,7 @@ class BuildGuardTests(TestCase):
         root = Path(__file__).resolve().parent
         source = "\n".join(
             (root / name).read_text(encoding="utf-8")
-            for name in ("src/native_environment.rs", "src/private_native_record.rs")
+            for name in ("src/native_environment.rs", "src/native_identity.rs", "src/private_native_record.rs")
         )
         for names in build.PURE_STARTUP_ENVIRONMENT_TESTS.values():
             for name in names:

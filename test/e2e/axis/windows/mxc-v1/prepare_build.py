@@ -133,6 +133,7 @@ PURE_DLL_TESTS = {
 
 PURE_STARTUP_ENVIRONMENT_TESTS = {
     "defenseclaw-axis-windows-psec-probe": [
+        "probe::native_identity::tests::directory_open_refusal_contains_only_closed_gate_index_and_numeric_status",
         "probe::native_environment::tests::startup_environment_requires_exact_eight_private_values",
         "probe::native_environment::tests::startup_environment_snapshot_refuses_drift_and_canary_misuse",
         "probe::native_environment::tests::native_profile_refusal_classifier_reports_bounded_relationships",

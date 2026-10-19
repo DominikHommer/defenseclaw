@@ -995,13 +995,13 @@ the combined predicate. The ASCII-only predicate and independent base-string
 mismatch remained unchanged. This reveals no particular name or rejected
 character and grants no mapping authority.
 
-The next mapper correction is source-only: it binds the native OS profile root
+At this point the next mapper correction was source-only: it binds the native OS profile root
 to the actual held child token, requires caller/child TokenUser equality, and
 admits only the exact default AppData Local branch and one safe literal
 component. It independently keeps caller-knownfolder equality with the frozen
 private startup value. It neither opens the OS profile nor creates a missing
-private descendant. New pure gates and existing frame/custody tests must pass
-in CI; no new artifact or native result qualifies this change yet. The separate
+private descendant. New pure gates and existing frame/custody tests were still required
+in CI; no new artifact or native result qualified this change then. The separate
 source-only native-handle [upstream proposal](https://github.com/microsoft/mxc/pull/1524)
 is not a released SDK or a production runtime qualification.
 
@@ -1034,3 +1034,47 @@ This records a failed boundary qualification and narrower diagnostic facts.
 It establishes no qualified mapper, supported suffix, enforcement, full resource
 cleanup or customer-provider qualification. No native rerun or changed build is
 authorized by this record.
+
+## Held-child token mapper build and Case14 directory-open refusal
+
+The initial mapper build
+[39178182150](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39178182150)
+at `2bd3ba2d613a672053a2d6b7b24ab8eb42c6f6dc` failed Rust compilation with
+E0061: the new SID-range helper signature missed two existing private-record
+callers. No selected Rust tests or native case ran from that failed build. The
+correction retained the original two-argument helper for those callers and a
+separate explicit-header validator for the new child TokenUser binding.
+
+The corrected build
+[39179229027](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39179229027)
+at `2d679e73ef4fb8767bced5d78c7e01e83316f972` passed all thirty-three selected
+tests exactly once. Independent inert reviews verified thirty ZIP members,
+twenty-six manifest hashes, eighteen exact Git source files, all sixteen
+reconstructed SDK fingerprints, unchanged locks and three x64 console images.
+Artifact `12156041712` is 1,414,060 bytes; ZIP SHA-256 is
+`ec66f75f071e8706334922213e252c884c237d4b0b5654bab585d1bda866156b`
+and provenance SHA-256 is
+`b725c8b8abe38a3e706de2d2801bc204c4c8947841dbba26fb93e857dff940aa`.
+These reviews executed no packaged image.
+
+After source, artifact and fixed-recipe review, ROOT ran Case14 once. Literal
+argv passed with `FIXED_ARGV_PASS`, empty child stderr, `Exited(0)` and a
+signaled retained direct handle. The parent then refused with
+`private native directory open refused`, exiting one. Elapsed time was
+7.848 seconds outside / 7.7105487 seconds in the probe. The outer Job was
+assigned before resume and observed with zero active processes and empty;
+there was no outer deadline, output overflow or reader error. The failed
+fixture remains retained. Result SHA-256 is
+`a2cc1ee3263aa5d622425ac05ad885cf7dc365fffe524917e7474048f0147ba1`.
+
+The error helper is shared by fixture ancestry pinning before boundary child
+creation and mapped private-directory opens after the mapper. This result
+does not distinguish them, establish successful token/profile mapping, or
+identify a missing directory, access denial or sharing conflict. No new private
+path inspection, host-profile open, missing-directory creation, ACL repair or
+native retry followed this attempt. The next source-only diagnostic adds only
+a closed gate, component index and the exact NtOpenFile return status; its new
+pure formatter gate raises the boundary inventory to thirty-four. All existing
+open-only, no-reparse, access, sharing and admission checks remain unchanged.
+No full boundary, realized child environment or customer-provider qualification
+is established.
