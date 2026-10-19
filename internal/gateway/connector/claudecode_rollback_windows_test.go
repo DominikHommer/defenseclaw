@@ -143,9 +143,10 @@ func TestClaudeCodeRollbackRestoreRefusesForeignState(t *testing.T) {
 				}
 			} else {
 				data := converted
-				if scenario == "changed" {
+				switch scenario {
+				case "changed":
 					data = []byte(`{"foreign":"edited"}`)
-				} else if scenario == "same-original" {
+				case "same-original":
 					data = original
 				}
 				replaceClaudeRollbackFixture(t, path, data)

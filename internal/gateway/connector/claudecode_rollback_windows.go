@@ -258,7 +258,7 @@ func (c *ClaudeCodeConnector) RestoreHooksAfterRollback(opts SetupOpts) (int, er
 			}
 		}
 		if err != nil {
-			return 0, fmt.Errorf("Claude Code rollback protection could not be verified or restored; retained recovery evidence: %w", err)
+			return 0, fmt.Errorf("rollback protection for Claude Code could not be verified or restored; retained recovery evidence: %w", err)
 		}
 	}
 	var witness claudeCodeRollbackWitness
@@ -315,7 +315,7 @@ func (c *ClaudeCodeConnector) RestoreHooksAfterRollback(opts SetupOpts) (int, er
 		})
 	})
 	if err != nil {
-		return 0, fmt.Errorf("Claude Code rollback protection could not be verified or restored; retained recovery evidence: %w", err)
+		return 0, fmt.Errorf("rollback protection for Claude Code could not be verified or restored; retained recovery evidence: %w", err)
 	}
 	return restored, nil
 }
