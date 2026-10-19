@@ -22875,6 +22875,27 @@ function Assert-DefenseClawRecordedArtifactHashes {
     }
 }
 
+function Add-DefenseClawNativeCleanupSource {
+    <#
+        Admits the uninstall-only native exact-scope cleanup executable (the
+        running defenseclaw.exe or Setup) by the payload trust in force when
+        it is called, and records it as the native_cleanup source.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [string]$NativeCleanupBinary,
+        [switch]$AllowUnsigned
+    )
+    if ([string]::IsNullOrWhiteSpace($NativeCleanupBinary)) {
+        return
+    }
+    $Sources['native_cleanup'] = Get-DefenseClawSourceDescriptor `
+        -Path $NativeCleanupBinary `
+        -Label 'native exact-scope cleanup executable' `
+        -Authenticode `
+        -AllowUnsigned:$AllowUnsigned
+}
+
 function Get-DefenseClawLifecycleSources {
     param(
         [Parameter(Mandatory)][string]$Action,
@@ -22897,13 +22918,10 @@ function Get-DefenseClawLifecycleSources {
         [switch]$DeferredConfig
     )
     $sources = @{}
-    if (-not [string]::IsNullOrWhiteSpace($NativeCleanupBinary)) {
-        $sources['native_cleanup'] = Get-DefenseClawSourceDescriptor `
-            -Path $NativeCleanupBinary `
-            -Label 'native exact-scope cleanup executable' `
-            -Authenticode `
-            -AllowUnsigned:$AllowUnsigned
-    }
+    Add-DefenseClawNativeCleanupSource `
+        -Sources $sources `
+        -NativeCleanupBinary $NativeCleanupBinary `
+        -AllowUnsigned:$AllowUnsigned
     if ($Action -notin @('Install', 'Upgrade', 'Repair')) {
         return $sources
     }
@@ -32739,6 +32757,41 @@ function Initialize-DefenseClawRecordedPayloadTrust {
     }
 }
 
+function Add-DefenseClawProductionUninstallNativeCleanupSource {
+    <#
+        A production uninstall authenticates its deployment metadata under the
+        lifecycle lock (after Repair-DefenseClawUninstallAdminFileAcl), not at
+        entry. A hash-pinned standalone deployment's payload, the installed
+        unsigned defenseclaw.exe included, is admitted by the SHA-256 pins
+        that metadata recorded, so those pins are loaded here, from metadata
+        that just passed authentication, before the native cleanup executable
+        is admitted (GAP-0023). Untrusted or absent metadata loads no pins:
+        the executable then needs a valid signature or the caller's own
+        payload manifest (Setup /uninstall passes its embedded one).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [AllowNull()]$Metadata,
+        [switch]$MetadataTrusted,
+        [string]$NativeCleanupBinary,
+        [string]$PayloadManifest,
+        [switch]$AllowUnsigned
+    )
+    if ((Test-DefenseClawStandaloneProfile) -and
+        $MetadataTrusted -and
+        $null -ne $Metadata -and
+        [string]::IsNullOrWhiteSpace($PayloadManifest)) {
+        Initialize-DefenseClawRecordedPayloadTrust `
+            -Metadata $Metadata `
+            -Layout $Layout
+    }
+    Add-DefenseClawNativeCleanupSource `
+        -Sources $Sources `
+        -NativeCleanupBinary $NativeCleanupBinary `
+        -AllowUnsigned:$AllowUnsigned
+}
+
 function Invoke-DefenseClawEnterpriseLifecycle {
     [CmdletBinding()]
     param(
@@ -33140,6 +33193,18 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -PathType Container)) {
         throw "$Action requires an existing managed StateRoot: $resolvedStateRoot"
     }
+    # A production uninstall skips the entry metadata read above, so a
+    # hash-pinned standalone deployment's recorded pins are not loaded yet.
+    # Its native cleanup executable (the installed, unsigned defenseclaw.exe)
+    # is admitted under the lifecycle lock instead, once the metadata is
+    # authenticated (GAP-0023); admitting it here would judge it by
+    # Authenticode alone and refuse it.
+    $entryNativeCleanupBinary = if ($recoverProductionUninstallAcl) {
+        ''
+    }
+    else {
+        $NativeCleanupBinary
+    }
     $sources = Get-DefenseClawLifecycleSources `
         -Action $Action `
         -BrokerBinary $BrokerBinary `
@@ -33150,7 +33215,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -SensorHelperBinary $SensorHelperBinary `
         -PolicyCompiler $PolicyCompiler `
         -CLIBinary $CLIBinary `
-        -NativeCleanupBinary $NativeCleanupBinary `
+        -NativeCleanupBinary $entryNativeCleanupBinary `
         -Config $Config `
         -Manifest $Manifest `
         -InstallerSource $InstallerSource `
@@ -33239,6 +33304,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         if ($recoverProductionUninstallAcl) {
             $untrustedEvidenceReason = ''
             $uninstallMetadataExists = $false
+            $uninstallMetadata = $null
             try {
                 # Authenticate ownership and repair only recoverable ACL
                 # drift under the lifecycle lock, before trusting metadata.
@@ -33271,6 +33337,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                         'deployment.json is missing from an existing StateRoot'
                 }
             }
+            Add-DefenseClawProductionUninstallNativeCleanupSource `
+                -Sources $sources `
+                -Layout $layout `
+                -Metadata $(if ($uninstallMetadataExists) { $uninstallMetadata } else { $null }) `
+                -MetadataTrusted:([string]::IsNullOrWhiteSpace($untrustedEvidenceReason)) `
+                -NativeCleanupBinary $NativeCleanupBinary `
+                -PayloadManifest $PayloadManifest `
+                -AllowUnsigned:$AllowUnsigned
             if (-not [string]::IsNullOrWhiteSpace(
                     $untrustedEvidenceReason)) {
                 return Invoke-DefenseClawUntrustedMetadataRecoveryPurge `
