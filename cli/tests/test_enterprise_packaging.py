@@ -9,6 +9,7 @@ import plistlib
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1809,7 +1810,7 @@ _USER_MANAGER_ANSWERS = {
 }
 
 
-@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.skipif(not sys.platform.startswith("linux") or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
 @pytest.mark.parametrize("answer", sorted(_USER_MANAGER_ANSWERS))
 def test_linux_preremove_stops_the_sandbox_user_units_in_every_user_manager(tmp_path: Path, answer: str) -> None:
     host = _Host(tmp_path)
@@ -1852,7 +1853,7 @@ case "$*" in {_USER_MANAGER_ANSWERS[answer]} esac""")
 # not skip a live user manager: its units stop as the uid and gid that own
 # its runtime directory, and a manager that then does not answer keeps the
 # package.
-@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.skipif(not sys.platform.startswith("linux") or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
 @pytest.mark.parametrize("answer", ["stopped", "no_answer"])
 def test_linux_preremove_stops_the_user_units_of_an_account_the_lookup_does_not_name(tmp_path: Path, answer: str) -> None:
     host = _Host(tmp_path)
