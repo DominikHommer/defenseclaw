@@ -152,7 +152,7 @@ func (o *owner) close(record *result) {
 // format an error: even a trusted error may wrap an os.PathError or peer text.
 func writeFixedDiagnostic(writer io.Writer, stage string, err error) {
 	switch stage {
-	case "start", "session_close", "session_stop_and_wait":
+	case "start", "protocol", "session_close", "session_stop_and_wait":
 	default:
 		stage = "diagnostic_refused"
 	}
@@ -187,16 +187,41 @@ func writeFixedDiagnostic(writer io.Writer, stage string, err error) {
 			nativeStage = "unclassified"
 		}
 	}
+	operation, peerKind, peerFailure, preparationStage := "", "", "", ""
+	var protocolFailure *fixedProtocolError
+	if errors.As(err, &protocolFailure) {
+		operation = closedProtocolOperation(protocolFailure.operation)
+		peerKind = closedPeerKind(protocolFailure.kind)
+		peerFailure = closedPeerFailure(protocolFailure.failure)
+		if bridgeproto.ValidNativePreparationStage(protocolFailure.preparationStage) {
+			preparationStage = protocolFailure.preparationStage
+		}
+	}
+	cleanupStage := ""
+	var cleanup interface{ NativeCleanupStage() string }
+	if errors.As(err, &cleanup) {
+		cleanupStage = cleanup.NativeCleanupStage()
+		switch cleanupStage {
+		case "entry", "completion", "startup_wait", "cleanup_slot", "root_wait", "job_query", "native_signal", "native_wait", "native_handles_close", "asset_close", "startup_copies_close", "preowner_pipes_close", "pipe_setup_close", "sticky_uncertainty", "unclassified":
+		default:
+			cleanupStage = "unclassified"
+		}
+	}
 	var native syscall.Errno
 	hasNative := errors.As(err, &native)
 	raw, _ := json.Marshal(struct {
-		Stage        string   `json:"fixed_diagnostic_stage"`
-		NativeStage  string   `json:"native_start_stage,omitempty"`
-		Present      bool     `json:"error_present"`
-		Classes      []string `json:"error_classes"`
-		Win32        uint32   `json:"win32_error"`
-		Unclassified bool     `json:"unclassified_error"`
-	}{stage, nativeStage, err != nil, classes, uint32(native), err != nil && len(classes) == 0 && !hasNative})
+		Stage            string   `json:"fixed_diagnostic_stage"`
+		NativeStage      string   `json:"native_start_stage,omitempty"`
+		Operation        string   `json:"protocol_operation,omitempty"`
+		PeerKind         string   `json:"peer_frame_kind,omitempty"`
+		PeerFailure      string   `json:"peer_failure_code,omitempty"`
+		PreparationStage string   `json:"native_preparation_stage,omitempty"`
+		CleanupStage     string   `json:"native_cleanup_stage,omitempty"`
+		Present          bool     `json:"error_present"`
+		Classes          []string `json:"error_classes"`
+		Win32            uint32   `json:"win32_error"`
+		Unclassified     bool     `json:"unclassified_error"`
+	}{stage, nativeStage, operation, peerKind, peerFailure, preparationStage, cleanupStage, err != nil, classes, uint32(native), err != nil && len(classes) == 0 && !hasNative})
 	raw = append(raw, '\n')
 	_, _ = writer.Write(raw) // already a failed measurement; outer stderr refuses.
 }
@@ -333,10 +358,70 @@ type protocol interface {
 	Receive(context.Context) (bridgeproto.Frame, error)
 }
 
-func reply(ctx context.Context, p protocol, b bridgeproto.Binding, request uint64, kind bridgeproto.Kind) error {
+// This private wrapper carries only source-fixed operation labels and already
+// validated correlated peer enums. Its cause remains available to errors.Is/As;
+// neither Error nor the diagnostic serializer formats private cause text.
+type fixedProtocolError struct {
+	operation        string
+	cause            error
+	kind             bridgeproto.Kind
+	failure          string
+	preparationStage string
+}
+
+func (err *fixedProtocolError) Error() string { return "fixed contributor protocol refused" }
+func (err *fixedProtocolError) Unwrap() error { return err.cause }
+
+func closedProtocolOperation(value string) string {
+	switch value {
+	case "prepare_send", "prepare_receive", "launch_send", "launch_receive", "input_send", "input_eof_send", "wait_send", "execution_receive", "execution_frame", "execution_kind", "destroy_send", "destroy_receive":
+		return value
+	default:
+		return "unclassified"
+	}
+}
+
+func closedPeerKind(value bridgeproto.Kind) string {
+	switch value {
+	case bridgeproto.Prepared, bridgeproto.Started, bridgeproto.Output, bridgeproto.Exited, bridgeproto.Destroyed, bridgeproto.Failed:
+		return string(value)
+	case "":
+		return ""
+	default:
+		return "unclassified"
+	}
+}
+
+func closedPeerFailure(value string) string {
+	switch value {
+	case "", "invalid_request", "unsupported", "preparation_failed", "launch_failed", "io_failed", "cleanup_failed":
+		return value
+	default:
+		return "unclassified"
+	}
+}
+
+func correlatedProtocolFailure(operation string, frame bridgeproto.Frame) error {
+	failure, preparationStage := "", ""
+	if frame.Kind == bridgeproto.Failed && frame.Failure != nil {
+		failure = frame.Failure.Code
+		if frame.Failure.NativeStage != nil {
+			preparationStage = string(*frame.Failure.NativeStage)
+		}
+	}
+	return &fixedProtocolError{operation: operation, cause: bridgeproto.ErrProtocol, kind: frame.Kind, failure: failure, preparationStage: preparationStage}
+}
+
+func reply(ctx context.Context, p protocol, b bridgeproto.Binding, request uint64, kind bridgeproto.Kind, operation string) error {
 	f, err := p.Receive(ctx)
-	if err != nil || f.Validate() != nil || f.Binding != b || f.Request != request || f.Kind != kind {
-		return errors.New("fixed_reply")
+	if err != nil {
+		return &fixedProtocolError{operation: operation, cause: err}
+	}
+	if f.Validate() != nil || f.Binding != b || f.Request != request {
+		return &fixedProtocolError{operation: operation, cause: bridgeproto.ErrProtocol}
+	}
+	if f.Kind != kind {
+		return correlatedProtocolFailure(operation, f)
 	}
 	return nil
 }
@@ -352,29 +437,38 @@ func exercise(ctx context.Context, p protocol, b bridgeproto.Binding, plan bridg
 		}
 	}()
 	id, err := p.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Prepare, Plan: &plan})
-	if err != nil || reply(ctx, p, b, id, bridgeproto.Prepared) != nil {
-		return errors.New("prepare")
+	if err != nil {
+		return &fixedProtocolError{operation: "prepare_send", cause: err}
+	}
+	if err := reply(ctx, p, b, id, bridgeproto.Prepared, "prepare_receive"); err != nil {
+		return err
 	}
 	r.Prepared = true
 	id, err = p.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Launch})
-	if err != nil || reply(ctx, p, b, id, bridgeproto.Started) != nil {
-		return errors.New("launch")
+	if err != nil {
+		return &fixedProtocolError{operation: "launch_send", cause: err}
+	}
+	if err := reply(ctx, p, b, id, bridgeproto.Started, "launch_receive"); err != nil {
+		return err
 	}
 	r.PeerStartedReply = true
 	if _, err = p.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Input, Data: &bridgeproto.Data{Stream: "stdin", Bytes: input}}); err != nil {
-		return errors.New("input")
+		return &fixedProtocolError{operation: "input_send", cause: err}
 	}
 	if _, err = p.Send(ctx, bridgeowner.Command{Kind: bridgeproto.InputEOF}); err != nil {
-		return errors.New("input_eof")
+		return &fixedProtocolError{operation: "input_eof_send", cause: err}
 	}
 	if _, err = p.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Wait}); err != nil {
-		return errors.New("wait")
+		return &fixedProtocolError{operation: "wait_send", cause: err}
 	}
 	exited := false
 	for count := 0; count < 256; count++ {
 		f, err := p.Receive(ctx)
-		if err != nil || f.Validate() != nil || f.Binding != b || f.Request != id {
-			return errors.New("execution")
+		if err != nil {
+			return &fixedProtocolError{operation: "execution_receive", cause: err}
+		}
+		if f.Validate() != nil || f.Binding != b || f.Request != id {
+			return &fixedProtocolError{operation: "execution_frame", cause: bridgeproto.ErrProtocol}
 		}
 		switch f.Kind {
 		case bridgeproto.Output:
@@ -393,7 +487,7 @@ func exercise(ctx context.Context, p protocol, b bridgeproto.Binding, plan bridg
 			exited = true
 			r.Exit23 = true
 		default:
-			return errors.New("execution")
+			return correlatedProtocolFailure("execution_kind", f)
 		}
 		if exited {
 			break
@@ -404,8 +498,11 @@ func exercise(ctx context.Context, p protocol, b bridgeproto.Binding, plan bridg
 	}
 	r.CanaryMarker = true
 	id, err = p.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Destroy})
-	if err != nil || reply(ctx, p, b, id, bridgeproto.Destroyed) != nil {
-		return errors.New("destroy")
+	if err != nil {
+		return &fixedProtocolError{operation: "destroy_send", cause: err}
+	}
+	if err := reply(ctx, p, b, id, bridgeproto.Destroyed, "destroy_receive"); err != nil {
+		return err
 	}
 	r.Destroyed = true
 	return nil

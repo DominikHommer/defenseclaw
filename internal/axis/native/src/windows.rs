@@ -7,22 +7,24 @@
 use crate::owner::{Engine, Pipes, Prepared, Process};
 use crate::windows_bootstrap::Capabilities;
 use crate::windows_io::Pipe;
-use crate::wire::{Preparation, ProtocolError, Result};
+use crate::wire::{NativePreparationStage, Preparation, ProtocolError, Result};
 use mxc_sdk::v1::{
     ContainerRequest, Containment, FilesystemPolicy, NetworkAction, NetworkEgressPolicy,
-    NetworkIngressPolicy, NetworkPolicy, OwnedPsecProcess, OwnedWindowsStdio,
-    PreparedOwnedWindowsPsec, configs::ProcessContainerConfig,
+    NetworkIngressPolicy, NetworkPolicy, OwnedPsecProcess, OwnedWindowsPreparationStage,
+    OwnedWindowsStdio, PreparedOwnedWindowsPsec, configs::ProcessContainerConfig,
 };
 use std::ffi::OsString;
 use std::fs::File;
 
 pub struct WindowsEngine {
     capabilities: Option<Capabilities>,
+    last_preparation_stage: Option<NativePreparationStage>,
 }
 impl WindowsEngine {
     pub fn new(capabilities: Capabilities) -> Self {
         Self {
             capabilities: Some(capabilities),
+            last_preparation_stage: None,
         }
     }
 }
@@ -32,9 +34,14 @@ struct WindowsProcess {
     pipes: Option<Pipes>,
 }
 impl Engine for WindowsEngine {
+    fn preparation_failure_stage(&self) -> Option<NativePreparationStage> {
+        self.last_preparation_stage
+    }
     fn prepare(&mut self, plan: &Preparation) -> Result<Box<dyn Prepared>> {
+        self.last_preparation_stage = Some(NativePreparationStage::WindowsCapabilityBinding);
         let capabilities = self.capabilities.take().ok_or(ProtocolError)?;
         capabilities.bind(plan)?;
+        self.last_preparation_stage = Some(NativePreparationStage::WindowsCapabilityObjects);
         let mut files = capabilities.into_objects().into_iter();
         let payload = File::from(files.next().ok_or(ProtocolError)?.into_handle()?);
         let cwd = File::from(files.next().ok_or(ProtocolError)?.into_handle()?);
@@ -92,7 +99,53 @@ impl Engine for WindowsEngine {
             readonly,
             readwrite,
         )
-        .map_err(|_| ProtocolError)?;
+        .map_err(|error| {
+            self.last_preparation_stage = PreparedOwnedWindowsPsec::preparation_failure_stage(
+                &error,
+            )
+            .map(|stage| match stage {
+                OwnedWindowsPreparationStage::InputShape => {
+                    NativePreparationStage::WindowsInputShape
+                }
+                OwnedWindowsPreparationStage::PayloadAccess => {
+                    NativePreparationStage::WindowsPayloadAccess
+                }
+                OwnedWindowsPreparationStage::PayloadIdentity => {
+                    NativePreparationStage::WindowsPayloadIdentity
+                }
+                OwnedWindowsPreparationStage::CwdAccess => NativePreparationStage::WindowsCwdAccess,
+                OwnedWindowsPreparationStage::CwdIdentity => {
+                    NativePreparationStage::WindowsCwdIdentity
+                }
+                OwnedWindowsPreparationStage::CwdPrivacy => {
+                    NativePreparationStage::WindowsCwdPrivacy
+                }
+                OwnedWindowsPreparationStage::CwdPath => NativePreparationStage::WindowsCwdPath,
+                OwnedWindowsPreparationStage::RootPin => NativePreparationStage::WindowsRootPin,
+                OwnedWindowsPreparationStage::GrantAccess => {
+                    NativePreparationStage::WindowsGrantAccess
+                }
+                OwnedWindowsPreparationStage::GrantIdentity => {
+                    NativePreparationStage::WindowsGrantIdentity
+                }
+                OwnedWindowsPreparationStage::GrantPath => NativePreparationStage::WindowsGrantPath,
+                OwnedWindowsPreparationStage::GrantPin => NativePreparationStage::WindowsGrantPin,
+                OwnedWindowsPreparationStage::PayloadPath => {
+                    NativePreparationStage::WindowsPayloadPath
+                }
+                OwnedWindowsPreparationStage::ArgvPolicy => {
+                    NativePreparationStage::WindowsArgvPolicy
+                }
+                OwnedWindowsPreparationStage::PolicyFloor => {
+                    NativePreparationStage::WindowsPolicyFloor
+                }
+                OwnedWindowsPreparationStage::PayloadCustody => {
+                    NativePreparationStage::WindowsPayloadCustody
+                }
+            });
+            ProtocolError
+        })?;
+        self.last_preparation_stage = None;
         Ok(Box::new(WindowsPrepared(prepared)))
     }
 }

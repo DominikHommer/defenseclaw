@@ -123,7 +123,7 @@ func run() (record result) {
 		return record
 	}
 	base := filepath.Dir(executable)
-	if filepath.Base(base) != "windows-native-peer-canary-05" {
+	if filepath.Base(base) != "windows-native-peer-canary-06" {
 		return record
 	}
 	if o.parents(executable) != nil {
@@ -270,7 +270,8 @@ func run() (record result) {
 	tcp := uint16(o.tcp.Addr().(*net.TCPAddr).Port)
 	udp := uint16(o.udp.LocalAddr().(*net.UDPAddr).Port)
 	record.Stage = "protocol"
-	if exercise(ctx, o.session.Protocol, binding, plan, inputFrame(work, system, tcp, udp), &record) != nil {
+	if err := exercise(ctx, o.session.Protocol, binding, plan, inputFrame(work, system, tcp, udp), &record); err != nil {
+		writeFixedDiagnostic(os.Stderr, "protocol", err)
 		return record
 	}
 	record.Stage = "host_observations"

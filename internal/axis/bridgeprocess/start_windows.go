@@ -73,6 +73,43 @@ func wrapWindowsStartError(stage string, cause error) error {
 	return &windowsStartError{stage: stage, cause: cause}
 }
 
+// Cleanup diagnostics retain cancellation and joined causes without formatting
+// private native error text. They do not change cleanup or permit retry bypass.
+type windowsCleanupError struct {
+	stage string
+	cause error
+}
+
+func knownWindowsCleanupStage(stage string) bool {
+	switch stage {
+	case "entry", "completion", "startup_wait", "cleanup_slot", "root_wait", "job_query", "native_signal", "native_wait", "native_handles_close", "asset_close", "startup_copies_close", "preowner_pipes_close", "pipe_setup_close", "sticky_uncertainty", "unclassified":
+		return true
+	default:
+		return false
+	}
+}
+func (err *windowsCleanupError) NativeCleanupStage() string {
+	if err == nil || !knownWindowsCleanupStage(err.stage) {
+		return "unclassified"
+	}
+	return err.stage
+}
+func (err *windowsCleanupError) Error() string {
+	return "private AXIS native cleanup refused at " + err.NativeCleanupStage()
+}
+func (err *windowsCleanupError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.cause
+}
+func wrapWindowsCleanupError(stage string, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &windowsCleanupError{stage: stage, cause: cause}
+}
+
 // The same Session owns this native object before protocol workers or process
 // creation. There is no PID adoption, second supervisor, output-reader goroutine,
 // detached cleanup owner, or unbounded native wait. An error retains custody.
@@ -86,16 +123,23 @@ type windowsCustody struct {
 	preOwnerPipes                         []*os.File // only until bridgeowner.New accepts their ownership
 	pipeSetup                             []*bridgeowner.OverlappedPrivatePipe
 	starting, closed, complete, uncertain bool
+	firstUncertainStage                   string // diagnostic only; first failed close never resets
 }
 
-func (custody *windowsCustody) StopAndWait(ctx context.Context) error {
+func (custody *windowsCustody) StopAndWait(ctx context.Context) (resultErr error) {
+	stage := "entry"
+	defer func() { resultErr = wrapWindowsCleanupError(stage, resultErr) }()
 	if ctx == nil {
 		return ErrAdmission
 	}
+	stage = "completion"
 	custody.mu.Lock()
 	custody.closed = true
 	if custody.complete {
 		uncertain := custody.uncertain
+		if uncertain {
+			stage = custody.uncertaintyStage()
+		}
 		custody.mu.Unlock()
 		if uncertain {
 			return bridgeowner.ErrCleanup
@@ -105,6 +149,7 @@ func (custody *windowsCustody) StopAndWait(ctx context.Context) error {
 	pending := custody.starting
 	done := custody.launchDone
 	custody.mu.Unlock()
+	stage = "startup_wait"
 	if pending {
 		// The native creation goroutine retains startup buffers, handles and
 		// child duplicates until CreateProcess and every startup check finish.
@@ -115,6 +160,7 @@ func (custody *windowsCustody) StopAndWait(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+	stage = "cleanup_slot"
 	select {
 	case custody.serial <- struct{}{}:
 		defer func() { <-custody.serial }()
@@ -125,6 +171,7 @@ func (custody *windowsCustody) StopAndWait(ctx context.Context) error {
 	defer custody.mu.Unlock()
 	if custody.complete {
 		if custody.uncertain {
+			stage = custody.uncertaintyStage()
 			return bridgeowner.ErrCleanup
 		}
 		return nil
@@ -134,6 +181,7 @@ func (custody *windowsCustody) StopAndWait(ctx context.Context) error {
 	// signals and single close attempts; polling sleeps release it below.
 	for {
 		rootDone := custody.process == 0
+		stage = "root_wait"
 		if !rootDone {
 			state, err := windows.WaitForSingleObject(custody.process, 0)
 			if err != nil {
@@ -141,6 +189,7 @@ func (custody *windowsCustody) StopAndWait(ctx context.Context) error {
 			}
 			rootDone = state == windows.WAIT_OBJECT_0
 		}
+		stage = "job_query"
 		active, err := windowsActiveProcesses(custody.job)
 		if err != nil {
 			return bridgeowner.ErrCleanup
@@ -151,6 +200,7 @@ func (custody *windowsCustody) StopAndWait(ctx context.Context) error {
 		// Even a normally exited root leaves descendants to the owned Job.
 		// The Job is never inherited, permits no breakaway, and was assigned
 		// atomically by JOB_LIST before the initial suspended process existed.
+		stage = "native_signal"
 		jobErr := windows.TerminateJobObject(custody.job, 1)
 		var rootErr error
 		if !rootDone {
@@ -160,6 +210,7 @@ func (custody *windowsCustody) StopAndWait(ctx context.Context) error {
 			return bridgeowner.ErrCleanup // exact handles remain for explicit retry
 		}
 		custody.mu.Unlock()
+		stage = "native_wait"
 		timer := time.NewTimer(10 * time.Millisecond)
 		select {
 		case <-timer.C:
@@ -175,18 +226,23 @@ func (custody *windowsCustody) StopAndWait(ctx context.Context) error {
 		}
 		custody.mu.Lock()
 	}
+	stage = "native_handles_close"
 	for _, handle := range []*windows.Handle{&custody.thread, &custody.process, &custody.job} {
 		if *handle != 0 {
 			owned := *handle
 			*handle = 0 // never retry a possibly recycled native handle
 			if windows.CloseHandle(owned) != nil {
-				custody.uncertain = true
+				custody.markUncertain("native_handles_close")
 			}
 		}
 	}
-	custody.closeFiles(custody.files)
-	custody.closeFiles(custody.startupCopies)
-	custody.closeFiles(custody.preOwnerPipes)
+	stage = "asset_close"
+	custody.closeFiles(custody.files, "asset_close")
+	stage = "startup_copies_close"
+	custody.closeFiles(custody.startupCopies, "startup_copies_close")
+	stage = "preowner_pipes_close"
+	custody.closeFiles(custody.preOwnerPipes, "preowner_pipes_close")
+	stage = "pipe_setup_close"
 	for index, setup := range custody.pipeSetup {
 		if setup != nil {
 			custody.mu.Unlock()
@@ -198,21 +254,45 @@ func (custody *windowsCustody) StopAndWait(ctx context.Context) error {
 			custody.pipeSetup[index] = nil
 		}
 	}
+	stage = "sticky_uncertainty"
 	if custody.uncertain {
+		stage = custody.uncertaintyStage()
 		return bridgeowner.ErrCleanup
 	}
 	custody.complete = true
 	return nil
 }
 
+// Caller holds mu. Preserve the first failed-close category across retries;
+// this records no handle/name/cause and never changes the sticky failure rule.
+func (custody *windowsCustody) markUncertain(stage string) {
+	if !custody.uncertain {
+		switch stage {
+		case "native_handles_close", "asset_close", "startup_copies_close", "preowner_pipes_close":
+			custody.firstUncertainStage = stage
+		default:
+			custody.firstUncertainStage = "sticky_uncertainty"
+		}
+	}
+	custody.uncertain = true
+}
+func (custody *windowsCustody) uncertaintyStage() string {
+	switch custody.firstUncertainStage {
+	case "native_handles_close", "asset_close", "startup_copies_close", "preowner_pipes_close":
+		return custody.firstUncertainStage
+	default:
+		return "sticky_uncertainty"
+	}
+}
+
 // Caller holds mu and has excluded pending native creation. Each slot loses
 // execution authority before exactly one Close attempt; uncertainty is sticky.
-func (custody *windowsCustody) closeFiles(files []*os.File) {
+func (custody *windowsCustody) closeFiles(files []*os.File, stage string) {
 	for index, file := range files {
 		if file != nil {
 			files[index] = nil
 			if file.Close() != nil {
-				custody.uncertain = true
+				custody.markUncertain(stage)
 			}
 		}
 	}
@@ -477,7 +557,7 @@ func (custody *windowsCustody) begin(ctx context.Context, launch windowsPeerLaun
 		// until CreateProcess has completed, even if the caller already timed out.
 		err := custody.create(ctx, launch)
 		custody.mu.Lock()
-		custody.closeFiles(custody.startupCopies)
+		custody.closeFiles(custody.startupCopies, "startup_copies_close")
 		if custody.uncertain {
 			err = errors.Join(err, bridgeowner.ErrCleanup)
 		}

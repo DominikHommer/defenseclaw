@@ -1061,15 +1061,17 @@ index b23ed52..40e0655 100644
 +    }
 +}
 diff --git a/src/mxc-sdk/src/lib.rs b/src/mxc-sdk/src/lib.rs
-index 9ddb78a..018d8e7 100644
+index 9ddb78a..eae958f 100644
 --- a/src/mxc-sdk/src/lib.rs
 +++ b/src/mxc-sdk/src/lib.rs
-@@ -226,14 +226,19 @@ use sandbox::{ExecutionResult, MxcProcess};
+@@ -226,14 +226,21 @@ use sandbox::{ExecutionResult, MxcProcess};
  /// schema version.
  ///
  pub mod v1 {
 +    #[cfg(target_os = "windows")]
-+    pub use crate::owned_windows_psec::{OwnedWindowsStdio, PreparedOwnedWindowsPsec};
++    pub use crate::owned_windows_psec::{
++        OwnedWindowsPreparationStage, OwnedWindowsStdio, PreparedOwnedWindowsPsec,
++    };
 +    #[cfg(target_os = "windows")]
 +    pub use crate::process_container_common::base_container_runner::OwnedPsecProcess;
 +
@@ -1086,7 +1088,7 @@ index 9ddb78a..018d8e7 100644
      };
      #[cfg(target_os = "windows")]
      pub use crate::mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
-@@ -262,8 +267,8 @@ pub mod v1 {
+@@ -262,8 +269,8 @@ pub mod v1 {
          /// Host filesystem-policy discovery helpers and their options.
          pub mod filesystem {
              pub use crate::policy::{
@@ -1096,7 +1098,7 @@ index 9ddb78a..018d8e7 100644
              };
          }
  
-@@ -373,7 +378,7 @@ pub mod v1 {
+@@ -373,7 +380,7 @@ pub mod v1 {
      }
  
      #[cfg(target_os = "windows")]
@@ -1105,7 +1107,7 @@ index 9ddb78a..018d8e7 100644
          request: &ContainerRequest,
          values: Vec<std::ffi::OsString>,
          telemetry: Option<TelemetryConfig>,
-@@ -685,3 +690,6 @@ fn wait_with_output(sandbox: MxcProcess) -> Result<ExecutionResult, Error> {
+@@ -685,3 +692,6 @@ fn wait_with_output(sandbox: MxcProcess) -> Result<ExecutionResult, Error> {
          )
      })
  }
@@ -1114,10 +1116,10 @@ index 9ddb78a..018d8e7 100644
 +mod owned_windows_psec;
 diff --git a/src/mxc-sdk/src/owned_windows_psec.rs b/src/mxc-sdk/src/owned_windows_psec.rs
 new file mode 100644
-index 0000000..667413b
+index 0000000..4cb3400
 --- /dev/null
 +++ b/src/mxc-sdk/src/owned_windows_psec.rs
-@@ -0,0 +1,569 @@
+@@ -0,0 +1,681 @@
 +// Copyright 2026 Cisco Systems, Inc. and its affiliates
 +// SPDX-License-Identifier: MIT
 +
@@ -1445,6 +1447,46 @@ index 0000000..667413b
 +    }
 +    Ok(())
 +}
++/// Closed diagnostic correlation only; it never selects a grant or fallback.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum OwnedWindowsPreparationStage {
++    InputShape,
++    PayloadAccess,
++    PayloadIdentity,
++    CwdAccess,
++    CwdIdentity,
++    CwdPrivacy,
++    CwdPath,
++    RootPin,
++    GrantAccess,
++    GrantIdentity,
++    GrantPath,
++    GrantPin,
++    PayloadPath,
++    ArgvPolicy,
++    PolicyFloor,
++    PayloadCustody,
++}
++
++#[derive(Debug)]
++struct OwnedWindowsPreparationError {
++    stage: OwnedWindowsPreparationStage,
++    cause: io::Error,
++}
++impl std::fmt::Display for OwnedWindowsPreparationError {
++    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        output.write_str("owned Windows PSEC preparation refused")
++    }
++}
++impl std::error::Error for OwnedWindowsPreparationError {
++    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
++        Some(&self.cause)
++    }
++}
++fn preparation_error(stage: OwnedWindowsPreparationStage, cause: io::Error) -> io::Error {
++    io::Error::new(cause.kind(), OwnedWindowsPreparationError { stage, cause })
++}
++
 +pub struct PreparedOwnedWindowsPsec {
 +    request: PreparedContainerRequest,
 +    argv: LiteralArgv,
@@ -1492,78 +1534,107 @@ index 0000000..667413b
 +        readonly: Vec<File>,
 +        readwrite: Vec<File>,
 +    ) -> io::Result<Self> {
-+        let fs = request.filesystem.as_ref().ok_or_else(refused)?;
-+        if fs.readonly_paths.len() != readonly.len()
-+            || fs.readwrite_paths.len() != readwrite.len()
-+            || !fs.denied_paths.is_empty()
-+        {
-+            return Err(refused());
-+        }
-+        access(&payload, false, true)?;
-+        identity(&payload, false)?;
-+        access(&cwd, false, false)?;
-+        identity(&cwd, true)?;
-+        private_root(&cwd)?;
-+        let root = actual_path(&cwd)?;
-+        if request.working_directory.as_deref() != Some(root.as_str()) {
-+            return Err(refused());
-+        }
-+        let mut pins = relative_pin(&cwd, &cwd, "", true)?;
-+        for (paths, objects, write) in [
-+            (&fs.readonly_paths, &readonly, false),
-+            (&fs.readwrite_paths, &readwrite, true),
-+        ] {
-+            for (path, object) in paths.iter().zip(objects) {
-+                let directory = object.metadata().map_err(|_| refused())?.is_dir();
-+                access(object, write, false)?;
-+                identity(object, directory)?;
-+                if actual_path(object)? != *path {
-+                    return Err(refused());
-+                }
-+                let relative = if *path == root {
-+                    ""
-+                } else {
-+                    path.strip_prefix(&(root.clone() + "\\"))
-+                        .ok_or_else(refused)?
-+                };
-+                pins.extend(relative_pin(&cwd, object, relative, directory)?);
++        let mut stage = OwnedWindowsPreparationStage::InputShape;
++        let result = (|| {
++            let fs = request.filesystem.as_ref().ok_or_else(refused)?;
++            if fs.readonly_paths.len() != readonly.len()
++                || fs.readwrite_paths.len() != readwrite.len()
++                || !fs.denied_paths.is_empty()
++            {
++                return Err(refused());
 +            }
-+        }
-+        let payload_path = actual_path(&payload)?;
-+        let mut request = request;
-+        let fs = request.filesystem.as_mut().ok_or_else(refused)?;
-+        // The exact frozen executable is the only extra read object; it never
-+        // grants its parent directory or original caller image pathname.
-+        if !fs.readonly_paths.contains(&payload_path) {
-+            fs.readonly_paths.push(payload_path);
-+        }
-+        let (prepared, argv) = crate::v1::prepare_windows_psec_argv(
-+            &request,
-+            values,
-+            Some(crate::options::TelemetryConfig {
-+                enabled: Some(false),
-+            }),
-+        )
-+        .map_err(|_| refused())?;
-+        if prepared.inner.policy.capture_denials.is_some()
-+            || prepared.inner.policy.network_proxy.address.is_some()
-+            || prepared.inner.lifecycle.preserve_policy
-+        {
-+            return Err(refused());
-+        }
-+        let custody =
-+            LocalExecutableCustody::from_owned(payload.try_clone().map_err(|_| refused())?)
-+                .map_err(|_| refused())?;
-+        let mut files = vec![payload, cwd];
-+        files.extend(readonly);
-+        files.extend(readwrite);
-+        files.extend(pins);
-+        Ok(Self {
-+            request: prepared,
-+            argv,
-+            custody,
-+            files,
-+        })
++            stage = OwnedWindowsPreparationStage::PayloadAccess;
++            access(&payload, false, true)?;
++            stage = OwnedWindowsPreparationStage::PayloadIdentity;
++            identity(&payload, false)?;
++            stage = OwnedWindowsPreparationStage::CwdAccess;
++            access(&cwd, false, false)?;
++            stage = OwnedWindowsPreparationStage::CwdIdentity;
++            identity(&cwd, true)?;
++            stage = OwnedWindowsPreparationStage::CwdPrivacy;
++            private_root(&cwd)?;
++            stage = OwnedWindowsPreparationStage::CwdPath;
++            let root = actual_path(&cwd)?;
++            if request.working_directory.as_deref() != Some(root.as_str()) {
++                return Err(refused());
++            }
++            stage = OwnedWindowsPreparationStage::RootPin;
++            let mut pins = relative_pin(&cwd, &cwd, "", true)?;
++            for (paths, objects, write) in [
++                (&fs.readonly_paths, &readonly, false),
++                (&fs.readwrite_paths, &readwrite, true),
++            ] {
++                for (path, object) in paths.iter().zip(objects) {
++                    stage = OwnedWindowsPreparationStage::GrantIdentity;
++                    let directory = object.metadata().map_err(|_| refused())?.is_dir();
++                    stage = OwnedWindowsPreparationStage::GrantAccess;
++                    access(object, write, false)?;
++                    stage = OwnedWindowsPreparationStage::GrantIdentity;
++                    identity(object, directory)?;
++                    stage = OwnedWindowsPreparationStage::GrantPath;
++                    if actual_path(object)? != *path {
++                        return Err(refused());
++                    }
++                    stage = OwnedWindowsPreparationStage::GrantPin;
++                    let relative = if *path == root {
++                        ""
++                    } else {
++                        path.strip_prefix(&(root.clone() + "\\"))
++                            .ok_or_else(refused)?
++                    };
++                    pins.extend(relative_pin(&cwd, object, relative, directory)?);
++                }
++            }
++            stage = OwnedWindowsPreparationStage::PayloadPath;
++            let payload_path = actual_path(&payload)?;
++            let mut request = request;
++            let fs = request.filesystem.as_mut().ok_or_else(refused)?;
++            // The exact frozen executable is the only extra read object; it never
++            // grants its parent directory or original caller image pathname.
++            if !fs.readonly_paths.contains(&payload_path) {
++                fs.readonly_paths.push(payload_path);
++            }
++            stage = OwnedWindowsPreparationStage::ArgvPolicy;
++            let (prepared, argv) = crate::v1::prepare_windows_psec_argv(
++                &request,
++                values,
++                Some(crate::options::TelemetryConfig {
++                    enabled: Some(false),
++                }),
++            )
++            .map_err(|_| refused())?;
++            stage = OwnedWindowsPreparationStage::PolicyFloor;
++            if prepared.inner.policy.capture_denials.is_some()
++                || prepared.inner.policy.network_proxy.address.is_some()
++                || prepared.inner.lifecycle.preserve_policy
++            {
++                return Err(refused());
++            }
++            stage = OwnedWindowsPreparationStage::PayloadCustody;
++            let custody =
++                LocalExecutableCustody::from_owned(payload.try_clone().map_err(|_| refused())?)
++                    .map_err(|_| refused())?;
++            let mut files = vec![payload, cwd];
++            files.extend(readonly);
++            files.extend(readwrite);
++            files.extend(pins);
++            Ok(Self {
++                request: prepared,
++                argv,
++                custody,
++                files,
++            })
++        })();
++        result.map_err(|cause| preparation_error(stage, cause))
++    }
++
++    /// Recover only this constructor's closed diagnostic stage, never its cause
++    /// text. An unrelated error cannot supply a stage or execution authority.
++    pub fn preparation_failure_stage(error: &io::Error) -> Option<OwnedWindowsPreparationStage> {
++        error
++            .get_ref()?
++            .downcast_ref::<OwnedWindowsPreparationError>()
++            .map(|error| error.stage)
 +    }
 +    /// Create the exact child in its owned Job without resuming its primary thread.
 +    ///
@@ -1605,6 +1676,49 @@ index 0000000..667413b
 +    use super::*;
 +    #[test]
 +    fn owned_access_requires_exact_role_rights_without_host_mutation_rights() {
++        for stage in [
++            OwnedWindowsPreparationStage::InputShape,
++            OwnedWindowsPreparationStage::PayloadAccess,
++            OwnedWindowsPreparationStage::PayloadIdentity,
++            OwnedWindowsPreparationStage::CwdAccess,
++            OwnedWindowsPreparationStage::CwdIdentity,
++            OwnedWindowsPreparationStage::CwdPrivacy,
++            OwnedWindowsPreparationStage::CwdPath,
++            OwnedWindowsPreparationStage::RootPin,
++            OwnedWindowsPreparationStage::GrantAccess,
++            OwnedWindowsPreparationStage::GrantIdentity,
++            OwnedWindowsPreparationStage::GrantPath,
++            OwnedWindowsPreparationStage::GrantPin,
++            OwnedWindowsPreparationStage::PayloadPath,
++            OwnedWindowsPreparationStage::ArgvPolicy,
++            OwnedWindowsPreparationStage::PolicyFloor,
++            OwnedWindowsPreparationStage::PayloadCustody,
++        ] {
++            let error = preparation_error(
++                stage,
++                io::Error::new(
++                    io::ErrorKind::PermissionDenied,
++                    "fixed synthetic private cause",
++                ),
++            );
++            assert_eq!(
++                PreparedOwnedWindowsPsec::preparation_failure_stage(&error),
++                Some(stage)
++            );
++            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
++            assert_eq!(error.to_string(), "owned Windows PSEC preparation refused");
++            let payload = error
++                .get_ref()
++                .unwrap()
++                .downcast_ref::<OwnedWindowsPreparationError>()
++                .unwrap();
++            assert_eq!(payload.cause.to_string(), "fixed synthetic private cause");
++            assert!(std::error::Error::source(payload).is_some());
++        }
++        assert_eq!(
++            PreparedOwnedWindowsPsec::preparation_failure_stage(&io::Error::other("unclassified")),
++            None
++        );
 +        assert!(access_allowed(0x120089, false, false));
 +        assert!(access_allowed(0x1200a9, false, true));
 +        assert!(access_allowed(0x12019f, true, false));

@@ -144,10 +144,36 @@ pub enum FailureCode {
     CleanupFailed,
 }
 
+// Diagnostic-only Windows constructor gates. No string selects authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePreparationStage {
+    WindowsCapabilityBinding,
+    WindowsCapabilityObjects,
+    WindowsInputShape,
+    WindowsPayloadAccess,
+    WindowsPayloadIdentity,
+    WindowsCwdAccess,
+    WindowsCwdIdentity,
+    WindowsCwdPrivacy,
+    WindowsCwdPath,
+    WindowsRootPin,
+    WindowsGrantAccess,
+    WindowsGrantIdentity,
+    WindowsGrantPath,
+    WindowsGrantPin,
+    WindowsPayloadPath,
+    WindowsArgvPolicy,
+    WindowsPolicyFloor,
+    WindowsPayloadCustody,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Failure {
     pub code: FailureCode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_stage: Option<NativePreparationStage>,
 }
 
 fn text(value: &str, limit: usize) -> bool {
@@ -416,7 +442,13 @@ impl Frame {
                 }
             }
             Kind::Exited if payloads == 1 && self.result.is_some() => {}
-            Kind::Failed if payloads == 1 && self.failure.is_some() => {}
+            Kind::Failed if payloads == 1 && self.failure.is_some() => {
+                let failure = self.failure.as_ref().ok_or(ProtocolError)?;
+                if failure.native_stage.is_some() && failure.code != FailureCode::PreparationFailed
+                {
+                    return Err(ProtocolError);
+                }
+            }
             Kind::Launch
             | Kind::InputEof
             | Kind::Cancel
@@ -715,6 +747,44 @@ mod tests {
 
     #[test]
     fn ambiguous_json_and_null_poison_the_decoder() {
+        let mut failure = fixture();
+        failure.kind = Kind::Failed;
+        failure.plan = None;
+        failure.failure = Some(Failure {
+            code: FailureCode::PreparationFailed,
+            native_stage: None,
+        });
+        let absent = serde_json::to_vec(&failure).unwrap();
+        assert!(
+            !std::str::from_utf8(&absent)
+                .unwrap()
+                .contains("native_stage")
+        );
+        assert_eq!(parse(&absent).unwrap(), failure);
+        failure.failure.as_mut().unwrap().native_stage =
+            Some(NativePreparationStage::WindowsCwdPrivacy);
+        let diagnostic = serde_json::to_vec(&failure).unwrap();
+        assert_eq!(parse(&diagnostic).unwrap(), failure);
+        for code in [
+            FailureCode::InvalidRequest,
+            FailureCode::Unsupported,
+            FailureCode::LaunchFailed,
+            FailureCode::IoFailed,
+            FailureCode::CleanupFailed,
+        ] {
+            let mut changed = failure.clone();
+            changed.failure.as_mut().unwrap().code = code;
+            assert_eq!(
+                parse(&serde_json::to_vec(&changed).unwrap()),
+                Err(ProtocolError)
+            );
+        }
+        for replacement in ["private-unrecognized-stage", "", "WINDOWS_CWD_PRIVACY"] {
+            let changed = std::str::from_utf8(&diagnostic)
+                .unwrap()
+                .replace("windows_cwd_privacy", replacement);
+            assert_eq!(parse(changed.as_bytes()), Err(ProtocolError));
+        }
         let frame = fixture();
         let original = serde_json::to_string(&frame).unwrap();
         for changed in [

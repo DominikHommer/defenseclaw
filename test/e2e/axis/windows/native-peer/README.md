@@ -3,6 +3,11 @@
 
 # TASK-only fixed Windows native-peer canary
 
+Failure diagnostics accept only validated request/binding correlation, closed
+protocol operation and reason codes, and the optional closed Windows native
+preparation/cleanup stages. They never print raw errors, paths, environment,
+arguments or peer stderr. The next fixed fixture basename is canary-06.
+
 This source draft exercises the existing bridgeprocess SealImageIn/Start and
 the shared Prepare/Launch/Input/InputEOF/Wait/Exited/Destroy protocol. It adds
 no production provider, common production LaunchGate qualification, hook/model

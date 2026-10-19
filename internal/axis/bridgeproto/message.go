@@ -131,8 +131,21 @@ type Result struct {
 
 // Failure carries a closed reason code, never arbitrary backend diagnostics,
 // environment values, paths, stdout or credential material.
+type NativePreparationStage string
+
 type Failure struct {
-	Code string `json:"code"`
+	Code        string                  `json:"code"`
+	NativeStage *NativePreparationStage `json:"native_stage,omitempty"`
+}
+
+// Diagnostic-only; a stage never authorizes preparation or native execution.
+func ValidNativePreparationStage(stage string) bool {
+	switch stage {
+	case "windows_capability_binding", "windows_capability_objects", "windows_input_shape", "windows_payload_access", "windows_payload_identity", "windows_cwd_access", "windows_cwd_identity", "windows_cwd_privacy", "windows_cwd_path", "windows_root_pin", "windows_grant_access", "windows_grant_identity", "windows_grant_path", "windows_grant_pin", "windows_payload_path", "windows_argv_policy", "windows_policy_floor", "windows_payload_custody":
+		return true
+	default:
+		return false
+	}
 }
 
 var (
@@ -331,6 +344,9 @@ func (f Frame) Validate() error {
 		}
 	case Failed:
 		if f.Failure == nil || payloads != 1 {
+			return ErrProtocol
+		}
+		if f.Failure.NativeStage != nil && (f.Failure.Code != "preparation_failed" || !ValidNativePreparationStage(string(*f.Failure.NativeStage))) {
 			return ErrProtocol
 		}
 		switch f.Failure.Code {

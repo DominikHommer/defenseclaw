@@ -8,8 +8,8 @@ use crate::transport::{Transport, nonblocking};
 #[cfg(target_os = "windows")]
 use crate::windows_io::Pipe;
 use crate::wire::{
-    Binding, Completion, Data, Failure, FailureCode, Frame, Kind, MAX_DATA, Preparation,
-    ProtocolError, Result, VERSION,
+    Binding, Completion, Data, Failure, FailureCode, Frame, Kind, MAX_DATA, NativePreparationStage,
+    Preparation, ProtocolError, Result, VERSION,
 };
 use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
@@ -45,6 +45,9 @@ pub trait Prepared {
 
 pub trait Engine {
     fn prepare(&mut self, plan: &Preparation) -> Result<Box<dyn Prepared>>;
+    fn preparation_failure_stage(&self) -> Option<NativePreparationStage> {
+        None
+    }
 }
 
 struct Active {
@@ -336,7 +339,12 @@ impl<E: Engine> Owner<E> {
 
     fn fail(&mut self, request: u64, code: FailureCode) -> Result<()> {
         let mut frame = self.frame(Kind::Failed, request)?;
-        frame.failure = Some(Failure { code });
+        let native_stage = if code == FailureCode::PreparationFailed {
+            self.engine.preparation_failure_stage()
+        } else {
+            None
+        };
+        frame.failure = Some(Failure { code, native_stage });
         self.emit(frame)?;
         self.finished = true;
         Ok(())

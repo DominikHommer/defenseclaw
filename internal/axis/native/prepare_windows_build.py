@@ -32,7 +32,7 @@ PATCHES = {
 # Reviewed owned-input adapter; never includes the uncontained control overlay.
 OWNED_PATCH = {
     "path": "patches/mxc-owned-windows-psec.patch",
-    "sha256": "c5ce1bb248ee112b87d59b763ed51e96dc9057b3187d3e5f9909ce1f31340691",
+    "sha256": "81656d204eb07b4296a7a8640c99c488de4222b99934ef8be88d0faa9d28f451",
 }
 SDK_OVERLAY_FILES = {
     "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs": (
@@ -60,9 +60,9 @@ SDK_OVERLAY_FILES = {
         "c35bb7f302e84fbca74c62d4d8d12bb142002a6f69f12476f386c7a858b5f719"
     ),
     "src/mxc-sdk/src/core/mxc_engine/mod.rs": "1561b879ebe6bfee5d4db6d84e112aa0b97f8395e1cbf4bc3be41c3cfd9a60fe",
-    "src/mxc-sdk/src/lib.rs": "4de6da448d6f68da8142efe39fe8abf56c843ebab397d63e2d0cd3a38e2fa7b1",
+    "src/mxc-sdk/src/lib.rs": "c5526a5ec2fd6536a1e1be8d542d3f68f58ceacb077713faf70c7bed7d13889e",
     "src/mxc-sdk/src/literal_argv.rs": "3e5884c316403be2ad82052492f1d3fd9dbd7ea2500ccbb7c716a64a29602cd5",
-    "src/mxc-sdk/src/owned_windows_psec.rs": "99d2bdbfcf32e00e923a114b4fb102810d142b931ebe7f8f8b999f58b9bcd036",
+    "src/mxc-sdk/src/owned_windows_psec.rs": "f3cf4137c6de6c0f71b895acce834f3f831200928c167178476f7d3ade492e60",
     "src/mxc-sdk/src/owned_windows_root_security.rs": (
         "e219d0a4c07a4e435e8ce3b4f319606bf23065b42337b277496552cc04915c04"
     ),

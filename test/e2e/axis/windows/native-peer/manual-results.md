@@ -102,3 +102,14 @@ of its handles closed, without timeout or output overflow. Elapsed time was
 16.578 seconds. The public canary-05 fixture and failed records are retained.
 The result does not qualify peer preparation, a contained workload or inner
 native cleanup; the protocol failure needs a bounded diagnostic before retry.
+
+The next source revision adds closed preparation/cleanup stages, preserving
+the original refusal and cleanup behavior. Its four-package Windows race run
+passed 135 test/subtest rows, with zero failures/skips; log SHA256
+`b38f64d981d3602097e1c4e5f0086fe6f92dac1a66902c00ff9fa0100c172798`.
+This includes both pre-owner and protocol-owner handoffs of three real
+overlapped pipe pairs, inherited copies and an empty Job. Both cleanup paths
+passed without creating a child, PE, PSEC or sandbox. The actual failed peer's
+cleanup cause remains unproven. All 38 Python build/archive/verifier tests and
+Rustfmt checks also passed; Rust compilation and a fresh integrated attempt
+are still required for this diagnostic revision.
