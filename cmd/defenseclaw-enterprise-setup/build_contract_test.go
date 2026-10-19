@@ -170,12 +170,13 @@ func TestStandaloneFleetCompilerSourceIsOptInBeforeMutation(t *testing.T) {
 	deferredGuard := strings.Index(lifecycle, "if (-not $DeferredConfig) {")
 	inspect := strings.Index(lifecycle, "$standaloneFleetEnabled = Test-DefenseClawStandaloneFleetSourceEnabled `")
 	gate := strings.Index(lifecycle, "if ($standaloneFleetEnabled) {")
-	missing := strings.Index(lifecycle, "if ([string]::IsNullOrWhiteSpace($PolicyCompiler)) {")
-	refusal := strings.Index(lifecycle, "throw 'Fleet-enabled standalone Setup requires -PolicyCompiler from its signed payload'")
+	supplied := strings.Index(lifecycle, "if (-not [string]::IsNullOrWhiteSpace($PolicyCompiler)) {")
 	add := strings.Index(lifecycle, "Add-DefenseClawStandaloneFleetCompilerSource `")
+	kept := strings.Index(lifecycle, "elseif ([string]::IsNullOrEmpty((Get-DefenseClawRecordedStandaloneCompilerPath -Layout $layout))) {")
+	refusal := strings.Index(lifecycle, "throw 'Fleet-enabled standalone Setup carries no Fleet policy compiler and this host has no recorded one to keep; turn Fleet off in the config, then run Setup again'")
 	mutation := strings.Index(lifecycle, "Initialize-DefenseClawManagedRoot `")
-	if deferredGuard < 0 || inspect < deferredGuard || gate < inspect || missing < gate || refusal < missing || add < refusal || mutation < add {
-		t.Fatalf("Fleet-on missing compiler must be refused before managed-root mutation (deferred guard %d, inspect %d, gate %d, missing %d, refusal %d, add %d, mutation %d)", deferredGuard, inspect, gate, missing, refusal, add, mutation)
+	if deferredGuard < 0 || inspect < deferredGuard || gate < inspect || supplied < gate || add < supplied || kept < add || refusal < kept || mutation < refusal {
+		t.Fatalf("Fleet-on without a recorded compiler must be refused before managed-root mutation (deferred guard %d, inspect %d, gate %d, supplied %d, add %d, kept %d, refusal %d, mutation %d)", deferredGuard, inspect, gate, supplied, add, kept, refusal, mutation)
 	}
 	for _, required := range []string{
 		"'inspect-standalone-fleet'",
@@ -185,6 +186,53 @@ func TestStandaloneFleetCompilerSourceIsOptInBeforeMutation(t *testing.T) {
 	} {
 		if !strings.Contains(module, required) {
 			t.Fatalf("standalone Fleet opt-in lifecycle omits %q", required)
+		}
+	}
+}
+
+// moduleFunction returns one function of the Windows enterprise module.
+func moduleFunction(t *testing.T, module, name string) string {
+	t.Helper()
+	start := strings.Index(module, "function "+name+" {")
+	if start < 0 {
+		t.Fatalf("module function %s is missing", name)
+	}
+	body := module[start:]
+	if end := strings.Index(body[1:], "\nfunction "); end >= 0 {
+		body = body[:end+1]
+	}
+	return body
+}
+
+// TestStandaloneFleetUpgradeKeepsTheRecordedCompiler pins GAP-0274: Setup
+// carries no Fleet compiler, so a Fleet-on 1.0.2 host keeps the compiler it
+// installed. Its layout path stays, the lifecycle records the same hash, a
+// rollback restores it, and the install-tree walk accepts it only through the
+// hash-checked helper. No lifecycle creates the compiler tree (GAP-0270).
+func TestStandaloneFleetUpgradeKeepsTheRecordedCompiler(t *testing.T) {
+	module := readEnterpriseSetupContractFile(t, "packaging/windows/DefenseClawEnterprise.psm1")
+	for _, check := range []struct{ function, want string }{
+		{"Get-DefenseClawLayout", "$layout['CompilerPath'] = [IO.Path]::Combine($layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')"},
+		{"Get-DefenseClawArtifactPath", "'compiler' { Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath }"},
+		{"New-DefenseClawDeploymentMetadata", "@('compiler', (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath)),"},
+		{"New-DefenseClawTransaction", "(Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),"},
+		{"Set-DefenseClawManagedAcls", "Set-DefenseClawPathAcl -Path $compilerPath -Kind ServiceInstallFile -GatewayServiceSID $gatewaySID"},
+		{"Assert-DefenseClawEnterpriseDeployment", "-Path $compilerPath `"},
+		{"Assert-DefenseClawManagedInstallTree", "$recordedCompiler = Get-DefenseClawRecordedStandaloneCompilerPath -Layout $Layout"},
+		{"Get-DefenseClawRecordedStandaloneCompilerPath", "if (-not [string]::Equals($actual, $recorded, [StringComparison]::OrdinalIgnoreCase)) {"},
+		{"Get-DefenseClawRecordedStandaloneCompilerPath", "if (-not (Test-DefenseClawStandaloneProfile)) {"},
+	} {
+		if !strings.Contains(moduleFunction(t, module, check.function), check.want) {
+			t.Errorf("%s omits %q", check.function, check.want)
+		}
+	}
+	if strings.Contains(moduleFunction(t, module, "New-DefenseClawLayoutDirectories"), "Compiler") {
+		t.Error("a lifecycle creates the retired compiler tree again")
+	}
+	helper := moduleFunction(t, module, "Get-DefenseClawRecordedStandaloneCompilerPath")
+	for _, forbidden := range []string{"Copy-Item", "Install-DefenseClawFileAtomic", "[IO.File]::Delete", "Remove-Item"} {
+		if strings.Contains(helper, forbidden) {
+			t.Errorf("the recorded-compiler check changes the compiler: %q", forbidden)
 		}
 	}
 }
