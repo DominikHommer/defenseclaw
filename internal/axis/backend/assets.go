@@ -31,6 +31,10 @@ type Assets struct {
 	// be bound or used for execution, even when its identity is otherwise valid.
 	cleanupOnly  bool
 	releaseStage func() error
+	// Only PreparePolicyHostStageAssets installs this after deriving the real
+	// capture inputs from the same opaque host policy. It acknowledges no
+	// export, review, undo, native mount or complete policy capability.
+	workspacePreparation *workspacePreparation
 }
 
 func NewAssets(identity sandboxruntime.SessionIdentity, inputs bridgeprocess.Inputs, read, write []string) (*Assets, error) {

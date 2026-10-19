@@ -51,9 +51,12 @@ func guestGrants(read, write []string) error {
 // or MCP contract. Every such component, including future names, refuses here.
 // This must be replaced component by component with reviewed translations,
 // rather than copying component digests into an otherwise empty receipt.
-func compilePolicy(policy *sandboxruntime.ExecutionPolicy, spec sandboxruntime.Spec, _ *Assets) (bridgeproto.Preparation, sandboxruntime.PolicyReceipt, error) {
+func compilePolicy(policy *sandboxruntime.ExecutionPolicy, spec sandboxruntime.Spec, assets *Assets) (bridgeproto.Preparation, sandboxruntime.PolicyReceipt, error) {
 	if policy.Digest() == "" || spec.Identity.Validate() != nil {
 		return bridgeproto.Preparation{}, sandboxruntime.PolicyReceipt{}, ErrPolicy
+	}
+	if err := validateWorkspacePreparation(policy, spec, assets); err != nil {
+		return bridgeproto.Preparation{}, sandboxruntime.PolicyReceipt{}, err
 	}
 	unsupported := &UnsupportedPolicy{}
 	seen := map[sandboxruntime.PolicyComponentName]bool{}

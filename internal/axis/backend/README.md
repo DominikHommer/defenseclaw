@@ -52,6 +52,26 @@ remain independent admission checks; this addition does not open the catalog.
 A cleanup-only stage returned with a preparation error cannot issue the root
 lease required by this constructor; its caller retains cleanup ownership.
 
+`PreparePolicyHostStageAssets` derives capture options from the same opaque
+host-resolved `ExecutionPolicy` used by the backend. It accepts only copied,
+canonical Windows/Linux projects within the current producer's size floor.
+Masks, unmask entries, protected policy sources, history depth and byte cap
+come from the policy; callers supply only the trusted home/data location and
+already-held image/file inputs. There is no detector or scan-disable override.
+Successful assets retain a private association with that policy, complete
+session identity, workspace component and actual stage summary. Caller-created
+`NewAssets` values cannot manufacture this association. Partial preparation or
+handoff retains a cleanup-only owner, with supplied images transferring only
+on success.
+
+The compiler validates an existing preparation association but still refuses
+the complete workspace component. Bounded result export, review, on-exit and
+undo semantics remain unfinished; capture does not acknowledge them. The
+merged policy also lacks the explicit-request subset used for unmatched
+`--unmask` warnings, so this producer claims no warning parity. It installs no
+runtime or artifact capability and does not check current publication itself;
+the future controller must use the owner's launch gate and complete admission.
+
 The native Windows filesystem custody regression passed under the race
 detector, without executing an image, child process or sandbox:
 
