@@ -1,7 +1,8 @@
 diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
+index b23ed52..40e0655 100644
 --- a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
 +++ b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
-@@ -13,28 +13,27 @@
+@@ -13,28 +13,27 @@ use std::path::{Path, PathBuf};
  use std::ptr;
  use std::sync::Arc;
  
@@ -37,7 +38,7 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
  };
  use crate::mxc_common::error::WxcError;
  use crate::mxc_common::log_symbols::EMOJI_SECTION;
-@@ -44,17 +43,17 @@
+@@ -44,17 +43,17 @@ use crate::mxc_common::models::{
      FailurePhase, SandboxOutputMetadata, ScriptResponse,
  };
  use crate::mxc_common::process_util::{
@@ -61,7 +62,7 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
  use crate::process_container_common::base_container_helpers::{
      build_psec_v1_security_environment_spec, has_conflicting_proxy_identity,
  };
-@@ -71,13 +70,13 @@
+@@ -71,13 +70,13 @@ use crate::process_container_common::launch_diagnostics::{
  use crate::process_container_common::native_capture::CaptureSession;
  use crate::process_container_common::proxy_coordinator::ProxyCoordinator;
  use crate::process_container_common::secenv::{
@@ -79,7 +80,7 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
  };
  
  trait CaptureDenialAnalyzer {
-@@ -433,7 +432,7 @@
+@@ -433,7 +432,7 @@ fn windows_literal_argv_buffers(
  
  /// Pure admission: local drive or verbatim-drive syntax only. Do not normalize
  /// a caller path first: that could traverse a remote junction on the host.
@@ -88,7 +89,7 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
      program: &std::ffi::OsStr,
  ) -> Result<(u16, Vec<std::ffi::OsString>), ScriptResponse> {
      use std::os::windows::ffi::{OsStrExt, OsStringExt};
-@@ -497,13 +496,30 @@
+@@ -497,7 +496,7 @@ fn local_executable_parts(
      ))
  }
  
@@ -97,11 +98,10 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
      // DOS spelling is only a CreateProcess compatibility input, not authority.
      application: Vec<u16>,
      // Hold directory names against rename; hold the image against writes/rename.
-     // Directory metadata and contents remain mutable under the caller's rights.
-     // This is not a digest-based executable authorization for a production host.
+@@ -506,6 +505,23 @@ struct LocalExecutableCustody {
      _handles: Vec<OwnedHandle>,
-+}
-+
+ }
+ 
 +impl LocalExecutableCustody {
 +    pub(crate) fn from_owned(image: std::fs::File) -> std::io::Result<Self> {
 +        use std::os::windows::io::IntoRawHandle;
@@ -117,10 +117,12 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
 +            _handles: vec![image],
 +        })
 +    }
- }
- 
++}
++
  // Native PROCESSINFOCLASS ProcessImageFileMapping (44) reads an input HANDLE
-@@ -548,12 +564,12 @@
+ // and compares the process image's SectionObjectPointer with that held file.
+ // It requires PROCESS_QUERY_INFORMATION and FILE_EXECUTE | SYNCHRONIZE on the
+@@ -548,12 +564,12 @@ fn pin_local_executable(
  ) -> Result<LocalExecutableCustody, ScriptResponse> {
      use std::os::windows::ffi::{OsStrExt, OsStringExt};
      use windows::Win32::Storage::FileSystem::{
@@ -136,7 +138,7 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
      };
      let (drive, parts) = local_executable_parts(program)?;
      let alias = [drive, 58, 0];
-@@ -805,7 +821,7 @@
+@@ -805,7 +821,7 @@ mod strict_windows_path_tests {
          use std::io::{Read, Seek, SeekFrom, Write};
          use std::os::windows::io::BorrowedHandle;
          use windows::Win32::Storage::FileSystem::{
@@ -145,15 +147,22 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
          };
          use windows::Win32::System::Threading::GetCurrentProcess;
          fn held_file(custody: &LocalExecutableCustody) -> std::fs::File {
-@@ -1137,6 +1153,7 @@
+@@ -1137,7 +1153,14 @@ impl BaseContainerRunner {
          capture: bool,
          literal_argv: Option<&crate::mxc_common::literal_argv::LiteralArgv>,
          literal_custody: Option<&LocalExecutableCustody>,
 +        owned_stdio: Option<&crate::owned_windows_psec::OwnedWindowsStdio>,
++        defer_owned_resume: bool,
      ) -> Result<BaseChild, ScriptResponse> {
++        if defer_owned_resume && (owned_stdio.is_none() || literal_argv.is_none() || capture) {
++            return Err(ScriptResponse::rejected(
++                "suspended owned launch requires literal custody and owned stdio",
++            ));
++        }
          if literal_argv.is_some() != literal_custody.is_some() {
              return Err(ScriptResponse::rejected(
-@@ -1258,8 +1275,10 @@
+                 "literal argv and held executable custody must be bound together",
+@@ -1258,8 +1281,10 @@ impl BaseContainerRunner {
          // In capture mode (`StdioMode::Pipes`) we always take the pipe
          // path and wire the child to capture pipes that the streaming handle
          // reads from.
@@ -166,7 +175,7 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
  
          if pipe_mode {
              if capture {
-@@ -1289,7 +1308,47 @@
+@@ -1289,7 +1314,47 @@ impl BaseContainerRunner {
          let mut captured_stdin_write: Option<OwnedHandle> = None;
  
          if pipe_mode {
@@ -215,7 +224,7 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
                  let (stdin_read, stdin_write) = match create_std_pipes(false) {
                      Ok(p) => p,
                      Err(e) => return Err(ScriptResponse::error(&format!("stdin pipe: {e}"))),
-@@ -1528,50 +1587,48 @@
+@@ -1528,50 +1593,48 @@ impl BaseContainerRunner {
                      .map(ProcessSecurityEnvironment::raw)
              })
              .expect("PSEC environment owner is initialized before launch");
@@ -304,7 +313,7 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
          let environment = (!current_env_ptr.is_null()).then_some(current_env_ptr);
          // Freeze numeric shape before the native call. UTF-16 block lengths
          // include their NUL terminators; counts never carry source values.
-@@ -1783,8 +1840,7 @@
+@@ -1783,8 +1846,7 @@ impl BaseContainerRunner {
                  }
                  self.proxy_coordinator.stop(logger);
  
@@ -314,24 +323,59 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
                       could not be reliably terminated; the launch was rejected to \
                       avoid running an uncontainable sandbox.";
                  let mut extended_error = format!("BaseContainer job-object setup failed: {e}");
-@@ -2024,7 +2080,7 @@
+@@ -1805,6 +1867,33 @@ impl BaseContainerRunner {
+             }
+         };
+ 
++        // Only the explicit owned route may transfer a still-suspended child.
++        // All native handles, Job, PSEC state and pipe owners move together.
++        // Literal image identity is checked by admit_and_resume before and
++        // after host admission; this branch never calls ResumeThread.
++        if defer_owned_resume {
++            return Ok(BaseChild {
++                process: OwnedHandle::new(pi.hProcess),
++                thread: OwnedHandle::new(pi.hThread),
++                pid: pi.dwProcessId,
++                job: Some(job),
++                stdin_write: captured_stdin_write,
++                stdout_read,
++                stderr_read,
++                timeout_ms: get_timeout_milliseconds(request.script_timeout),
++                preserve_policy: request.lifecycle.preserve_policy,
++                identity,
++                proxy_coordinator: std::mem::take(&mut self.proxy_coordinator),
++                capture_session,
++                security_environment,
++                managed_capture: managed_capture.take(),
++                capture_output_path,
++                retain_capture_etl: capture_denials
++                    .as_ref()
++                    .is_some_and(|config| config.retain_etl),
++            });
++        }
++
+         // The child was created suspended; now that it is in the job object (so
+         // every descendant it spawns is captured), resume its main thread.
+         // SAFETY: `pi.hThread` is the just-created, still-owned main-thread
+@@ -2024,7 +2113,7 @@ impl SandboxBackend for BaseContainerRunner {
          // Pipes → capture pipes the caller drives; Inherit → the child inherits
          // the binary's own std handles / console (a TTY when the binary has one).
          let capture = stdio == StdioMode::Pipes;
 -        let child = self.spawn_base(request, logger, capture, None, None)?;
-+        let child = self.spawn_base(request, logger, capture, None, None, None)?;
++        let child = self.spawn_base(request, logger, capture, None, None, None, false)?;
          Ok(Box::new(BaseContainerSandboxProcess::from_child(
              child, logger,
          )))
-@@ -2050,6 +2106,7 @@
+@@ -2050,6 +2139,8 @@ impl SandboxBackend for BaseContainerRunner {
              stdio == StdioMode::Pipes,
              Some(argv),
              Some(&custody),
 +            None,
++            false,
          )?;
          drop(custody);
          Ok(Box::new(BaseContainerSandboxProcess::from_child(
-@@ -2915,15 +2972,15 @@
+@@ -2915,15 +3006,15 @@ fn managed_capture_output_path_in(
  mod tests {
      use super::*;
      use crate::learning_mode_core::{
@@ -350,7 +394,7 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
      use crate::mxc_common::ui_policy::EffectiveUiRestrictions;
      use crate::mxc_common::wire;
      use crate::process_container_common::job_object::to_job_object_uilimit_mask;
-@@ -3919,13 +3976,15 @@
+@@ -3919,13 +4010,15 @@ mod tests {
              spec.capabilities(),
              Some("privateNetworkClientServer,networkLoopback")
          );
@@ -373,7 +417,7 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
      }
  
      #[test]
-@@ -4043,16 +4102,19 @@
+@@ -4043,16 +4136,19 @@ mod tests {
                  let bytes = build_psec_v1_security_environment_spec(&request, version, false);
                  let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
  
@@ -403,7 +447,7 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
              }
          }
      }
-@@ -4513,3 +4575,142 @@
+@@ -4513,3 +4609,612 @@ mod tests {
      // BaseContainer native-PSEC exception) is exercised as a consolidated
      // matrix in `crate::guarded_capture`'s tests, so it is not duplicated here.
  }
@@ -412,6 +456,8 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
 +// event-loop/controller. This value reuses the existing native child and Job.
 +pub struct OwnedPsecProcess {
 +    child: BaseChild,
++    start: OwnedPsecStart,
++    resume_custody: Option<LocalExecutableCustody>,
 +    _files: Vec<std::fs::File>,
 +    stop_requested: bool,
 +    code: Option<i32>,
@@ -435,8 +481,214 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
 +        used: *mut u32,
 +    ) -> i32;
 +}
++fn duplicate_retained_query_process_handle(
++    process: HANDLE,
++) -> std::io::Result<std::os::windows::io::OwnedHandle> {
++    use std::os::windows::io::FromRawHandle;
++    use windows::Win32::Foundation::{DUPLICATE_HANDLE_OPTIONS, DuplicateHandle};
++    use windows::Win32::System::Threading::{
++        GetCurrentProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
++    };
++    let mut duplicate = HANDLE::default();
++    // SAFETY: the caller keeps the source process handle valid throughout
++    // this call. The new handle is noninheritable and has no mutation rights.
++    unsafe {
++        DuplicateHandle(
++            GetCurrentProcess(),
++            process,
++            GetCurrentProcess(),
++            &mut duplicate,
++            PROCESS_QUERY_LIMITED_INFORMATION.0 | PROCESS_SYNCHRONIZE.0,
++            false,
++            DUPLICATE_HANDLE_OPTIONS(0),
++        )
++    }
++    .map_err(|error| {
++        // Only FACILITY_WIN32 HRESULTs embed a Win32 error in the low word.
++        // Preserve other facilities as HRESULT diagnostics instead of
++        // misreporting their low word as an unrelated OS error.
++        let hr = error.code().0 as u32;
++        if (hr & 0xFFFF_0000) == 0x8007_0000 {
++            std::io::Error::from_raw_os_error((hr & 0xFFFF) as i32)
++        } else {
++            std::io::Error::other(error.to_string())
++        }
++    })?;
++    // SAFETY: DuplicateHandle created a distinct owned kernel handle.
++    Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(duplicate.0) })
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum OwnedPsecStart {
++    Running,
++    Suspended,
++    Refused,
++}
++impl OwnedPsecStart {
++    fn begin(&mut self, stopped: bool) -> std::io::Result<()> {
++        if *self != Self::Suspended {
++            return Err(std::io::Error::other("owned PSEC resume is not pending"));
++        }
++        // No callback, query, panic or retry can turn a failed attempt into a
++        // later resume. The caller keeps the same exclusive cleanup owner.
++        *self = Self::Refused;
++        if stopped {
++            return Err(std::io::Error::other("owned PSEC resume was cancelled"));
++        }
++        Ok(())
++    }
++}
++
++struct OwnedAdmissionSeal<S: FnOnce()> {
++    seal: Option<S>,
++}
++impl<S: FnOnce()> Drop for OwnedAdmissionSeal<S> {
++    fn drop(&mut self) {
++        if let Some(seal) = self.seal.take() {
++            seal();
++        }
++    }
++}
++
++// Install rollback before checking whether this owner can begin. A host
++// endpoint may already be bound even when cancellation or a duplicate call
++// refuses before any admission callback. No early return may bypass sealing.
++fn begin_owned_admission<S: FnOnce()>(
++    start: &mut OwnedPsecStart,
++    stopped: bool,
++    seal: S,
++) -> std::io::Result<OwnedAdmissionSeal<S>> {
++    let rollback = OwnedAdmissionSeal { seal: Some(seal) };
++    start.begin(stopped)?;
++    Ok(rollback)
++}
++
++fn owned_admission_before_resume<Q>(
++    mut live: impl FnMut() -> std::io::Result<()>,
++    mut custody: impl FnMut() -> std::io::Result<()>,
++    query: impl FnOnce() -> std::io::Result<Q>,
++    admit: impl FnOnce(&Q) -> std::io::Result<()>,
++    resume: impl FnOnce() -> std::io::Result<()>,
++    seal: impl FnOnce(),
++) -> std::io::Result<()> {
++    let mut rollback = OwnedAdmissionSeal { seal: Some(seal) };
++    live()?;
++    custody()?;
++    let query = query()?;
++    admit(&query)?;
++    live()?;
++    custody()?;
++    resume()?;
++    let _ = rollback.seal.take();
++    Ok(())
++}
++
 +impl OwnedPsecProcess {
-+    fn empty(&self) -> std::io::Result<bool> {
++    /// Duplicate the retained native child handle for identity queries and waiting.
++    ///
++    /// The returned handle is non-inheritable, independently owned, and limited
++    /// to `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`. This does not reopen
++    /// a numeric PID or transfer this owner's stop, Job wait, or cleanup duties.
++    pub fn duplicate_query_process_handle(
++        &self,
++    ) -> std::io::Result<std::os::windows::io::OwnedHandle> {
++        duplicate_retained_query_process_handle(self.child.process.get())
++    }
++
++    /// Bind the exact suspended child to its trusted host session, then resume.
++    ///
++    /// `live` must check the existing owner lifetime/cancellation; `admit` must
++    /// synchronously complete endpoint binding using this borrowed restricted
++    /// query handle and the caller's trusted session identity. Neither callback
++    /// may select authority from a PID, guest profile or client-supplied label.
++    /// Both callbacks must obey the existing owner/outer deadline; the SDK does
++    /// not detach a worker or interrupt a blocking callback. The query duplicate
++    /// stays held through Resume and must not be closed by the borrowed caller.
++    /// `seal` must synchronously close host endpoint admission in memory without
++    /// blocking, panicking, filesystem I/O or waiting for native cleanup. Error
++    /// and unwind paths call it before Stop; durable revocation/drain is later.
++    /// This includes cancellation, repeated calls, and nonpending-state refusal
++    /// before either callback runs, even when the host prebound its endpoint.
++    ///
++    /// Any refusal consumes the one attempt and requests Stop. On error this
++    /// same value retains all cleanup custody: revoke endpoint admission, then
++    /// Stop/try_wait to native completion before releasing dependent assets.
++    /// Omitting this call never resumes a spawn_suspended child. Panic leaves
++    /// it Refused and suspended, with this same owner still requiring cleanup.
++    pub fn admit_and_resume(
++        &mut self,
++        live: impl FnMut() -> std::io::Result<()>,
++        admit: impl FnOnce(&std::os::windows::io::OwnedHandle) -> std::io::Result<()>,
++        seal: impl FnOnce(),
++    ) -> std::io::Result<()> {
++        let attempt = begin_owned_admission(
++            &mut self.start,
++            self.stop_requested || self.code.is_some(),
++            seal,
++        );
++        let result = match attempt {
++            Ok(mut rollback) => {
++                let result = owned_admission_before_resume(
++                    live,
++                    || {
++                        let custody = self.resume_custody.as_ref().ok_or_else(|| {
++                            std::io::Error::other("owned PSEC suspended image custody absent")
++                        })?;
++                        if unsafe { WaitForSingleObject(self.child.process.get(), 0) }
++                            != WAIT_TIMEOUT
++                            || self.active_processes()? != 1
++                            || literal_image_mapping_status(self.child.process.get(), custody) != 0
++                        {
++                            return Err(std::io::Error::other(
++                                "owned PSEC suspended custody differs",
++                            ));
++                        }
++                        Ok(())
++                    },
++                    || duplicate_retained_query_process_handle(self.child.process.get()),
++                    admit,
++                    || {
++                        // A freshly created private primary thread has suspend count1.
++                        // Any other result is terminal refusal, never a resume retry.
++                        let previous = unsafe { ResumeThread(self.child.thread.get()) };
++                        if previous == u32::MAX {
++                            return Err(std::io::Error::last_os_error());
++                        }
++                        if previous != 1 {
++                            return Err(std::io::Error::other("owned PSEC suspend count differs"));
++                        }
++                        Ok(())
++                    },
++                    || {
++                        if let Some(seal) = rollback.seal.take() {
++                            seal();
++                        }
++                    },
++                );
++                if result.is_ok() {
++                    let _ = rollback.seal.take();
++                }
++                result
++            }
++            Err(error) => Err(error),
++        };
++        match result {
++            Ok(()) => {
++                self.start = OwnedPsecStart::Running;
++                Ok(())
++            }
++            Err(error) => {
++                if self.stop().is_err() {
++                    return Err(std::io::Error::other(
++                        "owned PSEC admission/resume refused and Stop incomplete",
++                    ));
++                }
++                Err(error)
++            }
++        }
++    }
++
++    fn active_processes(&self) -> std::io::Result<u32> {
 +        let job = self
 +            .child
 +            .job
@@ -457,7 +709,10 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
 +        {
 +            return Err(std::io::Error::other("owned PSEC Job accounting refused"));
 +        }
-+        Ok(accounting.active == 0)
++        Ok(accounting.active)
++    }
++    fn empty(&self) -> std::io::Result<bool> {
++        self.active_processes().map(|active| active == 0)
 +    }
 +    pub fn stop(&mut self) -> std::io::Result<()> {
 +        self.stop_requested = true;
@@ -524,6 +779,29 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
 +        files: Vec<std::fs::File>,
 +        stdio: crate::owned_windows_psec::OwnedWindowsStdio,
 +    ) -> Result<OwnedPsecProcess, ScriptResponse> {
++        self.spawn_owned_psec_with_mode(request, argv, custody, files, stdio, false)
++    }
++
++    pub(crate) fn spawn_owned_psec_suspended(
++        &mut self,
++        request: ExecutionRequest,
++        argv: crate::mxc_common::literal_argv::LiteralArgv,
++        custody: LocalExecutableCustody,
++        files: Vec<std::fs::File>,
++        stdio: crate::owned_windows_psec::OwnedWindowsStdio,
++    ) -> Result<OwnedPsecProcess, ScriptResponse> {
++        self.spawn_owned_psec_with_mode(request, argv, custody, files, stdio, true)
++    }
++
++    fn spawn_owned_psec_with_mode(
++        &mut self,
++        request: ExecutionRequest,
++        argv: crate::mxc_common::literal_argv::LiteralArgv,
++        custody: LocalExecutableCustody,
++        files: Vec<std::fs::File>,
++        stdio: crate::owned_windows_psec::OwnedWindowsStdio,
++        defer_owned_resume: bool,
++    ) -> Result<OwnedPsecProcess, ScriptResponse> {
 +        crate::mxc_common::validator::validate_argv_common(&request, &argv)?;
 +        self.validate(&request)?;
 +        windows_literal_argv_buffers(&argv)?;
@@ -537,19 +815,256 @@ diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_ru
 +            Some(&argv),
 +            Some(&custody),
 +            Some(&stdio),
++            defer_owned_resume,
 +        )?;
 +        Ok(OwnedPsecProcess {
 +            child,
++            start: if defer_owned_resume {
++                OwnedPsecStart::Suspended
++            } else {
++                OwnedPsecStart::Running
++            },
++            resume_custody: if defer_owned_resume {
++                Some(custody)
++            } else {
++                None
++            },
 +            _files: files,
 +            stop_requested: false,
 +            code: None,
 +        })
 +    }
 +}
++
++#[cfg(test)]
++mod owned_psec_query_tests {
++    use super::*;
++
++    #[test]
++    fn native_owned_psec_query_duplicate_is_noninheritable_and_independently_owned() {
++        use std::os::windows::io::AsRawHandle;
++        use windows::Win32::Foundation::{GetHandleInformation, NTSTATUS};
++        use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
++        use windows::Win32::System::Threading::{
++            GetCurrentProcess, GetCurrentProcessId, GetProcessId,
++            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
++        };
++
++        // NtQueryObject(ObjectBasicInformation) is a read-only query of the
++        // duplicate's granted mask. It avoids attempting a mutating operation
++        // against the test process to prove the absence of broader rights.
++        #[repr(C)]
++        #[derive(Default)]
++        struct PublicObjectBasicInformation {
++            _attributes: u32,
++            granted_access: u32,
++            _handle_count: u32,
++            _pointer_count: u32,
++            _reserved: [u32; 10],
++        }
++        type NtQueryObjectFn =
++            unsafe extern "system" fn(HANDLE, u32, *mut c_void, u32, *mut u32) -> NTSTATUS;
++
++        // The current-process pseudo-handle is an inert source: no child,
++        // container, profile or host permission is created or changed.
++        let original = duplicate_retained_query_process_handle(unsafe { GetCurrentProcess() })
++            .expect("duplicate current process for query");
++        let survivor = duplicate_retained_query_process_handle(HANDLE(original.as_raw_handle()))
++            .expect("duplicate retained query handle");
++        assert_ne!(original.as_raw_handle(), survivor.as_raw_handle());
++        drop(original);
++        let handle = HANDLE(survivor.as_raw_handle());
++        assert_eq!(unsafe { GetProcessId(handle) }, unsafe {
++            GetCurrentProcessId()
++        });
++        let mut flags = 0;
++        unsafe { GetHandleInformation(handle, &mut flags) }.expect("query duplicate flags");
++        assert_eq!(flags & HANDLE_FLAG_INHERIT.0, 0);
++        // SAFETY: ntdll is already loaded; the export has the documented
++        // NtQueryObject signature and the stack output buffer is fully sized.
++        let module =
++            unsafe { GetModuleHandleW(windows::core::w!("ntdll.dll")) }.expect("loaded ntdll");
++        let export = unsafe { GetProcAddress(module, windows::core::s!("NtQueryObject")) }
++            .expect("NtQueryObject export");
++        let query: NtQueryObjectFn = unsafe { std::mem::transmute(export) };
++        assert_eq!(std::mem::size_of::<PublicObjectBasicInformation>(), 56);
++        let mut basic = PublicObjectBasicInformation::default();
++        let mut returned = 0u32;
++        let status = unsafe {
++            query(
++                handle,
++                0, // ObjectBasicInformation
++                (&mut basic as *mut PublicObjectBasicInformation).cast(),
++                std::mem::size_of::<PublicObjectBasicInformation>() as u32,
++                &mut returned,
++            )
++        };
++        assert_eq!(status.0, 0, "query duplicate granted access");
++        assert_eq!(
++            returned as usize,
++            std::mem::size_of::<PublicObjectBasicInformation>()
++        );
++        assert_eq!(
++            basic.granted_access,
++            PROCESS_QUERY_LIMITED_INFORMATION.0 | PROCESS_SYNCHRONIZE.0
++        );
++        assert_eq!(unsafe { WaitForSingleObject(handle, 0) }, WAIT_TIMEOUT);
++    }
++}
++
++#[cfg(test)]
++mod owned_psec_resume_tests {
++    use super::*;
++    use std::cell::RefCell;
++
++    #[test]
++    fn owned_resume_orders_live_identity_admission_and_fresh_custody_before_resume() {
++        let calls = RefCell::new(Vec::new());
++        owned_admission_before_resume(
++            || {
++                calls.borrow_mut().push("live");
++                Ok(())
++            },
++            || {
++                calls.borrow_mut().push("custody");
++                Ok(())
++            },
++            || {
++                calls.borrow_mut().push("query");
++                Ok(73)
++            },
++            |query| {
++                assert_eq!(*query, 73);
++                calls.borrow_mut().push("admit");
++                Ok(())
++            },
++            || {
++                calls.borrow_mut().push("resume");
++                Ok(())
++            },
++            || {
++                calls.borrow_mut().push("seal");
++            },
++        )
++        .unwrap();
++        assert_eq!(
++            *calls.borrow(),
++            [
++                "live", "custody", "query", "admit", "live", "custody", "resume"
++            ]
++        );
++    }
++
++    #[test]
++    fn owned_resume_refuses_each_failed_gate_without_later_admission_or_resume() {
++        for failure in 1..=7 {
++            let calls = RefCell::new(Vec::new());
++            let step = |name| {
++                let mut calls = calls.borrow_mut();
++                calls.push(name);
++                if calls.len() == failure {
++                    Err(std::io::Error::other("fixed synthetic refusal"))
++                } else {
++                    Ok(())
++                }
++            };
++            let result = owned_admission_before_resume(
++                || step("live"),
++                || step("custody"),
++                || step("query").map(|()| 73),
++                |query| {
++                    assert_eq!(*query, 73);
++                    step("admit")
++                },
++                || step("resume"),
++                || {
++                    calls.borrow_mut().push("seal");
++                },
++            );
++            assert!(result.is_err());
++            // This is the caller's native Stop boundary: rollback has already
++            // sealed even if admission succeeded and a later gate failed.
++            assert_eq!(calls.borrow().last(), Some(&"seal"));
++            calls.borrow_mut().push("stop");
++            assert_eq!(calls.borrow().len(), failure + 2);
++            assert_eq!(&calls.borrow()[failure..], &["seal", "stop"]);
++            assert_eq!(
++                calls
++                    .borrow()
++                    .iter()
++                    .filter(|name| **name == "resume")
++                    .count(),
++                usize::from(failure == 7)
++            );
++            if failure >= 5 {
++                assert_eq!(
++                    calls
++                        .borrow()
++                        .iter()
++                        .filter(|name| **name == "admit")
++                        .count(),
++                    1
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn owned_resume_attempt_is_one_shot_for_cancel_refusal_and_panic() {
++        for (mut start, stopped) in [
++            (OwnedPsecStart::Suspended, true),
++            (OwnedPsecStart::Refused, false),
++            (OwnedPsecStart::Running, false),
++        ] {
++            let calls = RefCell::new(Vec::new());
++            let result = begin_owned_admission(&mut start, stopped, || {
++                calls.borrow_mut().push("seal");
++            });
++            assert!(result.is_err());
++            // The public method's common error branch invokes native Stop only
++            // after begin has returned and its refusal guard has sealed.
++            assert_eq!(*calls.borrow(), ["seal"]);
++            calls.borrow_mut().push("stop");
++            assert_eq!(*calls.borrow(), ["seal", "stop"]);
++            drop(result);
++            assert_eq!(*calls.borrow(), ["seal", "stop"]);
++        }
++
++        let mut omitted = OwnedPsecStart::Suspended;
++        assert_eq!(omitted, OwnedPsecStart::Suspended);
++        assert!(omitted.begin(true).is_err());
++        assert_eq!(omitted, OwnedPsecStart::Refused);
++        assert!(omitted.begin(false).is_err());
++
++        let mut attempted = OwnedPsecStart::Suspended;
++        assert!(attempted.begin(false).is_ok());
++        assert_eq!(attempted, OwnedPsecStart::Refused);
++        let sealed = std::sync::atomic::AtomicBool::new(false);
++        let result = std::panic::catch_unwind(|| {
++            owned_admission_before_resume(
++                || Ok(()),
++                || Ok(()),
++                || Ok(73),
++                |_| -> std::io::Result<()> { panic!("fixed admission panic") },
++                || -> std::io::Result<()> { panic!("resume must not be called") },
++                || {
++                    sealed.store(true, std::sync::atomic::Ordering::SeqCst);
++                },
++            )
++        });
++        assert!(result.is_err());
++        assert!(sealed.load(std::sync::atomic::Ordering::SeqCst));
++        assert!(attempted.begin(false).is_err());
++        let mut running = OwnedPsecStart::Running;
++        assert!(running.begin(false).is_err());
++        assert_eq!(running, OwnedPsecStart::Running);
++    }
++}
 diff --git a/src/mxc-sdk/src/lib.rs b/src/mxc-sdk/src/lib.rs
+index 9ddb78a..018d8e7 100644
 --- a/src/mxc-sdk/src/lib.rs
 +++ b/src/mxc-sdk/src/lib.rs
-@@ -226,14 +226,19 @@
+@@ -226,14 +226,19 @@ use sandbox::{ExecutionResult, MxcProcess};
  /// schema version.
  ///
  pub mod v1 {
@@ -571,17 +1086,17 @@ diff --git a/src/mxc-sdk/src/lib.rs b/src/mxc-sdk/src/lib.rs
      };
      #[cfg(target_os = "windows")]
      pub use crate::mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
-@@ -262,8 +267,8 @@
+@@ -262,8 +267,8 @@ pub mod v1 {
          /// Host filesystem-policy discovery helpers and their options.
          pub mod filesystem {
              pub use crate::policy::{
-+                FilesystemPolicyResult, ToolsPolicyContainerType, ToolsPolicyOptions,
-                 available_tools_policy, temporary_files_policy, user_profile_policy,
--                FilesystemPolicyResult, ToolsPolicyContainerType, ToolsPolicyOptions,
+-                available_tools_policy, temporary_files_policy, user_profile_policy,
+                 FilesystemPolicyResult, ToolsPolicyContainerType, ToolsPolicyOptions,
++                available_tools_policy, temporary_files_policy, user_profile_policy,
              };
          }
  
-@@ -373,7 +378,7 @@
+@@ -373,7 +378,7 @@ pub mod v1 {
      }
  
      #[cfg(target_os = "windows")]
@@ -590,7 +1105,7 @@ diff --git a/src/mxc-sdk/src/lib.rs b/src/mxc-sdk/src/lib.rs
          request: &ContainerRequest,
          values: Vec<std::ffi::OsString>,
          telemetry: Option<TelemetryConfig>,
-@@ -685,3 +690,6 @@
+@@ -685,3 +690,6 @@ fn wait_with_output(sandbox: MxcProcess) -> Result<ExecutionResult, Error> {
          )
      })
  }
@@ -599,9 +1114,10 @@ diff --git a/src/mxc-sdk/src/lib.rs b/src/mxc-sdk/src/lib.rs
 +mod owned_windows_psec;
 diff --git a/src/mxc-sdk/src/owned_windows_psec.rs b/src/mxc-sdk/src/owned_windows_psec.rs
 new file mode 100644
+index 0000000..667413b
 --- /dev/null
 +++ b/src/mxc-sdk/src/owned_windows_psec.rs
-@@ -0,0 +1,548 @@
+@@ -0,0 +1,569 @@
 +// Copyright 2026 Cisco Systems, Inc. and its affiliates
 +// SPDX-License-Identifier: MIT
 +
@@ -1049,6 +1565,27 @@ new file mode 100644
 +            files,
 +        })
 +    }
++    /// Create the exact child in its owned Job without resuming its primary thread.
++    ///
++    /// This consumes all prepared inputs just like spawn, but a successful return
++    /// requires an explicit admit_and_resume call before any agent code runs.
++    /// Keep this exclusive owner until Stop/try_wait confirms native cleanup if
++    /// admission is omitted, cancelled or refused. Drop requests containment but
++    /// is not evidence of native wait completion. Setup failures before a usable
++    /// BaseChild is returned retain the existing spawn setup/cleanup behavior.
++    pub fn spawn_suspended(self, stdio: OwnedWindowsStdio) -> io::Result<OwnedPsecProcess> {
++        let mut runner = BaseContainerRunner::new();
++        runner
++            .spawn_owned_psec_suspended(
++                self.request.inner,
++                self.argv,
++                self.custody,
++                self.files,
++                stdio,
++            )
++            .map_err(|_: ScriptResponse| refused())
++    }
++
 +    pub fn spawn(self, stdio: OwnedWindowsStdio) -> io::Result<OwnedPsecProcess> {
 +        let mut runner = BaseContainerRunner::new();
 +        runner
@@ -1152,6 +1689,7 @@ new file mode 100644
 +}
 diff --git a/src/mxc-sdk/src/owned_windows_root_security.rs b/src/mxc-sdk/src/owned_windows_root_security.rs
 new file mode 100644
+index 0000000..6b58ee0
 --- /dev/null
 +++ b/src/mxc-sdk/src/owned_windows_root_security.rs
 @@ -0,0 +1,212 @@

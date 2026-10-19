@@ -32,7 +32,7 @@ PATCHES = {
 # Reviewed owned-input adapter; never includes the uncontained control overlay.
 OWNED_PATCH = {
     "path": "patches/mxc-owned-windows-psec.patch",
-    "sha256": "a0232b93b5131905dcfc4c7c47f85faa9113f85ca03be413b8f453b774ca25d2",
+    "sha256": "c5ce1bb248ee112b87d59b763ed51e96dc9057b3187d3e5f9909ce1f31340691",
 }
 SDK_OVERLAY_FILES = {
     "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs": (
@@ -42,7 +42,7 @@ SDK_OVERLAY_FILES = {
         "5b23635df276e0743f9f9986f1ee4b63d9b0c71685b8e14bfa7b099023cfa210"
     ),
     "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs": (
-        "e01e8885fbea92083c308a5ff47c683e77567e6b0f930ca9b002bf8e7bf38323"
+        "126b9e6690ae8253a4d4f3a6309c3a32de9ac8b3f60ec49ffbdd9ca17722a68b"
     ),
     "src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs": (
         "110534317bd4311b6ce1253126a7f6d507b7e98f381ad7945a63792e3297a13e"
@@ -62,7 +62,7 @@ SDK_OVERLAY_FILES = {
     "src/mxc-sdk/src/core/mxc_engine/mod.rs": "1561b879ebe6bfee5d4db6d84e112aa0b97f8395e1cbf4bc3be41c3cfd9a60fe",
     "src/mxc-sdk/src/lib.rs": "4de6da448d6f68da8142efe39fe8abf56c843ebab397d63e2d0cd3a38e2fa7b1",
     "src/mxc-sdk/src/literal_argv.rs": "3e5884c316403be2ad82052492f1d3fd9dbd7ea2500ccbb7c716a64a29602cd5",
-    "src/mxc-sdk/src/owned_windows_psec.rs": "f52eec99f1feb5e125b3e923377b02b9f68a4cecfc1d4ee937252f01c1db4218",
+    "src/mxc-sdk/src/owned_windows_psec.rs": "99d2bdbfcf32e00e923a114b4fb102810d142b931ebe7f8f8b999f58b9bcd036",
     "src/mxc-sdk/src/owned_windows_root_security.rs": (
         "e219d0a4c07a4e435e8ce3b4f319606bf23065b42337b277496552cc04915c04"
     ),
@@ -90,6 +90,10 @@ SDK_INERT_TESTS = (
     "owned_windows_psec::stdio_tests::stdio_requires_synchronous_mode_and_direction_before_native_launch",
     "owned_windows_psec::native_access_tests::native_current_image_read_handle_cannot_be_promoted_to_execute_or_write",
     "owned_windows_psec::native_access_tests::native_relative_grant_pin_requires_the_exact_held_file_object",
+    "backend_modules::process_container::common::base_container_runner::owned_psec_query_tests::native_owned_psec_query_duplicate_is_noninheritable_and_independently_owned",
+    "backend_modules::process_container::common::base_container_runner::owned_psec_resume_tests::owned_resume_orders_live_identity_admission_and_fresh_custody_before_resume",
+    "backend_modules::process_container::common::base_container_runner::owned_psec_resume_tests::owned_resume_refuses_each_failed_gate_without_later_admission_or_resume",
+    "backend_modules::process_container::common::base_container_runner::owned_psec_resume_tests::owned_resume_attempt_is_one_shot_for_cancel_refusal_and_panic",
 )
 
 
@@ -178,7 +182,7 @@ def main():
         and len(INERT_TESTS) > 0
         and len(set(INERT_TESTS)) == len(INERT_TESTS)
         and isinstance(SDK_INERT_TESTS, tuple)
-        and len(SDK_INERT_TESTS) == len(set(SDK_INERT_TESTS)) == 4,
+        and len(SDK_INERT_TESTS) == len(set(SDK_INERT_TESTS)) == 8,
         "Windows source/test admission is closed",
     )
     require(
