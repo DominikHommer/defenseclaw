@@ -82,7 +82,7 @@ jobs:
 
           roots = {
               'internal/axis/namespaceinit': ['README.md', 'bootstrap_linux.go', 'bootstrap_linux_test.go', 'proof.go', 'proof_test.go'],
-              'test/e2e/axis/native-peer/driver': ['README.md', 'cleanup.go', 'cleanup_test.go', 'custody_linux.go', 'driver_linux.go', 'driver_linux_test.go', 'images_linux.go', 'main.go', 'main_other.go', 'main_test.go'],
+              'test/e2e/axis/native-peer/driver': ['README.md', 'cleanup.go', 'cleanup_test.go', 'custody_linux.go', 'driver_linux.go', 'driver_linux_test.go', 'images_linux.go', 'main.go', 'main_other.go', 'main_test.go', 'version.go', 'version_linux.go', 'version_linux_test.go', 'version_test.go'],
           }
           sources = ['go.mod', 'go.sum', 'LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt', '.github/workflows/axis-native-driver-build.yml']
           for root, names in roots.items():
@@ -111,9 +111,12 @@ jobs:
               source_hashes[name] = hashlib.sha256(raw).hexdigest()
           admission = Path('test/e2e/axis/native-peer/driver/main.go').read_bytes()
           admission_sha = hashlib.sha256(admission).hexdigest()
-          if admission_sha != '660a92f44df5179739163893080a80a4e388d59d0fc04fbeafd6252a465dab2b':
+          if admission_sha != '52bd875d16df51d20c2f5b1a1eac32517d8d1cacc3998bfab3084b606efaac64':
               raise SystemExit('exact reviewed fixed-wrapper admission source required')
-          (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'admission_source_sha256': admission_sha, 'wrapper_image_sha256': '485aa37bf8fda4aa35f41247c802931fd73decfac28eda60ed8ea44577f63e87', 'wrapper_image_size': 3473534, 'reviewed_registry_receipt_sha256': '6db10d2a73ee7860bb0d7ad8a6155166d2b59e7d504513e1222a634aac55c668', 'go_embed_or_native_inputs': False, 'driver_wrapper_or_sandbox_execution': False}, indent=2) + '\n')
+          version_sha = hashlib.sha256(Path('test/e2e/axis/native-peer/driver/version.go').read_bytes()).hexdigest()
+          if version_sha != '64cfb8e89d0ce16660ba253718f039d450949f903682181ee5051056747676a9':
+              raise SystemExit('exact reviewed version-wrapper admission source required')
+          (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'admission_source_sha256': admission_sha, 'version_admission_source_sha256': version_sha, 'version_wrapper_image_sha256': '63300aa074ad60c607b15fb7833a38dc3421a5616c73abdb54386a7045563912', 'version_wrapper_image_size': 3506302, 'reviewed_version_receipt_sha256': 'e24ee1736320e9df281e0ab7049b2df8cbacbf27d81d31fc46e21cef09b165b7', 'wrapper_image_sha256': '485aa37bf8fda4aa35f41247c802931fd73decfac28eda60ed8ea44577f63e87', 'wrapper_image_size': 3473534, 'reviewed_registry_receipt_sha256': '6db10d2a73ee7860bb0d7ad8a6155166d2b59e7d504513e1222a634aac55c668', 'go_embed_or_native_inputs': False, 'driver_wrapper_or_sandbox_execution': False}, indent=2) + '\n')
           PY
       - name: Verify exact dependency closure without running the outer driver
         shell: bash
@@ -211,6 +214,14 @@ jobs:
           import json
           from pathlib import Path
           expected = {
+              'TestClaudeVersionDriverAdmissionCannotReuseBaselineWrapper',
+              'TestClaudeVersionDriverSourcesAwaitNativeWait',
+              'TestClaudeVersionLoaderDescriptorExecTransition',
+              'TestClaudeVersionUnreviewedLoaderCannotCreateFixtureLeaf',
+              'TestClaudeVersionWrapperRequiresExactOutputAndCleanup',
+              'TestClaudeVersionUnreviewedLoaderCannotCreateFixtureLeaf/wrong-bytes',
+              'TestClaudeVersionUnreviewedLoaderCannotCreateFixtureLeaf/link',
+              'TestClaudeVersionUnreviewedLoaderCannotCreateFixtureLeaf/alias',
               'TestProofAndSingleNonrootMaps',
               'TestBootstrapStopsBeforeMutationOrReadinessOnEveryFailure',
               'TestNamespaceOwnershipRefusesReusedOrForeignNamespaces',
@@ -239,7 +250,7 @@ jobs:
           passed = [row['Test'] for row in rows if row.get('Action') == 'pass' and 'Test' in row]
           if set(passed) != expected or len(passed) != len(expected) or any(row.get('Action') in ('skip', 'fail') for row in rows) or not any(row.get('Action') == 'pass' and 'Test' not in row for row in rows):
               raise SystemExit('exact inert test inventory refused')
-          Path('driver-artifact/INERT-TESTS.json').write_text(json.dumps({'passed': sorted(passed), 'count': len(passed), 'driver_wrapper_payload_or_sandbox_execution': False, 'namespace_or_prctl_called': False}, indent=2) + '\n')
+          Path('driver-artifact/INERT-TESTS.json').write_text(json.dumps({'passed': sorted(passed), 'count': len(passed), 'root_count': 25, 'driver_wrapper_payload_or_sandbox_execution': False, 'namespace_or_prctl_called': False}, indent=2) + '\n')
           PY
       - name: Build two deterministic static outer driver images and retain evidence
         shell: bash
@@ -305,7 +316,7 @@ jobs:
               raw = path.read_bytes()
               files[path.relative_to(artifact).as_posix()] = {'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
           prebuild = json.loads((artifact / 'PREBUILD.json').read_text(encoding='utf-8'))
-          provenance = {'scope': 'fixed_linux_native_peer_outer_driver_build_only', 'repository': os.environ['GITHUB_REPOSITORY'], 'workflow': '.github/workflows/axis-native-driver-build.yml', 'build_commit': os.environ['GITHUB_SHA'], 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'go_version': 'go1.26.5', 'tool_sha256': tool_hashes, 'source_sha256': prebuild['source_sha256'], 'files': files, 'static_elf': True, 'two_independent_caches_byte_identical': True, 'admission_source_sha256': prebuild['admission_source_sha256'], 'wrapper_image_sha256': prebuild['wrapper_image_sha256'], 'wrapper_image_size': prebuild['wrapper_image_size'], 'reviewed_registry_receipt_sha256': prebuild['reviewed_registry_receipt_sha256'], 'inert_tests': json.loads((artifact / 'INERT-TESTS.json').read_text(encoding='utf-8')), 'driver_wrapper_peer_payload_or_sandbox_execution': False, 'production_certification': False}
+          provenance = {'scope': 'fixed_linux_native_peer_outer_driver_build_only', 'repository': os.environ['GITHUB_REPOSITORY'], 'workflow': '.github/workflows/axis-native-driver-build.yml', 'build_commit': os.environ['GITHUB_SHA'], 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'go_version': 'go1.26.5', 'tool_sha256': tool_hashes, 'source_sha256': prebuild['source_sha256'], 'files': files, 'static_elf': True, 'two_independent_caches_byte_identical': True, 'admission_source_sha256': prebuild['admission_source_sha256'], 'version_admission_source_sha256': prebuild['version_admission_source_sha256'], 'version_wrapper_image_sha256': prebuild['version_wrapper_image_sha256'], 'version_wrapper_image_size': prebuild['version_wrapper_image_size'], 'reviewed_version_receipt_sha256': prebuild['reviewed_version_receipt_sha256'], 'wrapper_image_sha256': prebuild['wrapper_image_sha256'], 'wrapper_image_size': prebuild['wrapper_image_size'], 'reviewed_registry_receipt_sha256': prebuild['reviewed_registry_receipt_sha256'], 'inert_tests': json.loads((artifact / 'INERT-TESTS.json').read_text(encoding='utf-8')), 'driver_wrapper_peer_payload_or_sandbox_execution': False, 'production_certification': False}
           (artifact / 'PROVENANCE.json').write_text(json.dumps(provenance, indent=2) + '\n')
           PY
       - name: Retain run identity even when the build refuses

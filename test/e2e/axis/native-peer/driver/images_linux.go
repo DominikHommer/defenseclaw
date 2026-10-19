@@ -153,6 +153,7 @@ func sealBytes(data []byte, expected string) (_ *os.File, resultErr error) {
 // namespace clone. The parent owner check is never inferred from overflow UID.
 type fixtureCapabilities struct {
 	parent, root *os.File
+	loader       *os.File
 	path         string
 }
 
@@ -161,6 +162,9 @@ func (f *fixtureCapabilities) close() error {
 		return nil
 	}
 	var errs []error
+	if f.loader != nil {
+		errs = append(errs, f.loader.Close())
+	}
 	if f.root != nil {
 		errs = append(errs, f.root.Close())
 	}

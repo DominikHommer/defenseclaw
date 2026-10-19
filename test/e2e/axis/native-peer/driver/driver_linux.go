@@ -37,7 +37,7 @@ func runDriver(ctx context.Context, opts options, admission wrapperAdmission, re
 	if err := privateDirectory(root); err != nil {
 		return err
 	}
-	receipt, _, err := boundedFile(root, "REVIEWED-ARTIFACTS.json", 64<<10, receiptSHA)
+	receipt, _, err := boundedFile(root, "REVIEWED-ARTIFACTS.json", 64<<10, receiptForSuite(opts.suite))
 	if err != nil {
 		return err
 	}
@@ -69,10 +69,36 @@ func runDriver(ctx context.Context, opts options, admission wrapperAdmission, re
 	fixture, err := newHostFixture()
 	if fixture != nil {
 		record["synthetic_fixture"], record["fixture_retained"] = fixture.path, true
-		defer func() { resultErr = errors.Join(resultErr, fixture.close()) }()
+		defer func() {
+			if opts.suite == claudeVersionSuite {
+				resultErr = errors.Join(resultErr, retained.releaseResource(func() error {
+					if fixture.loader != nil {
+						if err := verifyDriverVersionLoader(fixture.root, fixture.loader, true); err != nil {
+							return err
+						}
+						var st unix.Stat_t
+						if err := unix.Fstat(int(fixture.loader.Fd()), &st); err != nil {
+							return err
+						}
+						record["retained_loader"] = map[string]any{"leaf": claudeLoaderLeaf, "device": uint64(st.Dev), "inode": st.Ino, "size": int64(claudeLoaderSize), "sha256": claudeLoaderSHA}
+					}
+					return fixture.close()
+				}))
+				record["pending_driver_loader_resources"] = len(retained.heldResources)
+			} else {
+				resultErr = errors.Join(resultErr, fixture.close())
+			}
+		}()
 	}
 	if err != nil {
 		return err
+	}
+	if opts.suite == claudeVersionSuite {
+		record["driver_stage"] = "held_loader_copy"
+		if err := copyVersionLoader(root, fixture); err != nil {
+			return err
+		}
+		record["held_loader_copy_verified_before_clone"] = true
 	}
 	record["host_fixture_source_no_idmap_verified_before_clone"] = true
 	record["host_fixture_parent_verified_before_clone"] = true
@@ -88,7 +114,8 @@ func runDriver(ctx context.Context, opts options, admission wrapperAdmission, re
 	}
 	defer readyRead.Close()
 	var childFiles []*os.File
-	for _, image := range []*os.File{self, wrapper, fixture.parent, fixture.root} {
+	fixedInputs := append([]*os.File{self, wrapper}, versionFixtureInputs(fixture.parent, fixture.root, fixture.loader)...)
+	for _, image := range fixedInputs {
 		fd, err := unix.FcntlInt(image.Fd(), unix.F_DUPFD_CLOEXEC, 3)
 		if err != nil {
 			_ = grantRead.Close()
@@ -182,8 +209,11 @@ func validateWrapperSuiteResult(child map[string]any, suite string) error {
 	if !validSuite(suite) || child["fixed_suite"] != suite {
 		return errors.New("fixed wrapper suite differs")
 	}
-	if child["scope"] != "fixed_linux_native_peer_offline_contributor_v1" || child["passed"] != true || child["execution_performed"] != true || child["production_certification"] != false || child["common_launch_gate_qualified"] != false || child["artifact_receipt_sha256"] != receiptSHA || child["outer_namespace_cleanup_observed"] != true || child["pending_outer_cleanup"] != float64(0) || child["pending_native_cleanup"] != float64(0) {
+	if child["scope"] != scopeForSuite(suite) || child["passed"] != true || child["execution_performed"] != true || child["production_certification"] != false || child["common_launch_gate_qualified"] != false || child["artifact_receipt_sha256"] != receiptForSuite(suite) || child["outer_namespace_cleanup_observed"] != true || child["pending_outer_cleanup"] != float64(0) || child["pending_native_cleanup"] != float64(0) {
 		return errors.New("fixed wrapper result or native cleanup differs")
+	}
+	if suite == claudeVersionSuite && (child["pending_version_resources"] != float64(0) || child["pending_outer_loader_resources"] != float64(0) || child["claude_version_output_observed"] != true) {
+		return errors.New("fixed Claude source custody or output missing")
 	}
 	for _, key := range []string{"outer_worker_ready_observed", "outer_worker_grant_sent", "owned_worker_result_observed", "host_outside_read_and_write_positive_controls", "original_canary_identities_and_bytes_preserved"} {
 		if child[key] != true {
@@ -191,6 +221,9 @@ func validateWrapperSuiteResult(child map[string]any, suite string) error {
 		}
 	}
 	want := []string{"argv", "stdio", "exit23", "boundaries"}
+	if suite == claudeVersionSuite {
+		want = []string{claudeVersionSuite}
+	}
 	if suite == "lifecycle" {
 		want = []string{"wait-timeout", "wait-cancel", "tree-cancel"}
 	}
@@ -200,10 +233,14 @@ func validateWrapperSuiteResult(child map[string]any, suite string) error {
 	}
 	for index, mode := range want {
 		result, ok := cases[index].(map[string]any)
-		if !ok || result["mode"] != mode || result["passed"] != true || result["prepared"] != true || result["started"] != true || result["fixed_payload_marker_observed"] != true || result["destroyed"] != true || result["native_cleanup_observed"] != true || result["error"] != nil {
+		if !ok || result["mode"] != mode || result["passed"] != true || result["prepared"] != true || result["started"] != true || suite != claudeVersionSuite && result["fixed_payload_marker_observed"] != true || result["destroyed"] != true || result["native_cleanup_observed"] != true || result["error"] != nil {
 			return errors.New("fixed wrapper case assertion differs")
 		}
-		if suite == "baseline" {
+		if suite == claudeVersionSuite {
+			if result["claude_version_output_observed"] != true || result["output_bytes"] != float64(22) || result["stderr_bytes"] != float64(0) || result["exit_code"] != float64(0) || result["native_terminal_before_outer_cleanup"] != true || result["fixed_payload_marker_observed"] == true || result["timed_out"] == true || result["cancel_sent"] == true {
+				return errors.New("fixed Claude version assertion differs")
+			}
+		} else if suite == "baseline" {
 			if result["exit_code"] != float64(23) {
 				return errors.New("fixed wrapper exit differs")
 			}
@@ -254,7 +291,7 @@ func bootstrap(args []string, admission wrapperAdmission) (map[string]any, *clea
 		return record, owner, err
 	}
 	opts, err := bootstrapOptions(args)
-	if err != nil || os.Getpid() != 1 || os.Getppid() != 0 || os.Geteuid() == 0 || runtime.GOARCH != "amd64" {
+	if err != nil || admission.VersionOnly != (opts.suite == claudeVersionSuite) || os.Getpid() != 1 || os.Getppid() != 0 || os.Geteuid() == 0 || runtime.GOARCH != "amd64" {
 		return record, owner, errors.New("fixed owned bootstrap required")
 	}
 	record["fixed_suite"] = opts.suite
@@ -270,6 +307,14 @@ func bootstrap(args []string, admission wrapperAdmission) (map[string]any, *clea
 	defer fixtureRoot.Close()
 	if err := checkInheritedFixture(fixtureParent, fixtureRoot); err != nil {
 		return record, owner, err
+	}
+	var loader *os.File
+	if opts.suite == claudeVersionSuite {
+		loader = os.NewFile(10, "fixed-inherited-version-loader")
+		defer loader.Close()
+		if err := verifyDriverVersionLoader(fixtureRoot, loader, false); err != nil {
+			return record, owner, err
+		}
 	}
 	defer grant.Close()
 	defer ready.Close()
@@ -317,6 +362,12 @@ func bootstrap(args []string, admission wrapperAdmission) (map[string]any, *clea
 	}
 	if _, err := unix.FcntlInt(wrapper.Fd(), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
 		return record, owner, err
+	}
+	if loader != nil {
+		flags, err := unix.FcntlInt(loader.Fd(), unix.F_GETFD, 0)
+		if err != nil || flags&unix.FD_CLOEXEC != 0 {
+			return record, owner, errors.New("fixed loader exec handoff refused")
+		}
 	}
 	// Literal proc-self FD names the still-held sealed executable; no host image
 	// pathname is reopened. Exec has no PATH lookup or command-string parsing.

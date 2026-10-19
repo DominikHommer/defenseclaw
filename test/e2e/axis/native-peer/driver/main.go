@@ -26,9 +26,10 @@ var errUnreviewed = errors.New("fixed wrapper artifact has no reviewed driver ad
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type wrapperAdmission struct {
-	Reviewed bool
-	SHA      string
-	Size     int64
+	VersionOnly bool
+	Reviewed    bool
+	SHA         string
+	Size        int64
 }
 
 // Source, Actions/archive/provenance and static image independently reviewed by
@@ -68,7 +69,7 @@ func execute(args []string, admission wrapperAdmission, run driverRun) (map[stri
 	flags.StringVar(&opts.receipt, "receipt", "", "fixed reviewed artifact metadata")
 	flags.StringVar(&opts.evidence, "evidence", "", "fresh private wrapper evidence metadata")
 	flags.StringVar(&opts.suite, "suite", "baseline", "fixed baseline or lifecycle suite")
-	if flags.Parse(args) != nil || !*explicit || flags.NArg() != 0 || opts.receipt == "" || opts.evidence == "" || len(opts.receipt) > 4096 || len(opts.evidence) > 4096 || !validSuite(opts.suite) || run == nil {
+	if flags.Parse(args) != nil || !*explicit || flags.NArg() != 0 || opts.receipt == "" || opts.evidence == "" || len(opts.receipt) > 4096 || len(opts.evidence) > 4096 || !validSuite(opts.suite) || admission.VersionOnly != (opts.suite == claudeVersionSuite) || run == nil {
 		return record, owner, errors.New("fixed contributor selector and bounded metadata required")
 	}
 	record["fixed_suite"] = opts.suite
@@ -77,7 +78,9 @@ func execute(args []string, admission wrapperAdmission, run driverRun) (map[stri
 	return record, owner, run(ctx, opts, admission, record, owner)
 }
 
-func validSuite(suite string) bool { return suite == "baseline" || suite == "lifecycle" }
+func validSuite(suite string) bool {
+	return suite == "baseline" || suite == "lifecycle" || suite == claudeVersionSuite
+}
 
 func bootstrapOptions(args []string) (options, error) {
 	if (len(args) != 4 && len(args) != 6) || args[0] != "--receipt" || args[2] != "--evidence" || args[1] == "" || len(args[1]) > 4096 || args[3] == "" || len(args[3]) > 4096 {
@@ -98,9 +101,9 @@ func main() {
 	var owner *cleanupOwner
 	var err error
 	if len(os.Args) > 1 && os.Args[1] == "--owned-wrapper-bootstrap" {
-		record, owner, err = bootstrap(os.Args[2:], liveAdmission)
+		record, owner, err = bootstrap(os.Args[2:], admissionForArgs(os.Args[2:]))
 	} else {
-		record, owner, err = execute(os.Args[1:], liveAdmission, runDriver)
+		record, owner, err = execute(os.Args[1:], admissionForArgs(os.Args[1:]), runDriver)
 	}
 	if err != nil {
 		record["error"] = "fixed_outer_driver_admission_or_observation_failed"

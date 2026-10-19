@@ -136,3 +136,40 @@ descendants; it does not change the offline filter or admit session creation.
 Only the positive-group, nonleader child/grandchild checks substantiate filter
 denial; the parent check is consistency only.
 The earlier four-case result remains evidence for its exact original pairing.
+
+
+## Separate Claude version source
+
+`claude-version` is a fixed distinct suite and receipt; its wrapper admission
+pins the independently reviewed 49c image
+`63300aa074ad60c607b15fb7833a38dc3421a5616c73abdb54386a7045563912`
+(3,506,302 bytes). Its build 39196467675/artifact 12161534865, archive
+`399a239a759d81f068a37ec8dec2a5d0364c87152fce5268993ba8454530cafa`
+and provenance
+`c1b5e59400253e78a2c07579aed7db796325edbda5bb62629e439ad10d2caa9b`
+passed three inert reviews. This new driver still needs its own build/artifact
+review before any actual version canary.
+The old baseline/lifecycle admission remains separate. The driver uses no new
+launcher: it copies only reviewed loader SHA256
+`76b812138a1d4be51ae095e94920e1fd1c5d25f793651baf834d05a2c455c040`
+(853,616 bytes) from the held artifact input into one O_EXCL, O_NOFOLLOW,
+CLOEXEC fixed leaf under the already-held fresh private fixture. It fsyncs and
+closes the writer before any clone/grant; a readonly reopen must match that
+created inode and exact bytes. The original input remains held and is checked
+again after copying. The creator verifies local same-mount identity, no IDMAP,
+single link, mode 0500 and no NOEXEC; unsupported floors refuse without repair.
+
+The first table is proof3/grant4/ready5/self6/wrapper7/fixture-parent8/root9/
+loader10. The wrapper-to-worker table is proof3/grant4/ready5/self6/
+fixture-parent7/root8/loader9. Each transition duplicates only the fixed held
+inputs; the first bootstrap keeps loader10 across its one fixed exec and later
+copies use CLOEXEC. Loader and fixture custody stay retained on uncertain native
+cleanup or source close. After confirmed whole-wrapper cleanup, the driver
+revalidates and records the exact retained loader FileID, size and digest for a
+collector to exclude that registered object only; a same-name replacement must
+never be excluded. The vendor binary is not copied into public evidence.
+
+The future finite assertion is exact `2.1.292 (Claude Code)\n` (22 bytes), stderr
+empty, exit0, Destroyed and all owned cleanup complete. This is not full-agent,
+dlopen, hook, broker or common-launch qualification. No actual version run is
+claimed by this source.
