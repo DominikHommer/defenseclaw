@@ -4613,15 +4613,148 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 	pruneEmptyMapArrays(hooks)
 	// DefenseClaw owns entries in the hooks mapping only: every other byte of
 	// config.yaml (Hermes' commented template, the user's settings and their
-	// order and quoting) stays as it is.
-	data, err := marshalTopLevelYAMLFieldPreservingOtherBytes(path, "hooks", hooks)
-	if err != nil {
-		return err
+	// order and quoting) stays as it is. A hooks field that Setup added to a
+	// copy without one goes as a whole, so an edited config is the captured
+	// copy plus the edit and an unedited one is the captured copy again;
+	// leaving `hooks: {}` behind changed the file's bytes (GAP-0262).
+	var data []byte
+	if len(hooks) == 0 && !hermesPristineHasOwnHooksField(backup, hookScript) {
+		data, err = removeTopLevelYAMLFieldPreservingOtherBytes(path, "hooks")
+		if err != nil {
+			return err
+		}
+	}
+	if data == nil {
+		data, err = marshalTopLevelYAMLFieldPreservingOtherBytes(path, "hooks", hooks)
+		if err != nil {
+			return err
+		}
 	}
 	if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, data) {
 		return nil
 	}
 	return atomicWriteFile(path, data, 0o600)
+}
+
+// hermesPristineHasOwnHooksField reports whether the config.yaml copy Setup
+// captured has a hooks field of the account's own, that is one that holds
+// more than DefenseClaw's entries or that the account left empty. Without a
+// copy, or with one that does not parse, the field is taken to be the
+// account's and stays.
+func hermesPristineHasOwnHooksField(backup *managedFileBackup, hookScript string) bool {
+	if backup == nil {
+		return true
+	}
+	if !backup.Existed || len(bytes.TrimSpace(backup.PristineBytes)) == 0 {
+		return false
+	}
+	var pristine map[string]interface{}
+	if err := yaml.Unmarshal(backup.PristineBytes, &pristine); err != nil {
+		return true
+	}
+	raw, present := pristine["hooks"]
+	if !present {
+		return false
+	}
+	hooks, ok := raw.(map[string]interface{})
+	if !ok || len(hooks) == 0 {
+		return true
+	}
+	for event, value := range hooks {
+		hooks[event] = removeOwnedFlatHooks(value, hookScript)
+	}
+	pruneEmptyMapArrays(hooks)
+	return len(hooks) != 0
+}
+
+// removeTopLevelYAMLFieldPreservingOtherBytes removes one top-level field of
+// the YAML document at path and keeps every other byte: the lines from the
+// field's key to the next top-level key go, and top-level comments after the
+// field stay with what follows (as replaceTopLevelYAMLFieldPreservingOtherBytes
+// keeps them). A document left with nothing is the empty mapping {}. It
+// returns nil, and no error, when it cannot cut the field out by lines (a
+// flow-style root, or a cut that would change another field); the caller
+// then renders the field instead. The bytes are returned unchanged when the
+// field is absent.
+func removeTopLevelYAMLFieldPreservingOtherBytes(path, field string) ([]byte, error) {
+	original, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(original, &document); err != nil {
+		return nil, fmt.Errorf("parse YAML %s for byte-preserving update: %w", path, err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("parse YAML %s for byte-preserving update: root is not a mapping", path)
+	}
+	root := document.Content[0]
+	if root.Style&yaml.FlowStyle != 0 {
+		return nil, nil
+	}
+	offsets := yamlLineOffsets(original)
+	for index := 0; index+1 < len(root.Content); index += 2 {
+		if root.Content[index].Value != field {
+			continue
+		}
+		start, ok := yamlLineOffset(offsets, root.Content[index].Line)
+		if !ok {
+			return nil, nil
+		}
+		end := len(original)
+		if index+2 < len(root.Content) {
+			if end, ok = yamlLineOffset(offsets, root.Content[index+2].Line); !ok || end <= start {
+				return nil, nil
+			}
+		}
+		end = preserveTrailingTopLevelYAMLTrivia(original, start, end)
+		updated := make([]byte, 0, len(original)-(end-start))
+		updated = append(updated, original[:start]...)
+		updated = append(updated, original[end:]...)
+		if len(bytes.TrimSpace(updated)) == 0 {
+			lineEnding := "\n"
+			if bytes.Contains(original, []byte("\r\n")) {
+				lineEnding = "\r\n"
+			}
+			return []byte("{}" + lineEnding), nil
+		}
+		if !yamlTopLevelKeysAre(updated, yamlTopLevelKeysWithout(root, field)) {
+			return nil, nil
+		}
+		return updated, nil
+	}
+	return original, nil
+}
+
+// yamlTopLevelKeysWithout lists the keys of a mapping node except field.
+func yamlTopLevelKeysWithout(root *yaml.Node, field string) []string {
+	var keys []string
+	for index := 0; index+1 < len(root.Content); index += 2 {
+		if key := root.Content[index].Value; key != field {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// yamlTopLevelKeysAre reports whether data is a YAML mapping with exactly
+// the keys want, in that order.
+func yamlTopLevelKeysAre(data []byte, want []string) bool {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil ||
+		len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return false
+	}
+	got := yamlTopLevelKeysWithout(document.Content[0], "")
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func validateHermesManagedBackupPristine(backup *managedFileBackup) error {

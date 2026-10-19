@@ -87,6 +87,72 @@ func TestPurgeWindowsUserStateKeepsConnectorBackup(t *testing.T) {
 	}
 }
 
+// Every per-user connector that keeps a backup record of an agent file it
+// patches or writes (amp, antigravity, devin, hermes, kiro, opencode) keeps
+// the account's state while that record is left after the teardowns, and
+// the error names the file. The check reads every record in
+// connector_backups, so this walks each record name the Windows cleanup
+// contract allows (GAP-0262).
+func TestPurgeWindowsUserStateKeepsEveryConnectorBackup(t *testing.T) {
+	previous := windowsEnterpriseMutationIdentityCheck
+	windowsEnterpriseMutationIdentityCheck = func() error { return nil }
+	t.Cleanup(func() { windowsEnterpriseMutationIdentityCheck = previous })
+
+	covered := map[string]bool{}
+	for _, name := range WindowsStandalonePerUserConnectorNames() {
+		var records []string
+		for _, leaf := range windowsManagedRuntimeCleanupConnectors[name].backups {
+			if strings.EqualFold(filepath.Ext(leaf), ".json") {
+				records = append(records, leaf)
+			}
+		}
+		for _, leaf := range records {
+			covered[name] = true
+			t.Run(name+"/"+leaf, func(t *testing.T) {
+				home := filepath.Join(t.TempDir(), "home")
+				dataDir := filepath.Join(home, ".defenseclaw")
+				logical := strings.TrimSuffix(leaf, filepath.Ext(leaf))
+				target := filepath.Join(home, "agent", name, logical)
+				receipt := filepath.Join(dataDir, "connector_backups", name, leaf)
+				for _, path := range []string{target, receipt} {
+					if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				edited := []byte("edited by the account after Setup\n")
+				if err := os.WriteFile(target, edited, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				backup, err := json.Marshal(map[string]any{
+					"version": 1, "connector": name, "logical_name": logical,
+					"path": target, "pristine_sha256": "missing",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(receipt, backup, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				err = PurgeWindowsUserState(home, currentWindowsTestSID(t).String(), "")
+				if err == nil || !strings.Contains(err.Error(), target) ||
+					!strings.Contains(err.Error(), "kept the per-user state for its backups") {
+					t.Fatalf("purge with a %s backup left = %v", name, err)
+				}
+				for path, want := range map[string][]byte{target: edited, receipt: backup} {
+					if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+						t.Fatalf("purge changed %s: %v", path, err)
+					}
+				}
+			})
+		}
+	}
+	for _, name := range []string{"amp", "antigravity", "devin", "hermes", "kiro", "opencode"} {
+		if !covered[name] {
+			t.Errorf("%s keeps a backup record but its cleanup contract lists none", name)
+		}
+	}
+}
+
 // An uninstall with purge removes an account's whole per-user folder as
 // LocalSystem: hook scripts, per-user hook tokens and the account's
 // moved-aside hooks included. A junction in the folder is removed, not
