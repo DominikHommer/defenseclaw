@@ -457,6 +457,12 @@ func (m *Manager) ocsfFinding(ctx context.Context, b *box, id audit.SandboxIdent
 		ev.Remediation = "If the sandbox's conversation printed its environment, start a new conversation " +
 			"(`defenseclaw sandbox connect " + name + "`, without --continue)."
 	}
+	if r.FindingType == "openshell.provider_credential.endpoint_mismatch" {
+		ev.Description = strings.TrimSuffix(firstNonEmpty(r.Message, ev.Title), ".") +
+			". A credential placeholder is bound to its configured endpoint; it cannot be used as the model provider key at another endpoint."
+		ev.Remediation = "Check the model provider and endpoint for this sandbox. Use the model provider's configured credential for model requests; " +
+			"keep a sandbox credential placeholder only with the endpoint it was bound to."
+	}
 	if repeats > 0 {
 		ev.Description = strings.TrimSpace(ev.Description + " (OpenShell raised it " + strconv.Itoa(repeats) +
 			" more times after the alert of " + since.UTC().Format("15:04:05") + " UTC.)")
@@ -808,8 +814,13 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 		// call, which goes around the proxy.
 		m.markWork(b, at, harnessActivity(harnessName, r.Binary), noModelCall)
 		if r.Allowed() && r.Binary != "" {
+			pid := ocsfPID(r)
 			m.mu.Lock()
-			b.proxyOpens = append(b.proxyOpens, proxyOpen{binary: r.Binary, pid: ocsfPID(r), at: m.now()})
+			name := b.rec.Name
+			m.mu.Unlock()
+			lineage := m.actorLineage(name, r.Binary, pid, at)
+			m.mu.Lock()
+			b.proxyOpens = append(b.proxyOpens, proxyOpen{binary: r.Binary, pid: pid, at: m.now(), lineage: lineage})
 			if n := len(b.proxyOpens); n > maxProxyOpens {
 				b.proxyOpens = slices.Delete(b.proxyOpens, 0, n-maxProxyOpens)
 			}

@@ -59,6 +59,7 @@ import click
 
 from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
+from defenseclaw.audit_time_order import audit_time_order
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACT_MANIFEST,
     HOOK_CONTRACTS,
@@ -3263,7 +3264,7 @@ def _check_recent_judge_outage(cfg, r: _DoctorResult, *, window_hours: int = 24)
         try:
             row = conn.execute(
                 "SELECT timestamp, target FROM audit_events WHERE action = 'watcher-block' "
-                "AND details LIKE ? ORDER BY timestamp DESC LIMIT 1",
+                f"AND details LIKE ? ORDER BY {audit_time_order(conn)} LIMIT 1",
                 (f"%{_JUDGE_OUTAGE_MARKER}%",),
             ).fetchone()
         finally:
@@ -8637,7 +8638,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     could not tell from doctor whether their hooks were installed (D4).
     Resolves the hook file from ``hook_contract_lock.json`` first (what the
     gateway actually wrote), then the static fallback map, and
-    raw-substring-checks it for a DefenseClaw marker. (The Connectors section's
+    checks it for a DefenseClaw registration. Cursor and Kiro use the parsed
+    registration check when the lock records their paths, because Windows
+    encodes the native hook command in PowerShell. (The Connectors section's
     ``_check_hook_contract_lock`` validates contract/version drift — a
     different concern from "does the hook file exist and reference us".)
     """
@@ -8648,7 +8651,8 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     label = _HOOK_HEALTH_LABELS.get(connector, f"{connector} hooks")
     home = os.path.expanduser("~")
     # Prefer the lock-file's recorded paths; fall back to the static map.
-    candidates = _hook_health_paths_from_lock(cfg, connector)
+    locked_paths = _hook_health_paths_from_lock(cfg, connector)
+    candidates = locked_paths
     if not candidates:
         if connector == "hermes":
             candidates = [hermes_config_path()]
@@ -8682,7 +8686,12 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("fail", label, edited, r=r, remediation=edited.repair)
         return
     for path in present:
-        if _file_references_marker(path, markers):
+        registered = _file_references_marker(path, markers)
+        if not registered and connector in ("cursor", "kiro") and locked_paths:
+            from defenseclaw.hook_integrity import _registers_defenseclaw_hooks
+
+            registered = _registers_defenseclaw_hooks(cfg, connector, Path(path), strict=False)
+        if registered:
             if connector == "cursor":
                 _check_cursor_configured_runtime(
                     cfg,
@@ -10092,7 +10101,7 @@ def _check_judge_calls(cfg, r: _DoctorResult) -> None:
         with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as db:
             rows = db.execute(
                 "SELECT structured_json FROM audit_events WHERE action = ? AND timestamp >= ? "
-                "ORDER BY timestamp DESC, rowid DESC LIMIT 20",
+                f"ORDER BY {audit_time_order(db)} LIMIT 20",
                 ("llm-judge-response", since),
             ).fetchall()
     except sqlite3.Error as exc:
@@ -15935,6 +15944,9 @@ def _fix_gateway_token(
                 default=True,
             ):
                 return ("skip", "declined by user")
+            from defenseclaw.logger import keep_running_gateway_token
+
+            keep_running_gateway_token(None, cfg.data_dir, cfg.gateway.resolved_token(), token)
             _save_secret_to_dotenv(env_var, token, cfg.data_dir)
             return ("pass", f"{env_var} updated from openclaw.json")
         # OpenClaw can be local and unauthenticated while the DefenseClaw

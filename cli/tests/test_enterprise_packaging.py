@@ -27,6 +27,23 @@ STANDALONE_ENV = {
 }
 
 
+def test_managed_package_recipes_exclude_fleet_compiler():
+    release = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    for archive in release["archives"]:
+        assert not any("policy_compiler.py" in entry for entry in archive.get("files", [])), archive["id"]
+    for package in release["nfpms"]:
+        assert not any("policy_compiler.py" in entry.get("src", "") or
+                       "policy_compiler.py" in entry.get("dst", "")
+                       for entry in package.get("contents", [])), package["id"]
+    mac_recipe = (ROOT / "scripts/build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
+    windows_recipe = (ROOT / "packaging/windows/standalone/build-setup.sh").read_text(encoding="utf-8")
+    windows_layout = (ROOT / "packaging/windows/DefenseClawEnterprise.psm1").read_text(encoding="utf-8")
+    assert "BUNDLED_COMPILER" not in mac_recipe
+    assert 'install -m 0644 "$compiler_src"' not in mac_recipe
+    assert "policy_compiler.py" not in windows_recipe
+    assert "$layout['CompilerPath']" not in windows_layout
+
+
 def _unit(name: str) -> list[str]:
     return (SYSTEMD / name).read_text(encoding="utf-8").splitlines()
 
@@ -147,6 +164,22 @@ def test_windows_bundle_acl_contract_keeps_public_receipt_separate():
     assert "Get-DefenseClawBundlePathKind -RelativePath $relative" in contract
     assert "Assert-DefenseClawCanonicalPathAcl" in contract
     assert "Set-DefenseClawPathAcl" in contract
+
+
+def test_systemd_guardian_can_flush_the_sssd_caches():
+    # When SSSD is online again after an outage the guardian runs
+    # sss_cache -E, which opens SSSD's databases read-write and invalidates its
+    # memory cache. Under ProtectSystem=strict both directories must be
+    # writable, or the flush exits 5 (GAP-0208). Nothing broader is opened.
+    lines = _unit("defenseclaw-hook-guardian.service")
+    assert "ProtectSystem=strict" in lines
+    writable = _unit_values(lines, "ReadWritePaths")
+    assert {"-/var/lib/sss/db", "-/var/lib/sss/mc"} <= writable
+    assert not writable & {"/var", "-/var", "/var/lib", "-/var/lib", "/var/lib/sss", "-/var/lib/sss"}
+    # Only the watching guardian flushes; the one-shot reconcile and the
+    # enumerator never write SSSD's caches.
+    for name in ("defenseclaw-hook-guardian-reconcile.service", "defenseclaw-hook-enumerator.service"):
+        assert not any("/var/lib/sss" in path for path in _unit_values(_unit(name), "ReadWritePaths")), name
 
 
 def test_systemd_enumerator_can_publish_refused_surfaces():
@@ -856,8 +889,13 @@ exit {gateway_rc}""")
 
 
 def _linux_scriptlet(host: _Host, name: str) -> str:
+    text = (LINUX / name).read_text(encoding="utf-8")
+    # The preremove walks the user managers' runtime directories; a test
+    # never reaches the real /run/user.
+    if "user_runtime=/run/user" in text:
+        text = text.replace("user_runtime=/run/user", f"user_runtime={host.tmp / 'run-user'}")
     return _rooted(
-        (LINUX / name).read_text(encoding="utf-8"),
+        text,
         {
             "gateway=/opt/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
             "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
@@ -939,6 +977,39 @@ def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_pat
         assert f"finish the install with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
 
 
+
+# GAP-0662: a package ensure that failed on a full disk named only the failed
+# step (the services not active); the disk_full entry after it is shown too.
+def test_linux_postinstall_names_a_full_disk_after_the_failed_step(tmp_path: Path) -> None:
+    document = {
+        "schema_version": 2,
+        "ok": False,
+        "action": "ensure",
+        "installed": True,
+        "installed_version": "1.0.2",
+        "errors": [
+            {"code": "verify_failed", "message": "defenseclaw-hook-guardian.service is not active"},
+            {
+                "code": "disk_full",
+                "message": "the filesystem holding /var/lib/defenseclaw has 456 KiB free of 64.0 MiB: "
+                "free space on it and run ensure again",
+            },
+        ],
+        "warnings": [{"code": "rolled_back", "message": "the previous deployment was restored"}],
+    }
+    host = _Host(tmp_path, gateway_rc=1, gateway_out=json.dumps(document, indent=2))
+    result = host.run(_linux_scriptlet(host, "postinstall.sh"), "configure")
+    assert result.returncode == 0
+    assert "verify_failed: defenseclaw-hook-guardian.service is not active" in result.stderr
+    assert "disk_full: the filesystem holding /var/lib/defenseclaw has 456 KiB free of 64.0 MiB" in result.stderr
+    assert result.stderr.index("verify_failed:") < result.stderr.index("disk_full:")
+
+
+def test_linux_postinstall_names_no_full_disk_without_one(tmp_path: Path) -> None:
+    document = {"schema_version": 2, "ok": False, "errors": [{"code": "verify_failed", "message": "not active"}]}
+    host = _Host(tmp_path, gateway_rc=1, gateway_out=json.dumps(document, indent=2))
+    result = host.run(_linux_scriptlet(host, "postinstall.sh"), "configure")
+    assert "disk_full" not in result.stderr
 
 # GAP-0268: MDM writes config.yaml and then installs the package. The config
 # write started the apply unit, whose ensure ran the old binary while the
@@ -1694,3 +1765,139 @@ def test_macos_pkg_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp
     assert "fix that, then install the package again" in result.stderr
     assert "records the pkg receipt" in result.stderr
     assert f"sudo {host.gateway} enterprise macos ensure --from-package also finishes the install, but records no pkg receipt" in result.stderr
+
+
+# #1210: the package removal deleted the sandbox user units while an
+# account's socket still listened, and the daemon it started failed 203/EXEC
+# on the deleted binary in a loop. The preremove stops the user units in the
+# user manager of every account that runs one, as that account, after the
+# system units, and drops the socket's global enable link.
+def _package_user_units() -> set[str]:
+    return {
+        Path(c["dst"]).name
+        for c in _enterprise_nfpm_contents()
+        if c.get("dst", "").startswith("/usr/lib/systemd/user/") and c.get("type") != "dir"
+    }
+
+
+def test_linux_preremove_names_every_user_unit_the_package_ships() -> None:
+    assert set(_preremove_units("user_units")) == _package_user_units() == {
+        "defenseclaw-sandbox.socket",
+        "defenseclaw-sandbox.service",
+        "defenseclaw-openshell-gateway.service",
+    }
+
+
+def _user_manager(host: _Host, uid: int) -> Path:
+    """A runtime directory with the user manager's private socket."""
+    import socket
+
+    runtime = host.tmp / "run-user" / str(uid)
+    (runtime / "systemd").mkdir(parents=True)
+    cwd = os.getcwd()
+    os.chdir(runtime / "systemd")
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind("private")
+        sock.close()
+    finally:
+        os.chdir(cwd)
+    return runtime
+
+
+# What the account's user manager answers, as `case` branches of a runuser or
+# setpriv stub: is-active exits 3 when no unit is active, with each unit's
+# state; a manager that does not answer exits 1 with no state.
+_USER_MANAGER_ANSWERS = {
+    # Every unit stopped (a failed daemon is not running either).
+    "stopped": "*is-active*) printf 'inactive\\ninactive\\nfailed\\n'; exit 3 ;;",
+    # A unit keeps running after every stop.
+    "still_active": "*is-active*) printf 'active\\ninactive\\ninactive\\n'; exit 0 ;;",
+    # The socket is still deactivating: exit 3, but not established stopped.
+    "deactivating": "*is-active*) printf 'deactivating\\ninactive\\ninactive\\n'; exit 3 ;;",
+    # Neither stop nor is-active reaches the manager.
+    "no_answer": "*) echo 'Failed to connect to bus' >&2; exit 1 ;;",
+    # The account signed out during the stop: its manager exited.
+    "signed_out": "*' stop '*) rm -f \"$XDG_RUNTIME_DIR/systemd/private\"; exit 1 ;; *) exit 1 ;;",
+}
+
+
+@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.parametrize("answer", sorted(_USER_MANAGER_ANSWERS))
+def test_linux_preremove_stops_the_sandbox_user_units_in_every_user_manager(tmp_path: Path, answer: str) -> None:
+    host = _Host(tmp_path)
+    uid = os.getuid()
+    runtime = _user_manager(host, uid)
+    # Not a user manager: a directory someone else's uid names, a name that
+    # is no uid, and a runtime directory without the private socket.
+    _user_manager(host, uid + 1)
+    (host.tmp / "run-user" / "abc" / "systemd").mkdir(parents=True)
+    (host.tmp / "run-user" / str(uid + 2)).mkdir()
+    _write_stub(host.bin, "getent", f"""[ "$2" = {uid} ] && echo "sample-user:x:{uid}:{uid}::/home/sample-user:/bin/sh" """)
+    # The stub runs the env the script passes, so the manager's runtime
+    # directory is known to it.
+    _write_stub(host.bin, "runuser", f"""echo "runuser $*" >>'{host.log}'
+while [ "$1" != env ]; do shift; done
+shift
+export "$1"
+case "$*" in {_USER_MANAGER_ANSWERS[answer]} esac""")
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), "remove")
+    stopped = answer in ("stopped", "signed_out")
+    calls = host.calls()
+    env = f"env XDG_RUNTIME_DIR={runtime} DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus"
+    units = " ".join(_preremove_units("user_units"))
+    stop = f"runuser -u sample-user -- {env} systemctl --user stop {units}"
+    stops = [c for c in calls if c.startswith("runuser ") and " stop " in c]
+    # A unit that keeps running, or a manager that does not say, is stopped
+    # three times; then the removal fails and the package keeps its files.
+    assert stops == [stop] * (1 if stopped else 3), calls
+    system_stop = next(c for c in calls if c.startswith("systemctl stop "))
+    assert calls.index(system_stop) < calls.index(stop) < calls.index("systemctl --global disable defenseclaw-sandbox.socket")
+    if stopped:
+        assert result.returncode == 0, result.stderr
+        assert "sandbox user units" not in result.stderr
+    else:
+        assert result.returncode == 1
+        assert "could not stop, or confirm stopped, the sandbox user units of sample-user; package files were kept" in result.stderr
+
+
+# An account lookup that does not answer (a directory service outage) does
+# not skip a live user manager: its units stop as the uid and gid that own
+# its runtime directory, and a manager that then does not answer keeps the
+# package.
+@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.parametrize("answer", ["stopped", "no_answer"])
+def test_linux_preremove_stops_the_user_units_of_an_account_the_lookup_does_not_name(tmp_path: Path, answer: str) -> None:
+    host = _Host(tmp_path)
+    uid, gid = os.getuid(), os.getgid()
+    runtime = _user_manager(host, uid)
+    _write_stub(host.bin, "getent", "exit 2")
+    _write_stub(host.bin, "runuser", f"""echo "runuser $*" >>'{host.log}'; exit 1""")
+    _write_stub(host.bin, "setpriv", f"""echo "setpriv $*" >>'{host.log}'
+case "$*" in {_USER_MANAGER_ANSWERS[answer]} esac""")
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), "remove")
+    calls = host.calls()
+    units = " ".join(_preremove_units("user_units"))
+    stop = (
+        f"setpriv --reuid={uid} --regid={gid} --clear-groups env XDG_RUNTIME_DIR={runtime} "
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus systemctl --user stop {units}"
+    )
+    assert not [c for c in calls if c.startswith("runuser ")], calls
+    if answer == "stopped":
+        assert result.returncode == 0, result.stderr
+        assert [c for c in calls if c.startswith("setpriv ") and " stop " in c] == [stop], calls
+    else:
+        assert result.returncode == 1
+        assert [c for c in calls if c.startswith("setpriv ") and " stop " in c] == [stop] * 3, calls
+        assert f"the sandbox user units of uid {uid}; package files were kept" in result.stderr
+    assert "systemctl --global disable defenseclaw-sandbox.socket" in calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+@pytest.mark.parametrize("arguments", [("upgrade", "9.9.10"), ("1",)])
+def test_linux_preremove_leaves_the_user_units_alone_on_an_upgrade(tmp_path: Path, arguments: tuple[str, ...]) -> None:
+    host = _Host(tmp_path)
+    _write_stub(host.bin, "runuser", f"""echo "runuser $*" >>'{host.log}'""")
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), *arguments)
+    assert result.returncode == 0, result.stderr
+    assert not [c for c in host.calls() if c.startswith(("runuser", "systemctl --global"))]

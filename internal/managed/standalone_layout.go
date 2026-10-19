@@ -78,6 +78,24 @@ type StandaloneLayout struct {
 // StandaloneLayoutFor returns the unix standalone layout for goos
 // ("linux" or "darwin"). Use StandaloneWindowsLayout for Windows, which
 // resolves the protected machine roots at runtime.
+// The sandbox state a non-purge uninstall of a Linux or macOS deployment
+// keeps while an account keeps sandboxes: the gateway's sandbox registration
+// store and its correlation key below DataDir, and the lifecycle's root-only
+// record of the sandbox setup below LifecycleDir.
+const (
+	StandaloneSandboxStoreDirName    = "sandbox"
+	StandaloneCorrelationKeyFileName = "redaction-correlation.key"
+	StandaloneKeptOpenShellStateFile = "openshell-state.kept.json"
+)
+
+// KeptSandboxStatePaths are the paths of that state in a Linux or macOS
+// layout.
+func (l StandaloneLayout) KeptSandboxStatePaths() (store, key, record string) {
+	return path.Join(l.DataDir, StandaloneSandboxStoreDirName),
+		path.Join(l.DataDir, StandaloneCorrelationKeyFileName),
+		path.Join(l.LifecycleDir, StandaloneKeptOpenShellStateFile)
+}
+
 func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 	switch goos {
 	case "linux":

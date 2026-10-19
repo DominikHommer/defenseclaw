@@ -87,7 +87,7 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 		OwnerGID: os.Getgid(),
 		Registry: connector.NewDefaultRegistry(),
 	}
-	if err := PurgeUserState(context.Background(), opts); err != nil {
+	if _, err := PurgeUserState(context.Background(), opts); err != nil {
 		t.Fatalf("PurgeUserState: %v", err)
 	}
 	if _, err := os.Lstat(dataDir); !os.IsNotExist(err) {
@@ -117,7 +117,7 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 	// could not reach, and a missing ~/.local/bin is not an error.
 	write(filepath.Join(binDir, "defenseclaw-gateway"), "gateway", 0o755)
 	link(filepath.Join(dataDir, ".venv", "bin", "defenseclaw"), filepath.Join(binDir, "defenseclaw"))
-	if err := PurgeUserState(context.Background(), opts); err != nil {
+	if _, err := PurgeUserState(context.Background(), opts); err != nil {
 		t.Fatalf("rerun PurgeUserState: %v", err)
 	}
 	for _, name := range []string{"defenseclaw-gateway", "defenseclaw"} {
@@ -128,7 +128,7 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(home, ".local")); err != nil {
 		t.Fatal(err)
 	}
-	if err := PurgeUserState(context.Background(), opts); err != nil {
+	if _, err := PurgeUserState(context.Background(), opts); err != nil {
 		t.Fatalf("PurgeUserState without ~/.local/bin: %v", err)
 	}
 }

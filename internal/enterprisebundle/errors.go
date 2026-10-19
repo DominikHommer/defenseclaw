@@ -34,6 +34,7 @@ const (
 	CodeFileHashMismatch Code = "file_hash_mismatch"
 	CodeInlineSecret     Code = "inline_secret"
 	CodeConfigInvalid    Code = "config_invalid"
+	CodeInvalidArguments Code = "invalid_arguments"
 
 	// Trust: the anchor file, the signing key and the signature.
 	CodeAnchorMissing    Code = "anchor_missing"

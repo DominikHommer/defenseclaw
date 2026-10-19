@@ -429,11 +429,13 @@ rules on Linux and macOS:
    The packages ship no copy before they install, so for a first install put
    the pack in place before the package (with your MDM, for example) or install
    with the built-in packs first and switch `rule_pack` afterwards. To repair a
-   copy made with restrictive modes, change only the created parent folders
-   and this pack. On macOS, run
-   `sudo chmod 0755 /opt/cisco/defenseclaw/etc/policies /opt/cisco/defenseclaw/etc/policies/guardrail`
+   copy made with restrictive modes, change only the `guardrail` folder
+   and this pack, and leave `policies` itself to the lifecycle: it keeps that
+   folder at `0750`, owned by root with the service group, and restores it on
+   the next `ensure`, so do not open it to every account. On macOS, run
+   `sudo chmod 0755 /opt/cisco/defenseclaw/etc/policies/guardrail`
    and `sudo chmod -R u=rwX,go=rX /opt/cisco/defenseclaw/etc/policies/guardrail/my-pack`.
-   On Linux, run `sudo chmod 0755 /etc/defenseclaw/policies /etc/defenseclaw/policies/guardrail`
+   On Linux, run `sudo chmod 0755 /etc/defenseclaw/policies/guardrail`
    and `sudo chmod -R u=rwX,go=rX /etc/defenseclaw/policies/guardrail/my-pack`.
    Keep every file and folder owned by root,
    not writable by group or others, and readable by the gateway (for example

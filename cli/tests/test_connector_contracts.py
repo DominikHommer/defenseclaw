@@ -851,6 +851,9 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        preflight = patch("defenseclaw.commands.cmd_setup._preflight_opencode_plugin_folder")
+        preflight.start()
+        self.addCleanup(preflight.stop)
         self.app.cfg.claw.mode = "openclaw"
         self.app.cfg.guardrail.connector = "openclaw"
         self.save_calls = 0
@@ -883,6 +886,19 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
+    def test_action_downgrade_cannot_stage_unsupported_codex(self) -> None:
+        with patch(
+            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+            return_value=_discovery("codex", installed=True, version="codex 0.124.0"),
+        ):
+            ok = _apply_hook_connector_setup(
+                self.app, connector="codex", mode="action", restart=False,
+                _downgrade_refused_action=True,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(self.save_calls, 0)
+        self.assertEqual(self.app.cfg.claw.mode, "openclaw")
+
     def test_hermes_action_mode_detects_but_rejects_v017_before_save(self) -> None:
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
@@ -904,7 +920,9 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
-    def test_peer_observe_mode_warns_and_stages_unsupported_installed_version(self) -> None:
+    def test_peer_observe_mode_refuses_installed_version_without_app_server_stdio(self) -> None:
+        # Both modes need the app-server --stdio command, first present in
+        # Codex 0.136.0. A staged registration would claim unsupported hooks.
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
             return_value=_discovery("codex", installed=True, version="codex 0.123.0"),
@@ -916,10 +934,10 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
                 restart=False,
             )
 
-        self.assertTrue(ok)
-        self.assertEqual(self.save_calls, 1)
-        self.assertEqual(self.app.cfg.claw.mode, "codex")
-        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
+        self.assertFalse(ok)
+        self.assertEqual(self.save_calls, 0)
+        self.assertEqual(self.app.cfg.claw.mode, "openclaw")
+        self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
     def test_opencode_11819_is_exactly_supported(self) -> None:
         resolved = resolve_connector_contract("opencode", "opencode 1.18.19")

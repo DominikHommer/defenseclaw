@@ -2013,6 +2013,44 @@ def test_signing_helpers_refuse_without_credentials(tmp_path: Path) -> None:
             subprocess.run(["shellcheck", "-S", "warning", str(path)], check=True)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the release jobs run the signing helpers with bash on Linux and macOS")
+@pytest.mark.skipif(shutil.which("openssl") is None, reason="needs openssl")
+def test_signing_helper_prints_the_pfx_thumbprint(tmp_path: Path) -> None:
+    # #1280: build-setup.sh takes the signer pin as --expected-signer-sha256;
+    # --thumbprint prints it from the PFX without signing anything.
+    key, cert, pfx = tmp_path / "key.pem", tmp_path / "cert.pem", tmp_path / "test.pfx"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-subj", "/CN=DefenseClaw thumbprint test", "-keyout", str(key), "-out", str(cert)],
+                   check=True, capture_output=True)
+    subprocess.run(["openssl", "pkcs12", "-export", "-inkey", str(key), "-in", str(cert), "-out", str(pfx),
+                    "-passout", "pass:"], check=True, capture_output=True)
+    der = subprocess.run(["openssl", "x509", "-in", str(cert), "-outform", "DER"], check=True, capture_output=True).stdout
+    result = subprocess.run(["bash", str(MDM / "signing" / "authenticode-sign.sh"), "--thumbprint"],
+                            capture_output=True, text=True,
+                            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "AUTHENTICODE_PFX": str(pfx)})
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == hashlib.sha256(der).hexdigest()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the release jobs run build-setup.sh with bash on Linux")
+def test_signed_standalone_build_runs_on_linux_with_osslsigncode(tmp_path: Path) -> None:
+    # #1280: the signed channels no longer need a Windows build host; on Linux
+    # and macOS they need osslsigncode, checked before any build work.
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    (tools / "uname").symlink_to(shutil.which("uname"))
+    builder = ROOT / "packaging" / "windows" / "standalone" / "build-setup.sh"
+    sign = MDM / "signing" / "authenticode-sign.sh"
+    result = subprocess.run(
+        [shutil.which("bash"), str(builder), "--version", "1.0.0", "--sign-command", str(sign),
+         "--signing-type", "DEV", "--expected-signer-sha256", "ab" * 32],
+        capture_output=True, text=True, env={"PATH": str(tools)},
+    )
+    assert result.returncode == 1, result.stderr
+    assert "need osslsigncode 2.5 or later" in result.stderr
+    assert "Windows build host" not in result.stderr
+
+
 # The macOS app job needs these five for every release (release.yaml).
 _MACOS_APP_SECRETS = {
     "MACOS_DEVELOPER_ID_P12_BASE64": "cDEy",
@@ -2122,3 +2160,52 @@ def test_standalone_installer_binds_native_output_to_the_process_deadline() -> N
     assert "native process output timed out" in native
     assert "DC_LIFECYCLE_PHASE:" in module
     assert "transaction quiesce stop services" in module
+
+
+# #1298: after a Linux MDM purge an empty root-only /var/lib/defenseclaw-mdm
+# (the wrapper's staging folder) stayed. A purge removes it when it is empty
+# and root's own directory; anything else stays.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize(
+    ("purge", "platform", "owner", "content", "removed"),
+    [
+        ("1", "linux", "0", "", True),
+        ("1", "linux", "0", "defenseclaw-mdm.abc123", False),
+        ("0", "linux", "0", "", False),
+        ("1", "darwin", "0", "", False),
+        ("1", "linux", "501", "", False),
+        ("1", "linux", "0", "symlink", False),
+    ],
+)
+def test_unix_uninstall_purge_removes_the_empty_staging_folder(
+    tmp_path: Path, purge: str, platform: str, owner: str, content: str, removed: bool
+) -> None:
+    function = _shell_function(_text(MDM / "linux" / "uninstall.sh"), "dc_remove_stage_parent")
+    parent = tmp_path / "defenseclaw-mdm"
+    if content == "symlink":
+        (tmp_path / "elsewhere").mkdir()
+        parent.symlink_to(tmp_path / "elsewhere")
+    else:
+        parent.mkdir(mode=0o700)
+        if content:
+            (parent / content).mkdir()
+    script = f"""DC_PURGE={purge}
+DC_SCRIPT_OS={platform}
+DC_LINUX_STAGE_PARENT="{parent}"
+dc_log() {{ :; }}
+dc_stat_uid() {{ echo {owner}; }}
+{function}
+dc_remove_stage_parent
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert (not os.path.lexists(parent)) is removed
+    if content == "symlink":
+        assert (tmp_path / "elsewhere").is_dir()
+
+
+def test_unix_uninstall_removes_the_staging_folder_after_the_package_and_without_a_gateway() -> None:
+    text = _text(MDM / "linux" / "uninstall.sh")
+    assert text.count("\ndc_remove_stage_parent\n") + text.count("    dc_remove_stage_parent\n") == 2
+    assert 'DC_LINUX_STAGE_PARENT=/var/lib/defenseclaw-mdm' in text
+    assert "DC_STAGE_PARENT=/var/lib/defenseclaw-mdm" in _text(MDM / "linux" / "defenseclaw-enterprise.sh")

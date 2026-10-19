@@ -135,6 +135,20 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	if managed && st != nil && st.managed != nil {
 		rep.ConfiguredDriver = openshell.ComputeDriver(sandboxapi.DisplayText(st.managed.Driver))
 		rep.Driver = rep.ConfiguredDriver
+	} else if managed && a.GOOS == "darwin" {
+		// The daemon may be stopped while the administrator's rendered
+		// gateway still selects Docker. Use the same applied configuration
+		// as the exec shim before deciding which prerequisites to check.
+		if driver, err := managedRenderedDoctorDriver(d.Rendered); err == nil {
+			rep.ConfiguredDriver, rep.Driver = driver, driver
+		} else {
+			rep.ConfiguredDriver, rep.Driver = "", ""
+			rep.Checks = append(rep.Checks, openshell.Check{
+				ID: openshell.CheckIDManagedE2fsprogs, Title: "Sandbox prerequisites",
+				Status: openshell.StatusFail,
+				Detail: "cannot determine the applied sandbox driver: " + err.Error(),
+			})
+		}
 	}
 	if st != nil {
 		switch gw := rep.Get(openshell.CheckIDGatewayVersion); {
@@ -194,8 +208,13 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 			rep.Checks = append(rep.Checks, a.adminCheck())
 		}
 	}
+	if a.Cfg != nil || managed {
+		rep.Checks = append(rep.Checks, a.tlsTrustCheck(ctx, managed))
+	}
 	if managed && a.GOOS == "darwin" {
-		rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
+		if rep.Driver == openshell.DriverVM || (st.managed != nil && rep.Driver != openshell.DriverDocker) {
+			rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
+		}
 		// The per-user job is outside the root gateway's readiness report.
 		// Read only this account's gui domain through the host doctor's runner.
 		d.GOOS, d.Geteuid = a.GOOS, a.Geteuid
@@ -204,6 +223,27 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		}
 	}
 	return rep
+}
+
+func managedRenderedDoctorDriver(paths *openshell.RenderedPaths) (openshell.ComputeDriver, error) {
+	if paths == nil || paths.TOML == "" {
+		return "", errors.New("the administrator's rendered gateway configuration is unavailable")
+	}
+	if err := managedRenderedVMConfigTrust(paths.TOML, "OpenShell gateway configuration"); err != nil {
+		return "", fmt.Errorf("the administrator's rendered gateway configuration is not trusted: %w", err)
+	}
+	data, err := os.ReadFile(paths.TOML)
+	if err != nil {
+		return "", fmt.Errorf("read the administrator's rendered gateway configuration: %w", err)
+	}
+	rendered, err := openshell.ParseRenderedGateway(data, nil)
+	if err != nil {
+		return "", err
+	}
+	if err := rendered.Validate(); err != nil {
+		return "", err
+	}
+	return rendered.ComputeDriver, nil
 }
 
 type statusProbe struct {
@@ -235,7 +275,7 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Status, c.Detail = openshell.StatusWarn, "could not list the sandboxes: "+apiError(err).Error()
 		return c
 	}
-	var bad, stopped, errored []string
+	var bad, stopped, stoppedSilent, errored []string
 	running := 0
 	// A sandbox of the compute driver the gateway ran before a switch is in
 	// OpenShell's error state because the gateway cannot run it, not because a
@@ -255,6 +295,9 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		}
 		if sb.Phase == "error" && !otherDriverNames[sb.Name] {
 			errored = append(errored, sb.Name)
+		}
+		if sb.Phase != "ready" && sb.Phase != "error" && sb.Hooks.Silent && sb.Hooks.OnSilence == "stop" {
+			stoppedSilent = append(stoppedSilent, sb.Name)
 		}
 		switch {
 		case !sb.Hooks.Unreachable:
@@ -283,6 +326,10 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Detail = strings.Join(errored, ", ") + verb + " OpenShell's error state (the container stopped: Docker restarted, or the workload failed), " +
 			"where OpenShell can neither stop nor start " + itThem(errored)
 		c.Fix = &openshell.Fix{Summary: "delete " + itThem(errored) + " (`" + CommandName + " delete NAME --keep-snapshot` keeps a mounted project's undo point) and run again"}
+	case len(stoppedSilent) > 0:
+		c.Status = openshell.StatusWarn
+		c.Detail = strings.Join(stoppedSilent, ", ") + " stopped after its harness worked without hooks reaching DefenseClaw (hooks.on_silence: stop); no sandbox work runs now"
+		c.Fix = &openshell.Fix{Summary: "fix the sandbox harness's hook configuration before starting it again, or delete it"}
 	case len(otherDriver) > 0 && len(stopped) == 0:
 		c.Status = openshell.StatusWarn
 		c.Detail = otherDriverNote(list, liveDriver)

@@ -346,6 +346,11 @@ Which users are protected is set by enrollment. See
 
 ### Not covered
 
+- Commands a user types into an agent's own shell mode, such as Claude Code's
+  bash mode, are the user's input, not an agent tool call. The agent runs them
+  without a pre-tool hook, so DefenseClaw does not check or block them, the
+  same as a command the user runs in their own terminal. Guardrails cover the
+  actions the agent takes.
 - Agents that are not in the table above.
 - Self-built, modified or copied agent clients, and clients below
   DefenseClaw's supported minimum version.

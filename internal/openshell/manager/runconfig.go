@@ -504,10 +504,10 @@ func (m *Manager) planRunConfig(ctx context.Context, in runConfigInput) (*runCon
 	if names := projectMCPList(project, projectOther); names != "" {
 		if allowProject {
 			notices = append(notices, "MCP: the repository's servers "+names+
-				" start without a DefenseClaw check (mcp.project_servers: allow)")
+				" start without a DefenseClaw check; review the repository before using them")
 		} else {
 			notices = append(notices, "MCP: blocked the repository's servers "+names+
-				" (mcp.project_servers: block; a sandbox pack with mcp.project_servers: allow runs them)")
+				"; ask your administrator for a sandbox pack that allows repository servers")
 		}
 	}
 	return &runConfig{files: files, mcp: summary, notices: notices}, nil

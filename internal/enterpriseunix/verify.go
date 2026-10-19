@@ -135,6 +135,15 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 				len(duplicates), linuxPackageName, strings.Join(duplicates, ", "), linuxPackageName, linuxPackageName))
 		}
 	}
+	// The 1.0.2 loader accepted these literals. Keep an installed deployment
+	// running while pointing the administrator to the candidate-safe form.
+	if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil {
+		if installed, err := config.LoadRuntimeV8InspectionCandidateFromBytes(env.Layout.ConfigPath, raw); err == nil {
+			if paths := config.ManagedStandaloneUpgradeAdvisories(installed, raw); len(paths) > 0 {
+				r.AddWarning("managed_literal_credentials", "installed config uses literals at "+strings.Join(paths, ", ")+"; use {credential: NAME} or {env: NAME} where supported; webhook URLs remain supported")
+			}
+		}
+	}
 	if failure := env.lastPackageInstallFailure(); failure != "" {
 		// A package reinstall or upgrade the lifecycle refused (a full disk,
 		// a config it rejected) printed Complete and left status and verify
@@ -152,6 +161,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddWarning(codeUnitDropIn, "local drop-ins change DefenseClaw units: "+strings.Join(dropIns, ", ")+"; they keep the units' account, sandbox and config")
 	}
 	l.describe(ctx, record, true)
+	l.warnDirectoryUnreachable()
 	l.warnSELinuxConfinedUsers()
 	problems = append(problems, l.describeMachinePolicy(record)...)
 	problems = append(problems, l.describeTetragon(ctx)...)
@@ -1087,7 +1097,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()
-	l.describeDeletedEnrolledAccounts()
+	l.describeUnavailableEnrolledHomes()
 	l.describeDiscoveryHomeDirs()
 	l.describeIdentityRecords()
 	l.describeDestinations()
@@ -1172,6 +1182,27 @@ const codeAIDefenseUnavailable = "ai_defense_unavailable"
 // codeDirectoryLookups warns that the gateway cannot resolve some accounts in
 // the directory (a domain controller or SSSD that does not answer).
 const codeDirectoryLookups = "directory_lookups_failing"
+
+// warnDirectoryUnreachable reports the guardian's current reachability
+// observation independently of the gateway's count of failed account lookups.
+// Cached directory facts can keep that count at zero throughout an outage.
+func (l *lifecycle) warnDirectoryUnreachable() {
+	env := l.env
+	dir := enterprisehooks.IdentitySpoolDir(env.P(env.Layout.GuardianAuthDir))
+	domains := enterprisehooks.ReadDirectoryUnreachable(dir, func(path, _ string) error {
+		return env.Trust(path, TrustAdminFile)
+	}, env.Now())
+	if len(domains) == 0 {
+		return
+	}
+	check := "Check SSSD or the domain controller"
+	if env.GOOS == "darwin" {
+		check = "Check the directory binding of this Mac (dsconfigad -show) or the domain controller"
+	}
+	l.result.AddWarning(codeDirectoryLookups, "the hook guardian reports a directory controller unreachable for "+
+		strings.Join(domains, ", ")+"; cached account facts may still select their verified profiles. "+check+
+		"; `"+env.lifecycleCommand("profile-explain --user <account>")+"` shows each account's current match")
+}
 
 const codeProfileAssignments = "profile_assignment_unmatched"
 const codeOptionalDestination = "optional_destination_failing"

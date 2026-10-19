@@ -456,6 +456,18 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	return m.unblock(ctx, req, "")
 }
 
+// modelHostUnblockNote ends the message of an unblock of the sandbox's own
+// model host. OpenShell's provider rule opens that host only to the
+// agent's own programs, for its model calls with the credential, and
+// DefenseClaw never adds another program to that rule (triage judgeRule),
+// so the other programs in the sandbox still cannot reach the host: the
+// unblock lifts only DefenseClaw's own refusal. A bare "unblocked" read as
+// done while the next fetch was refused again (GAP-0178, GAP-0183).
+func modelHostUnblockNote(host string) string {
+	return "; " + host + " is also this sandbox's model host, which OpenShell opens only to the agent's own programs " +
+		"for its model calls, so OpenShell still refuses the other programs in the sandbox there (an unblock or an allow entry does not change that)"
+}
+
 // unblock is Unblock for a decision that may answer an ask (approvalID: the
 // ask a proxy refusal raised, proxyAsk), so the managed gateway's record of
 // it names the ask.
@@ -471,7 +483,7 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 		// The managed gateway keeps an "always" for the person, and
 		// learns who that is from one of their sandboxes: the one they
 		// run, else the one they name with --sandbox (GAP-0609).
-		name, err := m.personSandbox()
+		name, err := m.personSandbox("unblock")
 		if err != nil {
 			return nil, err
 		}
@@ -576,6 +588,9 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 		if m.managedMode() {
 			resp.Message += " until it stops"
 		}
+		if m.modelEndpointHost(b, host) {
+			resp.Message += modelHostUnblockNote(host)
+		}
 	}
 	if b != nil {
 		m.mu.Lock()
@@ -599,10 +614,10 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 }
 
 // personSandbox names the sandbox through which the managed gateway keeps
-// an "always" unblock made without --sandbox: the person's one sandbox.
+// a lasting decision made without --sandbox: the person's one sandbox.
 // Their sandboxes may match different profiles, whose floors check it, so
 // with several they name one.
-func (m *Manager) personSandbox() (string, error) {
+func (m *Manager) personSandbox(action string) (string, error) {
 	var names []string
 	for _, b := range m.liveBoxes() {
 		m.mu.Lock()
@@ -615,14 +630,76 @@ func (m *Manager) personSandbox() (string, error) {
 	switch len(names) {
 	case 0:
 		return "", sandboxapi.Errorf(sandboxapi.CodeInvalid,
-			"on a managed computer, your organization's DefenseClaw gateway keeps an unblock for every sandbox through one of your sandboxes, "+
-				"and none is running; start one with `defenseclaw sandbox run`, then unblock again")
+			"start a sandbox with `defenseclaw sandbox run`, then %s again", action)
 	case 1:
 		return names[0], nil
 	}
+	hint := "--sandbox NAME"
+	if action == "unblock" {
+		hint += " --always"
+	}
 	return "", sandboxapi.Errorf(sandboxapi.CodeInvalid,
-		"you have several sandboxes (%s), whose profiles may differ: name the one whose policy checks the unblock, with --sandbox NAME --always",
-		strings.Join(names, ", "))
+		"you have several sandboxes (%s), whose profiles may differ: name one with %s",
+		strings.Join(names, ", "), hint)
+}
+
+// PolicyDecision records an always allow or block through the managed
+// gateway. Its registration selects the caller's own floor; the gateway
+// rechecks and records the decision before the daemon refreshes egress.
+func (m *Manager) PolicyDecision(ctx context.Context, req sandboxapi.PolicyDecisionRequest) (*sandboxapi.PolicyDecisionResponse, error) {
+	if m.authority() == nil {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "this command is for a managed computer")
+	}
+	host := triage.NormalizeHost(req.Host)
+	if host == "" || strings.ContainsAny(host, "*/ \t") || config.ValidateOpenShellEgressPattern(host) != nil {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "name one destination host or IP address")
+	}
+	if req.Kind != "allow" && req.Kind != "block" {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "choose allow or block")
+	}
+	name := req.Sandbox
+	if name == "" {
+		var err error
+		name, err = m.personSandbox("record this decision")
+		if err != nil {
+			return nil, err
+		}
+	}
+	b, err := m.box(name)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.refuseRetained(b); err != nil {
+		return nil, err
+	}
+	kind := sandboxrelay.DecisionEgressAllow
+	if req.Kind == "block" {
+		kind = sandboxrelay.DecisionEgressBlock
+	} else {
+		eff, err := m.resolveBox(b)
+		if err != nil {
+			return nil, err
+		}
+		if err := triage.CheckUnblock(eff, host); err != nil {
+			return nil, m.decisionViolation(ctx, err, b, eff, audit.SandboxEgressUnblock, host)
+		}
+		if err := triage.CheckApproval(eff, host, 0, true); err != nil {
+			return nil, m.decisionViolation(ctx, err, b, eff, audit.SandboxEgressUnblock, host)
+		}
+		floor := m.floor(eff)
+		if err := sandboxreg.CheckApprovals(floor, kind, sandboxrelay.DecisionScopeAlways); err != nil {
+			m.recordAdminRefusal(ctx, name, audit.SandboxEgressUnblock, host)
+			return nil, m.decisionRefusal(err, b, floor, host)
+		}
+	}
+	stored, err := m.keepDecision(ctx, b, kind, host, sandboxrelay.DecisionScopeAlways, "")
+	if err != nil {
+		return nil, err
+	}
+	if !stored {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the decision was not saved; try again")
+	}
+	return &sandboxapi.PolicyDecisionResponse{Sandbox: name, Host: host, Kind: req.Kind}, nil
 }
 
 // decisionViolation is violationErrorFor for a decision about host in
@@ -640,7 +717,11 @@ func (m *Manager) decisionViolation(ctx context.Context, err error, b *box, eff 
 	}
 	var v *packs.Violation
 	if errors.As(err, &v) {
-		if rule := adminRule(v); rule != "" {
+		rule := adminRule(v)
+		if rule == "" && m.authority() != nil {
+			rule = floorRule(v, m.floor(eff))
+		}
+		if rule != "" {
 			m.logf("%s: sandbox %s: %s", gatewaylog.ErrCodeOpenShellAdminViolation, sandbox, v.Error())
 			m.recordAdminRefusal(ctx, sandbox, op, host)
 			// The check's words when they name the host ("… matches
@@ -656,6 +737,22 @@ func (m *Manager) decisionViolation(ctx context.Context, err error, b *box, eff 
 		}
 	}
 	return m.violationErrorFor(ctx, err, sandbox, op, host)
+}
+
+// floorRule is the floor key behind a pack or profile refusal that the
+// organization imposed on a managed sandbox: its required pack's own block
+// list (required_pack), or the strict profile min_profile requires
+// (min_profile). The person can't change either, so the refusal reads as
+// every managed refusal does, with the request-access line (GAP-0175). ""
+// for a pack or profile the person chose.
+func floorRule(v *packs.Violation, f config.OpenShellAdminConfig) string {
+	switch {
+	case strings.HasPrefix(v.Constraint, "pack ") && strings.TrimSpace(f.RequiredPack) != "":
+		return "required_pack"
+	case v.Constraint == "profile "+config.OpenShellProfileStrict && sandboxreg.StrictFloor(f):
+		return sandboxreg.RuleMinProfile
+	}
+	return ""
 }
 
 // syncConfig loads config.yaml into the configuration snapshot

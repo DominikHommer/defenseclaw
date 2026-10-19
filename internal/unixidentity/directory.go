@@ -213,6 +213,9 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 			if err == nil {
 				facts.Groups, err = r.groupNames(ids)
 			}
+			if err == nil && sssd != nil {
+				facts.OnlyPrimaryGroup, err = sssdListsOnlyPrimaryGroup(sssd, ids, account)
+			}
 		}
 		if err != nil {
 			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
@@ -649,6 +652,40 @@ func (r *NSSResolver) sssdGroupsOfDomain(sssd *sssdNSS, ids []int, account Accou
 		}
 	}
 	return kept, nil
+}
+
+// sssdDomainUsersRID ends the SID of an Active Directory domain's Domain
+// Users group, the primary group of its accounts in the directory.
+const sssdDomainUsersRID = "-513"
+
+// sssdListsOnlyPrimaryGroup reports whether the groups SSSD lists for an
+// account are only its primary group, the Domain Users group of its domain
+// (its directory primary group, when SSSD gives the account a private group)
+// and the /etc/group groups that list it. While SSSD cannot reach the
+// directory it answers from its cache, and for an account whose memberships
+// it never looked up (a first sign-in during the outage, or a cleared cache)
+// that answer is the primary group alone, with nothing to say the rest is
+// missing (GAP-0191). An account in no other group gets the same answer. A
+// SID lookup that fails says nothing, and the groups count as listed.
+func sssdListsOnlyPrimaryGroup(sssd *sssdNSS, ids []int, account Account) (bool, error) {
+	local, err := localGroupsListing(account.Name)
+	if err != nil {
+		return false, err
+	}
+	var others []int
+	for _, id := range ids {
+		if id != account.GID && !slices.Contains(local, id) {
+			others = append(others, id)
+		}
+	}
+	switch len(others) {
+	case 0:
+		return true, nil
+	case 1:
+		sid, err := sssd.sidByGID(others[0])
+		return err == nil && sid != "" && strings.HasSuffix(sid, sssdDomainUsersRID), nil
+	}
+	return false, nil
 }
 
 // otherNSSGroupMemberships asks each configured non-SSSD initgroups service

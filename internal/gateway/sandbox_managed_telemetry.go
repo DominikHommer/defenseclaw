@@ -557,7 +557,7 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 // tombstone still takes the sandbox's last records (the stopping, stopped,
 // error, deleting and deleted phases, the ends of its connections), which
 // the daemon posts within seconds.
-const sandboxTelemetryAfterRevoke = 10 * time.Minute
+const sandboxTelemetryAfterRevoke = sandboxreg.RevokedTelemetryWindow
 
 // sandboxClaimMaxDuration bounds a claimed connection duration.
 const sandboxClaimMaxDuration = 30 * 24 * time.Hour

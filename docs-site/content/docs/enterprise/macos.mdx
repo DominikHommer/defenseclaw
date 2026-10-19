@@ -389,9 +389,10 @@ A macOS standalone install can run coding agents in OpenShell MicroVM sandboxes
 on Apple silicon, under the sandbox policy of each person's directory group.
 They are off until `openshell.enabled` is on. The pkg packages the `defenseclaw`
 launcher and the LaunchAgents, which stay in place while sandboxes are off and
-leave with `uninstall`; you provide OpenShell and, for the MicroVM
-driver, `e2fsprogs` in a root-owned directory (`enterprise.openshell.e2fsprogs_dir`),
-or let each person's daemon download OpenShell (`install: setup`). Docker
+leave with `uninstall`; you provide OpenShell or let each person's daemon
+download it (`install: setup`). The pkg supplies a MicroVM `e2fsprogs`
+fallback. Set the root-owned `enterprise.openshell.e2fsprogs_dir` to use
+your own host tools instead. Docker
 Desktop must run for the person, because the agent images are built there.
 An Intel Mac is refused with the reason `os_unsupported`. Write directory groups
 in the spelling macOS reports (`DOMAIN\group`) and check them with
@@ -423,17 +424,23 @@ Add `--all` to also delete `~/.defenseclaw`. See
 [Uninstall](/docs/get-started/install#uninstall).
 
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy
-the device enforces. `defenseclaw config get`, `guardrail`, `status` and the
-other per-user commands exit `3` and name it instead of answering from it, and
-`doctor` reports the device as managed. `defenseclaw uninstall --all --binaries
---yes` removes it.
+the device enforces. The installed managed `defenseclaw` launcher offers only
+`sandbox` commands. Its `config get`, `guardrail`, `status` and other per-user
+command forms exit `2` and name the managed computer. A separate per-user CLI,
+if present, exits `3` for these commands and `doctor` reports the device as
+managed. `defenseclaw uninstall --all --binaries --yes` removes that per-user
+installation.
 
 A per-user gateway that is still running holds the managed gateway port,
 `127.0.0.1:18970`, unless its user moved it to another port. The install then
-stops before it changes anything: it fails with `api_port_held`, which names
-the process and gives the `kill` command (the pkg install still completes, and
-`last-package-result.json` has the error). Stop that gateway, or move it to
-another port, then run `defenseclaw-gateway enterprise macos ensure --from-package`.
+stops before it changes anything: it fails with `api_port_held`.
+`installer -pkg` prints a generic postinstall failure and records no package
+receipt, so detection reports the computer as not installed. The process and `kill` command
+appear in `/var/log/install.log` and the error in `last-package-result.json`;
+`enterprise macos status --json` also reports the holder. Stop that gateway,
+or move it to another port, then run
+`installer -pkg` again (or `defenseclaw-gateway enterprise macos ensure --from-package`,
+which records no package receipt).
 A per-user gateway on another port keeps running until it is stopped. The
 install, `status` and `verify` name each such account with the
 `per_user_gateway_running` warning and the `kill` command that stops it.
@@ -442,7 +449,7 @@ install, `status` and `verify` name each such account with the
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment, its binaries, config, secrets and logs, most of its data and lifecycle state, and the `_defenseclaw` account. When an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay. They are root-owned while the service account is gone; the next `ensure` adopts them. Each user keeps `~/.defenseclaw`. | `defenseclaw-gateway enterprise macos uninstall --json` |
+| Stop and remove the deployment, its binaries, config, secrets and logs, most of its data and lifecycle state, and the `_defenseclaw` account. When an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay, with the root-only sandbox setup record `/opt/cisco/defenseclaw/lifecycle/openshell-state.kept.json`. They are root-owned while the service account is gone; the next `ensure` adopts them. Each user keeps `~/.defenseclaw`. | `defenseclaw-gateway enterprise macos uninstall --json` |
 | Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise macos uninstall --purge --json` |
 | Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise macos uninstall --keep-state --json` |
 | Keep only the `_defenseclaw` account | Add `--keep-service-account` |
@@ -460,7 +467,11 @@ stops each enrolled user's per-user gateway and removes all of that user's
 `~/.defenseclaw`, the empty agent folders DefenseClaw created in that home,
 the per-user binaries and launcher links in `~/.local/bin`, and the
 DefenseClaw wheels earlier per-user installs left in `~/.cache/uv`, and the
-result names every user it purged or left alone.
+result names every user it purged or left alone. A user's own DefenseClaw
+install from before the enrollment is moved to `~/.defenseclaw-backup-<UTC
+time>` in that home first, and a user whose home folder is gone is reported
+as already clean (see
+[Uninstall](/docs/enterprise/lifecycle#uninstall)).
 Pass `--purge` in the same run as the uninstall: uninstall deletes the list of
 enrolled accounts, so a later `--purge` on a host that is already uninstalled
 is a no-op (`not_installed`) and leaves each user's `~/.defenseclaw`. To
@@ -516,7 +527,11 @@ such as `~/.claude`, `~/.codex` and `~/.config`. macOS privacy controls (TCC)
 do not protect those folders, so no profile is needed.
 
 The per-user AI Discovery scan also walks the home for package manifests and
-model files. Without Full Disk Access it never opens the folders that make
+model files. Its inventory includes CLI binaries in `/usr/local/bin`,
+`/opt/homebrew/bin`, `/opt/local/bin`, `/opt/dc-agents/bin`, and the user's
+`~/.local/bin` and `~/bin`. It checks executability without running the binary.
+The gateway's host-wide inventory separately checks its scanner `PATH`.
+Without Full Disk Access it never opens the folders that make
 macOS ask the employee for permission: Desktop, Documents, Downloads, Movies,
 Music, Pictures, iCloud Drive, other apps' data in `~/Library/Containers` and
 `~/Library/Group Containers`, and Contacts. No employee sees a prompt

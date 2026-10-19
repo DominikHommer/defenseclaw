@@ -306,6 +306,16 @@ func withLauncherClient(newApp func(*cobra.Command) *sandboxcli.App) func(*cobra
 // code.
 func executeLauncher(ctx context.Context, root *cobra.Command, args []string) int {
 	if !launcherOffers(args) {
+		if len(args) > 0 {
+			switch args[0] {
+			case "guardrail":
+				if len(args) > 1 && args[1] == "disable" {
+					reportManagedCommandRefusal("guardrail disable", "")
+				}
+			case "uninstall":
+				reportManagedCommandRefusal("uninstall", "")
+			}
+		}
 		fmt.Fprintln(root.ErrOrStderr(), launcherRefusal)
 		return 2
 	}

@@ -88,6 +88,13 @@ func (st *Status) OffMessage() string {
 // the other account's name, uid or PID.
 const AccountBusyMessage = "Sandboxes aren't available for your account on this computer right now: another account is using them"
 
+// UnavailableSetupChanging is ManagedStatus.Unavailable while the
+// organization's change of this computer's sandbox setup (its compute
+// driver or OpenShell install mode) is not applied yet (#1203). It is a
+// notice that clears by itself, not a refusal to take to IT.
+const UnavailableSetupChanging = "your organization changed how sandboxes run on this computer, and DefenseClaw is still setting that up; " +
+	"try again in a few minutes"
+
 // managedOffMessage is OffMessage for a managed computer.
 func (st *Status) managedOffMessage() string {
 	m := st.Managed
@@ -95,6 +102,10 @@ func (st *Status) managedOffMessage() string {
 	switch {
 	case st.GatewayElsewhere != "":
 		msg = AccountBusyMessage + "; try again when it has no sandbox running."
+	case m.Unavailable == UnavailableSetupChanging:
+		// A notice that clears by itself: it says to retry, with no
+		// exception to ask IT for (GAP-0023, GAP-0187).
+		return UnavailableSentence(m.Unavailable)
 	case m.Unavailable != "":
 		msg = UnavailableSentence(m.Unavailable)
 	default:

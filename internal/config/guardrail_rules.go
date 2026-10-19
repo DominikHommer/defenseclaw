@@ -111,11 +111,17 @@ func (g *GuardrailConfig) EffectiveRulePackRef(connector string) RulePackRef {
 // layout a built-in name whose policy_dir folder does not exist is the
 // shipped vendor pack, as the implicit default pack is
 // (standaloneRulePackDefault). An unknown name resolves to "" (the
-// gateway's generation build rejects it before anything loads).
+// gateway's generation build rejects it before anything loads). A copy set
+// up with UseOfflineVendorPolicies loads a shipped pack from its private
+// copy instead.
 func (c *Config) ResolveRulePackDir(ref RulePackRef) string {
 	if c == nil {
 		return ""
 	}
+	return c.offlineVendorPath(c.resolveRulePackDir(ref))
+}
+
+func (c *Config) resolveRulePackDir(ref RulePackRef) string {
 	if ref.Name == "" {
 		return strings.TrimSpace(ref.Dir)
 	}
@@ -132,6 +138,35 @@ func (c *Config) ResolveRulePackDir(ref RulePackRef) string {
 		return dir
 	}
 	return ""
+}
+
+// UseOfflineVendorPolicies makes every rule pack that resolves under
+// vendorDir, the target Linux or macOS layout's shipped policy folder, load
+// from the same relative path under root: a private copy of the policies
+// this binary embeds. A bundle signer on another workstation has no
+// installed copy, and the standalone default pack falls back to that folder
+// whenever the policy_dir pack is absent (GAP-0223). The shipped packs are
+// pinned by product_version, not by the bundle digest; the paths the digest
+// sees are written back to vendorDir.
+func (c *Config) UseOfflineVendorPolicies(vendorDir, root string) {
+	c.offlineVendorPolicyDir = strings.TrimRight(path.Clean(filepath.ToSlash(strings.TrimSpace(vendorDir))), "/")
+	c.offlineVendorPolicyRoot = root
+}
+
+// offlineVendorPath is dir with a leading shipped policy folder replaced by
+// the offline copy (UseOfflineVendorPolicies); any other dir is unchanged.
+func (c *Config) offlineVendorPath(dir string) string {
+	if c.offlineVendorPolicyRoot == "" || c.offlineVendorPolicyDir == "" || strings.TrimSpace(dir) == "" {
+		return dir
+	}
+	clean := path.Clean(filepath.ToSlash(dir))
+	if clean == c.offlineVendorPolicyDir {
+		return c.offlineVendorPolicyRoot
+	}
+	if rel, ok := strings.CutPrefix(clean, c.offlineVendorPolicyDir+"/"); ok {
+		return filepath.Join(c.offlineVendorPolicyRoot, filepath.FromSlash(rel))
+	}
+	return dir
 }
 
 // EmbeddedRulePack reports whether ref selects the rule packs embedded in

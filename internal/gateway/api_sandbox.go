@@ -62,6 +62,7 @@ type SandboxController interface {
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	DecideApproval(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
 	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)
+	PolicyDecision(ctx context.Context, req sandboxapi.PolicyDecisionRequest) (*sandboxapi.PolicyDecisionResponse, error)
 	Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error)
 	// PolicyTest judges destinations with a sandbox's egress policy.
 	PolicyTest(ctx context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error)
@@ -103,6 +104,20 @@ func (a *APIServer) registerSandboxRoutes(mux *http.ServeMux) {
 	mux.Handle(sandboxapi.PathPrefix, a.sandboxAPIHandler())
 }
 
+// sandboxPolicyConfirmKey marks a Get the caller asked to answer with the
+// running sandbox's policy confirmed first (sandboxapi.QueryConfirm).
+type sandboxPolicyConfirmKey struct{}
+
+func withSandboxPolicyConfirm(ctx context.Context) context.Context {
+	return context.WithValue(ctx, sandboxPolicyConfirmKey{}, true)
+}
+
+// sandboxPolicyConfirmAsked reports a Get withSandboxPolicyConfirm marked.
+func sandboxPolicyConfirmAsked(ctx context.Context) bool {
+	asked, _ := ctx.Value(sandboxPolicyConfirmKey{}).(bool)
+	return asked
+}
+
 // sandboxAPIHandler is the sandbox API's own router.
 func (a *APIServer) sandboxAPIHandler() http.Handler {
 	mux := http.NewServeMux()
@@ -122,6 +137,9 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 		return c.Create(ctx, req)
 	}))
 	mux.HandleFunc("GET "+sandboxapi.PathSandboxes+"/{name}", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
+		if r.URL.Query().Get(sandboxapi.QueryConfirm) == sandboxapi.ConfirmPolicy {
+			ctx = withSandboxPolicyConfirm(ctx)
+		}
 		return c.Get(ctx, r.PathValue("name"))
 	}))
 	mux.HandleFunc("GET "+sandboxapi.PathSandboxes+"/{name}/logs", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
@@ -216,6 +234,13 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 			return nil, err
 		}
 		return c.Unblock(ctx, req)
+	}))
+	mux.HandleFunc("POST "+sandboxapi.PathPolicyDecision, a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
+		var req sandboxapi.PolicyDecisionRequest
+		if err := decodeSandboxBody(r, &req, false); err != nil {
+			return nil, err
+		}
+		return c.PolicyDecision(ctx, req)
 	}))
 	mux.HandleFunc("GET "+sandboxapi.PathPolicyExplain, a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
 		return c.Explain(ctx, sandboxapi.ParseExplainQuery(r.URL.Query()))

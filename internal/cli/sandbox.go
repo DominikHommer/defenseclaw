@@ -48,6 +48,10 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 			settings, ok := sandboxOpenShellDaemonSettings(ctx)
 			return settings.Enterprise.E2fsprogsDir, ok
 		},
+		ManagedTrustedCAs: func(ctx context.Context) (string, string, bool) {
+			settings, ok := sandboxOpenShellDaemonSettings(ctx)
+			return settings.Operational.TrustedCAs, settings.Operational.TrustedCAError, ok
+		},
 		ManagedAccountHome: sandboxAccountHome,
 		IO: sandboxcli.IO{
 			In: cmd.InOrStdin(), Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
@@ -1020,16 +1024,26 @@ is applied.`,
 	cmd.AddCommand(suggest)
 	for _, list := range []string{"allow", "block"} {
 		list := list
-		short := "Add hosts to openshell.egress.allow (used by the balanced and strict profiles)"
+		short := "Allow a destination under your sandbox policy"
 		if list == "block" {
-			short = "Add hosts to openshell.egress.block"
+			short = "Block a destination under your sandbox policy"
 		}
 		var remove bool
+		var decisionSandbox string
 		edit := &cobra.Command{
 			Use:   list + " <host>...",
 			Short: short,
 			Args:  cobra.MinimumNArgs(1),
 			RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
+				if app.ManagedHost() {
+					if remove {
+						return errors.New("removing a saved managed decision is not available; contact your administrator")
+					}
+					return app.ManagedPolicyDecision(ctx, list, args, decisionSandbox)
+				}
+				if decisionSandbox != "" {
+					return errors.New("--sandbox is for managed computers")
+				}
 				if remove {
 					return app.PolicyRemove(ctx, list, args)
 				}
@@ -1037,6 +1051,7 @@ is applied.`,
 			}),
 		}
 		edit.Flags().BoolVar(&remove, "remove", false, "remove the hosts from openshell.egress."+list+" instead")
+		edit.Flags().StringVar(&decisionSandbox, "sandbox", "", "on a managed computer, use this sandbox's policy to check the decision")
 		cmd.AddCommand(edit)
 	}
 	return cmd
