@@ -280,10 +280,12 @@ int cycle(MQTTClient* c, Timer* timer)
             MQTTMessage msg;
             Timer ack_timer;
             int intQoS;
-            msg.payloadlen = 0; /* this is a size_t, but deserialize publish sets this as int */
+            int payloadlen = 0; /* DefenseClaw: msg.payloadlen is a size_t; never write it through an int* */
             if (MQTTDeserialize_publish(&msg.dup, &intQoS, &msg.retained, &msg.id, &topicName,
-               (unsigned char**)&msg.payload, (int*)&msg.payloadlen, c->readbuf, c->readbuf_size) != 1)
+               (unsigned char**)&msg.payload, &payloadlen, c->readbuf, c->readbuf_size) != 1 ||
+               payloadlen < 0)
                 goto exit;
+            msg.payloadlen = (size_t)payloadlen;
             msg.qos = (enum QoS)intQoS;
             deliverMessage(c, &topicName, &msg);
             if (msg.qos != QOS0)
