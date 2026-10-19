@@ -377,10 +377,14 @@ var tetragonCodes = map[string]tetragonCodeText{
 	kernelpolicy.WarnSessionsUnconfirmed: {Message: func(f tetragonFacts) string {
 		count, n := sessionCount(f.Detail, "agent session of an enforced user", "agent sessions of enforced users")
 		return count + " fit the enforcing kernel controls, but Tetragon never reported " + plural(n, "its", "their") +
-			" start on the event stream (the stream was down, or the sensor helper restarted before it saw " + plural(n, "it", "them") +
-			"), so " + plural(n, "it is", "they are") + " not counted as denied and " + plural(n, "its user is", "their users are") +
-			" armed, not enforcing; restart " + plural(n, "it", "them") + " while the stream is connected. " + gwStatus +
-			" lists " + plural(n, "it", "them") + " under Observed, not enforced"
+			" start on the event stream (" + plural(n, "it is", "they are") + " not counted as denied and " +
+			plural(n, "its user is", "their users are") + " armed, not enforcing; the stream was down, or the sensor helper restarted" +
+			" before it saw " + plural(n, "it", "them") + "); restart " + plural(n, "it", "them") + " while the stream is connected. " +
+			gwStatus + " lists " + plural(n, "it", "them") + " under Observed, not enforced"
+	}},
+	kernelpolicy.ReasonNoAnchoredSession: {Message: func(tetragonFacts) string {
+		return "enforce is loaded for the user, but no running agent session of theirs started from an agent binary after the" +
+			" kernel controls loaded (nothing of theirs is denied now); nothing to do: the next agent session they start is denied"
 	}},
 	kernelpolicy.WarnBinaryScopeLimited: {Message: func(tetragonFacts) string {
 		return "more than one user of a controls policy has a native agent install" +
