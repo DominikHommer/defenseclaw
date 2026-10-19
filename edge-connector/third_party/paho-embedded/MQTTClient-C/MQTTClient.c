@@ -620,6 +620,43 @@ exit:
 }
 
 
+/* DefenseClaw addition: MQTTPublish without the PUBACK/PUBCOMP wait, so a
+ * single-threaded caller is not blocked for a broker round trip. */
+int MQTTPublishNoWait(MQTTClient* c, const char* topicName, MQTTMessage* message)
+{
+    int rc = FAILURE;
+    Timer timer;
+    MQTTString topic = MQTTString_initializer;
+    topic.cstring = (char *)topicName;
+    int len = 0;
+
+#if defined(MQTT_TASK)
+	  MutexLock(&c->mutex);
+#endif
+	  if (!c->isconnected)
+		    goto exit;
+
+    TimerInit(&timer);
+    TimerCountdownMS(&timer, c->command_timeout_ms);
+
+    if (message->qos == QOS1 || message->qos == QOS2)
+        message->id = getNextPacketId(c);
+
+    len = MQTTSerialize_publish(c->buf, c->buf_size, 0, message->qos, message->retained, message->id,
+              topic, (unsigned char*)message->payload, message->payloadlen);
+    if (len <= 0)
+        goto exit;
+    rc = sendPacket(c, len, &timer);
+
+exit:
+    if (rc == FAILURE)
+        MQTTCloseSession(c);
+#if defined(MQTT_TASK)
+	  MutexUnlock(&c->mutex);
+#endif
+    return rc;
+}
+
 int MQTTPublish(MQTTClient* c, const char* topicName, MQTTMessage* message)
 {
     int rc = FAILURE;

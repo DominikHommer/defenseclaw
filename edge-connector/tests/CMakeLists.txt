@@ -78,6 +78,17 @@ if(DCLAW_MQTT_ENABLED)
     target_compile_definitions(test_mqtt_ack PRIVATE
         MQTTCLIENT_PLATFORM_HEADER=MQTTDclaw.h)
     add_test(NAME mqtt_ack COMMAND test_mqtt_ack)
+
+    add_executable(test_mqtt_publish_nowait test_mqtt_publish_nowait.c)
+    target_link_libraries(test_mqtt_publish_nowait PRIVATE dclaw_core)
+    target_include_directories(test_mqtt_publish_nowait PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/paho-embedded
+        ${CMAKE_SOURCE_DIR}/third_party/paho-embedded/MQTTClient-C
+        ${CMAKE_SOURCE_DIR}/third_party/paho-embedded/MQTTPacket)
+    target_compile_definitions(test_mqtt_publish_nowait PRIVATE
+        MQTTCLIENT_PLATFORM_HEADER=MQTTDclaw.h)
+    add_test(NAME mqtt_publish_nowait COMMAND test_mqtt_publish_nowait)
+    list(APPEND DCLAW_TEST_TARGETS test_mqtt_publish_nowait)
     list(APPEND DCLAW_TEST_TARGETS test_mqtt_ack)
 
     add_executable(test_verdict_protocol test_verdict_protocol.c)

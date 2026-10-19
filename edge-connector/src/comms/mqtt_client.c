@@ -766,7 +766,12 @@ int dclaw_mqtt_publish(const char *topic, const void *payload, size_t len, uint8
         .payloadlen = len,
     };
 
-    int rc = MQTTPublish(&mqtt_ctx.paho, topic, &msg);
+    /* Do not wait for PUBACK: this runs inside dclaw_evaluate on the single
+     * daemon thread, and waiting would put a broker round trip (and, under
+     * loss, TCP retransmission delay up to MQTT_COMMAND_TIMEOUT) in front of
+     * every escalation, including speculative ones, and stall other clients.
+     * The PUBACK is absorbed by the next MQTTYield. */
+    int rc = MQTTPublishNoWait(&mqtt_ctx.paho, topic, &msg);
     if (rc != SUCCESS || mqtt_frame_failed) {
         fprintf(stderr, "[DCLAW-MQTT] Publish failed (rc=%d), marking disconnected\n", rc);
         mqtt_mark_disconnected();
