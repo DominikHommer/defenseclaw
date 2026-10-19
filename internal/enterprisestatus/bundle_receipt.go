@@ -58,6 +58,7 @@ type PublicReceipt struct {
 	// Actor is the local OS account that received this bundle.
 	Actor         string `json:"actor,omitempty"`
 	ChangeSummary string `json:"change_summary,omitempty"`
+	RollbackOf    string `json:"rollback_of,omitempty"`
 	// State is BundleConfirmed or BundleFailed; ErrorCode is the closed
 	// code of a failed receipt.
 	State                   string   `json:"state"`

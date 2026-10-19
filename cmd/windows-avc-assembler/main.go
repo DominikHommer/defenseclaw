@@ -75,8 +75,7 @@ var requiredPayloadFiles = []string{
 // requiredStandalonePayloadFiles is the pinned inventory for the
 // standalone (MDM-deployable) flavor. No Cisco Secure Client CMID
 // broker — standalone profiles use PowerShell 7 and vendor-neutral
-// paths — plus the scanner runtime launcher and Fleet policy compiler the
-// standalone lifecycle installs into its own root. A change here MUST match
+// paths — plus the scanner runtime launcher. A change here MUST match
 // cmd/defenseclaw-enterprise-setup/main.go standalonePayloadFiles verbatim.
 var requiredStandalonePayloadFiles = []string{
 	"DefenseClawEnterprise.psm1",
@@ -87,7 +86,6 @@ var requiredStandalonePayloadFiles = []string{
 	"defenseclaw-sensor-helper.exe",
 	"defenseclaw.exe",
 	"install-enterprise.ps1",
-	"policy_compiler.py",
 }
 
 // payloadFilesFor selects the pinned inventory for the given -Flavor.
@@ -96,12 +94,6 @@ func payloadFilesFor(flavor string) []string {
 		return requiredStandalonePayloadFiles
 	}
 	return requiredPayloadFiles
-}
-
-// The standalone Python source is authenticated by the signed outer Setup's
-// digest manifest. Authenticode cannot be embedded in a .py file.
-func payloadRequiresAuthenticode(flavor, name string) bool {
-	return flavor != flavorStandalone || name != "policy_compiler.py"
 }
 
 // artifactNameFor selects the shipped Setup EXE filename for the given
@@ -375,9 +367,6 @@ func assemble(opts options, stdout io.Writer) error {
 	stage(2, "verify signatures")
 	if !opts.AllowUnsigned {
 		for _, name := range payloadFilesFor(opts.Flavor) {
-			if !payloadRequiresAuthenticode(opts.Flavor, name) {
-				continue
-			}
 			if err := verifyAuthenticode(
 				filepath.Join(payloadDir, name),
 				opts.signingTypeParsed,

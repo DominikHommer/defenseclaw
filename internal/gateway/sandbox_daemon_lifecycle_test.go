@@ -278,7 +278,8 @@ func TestSandboxDaemonRevalidatesPersistedRegistrations(t *testing.T) {
 		case id == "reg-edited":
 			return sandboxrelay.CurrentPolicy{}, &sandboxrelay.Error{Status: http.StatusNotFound, Reason: sandboxrelay.ReasonRegistrationUnknown}
 		}
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 4, Floor: wireFloor(config.OpenShellAdminConfig{MinProfile: "balanced"})}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 4,
+			Floor: &config.OpenShellAdminConfig{MinProfile: "balanced"}}, nil
 	}
 	if revoked := f.d.revalidate(context.Background()); len(revoked) != 0 || f.d.config().OpenShell.Admin.MinProfile != "strict" {
 		t.Fatalf("an unreachable gateway confirmed something: %v %+v", revoked, f.d.config().OpenShell.Admin)

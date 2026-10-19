@@ -16,7 +16,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -59,15 +58,37 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	}, nil
 }
 
+// DirectoryCachesHoldOutageAnswers: Open Directory keeps serving the answers
+// it gave while the domain controller was away, so the guardian watches for
+// them (DirectoryCachesStale).
+const DirectoryCachesHoldOutageAnswers = true
+
+// DirectoryAwayWithoutAnswer is false on a Mac: its own check cannot tell an
+// outage from a firewall in front of the LDAP port, so a domain whose
+// domain controllers never answered since the guardian started is not away.
+const DirectoryAwayWithoutAnswer = false
+
+// DirectoryAnswers reports whether a domain controller of the Active
+// Directory domain answers (DomainControllerAnswers).
+func DirectoryAnswers(ctx context.Context, domain string) bool {
+	return DomainControllerAnswers(ctx, domain)
+}
+
+// directoryReachDomain is the domain the guardian checks for an account's
+// record: its Active Directory domain.
+func directoryReachDomain(record IdentitySpoolRecord) string {
+	return activeDirectoryDomain(record)
+}
+
 // FlushDirectoryCaches empties Open Directory's caches (dscacheutil
 // -flushcache, dsmemberutil flushcache), which only root can do. The
-// guardian calls it when its pass resolves accounts again after one that
-// resolved none: once the domain controller answers again, Open Directory
-// kept answering from the caches it filled during the outage, an account
-// without its domain groups, for about 11 more minutes, and the accounts
-// stayed on the default profile until an administrator flushed them by hand
-// (GAP-0680, GAP-0517). The gateway's next lookup of an account then gets its
-// groups from the directory.
+// guardian calls it when a domain controller answers again while Open
+// Directory still lists an Active Directory account without its domain
+// groups: it kept answering from the caches it filled during the outage for
+// 11 to 19 more minutes, and the accounts stayed on the default profile until
+// an administrator flushed them by hand (#1197, GAP-0680, GAP-0517). The
+// gateway's next lookup of an account then gets its groups from the
+// directory.
 func FlushDirectoryCaches(ctx context.Context) error {
 	var errs []error
 	for _, step := range [][]string{{"/usr/bin/dscacheutil", "-flushcache"}, {"/usr/bin/dsmemberutil", "flushcache"}} {
@@ -99,25 +120,4 @@ func runMacOSIdentityTool(ctx context.Context, tool string, args ...string) stri
 		return ""
 	}
 	return boundedOutput(out)
-}
-
-// trustedIdentityTool returns the first root-owned, non-writable candidate.
-func trustedIdentityTool(candidates ...string) string {
-	for _, candidate := range candidates {
-		info, err := os.Lstat(candidate)
-		if err != nil || !info.Mode().IsRegular() || !rootOwnedChain(candidate) {
-			continue
-		}
-		return candidate
-	}
-	return ""
-}
-
-// boundedOutput trims command output to a sane size.
-func boundedOutput(data []byte) string {
-	const limit = 64 << 10
-	if len(data) > limit {
-		data = data[:limit]
-	}
-	return strings.ToValidUTF8(string(data), "")
 }

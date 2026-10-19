@@ -252,6 +252,46 @@ func TestManagedBackupFollowsAMovedHome(t *testing.T) {
 	}
 }
 
+// GAP-0633: an account moved by copying its home and then emptying the old
+// folder keeps the old home as an empty folder. The record follows the move
+// as it does when the old home is gone; an old home that still holds a file
+// does not.
+func TestManagedBackupFollowsAHomeMovedIntoAnEmptiedOldHome(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		leftovers bool
+		want      bool
+	}{{"emptied", false, true}, {"not emptied", true, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			oldHome := filepath.Join(root, "old-home")
+			newHome := filepath.Join(root, "new-home")
+			oldTarget := filepath.Join(oldHome, ".config", "opencode", "plugins", "defenseclaw.js")
+			newTarget := filepath.Join(newHome, ".config", "opencode", "plugins", "defenseclaw.js")
+			record := filepath.Join(newHome, ".defenseclaw", "connector_backups", "opencode", "plugin.json")
+			for _, dir := range []string{filepath.Dir(newTarget), filepath.Dir(record), oldHome} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(newTarget, []byte("// plugin\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.leftovers {
+				if err := os.WriteFile(filepath.Join(oldHome, ".profile"), []byte("# kept\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("HOME", newHome)
+			t.Setenv("USERPROFILE", newHome)
+			got, ok := managedBackupTargetAfterHomeMove(record, oldTarget)
+			if ok != tc.want || (tc.want && got != newTarget) {
+				t.Fatalf("mapped %q (%v), want %v onto %s", got, ok, tc.want, newTarget)
+			}
+		})
+	}
+}
+
 // GAP-0433: a gateway started with CLAUDE_CONFIG_DIR pointing elsewhere keeps
 // the config root setup bound, so connector setup does not stop at "managed
 // backup target mismatch".

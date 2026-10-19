@@ -45,6 +45,71 @@ func TestV8SchemaNamesFieldsThatExcludeEachOther(t *testing.T) {
 	}
 }
 
+// GAP-0760 (#1099): severity_overrides takes the rule severities block_at
+// takes, in any case. INFO, which no rule can have, passed the schema and was
+// then refused by the rule composer; the schema now refuses it and names the
+// words it takes, as it does for block_at.
+func TestV8SchemaRuleSeverityOverrideWords(t *testing.T) {
+	override := func(value string) []byte {
+		return []byte("config_version: 9\nguardrail:\n  rules:\n    severity_overrides: {SEC-AWS-SECRET: " + value + "}\n")
+	}
+	for _, value := range []string{"CRITICAL", "high", "Medium", "low"} {
+		if err := ValidateV8SchemaBytes("admin.yaml", override(value)); err != nil {
+			t.Errorf("severity_overrides %s refused: %v", value, err)
+		}
+	}
+	for _, value := range []string{"INFO", "info", "severe"} {
+		err := ValidateV8SchemaBytes("admin.yaml", override(value))
+		var schemaErr *V8SchemaError
+		if !errors.As(err, &schemaErr) || schemaErr.Keyword != "pattern" ||
+			schemaErr.Expected != "one of CRITICAL, HIGH, MEDIUM, LOW in any case" {
+			t.Errorf("severity_overrides %s = %v (%+v)", value, err, schemaErr)
+		}
+	}
+	err := ValidateV8SchemaBytes("admin.yaml", []byte("config_version: 9\nguardrail:\n  block_at: severe\n"))
+	var schemaErr *V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Expected != "one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)" {
+		t.Errorf("block_at severe = %v (%+v)", err, schemaErr)
+	}
+}
+
+// GAP-0760 (#1099): hilt.min_severity follows the same case rule as block_at
+// and severity_overrides. The Go and Python validators and every gateway
+// reader already took any case; only the schema refused lower case.
+func TestV8SchemaHILTMinSeverityTakesAnyCase(t *testing.T) {
+	hilt := func(value string) []byte {
+		return []byte("config_version: 9\nguardrail:\n  hilt: {enabled: true, min_severity: \"" + value + "\"}\n" +
+			"  connectors:\n    codex:\n      hilt: {enabled: true, min_severity: \"" + value + "\"}\n")
+	}
+	for _, value := range []string{"", "CRITICAL", "high", "Medium", "low"} {
+		if err := ValidateV8SchemaBytes("admin.yaml", hilt(value)); err != nil {
+			t.Errorf("hilt.min_severity %q refused: %v", value, err)
+		}
+	}
+	for _, value := range []string{"INFO", "severe"} {
+		err := ValidateV8SchemaBytes("admin.yaml", hilt(value))
+		var schemaErr *V8SchemaError
+		if !errors.As(err, &schemaErr) || schemaErr.Keyword != "pattern" ||
+			schemaErr.Expected != "one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)" {
+			t.Errorf("hilt.min_severity %q = %v (%+v)", value, err, schemaErr)
+		}
+	}
+}
+
+func TestV8SchemaPatternWords(t *testing.T) {
+	for pattern, want := range map[string]string{
+		"^([Ll][Oo][Ww]|[Hh][Ii][Gg][Hh])$": "one of LOW, HIGH in any case",
+		"^(|observe|action)$":               "one of observe, action (empty inherits)",
+		"^[a-z0-9][a-z0-9_-]{0,63}$":        "",
+		"^agt-[0-9a-f]{16}$":                "",
+		"^(a.b|c)$":                         "",
+	} {
+		if got := v8SchemaPatternWords(pattern); got != want {
+			t.Errorf("v8SchemaPatternWords(%q) = %q, want %q", pattern, got, want)
+		}
+	}
+}
+
 func TestConfigV8SchemaClassifiesEveryTopLevelGoConfigField(t *testing.T) {
 	var schema map[string]any
 	if err := json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &schema); err != nil {

@@ -121,6 +121,16 @@ func TestManagedRunBringsTheUsersMCPServersAsTheGatewayJudged(t *testing.T) {
 	if kept, _, err := (daemonMCPInventory{}).SandboxMCPServers(start, "claudecode"); err == nil || kept != nil {
 		t.Fatalf("a start without the gateway's answer kept %v (%v)", names(kept), err)
 	}
+	// GAP-0179: once the person withdraws their servers, the next start
+	// reads that and brings none along, without a gateway answer to reuse.
+	entries = nil
+	relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		t.Fatal("a start without claims asked the gateway")
+		return sandboxapi.ManagedExplain{}, nil
+	}
+	if kept, skipped, err := (daemonMCPInventory{}).SandboxMCPServers(start, "claudecode"); err != nil || len(kept) != 0 || len(skipped) != 0 {
+		t.Fatalf("a start after the servers were withdrawn kept %v skipped %+v (%v)", names(kept), skipped, err)
+	}
 }
 
 // The caller's explain judges the MCP servers it claims (the MCP row), and

@@ -75,7 +75,9 @@ type Options struct {
 	// KeepState makes a (non-purge) uninstall keep the machine state: the
 	// config, secrets, gateway and guardian state, logs and lifecycle
 	// state, and the service account, so a reinstall resumes with them.
-	// Without it uninstall removes all of it.
+	// Without it uninstall removes that state except the gateway's sandbox
+	// registrations, their key and the sandbox setup record while an account
+	// keeps sandboxes. Purge removes those too.
 	KeepState bool
 	// KeepServiceAccount makes uninstall keep the gateway service account,
 	// which it removes otherwise.
@@ -156,6 +158,11 @@ type lifecycle struct {
 	// reportChanges is set while a repair or ensure re-applies an installed
 	// deployment: the result then lists what the transaction changed.
 	reportChanges bool
+	// perUserStateKept names the accounts whose per-user state the purge
+	// left in place (remove-all's state_failed: a pending cleanup still
+	// needs it, or its home was not available). Their session-facts cache
+	// stays with that state (GAP-0582).
+	perUserStateKept map[string]bool
 	// perUserRemoved counts the per-user hook registrations an uninstall
 	// removed, for its summary.
 	perUserRemoved int
@@ -198,8 +205,9 @@ type lifecycle struct {
 	// sandboxesKept names the accounts whose sandboxes a non-purge
 	// uninstall kept; sandboxStoreKept is set once it kept the gateway's
 	// registrations of them with it (GAP-0598).
-	sandboxesKept    []string
-	sandboxStoreKept bool
+	sandboxesKept       []string
+	sandboxStoreKept    bool
+	openshellRecordKept bool
 	// configWrittenDuringRun holds a config.yaml another writer put in place
 	// while a transaction of this run planned its own (applyFiles kept it).
 	// A rollback restores the earlier file, so the newer one is put back
@@ -339,6 +347,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	// removed file.
 	if err := env.ensureDir(env.P(env.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
 		r.AddError(codeState, err.Error())
+		l.reportNoSpace(err)
 		return 0
 	}
 	lock, err := env.acquireLock(ctx)
@@ -367,6 +376,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		r.AddError(codeState, err.Error())
+		l.reportNoSpace(err)
 		return 0
 	}
 	defer lock.release()
@@ -566,14 +576,18 @@ func (l *lifecycle) ensureInstalled(ctx context.Context, record *Deployment, app
 // uninstall that then failed to remove another state folder left no record,
 // so its rerun was a not_installed no-op and the leftovers needed
 // --adopt-existing (GAP-1440).
-func (e *Env) removeLifecycleStateKeepingLock() error {
+func (e *Env) removeLifecycleStateKeepingLock(keep ...string) error {
 	dir := e.P(e.Layout.LifecycleDir)
+	skip := map[string]bool{lockFileName: true, deploymentFileName: true}
+	for _, name := range keep {
+		skip[name] = true
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Name() == lockFileName || entry.Name() == deploymentFileName {
+		if skip[entry.Name()] {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
@@ -1603,6 +1617,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			committedConfig = l.inPlaceConfigEdit(record)
 		}
 		r.AddError(code, err.Error())
+		l.reportNoSpace(err)
 		if record == nil && account.Created {
 			// Refused before any change: the service account this run
 			// created goes too (GAP-0542).
@@ -1721,6 +1736,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			env.discardSnapshot(snap)
 		}
 		r.AddError(codeApply, err.Error())
+		l.reportDiskFull(err)
 		return 0
 	}
 	pending := &Pending{
@@ -1730,6 +1746,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := env.savePending(pending); err != nil {
 		env.discardSnapshot(snap)
 		r.AddError(codeApply, err.Error())
+		l.reportDiskFull(err)
 		return 0
 	}
 
@@ -1737,6 +1754,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 
 	failAndRollback := func(code string, cause error) int {
 		r.AddError(code, cause.Error())
+		// Before the rollback, which can free space: what was full when the
+		// step failed (GAP-0662).
+		l.reportDiskFull(cause)
 		// The previous deployment's sandbox settings are back, not the plan's.
 		l.osPlan = nil
 		// The rollback undoes this transaction's changes.
@@ -3000,9 +3020,10 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 
 // uninstall stops and removes the deployment, with its machine state (the
 // config, secrets, gateway and guardian state, logs and lifecycle state) and
-// the service account. Each account keeps its own ~/.defenseclaw and
-// per-user binaries unless purge is set. KeepState keeps the machine state
-// for a reinstall to resume with.
+// the service account. Without purge each account keeps its ~/.defenseclaw,
+// per-user binaries and sandboxes; the gateway's sandbox registrations and
+// key stay for those sandboxes, and Linux keeps administrator policies.
+// KeepState keeps the other machine state for a reinstall to resume with.
 func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
 	units := env.Services.Units()
@@ -3141,10 +3162,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	} else if record == nil && l.opts.Purge {
 		l.warnUnpurgedPerUser(ctx)
 	}
-	// The sandbox subsystem goes before the binaries it runs: each account's
-	// daemon and OpenShell gateway stop (its sandboxes first), the account's
-	// sandboxes are torn down as the account, and a purge removes what the
-	// subsystem left in the account's home.
+	// The sandbox subsystem goes before the binaries it runs: a non-purge
+	// uninstall stops and keeps each account's sandboxes, then its daemon
+	// and OpenShell gateway. A purge tears down the sandboxes as the account
+	// and removes what the subsystem left in its home.
 	l.teardownOpenShell(ctx, sandboxAccounts)
 	// DefenseClaw's vendor machine policy entries go next, while the hook
 	// binary they name still exists; administrator entries stay byte for
@@ -3369,7 +3390,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		if err := env.removeSensorState(); err != nil {
 			errs = append(errs, err)
 		}
-		if err := env.removeLifecycleStateKeepingLock(); err != nil {
+		var keepLifecycle []string
+		if l.openshellRecordKept {
+			keepLifecycle = append(keepLifecycle, openshellKeptStateFile)
+		}
+		if err := env.removeLifecycleStateKeepingLock(keepLifecycle...); err != nil {
 			errs = append(errs, err)
 		}
 		if !packageManaged {
@@ -3528,15 +3553,27 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	}
 	state := fmt.Sprintf("the managed config and secrets (%s), the gateway and guardian state (%s, %s), the logs (%s)",
 		layout.ConfigDir, layout.DataDir, layout.GuardianAuthDir, layout.LogDir)
+	if l.sandboxStoreKept {
+		state = fmt.Sprintf("the managed config and secrets (%s), the gateway and guardian state (%s except its sandbox registrations and their key, which stay, %s), the logs (%s)",
+			layout.ConfigDir, layout.DataDir, layout.GuardianAuthDir, layout.LogDir)
+	}
+	lifecycleState := "the lifecycle state (" + layout.LifecycleDir + ")"
+	if l.openshellRecordKept {
+		lifecycleState = "the lifecycle state (" + layout.LifecycleDir + " except the record of the sandbox setup the kept sandboxes were made under, " +
+			filepath.Join(layout.LifecycleDir, openshellKeptStateFile) + ")"
+	}
 	switch {
 	case l.opts.KeepState:
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
+		if l.openshellRecordKept {
+			lines = append(lines, "kept the record of the sandbox setup the kept sandboxes were made under in "+layout.LifecycleDir)
+		}
 	case l.opts.KeepServiceAccount:
-		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); kept the service account "+layout.ServiceUser)
+		lines = append(lines, "removed the machine state: "+state+" and "+lifecycleState+"; kept the service account "+layout.ServiceUser)
 	case l.serviceAccountKept:
-		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); the service account "+layout.ServiceUser+" stays (see the warning)")
+		lines = append(lines, "removed the machine state: "+state+" and "+lifecycleState+"; the service account "+layout.ServiceUser+" stays (see the warning)")
 	default:
-		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
+		lines = append(lines, "removed the machine state: "+state+", "+lifecycleState+" and the service account "+layout.ServiceUser)
 	}
 	if l.policiesKept {
 		// A package host keeps its binaries, so ensure --from-package turns
@@ -3694,18 +3731,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		args = append(args, "--purge")
 	}
 	out, err := env.runGatewayCLILong(ctx, removeAllTimeout, args...)
-	if err != nil && l.opts.Purge && !json.Valid(out.Stdout) {
-		// An installed binary from before remove-all took --purge: remove
-		// the registrations, which is what the binaries are kept for.
-		out, err = env.runGatewayCLILong(ctx, removeAllTimeout, args[:len(args)-1]...)
-	}
 	var report struct {
-		Pending     []string `json:"pending"`
-		Failed      []string `json:"failed"`
-		StateFailed []string `json:"state_failed"`
-		Purged      []string `json:"purged"`
-		Removed     int      `json:"removed"`
-		// PurgedDetail is absent from an installed binary that predates it.
+		Pending      []string                    `json:"pending"`
+		Failed       []string                    `json:"failed"`
+		StateFailed  []string                    `json:"state_failed"`
+		Purged       []string                    `json:"purged"`
+		Removed      int                         `json:"removed"`
 		PurgedDetail map[string]purgedUserDetail `json:"purged_detail"`
 	}
 	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
@@ -3744,16 +3775,16 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	}
 	for _, entry := range report.StateFailed {
 		user, reason, _ := strings.Cut(entry, ": ")
+		if l.perUserStateKept == nil {
+			l.perUserStateKept = map[string]bool{}
+		}
+		l.perUserStateKept[user] = true
 		r.AddWarning(codePerUserState, fmt.Sprintf("the DefenseClaw per-user data and binaries of user %s were not removed: %s; fix the cause and rerun %s", user, reason, rerun))
 	}
 	// A purge deletes data an account created before the install; name each
 	// account, instead of a bare "done".
 	for _, user := range report.Purged {
-		var detail *purgedUserDetail
-		if found, ok := report.PurgedDetail[user]; ok {
-			detail = &found
-		}
-		r.Changes = append(r.Changes, purgedUserChange(user, detail))
+		r.Changes = append(r.Changes, purgedUserChange(user, report.PurgedDetail[user]))
 	}
 	return left
 }
@@ -3761,6 +3792,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 // purgedUserDetail is what the purge found and removed for one account.
 type purgedUserDetail struct {
 	Data     bool `json:"data"`
+	Backup   bool `json:"backup"`
 	Binaries bool `json:"binaries"`
 	Gateway  bool `json:"gateway"`
 	UVCache  bool `json:"uv_cache"`
@@ -3768,13 +3800,10 @@ type purgedUserDetail struct {
 
 // purgedUserChange names what the purge removed for user: only what it
 // found, so an account that never had a per-user install is not said to
-// have lost per-user binaries and a gateway (GAP-1444). Without detail (an
-// installed binary from before it) it names everything the purge covers.
-func purgedUserChange(user string, detail *purgedUserDetail) string {
+// have lost per-user binaries and a gateway (GAP-1444), and where the data
+// of the account's own per-user install went (#1299).
+func purgedUserChange(user string, detail purgedUserDetail) string {
 	const data = "all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder)"
-	if detail == nil {
-		return fmt.Sprintf("removed "+data+" and its per-user binaries and launcher links in ~/.local/bin, after stopping its per-user gateway", user)
-	}
 	var text string
 	switch {
 	case detail.Data && detail.Binaries:
@@ -3795,6 +3824,9 @@ func purgedUserChange(user string, detail *purgedUserDetail) string {
 	}
 	if detail.Gateway {
 		text += ", after stopping its per-user gateway"
+	}
+	if detail.Backup {
+		text += "; the data of its own DefenseClaw install from before the managed deployment (config, secrets, audit history, policies) was moved to ~/.defenseclaw-backup-<UTC time> in its home first, with a DEFENSECLAW-BACKUP.txt that says how to restore it"
 	}
 	return text
 }

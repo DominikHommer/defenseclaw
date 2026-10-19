@@ -176,7 +176,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("selects the members of that local group", text)
         self.assertIn("A bare name also selects, by its name part,", text)
         self.assertIn("the members of the `DOMAIN\\name` Active Directory group the user is already listed in", text)
-        self.assertIn("Open Directory's search order only decides which group the extra nested-membership "
+        self.assertIn("Open Directory's search order only decides which group that nested-membership "
                       "check resolves (the local one when both exist)", text)
         self.assertIn("Write `DOMAIN\\name` to target only the Active Directory group", text)
         self.assertNotIn("the local group is " "the one checked", text)

@@ -130,6 +130,9 @@ type session struct {
 	// passArgs is set when the command was given arguments for the harness
 	// (after --), which it may answer without a session (--version).
 	passArgs bool
+	// continueAfterDetached marks a Claude Code --continue after a completed
+	// detached run, whose conversation may not have been saved.
+	continueAfterDetached bool
 	// startedAt is when the harness (or shell) was attached; harnessCode
 	// its exit status.
 	startedAt   time.Time
@@ -861,6 +864,9 @@ func (s *session) detach(ctx context.Context, opts harness.LaunchOptions) error 
 		a.line("review:  " + CommandName + " review " + s.sb.Name + "   undo: " + CommandName + " undo " + s.sb.Name)
 	}
 	a.line("stop:    " + CommandName + " stop " + s.sb.Name)
+	if s.spec.Name == harness.ClaudeCode.Name {
+		a.note("A completed detached Claude Code run may leave no saved conversation. If connect -- --continue cannot find one, connect without --continue to start a new conversation.")
+	}
 	return nil
 }
 
@@ -975,7 +981,14 @@ func (s *session) end(ctx context.Context) error {
 			s.driver = firstNonEmpty(s.driver, st.Managed.Driver)
 			s.otherGateways = slices.Clone(st.Managed.OtherGateways)
 			if after.Phase != "ready" {
-				s.policyStop = s.managedStopText(ctx)
+				// The managed gateway's words for the stop that revoked the
+				// sandbox's registration (a re-match: a host port, settings
+				// or a harness the profile no longer allows), else what the
+				// caller's policy says now (#1199, GAP-0486).
+				s.policyStop = after.StopReason
+				if s.policyStop == "" {
+					s.policyStop = s.managedStopText(ctx)
+				}
 			}
 		}
 		if st.Gateway != nil {

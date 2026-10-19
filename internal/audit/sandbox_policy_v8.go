@@ -687,7 +687,7 @@ func (recorder *SandboxRecorder) RecordSandboxAskDecided(ctx context.Context, in
 // SandboxHostRunRefusedEvent is a hook of an agent running on the host
 // that was refused because the matched profile requires a sandbox for it
 // (log.sandbox.host_run_refused). Sandbox.Connector names the agent; Reason
-// is a registered code such as required_group and Rule the required_for
+// is a registered code such as required_for and Rule the required_for
 // entry that matched (the caller's own match only). It is an enforced
 // outcome and therefore mandatory.
 type SandboxHostRunRefusedEvent struct {

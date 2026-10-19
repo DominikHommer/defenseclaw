@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -248,11 +249,15 @@ func (l *egressLeases) prune(regs []daemonRegistration) {
 // changed the registration (applyLive) and moved that it named another
 // generation than the registration's. err is a transient failure.
 type policyAnswer struct {
-	id             string
-	sent           time.Time
-	err            error
-	gone           bool
-	reason         string
+	id     string
+	sent   time.Time
+	err    error
+	gone   bool
+	reason string
+	// stopText is the managed gateway's words for a revoke it answered
+	// (CurrentPolicy.RevokedReason); "" for a refusal that ended the
+	// registration (registrationGone), whose reason is a code.
+	stopText       string
 	changed, moved bool
 }
 
@@ -300,11 +305,25 @@ func (d *SandboxDaemon) askPolicy(ctx context.Context, r daemonRegistration, rep
 		return ans
 	}
 	if cp.Revoked {
+		ans.stopText = cp.RevokedReason
 		markGone(cp.RevokedReason)
+		return ans
+	}
+	if cp.Floor == nil {
+		ans.err = errors.New("managed gateway omitted the complete sandbox policy floor")
+		return ans
+	}
+	if ans.err = useCurrentPack(cp); ans.err != nil {
 		return ans
 	}
 	ans.moved = cp.Generation != 0 && cp.Generation != r.Generation
 	ans.changed = d.regs.applyOrdered(r, seq, cp)
+	if ans.moved || ans.changed {
+		// The managed gateway caps the saved decisions by the floor now: an
+		// allow the new floor no longer keeps leaves the running sandbox
+		// before its next connection is decided (GAP-0224).
+		d.rt.manager.ReloadDecisions(ctx, r.ID)
+	}
 	return ans
 }
 

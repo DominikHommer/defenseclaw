@@ -292,13 +292,7 @@ func managedExplainRows(m *sandboxapi.ManagedExplain, now time.Time) []managedRo
 	return managedExplainRowsFor(m, nil, "", now)
 }
 
-// managedExplainRowsFor is managedExplainRows with the explained run's
-// posture (ex: its pack and modes, nil when unknown) and the agent the
-// explain names ("" none).
-func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain, harnessName string, now time.Time) []managedRow {
-	var rows []managedRow
-	add := func(label, text string, keys ...string) { rows = append(rows, managedRow{label, text, keys}) }
-
+func managedProfileIdentity(m *sandboxapi.ManagedExplain) string {
 	profile := sandboxapi.DisplayText(m.Profile)
 	if profile == "" {
 		profile = "(your organization's floor)"
@@ -307,7 +301,17 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 	if m.Provisional {
 		text += "; provisional until your directory answers"
 	}
-	add("Organization profile", text)
+	return text
+}
+
+// managedExplainRowsFor is managedExplainRows with the explained run's
+// posture (ex: its pack and modes, nil when unknown) and the agent the
+// explain names ("" none).
+func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain, harnessName string, now time.Time) []managedRow {
+	var rows []managedRow
+	add := func(label, text string, keys ...string) { rows = append(rows, managedRow{label, text, keys}) }
+
+	add("Organization profile", managedProfileIdentity(m))
 	if d := strings.TrimSpace(m.Description); d != "" {
 		add("", sandboxapi.DisplayText(d))
 	}
@@ -396,6 +400,11 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 		approvals += "; you can't unblock destinations"
 	}
 	add("Approvals", approvals, "user_approvals", "allow_unblock")
+	foreign := "stopped"
+	if m.ForeignSandboxes == config.OpenShellForeignSandboxesAlert {
+		foreign = "reported to your administrators"
+	}
+	add("Other sandboxes", "sandboxes outside DefenseClaw are "+foreign, "foreign_sandboxes")
 
 	if len(m.MCPIncluded) > 0 || len(m.MCPBlocked) > 0 {
 		var org, asset int
@@ -760,19 +769,28 @@ func neutralStatus(st *sandboxapi.Status) *sandboxapi.Status {
 	return &out
 }
 
+// organizationPolicyText is the "Your policy" row's value without its
+// pointer to `policy explain`: the organization profile of the caller's
+// match, whether it is provisional, and the digest of the effective policy
+// of that same match.
+func organizationPolicyText(profile string, provisional bool, digest string) string {
+	policy := firstNonEmpty(sandboxapi.DisplayText(profile), "your organization's policy")
+	if profile != "" {
+		policy = "organization profile " + policy
+	}
+	if provisional {
+		policy += " (provisional: your directory couldn't be reached; your organization's default applies)"
+	}
+	if id := shortDigest(digest); id != "" {
+		policy += " " + id + " (yours)"
+	}
+	return policy
+}
+
 // managedStatusRows are the rows `status` adds on a managed computer: the
 // caller's own policy and the daemon's OpenShell.
 func managedStatusRows(m *sandboxapi.ManagedStatus, now time.Time) [][2]string {
-	policy := firstNonEmpty(sandboxapi.DisplayText(m.Profile), "your organization's policy")
-	if m.Profile != "" {
-		policy = "organization profile " + policy
-	}
-	if m.Provisional {
-		policy += " (provisional: your directory couldn't be reached; your organization's default applies)"
-	}
-	if id := shortDigest(m.EffectiveDigest); id != "" {
-		policy += " " + id + " (yours)"
-	}
+	policy := organizationPolicyText(m.Profile, m.Provisional, m.EffectiveDigest)
 	if ago := agoText(m.UpdatedAt, now); ago != "" {
 		policy += ", updated " + ago
 	}

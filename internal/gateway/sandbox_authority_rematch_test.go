@@ -152,7 +152,7 @@ func TestSandboxAuthorityRegroupStopsAnOpenedHostPort(t *testing.T) {
 
 	f.setGroups(sbxBob, "dc-sbx-contractors")
 	code, cur := f.current(sbxBob, resp.Registration.ID)
-	const want = "This sandbox was stopped: your profile no longer allows host ports. Start it again: "
+	const want = "This sandbox was stopped: your profile no longer allows host ports. Start it again without --host-port: "
 	if code != http.StatusOK || !cur.Revoked || !strings.HasPrefix(cur.RevokedReason, want) {
 		t.Fatalf("current after the regroup: %d %+v", code, cur)
 	}
@@ -170,6 +170,57 @@ func TestSandboxAuthorityRegroupStopsAnOpenedHostPort(t *testing.T) {
 	refused := f.resolve(sbxAlice, req)
 	if run, _, _ := auth.store.Run(sbxAlice.UID, refused.Registration.ID); len(run.HostPorts) != 0 {
 		t.Fatalf("host ports opened under allow_host_ports false = %v", run.HostPorts)
+	}
+}
+
+// GAP-0078: on a managed computer a --host-port the policy does not open is
+// a fatal violation (GAP-0558), so the re-match of a sandbox created with
+// one under a profile that allows host ports stopped it after a regroup to
+// a profile that does not with "no longer allows the settings this sandbox
+// was started with". The stop now names host ports and says to start again
+// without --host-port.
+func TestSandboxAuthorityManagedRegroupNamesTheHostPortStop(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	no := false
+	f.cfg.Guardrail.Profiles["contractors"] = config.GuardrailProfile{Description: "Contractors",
+		Sandbox: &config.OpenShellAdminConfig{AllowHostPorts: &no}}
+	f.setGroups(sbxBob, "dc-sbx-devs")
+	req := claudeResolve()
+	req.Flags = sandboxrelay.RunFlags{Pack: "open", HostPorts: []int{5432}}
+	resp := f.resolve(sbxBob, req)
+	if rec := f.bind(sbxBob, resp.Registration.ID, 1); rec.Code != http.StatusOK {
+		t.Fatalf("bind: %d %s", rec.Code, rec.Body.String())
+	}
+	f.setGroups(sbxBob, "dc-sbx-contractors")
+	code, cur := f.current(sbxBob, resp.Registration.ID)
+	const want = "This sandbox was stopped: your profile no longer allows host ports. Start it again without --host-port: "
+	if code != http.StatusOK || !cur.Revoked || !strings.HasPrefix(cur.RevokedReason, want) {
+		t.Fatalf("current after the regroup: %d %+v", code, cur)
+	}
+}
+
+// sandboxRematchStopField names host ports only when they are all a run
+// violates (GAP-0078).
+func TestSandboxRematchStopField(t *testing.T) {
+	hostPort := packs.Violation{Key: sandboxHostPortsKey, Attempted: "5432", Fatal: true}
+	yolo := packs.Violation{Key: "yolo", Attempted: "on", Fatal: true}
+	for _, tc := range []struct {
+		name         string
+		violations   []packs.Violation
+		opened, open []int
+		want         string
+	}{
+		{"nothing", nil, []int{5432}, []int{5432}, ""},
+		{"a warning only", []packs.Violation{{Key: "yolo"}}, nil, nil, ""},
+		{"an opened port closed", nil, []int{5432}, nil, sandboxStopFieldHostPorts},
+		{"a refused --host-port", []packs.Violation{hostPort}, []int{5432}, nil, sandboxStopFieldHostPorts},
+		{"a refused --host-port and another fatal one", []packs.Violation{hostPort, yolo}, []int{5432}, nil, sandboxStopFieldSettings},
+		{"another fatal one first", []packs.Violation{yolo, hostPort}, nil, nil, sandboxStopFieldSettings},
+	} {
+		if got := sandboxRematchStopField(tc.violations, tc.opened, tc.open); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

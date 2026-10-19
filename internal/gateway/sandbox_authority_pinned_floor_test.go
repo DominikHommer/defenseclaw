@@ -63,10 +63,10 @@ func TestSandboxAuthorityAssignmentChangeOnlyTightensARunningSandbox(t *testing.
 	blocked := func(g *sandboxFixture, peer managedHookPeer, id string) (string, bool) {
 		t.Helper()
 		code, cur := g.current(peer, id)
-		if code != http.StatusOK || cur.Revoked {
+		if code != http.StatusOK || cur.Revoked || cur.Floor == nil {
 			t.Fatalf("policy/current: %d %+v", code, cur)
 		}
-		return cur.Profile, slices.Contains(cur.Live.EgressBlock, "github.com") && cur.Live.AllowUnblock != nil && !*cur.Live.AllowUnblock
+		return cur.Profile, slices.Contains(cur.Floor.EgressBlock, "github.com") && cur.Floor.AllowUnblock != nil && !*cur.Floor.AllowUnblock
 	}
 	if _, ok := blocked(f, sbxAlice, strict.Registration.ID); !ok {
 		t.Fatal("the strict sandbox does not block github.com before the change")
@@ -145,7 +145,7 @@ func TestSandboxAuthorityPinsTheFloorOfAnEarlierRegistration(t *testing.T) {
 	moved := newSandboxFixtureOn(t, f)
 	pinnedFloorProfiles(moved, "engineering")
 	code, cur := moved.current(sbxAlice, resp.Registration.ID)
-	if code != http.StatusOK || cur.Profile != "engineering" || !slices.Contains(cur.Live.EgressBlock, "github.com") {
+	if code != http.StatusOK || cur.Profile != "engineering" || cur.Floor == nil || !slices.Contains(cur.Floor.EgressBlock, "github.com") {
 		t.Fatalf("an earlier registration after the move: %d %+v", code, cur)
 	}
 }

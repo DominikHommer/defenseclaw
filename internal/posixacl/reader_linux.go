@@ -29,6 +29,12 @@ func (systemReader) Read(path string, mode os.FileMode) (View, error) {
 	}
 	// Minimal Linux installations need not have the acl command. The kernel's
 	// access ACL xattr carries the same entries, so retain the check there.
+	return ReadAccessXattr(path)
+}
+
+// ReadAccessXattr reads the kernel ACL without starting a command. It is
+// suitable for device checks on the gateway's bounded request path.
+func ReadAccessXattr(path string) (View, error) {
 	for {
 		size, err := unix.Getxattr(path, "system.posix_acl_access", nil)
 		if errors.Is(err, unix.ENODATA) || errors.Is(err, unix.ENOTSUP) {

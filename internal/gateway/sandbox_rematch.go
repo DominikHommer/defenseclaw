@@ -209,13 +209,34 @@ func sandboxRematchResolve(cfg *config.Config, peer managedHookPeer, reg sandbox
 	if err != nil {
 		return nil, ""
 	}
-	switch {
-	case packs.FirstFatal(violations) != nil:
-		return eff, sandboxStopFieldSettings
-	case slices.ContainsFunc(run.HostPorts, func(port int) bool { return !slices.Contains(eff.MCP.HostPorts, port) }):
-		return eff, sandboxStopFieldHostPorts
+	return eff, sandboxRematchStopField(violations, run.HostPorts, eff.MCP.HostPorts)
+}
+
+// sandboxHostPortsKey is the violation key of a host port.
+const sandboxHostPortsKey = "mcp.host_ports"
+
+// sandboxRematchStopField names what a re-matched run violates ("" for
+// nothing): host ports when they are all it violates, a host port its
+// create opened that the policy no longer opens (opened, open) or a refused
+// --host-port, which a managed computer makes fatal (GAP-0558); its settings
+// in general for any other fatal violation. A host-port stop said only "the
+// settings this sandbox was started with" on a managed computer, where the
+// refused --host-port is fatal (GAP-0078).
+func sandboxRematchStopField(violations []packs.Violation, opened, open []int) string {
+	hostPorts := slices.ContainsFunc(opened, func(port int) bool { return !slices.Contains(open, port) })
+	for _, v := range violations {
+		if !v.Fatal {
+			continue
+		}
+		if v.Key != sandboxHostPortsKey {
+			return sandboxStopFieldSettings
+		}
+		hostPorts = true
 	}
-	return eff, ""
+	if hostPorts {
+		return sandboxStopFieldHostPorts
+	}
+	return ""
 }
 
 // sandboxRunInput is the resolve input of reg's run record.

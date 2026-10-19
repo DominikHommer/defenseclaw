@@ -8,6 +8,8 @@ package sandboxcli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,6 +178,45 @@ func TestPolicyExplainManagedUsesTheDaemonNotTheLocalConfig(t *testing.T) {
 	lacks(t, ta.output(), "local-secret-pack")
 }
 
+func TestPolicyExplainManagedKeepsIdentityAfterLongSettings(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.IO.Width = 80
+	ta.daemon.explain.Managed = managedExplainFixture()
+	for i := range 36 {
+		ta.daemon.explain.Settings = append(ta.daemon.explain.Settings, sandboxapi.Setting{
+			Key: fmt.Sprintf("setting.%02d", i), Value: "enabled", Source: "pack", Origin: "pack contractors",
+		})
+	}
+	ta.ok(t, ta.PolicyExplain(bg, PolicyOptions{Harness: "codex", Sources: true}))
+	lines := strings.Split(strings.TrimSpace(ta.output()), "\n")
+	lastPage := strings.Join(lines[max(0, len(lines)-24):], "\n")
+	has(t, lastPage, "Policy at a glance", "Organization profile: contractors", `matched: your group CORP\Contractors`, "Agent: codex")
+	has(t, ta.output(), "SETTING", "setting.35", "[from your organization profile]")
+}
+
+func TestPolicyExplainManagedFooterNamesTheSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		given PolicyOptions
+		want  string
+	}{
+		{"default agent", PolicyOptions{}, "Agent: default agent (add --harness NAME for another)"},
+		{"running sandbox", PolicyOptions{Sandbox: "bob-codex"}, "Agent: agent in sandbox bob-codex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			m := managedExplainFixture()
+			m.Provisional = true
+			ta.daemon.explain.Managed = m
+			ta.ok(t, ta.PolicyExplain(bg, tc.given))
+			output := ta.output()
+			has(t, output, "Policy at a glance", tc.want, "Organization profile: contractors",
+				"matched: your group CORP\\Contractors", "provisional until your directory answers")
+			lacks(t, output, "Agent: default agent (Claude Code)")
+		})
+	}
+}
+
 // GAP-0179/GAP-0550: the floor's source map identifies who supplied each
 // constraint, even though the posture calls every floor setting admin.
 func TestManagedExplainConstraintProvenance(t *testing.T) {
@@ -245,6 +286,21 @@ func TestManagedExplainSummaryUsesRepresentedSourcesAndRules(t *testing.T) {
 	has(t, out, "contractors (required)", "2 host patterns are always blocked")
 }
 
+func TestManagedExplainNamesForeignSandboxActionAndSource(t *testing.T) {
+	for _, tc := range []struct{ action, source, want string }{
+		{"stop", "profile", "sandboxes outside DefenseClaw are stopped"},
+		{"alert", "organization", "sandboxes outside DefenseClaw are reported to your administrators"},
+	} {
+		ta := newTestApp(t, "")
+		ta.daemon.explain = sandboxapi.Explain{Managed: &sandboxapi.ManagedExplain{
+			Profile: "contractors", Allowed: true, ForeignSandboxes: tc.action,
+			Sources: map[string]string{"foreign_sandboxes": tc.source},
+		}}
+		ta.ok(t, ta.PolicyExplain(bg, PolicyOptions{Sources: true}))
+		has(t, ta.output(), tc.want, explainSourceText(tc.source))
+	}
+}
+
 // GAP-0568: a required pack's effective hook settings apply even when the
 // organization's floor has no silence interval of its own.
 func TestManagedHooksSummaryUsesEffectivePackSettings(t *testing.T) {
@@ -285,6 +341,56 @@ func TestOwnedPolicyViewsDistinguishProfiles(t *testing.T) {
 	ta.fresh()
 	ta.printStatus(&sandboxapi.Status{Managed: &sandboxapi.ManagedStatus{Profile: "engineering"}})
 	has(t, ta.output(), "Your policy", "organization profile engineering")
+}
+
+// #1199 (rel GAP-0168, GAP-0607): `sandbox status NAME` named the pack
+// alone, so after a regroup nothing said which organization profile the
+// sandbox now runs under; and a stop the organization's policy made had no
+// reason there.
+func TestSandboxStatusNamesTheCurrentProfileAndThePolicyStop(t *testing.T) {
+	ta := newTestApp(t, "")
+	sb := &sandboxapi.Sandbox{Name: "dc-a", Harness: "claudecode", Phase: "ready", Pack: "contractors", Profile: "balanced",
+		NetworkMode: "allowlist", Approvals: "triage", WorkdirMode: "copy", OrganizationProfile: "engineering",
+		PolicyDigest: "sha256:41a7a6cf0123456789abcdef"}
+	ta.printSandbox(sb)
+	out := ta.output()
+	has(t, out, "Your policy", "organization profile engineering", "(yours)", "policy explain", "pack contractors")
+	if strings.Contains(out, "Stopped") {
+		t.Fatalf("a running sandbox shows a stop:\n%s", out)
+	}
+	ta.fresh()
+	sb.Phase, sb.OrganizationProfile, sb.PolicyDigest = "stopped", "", ""
+	sb.StopReason = sandboxapi.ProfileStop("host ports", "claudecode", "it-help@example.com")
+	ta.printSandbox(sb)
+	has(t, ta.output(), "Stopped", "your profile no longer allows host ports")
+	if strings.Contains(ta.output(), "Your policy") {
+		t.Fatalf("a revoked sandbox names a current profile:\n%s", ta.output())
+	}
+}
+
+// GAP-0080: `sandbox status NAME` asks the daemon to confirm the running
+// sandbox's policy with the organization's gateway first; the other reads of
+// a sandbox do not.
+func TestSandboxStatusAsksForTheConfirmedPolicy(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.add(sandboxapi.Sandbox{Name: "dc-a", Harness: "claudecode", Phase: "ready", Pack: "balanced",
+		Profile: "balanced", NetworkMode: "allowlist", Approvals: "triage", WorkdirMode: "copy", OrganizationProfile: "contractors"})
+	if err := ta.Status(context.Background(), "dc-a", OutputText); err != nil {
+		t.Fatal(err)
+	}
+	calls := ta.daemon.callsTo(http.MethodGet, sandboxapi.PathSandboxes+"/dc-a")
+	if len(calls) == 0 || calls[0].Query != sandboxapi.QueryConfirm+"="+sandboxapi.ConfirmPolicy {
+		t.Fatalf("status reads = %+v, want the confirmed policy asked for", calls)
+	}
+	has(t, ta.output(), "organization profile contractors")
+	ta.fresh()
+	if _, err := ta.daemon.client().Get(context.Background(), "dc-a"); err != nil {
+		t.Fatal(err)
+	}
+	all := ta.daemon.callsTo(http.MethodGet, sandboxapi.PathSandboxes+"/dc-a")
+	if last := all[len(all)-1]; last.Query != "" {
+		t.Fatalf("a plain read asked for the confirmed policy: %+v", last)
+	}
 }
 
 func TestBannerShowsTheManagedPolicyLine(t *testing.T) {
