@@ -229,6 +229,11 @@ func TestR103B36ProcCWDAliasRemainsUnknown(t *testing.T) {
 }
 
 func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
+	// The managed Claude proof uses POSIX shell operands and /proc/self/cwd;
+	// Windows managed hooks use a separate path implementation.
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX managed hook-path proof does not apply to Windows")
+	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
