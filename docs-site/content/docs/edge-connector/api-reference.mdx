@@ -352,6 +352,7 @@ Standard per-user `install.sh`/`install.ps1` copy the matching compiler only whe
 | `409` | The fleet policy version reached 65534; provision a new device policy lineage |
 | `413` | Request body or compiled policy exceeds its size limit |
 | `422` | Policy YAML cannot be compiled |
+| `429` | Every policy compiler slot stayed busy; retry later |
 | `500` | Signing or distribution failed |
 | `501` | Policy service not configured |
 
@@ -450,6 +451,9 @@ Compiles a policy YAML without signing or distributing. Use this to validate pol
 | `200` | Compilation succeeded (or policy service not configured, returns stub result) |
 | `400` | Malformed JSON |
 | `422` | Compilation failed (invalid policy YAML) |
+| `429` | Every policy compiler slot stayed busy; retry later |
+
+The gateway runs at most two policy compiler processes at a time across simulate and push requests; a request that cannot get a slot within 2 seconds returns `429`. A relative `fleet.policy_compiler_path` is resolved once, against the gateway's working directory at startup, and that absolute path is both validated and executed.
 
 ### Send emergency command
 

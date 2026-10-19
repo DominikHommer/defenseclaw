@@ -47,6 +47,17 @@ var ErrInvalidPolicy = errors.New("invalid policy")
 // that only distinguish client input from compiler infrastructure failures.
 var ErrPolicyTooLarge = fmt.Errorf("%w: policy YAML exceeds 64 KiB", ErrInvalidPolicy)
 var ErrMalformedPolicy = fmt.Errorf("%w: malformed policy content", ErrInvalidPolicy)
+
+// ErrCompilerBusy means every policy compiler slot stayed in use; callers
+// should retry later (HTTP 429).
+var ErrCompilerBusy = errors.New("policy compiler busy")
+
+// maxConcurrentCompiles bounds the number of policy compiler processes the
+// gateway runs at once; compileSlotWait is how long a request waits for one.
+const maxConcurrentCompiles = 2
+
+var compileSlotWait = 2 * time.Second
+
 var ErrPolicyVersionExhausted = fmt.Errorf("%w: policy version 65534 is the highest supported OTA version; provision a new device policy lineage", ErrInvalidPolicy)
 
 // OTA's uint16 high-water stores 0xffff as erased flash. Never issue it.
@@ -169,9 +180,13 @@ type Service struct {
 
 	emergencySigner Signer
 
-	// compilerPath is the path to the Python policy_compiler.py script.
-	// An empty config value selects a trusted compiler shipped with the gateway.
+	// compilerPath is the absolute path to the Python policy_compiler.py
+	// script, resolved once at construction; the validated path is the one
+	// executed. An empty config value selects a trusted shipped compiler.
 	compilerPath string
+
+	// compileSlots bounds concurrent compiler processes.
+	compileSlots chan struct{}
 
 	// emergencySeq tracks the next emergency broadcast sequence number.
 	// Must be strictly increasing per the C-side anti-replay (REQ-31).
@@ -244,6 +259,7 @@ func NewService(store PolicyStore, signer Signer, client mqtt.Client, cfg *Confi
 		compilerPath:  defaultCompilerPath(),
 		logger:        log.Default(),
 		policyReplays: make(map[string]policyReplayAttempt),
+		compileSlots:  make(chan struct{}, maxConcurrentCompiles),
 
 		emergencyReplays: make(map[string]*emergencyReplayState),
 	}
@@ -253,6 +269,17 @@ func NewService(store PolicyStore, signer Signer, client mqtt.Client, cfg *Confi
 		}
 		if cfg.Logger != nil {
 			s.logger = cfg.Logger
+		}
+	}
+
+	// Resolve a relative compiler path once, against the gateway's working
+	// directory at startup, so validation and execution use the same file.
+	if s.compilerPath != "" {
+		if abs, err := filepath.Abs(s.compilerPath); err == nil {
+			s.compilerPath = abs
+		} else {
+			s.logger.Printf("[policy] WARNING: cannot resolve compiler path %q: %v", s.compilerPath, err)
+			s.compilerPath = ""
 		}
 	}
 
@@ -570,9 +597,9 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 		return nil, fmt.Errorf("%w: unknown profile %q: must be minimal, standard, or edge", ErrInvalidPolicy, profile)
 	}
 
-	absPath, err := filepath.Abs(s.compilerPath)
-	if err != nil {
-		return nil, fmt.Errorf("invalid compiler path: %w", err)
+	absPath := s.compilerPath
+	if !filepath.IsAbs(absPath) {
+		return nil, fmt.Errorf("compiler path %q is not absolute", absPath)
 	}
 	if strings.Contains(absPath, "..") {
 		return nil, fmt.Errorf("compiler path must not contain '..'")
@@ -586,6 +613,18 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 	}
 	if !isUnderAllowedDir(absPath) {
 		return nil, fmt.Errorf("compiler path %q is not an approved installed, private-home, or source-checkout compiler", absPath)
+	}
+	// Bound concurrent compiler work (interpreter checks and the compile
+	// itself); any authenticated tenant can trigger it via /policy/simulate.
+	if s.compileSlots != nil {
+		timer := time.NewTimer(compileSlotWait)
+		select {
+		case s.compileSlots <- struct{}{}:
+			timer.Stop()
+			defer func() { <-s.compileSlots }()
+		case <-timer.C:
+			return nil, ErrCompilerBusy
+		}
 	}
 	python, err := pythonForCompiler(absPath)
 	if err != nil {
@@ -608,7 +647,7 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, python, "-I", s.compilerPath,
+	cmd := exec.CommandContext(ctx, python, "-I", absPath,
 		"--input", filepath.Base(inputPath),
 		"--profile", profile,
 		"--version", fmt.Sprintf("%d", version),

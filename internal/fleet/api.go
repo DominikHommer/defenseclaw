@@ -778,6 +778,10 @@ func (a *API) simulatePolicy(w http.ResponseWriter, r *http.Request) {
 
 	// Dry-run: compile without signing or distributing
 	blob, err := a.policy.Compile([]byte(req.PolicyYAML), req.Profile, 0)
+	if errors.Is(err, policy.ErrCompilerBusy) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "policy compiler busy — retry later"})
+		return
+	}
 	if err != nil {
 		log.Printf("[fleet-api] policy simulation compile failed: %v", err)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
@@ -855,6 +859,10 @@ func (a *API) pushPolicy(w http.ResponseWriter, r *http.Request) {
 	signed, version, err := a.policy.CompileSignAndStore([]byte(req.PolicyYAML), req.Profile, uint64(req.TenantID), uint64(req.FleetID))
 	if err != nil {
 		log.Printf("[fleet-api] policy compile/sign failed for tenant=%d fleet=%d: %v", req.TenantID, req.FleetID, err)
+		if errors.Is(err, policy.ErrCompilerBusy) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "policy compiler busy — retry later"})
+			return
+		}
 		if errors.Is(err, policy.ErrPolicyVersionExhausted) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "policy version exhausted at 65534; provision a new device policy lineage"})
 			return
