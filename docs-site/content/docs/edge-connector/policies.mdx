@@ -52,6 +52,8 @@ iot_extensions:
 
 The policy compiler converts these into deterministic finite automata (DFA) tables evaluated in constant time per input symbol. Sequences are tracked per `session_id`.
 
+The compiler rejects a policy (exit status 65) instead of dropping a rule when a sequence names an unknown capability, has more than 4 steps or an unknown `action`, when there are more than 16 sequences or 32 allowlist entries, or when `skill_actions.<severity>.runtime` is not `enable`, `disable` or `warn`.
+
 ## Destination rules
 
 ```yaml

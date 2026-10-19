@@ -86,6 +86,15 @@ ACTION_MAP = {
     "escalate": 3,
 }
 
+# Device limits (must match DCLAW_RT_MAX_* in defenseclaw.h).  Entries
+# beyond these are dropped by the device, so the compiler rejects them.
+MAX_SEQUENCE_STEPS = 4
+MAX_SEQUENCE_RULES = 16
+MAX_DEST_ALLOWLIST = 32
+
+# skill_actions.<severity>.runtime values the compiler understands.
+RUNTIME_ACTIONS = ("enable", "disable", "warn")
+
 # Severity name → enum value
 SEVERITY_MAP = {
     "info": 0,
@@ -310,6 +319,11 @@ def extract_severity_rules(policy: dict) -> list:
         if sev_val is None:
             continue
         runtime_action = actions.get("runtime", "enable")
+        if runtime_action not in RUNTIME_ACTIONS:
+            raise ValueError(
+                f"skill_actions.{severity_name}.runtime: unsupported value "
+                f"{runtime_action!r} (expected one of: {', '.join(RUNTIME_ACTIONS)})"
+            )
         if runtime_action == "disable":
             action_val = ACTION_MAP["block"]
         elif runtime_action == "warn":
@@ -328,26 +342,45 @@ def extract_sequence_rules(policy: dict) -> list:
     sequences = iot_ext.get("capability_sequences", [])
     if not isinstance(sequences, list):
         raise ValueError("capability_sequences must be a list")
+    if len(sequences) > MAX_SEQUENCE_RULES:
+        raise ValueError(
+            f"capability_sequences has {len(sequences)} entries; the device "
+            f"supports at most {MAX_SEQUENCE_RULES}"
+        )
     for entry in sequences:
+        if not isinstance(entry, dict):
+            raise ValueError("capability_sequences entries must be mappings")
         seq = entry.get("sequence", [])
+        if not isinstance(seq, list):
+            raise ValueError("capability_sequences sequence must be a list")
         if not seq or len(seq) == 0:
             raise ValueError(
                 "capability_sequences entry has empty sequence. "
                 "Empty sequences would match everything, weakening the C agent."
             )
-        action = ACTION_MAP.get(entry.get("action", "block"), 1)
+        if len(seq) > MAX_SEQUENCE_STEPS:
+            raise ValueError(
+                f"capability_sequences entry has {len(seq)} steps; the device "
+                f"supports at most {MAX_SEQUENCE_STEPS}"
+            )
+        action_name = entry.get("action", "block")
+        if action_name not in ACTION_MAP:
+            raise ValueError(
+                f"capability_sequences action {action_name!r} is not one of: "
+                f"{', '.join(ACTION_MAP)}"
+            )
+        action = ACTION_MAP[action_name]
         cap_bytes = []
         for cap_name in seq:
             _validate_no_null_bytes(str(cap_name), "capability name")
             cap_val = CAP_MAP.get(cap_name)
             if cap_val is None:
-                print(f"WARNING: unknown capability '{cap_name}', skipping rule",
-                      file=sys.stderr)
-                break
+                raise ValueError(
+                    f"unknown capability {cap_name!r} in capability_sequences "
+                    f"(expected one of: {', '.join(CAP_MAP)})"
+                )
             cap_bytes.append(cap_val)
-        else:
-            if len(cap_bytes) <= 4:
-                rules.append((cap_bytes, action))
+        rules.append((cap_bytes, action))
     return rules
 
 
@@ -362,6 +395,11 @@ def extract_dest_allowlist(policy: dict) -> list:
     dest_list = iot_ext.get("destination_allowlist")
     if dest_list is None:
         dest_list = []
+    if len(dest_list) > MAX_DEST_ALLOWLIST:
+        raise ValueError(
+            f"destination_allowlist has {len(dest_list)} entries; the device "
+            f"supports at most {MAX_DEST_ALLOWLIST}"
+        )
     for dest in dest_list:
         _validate_no_null_bytes(str(dest), "destination allowlist entry")
     return dest_list

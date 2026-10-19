@@ -55,6 +55,25 @@ class PolicyCompilerExitTest(unittest.TestCase):
                 ('unsupported_canary', 'iot_extensions:\n  canary:\n    enabled: true\n', ()),
                 ('unsupported_rate', 'iot_extensions:\n  rate_limits:\n    tool_calls_per_minute: 1\n', ()),
                 ('unsupported_escalation', 'iot_extensions:\n  escalation_mode:\n    net_fetch: sync_block\n', ()),
+                ('unknown_sequence_cap',
+                 'iot_extensions:\n  destination_allowlist: []\n  capability_sequences:\n'
+                 '    - sequence: [net_fetch, exec_shel]\n      action: block\n', ()),
+                ('long_sequence',
+                 'iot_extensions:\n  destination_allowlist: []\n  capability_sequences:\n'
+                 '    - sequence: [read_fs, net_fetch, read_fs, net_fetch, exec_shell]\n'
+                 '      action: block\n', ()),
+                ('unknown_sequence_action',
+                 'iot_extensions:\n  destination_allowlist: []\n  capability_sequences:\n'
+                 '    - sequence: [net_fetch, exec_shell]\n      action: deny\n', ()),
+                ('too_many_sequences',
+                 'iot_extensions:\n  destination_allowlist: []\n  capability_sequences:\n'
+                 + '    - sequence: [net_fetch, exec_shell]\n      action: block\n' * 17, ()),
+                ('too_many_destinations',
+                 'iot_extensions:\n  destination_allowlist:\n'
+                 + ''.join(f'    - 8.8.{i}.1\n' for i in range(33)), ()),
+                ('runtime_block',
+                 'skill_actions:\n  high:\n    runtime: block\n'
+                 'iot_extensions:\n  destination_allowlist: []\n', ()),
                 ('missing_allowlist', 'iot_extensions:\n  canary:\n    baseline_blocks_per_min: 2\n', ()),
                 ('reserved_version', VALID.read_text(), ('--version', '65535')),
                 ('oversize', VALID.read_text(), ('--target-partition-size', '1')),
@@ -67,6 +86,21 @@ class PolicyCompilerExitTest(unittest.TestCase):
                     self.assertIn('Invalid policy:', result.stderr)
                     self.assertFalse((work / 'policy.bin').exists())
                     self.assertFalse((work / 'policy_tables.h').exists())
+
+    def test_four_step_sequence_and_known_runtime_values_compile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            policy = work / 'ok.yaml'
+            policy.write_text(
+                'skill_actions:\n  critical:\n    runtime: disable\n'
+                '  high:\n    runtime: warn\n  low:\n    runtime: enable\n'
+                'iot_extensions:\n  destination_allowlist: []\n  capability_sequences:\n'
+                '    - sequence: [sensor_read, net_fetch, read_fs, exec_shell]\n'
+                '      action: block\n')
+            result = self.compile(work, policy)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            header = (work / 'policy_tables.h').read_text()
+            self.assertIn('sequence_rules_count = 1;', header)
 
     def test_environment_fault_remains_distinct(self):
         with tempfile.TemporaryDirectory() as temp:
