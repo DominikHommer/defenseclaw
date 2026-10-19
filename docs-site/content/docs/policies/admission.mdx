@@ -148,9 +148,10 @@ On a managed Windows computer the gateway service cannot read the users'
 profiles, so it learns their Claude Code and Kiro MCP servers from the hook
 enumerator service. Before it decides a Claude Code MCP tool call, the
 gateway has the enumerator read the users' server lists again, so the call
-is decided on the definition the user has now. If the enumerator does not
-answer within 10 seconds, the call is refused, and the gateway log says
-why.
+is decided on the definition the user has now. If the enumerator is not
+running or does not answer within about 1.5 seconds, the call is refused as
+not scanned yet (the agent is told to try again in about a minute), never
+decided on the list read before, and the gateway log says why.
 
 Admission decides on tool calls, not on process starts. Claude Code starts
 the servers of a project it opens as soon as the user approves the

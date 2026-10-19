@@ -194,10 +194,35 @@ func verifyPipeClient(pipe windows.Handle, gatewaySID *windows.SID) error {
 	return <-result
 }
 
+// errEnumeratorNotServing says that the as-user pipe does not exist.
+var errEnumeratorNotServing = errors.New("the DefenseClaw hook enumerator service is not serving MCP as-user scans; " +
+	"it starts them once it runs (Setup /repair restarts it)")
+
+// refreshPipeAbsentGrace is how long a refresh waits for the as-user pipe to
+// exist. The pipe exists while the hook enumerator serves it (when all its
+// instances are in use, opening it answers ERROR_PIPE_BUSY instead), so a
+// pipe that is not there means the enumerator is stopped or not started
+// yet, which takes longer than a tool call's hook waits: the refresh fails
+// at once and the call is refused as not scanned yet (GAP-0216).
+const refreshPipeAbsentGrace = 250 * time.Millisecond
+
 // Dial connects to the enumerator's as-user pipe of gatewayService and
 // checks that the process serving it runs as LocalSystem, so a pipe a user
-// created under that name is never used.
+// created under that name is never used. It waits for the pipe until ctx
+// ends: an as-user scan may wait for the enumerator to start.
 func Dial(ctx context.Context, gatewayService string) (io.ReadWriteCloser, error) {
+	return dial(ctx, gatewayService, 0)
+}
+
+// dialRefresh is Dial for a refresh before a tool call: it fails after
+// refreshPipeAbsentGrace when the pipe does not exist.
+func dialRefresh(ctx context.Context, gatewayService string) (io.ReadWriteCloser, error) {
+	return dial(ctx, gatewayService, refreshPipeAbsentGrace)
+}
+
+// dial opens the pipe; absentGrace > 0 bounds the wait for a pipe that does
+// not exist, zero waits until ctx ends.
+func dial(ctx context.Context, gatewayService string, absentGrace time.Duration) (io.ReadWriteCloser, error) {
 	name, err := PipeName(gatewayService)
 	if err != nil {
 		return nil, err
@@ -206,6 +231,7 @@ func Dial(ctx context.Context, gatewayService string) (io.ReadWriteCloser, error
 	if err != nil {
 		return nil, err
 	}
+	var absentSince time.Time
 	for {
 		handle, openErr := windows.CreateFile(pointer, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil,
 			windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED|windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
@@ -216,14 +242,22 @@ func Dial(ctx context.Context, gatewayService string) (io.ReadWriteCloser, error
 			}
 			return os.NewFile(uintptr(handle), name), nil
 		}
-		if !errors.Is(openErr, windows.ERROR_PIPE_BUSY) && !errors.Is(openErr, windows.ERROR_FILE_NOT_FOUND) {
+		absent := errors.Is(openErr, windows.ERROR_FILE_NOT_FOUND)
+		if !absent && !errors.Is(openErr, windows.ERROR_PIPE_BUSY) {
 			return nil, fmt.Errorf("open %s: %w", name, openErr)
+		}
+		switch {
+		case !absent:
+			absentSince = time.Time{}
+		case absentSince.IsZero():
+			absentSince = time.Now()
+		case absentGrace > 0 && time.Since(absentSince) >= absentGrace:
+			return nil, errEnumeratorNotServing
 		}
 		select {
 		case <-ctx.Done():
-			if errors.Is(openErr, windows.ERROR_FILE_NOT_FOUND) {
-				return nil, errors.New("the DefenseClaw hook enumerator service is not serving MCP as-user scans; " +
-					"it starts them once it runs (Setup /repair restarts it)")
+			if absent {
+				return nil, errEnumeratorNotServing
 			}
 			return nil, fmt.Errorf("open %s: %w", name, ctx.Err())
 		case <-time.After(50 * time.Millisecond):

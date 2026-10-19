@@ -397,7 +397,7 @@ func TestCoalescerAnswersWithAPublishStartedAfterTheCall(t *testing.T) {
 	var publishes atomic.Int32
 	first := make(chan error, 1)
 	go func() {
-		first <- c.Run(func() error {
+		first <- c.Run(context.Background(), func() error {
 			publishes.Add(1)
 			close(running)
 			<-release
@@ -408,7 +408,7 @@ func TestCoalescerAnswersWithAPublishStartedAfterTheCall(t *testing.T) {
 	waiters := make(chan error, 3)
 	for range 3 {
 		go func() {
-			waiters <- c.Run(func() error { publishes.Add(1); return nil })
+			waiters <- c.Run(context.Background(), func() error { publishes.Add(1); return nil })
 		}()
 	}
 	// The waiters asked while the first publish ran; let them queue.
@@ -424,5 +424,42 @@ func TestCoalescerAnswersWithAPublishStartedAfterTheCall(t *testing.T) {
 	}
 	if got := publishes.Load(); got != 2 {
 		t.Fatalf("%d publishes, want 2 (the running one and one shared by the waiters)", got)
+	}
+}
+
+// A caller stops waiting when its context ends, also while another caller's
+// publish runs, and never publishes after that (GAP-0216: the gateway's
+// refresh before a tool call must end inside the hook's wait).
+func TestCoalescerWaiterStopsAtItsOwnDeadline(t *testing.T) {
+	var c Coalescer
+	running, release := make(chan struct{}), make(chan struct{})
+	first := make(chan error, 1)
+	go func() {
+		first <- c.Run(context.Background(), func() error { close(running); <-release; return nil })
+	}()
+	<-running
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	var published atomic.Bool
+	started := time.Now()
+	err := c.Run(ctx, func() error { published.Store(true); return nil })
+	if !errors.Is(err, context.DeadlineExceeded) || published.Load() {
+		t.Fatalf("waiter = %v (published %v), want its deadline and no publish", err, published.Load())
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("waiter waited %s for another caller's publish, want its own deadline", elapsed)
+	}
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatalf("first caller: %v", err)
+	}
+	if err := c.Run(context.Background(), func() error { published.Store(true); return nil }); err != nil || !published.Load() {
+		t.Fatalf("next caller = %v (published %v), want a publish of its own", err, published.Load())
+	}
+	done, cancelDone := context.WithCancel(context.Background())
+	cancelDone()
+	published.Store(false)
+	if err := c.Run(done, func() error { published.Store(true); return nil }); err == nil || published.Load() {
+		t.Fatalf("ended caller = %v (published %v), want no publish", err, published.Load())
 	}
 }

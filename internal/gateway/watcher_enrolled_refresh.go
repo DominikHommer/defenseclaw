@@ -16,9 +16,32 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 )
 
-// enrolledMCPRefreshTimeout bounds the refresh before an MCP tool call; the
-// hook waits for it, and a refresh that does not finish refuses the call.
-var enrolledMCPRefreshTimeout = 10 * time.Second
+// enrolledMCPRefreshBudget bounds the refresh before an MCP tool call. The
+// call's hook waits about 3.5 seconds, from the start of the hook process,
+// for the whole decision: its own start, the dial, this refresh and the
+// checks after it. A refresh that does not finish within its budget refuses
+// the call as not scanned yet (the agent reads the "still scanning" wait and
+// tries again), never decides it on the list read before. With a 10 second
+// bound a stopped hook enumerator held the call past the hook's wait, so the
+// agent got the hook's no-answer failure instead (GAP-0216). A refresh
+// normally takes well under 200 ms.
+var enrolledMCPRefreshBudget = 1500 * time.Millisecond
+
+// enrolledMCPRefreshMargin is kept before the deadline of a request that
+// has one, for the checks and the answer after the refresh.
+const enrolledMCPRefreshMargin = 500 * time.Millisecond
+
+// enrolledMCPRefreshDeadline is when a refresh that starts at now stops
+// waiting: its budget, or earlier when the request ends sooner.
+func enrolledMCPRefreshDeadline(ctx context.Context, now time.Time) time.Time {
+	deadline := now.Add(enrolledMCPRefreshBudget)
+	if request, ok := ctx.Deadline(); ok {
+		if bounded := request.Add(-enrolledMCPRefreshMargin); bounded.Before(deadline) {
+			deadline = bounded
+		}
+	}
+	return deadline
+}
 
 // enrolledMCPEnumeratorRefresh asks the hook enumerator serving the gateway
 // service to publish the enrolled users' MCP servers again (seam).
@@ -60,18 +83,20 @@ func (s *Sidecar) newEnrolledMCPRefresher(reg *connector.Registry, wcfg config.G
 // refreshEnrolledMCPBeforeCall refreshes, on a managed Windows gateway, the
 // enrolled users' MCP servers of a connector the enumerator publishes before
 // a tool call of that connector is decided. Calls that arrive together share
-// one refresh, and each is answered by a refresh that started after it. It
-// returns why the refresh failed, and the caller refuses the call (fail
-// closed): the gateway would otherwise decide it on a definition it cannot
-// tell is current. Other gateways and connectors have nothing to refresh.
+// one refresh, and each is answered by a refresh that started after it,
+// within its own budget (enrolledMCPRefreshBudget), also while another
+// call's refresh runs. It returns why the refresh failed or did not finish
+// in time, and the caller refuses the call (fail closed): the gateway would
+// otherwise decide it on a definition it cannot tell is current. Other
+// gateways and connectors have nothing to refresh.
 func (s *Sidecar) refreshEnrolledMCPBeforeCall(ctx context.Context, connectorName string) error {
 	r := s.enrolledMCPRefresh.Load()
 	if r == nil || !mcpasuser.PublishedConnector(connectorName) {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, enrolledMCPRefreshTimeout)
+	ctx, cancel := context.WithDeadline(ctx, enrolledMCPRefreshDeadline(ctx, time.Now()))
 	defer cancel()
-	err := r.coalesce.Run(func() error {
+	err := r.coalesce.Run(ctx, func() error {
 		if err := r.refresh(ctx); err != nil {
 			return err
 		}

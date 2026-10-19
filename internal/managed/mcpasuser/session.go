@@ -173,9 +173,10 @@ func RequestRefresh(conn io.ReadWriter, gatewayService string) error {
 }
 
 // Refresh asks the enumerator serving gatewayService to publish the enrolled
-// users' MCP servers again (RequestRefresh), within ctx.
+// users' MCP servers again (RequestRefresh), within ctx. It fails at once
+// when the enumerator is not serving its pipe (dialRefresh).
 func Refresh(ctx context.Context, gatewayService string) error {
-	conn, err := Dial(ctx, gatewayService)
+	conn, err := dialRefresh(ctx, gatewayService)
 	if err != nil {
 		return err
 	}
@@ -194,21 +195,34 @@ func Refresh(ctx context.Context, gatewayService string) error {
 // Coalescer runs one publish at a time and shares a publish among the
 // callers that wait for it: a caller is answered by the first publish that
 // started after it asked, so a burst of tool calls costs one read of the
-// users' files, and no caller gets a result older than its own request.
+// users' files, and no caller gets a result older than its own request. A
+// caller waits at most until its context ends, also while another caller's
+// publish runs: a tool call's hook waits only seconds (GAP-0216).
 type Coalescer struct {
-	mu      sync.Mutex
+	once    sync.Once
+	turn    chan struct{} // one token: the right to publish or read lastErr
 	started atomic.Uint64
 	lastErr error
 }
 
-// Run returns the result of a publish that started after the call.
-func (c *Coalescer) Run(publish func() error) error {
+// Run returns the result of a publish that started after the call, or why
+// the call stopped waiting for one (ctx ended). publish runs on the
+// caller's goroutine and must itself end with ctx.
+func (c *Coalescer) Run(ctx context.Context, publish func() error) error {
+	c.once.Do(func() { c.turn = make(chan struct{}, 1) })
 	asked := c.started.Load()
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	select {
+	case c.turn <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("a publication of the MCP servers is still running: %w", ctx.Err())
+	}
+	defer func() { <-c.turn }()
 	if c.started.Load() != asked {
 		// A publish started after this call asked, and it has finished.
 		return c.lastErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	c.started.Add(1)
 	c.lastErr = publish()

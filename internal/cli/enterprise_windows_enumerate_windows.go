@@ -531,7 +531,7 @@ func runEnterpriseWindowsEnumerateInterval(
 				}
 			}
 		case <-mcpRefresh.C:
-			_ = enterpriseWindowsMCPRefresh.Run(func() error { return refreshEnterpriseWindowsMCPServers(stderr, manifestPath) })
+			_ = enterpriseWindowsMCPRefresh.Run(ctx, func() error { return refreshEnterpriseWindowsMCPServers(stderr, manifestPath) })
 		case <-ticker.C:
 			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
@@ -580,8 +580,8 @@ func serveEnterpriseWindowsMCPAsUser(ctx context.Context, stderr io.Writer, mani
 		},
 	}
 	logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
-	refresh := func(context.Context) error {
-		return enterpriseWindowsMCPRefresh.Run(func() error { return refreshEnterpriseWindowsMCPServers(stderr, manifestPath) })
+	refresh := func(ctx context.Context) error {
+		return enterpriseWindowsMCPRefresh.Run(ctx, func() error { return refreshEnterpriseWindowsMCPServers(stderr, manifestPath) })
 	}
 	for {
 		err := enterpriseWindowsMCPAsUserServe(ctx, gatewayService, refresh, starter.Start, logf)

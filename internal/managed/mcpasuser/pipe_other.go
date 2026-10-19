@@ -22,3 +22,6 @@ func Serve(context.Context, string, Refresher, Starter, func(string, ...any)) er
 
 // Dial is Windows only.
 func Dial(context.Context, string) (io.ReadWriteCloser, error) { return nil, ErrUnsupported }
+
+// dialRefresh is Windows only.
+func dialRefresh(context.Context, string) (io.ReadWriteCloser, error) { return nil, ErrUnsupported }
