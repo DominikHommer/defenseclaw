@@ -157,7 +157,7 @@ func newHookCmd() *cobra.Command {
 	cmd.Flags().StringVar(&hookContractID, "hook-contract", "", "installer-bound connector hook contract")
 	cmd.Flags().StringVar(&hookSurface, "hook-surface", "", "hook dialect the invoking hook configuration speaks (per connector; kiro: v3, copilot: vscode-local)")
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway host:port (defaults to the hook sidecar / local gateway)")
-	cmd.Flags().StringVar(&failMode, "fail-mode", "", "response-failure policy: open or closed (defaults to the hook sidecar / open)")
+	cmd.Flags().StringVar(&failMode, "fail-mode", "", "response-failure policy: open or closed (defaults to the hook sidecar, else closed)")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
 	cmd.Flags().BoolVar(&enterpriseManaged, "enterprise-managed", false, "resolve the current SID's administrator-managed hook runtime")
 	cmd.Flags().BoolVar(&foreignHookCheck, "foreign-hook-check", false, "print the standalone foreign-hook guard decision as JSON (in-agent plugins)")
@@ -299,10 +299,10 @@ func (c hookFailureContext) resolve() hookFailureContext {
 // a positional argument. Cobra reports these as 1. Kiro treats every status
 // other than 0 and 2 as a failed hook, shows its stderr as a warning and
 // lets the prompt or tool call go ahead (kiro.dev/docs/hooks/actions). A
-// Kiro hook that fails closed (an administrator-managed hook, or fail mode
-// closed from the flag, the hook sidecar or DEFENSECLAW_FAIL_MODE, resolved
-// as hookexec resolves it) exits 2, the only status Kiro honors as a block.
-// A fail-open Kiro hook and every other connector keep 1.
+// Kiro hook that fails closed (an administrator-managed hook, or any hook
+// whose flag, hook sidecar or DEFENSECLAW_FAIL_MODE does not say open,
+// resolved as hookexec resolves it) exits 2, the only status Kiro honors as
+// a block. An explicitly fail-open Kiro hook and every other connector keep 1.
 func hookFailureExitCode(failure hookFailureContext) int {
 	failure = failure.resolve()
 	if strings.EqualFold(strings.TrimSpace(failure.connector), "kiro") && hookPreRunFailsClosed(failure) {
@@ -330,7 +330,20 @@ func hookPreRunFailsClosed(failure hookFailureContext) bool {
 	if v := os.Getenv("DEFENSECLAW_FAIL_MODE"); v != "" && (!trusted || strings.EqualFold(strings.TrimSpace(v), "closed")) {
 		mode = v
 	}
-	return strings.EqualFold(strings.TrimSpace(mode), "closed")
+	return nativeHookFailMode(mode) == "closed"
+}
+
+// nativeHookFailMode resolves the fail mode a hook command ends with (flag,
+// sidecar, environment) as the config resolver does: only an explicit
+// "open" opens. A Windows native command carries no --fail-mode and relies
+// on hooks/.hookcfg; when that sidecar is missing, unreadable or names no
+// mode for the connector the hook fails closed, never open. Managed hooks
+// are closed before this (buildHookOptionsForRuntime).
+func nativeHookFailMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), "open") {
+		return "open"
+	}
+	return "closed"
 }
 
 // hookFailure labels a pre-run hook failure with the connector's failure
@@ -536,6 +549,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			failMode = v
 		}
 	}
+	failMode = nativeHookFailMode(failMode)
 	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")
 	if trustedNativeState {
 		// Connector-scoped token sidecars are ACL-protected installer state.

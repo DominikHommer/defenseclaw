@@ -266,7 +266,8 @@ type Options struct {
 	APIAddr string
 	// FailMode is "open" or "closed"; it governs invalid responses
 	// (4xx / bad JSON) and transport failures. StrictAvailability forces
-	// closed independently. Empty defaults to "open".
+	// closed independently. Only "open" opens: empty or any other value is
+	// "closed" (owner rule: hooks fail closed unless the operator chose open).
 	FailMode string
 
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
@@ -885,11 +886,18 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failUnreachable(opts, sp, failMode, reason)
 	}
 	defer resp.Body.Close()
-	// The decision is in: reading its body no longer counts against the
-	// answer budget.
+	// The decision is in only when its whole body is: the answer budget
+	// holds while it is read. A gateway that sent its headers and part of a
+	// body, then stalled or dropped the connection, has not answered, and
+	// the bytes it sent are never taken as its decision.
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody+1))
 	stopAnswer()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody))
+	if readErr != nil {
+		return failNoAnswer(opts, sp, failMode)
+	}
+	if int64(len(body)) > defaultMaxBody {
+		return failResponse(opts, sp, managedDecisionFailMode(opts), "gateway response too large")
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		opts.gatewayRefusal = perUserRefusalText(opts, resp.StatusCode, body)
@@ -2838,11 +2846,15 @@ func defaultHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
+// normalizeFailMode resolves a hook's fail mode as the config resolver does
+// (config.GuardrailConfig.EffectiveHookFailMode): only an explicit "open"
+// opens; empty (a hook command without --fail-mode whose sidecar is missing
+// or names no mode) and any other value fail closed.
 func normalizeFailMode(m string) string {
-	if strings.EqualFold(strings.TrimSpace(m), "closed") {
-		return "closed"
+	if strings.EqualFold(strings.TrimSpace(m), "open") {
+		return "open"
 	}
-	return "open"
+	return "closed"
 }
 
 func fileExists(path string) bool {
