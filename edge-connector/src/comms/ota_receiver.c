@@ -456,6 +456,14 @@ typedef struct {
     uint8_t  signature[64];
 } __attribute__((packed)) dclaw_emergency_msg_t;
 
+/* Lockdown state as last written to flash, and whether RAM holds a
+ * lockdown that only a storage failure caused. A command whose persistence
+ * fails leaves the device locked (fail closed); once storage works again, a
+ * replay of that command must be applied to the durable state, not on top
+ * of the storage-forced lockdown, or the device stays locked for good. */
+static dclaw_emergency_state_t s_durable_emergency;
+static bool s_storage_forced_lock = false;
+
 int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
     dclaw_state_t *s = dclaw_get_state();
 
@@ -485,6 +493,11 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
     if (command < 0x01 || command > 0x05) return -4;
 
     dclaw_emergency_state_t prior = s->emergency;
+    if (s_storage_forced_lock) {
+        s->emergency.block_all_active = s_durable_emergency.block_all_active;
+        s->emergency.last_was_lockdown = s_durable_emergency.last_was_lockdown;
+        s->emergency.lockdown_timestamp = s_durable_emergency.lockdown_timestamp;
+    }
     s->emergency.initialized = true;
 
     /* Apply command */
@@ -541,6 +554,7 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         s->emergency = prior;
         s->emergency.block_all_active = true;
         s->emergency.last_was_lockdown = true;
+        s_storage_forced_lock = true;
         dclaw_cache_flush_all();
         return -3;
     }
@@ -1005,6 +1019,8 @@ int dclaw_emergency_persist(void) {
     if (!stored_a || !stored_b)
         fprintf(stderr, "[DCLAW] WARNING: Emergency state redundancy degraded.\n");
     emergency_generation++;
+    s_durable_emergency = s->emergency;
+    s_storage_forced_lock = false;
     return 0;
 }
 
@@ -1060,5 +1076,7 @@ int dclaw_emergency_load_from_flash(void) {
         s->emergency.lockdown_timestamp = hal_tick_ms();
         fprintf(stderr, "[DCLAW] Emergency lockdown restored (24h timer restarted).\n");
     }
+    s_durable_emergency = s->emergency;
+    s_storage_forced_lock = false;
     return 0;
 }
