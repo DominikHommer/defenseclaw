@@ -81,7 +81,7 @@ jobs:
           import subprocess
 
           roots = {
-              'internal/axis/namespaceinit': ['README.md', 'bootstrap_linux.go', 'bootstrap_linux_test.go', 'private_root_probe_linux_test.go', 'proof.go', 'proof_test.go'],
+              'internal/axis/namespaceinit': ['README.md', 'bootstrap_linux.go', 'bootstrap_linux_test.go', 'private_root_linux.go', 'private_root_linux_test.go', 'private_root_probe_linux_test.go', 'proof.go', 'proof_test.go'],
               'test/e2e/axis/native-peer/driver': ['README.md', 'cleanup.go', 'cleanup_test.go', 'custody_linux.go', 'driver_linux.go', 'driver_linux_test.go', 'images_linux.go', 'main.go', 'main_other.go', 'main_test.go', 'version.go', 'version_linux.go', 'version_linux_test.go', 'version_test.go'],
           }
           sources = ['go.mod', 'go.sum', 'LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt', '.github/workflows/axis-native-driver-build.yml']
@@ -242,6 +242,8 @@ jobs:
               'TestHostFixtureParentNeverTreatsUnmappedUIDAsRootProof',
               'TestHostFixtureCreationRetainsExactHeldParentAndFreshRoot',
               'TestCreatorMountStatusRefusesMissingForeignAndIDMappedSources',
+              'TestPrivateRootPinnedImageRefusesMutationAndPartialSeal',
+              'TestPrivateRootControlPipeTypeAndDirection',
           }
           raw = Path('driver-artifact/INERT-TESTS.jsonl').read_bytes()
           if len(raw) > 1024 * 1024:
@@ -250,7 +252,7 @@ jobs:
           passed = [row['Test'] for row in rows if row.get('Action') == 'pass' and 'Test' in row]
           if set(passed) != expected or len(passed) != len(expected) or any(row.get('Action') in ('skip', 'fail') for row in rows) or not any(row.get('Action') == 'pass' and 'Test' not in row for row in rows):
               raise SystemExit('exact inert test inventory refused')
-          Path('driver-artifact/INERT-TESTS.json').write_text(json.dumps({'passed': sorted(passed), 'count': len(passed), 'root_count': 25, 'driver_wrapper_payload_or_sandbox_execution': False, 'namespace_or_prctl_called': False}, indent=2) + '\n')
+          Path('driver-artifact/INERT-TESTS.json').write_text(json.dumps({'passed': sorted(passed), 'count': len(passed), 'root_count': 27, 'driver_wrapper_payload_or_sandbox_execution': False, 'namespace_or_prctl_called': False}, indent=2) + '\n')
           PY
       - name: Build two deterministic static outer driver images and retain evidence
         shell: bash

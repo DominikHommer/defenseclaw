@@ -6,6 +6,9 @@
 package namespaceinit
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"debug/elf"
 	"errors"
 	"fmt"
 	"io"
@@ -21,8 +24,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const privateRootReady = "DCAX_PRIVATE_ROOT_READY_V1\n"
-const privateRootGrant = "DCAX_PRIVATE_ROOT_GRANT_V1\n"
 const privateRootOutputLimit = 16 << 10
 
 type privateRootCapture struct {
@@ -70,182 +71,149 @@ func privateRootPipe(file *os.File, wanted int) error {
 }
 
 func privateRootChild() (resultErr error) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	if runtime.GOARCH != "amd64" || os.Getpid() != 1 || os.Getppid() != 0 || os.Getuid() <= 0 || os.Getuid() != os.Geteuid() || os.Getgid() != os.Getegid() {
+	if runtime.GOARCH != "amd64" || os.Getpid() != 1 || os.Getppid() != 0 || os.Getuid() <= 0 {
 		return errors.New("fixed private-root child identity refused")
 	}
-	// Go's pre-exec Pdeathsig comparison cannot be used with CLONE_NEWPID:
-	// the namespace init sees PPID 0. The fixed parent holds this creating
-	// thread; no mount or workload is possible until its GRANT arrives.
-	if err := unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(unix.SIGKILL), 0, 0, 0); err != nil {
-		return fmt.Errorf("parent death guard: %w", err)
+	self, driver := os.NewFile(6, "fixed-static-self"), os.NewFile(7, "fixed-static-exec")
+	defer func() { resultErr = errors.Join(resultErr, closePrivateRootFile(&self), closePrivateRootFile(&driver)) }()
+	info, err := self.Stat()
+	selfSeals, sealErr := unix.FcntlInt(self.Fd(), unix.F_GET_SEALS, 0)
+	driverSeals, driverSealErr := unix.FcntlInt(driver.Fd(), unix.F_GET_SEALS, 0)
+	if err != nil || sealErr != nil || driverSealErr != nil || !info.Mode().IsRegular() || info.Size() < 64 || info.Size() > privateRootImageBudget/3 || selfSeals != seals || driverSeals != seals {
+		return errors.New("fixed static self image refused")
 	}
-	proofFile := os.NewFile(3, "fixed-private-root-proof")
-	grant := os.NewFile(4, "fixed-private-root-grant")
-	ready := os.NewFile(5, "fixed-private-root-ready")
-	defer func() {
-		resultErr = errors.Join(resultErr, closePrivateRootFile(&proofFile), closePrivateRootFile(&grant), closePrivateRootFile(&ready))
-	}()
-	if proofFile == nil || privateRootPipe(grant, unix.O_RDONLY) != nil || privateRootPipe(ready, unix.O_WRONLY) != nil {
-		return errors.New("fixed private-root inherited descriptors refused")
-	}
-	info, statErr := proofFile.Stat()
-	seals, sealErr := unix.FcntlInt(proofFile.Fd(), unix.F_GET_SEALS, 0)
-	if statErr != nil || sealErr != nil || !info.Mode().IsRegular() || info.Size() != proofSize || seals != unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL {
-		return errors.New("fixed private-root sealed proof refused")
-	}
-	var raw [proofSize]byte
-	if n, err := proofFile.ReadAt(raw[:], 0); err != nil || n != len(raw) {
-		return errors.New("fixed private-root proof read refused")
-	}
-	parent, err := decode(raw[:])
+	running, err := os.Open("/proc/self/exe")
 	if err != nil {
 		return err
 	}
-	if err := closePrivateRootFile(&proofFile); err != nil {
-		return err
+	var runningSt, heldSt, driverSt unix.Stat_t
+	identityErr := errors.Join(unix.Fstat(int(running.Fd()), &runningSt), unix.Fstat(int(self.Fd()), &heldSt),
+		unix.Fstat(int(driver.Fd()), &driverSt), running.Close())
+	// The currently executing path is the original test binary, whereas self
+	// is a sealed copy, so equality is the parent-supplied self/driver pair.
+	if identityErr != nil || heldSt.Dev != driverSt.Dev || heldSt.Ino != driverSt.Ino || runningSt.Mode&unix.S_IFMT != unix.S_IFREG {
+		return errors.New("fixed sealed static child pair differs")
 	}
-	b := &nativeBootstrap{parent: parent, fds: [3]int{-1, -1, -1}, proc: -1}
-	defer func() {
-		for i := range b.fds {
-			if b.fds[i] >= 0 {
-				resultErr = errors.Join(resultErr, unix.Close(b.fds[i]))
-				b.fds[i] = -1
-			}
+	hasher := sha256.New()
+	var buf [64 << 10]byte
+	for offset := int64(0); offset < info.Size(); {
+		size := len(buf)
+		if int64(size) > info.Size()-offset {
+			size = int(info.Size() - offset)
 		}
-		if b.proc >= 0 {
-			resultErr = errors.Join(resultErr, unix.Close(b.proc))
-			b.proc = -1
+		n, err := self.ReadAt(buf[:size], offset)
+		if n != size || err != nil {
+			return errors.New("fixed static self read refused")
 		}
-	}()
-	if err := b.validate(); err != nil {
-		return fmt.Errorf("owned namespace proof: %w", err)
-	}
-	if _, err := io.WriteString(ready, privateRootReady); err != nil {
-		return fmt.Errorf("fixed READY: %w", err)
-	}
-	if err := closePrivateRootFile(&ready); err != nil {
-		return err
-	}
-	message, err := io.ReadAll(io.LimitReader(grant, int64(len(privateRootGrant)+1)))
-	if err != nil || string(message) != privateRootGrant {
-		return errors.New("fixed GRANT missing or malformed")
-	}
-	if err := closePrivateRootFile(&grant); err != nil {
-		return err
-	}
-	// Every mount is made only after the exact owner has an atomic pidfd and
-	// has granted this already validated private namespace init.
-	if err := b.privateMounts(); err != nil {
-		return fmt.Errorf("private propagation: %w", err)
-	}
-	// The original bootstrap already mounts this exact fresh PID view while
-	// the old root is visible. Move only this held mount into the private root.
-	if err := b.mountProc(); err != nil {
-		return fmt.Errorf("fresh proc before private pivot: %w", err)
-	}
-	options := fmt.Sprintf("size=4m,nr_inodes=256,mode=0700,uid=%d,gid=%d", os.Getuid(), os.Getgid())
-	if err := unix.Mount("tmpfs", "/tmp", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, options); err != nil {
-		return fmt.Errorf("private tmpfs mount: %w", err)
-	}
-	// Open AFTER the mount. A descriptor held before it would still name the
-	// covered host /tmp and must never become pivot_root authority.
-	rootFD, err := unix.Open("/tmp", unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return fmt.Errorf("new tmpfs root open: %w", err)
-	}
-	defer func() {
-		if rootFD >= 0 {
-			resultErr = errors.Join(resultErr, unix.Close(rootFD))
-		}
-	}()
-	var before unix.Stat_t
-	var rootFS unix.Statfs_t
-	if err := unix.Fstat(rootFD, &before); err != nil {
-		return err
-	}
-	if err := unix.Fstatfs(rootFD, &rootFS); err != nil || rootFS.Type != unix.TMPFS_MAGIC || before.Mode&unix.S_IFMT != unix.S_IFDIR || before.Mode&07777 != 0700 || before.Uid != uint32(os.Getuid()) || before.Gid != uint32(os.Getgid()) {
-		return errors.New("new tmpfs root identity or mapped ownership refused")
-	}
-	if err := unix.Mkdir("/tmp/tmp", 0700); err != nil {
-		return err
-	}
-	if err := unix.Mkdir("/tmp/proc", 0700); err != nil {
-		return err
-	}
-	// The target is opened only after the new tmpfs exists. A covered old
-	// directory FD cannot become a mount target or pivot authority.
-	procTargetFD, err := unix.Open("/tmp/proc", unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return fmt.Errorf("private proc target open: %w", err)
-	}
-	defer func() {
-		if procTargetFD >= 0 {
-			resultErr = errors.Join(resultErr, unix.Close(procTargetFD))
-		}
-	}()
-	var procTarget unix.Stat_t
-	if err := unix.Fstat(procTargetFD, &procTarget); err != nil || procTarget.Dev != before.Dev || procTarget.Mode&unix.S_IFMT != unix.S_IFDIR || procTarget.Mode&07777 != 0700 || procTarget.Uid != uint32(os.Getuid()) || procTarget.Gid != uint32(os.Getgid()) {
-		return errors.New("private proc target identity or mapped ownership refused")
-	}
-	if err := unix.MoveMount(b.proc, "", procTargetFD, "", unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
-		return fmt.Errorf("move held fresh proc into private root: %w", err)
-	}
-	var movedProcFS unix.Statfs_t
-	if err := unix.Statfs("/tmp/proc", &movedProcFS); err != nil || movedProcFS.Type != unix.PROC_SUPER_MAGIC {
-		return errors.New("moved private proc filesystem refused")
-	}
-	closeErr := unix.Close(procTargetFD)
-	procTargetFD = -1
-	if closeErr != nil {
-		return fmt.Errorf("private proc target close: %w", closeErr)
-	}
-	if err := unix.Fchdir(rootFD); err != nil {
-		return fmt.Errorf("new tmpfs root chdir: %w", err)
-	}
-	if err := unix.PivotRoot(".", "."); err != nil {
-		return fmt.Errorf("private pivot_root: %w", err)
-	}
-	if err := unix.Unmount(".", unix.MNT_DETACH); err != nil {
-		return fmt.Errorf("old root detach: %w", err)
-	}
-	if err := unix.Chdir("/"); err != nil {
-		return err
-	}
-	if err := unix.Close(rootFD); err != nil {
-		return err
-	}
-	rootFD = -1
-	var after, ownedTmp unix.Stat_t
-	if err := unix.Stat("/", &after); err != nil || after.Dev != before.Dev || after.Ino != before.Ino || after.Uid != uint32(os.Getuid()) || after.Gid != uint32(os.Getgid()) || after.Mode&07777 != 0700 {
-		return errors.New("pivoted root identity or owner differs")
-	}
-	if err := unix.Stat("/tmp", &ownedTmp); err != nil || ownedTmp.Mode&unix.S_IFMT != unix.S_IFDIR || ownedTmp.Mode&07777 != 0700 || ownedTmp.Uid != uint32(os.Getuid()) || ownedTmp.Gid != uint32(os.Getgid()) {
-		return errors.New("private /tmp mapped ownership refused")
-	}
-	var unexpected unix.Stat_t
-	if err := unix.Stat("/etc", &unexpected); !errors.Is(err, unix.ENOENT) {
-		return errors.New("old root pathname remains visible")
-	}
-	if err := b.dropCaps(); err != nil {
-		return fmt.Errorf("all-thread capability drop: %w", err)
-	}
-	if err := b.verify(); err != nil {
-		return fmt.Errorf("private bootstrap verification: %w", err)
-	}
-	for i := range b.fds {
-		if err := unix.Close(b.fds[i]); err != nil {
+		if _, err := hasher.Write(buf[:n]); err != nil {
 			return err
 		}
-		b.fds[i] = -1
+		offset += int64(n)
 	}
-	if err := unix.Close(b.proc); err != nil {
+	var digest [32]byte
+	copy(digest[:], hasher.Sum(nil))
+	pinned := func(fd uintptr) PinnedSealedFile {
+		return PinnedSealedFile{File: os.NewFile(fd, "fixed-sealed-role"), Size: info.Size(), SHA256: digest}
+	}
+	plan := PrivateRootPlan{
+		Grant: os.NewFile(4, "fixed-grant"), Ready: os.NewFile(5, "fixed-ready"),
+		Images: PrivateRootImages{Peer: pinned(8), Bubblewrap: pinned(9), Payload: pinned(10)},
+		Devices: PrivateRootDevices{
+			Null: os.NewFile(11, "fixed-null"), Zero: os.NewFile(12, "fixed-zero"), Full: os.NewFile(13, "fixed-full"),
+			Random: os.NewFile(14, "fixed-random"), URandom: os.NewFile(15, "fixed-urandom"), TTY: os.NewFile(16, "fixed-tty"),
+		},
+	}
+	if err := SetupPrivateRoot(&plan); err != nil {
 		return err
 	}
-	b.proc = -1
-	fmt.Printf("DCAX_PRIVATE_ROOT_PASS uid=%d gid=%d tmpfs=true pivot=true detached=true proc=true caps_zero=true\n", os.Getuid(), os.Getgid())
-	return nil
+	if err := closePrivateRootFile(&self); err != nil {
+		return err
+	}
+	if _, err := unix.FcntlInt(driver.Fd(), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+		return err
+	}
+	return syscall.Exec("/proc/self/fd/7", []string{"fixed-private-root-static.test", "-test.v=true", "-test.run=^TestPrivateRootStaticExecChild$"}, []string{})
+}
+
+func privateRootSealedStaticSelf() (_ *os.File, resultErr error) {
+	source, err := os.Open("/proc/self/exe")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, source.Close()) }()
+	data, err := io.ReadAll(io.LimitReader(source, privateRootImageBudget/3+1))
+	if err != nil || len(data) < 64 || int64(len(data)) > privateRootImageBudget/3 {
+		return nil, errors.New("fixed self image size refused")
+	}
+	parsed, err := elf.NewFile(bytes.NewReader(data))
+	if err != nil {
+		return nil, errors.New("fixed self ELF refused")
+	}
+	defer parsed.Close()
+	if parsed.Class != elf.ELFCLASS64 || parsed.Machine != elf.EM_X86_64 || parsed.Type != elf.ET_EXEC {
+		return nil, errors.New("fixed static self shape refused")
+	}
+	executable := false
+	for _, segment := range parsed.Progs {
+		if segment.Type == elf.PT_INTERP || segment.Type == elf.PT_DYNAMIC {
+			return nil, errors.New("fixed self external runtime refused")
+		}
+		if segment.Type == elf.PT_LOAD && segment.Flags&elf.PF_X != 0 && parsed.Entry >= segment.Vaddr && parsed.Entry-segment.Vaddr < segment.Filesz {
+			executable = true
+		}
+	}
+	if !executable {
+		return nil, errors.New("fixed static self entry refused")
+	}
+	fd, err := unix.MemfdCreate("fixed-private-root-static-self", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), "fixed-static-self")
+	accepted := false
+	defer func() {
+		if !accepted {
+			resultErr = errors.Join(resultErr, file.Close())
+		}
+	}()
+	if n, err := file.Write(data); err != nil || n != len(data) {
+		return nil, errors.New("fixed self memfd write refused")
+	}
+	if _, err := unix.FcntlInt(file.Fd(), unix.F_ADD_SEALS, seals); err != nil {
+		return nil, err
+	}
+	accepted = true
+	return file, nil
+}
+
+func privateRootHeldDevices() (_ [6]*os.File, resultErr error) {
+	names := [6]string{"null", "zero", "full", "random", "urandom", "tty"}
+	major := [6]uint32{1, 1, 1, 1, 1, 5}
+	minor := [6]uint32{3, 5, 7, 8, 9, 0}
+	var files [6]*os.File
+	accepted := false
+	defer func() {
+		if !accepted {
+			for i := range files {
+				resultErr = errors.Join(resultErr, closePrivateRootFile(&files[i]))
+			}
+		}
+	}()
+	for i, name := range names {
+		fd, err := unix.Open("/dev/"+name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return files, err
+		}
+		files[i] = os.NewFile(uintptr(fd), "fixed-held-char")
+		var st unix.Stat_t
+		var fs unix.Statfs_t
+		if unix.Fstat(fd, &st) != nil || unix.Fstatfs(fd, &fs) != nil || st.Mode&unix.S_IFMT != unix.S_IFCHR ||
+			unix.Major(st.Rdev) != major[i] || unix.Minor(st.Rdev) != minor[i] || uint64(fs.Flags)&uint64(unix.ST_NODEV) != 0 {
+			return files, errors.New("fixed held host character device refused")
+		}
+	}
+	accepted = true
+	return files, nil
 }
 
 func privateRootParent() (resultErr error) {
@@ -256,9 +224,24 @@ func privateRootParent() (resultErr error) {
 	if err != nil {
 		return err
 	}
+	defer func() { resultErr = errors.Join(resultErr, closePrivateRootFile(&proofFile)) }()
+	sealedSelf, err := privateRootSealedStaticSelf()
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, closePrivateRootFile(&sealedSelf)) }()
+	heldDevices, err := privateRootHeldDevices()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for i := range heldDevices {
+			resultErr = errors.Join(resultErr, closePrivateRootFile(&heldDevices[i]))
+		}
+	}()
 	var grantRead, grantWrite, readyRead, readyWrite *os.File
 	defer func() {
-		resultErr = errors.Join(resultErr, closePrivateRootFile(&proofFile), closePrivateRootFile(&grantRead), closePrivateRootFile(&grantWrite), closePrivateRootFile(&readyRead), closePrivateRootFile(&readyWrite))
+		resultErr = errors.Join(resultErr, closePrivateRootFile(&grantRead), closePrivateRootFile(&grantWrite), closePrivateRootFile(&readyRead), closePrivateRootFile(&readyWrite))
 	}()
 	grantRead, grantWrite, err = os.Pipe()
 	if err != nil {
@@ -273,7 +256,7 @@ func privateRootParent() (resultErr error) {
 	command := &exec.Cmd{
 		Path: "/proc/self/exe",
 		Args: []string{"fixed-private-root-probe.test", "-test.v=true", "-test.run=^TestPrivateTmpfsRootProbe$"},
-		Env:  []string{}, Dir: "/", ExtraFiles: []*os.File{proofFile, grantRead, readyWrite},
+		Env:  []string{}, Dir: "/", ExtraFiles: []*os.File{proofFile, grantRead, readyWrite, sealedSelf, sealedSelf, sealedSelf, sealedSelf, sealedSelf, heldDevices[0], heldDevices[1], heldDevices[2], heldDevices[3], heldDevices[4], heldDevices[5]},
 		Stdout: stdout, Stderr: stderr,
 		SysProcAttr: &syscall.SysProcAttr{
 			Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
@@ -330,14 +313,14 @@ func privateRootParent() (resultErr error) {
 	if pidfd < 0 {
 		return errors.New("atomic pidfd custody unavailable")
 	}
-	if err := errors.Join(closePrivateRootFile(&proofFile), closePrivateRootFile(&grantRead), closePrivateRootFile(&readyWrite)); err != nil {
+	if err := errors.Join(closePrivateRootFile(&proofFile), closePrivateRootFile(&grantRead), closePrivateRootFile(&readyWrite), closePrivateRootFile(&sealedSelf)); err != nil {
 		return err
 	}
 	if err := readyRead.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return err
 	}
-	readyMessage, err := io.ReadAll(io.LimitReader(readyRead, int64(len(privateRootReady)+1)))
-	if err != nil || string(readyMessage) != privateRootReady {
+	readyMessage, err := io.ReadAll(io.LimitReader(readyRead, int64(len(PrivateRootReady)+1)))
+	if err != nil || string(readyMessage) != PrivateRootReady {
 		return errors.New("fixed private-root READY absent or malformed")
 	}
 	if err := closePrivateRootFile(&readyRead); err != nil {
@@ -346,7 +329,7 @@ func privateRootParent() (resultErr error) {
 	if err := grantWrite.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return err
 	}
-	if _, err := io.WriteString(grantWrite, privateRootGrant); err != nil {
+	if _, err := io.WriteString(grantWrite, PrivateRootGrant); err != nil {
 		return err
 	}
 	if err := closePrivateRootFile(&grantWrite); err != nil {
@@ -363,8 +346,8 @@ func privateRootParent() (resultErr error) {
 	}
 	out, overflow := stdout.snapshot()
 	diagnostics, stderrOverflow := stderr.snapshot()
-	want := fmt.Sprintf("DCAX_PRIVATE_ROOT_PASS uid=%d gid=%d tmpfs=true pivot=true detached=true proc=true caps_zero=true\n", os.Getuid(), os.Getgid())
-	if overflow || stderrOverflow || diagnostics != "" || strings.Count(out, want) != 1 || !strings.Contains(out, "--- PASS: TestPrivateTmpfsRootProbe") || !strings.Contains(out, "\nPASS\n") {
+	want := fmt.Sprintf("DCAX_PRIVATE_ROOT_STATIC_EXEC_PASS uid=%d gid=%d root_ro=true tmp_rw=true devices=true caps_zero=true\n", os.Getuid(), os.Getgid())
+	if overflow || stderrOverflow || diagnostics != "" || strings.Count(out, want) != 1 || !strings.Contains(out, "--- PASS: TestPrivateRootStaticExecChild") || !strings.Contains(out, "\nPASS\n") {
 		return errors.New("fixed private-root proof or test pass inventory differs")
 	}
 	fmt.Println("DCAX_PRIVATE_ROOT_CUSTODY pidfd=true namespace_init_reaped=true fixed_grant=true")
@@ -384,4 +367,56 @@ func TestPrivateTmpfsRootProbe(t *testing.T) {
 	if err := privateRootParent(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// This fixed static self reexec is the only workload in the compatibility
+// probe. It checks the actual helper result after exec, without a peer/agent.
+func TestPrivateRootStaticExecChild(t *testing.T) {
+	if os.Getpid() != 1 || os.Getuid() <= 0 || verifyCaps(false) != nil {
+		t.Fatal("private static exec lost PID/credential/capability custody")
+	}
+	var rootFS, tmpFS, devFS, procFS unix.Statfs_t
+	if unix.Statfs("/", &rootFS) != nil || unix.Statfs("/tmp", &tmpFS) != nil ||
+		unix.Statfs("/dev", &devFS) != nil || unix.Statfs("/proc", &procFS) != nil ||
+		rootFS.Type != unix.TMPFS_MAGIC || tmpFS.Type != unix.TMPFS_MAGIC ||
+		devFS.Type != unix.TMPFS_MAGIC || procFS.Type != unix.PROC_SUPER_MAGIC ||
+		uint64(rootFS.Flags)&uint64(unix.ST_RDONLY|unix.ST_NOSUID|unix.ST_NODEV) != uint64(unix.ST_RDONLY|unix.ST_NOSUID|unix.ST_NODEV) ||
+		uint64(rootFS.Flags)&uint64(unix.ST_NOEXEC) != 0 ||
+		uint64(tmpFS.Flags)&uint64(unix.ST_RDONLY|unix.ST_NOEXEC) != uint64(unix.ST_NOEXEC) {
+		t.Fatal("private static exec root/tmp/proc flags differ")
+	}
+	null, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal("private static exec cannot open real null device")
+	}
+	if n, err := null.Write([]byte{1}); err != nil || n != 1 {
+		t.Fatal("private static exec null device write differs")
+	}
+	if err := null.Close(); err != nil {
+		t.Fatal(err)
+	}
+	temp, err := os.CreateTemp("/tmp", "fixed-private-root-")
+	if err != nil {
+		t.Fatal("private static exec tmp write refused")
+	}
+	if err := errors.Join(temp.Close(), os.Remove(temp.Name())); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := os.Open("/proc/self/exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := io.ReadAll(io.LimitReader(opened, privateRootImageBudget/3+1))
+	closeErr := opened.Close()
+	if err != nil || closeErr != nil || len(self) < 64 || int64(len(self)) > privateRootImageBudget/3 {
+		t.Fatal("fixed static reexec image unavailable")
+	}
+	want := sha256.Sum256(self)
+	for _, leaf := range [3]string{"peer", "bubblewrap", "payload"} {
+		data, err := os.ReadFile("/run/axis/images/" + leaf)
+		if err != nil || len(data) != len(self) || sha256.Sum256(data) != want {
+			t.Fatal("private root typed runtime copy differs")
+		}
+	}
+	fmt.Printf("DCAX_PRIVATE_ROOT_STATIC_EXEC_PASS uid=%d gid=%d root_ro=true tmp_rw=true devices=true caps_zero=true\n", os.Getuid(), os.Getgid())
 }

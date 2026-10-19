@@ -903,7 +903,7 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 			t.Error("fixed exact resources remain retained for uncertain cleanup")
 		}
 	}()
-	inputFD, err := unix.Open("native-hook-canary-inputs", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	inputFD, err := unix.Open("/run/axis/images", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal("fixed admitted input directory unavailable")
 	}

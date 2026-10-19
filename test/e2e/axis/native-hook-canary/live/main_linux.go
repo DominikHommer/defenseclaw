@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -277,6 +278,37 @@ func verifyCase(item map[string]any, name string) error {
 	return nil
 }
 
+func fixedPrivateDeviceInputs() ([6]*os.File, error) {
+	names := [6]string{"null", "zero", "full", "random", "urandom", "tty"}
+	majors := [6]uint32{1, 1, 1, 1, 1, 5}
+	minors := [6]uint32{3, 5, 7, 8, 9, 0}
+	var files [6]*os.File
+	for i, name := range names {
+		fd, err := unix.Open("/dev/"+name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return files, err
+		}
+		files[i] = os.NewFile(uintptr(fd), "fixed-held-char")
+		var st unix.Stat_t
+		var fs unix.Statfs_t
+		if unix.Fstat(fd, &st) != nil || unix.Fstatfs(fd, &fs) != nil || st.Mode&unix.S_IFMT != unix.S_IFCHR ||
+			unix.Major(st.Rdev) != majors[i] || unix.Minor(st.Rdev) != minors[i] || uint64(fs.Flags)&uint64(unix.ST_NODEV) != 0 {
+			return files, errors.New("fixed host character device refused")
+		}
+	}
+	return files, nil
+}
+
+func fixedPrivateDigest(pin imagePin) ([32]byte, error) {
+	var digest [32]byte
+	raw, err := hex.DecodeString(pin.sha)
+	if err != nil || len(raw) != len(digest) {
+		return digest, errors.New("fixed private image digest literal refused")
+	}
+	copy(digest[:], raw)
+	return digest, nil
+}
+
 func execute(suite string) (record map[string]any, resultErr error) {
 	record = map[string]any{"scope": scope, "suite": suite, "passed": false, "execution_performed": false, "production_qualification": false, "vendor_runtime_qualification": false}
 	// Admit before every filesystem/image/native operation.
@@ -350,6 +382,16 @@ func execute(suite string) (record map[string]any, resultErr error) {
 	record["peer_sha256"] = peerSHA
 	record["bubblewrap_sha256"] = bwrapSHA
 
+	devices, err := fixedPrivateDeviceInputs()
+	for _, device := range devices {
+		if device != nil {
+			held := device
+			defer func() { resultErr = errors.Join(resultErr, retained.releaseResource(held.Close)) }()
+		}
+	}
+	if err != nil {
+		return record, err
+	}
 	proof, err := namespaceinit.Capture()
 	if proof != nil {
 		defer func() { resultErr = errors.Join(resultErr, retained.releaseResource(proof.Close)) }()
@@ -389,7 +431,7 @@ func execute(suite string) (record map[string]any, resultErr error) {
 	if err != nil {
 		return record, err
 	}
-	originals := []*os.File{proof, grantRead, readyWrite, self, driver, root}
+	originals := []*os.File{proof, grantRead, readyWrite, self, driver, peer, bwrap, payload, devices[0], devices[1], devices[2], devices[3], devices[4], devices[5]}
 	children := make([]*os.File, 0, len(originals))
 	for _, original := range originals {
 		fd, e := unix.FcntlInt(original.Fd(), unix.F_DUPFD_CLOEXEC, 3)
@@ -448,12 +490,12 @@ func execute(suite string) (record map[string]any, resultErr error) {
 	if err := grantWrite.SetWriteDeadline(deadline); err != nil {
 		return record, err
 	}
-	ready := make([]byte, len(workerReady))
-	if _, err := io.ReadFull(readyRead, ready); err != nil || string(ready) != workerReady {
+	ready, err := io.ReadAll(io.LimitReader(readyRead, int64(len(namespaceinit.PrivateRootReady)+1)))
+	if err != nil || string(ready) != namespaceinit.PrivateRootReady {
 		return record, errors.New("fixed worker READY refused")
 	}
 	record["worker_ready_observed"] = true
-	if _, err := io.WriteString(grantWrite, workerGrant); err != nil {
+	if _, err := io.WriteString(grantWrite, namespaceinit.PrivateRootGrant); err != nil {
 		return record, err
 	}
 	grantWriteCloseErr := retained.releaseResource(grantWrite.Close)
@@ -482,33 +524,22 @@ func execute(suite string) (record map[string]any, resultErr error) {
 	return record, nil
 }
 
-func bootstrap(suite string) error {
+func bootstrap(suite string) (resultErr error) {
 	if testName(suite) == "" || !admitted() || os.Getpid() != 1 || os.Getppid() != 0 || os.Geteuid() == 0 || runtime.GOARCH != "amd64" {
 		return errors.New("fixed namespace worker refused")
 	}
-	if err := namespaceinit.Setup(); err != nil {
-		return err
-	}
-	grant, ready, self, driver, root := os.NewFile(4, "fixed-grant"), os.NewFile(5, "fixed-ready"), os.NewFile(6, "fixed-self"), os.NewFile(7, "fixed-driver"), os.NewFile(8, "fixed-input-root")
-	defer grant.Close()
-	defer ready.Close()
-	defer self.Close()
-	defer driver.Close()
-	defer root.Close()
-	for index, file := range []*os.File{grant, ready} {
-		var st unix.Stat_t
-		flags, err := unix.FcntlInt(file.Fd(), unix.F_GETFL, 0)
-		wanted := unix.O_RDONLY
-		if index == 1 {
-			wanted = unix.O_WRONLY
+	self, driver := os.NewFile(6, "fixed-self"), os.NewFile(7, "fixed-driver")
+	defer func() {
+		if self != nil {
+			resultErr = errors.Join(resultErr, self.Close())
 		}
-		if err != nil || unix.Fstat(int(file.Fd()), &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFIFO || flags&unix.O_ACCMODE != wanted {
-			return errors.New("fixed private handshake channel refused")
+		if driver != nil {
+			resultErr = errors.Join(resultErr, driver.Close())
 		}
-	}
+	}()
 	for _, file := range []*os.File{self, driver} {
-		seals, err := unix.FcntlInt(file.Fd(), unix.F_GET_SEALS, 0)
-		if err != nil || seals != unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL {
+		gotSeals, err := unix.FcntlInt(file.Fd(), unix.F_GET_SEALS, 0)
+		if err != nil || gotSeals != unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL {
 			return errors.New("fixed sealed executable refused")
 		}
 	}
@@ -521,19 +552,41 @@ func bootstrap(suite string) error {
 	if identityErr != nil || running.Dev != held.Dev || running.Ino != held.Ino {
 		return errors.New("fixed worker executable identity differs")
 	}
-	var st unix.Stat_t
-	if unix.Fstat(int(root.Fd()), &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Mode&07777 != 0700 || st.Uid != uint32(os.Geteuid()) {
-		return errors.New("fixed input root identity refused")
-	}
-	if err := unix.Fchdir(int(root.Fd())); err != nil {
+	peerDigest, err := fixedPrivateDigest(peerPin)
+	if err != nil {
 		return err
 	}
-	if err := readyThenGrant(ready, grant); err != nil {
+	bwrapDigest, err := fixedPrivateDigest(bwrapPin)
+	if err != nil {
 		return err
 	}
-	if err := errors.Join(grant.Close(), ready.Close(), self.Close(), root.Close()); err != nil {
+	payloadDigest, err := fixedPrivateDigest(payloadPin)
+	if err != nil {
 		return err
 	}
+	plan := namespaceinit.PrivateRootPlan{
+		Grant: os.NewFile(4, "fixed-grant"), Ready: os.NewFile(5, "fixed-ready"),
+		Images: namespaceinit.PrivateRootImages{
+			Peer:       namespaceinit.PinnedSealedFile{File: os.NewFile(8, "fixed-peer"), Size: peerPin.size, SHA256: peerDigest},
+			Bubblewrap: namespaceinit.PinnedSealedFile{File: os.NewFile(9, "fixed-bwrap"), Size: bwrapPin.size, SHA256: bwrapDigest},
+			Payload:    namespaceinit.PinnedSealedFile{File: os.NewFile(10, "fixed-payload"), Size: payloadPin.size, SHA256: payloadDigest},
+		},
+		Devices: namespaceinit.PrivateRootDevices{
+			Null: os.NewFile(11, "fixed-null"), Zero: os.NewFile(12, "fixed-zero"), Full: os.NewFile(13, "fixed-full"),
+			Random: os.NewFile(14, "fixed-random"), URandom: os.NewFile(15, "fixed-urandom"), TTY: os.NewFile(16, "fixed-tty"),
+		},
+	}
+	// This call consumes proof, handshake, images and held devices. It admits
+	// no guest-supplied path, performs no mount before the parent's GRANT, and
+	// returns only after old-root capabilities close and all thread caps zero.
+	if err := namespaceinit.SetupPrivateRoot(&plan); err != nil {
+		return err
+	}
+	if err := self.Close(); err != nil {
+		self = nil
+		return err
+	}
+	self = nil
 	if _, err := unix.FcntlInt(driver.Fd(), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
 		return err
 	}
@@ -542,8 +595,6 @@ func bootstrap(suite string) error {
 		testTimeout = "12m"
 	}
 	argv := []string{"fixed-contained-hook-test", "-test.v=true", "-test.count=1", "-test.timeout=" + testTimeout, "-test.run=^" + testName(suite) + "$"}
-	// The exact sealed FD is executable only after READY/GRANT. The test's
-	// own nested peer/bwrap custody remains below this PID namespace init.
 	return syscall.Exec("/proc/self/fd/7", argv, []string{})
 }
 

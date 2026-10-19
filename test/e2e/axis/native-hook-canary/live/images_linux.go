@@ -44,39 +44,6 @@ func validateStaticELF(data []byte) error {
 	return nil
 }
 
-// The independently reviewed peer is a fixed glibc-linked ET_DYN image.
-// Its exact digest and interpreter are pinned; only the Go testdriver,
-// synthetic payload, Bubblewrap and outer custodian are static ET_EXEC.
-func validateReviewedPeerELF(data []byte) error {
-	file, err := elf.NewFile(bytes.NewReader(data))
-	if err != nil {
-		return errors.New("fixed reviewed peer ELF header refused")
-	}
-	defer file.Close()
-	if file.Class != elf.ELFCLASS64 || file.Data != elf.ELFDATA2LSB || file.Machine != elf.EM_X86_64 || file.Type != elf.ET_DYN || len(file.Progs) != 12 {
-		return errors.New("fixed reviewed peer Linux amd64 shape differs")
-	}
-	entry, interpreter, dynamic := false, false, false
-	for _, p := range file.Progs {
-		if p.Filesz > p.Memsz || p.Off > uint64(len(data)) || p.Filesz > uint64(len(data))-p.Off || p.Vaddr > ^uint64(0)-p.Memsz {
-			return errors.New("fixed reviewed peer segment differs")
-		}
-		entry = entry || p.Type == elf.PT_LOAD && p.Flags&elf.PF_X != 0 && file.Entry >= p.Vaddr && file.Entry-p.Vaddr < p.Filesz
-		if p.Type == elf.PT_INTERP {
-			raw, err := io.ReadAll(io.LimitReader(p.Open(), 64))
-			if err != nil || string(raw) != "/lib64/ld-linux-x86-64.so.2\x00" {
-				return errors.New("fixed reviewed peer loader differs")
-			}
-			interpreter = true
-		}
-		dynamic = dynamic || p.Type == elf.PT_DYNAMIC
-	}
-	if !entry || !interpreter || !dynamic {
-		return errors.New("fixed reviewed peer entry/loader differs")
-	}
-	return nil
-}
-
 func privateDirectory(parent *os.File, leaf string) (*os.File, error) {
 	base := unix.AT_FDCWD
 	if parent != nil {
@@ -116,9 +83,6 @@ func admittedImage(parent *os.File, leaf string, pin imagePin, owner *cleanupOwn
 		return nil, errors.New("fixed source bytes differ")
 	}
 	imageErr := validateStaticELF(raw)
-	if leaf == "peer" && pin.sha == peerSHA {
-		imageErr = validateReviewedPeerELF(raw)
-	}
 	if imageErr != nil {
 		return nil, errors.New("fixed source ELF profile differs")
 	}

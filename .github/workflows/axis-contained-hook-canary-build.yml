@@ -33,7 +33,7 @@ jobs:
       - name: Check fixed build recipe and run pure Python negative tests
         shell: bash
         env:
-          EXPECTED_HELPER_SHA: 32733c0ccea54a5ff3c2feba3fa4bee43f38b342f038827dd3511b4920d51fa8
+          EXPECTED_HELPER_SHA: 40de18cd6b23ff447ff8e30c41fe76e972e509ffae05d273f1241e9b37b83b87
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
