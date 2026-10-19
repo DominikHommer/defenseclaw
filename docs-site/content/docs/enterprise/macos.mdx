@@ -433,7 +433,8 @@ installation.
 
 A per-user gateway that is still running holds the managed gateway port,
 `127.0.0.1:18970`, unless its user moved it to another port. The install then
-stops before it changes anything: it fails with `api_port_held`.
+stages the package files, but the postinstall refuses the managed deployment
+before applying it with `api_port_held`.
 `installer -pkg` prints a generic postinstall failure and records no package
 receipt, so detection reports the computer as not installed. The process and `kill` command
 appear in `/var/log/install.log` and the error in `last-package-result.json`;

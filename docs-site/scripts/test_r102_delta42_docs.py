@@ -3,7 +3,6 @@
 import unittest
 from pathlib import Path
 
-
 DOCS = Path(__file__).resolve().parents[1] / "content/docs/enterprise"
 
 
@@ -20,13 +19,21 @@ class Delta42DocsTest(unittest.TestCase):
             "`gateway-docker-default-namespace.toml`",
             "while that user still keeps a sandbox there",
             "list, start, connect and pull as before, running or stopped",
-            "the upgrade is a plain restart (\"pending restart\" while a sandbox runs), not a switch",
+            'the upgrade is a plain restart ("pending restart" while a sandbox runs), not a switch',
             "A user who never ran sandboxes moves straight to `defenseclaw-managed`",
             "once their last 1.0.1 sandbox is deleted",
             # rel-1-0-2:GAP-0666 and GAP-0677 (1.0.3): the bridge survives a
             # non-purge uninstall; a folder whose containers are gone ends it.
-            "A sandbox folder of the docker driver whose containers are gone (removed outside OpenShell) does not keep a user on the bridge",
-            "A non-purge uninstall keeps that record while an account keeps sandboxes, so the bridge comes back with the next `ensure`, also after a package reinstall; a purge removes it",
+            (
+                "A sandbox folder of the docker driver whose containers are "
+                "gone (removed outside OpenShell) does not keep a user on the "
+                "bridge"
+            ),
+            (
+                "A non-purge uninstall keeps that record while an account "
+                "keeps sandboxes, so the bridge comes back with the next "
+                "`ensure`, also after a package reinstall; a purge removes it"
+            ),
             "This is the 1.0.1 upgrade bridge; it is removed when 1.0.1 is out of support.",
         ):
             self.assertIn(phrase, bullet)
@@ -42,7 +49,10 @@ class Delta42DocsTest(unittest.TestCase):
         for phrase in (
             "keeps the root-only record of the sandbox setup they were made under (`openshell-state.kept.json`)",
             "after a reinstall whose first `ensure` failed and rolled back",
-            "a driver or version change is a switch that waits for running sandboxes, and it keeps the 1.0.1 upgrade bridge",
+            (
+                "a driver or version change is a switch that waits for "
+                "running sandboxes, and it keeps the 1.0.1 upgrade bridge"
+            ),
             "The kept sandboxes then start, review and pull as before, the sandboxes kept under 1.0.1 included",
         ):
             self.assertIn(phrase, bullet)
@@ -55,7 +65,11 @@ class Delta42DocsTest(unittest.TestCase):
         text = flat("sandboxes.mdx")
         bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
         for phrase in (
-            "On Linux, purge first asks host Docker as root to remove the containers and volumes of each account's sandboxes in both managed Docker namespaces",
+            (
+                "On Linux, purge first asks host Docker as root to remove the "
+                "containers and volumes of each account's sandboxes in both "
+                "managed Docker namespaces"
+            ),
             "OpenShell's `default` (the sandboxes kept under 1.0.1) and `defenseclaw-managed`",
             "matched by OpenShell's sandbox labels and the account's DefenseClaw uid and owner labels",
             "a container or volume that names another account stays, with a warning",

@@ -327,7 +327,6 @@ class UnshippedConnectorMigrationTests(unittest.TestCase):
         from unittest.mock import patch
 
         import yaml
-
         from defenseclaw import migrations
 
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -21,7 +21,6 @@ from __future__ import annotations
 import dataclasses
 
 import yaml
-
 from defenseclaw import config as cfgmod
 
 
