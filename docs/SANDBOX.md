@@ -2826,6 +2826,13 @@ The managed daemon re-resolves each kept sandbox against the floor of its own
 confirmed registration. Concurrent sandboxes can therefore use different
 profile floors. A missing, unconfirmed or revoked registration resolves
 against the closed floor instead of inheriting another sandbox's floor.
+The daemon's poll (about once a minute) brings each registration's floor up
+to date, so an administrator's stricter `foreign_sandboxes` reaches a running
+sandbox's registration at the next poll and the next reconcile acts on it.
+When the managed gateway answers that it cannot load a registration's policy
+(`sandbox_policy_unloadable`), the registration goes back to the closed floor
+until a later answer carries its policy again; an unreachable gateway keeps
+the confirmed floor.
 
 `Effective.Allow` checks runtime actions against the same policy: unblock,
 approve, approve always, host port, mount, skip-permissions, learn mode and
