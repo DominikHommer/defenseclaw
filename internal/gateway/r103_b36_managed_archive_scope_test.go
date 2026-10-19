@@ -31,13 +31,13 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 	homes := filepath.Join(root, "home")
 	home := filepath.Join(homes, "dcad-r103-eng1@dclab.test")
 	project := filepath.Join(home, "r103-t8a-b36-proj")
-	for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(project, "build"), filepath.Join(project, "unpack")} {
+	for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(project, "build"), filepath.Join(project, "unpack"), filepath.Join(project, "out")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	keys := filepath.Join(home, ".ssh", "authorized_keys")
-	for path, data := range map[string]string{keys: "# decoy\n", filepath.Join(project, "pkg.tgz"): "x", filepath.Join(project, "keys.tar"): "x"} {
+	for path, data := range map[string]string{keys: "# decoy\n", filepath.Join(project, "pkg.tgz"): "x", filepath.Join(project, "keys.tar"): "x", filepath.Join(project, "notes.txt"): "x"} {
 		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -86,6 +86,17 @@ func TestR103B36ManagedArchiveScopeUsesClientWalk(t *testing.T) {
 	allowed := []string{
 		"tar -xzf pkg.tgz --strip-components=1 -C build; echo hi > report.txt", // FP-0001
 		"tar -xzf pkg.tgz --exclude=docs -C build; echo hi > report.txt",       // FP-0002
+		"tar -a -xf pkg.tar -C build; echo hi > report.txt",                    // FP-0003
+		`for f in *.txt; do cp "$f" build/; done; echo ok > report.txt`,        // FP-0004
+		`cp "$F" out.txt && echo done > report.txt`,                            // FP-0005
+		"cp -c notes.txt r2.txt",                                               // FP-0006
+		"cp -X notes.txt r2.txt",                                               // FP-0007
+		"cp -N notes.txt r2.txt",                                               // FP-0008
+		"cp -Z notes.txt r2.txt",                                               // FP-0009
+		"> out/build.log",                                                      // PAN-0001
+		"> out/build.log && echo done",                                         // PAN-0002
+		"true && > out/build.log",                                              // PAN-0005
+		"  >> out/build.log",                                                   // PAN-0006
 		"tar -C unpack -xf keys.tar; echo hi > report.txt",
 	}
 	blocked := []string{
