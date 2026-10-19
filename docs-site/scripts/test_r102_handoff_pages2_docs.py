@@ -134,7 +134,7 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
         section = page("reference/migrate-v9.mdx").split("### Custom providers", 1)[1]
         self.assertIn("lists are\nunioned and the later entry's values win", section)
         self.assertIn("provider already in `llm_providers.custom` keeps the values `config.yaml` sets", section)
-        self.assertIn("`migration-v9.json` notes each merged provider", section)
+        self.assertIn("`migration-v9.json` notes each merged\nprovider", section)
 
     def test_fg01_rollback_restores_data_and_prunes_hooks(self):
         text = page("get-started/upgrade.mdx")
