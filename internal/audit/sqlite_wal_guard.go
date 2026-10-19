@@ -34,8 +34,14 @@ var walIdleTrimBytes int64 = auditWALJournalSizeLimitBytes
 
 // walCopyPasses bounds the copy passes on the dedicated connection. Each pass
 // copies what was written during the one before, so the backlog shrinks pass
-// by pass while the disk copies faster than the hooks write.
-const walCopyPasses = 6
+// by pass while the disk copies faster than the hooks write. The passes stop
+// once the backlog is at most walCopyTargetFrames (about 1 MiB): the writer
+// copies that backlog while it holds the hooks, so a larger one made each
+// hold longer as the database grew.
+const (
+	walCopyPasses       = 6
+	walCopyTargetFrames = 256
+)
 
 // walWriterCopyFrames is the largest backlog (about 8 MiB) a pass leaves for
 // the writer connection to copy. With a larger backlog the pass does not take
@@ -157,7 +163,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 		if pass == 0 {
 			result.LogBytes = int64(frames) * walFrameBytes
 		}
-		if frames-copied <= walWriterCopyFrames {
+		if frames-copied <= walCopyTargetFrames {
 			break
 		}
 	}
@@ -174,9 +180,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	if quiet || idleOversized {
 		mode = walCheckpointTruncate
 	}
-	started := time.Now()
-	busy, err = s.checkpointWALOnWriter(ctx, writerBudget, mode)
-	result.WriterHeld = time.Since(started)
+	busy, result.WriterHeld, err = s.checkpointWALOnWriter(ctx, writerBudget, mode)
 	if err != nil {
 		return result, err
 	}
@@ -206,12 +210,13 @@ func (s *Store) walGuardQuiet(ctx context.Context, db *sql.DB) bool {
 }
 
 // checkpointWALOnWriter runs the RESTART or TRUNCATE checkpoint statement on
-// the writer connection within budget and returns its busy column. Both
+// the writer connection within budget and returns its busy column and how
+// long it held the connection, from getting it until giving it back. Both
 // checkpoints wait in SQLite's busy handler for readers on older snapshots,
 // and a deadline does not interrupt that wait, so the connection's busy
 // timeout is zero for the statement and restored afterwards. A connection
 // whose busy timeout cannot be restored is dropped from the pool.
-func (s *Store) checkpointWALOnWriter(ctx context.Context, budget time.Duration, statement string) (int, error) {
+func (s *Store) checkpointWALOnWriter(ctx context.Context, budget time.Duration, statement string) (busy int, held time.Duration, err error) {
 	writerCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	yielded := func(err error) error {
@@ -222,12 +227,14 @@ func (s *Store) checkpointWALOnWriter(ctx context.Context, budget time.Duration,
 	}
 	conn, err := s.db.Conn(writerCtx)
 	if err != nil {
-		return 0, yielded(err)
+		return 0, 0, yielded(err)
 	}
 	defer conn.Close() //nolint:errcheck -- returns the connection to the pool.
+	acquired := time.Now()
+	defer func() { held = time.Since(acquired) }()
 	if _, err := conn.ExecContext(writerCtx, "PRAGMA busy_timeout = 0"); err != nil {
 		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-		return 0, yielded(err)
+		return 0, 0, yielded(err)
 	}
 	defer func() {
 		restoreCtx, cancelRestore := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
@@ -241,11 +248,11 @@ func (s *Store) checkpointWALOnWriter(ctx context.Context, budget time.Duration,
 	if walWriterPhaseHook != nil {
 		walWriterPhaseHook(writerCtx)
 	}
-	var busy, frames, copied int
+	var frames, copied int
 	if err := conn.QueryRowContext(writerCtx, statement).Scan(&busy, &frames, &copied); err != nil {
-		return 0, yielded(err)
+		return 0, 0, yielded(err)
 	}
-	return busy, nil
+	return busy, 0, nil
 }
 
 func (s *Store) walFileBytes() int64 {
