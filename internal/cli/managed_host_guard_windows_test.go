@@ -24,6 +24,26 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestSecureClientClassificationIgnoresProcessMachineRootEnvironment(t *testing.T) {
+	want, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	if err != nil {
+		t.Skipf("machine roots unavailable: %v", err)
+	}
+	poison := `C:\Users\Sample\Controlled`
+	t.Setenv("ProgramFiles", poison)
+	t.Setenv("ProgramData", poison)
+	got, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	if err != nil || got != want {
+		t.Fatalf("process environment selected Secure Client roots: got=%+v err=%v want=%+v", got, err, want)
+	}
+	if secureClientServiceMatches(got, poison+`\bin\defenseclaw-gateway.exe`) {
+		t.Fatal("user-controlled service path selected Secure Client handling")
+	}
+	if secureClientServiceMatches(got, got.InstallRoot+`\bin\defenseclaw-gateway.exe`) != true {
+		t.Fatal("registered Secure Client service path not recognized")
+	}
+}
+
 // TestWindowsManagedRecordTrustUsesRealACLs checks the guard's validators on
 // real NTFS security descriptors: an administrator-owned record in an
 // administrator-only tree is trusted, and the same record owned by the Users

@@ -41,6 +41,11 @@ export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  # A registered closed hook cannot treat missing local state as retirement.
+  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+    echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
+    exit 2
+  fi
   exit 0
 fi
 {{end}}
@@ -183,15 +188,17 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
-{{if .Sandbox}}# Every DefenseClaw inspect verdict names its action: an empty or
-# action-less reply from the sandbox ingress is not a verdict.
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
-[ -n "$ACTION" ] || fail_response "missing action in ingress response"
-{{else}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+{{else}}# Only a recognized string action is a usable gateway verdict.
+ACTION=$(echo "$RESULT" | _dc_jq -r 'if (.action | type) == "string" then .action else empty end' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+case "$ACTION" in
+  allow|alert|block|confirm) ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
 {{end}}if [ "$ACTION" = "block" ]; then
   REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "blocked by DefenseClaw"' 2>/dev/null)
   echo "DefenseClaw: $REASON" >&2

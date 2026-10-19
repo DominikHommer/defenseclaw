@@ -43,15 +43,30 @@ import (
 // Secure Client hosts are unaffected: only the standalone profile writes the
 // marker, and their record lives under the Secure Client roots, which this
 // profile's inspection never reads.
-// secureClientHost reports a Secure Client DefenseClaw install: its state
-// root under ProgramData exists. A seam for tests.
+// secureClientHost reports an installed Secure Client profile only when its
+// roots come from machine registration and its protected gateway service is
+// registered for that profile. A state directory alone is not proof.
 var secureClientHost = func() bool {
-	roots, err := winpath.EnterpriseRootsFor(winpath.EnterpriseProfileSecureClient, os.Getenv("ProgramFiles"), os.Getenv("ProgramData"))
+	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
 	if err != nil {
 		return false
 	}
-	_, err = os.Stat(roots.StateRoot)
-	return err == nil
+	deployment, err := winpath.InspectEnterpriseDeploymentAt(roots.Profile, roots.MetadataPath)
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled {
+		return false
+	}
+	if err := managed.ValidateTrustedRuntimeDir(roots.InstallRoot, "Secure Client installation"); err != nil {
+		return false
+	}
+	image, err := windowsServiceImagePath(managed.StandaloneWindowsGatewaySvc)
+	return err == nil && secureClientServiceMatches(roots, image)
+}
+
+func secureClientServiceMatches(roots winpath.EnterpriseRoots, image string) bool {
+	if roots.Profile != winpath.EnterpriseProfileSecureClient {
+		return false
+	}
+	return standaloneGatewayServiceImageMatches(image, roots.InstallRoot+`\bin\defenseclaw-gateway.exe`) == nil
 }
 
 var managedHostWindowsStandalone = func() (string, bool) {

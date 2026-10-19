@@ -28,7 +28,7 @@ import (
 )
 
 // TestSafeEvaluateHook_ObserveRecovery exercises safeEvaluateHook directly:
-// a recovered evaluation error keeps observe mode and its audit fields.
+// a recovered evaluation error denies a blockable event even in observe mode.
 func TestSafeEvaluateHook_ObserveRecovery(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	api := &APIServer{}
@@ -43,8 +43,8 @@ func TestSafeEvaluateHook_ObserveRecovery(t *testing.T) {
 	if !panicked {
 		t.Fatal("safeEvaluateHook panicked=false, want true")
 	}
-	if evalResp.Action != "allow" || evalResp.Mode != "observe" || !evalResp.WouldBlock {
-		t.Fatalf("safeEvaluateHook panic response = %+v, want observe allow + would_block", evalResp)
+	if evalResp.Action != "block" || evalResp.Mode != "action" || evalResp.WouldBlock {
+		t.Fatalf("safeEvaluateHook panic response = %+v, want fail-closed block", evalResp)
 	}
 
 	resp := safeHookPanicResponse("codex", "PreToolUse")
