@@ -42,6 +42,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
+	"github.com/defenseclaw/defenseclaw/internal/fleet/mqtt"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/policy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 	"github.com/google/uuid"
@@ -138,6 +139,7 @@ func NewAPI(ctx context.Context, mgr *manager.FleetManager, cache *verdict.Cache
 	for _, opt := range opts {
 		opt(api)
 	}
+	warnIgnoredPlaintextCredentials(api.settings)
 	api.registerRoutes()
 
 	go func() {
@@ -1529,11 +1531,36 @@ func isTrustedProxy(r *http.Request, settings FleetSettings) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// credentialDeliveryAllowed requires a private transport unless the gateway's
-// resolved Fleet settings explicitly permit plaintext credential delivery.
+// plaintextCredentialsAllowed reports whether allow_key_over_http may take
+// effect. It is honoured only in explicit unmanaged development mode: on
+// managed or production hosts the flag is ignored (fail closed) so device
+// keys and the admin token never travel in cleartext.
+func plaintextCredentialsAllowed(settings FleetSettings) bool {
+	return settings.AllowKeyOverHTTP && !mqtt.IsProductionMode()
+}
+
+// warnIgnoredPlaintextCredentials logs loudly when allow_key_over_http is set
+// where it cannot take effect.
+func warnIgnoredPlaintextCredentials(settings FleetSettings) {
+	if settings.AllowKeyOverHTTP && mqtt.IsProductionMode() {
+		log.Printf("[fleet-api] WARNING: fleet.allow_key_over_http is IGNORED on managed/production hosts; " +
+			"device keys and Fleet API tokens are delivered only over HTTPS or a trusted TLS proxy")
+	}
+}
+
+// credentialDeliveryAllowed requires a private transport unless explicit
+// development mode permits plaintext credential delivery.
 func credentialDeliveryAllowed(r *http.Request, settings FleetSettings) bool {
-	return r.TLS != nil || settings.AllowKeyOverHTTP ||
-		(isTrustedProxy(r, settings) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"))
+	if r.TLS != nil {
+		return true
+	}
+	if plaintextCredentialsAllowed(settings) {
+		return true
+	}
+	if settings.AllowKeyOverHTTP {
+		warnIgnoredPlaintextCredentials(settings)
+	}
+	return isTrustedProxy(r, settings) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

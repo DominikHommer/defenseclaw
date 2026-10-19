@@ -122,3 +122,48 @@ func TestAdminTokenRotationRequiresDurableStore(t *testing.T) {
 		t.Fatal("refused rotation changed the admin token")
 	}
 }
+
+// allow_key_over_http is ignored on managed or production hosts: device keys
+// and the admin token are never returned over plaintext HTTP there.
+func TestAllowKeyOverHTTPIgnoredOutsideDevMode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+	}{
+		{"managed", map[string]string{"DEFENSECLAW_DEPLOYMENT_MODE": "managed_enterprise", "DCLAW_DEV_MODE": "ON"}},
+		{"production flag", map[string]string{"DCLAW_PRODUCTION": "1", "DCLAW_DEV_MODE": "ON"}},
+		{"default", map[string]string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			t.Setenv("DCLAW_PRODUCTION", "")
+			t.Setenv("DCLAW_DEV_MODE", "")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			api, store, _, _ := hardeningAPI(t, FleetSettings{APIToken: "admin", AllowKeyOverHTTP: true}, "")
+			c, key := registerDeviceVia(t, api, "admin", 1, 1, 12, "", false)
+			if c != http.StatusForbidden || key != "" {
+				t.Fatalf("plaintext device key delivery: %d", c)
+			}
+			if k, _ := store.LoadDeviceKey(manager.ComposeID(1, 1, 12)); k != nil {
+				t.Fatal("refused registration stored a key")
+			}
+			if rec := securityTestRequest(api, http.MethodPost, "/token/rotate", "admin", "{}", false); rec.Code != http.StatusForbidden {
+				t.Fatalf("plaintext token delivery: %d", rec.Code)
+			}
+			if c, _ := registerDeviceVia(t, api, "admin", 1, 1, 12, "", true); c != http.StatusCreated {
+				t.Fatalf("TLS registration: %d", c)
+			}
+		})
+	}
+	t.Run("explicit dev mode", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+		t.Setenv("DCLAW_PRODUCTION", "")
+		t.Setenv("DCLAW_DEV_MODE", "ON")
+		api, _, _, _ := hardeningAPI(t, FleetSettings{APIToken: "admin", AllowKeyOverHTTP: true}, "")
+		if c, key := registerDeviceVia(t, api, "admin", 1, 1, 13, "", false); c != http.StatusCreated || key == "" {
+			t.Fatalf("dev-mode plaintext delivery: %d", c)
+		}
+	})
+}

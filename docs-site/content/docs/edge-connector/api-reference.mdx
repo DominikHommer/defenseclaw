@@ -161,7 +161,7 @@ Registers a new device with the fleet manager. Pre-register each production devi
 ```
 
 <Callout type="warn">
-The `device_key` is returned on initial registration, re-registration, and explicit key rotation. Each response containing a new key invalidates the previous key; the key cannot be retrieved later. Provision it via `DCLAW_DEVICE_KEY` or `/etc/defenseclaw/device.key`. Registration returns `503` if the credential store is unavailable. Production key delivery requires HTTPS or a configured trusted TLS proxy.
+The `device_key` is returned on initial registration, re-registration, and explicit key rotation. Each response containing a new key invalidates the previous key; the key cannot be retrieved later. Provision it via `DCLAW_DEVICE_KEY` or `/etc/defenseclaw/device.key`. Registration returns `503` if the credential store is unavailable. Production key delivery requires HTTPS or a configured trusted TLS proxy. `fleet.allow_key_over_http` takes effect only in explicit unmanaged development mode (`DCLAW_DEV_MODE=ON`); on managed or production hosts it is ignored with a startup warning, and plaintext requests for a key or token return `403`.
 </Callout>
 
 Outside explicit unmanaged development mode (`DCLAW_DEV_MODE=ON`), the gateway authenticates MQTT traffic only with per-device keys issued by this endpoint. A fleet-wide `DCLAW_DEVICE_KEY` set on the gateway is ignored, and heartbeats, registrations and verdict requests from a device without a per-device key are rejected; every verdict request must carry a valid HMAC together with the device's boot nonce and request nonce (firmware that omits them is refused).

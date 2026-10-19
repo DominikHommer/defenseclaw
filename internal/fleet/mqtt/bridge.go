@@ -169,6 +169,12 @@ func nonzeroDeviceKey(key []byte) bool {
 	return false
 }
 
+// IsProductionMode reports whether Fleet runs with production security
+// defaults. It defaults to fail-closed: only explicit development mode
+// (DCLAW_DEV_MODE=ON) on an unmanaged host without DCLAW_PRODUCTION set
+// relaxes it. Other Fleet packages share this one predicate.
+func IsProductionMode() bool { return isProductionMode() }
+
 // isProductionMode defaults to fail-closed. Explicit development mode is
 // honored only on unmanaged hosts and never overrides DCLAW_PRODUCTION=true.
 func isProductionMode() bool {
