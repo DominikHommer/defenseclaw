@@ -183,9 +183,47 @@ def relevant(row, spec):
     edits = "\n".join(line[1:] for line in (row.get("patch") or "").splitlines() if line.startswith(("+", "-")))
     return any(re.search(spec["paths"], path, re.I) for path in paths) or bool(
         re.search(
-            r"hook|settings|managed|config\.toml|requirements\.toml|tool_use_id|PreToolUse|SessionStart", edits, re.I
+            r"hook|settings\.json|config\.toml|requirements\.toml|tool_use_id|"
+            r"(?-i:\b(?:Pre|Post)[A-Z]\w*\b)|Session(?:Start|End)|UserPrompt(?:Submit|Expansion)|Permission(?:Request|Denied)",
+            edits,
+            re.I,
         )
     )
+
+
+def dependency_path(path, spec):
+    """Public artifact scope, not an impact verdict. Other candidates stay local."""
+    if path in spec.get("input_schemas", []) + spec.get("output_schemas", []) or (
+        path == "CHANGELOG.md" and spec["name"] == "claudecode"
+    ):
+        return True
+    if re.search(
+        r"(?:^|/)(?:tests?|fixtures?|snapshots?|docs?)(?:/|[._-])|(?:^|[._/-])tests?\.[^/]+$|\.(?:md|snap)$",
+        path,
+        re.I,
+    ):
+        return False
+    if re.search(spec["notify_paths"], path):
+        return True
+    # New source/config locations still get review; only known non-dependencies are quiet.
+    return bool(re.search(r"\.(?:rs|go|py|[cm]?[jt]sx?|json|toml|ya?ml|sh|ps1)$", path)) and not re.search(
+        spec["quiet_paths"], path
+    )
+
+
+def priority(row, spec):
+    paths = [row["filename"], row.get("previous_filename", "")]
+    if any(
+        path in spec.get("input_schemas", []) + spec.get("output_schemas", [])
+        or (path == "CHANGELOG.md" and spec["name"] == "claudecode")
+        for path in paths
+    ):
+        rank = 0
+    elif any(re.search(spec["priority_paths"], path) for path in paths):
+        rank = 1
+    else:
+        rank = 2 if any(dependency_path(path, spec) for path in paths) else 3
+    return rank, row["filename"]
 
 
 def local_context(spec, root):
@@ -201,7 +239,11 @@ def local_context(spec, root):
         }
         # Include actual decoder/response anchors, not just the file prefix.
         selected = sorted(
-            indices, key=lambda i: (not bool(re.search(r"ToolUseID|permissionDecision|behavior|deny", lines[i])), i)
+            indices,
+            key=lambda i: (
+                not bool(re.search(r'ToolUseID|permissionDecision|behavior|deny|features\[|"hooks"\s*:', lines[i])),
+                i,
+            ),
         )[:70]
         context[path] = "\n".join(f"{i + 1}: {lines[i]}" for i in sorted(selected))[:8000]
     return contract, context
@@ -330,7 +372,7 @@ def inspect_pr(pr, spec, requirements, root, fetch=request, ai=False):
     repo, revision = spec["repository"], pr["merge_commit_sha"]
     position(pr)
     inventory = files(repo, pr["number"], fetch)
-    selected = [row for row in inventory if relevant(row, spec)]
+    selected = sorted((row for row in inventory if relevant(row, spec)), key=lambda row: priority(row, spec))
     parent = api(repo, f"commits/{revision}", fetch)["parents"][0]["sha"] if selected else ""
     contract, context = local_context(spec, root) if selected else ({}, {})
     changes = []
@@ -349,9 +391,11 @@ def inspect_pr(pr, spec, requirements, root, fetch=request, ai=False):
         "number": pr["number"],
         "revision": revision,
         "files": [row["filename"] for row in inventory],
+        "analyzed_files": [c["path"] for c in changes],
+        "omitted_files": [row["filename"] for row in selected[10:]],
         "conflicts": proven,
         "decision": "static_conflict" if proven else "review_required" if selected else "informational",
-        "coverage": "partial: at most ten relevant files; unsupported behavior requires review",
+        "coverage": f"partial: {len(changes)}/{len(selected)} relevant files; unsupported behavior requires review",
     }
     if ai and selected and not proven:
         packet = {
@@ -377,7 +421,12 @@ def inspect_pr(pr, spec, requirements, root, fetch=request, ai=False):
                 result["decision"] = "suspected_conflict"  # AI suspicion, never a proven static break.
         else:
             result["coverage"] += "; AI skipped because context exceeds bound"
-    return result, notice(spec["name"], pr, [row["filename"] for row in selected])
+    notification_paths = [
+        row["filename"]
+        for row in selected
+        if any(dependency_path(path, spec) for path in (row["filename"], row.get("previous_filename", "")))
+    ]
+    return result, notice(spec["name"], pr, notification_paths)
 
 
 def notice(connector, pr, paths):
