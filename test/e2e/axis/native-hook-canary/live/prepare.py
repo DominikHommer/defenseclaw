@@ -235,7 +235,10 @@ def flat_manifest(archive, pin, role):
     )
     for name, entry in files.items():
         require(isinstance(entry, dict) and set(entry) == {"sha256", "bytes"}, "fixed provenance member schema differs")
-        data = archive.read(name)
+        if role == "canary" and name == "fixed-contained-hook-driver.test":
+            data = archive.read(name, IMAGES["testdriver"][4])
+        else:
+            data = archive.read(name)
         require(entry == {"sha256": sha(data), "bytes": len(data)}, "fixed provenance member bytes differ")
     if role == "canary":
         result = json_object(archive.read("BUILD-RESULT.json", 1 << 20))
@@ -302,7 +305,10 @@ def prepare():
         run, artifact = check_actions(pin)
         raw = api(f"actions/artifacts/{pin['artifact']}/zip", 128 << 20)
         require(len(raw) == artifact["size_in_bytes"] and sha(raw) == pin["archive"], "fixed ZIP bytes differ")
-        archive = ZipEvidence(raw)
+        if role == "canary":
+            archive = ZipEvidence(raw, member_bounds={"fixed-contained-hook-driver.test": IMAGES["testdriver"][4]})
+        else:
+            archive = ZipEvidence(raw)
         if role == "peer":
             peer_manifest(archive, pin["provenance"])
         else:
@@ -311,7 +317,13 @@ def prepare():
         metadata[role] = {"run": run, "artifact": artifact}
     images = {}
     for label, (role, member, _, digest, size, _) in IMAGES.items():
-        raw = archives[role].read(member, 256 << 20)
+        if label == "testdriver":
+            require(
+                role == "canary" and member == "fixed-contained-hook-driver.test", "fixed large driver mapping differs"
+            )
+            raw = archives[role].read(member, size)
+        else:
+            raw = archives[role].read(member)
         require(len(raw) == size and sha(raw) == digest, "fixed image bytes differ")
         # The exact reviewed Rust peer is glibc-linked ET_DYN. Its archive
         # provenance and image digest are fixed; all other images are static.

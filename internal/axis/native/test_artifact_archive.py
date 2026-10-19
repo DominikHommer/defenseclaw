@@ -106,6 +106,116 @@ class ArchiveTests(unittest.TestCase):
                 archive.ZipEvidence(raw)
             parse.assert_not_called()
 
+    def test_zip_exact_member_exception_is_opt_in_and_reads_remain_explicit(self):
+        # Scale only constants/default arguments to exercise real compressed
+        # archives without allocating a 129 MiB fixture. Production defaults
+        # remain 128 MiB ZIP/member/read, 256 MiB exception and 512 MiB total.
+        self.assertEqual(archive.FILE_LIMIT, 128 << 20)
+        self.assertEqual(archive.MEMBER_EXCEPTION_LIMIT, 256 << 20)
+        self.assertEqual(archive.TOTAL_LIMIT, 512 << 20)
+        self.assertEqual(archive.ZipEvidence.read.__defaults__, (128 << 20,))
+        raw = zipped([("driver", b"a" * 1536), ("ordinary", b"public")])
+        with (
+            patch.multiple(archive, FILE_LIMIT=1024, MEMBER_EXCEPTION_LIMIT=2048, TOTAL_LIMIT=4096),
+            patch.object(archive.ZipEvidence.read, "__defaults__", (1024,)),
+            patch.object(zipfile.ZipFile, "extract") as extract,
+            patch.object(zipfile.ZipFile, "extractall") as extractall,
+        ):
+            with self.assertRaises(ValueError):
+                archive.ZipEvidence(raw)
+            evidence = archive.ZipEvidence(raw, member_bounds={"driver": 1536})
+            self.assertEqual(set(evidence.files), {"driver", "ordinary"})
+            with self.assertRaises(ValueError):
+                evidence.read("driver")
+            with self.assertRaises(ValueError):
+                evidence.read("driver", 1535)
+            self.assertEqual(evidence.read("driver", 1536), b"a" * 1536)
+            self.assertEqual(evidence.read("ordinary"), b"public")
+            extract.assert_not_called()
+            extractall.assert_not_called()
+
+    def test_zip_exact_member_exception_does_not_admit_other_oversize_or_wrong_size(self):
+        with patch.multiple(archive, FILE_LIMIT=1024, MEMBER_EXCEPTION_LIMIT=2048, TOTAL_LIMIT=4096):
+            unrelated = zipped([("driver", b"a" * 1536), ("other", b"b" * 1025)])
+            with self.assertRaises(ValueError):
+                archive.ZipEvidence(unrelated, member_bounds={"driver": 1536})
+            raw = zipped([("driver", b"a" * 1536)])
+            for bound in (1535, 1537):
+                with self.subTest(bound=bound), self.assertRaises(ValueError):
+                    archive.ZipEvidence(raw, member_bounds={"driver": bound})
+
+    def test_zip_exact_member_exception_refuses_invalid_unknown_and_redundant_keys(self):
+        raw = zipped([("driver", b"a" * 1536), ("ordinary", b"public")])
+        with patch.multiple(archive, FILE_LIMIT=1024, MEMBER_EXCEPTION_LIMIT=2048, TOTAL_LIMIT=4096):
+            for bounds in (
+                {"driver": True},
+                {"driver": 1536.0},
+                {"driver": "1536"},
+                {"driver": 0},
+                {"driver": -1},
+                {"driver": 1024},
+                {"driver": 2049},
+                {"driver": 1536, "Driver": 1536},
+                {"Driver": 1536},
+                {"missing": 1536},
+                {"ordinary": 1536},
+                {"driver": 1536, "missing": 1536},
+                {"driver": 1536, "ordinary": 1536},
+                {False: 1536},
+                {"../driver": 1536},
+                {"/driver": 1536},
+                {"a:b": 1536},
+                {"a\\driver": 1536},
+                {"driver/": 1536},
+                {"": 1536},
+                {"./driver": 1536},
+                {"driver\x00": 1536},
+                [("driver", 1536)],
+                "driver",
+                1536,
+            ):
+                with self.subTest(bounds=bounds), self.assertRaises(ValueError):
+                    archive.ZipEvidence(raw, member_bounds=bounds)
+            with self.assertRaises(ValueError):
+                archive.ZipEvidence(zipped([("ordinary", b"public")]), member_bounds={"driver": 1536})
+            # The empty mapping is exactly the ordinary API, not an exception.
+            self.assertEqual(
+                archive.ZipEvidence(zipped([("ordinary", b"public")]), member_bounds={}).read("ordinary"), b"public"
+            )
+
+    def test_zip_exact_member_exception_preserves_zip_aggregate_and_member_count_limits(self):
+        raw = zipped([("driver", b"a" * 1536), ("ordinary", b"public")])
+        with patch.multiple(archive, FILE_LIMIT=1024, MEMBER_EXCEPTION_LIMIT=2048, TOTAL_LIMIT=1541):
+            with self.assertRaises(ValueError):
+                archive.ZipEvidence(raw, member_bounds={"driver": 1536})
+        with patch.multiple(archive, FILE_LIMIT=1024, MEMBER_EXCEPTION_LIMIT=2048, TOTAL_LIMIT=4096, MEMBER_LIMIT=1):
+            with self.assertRaises(ValueError):
+                archive.ZipEvidence(raw, member_bounds={"driver": 1536})
+        stored = io.BytesIO()
+        with zipfile.ZipFile(stored, "w", zipfile.ZIP_STORED) as output:
+            output.writestr("driver", b"a" * 1536)
+        with (
+            patch.multiple(archive, FILE_LIMIT=1024, MEMBER_EXCEPTION_LIMIT=2048, TOTAL_LIMIT=4096),
+            patch.object(archive.zipfile, "ZipFile") as parse,
+            self.assertRaises(ValueError),
+        ):
+            archive.ZipEvidence(stored.getvalue(), member_bounds={"driver": 1536})
+        parse.assert_not_called()  # per-member opt-in never enlarges ZIP cap
+
+    def test_zip_exact_member_exception_does_not_bypass_name_or_type_checks(self):
+        link = zipfile.ZipInfo("driver")
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        with patch.multiple(archive, FILE_LIMIT=1024, MEMBER_EXCEPTION_LIMIT=2048, TOTAL_LIMIT=4096):
+            for raw in (
+                zipped([("driver", b"a" * 1536), ("Driver", b"public")]),
+                zipped([(link, b"a" * 1536)]),
+                zipped([("../driver", b"a" * 1536)]),
+            ):
+                with self.subTest(size=len(raw)), self.assertRaises(ValueError):
+                    archive.ZipEvidence(raw, member_bounds={"driver": 1536})
+        with self.assertRaises(TypeError):
+            archive.ZipEvidence(zipped([("ordinary", b"public")]), {"driver": 1536})
+
     def test_bounded_ordinary_read_and_reparse_refusal(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fixed"

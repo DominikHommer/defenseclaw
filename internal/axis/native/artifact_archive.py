@@ -17,6 +17,7 @@ import zipfile
 from pathlib import Path
 
 FILE_LIMIT = 128 << 20
+MEMBER_EXCEPTION_LIMIT = 256 << 20
 TOTAL_LIMIT = 512 << 20
 MEMBER_LIMIT = 16384
 
@@ -117,9 +118,28 @@ def zip_inventory(raw: bytes):
 
 
 class ZipEvidence:
-    def __init__(self, raw: bytes):
+    def __init__(self, raw: bytes, *, member_bounds: dict[str, int] | None = None):
         if not raw or len(raw) > FILE_LIMIT:
             raise ValueError("ZIP exceeds its byte bound")
+        # A trusted caller may name an exact source-pinned oversized member.
+        # This grants no digest authority and does not widen ZIP/total/read
+        # limits. No fuzzy names, redundant allowance or unused key is accepted.
+        if member_bounds is None:
+            bounds = {}
+        elif type(member_bounds) is not dict or len(member_bounds) > MEMBER_LIMIT:
+            raise ValueError("ZIP member bounds are unsupported")
+        else:
+            bounds = member_bounds.copy()
+        seen_bounds = set()
+        for name, bound in bounds.items():
+            if type(name) is not str:
+                raise ValueError("ZIP member bound name is unsupported")
+            path_name(name)
+            if name.casefold() in seen_bounds:
+                raise ValueError("ZIP member bound names are ambiguous")
+            seen_bounds.add(name.casefold())
+            if type(bound) is not int or not FILE_LIMIT < bound <= MEMBER_EXCEPTION_LIMIT:
+                raise ValueError("ZIP member bound exceeds its exact exception range")
         zip_inventory(raw)
         self.archive = zipfile.ZipFile(io.BytesIO(raw))
         self.files = {}
@@ -141,7 +161,7 @@ class ZipEvidence:
                 or member.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
                 or stat.S_IFMT(mode) not in {0, stat.S_IFDIR if member.is_dir() else stat.S_IFREG}
                 or mode & 0o6000
-                or member.file_size > FILE_LIMIT
+                or member.file_size > bounds.get(name, FILE_LIMIT)
                 or member.file_size < 0
                 or (member.is_dir() and member.file_size)
             ):
@@ -154,6 +174,10 @@ class ZipEvidence:
         for name in self.files:
             if any("/".join(name.split("/")[:index]) in self.files for index in range(1, name.count("/") + 1)):
                 raise ValueError("ZIP member is a file ancestor")
+        for name, bound in bounds.items():
+            member = self.files.get(name)
+            if member is None or member.file_size <= FILE_LIMIT or member.file_size != bound:
+                raise ValueError("ZIP member bound is missing, redundant or not exact")
 
     def read(self, name: str, bound: int = FILE_LIMIT) -> bytes:
         member = self.files.get(path_name(name))
