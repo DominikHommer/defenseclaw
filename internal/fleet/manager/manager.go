@@ -77,7 +77,21 @@ type Device struct {
 	// from the latest accepted signed heartbeat: operators confirm a kill
 	// switch reached a device by comparing it with the fleet's latest seq.
 	LastEmergencySeq uint32 `json:"last_emergency_seq"`
+	// EmergencyLockdown mirrors heartbeat flag 0x40: the device reports that
+	// an emergency lockdown (block-all) is active. It is distinct from
+	// TAMPER_DETECT (0x04); either one shows the device as "lockdown".
+	EmergencyLockdown bool `json:"emergency_lockdown"`
 }
+
+// Heartbeat flag bits (byte 30 of the heartbeat wire format).
+const (
+	HeartbeatFlagPolicyStale       uint8 = 0x02
+	HeartbeatFlagTamperDetect      uint8 = 0x04
+	HeartbeatFlagCanaryRollback    uint8 = 0x08
+	HeartbeatFlagOfflineMode       uint8 = 0x20
+	HeartbeatFlagEmergencyLockdown uint8 = 0x40
+	HeartbeatFlagSEDegraded        uint8 = 0x80
+)
 
 // Heartbeat represents a parsed 40-byte device heartbeat.
 type Heartbeat struct {
@@ -593,6 +607,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 
 	dev.LastHeartbeat = time.Now()
 	dev.Flags = hb.Flags
+	dev.EmergencyLockdown = hb.Flags&HeartbeatFlagEmergencyLockdown != 0
 
 	// PolicyVersion, FWVersion, and Capabilities can only advance
 	// (anti-rollback). A replayed heartbeat with an older policy version
@@ -637,22 +652,29 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 
 	oldStatus := dev.Status
 
-	// Update status based on flags.
-	// Flag layout matches the C encoder in cbor_codec.c:
-	//   0x02 = POLICY_STALE  (clock not trusted — treated as degraded)
-	//   0x04 = TAMPER_DETECT  (reserved — C encoder does not set this yet)
-	//   0x08 = CANARY_ROLLBACK (handled above)
+	// Update status based on flags. The C encoder (cbor_codec.c) sets
+	// OFFLINE_MODE, POLICY_STALE and CANARY_ROLLBACK, and EMERGENCY_LOCKDOWN
+	// while block-all is active. TAMPER_DETECT and SE_DEGRADED are reserved:
+	// the device does not verify its audit chain on-device or report a
+	// secure-element fault yet; chain verification is offline.
+	//   0x02 = POLICY_STALE       (clock not trusted — treated as degraded)
+	//   0x04 = TAMPER_DETECT      (reserved)
+	//   0x08 = CANARY_ROLLBACK    (alert below)
 	//   0x20 = OFFLINE_MODE
-	//   0x80 = SE_DEGRADED    (reserved — C encoder does not set this yet)
-	if hb.Flags&0x04 != 0 { // TAMPER_DETECT — C encoder sets when audit chain breaks
+	//   0x40 = EMERGENCY_LOCKDOWN (block-all active on the device)
+	//   0x80 = SE_DEGRADED        (reserved)
+	switch {
+	case hb.Flags&HeartbeatFlagTamperDetect != 0:
 		dev.Status = StatusLockdown
-	} else if hb.Flags&0x80 != 0 { // SE_DEGRADED — C encoder sets when secure element unavailable
+	case hb.Flags&HeartbeatFlagEmergencyLockdown != 0:
+		dev.Status = StatusLockdown
+	case hb.Flags&HeartbeatFlagSEDegraded != 0:
 		dev.Status = StatusDegraded
-	} else if hb.Flags&0x02 != 0 { // POLICY_STALE (clock not trusted)
+	case hb.Flags&HeartbeatFlagPolicyStale != 0:
 		dev.Status = StatusDegraded
-	} else if hb.Flags&0x20 != 0 { // OFFLINE_MODE
+	case hb.Flags&HeartbeatFlagOfflineMode != 0:
 		dev.Status = StatusDegraded
-	} else {
+	default:
 		dev.Status = StatusOnline
 	}
 
@@ -691,17 +713,17 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	if onHB != nil {
 		onHB()
 	}
-	if hb.Flags&0x08 != 0 && previous.Flags&0x08 == 0 {
+	if hb.Flags&HeartbeatFlagCanaryRollback != 0 && previous.Flags&HeartbeatFlagCanaryRollback == 0 {
 		fm.fireAlert(Alert{
 			Type: AlertCanaryRollback, DeviceID: fullID,
 			Message:  fmt.Sprintf("Device performed OTA canary rollback (policy_v=%d)", hb.PolicyVersion),
 			Severity: "high", Timestamp: time.Now(),
 		})
 	}
-	if hb.Flags&0x04 != 0 {
+	if hb.Flags&HeartbeatFlagTamperDetect != 0 {
 		fm.fireAlert(Alert{Type: AlertTamperDetect, DeviceID: fullID,
 			Message: "Audit chain integrity failure detected", Severity: "critical", Timestamp: time.Now()})
-	} else if hb.Flags&0x80 != 0 {
+	} else if hb.Flags&HeartbeatFlagSEDegraded != 0 {
 		fm.fireAlert(Alert{Type: AlertSEDegraded, DeviceID: fullID,
 			Message: "Secure element in degraded mode", Severity: "critical", Timestamp: time.Now()})
 	}

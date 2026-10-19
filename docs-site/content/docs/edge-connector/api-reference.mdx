@@ -72,6 +72,7 @@ Returns all registered devices with an aggregate fleet summary.
       "site_id": "factory-east",
       "registered_at": "2026-09-01T10:00:00Z",
       "flags": 0,
+      "emergency_lockdown": false,
       "denied_total": 42,
       "allowed_total": 18305,
       "flash_writes": 1200
@@ -138,6 +139,7 @@ Registers a new device with the fleet manager. Pre-register each production devi
     "site_id": "",
     "registered_at": "2026-10-05T14:00:00Z",
     "flags": 0,
+    "emergency_lockdown": false,
     "denied_total": 0,
     "allowed_total": 0,
     "flash_writes": 0
@@ -220,6 +222,7 @@ Returns the full device record for a specific device. The `{id}` is the 64-bit c
   "site_id": "factory-east",
   "registered_at": "2026-09-01T10:00:00Z",
   "flags": 0,
+  "emergency_lockdown": false,
   "denied_total": 42,
   "allowed_total": 18305,
   "flash_writes": 1200
@@ -236,6 +239,8 @@ Returns the full device record for a specific device. The `{id}` is the 64-bit c
 | `0x20` | `OFFLINE_MODE` | The device is not connected to the broker |
 | `0x40` | `EMERGENCY_LOCKDOWN` | A `BLOCK_ALL` or `ENTER_LOCKDOWN` command is in effect and every tool call is denied |
 | `0x80` | `SE_DEGRADED` | Reserved; never set |
+
+`emergency_lockdown` is `true` while the device reports an active emergency lockdown (block-all, heartbeat flag `0x40`) and `status` is then `lockdown`; it returns to `false` in the first heartbeat after the device releases the lockdown. `status` is also `lockdown` for the reserved tamper flag `0x04`, which the device does not currently set (audit-chain verification is offline); only `0x04` raises a `tamper_detect` alert. Compare `last_emergency_seq` with the fleet's latest emergency sequence to confirm a specific command was applied.
 
 **Status codes**
 

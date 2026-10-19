@@ -113,7 +113,8 @@ func createTable(db *sql.DB) error {
 			prev_warned     INTEGER NOT NULL DEFAULT 0,
 			prev_escalated  INTEGER NOT NULL DEFAULT 0,
 			boot_epoch      INTEGER NOT NULL DEFAULT 0,
-			last_emergency_seq INTEGER NOT NULL DEFAULT 0
+			last_emergency_seq INTEGER NOT NULL DEFAULT 0,
+			emergency_lockdown INTEGER NOT NULL DEFAULT 0
 		)
 	`)
 	if err != nil {
@@ -131,6 +132,7 @@ func createTable(db *sql.DB) error {
 		"ALTER TABLE devices ADD COLUMN prev_escalated INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE devices ADD COLUMN boot_epoch INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE devices ADD COLUMN last_emergency_seq INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE devices ADD COLUMN emergency_lockdown INTEGER NOT NULL DEFAULT 0",
 	} {
 		if _, err := db.Exec(col); err != nil {
 			// Ignore "duplicate column name" — column already exists.
@@ -260,8 +262,9 @@ func saveDeviceWith(exec sqliteExecer, dev *manager.Device) error {
 			last_audit_hmac, site_id, registered_at, flags,
 			denied_total, allowed_total, warned_total, escalated_total,
 			flash_writes, last_uptime, boot_counter, prev_denied, prev_allowed,
-			prev_warned, prev_escalated, boot_epoch, last_emergency_seq
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			prev_warned, prev_escalated, boot_epoch, last_emergency_seq,
+			emergency_lockdown
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(device_id) DO UPDATE SET
 			hw_profile      = excluded.hw_profile,
 			fw_version      = excluded.fw_version,
@@ -284,7 +287,8 @@ func saveDeviceWith(exec sqliteExecer, dev *manager.Device) error {
 			prev_warned     = excluded.prev_warned,
 			prev_escalated  = excluded.prev_escalated,
 			boot_epoch      = excluded.boot_epoch,
-			last_emergency_seq = excluded.last_emergency_seq
+			last_emergency_seq = excluded.last_emergency_seq,
+			emergency_lockdown = excluded.emergency_lockdown
 	`,
 		dev.DeviceID, dev.TenantID, dev.FleetID,
 		dev.HWProfile, dev.FWVersion,
@@ -295,6 +299,7 @@ func saveDeviceWith(exec sqliteExecer, dev *manager.Device) error {
 		dev.WarnedTotal, dev.EscalatedTotal,
 		dev.FlashWrites, dev.LastUptime, dev.BootCounter, dev.PrevDenied, dev.PrevAllowed,
 		dev.PrevWarned, dev.PrevEscalated, dev.BootEpoch, dev.LastEmergencySeq,
+		dev.EmergencyLockdown,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert device %d: %w", dev.DeviceID, err)
@@ -383,7 +388,8 @@ func (s *SQLiteStore) LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*ma
 		       last_audit_hmac, site_id, registered_at, flags,
 		       denied_total, allowed_total, warned_total, escalated_total,
 		       flash_writes, last_uptime, boot_counter, prev_denied, prev_allowed,
-		       prev_warned, prev_escalated, boot_epoch, last_emergency_seq
+		       prev_warned, prev_escalated, boot_epoch, last_emergency_seq,
+		       emergency_lockdown
 		FROM devices WHERE device_id = ?
 	`, fullID)
 
@@ -397,7 +403,8 @@ func (s *SQLiteStore) ListDevices() ([]*manager.Device, error) {
 		       last_audit_hmac, site_id, registered_at, flags,
 		       denied_total, allowed_total, warned_total, escalated_total,
 		       flash_writes, last_uptime, boot_counter, prev_denied, prev_allowed,
-		       prev_warned, prev_escalated, boot_epoch, last_emergency_seq
+		       prev_warned, prev_escalated, boot_epoch, last_emergency_seq,
+		       emergency_lockdown
 		FROM devices ORDER BY device_id
 	`)
 	if err != nil {
@@ -596,6 +603,7 @@ func scanDeviceFromScanner(s scanner) (*manager.Device, error) {
 		&dev.PrevDenied, &dev.PrevAllowed,
 		&dev.PrevWarned, &dev.PrevEscalated,
 		&dev.BootEpoch, &dev.LastEmergencySeq,
+		&dev.EmergencyLockdown,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {

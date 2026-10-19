@@ -18,10 +18,13 @@ package fleet
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -302,5 +305,56 @@ func TestNewDeviceKeyStartsNewHeartbeatLineage(t *testing.T) {
 	}
 	if !hb(mgr2, 1, 5) {
 		t.Fatal("device dropped as a replay after key rotation")
+	}
+}
+
+// emergency_lockdown persists in SQLite, including on a database created
+// before the column existed.
+func TestEmergencyLockdownPersistsAndMigrates(t *testing.T) {
+	path := filepath.Join(securitySQLiteDir(t), "fleet.db")
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := manager.New(nil)
+	mgr.SetStore(store)
+	if _, err := mgr.RegisterDevice(1, 1, 42, "sbc", "1", 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec("ALTER TABLE devices DROP COLUMN emergency_lockdown"); err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	legacy.Close()
+
+	upgraded, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("migrate database without emergency_lockdown: %v", err)
+	}
+	defer upgraded.Close()
+	mgr = manager.New(nil)
+	mgr.SetStore(upgraded)
+	if _, err := mgr.LoadFromStore(); err != nil {
+		t.Fatal(err)
+	}
+	if !mgr.ProcessHeartbeat(1, 1, 42, &manager.Heartbeat{DeviceID: 42, BootCounter: 1, UptimeSec: 5,
+		Flags: manager.HeartbeatFlagEmergencyLockdown}) {
+		t.Fatal("heartbeat rejected")
+	}
+	loaded, err := upgraded.LoadDevice(1, 1, 42)
+	if err != nil || loaded == nil || !loaded.EmergencyLockdown || loaded.Status != manager.StatusLockdown {
+		t.Fatalf("persisted device=%+v err=%v", loaded, err)
+	}
+	rec := httptest.NewRecorder()
+	json.NewEncoder(rec).Encode(loaded)
+	if !strings.Contains(rec.Body.String(), `"emergency_lockdown":true`) {
+		t.Fatalf("device JSON lacks emergency_lockdown: %s", rec.Body.String())
 	}
 }
