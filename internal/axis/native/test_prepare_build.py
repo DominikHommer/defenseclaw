@@ -35,10 +35,18 @@ class BuildAdmissionTests(unittest.TestCase):
             return b"#[test]\nfn fixed() {}\n"
 
         with patch.object(build, "SOURCE", names), patch.object(build, "ordinary", side_effect=read) as source:
-            self.assertEqual(
-                build.native_test_inventory(), {"linux::tests::fixed", "windows_future::tests::fixed"}
-            )
+            self.assertEqual(build.native_test_inventory(), {"linux::tests::fixed", "windows_future::tests::fixed"})
             self.assertEqual(source.call_count, 2)
+
+    def test_retained_launch_test_module_is_shared_and_token_queries_stay_windows_only(self):
+        names = {"src/owner_launch_tests.rs", "src/windows_token_probe.rs", "src/windows_token_probe_launch.rs"}
+
+        def read(path):
+            self.assertEqual(path.name, "owner_launch_tests.rs")
+            return b"#[test]\nfn fixed() {}\n"
+
+        with patch.object(build, "SOURCE", names), patch.object(build, "ordinary", side_effect=read):
+            self.assertEqual(build.native_test_inventory(), {"owner::launch_tests::fixed"})
 
     def test_same_reviewed_registry_and_exact_path_packages_admit(self):
         result = build.admit_lock(lock(), lock())

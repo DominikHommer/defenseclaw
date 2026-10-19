@@ -28,3 +28,8 @@ pub mod windows;
 pub mod windows_bootstrap;
 #[cfg(target_os = "windows")]
 pub mod windows_io;
+
+#[cfg(target_os = "windows")]
+pub mod windows_token_probe;
+#[cfg(target_os = "windows")]
+pub mod windows_token_probe_launch;

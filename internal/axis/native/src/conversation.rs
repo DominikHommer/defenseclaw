@@ -229,6 +229,7 @@ mod tests {
             size: None,
             result: None,
             failure: None,
+            native_token_observation: None,
         }
     }
 

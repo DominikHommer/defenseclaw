@@ -42,9 +42,9 @@ func (f *fakeProtocol) Receive(context.Context) (bridgeproto.Frame, error) {
 func fakeConversation() (*fakeProtocol, bridgeproto.Binding, bridgeproto.Preparation) {
 	h := "sha256:" + strings.Repeat("a", 64)
 	b := bridgeproto.Binding{SessionID: "fixed-test", SessionDigest: h, PolicyDigest: h, RuntimeDigest: h, HarnessDigest: h, PreparationHash: h}
-	plan := fixedPlan(`C:\fixed\windows-native-peer-canary-08\fixture\work`, `C:\Windows`)
+	plan := fixedPlan(`C:\fixed\windows-native-peer-canary-09\fixture\work`, `C:\Windows`)
 	f := &fakeProtocol{frames: []bridgeproto.Frame{
-		{Kind: bridgeproto.Prepared, Request: 1}, {Kind: bridgeproto.Started, Request: 2},
+		{Kind: bridgeproto.Prepared, Request: 1}, {Kind: bridgeproto.Started, Request: 2, NativeTokenObservation: fixedTokenObservation()},
 		{Kind: bridgeproto.Output, Request: 2, Data: &bridgeproto.Data{Stream: "stdout", Bytes: []byte(fixedStdout)}},
 		{Kind: bridgeproto.Output, Request: 2, Data: &bridgeproto.Data{Stream: "stderr", Bytes: []byte(fixedStderr)}},
 		{Kind: bridgeproto.Exited, Request: 2, Result: &bridgeproto.Result{ExitCode: 23}},
@@ -85,7 +85,7 @@ func TestFixedCanaryRegistryIsClosedAndWindowsPlanIsExplicit(t *testing.T) {
 	if reviewed.valid() || (artifactRegistry{Enabled: true}).valid() {
 		t.Fatal("unreviewed artifact admitted")
 	}
-	plan := fixedPlan(`C:\fixed\windows-native-peer-canary-08\fixture\work`, `C:\Windows`)
+	plan := fixedPlan(`C:\fixed\windows-native-peer-canary-09\fixture\work`, `C:\Windows`)
 	if plan.Validate() != nil || plan.Backend != "windows_psec" || !plan.Offline || plan.Terminal != nil || len(plan.Environment) != 8 || len(plan.Filesystem.Read) != 1 || len(plan.Filesystem.Write) != 3 || len(plan.Filesystem.Deny) != 0 {
 		t.Fatal("fixed plan differs")
 	}
@@ -200,5 +200,34 @@ func TestFixedPreparationDiagnosticRequiresCorrelatedValidatedFailure(t *testing
 	writeFixedDiagnostic(&output, "protocol", &fixedProtocolError{operation: "prepare_receive", preparationStage: "private-stage", cause: privateDiagnosticError{}})
 	if strings.Contains(output.String(), "private-stage") {
 		t.Fatal("unknown stage escaped")
+	}
+}
+
+func fixedTokenObservation() *bridgeproto.NativeTokenObservation {
+	return &bridgeproto.NativeTokenObservation{DiagnosticOnly: true, QueryComplete: true, PrimaryToken: true,
+		UserSIDValid: true, UserMatchesPeer: true, IntegrityRID: 4096, TokenSessionID: 1,
+		SessionMatchesPeer: true, TokenHandlesClosed: true}
+}
+func TestFixedTokenFactsAreReportedOnlyAfterCorrelatedStarted(t *testing.T) {
+	for _, alter := range []func(*fakeProtocol){
+		func(f *fakeProtocol) { f.frames[1].Binding.SessionID = "other" },
+		func(f *fakeProtocol) { f.frames[1].Request++ },
+		func(f *fakeProtocol) { f.frames[1].NativeTokenObservation = nil },
+		func(f *fakeProtocol) { f.frames[1].NativeTokenObservation.AuthorizationGranted = true },
+		func(f *fakeProtocol) { f.frames[1].Kind = bridgeproto.Prepared },
+	} {
+		f, b, plan := fakeConversation()
+		alter(f)
+		var record result
+		if exercise(context.Background(), f, b, plan, nil, &record) == nil || record.NativeTokenObservation != nil || record.PeerStartedReply {
+			t.Fatal("uncorrelated/missing facts escaped")
+		}
+	}
+	f, b, plan := fakeConversation()
+	f.frames[1].NativeTokenObservation.UserMatchesPeer = false
+	f.frames[1].NativeTokenObservation.SessionMatchesPeer = false
+	var record result
+	if exercise(context.Background(), f, b, plan, nil, &record) != nil || record.NativeTokenObservation == nil || record.NativeTokenObservation.UserMatchesPeer {
+		t.Fatal("observation became admission policy")
 	}
 }

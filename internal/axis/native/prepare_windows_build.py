@@ -71,6 +71,14 @@ SDK_OVERLAY_FILES = {
     "src/mxc-sdk/src/sandbox.rs": "530bb8fbbaf97715fdc6efbdfe28706b333e3140cca4456641759fdb30ca62b1",
 }
 INERT_TESTS = (
+    "owner::launch_tests::pending_pipe_refusal_retains_process_until_terminal_observation",
+    "owner::launch_tests::callback_and_stop_refusal_leave_the_same_pending_process_owned",
+    "owner::launch_tests::uncertain_cleanup_keeps_process_until_private_peer_exit",
+    "wire::tests::native_token_observation_is_started_only_strict_and_absence_preserves_bytes",
+    "windows_token_probe::tests::sid_pointer_requires_complete_canonical_sid_after_correct_header",
+    "windows_token_probe::tests::null_container_and_nonzero_flag_remain_independent_observations",
+    "windows_token_probe::tests::scalar_and_integrity_results_have_exact_bounded_shapes",
+    "windows_token_probe::tests::closed_observation_contains_only_booleans_and_numbers",
     "conversation::tests::prepared_handle_cannot_admit_duplicate_launch",
     "conversation::tests::late_controls_do_not_reopen_exited_session_and_destroy_is_separate",
     "wire::tests::independent_go_hash_vector_and_no_read_ahead",

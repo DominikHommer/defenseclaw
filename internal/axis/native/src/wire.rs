@@ -68,6 +68,42 @@ pub struct Frame {
     pub result: Option<Completion>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_token_observation: Option<NativeTokenObservation>,
+}
+
+/// Diagnostic-only same-child observation, never endpoint authentication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTokenObservation {
+    pub diagnostic_only: bool,
+    pub authorization_granted: bool,
+    pub query_complete: bool,
+    pub primary_token: bool,
+    pub user_sid_valid: bool,
+    pub user_matches_peer: bool,
+    pub app_container_sid_present: bool,
+    pub app_container_sid_valid: bool,
+    pub token_is_app_container: bool,
+    pub integrity_rid: u32,
+    pub token_session_id: u32,
+    pub session_matches_peer: bool,
+    pub token_handles_closed: bool,
+}
+impl NativeTokenObservation {
+    pub fn validate(&self) -> Result<()> {
+        if !self.diagnostic_only
+            || self.authorization_granted
+            || !self.query_complete
+            || !self.primary_token
+            || !self.user_sid_valid
+            || !self.token_handles_closed
+            || self.app_container_sid_present != self.app_container_sid_valid
+        {
+            return Err(ProtocolError);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -401,6 +437,12 @@ impl Frame {
         if self.version != VERSION || self.sequence == 0 || self.request == 0 {
             return Err(ProtocolError);
         }
+        if let Some(observation) = &self.native_token_observation {
+            if self.kind != Kind::Started {
+                return Err(ProtocolError);
+            }
+            observation.validate()?;
+        }
         let payloads = [
             self.plan.is_some(),
             self.data.is_some(),
@@ -666,6 +708,7 @@ mod tests {
             size: None,
             result: None,
             failure: None,
+            native_token_observation: None,
         }
     }
 
@@ -803,5 +846,91 @@ mod tests {
             assert_eq!(decoder.decode(), Err(ProtocolError));
             assert_eq!(decoder.decode(), Err(ProtocolError));
         }
+    }
+
+    #[test]
+    fn native_token_observation_is_started_only_strict_and_absence_preserves_bytes() {
+        let mut frame = fixture();
+        frame.kind = Kind::Started;
+        frame.plan = None;
+        let legacy = serde_json::to_vec(&frame).unwrap();
+        assert!(!String::from_utf8_lossy(&legacy).contains("native_token_observation"));
+        assert_eq!(parse(&legacy).unwrap(), frame);
+        frame.native_token_observation = Some(token_observation_fixture());
+        let raw = serde_json::to_vec(&frame).unwrap();
+        assert_eq!(parse(&raw).unwrap(), frame);
+        for kind in [
+            Kind::Prepare,
+            Kind::Prepared,
+            Kind::Launch,
+            Kind::Output,
+            Kind::Exited,
+            Kind::Failed,
+            Kind::Destroyed,
+        ] {
+            let mut changed = frame.clone();
+            changed.kind = kind;
+            assert!(changed.validate().is_err());
+        }
+        let object = serde_json::to_value(frame.native_token_observation.unwrap()).unwrap();
+        for key in object.as_object().unwrap().keys() {
+            let mut missing = serde_json::to_value(&frame).unwrap();
+            missing["native_token_observation"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(parse(&serde_json::to_vec(&missing).unwrap()).is_err());
+            let mut null = serde_json::to_value(&frame).unwrap();
+            null["native_token_observation"][key.as_str()] = serde_json::Value::Null;
+            assert!(parse(&serde_json::to_vec(&null).unwrap()).is_err());
+        }
+        for (key, value) in [
+            ("authorization_granted", serde_json::json!(true)),
+            ("query_complete", serde_json::json!(false)),
+            ("integrity_rid", serde_json::json!(-1)),
+            ("token_session_id", serde_json::json!(4294967296u64)),
+            ("sid", serde_json::json!("private")),
+        ] {
+            let mut changed = serde_json::to_value(&frame).unwrap();
+            changed["native_token_observation"][key] = value;
+            assert!(parse(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+        let text = String::from_utf8(raw).unwrap();
+        assert!(
+            parse(
+                text.replace(
+                    "\"diagnostic_only\":true",
+                    "\"diagnostic_only\":true,\"diagnostic_only\":true"
+                )
+                .as_bytes()
+            )
+            .is_err()
+        );
+        let mut observed = token_observation_fixture();
+        observed.user_matches_peer = false;
+        observed.session_matches_peer = false;
+        observed.token_is_app_container = true;
+        observed.integrity_rid = u32::MAX;
+        observed.token_session_id = u32::MAX;
+        observed.validate().unwrap(); // measurements are not admission policy
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn token_observation_fixture() -> NativeTokenObservation {
+    NativeTokenObservation {
+        diagnostic_only: true,
+        authorization_granted: false,
+        query_complete: true,
+        primary_token: true,
+        user_sid_valid: true,
+        user_matches_peer: true,
+        app_container_sid_present: false,
+        app_container_sid_valid: false,
+        token_is_app_container: false,
+        integrity_rid: 4096,
+        token_session_id: 1,
+        session_matches_peer: true,
+        token_handles_closed: true,
     }
 }

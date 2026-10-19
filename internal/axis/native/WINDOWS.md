@@ -156,3 +156,29 @@ GetQueuedCompletionStatus (event low-bit suppression), ConnectNamedPipe
 (ERROR_PIPE_CONNECTED and non-null OVERLAPPED), UuidCreate, NtQueryObject public
 basic GrantedAccess layout, UpdateProcThreadAttribute HANDLE_LIST; exact Go1.26
 nonblocking mode and external-IOCP handling; pinned fda BaseContainer/UiJobObject.
+
+
+## Pre-resume token observation source
+
+The next no-Hook Windows peer source uses the SDK's existing suspended spawn
+and retained query callback. The same Owner stores the process before pipe
+adoption, token query or Resume. Query/resume refusal uses that Owner's existing
+bounded native stop/wait/output-drain path before a launch-failure frame; an
+uncertain attempt deliberately retains the entire peer Owner until fatal peer
+exit, while the outer Go Job remains independent final custody. It produces no
+completion claim. There is no second launcher, controller or cleanup loop.
+
+Only the borrowed restricted handle of that retained suspended child is used.
+TOKEN_QUERY obtains User SID, AppContainer SID/presence, IsAppContainer,
+integrity RID and SessionID; User/session comparisons with the trusted peer stay
+private. Fixed buffers and bounded SID parsing precede interpretation. Started
+can carry only a typed optional diagnostic of 13 booleans/numbers; it contains no
+SID, name, PID, path, hash or formatted native error. Its absence preserves old
+wire bytes. Measurements are not endpoint authorization. Windows Hook remains
+refused; no endpoint, event, bearer or client capability is introduced.
+
+This source has not been compiled or executed as a probe. The prior fixed
+baseline canary success is separate evidence. Successful new facts would still
+not prove named-pipe reachability, client identity, per-session uniqueness or
+hook behavior. Native query syscalls are synchronous; pre/post owner deadline
+checks do not replace the independently retained Go Job and outer bound.

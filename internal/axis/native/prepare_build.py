@@ -24,7 +24,7 @@ AXIS = "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c"
 MXC = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 BWRAP = "8e51677abd7e3338e4952370bf7d902e37d8cbb6"
 TOOLCHAIN = "1.95.0"
-NATIVE_TEST_COUNT = 22
+NATIVE_TEST_COUNT = 26
 C_TESTS = (
     "topology_refuses_nested_bind_mounts_and_malformed_inventory",
     "locator_refuses_deleted_traversal_and_unrepresentable_names",
@@ -50,32 +50,39 @@ WINDOWS_SOURCE = {
     "src/windows_bootstrap.rs",
     "src/windows_io.rs",
     "src/windows_transport.rs",
+    "src/windows_token_probe.rs",
+    "src/windows_token_probe_launch.rs",
     "patches/mxc-owned-windows-psec.patch",
 }
-SOURCE = {
-    "Cargo.toml",
-    "README.md",
-    "prepare_build.py",
-    "test_prepare_build.py",
-    "src/lib.rs",
-    "src/main.rs",
-    "src/namespace.rs",
-    "src/conversation.rs",
-    "src/custody.rs",
-    "src/linux.rs",
-    "src/owner.rs",
-    "src/transport.rs",
-    "src/wire.rs",
-    "patches/README.md",
-    "patches/bwrap-COPYING",
-    "patches/bwrap-owned-fd-tests.c",
-    "static/README.md",
-    "static/sources.json",
-    "static/build_static.py",
-    "static/test_build_static.py",
-    "static/musl-LICENSE",
-    "static/libcap-LICENSE",
-} | (set(PATCHES) - {"mxc-literal-argv.patch"}) | WINDOWS_SOURCE
+SOURCE = (
+    {
+        "Cargo.toml",
+        "README.md",
+        "prepare_build.py",
+        "test_prepare_build.py",
+        "src/lib.rs",
+        "src/main.rs",
+        "src/namespace.rs",
+        "src/conversation.rs",
+        "src/custody.rs",
+        "src/linux.rs",
+        "src/owner.rs",
+        "src/owner_launch_tests.rs",
+        "src/transport.rs",
+        "src/wire.rs",
+        "patches/README.md",
+        "patches/bwrap-COPYING",
+        "patches/bwrap-owned-fd-tests.c",
+        "static/README.md",
+        "static/sources.json",
+        "static/build_static.py",
+        "static/test_build_static.py",
+        "static/musl-LICENSE",
+        "static/libcap-LICENSE",
+    }
+    | (set(PATCHES) - {"mxc-literal-argv.patch"})
+    | WINDOWS_SOURCE
+)
 PATH_PACKAGES = {
     ("axis-core", "0.3.5"),
     ("axis-sandbox", "0.3.5"),
@@ -109,7 +116,8 @@ def native_test_inventory() -> set[str]:
     for name in sorted(SOURCE - WINDOWS_SOURCE):
         if name.startswith("src/") and name.endswith(".rs"):
             expected |= {
-                f"{Path(name).stem}::tests::{test}"
+                ("owner::launch_tests" if name == "src/owner_launch_tests.rs" else f"{Path(name).stem}::tests")
+                + f"::{test}"
                 for test in re.findall(r"#\[test\]\s+fn ([A-Za-z_][A-Za-z_0-9]*)\(", ordinary(ROOT / name).decode())
             }
     return expected

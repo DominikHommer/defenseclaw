@@ -62,26 +62,27 @@ func (r artifactRegistry) valid() bool {
 }
 
 type result struct {
-	Passed              bool   `json:"passed"`
-	Stage               string `json:"stage"`
-	Prepared            bool   `json:"prepared"`
-	PeerStartedReply    bool   `json:"peer_started_reply_observed"`
-	CanaryMarker        bool   `json:"fixed_canary_marker_observed"`
-	Exit23              bool   `json:"exit23_observed"`
-	Destroyed           bool   `json:"destroyed"`
-	NativeCleanup       bool   `json:"native_cleanup_observed"`
-	FirstCleanupFailed  bool   `json:"initial_cleanup_failed"`
-	ImagesClosed        bool   `json:"image_views_and_copies_closed"`
-	HandlesClosed       bool   `json:"harness_handles_closed"`
-	TCPPositive         bool   `json:"host_tcp_positive_control"`
-	UDPPositive         bool   `json:"host_udp_positive_control"`
-	TCPNoArrival        bool   `json:"host_tcp_no_arrival_observed"`
-	UDPNoArrival        bool   `json:"host_udp_no_arrival_observed"`
-	SentinelsUnchanged  bool   `json:"sentinels_unchanged"`
-	WorkspaceWrite      bool   `json:"workspace_write_observed"`
-	FixtureRetained     bool   `json:"fresh_fixture_retained"`
-	ProductionQualified bool   `json:"production_qualification"`
-	CanaryFailure       string `json:"fixed_canary_failure,omitempty"`
+	NativeTokenObservation *bridgeproto.NativeTokenObservation `json:"native_token_observation,omitempty"`
+	Passed                 bool                                `json:"passed"`
+	Stage                  string                              `json:"stage"`
+	Prepared               bool                                `json:"prepared"`
+	PeerStartedReply       bool                                `json:"peer_started_reply_observed"`
+	CanaryMarker           bool                                `json:"fixed_canary_marker_observed"`
+	Exit23                 bool                                `json:"exit23_observed"`
+	Destroyed              bool                                `json:"destroyed"`
+	NativeCleanup          bool                                `json:"native_cleanup_observed"`
+	FirstCleanupFailed     bool                                `json:"initial_cleanup_failed"`
+	ImagesClosed           bool                                `json:"image_views_and_copies_closed"`
+	HandlesClosed          bool                                `json:"harness_handles_closed"`
+	TCPPositive            bool                                `json:"host_tcp_positive_control"`
+	UDPPositive            bool                                `json:"host_udp_positive_control"`
+	TCPNoArrival           bool                                `json:"host_tcp_no_arrival_observed"`
+	UDPNoArrival           bool                                `json:"host_udp_no_arrival_observed"`
+	SentinelsUnchanged     bool                                `json:"sentinels_unchanged"`
+	WorkspaceWrite         bool                                `json:"workspace_write_observed"`
+	FixtureRetained        bool                                `json:"fresh_fixture_retained"`
+	ProductionQualified    bool                                `json:"production_qualification"`
+	CanaryFailure          string                              `json:"fixed_canary_failure,omitempty"`
 }
 
 type owner struct {
@@ -421,18 +422,22 @@ func correlatedProtocolFailure(operation string, frame bridgeproto.Frame) error 
 	return &fixedProtocolError{operation: operation, cause: bridgeproto.ErrProtocol, kind: frame.Kind, failure: failure, preparationStage: preparationStage}
 }
 
-func reply(ctx context.Context, p protocol, b bridgeproto.Binding, request uint64, kind bridgeproto.Kind, operation string) error {
+func replyFrame(ctx context.Context, p protocol, b bridgeproto.Binding, request uint64, kind bridgeproto.Kind, operation string) (bridgeproto.Frame, error) {
 	f, err := p.Receive(ctx)
 	if err != nil {
-		return &fixedProtocolError{operation: operation, cause: err}
+		return bridgeproto.Frame{}, &fixedProtocolError{operation: operation, cause: err}
 	}
 	if f.Validate() != nil || f.Binding != b || f.Request != request {
-		return &fixedProtocolError{operation: operation, cause: bridgeproto.ErrProtocol}
+		return bridgeproto.Frame{}, &fixedProtocolError{operation: operation, cause: bridgeproto.ErrProtocol}
 	}
 	if f.Kind != kind {
-		return correlatedProtocolFailure(operation, f)
+		return bridgeproto.Frame{}, correlatedProtocolFailure(operation, f)
 	}
-	return nil
+	return f, nil
+}
+func reply(ctx context.Context, p protocol, b bridgeproto.Binding, request uint64, kind bridgeproto.Kind, operation string) error {
+	_, err := replyFrame(ctx, p, b, request, kind, operation)
+	return err
 }
 
 func exercise(ctx context.Context, p protocol, b bridgeproto.Binding, plan bridgeproto.Preparation, input []byte, r *result) error {
@@ -457,9 +462,16 @@ func exercise(ctx context.Context, p protocol, b bridgeproto.Binding, plan bridg
 	if err != nil {
 		return &fixedProtocolError{operation: "launch_send", cause: err}
 	}
-	if err := reply(ctx, p, b, id, bridgeproto.Started, "launch_receive"); err != nil {
+	started, err := replyFrame(ctx, p, b, id, bridgeproto.Started, "launch_receive")
+	if err != nil {
 		return err
 	}
+	if started.NativeTokenObservation == nil {
+		return &fixedProtocolError{operation: "launch_receive", cause: bridgeproto.ErrProtocol}
+	}
+	// Copy only closed typed facts after exact launch/binding correlation.
+	observation := *started.NativeTokenObservation
+	r.NativeTokenObservation = &observation
 	r.PeerStartedReply = true
 	if _, err = p.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Input, Data: &bridgeproto.Data{Stream: "stdin", Bytes: input}}); err != nil {
 		return &fixedProtocolError{operation: "input_send", cause: err}

@@ -7,7 +7,9 @@
 use crate::owner::{Engine, Pipes, Prepared, Process};
 use crate::windows_bootstrap::Capabilities;
 use crate::windows_io::Pipe;
-use crate::wire::{NativePreparationStage, Preparation, ProtocolError, Result};
+use crate::wire::{
+    NativePreparationStage, NativeTokenObservation, Preparation, ProtocolError, Result,
+};
 use mxc_sdk::v1::{
     ContainerRequest, Containment, FilesystemPolicy, NetworkAction, NetworkEgressPolicy,
     NetworkIngressPolicy, NetworkPolicy, OwnedPsecProcess, OwnedWindowsPreparationStage,
@@ -32,6 +34,7 @@ struct WindowsPrepared(PreparedOwnedWindowsPsec);
 struct WindowsProcess {
     process: OwnedPsecProcess,
     pipes: Option<Pipes>,
+    token_observation: Option<NativeTokenObservation>,
 }
 impl Engine for WindowsEngine {
     fn preparation_failure_stage(&self) -> Option<NativePreparationStage> {
@@ -156,13 +159,14 @@ impl Prepared for WindowsPrepared {
         let (error, child_error) = Pipe::workload_pair(false).map_err(|_| ProtocolError)?;
         let process = self
             .0
-            .spawn(
+            .spawn_suspended(
                 OwnedWindowsStdio::new(child_input, child_output, child_error)
                     .map_err(|_| ProtocolError)?,
             )
             .map_err(|_| ProtocolError)?;
         Ok(Box::new(WindowsProcess {
             process,
+            token_observation: None,
             pipes: Some(Pipes {
                 input: Some(input),
                 output: Some(output),
@@ -172,6 +176,22 @@ impl Prepared for WindowsPrepared {
     }
 }
 impl Process for WindowsProcess {
+    fn finish_launch(&mut self, deadline: std::time::Instant) -> Result<()> {
+        let observation =
+            crate::windows_token_probe_launch::observe_and_resume(&mut self.process, || {
+                if std::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::other("native launch owner expired"));
+                }
+                Ok(())
+            })
+            .map_err(|_| ProtocolError)?;
+        self.token_observation = Some(observation);
+        Ok(())
+    }
+    fn native_token_observation(&self) -> Option<NativeTokenObservation> {
+        self.token_observation
+    }
+
     fn take_pipes(&mut self) -> Result<Pipes> {
         self.pipes.take().ok_or(ProtocolError)
     }

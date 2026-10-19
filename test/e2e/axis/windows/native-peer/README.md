@@ -32,7 +32,7 @@ still preserved. No launch/policy behavior changes besides the fresh fixed label
 
 The only harness argument is `--run-fixed`. A separately reviewed root recipe
 must stage exact admitted files beneath one fresh protected private directory
-named `windows-native-peer-canary-05`: the fixed harness filename,
+named `windows-native-peer-canary-09`: the fixed harness filename,
 `REVIEWED-ARTIFACTS.json`, `peer.exe` and `payload.exe`. Their complete hashes
 and sizes are source constants, not runtime inputs. The recipe must own the
 harness image/ancestry and an atomic kill-on-close Job before its Resume, with
@@ -129,3 +129,15 @@ The next fixed diagnostic retains both original native termination failures as
 private causes and emits only attempted/failed flags and numeric Win32 codes
 for the Job and root roles at the native_signal cleanup stage. A failed call
 with code zero is unclassified, not success. Cleanup decisions remain unchanged.
+
+
+The next fixed source requires a Started-only `native_token_observation` after
+exact binding and launch-request correlation. It copies only 13 closed typed
+booleans/numbers into the result. A missing, malformed or uncorrelated record
+fails this changed diagnostic canary, while the general protocol still accepts
+legacy Started without the optional field. Different User/session or absent
+AppContainer facts are measurements, never permissions. No raw SID, native
+error, environment or path is reported; Windows Hook remains refused. The next
+fresh fixed fixture basename is `windows-native-peer-canary-09`; prior fixtures
+and actual baseline success remain unchanged. New source/build/artifact/recipe
+review is required before ROOT's single probe attempt.

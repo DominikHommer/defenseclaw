@@ -37,7 +37,7 @@ MXC = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 BWRAP = "8e51677abd7e3338e4952370bf7d902e37d8cbb6"
 LOCK = "9fb53262adf9c0b9ec3fb434dd04a5fe17572d6a522b4b5e3fb31cd2c6bef325"
 SEED = "d6556677c6decd2d5d786ca082ac2bcdb37fc92130d45b7002a7e8bffe2154db"
-PEER_TEST_COUNT = 22
+PEER_TEST_COUNT = 26
 PATCHES = {
     "patches/axis-unix-hook-bpf.patch": "94c1ad86e706d71784356d4601d5df1cba3c2711d61e08a65f607fbfec5f7f35",
     "patches/axis-offline-bpf.patch": "914b75d4ad1da26f4f9850886093fb3560ade14d9870dd604de20a33d2f179f2",
@@ -54,34 +54,41 @@ WINDOWS_SOURCE = {
     "src/windows_bootstrap.rs",
     "src/windows_io.rs",
     "src/windows_transport.rs",
+    "src/windows_token_probe.rs",
+    "src/windows_token_probe_launch.rs",
     "patches/mxc-owned-windows-psec.patch",
 }
-SOURCES = {
-    "Cargo.toml",
-    "Cargo.lock",
-    "README.md",
-    "prepare_build.py",
-    "test_prepare_build.py",
-    "src/lib.rs",
-    "src/main.rs",
-    "src/namespace.rs",
-    "src/conversation.rs",
-    "src/custody.rs",
-    "src/linux.rs",
-    "src/owner.rs",
-    "src/transport.rs",
-    "src/wire.rs",
-    "patches/README.md",
-    "patches/bwrap-COPYING",
-    "patches/bwrap-owned-fd-tests.c",
-    "static/README.md",
-    "static/sources.json",
-    "static/build_static.py",
-    "static/test_build_static.py",
-    "static/musl-LICENSE",
-    "static/libcap-LICENSE",
-    "reviewed-linux-seed.lock",
-} | set(PATCHES) | WINDOWS_SOURCE
+SOURCES = (
+    {
+        "Cargo.toml",
+        "Cargo.lock",
+        "README.md",
+        "prepare_build.py",
+        "test_prepare_build.py",
+        "src/lib.rs",
+        "src/main.rs",
+        "src/namespace.rs",
+        "src/conversation.rs",
+        "src/custody.rs",
+        "src/linux.rs",
+        "src/owner.rs",
+        "src/owner_launch_tests.rs",
+        "src/transport.rs",
+        "src/wire.rs",
+        "patches/README.md",
+        "patches/bwrap-COPYING",
+        "patches/bwrap-owned-fd-tests.c",
+        "static/README.md",
+        "static/sources.json",
+        "static/build_static.py",
+        "static/test_build_static.py",
+        "static/musl-LICENSE",
+        "static/libcap-LICENSE",
+        "reviewed-linux-seed.lock",
+    }
+    | set(PATCHES)
+    | WINDOWS_SOURCE
+)
 C_TESTS = [
     "topology_refuses_nested_bind_mounts_and_malformed_inventory",
     "locator_refuses_deleted_traversal_and_unrepresentable_names",
@@ -380,7 +387,8 @@ def peer_test_inventory(archive):
         if name.startswith("src/") and name.endswith(".rs"):
             raw = archive.read("build-artifact/source/" + name).decode()
             expected.update(
-                f"{PurePosixPath(name).stem}::tests::{test}"
+                ("owner::launch_tests" if name == "src/owner_launch_tests.rs" else f"{PurePosixPath(name).stem}::tests")
+                + f"::{test}"
                 for test in re.findall(r"#\[test\]\s+fn ([A-Za-z_][A-Za-z_0-9]*)\(\)", raw)
             )
     return expected

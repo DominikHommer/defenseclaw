@@ -62,16 +62,43 @@ const (
 // is monotonic per direction; Request correlates replies with a host command.
 // The session state machine, rather than JSON alone, must admit transitions.
 type Frame struct {
-	Version  uint16       `json:"version"`
-	Sequence uint64       `json:"sequence"`
-	Request  uint64       `json:"request"`
-	Binding  Binding      `json:"binding"`
-	Kind     Kind         `json:"kind"`
-	Plan     *Preparation `json:"plan,omitempty"`
-	Data     *Data        `json:"data,omitempty"`
-	Size     *Size        `json:"size,omitempty"`
-	Result   *Result      `json:"result,omitempty"`
-	Failure  *Failure     `json:"failure,omitempty"`
+	Version                uint16                  `json:"version"`
+	Sequence               uint64                  `json:"sequence"`
+	Request                uint64                  `json:"request"`
+	Binding                Binding                 `json:"binding"`
+	Kind                   Kind                    `json:"kind"`
+	Plan                   *Preparation            `json:"plan,omitempty"`
+	Data                   *Data                   `json:"data,omitempty"`
+	Size                   *Size                   `json:"size,omitempty"`
+	Result                 *Result                 `json:"result,omitempty"`
+	Failure                *Failure                `json:"failure,omitempty"`
+	NativeTokenObservation *NativeTokenObservation `json:"native_token_observation,omitempty"`
+}
+
+// NativeTokenObservation contains diagnostic facts of the same retained child.
+// It cannot authenticate a hook client or authorize any endpoint or capability.
+type NativeTokenObservation struct {
+	DiagnosticOnly         bool   `json:"diagnostic_only"`
+	AuthorizationGranted   bool   `json:"authorization_granted"`
+	QueryComplete          bool   `json:"query_complete"`
+	PrimaryToken           bool   `json:"primary_token"`
+	UserSIDValid           bool   `json:"user_sid_valid"`
+	UserMatchesPeer        bool   `json:"user_matches_peer"`
+	AppContainerSIDPresent bool   `json:"app_container_sid_present"`
+	AppContainerSIDValid   bool   `json:"app_container_sid_valid"`
+	TokenIsAppContainer    bool   `json:"token_is_app_container"`
+	IntegrityRID           uint32 `json:"integrity_rid"`
+	TokenSessionID         uint32 `json:"token_session_id"`
+	SessionMatchesPeer     bool   `json:"session_matches_peer"`
+	TokenHandlesClosed     bool   `json:"token_handles_closed"`
+}
+
+func (o NativeTokenObservation) Validate() error {
+	if !o.DiagnosticOnly || o.AuthorizationGranted || !o.QueryComplete || !o.PrimaryToken ||
+		!o.UserSIDValid || !o.TokenHandlesClosed || o.AppContainerSIDPresent != o.AppContainerSIDValid {
+		return ErrProtocol
+	}
+	return nil
 }
 
 // Preparation is host-helper input only, never a child launch plan. It omits
@@ -311,6 +338,9 @@ func PreparationDigest(p Preparation) (string, error) {
 
 func (f Frame) Validate() error {
 	if f.Version != Version || f.Sequence == 0 || f.Request == 0 || f.Binding.Validate() != nil {
+		return ErrProtocol
+	}
+	if f.NativeTokenObservation != nil && (f.Kind != Started || f.NativeTokenObservation.Validate() != nil) {
 		return ErrProtocol
 	}
 	payloads := 0

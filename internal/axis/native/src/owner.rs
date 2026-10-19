@@ -9,7 +9,7 @@ use crate::transport::{Transport, nonblocking};
 use crate::windows_io::Pipe;
 use crate::wire::{
     Binding, Completion, Data, Failure, FailureCode, Frame, Kind, MAX_DATA, NativePreparationStage,
-    Preparation, ProtocolError, Result, VERSION,
+    NativeTokenObservation, Preparation, ProtocolError, Result, VERSION,
 };
 use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
@@ -30,6 +30,13 @@ pub trait Process {
     fn take_pipes(&mut self) -> Result<Pipes>;
     fn try_wait(&mut self) -> Result<Option<i32>>;
     fn stop(&mut self) -> Result<()>;
+    // The Owner already retains this process before either callback is called.
+    fn finish_launch(&mut self, _deadline: Instant) -> Result<()> {
+        Ok(())
+    }
+    fn native_token_observation(&self) -> Option<NativeTokenObservation> {
+        None
+    }
 }
 
 pub struct Pipes {
@@ -67,25 +74,29 @@ struct Active {
     limit: u64,
 }
 
+// A failed containment attempt cannot drop the exact process, Job and held
+// inputs before the independent host custodian observes teardown. This private
+// peer exits fatally when run returns Err; forgetting the Owner keeps those
+// handles alive until that process exit. Normal completed cleanup still drops
+// its owner. This is not a general reusable API or native completion proof.
+fn retain_on_uncertain_cleanup<T>(owner: T, result: Result<()>) -> Result<()> {
+    if result.is_err() {
+        std::mem::forget(owner);
+    }
+    result
+}
+
 impl Active {
-    fn new(mut process: Box<dyn Process>, plan: &Preparation, now: Instant) -> Result<Self> {
-        let pipes = process.take_pipes()?;
-        if pipes.input.is_none() || pipes.output.is_none() || pipes.error.is_none() {
-            process.stop()?;
-            return Err(ProtocolError);
-        }
-        for file in [&pipes.input, &pipes.output, &pipes.error]
-            .into_iter()
-            .flatten()
-        {
-            if nonblocking(file).is_err() {
-                process.stop()?;
-                return Err(ProtocolError);
-            }
-        }
-        Ok(Self {
+    // Infallible ownership transfer: publish this in Owner before adopting
+    // pipes, checking them, querying the child, or allowing Resume.
+    fn retained(process: Box<dyn Process>, plan: &Preparation, now: Instant) -> Self {
+        Self {
             process,
-            pipes,
+            pipes: Pipes {
+                input: None,
+                output: None,
+                error: None,
+            },
             input: VecDeque::new(),
             input_offset: 0,
             input_bytes: 0,
@@ -98,7 +109,30 @@ impl Active {
             truncated: false,
             emitted: 0,
             limit: u64::from(plan.output_limit),
-        })
+        }
+    }
+
+    fn adopt_pipes(&mut self) -> Result<()> {
+        // Store even an incomplete returned set before any further refusal.
+        self.pipes = self.process.take_pipes()?;
+        if self.pipes.input.is_none() || self.pipes.output.is_none() || self.pipes.error.is_none() {
+            return Err(ProtocolError);
+        }
+        for file in [&self.pipes.input, &self.pipes.output, &self.pipes.error]
+            .into_iter()
+            .flatten()
+        {
+            nonblocking(file)?;
+        }
+        Ok(())
+    }
+    fn finish_launch(&mut self, owner_deadline: Instant) -> Result<()> {
+        self.process
+            .finish_launch(self.deadline.min(owner_deadline))
+    }
+    fn activate(&mut self, owner_deadline: Instant) -> Result<()> {
+        self.adopt_pipes()?;
+        self.finish_launch(owner_deadline)
     }
 
     fn stop(&mut self, now: Instant, timeout: bool) -> Result<()> {
@@ -287,6 +321,7 @@ pub struct Owner<E> {
     idle_deadline: Instant,
     finished: bool,
     read_stderr_next: bool,
+    failure_cleanup_started: bool,
 }
 
 impl<E: Engine> Owner<E> {
@@ -304,6 +339,7 @@ impl<E: Engine> Owner<E> {
             idle_deadline: Instant::now() + CONTROL_IDLE,
             finished: false,
             read_stderr_next: false,
+            failure_cleanup_started: false,
         }
     }
 
@@ -326,6 +362,7 @@ impl<E: Engine> Owner<E> {
             size: None,
             result: None,
             failure: None,
+            native_token_observation: None,
         })
     }
 
@@ -374,14 +411,32 @@ impl<E: Engine> Owner<E> {
             Kind::Launch => {
                 let prepared = self.prepare.take().ok_or(ProtocolError)?;
                 let plan = self.plan.as_ref().ok_or(ProtocolError)?;
-                match prepared
-                    .launch()
-                    .and_then(|process| Active::new(process, plan, now))
-                {
-                    Ok(active) => {
-                        self.active = Some(active);
+                match prepared.launch() {
+                    Ok(process) => {
+                        // A suspended/failed native launch remains in this one
+                        // Owner before every fallible operation after spawn.
+                        self.active = Some(Active::retained(process, plan, now));
                         self.launch_request = frame.request;
-                        let reply = self.frame(Kind::Started, frame.request)?;
+                        if self
+                            .active
+                            .as_mut()
+                            .ok_or(ProtocolError)?
+                            .activate(self.idle_deadline)
+                            .is_err()
+                        {
+                            // Reuse the sole existing bounded cleanup path. No
+                            // Failed/Destroyed result is emitted on uncertainty.
+                            self.contain_after_error()?;
+                            return self.fail(frame.request, FailureCode::LaunchFailed);
+                        }
+                        let observation = self
+                            .active
+                            .as_ref()
+                            .ok_or(ProtocolError)?
+                            .process
+                            .native_token_observation();
+                        let mut reply = self.frame(Kind::Started, frame.request)?;
+                        reply.native_token_observation = observation;
                         self.emit(reply)?;
                     }
                     Err(_) => self.fail(frame.request, FailureCode::LaunchFailed)?,
@@ -465,25 +520,38 @@ impl<E: Engine> Owner<E> {
 
     fn contain_after_error(&mut self) -> Result<()> {
         self.prepare.take();
-        let Some(mut active) = self.active.take() else {
+        if self.active.is_none() {
             return Ok(());
-        };
-        active.stop(Instant::now(), false)?;
+        }
+        // A failed attempt remains owned but is not retried by run's outer
+        // error branch. The retained Go Job is final custody on uncertainty.
+        if std::mem::replace(&mut self.failure_cleanup_started, true) {
+            return Err(ProtocolError);
+        }
+        self.active
+            .as_mut()
+            .ok_or(ProtocolError)?
+            .stop(Instant::now(), false)?;
         let limit = Instant::now() + CLEANUP_LIMIT;
         loop {
             let now = Instant::now();
+            let active = self.active.as_mut().ok_or(ProtocolError)?;
             active.tick(now)?;
             // During failure cleanup no bytes are forwarded or retained.
             active.read(false, now)?;
             active.read(true, now)?;
             if active.complete() {
+                // Exact native terminal observation AND output EOFs precede
+                // dropping this process and its dependent capabilities.
+                self.active.take();
                 return Ok(());
             }
             if now >= limit {
                 return Err(ProtocolError);
             }
+            let descriptors = active.poll_descriptors(true);
             self.transport
-                .poll(&active.poll_descriptors(true), Duration::from_millis(10))?;
+                .poll(&descriptors, Duration::from_millis(10))?;
         }
     }
 
@@ -520,7 +588,10 @@ impl<E: Engine> Owner<E> {
             }
         })();
         if result.is_err() {
-            self.contain_after_error()?;
+            let cleanup = self.contain_after_error();
+            if cleanup.is_err() {
+                return retain_on_uncertain_cleanup(self, cleanup);
+            }
         }
         result
     }
@@ -644,6 +715,7 @@ mod tests {
                 size: None,
                 result: None,
                 failure: None,
+                native_token_observation: None,
             })
             .collect()
     }
@@ -733,8 +805,8 @@ mod tests {
         let mut plan = plan(1024);
         plan.timeout_ms = 1;
         let now = Instant::now();
-        let mut active =
-            Active::new(Box::new(FakeProcess::new(counts.clone())), &plan, now).unwrap();
+        let mut active = Active::retained(Box::new(FakeProcess::new(counts.clone())), &plan, now);
+        active.activate(now + CONTROL_IDLE).unwrap();
         for _ in 0..4 {
             active.input(vec![b'x'; MAX_DATA]).unwrap();
         }
@@ -758,7 +830,8 @@ mod tests {
         // Make a terminal result immediately available, but give the owner no
         // native evidence of an exit timestamp before its first late tick.
         process.stopped = true;
-        let mut active = Active::new(Box::new(process), &plan, now).unwrap();
+        let mut active = Active::retained(Box::new(process), &plan, now);
+        active.activate(now + CONTROL_IDLE).unwrap();
         active.tick(now + Duration::from_millis(2)).unwrap();
         assert_eq!(active.status, Some(23));
         assert!(active.timed_out);
@@ -771,7 +844,8 @@ mod tests {
         let process = FakeProcess::new(counts.clone());
         process._reader.shutdown(std::net::Shutdown::Read).unwrap();
         let now = Instant::now();
-        let mut active = Active::new(Box::new(process), &plan(1024), now).unwrap();
+        let mut active = Active::retained(Box::new(process), &plan(1024), now);
+        active.activate(now + CONTROL_IDLE).unwrap();
         active.input(b"before native close".to_vec()).unwrap();
         active.flush_input().unwrap();
         assert!(active.pipes.input.is_none());
@@ -833,3 +907,7 @@ mod tests {
         assert_eq!(frames[3].data.as_ref().unwrap().bytes, b"fixed stderr");
     }
 }
+
+#[cfg(test)]
+#[path = "owner_launch_tests.rs"]
+mod launch_tests;

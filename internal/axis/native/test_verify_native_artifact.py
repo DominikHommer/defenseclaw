@@ -293,6 +293,8 @@ class VerifierTests(unittest.TestCase):
                 "src/windows_bootstrap.rs",
                 "src/windows_io.rs",
                 "src/windows_transport.rs",
+                "src/windows_token_probe.rs",
+                "src/windows_token_probe_launch.rs",
                 "patches/mxc-owned-windows-psec.patch",
             },
         )
@@ -314,6 +316,16 @@ class VerifierTests(unittest.TestCase):
             self.assertEqual(
                 verify.peer_test_inventory(archive), {"linux::tests::fixed", "windows_future::tests::fixed"}
             )
+
+    def test_retained_launch_test_mapping_and_windows_query_exclusion_are_exact(self):
+        names = {"src/owner_launch_tests.rs", "src/windows_token_probe.rs", "src/windows_token_probe_launch.rs"}
+
+        def read(name):
+            self.assertEqual(name, "build-artifact/source/src/owner_launch_tests.rs")
+            return b"#[test]\nfn fixed() {}\n"
+
+        with patch.object(verify, "SOURCES", names):
+            self.assertEqual(verify.peer_test_inventory(SimpleNamespace(read=read)), {"owner::launch_tests::fixed"})
 
     def test_existing_staging_is_refused_before_metadata_and_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
