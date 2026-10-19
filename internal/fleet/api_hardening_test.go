@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
 )
@@ -256,5 +257,50 @@ func TestSQLiteRotateDeviceKeyRequiresLiveDevice(t *testing.T) {
 	}
 	if k, _ := store.LoadDeviceKey(dev.DeviceID); k != nil {
 		t.Fatal("refused rotation wrote a key")
+	}
+}
+
+// A re-provisioned device (new key, reset flash so its boot counter restarts)
+// is not dropped as a replay after forced re-registration or key rotation,
+// including after a gateway restart.
+func TestNewDeviceKeyStartsNewHeartbeatLineage(t *testing.T) {
+	api, _, mgr, dbPath := hardeningAPI(t, FleetSettings{APIToken: "admin"}, "")
+	if c, _ := registerDeviceVia(t, api, "admin", 1, 1, 21, "", true); c != http.StatusCreated {
+		t.Fatalf("register: %d", c)
+	}
+	id := manager.ComposeID(1, 1, 21)
+	hb := func(m *manager.FleetManager, boot, uptime uint32) bool {
+		return m.ProcessHeartbeat(1, 1, 21, &manager.Heartbeat{DeviceID: 21, BootCounter: boot, UptimeSec: uptime})
+	}
+	if !hb(mgr, 5, 7200) {
+		t.Fatal("setup heartbeat rejected")
+	}
+	if hb(mgr, 1, 10) {
+		t.Fatal("old-lineage replay accepted before re-provisioning")
+	}
+
+	if c, _ := registerDeviceVia(t, api, "admin", 1, 1, 21, `,"force_reregister":true`, true); c != http.StatusOK {
+		t.Fatalf("forced re-registration: %d", c)
+	}
+	restarted, _, mgr2, _ := hardeningAPI(t, FleetSettings{APIToken: "admin"}, dbPath)
+	if d, _ := mgr2.GetDevice(id); d.BootCounter != 0 || d.LastUptime != 0 {
+		t.Fatalf("lineage not reset durably: boot=%d uptime=%d", d.BootCounter, d.LastUptime)
+	}
+	if !hb(mgr2, 1, 10) {
+		t.Fatal("re-provisioned device dropped as a replay after forced re-registration")
+	}
+	if !hb(mgr2, 3, 50) {
+		t.Fatal("heartbeat rejected")
+	}
+
+	restarted.rotationMu.Lock()
+	restarted.deviceKeyRotations = map[uint64]time.Time{}
+	restarted.rotationMu.Unlock()
+	rec := securityTestRequest(restarted, http.MethodPost, fmt.Sprintf("/devices/%d/rotate-key", id), "admin", "{}", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotate-key: %d %s", rec.Code, rec.Body.String())
+	}
+	if !hb(mgr2, 1, 5) {
+		t.Fatal("device dropped as a replay after key rotation")
 	}
 }

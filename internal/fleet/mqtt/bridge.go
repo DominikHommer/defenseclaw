@@ -357,6 +357,15 @@ func (b *Bridge) ClearDecommissioned(fullDeviceID uint64) {
 	b.replayMu.Unlock()
 }
 
+// ResetDeviceLineage forgets the bridge's catch-up freshness baseline for a
+// device whose key changed, so a re-provisioned device that restarts its boot
+// counter still receives OTA catch-up.
+func (b *Bridge) ResetDeviceLineage(fullDeviceID uint64) {
+	b.replayMu.Lock()
+	delete(b.replayState, fullDeviceID)
+	b.replayMu.Unlock()
+}
+
 // SetDeviceKeyStore configures per-device key resolution via a persistent store.
 // When set, the bridge looks up a unique 32-byte key for each device before
 // falling back to the fleet-wide DCLAW_DEVICE_KEY environment variable.

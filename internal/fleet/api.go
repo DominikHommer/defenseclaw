@@ -1477,6 +1477,9 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 
 	a.deviceKeyRotations[deviceID] = time.Now()
 	a.rotationMu.Unlock()
+	if lr, ok := a.bridge.(interface{ ResetDeviceLineage(uint64) }); ok {
+		lr.ResetDeviceLineage(deviceID)
+	}
 	newKeyHex := hex.EncodeToString(newKey)
 
 	if r.TLS == nil {

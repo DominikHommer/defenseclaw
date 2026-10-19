@@ -398,3 +398,41 @@ func TestReplayDoesNotBlockHeartbeatHandler(t *testing.T) {
 	close(release)
 	b.replayPending.Wait()
 }
+
+// After a key change the bridge's catch-up baseline is reset, so a device
+// whose boot counter restarted still gets OTA catch-up.
+func TestResetDeviceLineageRestoresCatchup(t *testing.T) {
+	key := []byte("12345678901234567890123456789012")
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 0, 0)
+	b := newTestBridge(t, newMockClient(), fm, verdict.NewCache(10, nil))
+	quietBridge(b)
+	b.SetHeartbeatRateLimit(0)
+	b.SetKeyProvider(&fixedKeyProvider{key: key})
+	var mu sync.Mutex
+	calls := 0
+	b.SetReplayForDevice(func(context.Context, uint64, uint64, uint16, uint32) (uint32, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return 0, nil
+	})
+	topic := "defenseclaw/1/2/42/heartbeat"
+	b.handleHeartbeat(Message{Topic: topic, Payload: signedHB(topic, key, 42, 7200, 5, 0)})
+	b.replayPending.Wait()
+	full := manager.ComposeID(1, 2, 42)
+	// The API calls this after a new key; the manager-side reset is covered
+	// by the fleet package tests.
+	b.ResetDeviceLineage(full)
+	b.replayMu.Lock()
+	_, kept := b.replayState[full]
+	b.replayMu.Unlock()
+	if kept {
+		t.Fatal("replay baseline kept after lineage reset")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("catch-up calls=%d, want 1", calls)
+	}
+}

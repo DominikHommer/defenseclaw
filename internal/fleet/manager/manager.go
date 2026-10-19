@@ -306,6 +306,10 @@ func (fm *FleetManager) RegisterDeviceWithCredential(tenantID, fleetID uint16, d
 		}
 		updated.HWProfile = hwProfile
 		updated.Capabilities = capabilities
+		// A new credential starts a new heartbeat lineage: a re-provisioned
+		// device (reset flash) restarts its boot counter, and frames signed
+		// with the old key cannot verify anyway.
+		resetHeartbeatLineage(&updated)
 		if err := store.SaveDeviceRegistration(&updated, key, allowRecommission); err != nil {
 			return nil, true, fmt.Errorf("persist device re-registration %d: %w", fullID, err)
 		}
@@ -359,11 +363,24 @@ func (fm *FleetManager) RotateDeviceKey(fullID uint64, key []byte) (*Device, err
 		return nil, ErrDeviceNotFound
 	}
 	updated := *existing
+	resetHeartbeatLineage(&updated)
 	if err := store.RotateDeviceKey(&updated, key); err != nil {
 		return nil, fmt.Errorf("persist device key rotation %d: %w", fullID, err)
 	}
 	*existing = updated
 	return &updated, nil
+}
+
+// resetHeartbeatLineage clears the replay baseline (boot counter, uptime)
+// and per-boot counter baselines when a device receives a new key. Replay
+// protection still holds: frames signed with the previous key fail HMAC.
+func resetHeartbeatLineage(dev *Device) {
+	dev.BootCounter = 0
+	dev.LastUptime = 0
+	dev.PrevDenied = 0
+	dev.PrevAllowed = 0
+	dev.PrevWarned = 0
+	dev.PrevEscalated = 0
 }
 
 func (fm *FleetManager) registerDevice(tenantID, fleetID uint16, deviceID uint32,
