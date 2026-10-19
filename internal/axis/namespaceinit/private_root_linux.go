@@ -293,6 +293,42 @@ func privateRootCopyImage(dirFD int, leaf string, image *PinnedSealedFile) (resu
 }
 
 func privateRootBindDevice(devFD int, device privateDevice) (resultErr error) {
+	// A held parent descriptor still names its parent mount namespace. Reopen
+	// only one of the six fixed host device names in this child's namespace;
+	// the held descriptor remains the exact inode and device authority.
+	roles := [...]struct {
+		leaf         string
+		fd           uintptr
+		major, minor uint32
+	}{
+		{"null", 11, 1, 3}, {"zero", 12, 1, 5}, {"full", 13, 1, 7},
+		{"random", 14, 1, 8}, {"urandom", 15, 1, 9}, {"tty", 16, 5, 0},
+	}
+	matched := false
+	for _, role := range roles {
+		if device.leaf == role.leaf && device.fd == role.fd && device.major == role.major &&
+			device.minor == role.minor && device.file != nil && device.file.Fd() == role.fd {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return errors.New("private root held device role refused")
+	}
+	reified, err := unix.Open("/dev/"+device.leaf, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("fixed device child-namespace reification: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, unix.Close(reified)) }()
+	var source unix.Stat_t
+	var sourceFS unix.Statfs_t
+	if unix.Fstat(reified, &source) != nil || unix.Fstatfs(reified, &sourceFS) != nil ||
+		source.Mode&unix.S_IFMT != unix.S_IFCHR || source.Dev != device.identity.Dev ||
+		source.Ino != device.identity.Ino || source.Rdev != device.identity.Rdev ||
+		unix.Major(source.Rdev) != device.major || unix.Minor(source.Rdev) != device.minor ||
+		uint64(sourceFS.Flags)&uint64(unix.ST_NODEV) != 0 {
+		return errors.New("fixed device child-namespace identity refused")
+	}
 	target, err := unix.Openat(devFD, device.leaf, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0400)
 	if err != nil {
 		return err
@@ -310,9 +346,9 @@ func privateRootBindDevice(devFD int, device privateDevice) (resultErr error) {
 		before.Uid != uint32(os.Getuid()) || before.Gid != uint32(os.Getgid()) || before.Size != 0 {
 		return errors.New("private root device target refused")
 	}
-	tree, err := unix.OpenTree(int(device.fd), "", uint(unix.AT_EMPTY_PATH|unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC))
+	tree, err := unix.OpenTree(reified, "", uint(unix.AT_EMPTY_PATH|unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC))
 	if err != nil {
-		return fmt.Errorf("held device clone: %w", err)
+		return fmt.Errorf("reified fixed device clone: %w", err)
 	}
 	defer func() { resultErr = errors.Join(resultErr, unix.Close(tree)) }()
 	if err := unix.MountSetattr(tree, "", unix.AT_EMPTY_PATH,

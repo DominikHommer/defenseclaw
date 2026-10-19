@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -21,6 +22,16 @@ import (
 
 const nativeInputAgentSecret = "synthetic-agent-key-not-the-judge"
 const nativeInputJudgeSecret = "synthetic-inspection-key-not-the-agent"
+
+type nativeInputPolicyTelemetry struct {
+	nopTelemetry
+	events []audit.SandboxPolicyEvent
+}
+
+func (r *nativeInputPolicyTelemetry) RecordSandboxPolicy(_ context.Context, event audit.SandboxPolicyEvent) error {
+	r.events = append(r.events, event)
+	return nil
+}
 
 func nativeInputForTest(t *testing.T, edit func(*config.Config, *sandboxapi.LLMCredential, *sandboxapi.RunIntent)) (*NativeLaunchInput, error) {
 	t.Helper()
@@ -191,6 +202,8 @@ func TestNativeCreateQualifiedModelInputAndSecretIsolation(t *testing.T) {
 	for _, mode := range []string{"qualified", "missing-capability", "skipped-plan", "wrong-profile", "wrong-offline", "wrong-session", "admin-denied"} {
 		t.Run(mode, func(t *testing.T) {
 			f := nativeTransaction(t)
+			telemetry := &nativeInputPolicyTelemetry{}
+			f.m.tel = newTelemetryGuard(telemetry, f.m.host, f.m.logf, f.m.now)
 			cfg := f.m.config()
 			cfg.Sandbox.LLM = config.OpenShellLLMAuto
 			cfg.LLM.Model, cfg.LLM.APIKey = "openai/synthetic-inspector", nativeInputJudgeSecret
@@ -266,6 +279,18 @@ func TestNativeCreateQualifiedModelInputAndSecretIsolation(t *testing.T) {
 				if (mode == "missing-capability" || mode == "admin-denied") && called {
 					t.Fatal("model refusal reached producer before qualification/credential checks")
 				}
+			}
+			if mode == "admin-denied" {
+				if !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || len(telemetry.events) != 1 {
+					t.Fatal("credential floor refusal did not record exactly one admin violation")
+				}
+				event := telemetry.events[0]
+				if event.Sandbox.Name != f.request.Name || event.Operation != audit.SandboxPolicyApply ||
+					event.Origin != "api" || event.Target != "credentials" || event.Reason != policyReasonAdminRefused || !event.NoChange {
+					t.Fatal("credential floor refusal recorded the wrong policy decision")
+				}
+			} else if len(telemetry.events) != 0 {
+				t.Fatal("non-admin model result recorded an admin refusal")
 			}
 			if cfg.Sandbox.LLM != config.OpenShellLLMAuto || cfg.LLM.APIKey != nativeInputJudgeSecret {
 				t.Fatal("native planning mutated source defaults or judge association")

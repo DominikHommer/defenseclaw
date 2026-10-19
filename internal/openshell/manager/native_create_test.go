@@ -181,6 +181,7 @@ func nativeTransaction(t *testing.T) *nativeTransactionFixture {
 			return nil, nil
 		}},
 		ws: DefaultWorkspace{}, boxes: map[string]*box{}, records: newRecordStore(data), now: time.Now, runCtx: owner, logf: func(string, ...any) {}}
+	f.m.tel = newTelemetryGuard(f.m.opts.Telemetry, f.m.host, f.m.logf, f.m.now)
 	f.request = sandboxapi.CreateRequest{Runtime: "axis", Name: "native-transaction", Harness: "claudecode", Project: t.TempDir(), Copy: true, Safe: true, NoMCP: true}
 	return f
 }
