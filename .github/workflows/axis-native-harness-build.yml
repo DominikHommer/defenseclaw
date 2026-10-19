@@ -89,8 +89,8 @@ jobs:
           roots = {
               'internal/axis/namespaceinit': ['README.md', 'bootstrap_linux.go', 'bootstrap_linux_test.go', 'proof.go', 'proof_test.go'],
               'internal/axis/bridgeproto': ['README.md', 'codec.go', 'fuzz_test.go', 'message.go', 'protocol_test.go', 'state.go'],
-              'internal/axis/bridgeowner': ['README.md', 'owner.go', 'owner_test.go', 'pipe.go', 'pipe_other.go', 'pipe_test.go', 'pipe_windows.go', 'pipe_windows_test.go'],
-              'internal/axis/bridgeprocess': ['README.md', 'image_linux.go', 'image_windows.go', 'image_windows_test.go', 'start.go', 'start_linux.go', 'start_linux_test.go', 'start_other.go', 'start_other_test.go', 'start_test.go'],
+              'internal/axis/bridgeowner': ['README.md', 'owner.go', 'owner_test.go', 'pipe.go', 'pipe_child_overlapped_windows.go', 'pipe_child_overlapped_windows_test.go', 'pipe_other.go', 'pipe_test.go', 'pipe_windows.go', 'pipe_windows_test.go'],
+              'internal/axis/bridgeprocess': ['README.md', 'bootstrap_windows.go', 'image_linux.go', 'image_windows.go', 'image_windows_test.go', 'start.go', 'start_linux.go', 'start_linux_test.go', 'start_other.go', 'start_other_test.go', 'start_test.go', 'start_windows.go', 'start_windows_test.go'],
               'test/e2e/axis/native-peer/harness': ['README.md', 'artifact.go', 'cleanup.go', 'cleanup_test.go', 'harness_test.go', 'lifecycle.go', 'lifecycle_linux.go', 'lifecycle_linux_test.go', 'lifecycle_test.go', 'main.go', 'outer_linux.go', 'outer_linux_test.go', 'platform_linux.go', 'platform_linux_test.go', 'platform_other.go', 'protocol.go', 'version.go', 'version_linux.go', 'version_linux_test.go', 'version_test.go'],
           }
           sources = ['go.mod', 'go.sum', 'LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt', '.github/workflows/axis-native-harness-build.yml']
