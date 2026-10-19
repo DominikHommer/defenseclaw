@@ -688,11 +688,13 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				if check.State != HomeAvailable {
 					reason = check.Reason
 				} else if UnixAgentInstalledWithoutVersion(reason) {
+					// Without a version no hook contract can be selected, so
+					// the agent has no DefenseClaw hook (GAP-0151).
 					report.Unprotected = append(report.Unprotected, UnprotectedAgent{
 						User:      name,
 						UID:       intPointer(account.UID),
 						Connector: conn,
-						Code:      UnprotectedCodeAgentUnprotected,
+						Code:      UnprotectedCodeHookContractUnverified,
 						Reason:    reason + "; DefenseClaw cannot select a hook contract without a version, so " + consequence,
 					})
 				} else if binary, prefix := outsideDiscovery(conn); binary != "" {
@@ -706,6 +708,22 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 					})
 				}
 				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, reason))
+				continue
+			}
+			if refused := unixNewRowVersionRefused(conn, version); refused != "" {
+				consequence := "DefenseClaw installs no hooks for it, so it runs without DefenseClaw hooks"
+				if isMachine {
+					consequence = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)"
+				}
+				report.Unprotected = append(report.Unprotected, UnprotectedAgent{
+					User:      name,
+					UID:       intPointer(account.UID),
+					Connector: conn,
+					Version:   version,
+					Code:      UnprotectedCodeHookContractUnverified,
+					Reason:    refused + "; " + consequence,
+				})
+				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, refused))
 				continue
 			}
 			enabled := true
@@ -1127,6 +1145,27 @@ func unixKnownRowVersionRefused(connectorName, from, to string) string {
 		return "" // nothing verified to keep
 	}
 	return fmt.Sprintf("version %s is not verified against a known hook contract", strings.TrimSpace(to))
+}
+
+// unixNewRowVersionRefused explains why a new row must not be enrolled at
+// version: it resolves to no verified hook contract (below every contract's
+// floor, between contracts, known broken, or not a version DefenseClaw can
+// read). Enrolling it rendered the connector's hooks with no contract, and
+// status and verify then reported the agent as covered (GAP-0151). On the
+// standalone profile a version newer than every tested range resolves to the
+// newest contract (an untested newer version) and is enrolled. A connector
+// with a standalone floor instead of a contract (Kiro) is checked by the
+// guardian's install (validateHookContract). Empty when the row is enrolled.
+func unixNewRowVersionRefused(connectorName, version string) string {
+	if standaloneNotGatedAgentFloor(connectorName) != "" {
+		return ""
+	}
+	resolution := resolveHookContract(connectorName, version)
+	switch resolution.Status {
+	case connector.HookCompatibilityKnown, connector.HookCompatibilityNotGated:
+		return ""
+	}
+	return fmt.Sprintf("version %s is not verified against a known hook contract (%s)", strings.TrimSpace(version), resolution.Reason)
 }
 
 // unixRejectedSurfaces reports the surfaces of one (user, connector) that

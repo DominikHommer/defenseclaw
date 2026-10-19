@@ -1588,6 +1588,11 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 		return
 	}
 	for _, agent := range agents {
+		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified {
+			// No hook contract: the agent runs with no DefenseClaw hook, so
+			// the deployment does not cover it (GAP-0151).
+			result.CoverageComplete = false
+		}
 		// unverified_versions: refuse that nothing enforces fails verify.
 		if agent.Refusal == enterprisehooks.RefusalMissing && result.Action == "verify" {
 			result.AddError(agent.Code, agent.Message())

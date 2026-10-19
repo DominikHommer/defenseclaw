@@ -128,6 +128,13 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	r.Installed = true
 	r.InstalledVersion = record.ProductVersion
+	if env.GOOS == "linux" && record.Channel == ChannelPackage {
+		if duplicates := env.rpmDuplicateRecords(ctx); len(duplicates) > 1 {
+			r.AddWarning(codeVerify, fmt.Sprintf(
+				"the rpm database records %d versions of %s (%s); remove duplicate records with `sudo dnf remove --duplicates %s`, then reinstall the package with `sudo dnf reinstall %s`",
+				len(duplicates), linuxPackageName, strings.Join(duplicates, ", "), linuxPackageName, linuxPackageName))
+		}
+	}
 	// The 1.0.2 loader accepted these literals. Keep an installed deployment
 	// running while pointing the administrator to the candidate-safe form.
 	if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil {

@@ -70,7 +70,8 @@ var unverifiedVersionPattern = regexp.MustCompile(`agent version "([^"]*)"`)
 // describeHookContracts reports every guardian target the guardian could
 // not protect (an unverified hook contract gets its own code) and marks the
 // deployment security-incomplete: an unprotected agent must never look like
-// a healthy deployment. A target refused only because of a path in its
+// a healthy deployment. A target with no verified hook contract also marks
+// coverage incomplete: no DefenseClaw hook is installed for it. A target refused only because of a path in its
 // account's own home is reported for that account without marking the
 // deployment incomplete.
 func (l *lifecycle) describeHookContracts(ctx context.Context) {
@@ -179,6 +180,11 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 		r.AddWarning(codeGuardianTargetFailed, message)
 	}
 	r.SecurityComplete = false
+	if len(unverified) > 0 {
+		// An enrolled agent with no hook contract has no DefenseClaw hook at
+		// all, so the deployment does not cover it (GAP-0151).
+		r.CoverageComplete = false
+	}
 }
 
 // codeAgentSettingsNotRestored names an account whose agent config the
@@ -361,6 +367,11 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		return
 	}
 	for _, agent := range agents {
+		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified {
+			// No hook contract: the agent runs with no DefenseClaw hook, so
+			// the deployment does not cover it (GAP-0151).
+			r.CoverageComplete = false
+		}
 		if agent.Refusal == enterprisehooks.RefusalMissing && l.opts.Action == ActionVerify {
 			r.AddError(agent.Code, agent.Message())
 			continue

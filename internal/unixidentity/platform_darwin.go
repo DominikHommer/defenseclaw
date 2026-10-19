@@ -32,6 +32,10 @@ func GroupNameLookupDefinitive() bool {
 	return !OpenDirectoryOffline(ctx)
 }
 
+// GroupDirectoryUsesWinbind is false on macOS: Open Directory answers for a
+// bound Active Directory domain.
+func GroupDirectoryUsesWinbind() bool { return false }
+
 // QualifiedGroupName has nothing to offer on macOS, whose group names carry
 // no domain.
 func QualifiedGroupName(context.Context, Resolver, string) string { return "" }

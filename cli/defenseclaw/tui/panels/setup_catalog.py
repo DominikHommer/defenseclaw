@@ -31,7 +31,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from defenseclaw.fail_mode import _UPSTREAM_FAIL_OPEN_CONNECTORS
+from defenseclaw.fail_mode import upstream_fail_open
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupWizard
 from defenseclaw.tui.services.setup_state import (
     ConfigSection,
@@ -334,7 +334,7 @@ def _fail_mode_text(cfg: Any) -> str:
     for name in active_connector_names(cfg):
         if callable(enabled) and not enabled(name):
             continue
-        if name.lower() in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+        if upstream_fail_open(cfg, name):
             modes.append("open")
         elif callable(resolver):
             try:
