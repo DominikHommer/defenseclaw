@@ -192,7 +192,7 @@ Generates and persists a replacement 32-byte device HMAC key. The response retur
 POST /api/v1/fleet/token/rotate
 ```
 
-Requires the admin token and returns a new 32-byte token once. Rotation invalidates the old admin token in the running gateway and is rate limited to once per minute. Save the returned token in the gateway's secret source: rotation is currently **in memory only** and does not update `DCLAW_FLEET_API_TOKEN`, so a restart without updating the secret restores the old token. Production token delivery requires HTTPS or a configured trusted TLS proxy.
+Requires the admin token and returns a new 32-byte token once. Rotation invalidates the old admin token and is rate limited to once per minute. The gateway persists a SHA-256 hash of the new token (never the token itself) in the Fleet device database before answering, so a restart does not revive the rotated-out token; if the rotation cannot be persisted the request returns `503` and the current token stays valid. Rotation does not edit `DCLAW_FLEET_API_TOKEN`: after a restart the rotated token remains in effect while the secret source still holds the superseded token. Save the returned token in the secret source; configuring any other new token there replaces the persisted rotation at the next start. Production token delivery requires HTTPS or a configured trusted TLS proxy.
 
 ### Get device details
 

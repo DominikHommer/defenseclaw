@@ -616,7 +616,7 @@ func TestFleetCredentialRotationsRequireAuditBeforeMutation(t *testing.T) {
 	if got := securityTestRequest(api, http.MethodPost, "/token/rotate", "admin-review", "{}", true); got.Code != http.StatusServiceUnavailable {
 		t.Fatalf("token rotation during audit failure status=%d body=%s", got.Code, got.Body.String())
 	}
-	if token := api.currentToken.Load(); token == nil || *token != "admin-review" {
+	if !api.isAdminToken("admin-review") {
 		t.Fatal("admin token changed after audit failure")
 	}
 	if !api.lastTokenRotation.IsZero() {

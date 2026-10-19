@@ -19,8 +19,10 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -103,7 +105,16 @@ type API struct {
 	mux         *http.ServeMux
 	settings    FleetSettings
 
-	currentToken atomic.Pointer[string]
+	// adminTokenHash is SHA-256 of the admin bearer token in effect. Only a
+	// hash is kept so a rotation restored from the durable store after a
+	// restart authenticates exactly like a configured token.
+	adminTokenHash atomic.Pointer[[32]byte]
+	// configTokenHash is SHA-256 of the configured admin token at startup
+	// (nil when unset). A rotation records it as the superseded token.
+	configTokenHash *[32]byte
+	// adminTokenInitErr is set when a durable rotation could not be loaded;
+	// the admin token then fails closed.
+	adminTokenInitErr error
 
 	tenantScopesMu sync.RWMutex
 	tenantScopes   map[string]uint16
@@ -252,8 +263,7 @@ func (a *API) tenantFromRequest(r *http.Request) (uint16, bool) {
 		return 0, false
 	}
 
-	tp := a.currentToken.Load()
-	if tp != nil && *tp != "" && subtle.ConstantTimeCompare([]byte(got), []byte(*tp)) == 1 {
+	if a.isAdminToken(got) {
 		return 0, true
 	}
 
@@ -292,7 +302,7 @@ func (a *API) AuthConfigured() bool {
 	if a == nil {
 		return false
 	}
-	if tp := a.currentToken.Load(); tp != nil && *tp != "" {
+	if a.adminTokenHash.Load() != nil {
 		return true
 	}
 	a.tenantScopesMu.RLock()
@@ -334,16 +344,13 @@ func (a *API) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		// Fallback: check the current (possibly rotated) admin token.
 		if !authenticated {
-			tp := a.currentToken.Load()
-			if tp == nil || *tp == "" {
+			if a.adminTokenHash.Load() == nil {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{
 					"error": "fleet API authentication not configured (set DCLAW_FLEET_API_TOKEN)",
 				})
 				return
 			}
-			if subtle.ConstantTimeCompare([]byte(got), []byte(*tp)) == 1 {
-				authenticated = true
-			}
+			authenticated = a.isAdminToken(got)
 		}
 
 		if !authenticated {
@@ -351,6 +358,56 @@ func (a *API) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r)
+	}
+}
+
+// isAdminToken compares a presented bearer token with the admin token in
+// effect, in constant time over its SHA-256.
+func (a *API) isAdminToken(got string) bool {
+	want := a.adminTokenHash.Load()
+	if want == nil || got == "" {
+		return false
+	}
+	sum := sha256.Sum256([]byte(got))
+	return subtle.ConstantTimeCompare(sum[:], want[:]) == 1
+}
+
+// initAdminToken selects the admin token in effect. A durable rotation
+// overrides the configured token it superseded, so a restart does not revive
+// a rotated-out token. Configuring a different token (for example the one a
+// rotation returned, or a new secret) takes precedence over the rotation.
+func (a *API) initAdminToken(token string) {
+	if token != "" {
+		sum := sha256.Sum256([]byte(token))
+		a.configTokenHash = &sum
+	}
+	effective := a.configTokenHash
+	if ts, ok := a.keyStore.(AdminTokenStore); ok {
+		active, superseded, err := ts.LoadAdminTokenRotation()
+		switch {
+		case err != nil:
+			// Fail closed: the configured token may be one that was rotated out.
+			a.adminTokenInitErr = err
+			log.Printf("[fleet-api] ERROR: cannot load admin token rotation: %v — admin token disabled", err)
+			effective = nil
+		case len(active) == 32:
+			var activeHash [32]byte
+			copy(activeHash[:], active)
+			if a.configTokenHash == nil || bytes.Equal(a.configTokenHash[:], superseded) || *a.configTokenHash == activeHash {
+				effective = &activeHash
+				if a.configTokenHash != nil && *a.configTokenHash != activeHash {
+					log.Printf("[fleet-api] configured fleet API token was rotated out; using the rotated token")
+				}
+			} else {
+				// The operator configured a new token after the rotation.
+				if err := ts.ClearAdminTokenRotation(); err != nil {
+					log.Printf("[fleet-api] WARNING: clear superseded admin token rotation: %v", err)
+				}
+			}
+		}
+	}
+	if effective != nil {
+		a.adminTokenHash.Store(effective)
 	}
 }
 
@@ -364,12 +421,9 @@ func (a *API) registerRoutes() {
 		log.Println("WARNING: fleet API token not configured — fleet API will reject all requests (set fleet.api_token_env in config.yaml or DCLAW_FLEET_API_TOKEN)")
 	}
 
-	a.currentToken.Store(&token)
+	a.initAdminToken(token)
 
 	a.tenantScopes = make(map[string]uint16)
-	if token != "" {
-		a.tenantScopes[token] = 0 // global admin
-	}
 	tenantTokens := a.settings.TenantTokens
 	if tenantTokens == "" {
 		tenantTokens = os.Getenv("DCLAW_FLEET_TENANT_TOKENS")
@@ -377,7 +431,7 @@ func (a *API) registerRoutes() {
 	if tenantTokens != "" {
 		for _, entry := range strings.Split(tenantTokens, ",") {
 			parts := strings.SplitN(strings.TrimSpace(entry), ":", 2)
-			if len(parts) == 2 && parts[0] != "" && parts[0] != token {
+			if len(parts) == 2 && parts[0] != "" && parts[0] != token && !a.isAdminToken(parts[0]) {
 				if tid, err := strconv.ParseUint(parts[1], 10, 16); err == nil && tid != 0 {
 					a.tenantScopes[parts[0]] = uint16(tid)
 				}
@@ -1265,6 +1319,11 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newTokenHex := hex.EncodeToString(newToken)
+	tokenStore, durable := a.keyStore.(AdminTokenStore)
+	if !durable || a.adminTokenInitErr != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "durable token store unavailable"})
+		return
+	}
 	if err := a.requireCredentialAudit(auditTokenRotated, "DCLAW_FLEET_API_TOKEN",
 		"Fleet API token rotation authorized — old token will be invalidated"); err != nil {
 		log.Printf("[fleet-api] token rotation refused because audit failed: %v", err)
@@ -1272,18 +1331,20 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.tenantScopesMu.Lock()
-	for tok, tid := range a.tenantScopes {
-		if tid == 0 {
-			delete(a.tenantScopes, tok)
-		}
+	newHash := sha256.Sum256([]byte(newTokenHex))
+	var superseded []byte
+	if a.configTokenHash != nil {
+		superseded = a.configTokenHash[:]
 	}
-	a.tenantScopes[newTokenHex] = 0
-	a.tenantScopesMu.Unlock()
+	if err := tokenStore.SaveAdminTokenRotation(newHash[:], superseded); err != nil {
+		log.Printf("[fleet-api] token rotation refused because it could not be persisted: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "durable token store unavailable"})
+		return
+	}
 
-	a.currentToken.Store(&newTokenHex)
+	a.adminTokenHash.Store(&newHash)
 	a.lastTokenRotation = time.Now()
-	log.Printf("INFO: fleet API token rotated (in-memory only, env var DCLAW_FLEET_API_TOKEN not updated)")
+	log.Printf("INFO: fleet API token rotated and persisted; the configured DCLAW_FLEET_API_TOKEN is superseded")
 
 	if r.TLS == nil {
 		w.Header().Set("X-Security-Warning", "token-delivered-over-plaintext")

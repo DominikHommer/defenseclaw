@@ -174,6 +174,71 @@ func createTable(db *sql.DB) error {
 		return fmt.Errorf("create decommissioned_devices table: %w", err)
 	}
 
+	// Durable admin-token rotation: SHA-256 of the token in effect after the
+	// last rotation and of the configured token it superseded. Only hashes
+	// are stored.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS fleet_admin_token (
+			id              INTEGER PRIMARY KEY CHECK (id = 1),
+			active_hash     TEXT NOT NULL,
+			superseded_hash TEXT NOT NULL DEFAULT '',
+			rotated_at      TEXT NOT NULL
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create fleet_admin_token table: %w", err)
+	}
+
+	return nil
+}
+
+// LoadAdminTokenRotation returns the persisted admin-token rotation, or nil
+// hashes when the token has never been rotated.
+func (s *SQLiteStore) LoadAdminTokenRotation() (active, superseded []byte, err error) {
+	var activeHex, supersededHex string
+	err = s.db.QueryRow(`SELECT active_hash, superseded_hash FROM fleet_admin_token WHERE id = 1`).Scan(&activeHex, &supersededHex)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("load admin token rotation: %w", err)
+	}
+	if active, err = hex.DecodeString(activeHex); err != nil || len(active) != 32 {
+		return nil, nil, fmt.Errorf("load admin token rotation: invalid active hash")
+	}
+	if supersededHex != "" {
+		if superseded, err = hex.DecodeString(supersededHex); err != nil || len(superseded) != 32 {
+			return nil, nil, fmt.Errorf("load admin token rotation: invalid superseded hash")
+		}
+	}
+	return active, superseded, nil
+}
+
+// SaveAdminTokenRotation durably records a rotated admin token hash.
+func (s *SQLiteStore) SaveAdminTokenRotation(active, superseded []byte) error {
+	if len(active) != 32 || (superseded != nil && len(superseded) != 32) {
+		return fmt.Errorf("admin token hashes must be 32 bytes")
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO fleet_admin_token (id, active_hash, superseded_hash, rotated_at)
+		VALUES (1, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			active_hash     = excluded.active_hash,
+			superseded_hash = excluded.superseded_hash,
+			rotated_at      = excluded.rotated_at
+	`, hex.EncodeToString(active), hex.EncodeToString(superseded), time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("save admin token rotation: %w", err)
+	}
+	return nil
+}
+
+// ClearAdminTokenRotation forgets a persisted rotation, used when the
+// operator configures a new admin token.
+func (s *SQLiteStore) ClearAdminTokenRotation() error {
+	if _, err := s.db.Exec(`DELETE FROM fleet_admin_token`); err != nil {
+		return fmt.Errorf("clear admin token rotation: %w", err)
+	}
 	return nil
 }
 
