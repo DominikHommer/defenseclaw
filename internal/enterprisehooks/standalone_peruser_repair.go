@@ -242,7 +242,7 @@ func verifyStandaloneHookRuntime(conn connector.Connector, setupOpts connector.S
 	if err := verifyHookRuntimeToken(conn, opts); err != nil {
 		return err
 	}
-	return verifyHookRuntimeRecords(hookDir, name, renderedHookFailMode(conn, opts, expected.HookFailMode))
+	return verifyHookRuntimeRecords(hookDir, name, connector.CapableHookFailMode(opts, conn, expected.HookFailMode))
 }
 
 // verifyHookRuntimeToken requires the connector-scoped token file the hook

@@ -39,8 +39,10 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winsession"
@@ -433,6 +435,9 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	if err := validateEnterpriseHookManagedRuntime(); err != nil {
 		return enterpriseHooksInstallError(cmd, err)
 	}
+	if err := enterpriseHookInstallConnectorPublished(cfg, enterpriseHookConnector); err != nil {
+		return enterpriseHooksInstallError(cmd, err)
+	}
 	target, err := resolveEnterpriseHookTarget()
 	if err != nil {
 		return enterpriseHooksInstallError(cmd, err)
@@ -512,6 +517,30 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s hooks installed for %s\n", Style("✓", "fg=green", "bold"), result.Connector, result.UserHome)
 	return nil
+}
+
+// enterpriseHookInstallConnectorPublished refuses, on a standalone managed
+// deployment, a hook install for a connector the installed config does not
+// publish (enterprisepolicy.StandaloneConnectorPublished): its hook would
+// get no usable answer from the gateway, so every call of that agent would
+// be blocked with a message that does not name the cause (rel-1-0-3
+// GAP-0235). Other deployments are unchanged.
+func enterpriseHookInstallConnectorPublished(cfg *config.Config, name string) error {
+	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(name) == "" {
+		return nil
+	}
+	if enterprisepolicy.StandaloneConnectorPublished(cfg, name) {
+		return nil
+	}
+	published := enterprisepolicy.StandaloneConnectors(cfg)
+	list := "none"
+	if len(published) > 0 {
+		list = strings.Join(published, ", ")
+	}
+	return fmt.Errorf("enterprise hooks install: connector %q is not enabled by this computer's DefenseClaw configuration "+
+		"(enabled: %s), so its hooks would block every call; add it under guardrail.connectors in the "+
+		"administrator config and run ensure, which installs its hooks for every enrolled account",
+		config.NormalizeConnectorName(name), list)
 }
 
 func enterpriseHooksInstallError(cmd *cobra.Command, err error) error {

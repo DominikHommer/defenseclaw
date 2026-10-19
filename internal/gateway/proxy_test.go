@@ -3983,7 +3983,7 @@ func TestSwitchConnectorLocked_UnknownConnectorIgnored(t *testing.T) {
 	}
 }
 
-func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
+func TestSwitchConnectorLocked(t *testing.T) {
 	if !connector.OpenClawExtensionAvailable() {
 		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
 	}
@@ -4009,101 +4009,33 @@ func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
 		inspector: NewGuardrailInspector("local", nil, nil),
 	}
 
-	cfg := map[string]any{"connector": "openclaw"}
-	p.applyRuntime(cfg)
+	p.rtMu.Lock()
+	p.switchConnectorLocked("openclaw")
+	p.rtMu.Unlock()
 
 	if p.connector.Name() != "openclaw" {
-		t.Errorf("connector after applyRuntime = %q, want openclaw", p.connector.Name())
+		t.Errorf("connector after the switch = %q, want openclaw", p.connector.Name())
 	}
 }
 
-// TestApplyRuntime_HILTHotReload pins the legacy map-apply contract that
-// HILT fields are routed into the inspector via SetHILTConfig. Production
-// reloads now flow from config.yaml through ApplyGuardrailConfig.
-func TestApplyRuntime_HILTHotReload(t *testing.T) {
-	dir := t.TempDir()
-	reg := connector.NewDefaultRegistry()
-	codexConn, ok := reg.Get("codex")
-	if !ok {
-		t.Skip("codex connector not registered in this build")
-	}
-
-	insp := newMockInspector()
-	captured := []hiltCall{}
-	mu := sync.Mutex{}
+// TestApplyGuardrailConfigForwardsHILT pins that a config.yaml reload routes
+// the HILT fields into the inspector (SetHILTConfig).
+func TestApplyGuardrailConfigForwardsHILT(t *testing.T) {
+	var captured []hiltCall
 	wrapper := &hiltCapturingInspector{
-		ContentInspector: insp,
+		ContentInspector: newMockInspector(),
 		onSetHILT: func(enabled bool, minSeverity string) {
-			mu.Lock()
-			defer mu.Unlock()
 			captured = append(captured, hiltCall{enabled: enabled, minSeverity: minSeverity})
 		},
 	}
-
-	p := &GuardrailProxy{
-		connector: codexConn,
-		registry:  reg,
-		setupOpts: connector.SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"},
-		health:    NewSidecarHealth(),
-		inspector: wrapper,
+	p := &GuardrailProxy{health: NewSidecarHealth(), inspector: wrapper}
+	cfg := &config.GuardrailConfig{Mode: "observe"}
+	cfg.HILT.Enabled = true
+	cfg.HILT.MinSeverity = "HIGH"
+	p.ApplyGuardrailConfig(cfg)
+	if len(captured) != 1 || !captured[0].enabled || captured[0].minSeverity != "HIGH" {
+		t.Fatalf("forwarded HILT = %+v, want one {enabled=true minSeverity=HIGH}", captured)
 	}
-
-	t.Run("bool true is forwarded with normalized min severity", func(t *testing.T) {
-		mu.Lock()
-		captured = captured[:0]
-		mu.Unlock()
-		p.applyRuntime(map[string]any{
-			"hilt_enabled":      true,
-			"hilt_min_severity": "high",
-		})
-		mu.Lock()
-		defer mu.Unlock()
-		if len(captured) != 1 {
-			t.Fatalf("expected SetHILTConfig to fire once, got %d calls", len(captured))
-		}
-		if !captured[0].enabled || captured[0].minSeverity != "high" {
-			t.Fatalf("forwarded HILT = %+v, want {enabled=true minSeverity=high}", captured[0])
-		}
-	})
-
-	t.Run("string true accepted for forward compatibility", func(t *testing.T) {
-		mu.Lock()
-		captured = captured[:0]
-		mu.Unlock()
-		p.applyRuntime(map[string]any{
-			"hilt_enabled":      "true",
-			"hilt_min_severity": "MEDIUM",
-		})
-		mu.Lock()
-		defer mu.Unlock()
-		if len(captured) != 1 || !captured[0].enabled || captured[0].minSeverity != "MEDIUM" {
-			t.Fatalf("forwarded HILT = %+v, want {enabled=true minSeverity=MEDIUM}", captured)
-		}
-	})
-
-	t.Run("absent hilt_enabled does not call SetHILTConfig", func(t *testing.T) {
-		mu.Lock()
-		captured = captured[:0]
-		mu.Unlock()
-		p.applyRuntime(map[string]any{"mode": "observe"})
-		mu.Lock()
-		defer mu.Unlock()
-		if len(captured) != 0 {
-			t.Fatalf("SetHILTConfig should not fire when hilt_enabled is absent, got %d calls", len(captured))
-		}
-	})
-
-	t.Run("malformed hilt_enabled value is treated as absent", func(t *testing.T) {
-		mu.Lock()
-		captured = captured[:0]
-		mu.Unlock()
-		p.applyRuntime(map[string]any{"hilt_enabled": 42})
-		mu.Lock()
-		defer mu.Unlock()
-		if len(captured) != 0 {
-			t.Fatalf("SetHILTConfig must reject non-bool/non-string hilt_enabled, got %d calls", len(captured))
-		}
-	})
 }
 
 type hiltCall struct {

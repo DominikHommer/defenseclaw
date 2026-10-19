@@ -387,7 +387,9 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 				inspector:    NewGuardrailInspector("local", nil, nil),
 			}
 
-			p.applyRuntime(map[string]any{"connector": target})
+			p.rtMu.Lock()
+			p.switchConnectorLocked(target)
+			p.rtMu.Unlock()
 			if !connector.ConnectorSupportedOnHostOS(target) {
 				if p.connector.Name() != "codex" {
 					t.Fatalf("unsupported runtime switch changed active connector to %q", p.connector.Name())
@@ -396,7 +398,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 			}
 
 			if p.connector.Name() != target {
-				t.Errorf("applyRuntime({connector=%q}) -> %q",
+				t.Errorf("switchConnectorLocked(%q) -> %q",
 					target, p.connector.Name())
 			}
 		})

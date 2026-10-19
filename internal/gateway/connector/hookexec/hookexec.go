@@ -434,6 +434,7 @@ func Run(ctx context.Context, opts Options) int {
 		overflow = true
 	}
 	if overflow {
+		opts.Event = managedHermesPrefixEvent(opts, sp, payload)
 		return handleOversized(opts, sp, failMode, payload)
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.Connector), "codex") {
@@ -456,7 +457,11 @@ func Run(ctx context.Context, opts Options) int {
 			return failResponse(opts, sp, "open", "missing or unsupported Antigravity hook event binding")
 		}
 	} else {
+		bound := strings.TrimSpace(opts.Event) != ""
 		opts.Event = resolveHookEvent(opts.Event, payload)
+		if !bound && hermesBlocksFailures(opts, sp) && hookEventFieldsConflict(payload) {
+			return failHermesEventConflict(opts, sp)
+		}
 	}
 	if opts.Connector == "copilot" && !validCopilotEventForOptions(opts) {
 		// Copilot's official camelCase stdin bodies do not identify the
@@ -1235,6 +1240,16 @@ func decideHermes(opts Options, sp spec, fields map[string]json.RawMessage) int 
 	}
 	rawOutput, present := fields[sp.outputField]
 	if !present || strings.TrimSpace(string(rawOutput)) == "null" {
+		if hermesToolCallEvent(opts.Event) && !managedHermesAnswerUsable(action) {
+			// A block without its directive, or an answer with no usable
+			// verdict, would let the call run: a hook that fails closed
+			// blocks it (hermesFailClosed), one in fail mode open lets it
+			// run and logs that it did.
+			if action == "block" {
+				return failResponse(opts, sp, managedDecisionFailMode(opts), "Hermes gateway block without a hook_output directive")
+			}
+			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid or missing action in Hermes gateway response")
+		}
 		return 0
 	}
 	var output map[string]json.RawMessage
@@ -1321,19 +1336,20 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	return emitHookResult(opts, sp, sp.openAllow)
 }
 
+// handleUnavailableHome answers a per-user hook whose DefenseClaw home is
+// missing or disabled: an operator-requested no-op unless strict
+// availability is set. Run blocks a managed hook's missing or disabled home
+// itself, so a managed hook never gets here.
 func handleUnavailableHome(opts Options, sp spec, reason string) int {
-	closes := !sp.failOpenOnly && (opts.StrictAvailability || opts.ManagedEnterprise)
+	closes := !sp.failOpenOnly && opts.StrictAvailability
 	if closes && failClosedStopEvent(opts, sp) {
 		return allowFailClosedStop(opts, sp, reason, "transport")
-	}
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
-		return code
 	}
 	if closes {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
 		} else {
-			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (strict availability)\n", reason, sp.subject)
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
@@ -1362,6 +1378,9 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 		return failManagedStandaloneClosed(opts, sp, sp.oversizedClosed, "oversized", "stdin body exceeded cap")
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
+	if code, handled := hermesFailClosed(opts, sp, "oversized", "stdin body exceeded cap"); handled {
+		return code
+	}
 	if code, handled := managedCopilotFailClosed(opts, sp, "stdin body exceeded cap"); handled {
 		return code
 	}
@@ -1493,17 +1512,37 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	if strings.HasPrefix(reason, foreignListenerReasonPrefix) && !opts.ManagedEnterprise {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + reason + "."
 	}
-	if reason != "gateway unreachable" || opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return ""
 	}
-	return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": the DefenseClaw gateway is not running or " +
-		"not answering (fail mode closed). Check it with `defenseclaw-gateway status`, start it with " +
-		"`defenseclaw-gateway start`, then try again."
+	lead := "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": "
+	switch {
+	case reason == "gateway unreachable":
+		return lead + "the DefenseClaw gateway is not running or not answering (fail mode closed). " +
+			"Check it with `defenseclaw-gateway status`, start it with `defenseclaw-gateway start`, then try again."
+	case strings.HasPrefix(reason, coldStartFailedReason) && fileExists(filepath.Join(opts.Home, gatewayStoppedMarker)):
+		// The hook does not start a gateway the user stopped (GAP-0486:
+		// the agent showed only the cold-start error).
+		return lead + "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop` (fail mode closed). " +
+			"Start it with `defenseclaw-gateway start`, then try again."
+	case strings.HasPrefix(reason, coldStartFailedReason):
+		return lead + "the DefenseClaw gateway is not running and could not be started (fail mode closed). " +
+			"Run `defenseclaw-gateway start` to see why, then try again."
+	}
+	return ""
 }
+
+// gatewayStoppedMarker is the file `defenseclaw-gateway stop` leaves in the
+// data directory; while it exists hooks do not start the gateway
+// (internal/cli gatewayStoppedMarkerName).
+const gatewayStoppedMarker = "gateway.stopped"
 
 // emitPerUserGatewayDown renders perUserGatewayDownText in each connector's
 // fail-closed shape; connectors without a structured body keep theirs.
 func emitPerUserGatewayDown(opts Options, sp spec, text string) int {
+	if sp.connector == "claudecode" && !opts.SecureClient {
+		return emitPerUserClaudeGatewayDown(opts, text)
+	}
 	result := sp.unreachableStrict
 	if sp.connector == "codex" {
 		if result.exit == 0 {
@@ -1688,6 +1727,9 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 		return failManagedStandaloneClosed(opts, sp, sp.responseClosed, "response", reason)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
+	if code, handled := hermesFailClosed(opts, sp, "response", reason); handled {
+		return code
+	}
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
@@ -1713,7 +1755,14 @@ func responseFailureReason(reason string) string {
 // hooks fail open; a managed hook still owns Copilot's native structured
 // deny for preToolUse and permissionRequest and uses it. Other events cannot
 // block and keep the fail-open result.
+//
+// The same transport failure paths give a Hermes tool call that fails closed
+// its block (hermesFailClosed): Hermes too has no fail-closed hook contract
+// and blocks only through its native directive.
 func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) {
+	if sp.connector == "hermes" {
+		return hermesFailClosed(opts, sp, "transport", reason)
+	}
 	if !opts.ManagedEnterprise || sp.connector != "copilot" {
 		return 0, false
 	}
@@ -1975,8 +2024,31 @@ func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer
 	return emitHookResult(opts, sp, result)
 }
 
+// emitPerUserClaudeGatewayDown delivers perUserGatewayDownText to Claude
+// Code. Claude Code shows a failed hook's stderr after the hook's whole
+// command line, and on Windows that line is the cmd.exe launcher guard with
+// its own "launcher is missing" sentence, so the user read reinstall advice
+// for a launcher that exists (rel-1-0-2 GAP-0486). A prompt or tool call
+// gets the structured block of a policy verdict, and a session start (which
+// cannot be blocked) a systemMessage, so only the text shows. A session end
+// or subagent start cannot be blocked either and has nothing to show: it
+// exits 0 with no output (as Codex's do, emitCodexBlock), so Claude Code
+// does not print that hook's command line after the prompt's block
+// (rel-1-0-3 GAP-0203). The failure is in hook-failures.jsonl.
+func emitPerUserClaudeGatewayDown(opts Options, text string) int {
+	switch strings.TrimSpace(opts.Event) {
+	case "SessionStart":
+		fmt.Fprintln(opts.Stdout, `{"systemMessage":`+mustJSONString(text)+`}`)
+		return 0
+	case "SessionEnd", "SubagentStart":
+		return 0
+	}
+	return emitManagedClaudeBlock(opts, text)
+}
+
 // emitManagedClaudeBlock uses the same structured block shapes as a gateway
-// policy verdict, so Claude Code shows the reason without a hook-command prefix.
+// policy verdict, so Claude Code shows the reason without a hook-command
+// prefix (managed hooks, and per-user hooks whose gateway is down).
 func emitManagedClaudeBlock(opts Options, reason string) int {
 	encoded := mustJSONString(reason)
 	switch opts.Event {
@@ -2006,6 +2078,9 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	switch {
 	case layer == "oversized":
 		cause, advice = "it is too large for DefenseClaw to inspect", "Make it smaller and try again."
+	case layer == "input":
+		cause, advice = "its hook input names two different events, so DefenseClaw cannot tell what to check",
+			"Try again; if this continues, contact your administrator."
 	case layer == "response":
 		cause, advice = "the DefenseClaw gateway returned an answer DefenseClaw could not use",
 			"Try again; if this continues, contact your administrator."
@@ -2071,7 +2146,7 @@ func hookEventSubject(event string) string {
 	case "userpromptsubmit", "beforesubmitprompt", "userpromptsubmitted", "userprompttransformed":
 		return "prompt"
 	case "pretooluse", "permissionrequest", "beforeshellexecution", "beforemcpexecution",
-		"beforereadfile", "beforetabfileread", "tool.execute.before":
+		"beforereadfile", "beforetabfileread", "tool.execute.before", "pre_tool_call":
 		return "tool call"
 	case "posttooluse", "posttoolusefailure", "aftershellexecution", "aftermcpexecution",
 		"afterfileedit", "tool.execute.after":
@@ -2289,15 +2364,37 @@ func resolveHookEvent(explicit string, payload []byte) string {
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return ""
 	}
-	hookEventName := strings.TrimSpace(envelope.HookEventName)
-	event := strings.TrimSpace(envelope.Event)
+	event, _ := pickHookEvent(envelope.HookEventName, envelope.Event)
+	return event
+}
+
+// pickHookEvent names the event of an invocation whose command binds none
+// from the payload's two top-level fields: either one alone, or both when
+// they agree. Two fields that name different events name no event, and
+// conflict is true.
+func pickHookEvent(hookEventName, event string) (resolved string, conflict bool) {
+	hookEventName, event = strings.TrimSpace(hookEventName), strings.TrimSpace(event)
 	if hookEventName != "" && event != "" && !strings.EqualFold(hookEventName, event) {
-		return ""
+		return "", true
 	}
 	if hookEventName != "" {
-		return hookEventName
+		return hookEventName, false
 	}
-	return event
+	return event, false
+}
+
+// hookEventFieldsConflict reports a payload whose top-level hook_event_name
+// and event fields name different events (pickHookEvent).
+func hookEventFieldsConflict(payload []byte) bool {
+	var envelope struct {
+		HookEventName string `json:"hook_event_name"`
+		Event         string `json:"event"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return false
+	}
+	_, conflict := pickHookEvent(envelope.HookEventName, envelope.Event)
+	return conflict
 }
 
 func validateCodexInvocationBinding(

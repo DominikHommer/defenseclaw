@@ -1486,6 +1486,9 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // (see templateData.FailMode and defaultHookFailMode for the
 // contract):
 //
+//  0. A managed standalone render's "closed" stays closed: outside Secure
+//     Client the managed config resolves every connector closed
+//     (config.ManagedHooksFailClosed).
 //  1. Cursor observe mode always resolves to "open"; host failClosed and
 //     adapter transport failures must not enforce outside action mode.
 //  2. Otherwise, an EXPLICIT operator value in opts.HookFailMode — either
@@ -1501,9 +1504,10 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //  4. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
-//     vendor fail-closed fields. The per-user Hermes shell hook is the
-//     exception (hookBlocksItsOwnFailures): it blocks through Hermes' block
-//     directive, so an unset or closed fail mode stays closed.
+//     vendor fail-closed fields, except in a managed standalone render,
+//     whose hooks block through the native deny, and for the per-user
+//     Hermes hook, which blocks through Hermes' block directive
+//     (CapableHookFailMode, hookBlocksItsOwnFailures).
 //
 // Transport-layer failures (gateway unreachable / timeout / 5xx) follow
 // FailMode too. DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
@@ -1537,13 +1541,7 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 	if owner, ok := c.(HookScriptOwner); ok {
 		render.extras = owner.HookScriptNames(opts)
 	}
-	render.failMode = resolveHookFailMode(opts, c)
-	if hp, ok := c.(HookCapabilityProvider); ok {
-		caps := hp.HookCapabilities(opts)
-		if render.failMode == "closed" && !caps.SupportsFailClosed && !hookBlocksItsOwnFailures(opts, c) {
-			render.failMode = "open"
-		}
-	}
+	render.failMode = CapableHookFailMode(opts, c, resolveHookFailMode(opts, c))
 	render.token = opts.HookAPIToken
 	render.scopedToken = opts.HookAPITokenScoped
 	if strings.TrimSpace(render.token) == "" {
@@ -1568,6 +1566,29 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 	return render
 }
 
+// CapableHookFailMode is the fail mode conn's rendered hooks record for the
+// resolved mode: open when mode is closed but the connector's hook surface
+// cannot fail closed (SupportsFailClosed). A managed standalone render keeps
+// closed (managedStandaloneRender): its hooks block a call they cannot check
+// through the connector's native deny, as the owner rule for managed
+// deployments outside Secure Client requires (config.ManagedHooksFailClosed).
+// The per-user Hermes hook keeps closed too (hookBlocksItsOwnFailures).
+func CapableHookFailMode(opts SetupOpts, conn Connector, mode string) string {
+	if mode != "closed" || managedStandaloneRender(opts) || hookBlocksItsOwnFailures(opts, conn) {
+		return mode
+	}
+	if provider, ok := conn.(HookCapabilityProvider); ok && !provider.HookCapabilities(opts).SupportsFailClosed {
+		return "open"
+	}
+	return mode
+}
+
+// managedStandaloneRender reports a managed render outside the Secure Client
+// profile (shellHookSecureClientProfile): a standalone install's hooks.
+func managedStandaloneRender(opts SetupOpts) bool {
+	return opts.ManagedEnterprise && !shellHookSecureClientProfile(opts)
+}
+
 // resolveHookFailMode picks the delivery/response fail mode for a hook render
 // given the operator's setup opts and the connector identity.
 // The explicit string in opts.HookFailMode normally wins; Cursor first applies
@@ -1576,6 +1597,12 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 // "closed" when the operator has set the matching enforcement flag for
 // codex / claudecode (avarice F-0681).
 func resolveHookFailMode(opts SetupOpts, c Connector) string {
+	if managedStandaloneRender(opts) && strings.EqualFold(strings.TrimSpace(opts.HookFailMode), "closed") {
+		// A managed standalone config resolves every connector closed
+		// (config.ManagedHooksFailClosed); Cursor's observe boundary does
+		// not reopen it. Secure Client keeps the Cursor rule below.
+		return "closed"
+	}
 	if c != nil && c.Name() == "cursor" {
 		// Cursor mode owns its availability posture: action registrations are
 		// fail-closed and observe registrations are fail-open. This prevents a
@@ -1767,11 +1794,7 @@ func failedSetupHookPlaceholder(vendorLabel string) string {
 // HookFailClosed reports whether conn blocks agent calls when its gateway is
 // unavailable under opts.
 func HookFailClosed(opts SetupOpts, conn Connector) bool {
-	if provider, ok := conn.(HookCapabilityProvider); ok && !provider.HookCapabilities(opts).SupportsFailClosed &&
-		!hookBlocksItsOwnFailures(opts, conn) {
-		return false
-	}
-	return resolveHookFailMode(opts, conn) == "closed"
+	return CapableHookFailMode(opts, conn, resolveHookFailMode(opts, conn)) == "closed"
 }
 
 // disabledHookTombstone is the body writeDisabledHookTombstone writes.

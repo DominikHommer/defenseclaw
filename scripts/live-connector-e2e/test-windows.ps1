@@ -4930,8 +4930,8 @@ threading.Event().wait()
         'OpenCode setup loads the managed plugin while convergence is waiting and cleans up a failed setup child'
     Assert-True ($gatewayHookReadiness -match "'--connector', 'hermes', '--event', 'pre_tool_call'" -and
         $gatewayHookReadiness -match '\$probeID ''pre_tool_call''' -and
-        $gatewayHookReadiness -match 'canonical fail-open allow decision') `
-        'Hermes readiness uses its official event name and forced fail-open effective posture'
+        $gatewayHookReadiness -match 'canonical allow decision') `
+        'Hermes readiness uses its official event name and a canonical allow decision'
     Assert-True ($gatewayHookReadiness -match '\$toolDecision\.action -cne ''allow''' -and
         $gatewayHookReadiness -match '\$toolDecision\.raw_action -cne ''allow''' -and
         $gatewayHookReadiness -match '\$toolDecision\.would_block') `

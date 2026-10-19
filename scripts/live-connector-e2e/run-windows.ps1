@@ -5180,10 +5180,10 @@ function Wait-GatewayHookReady([int]$Timeout = 90) {
                 if ($result.ExitCode -ne 0 -or $null -eq $decision -or
                     $decision.action -cne 'allow' -or $decision.raw_action -cne 'allow' -or
                     $decision.would_block) {
-                    throw 'pre_tool_call readiness did not produce a canonical fail-open allow decision'
+                    throw 'pre_tool_call readiness did not produce a canonical allow decision'
                 }
                 Write-Result 'gateway-hook-readiness' pass `
-                    "stable native pre_tool_call allow after $attempt probe(s); effective-failure=fail-open"
+                    "stable native pre_tool_call allow after $attempt probe(s)"
                 return
             } catch {
                 $lastError = Protect-LogText $_.Exception.Message
@@ -5508,7 +5508,7 @@ function Get-ConnectorHookLabel {
         'copilot' { 'Copilot hooks' }
         'cursor' { 'Cursor hooks' }
         'devin' { 'Devin hooks' }
-        'hermes' { 'Hermes hooks (fail-open)' }
+        'hermes' { 'Hermes hooks' }
         'antigravity' { 'Antigravity hooks' }
         'opencode' { 'OpenCode hooks' }
     }
@@ -6955,9 +6955,8 @@ function Assert-DoctorWindowsHookRegistration {
     if ($Connector -eq 'hermes' -and
         ($check.detail -notmatch 'hook_entries=23' -or
          $check.detail -notmatch 'allowlist_entries=23' -or
-         $check.detail -notmatch 'no Hermes host is running' -or
-         $label -notmatch 'fail-open')) {
-        throw "Doctor did not expose Hermes's exact event inventory and forced fail-open posture: $($check.detail)"
+         $check.detail -notmatch 'no Hermes host is running')) {
+        throw "Doctor did not expose Hermes's exact event inventory: $($check.detail)"
     }
     if ($Connector -eq 'devin' -and
         ($check.detail -notmatch 'entries=8' -or

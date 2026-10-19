@@ -128,7 +128,10 @@ readonly FAIL_MODE
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+# A managed hook takes only its rendered fail mode, never one from the
+# environment (the shared inspect hooks do the same).
+FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{if .Managed}}
+FAIL_MODE="{{.FailMode}}"{{end}}
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="cursor"
 DEFENSECLAW_HOOK_NAME="cursor-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
@@ -305,7 +308,10 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-{{if .Sandbox}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{if or .Sandbox (not .SecureClient)}}{{/* Every DefenseClaw verdict names its action: an empty or unknown one is no
+verdict, never an allow (a sandbox workload may have shaped it; a hook in fail
+mode closed blocks on it, open lets the call run: rel-1-0-3 GAP-0037, GAP-0153;
+a Secure Client render keeps its own contract). */}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 case "$ACTION" in
@@ -313,7 +319,7 @@ case "$ACTION" in
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
 if [ "$ACTION" = "block" ]; then
-  # Exit 2 denies whatever the object says; the event-native object carries
+{{if or .Sandbox .Managed}}  # Exit 2 denies whatever the object says; the event-native object carries
   # DefenseClaw's reason when the gateway rendered one.
   if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
     echo "$OUTPUT"
@@ -321,7 +327,16 @@ if [ "$ACTION" = "block" ]; then
     emit_cursor_deny "Blocked by DefenseClaw Cursor policy."
   fi
   exit 2
-fi
+{{else}}  # A per-user hook keeps the exit-0 contract, where the object decides: a
+  # block whose object does not deny is answered with DefenseClaw's own deny.
+  if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ] &&
+    echo "$OUTPUT" | _dc_jq -e '.permission == "deny" or .continue == false' >/dev/null 2>&1; then
+    echo "$OUTPUT"
+  else
+    emit_cursor_deny "Blocked by DefenseClaw Cursor policy."
+  fi
+  exit 0
+{{end}}fi
 {{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 else
