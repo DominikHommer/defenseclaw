@@ -369,8 +369,11 @@ class TestNoSilentFFIFallback:
     def test_socket_error_falls_back_with_opt_in(self, ffi, _evaluate):
         backend = _SocketBackend("/nonexistent/dclaw.sock")
         ec = _bare_connector(backend=backend, allow_ffi=True)
-        v = ec.evaluate(tool_name="read_file", arguments={"path": "/tmp/x"})
+        # Skip the liveness probe so the socket error happens inside evaluate().
+        with patch.object(EdgeConnector, "_check_backend", lambda self: None):
+            v = ec.evaluate(tool_name="read_file", arguments={"path": "/tmp/x"})
         ffi.assert_called_once()
+        assert isinstance(ec._backend, _FFIBackend)
         assert v.blocked is False
 
     @patch("generic_hook._FFIBackend.__init__", return_value=None)
