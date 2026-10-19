@@ -72,6 +72,15 @@ merged policy also lacks the explicit-request subset used for unmatched
 runtime or artifact capability and does not check current publication itself;
 the future controller must use the owner's launch gate and complete admission.
 
+The complete affected Windows backend race suite passed 58 tests/subtests with
+zero failures or skips (9.362 seconds); Windows vet and Linux compilation/vet
+also passed. The fresh [three-platform host matrix](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39179169402)
+at **2d679e73** then passed full workspace/backend race suites and vet on Ubuntu,
+Windows and macOS. Its Linux case exercises the actual policy-derived
+sanitizer, mask/unmask selection, full session association, held assets,
+original-source preservation and cleanup. It starts no sandbox; complete
+workspace policy translation and runtime qualification remain unavailable.
+
 The native Windows filesystem custody regression passed under the race
 detector, without executing an image, child process or sandbox:
 

@@ -48,6 +48,17 @@ the separate baseline commit/tree records the captured working files. The
 test-only correction checks both representations and the copied POSIX mode.
 This remains a failed run, not a complete workspace regression pass.
 
+The fresh [host regression matrix 39179169402](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39179169402)
+at exact source **2d679e73ef4fb8767bced5d78c7e01e83316f972** passed workspace and
+backend race suites and vet on Ubuntu 24.04, Windows 2025 and macOS 15. Linux
+workspace/backend package times were 13.224/2.864 seconds, Windows
+21.571/2.922 seconds and macOS 44.735/2.961 seconds. Root and GPT-6 Sol Max
+independently checked API records and saved log hashes. This includes the
+corrected mode oracle, cleanup-only ownership, held-root/asset barriers and the
+actual policy-derived sanitizer/asset producer. These are ordinary host
+filesystem assertions; no namespace, filter or sandbox payload was executed.
+The two earlier failed runs remain failed.
+
 The staging parent must already belong to the current effective UID with no
 group/other mode permissions. No permissions repair occurs. Fresh artifact,
 capture, sanitized and scratch objects are private and created relative to
@@ -91,8 +102,8 @@ retry through the same owner.
 This producer and `backend.NewHostStageAssets` do not certify native source
 mount topology/no-IDMAP lineage, guest permission, runtime/harness images,
 policy translation or production launch. The adapter must independently check
-those requirements before its first namespace clone. The corrected component
-walk's filesystem assertions remain pending a fresh execution gate.
+those requirements before its first namespace clone. The host regression pass
+above establishes only the assertions exercised by those synthetic fixtures.
 
 ## Owned sanitized-root custody
 

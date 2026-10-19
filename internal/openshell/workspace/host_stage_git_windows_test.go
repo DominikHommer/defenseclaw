@@ -97,10 +97,12 @@ func (b *fixedGitOutput) Write(p []byte) (int, error) {
 // Native Git is an independent compatibility oracle, never the staging engine.
 // Require its explicit no-lazy-fetch option so a missing guest object fails
 // locally; all descendants belong to the bounded, non-breakaway owned Job.
+// Held volume paths can exceed MAX_PATH; enable Git's existing Windows support
+// only for this fixed test command, without changing host Git configuration.
 func fixedGitResult(dir string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd, cleanup, err := (gitCmd{dir: dir}).command(ctx, append([]string{"--no-lazy-fetch"}, args...))
+	cmd, cleanup, err := (gitCmd{dir: dir}).command(ctx, append([]string{"--no-lazy-fetch", "-c", "core.longpaths=true"}, args...))
 	if err != nil {
 		return nil, err
 	}
