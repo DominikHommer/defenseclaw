@@ -309,7 +309,8 @@ routes, arbitrary `--credential` substitution, or every child executable.
 Reject an unsupported selected profile before creating the sandbox, and explain
 the supported choices without copying host credentials into the workload.
 
-Reuse Claude's connector and guardrail pipeline. Protect hook scripts and managed
+Reuse the shared connector and guardrail pipeline for every existing hook
+connector. Protect hook scripts and managed
 settings at the actual containment boundary, use scoped and revocable hook
 authentication, and run a hook-fire probe against the exact harness bundle.
 Prove allow/block outcomes and resist hostile user/project settings. Keep the
@@ -402,22 +403,41 @@ checks for each implementation PR.
 | --- | --- |
 | Selection and compatibility | Explicit/default/auto selection; disabled or unavailable runtime; legacy OpenShell configuration and records; mixed lists; default changes; resume mismatch; every existing OpenShell API operation. |
 | Lifecycle and terminal | Interactive/headless exit status; streams; resize; Ctrl+C/Ctrl+D; terminal restoration; timeout; parent death; descendant cleanup; teardown; concurrency; restart reconciliation. Unsupported persistence/detach modes refuse clearly. |
-| Hooks and policy | Real hook-fire allow/block probe; hostile settings; tamper/silence detection; authenticated ingress; effective admin clamps; no direct control-API access; unsupported resource policy refused before launch. |
+| Hooks and policy | Each existing hook connector: real hook-fire allow/block probe; hostile settings; tamper/silence detection; authenticated ingress; effective admin clamps; no direct control-API access; unsupported resource policy refused before launch. |
 | Credentials and egress | Raw secret absence in guest environment, files, logs, and telemetry; API-key and OAuth independently; Anthropic streaming; expiry/revocation; HTTPS required before credential attachment; credentialed redirects refused, including unapproved-host and downgrade targets, with no target connection or credential disclosure; direct network bypass blocked; DNS/non-HTTP paths; approvals and policy refresh. |
 | Workspace and ownership | Private HOME; no real Claude state migration; denied reads of synthetic canaries outside approved paths under hard filesystem compatibility; no host-root read grant; secret masks; copied project review/pull/undo; archive/path safety; two simultaneous sessions; recovery preserving user changes; operations restricted to owned instances. |
 | Deployment and UI | AXIS-only installation; both providers installed; disabled runtime has no background cost; missing prerequisites; config save/load and managed controls; correct TUI runtime arguments and action availability; uninstall cleans only owned artifacts. |
 | Managed execution | Per-user daemon identity; gateway registration and policy authority; generation/revocation; relay failures; cross-user refusal/privacy; upgrade and rollback against supported prior configurations. |
 
-The requested release scope is opt-in Claude execution with copied workspaces
+The requested release scope includes every existing hook connector, with copied workspaces
 on native Windows through MXC ProcessContainerWindows, Linux through MXC
 BubblewrapLinux, and native macOS through MXC Seatbelt. Each platform needs real
 interactive/headless execution and individually qualified authentication and
 deployment profiles before it becomes available. No platform is currently
-qualified by this plan or its initial prototype. Existing OpenShell behavior
+qualified by this plan or its initial prototype. Claude is the first complete
+integration case, not the release coverage boundary. Existing OpenShell behavior
 remains supported.
 
+The current sandbox harness registry contains Amp, Antigravity, Claude Code,
+Codex, Copilot, Cursor, Devin, Hermes, Kiro, Omnigent, OpenCode and OpenHands.
+Track each harness against Windows, Linux and macOS using its actual native
+availability and versioned hook contract. Reuse `ResolveHookContract`,
+`RenderSandbox`, authenticated sandbox ingress, and the manager's hook decision,
+tamper and silence handling. Kiro's adapter remains part of this inventory;
+proxy-only integrations must retain their existing route rather than being
+reported as hook connectors. New providers must not require changes to agent
+hook semantics. An unavailable native agent distribution is an explicit matrix
+gap, never a passing result or host fallback.
+
+For every offered connector/platform pair, require an actual contained agent
+session, allow/block decisions, hostile project/user settings, protected hook
+assets, timeout and authority-loss behavior, session isolation and owned cleanup.
+Headless, interactive and provider-authentication profiles require separate
+evidence where their behavior differs. Shared contract tests cover all registry
+entries, while native manual tests qualify the real agent and OS boundary.
+
 WSL and alternate AXIS-native backends are outside this integration route.
-Other harnesses, live mounts, GPU/VM backends, MCP import, executable-bound
+Live mounts, GPU/VM backends, MCP import, executable-bound
 generic credentials, learn mode, and persistent attach need separate accepted
 scope and qualification. Unsupported features and unqualified platform routes
 are visible refusals, not silently ignored settings or fallback execution.

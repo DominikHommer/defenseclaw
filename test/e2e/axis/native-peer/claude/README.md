@@ -5,7 +5,11 @@ and Linux x64 musl distributions as data. It never runs the installer, either
 vendor binary, a loader, `ldd`, package scripts, or a sandbox. It installs no
 tools. The disposable Ubuntu runner must already provide Python 3, GPG and GNU
 readelf; missing or incompatible inputs cause refusal. This is an inspection
-recipe awaiting source review and its first CI result.
+recipe whose first CI run refused during the first public metadata fetch before
+downloading any release data. An independent HTTP check found the old install
+URL returned a 302 to the corrected recipe's pinned official destination,
+`https://downloads.claude.ai/claude-code-releases/bootstrap.sh`, as text only;
+redirects remain refused. The corrected acquisition result is pending.
 The canonical branch's own-workflow push trigger registers the workflow; the
 entire inspection job is guarded by `workflow_dispatch`, so registration pushes
 skip every download and inspection step. Registration and an accepted manual
@@ -58,7 +62,8 @@ The uploaded artifact contains only the four exact committed recipe sources,
 public installer text, manifest/signature/key/license evidence, bounded reader
 text and JSON reports. A fixed member allowlist and 20 MiB total limit exclude
 both vendor binaries and the GPG home; the private directory is outside the
-upload path. Failure evidence remains available. No provider credentials are
+upload path. Failure evidence remains available. Known download gates have fixed
+reason codes; arbitrary exception text and private runner paths are omitted. No provider credentials are
 passed to a reader process. Runtime admission and production certification
 remain false on success as well as failure. A future fixed `--version` canary
 needs separately reviewed held images and any interpreter/library objects,

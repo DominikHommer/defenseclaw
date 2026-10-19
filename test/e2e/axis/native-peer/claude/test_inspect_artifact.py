@@ -72,9 +72,14 @@ class InspectorTests(unittest.TestCase):
         ):
             summary = inspect.error_summary(error)
             self.assertNotIn("private-secret-path", json.dumps(summary))
-            self.assertEqual(set(summary), {"category", "errno", "http_status"})
+            self.assertEqual(set(summary), {"category", "gate", "errno", "http_status"})
+            self.assertIsNone(summary["gate"])
             if isinstance(error, inspect.urllib.error.HTTPError):
                 error.close()
+        self.assertEqual(
+            inspect.error_summary(inspect.InspectionError("HTTP redirect refused"))["gate"],
+            "http_redirect_refused",
+        )
 
     def test_url_and_all_redirects_refused_before_network(self):
         with mock.patch.object(inspect.urllib.request, "build_opener") as opener:

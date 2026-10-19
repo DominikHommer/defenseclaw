@@ -24,7 +24,7 @@ VERSION = "2.1.292"
 PLATFORMS = ("linux-x64", "linux-x64-musl")
 FINGERPRINT = "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
 BASE = "https://downloads.claude.ai/claude-code-releases/" + VERSION
-INSTALLER = "https://claude.ai/install.sh"
+INSTALLER = "https://downloads.claude.ai/claude-code-releases/bootstrap.sh"
 KEY = "https://downloads.claude.ai/keys/claude-code.asc"
 LICENSE = "https://raw.githubusercontent.com/anthropics/claude-code/fbe20e00e2851fc01506f54f98a8f0b875af3847/LICENSE.md"
 MANIFEST = BASE + "/manifest.json"
@@ -316,6 +316,20 @@ def error_summary(exc):
     status = getattr(exc, "code", None) if isinstance(exc, urllib.error.HTTPError) else None
     return {
         "category": category,
+        "gate": {
+            "HTTP redirect refused": "http_redirect_refused",
+            "HTTP response": "http_response_refused",
+            "HTTP content encoding": "http_content_encoding_refused",
+            "HTTP content length": "http_content_length_refused",
+            "HTTP length mismatch": "http_length_mismatch",
+            "download deadline": "download_deadline",
+            "download byte limit": "download_byte_limit",
+            "empty download": "empty_download",
+            "signed binary checksum mismatch": "signed_binary_checksum_mismatch",
+            "signed binary size mismatch": "signed_binary_size_mismatch",
+        }.get(str(exc))
+        if isinstance(exc, InspectionError)
+        else None,
         "errno": errno if type(errno) is int and 0 < errno <= 4095 else None,
         "http_status": status if type(status) is int and 400 <= status <= 599 else None,
     }
