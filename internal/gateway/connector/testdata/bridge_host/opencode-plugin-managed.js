@@ -578,7 +578,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     if (out && (out.decision === "deny" || out.decision === "block")) {
       return { reason: out.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
-    if (data.action === "block") {
+    if (data.action === "block" || data.action === "confirm") {
       return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
     }
     return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
