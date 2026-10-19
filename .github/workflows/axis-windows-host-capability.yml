@@ -1,0 +1,43 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+name: AXIS Windows inert host capability facts
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: axis-windows-host-capability-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  read-host-facts:
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+          sparse-checkout: test/e2e/axis/windows/native-peer/host_capability_probe.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12.13'
+      - name: Pure fake and output privacy tests
+        shell: pwsh
+        timeout-minutes: 1
+        run: |
+          python -I -S -B test/e2e/axis/windows/native-peer/host_capability_probe.py --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Pure capability tests failed' }
+      - name: Query host facts without creating PSEC or workload
+        shell: pwsh
+        timeout-minutes: 1
+        run: |
+          python -I -S -B test/e2e/axis/windows/native-peer/host_capability_probe.py --probe |
+            Out-File -LiteralPath host-capability.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Capability observation refused' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: axis-windows-host-capability-${{ github.sha }}
+          path: host-capability.json
+          if-no-files-found: error
+          retention-days: 7
