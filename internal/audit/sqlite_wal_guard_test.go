@@ -510,7 +510,9 @@ func walGuardSteps(t *testing.T, store *Store, syncTakes time.Duration) func() [
 		time.Sleep(syncTakes)
 	}
 	walWriterPhaseHook = func(context.Context) { record("writer") }
-	t.Cleanup(func() { walCopyPhaseHook, walSyncPhaseHook, walWriterPhaseHook = originalCopy, originalSync, originalWriter })
+	t.Cleanup(func() {
+		walCopyPhaseHook, walSyncPhaseHook, walWriterPhaseHook = originalCopy, originalSync, originalWriter
+	})
 	return func() []string {
 		mu.Lock()
 		defer mu.Unlock()
@@ -585,9 +587,7 @@ func TestAuditConnectionsMapTheDatabaseOnlyOffWindows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, db := range map[string]interface {
-		QueryRow(string, ...any) *sql.Row
-	}{"writer": store.db, "checkpoint": checkpointDB} {
+	for name, db := range map[string]*sql.DB{"writer": store.db, "checkpoint": checkpointDB} {
 		var size int64
 		if err := db.QueryRow(`PRAGMA mmap_size`).Scan(&size); err != nil || size != want {
 			t.Fatalf("%s connection mmap_size = %d, %v; want %d", name, size, err, want)
