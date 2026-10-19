@@ -27,19 +27,118 @@ import (
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 )
 
+// hookFloodMinute is one minute of a flood: the latencies of the calls
+// launched in it, summarized.
+type hookFloodMinute struct {
+	average, p50, p99, max time.Duration
+}
+
+// The flatness rule of the B-26 flood cells (rel-1-0-3 GAP-0247, GAP-0186):
+// minute 1 is warm-up, minutes 2-5 are the baseline, and each of the last
+// five minutes has its average and p99 within 1.25x of the baseline's mean
+// average and mean p99. No call takes 5 s or more.
+const (
+	hookFloodBaselineFirst = 1 // zero-based: minutes 2-5
+	hookFloodBaselineLast  = 4
+	hookFloodCheckedTail   = 5
+	hookFloodFlatRatio     = 1.25
+	hookFloodMaxCall       = 5 * time.Second
+)
+
+// hookFloodFlatnessViolations applies the flatness rule to a flood's minutes
+// and returns one line per violation.
+func hookFloodFlatnessViolations(minutes []hookFloodMinute) []string {
+	if len(minutes) < hookFloodBaselineLast+1+hookFloodCheckedTail {
+		return []string{fmt.Sprintf("the flood has %d minutes; the flatness rule needs at least %d",
+			len(minutes), hookFloodBaselineLast+1+hookFloodCheckedTail)}
+	}
+	var averages, p99s time.Duration
+	for _, minute := range minutes[hookFloodBaselineFirst : hookFloodBaselineLast+1] {
+		averages += minute.average
+		p99s += minute.p99
+	}
+	count := time.Duration(hookFloodBaselineLast - hookFloodBaselineFirst + 1)
+	baseAverage, baseP99 := averages/count, p99s/count
+	limit := func(base time.Duration) time.Duration { return time.Duration(float64(base) * hookFloodFlatRatio) }
+	var violations []string
+	for index := len(minutes) - hookFloodCheckedTail; index < len(minutes); index++ {
+		minute := minutes[index]
+		if minute.average > limit(baseAverage) {
+			violations = append(violations, fmt.Sprintf("minute %d average %v is over %v (1.25x the minutes 2-5 mean %v)",
+				index+1, minute.average, limit(baseAverage), baseAverage))
+		}
+		if minute.p99 > limit(baseP99) {
+			violations = append(violations, fmt.Sprintf("minute %d p99 %v is over %v (1.25x the minutes 2-5 mean %v)",
+				index+1, minute.p99, limit(baseP99), baseP99))
+		}
+	}
+	for index, minute := range minutes {
+		if minute.max >= hookFloodMaxCall {
+			violations = append(violations, fmt.Sprintf("minute %d has a call of %v", index+1, minute.max))
+		}
+	}
+	return violations
+}
+
+func TestHookFloodFlatnessRule(t *testing.T) {
+	flat := func(average, p99 time.Duration) hookFloodMinute {
+		return hookFloodMinute{average: average, p50: average, p99: p99, max: p99}
+	}
+	minutes := func(tail hookFloodMinute) []hookFloodMinute {
+		out := []hookFloodMinute{flat(400*time.Millisecond, 900*time.Millisecond)} // warm-up is ignored
+		for range 4 {
+			out = append(out, flat(100*time.Millisecond, 200*time.Millisecond))
+		}
+		for range 20 {
+			out = append(out, flat(110*time.Millisecond, 220*time.Millisecond))
+		}
+		for range 5 {
+			out = append(out, tail)
+		}
+		return out
+	}
+	if got := hookFloodFlatnessViolations(minutes(flat(125*time.Millisecond, 250*time.Millisecond))); len(got) != 0 {
+		t.Fatalf("a flood at 1.25x is flat: %v", got)
+	}
+	if got := hookFloodFlatnessViolations(minutes(flat(126*time.Millisecond, 200*time.Millisecond))); len(got) != 5 {
+		t.Fatalf("an average over 1.25x in the last five minutes: %v, want five violations", got)
+	}
+	if got := hookFloodFlatnessViolations(minutes(flat(100*time.Millisecond, 251*time.Millisecond))); len(got) != 5 {
+		t.Fatalf("a p99 over 1.25x in the last five minutes: %v, want five violations", got)
+	}
+	slow := minutes(flat(100*time.Millisecond, 200*time.Millisecond))
+	slow[12].max = hookFloodMaxCall
+	if got := hookFloodFlatnessViolations(slow); len(got) != 1 {
+		t.Fatalf("a 5 s call: %v, want one violation", got)
+	}
+	if got := hookFloodFlatnessViolations(minutes(flat(0, 0))[:9]); len(got) != 1 {
+		t.Fatalf("a nine-minute flood: %v, want the length violation", got)
+	}
+}
+
+// hookFloodGuardMinute sums the WAL guard passes that ended in one minute.
+type hookFloodGuardMinute struct {
+	passes, writer, restarted, truncated, failed int
+	held, heldMax, passMax                       time.Duration
+}
+
 // TestHookFloodProbe drives the real Claude Code hook handler, audit store and
 // v8 runtime in process with one session at a fixed rate, the shape of the
-// B-26 flood cells (rel-1-0-3 GAP-0247, GAP-0186, GAP-0244). It is skipped
-// unless DEFENSECLAW_HOOK_FLOOD_PROBE=1 and runs on Linux, macOS and Windows,
-// so a lane can run the test binary on the host that saturated. Settings:
+// B-26 flood cells (rel-1-0-3 GAP-0247, GAP-0186, GAP-0244), and fails unless
+// every flood meets the flatness rule (hookFloodFlatnessViolations). It is
+// skipped unless DEFENSECLAW_HOOK_FLOOD_PROBE=1 and runs on Linux, macOS and
+// Windows, so a lane can run the test binary on the host that saturated; it
+// needs no source tree there. Settings:
 //
-//	DEFENSECLAW_HOOK_FLOOD_CALLS  calls per flood (default 6000)
+//	DEFENSECLAW_HOOK_FLOOD_CALLS  calls per flood (default 6000; at least ten minutes of calls)
 //	DEFENSECLAW_HOOK_FLOOD_RATE   calls per second (default 10)
 //	DEFENSECLAW_HOOK_FLOOD_FLOODS back-to-back floods in one process (default 1)
 //	DEFENSECLAW_HOOK_FLOOD_IDLE   idle seconds after each flood (default 0)
 //	DEFENSECLAW_HOOK_FLOOD_OUT    directory for cpu, block, mutex and heap profiles
-//	DEFENSECLAW_HOOK_FLOOD_ASSERT 1: fail unless the last 600-call segment's average
-//	                              and p99 are within 1.25x (+20 ms) of the first
+//
+// Each minute's line has the latencies of the calls launched in it and the
+// WAL guard passes that ended in it: how often and how long a pass held the
+// audit writer connection.
 func TestHookFloodProbe(t *testing.T) {
 	if os.Getenv("DEFENSECLAW_HOOK_FLOOD_PROBE") != "1" {
 		t.Skip("set DEFENSECLAW_HOOK_FLOOD_PROBE=1 to run the hook flood probe")
@@ -56,8 +155,12 @@ func TestHookFloodProbe(t *testing.T) {
 	}
 	calls, rate := setting("DEFENSECLAW_HOOK_FLOOD_CALLS", 6000), setting("DEFENSECLAW_HOOK_FLOOD_RATE", 10)
 	floods, idle := setting("DEFENSECLAW_HOOK_FLOOD_FLOODS", 1), setting("DEFENSECLAW_HOOK_FLOOD_IDLE", 0)
-	if calls < 600 || rate < 1 || floods < 1 {
-		t.Fatal("the probe needs at least 600 calls, a rate and one flood")
+	if rate < 1 || floods < 1 {
+		t.Fatal("the probe needs a rate and one flood")
+	}
+	segment := rate * 60
+	if minutes := hookFloodBaselineLast + 1 + hookFloodCheckedTail; calls < minutes*segment {
+		t.Fatalf("the flatness rule needs at least %d minutes: %d calls at %d/s", minutes, minutes*segment, rate)
 	}
 	out := os.Getenv("DEFENSECLAW_HOOK_FLOOD_OUT")
 
@@ -77,15 +180,19 @@ func TestHookFloodProbe(t *testing.T) {
 	bindHookLifecycleV8(t, api, fixture.runtime)
 	cwd := t.TempDir()
 
-	// The sidecar's background audit loops: the WAL guard every 2 s and the
-	// planner statistics every auditPlannerStatsInterval.
+	// The sidecar's background audit loops: the WAL guard every
+	// auditWALGuardInterval with the sidecar's limits, and the planner
+	// statistics every auditPlannerStatsInterval.
+	var guardMu sync.Mutex
+	var guardStart time.Time
+	guardMinutes := map[int]*hookFloodGuardMinute{}
 	ctx, cancel := context.WithCancel(t.Context())
 	var loops sync.WaitGroup
 	defer func() { cancel(); loops.Wait() }()
 	loops.Add(2)
 	go func() {
 		defer loops.Done()
-		tick := time.NewTicker(2 * time.Second)
+		tick := time.NewTicker(auditWALGuardInterval)
 		defer tick.Stop()
 		for {
 			select {
@@ -93,9 +200,35 @@ func TestHookFloodProbe(t *testing.T) {
 				return
 			case <-tick.C:
 			}
-			pass, passCancel := context.WithTimeout(ctx, 2*time.Minute)
-			_, _ = fixture.store.CheckpointWALIfLarge(pass, 256<<20, 200*time.Millisecond)
+			began := time.Now()
+			pass, passCancel := context.WithTimeout(ctx, auditWALCopyTimeout)
+			result, err := fixture.store.CheckpointWALIfLarge(pass, auditWALLimitBytes, auditWALWriterBudget)
 			passCancel()
+			guardMu.Lock()
+			if !guardStart.IsZero() {
+				minute := guardMinutes[int(time.Since(guardStart)/time.Minute)]
+				if minute == nil {
+					minute = &hookFloodGuardMinute{}
+					guardMinutes[int(time.Since(guardStart)/time.Minute)] = minute
+				}
+				minute.passes++
+				if err != nil {
+					minute.failed++
+				}
+				if result.WriterHeld > 0 {
+					minute.writer++
+					minute.held += result.WriterHeld
+					minute.heldMax = max(minute.heldMax, result.WriterHeld)
+				}
+				if result.Restarted {
+					minute.restarted++
+				}
+				if result.Truncated {
+					minute.truncated++
+				}
+				minute.passMax = max(minute.passMax, time.Since(began))
+			}
+			guardMu.Unlock()
 		}
 	}()
 	go func() {
@@ -164,7 +297,6 @@ func TestHookFloodProbe(t *testing.T) {
 	memory("start")
 	heapProfile("heap-start.prof")
 
-	const segment = 600
 	for flood := 1; flood <= floods; flood++ {
 		session := fmt.Sprintf("hook-flood-probe-%d", flood)
 		latencies := make([]time.Duration, calls)
@@ -191,6 +323,10 @@ func TestHookFloodProbe(t *testing.T) {
 		startCPU(fmt.Sprintf("cpu-flood%d-first.prof", flood))
 		var wg sync.WaitGroup
 		start := time.Now()
+		guardMu.Lock()
+		guardStart = start
+		clear(guardMinutes)
+		guardMu.Unlock()
 		segmentCPU := cpuSeconds()
 		for index := range calls {
 			if wait := time.Until(start.Add(time.Duration(index) * time.Second / time.Duration(rate))); wait > 0 {
@@ -220,15 +356,21 @@ func TestHookFloodProbe(t *testing.T) {
 			if (index+1)%segment == 0 {
 				now := cpuSeconds()
 				t.Logf("flood %d sent %d audit.db=%d wal=%d cpu_per_call=%.1fms", flood, index+1,
-					fileSize(fixture.path), fileSize(fixture.path+"-wal"), (now-segmentCPU)*1000/segment)
+					fileSize(fixture.path), fileSize(fixture.path+"-wal"), (now-segmentCPU)*1000/float64(segment))
 				segmentCPU = now
 			}
 		}
 		wg.Wait()
 		stopCPU()
 		t.Logf("flood %d drained %v after the first call", flood, time.Since(start).Round(time.Millisecond))
-		type stats struct{ average, p99 time.Duration }
-		var segments []stats
+		guardMu.Lock()
+		guardStart = time.Time{}
+		guards := map[int]hookFloodGuardMinute{}
+		for minute, stats := range guardMinutes {
+			guards[minute] = *stats
+		}
+		guardMu.Unlock()
+		var minutes []hookFloodMinute
 		for first := 0; first+segment <= calls; first += segment {
 			part := slices.Clone(latencies[first : first+segment])
 			slices.Sort(part)
@@ -236,11 +378,21 @@ func TestHookFloodProbe(t *testing.T) {
 			for _, latency := range part {
 				sum += latency
 			}
-			s := stats{average: sum / segment, p99: part[segment*99/100]}
-			segments = append(segments, s)
-			t.Logf("flood %d calls %d-%d average=%v p50=%v p99=%v max=%v", flood, first, first+segment,
-				s.average.Round(time.Microsecond), part[segment/2].Round(time.Microsecond),
-				s.p99.Round(time.Microsecond), part[segment-1].Round(time.Microsecond))
+			minute := hookFloodMinute{
+				average: sum / time.Duration(segment), p50: part[segment/2],
+				p99: part[segment*99/100], max: part[segment-1],
+			}
+			minutes = append(minutes, minute)
+			guard := guards[len(minutes)-1]
+			t.Logf("flood %d minute %d calls %d-%d average=%v p50=%v p99=%v max=%v guard passes=%d writer=%d restarted=%d truncated=%d failed=%d writer_held=%v writer_held_max=%v pass_max=%v",
+				flood, len(minutes), first, first+segment,
+				minute.average.Round(time.Microsecond), minute.p50.Round(time.Microsecond),
+				minute.p99.Round(time.Microsecond), minute.max.Round(time.Microsecond),
+				guard.passes, guard.writer, guard.restarted, guard.truncated, guard.failed,
+				guard.held.Round(time.Millisecond), guard.heldMax.Round(time.Millisecond), guard.passMax.Round(time.Millisecond))
+		}
+		for _, violation := range hookFloodFlatnessViolations(minutes) {
+			t.Errorf("flood %d is not flat: %s", flood, violation)
 		}
 		memory(fmt.Sprintf("flood%d-end", flood))
 		for waited := 0; waited < idle; waited += 60 {
@@ -249,14 +401,6 @@ func TestHookFloodProbe(t *testing.T) {
 			memory(fmt.Sprintf("flood%d-idle+%ds", flood, waited+pause))
 		}
 		heapProfile(fmt.Sprintf("heap-flood%d.prof", flood))
-		if os.Getenv("DEFENSECLAW_HOOK_FLOOD_ASSERT") == "1" {
-			first, last := segments[0], segments[len(segments)-1]
-			bound := func(d time.Duration) time.Duration { return d*5/4 + 20*time.Millisecond }
-			if last.average > bound(first.average) || last.p99 > bound(first.p99) {
-				t.Errorf("flood %d is not flat: last segment average %v p99 %v, first %v %v",
-					flood, last.average, last.p99, first.average, first.p99)
-			}
-		}
 	}
 	writeProfile("block.prof", func(file *os.File) error { return pprof.Lookup("block").WriteTo(file, 0) })
 	writeProfile("mutex.prof", func(file *os.File) error { return pprof.Lookup("mutex").WriteTo(file, 0) })

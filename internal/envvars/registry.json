@@ -2029,26 +2029,6 @@
       "since": "0.8.8"
     },
     {
-      "name": "DEFENSECLAW_HOOK_FLOOD_ASSERT",
-      "category": "test_fixture",
-      "purpose": "Enables the probe latency assertion.",
-      "default": "unset",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "internal/gateway/hook_flood_probe_test.go",
-          "description": "Opt-in hook flood test fixture; never read by production gateway"
-        }
-      ],
-      "since": "1.0.3"
-    },
-    {
       "name": "DEFENSECLAW_HOOK_FLOOD_CALLS",
       "category": "test_fixture",
       "purpose": "Sets the number of hook calls in each probe flood.",
