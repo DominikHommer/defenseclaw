@@ -963,7 +963,7 @@ int dclaw_mqtt_send_verdict_request(const dclaw_tool_request_t *req,
 #else
             {
                 size_t tlen = strlen(topic);
-                uint8_t vtmp[128 + 512];
+                uint8_t vtmp[sizeof(topic) + DCLAW_VERDICT_REQUEST_MAX];
                 if (tlen + cbor_len <= sizeof(vtmp)) {
                     memcpy(vtmp, topic, tlen);
                     memcpy(vtmp + tlen, cbor_buf, cbor_len);
