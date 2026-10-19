@@ -93,6 +93,15 @@ make packaging-macos-enterprise VERSION=1.2.3
   build in `~/.local/opt/e2fsprogs/sbin`. An explicit administrator directory
   remains authoritative. The Mac running the package builder needs network
   access to kernel.org; the Mac receiving the package does not.
+- Before it runs `ensure`, the postinstall gives every program the package
+  installed (`bin/*`, the LaunchAgent gateway copy under
+  `bin/launch-agents/<sha256>/` and the e2fsprogs tools) a new file: a copy
+  in the same folder renamed over the original. macOS can keep the code
+  signature it checked with a file that is rewritten in place and kill the
+  next start for code signing (`OS_REASON_CODESIGNING`). The new gateway file
+  makes `ensure` boot out and bootstrap every account's loaded LaunchAgent;
+  `enterprise macos repair` gives the gateway a new file again before it
+  reloads a job that macOS killed for code signing.
 - `scripts/test-enterprise-unix-install.sh` installs, converges, verifies
   and removes the package on a disposable Mac; see
   [docs/TESTING.md](../../docs/TESTING.md#enterprise-install-lanes).

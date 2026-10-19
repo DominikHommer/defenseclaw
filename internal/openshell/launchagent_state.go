@@ -51,7 +51,7 @@ func (s LaunchAgentState) Failure(expectedRunning bool) string {
 	if s.State == "running" {
 		return ""
 	}
-	if strings.Contains(strings.ToUpper(s.ExitReason), "CODESIGN") || strings.Contains(strings.ToUpper(s.SpawnError), "CODESIGN") {
+	if s.CodeSigningKilled() {
 		return "last start was killed for code signing (" + strings.TrimSpace(s.ExitReason+" "+s.SpawnError) + ")"
 	}
 	if s.SpawnError != "" {
@@ -61,6 +61,12 @@ func (s LaunchAgentState) Failure(expectedRunning bool) string {
 		return "loaded but not running when it must be running"
 	}
 	return ""
+}
+
+// CodeSigningKilled reports a job that is not running because macOS killed
+// or refused its last start for code signing (OS_REASON_CODESIGNING).
+func (s LaunchAgentState) CodeSigningKilled() bool {
+	return s.State != "running" && (strings.Contains(strings.ToUpper(s.ExitReason), "CODESIGN") || strings.Contains(strings.ToUpper(s.SpawnError), "CODESIGN"))
 }
 
 // Notice describes an idle job's previous exit without treating an on-demand
@@ -120,7 +126,7 @@ func (d *Doctor) ManagedLaunchAgentCheck(ctx context.Context) *Check {
 			continue
 		}
 		if why := state.Failure(false); why != "" {
-			c.Status, c.Detail = StatusFail, target+" is "+why
+			c.Status, c.Detail = StatusFail, target+" failed: "+why
 			c.Fix = &Fix{Summary: "ask your administrator to repair this computer's sandbox LaunchAgent", Command: "sudo defenseclaw-gateway enterprise macos repair", Sudo: true}
 			if failed == nil {
 				failed = c
