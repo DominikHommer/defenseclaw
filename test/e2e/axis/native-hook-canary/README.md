@@ -1,7 +1,7 @@
 # Fixed synthetic contained-hook build inputs
 
-This TASK source draft builds an opt-in Linux/amd64 contributor harness. It has
-not been compiled or run. It installs no runtime catalog or production factory.
+This opt-in Linux/amd64 contributor harness has been compiled and its first
+contained run failed before payload startup. It installs no runtime catalog or production factory.
 It exercises the actual FileStore binding, shared ingress policy evaluator and
 owned hook producer. It calls the producer directly: Manager.Create, LaunchGate
 and a common ExecutionPolicy receipt are outside this canary. The test adapter
@@ -15,7 +15,7 @@ executed. OmniGent exercises only its raw Go transport; its Python policy bridge
 is not run. Fail-open and silence/registration behavior remains unqualified for
 every vendor, including Copilot and Hermes.
 
-The first future native selector is
+The first native selector is
 `TestContainedNativeHookClaudeUsesActualSharedEvaluator`; a separately sequenced
 `TestContainedNativeHookAllTwelveUseActualSharedEvaluator` uses the same payload.
 Both require the distinct reviewed 361 peer and unchanged static Bubblewrap,

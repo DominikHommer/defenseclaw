@@ -379,7 +379,7 @@ func TestWindowsHookAdmissionEventFailuresAndHandlerPanicNeverOpenOrLeakValues(t
 				event.set = true
 			}
 			event.mu.Unlock()
-			if strings.HasPrefix(mode, "signal") {
+			if mode == "signal_error" || mode == "signal_panic" {
 				if !errors.Is(gate.seal(), errWindowsHookEvent) || !errors.Is(gate.seal(), errWindowsHookEvent) {
 					t.Fatal("failed signal was not sticky")
 				}
