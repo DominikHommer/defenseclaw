@@ -890,7 +890,7 @@ class EdgeConnector:
     # the socket backend sends (json.dumps, ensure_ascii).  The daemon
     # flags content as truncated -- and blocks it -- when the escaped
     # string exceeds DCLAW_CONTENT_MAX - 1 (4095) or the unescaped text
-    # reaches DCLAW_CONTENT_MAX - 4 (4092) bytes.  The unescaped UTF-8 length
+    # exceeds DCLAW_CONTENT_MAX - 4 (4092) bytes.  The unescaped UTF-8 length
     # never exceeds the escaped length, so 4092 escaped characters satisfies
     # both limits and also fits the FFI backend's 4095-byte buffer.
     _CONTENT_ESCAPED_MAX = 4092
