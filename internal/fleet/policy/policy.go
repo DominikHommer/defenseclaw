@@ -53,10 +53,15 @@ var ErrMalformedPolicy = fmt.Errorf("%w: malformed policy content", ErrInvalidPo
 var ErrCompilerBusy = errors.New("policy compiler busy")
 
 // maxConcurrentCompiles bounds the number of policy compiler processes the
-// gateway runs at once; compileSlotWait is how long a request waits for one.
+// gateway runs at once. compileSlotWait is how long a simulate request (which
+// any authenticated tenant can issue) waits for a slot; pushCompileSlotWait is
+// the longer wait for an operator policy push, which should queue behind other
+// compiles rather than fail.
 const maxConcurrentCompiles = 2
 
 var compileSlotWait = 2 * time.Second
+
+var pushCompileSlotWait = 60 * time.Second
 
 var ErrPolicyVersionExhausted = fmt.Errorf("%w: policy version 65534 is the highest supported OTA version; provision a new device policy lineage", ErrInvalidPolicy)
 
@@ -576,6 +581,10 @@ func isUnderAllowedDir(abs string) bool {
 //
 // Returns the raw binary blob (header + payload, no signature).
 func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]byte, error) {
+	return s.compile(yamlBytes, profile, version, compileSlotWait)
+}
+
+func (s *Service) compile(yamlBytes []byte, profile string, version uint32, slotWait time.Duration) ([]byte, error) {
 	// Version zero is a dry-run compiler input used by /policy/simulate; it
 	// is never signed or stored as an OTA policy.
 	if version > maxPolicyVersion {
@@ -617,7 +626,7 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 	// Bound concurrent compiler work (interpreter checks and the compile
 	// itself); any authenticated tenant can trigger it via /policy/simulate.
 	if s.compileSlots != nil {
-		timer := time.NewTimer(compileSlotWait)
+		timer := time.NewTimer(slotWait)
 		select {
 		case s.compileSlots <- struct{}{}:
 			timer.Stop()
@@ -1044,7 +1053,7 @@ func (s *Service) CompileSignAndStore(yamlBytes []byte, profile string, tenantID
 	}
 
 	// Compile
-	blob, err := s.Compile(yamlBytes, profile, version)
+	blob, err := s.compile(yamlBytes, profile, version, pushCompileSlotWait)
 	if err != nil {
 		return nil, 0, fmt.Errorf("compile: %w", err)
 	}

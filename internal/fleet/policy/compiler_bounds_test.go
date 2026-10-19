@@ -87,3 +87,27 @@ func TestCompileBoundsConcurrentCompilerProcesses(t *testing.T) {
 		t.Fatalf("compile leaked a slot: %d in use", len(svc.compileSlots))
 	}
 }
+
+// A policy push waits longer than a simulate request: it must not fail with
+// ErrCompilerBusy just because other compiles hold the slots for a while.
+func TestPushWaitsLongerThanSimulateForCompilerSlot(t *testing.T) {
+	base := privateHomeCompiler(t)
+	signer, err := NewHMACSigner([]byte("test-key-for-unit-tests-32bytes!"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(NewMemoryPolicyStore(), signer, nil, &Config{CompilerPath: filepath.Join(base, "dchome", "pc.py")})
+	old := compileSlotWait
+	compileSlotWait = 50 * time.Millisecond
+	t.Cleanup(func() { compileSlotWait = old })
+	for i := 0; i < maxConcurrentCompiles; i++ {
+		svc.compileSlots <- struct{}{}
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond) // longer than the simulate wait
+		<-svc.compileSlots
+	}()
+	if _, _, err := svc.CompileSignAndStore([]byte("x: 1"), "standard", 1, 2); errors.Is(err, ErrCompilerBusy) {
+		t.Fatal("policy push failed with ErrCompilerBusy instead of waiting for a slot")
+	}
+}
