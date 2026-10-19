@@ -201,7 +201,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Connector:                     "claudecode",
 			EnforcementCapable:            true,
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
-			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
+			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: toolArgs}),
 			SandboxGuestCWD:               req.guestCWD,
 			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)

@@ -306,7 +306,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			LegacyText:                    string(toolArgs),
 			Connector:                     "codex",
 			EnforcementCapable:            true,
-			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
+			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionInput),
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			DowngradeReadOnlyDataArgs:     mode != "action",
 			SandboxGuestCWD:               req.guestCWD,
