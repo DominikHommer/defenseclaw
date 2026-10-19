@@ -52,6 +52,7 @@ extern int  dclaw_mqtt_get_fd(void);
 extern bool dclaw_mqtt_has_pending_input(void);
 extern void dclaw_canary_tick(void);
 extern void dclaw_speculative_expire(uint64_t now_ms);
+extern int  dclaw_verdict_require_device_key(bool production);
 #endif
 extern int  dclaw_ipc_parse_request(const char *json, size_t json_len,
                                     dclaw_tool_request_t *out);
@@ -237,6 +238,15 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "edge-connector: init failed\n");
         return 1;
     }
+
+#if DCLAW_MQTT_ENABLED
+    /* Like the audit key: production refuses to start unsigned. */
+    if (dclaw_verdict_require_device_key(!DCLAW_DEV_MODE) != 0) {
+        fprintf(stderr, "edge-connector: device key not provisioned\n");
+        dclaw_shutdown();
+        return 1;
+    }
+#endif
 
 #ifdef __linux__
     /* Prevent /proc/PID/environ access by other same-UID processes since

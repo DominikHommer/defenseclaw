@@ -572,6 +572,19 @@ bool dclaw_verdict_is_key_provisioned(void) {
     return s_device_key_provisioned;
 }
 
+/* A production daemon must not run with an unprovisioned or all-zero device
+ * key: it would publish unsigned registration and heartbeat frames and
+ * every escalation would time out. Called at startup with
+ * production = !DCLAW_DEV_MODE; returns -1 when the daemon must refuse to
+ * start. */
+int dclaw_verdict_require_device_key(bool production) {
+    if (!production) return 0;
+    if (dclaw_verdict_is_key_provisioned()) return 0;
+    fprintf(stderr, "[DCLAW] ERROR: A nonzero device key is required in production. "
+            "Provision /etc/defenseclaw/device.key (or DCLAW_DEVICE_KEY).\n");
+    return -1;
+}
+
 /* Compute HMAC for outbound use (e.g., for testing/verification).
  * Full 32-byte HMAC-SHA256 output (extended from 16 bytes).
  * Includes request_nonce for per-request HMAC freshness. */

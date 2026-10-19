@@ -261,6 +261,31 @@ static void test_reconnect_backoff_bounds(void) {
     printf("  PASS: reconnect backoff is jittered in [cap/2, cap), cap <= 30 s\n");
 }
 
+
+extern int dclaw_verdict_require_device_key(bool production);
+extern void dclaw_verdict_protocol_shutdown(void);
+
+/* Regression: a production daemon started without a device key (or with an
+ * all-zero one) and sent unsigned frames. */
+static void test_production_requires_device_key(void) {
+    unsetenv("DCLAW_DEVICE_KEY");
+    dclaw_verdict_protocol_shutdown(); /* forget the loaded key */
+    assert(dclaw_verdict_require_device_key(true) == -1);
+    assert(dclaw_verdict_require_device_key(false) == 0);
+
+    dclaw_verdict_protocol_shutdown();
+    setenv("DCLAW_DEVICE_KEY",
+           "0000000000000000000000000000000000000000000000000000000000000000", 1);
+    assert(dclaw_verdict_require_device_key(true) == -1);
+
+    dclaw_verdict_protocol_shutdown();
+    setenv("DCLAW_DEVICE_KEY",
+           "4242424242424242424242424242424242424242424242424242424242424242", 1);
+    assert(dclaw_verdict_require_device_key(true) == 0);
+    unsetenv("DCLAW_DEVICE_KEY");
+    printf("  PASS: production startup requires a nonzero device key\n");
+}
+
 int main(void) {
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
@@ -285,7 +310,8 @@ int main(void) {
     test_signed_ttl_controls_cache();
     test_max_content_request_encodes();
     test_reconnect_backoff_bounds();
-    printf("  ALL PASSED (9 tests)\n");
+    test_production_requires_device_key();
+    printf("  ALL PASSED (10 tests)\n");
 
     dclaw_shutdown();
     return 0;
