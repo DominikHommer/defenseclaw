@@ -171,7 +171,18 @@ unsafe fn bounded_wide(pointer: PWSTR, maximum: usize) -> Result<Vec<u16>> {
 
 // Validate every SID byte range before handing a returned in-buffer pointer to
 // IsValidSid/GetLengthSid. Null, forged offsets/counts and unknown shape refuse.
-fn sid_range(bytes: &[u8], address: usize, header: usize) -> Result<std::ops::Range<usize>> {
+// Retain the original pointer-header contract used by the private record's
+// TokenUser and ACE readers. New TokenUser authority uses its larger explicit
+// header through the validator below.
+fn sid_range(bytes: &[u8], address: usize) -> Result<std::ops::Range<usize>> {
+    sid_range_with_header(bytes, address, size_of::<usize>())
+}
+
+fn sid_range_with_header(
+    bytes: &[u8],
+    address: usize,
+    header: usize,
+) -> Result<std::ops::Range<usize>> {
     let start = bytes.as_ptr() as usize;
     let offset = address
         .checked_sub(start)
@@ -258,7 +269,7 @@ fn token_user_sid(token: &OwnedHandle) -> Result<Vec<u8>> {
     let mut encoded_pointer = [0u8; size_of::<usize>()];
     encoded_pointer.copy_from_slice(&bytes[..size_of::<usize>()]);
     let address = usize::from_ne_bytes(encoded_pointer);
-    let range = sid_range(bytes, address, size_of::<TOKEN_USER>())?;
+    let range = sid_range_with_header(bytes, address, size_of::<TOKEN_USER>())?;
     let sid = PSID(address as *mut _);
     ensure!(
         unsafe { IsValidSid(sid) }.as_bool()
@@ -328,7 +339,7 @@ fn native_folder(process: &OwnedHandle) -> Result<NativeProfile> {
     let mut encoded_pointer = [0u8; size_of::<usize>()];
     encoded_pointer.copy_from_slice(&bytes[..size_of::<usize>()]);
     let address = usize::from_ne_bytes(encoded_pointer);
-    let range = sid_range(bytes, address, size_of::<usize>())?;
+    let range = sid_range_with_header(bytes, address, size_of::<usize>())?;
     let sid = PSID(address as *mut _);
     ensure!(
         unsafe { IsValidSid(sid) }.as_bool()
@@ -656,25 +667,29 @@ mod tests {
         bytes[16] = 1;
         bytes[17] = 2;
         let base = bytes.as_ptr() as usize;
+        assert_eq!(sid_range(&bytes, base + 16).unwrap(), 16..32);
         assert_eq!(
-            sid_range(&bytes, base + 16, size_of::<usize>()).unwrap(),
+            sid_range_with_header(&bytes, base + 16, size_of::<usize>()).unwrap(),
             16..32
         );
         assert_eq!(
-            sid_range(&bytes, base + 16, size_of::<TOKEN_USER>()).unwrap(),
+            sid_range_with_header(&bytes, base + 16, size_of::<TOKEN_USER>()).unwrap(),
             16..32
         );
         // TokenUser's SID must not overlap the larger SID_AND_ATTRIBUTES header.
         bytes[size_of::<usize>()] = 1;
         bytes[size_of::<usize>() + 1] = 0;
-        assert!(sid_range(&bytes, base + size_of::<usize>(), size_of::<TOKEN_USER>()).is_err());
-        assert!(sid_range(&bytes, base + 16, 0).is_err());
+        assert!(
+            sid_range_with_header(&bytes, base + size_of::<usize>(), size_of::<TOKEN_USER>())
+                .is_err()
+        );
+        assert!(sid_range_with_header(&bytes, base + 16, 0).is_err());
         for pointer in [0, base, base + 95, base + bytes.len(), usize::MAX] {
-            assert!(sid_range(&bytes, pointer, size_of::<usize>()).is_err());
+            assert!(sid_range_with_header(&bytes, pointer, size_of::<usize>()).is_err());
         }
         bytes[17] = 16;
-        assert!(sid_range(&bytes, base + 16, size_of::<usize>()).is_err());
+        assert!(sid_range_with_header(&bytes, base + 16, size_of::<usize>()).is_err());
         bytes[17] = 15;
-        assert!(sid_range(&bytes[..32], base + 16, size_of::<usize>()).is_err());
+        assert!(sid_range_with_header(&bytes[..32], base + 16, size_of::<usize>()).is_err());
     }
 }
