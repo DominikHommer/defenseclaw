@@ -1080,3 +1080,84 @@ def test_an_undone_legacy_rollback_puts_the_saved_store_back_over_a_new_one(tmp_
     else:
         _assert_store_at(data / "audit.db", new)
         assert fresh == []
+
+
+# ── 1.0.3 (B-01, GAP-0196): the new hook answers during the install ─────────
+
+
+def test_the_new_hook_goes_in_before_the_data_copy() -> None:
+    # GAP-0196: the 1.0.2 hook answered the whole data copy and environment
+    # build with the operator-stop notice and cold starts. The new hook goes
+    # in once the rollback copy holds the old one, before the slow copies.
+    save = _ps1_function("Save-Snapshot")
+    order = [
+        'Copy-BinDir (Join-Path $Snap "bin")',
+        "Install-HookFirst $Snap",
+        "foreach ($entry in $entries) { Copy-Kept",
+        'Move-Path $Venv (Join-Path $Snap "venv")',
+        'Join-Path $Snap "COMPLETE"',
+    ]
+    positions = [save.index(step) for step in order]
+    assert positions == sorted(positions), save
+    first = _ps1_function("Install-HookFirst")
+    assert first.index('(Join-Path $Slot "HOOK_FIRST")') < first.index("Install-File $staged $live")
+    # An unfinished snapshot puts the old hook back before anything else.
+    undo = _ps1_function("Undo-Snapshot")
+    assert undo.index("Undo-HookFirst $Slot") < undo.index("Move-Path")
+    # A finished one is restored with the rest of the bin folder.
+    assert 'Restore-BinDir (Join-Path $Slot "bin")' in _ps1_function("Restore-Slot")
+
+
+@pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+@pytest.mark.parametrize("case", ["upgrade", "first-install", "interrupted-before-marker"])
+def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path, shell: str, case: str) -> None:
+    bin_dir, staging, slot = tmp_path / "bin", tmp_path / "staging", tmp_path / "slot"
+    (staging / "bin").mkdir(parents=True)
+    (staging / "bin" / "defenseclaw-hook.exe").write_text("new", encoding="utf-8")
+    if case != "first-install":
+        bin_dir.mkdir()
+        (bin_dir / "defenseclaw-hook.exe").write_text("old", encoding="utf-8")
+    steps = (
+        "Copy-BinDir (Join-Path $Slot bin); Undo-HookFirst $Slot"
+        if case == "interrupted-before-marker"
+        else "Copy-BinDir (Join-Path $Slot bin); Install-HookFirst $Slot; Write-Host \"after: $(Get-Content -Raw (Join-Path $BinDir 'defenseclaw-hook.exe') -ErrorAction SilentlyContinue)\"; Undo-HookFirst $Slot"
+    )
+    script = tmp_path / "case.ps1"
+    script.write_text(
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$BinDir = '{bin_dir}'\n$Staging = '{staging}'\n$Slot = '{slot}'\n"
+        "$ManagedFiles = @('defenseclaw-hook.exe')\n"
+        "function Install-File([string]$From, [string]$To) { Copy-Item -LiteralPath $From -Destination $To -Force }\n"
+        "function Remove-Aside([string]$Path) { Remove-Item -LiteralPath $Path -Force }\n"
+        + _bin_dir_functions()
+        + _ps1_function("Install-HookFirst")
+        + _ps1_function("Undo-HookFirst")
+        + steps
+        + "\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    live = bin_dir / "defenseclaw-hook.exe"
+    if case == "first-install":
+        # Nothing ran a hook before: nothing to swap, no marker, no hook yet.
+        assert not live.exists() and not (slot / "HOOK_FIRST").exists(), out
+        return
+    if case == "upgrade":
+        assert "after: new" in out, out
+        assert (slot / "HOOK_FIRST").exists()
+        assert (slot / "bin" / "defenseclaw-hook.exe").read_text(encoding="utf-8") == "old"
+    else:
+        assert not (slot / "HOOK_FIRST").exists()
+    # Undo leaves the old hook live.
+    assert live.read_text(encoding="utf-8").strip() == "old", out
