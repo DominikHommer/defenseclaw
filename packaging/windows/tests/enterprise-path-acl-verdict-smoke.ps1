@@ -58,6 +58,7 @@ $cases = @(
     @{ name = 'foreign owner survives'; before = @($owner); after = @($owner); stamp = 'noop'; strict = ''; expect = $owner.Reason }
     @{ name = 'missing rights survive'; before = @($rights); after = @($rights); stamp = 'noop'; strict = ''; expect = $rights.Reason }
     @{ name = 'Secure Client state root advisory'; before = @($write); after = @($write); stamp = 'noop'; strict = ''; advisory = $true; profile = 'SecureClient'; expect = '' }
+    @{ name = 'standalone state root has no advisory'; before = @($write); after = @($write); stamp = 'noop'; strict = ''; advisory = $true; profile = 'Standalone'; expect = $write.Reason }
     @{ name = 'Secure Client state root advisory, strict pin'; before = @($write); after = @($write); stamp = 'noop'; strict = '1'; advisory = $true; profile = 'SecureClient'; expect = $write.Reason }
 )
 

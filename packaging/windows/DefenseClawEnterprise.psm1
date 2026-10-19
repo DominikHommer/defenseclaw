@@ -5420,7 +5420,12 @@ function Assert-DefenseClawPathAcl {
         [string]$SelfHealKind,
         [string]$SelfHealGatewayServiceSID
     )
-    $advisory = [bool]$AdvisoryUntrustedAccess -and -not (Test-DefenseClawTrustStrictAncestors)
+    # Only the Secure Client state root sits inside a tree AVC re-ACLs. The
+    # standalone state root (%ProgramData%\Cisco\DefenseClaw) has no other
+    # owner, so foreign access there is judged like any other managed path.
+    $advisory = [bool]$AdvisoryUntrustedAccess -and
+        -not (Test-DefenseClawTrustStrictAncestors) -and
+        -not (Test-DefenseClawStandaloneProfile)
     Assert-DefenseClawNoReparsePath -Path $Path
     $verdictArgs = @{
         Path                   = $Path
@@ -5493,8 +5498,8 @@ function Assert-DefenseClawPathAcl {
         $downgradable = switch ($verdict.Kind) {
             # Access verdicts (foreign SIDs on managed paths) downgrade only
             # for drift a standard user cannot have created:
-            #   - the caller passed -AdvisoryUntrustedAccess (the state root,
-            #     which AVC re-ACLs inside the Secure Client tree);
+            #   - the caller passed -AdvisoryUntrustedAccess (the Secure Client
+            #     state root, which AVC re-ACLs; never the standalone profile);
             #   - a Read-severity verdict in non-strict mode: Group Policy,
             #     WDAC or a filesystem driver dropping SE_DACL_PROTECTED and
             #     re-admitting an inherited BUILTIN\Users READ ACE. Adding
