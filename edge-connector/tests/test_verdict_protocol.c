@@ -243,6 +243,24 @@ static void test_max_content_request_encodes(void) {
     printf("  PASS: maximum-size verdict request encodes (%zu bytes)\n", len);
 }
 
+extern uint64_t dclaw_mqtt_next_backoff(uint64_t *cap_ms, uint32_t rnd);
+
+/* Reconnect backoff: jittered, bounded, short cap. */
+static void test_reconnect_backoff_bounds(void) {
+    uint64_t cap = 1000, expect_cap[] = {2000, 4000, 8000, 16000, 30000, 30000, 30000};
+    for (size_t i = 0; i < sizeof(expect_cap) / sizeof(expect_cap[0]); i++) {
+        uint64_t lo = dclaw_mqtt_next_backoff(&(uint64_t){cap}, 0);
+        uint64_t hi = dclaw_mqtt_next_backoff(&(uint64_t){cap}, 0xFFFFFFFFu);
+        uint64_t d = dclaw_mqtt_next_backoff(&cap, (uint32_t)(i * 2654435761u));
+        assert(cap == expect_cap[i]);
+        assert(lo == cap / 2 && hi < cap && d >= cap / 2 && d < cap);
+    }
+    /* Different random draws give different delays (no lock-step retries). */
+    uint64_t c1 = 8000, c2 = 8000;
+    assert(dclaw_mqtt_next_backoff(&c1, 1) != dclaw_mqtt_next_backoff(&c2, 3000));
+    printf("  PASS: reconnect backoff is jittered in [cap/2, cap), cap <= 30 s\n");
+}
+
 int main(void) {
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
@@ -266,7 +284,8 @@ int main(void) {
     test_wrong_size_rejected();
     test_signed_ttl_controls_cache();
     test_max_content_request_encodes();
-    printf("  ALL PASSED (8 tests)\n");
+    test_reconnect_backoff_bounds();
+    printf("  ALL PASSED (9 tests)\n");
 
     dclaw_shutdown();
     return 0;

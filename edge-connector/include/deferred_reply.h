@@ -45,6 +45,9 @@ bool dclaw_deferred_add(int fd, int32_t rpc_id, uint16_t request_id,
 
 bool dclaw_deferred_pending_for_fd(int fd);
 
+/* True if any reply is held (the event loop must wake often enough to expire it). */
+bool dclaw_deferred_any_pending(void);
+
 /* Forget held replies for a client that disconnected. */
 void dclaw_deferred_drop_fd(int fd);
 

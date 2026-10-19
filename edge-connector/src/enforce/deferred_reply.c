@@ -85,6 +85,13 @@ bool dclaw_deferred_pending_for_fd(int fd) {
     return false;
 }
 
+bool dclaw_deferred_any_pending(void) {
+    for (int i = 0; i < DCLAW_DEFERRED_MAX; i++) {
+        if (s_deferred[i].active) return true;
+    }
+    return false;
+}
+
 void dclaw_deferred_drop_fd(int fd) {
     for (int i = 0; i < DCLAW_DEFERRED_MAX; i++) {
         if (s_deferred[i].active && s_deferred[i].fd == fd) {

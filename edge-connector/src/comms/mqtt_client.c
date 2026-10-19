@@ -55,6 +55,8 @@ extern bool dclaw_verdict_is_key_provisioned(void);
 
 #define MQTT_DEFAULT_PORT    1883
 #define MQTT_KEEPALIVE_SEC   60
+#define DCLAW_RECONNECT_BACKOFF_MIN_MS 1000
+#define DCLAW_RECONNECT_BACKOFF_MAX_MS 30000
 #define MQTT_RECV_BUF_SIZE   4224  /* 4096 (max OTA blob) + 128 (MQTT header overhead) */
 /* Largest outgoing publish: a verdict request with HMAC tag plus topic and
  * MQTT header overhead. */
@@ -68,6 +70,7 @@ typedef struct {
     uint8_t         readbuf[MQTT_RECV_BUF_SIZE];
     bool            connected;
     uint64_t        backoff_ms;
+    uint64_t        backoff_cap_ms;
     uint64_t        last_attempt_tick;
     uint64_t        last_heartbeat_tick;
     char            session_id[32];
@@ -504,7 +507,8 @@ int dclaw_mqtt_init(void) {
     memset(&mqtt_ctx, 0, sizeof(mqtt_ctx));
     mqtt_frame_reset();
     mqtt_ctx.connected = false;
-    mqtt_ctx.backoff_ms = 1000;
+    mqtt_ctx.backoff_ms = DCLAW_RECONNECT_BACKOFF_MIN_MS;
+    mqtt_ctx.backoff_cap_ms = DCLAW_RECONNECT_BACKOFF_MIN_MS;
     mqtt_ctx.net.my_socket = -1;
     mqtt_context_initialized = true;
 
@@ -730,6 +734,21 @@ int dclaw_mqtt_connect(void) {
     return 0;
 }
 
+/* Reconnect delay after a failed attempt: the cap doubles from
+ * DCLAW_RECONNECT_BACKOFF_MIN_MS up to DCLAW_RECONNECT_BACKOFF_MAX_MS and the
+ * delay is drawn uniformly from [cap/2, cap) ("equal jitter"). Devices that
+ * lost the broker together must not retry in lock step, and a device whose
+ * link heals must learn about a kill switch within seconds, so the cap is
+ * kept short. */
+uint64_t dclaw_mqtt_next_backoff(uint64_t *cap_ms, uint32_t rnd) {
+    uint64_t cap = *cap_ms * 2;
+    if (cap > DCLAW_RECONNECT_BACKOFF_MAX_MS) cap = DCLAW_RECONNECT_BACKOFF_MAX_MS;
+    if (cap < DCLAW_RECONNECT_BACKOFF_MIN_MS) cap = DCLAW_RECONNECT_BACKOFF_MIN_MS;
+    *cap_ms = cap;
+    uint64_t half = cap / 2;
+    return half + (half ? rnd % half : 0);
+}
+
 int dclaw_mqtt_reconnect(void) {
     if (mqtt_ctx.connected) return 0;
 
@@ -739,10 +758,12 @@ int dclaw_mqtt_reconnect(void) {
 
     int rc = dclaw_mqtt_connect();
     if (rc != 0) {
-        mqtt_ctx.backoff_ms *= 2;
-        if (mqtt_ctx.backoff_ms > 300000) mqtt_ctx.backoff_ms = 300000;
+        uint32_t rnd = 0;
+        (void)hal_random_bytes(&rnd, sizeof(rnd));
+        mqtt_ctx.backoff_ms = dclaw_mqtt_next_backoff(&mqtt_ctx.backoff_cap_ms, rnd);
     } else {
-        mqtt_ctx.backoff_ms = 1000;
+        mqtt_ctx.backoff_ms = DCLAW_RECONNECT_BACKOFF_MIN_MS;
+        mqtt_ctx.backoff_cap_ms = DCLAW_RECONNECT_BACKOFF_MIN_MS;
 
         dclaw_state_t *rs = dclaw_get_state();
         if (rs->emergency.initialized && rs->emergency.last_was_lockdown) {

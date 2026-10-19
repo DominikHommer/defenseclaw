@@ -331,7 +331,11 @@ int main(int argc, char *argv[]) {
         }
         const int client_slots_end = nfds;
 
-        int poll_timeout_ms = 10;
+        /* Sockets (IPC and MQTT) wake the loop; the timeout only paces timers.
+         * Held replies need ~10 ms granularity for their 500 ms deadline;
+         * otherwise every remaining timer (heartbeat, keepalive, reconnect
+         * backoff, audit flush, lockdown timeouts) is coarse. */
+        int poll_timeout_ms = dclaw_deferred_any_pending() ? 10 : 250;
 #if DCLAW_MQTT_ENABLED
         /* Poll the MQTT socket here so a gateway verdict wakes the loop
          * immediately, instead of waiting inside a fixed-length MQTTYield. */
