@@ -51,7 +51,7 @@ type nativeModelGrant struct {
 	Spec       sandboxruntime.Spec
 	Profile    string
 	Endpoint   string
-	Model      string
+	Model      sandboxruntime.ModelSelection
 	MaxTokens  int
 	Credential string
 }
@@ -129,7 +129,7 @@ func newNativeModelAdapter(owner context.Context, proxy *GuardrailProxy, store *
 		grant.Spec.HarnessIdentity != grant.Selection.HarnessIdentity || grant.Spec.BindingID != grant.Binding.ID ||
 		grant.Spec.CredentialProfile != grant.Profile || grant.Spec.Offline ||
 		grant.Profile != nativeClaudeProfile || grant.Endpoint != nativeClaudeEndpoint ||
-		grant.Model == "" || len(grant.Model) > 256 || strings.ContainsAny(grant.Model, "\x00\r\n") ||
+		!grant.Model.Valid() || grant.Model.Kind == sandboxruntime.ModelSelectionProfileDefault ||
 		grant.MaxTokens <= 0 || grant.MaxTokens > 8192 ||
 		grant.Credential == "" || len(grant.Credential) > 16<<10 || strings.ContainsAny(grant.Credential, "\x00\r\n") {
 		return nil, errNativeModelAdapter
@@ -317,7 +317,7 @@ func nativeModelHeaders(input http.Header) (http.Header, bool) {
 	return result, true
 }
 
-func nativeModelBody(body []byte, model string, maxTokens int) (string, bool) {
+func nativeModelBody(body []byte, model sandboxruntime.ModelSelection, maxTokens int) (string, bool) {
 	if len(body) == 0 || !nativeModelUniqueJSON(body) {
 		return "", false
 	}
@@ -336,7 +336,7 @@ func nativeModelBody(body []byte, model string, maxTokens int) (string, bool) {
 		Model     string `json:"model"`
 		MaxTokens int    `json:"max_tokens"`
 	}
-	if json.Unmarshal(body, &shape) != nil || shape.Model != model ||
+	if json.Unmarshal(body, &shape) != nil || !model.Accepts(shape.Model) ||
 		shape.MaxTokens <= 0 || shape.MaxTokens > maxTokens {
 		return "", false
 	}

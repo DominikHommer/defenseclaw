@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -92,11 +93,53 @@ type ExecutionPolicy struct {
 	digest     string
 }
 
+// ModelSelection is request data selected by a trusted host producer from the
+// admitted harness arguments and credential profile. It cannot choose a
+// provider, credential, endpoint, policy, or session identity. A zero value
+// is invalid. AgentSelected leaves the model name to the agent's bounded
+// request while preserving every other host-owned route decision.
+type ModelSelectionKind uint8
+
+const (
+	ModelSelectionExplicit ModelSelectionKind = iota + 1
+	ModelSelectionProfileDefault
+	ModelSelectionAgentSelected
+)
+
+type ModelSelection struct {
+	Kind ModelSelectionKind
+	Name string
+}
+
+func validModelRequestName(name string) bool {
+	return name != "" && len(name) <= 256 && utf8.ValidString(name) &&
+		strings.TrimSpace(name) == name &&
+		!strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f })
+}
+
+func (selection ModelSelection) Valid() bool {
+	switch selection.Kind {
+	case ModelSelectionExplicit, ModelSelectionProfileDefault:
+		return validModelRequestName(selection.Name)
+	case ModelSelectionAgentSelected:
+		return selection.Name == ""
+	default:
+		return false
+	}
+}
+
+// Accepts checks only request model data. Provider/profile/credential and
+// generation checks remain independent and mandatory at the host broker.
+func (selection ModelSelection) Accepts(name string) bool {
+	return selection.Valid() && validModelRequestName(name) &&
+		(selection.Kind == ModelSelectionAgentSelected || name == selection.Name)
+}
+
 // ModelBrokerPolicy is a copied description of the host's resolved model
 // route. It is not an authorization handle: a native producer must capture it
 // with the policy and admitted launch, rather than reconstruct it from policy
-// Snapshot or a guest request. The model name itself is chosen by that host
-// producer; the sandbox policy has no model-name field.
+// Snapshot or a guest request. The producer owns the model-selection rule;
+// this sandbox policy has no model-name field.
 type ModelBrokerPolicy struct {
 	Authority       PolicyAuthorityBinding
 	PolicyDigest    string

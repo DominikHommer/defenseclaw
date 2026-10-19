@@ -196,7 +196,7 @@ func TestNativeModelAdapterPrivateNotificationAndBlockState(t *testing.T) {
 	}
 }
 
-func TestNativeModelAdapterRequiresSelectedAnthropicAndPinnedModel(t *testing.T) {
+func TestNativeModelAdapterRequiresSelectedAnthropicAndOwnedModelChoice(t *testing.T) {
 	adapter, store, _, _ := nativeModelFixture(t)
 	owner, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -247,6 +247,57 @@ func TestNativeModelAdapterRequiresSelectedAnthropicAndPinnedModel(t *testing.T)
 	adapter.ServeHTTP(rec, nativeModelRequest(body))
 	if rec.Code < 400 || called != 0 {
 		t.Fatalf("guest substituted host-selected model: status=%d upstream=%d", rec.Code, called)
+	}
+	// The Anthropic credential profile has no DefaultModel. With no --model,
+	// Claude owns the model request data but cannot choose another host route.
+	agentGrant := adapter.grant
+	agentGrant.Model = sandboxruntime.ModelSelection{Kind: sandboxruntime.ModelSelectionAgentSelected}
+	agent, err := newNativeModelAdapter(owner, adapter.proxy, store, agentGrant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := agent.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+	wantBody := ""
+	nativeModelSetTransport(t, agent, nativeModelRoundTrip(func(req *http.Request) (*http.Response, error) {
+		called++
+		forwarded, readErr := io.ReadAll(req.Body)
+		if readErr != nil || string(forwarded) != wantBody ||
+			req.URL.String() != nativeClaudeEndpoint+"/v1/messages" || req.Host != "api.anthropic.com" ||
+			req.Header.Get("x-api-key") != agentGrant.Credential || req.Header.Get("X-DC-Target-URL") != "" ||
+			req.Header.Get("X-AI-Auth") != "" || req.Header.Get("Authorization") != "" {
+			t.Error("agent model request changed host-owned route, key, or body")
+		}
+		return nativeModelOK(), nil
+	}))
+	for _, name := range []string{"claude-sonnet-test", "claude-opus-test"} {
+		wantBody = `{"model":"` + name + `","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`
+		rec = httptest.NewRecorder()
+		agent.ServeHTTP(rec, nativeModelRequest(wantBody))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "answer") {
+			t.Fatalf("agent-selected model was not inspected and forwarded: status=%d", rec.Code)
+		}
+	}
+	if called != 2 {
+		t.Fatalf("agent-selected requests reached upstream %d times, want 2", called)
+	}
+	for _, malformed := range []string{
+		`{"max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`,
+		`{"model":"","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`,
+		`{"model":" padded ","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`,
+		`{"model":"x\u000a","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`,
+		`{"model":"` + strings.Repeat("x", 257) + `","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`,
+	} {
+		rec = httptest.NewRecorder()
+		agent.ServeHTTP(rec, nativeModelRequest(malformed))
+		if rec.Code < 400 || called != 2 {
+			t.Fatalf("malformed agent model reached provider: status=%d upstream=%d", rec.Code, called)
+		}
 	}
 }
 

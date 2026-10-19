@@ -68,7 +68,7 @@ func nativeModelFixture(t *testing.T) (*nativeModelAdapter, *sandboxauth.FileSto
 	adapter, err := newNativeModelAdapter(owner, proxy, store, nativeModelGrant{Identity: identity,
 		Binding: binding, Bearer: token, Authority: *authority.Load(), Current: func() sandboxruntime.PolicyAuthorityBinding { return *authority.Load() },
 		Policy: policy, Selection: selection, Spec: spec, Profile: nativeClaudeProfile,
-		Endpoint: nativeClaudeEndpoint, Model: "claude-sonnet-test",
+		Endpoint: nativeClaudeEndpoint, Model: sandboxruntime.ModelSelection{Kind: sandboxruntime.ModelSelectionExplicit, Name: "claude-sonnet-test"},
 		MaxTokens: 512, Credential: "real-host-only-key"})
 	if err != nil {
 		t.Fatal(err)
@@ -220,8 +220,15 @@ func TestNativeModelAdapterConstructorRejectsForeignOrUnpinnedGrant(t *testing.T
 		{"stale authority", func(g *nativeModelGrant) { g.Authority.Generation++ }},
 		{"selection authority mismatch", func(g *nativeModelGrant) { g.Selection.Authority.Generation++ }},
 		{"policy authority mismatch", func(g *nativeModelGrant) { g.Policy = nil }},
-		{"unselected model", func(g *nativeModelGrant) { g.Model = "" }},
-		{"oversized model pin", func(g *nativeModelGrant) { g.Model = strings.Repeat("x", 257) }},
+		{"unselected model", func(g *nativeModelGrant) { g.Model.Name = "" }},
+		{"oversized model pin", func(g *nativeModelGrant) { g.Model.Name = strings.Repeat("x", 257) }},
+		{"unknown model choice", func(g *nativeModelGrant) { g.Model.Kind = 0 }},
+		{"agent choice with pin", func(g *nativeModelGrant) {
+			g.Model = sandboxruntime.ModelSelection{Kind: sandboxruntime.ModelSelectionAgentSelected, Name: "claude-sonnet-test"}
+		}},
+		{"profile default absent for Anthropic", func(g *nativeModelGrant) {
+			g.Model.Kind = sandboxruntime.ModelSelectionProfileDefault
+		}},
 		{"token ceiling removed", func(g *nativeModelGrant) { g.MaxTokens = 0 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

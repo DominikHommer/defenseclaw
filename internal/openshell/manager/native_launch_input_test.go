@@ -68,7 +68,10 @@ func nativeInputForTest(t *testing.T, edit func(*config.Config, *sandboxapi.LLMC
 	if request.Credentials != nil {
 		request.Credentials["ANTHROPIC_API_KEY"] = "mutated-caller-map"
 	}
-	intent.Args[1], intent.Prompt = "mutated-caller-model", "mutated-caller-prompt"
+	if len(intent.Args) > 1 {
+		intent.Args[1] = "mutated-caller-model"
+	}
+	intent.Prompt = "mutated-caller-prompt"
 	return input, nil
 }
 
@@ -86,6 +89,7 @@ func TestNativeLaunchInputOwnsAndRedactsAgentSelection(t *testing.T) {
 	plan, err := input.PlanModel([]string{"/synthetic/held-agent"})
 	nativeMust(t, err)
 	if plan == nil || plan.ProfileID() != profiles.AnthropicID || plan.Model() != "synthetic-agent-model" ||
+		plan.ModelSelection() != (sandboxruntime.ModelSelection{Kind: sandboxruntime.ModelSelectionExplicit, Name: "synthetic-agent-model"}) ||
 		plan.Selection().LLM != config.OpenShellLLMAnthropic || plan.Selection().Offline ||
 		!slices.Contains(plan.Hosts(), "api.anthropic.com") {
 		t.Fatal("agent profile/model was replaced with inspector or sandbox policy profile")
@@ -138,6 +142,40 @@ func TestNativeLaunchInputOwnsAndRedactsAgentSelection(t *testing.T) {
 		plan.ValidateFor(input.run, input.policy, input.identity, foreignHarness) == nil {
 		t.Fatal("model input crossed admitted harness bytes")
 	}
+	t.Run("agent chooses when Claude profile has no default", func(t *testing.T) {
+		choice, err := nativeInputForTest(t, func(_ *config.Config, _ *sandboxapi.LLMCredential, intent *sandboxapi.RunIntent) {
+			intent.Args = nil
+		})
+		nativeMust(t, err)
+		chosen, err := choice.PlanModel([]string{"/synthetic/held-agent"})
+		nativeMust(t, err)
+		if chosen == nil || chosen.Model() != "" ||
+			chosen.ModelSelection() != (sandboxruntime.ModelSelection{Kind: sandboxruntime.ModelSelectionAgentSelected}) ||
+			chosen.Selection().LLM != config.OpenShellLLMAnthropic || chosen.ProfileID() != profiles.AnthropicID {
+			t.Fatal("default Claude command lost its fixed provider/profile or invented a model pin")
+		}
+	})
+	t.Run("profile default remains distinct", func(t *testing.T) {
+		spec, _ := harness.Get("claudecode")
+		chosen, err := nativeModelSelection(spec, profiles.ClaudeBedrockMantleID, nil)
+		nativeMust(t, err)
+		if chosen.Kind != sandboxruntime.ModelSelectionProfileDefault || chosen.Name != harness.ClaudeCodeMantleDefaultModel {
+			t.Fatal("harness profile default was treated as agent-selected")
+		}
+	})
+	t.Run("duplicate explicit flags keep harness last-wins", func(t *testing.T) {
+		spec, _ := harness.Get("claudecode")
+		chosen, err := nativeModelSelection(spec, profiles.AnthropicID, []string{"--model=a", "--model", "b"})
+		nativeMust(t, err)
+		if chosen.Kind != sandboxruntime.ModelSelectionExplicit || chosen.Name != "b" {
+			t.Fatal("native model selection changed the harness's duplicate-flag semantics")
+		}
+		chosen, err = nativeModelSelection(spec, profiles.AnthropicID, []string{"--", "--model=ignored"})
+		nativeMust(t, err)
+		if chosen.Kind != sandboxruntime.ModelSelectionAgentSelected {
+			t.Fatal("model flag after argument terminator acquired authority")
+		}
+	})
 }
 
 func TestNativeLaunchInputRejectsUnboundModelPlan(t *testing.T) {
@@ -155,7 +193,18 @@ func TestNativeLaunchInputRejectsUnboundModelPlan(t *testing.T) {
 		{name: "wrong-harness-profile", edit: func(_ *config.Config, request *sandboxapi.LLMCredential, _ *sandboxapi.RunIntent) {
 			request.Profile = profiles.OpenAIID
 		}},
-		{name: "missing-agent-model", edit: func(_ *config.Config, _ *sandboxapi.LLMCredential, intent *sandboxapi.RunIntent) { intent.Args = nil }},
+		{name: "empty-explicit-model", edit: func(_ *config.Config, _ *sandboxapi.LLMCredential, intent *sandboxapi.RunIntent) {
+			intent.Args = []string{"--model="}
+		}},
+		{name: "missing-explicit-model-value", edit: func(_ *config.Config, _ *sandboxapi.LLMCredential, intent *sandboxapi.RunIntent) {
+			intent.Args = []string{"--model"}
+		}},
+		{name: "duplicate-last-empty", edit: func(_ *config.Config, _ *sandboxapi.LLMCredential, intent *sandboxapi.RunIntent) {
+			intent.Args = []string{"--model=a", "--model="}
+		}},
+		{name: "flag-as-model-value", edit: func(_ *config.Config, _ *sandboxapi.LLMCredential, intent *sandboxapi.RunIntent) {
+			intent.Args = []string{"--model", "--output-format"}
+		}},
 		{name: "no-held-network-realpaths", paths: []string{}},
 		{name: "arbitrary-realpath-glob", paths: []string{"/synthetic/*"}},
 		{name: "admin-credential-refusal", edit: func(cfg *config.Config, _ *sandboxapi.LLMCredential, _ *sandboxapi.RunIntent) {

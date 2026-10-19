@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
-	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -33,7 +32,7 @@ type NativeLaunchInput struct {
 	intent   *sandboxapi.RunIntent
 	request  *sandboxapi.LLMCredential
 	mode     string
-	model    string
+	model    sandboxruntime.ModelSelection
 	planned  *atomic.Bool
 }
 
@@ -50,6 +49,59 @@ func ownLLMCredential(request *sandboxapi.LLMCredential) *sandboxapi.LLMCredenti
 	owned := *request
 	owned.Credentials = maps.Clone(request.Credentials)
 	return &owned
+}
+
+// nativeClaudeModelArgsValid distinguishes a launch with no model flag from
+// one with a malformed flag. Repeated valid flags retain the harness's
+// existing last-one-wins semantics; flags after -- are positional data.
+func nativeClaudeModelArgsValid(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		value := ""
+		switch {
+		case arg == "--model":
+			i++
+			if i >= len(args) {
+				return false
+			}
+			value = args[i]
+		case strings.HasPrefix(arg, "--model="):
+			value = strings.TrimPrefix(arg, "--model=")
+		default:
+			continue
+		}
+		choice := sandboxruntime.ModelSelection{Kind: sandboxruntime.ModelSelectionExplicit, Name: value}
+		if !choice.Valid() || strings.HasPrefix(value, "-") {
+			return false
+		}
+	}
+	return true
+}
+
+// nativeModelSelection preserves the harness's explicit/default/no-model
+// distinction. A missing profile default leaves the request model to the
+// agent; it does not select a different credential or provider.
+func nativeModelSelection(spec *harness.Spec, profile string, args []string) (sandboxruntime.ModelSelection, error) {
+	if spec == nil || spec.Name == "claudecode" && !nativeClaudeModelArgsValid(args) {
+		return sandboxruntime.ModelSelection{}, sandboxapi.Errorf(sandboxapi.CodeInvalid, "invalid native agent model flag")
+	}
+	model, isDefault, _ := spec.Model(profile, args)
+	selection := sandboxruntime.ModelSelection{Name: model}
+	switch {
+	case model == "":
+		selection.Kind = sandboxruntime.ModelSelectionAgentSelected
+	case isDefault:
+		selection.Kind = sandboxruntime.ModelSelectionProfileDefault
+	default:
+		selection.Kind = sandboxruntime.ModelSelectionExplicit
+	}
+	if !selection.Valid() {
+		return sandboxruntime.ModelSelection{}, sandboxapi.Errorf(sandboxapi.CodeInvalid, "invalid native agent model selection")
+	}
+	return selection, nil
 }
 
 // selectedNativeLLM accepts only an actual profile in this harness's roster.
@@ -89,20 +141,18 @@ func newNativeLaunchInput(run *sandboxruntime.HostResolvedRun, policy *sandboxru
 	}
 	input := &NativeLaunchInput{run: run, policy: policy, identity: identity, harness: admitted,
 		spec: spec, intent: ownedIntent, request: request, mode: mode, planned: &atomic.Bool{}}
-	if err := input.ValidateFor(run, policy, identity, admitted); err != nil {
-		return nil, err
-	}
 	if request != nil {
 		var args []string
 		if ownedIntent != nil {
 			args = ownedIntent.Args
 		}
-		input.model, _, _ = spec.Model(strings.TrimSpace(request.Profile), args)
-		if len(input.model) == 0 || len(input.model) > 256 || !utf8.ValidString(input.model) ||
-			strings.TrimSpace(input.model) != input.model ||
-			strings.ContainsFunc(input.model, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "native agent model must be selected explicitly or by its provider profile")
+		input.model, err = nativeModelSelection(spec, strings.TrimSpace(request.Profile), args)
+		if err != nil {
+			return nil, err
 		}
+	}
+	if err := input.ValidateFor(run, policy, identity, admitted); err != nil {
+		return nil, err
 	}
 	return input, nil
 }
@@ -126,6 +176,9 @@ func (input *NativeLaunchInput) ValidateFor(run *sandboxruntime.HostResolvedRun,
 		return nativeInputRefusal()
 	}
 	if input.request != nil {
+		if !input.model.Valid() {
+			return nativeInputRefusal()
+		}
 		for _, capability := range []sandboxruntime.Capability{sandboxruntime.BrokerEgress,
 			sandboxruntime.HostCredentials, sandboxruntime.ExecutableCredentialBinding} {
 			if !slices.Contains(policy.RequiredCapabilities(), capability) {
@@ -218,7 +271,7 @@ type NativeModelPlan struct {
 	harness     sandboxruntime.HarnessIdentity
 	selection   sandboxruntime.ModelBrokerPolicy
 	profile     string
-	model       string
+	model       sandboxruntime.ModelSelection
 	hosts       []string
 	credentials map[string]string
 }
@@ -231,7 +284,7 @@ func (plan *NativeModelPlan) ValidateFor(run *sandboxruntime.HostResolvedRun, po
 		return nativeInputRefusal()
 	}
 	selection, ok := policy.ModelBrokerPolicy()
-	if !ok || selection != plan.selection || selection.Offline || selection.HarnessIdentity != admitted {
+	if !ok || selection != plan.selection || selection.Offline || selection.HarnessIdentity != admitted || !plan.model.Valid() {
 		return nativeInputRefusal()
 	}
 	return nil
@@ -254,6 +307,15 @@ func (plan *NativeModelPlan) ProfileID() string {
 func (plan *NativeModelPlan) Model() string {
 	if plan == nil {
 		return ""
+	}
+	return plan.model.Name
+}
+
+// ModelSelection is a copied model request choice from the admitted harness.
+// It does not contain provider routing or credential authority.
+func (plan *NativeModelPlan) ModelSelection() sandboxruntime.ModelSelection {
+	if plan == nil {
+		return sandboxruntime.ModelSelection{}
 	}
 	return plan.model
 }
