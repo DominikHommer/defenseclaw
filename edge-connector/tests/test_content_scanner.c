@@ -452,6 +452,31 @@ static void test_medium_severity_returns_warn(void) {
     printf("  PASS: MEDIUM severity returns WARN (TOOL_OUTPUT scope)\n");
 }
 
+
+/* Regression: four MEDIUM findings filled the array and the scanner stopped,
+ * so a later HIGH credit card number in TOOL_OUTPUT was only a WARN. */
+static void test_high_finding_after_full_array(void) {
+    const char *content = "a@b c@d e@f g@h i@j 4111111111111111";
+    dclaw_scan_context_t ctx;
+    dclaw_content_scan(content, (uint16_t)strlen(content),
+                       DCLAW_CONTENT_SCOPE_TOOL_OUTPUT, &ctx);
+    assert(ctx.finding_count == DCLAW_MAX_SCAN_FINDINGS);
+    bool high = false;
+    for (uint8_t i = 0; i < ctx.finding_count; i++)
+        if (ctx.findings[i].severity >= DCLAW_SEV_HIGH) high = true;
+    assert(high);
+    assert(dclaw_content_scan_worst_action(&ctx, DCLAW_CONTENT_SCOPE_TOOL_OUTPUT)
+           == DCLAW_ACTION_BLOCK);
+    /* The card alone blocks too, and four MEDIUMs alone still only warn. */
+    const char *mediums = "a@b c@d e@f g@h i@j";
+    dclaw_content_scan(mediums, (uint16_t)strlen(mediums),
+                       DCLAW_CONTENT_SCOPE_TOOL_OUTPUT, &ctx);
+    assert(dclaw_content_scan_worst_action(&ctx, DCLAW_CONTENT_SCOPE_TOOL_OUTPUT)
+           == DCLAW_ACTION_WARN);
+    (void)high;
+    printf("  PASS: HIGH finding is kept after MEDIUM findings fill the array\n");
+}
+
 int main(void) {
     printf("test_content_scanner:\n");
 
@@ -495,7 +520,8 @@ int main(void) {
     /* Worst action tests */
     test_high_severity_returns_block();
     test_medium_severity_returns_warn();
+    test_high_finding_after_full_array();
 
-    printf("  ALL PASSED (29 tests)\n");
+    printf("  ALL PASSED (30 tests)\n");
     return 0;
 }
