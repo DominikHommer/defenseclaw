@@ -288,10 +288,10 @@ int dclaw_paho_read(Network *net, unsigned char *buf, int len, int timeout_ms) {
  * Must return the number of bytes written, or -1 on error.
  */
 int dclaw_paho_write(Network *net, unsigned char *buf, int len, int timeout_ms) {
-    (void)timeout_ms;
+    (void)timeout_ms; /* used by the TLS path */
 #if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
     if (net->tls_active) {
-        int ret = dclaw_tls_write(buf, (size_t)len);
+        int ret = dclaw_tls_write(buf, (size_t)len, timeout_ms);
         return (ret >= 0 && (size_t)ret == (size_t)len) ? ret : -1;
     }
 #endif

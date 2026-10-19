@@ -102,6 +102,24 @@ if(DCLAW_MQTT_ENABLED)
     list(APPEND DCLAW_TEST_TARGETS test_mqtt_publish_nowait)
     list(APPEND DCLAW_TEST_TARGETS test_mqtt_ack)
 
+    # Needs a real TLS stack (it runs an in-process mbedTLS server).
+    if(DCLAW_HAS_USABLE_MBEDTLS)
+        find_package(Threads REQUIRED)
+        add_executable(test_tls_timeouts test_tls_timeouts.c)
+        if(TARGET MbedTLS::mbedtls)
+            target_link_libraries(test_tls_timeouts PRIVATE dclaw_core
+                MbedTLS::mbedtls MbedTLS::mbedx509 MbedTLS::mbedcrypto Threads::Threads)
+        else()
+            target_include_directories(test_tls_timeouts PRIVATE ${_MBEDTLS_PREFIX}/include)
+            target_link_directories(test_tls_timeouts PRIVATE ${_MBEDTLS_LIBDIR})
+            target_link_libraries(test_tls_timeouts PRIVATE dclaw_core
+                mbedtls mbedx509 mbedcrypto Threads::Threads)
+        endif()
+        add_test(NAME tls_timeouts COMMAND test_tls_timeouts)
+        set_tests_properties(tls_timeouts PROPERTIES TIMEOUT 30)
+        list(APPEND DCLAW_TEST_TARGETS test_tls_timeouts)
+    endif()
+
     add_executable(test_verdict_protocol test_verdict_protocol.c)
     target_link_libraries(test_verdict_protocol PRIVATE dclaw_core)
     add_test(NAME verdict_protocol COMMAND test_verdict_protocol)

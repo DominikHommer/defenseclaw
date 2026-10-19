@@ -385,9 +385,10 @@ void dclaw_sessions_reset_keep_revoked(void);
 
 int  dclaw_tls_init(void);
 int  dclaw_tls_connect(int tcp_fd, const char *hostname);
-int  dclaw_tls_write(const uint8_t *data, size_t len);
+int  dclaw_tls_write(const uint8_t *data, size_t len, int timeout_ms);
 int  dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms);
 size_t dclaw_tls_pending(void); /* decrypted bytes buffered, not yet read */
+void dclaw_tls_set_handshake_timeout(uint32_t timeout_ms); /* test hook; 0 = default */
 void dclaw_tls_shutdown(void);
 
 #endif /* DEFENSECLAW_H */
