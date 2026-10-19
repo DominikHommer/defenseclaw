@@ -75,10 +75,10 @@ class BuildAdmissionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 build.ordinary(path)
 
-    def test_dependency_unit_gate_inventory_is_six_fixed_nonspawning_tests(self):
-        self.assertEqual(sum(len(value["tests"]) for value in build.DEPENDENCY_TESTS.values()), 6)
+    def test_dependency_unit_gate_inventory_is_seven_fixed_nonspawning_tests(self):
+        self.assertEqual(sum(len(value["tests"]) for value in build.DEPENDENCY_TESTS.values()), 7)
         for value in build.DEPENDENCY_TESTS.values():
-            self.assertEqual(len(value["tests"]), 2 if value["package"] == "axis-sandbox" else 4)
+            self.assertEqual(len(value["tests"]), 3 if value["package"] == "axis-sandbox" else 4)
             self.assertTrue(all(name.startswith(value["prefix"]) for name in value["tests"]))
 
     def test_inert_c_evidence_refuses_missing_extra_reordered_or_incomplete_results(self):

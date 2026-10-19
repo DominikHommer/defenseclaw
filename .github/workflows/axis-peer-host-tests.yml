@@ -15,6 +15,7 @@ on:
       - internal/axis/namespaceinit/**
       - internal/audit/**
       - internal/gateway/**
+      - internal/cli/**
       - internal/openshell/manager/**
       - internal/openshell/sandboxcli/**
       - internal/sandboxauth/**
@@ -35,6 +36,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  native-hook-client-contracts:
+    name: Native hook client contracts (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: 1.26.5
+          cache: false
+      - name: Test existing hook dialects and native profile refusal
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          CGO_ENABLED: '1'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(go env GOVERSION)" = "go1.26.5"
+          go test -race -p 1 ./internal/gateway/connector/hookexec -count=1 -timeout=120s
+          go test -race -p 1 ./internal/cli -run '^TestNativeSandbox' -count=1 -timeout=120s
+          go vet -p 1 ./internal/gateway/connector/hookexec ./internal/cli
+
   host-contracts:
     strategy:
       fail-fast: false

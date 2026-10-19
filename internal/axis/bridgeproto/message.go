@@ -19,6 +19,9 @@ const (
 	Version       = 1
 	MaxFrameBytes = 256 << 10
 	MaxDataBytes  = 16 << 10
+	HookDirectory = "/run/defenseclaw-hook"
+	HookSocket    = HookDirectory + "/ingress.sock"
+	HookProfile   = HookDirectory + "/runtime.json"
 )
 
 var ErrProtocol = errors.New("invalid private sandbox bridge protocol")
@@ -86,6 +89,15 @@ type Preparation struct {
 	Terminal    *Size      `json:"terminal,omitempty"`
 	TimeoutMS   uint32     `json:"timeout_ms"`
 	OutputLimit uint32     `json:"output_limit"`
+	Hook        *Hook      `json:"hook,omitempty"`
+}
+
+// Hook is a typed, one-session capability. The guest path is fixed by this
+// protocol; ReadIndex identifies its held directory grant, not a host path.
+type Hook struct {
+	SessionID     string `json:"session_id"`
+	ReadIndex     uint16 `json:"read_index"`
+	ProfileDigest string `json:"profile_digest"`
 }
 
 type Variable struct {
@@ -172,7 +184,8 @@ func (p Preparation) Validate() error {
 		if p.Backend == "windows_psec" {
 			key = strings.ToUpper(key)
 		}
-		if !envPattern.MatchString(variable.Name) || seen[key] || !text(variable.Value, 32<<10) {
+		if !envPattern.MatchString(variable.Name) || seen[key] || !text(variable.Value, 32<<10) ||
+			variable.Name == "DEFENSECLAW_HOOK_SESSION" || variable.Name == "DEFENSECLAW_HOOK_SOCKET" {
 			return ErrProtocol
 		}
 		seen[key] = true
@@ -181,14 +194,23 @@ func (p Preparation) Validate() error {
 	if bytes > 64<<10 {
 		return ErrProtocol
 	}
+	if p.Hook != nil {
+		if p.Backend != "bubblewrap" || !sessionPattern.MatchString(p.Hook.SessionID) ||
+			!digestPattern.MatchString(p.Hook.ProfileDigest) ||
+			int(p.Hook.ReadIndex) >= len(p.Filesystem.Read) || p.Filesystem.Read[p.Hook.ReadIndex] != HookDirectory ||
+			(protectedGrant(p.Workdir) || coversPath(HookDirectory, p.Workdir)) {
+			return ErrProtocol
+		}
+	}
 	bytes = 0
-	for _, paths := range [][]string{p.Filesystem.Read, p.Filesystem.Write, p.Filesystem.Deny} {
+	for group, paths := range [][]string{p.Filesystem.Read, p.Filesystem.Write, p.Filesystem.Deny} {
 		if len(paths) > 256 {
 			return ErrProtocol
 		}
 		seen := map[string]bool{}
-		for _, path := range paths {
-			if !wirePath(p.Backend, path) || seen[path] {
+		for index, path := range paths {
+			hookGrant := p.Hook != nil && group == 0 && index == int(p.Hook.ReadIndex) && path == HookDirectory
+			if !wirePath(p.Backend, path) || seen[path] || protectedGrant(path) && !hookGrant {
 				return ErrProtocol
 			}
 			seen[path] = true
@@ -211,6 +233,19 @@ func wirePath(backend, value string) bool {
 		return len(value) >= 3 && (value[0] >= 'A' && value[0] <= 'Z' || value[0] >= 'a' && value[0] <= 'z') && value[1] == ':' && value[2] == '\\'
 	}
 	return value[0] == '/'
+}
+
+func coversPath(ancestor, path string) bool {
+	return path == ancestor || ancestor == "/" && strings.HasPrefix(path, "/") || strings.HasPrefix(path, ancestor+"/")
+}
+
+func protectedGrant(path string) bool {
+	for _, root := range []string{"/proc", "/dev", "/.defenseclaw", HookDirectory} {
+		if coversPath(path, root) || coversPath(root, path) {
+			return true
+		}
+	}
+	return false
 }
 
 func PreparationDigest(p Preparation) (string, error) {
@@ -251,6 +286,12 @@ func PreparationDigest(p Preparation) (string, error) {
 	}
 	encoded = binary.BigEndian.AppendUint32(encoded, p.TimeoutMS)
 	encoded = binary.BigEndian.AppendUint32(encoded, p.OutputLimit)
+	if p.Hook != nil {
+		encoded = append(encoded, "\x01defenseclaw-hook-v1\x00"...)
+		putString(p.Hook.SessionID)
+		encoded = binary.BigEndian.AppendUint16(encoded, p.Hook.ReadIndex)
+		putString(p.Hook.ProfileDigest)
+	}
 	digest := sha256.Sum256(encoded)
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
@@ -271,7 +312,8 @@ func (f Frame) Validate() error {
 			return ErrProtocol
 		}
 		digest, err := PreparationDigest(*f.Plan)
-		if err != nil || digest != f.Binding.PreparationHash {
+		if err != nil || digest != f.Binding.PreparationHash ||
+			f.Plan.Hook != nil && f.Plan.Hook.SessionID != f.Binding.SessionID {
 			return ErrProtocol
 		}
 	case Input, Output:

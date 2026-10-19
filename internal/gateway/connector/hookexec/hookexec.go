@@ -226,6 +226,10 @@ func hookDialect(opts Options) string {
 // from flags + environment; tests construct them directly so the full decision
 // matrix can be exercised without a real gateway or agent.
 type Options struct {
+	// NativeSandbox selects only the separately admitted Linux session socket.
+	// It does not select ManagedStandalone or qualify upstream hook enforcement.
+	NativeSandbox    *NativeSandboxProfile
+	nativeRequestKey string
 	// Connector is the logical connector name, e.g. "claudecode", "codex".
 	Connector string
 	// Event is the agent hook event used for deadlines and failure logs. Claude
@@ -361,6 +365,9 @@ func Run(ctx context.Context, opts Options) int {
 		startedAt = time.Now()
 	}
 	opts = withDefaults(opts)
+	if opts.NativeSandbox != nil && opts.Connector == "omnigent" {
+		return runNativeSandboxOmnigent(ctx, opts)
+	}
 
 	sp, ok := specFor(opts.Connector)
 	if ok && copilotVSCodeLocal(opts) {
@@ -373,6 +380,9 @@ func Run(ctx context.Context, opts Options) int {
 		// this is unreachable in normal operation.
 		fmt.Fprintf(opts.Stderr, "defenseclaw: unknown hook connector %q\n", opts.Connector)
 		return blockExit
+	}
+	if opts.NativeSandbox != nil && prepareNativeSandboxOptions(&opts) != nil {
+		return failUnreachable(opts, sp, "closed", "native_sandbox_runtime_unavailable")
 	}
 	failMode := normalizeFailMode(opts.FailMode)
 	if managedNativeDecision(opts) {
@@ -399,33 +409,36 @@ func Run(ctx context.Context, opts Options) int {
 		)
 	}
 
-	// DEFENSECLAW_HOME guard: an ordinary removed/disabled installation is an
-	// intentional no-op. Administrator-managed hooks carry ManagedEnterprise
-	// (and invalid runtimes also set StrictAvailability), so a missing or
-	// disabled machine-policy home must block instead of bypassing enforcement.
-	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
-		if opts.ManagedEnterprise {
-			resolveManagedStandaloneFailureEvent(&opts, sp)
-			return failUnreachable(
-				opts,
-				sp,
-				"closed",
-				"enterprise_managed_runtime_home_missing",
-			)
+	if opts.NativeSandbox == nil {
+		// DEFENSECLAW_HOME guard: an ordinary removed/disabled installation is an
+		// intentional no-op. Administrator-managed hooks carry ManagedEnterprise
+		// (and invalid runtimes also set StrictAvailability), so a missing or
+		// disabled machine-policy home must block instead of bypassing enforcement.
+		if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
+			if opts.ManagedEnterprise {
+				resolveManagedStandaloneFailureEvent(&opts, sp)
+				return failUnreachable(
+					opts,
+					sp,
+					"closed",
+					"enterprise_managed_runtime_home_missing",
+				)
+			}
+			return handleUnavailableHome(opts, sp, "DefenseClaw home is unavailable")
 		}
-		return handleUnavailableHome(opts, sp, "DefenseClaw home is unavailable")
-	}
-	if _, err := os.Stat(filepath.Join(opts.Home, ".disabled")); err == nil {
-		if opts.ManagedEnterprise {
-			resolveManagedStandaloneFailureEvent(&opts, sp)
-			return failUnreachable(
-				opts,
-				sp,
-				"closed",
-				"enterprise_managed_runtime_disable_sentinel_forbidden",
-			)
+		if _, err := os.Stat(filepath.Join(opts.Home, ".disabled")); err == nil {
+			if opts.ManagedEnterprise {
+				resolveManagedStandaloneFailureEvent(&opts, sp)
+				return failUnreachable(
+					opts,
+					sp,
+					"closed",
+					"enterprise_managed_runtime_disable_sentinel_forbidden",
+				)
+			}
+			return handleUnavailableHome(opts, sp, "DefenseClaw home is disabled")
 		}
-		return handleUnavailableHome(opts, sp, "DefenseClaw home is disabled")
+
 	}
 
 	payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody)
@@ -480,7 +493,13 @@ func Run(ctx context.Context, opts Options) int {
 		return failUnreachable(opts, sp, "closed", managedGatewayPeerUnverifiedReason)
 	}
 	if opts.HTTPClient == nil {
-		if opts.ManagedEnterprise {
+		if opts.NativeSandbox != nil {
+			var err error
+			opts.HTTPClient, err = nativeSandboxHTTPClient(requestTimeout)
+			if err != nil {
+				return failUnreachable(opts, sp, "closed", "native_sandbox_transport_unavailable")
+			}
+		} else if opts.ManagedEnterprise {
 			var err error
 			if opts.ManagedStandalone {
 				opts.HTTPClient, err = managedStandaloneHTTPClient(
@@ -510,11 +529,14 @@ func Run(ctx context.Context, opts Options) int {
 	// the same event is not also attributed to Claude Code. Keep this before the
 	// missing-token branch: a missing Claude token must not fail-closed an
 	// imported Cursor copy that the Cursor bridge is already handling.
-	if suppressCursorCompatibilityImport(opts, payload) {
+	if opts.NativeSandbox == nil && suppressCursorCompatibilityImport(opts, payload) {
 		return 0
 	}
 
 	var token string
+	if opts.NativeSandbox != nil {
+		return doRequest(ctx, opts, sp, failMode, payload, "")
+	}
 	if opts.ManagedEnterprise && opts.ManagedStandalone {
 		// The standalone hook socket authenticates this process by its
 		// kernel-verified uid. No bearer is read or sent, so there is no
@@ -577,6 +599,9 @@ func Run(ctx context.Context, opts Options) int {
 // best-effort: every local/configuration/transport/response failure returns 0,
 // matching the legacy Bash bridge's `curl ... || true` contract.
 func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
+	if opts.NativeSandbox != nil {
+		return blockExit
+	}
 	opts = withDefaults(opts)
 	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
 		return 0
@@ -667,8 +692,10 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 // connector-specific decision logic, applying the transport vs response
 // failure split exactly like the .sh hooks.
 func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, token string) int {
-	if pid := perUserForeignListener(opts); pid > 0 {
-		return failUnreachable(opts, sp, failMode, foreignListenerReason(opts.APIAddr, pid))
+	if opts.NativeSandbox == nil {
+		if pid := perUserForeignListener(opts); pid > 0 {
+			return failUnreachable(opts, sp, failMode, foreignListenerReason(opts.APIAddr, pid))
+		}
 	}
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts)
 	defer releaseWatch()
@@ -743,7 +770,14 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody))
+	limit := defaultMaxBody
+	if opts.NativeSandbox != nil {
+		limit++
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if opts.NativeSandbox != nil && (readErr != nil || int64(len(body)) > defaultMaxBody) {
+		return failResponse(opts, sp, "closed", "native_sandbox_response_unavailable")
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		opts.gatewayRefusal = perUserRefusalText(opts, resp.StatusCode, body)
@@ -868,6 +902,9 @@ func sendHookRequest(
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DefenseClaw-Client", sp.hookName+"/1.0")
+	if opts.NativeSandbox != nil {
+		req.Header.Set("X-DefenseClaw-Hook-Idempotency-Key", opts.nativeRequestKey)
+	}
 	if opts.ManagedEnterprise && !opts.SecureClient && runtime.GOOS != "windows" {
 		if resolved := hookpaths.Resolve(payload); resolved != "" {
 			req.Header.Set(hookpaths.Header, resolved)
@@ -1198,7 +1235,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 }
 
 func managedNativeDecision(opts Options) bool {
-	return opts.ManagedEnterprise && !opts.SecureClient
+	return (opts.ManagedEnterprise && !opts.SecureClient) || opts.NativeSandbox != nil
 }
 
 func managedDecisionFailMode(opts Options) string {
@@ -2206,6 +2243,9 @@ func emitCodexBlock(opts Options, reason string) int {
 }
 
 func withDefaults(o Options) Options {
+	if o.NativeSandbox != nil {
+		o.Home, o.HookDir = NativeSandboxHookDirectory, NativeSandboxHookDirectory
+	}
 	if o.Stdin == nil {
 		o.Stdin = os.Stdin
 	}

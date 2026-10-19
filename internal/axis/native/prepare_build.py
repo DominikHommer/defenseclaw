@@ -24,7 +24,7 @@ AXIS = "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c"
 MXC = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 BWRAP = "8e51677abd7e3338e4952370bf7d902e37d8cbb6"
 TOOLCHAIN = "1.95.0"
-NATIVE_TEST_COUNT = 19
+NATIVE_TEST_COUNT = 22
 C_TESTS = (
     "topology_refuses_nested_bind_mounts_and_malformed_inventory",
     "locator_refuses_deleted_traversal_and_unrepresentable_names",
@@ -35,6 +35,7 @@ C_TESTS = (
 C_TEST_SUMMARY = "PASS 5 inert owned-FD tests; no namespace, mount or workload execution"
 SEED_SHA256 = "d6556677c6decd2d5d786ca082ac2bcdb37fc92130d45b7002a7e8bffe2154db"
 PATCHES = {
+    "patches/axis-unix-hook-bpf.patch": "94c1ad86e706d71784356d4601d5df1cba3c2711d61e08a65f607fbfec5f7f35",
     "patches/axis-offline-bpf.patch": "914b75d4ad1da26f4f9850886093fb3560ade14d9870dd604de20a33d2f179f2",
     "patches/mxc-owned-bubblewrap.patch": "422aff2de2719878e6fe10a6c097153c58dc3f58d3fa53ee97b2b1d1ea43d5e8",
     "patches/bwrap-owned-fds.patch": "1563032b5bfbd74b56214119f1287de3a7e63c9054898b58c6cd9603948dd621",
@@ -118,9 +119,10 @@ DEPENDENCY_TESTS = {
     "axis": {
         "workspace": "axis-source",
         "package": "axis-sandbox",
-        "prefix": "linux::seccomp::tests::private_offline_export_",
+        "prefix": "linux::seccomp::tests::private_",
         "tests": {
             "linux::seccomp::tests::private_offline_export_denies_every_socket_without_installing_filter",
+            "linux::seccomp::tests::private_unix_hook_export_only_opens_unix_socket_not_socketpair",
             "linux::seccomp::tests::private_offline_export_keeps_explicit_blocked_syscalls_and_refuses_unknown",
         },
     },
@@ -304,7 +306,7 @@ def main() -> None:
     if upstream["bwrap-COPYING"] != ordinary(ROOT / "patches/bwrap-COPYING"):
         raise RuntimeError("pinned Bubblewrap license differs")
     overlays = {
-        "axis": apply(axis, ["patches/axis-offline-bpf.patch"]),
+        "axis": apply(axis, ["patches/axis-offline-bpf.patch", "patches/axis-unix-hook-bpf.patch"]),
         "mxc": apply(mxc, ["mxc-literal-argv.patch", "patches/mxc-owned-bubblewrap.patch"]),
         "bwrap": apply(bwrap, ["patches/bwrap-owned-fds.patch"]),
     }

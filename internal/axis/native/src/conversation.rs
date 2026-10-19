@@ -209,6 +209,7 @@ mod tests {
             terminal: None,
             timeout_ms: 1000,
             output_limit: 1024,
+            hook: None,
         };
         Frame {
             version: 1,

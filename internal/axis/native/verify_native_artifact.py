@@ -37,8 +37,9 @@ MXC = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 BWRAP = "8e51677abd7e3338e4952370bf7d902e37d8cbb6"
 LOCK = "9fb53262adf9c0b9ec3fb434dd04a5fe17572d6a522b4b5e3fb31cd2c6bef325"
 SEED = "d6556677c6decd2d5d786ca082ac2bcdb37fc92130d45b7002a7e8bffe2154db"
-PEER_TEST_COUNT = 19
+PEER_TEST_COUNT = 22
 PATCHES = {
+    "patches/axis-unix-hook-bpf.patch": "94c1ad86e706d71784356d4601d5df1cba3c2711d61e08a65f607fbfec5f7f35",
     "patches/axis-offline-bpf.patch": "914b75d4ad1da26f4f9850886093fb3560ade14d9870dd604de20a33d2f179f2",
     "patches/mxc-owned-bubblewrap.patch": "422aff2de2719878e6fe10a6c097153c58dc3f58d3fa53ee97b2b1d1ea43d5e8",
     "patches/bwrap-owned-fds.patch": "1563032b5bfbd74b56214119f1287de3a7e63c9054898b58c6cd9603948dd621",
@@ -94,6 +95,7 @@ DEPENDENCIES = {
         "tests": [
             "linux::seccomp::tests::private_offline_export_denies_every_socket_without_installing_filter",
             "linux::seccomp::tests::private_offline_export_keeps_explicit_blocked_syscalls_and_refuses_unknown",
+            "linux::seccomp::tests::private_unix_hook_export_only_opens_unix_socket_not_socketpair",
         ],
     },
     "mxc": {
@@ -759,7 +761,7 @@ def verify(options):
     scratch.mkdir(mode=0o700)
     observed = {}
     for name, root, commit, overlays, license_file in (
-        ("axis", options.axis, AXIS, ["patches/axis-offline-bpf.patch"], "LICENSE"),
+        ("axis", options.axis, AXIS, ["patches/axis-offline-bpf.patch", "patches/axis-unix-hook-bpf.patch"], "LICENSE"),
         ("mxc", options.mxc, MXC, ["mxc-literal-argv.patch", "patches/mxc-owned-bubblewrap.patch"], "LICENSE.md"),
         ("bwrap", options.bubblewrap, BWRAP, ["patches/bwrap-owned-fds.patch"], "COPYING"),
     ):

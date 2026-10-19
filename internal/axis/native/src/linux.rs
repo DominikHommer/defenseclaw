@@ -3,7 +3,7 @@
 
 //! Explicit sparse Bubblewrap adapter. No native/auto/path-based fallback.
 
-use crate::custody::PreparedFiles;
+use crate::custody::{HookPins, PreparedFiles};
 use crate::owner::{Engine, Pipes, Prepared, Process};
 use crate::wire::{Preparation, ProtocolError, Result};
 use axis_core::policy::Policy;
@@ -15,12 +15,20 @@ use std::os::fd::{AsRawFd, FromRawFd};
 
 pub struct LinuxEngine;
 
-struct LinuxPrepared(PreparedOwnedBubblewrap);
-struct LinuxProcess(MxcProcess);
+struct LinuxPrepared(PreparedOwnedBubblewrap, Option<HookPins>);
+struct LinuxProcess {
+    process: MxcProcess,
+    _hook_pins: Option<HookPins>,
+}
 
 fn policy(plan: &Preparation) -> Result<Policy> {
     // This versioned projection describes only this private offline slice.
     // It does not accept or claim translation of the full host resolver state.
+    let blocked = if plan.hook.is_some() {
+        vec!["socketpair"]
+    } else {
+        vec!["socket", "socketpair"]
+    };
     let policy: Policy = serde_json::from_value(serde_json::json!({
         "version": 1,
         "name": "defenseclaw-private-offline",
@@ -34,7 +42,7 @@ fn policy(plan: &Preparation) -> Result<Policy> {
         },
         "process": {
             "max_processes": 0, "max_memory_mb": 0, "cpu_rate_percent": 0,
-            "blocked_syscalls": ["socket", "socketpair"]
+            "blocked_syscalls": blocked
         },
         "network": {"mode": "block"}
     }))
@@ -76,18 +84,29 @@ impl Engine for LinuxEngine {
         // allocate descriptors. Guest strings never reopen a host object.
         let files = PreparedFiles::receive(plan)?;
         let policy = policy(plan)?;
-        let filter = axis_sandbox::linux::seccomp::export_offline_mxc_bpf(&policy.process)
-            .map_err(|_| ProtocolError)?;
+        let filter = match &plan.hook {
+            None => axis_sandbox::linux::seccomp::export_offline_mxc_bpf(&policy.process),
+            Some(_) => axis_sandbox::linux::seccomp::export_unix_hook_mxc_bpf(&policy.process),
+        }
+        .map_err(|_| ProtocolError)?;
         let filter = sealed_filter(&filter)?;
         // SAFETY: single-threaded peer, held admitted directory object. This
         // avoids retaining a caller host cwd while preparing native execution.
         if unsafe { libc::fchdir(files.cwd.file().as_raw_fd()) } < 0 {
             return Err(ProtocolError);
         }
-        let mut mounts = Vec::with_capacity(files.read.len() + files.write.len());
+        let PreparedFiles {
+            bwrap,
+            payload,
+            cwd: _,
+            read,
+            write,
+            hook_pins,
+        } = files;
+        let mut mounts = Vec::with_capacity(read.len() + write.len());
         for (paths, objects, readonly) in [
-            (&plan.filesystem.read, files.read, true),
-            (&plan.filesystem.write, files.write, false),
+            (&plan.filesystem.read, read, true),
+            (&plan.filesystem.write, write, false),
         ] {
             for (path, object) in paths.iter().zip(objects) {
                 mounts.push(
@@ -97,8 +116,8 @@ impl Engine for LinuxEngine {
             }
         }
         let prepared = PreparedOwnedBubblewrap::new(
-            files.bwrap.into_file(),
-            files.payload.into_file(),
+            bwrap.into_file(),
+            payload.into_file(),
             filter,
             mounts,
             plan.argv.iter().map(OsString::from).collect(),
@@ -114,21 +133,25 @@ impl Engine for LinuxEngine {
             plan.workdir.clone(),
         )
         .map_err(|_| ProtocolError)?;
-        Ok(Box::new(LinuxPrepared(prepared)))
+        Ok(Box::new(LinuxPrepared(prepared, hook_pins)))
     }
 }
 
 impl Prepared for LinuxPrepared {
     fn launch(self: Box<Self>) -> Result<Box<dyn Process>> {
-        let process = self.0.spawn().map_err(|_| ProtocolError)?;
-        Ok(Box::new(LinuxProcess(process)))
+        let LinuxPrepared(prepared, hook_pins) = *self;
+        let process = prepared.spawn().map_err(|_| ProtocolError)?;
+        Ok(Box::new(LinuxProcess {
+            process,
+            _hook_pins: hook_pins,
+        }))
     }
 }
 
 impl Process for LinuxProcess {
     fn take_pipes(&mut self) -> Result<Pipes> {
         let pipes = self
-            .0
+            .process
             .take_native_stdio()
             .map_err(|_| ProtocolError)?
             .ok_or(ProtocolError)?;
@@ -139,10 +162,10 @@ impl Process for LinuxProcess {
         })
     }
     fn try_wait(&mut self) -> Result<Option<i32>> {
-        self.0.try_wait().map_err(|_| ProtocolError)
+        self.process.try_wait().map_err(|_| ProtocolError)
     }
     fn stop(&mut self) -> Result<()> {
-        self.0.kill().map_err(|_| ProtocolError)
+        self.process.kill().map_err(|_| ProtocolError)
     }
 }
 

@@ -18,6 +18,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +46,9 @@ func newNotifyCmd() *cobra.Command {
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts := buildHookOptions("codex", "notify", "", "open")
+			if opts.NativeSandbox != nil {
+				return withExitCode(errors.New("native sandbox notify is not admitted"), 2)
+			}
 			hookexec.RunCodexNotify(cmd.Context(), opts, []byte(args[0]))
 			if !opts.ManagedEnterprise && !opts.SecureClient {
 				runOriginalCodexNotify(opts.Home, args[0])

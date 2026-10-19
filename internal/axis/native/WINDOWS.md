@@ -4,9 +4,10 @@
 # Private Windows native peer source contract
 
 This source connects the existing shared wire, Conversation and Owner to Windows
-raw-overlapped transport, inherited-capability bootstrap and native PSEC. It is
-source only: no Rust typecheck, unit test, PSEC workload or peer launch has run.
-There is no customer activation or default selection.
+raw-overlapped transport, inherited-capability bootstrap and native PSEC.
+The baseline Windows build and inert tests passed as recorded below. This new
+peer has not yet launched a PSEC workload. Customer activation and default
+selection remain unavailable.
 
 The platform modules in `src/` supply the Windows entry point, engine, raw IO
 and capability bootstrap. Cargo.toml moves
@@ -88,24 +89,33 @@ refused. Shared Owner alone handles input/output/deadline/cancel/destroy.
 
 ## Build and validation boundary
 
-This source revision has received static source review and Rustfmt1.95
-edition2024 parse/check. Compilation and native peer behavior remain unverified.
+The [baseline Windows build](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39202151247)
+at `d07233468fb02dff7c97c9841f7adb896e4374b4` compiled with Rust 1.95/MSVC
+and passed twelve peer plus four SDK tests. Its 1,421,312-byte PE has SHA256
+`dbd6f9f1ba179b450c4928d66c09c929f7e2ff132f7ed2b0f0a6e9928b6a01a9`.
+Root, author and adversarial inert artifact reviews passed. The later typed
+Linux hook schema adds one shared protocol test; it is rejected on Windows,
+and the updated thirteen-test Windows inventory requires a fresh build.
+Native execution of this peer remains unverified.
 The dedicated Windows build helper stages exact Git bytes and pinned upstream
 commits, applies only the four Windows overlays plus the owned-input overlay,
 and records locks, source fingerprints, PE data and the exact inert test logs.
 The Linux builder retains these Windows sources, helper, document and overlay
-as data; its Linux overlay set and nineteen native test roots remain unchanged.
+as data; the additive Linux hook exporter is selected only by its typed directory capability.
+The Linux peer now has twenty-two selected native test roots.
 
 Before any peer execution: hosted MSVC build with exact Git/lock/overlay/test
 provenance; independent artifact review; and one separately reviewed fixed
 contributor invocation under Go Job custody.
 Hosted tests below create no child process or PSEC and execute no copied image.
 
-Peer exact roots (12 total including the four shared protocol roots):
+Peer exact roots (13 total including the five shared protocol roots):
+
 - conversation::tests::prepared_handle_cannot_admit_duplicate_launch
 - conversation::tests::late_controls_do_not_reopen_exited_session_and_destroy_is_separate
 - wire::tests::independent_go_hash_vector_and_no_read_ahead
 - wire::tests::ambiguous_json_and_null_poison_the_decoder
+- wire::tests::typed_hook_is_hash_bound_to_session_and_one_fixed_read_slot
 - windows_io::tests::read_buffer_storage_stays_stable_and_observation_follows_completion
 - windows_io::tests::completion_never_treats_cancel_request_as_terminal_proof
 - windows_io::tests::overlapped_event_suppresses_foreign_iocp_without_changing_owned_handle
@@ -116,6 +126,7 @@ Peer exact roots (12 total including the four shared protocol roots):
 - windows::tests::native_sdk_owned_stdio_accepts_only_the_fixed_sync_child_endpoints
 
 SDK exact roots:
+
 - owned_windows_psec::tests::owned_access_requires_exact_role_rights_without_host_mutation_rights
 - owned_windows_psec::stdio_tests::stdio_requires_synchronous_mode_and_direction_before_native_launch
 - owned_windows_psec::native_access_tests::native_current_image_read_handle_cannot_be_promoted_to_execute_or_write

@@ -75,6 +75,7 @@ INERT_TESTS = (
     "conversation::tests::late_controls_do_not_reopen_exited_session_and_destroy_is_separate",
     "wire::tests::independent_go_hash_vector_and_no_read_ahead",
     "wire::tests::ambiguous_json_and_null_poison_the_decoder",
+    "wire::tests::typed_hook_is_hash_bound_to_session_and_one_fixed_read_slot",
     "windows_bootstrap::tests::prefix_only_pure_roundtrip_and_all_boundaries",
     "windows_io::tests::completion_never_treats_cancel_request_as_terminal_proof",
     "windows_io::tests::overlapped_event_suppresses_foreign_iocp_without_changing_owned_handle",

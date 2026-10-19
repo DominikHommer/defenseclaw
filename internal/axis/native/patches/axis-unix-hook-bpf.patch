@@ -1,0 +1,89 @@
+--- a/crates/axis-sandbox/src/linux/seccomp.rs
++++ b/crates/axis-sandbox/src/linux/seccomp.rs
+@@ -723,6 +723,28 @@
+     Ok(filter.export_bpf_bytes())
+ }
+ 
++/// Separate contributor-only hook transport variant. The caller must prove a
++/// per-session, held Unix listener-directory capability before selecting this
++/// exporter; this function itself grants no filesystem or binding authority.
++/// socket(AF_UNIX) and connect remain available, while socketpair and every
++/// non-Unix socket domain return EPERM. The offline exporter above is unchanged.
++pub fn export_unix_hook_mxc_bpf(policy: &ProcessPolicy) -> Result<Vec<u8>, String> {
++    if policy
++        .blocked_syscalls
++        .iter()
++        .any(|name| name == "socket" || name == "connect")
++    {
++        return Err("hook socket conflicts with blocked syscall".into());
++    }
++    let mut policy = policy.clone();
++    if !policy.blocked_syscalls.iter().any(|name| name == "socketpair") {
++        policy.blocked_syscalls.push("socketpair".into());
++    }
++    let filter =
++        prepare_seccomp_with_options(&policy, SeccompOptions::deny_network_socket_domains())?;
++    Ok(filter.export_bpf_bytes())
++}
++
+ pub fn launcher_main_from_env() -> i32 {
+     match run_launcher_from_args(std::env::args_os().skip(1)) {
+         Ok(code) => code,
+@@ -1562,6 +1584,57 @@
+     }
+ 
+     #[test]
++    fn private_unix_hook_export_only_opens_unix_socket_not_socketpair() {
++        let bytes = export_unix_hook_mxc_bpf(&ProcessPolicy::default()).unwrap();
++        let filter = PreparedSeccompFilter::from_bpf_bytes(&bytes).unwrap();
++        for (syscall, domain, want) in [
++            (SYS_SOCKET, AF_UNIX, FilterDecision::Allow),
++            (SYS_SOCKET, 2, FilterDecision::Errno(libc::EPERM)),
++            (SYS_SOCKET, 10, FilterDecision::Errno(libc::EPERM)),
++            (SYS_SOCKET, 9999, FilterDecision::Errno(libc::EPERM)),
++            (SYS_SOCKETPAIR, AF_UNIX, FilterDecision::Errno(libc::EPERM)),
++            (SYS_SOCKETPAIR, 2, FilterDecision::Errno(libc::EPERM)),
++        ] {
++            assert_eq!(
++                prepared_bpf_decision_for(
++                    &filter,
++                    AUDIT_ARCH_X86_64,
++                    syscall,
++                    [domain as u64, 0, 0, 0, 0, 0]
++                ),
++                want
++            );
++        }
++        assert_eq!(
++            prepared_bpf_decision_for(&filter, AUDIT_ARCH_X86_64, SYS_CONNECT, [0; 6]),
++            FilterDecision::Allow
++        );
++        assert_eq!(
++            prepared_bpf_decision_for(&filter, 0, SYS_SOCKET, [AF_UNIX as u64, 0, 0, 0, 0, 0]),
++            FilterDecision::KillProcess
++        );
++        for blocked in ["socket", "connect"] {
++            let policy = ProcessPolicy {
++                blocked_syscalls: vec![blocked.into()],
++                ..ProcessPolicy::default()
++            };
++            assert!(export_unix_hook_mxc_bpf(&policy).is_err());
++        }
++        let policy = ProcessPolicy {
++            blocked_syscalls: vec!["socketpair".into(), "uname".into()],
++            ..ProcessPolicy::default()
++        };
++        let filter = PreparedSeccompFilter::from_bpf_bytes(
++            &export_unix_hook_mxc_bpf(&policy).unwrap(),
++        )
++        .unwrap();
++        assert_eq!(
++            prepared_bpf_decision_for(&filter, AUDIT_ARCH_X86_64, 63, [0; 6]),
++            FilterDecision::Errno(libc::EPERM)
++        );
++    }
++
++    #[test]
+     fn exported_bpf_roundtrip_preserves_action_matrix() {
+         let default_filter = prepare_seccomp(&ProcessPolicy::default()).unwrap();
+         let imported_default =

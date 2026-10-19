@@ -609,6 +609,7 @@ mod tests {
             terminal: None,
             timeout_ms: 1000,
             output_limit: limit,
+            hook: None,
         }
     }
 

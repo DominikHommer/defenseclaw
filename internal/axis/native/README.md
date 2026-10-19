@@ -13,8 +13,18 @@ native process custody. Correlation digests do not grant authority.
 The additive Windows source path uses the same protocol and Owner with native
 PSEC and owned overlapped transport. Its separate build, held-capability floor,
 external ancestor/image leases and unverified runtime gates are documented in
-[the Windows source contract](WINDOWS.md). Linux keeps its existing overlay and
-native test inventories; Windows-only inputs are retained as source data.
+[the Windows source contract](WINDOWS.md). Windows-only inputs are retained as
+source data and excluded from Linux overlay application and test discovery.
+
+The additive Linux hook capability binds a session, one held readonly directory
+grant and the exact runtime profile digest. The guest uses the existing hook
+command forms and a fixed Unix socket to reach the ordinary authenticated host
+policy pipeline; the bearer stays on the host. Its separate AXIS filter permits
+AF_UNIX while keeping other socket domains blocked, and the existing private
+network namespace remains mandatory. The offline exporter stays unchanged.
+The producer, actual guest transport and every connector still require native
+acceptance before factory activation. The hook profile is discovery data;
+trusted host ownership and the independently bound listener supply authority.
 
 Preparation consumes the trusted **unprivileged** factory's inherited table:
 fd3 = sealed namespace bootstrap proof (consumed before control),

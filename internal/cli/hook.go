@@ -78,6 +78,16 @@ func newHookCmd() *cobra.Command {
 			if err := validateHookSurface(connector, hookSurface); err != nil {
 				return hookFailure(hookFailureContext{connector, failMode, enterpriseManaged}, err)
 			}
+			if opts, native := nativeSandboxHookOptions(connector, event); native {
+				if foreignHookCheck || inputFile != "" || apiAddr != "" ||
+					failMode != "" && !strings.EqualFold(strings.TrimSpace(failMode), "closed") ||
+					hookContractID != "" && hookContractID != opts.HookContractID ||
+					hookSurface != "" && hookSurface != opts.HookSurface {
+					opts.NativeSandbox = &hookexec.NativeSandboxProfile{} // explicit refusal, no host fallback
+				}
+				hookProcessExit(hookexec.Run(cmd.Context(), opts))
+				return nil
+			}
 			if foreignHookCheck {
 				// The standalone Amp and OpenCode plugins ask for the
 				// foreign-hook guard's decision only; nothing is sent to
@@ -253,6 +263,9 @@ func hookFailureExitCode(failure hookFailureContext) int {
 // always does; otherwise --fail-mode, else the sidecar, then an inherited
 // DEFENSECLAW_FAIL_MODE (for a packaged hook only when it tightens).
 func hookPreRunFailsClosed(failure hookFailureContext) bool {
+	if _, native := nativeSandboxHookOptions(failure.connector, ""); native {
+		return true
+	}
 	if failure.managed || implicitEnterpriseManagedHook() {
 		return true
 	}
@@ -374,6 +387,9 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 }
 
 func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, enterpriseManaged bool) hookexec.Options {
+	if opts, native := nativeSandboxHookOptions(connector, event); native {
+		return opts
+	}
 	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
 		// The administrator-owned runtime failed trust validation. Do not read its
 		// sidecar/token or contact any endpoint derived from those files; hand an

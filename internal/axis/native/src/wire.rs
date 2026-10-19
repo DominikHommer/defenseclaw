@@ -11,6 +11,9 @@ use std::io::{Read, Write};
 pub const VERSION: u16 = 1;
 pub const MAX_FRAME: usize = 256 << 10;
 pub const MAX_DATA: usize = 16 << 10;
+pub const HOOK_DIRECTORY: &str = "/run/defenseclaw-hook";
+pub const HOOK_SOCKET: &str = "/run/defenseclaw-hook/ingress.sock";
+pub const HOOK_PROFILE: &str = "/run/defenseclaw-hook/runtime.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProtocolError;
@@ -80,6 +83,16 @@ pub struct Preparation {
     pub terminal: Option<Size>,
     pub timeout_ms: u32,
     pub output_limit: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook: Option<Hook>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hook {
+    pub session_id: String,
+    pub read_index: u16,
+    pub profile_digest: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -149,15 +162,19 @@ fn digest(value: &str) -> bool {
             .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(value))
 }
 
+fn valid_session(value: &str) -> bool {
+    let session = value.as_bytes();
+    !session.is_empty()
+        && session.len() <= 128
+        && session[0].is_ascii_alphanumeric()
+        && session
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(c))
+}
+
 impl Binding {
     pub fn validate(&self) -> Result<()> {
-        let session = self.session_id.as_bytes();
-        if session.is_empty()
-            || session.len() > 128
-            || !session[0].is_ascii_alphanumeric()
-            || !session
-                .iter()
-                .all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(c))
+        if !valid_session(&self.session_id)
             || [
                 &self.session_digest,
                 &self.policy_digest,
@@ -184,6 +201,20 @@ fn wire_path(backend: &str, path: &str) -> bool {
     } else {
         path.starts_with('/')
     }
+}
+
+fn covers_path(ancestor: &str, path: &str) -> bool {
+    path == ancestor
+        || ancestor == "/" && path.starts_with('/')
+        || path
+            .strip_prefix(ancestor)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn protected_grant(path: &str) -> bool {
+    ["/proc", "/dev", "/.defenseclaw", HOOK_DIRECTORY]
+        .iter()
+        .any(|root| covers_path(path, root) || covers_path(root, path))
 }
 
 impl Size {
@@ -229,6 +260,8 @@ impl Preparation {
                 || !name.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
                 || !names.insert(key)
                 || !text(&variable.value, 32 << 10)
+                || ["DEFENSECLAW_HOOK_SESSION", "DEFENSECLAW_HOOK_SOCKET"]
+                    .contains(&variable.name.as_str())
             {
                 return Err(ProtocolError);
             }
@@ -237,18 +270,42 @@ impl Preparation {
         if bytes > 64 << 10 {
             return Err(ProtocolError);
         }
+        if let Some(hook) = &self.hook {
+            if self.backend != "bubblewrap"
+                || !valid_session(&hook.session_id)
+                || !digest(&hook.profile_digest)
+                || self
+                    .filesystem
+                    .read
+                    .get(usize::from(hook.read_index))
+                    .map(String::as_str)
+                    != Some(HOOK_DIRECTORY)
+                || protected_grant(&self.workdir)
+            {
+                return Err(ProtocolError);
+            }
+        }
         bytes = 0;
-        for paths in [
+        for (group, paths) in [
             &self.filesystem.read,
             &self.filesystem.write,
             &self.filesystem.deny,
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut seen = HashSet::new();
             if paths.len() > 256 {
                 return Err(ProtocolError);
             }
-            for path in paths {
-                if !wire_path(&self.backend, path) || !seen.insert(path) {
+            for (index, path) in paths.iter().enumerate() {
+                let hook_grant = self.hook.as_ref().is_some_and(|hook| {
+                    group == 0 && index == usize::from(hook.read_index) && path == HOOK_DIRECTORY
+                });
+                if !wire_path(&self.backend, path)
+                    || !seen.insert(path)
+                    || protected_grant(path) && !hook_grant
+                {
                     return Err(ProtocolError);
                 }
                 bytes += path.len() + 1;
@@ -295,6 +352,12 @@ impl Preparation {
         }
         bytes.extend_from_slice(&self.timeout_ms.to_be_bytes());
         bytes.extend_from_slice(&self.output_limit.to_be_bytes());
+        if let Some(hook) = &self.hook {
+            bytes.extend_from_slice(b"\x01defenseclaw-hook-v1\x00");
+            string(&mut bytes, &hook.session_id);
+            bytes.extend_from_slice(&hook.read_index.to_be_bytes());
+            string(&mut bytes, &hook.profile_digest);
+        }
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut encoded = String::with_capacity(71);
         encoded.push_str("sha256:");
@@ -325,7 +388,13 @@ impl Frame {
         match self.kind {
             Kind::Prepare => {
                 let plan = self.plan.as_ref().ok_or(ProtocolError)?;
-                if payloads != 1 || plan.hash()? != self.binding.preparation_hash {
+                if payloads != 1
+                    || plan.hash()? != self.binding.preparation_hash
+                    || plan
+                        .hook
+                        .as_ref()
+                        .is_some_and(|hook| hook.session_id != self.binding.session_id)
+                {
                     return Err(ProtocolError);
                 }
             }
@@ -545,6 +614,7 @@ mod tests {
             }),
             timeout_ms: 30000,
             output_limit: 1 << 20,
+            hook: None,
         };
         Frame {
             version: VERSION,
@@ -581,6 +651,66 @@ mod tests {
         let mut input = std::io::Cursor::new(bytes);
         assert_eq!(Decoder::new(&mut input).decode().unwrap(), frame);
         assert_eq!(input.position() as usize, length);
+    }
+
+    #[test]
+    fn typed_hook_is_hash_bound_to_session_and_one_fixed_read_slot() {
+        let mut frame = fixture();
+        let baseline = frame.binding.preparation_hash.clone();
+        let plan = frame.plan.as_mut().unwrap();
+        plan.filesystem.read.push(HOOK_DIRECTORY.into());
+        plan.hook = Some(Hook {
+            session_id: "fixed-session".into(),
+            read_index: 1,
+            profile_digest: format!("sha256:{}", "a".repeat(64)),
+        });
+        frame.binding.preparation_hash = plan.hash().unwrap();
+        assert_eq!(
+            frame.binding.preparation_hash,
+            "sha256:8a3ccd0c445a94ebb2b56a4147c9297330fe6d6012167ff845b1fc73a12344db"
+        );
+        assert_ne!(frame.binding.preparation_hash, baseline);
+        frame.validate().unwrap();
+        let mut changed = frame.clone();
+        changed
+            .plan
+            .as_mut()
+            .unwrap()
+            .hook
+            .as_mut()
+            .unwrap()
+            .session_id = "other-session".into();
+        changed.binding.preparation_hash = changed.plan.as_ref().unwrap().hash().unwrap();
+        assert_eq!(changed.validate(), Err(ProtocolError));
+        for path in ["/run", "/", HOOK_SOCKET, "/.defenseclaw/hooks"] {
+            let mut changed = frame.clone();
+            changed
+                .plan
+                .as_mut()
+                .unwrap()
+                .filesystem
+                .read
+                .push(path.into());
+            assert_eq!(
+                changed.plan.as_ref().unwrap().validate(),
+                Err(ProtocolError)
+            );
+        }
+        let mutations: [fn(&mut Preparation); 2] = [
+            |plan: &mut Preparation| plan.filesystem.write.push("/".into()),
+            |plan: &mut Preparation| plan.workdir = "/".into(),
+        ];
+        for mutation in mutations {
+            let mut changed = frame.clone();
+            mutation(changed.plan.as_mut().unwrap());
+            assert_eq!(
+                changed.plan.as_ref().unwrap().validate(),
+                Err(ProtocolError)
+            );
+        }
+        let mut absent = frame.clone();
+        absent.plan.as_mut().unwrap().hook = None;
+        assert_eq!(absent.plan.as_ref().unwrap().validate(), Err(ProtocolError));
     }
 
     #[test]

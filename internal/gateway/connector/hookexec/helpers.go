@@ -106,7 +106,9 @@ func isTracestateChar(c byte) bool {
 // mirroring defenseclaw_log_hook_failure. Best-effort: any error is ignored so
 // a read-only home or full disk never changes the hook's decision.
 func logHookFailure(opts Options, sp spec, reason, category, failMode string) {
-	if opts.Home == "" {
+	// Native session diagnostics remain in the owned process/host ingress.
+	// Never create host-style mutable sidecars in this readonly capability.
+	if opts.NativeSandbox != nil || opts.Home == "" {
 		return
 	}
 	logDir := filepath.Join(opts.Home, "logs")
