@@ -4,11 +4,13 @@
 """Offline regression cases for the small CI script; no clients or credentials."""
 
 import copy
+import io
 import json
 import os
 import ssl
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -261,12 +263,86 @@ class MonitorTests(unittest.TestCase):
 
     def test_public_notice_omits_conflict_evidence_and_model_output(self):
         bundle, report = self.run_fake(Fake())
-        report[0]["ai_review"] = "PRIVATE-SENTINEL"
-        text = json.dumps(m.notice(report[0]))
-        self.assertNotIn("PRIVATE-SENTINEL", text)
-        self.assertNotIn("tool_use_id", text)
-        self.assertNotIn("number", text)
-        self.assertNotIn(SCHEMA, json.dumps(bundle["notices"]))
+        self.assertEqual(report[0]["decision"], "static_conflict")
+        self.assertTrue(report[0]["conflicts"])
+        text = json.dumps(bundle)
+        for private in ("static_conflict", "suspected_conflict", "ai_review", "conflicts", "tool_use_id"):
+            self.assertNotIn(private, text)
+        self.assertEqual(bundle["notices"][0]["kind"], "upstream_change")
+        self.assertEqual(bundle["notices"][0]["number"], 1)
+        self.assertEqual(bundle["notices"][0]["files"], [SCHEMA])
+
+    def test_public_bundle_and_issue_do_not_depend_on_private_risk(self):
+        bundles, issues = [], []
+        for decision in ("review_required", "static_conflict", "suspected_conflict"):
+            fake = Fake()
+            proven = [{"reason": "PRIVATE-SENTINEL"}] if decision == "static_conflict" else []
+            with (
+                patch.object(m, "conflicts", return_value=proven),
+                patch.object(m, "ai_review", return_value={"risk": decision, "summary": "PRIVATE-SENTINEL"}),
+            ):
+                bundle, report = self.run_fake(fake, ai=decision == "suspected_conflict")
+            self.assertEqual(report[0]["decision"], decision)
+            m.publish(bundle, self.config, "owner/repo", fake, enabled=True)
+            bundles.append(bundle)
+            issues.append(fake.issues)
+            self.assertNotIn("PRIVATE-SENTINEL", json.dumps([bundle, fake.issues]))
+        self.assertEqual(bundles[0], bundles[1])
+        self.assertEqual(bundles[1], bundles[2])
+        self.assertEqual(issues[0], issues[1])
+        self.assertEqual(issues[1], issues[2])
+
+    def test_cli_keeps_private_findings_local_and_owner_readable(self):
+        bundle, report = self.run_fake(Fake())
+        report[0]["evidence"] = "PRIVATE-SENTINEL"
+        with tempfile.TemporaryDirectory() as directory:
+            root, stdout = Path(directory), io.StringIO()
+            with patch.object(m, "analyze", return_value=(bundle, report)), redirect_stdout(stdout):
+                self.assertEqual(m.main(["analyze", "--output", directory]), 0)
+            with patch.dict(os.environ, {"CONNECTOR_DELTA_NOTIFICATIONS_ENABLED": "false"}), redirect_stdout(stdout):
+                self.assertEqual(m.main(["publish", "--output", directory]), 0)
+            private = root / "private-report.json"
+            self.assertIn("PRIVATE-SENTINEL", private.read_text())
+            if os.name == "posix":
+                self.assertEqual(private.stat().st_mode & 0o777, 0o600)
+            public = stdout.getvalue() + "".join(path.read_text() for path in root.glob("public/*"))
+            public += (root / "checkpoint/state.json").read_text()
+            for value in ("PRIVATE-SENTINEL", "static_conflict", "conflicts"):
+                self.assertNotIn(value, public)
+
+    def test_publisher_rejects_legacy_and_private_fields_even_when_disabled(self):
+        bundle, _ = self.run_fake(Fake())
+        bad = []
+        for location, key in (
+            ((), "ai_review"),
+            (("notices", 0), "decision"),
+            (("state",), "findings"),
+            (("state", "cursors", "codex"), "assessment"),
+        ):
+            item = copy.deepcopy(bundle)
+            target = item
+            for part in location:
+                target = target[part]
+            target[key] = "PRIVATE-SENTINEL"
+            bad.append(item)
+        bad.append({key: value for key, value in bundle.items() if key != "schema_version"})
+        for item in bad:
+            for enabled in (False, True):
+                fake = Fake()
+                with self.subTest(item=item, enabled=enabled), self.assertRaises(ValueError):
+                    m.publish(item, self.config, "owner/repo", fake, enabled=enabled)
+                self.assertFalse(fake.calls)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(m, "analyze", return_value=(bad[0], [])):
+                self.assertEqual(m.main(["analyze", "--output", directory]), 2)
+            self.assertFalse((Path(directory) / "public/bundle.json").exists())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            m.save(root / "public/bundle.json", bad[0])
+            m.save(root / "checkpoint/state.json", self.empty)
+            with patch.dict(os.environ, {"CONNECTOR_DELTA_NOTIFICATIONS_ENABLED": "false"}):
+                self.assertEqual(m.main(["publish", "--output", directory]), 2)
+            self.assertEqual(m.load(root / "checkpoint/state.json"), self.empty)
 
     def test_ai_suspicion_is_private_and_not_a_static_proof(self):
         fake = Fake(after=json.dumps({**json.loads(schema()), "description": "changed"}))
@@ -283,7 +359,9 @@ class MonitorTests(unittest.TestCase):
             bundle, report = self.run_fake(suspicious, ai=True)
         self.assertEqual(report[0]["decision"], "suspected_conflict")
         self.assertFalse(report[0]["conflicts"])
-        self.assertNotIn("number", bundle["notices"][0])
+        self.assertNotIn("suspected_conflict", json.dumps(bundle))
+        self.assertNotIn("ai_review", json.dumps(bundle))
+        self.assertEqual(bundle["notices"][0]["kind"], "upstream_change")
 
     def test_optional_delivery_deduplicates_and_mentions_configured_contributors(self):
         fake = Fake(after=schema())
@@ -304,6 +382,12 @@ class MonitorTests(unittest.TestCase):
         for bad in ({}, {"schema_version": 0, "cursors": {}}, {"schema_version": 1, "cursors": []}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 m.analyze(self.config, m.ROOT, bad, Fake())
+        state = copy.deepcopy(bundle["state"])
+        state["cursors"]["codex"]["assessment"] = "PRIVATE-SENTINEL"
+        fake = Fake()
+        with self.assertRaises(ValueError):
+            m.analyze(self.config, m.ROOT, state, fake)
+        self.assertFalse(fake.calls)
 
     def test_strict_json_path_validation_and_redirect_refusal(self):
         for text in ('{"x":1,"x":2}', '{"x":NaN}'):
@@ -319,7 +403,13 @@ class MonitorTests(unittest.TestCase):
     def test_tls13_and_github_token_never_sent_to_raw_host(self):
         context = ssl.create_default_context()
         with (
-            patch.dict(os.environ, {"GH_TOKEN": "test-only-placeholder"}),
+            patch.dict(
+                os.environ,
+                {
+                    "GH_TOKEN": "test-only-placeholder",
+                    "CONNECTOR_DELTA_ANTHROPIC_API_KEY": "test-only-ai-placeholder",
+                },
+            ),
             patch.object(m.ssl, "create_default_context", return_value=context),
             patch.object(m.urllib.request, "build_opener") as build,
         ):
@@ -329,6 +419,10 @@ class MonitorTests(unittest.TestCase):
             self.assertIn("Authorization", build.return_value.open.call_args.args[0].headers)
             m.request("https://raw.githubusercontent.com/openai/codex/" + PARENT + "/hooks.rs")
             self.assertNotIn("Authorization", build.return_value.open.call_args.args[0].headers)
+            self.assertNotIn("X-api-key", build.return_value.open.call_args.args[0].headers)
+            m.request("https://api.anthropic.com/v1/messages", {"messages": []}, ai=True)
+            self.assertNotIn("Authorization", build.return_value.open.call_args.args[0].headers)
+            self.assertIn("X-api-key", build.return_value.open.call_args.args[0].headers)
         self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_3)
         self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
 

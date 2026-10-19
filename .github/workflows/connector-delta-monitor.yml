@@ -71,7 +71,7 @@ jobs:
           CONNECTOR_DELTA_MODEL: ${{ vars.CONNECTOR_DELTA_MODEL }}
           CONNECTOR_DELTA_ANTHROPIC_API_KEY: ${{ secrets.CONNECTOR_DELTA_ANTHROPIC_API_KEY }}
         run: python3 scripts/connector_delta_monitor.py analyze --repo integration --state monitor/checkpoint/state.json --output monitor
-      - name: Upload only sanitized notices and candidate checkpoint
+      - name: Prepare metadata-only notices and candidate checkpoint
         id: bundle
         if: ${{ always() }}
         run: |
@@ -79,7 +79,7 @@ jobs:
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         if: ${{ always() && steps.bundle.outputs.ready == 'true' }}
         with:
-          name: connector-delta-pending-v2
+          name: connector-delta-pending-v3
           path: monitor/public/bundle.json
           retention-days: 7
           if-no-files-found: error
@@ -97,7 +97,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: connector-delta-pending-v2
+          name: connector-delta-pending-v3
           path: monitor/public
       - name: Optionally notify, then commit processed-PR progress
         env:

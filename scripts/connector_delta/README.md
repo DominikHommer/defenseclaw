@@ -20,7 +20,7 @@ is installed or run; downloaded code is never executed. Python uses only stdlib.
 4. Optional AI compares the delta with eight explicit requirements in
    [connectors.json](connectors.json): discovery, registration, delivery, payload,
    decision, failure, execution and correlation. Local/upstream quotes are checked
-   against supplied text. AI can raise a suspected-conflict notice but cannot
+   against supplied text. AI can record a suspected conflict locally but cannot
    declare a proven break or certify safety. Raw output stays runner-local;
    reproduce privately to inspect its detailed reasoning.
 5. A separate main-only publisher optionally creates contributor issues, then
@@ -42,14 +42,23 @@ Set `CONNECTOR_DELTA_MONITOR_ENABLED=true` for the six-hour schedule. Publicatio
 also needs `CONNECTOR_DELTA_NOTIFICATIONS_ENABLED=true`; manual runs additionally
 require `notify=true`. Disabled publication queues no later emails.
 
-Hook-related changes are emailed even without a proven break; unrelated PRs stay
-informational in the run bundle instead of creating inbox noise. Issues mention
-the five configured contributors. GitHub email depends on their
-settings and access; this is not SMTP or a private channel. Concrete-conflict
-details, local source and model output stay out of public notices/artifacts.
+Hook-related changes get the same generic notice whether analysis finds a
+conflict or not; unrelated PRs stay informational in the local report instead of
+creating inbox noise. Notices contain public upstream PR/file metadata and
+filename-based review topics, never an impact classification. Issues mention the
+five configured contributors. GitHub email depends on their settings and access;
+this is not SMTP or a private channel. Public checkpoints identify processed
+merges, not risk. Legacy or extra fields are rejected before upload/publication.
+
+Conflict classifications, evidence and model output stay in the owner-readable
+`private-report.json`, never uploaded or included in notices/logs. On hosted CI
+this file is ephemeral; reproduce a PR locally to inspect it. There is no durable
+private report archive or private email delivery in this version.
 AI additionally needs `CONNECTOR_DELTA_AI_ENABLED=true`, `CONNECTOR_DELTA_MODEL`
 and the dedicated `CONNECTOR_DELTA_ANTHROPIC_API_KEY` Actions secret. Collection
-uses GitHub HTTPS endpoints; optional AI uses `api.anthropic.com`.
+uses GitHub HTTPS endpoints. Enabling AI sends the requirements, selected local
+source/contract snippets and upstream diffs to `api.anthropic.com`; it does not
+grant the model tools, repository access or permission to execute code.
 
 State is a main-only Actions artifact retained 90 days. Missing state after prior
 runs fails visibly. The scanner reads at most 300 recently updated closed PRs and

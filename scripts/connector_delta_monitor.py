@@ -112,6 +112,22 @@ def position(pr):
     return date, number
 
 
+def validate_state(state):
+    if (
+        not isinstance(state, dict)
+        or set(state) != {"schema_version", "cursors"}
+        or type(state["schema_version"]) is not int
+        or state["schema_version"] != 1
+        or not isinstance(state["cursors"], dict)
+        or not state["cursors"].keys() <= REPOS.keys()
+    ):
+        raise ValueError("invalid state; refusing to reset history")
+    for cursor in state["cursors"].values():
+        if not isinstance(cursor, dict) or set(cursor) != {"number", "merged_at", "merge_commit_sha"}:
+            raise ValueError("checkpoint must contain public merge metadata only")
+        position(cursor)
+
+
 def merged_prs(repo, cursor=None, fetch=request):
     if cursor is not None:
         position(cursor)
@@ -361,33 +377,77 @@ def inspect_pr(pr, spec, requirements, root, fetch=request, ai=False):
                 result["decision"] = "suspected_conflict"  # AI suspicion, never a proven static break.
         else:
             result["coverage"] += "; AI skipped because context exceeds bound"
-    return result
+    return result, notice(spec["name"], pr, [row["filename"] for row in selected])
 
 
-def notice(result):
-    key = hashlib.sha256(f"{result['connector']}:{result['revision']}".encode()).hexdigest()
-    safe = {"id": key, "connector": result["connector"], "decision": result["decision"]}
-    if result["decision"] not in ("static_conflict", "suspected_conflict"):
-        paths = " ".join(result["files"])
-        focus = [
-            key
-            for pattern, keys in (
-                (r"config|setting|managed|home", ("discovery", "registration")),
-                (r"schema|input|protocol", ("payload", "decision", "correlation")),
-                (r"run|exec|command", ("execution", "failure")),
-            )
-            if re.search(pattern, paths, re.I)
-            for key in keys
-        ]
-        safe.update(
-            number=result["number"], files=result["files"][:10], focus=sorted(set(focus)) or ["delivery", "decision"]
+def notice(connector, pr, paths):
+    """Public upstream metadata only; never accept a private analysis result."""
+    if not paths:
+        return None
+    focus = [
+        key
+        for pattern, keys in (
+            (r"config|setting|managed|home", ("discovery", "registration")),
+            (r"schema|input|protocol", ("payload", "decision", "correlation")),
+            (r"run|exec|command", ("execution", "failure")),
         )
-    return safe
+        if re.search(pattern, " ".join(paths), re.I)
+        for key in keys
+    ]
+    return {
+        "id": hashlib.sha256(f"{connector}:{pr['merge_commit_sha']}".encode()).hexdigest(),
+        "connector": connector,
+        "kind": "upstream_change",
+        "number": pr["number"],
+        "files": paths[:10],
+        "focus": sorted(set(focus)) or ["delivery", "decision"],
+    }
+
+
+def validate_bundle(bundle, config):
+    """Reject legacy/private fields before either artifact upload or publication."""
+    if (
+        not isinstance(bundle, dict)
+        or set(bundle) != {"schema_version", "state", "notices", "gaps", "replay"}
+        or type(bundle["schema_version"]) is not int
+        or bundle["schema_version"] != 2
+        or type(bundle["replay"]) is not bool
+        or not isinstance(bundle["gaps"], list)
+        or len(bundle["gaps"]) > len(REPOS)
+        or any(name not in REPOS for name in bundle["gaps"])
+        or not isinstance(bundle["notices"], list)
+        or len(bundle["notices"]) > len(REPOS) * (LIMIT + 1)
+    ):
+        raise ValueError("invalid public bundle")
+    validate_state(bundle["state"])
+    for item in bundle["notices"]:
+        fields = {"id", "connector", "kind"}
+        if isinstance(item, dict) and item.get("kind") == "upstream_change":
+            fields |= {"number", "files", "focus"}
+            if (
+                type(item.get("number")) is not int
+                or item["number"] <= 0
+                or not isinstance(item.get("files"), list)
+                or not 1 <= len(item["files"]) <= 10
+                or not all(path_ok(path) for path in item["files"])
+                or not isinstance(item.get("focus"), list)
+                or not 1 <= len(item["focus"]) <= 8
+                or any(key not in config["requirements"] for key in item["focus"])
+            ):
+                raise ValueError("invalid upstream notice")
+        if (
+            not isinstance(item, dict)
+            or set(item) != fields
+            or item["kind"] not in ("upstream_change", "coverage_gap")
+            or item["connector"] not in REPOS
+            or not isinstance(item["id"], str)
+            or not re.fullmatch(r"[a-f0-9]{64}", item["id"])
+        ):
+            raise ValueError("invalid public notice")
 
 
 def analyze(config, root, state, fetch=request, ai=False, only=None):
-    if state.get("schema_version") != 1 or not isinstance(state.get("cursors"), dict):
-        raise ValueError("invalid state; refusing to reset history")
+    validate_state(state)
     if only and (only[0] not in REPOS or only[1] <= 0):
         raise ValueError("invalid replay PR")
     updated = decode(json.dumps(state))
@@ -407,30 +467,28 @@ def analyze(config, root, state, fetch=request, ai=False, only=None):
             for pr in prs:
                 if not pr.get("merged_at") or pr.get("base", {}).get("ref") != "main":
                     raise ValueError("only PRs merged into main are supported")
-                result = inspect_pr(pr, spec, config["requirements"], root, fetch, ai)
+                result, public_notice = inspect_pr(pr, spec, config["requirements"], root, fetch, ai)
                 private.append(result)
-                notices.append(notice(result))
+                if public_notice is not None:
+                    notices.append(public_notice)
                 updated["cursors"][name] = {key: pr[key] for key in ("number", "merged_at", "merge_commit_sha")}
         except (ValueError, KeyError, TypeError, OSError, RecursionError, AttributeError):
             gaps.append(name)  # Earlier successful PRs advance; the failed PR stays pending.
             key = hashlib.sha256((name + ":gap:" + json.dumps(updated["cursors"].get(name))).encode()).hexdigest()
-            notices.append({"id": key, "connector": name, "decision": "coverage_gap"})
-    return {"state": updated, "notices": notices, "gaps": gaps, "replay": bool(only)}, private
+            notices.append({"id": key, "connector": name, "kind": "coverage_gap"})
+    return {"schema_version": 2, "state": updated, "notices": notices, "gaps": gaps, "replay": bool(only)}, private
 
 
 def publish(bundle, config, repository, fetch=request, enabled=False):
+    validate_bundle(bundle, config)
     if bundle.get("replay"):
         raise ValueError("replay cannot publish or checkpoint")
-    if not enabled:
+    if not enabled or not bundle["notices"]:
         return
     if not re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("invalid alert repository")
     issues = api(repository, "issues?state=all&creator=github-actions%5Bbot%5D&per_page=100", fetch)
     for item in bundle["notices"]:
-        if item["decision"] == "informational":
-            continue  # Unrelated changes stay in the run report, not contributor inboxes.
-        if item["connector"] not in REPOS or not re.fullmatch(r"[a-f0-9]{64}", item["id"]):
-            raise ValueError("invalid notice identity")
         marker = "<!-- connector-delta:" + item["id"] + " -->"
         if any(
             issue.get("user", {}).get("login") == "github-actions[bot]" and marker in (issue.get("body") or "")
@@ -438,23 +496,12 @@ def publish(bundle, config, repository, fetch=request, enabled=False):
         ):
             continue
         lines = [marker, " ".join("@" + user for user in config["recipients"]), NOTICE]
-        if item["decision"] == "coverage_gap":
+        if item["kind"] == "coverage_gap":
             lines.append(
                 "Collection or analysis is incomplete. Failed work stays pending; inspect the workflow privately."
             )
-        elif item["decision"] in ("static_conflict", "suspected_conflict"):
-            lines.append(
-                (
-                    "A concrete static conflict requires private maintainer review. "
-                    if item["decision"] == "static_conflict"
-                    else "AI flagged a possible conflict, not a proven break. Private maintainer review is needed. "
-                )
-                + "Reproduce locally; details are withheld here."
-            )
         else:
             number = item["number"]
-            if type(number) is not int or number <= 0:
-                raise ValueError("invalid notice PR number")
             lines.append(f"Upstream PR: https://github.com/{REPOS[item['connector']]}/pull/{number}")
             paths = [
                 html.escape(path)
@@ -463,13 +510,11 @@ def publish(bundle, config, repository, fetch=request, enabled=False):
                 .replace("[", "&#91;")
                 .replace("]", "&#93;")
                 for path in item["files"]
-                if path_ok(path)
             ]
             lines.append("Changed files: " + ", ".join(paths))
+            lines.append("What to inspect: " + " ".join(config["requirements"][key] for key in item["focus"]))
             lines.append(
-                "What to inspect: " + " ".join(config["requirements"][key] for key in item["focus"])
-                if item["decision"] == "review_required"
-                else "Informational: no configured hook dependency matched. This is not a compatibility verdict."
+                "This notice reflects upstream changes, not an impact verdict. Inspect detailed analysis locally."
             )
         payload = {"title": f"[Connector monitor] {item['connector']}: upstream change", "body": "\n\n".join(lines)}
         created = fetch(f"https://api.github.com/repos/{repository}/issues", payload)
@@ -494,6 +539,7 @@ def main(argv=None):
                 config, args.repo, state, ai=os.environ.get("CONNECTOR_DELTA_AI_ENABLED") == "true", only=only
             )
             save(args.output / "private-report.json", private)
+            validate_bundle(bundle, config)
             save(args.output / "public/bundle.json", bundle)
             print(json.dumps({"processed": len(private), "coverage_gaps": bundle["gaps"], "notice": NOTICE}))
             return 2 if bundle["gaps"] else 0
