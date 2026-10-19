@@ -72,6 +72,11 @@ const (
 // Flags are the `sandbox run` inputs that take part in resolution. Zero values
 // mean "not given".
 type Flags struct {
+	// SelectedLLM is an optional host-planning selection from an admitted
+	// agent credential profile. Nil preserves configured behavior. A concrete
+	// mode is frozen by ResolveRun before policy resolution; it is not a key,
+	// provider profile ID, guardrail LLM or a runtime capability grant.
+	SelectedLLM *string
 	// Pack is --pack (a pack reference, see Load).
 	Pack string
 	// Harness is the harness to run (claudecode, codex, ...).
@@ -655,7 +660,23 @@ func (r *resolver) policySources(o config.OpenShellConfig) []string {
 	return sources
 }
 
+func validateSelectedLLM(selected *string) error {
+	if selected == nil {
+		return nil
+	}
+	switch *selected {
+	case config.OpenShellLLMNone, config.OpenShellLLMAnthropic, config.OpenShellLLMClaudeOAuth,
+		config.OpenShellLLMOpenAI, config.OpenShellLLMBedrock, config.OpenShellLLMGemini:
+		return nil
+	default:
+		return errors.New("sandbox policy: selected model mode is unsupported")
+	}
+}
+
 func validateFlags(flags Flags) error {
+	if err := validateSelectedLLM(flags.SelectedLLM); err != nil {
+		return err
+	}
 	if p := strings.TrimSpace(flags.Profile); p != "" && config.OpenShellProfileRank(p) < 0 {
 		return fmt.Errorf("sandbox policy: --profile %q must be one of %s, %s, %s", flags.Profile,
 			config.OpenShellProfileOpen, config.OpenShellProfileBalanced, config.OpenShellProfileStrict)

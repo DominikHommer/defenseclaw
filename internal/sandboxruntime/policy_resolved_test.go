@@ -147,3 +147,105 @@ func TestHostResolvedRunCannotRebindOlderPolicyToNewAuthority(t *testing.T) {
 		t.Fatal("empty host snapshot acquired planning authority")
 	}
 }
+
+func TestNativeSelectedLLMResolutionPreservesCapturedPolicy(t *testing.T) {
+	cfg, flags, options := policyTestInput()
+	cfg.OpenShell.LLM = config.OpenShellLLMAuto
+	cfg.Sandbox = &config.SandboxConfig{Enabled: true, LLM: config.OpenShellLLMAuto,
+		Runtimes: config.SandboxRuntimesConfig{OpenShell: config.SandboxRuntimeConfig{Enabled: true}}}
+	original, _, err := ResolveHostRun(cfg, flags, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPolicy, _, err := BindResolvedExecutionPolicy(original, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, ok := originalPolicy.ModelBrokerPolicy()
+	if !ok || before.LLM != config.OpenShellLLMAuto {
+		t.Fatal("nil selected mode changed configured behavior")
+	}
+
+	selected := config.OpenShellLLMAnthropic
+	flags.SelectedLLM = &selected
+	run, _, err := ResolveHostRun(cfg, flags, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, _, err := BindResolvedExecutionPolicy(run, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured, ok := policy.ModelBrokerPolicy()
+	if !ok || captured.LLM != selected || captured.Authority != options.Authority ||
+		captured.HarnessIdentity != options.Harness || captured.Profile != before.Profile ||
+		policy.Digest() == originalPolicy.Digest() {
+		t.Fatal("selected model mode was not captured with the same independent policy/harness authority")
+	}
+	for _, capability := range []Capability{BrokerEgress, HostCredentials, ExecutableCredentialBinding} {
+		if !slices.Contains(policy.RequiredCapabilities(), capability) {
+			t.Fatal("online selection lost required mechanism", capability)
+		}
+	}
+	_, copiedFlags, _, _, err := run.run.ExecutionInputs()
+	if err != nil || copiedFlags.SelectedLLM == nil {
+		t.Fatal("captured flags are missing", err)
+	}
+	*copiedFlags.SelectedLLM = config.OpenShellLLMGemini
+	selected = config.OpenShellLLMOpenAI
+	cfg.OpenShell.LLM, cfg.Sandbox.LLM = config.OpenShellLLMNone, config.OpenShellLLMNone
+	again, _, err := BindResolvedExecutionPolicy(run, options)
+	if err != nil || again.Digest() != policy.Digest() {
+		t.Fatal("captured policy changed with caller mutations", err)
+	}
+	after, _ := again.ModelBrokerPolicy()
+	oldAgain, _, err := BindResolvedExecutionPolicy(original, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSelection, _ := oldAgain.ModelBrokerPolicy()
+	if after.LLM != config.OpenShellLLMAnthropic || oldSelection != before {
+		t.Fatal("selection rebound an earlier run")
+	}
+	_, nextFlags, _, _, err := run.run.ExecutionInputs()
+	if err != nil || *nextFlags.SelectedLLM != config.OpenShellLLMAnthropic {
+		t.Fatal("inspection copy mutated frozen selected mode", err)
+	}
+
+	none := config.OpenShellLLMNone
+	flags.SelectedLLM, options.Offline = &none, true
+	offline := mustPolicy(t, cfg, flags, options)
+	offlineSelection, _ := offline.ModelBrokerPolicy()
+	if !offlineSelection.Offline || offlineSelection.LLM != none ||
+		!slices.Contains(offline.RequiredCapabilities(), OfflineNetwork) ||
+		slices.Contains(offline.RequiredCapabilities(), HostCredentials) ||
+		slices.Contains(offline.RequiredCapabilities(), ExecutableCredentialBinding) ||
+		slices.Contains(offline.RequiredCapabilities(), BrokerEgress) {
+		t.Fatal("no-model selection did not remain truly offline")
+	}
+}
+
+func TestNativeSelectedLLMRefusesUnknownModes(t *testing.T) {
+	for _, mode := range []string{"", config.OpenShellLLMAuto, "amp", "OpenAI", "anthropic "} {
+		t.Run(mode, func(t *testing.T) {
+			cfg, flags, options := policyTestInput()
+			flags.SelectedLLM = &mode
+			if _, _, err := ResolveHostRun(cfg, flags, options); err == nil {
+				t.Fatal("unknown or unresolved model mode was frozen")
+			}
+		})
+	}
+	for _, mode := range []string{config.OpenShellLLMAnthropic, config.OpenShellLLMClaudeOAuth,
+		config.OpenShellLLMOpenAI, config.OpenShellLLMBedrock, config.OpenShellLLMGemini} {
+		cfg, flags, options := policyTestInput()
+		flags.SelectedLLM = &mode
+		policy := mustPolicy(t, cfg, flags, options)
+		got, ok := policy.ModelBrokerPolicy()
+		if !ok || got.LLM != mode {
+			t.Fatal("known selected model mode changed")
+		}
+		if cfg.OpenShell.LLM != config.OpenShellLLMNone {
+			t.Fatal("selected mode mutated caller configuration")
+		}
+	}
+}

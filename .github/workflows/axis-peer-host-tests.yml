@@ -172,6 +172,11 @@ jobs:
             TestNativeRunIntentRequiresHostCompiler
             TestNativeRunIntentInvalidValuesRefuseBeforeNativeCallbacks
             TestNativeRunIntentForwardsOwnedDataToHostCompiler
+            TestNativeLaunchInputOwnsAndRedactsAgentSelection
+            TestNativeLaunchInputRejectsUnboundModelPlan
+            TestNativeCreateQualifiedModelInputAndSecretIsolation
+            TestNativeSelectedLLMResolutionPreservesCapturedPolicy
+            TestNativeSelectedLLMRefusesUnknownModes
             TestOpenShellCreateRefusesNativeRunIntentBeforeProvisioning
             TestSandboxRuntimeOwnerRefusesLegacyOperations
             TestSandboxRuntimeOwnerLifecycleUsesAPIWithoutLegacyPreflight

@@ -90,6 +90,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	req.Unmask = slices.Clone(req.Unmask)
 	req.HostPorts = slices.Clone(req.HostPorts)
 	req.Context = slices.Clone(req.Context)
+	req.LLM = ownLLMCredential(req.LLM)
 	intent, err := sandboxapi.OwnRunIntent(req.RunIntent)
 	if err != nil {
 		return nil, err

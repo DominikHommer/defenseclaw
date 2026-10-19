@@ -36,10 +36,16 @@ func ResolveRun(cfg *config.Config, flags Flags) (*ResolvedRun, []Violation, err
 	if err != nil {
 		return nil, nil, err
 	}
+	flags = copyRunFlags(flags)
+	if flags.SelectedLLM != nil {
+		if err := validateSelectedLLM(flags.SelectedLLM); err != nil {
+			return nil, nil, err
+		}
+		owned.OpenShell.LLM = *flags.SelectedLLM
+	}
 	if err := owned.ValidateOpenShell(); err != nil {
 		return nil, nil, err
 	}
-	flags = copyRunFlags(flags)
 	effective, violations, err := Resolve(owned, flags)
 	if err != nil {
 		return nil, slices.Clone(violations), err
@@ -78,6 +84,10 @@ func (r *ResolvedRun) ExecutionInputs() (*config.Config, Flags, *Effective, []Vi
 }
 
 func copyRunFlags(flags Flags) Flags {
+	if flags.SelectedLLM != nil {
+		selected := *flags.SelectedLLM
+		flags.SelectedLLM = &selected
+	}
 	flags.Unmask = slices.Clone(flags.Unmask)
 	flags.HostPorts = slices.Clone(flags.HostPorts)
 	flags.UserPack = slices.Clone(flags.UserPack)

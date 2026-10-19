@@ -31,14 +31,14 @@ import (
 // that same HostResolvedRun/ExecutionPolicy. No request digest or receipt enters
 // this dependency. Bounded client run intent is only data; the host producer
 // must compile it against its held harness and effective policy, including
-// the admitted permission mode. This supports one headless offline launch,
-// not restart/export.
+// the admitted permission mode. This supports one headless launch, offline or
+// with a separately qualified host model broker, not restart/export.
 type NativeExecution struct {
 	owner   context.Context
 	backend sandboxruntime.Backend
 	gate    *sandboxruntime.LaunchGate
 	resolve func(packs.Flags, sandboxruntime.PolicyOptions) (*sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, []packs.Violation, error)
-	prepare func(context.Context, *sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, sandboxruntime.SessionIdentity, *sandboxapi.RunIntent) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error)
+	prepare func(context.Context, *sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, sandboxruntime.SessionIdentity, *NativeLaunchInput) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error)
 }
 
 // NewNativeExecution takes host-owned dependencies. The factory performs the
@@ -46,11 +46,12 @@ type NativeExecution struct {
 // nonnil PreparedProcess, including on error, transfers cleanup to the manager.
 // A nil process on error requires completed factory cleanup; uncertain partial
 // custody must return a nonnil cleanup-only process. No wire receipt is accepted.
-// prepare must refuse a nonnil run intent unless it can compile the exact
-// headless request from held harness assets and the resolved permission mode.
+// prepare must compile input.Intent against held harness assets and the resolved
+// permission mode. An online producer must call input.PlanModel with its admitted
+// network realpaths and keep the resulting credentials exclusively in the host.
 func NewNativeExecution(owner context.Context, backend sandboxruntime.Backend, gate *sandboxruntime.LaunchGate,
 	resolve func(packs.Flags, sandboxruntime.PolicyOptions) (*sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, []packs.Violation, error),
-	prepare func(context.Context, *sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, sandboxruntime.SessionIdentity, *sandboxapi.RunIntent) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error),
+	prepare func(context.Context, *sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, sandboxruntime.SessionIdentity, *NativeLaunchInput) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error),
 ) (*NativeExecution, error) {
 	if owner == nil || backend == nil || gate == nil || resolve == nil || prepare == nil {
 		return nil, nativeUnavailable()
@@ -129,7 +130,8 @@ func (m *Manager) createNative(ctx context.Context, req sandboxapi.CreateRequest
 		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)
 	}
 	name := config.NormalizeConnectorName(req.Harness)
-	if _, ok := harness.Get(name); !ok {
+	harnessSpec, ok := harness.Get(name)
+	if !ok {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "unknown harness %q", req.Harness)
 	}
 	verified, ok := info.Harnesses[name]
@@ -139,10 +141,15 @@ func (m *Manager) createNative(ctx context.Context, req sandboxapi.CreateRequest
 	if err := info.RequireHarness(name, verified.Identity); err != nil {
 		return nil, err
 	}
-	// The current native mechanism is offline. Do not accept secrets or options
-	// whose required broker/additional-root/environment translation is absent.
-	if req.LLM != nil || len(req.Credentials) != 0 || len(req.Context) != 0 || len(req.Env) != 0 || req.TimeZone != "" {
-		return nil, sandboxapi.Errorf(sandboxapi.CodePolicyViolation, "native offline preparation does not admit credentials, context roots or environment overrides")
+	// Custom credentials and additional roots/environment remain untranslated.
+	// A requested model is separately captured in the same policy resolution;
+	// backend/harness qualification and the producer still have to admit it.
+	if len(req.Credentials) != 0 || len(req.Context) != 0 || len(req.Env) != 0 || req.TimeZone != "" {
+		return nil, sandboxapi.Errorf(sandboxapi.CodePolicyViolation, "native preparation does not admit custom credentials, context roots or environment overrides")
+	}
+	selectedLLM, err := selectedNativeLLM(harnessSpec, req.LLM)
+	if err != nil {
+		return nil, err
 	}
 	if err := m.listenersReady(); err != nil {
 		return nil, err
@@ -160,7 +167,8 @@ func (m *Manager) createNative(ctx context.Context, req sandboxapi.CreateRequest
 		CPU: req.CPU, Memory: req.Memory, ProcessTree: req.ProcessTree, RepoPolicy: repo}
 	resolvedFlags := flags.packs(name, project, gatewayFacts{})
 	resolvedFlags.MountUnsupported = "native live workspace execution is not qualified"
-	run, policy, violations, err := n.resolve(resolvedFlags, sandboxruntime.PolicyOptions{Harness: verified.Identity, Offline: true})
+	resolvedFlags.SelectedLLM = &selectedLLM
+	run, policy, violations, err := n.resolve(resolvedFlags, sandboxruntime.PolicyOptions{Harness: verified.Identity, Offline: req.LLM == nil})
 	if err != nil {
 		return nil, err
 	}
@@ -176,6 +184,9 @@ func (m *Manager) createNative(ctx context.Context, req sandboxapi.CreateRequest
 	}
 	if effective.Workspace.Mode != config.OpenShellWorkdirCopy || effective.Harness != name {
 		return nil, sandboxapi.Errorf(sandboxapi.CodePolicyViolation, "native preparation requires its admitted copied workspace and harness")
+	}
+	if err := m.credentialsAllowed(ctx, effective, req, req.Name); err != nil {
+		return nil, err
 	}
 	if err := info.RequireHarness(name, verified.Identity, policy.RequiredCapabilities()...); err != nil {
 		return nil, err
@@ -198,6 +209,10 @@ func (m *Manager) createNative(ctx context.Context, req sandboxapi.CreateRequest
 		return nil, err
 	}
 	identity := sandboxruntime.SessionIdentity{Owner: m.opts.Owner, ID: hex.EncodeToString(nonce[:]), Name: sandboxName, Runtime: info.Identity}
+	input, err := newNativeLaunchInput(run, policy, identity, verified.Identity, harnessSpec, req.RunIntent, req.LLM)
+	if err != nil {
+		return nil, err
+	}
 	session := &nativeSession{runtime: n, identity: identity, harness: name, instance: sandboxruntime.Instance{Identity: identity, Phase: "bound"}}
 	b, err := m.reserveExecution(sandboxName, project, effective.Workspace.Mode, session)
 	if err != nil {
@@ -237,7 +252,7 @@ func (m *Manager) createNative(ctx context.Context, req sandboxapi.CreateRequest
 		m.mu.Unlock()
 		result = errors.Join(result, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "native cleanup remains pending; delete the retained sandbox to retry"))
 	}()
-	spec, prepared, receipt, err := n.prepare(ctx, run, policy, identity, req.RunIntent)
+	spec, prepared, receipt, err := n.prepare(ctx, run, policy, identity, input)
 	session.prepared = prepared
 	if err != nil {
 		return nil, err
@@ -245,7 +260,7 @@ func (m *Manager) createNative(ctx context.Context, req sandboxapi.CreateRequest
 	m.mu.Lock()
 	session.preparedComplete = true
 	m.mu.Unlock()
-	if sandboxruntime.ValidateOwnedSession(identity, spec.Identity) != nil || spec.Harness != name || spec.HarnessIdentity != verified.Identity || !spec.Offline {
+	if sandboxruntime.ValidateOwnedSession(identity, spec.Identity) != nil || spec.Harness != name || spec.HarnessIdentity != verified.Identity || input.validatePrepared(spec) != nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "native producer returned a different execution identity")
 	}
 	if err := ctx.Err(); err != nil {
@@ -286,6 +301,10 @@ func (m *Manager) createNative(ctx context.Context, req sandboxapi.CreateRequest
 	b.creating, b.phase, b.started = false, audit.SandboxPhaseReady, m.now()
 	b.rec.CreatedAt, b.rec.Workdir = instance.CreatedAt, instance.Workdir
 	b.rec.HarnessVersion, b.rec.HookContract = spec.HarnessIdentity.Version, spec.HarnessIdentity.HookContract
+	b.rec.CredentialProfile = spec.CredentialProfile
+	if req.LLM != nil {
+		b.rec.BedrockRegion = req.LLM.BedrockRegion
+	}
 	m.mu.Unlock()
 	// Native sessions are process-owned, not restart-adoptable OpenShell
 	// records. No persistence or restart capability is advertised by this slice.

@@ -150,8 +150,8 @@ func nativeTransaction(t *testing.T) *nativeTransactionFixture {
 		policy, violations, err := sandboxruntime.BindResolvedExecutionPolicy(run, options)
 		return run, policy, violations, err
 	}
-	prepare := func(ctx context.Context, run *sandboxruntime.HostResolvedRun, policy *sandboxruntime.ExecutionPolicy, id sandboxruntime.SessionIdentity, intent *sandboxapi.RunIntent) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error) {
-		if intent != nil {
+	prepare := func(ctx context.Context, run *sandboxruntime.HostResolvedRun, policy *sandboxruntime.ExecutionPolicy, id sandboxruntime.SessionIdentity, input *NativeLaunchInput) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error) {
+		if input.Intent() != nil {
 			return sandboxruntime.Spec{}, nil, sandboxruntime.PolicyReceipt{}, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "synthetic fixed producer cannot compile run intent")
 		}
 		if run == nil || policy == nil {
@@ -213,8 +213,9 @@ func TestNativeRunIntentForwardsOwnedDataToHostCompiler(t *testing.T) {
 	var received sandboxapi.RunIntent
 	producer, err := NewNativeExecution(previous.owner, previous.backend, previous.gate, previous.resolve,
 		func(_ context.Context, _ *sandboxruntime.HostResolvedRun, _ *sandboxruntime.ExecutionPolicy, _ sandboxruntime.SessionIdentity,
-			intent *sandboxapi.RunIntent,
+			input *NativeLaunchInput,
 		) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error) {
+			intent := input.Intent()
 			if intent == nil {
 				return sandboxruntime.Spec{}, nil, sandboxruntime.PolicyReceipt{}, sandboxapi.Errorf(sandboxapi.CodeInvalid, "synthetic intent is missing")
 			}
