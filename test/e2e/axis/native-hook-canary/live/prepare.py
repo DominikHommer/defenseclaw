@@ -22,8 +22,8 @@ from verify_native_artifact import static_elf  # noqa: E402
 REPOSITORY = "cisco-ai-defense/defenseclaw"
 BRANCH = "codex/axis-sandbox-feasibility"
 REF = "refs/heads/" + BRANCH
-SOURCE_CANARY = "ff281c211bcc014b3b80f00d5a27c16284b51e22"
-SOURCE_WRAPPER = "ff281c211bcc014b3b80f00d5a27c16284b51e22"
+SOURCE_CANARY = "1449006dae8a007deb9738774bc6bfd24f0af467"
+SOURCE_WRAPPER = "fa88dcfd0b4a89d7ca1596500830baff0ed291c9"
 PINS = {
     "peer": {
         "source": "36139fb98708b4cc021d1f20841ace231e058fa2",
@@ -37,22 +37,22 @@ PINS = {
     },
     "canary": {
         "source": SOURCE_CANARY,
-        "run": 39274812188,
-        "artifact": 12197502768,
-        "archive": "1f955af6e14314d15dda1dd63125228f2ebeae1f2cbc1b024037e47312b3365a",
-        "provenance": "0940ed91303f03d2ff13effa842bc350e4834d37fa3483c7f9fe30042e438fbb",
+        "run": 39287995321,
+        "artifact": 12204773054,
+        "archive": "fbf60ac2fea8a85b0f066342cfb91bca169af71926891436b97cd076587536c8",
+        "provenance": "41c1a2799f83229c80a9049b2edc4c9b46b2ea79cdf5007f18c0d551021e7c0c",
         "workflow": ".github/workflows/axis-contained-hook-canary-build.yml",
-        "name": "axis-contained-hook-build-only-ff281c211bcc014b3b80f00d5a27c16284b51e22",
+        "name": "axis-contained-hook-build-only-1449006dae8a007deb9738774bc6bfd24f0af467",
         "event": "workflow_dispatch",
     },
     "wrapper": {
         "source": SOURCE_WRAPPER,
-        "run": 39274817331,
-        "artifact": 12197595882,
-        "archive": "1e17f3c9f5e319b0d68429c87891092ca8ba60579e1b968766cc30748fef20e3",
-        "provenance": "d67d2b1bc8e8d6f6300c111a3e9699d17b11cd28888f1b7bd187e9e251942221",
+        "run": 39290902187,
+        "artifact": 12206240425,
+        "archive": "cc9013e38836a27ea51e9eaae546670cf52a31a6693700b35ae3e9c0c72194c0",
+        "provenance": "3be4317bf1ab706d0708f7140fb94840ca40d6907983c86a3e65ef94ed6c2b18",
         "workflow": ".github/workflows/axis-contained-hook-live-wrapper-build.yml",
-        "name": "axis-contained-hook-outer-build-only-ff281c211bcc014b3b80f00d5a27c16284b51e22",
+        "name": "axis-contained-hook-outer-build-only-fa88dcfd0b4a89d7ca1596500830baff0ed291c9",
         "event": "workflow_dispatch",
     },
 }
@@ -85,15 +85,15 @@ IMAGES = {
         "canary",
         "fixed-contained-hook-driver.test",
         "fixed-contained-hook-driver.test",
-        "798ecf9f63032512dbcc9acfdf4cf4d668c27a8b7606869a531840754235bfd8",
-        141455486,
+        "4b6f03634d6db339302a7c5b5aaddfc471419141a5b4c16c22b538e83a296808",
+        141533310,
         0o500,
     ),
     "wrapper": (
         "wrapper",
         "fixed-contained-hook-outer",
         "fixed-contained-hook-outer",
-        "0775e17eb54dda7b0fe446dea6aab0d3a40d26f5c93e212752241d66982fa07d",
+        "d2dc22fc19421446a1d523491b1dfca47f149d3308954e2f44fb73b5ad7670c0",
         2936958,
         0o500,
     ),

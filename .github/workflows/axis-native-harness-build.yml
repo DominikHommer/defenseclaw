@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-name: AXIS reviewed fixed Linux harness source build
+name: AXIS reviewed fixed native harness source build
 
 # Compile only. Never run this wrapper, a peer, clone, prctl or a sandbox.
 on:
@@ -20,6 +20,13 @@ on:
       - NOTICE
       - THIRD_PARTY_LICENSES.txt
   workflow_dispatch:
+    inputs:
+      harness_slice:
+        description: Closed build-only harness source slice
+        required: true
+        type: choice
+        default: linux-fixed
+        options: [linux-fixed, windows-token-probe]
 
 permissions:
   contents: read
@@ -30,6 +37,7 @@ concurrency:
 
 jobs:
   build-only:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.harness_slice == 'linux-fixed' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -352,6 +360,96 @@ jobs:
         with:
           name: axis-reviewed-native-harness-linux-${{ github.sha }}
           path: harness-artifact/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
+
+  windows-harness-build:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.harness_slice == 'windows-token-probe' }}
+    runs-on: windows-2025
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          persist-credentials: false
+          sparse-checkout: |
+            go.mod
+            go.sum
+            LICENSE
+            NOTICE
+            THIRD_PARTY_LICENSES.txt
+            .github/workflows/axis-native-harness-build.yml
+            internal/axis/bridgeproto
+            internal/axis/bridgeowner
+            internal/axis/bridgeprocess
+            internal/safefile
+            internal/winpath
+            test/e2e/axis/windows/native-peer
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.14.6'
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: 1.26.5
+          cache: false
+      - name: Stage exact Git build recipe and run its pure contract tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import os
+          from pathlib import Path
+          import subprocess
+          checkout, target = Path('defenseclaw-source'), Path('hosted-helper')
+          assert os.environ['GITHUB_REPOSITORY'] == 'cisco-ai-defense/defenseclaw'
+          assert os.environ['GITHUB_REF'] == 'refs/heads/codex/axis-sandbox-feasibility'
+          def git(*args):
+              return subprocess.run(['git', '-C', str(checkout), *args], check=True, capture_output=True, timeout=30).stdout
+          assert git('rev-parse', 'HEAD').decode().strip() == os.environ['GITHUB_SHA']
+          assert not git('status', '--porcelain').strip()
+          target.mkdir()
+          for name in ('prepare_harness_build.py', 'test_prepare_harness_build.py'):
+              raw = git('cat-file', 'blob', os.environ['GITHUB_SHA'] + ':test/e2e/axis/windows/native-peer/' + name)
+              assert 0 < len(raw) <= 2 << 20
+              with (target / name).open('xb') as stream: assert stream.write(raw) == len(raw)
+          '@ | python -I -B -
+          if ($LASTEXITCODE -ne 0) { throw 'Exact Windows harness build recipe staging failed' }
+          python -I -B -m unittest discover -s hosted-helper -p test_prepare_harness_build.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Pure Windows harness build recipe tests failed' }
+      - name: Run only reviewed pure host tests and compile the fixed harness twice
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -I -B hosted-helper/prepare_harness_build.py
+          if ($LASTEXITCODE -ne 0) { throw 'Fixed Windows harness build refused' }
+      - name: Preserve fixed workflow identity on success or refusal
+        if: ${{ always() }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import json
+          import os
+          from pathlib import Path
+          root = Path('windows-harness-artifact')
+          root.mkdir(exist_ok=True)
+          value = {'repository': os.environ['GITHUB_REPOSITORY'], 'workflow': '.github/workflows/axis-native-harness-build.yml', 'build_commit': os.environ['GITHUB_SHA'], 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'harness_peer_payload_or_psec_execution': False, 'native_child_or_job_test_execution': False, 'production_qualification': False}
+          raw = (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
+          path = root / 'WORKFLOW.json'
+          if path.exists(): assert path.read_bytes() == raw
+          else:
+              with path.open('xb') as stream: assert stream.write(raw) == len(raw)
+          '@ | python -I -B -
+          if ($LASTEXITCODE -ne 0) { throw 'Windows harness workflow identity capture failed' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: axis-reviewed-native-harness-windows-${{ github.sha }}
+          path: windows-harness-artifact/**
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
