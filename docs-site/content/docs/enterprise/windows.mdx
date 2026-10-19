@@ -360,11 +360,15 @@ the lifecycle from there. See [Payload trust](#payload-trust) for how the
 lifecycle decides which files to trust. It also generates the target manifest from the
 profiles on the computer, so you never write `targets.yaml`.
 
-To turn Fleet on or off, run the signed standalone Setup so it installs or
-removes the optional policy compiler with the config change. On a host that
-uses signed policy bundles, deliver the Fleet-changing `BUNDLE=` through
-Setup; the installed CLI refuses that transition because it has no compiler
-payload. Repeating `/ensure` with Fleet off and the same config is a no-op.
+Managed Setup does not carry the optional Fleet policy compiler. A host that
+1.0.2 Setup installed with Fleet on keeps the compiler it has: an upgrade
+leaves the file and its recorded hash unchanged, and the uninstall removes it
+only while it still matches that hash. Setup refuses a Fleet-on config on a
+host with no recorded compiler, before it changes anything. To turn Fleet
+off, run the signed standalone Setup with the new config; it removes the
+compiler. On a host that uses signed policy bundles, deliver a Fleet-changing
+`BUNDLE=` through Setup; the installed CLI refuses that transition. Repeating
+`/ensure` with Fleet off and the same config is a no-op.
 
 An empty `C:\Program Files\Cisco\DefenseClaw` an earlier removal left (it
 carries the default Program Files permissions, including the inherit-only
