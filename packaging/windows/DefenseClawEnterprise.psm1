@@ -5199,7 +5199,6 @@ function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
         $Layout.HookPath,
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),
         $Layout.InstallerPath,
         $Layout.ModulePath
     )
@@ -7983,20 +7982,6 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.InstallRoot -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.BinDirectory -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.LibexecDirectory -Kind InstallDirectory -GatewayServiceSID $gatewaySID
-    foreach ($directory in @(
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
-    )) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$directory) -and
-            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory -PathType Container)) {
-            Set-DefenseClawPathAcl -Path $directory -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
-        }
-    }
-    $compilerPath = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath
-    if (-not [string]::IsNullOrWhiteSpace($compilerPath) -and
-        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf)) {
-        Set-DefenseClawPathAcl -Path $compilerPath -Kind ServiceInstallFile -GatewayServiceSID $gatewaySID
-    }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GatewayPath -Kind ServiceInstallFile -GatewayServiceSID $gatewaySID
     }
@@ -9293,8 +9278,6 @@ function New-DefenseClawLayoutDirectories {
         $Layout.InstallRoot,
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory),
         $Layout.StateRoot,
         $Layout.ConfigDirectory,
         $Layout.RuntimeDirectory,
@@ -9607,7 +9590,6 @@ function New-DefenseClawDeploymentMetadata {
     foreach ($entry in @(
         @('broker', $Layout.BrokerPath),
         @('gateway', $Layout.GatewayPath),
-        @('compiler', (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath)),
         @('acp', $Layout.ACPPath),
         @('hook', $Layout.HookPath),
         @('sensor_helper', $Layout.SensorHelperPath),
@@ -10374,7 +10356,6 @@ function New-DefenseClawTransaction {
         $Layout.HookPath,
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),
         $Layout.ConfigPath,
         $Layout.ManifestPath,
         $Layout.InstallerPath,
@@ -20914,28 +20895,6 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RequiredRights $serviceInstallRights `
             -AllowUsersRead
     }
-    foreach ($directory in @(
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
-    )) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$directory) -and
-            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory -PathType Container)) {
-            Assert-DefenseClawPathAcl `
-                -Path $directory `
-                -AllowedWriterSIDs $adminWriters `
-                -RequiredRights $serviceInstallRights `
-                -AllowUsersRead
-        }
-    }
-    $compilerPath = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath
-    if (-not [string]::IsNullOrWhiteSpace($compilerPath) -and
-        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf)) {
-        Assert-DefenseClawPathAcl `
-            -Path $compilerPath `
-            -AllowedWriterSIDs $adminWriters `
-            -RequiredRights $serviceInstallRights `
-            -AllowUsersRead
-    }
     Assert-DefenseClawPathAcl `
         -Path $Layout.LibexecDirectory `
         -AllowedWriterSIDs $adminWriters `
@@ -22612,6 +22571,55 @@ function Remove-DefenseClawStandaloneManagedIPCDirectory {
     [IO.Directory]::Delete($directory, $false)
 }
 
+function Get-DefenseClawEmptyRetiredCompilerDirectories {
+    <#
+        GAP-0270: a 1.0.2 standalone install created InstallRoot\lib\defenseclaw
+        for the Fleet policy compiler, which this release no longer installs.
+        Returns those two retired directories that exist as plain directories
+        and hold nothing (lib may hold only an empty lib\defenseclaw), deepest
+        first. A directory with any other content, or a reparse point, is not
+        returned, so the callers keep refusing it.
+    #>
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    $lib = [IO.Path]::GetFullPath([IO.Path]::Combine($InstallRoot, 'lib')).TrimEnd('\')
+    $empty = [Collections.Generic.List[string]]::new()
+    foreach ($directory in @([IO.Path]::Combine($lib, 'defenseclaw'), $lib)) {
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item -or -not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            continue
+        }
+        $content = @(
+            Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force |
+                Microsoft.PowerShell.Core\Where-Object {
+                    [IO.Path]::GetFullPath([string]$_.FullName).TrimEnd('\') -notin $empty
+                }
+        )
+        if ($content.Count -eq 0) {
+            $empty.Add($directory)
+        }
+    }
+    return $empty.ToArray()
+}
+
+function Remove-DefenseClawRetiredStandaloneCompiler {
+    <#
+        Fleet-off Install, Upgrade and Repair remove the Fleet compiler an
+        older standalone install left, then lib\defenseclaw and lib once they
+        are empty, so a later uninstall finds no leftover tree (GAP-0270). A
+        directory with any other content stays for the uninstall to refuse.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $compilerPath = [IO.Path]::Combine($Layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
+    Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
+        [IO.File]::Delete($compilerPath)
+    }
+    foreach ($directory in @(Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot)) {
+        [IO.Directory]::Delete($directory, $false)
+    }
+}
+
 function Assert-DefenseClawManagedInstallTree {
     param([Parameter(Mandatory)][hashtable]$Layout)
     # ManagedIPCDirectory and ManagedIPCSocketPath live under InstallRoot
@@ -22625,8 +22633,6 @@ function Assert-DefenseClawManagedInstallTree {
     $allowedDirectories = @(
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory),
         $Layout.ManagedIPCDirectory
     )
     # Standalone keeps its managed IPC directory (sensor helper socket)
@@ -22635,6 +22641,11 @@ function Assert-DefenseClawManagedInstallTree {
     $standaloneIPCLeaves = @(Get-DefenseClawStandaloneIPCSocketLeaves -Layout $Layout)
     if ($standaloneIPCLeaves.Count -gt 0) {
         $allowedDirectories += [IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')
+    }
+    # The empty lib tree a 1.0.2 standalone install left for the retired
+    # Fleet compiler (GAP-0270). Anything inside it is still refused.
+    if (Test-DefenseClawStandaloneProfile) {
+        $allowedDirectories += @(Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot)
     }
     $allowedFiles = @(
         $Layout.BrokerPath,
@@ -22645,7 +22656,6 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.CLIPath,
         $Layout.InstallerPath,
         $Layout.ModulePath,
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),
         $managedIPCSocketPath
     )
     # Standalone also carries the managed OpenCode plugin under share\opencode.
@@ -25833,14 +25843,7 @@ function Remove-DefenseClawCommittedEmptyInstallRoot {
         [IO.Path]::GetFullPath($Layout.ManagedIPCDirectory).TrimEnd('\')
     )
     if (Test-DefenseClawStandaloneProfile) {
-        foreach ($directory in @(
-            (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
-            (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
-        )) {
-            if (-not [string]::IsNullOrWhiteSpace([string]$directory)) {
-                $allowed += [IO.Path]::GetFullPath($directory).TrimEnd('\')
-            }
-        }
+        $allowed += @(Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot)
     }
     # A layout without the socket key tolerates no leaf file at all.
     $managedIPCSocketPath = Get-DefenseClawOptionalLayoutValue `
@@ -27705,12 +27708,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             }
         }
         if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {
-            # Retire a compiler left by an older standalone install.
-            $compilerPath = [IO.Path]::Combine($Layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
-            Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
-            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
-                [IO.File]::Delete($compilerPath)
-            }
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $Layout
         }
         foreach ($requiredPath in @(
             $Layout.GatewayPath,

@@ -27,6 +27,13 @@ internal/gateway/connector/testdata/bridge_host/** text eol=lf
 # (STOCK_PROFILE_DIGESTS); keep them LF on Windows checkouts too.
 policies/guardrail/** text eol=lf
 
+# A Fleet-off upgrade retires these optional templates only when their bytes
+# match the reviewed SHA-256 (bundle_refresh._LOCAL_OBSERVABILITY_RETIRED_SHA256); keep
+# them LF on Windows checkouts too.
+bundles/local_observability_stack/docker-compose.fleet.yml text eol=lf
+bundles/local_observability_stack/prometheus/examples/fleet.yml text eol=lf
+bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json text eol=lf
+
 # The MDM kit scripts are uploaded to MDM consoles as committed and the Unix
 # ones run under /bin/sh; keep them LF on Windows checkouts too.
 packaging/mdm/**/*.sh text eol=lf
