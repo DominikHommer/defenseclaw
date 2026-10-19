@@ -96,8 +96,18 @@ int hal_flash_write(uint32_t offset, const void *buf, size_t len) {
     return 0;
 }
 
+static unsigned flash_sync_failures;
+
+void hal_flash_fail_next_syncs(unsigned n) {
+    flash_sync_failures = n;
+}
+
 int hal_flash_sync(void) {
     if (flash_fd < 0) return -1;
+    if (flash_sync_failures > 0) {
+        flash_sync_failures--;
+        return -1;
+    }
     if (fdatasync(flash_fd) != 0) return -1;
     flash_stats.syncs++;
     return 0;

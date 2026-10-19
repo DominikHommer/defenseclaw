@@ -29,6 +29,7 @@ extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
 extern dclaw_state_t *dclaw_get_state(void);
 extern void dclaw_audit_tick(uint64_t now_ms);
 extern bool dclaw_audit_sync_pending(void);
+extern int dclaw_audit_sync_due_in_ms(uint64_t now_ms);
 
 static void test_block_flushes_immediately(void) {
     dclaw_state_t *s = dclaw_get_state();
@@ -147,6 +148,34 @@ static void test_block_durable_within_window(void) {
     printf("  PASS: BLOCK entries are durable within one sync window\n");
 }
 
+static void test_failed_sync_stays_pending(void) {
+    sleep_ms(DCLAW_AUDIT_BLOCK_SYNC_MS + 10);
+    dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, 0x4444, 5);
+    assert(!dclaw_audit_sync_pending());
+    /* A BLOCK inside the window whose sync then fails stays pending... */
+    dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, 0x5555, 5);
+    assert(dclaw_audit_sync_pending());
+    hal_flash_fail_next_syncs(1);
+    sleep_ms(DCLAW_AUDIT_BLOCK_SYNC_MS + 10);
+    dclaw_audit_tick(hal_tick_ms());
+    assert(dclaw_audit_sync_pending());
+    /* ...without making the loop spin: the retry waits for a new window. */
+    assert(dclaw_audit_sync_due_in_ms(hal_tick_ms()) > 0);
+    /* An explicit flush reports the failure. */
+    hal_flash_fail_next_syncs(1);
+    assert(dclaw_flush_audit() != 0);
+    assert(dclaw_audit_sync_pending());
+    /* The retry succeeds. */
+    uint64_t s0 = flash_syncs();
+    sleep_ms(DCLAW_AUDIT_BLOCK_SYNC_MS + 10);
+    dclaw_audit_tick(hal_tick_ms());
+    assert(!dclaw_audit_sync_pending());
+    assert(flash_syncs() == s0 + 1);
+    assert(dclaw_flush_audit() == 0);
+    (void)s0;
+    printf("  PASS: failed BLOCK sync stays pending and is reported\n");
+}
+
 int main(void) {
     hal_init();
     dclaw_device_info_t info = {.device_id = 1};
@@ -159,6 +188,7 @@ int main(void) {
     test_flash_writes_tracked();
     test_block_flood_sync_rate_bounded();
     test_block_durable_within_window();
+    test_failed_sync_stays_pending();
     printf("  ALL PASSED (6 tests)\n");
 
     dclaw_shutdown();

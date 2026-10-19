@@ -37,12 +37,18 @@ static bool     s_sync_pending = false;
 static bool     s_synced_once = false;
 static uint64_t s_last_sync_ms = 0;
 
-static void audit_sync_now(uint64_t now) {
-    if (hal_flash_sync() != 0)
-        fprintf(stderr, "[DCLAW-AUDIT] WARNING: hal_flash_sync() failed\n");
+/* A failed sync leaves the entries pending; they are retried when the
+ * next window closes. */
+static int audit_sync_now(uint64_t now) {
     s_last_sync_ms = now;
     s_synced_once = true;
+    if (hal_flash_sync() != 0) {
+        fprintf(stderr, "[DCLAW-AUDIT] WARNING: hal_flash_sync() failed\n");
+        s_sync_pending = true;
+        return -1;
+    }
     s_sync_pending = false;
+    return 0;
 }
 
 static void audit_sync_block(void) {
@@ -51,13 +57,13 @@ static void audit_sync_block(void) {
         s_sync_pending = true;
         return;
     }
-    audit_sync_now(now);
+    (void)audit_sync_now(now);
 }
 
 /* Sync a BLOCK entry whose window has closed. Call from the event loop. */
 void dclaw_audit_tick(uint64_t now_ms) {
     if (s_sync_pending && now_ms - s_last_sync_ms >= DCLAW_AUDIT_BLOCK_SYNC_MS)
-        audit_sync_now(now_ms);
+        (void)audit_sync_now(now_ms);
 }
 
 /* Milliseconds until a pending BLOCK sync is due; -1 when none is pending. */
@@ -615,7 +621,7 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
 int dclaw_flush_audit(void) {
     dclaw_state_t *s = dclaw_get_state();
     int rc = flush_buffer_to_flash(&s->audit_writer);
-    if (s_sync_pending) audit_sync_now(hal_tick_ms());
+    if (s_sync_pending && audit_sync_now(hal_tick_ms()) != 0) rc = -1;
     return rc;
 }
 
@@ -634,7 +640,7 @@ const uint8_t *dclaw_audit_get_key(size_t *out_len) {
 
 void dclaw_audit_ring_shutdown(void)
 {
-    if (s_sync_pending) audit_sync_now(hal_tick_ms());
+    if (s_sync_pending) (void)audit_sync_now(hal_tick_ms());
     dclaw_secure_zero(s_audit_key, sizeof(s_audit_key));
     s_audit_key_loaded = false;
     s_audit_key_provisioned = false;
