@@ -245,8 +245,7 @@ def extract_destination(tool: str, arguments: dict) -> str:
                 break
         if "://" in url:
             try:
-                from urllib.parse import urlparse
-                return urlparse(url).hostname or ""
+                return _generic_hook._destination_host(url)
             except Exception:
                 pass
         return url

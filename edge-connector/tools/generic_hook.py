@@ -165,6 +165,33 @@ def fail_open_attested() -> bool:
     return True
 
 
+def _destination_host(url: str) -> str:
+    """Return the host of *url* in the form the C destination guard expects.
+
+    ``urlparse().hostname`` drops the brackets around an IPv6 literal; the
+    engine only recognises bracketed IPv6 destinations, so put them back.
+    """
+    host = urlparse(url).hostname or ""
+    if ":" in host:
+        return f"[{host}]"
+    return host
+
+
+def _json_escaped_len(ch: str) -> int:
+    """Length of *ch* inside a JSON string as produced by json.dumps()."""
+    if ch in _TWO_CHAR_ESCAPES:
+        return 2
+    o = ord(ch)
+    if o < 0x20 or 0x7F <= o <= 0xFFFF:
+        return 6   # \uXXXX
+    if o < 0x80:
+        return 1
+    return 12  # astral plane: surrogate pair, two \uXXXX escapes
+
+
+_TWO_CHAR_ESCAPES = frozenset('"\\\b\f\n\r\t')
+
+
 def check_http_production(url: str, context: str = "adapter") -> None:
     """Warn when a non-loopback URL uses plain HTTP in production.
 
@@ -859,13 +886,44 @@ class EdgeConnector:
                 return self._fail_open_verdict(tool_name)
             return Verdict.error(f"ENGINE_ERROR: {exc}")
 
-    # Maximum content bytes the C-side buffer accepts per call (DCLAW_CONTENT_MAX - 1 for NUL).
-    _CONTENT_BUF_MAX = 4095
-    # Overlap between consecutive content windows so patterns that span
-    # a window boundary are still caught.  256 bytes covers the longest
-    # pattern the scanner might detect (e.g. base64-encoded secrets,
-    # multi-field PII, long credential strings).
+    # Maximum content length per call, measured as the JSON-escaped string
+    # the socket backend sends (json.dumps, ensure_ascii).  The daemon
+    # flags content as truncated -- and blocks it -- when the escaped
+    # string exceeds DCLAW_CONTENT_MAX - 1 (4095) or the unescaped text
+    # reaches DCLAW_CONTENT_MAX - 4 (4092) bytes.  The unescaped UTF-8 length
+    # never exceeds the escaped length, so 4092 escaped characters satisfies
+    # both limits and also fits the FFI backend's 4095-byte buffer.
+    _CONTENT_ESCAPED_MAX = 4092
+    # Overlap (in characters) between consecutive content windows so
+    # patterns that span a window boundary are still caught.  256 covers
+    # the longest pattern the scanner might detect (e.g. base64-encoded
+    # secrets, multi-field PII, long credential strings).
     _CONTENT_OVERLAP = 256
+
+    @classmethod
+    def _content_windows(cls, content: str) -> list[str]:
+        """Split *content* into overlapping windows that each stay within
+        :attr:`_CONTENT_ESCAPED_MAX` once JSON-escaped.
+
+        Windows are cut on character boundaries, so multi-byte characters
+        are never split.
+        """
+        costs = [_json_escaped_len(ch) for ch in content]
+        windows: list[str] = []
+        start = 0
+        n = len(content)
+        while start < n:
+            end = start
+            used = 0
+            while end < n and used + costs[end] <= cls._CONTENT_ESCAPED_MAX:
+                used += costs[end]
+                end += 1
+            windows.append(content[start:end])
+            if end >= n:
+                break
+            overlap = min(cls._CONTENT_OVERLAP, (end - start) // 2)
+            start = end - overlap
+        return windows
 
     def _evaluate_chunked(
         self,
@@ -877,8 +935,8 @@ class EdgeConnector:
         session_id: int | None = None,
     ) -> Verdict:
         """Evaluate content in overlapping windows when it exceeds the
-        C-side content buffer, ensuring patterns near window boundaries
-        are still scanned.
+        daemon's content limit after JSON escaping, ensuring patterns near
+        window boundaries are still scanned.
 
         Any verdict that does not permit the call (BLOCK, ESCALATE or an
         unknown action) stops the loop and is returned; WARN verdicts are
@@ -887,7 +945,7 @@ class EdgeConnector:
         """
         sid = self._session_id if session_id is None else session_id
         # Short-circuit: content fits in a single buffer — no chunking.
-        if not content or len(content.encode("utf-8", errors="replace")) <= self._CONTENT_BUF_MAX:
+        if not content or len(json.dumps(content)) - 2 <= self._CONTENT_ESCAPED_MAX:
             return self._backend.evaluate(
                 tool_name=tool_name,
                 cap_flags=cap_flags,
@@ -897,13 +955,8 @@ class EdgeConnector:
                 direction=direction,
             )
 
-        encoded = content.encode("utf-8", errors="replace")
-        step = self._CONTENT_BUF_MAX - self._CONTENT_OVERLAP
-        offset = 0
         worst_verdict: Verdict | None = None
-        while offset < len(encoded):
-            chunk = encoded[offset:offset + self._CONTENT_BUF_MAX]
-            chunk_str = chunk.decode("utf-8", errors="replace")
+        for chunk_str in self._content_windows(content):
             verdict = self._backend.evaluate(
                 tool_name=tool_name,
                 cap_flags=cap_flags,
@@ -919,7 +972,6 @@ class EdgeConnector:
             if verdict.action == ACTION_WARN:
                 if worst_verdict is None or worst_verdict.action == ACTION_ALLOW:
                     worst_verdict = verdict
-            offset += step
 
         # Return the worst verdict seen (WARN if any chunk warned, else ALLOW).
         if worst_verdict is not None:
@@ -956,7 +1008,7 @@ class EdgeConnector:
                 if '\\' in str(val):
                     raise ValueError(f"URL contains backslash (potential authority bypass): {val}")
                 try:
-                    return urlparse(str(val)).hostname or ""
+                    return _destination_host(str(val))
                 except Exception:
                     pass
         return ""

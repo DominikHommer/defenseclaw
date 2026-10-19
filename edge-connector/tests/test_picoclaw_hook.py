@@ -108,3 +108,9 @@ def test_picoclaw_without_daemon_fails_closed(fresh_engine, monkeypatch):
         with pytest.raises(ConnectionError):
             picoclaw_hook.get_engine()
     ffi.assert_not_called()
+
+
+def test_picoclaw_destination_keeps_ipv6_brackets():
+    dest = picoclaw_hook.extract_destination(
+        "web_fetch", {"url": "http://[2606:4700:4700::1111]/x"})
+    assert dest == "[2606:4700:4700::1111]"

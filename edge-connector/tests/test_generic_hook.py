@@ -162,6 +162,14 @@ class TestDestinationExtraction:
         )
         assert dest == "example.org"
 
+    @pytest.mark.parametrize("url,want", [
+        ("http://[2606:4700:4700::1111]/x", "[2606:4700:4700::1111]"),
+        ("https://[2606:4700:4700::1111]:8443/x", "[2606:4700:4700::1111]"),
+        ("https://1.1.1.1/x", "1.1.1.1"),
+    ])
+    def test_ip_literals_keep_engine_form(self, url, want):
+        assert EdgeConnector._extract_destination("fetch", {"url": url}) == want
+
     def test_no_url(self):
         dest = EdgeConnector._extract_destination("fetch", {"query": "hello"})
         assert dest == ""
@@ -236,6 +244,49 @@ class TestChunkedEvaluation:
         assert backend.evaluate.call_count == 2
         assert v.blocked is True
         assert v.action == late_action
+
+    @staticmethod
+    def _sent_contents(content: str) -> list[str]:
+        backend = MagicMock()
+        backend.evaluate.return_value = Verdict.allow()
+        ec = _bare_connector(backend=backend)
+        assert ec.evaluate(tool_name="read_file", content=content).blocked is False
+        return [c.kwargs["content"] for c in backend.evaluate.call_args_list]
+
+    @staticmethod
+    def _escaped_len(text: str) -> int:
+        return len(json.dumps(text)) - 2
+
+    @pytest.mark.parametrize("content", [
+        # Under 4095 raw bytes, but over the limit once quotes are escaped.
+        ("a" * 2 + '"') * 1066 + "b" * 2,
+        # Exactly at the old raw-byte limit; the daemon's in-place decoder
+        # truncates beyond 4092 bytes.
+        "x" * 4094,
+        # Multi-byte characters are \uXXXX-escaped on the wire.
+        "\u00e9" * 3000,
+        "\U0001F600" * 1000 + "tail",
+        "line\n" * 2000,
+    ])
+    def test_chunks_fit_daemon_limit_after_json_escaping(self, content):
+        sent = self._sent_contents(content)
+        assert len(sent) > 1
+        limit = EdgeConnector._CONTENT_ESCAPED_MAX
+        assert limit <= 4092
+        for chunk in sent:
+            assert self._escaped_len(chunk) <= limit
+            assert "\ufffd" not in chunk
+        # Windows overlap and together cover the whole content.
+        rebuilt = sent[0]
+        for prev, chunk in zip(sent, sent[1:]):
+            overlap = min(EdgeConnector._CONTENT_OVERLAP, len(prev) // 2)
+            assert chunk[:overlap] == prev[len(prev) - overlap:]
+            rebuilt += chunk[overlap:]
+        assert rebuilt == content
+
+    def test_content_within_limit_is_sent_whole(self):
+        content = '"' * 2046  # 4092 escaped characters
+        assert self._sent_contents(content) == [content]
 
     def test_warn_chunk_is_kept(self):
         backend = MagicMock()
