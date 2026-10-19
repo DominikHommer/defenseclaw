@@ -62,6 +62,9 @@ extern int  dclaw_ipc_release_lockdown(void);
 extern void dclaw_lockdown_timeout_check(void);
 #endif
 
+extern void dclaw_audit_tick(uint64_t now_ms);
+extern int  dclaw_audit_sync_due_in_ms(uint64_t now_ms);
+
 static volatile sig_atomic_t g_running = 1;
 
 /* Connected IPC clients. A client that sends "subscribe_revocations"
@@ -337,6 +340,11 @@ int main(int argc, char *argv[]) {
          * otherwise every remaining timer (heartbeat, keepalive, reconnect
          * backoff, audit flush, lockdown timeouts) is coarse. */
         int poll_timeout_ms = dclaw_deferred_any_pending() ? 10 : 250;
+        {
+            /* Wake up in time to make a group-committed BLOCK durable. */
+            int due = dclaw_audit_sync_due_in_ms(hal_tick_ms());
+            if (due >= 0 && due < poll_timeout_ms) poll_timeout_ms = due;
+        }
 #if DCLAW_MQTT_ENABLED
         /* Poll the MQTT socket here so a gateway verdict wakes the loop
          * immediately, instead of waiting inside a fixed-length MQTTYield. */
@@ -557,6 +565,7 @@ int main(int argc, char *argv[]) {
         }
 #endif
         dclaw_deferred_expire(hal_tick_ms());
+        dclaw_audit_tick(hal_tick_ms());
 #if DCLAW_MQTT_ENABLED && DCLAW_SPECULATIVE_EXECUTION
         dclaw_speculative_expire(hal_tick_ms());
 #endif
