@@ -58,11 +58,22 @@ var upgradeFloorPeer = managedHookPeer{UID: 94409901, Name: "test-engineer@direc
 
 func upgradeFloorFixture(t *testing.T, rc1 bool) (*sandboxDaemonFixture, *managedSandboxController, *sandboxFixture, func(bool)) {
 	t.Helper()
+	return upgradeFloorFixtureWith(t, rc1, upgradeFloorPeer, nil)
+}
+
+// upgradeFloorFixtureWith is upgradeFloorFixture for peer, with edit
+// applied to the managed gateway's configuration before the sandbox is
+// registered.
+func upgradeFloorFixtureWith(t *testing.T, rc1 bool, peer managedHookPeer, edit func(*sandboxFixture)) (*sandboxDaemonFixture, *managedSandboxController, *sandboxFixture, func(bool)) {
+	t.Helper()
 	gate := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
-	gate.setGroups(upgradeFloorPeer, "dc-sbx-devs")
+	gate.setGroups(peer, "dc-sbx-devs")
 	gate.cfg.OpenShell.Admin = closedFloorRegFloor
 	gate.cfg.OpenShell.Admin.AllowedCredentials = []string{"none"}
-	resp := gate.live(upgradeFloorPeer, 1)
+	if edit != nil {
+		edit(gate)
+	}
+	resp := gate.live(peer, 1)
 	id := resp.Registration.ID
 	var answer bool
 	created := map[string]any{"pack": "balanced", "profile": "balanced", "network_mode": "allowlist", "approvals": "triage"}
@@ -113,7 +124,7 @@ func upgradeFloorFixture(t *testing.T, rc1 bool) (*sandboxDaemonFixture, *manage
 		if !answer {
 			return sandboxrelay.CurrentPolicy{}, sandboxrelay.ErrGatewayUnreachable
 		}
-		code, cp := gate.report(upgradeFloorPeer, id, false)
+		code, cp := gate.report(peer, id, false)
 		if code != http.StatusOK {
 			return sandboxrelay.CurrentPolicy{}, &sandboxrelay.Error{Status: code}
 		}

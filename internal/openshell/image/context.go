@@ -208,7 +208,8 @@ func NewContext(spec BuildSpec) (*Context, error) {
 		spec.BaseImage = openshell.DefaultBaseImage
 	}
 	if !digestRE.MatchString(spec.BaseImage) {
-		return nil, fmt.Errorf("openshell image: base image %q is not digest-pinned", spec.BaseImage)
+		return nil, fmt.Errorf("openshell image: base image %q is not digest-pinned: name it name@sha256:<digest>; "+
+			"for an image built on this computer the digest is its image ID (docker image inspect --format '{{.Id}}' <image>)", spec.BaseImage)
 	}
 	if spec.Repository == "" {
 		spec.Repository = DefaultRepository

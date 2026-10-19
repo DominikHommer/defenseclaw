@@ -174,7 +174,7 @@ func gatewayOutputExcerpt(output string) string {
 // or cannot be asked (an earlier release, an unreadable input).
 func (l *lifecycle) configRefusal(ctx context.Context) string {
 	out, err := l.env.runGatewayCLI(ctx, "policy", "digest", "--json")
-	if err == nil {
+	if err == nil && out.ExitCode == 0 {
 		return ""
 	}
 	for _, line := range strings.Split(string(out.Stderr), "\n") {
@@ -192,6 +192,16 @@ func (e *Env) configRefusedMessage(reason string) string {
 	ensure := e.lifecycleCommand(ActionEnsure)
 	return fmt.Sprintf("the installed gateway refuses the configuration: %s; correct that setting (in %s, or in the file passed to `%s --config`) and apply it with `%s`; repair applies the same configuration again and fails the same way",
 		reason, e.Layout.ConfigPath, ensure, ensure)
+}
+
+// policyAssetRefusedMessage says that the installed gateway refuses the
+// policy of an up-to-date deployment, why, and that nothing was applied: a
+// policy file the config names (a sandbox pack, say) was edited in place
+// into one that does not load, and the running gateway keeps the policy it
+// loaded.
+func (e *Env) policyAssetRefusedMessage(reason string) string {
+	return fmt.Sprintf("a policy file the configuration names does not load: %s; nothing was applied and the running gateway keeps the last good policy; correct or restore that file and run `%s` again",
+		reason, e.lifecycleCommand(ActionEnsure))
 }
 
 // recordActivationFailure keeps the gateway's output across the rollback

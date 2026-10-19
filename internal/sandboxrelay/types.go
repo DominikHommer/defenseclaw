@@ -451,6 +451,10 @@ type DaemonSettings struct {
 	// decides. Not part of Enterprise: a change never restarts a daemon.
 	SelectedDriver string `json:"selected_driver,omitempty"`
 	DriverReason   string `json:"driver_reason,omitempty"`
+	// ForeignSandboxes is the caller's own foreign_sandboxes (alert or
+	// stop), which the daemon applies to sandboxes DefenseClaw did not start
+	// while none of the caller's registrations names a floor yet (GAP-0058).
+	ForeignSandboxes string `json:"foreign_sandboxes,omitempty"`
 }
 
 // EnterpriseOpenShell is enterprise.openshell plus the rendered OpenShell

@@ -310,8 +310,17 @@ func (a *APIServer) handleSandboxSettings(w http.ResponseWriter, r *http.Request
 		V: sandboxrelay.WireVersion, Enabled: cfg.OpenShell.Enabled, Available: available, Unavailable: why,
 		Operational: sandboxOperational(cfg, floor), Enterprise: sandboxEnterprise(cfg, floor),
 		Generation: a.sandboxViewGeneration(cfg, view), RequestAccess: sandboxRequestAccess(floor),
-		SelectedDriver: avail.Driver, DriverReason: avail.DriverReason,
+		SelectedDriver: avail.Driver, DriverReason: avail.DriverReason, ForeignSandboxes: sandboxForeignAction(floor),
 	})
+}
+
+// sandboxForeignAction is floor F's foreign_sandboxes: alert only when F
+// says so, else stop (an empty value is stop on a managed computer).
+func sandboxForeignAction(f config.OpenShellAdminConfig) string {
+	if strings.EqualFold(strings.TrimSpace(f.ForeignSandboxes), config.OpenShellForeignSandboxesAlert) {
+		return config.OpenShellForeignSandboxesAlert
+	}
+	return config.OpenShellForeignSandboxesStop
 }
 
 // sandboxResolveInput is what a resolve asked for; its run inputs are kept
@@ -620,6 +629,10 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		ProjectReal: req.ProjectReal, Driver: driver, DriverReason: driverReason, OpenShell: req.OpenShell.Version,
 		InstallMode: sandboxEnterprise(cfg, floor).Install, CreatedAt: auth.clock(),
 	}
+	if !match.provisional {
+		created := match.decision.Name
+		reg.CreateProfile = &created
+	}
 	run := &sandboxreg.Run{
 		Flags: req.Flags, RepoOverlay: req.RepoOverlay, UserPack: req.UserPack,
 		PolicyKey: a.sandboxPolicyKey(r.Context(), cfg), FloorDigest: floorDigest,
@@ -803,19 +816,26 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	cfg := a.liveBaseConfig(r.Context())
-	floor, _, err := sandboxFloorFor(cfg, reg.Profile)
+	// The create-pinned floor (GAP-0242): the same floor every other
+	// route of a registered sandbox resolves under.
+	floor, _, err := sandboxRegistrationFloor(cfg, reg)
 	if err != nil {
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 		return
 	}
 	var requiredPack json.RawMessage
 	if floor.RequiredPack != "" && !packs.IsBuiltin(floor.RequiredPack) && reg.State != sandboxreg.StateRevoked {
+		// The required pack as the run loaded it: the pack the sandbox
+		// runs, or the required one a stricter pack stands in for. Only
+		// the second case carried it before, so a sandbox that ran the
+		// required pack itself got policy_unloadable on every poll and
+		// kept the floor of its create (GAP-0058).
 		eff, _, err := sandboxRegistrationEffective(cfg, auth, peer, reg, floor)
-		if err != nil || eff.RequiredPackContent() == nil {
+		if err != nil || eff.RequiredPackLoaded() == nil {
 			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 			return
 		}
-		requiredPack, err = json.Marshal(eff.RequiredPackContent())
+		requiredPack, err = json.Marshal(eff.RequiredPackLoaded())
 		if err != nil {
 			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 			return
@@ -919,6 +939,16 @@ func (a *APIServer) sandboxScope(w http.ResponseWriter, r *http.Request, auth *s
 	return sandboxOwnScope{connector: connectorName, match: a.sandboxMatchPeer(r.Context(), peer, connectorName, sandboxExplainLookupIn)}, true
 }
 
+// sandboxScopeFloor is the floor of scope: its sandbox's registration floor
+// (sandboxRegistrationFloor), or for a caller without one the floor of the
+// profile it matches now.
+func sandboxScopeFloor(cfg *config.Config, scope sandboxOwnScope) (config.OpenShellAdminConfig, string, error) {
+	if scope.registered {
+		return sandboxRegistrationFloor(cfg, scope.reg)
+	}
+	return sandboxFloorFor(cfg, scope.match.decision.Name)
+}
+
 // sandboxOverlayKeys are the floor keys a profile's sandbox section sets
 // (by their config names).
 func sandboxOverlayKeys(cfg *config.Config, profile string) map[string]bool {
@@ -963,7 +993,7 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 	}
 	cfg := a.liveBaseConfig(r.Context())
 	profile := scope.match.decision.Name
-	floor, _, err := sandboxFloorFor(cfg, profile)
+	floor, _, err := sandboxScopeFloor(cfg, scope)
 	if err != nil {
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 		return
@@ -1175,7 +1205,7 @@ func (a *APIServer) handleSandboxPolicyTest(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	cfg := a.liveBaseConfig(r.Context())
-	floor, _, err := sandboxFloorFor(cfg, scope.match.decision.Name)
+	floor, _, err := sandboxScopeFloor(cfg, scope)
 	if err != nil {
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 		return
@@ -1232,7 +1262,7 @@ func (a *APIServer) handleSandboxPacks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := a.liveBaseConfig(r.Context())
-	floor, _, err := sandboxFloorFor(cfg, scope.match.decision.Name)
+	floor, _, err := sandboxScopeFloor(cfg, scope)
 	if err != nil {
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 		return
@@ -1346,7 +1376,7 @@ func (a *APIServer) handleSandboxDecide(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cfg := a.liveBaseConfig(r.Context())
-	floor, _, err := sandboxFloorFor(cfg, reg.Profile)
+	floor, _, err := sandboxRegistrationFloor(cfg, reg)
 	if err != nil {
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 		return
@@ -1417,7 +1447,7 @@ func (a *APIServer) handleSandboxDecisions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	cfg := a.liveBaseConfig(r.Context())
-	floor, _, err := sandboxFloorFor(cfg, reg.Profile)
+	floor, _, err := sandboxRegistrationFloor(cfg, reg)
 	if err != nil {
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 		return

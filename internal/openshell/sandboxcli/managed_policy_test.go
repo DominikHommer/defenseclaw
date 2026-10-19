@@ -50,6 +50,31 @@ func withManagedHost(t *testing.T) {
 	t.Cleanup(func() { onManagedHost = prev })
 }
 
+func TestManagedPromptReasonUsesTheSandboxPolicy(t *testing.T) {
+	withManagedHost(t)
+	ta := newTestApp(t, "")
+	off := false
+	ta.Cfg.OpenShell.Admin.AllowYolo = &off
+	sb := &sandboxapi.Sandbox{Launch: sandboxapi.Launch{Yolo: false}}
+	if got := ta.promptsKept(sb); got != "harness prompts kept" {
+		t.Fatalf("base floor overrode the sandbox's managed policy: %q", got)
+	}
+	sb.Violations = []sandboxapi.Violation{{Key: "yolo", Admin: true, Constraint: "openshell.admin.allow_yolo"}}
+	if got := ta.promptsKept(sb); got != "your organization disables skip-permissions" {
+		t.Fatalf("sandbox policy reason = %q", got)
+	}
+}
+
+func TestManagedPolicyEditRefusesBeforeReadingTheLocalFloor(t *testing.T) {
+	withManagedHost(t)
+	ta := newTestApp(t, "")
+	ta.Cfg.OpenShell.Admin.EgressAllowOnly = []string{"other.example"}
+	err := ta.PolicyEdit(context.Background(), "allow", []string{"example.org"})
+	if err == nil || !strings.Contains(err.Error(), "administrator-owned") {
+		t.Fatalf("managed policy edit = %v", err)
+	}
+}
+
 // On a managed computer the doctor reads the administrator's rendered
 // gateway configuration, never the account's own gateway files (GAP-0254).
 func TestDefaultDoctorReadsTheRenderedGatewayOnAManagedComputer(t *testing.T) {

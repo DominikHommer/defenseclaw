@@ -935,14 +935,61 @@ func TestSandboxDaemonConfigIsCopyOnlyAndClosed(t *testing.T) {
 	}
 }
 
-// TestFloorConflictMessageNamesTheProvisionalPolicy pins GAP-0496: a run
-// refused because the directory did not answer (a provisional floor that
-// differs from the running sandboxes') says so, not that the policy changed.
-func TestFloorConflictMessageNamesTheProvisionalPolicy(t *testing.T) {
-	if got := floorConflictMessage(true); !strings.Contains(got, "directory couldn't be reached") || !strings.Contains(got, "provisional") {
-		t.Fatalf("provisional refusal = %q", got)
+// Two concurrent managed sandboxes keep their own confirmed floors. A
+// missing registration cannot inherit whichever floor was adopted last.
+func TestSandboxDaemonConfigForEachConfirmedSandbox(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	for _, tc := range []struct{ name, profile string }{{"dc-claude", "balanced"}, {"dc-codex", "strict"}} {
+		if err := f.d.regs.put(daemonRegistration{ID: "reg-" + tc.name, Sandbox: tc.name,
+			Floor: config.OpenShellAdminConfig{MinProfile: tc.profile}, Confirmed: true, UpdatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := floorConflictMessage(false); strings.Contains(got, "provisional") || !strings.Contains(got, "differs from the policy") {
-		t.Fatalf("changed-policy refusal = %q", got)
+	for _, tc := range []struct{ name, profile string }{{"dc-claude", "balanced"}, {"dc-codex", "strict"}} {
+		cfg := f.d.configForSandbox(tc.name)
+		if cfg == nil || cfg.OpenShell.Admin.MinProfile != tc.profile {
+			t.Fatalf("%s floor = %+v", tc.name, cfg)
+		}
+	}
+	closed := f.d.configForSandbox("unregistered").OpenShell.Admin
+	if closed.MinProfile != "strict" || closed.Allowed == nil || *closed.Allowed {
+		t.Fatalf("unregistered sandbox did not receive the closed floor: %+v", closed)
+	}
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-pending", Sandbox: "dc-pending",
+		Floor: config.OpenShellAdminConfig{MinProfile: "open"}, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dc-pending", "dc-claude"} {
+		if name == "dc-claude" {
+			f.d.regs.markRevoked(name, "profile removed")
+		}
+		cfg := f.d.configForSandbox(name)
+		if cfg.OpenShell.Admin.Allowed == nil || *cfg.OpenShell.Admin.Allowed {
+			t.Fatalf("%s borrowed a floor: %+v", name, cfg.OpenShell.Admin)
+		}
+	}
+}
+
+// #1195 (GAP-0123): on a managed computer the supported way to run agents on
+// an image of the organization's own is openshell.image.base in the
+// administrator config: every run of the daemon, a new one and an existing
+// sandbox resolved under its registration's floor alike, builds its agent
+// image on that base in the person's own Docker engine (docker build
+// --pull=false). No run takes an image of the person's choosing.
+func TestSandboxDaemonRunsOnTheAdministratorsBaseImage(t *testing.T) {
+	const base = "corp-sandbox-base:1"
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.Settings.Operational.Image.Base = base
+	})
+	if got := f.d.config().OpenShell.Image.Base; got != base {
+		t.Fatalf("a new run builds on %q, want %q", got, base)
+	}
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-1", Sandbox: "dc-a", UpdatedAt: time.Now(), Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dc-a", "dc-unregistered"} {
+		if got := f.d.configForSandbox(name).OpenShell.Image.Base; got != base {
+			t.Fatalf("sandbox %s builds on %q, want %q", name, got, base)
+		}
 	}
 }
