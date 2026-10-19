@@ -12,11 +12,11 @@ const claudeLoaderSHA = "76b812138a1d4be51ae095e94920e1fd1c5d25f793651baf834d05a
 const claudeLoaderSize = 853616
 const claudeLoaderLeaf = "claude-runtime-loader"
 
-// The exact 49c wrapper input passed three inert artifact reviews (run
-// 39196467675/artifact12161534865, ZIP399a239a..., PROVc1b5e594...). This
+// The exact f9 wrapper input passed three inert artifact reviews (run
+// 39199601189/artifact12162799813, ZIPacfe0492..., PROV3b630592...). This
 // driver still needs its own build/image review before any fixed native run.
 var versionAdmission = wrapperAdmission{Reviewed: true, VersionOnly: true,
-	SHA: "63300aa074ad60c607b15fb7833a38dc3421a5616c73abdb54386a7045563912", Size: 3506302,
+	SHA: "1493e1678ed0533a7a6fa81aa8bd04a0bad667aac43cbb10f3caec8f82d8c208", Size: 3510398,
 }
 
 func admissionForArgs(args []string) wrapperAdmission {

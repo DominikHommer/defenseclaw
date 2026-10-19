@@ -141,12 +141,12 @@ The earlier four-case result remains evidence for its exact original pairing.
 ## Separate Claude version source
 
 `claude-version` is a fixed distinct suite and receipt; its wrapper admission
-pins the independently reviewed 49c image
-`63300aa074ad60c607b15fb7833a38dc3421a5616c73abdb54386a7045563912`
-(3,506,302 bytes). Its build 39196467675/artifact 12161534865, archive
-`399a239a759d81f068a37ec8dec2a5d0364c87152fce5268993ba8454530cafa`
+pins the independently reviewed f9 image
+`1493e1678ed0533a7a6fa81aa8bd04a0bad667aac43cbb10f3caec8f82d8c208`
+(3,510,398 bytes). Its build 39199601189/artifact 12162799813, archive
+`acfe0492ecf2c2670aab32af1411d722fc1ffa4758eedf2e44809fb33c1dd0d3`
 and provenance
-`c1b5e59400253e78a2c07579aed7db796325edbda5bb62629e439ad10d2caa9b`
+`3b63059284ac539d0c903adc613759e4cc428ef501640a2b595a156fc176b191`
 passed three inert reviews. This new driver still needs its own build/artifact
 review before any actual version canary.
 The old baseline/lifecycle admission remains separate. The driver uses no new
@@ -171,5 +171,8 @@ never be excluded. The vendor binary is not copied into public evidence.
 
 The future finite assertion is exact `2.1.292 (Claude Code)\n` (22 bytes), stderr
 empty, exit0, Destroyed and all owned cleanup complete. This is not full-agent,
-dlopen, hook, broker or common-launch qualification. No actual version run is
-claimed by this source.
+dlopen, hook, broker or common-launch qualification. The historical b910 version
+attempt using wrapper49c/driver017 failed at fixture admission before peer
+Prepare or Launch; cleanup completed with zero pending custody. The f9 wrapper
+corrects that bounded directory-enumeration check and recorded 32 inert passes
+across 14 roots. This newly pinned pairing has not run.
