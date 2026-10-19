@@ -6,11 +6,16 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
+from pathlib import Path
+
+import pytest
 
 
 def test_issue_1174_upgrade_handoff_help_does_not_stage(tmp_path: Path) -> None:
+    # The 0.8.x handoff is a POSIX shell entry point; Windows upgrades use Setup.
+    if os.name == "nt":
+        pytest.skip("POSIX upgrade handoff does not run on Windows")
     script = Path(__file__).resolve().parents[2] / "scripts" / "defenseclaw-upgrade.sh"
     marker = tmp_path / "network-command-ran"
     bin_dir = tmp_path / "bin"
