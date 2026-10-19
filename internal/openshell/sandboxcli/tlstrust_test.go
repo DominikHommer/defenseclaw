@@ -87,9 +87,9 @@ func TestTLSTrustCheck(t *testing.T) {
 	ctx := context.Background()
 	lab := newTLSLab(t)
 
-	// No proxy: every provider verifies with the sandbox's roots.
+	// No proxy: every probed host verifies with the sandbox's roots.
 	c := tlsApp(t, lab, "").tlsTrustCheck(ctx, false)
-	if c.ID != CheckIDTLSTrust || c.Status != openshell.StatusPass || !strings.Contains(c.Detail, "api.anthropic.com, api.openai.com, api.githubcopilot.com verify") {
+	if c.ID != CheckIDTLSTrust || c.Status != openshell.StatusPass || !strings.Contains(c.Detail, "api.anthropic.com, api.openai.com, api.githubcopilot.com, registry.npmjs.org verify") {
 		t.Fatalf("no proxy: %+v", c)
 	}
 
@@ -147,7 +147,7 @@ func TestTLSTrustCheck(t *testing.T) {
 	}
 
 	// Offline: nothing to judge.
-	lab.down = map[string]bool{"api.anthropic.com": true, "api.openai.com": true, "api.githubcopilot.com": true}
+	lab.down = map[string]bool{"api.anthropic.com": true, "api.openai.com": true, "api.githubcopilot.com": true, tlsTrustDownloadHost: true}
 	c = tlsApp(t, lab, "").tlsTrustCheck(ctx, false)
 	if c.Status != openshell.StatusSkip || !strings.Contains(c.Detail, "did not answer") {
 		t.Fatalf("offline: %+v", c)
@@ -178,6 +178,42 @@ func TestTLSTrustCheck(t *testing.T) {
 	also := `; api.openai.com present a certificate from "Unknown Root CA", which neither this computer nor sandboxes trust`
 	if c.Status != openshell.StatusFail || !strings.Contains(c.Detail, want) || !strings.Contains(c.Detail, also) {
 		t.Fatalf("mixed: %+v", c)
+	}
+}
+
+func TestTLSTrustChecksInspectedDownloadHost(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			lab := newTLSLab(t)
+			lab.intercepted[tlsTrustDownloadHost] = true
+			app := tlsApp(t, lab, "")
+			app.GOOS = goos
+			c := app.tlsTrustCheck(context.Background(), false)
+			if c.Status != openshell.StatusFail || !strings.Contains(c.Detail, `registry.npmjs.org present a certificate from "Corp Inspection Root CA", which this computer trusts but sandboxes do not`) ||
+				c.Fix == nil || c.Fix.Command != "defenseclaw config set openshell.trusted_ca_bundle /path/to/proxy-root-ca.pem" ||
+				strings.Contains(c.Fix.Summary, "exempt registry.npmjs.org") {
+				t.Fatalf("download host inspected without CA: %+v", c)
+			}
+
+			file := filepath.Join(t.TempDir(), "corp.pem")
+			if err := os.WriteFile(file, lab.corp.PEM, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			app = tlsApp(t, lab, file)
+			app.GOOS = goos
+			c = app.tlsTrustCheck(context.Background(), false)
+			if c.Status != openshell.StatusPass || c.Fix != nil || !strings.Contains(c.Detail, "registry.npmjs.org verify") {
+				t.Fatalf("download host inspected with CA: %+v", c)
+			}
+
+			lab.down[tlsTrustDownloadHost] = true
+			app = tlsApp(t, lab, "")
+			app.GOOS = goos
+			c = app.tlsTrustCheck(context.Background(), false)
+			if c.Status != openshell.StatusPass || c.Fix != nil || !strings.Contains(c.Detail, "registry.npmjs.org did not answer") {
+				t.Fatalf("download host unreachable: %+v", c)
+			}
+		})
 	}
 }
 

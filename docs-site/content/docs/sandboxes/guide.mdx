@@ -1871,9 +1871,11 @@ sandbox's connections:
    web fetches, the agent's own tools) trusts the CAs you name in
    `openshell.trusted_ca_bundle`.
 
-The Sandbox TLS trust row of `defenseclaw sandbox doctor` connects to
-`api.anthropic.com`, `api.openai.com` and `api.githubcopilot.com` and fails
-by name while any of them is inspected:
+The Sandbox TLS trust row of `defenseclaw sandbox doctor` checks
+`api.anthropic.com`, `api.openai.com`, `api.githubcopilot.com` and the package
+download host `registry.npmjs.org`. It fails by name when an inspected host
+uses a CA the computer trusts but the sandbox does not. An inspected model
+provider must also be exempted from inspection for model calls to work:
 
 ```text
   ✗ Sandbox TLS trust          TLS inspection: api.anthropic.com, api.openai.com present a certificate from "Corp Root CA", which this computer trusts but sandboxes do not, …
