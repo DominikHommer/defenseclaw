@@ -737,6 +737,11 @@ func (b *Bridge) maybeReplayForDevice(fullID uint64, parts *TopicParts, hw *Hear
 	b.replayPending.Add(1)
 	select {
 	case b.replayJobs <- job:
+		// Workers drain the queue when they exit on shutdown; a job queued
+		// after their final drain must not stay pending forever.
+		if b.isStopped() {
+			b.drainReplayJobs()
+		}
 	default:
 		// Queue full: drop. A later heartbeat with advanced uptime retries.
 		b.replayPending.Done()
@@ -749,9 +754,35 @@ func (b *Bridge) replayWorker() {
 	for {
 		select {
 		case <-b.stopped:
+			b.drainReplayJobs()
 			return
 		case job := <-b.replayJobs:
 			b.runReplay(job)
+		}
+	}
+}
+
+// isStopped reports whether the bridge has shut down.
+func (b *Bridge) isStopped() bool {
+	select {
+	case <-b.stopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// drainReplayJobs discards queued catch-up jobs on shutdown, releasing their
+// pending count and in-flight marker. It never blocks.
+func (b *Bridge) drainReplayJobs() {
+	for {
+		select {
+		case job := <-b.replayJobs:
+			b.finishReplay(job.fullID)
+			b.replayPending.Done()
+			b.logger.Printf("[mqtt-bridge] bridge stopped; discarded OTA catch-up for device %d", job.deviceID)
+		default:
+			return
 		}
 	}
 }
@@ -1109,6 +1140,9 @@ func (b *Bridge) enqueueResponse(job responseJob) {
 	b.responsePending.Add(1)
 	select {
 	case b.responseJobs <- job:
+		if b.isStopped() {
+			b.drainResponseJobs()
+		}
 	default:
 		b.responsePending.Done()
 		b.logger.Printf("[mqtt-bridge] WARNING: verdict response queue full; dropping response to %s", job.topic)
@@ -1120,9 +1154,24 @@ func (b *Bridge) responseWorker() {
 	for {
 		select {
 		case <-b.stopped:
+			b.drainResponseJobs()
 			return
 		case job := <-b.responseJobs:
 			b.publishResponse(job)
+		}
+	}
+}
+
+// drainResponseJobs discards queued verdict responses on shutdown; the
+// device times out and fails closed. It never blocks.
+func (b *Bridge) drainResponseJobs() {
+	for {
+		select {
+		case job := <-b.responseJobs:
+			b.responsePending.Done()
+			b.logger.Printf("[mqtt-bridge] bridge stopped; discarded verdict response to %s", job.topic)
+		default:
+			return
 		}
 	}
 }
