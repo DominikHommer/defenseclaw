@@ -163,7 +163,9 @@ func hermesStandaloneOptions(t *testing.T, home string) InstallOptions {
 	}
 	opts := openHandsStandaloneOptions(home, "observe")
 	opts.ConnectorName = "hermes"
-	opts.AgentVersion = "0.9.0"
+	// A version with a hook contract: the guardian installs none for a
+	// version without one, in any mode (GAP-0151).
+	opts.AgentVersion = "0.21.5"
 	return opts
 }
 
