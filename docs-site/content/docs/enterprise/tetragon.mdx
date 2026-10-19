@@ -1347,6 +1347,7 @@ reports in its load-error or error state is the problem
 | Tetragon restarted and my own policies are gone | A restart drops policies added with `tetra` | Put the policies you keep in `/etc/tetragon/tetragon.tp.d` |
 | A pause is still on | The default pause is 4 hours | `tetragon status` shows who set it and when it ends; `tetragon resume` ends it |
 | An enforced user's running agent session is not denied (`kernel_sessions_predate_controls`) | The session started before the controls policy loaded: enforce turned on or Tetragon restarted | Restart the session; the restarted session is denied. An agent's own update keeps the old controls policy enforcing for running sessions until they exit |
+| `tetra tracingpolicy list` shows `NPOST` 0 for the DefenseClaw controls policy although a tool was denied | Tetragon 1.7.0 does not increment the policy `NPOST` counter for single-entry `generic_lsm` policies | Use the `process_lsm` events and the DefenseClaw block records to confirm enforcement: the `enforcement.block.applied` record with the initiator `kernel`, or the blocked list in `tetragon status --user` |
 
 Every code and its fix is under
 [Kernel sensor warnings](/docs/enterprise/troubleshooting#kernel-sensor-warnings).
