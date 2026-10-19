@@ -350,6 +350,15 @@ int main(int argc, char *argv[]) {
          * otherwise every remaining timer (heartbeat, keepalive, reconnect
          * backoff, audit flush, lockdown timeouts) is coarse. */
         int poll_timeout_ms = dclaw_deferred_any_pending() ? 10 : 250;
+        /* A client whose held reply was just resolved may still have
+         * complete messages buffered; handle them without waiting. */
+        for (int i = 0; i < num_clients; i++) {
+            if (!dclaw_deferred_pending_for_fd(client_fds[i]) &&
+                memchr(client_buf[i], '\n', client_buf_len[i]) != NULL) {
+                poll_timeout_ms = 0;
+                break;
+            }
+        }
         {
             /* Wake up in time to make a group-committed BLOCK durable. */
             int due = dclaw_audit_sync_due_in_ms(hal_tick_ms());
