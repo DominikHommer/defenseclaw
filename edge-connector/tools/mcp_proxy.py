@@ -54,7 +54,9 @@ Environment variables:
     DCLAW_MCP_PORT        HTTP port when proxy itself serves HTTP (default: 8089)
     DCLAW_LIB_PATH        Passed through to EdgeConnector
     DCLAW_SOCKET_PATH     Passed through to EdgeConnector
-    DCLAW_FAIL_OPEN       "1" = allow on engine error; "0" (default) = block
+    DCLAW_FAIL_OPEN       "1" = allow on engine error; "0" (default) = block.
+                          Takes effect only with DCLAW_DEV_MODE=1 or a valid
+                          DCLAW_FAIL_OPEN_TOKEN (also for YAML fail_mode: open)
 """
 from __future__ import annotations
 
@@ -74,7 +76,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
-from generic_hook import EdgeConnector, Verdict
+from generic_hook import EdgeConnector, Verdict, fail_open_attested
 
 logger = logging.getLogger("defenseclaw.mcp_proxy")
 
@@ -356,10 +358,20 @@ class SecurityGate:
     """Wraps EdgeConnector for async-friendly tool-call evaluation."""
 
     def __init__(self, config: ProxyConfig):
+        fail_open = False
+        if config.fail_mode == "open":
+            # fail_mode may come from a YAML file; it gets the same
+            # attestation requirement as DCLAW_FAIL_OPEN.
+            fail_open = fail_open_attested()
+            if not fail_open:
+                logger.warning(
+                    "fail_mode=open requested without DCLAW_DEV_MODE=1 or a "
+                    "valid DCLAW_FAIL_OPEN_TOKEN; running fail-closed"
+                )
         self._ec = EdgeConnector(
             lib_path=config.lib_path,
             socket_path=config.socket_path,
-            fail_open=(config.fail_mode == "open"),
+            fail_open=fail_open,
         )
 
     def evaluate_tool_call(self, tool_name: str,

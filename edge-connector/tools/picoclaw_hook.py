@@ -127,6 +127,15 @@ TOOL_CAP_MAP = {
 ACTION_ALLOW = 0
 ACTION_BLOCK = 1
 ACTION_WARN  = 2
+ACTION_ESCALATE = 3
+
+# Only ALLOW and WARN let a tool run; ESCALATE and any unknown action deny.
+_PERMIT_ACTIONS = frozenset((ACTION_ALLOW, ACTION_WARN))
+
+
+def _permits(action: Any) -> bool:
+    return (isinstance(action, int) and not isinstance(action, bool)
+            and action in _PERMIT_ACTIONS)
 
 # Reason codes
 REASON_NAMES = {
@@ -275,8 +284,8 @@ class DclawEngine:
                         "mode": verdict.mode,
                         "from_cache": verdict.from_cache,
                     }
-                    # BLOCK — return immediately, no need to scan further.
-                    if verdict.action == ACTION_BLOCK:
+                    # Anything but ALLOW/WARN denies — return immediately.
+                    if not _permits(verdict.action):
                         return chunk_result
                     # WARN — remember if current worst is None or ALLOW.
                     if verdict.action == ACTION_WARN:
@@ -462,7 +471,7 @@ def handle_before_tool(params: dict[str, Any]) -> dict[str, Any]:
     log(f"EVAL raw={raw_tool} tool={tool} caps=0x{cap_flags:02x} dest={destination!r} "
         f"session={session_id} → action={action} reason={reason_name}")
 
-    if action == ACTION_BLOCK:
+    if not _permits(action):
         reason_explanations = {
             "CLOUD_TIMEOUT": "This action requires cloud security approval, but no cloud connection is available. Fail-closed policy enforced.",
             "CAP_SEQUENCE": "A dangerous capability sequence was detected in this session. This multi-step pattern matches a known attack chain.",

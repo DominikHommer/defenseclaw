@@ -38,6 +38,7 @@ import threading
 from generic_hook import (
     ACTION_ALLOW,
     ACTION_BLOCK,
+    ACTION_ESCALATE,
     ACTION_WARN,
     CAP_EXEC_SHELL,
     CAP_NET_FETCH,
@@ -90,6 +91,10 @@ class TestVerdict:
         assert v.blocked is False
         assert v.action == ACTION_WARN
         assert v.reason == "CAP_SEQUENCE"
+
+    @pytest.mark.parametrize("action", [ACTION_ESCALATE, 4, 99, -1])
+    def test_from_raw_non_permitting_actions_block(self, action):
+        assert Verdict.from_raw(action, 0x06).blocked is True
 
     def test_from_raw_unknown_reason(self):
         v = Verdict.from_raw(ACTION_BLOCK, 0xFF)
@@ -208,6 +213,36 @@ class TestEvaluateWithMockFFI:
         # Check that "custom content payload" was passed
         all_args = list(call_args[0]) + list(call_args[1].values())
         assert any("custom content payload" in str(a) for a in all_args)
+
+
+# -----------------------------------------------------------------------
+# Chunked evaluation
+# -----------------------------------------------------------------------
+class TestChunkedEvaluation:
+    @pytest.mark.parametrize("late_action", [ACTION_ESCALATE, 7, -1])
+    def test_non_permitting_chunk_verdict_denies(self, late_action):
+        backend = MagicMock()
+        backend.evaluate.side_effect = [
+            Verdict.allow(),
+            Verdict.from_raw(late_action, 0x06),
+            Verdict.allow(),
+            Verdict.allow(),
+        ]
+        ec = _bare_connector(backend=backend)
+        v = ec.evaluate(tool_name="read_file", content="x" * 9000)
+        assert backend.evaluate.call_count == 2
+        assert v.blocked is True
+        assert v.action == late_action
+
+    def test_warn_chunk_is_kept(self):
+        backend = MagicMock()
+        backend.evaluate.side_effect = [
+            Verdict.allow(), Verdict.from_raw(ACTION_WARN, 0x08), Verdict.allow(),
+        ]
+        ec = _bare_connector(backend=backend)
+        v = ec.evaluate(tool_name="read_file", content="x" * 9000)
+        assert v.action == ACTION_WARN
+        assert v.blocked is False
 
 
 # -----------------------------------------------------------------------

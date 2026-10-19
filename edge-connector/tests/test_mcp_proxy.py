@@ -737,8 +737,9 @@ class TestSecurityGate:
         gate.shutdown()
         mock_ec.shutdown.assert_called_once()
 
+    @patch("mcp_proxy.fail_open_attested", return_value=True)
     @patch("mcp_proxy.EdgeConnector")
-    def test_gate_fail_open_config(self, mock_ec_cls):
+    def test_gate_fail_open_config(self, mock_ec_cls, _attested):
         config = ProxyConfig(fail_mode="open")
         SecurityGate(config)
         mock_ec_cls.assert_called_once_with(
@@ -746,6 +747,38 @@ class TestSecurityGate:
             socket_path=None,
             fail_open=True,
         )
+
+    @patch("mcp_proxy.EdgeConnector")
+    def test_gate_fail_open_requires_attestation(self, mock_ec_cls, monkeypatch):
+        monkeypatch.delenv("DCLAW_DEV_MODE", raising=False)
+        monkeypatch.setattr("generic_hook._FAIL_OPEN_TOKEN", "")
+        SecurityGate(ProxyConfig(fail_mode="open"))
+        mock_ec_cls.assert_called_once_with(
+            lib_path=None,
+            socket_path=None,
+            fail_open=False,
+        )
+
+    @patch("mcp_proxy.EdgeConnector")
+    def test_gate_fail_open_rejects_bad_token(self, mock_ec_cls, monkeypatch):
+        monkeypatch.delenv("DCLAW_DEV_MODE", raising=False)
+        monkeypatch.setenv("DCLAW_AUDIT_KEY", "11" * 32)
+        monkeypatch.setattr("generic_hook._FAIL_OPEN_TOKEN", "00" * 32)
+        SecurityGate(ProxyConfig(fail_mode="open"))
+        assert mock_ec_cls.call_args.kwargs["fail_open"] is False
+
+    @patch("mcp_proxy.EdgeConnector")
+    def test_gate_fail_open_accepts_valid_token(self, mock_ec_cls, monkeypatch):
+        import hashlib
+        import hmac
+        key = "11" * 32
+        token = hmac.new(bytes.fromhex(key), b"fail-open-authorized",
+                         hashlib.sha256).hexdigest()
+        monkeypatch.delenv("DCLAW_DEV_MODE", raising=False)
+        monkeypatch.setenv("DCLAW_AUDIT_KEY", key)
+        monkeypatch.setattr("generic_hook._FAIL_OPEN_TOKEN", token)
+        SecurityGate(ProxyConfig(fail_mode="open"))
+        assert mock_ec_cls.call_args.kwargs["fail_open"] is True
 
     @patch("mcp_proxy.EdgeConnector")
     def test_gate_fail_closed_config(self, mock_ec_cls):

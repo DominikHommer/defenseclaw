@@ -122,6 +122,17 @@ def _is_fail_open_authorized() -> bool:
     """Check if fail-open mode is authorized with a valid attestation token."""
     if _FAIL_OPEN_ENV != "1":
         return False
+    return fail_open_attested()
+
+
+def fail_open_attested() -> bool:
+    """Return True when fail-open is permitted on this host.
+
+    Fail-open requires either DCLAW_DEV_MODE=1 or a DCLAW_FAIL_OPEN_TOKEN
+    that verifies against DCLAW_AUDIT_KEY.  Every component that offers a
+    fail-open switch (environment, config file) must pass this check
+    before enabling it.
+    """
     if os.environ.get("DCLAW_DEV_MODE") == "1":
         return True
     if not _FAIL_OPEN_TOKEN:
@@ -186,6 +197,17 @@ CAP_SENSOR_READ = 0x40
 ACTION_ALLOW = 0
 ACTION_BLOCK = 1
 ACTION_WARN = 2
+ACTION_ESCALATE = 3
+
+# Only these actions let a call proceed.  Every other value, including
+# ESCALATE and codes added by a newer engine, is treated as a denial.
+_PERMIT_ACTIONS = frozenset((ACTION_ALLOW, ACTION_WARN))
+
+
+def action_permits(action: Any) -> bool:
+    """Return True only for ALLOW and WARN; anything else must deny."""
+    return (isinstance(action, int) and not isinstance(action, bool)
+            and action in _PERMIT_ACTIONS)
 
 REASON_NAMES = {
     0x01: "POLICY_TABLE",
@@ -294,7 +316,7 @@ class Verdict:
                  cached: bool = False) -> Verdict:
         return Verdict(
             action=action,
-            blocked=(action == ACTION_BLOCK or action >= 3),
+            blocked=not action_permits(action),
             reason=REASON_NAMES.get(reason_code, f"UNKNOWN(0x{reason_code:02x})"),
             severity=severity,
             cached=cached,
@@ -822,7 +844,8 @@ class EdgeConnector:
         C-side content buffer, ensuring patterns near window boundaries
         are still scanned.
 
-        BLOCK verdicts stop the loop immediately; WARN verdicts are
+        Any verdict that does not permit the call (BLOCK, ESCALATE or an
+        unknown action) stops the loop and is returned; WARN verdicts are
         remembered and returned after all chunks so warnings are never
         silently discarded.
         """
@@ -852,8 +875,8 @@ class EdgeConnector:
                 content=chunk_str,
                 direction=direction,
             )
-            # BLOCK — return immediately, no need to scan further.
-            if verdict.action == ACTION_BLOCK:
+            # Anything other than ALLOW/WARN denies — return immediately.
+            if verdict.blocked or not action_permits(verdict.action):
                 return verdict
             # WARN — remember the first (or worst) warning and keep scanning.
             if verdict.action == ACTION_WARN:
