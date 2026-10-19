@@ -28,6 +28,7 @@ var (
 	windowsStartKernel       = windows.NewLazySystemDLL("kernel32.dll")
 	windowsStartInJob        = windowsStartKernel.NewProc("IsProcessInJob")
 	windowsStartImageMapping = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtQueryInformationProcess")
+	windowsStartObjectBasic  = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtQueryObject")
 )
 
 // Windows ordinary SealImage remains unsupported: Windows admission requires
@@ -311,6 +312,40 @@ func windowsInheritableCopy(file *os.File) (*os.File, error) {
 	return owned, nil
 }
 
+// These are the mapped SDK role masks, not generic access flags. Additional
+// source rights may be reduced but never synthesized by a same-user reopen.
+func windowsAssetRequiredAccess(write bool) uint32 {
+	required := uint32(0x120089)
+	if write {
+		required |= 0x116
+	}
+	return required
+}
+func windowsAssetSourceAllows(granted uint32, write bool) bool {
+	return granted&windowsAssetRequiredAccess(write) == windowsAssetRequiredAccess(write)
+}
+func windowsAssetCopyAllows(granted uint32, write bool) bool {
+	required := windowsAssetRequiredAccess(write)
+	return granted&required == required && granted & ^(required|0x20) == 0
+}
+func windowsAssetGrantedAccess(handle windows.Handle) (uint32, error) {
+	if handle == 0 || handle == windows.InvalidHandle || windowsStartObjectBasic.Find() != nil {
+		return 0, ErrAdmission
+	}
+	// Microsoft PUBLIC_OBJECT_BASIC_INFORMATION is fourteen ULONGs. Only the
+	// documented GrantedAccess field is interpreted; reserved bytes stay opaque.
+	var basic struct {
+		Attributes, GrantedAccess, HandleCount, PointerCount uint32
+		Reserved                                             [10]uint32
+	}
+	var used uint32
+	status, _, _ := windowsStartObjectBasic.Call(uintptr(handle), 0, uintptr(unsafe.Pointer(&basic)), unsafe.Sizeof(basic), uintptr(unsafe.Pointer(&used)))
+	if uint32(status) != 0 || used != uint32(unsafe.Sizeof(basic)) {
+		return 0, ErrAdmission
+	}
+	return basic.GrantedAccess, nil
+}
+
 func windowsAsset(file *os.File, write bool) (*os.File, bool, windowsImageID, error) {
 	if file == nil {
 		return nil, false, windowsImageID{}, ErrAdmission
@@ -324,12 +359,8 @@ func windowsAsset(file *os.File, write bool) (*os.File, bool, windowsImageID, er
 	if write {
 		access |= windows.GENERIC_WRITE
 	}
-	var flags uint32
-	if directory {
-		flags = windows.FILE_FLAG_BACKUP_SEMANTICS
-	}
 	connection, err := file.SyscallConn()
-	if err != nil || windowsImageReopen.Find() != nil {
+	if err != nil {
 		return nil, false, windowsImageID{}, ErrAdmission
 	}
 	var handle windows.Handle
@@ -340,19 +371,63 @@ func windowsAsset(file *os.File, write bool) (*os.File, bool, windowsImageID, er
 		if metadataErr != nil {
 			return
 		}
-		value, _, _ := windowsImageReopen.Call(raw, uintptr(access), windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, uintptr(flags|windows.FILE_FLAG_OPEN_REPARSE_POINT))
+		granted, queryErr := windowsAssetGrantedAccess(windows.Handle(raw))
+		if queryErr != nil || !windowsAssetSourceAllows(granted, write) {
+			metadataErr = ErrAdmission
+			return
+		}
+		if directory {
+			return
+		}
+		if windowsImageReopen.Find() != nil {
+			metadataErr = ErrAdmission
+			return
+		}
+		value, _, _ := windowsImageReopen.Call(raw, uintptr(access), windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, uintptr(windows.FILE_FLAG_OPEN_REPARSE_POINT))
 		handle = windows.Handle(value)
 	})
-	if handle == 0 || handle == windows.InvalidHandle {
-		return nil, false, windowsImageID{}, ErrAdmission
-	}
-	owned := os.NewFile(uintptr(handle), "private-axis-object-capability")
 	if err != nil || metadataErr != nil {
-		return owned, directory, id, ErrAdmission
+		if handle != 0 && handle != windows.InvalidHandle {
+			return os.NewFile(uintptr(handle), "private-axis-refused-capability"), directory, id, ErrAdmission
+		}
+		return nil, directory, id, ErrAdmission
+	}
+	var owned *os.File
+	if directory {
+		// NT's empty name addresses this same held directory. A path name,
+		// DOS lookup, extra traverse right or ReOpenFile fallback is not used.
+		owned, err = windowsImageOpen(file, ".", true, windows.FILE_OPEN, nil, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+	} else {
+		if handle == 0 || handle == windows.InvalidHandle {
+			return nil, directory, id, ErrAdmission
+		}
+		owned = os.NewFile(uintptr(handle), "private-axis-object-capability")
+	}
+	if err != nil {
+		return owned, directory, id, err
+	} // allocated refusal remains owned
+	return windowsValidateAssetCopy(owned, directory, id, write)
+}
+
+// Refusal retains the allocated file so the same Session can close it. Tests
+// exercise wrong expected identity against a real fresh directory duplicate.
+func windowsValidateAssetCopy(owned *os.File, directory bool, id windowsImageID, write bool) (*os.File, bool, windowsImageID, error) {
+	if owned == nil {
+		return nil, directory, id, ErrAdmission
 	}
 	actual, err := windowsImageMetadata(owned, directory)
 	if err != nil || id != actual || windowsImageLocalNTFS(owned) != nil {
-		return owned, directory, id, ErrAdmission // caller must retain allocated refusal
+		return owned, directory, id, ErrAdmission
+	}
+	connection, err := owned.SyscallConn()
+	if err != nil {
+		return owned, directory, id, ErrAdmission
+	}
+	var granted uint32
+	var queryErr error
+	err = connection.Control(func(raw uintptr) { granted, queryErr = windowsAssetGrantedAccess(windows.Handle(raw)) })
+	if err != nil || queryErr != nil || !windowsAssetCopyAllows(granted, write) {
+		return owned, directory, id, ErrAdmission
 	}
 	return owned, directory, id, nil
 }

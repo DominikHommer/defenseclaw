@@ -17,6 +17,7 @@ The fixed payload SHA256 is
 | 02 | canary-01, retained | Harness started; host network positive control failed before bridge Start | Root terminal, Job empty, all handles closed |
 | 03 | canary-02, retained | TCP/UDP positive controls passed; bridge Start refused before Prepared | Native wait succeeded after initial Close error; root terminal, Job empty, all handles closed |
 | 04 | canary-03, retained | TCP/UDP positive controls passed; Start diagnostic classified `process_admission` | Initial native Close succeeded; root terminal, Job empty, all handles closed |
+| 05 | canary-04, retained | The closed native diagnostic identified `asset_cwd` | Initial native Close succeeded; root terminal, Job empty, all handles closed |
 
 The launcher admitted its exact held executable with ProcessImageFileMapping
 class 44 before resume, assigned its Job atomically at creation, and retained
@@ -56,8 +57,35 @@ Saved outer stdout SHA256 values, in attempt order:
 - 02: `dfa83a4b85d1411ac1d887f1a4088bbbaa628bda3e739f3fa615f5a04c4b68ef`
 - 03: `86dede9485bbc8b7f46d48123f86c54210a4ac04fac53d273dd12098d13ad114`
 - 04: `4bcfb6debaad48d5b3c530419b42a86bfb215ad840ee8d8aca2c2bbe691c72b9`
+- 05: `4bcfb6debaad48d5b3c530419b42a86bfb215ad840ee8d8aca2c2bbe691c72b9`
+
+Attempt 05 used source07 after six focused pure/fake race tests passed with
+zero failures/skips. A separate read-only native probe opened that retained CWD
+and verified its identity and local NTFS device. ReOpenFile then returned Win32
+5. Twelve read/execute-only combinations of original/requested traverse rights
+and flags also returned 5. An empty-name NtCreateFile self reopen relative to
+the same held directory succeeded, preserved full FileID and local NTFS, and
+closed all allocated handles. These probes created no child or sandbox and
+made no fixture writes. The proposed directory-duplication correction must
+also refuse rights absent from the original capability; its integrated native
+result is still pending.
 
 The full failed records and retained public fixtures remain on the test host.
 Native peer/workload execution, filesystem/network enforcement, real agent
 authentication, hooks, terminal support and production qualification remain
 unverified by these attempts.
+
+The directory correction uses an empty-name NT reopen relative to the held
+directory, checks the original granted access before reopening, and checks the
+reduced copy's full identity, device and granted access. A real-filesystem race
+test confirmed read-only directory identity, replacement refusal while held,
+release after closing a refused copy, and refusal to promote read-only file or
+directory capabilities. The first regression run exposed an error in its new
+writable-directory test: its synchronous child creation omitted the explicit
+SYNCHRONIZE access required by NtCreateFile, returning STATUS_INVALID_PARAMETER.
+Adding that right to the test matched all production helper callers; the
+changed directory subtest passed. The corrected three-package regression run
+then passed all 18 test/subtest rows with the race detector, zero failures and
+zero skips. Its log SHA256 is
+`629543c9ae35424d1382ea96800a2488041f5ee7db08b803beb86b924b470c11`.
+This is host-filesystem and pure/fake protocol evidence only.

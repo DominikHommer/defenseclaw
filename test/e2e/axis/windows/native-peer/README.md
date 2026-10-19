@@ -26,7 +26,7 @@ still preserved. No launch/policy behavior changes besides the fresh fixed label
 
 The only harness argument is `--run-fixed`. A separately reviewed root recipe
 must stage exact admitted files beneath one fresh protected private directory
-named `windows-native-peer-canary-04`: the fixed harness filename,
+named `windows-native-peer-canary-05`: the fixed harness filename,
 `REVIEWED-ARTIFACTS.json`, `peer.exe` and `payload.exe`. Their complete hashes
 and sizes are source constants, not runtime inputs. The recipe must own the
 harness image/ancestry and an atomic kill-on-close Job before its Resume, with
@@ -99,3 +99,22 @@ No admission, rights, launch, protocol or cleanup operation is changed. Prior
 attempt04 reported only process_admission with successful initial Session.Close
 and native/outer cleanup; that failed fixture remains retained. Internal stage
 evidence is still pending a separately reviewed changed-source attempt.
+
+Source08 changes only directory capability duplication to an NT empty-name
+self reopen under the original held handle. A current-handle GrantedAccess
+query must cover the mapped read/write role before any directory or regular
+file reopen; a reduced copy must match the SDK role floor plus optional traverse.
+The read mask is 0x120089 and write adds 0x116; no traverse right is added. Full
+FileID/type/local-NTFS checks remain required and allocated refusals remain owned.
+The prior changed attempt identified asset_cwd; twelve read-only ReOpenFile
+controls refused, while the exact held self reopen succeeded without a child.
+This is source evidence, not a new peer/PSEC/canary execution or policy grant.
+
+Source09 additionally fixes only the existing NT-open helper's partial-handle
+ownership: a valid allocated handle is returned before refusal classification;
+zero/INVALID are never wrapped. Its constructor callers already assign into the
+same cleanup state before checking errors. The local delete-open cleanup caller
+now closes any nonnil refusal through that state's one-attempt sticky-close
+method. Access, names, dispositions, image admission and numeric status wording
+are unchanged. The native host-only asset test includes real allocated-handle
+control/native-error finalization and close checks; execution remains ROOT-owned.

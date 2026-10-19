@@ -309,16 +309,29 @@ func windowsImageOpen(parent *os.File, name string, directory bool, disposition 
 		nativeErr = windows.NtCreateFile(&handle, access, &attributes, &status, nil,
 			attributesOnDisk, share, disposition, options, 0, 0)
 	})
-	if err != nil || nativeErr != nil {
+	return windowsImageOpenResult(handle, err, nativeErr)
+}
+
+// A valid allocation is owned before either Control or native refusal is
+// classified. Every caller must retain/close a nonnil result even on error.
+func windowsImageOpenResult(handle windows.Handle, controlErr, nativeErr error) (*os.File, error) {
+	var owned *os.File
+	if handle != 0 && handle != windows.InvalidHandle {
+		owned = os.NewFile(uintptr(handle), "private-axis-image-object")
+	}
+	if controlErr != nil || nativeErr != nil {
 		// NtCreateFile's typed status is numeric metadata. Do not format its
 		// native Error() text or the caller's os.File/SyscallConn error.
 		var status windows.NTStatus
 		if errors.As(nativeErr, &status) {
-			return nil, fmt.Errorf("%w: ntstatus=0x%08x", ErrAdmission, uint32(status))
+			return owned, fmt.Errorf("%w: ntstatus=0x%08x", ErrAdmission, uint32(status))
 		}
+		return owned, ErrAdmission
+	}
+	if owned == nil {
 		return nil, ErrAdmission
 	}
-	return os.NewFile(uintptr(handle), "private-axis-image-object"), nil
+	return owned, nil
 }
 
 func windowsImageReopenFile(file *os.File, share uint32) (*os.File, error) {
@@ -449,7 +462,10 @@ func (state *windowsImageState) close() error {
 			windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.SYNCHRONIZE,
 			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 		if err != nil {
-			return errWindowsImageCleanup
+			// The helper may have allocated before an uncertain Control/native
+			// refusal. Use the same one-attempt, sticky cleanup owner here too.
+			closeErr := state.closeFile(&file)
+			return errors.Join(errWindowsImageCleanup, closeErr)
 		}
 		if !windowsImageSame(file, state.id) || windowsImagePrivate(file) != nil {
 			_ = state.closeFile(&file)
