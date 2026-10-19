@@ -558,10 +558,7 @@ sudo "$(command -v defenseclaw-gateway)" sandbox kernel-feed install
 As root it checks Tetragon and Docker, installs the service and says how to
 check and remove it:
 
-![sudo defenseclaw-gateway sandbox kernel-feed install: the sandbox kernel feed is installed at the gateway's version with protocol 1 and Tetragon connected, Tetragon v1.7.1 on its socket and Docker Engine answering, sandboxes started with the process tree now record every exec and exit, and the check and remove commands](/images/segmentation/terminal-sandbox-kernel-feed-install.png)
-
-Current install output also says that a sandbox already running when the feed
-restarts shows DefenseClaw's own hook calls in full until you stop and start it.
+![sudo defenseclaw-gateway sandbox kernel-feed install: the sandbox kernel feed is installed at the gateway's version with protocol 1 and Tetragon connected, Tetragon v1.7.1 on its socket and Docker Engine answering, sandboxes started with the process tree now record every exec and exit, a sandbox that was already running shows DefenseClaw hook calls in full until it is stopped and started, and the check and remove commands](/images/segmentation/terminal-sandbox-kernel-feed-install.png)
 
 {/* AUTOGEN-BEGIN: sandbox-flags kernel-feed install */}
 This command has no flags.
@@ -877,8 +874,8 @@ A few rules the flags follow:
   of an image the driver has not prepared yet says it takes about a minute.
   That start prepares a disk of about the image's size in the driver's image
   cache: before anything is copied, `run` refuses it when the volume has less
-  free space than the image's size plus 1 GiB (at least 6 GiB), and warns
-  below twice that (at least 12 GiB), naming what is free and
+  free space than the measured first-start use of about 11 GiB (at least 12 GiB), and warns
+  below twice that (at least 22 GiB), naming what is free and
   `sandbox image prune`. The daemon refuses such a create from any client the
   same way.
 

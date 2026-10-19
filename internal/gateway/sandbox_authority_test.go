@@ -74,7 +74,6 @@ func newSandboxFixture(t testing.TB, enrollment config.EnterpriseEnrollmentConfi
 	cfg.Enterprise.Enrollment = enrollment
 	f.cfg = cfg
 	f.api = NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
-	t.Cleanup(func() { sandboxAuthorities.Delete(f.api) })
 
 	restoreFacts, restoreBlocking := identityFactsEnabled.Load(), identityLookupBlocking.Load()
 	identityFactsEnabled.Store(true)
@@ -167,6 +166,7 @@ func (f *sandboxFixture) do(peer managedHookPeer, method, path string, body any,
 	req := httptest.NewRequest(method, path, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+	req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 	for k, v := range header {
 		if v == "" {
 			req.Header.Del(k)
@@ -489,6 +489,12 @@ func TestSandboxAuthorityColdCacheRematch(t *testing.T) {
 	if rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK {
 		t.Fatalf("hook on a cold cache: %d %s", rec.Code, rec.Body.String())
 	}
+	// policy/current carries the match's provisional flag with its profile,
+	// so the daemon's status follows a re-match (#1199).
+	if code, cur := f.current(sbxAlice, resp.Registration.ID); code != http.StatusOK || cur.Provisional == nil || !*cur.Provisional ||
+		cur.Profile != "offline-floor" {
+		t.Fatalf("current on a cold cache: %d profile %q provisional %v", code, cur.Profile, cur.Provisional)
+	}
 	f.setGroups(sbxAlice, "dc-sbx-contractors")
 	rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil)
 	if rec.Code != http.StatusOK || rec.Header().Get(sandboxrelay.ProfileHeader) != "contractors" {
@@ -498,6 +504,10 @@ func TestSandboxAuthorityColdCacheRematch(t *testing.T) {
 	reg, _, _ := auth.store.Get(sbxAlice.UID, resp.Registration.ID)
 	if reg.Provisional || reg.Profile != "contractors" || reg.ProfileMatch != sandboxreg.MatchGroup || reg.State != sandboxreg.StateLive {
 		t.Fatalf("re-matched registration: %+v", reg)
+	}
+	if code, cur := f.current(sbxAlice, resp.Registration.ID); code != http.StatusOK || cur.Provisional == nil || *cur.Provisional ||
+		cur.Profile != "contractors" {
+		t.Fatalf("current after the re-match: %d profile %q provisional %v", code, cur.Profile, cur.Provisional)
 	}
 	f.mu.Lock()
 	rematched := strings.Join(f.rematched, ";")
@@ -574,7 +584,7 @@ func TestSandboxAuthorityConfigChangeSwitchesLiveFields(t *testing.T) {
 	gen = &Generation{N: 2, Config: &next, Profiles: f.api.guardrailProfileSet()}
 	genMu.Unlock()
 	code, after := f.current(sbxAlice, resp.Registration.ID)
-	if code != http.StatusOK || len(after.Live.EgressBlock) != 1 || after.Generation == before.Generation || after.Revoked {
+	if code != http.StatusOK || after.Floor == nil || len(after.Floor.EgressBlock) != 1 || after.Generation == before.Generation || after.Revoked {
 		t.Fatalf("current after the change: %d %+v (before %+v)", code, after, before)
 	}
 	f.mu.Lock()
@@ -1002,6 +1012,7 @@ func FuzzSandboxRelayHeaders(f *testing.F) {
 		req := httptest.NewRequest(http.MethodPost, sandboxrelay.PathHookPrefix+"claudecode", strings.NewReader(`{"hook_event_name":"PreToolUse"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+		req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 		req.Header.Set(sandboxrelay.RegistrationHeader, registration)
 		if files != "" {
 			req.Header.Set(sandboxrelay.FilesHeader, files)

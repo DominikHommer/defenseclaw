@@ -9,6 +9,7 @@ import plistlib
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,25 @@ def test_managed_package_recipes_exclude_fleet_compiler():
     assert 'install -m 0644 "$compiler_src"' not in mac_recipe
     assert "policy_compiler.py" not in windows_recipe
     assert "$layout['CompilerPath']" not in windows_layout
+
+
+def test_windows_standalone_retires_the_empty_compiler_tree():
+    # GAP-0270: 1.0.2 Setup created lib\defenseclaw for the Fleet compiler.
+    # The Fleet-off retire and every uninstall install-tree check use the same
+    # empty-only helper; no dead compiler layout key is read any more.
+    module = (ROOT / "packaging/windows/DefenseClawEnterprise.psm1").read_text(encoding="utf-8")
+    for key in ("CompilerLibDirectory", "CompilerDirectory"):
+        assert key not in module
+    retire = module[module.index("if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {") :]
+    assert retire.splitlines()[1].strip() == "Remove-DefenseClawRetiredStandaloneCompiler -Layout $Layout"
+    helper = module[module.index("function Get-DefenseClawEmptyRetiredCompilerDirectories {") :]
+    helper = helper[: helper.index("\n}\n")]
+    assert "ReparsePoint" in helper and "-notin $empty" in helper
+    for function in ("Assert-DefenseClawManagedInstallTree", "Remove-DefenseClawCommittedEmptyInstallRoot"):
+        body = module[module.index(f"function {function} {{") :]
+        body = body[: body.index("\nfunction ")]
+        assert "Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot" in body, function
+        assert "-Name CompilerPath" not in body, function
 
 
 def _unit(name: str) -> list[str]:
@@ -164,6 +184,22 @@ def test_windows_bundle_acl_contract_keeps_public_receipt_separate():
     assert "Get-DefenseClawBundlePathKind -RelativePath $relative" in contract
     assert "Assert-DefenseClawCanonicalPathAcl" in contract
     assert "Set-DefenseClawPathAcl" in contract
+
+
+def test_systemd_guardian_can_flush_the_sssd_caches():
+    # When SSSD is online again after an outage the guardian runs
+    # sss_cache -E, which opens SSSD's databases read-write and invalidates its
+    # memory cache. Under ProtectSystem=strict both directories must be
+    # writable, or the flush exits 5 (GAP-0208). Nothing broader is opened.
+    lines = _unit("defenseclaw-hook-guardian.service")
+    assert "ProtectSystem=strict" in lines
+    writable = _unit_values(lines, "ReadWritePaths")
+    assert {"-/var/lib/sss/db", "-/var/lib/sss/mc"} <= writable
+    assert not writable & {"/var", "-/var", "/var/lib", "-/var/lib", "/var/lib/sss", "-/var/lib/sss"}
+    # Only the watching guardian flushes; the one-shot reconcile and the
+    # enumerator never write SSSD's caches.
+    for name in ("defenseclaw-hook-guardian-reconcile.service", "defenseclaw-hook-enumerator.service"):
+        assert not any("/var/lib/sss" in path for path in _unit_values(_unit(name), "ReadWritePaths")), name
 
 
 def test_systemd_enumerator_can_publish_refused_surfaces():
@@ -1174,18 +1210,19 @@ def test_linux_postinstall_does_nothing_after_a_refused_removal(tmp_path: Path, 
 # when the installed one fails, so an apt Pre-Install-Pkgs hook refuses the
 # downgrade before dpkg runs, unless the rollback marker exists.
 @pytest.mark.parametrize(
-    ("line", "marker", "exit_code"),
+    ("line", "marker", "backup", "exit_code"),
     [
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb < 1.0.47~SNAPSHOT-aaa f.deb", False, 0),
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.46~SNAPSHOT-aaa f.deb", False, 0),
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > - **REMOVE**", False, 0),
-        ("other-package 1.0.46 > 1.0.45 f.deb", False, 0),
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, 1),
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", True, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb < 1.0.47~SNAPSHOT-aaa f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.46~SNAPSHOT-aaa f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > - **REMOVE**", False, False, 0),
+        ("other-package 1.0.46 > 1.0.45 f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, False, 1),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, True, 1),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", True, False, 0),
     ],
 )
 def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
-    tmp_path: Path, line: str, marker: bool, exit_code: int
+    tmp_path: Path, line: str, marker: bool, backup: bool, exit_code: int
 ) -> None:
     host = _Host(tmp_path)
     host.state.mkdir()
@@ -1198,9 +1235,18 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
     allow = host.state / "allow-downgrade"
     if marker:
         allow.write_text("", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    previous_config = tmp_path / "config.yaml.v8.bak"
+    config.write_text("config_version: 8\n", encoding="utf-8")
+    if backup:
+        previous_config.write_text("config_version: 8\n", encoding="utf-8")
     script = _rooted(
         (LINUX / "apt-downgrade-guard.sh").read_text(encoding="utf-8"),
-        {"state=/var/lib/defenseclaw-enterprise": f"state={host.state}"},
+        {
+            "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+            "previous_config=/etc/defenseclaw/config.yaml.v8.bak": f"previous_config={previous_config}",
+            "config=/etc/defenseclaw/config.yaml": f"config={config}",
+        },
     )
     path = tmp_path / "guard.sh"
     path.write_text(script, encoding="utf-8")
@@ -1218,6 +1264,8 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
     if exit_code:
         assert "refusing to downgrade to 1.0.45~SNAPSHOT-aaa" in result.stderr
         assert f"sudo touch {allow}" in result.stderr
+        assert "postinstall applies it" in result.stderr
+        assert f"--config {previous_config if backup else config}" in result.stderr
 
 
 def test_enterprise_deb_ships_the_apt_downgrade_hook_and_rpm_does_not() -> None:
@@ -1237,9 +1285,15 @@ def _macos_pkg_postinstall(host: _Host) -> str:
     builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
     match = re.search(r"cat >\"\$SCRIPTS/postinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)
     assert match, "the pkg postinstall heredoc was not found"
+    # The installed programs the postinstall gives new files before ensure.
+    prefix = host.tmp / "prefix"
+    (prefix / "bin").mkdir(parents=True)
+    for name in ("defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper"):
+        _write_stub(prefix / "bin", name, "exit 0")
     return _rooted(
         match.group(1) + "\n",
         {
+            "prefix=/opt/cisco/defenseclaw": f"prefix={prefix}",
             "gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
             "state=/opt/cisco/defenseclaw/lifecycle": f"state={host.state}",
         },
@@ -1367,7 +1421,8 @@ esac""",
     "dpkg-query": """[ -n "$DC_TEST_INSTALLED" ] || exit 1
 printf 'install ok installed %s' "$DC_TEST_INSTALLED\"""",
     "rpm": """case "$1" in
-    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *ARCH*) echo x86_64 ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    --eval) echo x86_64 ;;
     -q)
         if [ -z "$DC_TEST_INSTALLED" ]; then echo "package defenseclaw-enterprise is not installed"; exit 1; fi
         [ "$2" != --qf ] || printf '%s' "$DC_TEST_INSTALLED"
@@ -1665,7 +1720,7 @@ def test_unix_wrapper_stores_the_credential_before_it_applies_the_config(tmp_pat
     wrapper = (MDM / os_dir / "defenseclaw-enterprise.sh").read_text(encoding="utf-8")
     functions = "\n".join(
         _shell_function(wrapper, name)
-        for name in ("dc_run_lifecycle", "dc_run_lifecycle_retry", "dc_main")
+        for name in ("dc_run_lifecycle", "dc_run_lifecycle_retry", "dc_secret_json_error", "dc_store_secret", "dc_main")
     )
     log = tmp_path / "calls.log"
     gateway = tmp_path / "defenseclaw-gateway"
@@ -1793,7 +1848,7 @@ _USER_MANAGER_ANSWERS = {
 }
 
 
-@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.skipif(not sys.platform.startswith("linux") or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
 @pytest.mark.parametrize("answer", sorted(_USER_MANAGER_ANSWERS))
 def test_linux_preremove_stops_the_sandbox_user_units_in_every_user_manager(tmp_path: Path, answer: str) -> None:
     host = _Host(tmp_path)
@@ -1836,7 +1891,7 @@ case "$*" in {_USER_MANAGER_ANSWERS[answer]} esac""")
 # not skip a live user manager: its units stop as the uid and gid that own
 # its runtime directory, and a manager that then does not answer keeps the
 # package.
-@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.skipif(not sys.platform.startswith("linux") or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
 @pytest.mark.parametrize("answer", ["stopped", "no_answer"])
 def test_linux_preremove_stops_the_user_units_of_an_account_the_lookup_does_not_name(tmp_path: Path, answer: str) -> None:
     host = _Host(tmp_path)

@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -42,16 +43,34 @@ type SecretState struct {
 // listSecrets returns the credential names in the secrets directory and a
 // digest over their names and contents, so ensure notices a rotation.
 func (e *Env) listSecrets() ([]string, string, error) {
-	dir := e.P(e.Layout.SecretsDir)
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, sha256Bytes(nil), nil
-	}
+	names, err := e.secretNames()
 	if err != nil {
 		return nil, "", err
 	}
-	var names []string
 	var digest bytes.Buffer
+	for _, name := range names {
+		sum, err := sha256File(filepath.Join(e.P(e.Layout.SecretsDir), name))
+		if err != nil {
+			return nil, "", err
+		}
+		fmt.Fprintf(&digest, "%s:%s\n", name, sum)
+	}
+	return names, sha256Bytes(digest.Bytes()), nil
+}
+
+// secretNames lists, sorted, the credentials in the secrets directory: the
+// regular files with a credential name. No credential is opened; a missing
+// directory holds none.
+func (e *Env) secretNames() ([]string, error) {
+	dir := e.P(e.Layout.SecretsDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
 	for _, entry := range entries {
 		name := entry.Name()
 		if strings.HasPrefix(name, ".") || !config.ValidEnterpriseCredentialName(name) {
@@ -61,15 +80,22 @@ func (e *Env) listSecrets() ([]string, string, error) {
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		sum, err := sha256File(filepath.Join(dir, name))
-		if err != nil {
-			return nil, "", err
-		}
 		names = append(names, name)
-		fmt.Fprintf(&digest, "%s:%s\n", name, sum)
 	}
 	sort.Strings(names)
-	return names, sha256Bytes(digest.Bytes()), nil
+	return names, nil
+}
+
+// SecretPresent reports whether the secrets directory holds the credential
+// name, from the listing `enterprise secret status` reads (bundle verify's
+// presence check); the credential is not opened.
+func (e *Env) SecretPresent(name string) (bool, error) {
+	e.fillDefaults()
+	names, err := e.secretNames()
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(names, name), nil
 }
 
 // TrustedSecretSource refuses a --from-file credential that another account
@@ -91,10 +117,22 @@ func TrustedSecretSource(path string) error {
 // ReadSecretValue reads a credential from r, stripping one trailing line
 // ending so `echo key |` works.
 func ReadSecretValue(r io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, maxSecretBytes+1))
+	data, err := ReadSecretBytes(r)
 	if err != nil {
 		return nil, err
 	}
+	return ParseSecretValue(data)
+}
+
+// ReadSecretBytes reads what a credential source delivers, at most one byte
+// over the credential limit, without checking it (ParseSecretValue does).
+func ReadSecretBytes(r io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, maxSecretBytes+1))
+}
+
+// ParseSecretValue checks the bytes a credential source delivered and
+// strips one trailing line ending.
+func ParseSecretValue(data []byte) ([]byte, error) {
 	if len(data) > maxSecretBytes {
 		return nil, fmt.Errorf("credential exceeds %d bytes", maxSecretBytes)
 	}

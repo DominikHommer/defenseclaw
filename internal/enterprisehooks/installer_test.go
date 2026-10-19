@@ -1000,6 +1000,8 @@ func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
 	wantExclusive := []string{
 		filepath.Join(hookDir, "codex-hook.sh"),
 		filepath.Join(hookDir, ".hook-codex.token"),
+		// The flat runtime record the hook script reads (GAP-0671).
+		filepath.Join(hookDir, ".hookcfg.codex"),
 		filepath.Join(hookDir, "inspect-tool.sh"),
 		filepath.Join(hookDir, "inspect-request.sh"),
 		filepath.Join(hookDir, "inspect-response.sh"),

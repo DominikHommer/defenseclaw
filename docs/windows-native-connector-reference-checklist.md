@@ -44,8 +44,9 @@ Evidence was rechecked on 2026-07-31.
 
 - Default `CODEX_HOME`: `%USERPROFILE%\.codex`.
 - User configuration: `%CODEX_HOME%\config.toml`.
-- Managed configuration on Windows:
-  `%CODEX_HOME%\managed_config.toml`.
+- Legacy managed configuration on Windows:
+  `%CODEX_HOME%\managed_config.toml` (ignored by current Codex for hooks;
+  setup removes DefenseClaw entries left by older releases).
 - Machine requirements:
   `%ProgramData%\OpenAI\Codex\requirements.toml`.
 - Project configuration: `<workspace>\.codex\config.toml`.
@@ -76,9 +77,10 @@ Evidence was rechecked on 2026-07-31.
   directory.
 - Hook configuration can be declared in TOML at the active configuration
   layers. JSON hook files use `commandWindows`; TOML uses `command_windows`.
-- DefenseClaw's native user setup writes the owned hook matrix to
-  `%CODEX_HOME%\managed_config.toml`, and its marked OTel and `notify` fields to
-  `%CODEX_HOME%\config.toml`. The OTel block pins the documented
+- DefenseClaw's per-user setup writes the owned, trusted hook matrix and its
+  marked OTel and `notify` fields to `%CODEX_HOME%\config.toml`. Managed Windows
+  enrollment publishes the hook matrix in administrator-owned machine
+  `requirements.toml` and writes a protected user runtime. The OTel block pins the documented
   `otel.environment` field to DefenseClaw's configured environment; Codex
   otherwise defaults that field to `dev`. Doctor compares the file with the
   authenticated live runtime environment and telemetry state.

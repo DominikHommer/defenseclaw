@@ -456,6 +456,18 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	return m.unblock(ctx, req, "")
 }
 
+// modelHostUnblockNote ends the message of an unblock of the sandbox's own
+// model host. OpenShell's provider rule opens that host only to the
+// agent's own programs, for its model calls with the credential, and
+// DefenseClaw never adds another program to that rule (triage judgeRule),
+// so the other programs in the sandbox still cannot reach the host: the
+// unblock lifts only DefenseClaw's own refusal. A bare "unblocked" read as
+// done while the next fetch was refused again (GAP-0178, GAP-0183).
+func modelHostUnblockNote(host string) string {
+	return "; " + host + " is also this sandbox's model host, which OpenShell opens only to the agent's own programs " +
+		"for its model calls, so OpenShell still refuses the other programs in the sandbox there (an unblock or an allow entry does not change that)"
+}
+
 // unblock is Unblock for a decision that may answer an ask (approvalID: the
 // ask a proxy refusal raised, proxyAsk), so the managed gateway's record of
 // it names the ask.
@@ -482,6 +494,9 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 	// second must not be decided, and reported done, against the block
 	// list from before the write (GAP-0173).
 	m.syncConfig(ctx)
+	if req.Sandbox != "" {
+		m.confirmPolicy(ctx, req.Sandbox)
+	}
 	var (
 		b   *box
 		eff *packs.Effective
@@ -575,6 +590,9 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 		resp.Message = "unblocked " + host + " for sandbox " + req.Sandbox
 		if m.managedMode() {
 			resp.Message += " until it stops"
+		}
+		if m.modelEndpointHost(b, host) {
+			resp.Message += modelHostUnblockNote(host)
 		}
 	}
 	if b != nil {
@@ -749,6 +767,14 @@ func (m *Manager) syncConfig(ctx context.Context) {
 	}
 	if err := m.opts.SyncConfig(ctx); err != nil {
 		m.logf("load config.yaml before the decision: %v", err)
+	}
+}
+
+// confirmPolicy brings sandbox's policy up to date before a decision for it
+// (Options.ConfirmPolicy).
+func (m *Manager) confirmPolicy(ctx context.Context, sandbox string) {
+	if m.opts.ConfirmPolicy != nil {
+		m.opts.ConfirmPolicy(ctx, sandbox)
 	}
 }
 

@@ -692,7 +692,7 @@ func postureDrift(rec record, eff *packs.Effective) []string {
 	}
 	// The harness run files follow the policy from the next start on
 	// (refreshRunConfig); the running session keeps what it started with.
-	if rec.RunConfig != nil && !rec.RunConfig.Safe && !(rec.Yolo && eff.Yolo) {
+	if rec.RunConfig != nil && !rec.RunConfig.Safe && (!(rec.Yolo) || !(eff.Yolo)) {
 		out = append(out, "the sandbox policy no longer lets the harness skip its permission prompts; "+
 			"this session keeps skip-permissions mode until the sandbox stops, and its next start keeps the prompts")
 	}

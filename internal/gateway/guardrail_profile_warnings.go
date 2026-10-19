@@ -672,10 +672,20 @@ func groupNameCheckHint(platform string) string {
 	return "check the qualified name with getent group"
 }
 
-// directoryDownHint says what to check while the directory does not answer.
+// directoryUsesWinbind reports a Linux host whose groups come from winbind
+// rather than SSSD (unixidentity.GroupDirectoryUsesWinbind on Linux and
+// macOS); false elsewhere.
+var directoryUsesWinbind = func() bool { return false }
+
+// directoryDownHint says what to check while the directory does not answer:
+// the directory service the host uses (GAP-0712: a winbind host was told to
+// check SSSD).
 func directoryDownHint(platform string) string {
 	if platform == "darwin" {
 		return "check the directory binding of this Mac (dsconfigad -show) and the domain controller; the groups are checked again once it answers"
+	}
+	if directoryUsesWinbind() {
+		return "check winbind (wbinfo --ping-dc) and the domain controller; the groups are checked again once it answers"
 	}
 	return "check SSSD (sssctl domain-status <domain>) and its server; the groups are checked again once it answers"
 }

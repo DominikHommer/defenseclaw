@@ -226,7 +226,6 @@ func newRelayFixtureWith(t *testing.T, routes map[string]sandboxRelayRoute, muta
 		sandboxBudgetLimits[sandboxBudgetHook] = prevHook
 	})
 	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil, cfg)
-	t.Cleanup(func() { sandboxAuthorities.Delete(api) })
 	auth, err := api.sandboxAuth()
 	if err != nil {
 		t.Fatal(err)
@@ -313,6 +312,7 @@ func (f *relayFixture) post(t *testing.T, path, registration, body string, heade
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+	req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 	req.Header.Set(sandboxrelay.AgentSurfaceHeader, sandboxrelay.AgentSurfaceValue)
 	if registration != "" {
 		req.Header.Set(sandboxrelay.RegistrationHeader, registration)
@@ -341,6 +341,7 @@ func (f *relayFixture) currentGeneration(t *testing.T, registration string) stri
 	}
 	// Every sandbox route needs the CSRF client header, GET included.
 	req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+	req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 	resp, err := f.server.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -655,6 +656,7 @@ func TestSandboxRelayRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	getReq.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+	getReq.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 	resp, err := f.server.Client().Do(getReq)
 	if err != nil {
 		t.Fatal(err)
@@ -1050,7 +1052,6 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 	cfg.Guardrail.Mode = "observe"
 	cfg.OpenShell.Enabled = true
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
-	t.Cleanup(func() { sandboxAuthorities.Delete(api) })
 	api.SetConnectorRegistry(connector.NewDefaultRegistry())
 	api.bindOTLPObservabilityRuntime(newSidecarRuntimeFixture(t, true).runtime)
 	auth, err := api.sandboxAuth()
@@ -1092,6 +1093,7 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 		}
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+		req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 		req.Header.Set(sandboxrelay.AgentSurfaceHeader, sandboxrelay.AgentSurfaceValue)
 		req.Header.Set(sandboxrelay.RegistrationHeader, reg.ID)
 		for i := 0; i+1 < len(headers); i += 2 {

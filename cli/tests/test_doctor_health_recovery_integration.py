@@ -918,7 +918,7 @@ def test_windows_private_files_distinguish_unsafe_acl_from_uninspected_acl(tmp_p
     for problem, status, detail in (
         ("owner SID S-1-5-21-foreign is not the current user", "fail", "unsafe"),
         ("ACL grants write access to untrusted SID S-1-5-21-foreign", "fail", "unsafe"),
-        ("cannot read Windows ACL (access denied)", "warn", "could not verify"),
+        ("cannot read Windows ACL (access denied)", "warn", "could not inspect"),
     ):
         with patch("defenseclaw.file_permissions.windows_acl_confidentiality_error", return_value=problem):
             result = _DoctorResult()

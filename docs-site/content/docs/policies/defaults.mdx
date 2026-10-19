@@ -91,6 +91,14 @@ Arbitrary computed interpreter paths are outside that proof. A symlink already
 present in the gateway's local filesystem is resolved for write targets; sandbox
 filesystems are evaluated without local symlink resolution.
 
+**Known limit.** The rule reads the text of the command. A write made by a
+program that the command starts, such as a nested shell, a generated script,
+a build tool or a tool option that runs another command, is not visible in
+that text, so it is not caught when it goes through an already existing link
+to the protected file. Rely on the OpenShell sandbox and on file permissions
+for containment. A runtime control on the protected files is tracked as a
+design follow-up.
+
 The `default` and `permissive` packs ship the `curl ... | bash` rule `CMD-PIPE-CURL` off; `strict` enables it. See [Download piped into a shell](/docs/policies/deterministic-detection#download-piped-into-a-shell).
 
 All three packs share the same [severity rubric](/docs/policies#shared-severity-rubric) and the same `signal_strength` output schema — only the per-category thresholds and suppression scope differ between packs. Switching the rule pack does *not* enable the LLM judge — that's a separate `guardrail.judge.enabled` toggle in your operator config (default: `false`). Flipping the rule pack only changes which prompt YAMLs the judge will run *if* you've enabled it.

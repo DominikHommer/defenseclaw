@@ -30,6 +30,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
@@ -349,6 +351,22 @@ type enterpriseHookTargetHomeChangedError struct {
 	name, home, directoryHome string
 }
 
+// enterpriseHookTargetNoHomeReason is the pending reason of a manifest
+// target whose account the directory now gives no home (a removed macOS
+// mobile account answers with /var/empty): no agent of that account runs
+// on this computer, so it is waiting, not a protection failure. Status and
+// verify stayed failed (guardian_target_failed) until a reinstall
+// (rel-1-0-3 GAP-0177). The row goes when the enumerator drops the account,
+// or is protected again when it gets a home. Any other error is "".
+func enterpriseHookTargetNoHomeReason(err error) string {
+	var changed *enterpriseHookTargetHomeChangedError
+	if !errors.As(err, &changed) || !enterpriseHookDirectoryNoHome(changed.directoryHome) {
+		return ""
+	}
+	return fmt.Sprintf("the directory now gives account %q no home on this computer (%s instead of %s): it looks removed here, so the enrollment waits until the account is dropped from enrollment or gets a home again",
+		changed.name, changed.directoryHome, changed.home)
+}
+
 func (e *enterpriseHookTargetHomeChangedError) Error() string {
 	return fmt.Sprintf("enterprise hooks: target %q home %s no longer matches the directory home %s", e.name, e.home, e.directoryHome)
 }
@@ -420,12 +438,25 @@ var enterpriseHookCheckHome = func(home string, uid int) enterprisehooks.HomeChe
 // ptrace it. A success must name exactly the requested connector and home
 // and stay small enough for the gateway's bounded ledger read.
 func validateEnterpriseHookWorkerResult(target enterpriseHookWorkerTarget, result enterpriseHookWorkerTargetResult) error {
+	if target.Mode == enterpriseHookWorkerModeRemove {
+		if err := validateEnterpriseHookWorkerRemoveReport(result); err != nil {
+			return err
+		}
+	} else if result.PathsReported || len(result.CleanedPaths) != 0 || result.Remaining != "" || result.Unverified != "" {
+		return errors.New("worker reported removal paths for a non-remove target")
+	}
 	if !result.OK {
 		if result.Result != nil {
 			return errors.New("worker reported a failed target with a result")
 		}
 		if len(result.Error) > enterpriseHookWorkerResultMaxBytes {
 			return errors.New("worker error message is too large")
+		}
+		return nil
+	}
+	if target.Mode == enterpriseHookWorkerModeRemove {
+		if result.Pending || result.Result != nil || strings.TrimSpace(result.Error) != "" {
+			return errors.New("worker reported an inconsistent successful removal")
 		}
 		return nil
 	}
@@ -446,6 +477,55 @@ func validateEnterpriseHookWorkerResult(target enterpriseHookWorkerTarget, resul
 		return errors.New("worker result names an unknown agent config status")
 	}
 	return nil
+}
+
+const (
+	enterpriseHookWorkerRemovePathMax  = 512
+	enterpriseHookWorkerRemovePathsMax = 64
+	enterpriseHookWorkerRemainingMax   = 1024
+)
+
+func validateEnterpriseHookWorkerRemoveReport(result enterpriseHookWorkerTargetResult) error {
+	if !result.PathsReported && (len(result.CleanedPaths) != 0 || result.Remaining != "") {
+		return errors.New("worker removal paths lack a report marker")
+	}
+	if result.PathsReported && result.Unverified != "" {
+		return errors.New("worker reported both removal paths and an unverified reason")
+	}
+	if len(result.Unverified) > enterpriseHookWorkerRemainingMax ||
+		!utf8.ValidString(result.Unverified) || strings.IndexFunc(result.Unverified, unicode.IsControl) >= 0 {
+		return errors.New("worker reported an invalid unverified reason")
+	}
+	if len(result.CleanedPaths) > enterpriseHookWorkerRemovePathsMax {
+		return errors.New("worker reported too many removal paths")
+	}
+	for _, path := range result.CleanedPaths {
+		if len(path) > enterpriseHookWorkerRemovePathMax || !filepath.IsAbs(path) ||
+			filepath.Clean(path) != path || strings.TrimSpace(path) != path ||
+			!utf8.ValidString(path) || strings.IndexFunc(path, unicode.IsControl) >= 0 {
+			display := path
+			if len(display) > 96 && filepath.IsAbs(display) {
+				display = shortEnterpriseHookReportPath(display)
+			} else if len(display) > 96 {
+				display = boundedString(display, 96)
+			}
+			return fmt.Errorf("worker reported an invalid removal path %q", display)
+		}
+	}
+	if len(result.Remaining) > enterpriseHookWorkerRemainingMax ||
+		!utf8.ValidString(result.Remaining) || strings.IndexFunc(result.Remaining, unicode.IsControl) >= 0 {
+		return errors.New("worker reported an invalid remaining-entry reason")
+	}
+	return nil
+}
+
+func enterpriseHookWorkerPathWithin(home, path string) bool {
+	if !filepath.IsAbs(home) || !filepath.IsAbs(path) {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(home), filepath.Clean(path))
+	return err == nil && rel != "." && !filepath.IsAbs(rel) && rel != ".." &&
+		!strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // enterpriseHookStandaloneOutcome is one row's worker disposition.
@@ -577,6 +657,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
+	// ownedByRow is each dispatched target's exclusive-writer files, which
+	// the pass records the fingerprints of for status (GAP-0044).
+	ownedByRow := map[int][]string{}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -600,6 +683,10 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			}
 		}
 		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
+		if reason := enterpriseHookTargetNoHomeReason(err); reason != "" {
+			pendingRow(reason)
+			continue
+		}
 		if err != nil {
 			var binding *enterpriseHookUnixBinding
 			if previous, ok := bindings.Bindings[enterpriseHookProtectedTargetKey(row)]; ok {
@@ -755,7 +842,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 				watchDirs[dir] = struct{}{}
 			}
 		}
+		var ownedExclusive []string
 		if own, filesErr := enterprisehooks.WatchOwnedFiles(opts); filesErr == nil {
+			ownedExclusive = own.ExclusiveWriter
 			for _, f := range own.ExclusiveWriter {
 				exclusiveFiles[f] = struct{}{}
 			}
@@ -764,6 +853,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			}
 		}
 		index := len(rows)
+		ownedByRow[index] = ownedExclusive
 		rows = append(rows, row)
 		slot := enterpriseHookStandaloneSlot{
 			key: key, account: account, inode: check.Inode, verifiable: previousProtection.PreviouslyProtected,
@@ -867,6 +957,15 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	}
 	if stateErr == nil && cleanupErr != nil {
 		stateErr = fmt.Errorf("persist the per-user cleanup ledger: %w", cleanupErr)
+	}
+	uids := make(map[int]int, len(slots))
+	for index, slot := range slots {
+		uids[index] = slot.account.UID
+	}
+	if err := writeEnterpriseHookGuardianOwnedFiles(enterpriseHookWorkerLog, cfg.DataDir, rows, uids, ownedByRow); err != nil && stateErr == nil {
+		// Status would compare the files with an earlier pass: retry with
+		// the repair backoff.
+		stateErr = fmt.Errorf("record the verified hook files: %w", err)
 	}
 	if err := writeEnterpriseHookCredentialAttestation(manifestSHA256, rows, slots, verified, stateErr == nil); err != nil && stateErr == nil {
 		stateErr = fmt.Errorf("publish the guardian credential attestation: %w", err)

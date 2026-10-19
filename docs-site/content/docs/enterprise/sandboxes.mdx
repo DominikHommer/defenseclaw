@@ -58,6 +58,28 @@ Okta through SSSD, and similar sources work. See
   come back with `defenseclaw sandbox pull`. Skip-permissions mode is the
   default; a profile with `allow_yolo: false` keeps the agent's own prompts
   (the same as `--safe`). No flag loosens either limit.
+- **A Docker sandbox's commands show OpenShell's refusal.** Inside a sandbox
+  on the Docker driver, `curl` and `git` print only OpenShell's proxy refusal
+  for a destination the policy blocks (`CONNECT tunnel failed, response 403`).
+  The reason, such as "blocked by your organization" with the profile and the
+  rule, is in `defenseclaw sandbox destinations NAME`, `sandbox activity` and
+  the session summary. Showing it in the command's own output needs an
+  OpenShell change and is planned for a later release.
+- **Your own sandbox image goes through `openshell.image.base`.** A managed
+  `sandbox run` builds every agent image in the person's own Docker engine,
+  on the base image `openshell.image.base` names in the administrator
+  config, and the sandbox, a MicroVM included, starts from that local image.
+  For an image of your own, build or load it in the Docker engine the people
+  use and set `openshell.image.base` to it by digest: `name@sha256:<digest>`,
+  where for an image built on that computer the digest is its image ID
+  (`docker image inspect --format '{{.Id}}' name:tag`). A tag alone is
+  refused. A base the engine already has is never pulled: the agent image is
+  built on a local name of exactly that image
+  (`defenseclaw/sandbox-base:<image ID>`), which stays in the engine. `sandbox run` takes no image of the person's
+  choosing, and a sandbox made with `openshell sandbox create --from`
+  directly is not a DefenseClaw sandbox: it is foreign (see
+  [Foreign sandboxes](#foreign-sandboxes-rules-and-containers)) and may not
+  reach Ready on the managed OpenShell gateway.
 - **One sandbox account per host at a time.** The first account to run a
   sandbox holds the sandbox ports. Another account is told that sandboxes
   aren't available for it right now, without the name of the first account.
@@ -117,6 +139,14 @@ A sandbox run goes through five steps.
    running for five minutes, admits no relayed hook until the sandbox starts
    again. A registration bound to a sandbox the daemon reports as foreign is
    revoked.
+   Each sandbox keeps the floor of its own confirmed registration. One person
+   can run Claude Code and Codex sandboxes with different profile floors at
+   the same time; a change to either profile is applied to that sandbox.
+   The daemon keeps its registrations in a file in the person's own state
+   directory. After the daemon restarts, nothing in that file decides: until
+   the managed gateway answers for a registration, its sandbox is judged
+   under the closed floor, and the answer gives the whole floor, and the
+   required pack it names, again.
 4. Every hook the agent sends inside the sandbox goes from the sandbox to the
    user's daemon, and from there, unchanged, to the managed gateway, which
    judges it under the person's verified identity and profile. A broken relay
@@ -166,14 +196,17 @@ MicroVM user and group) are rendered by `ensure` into a root-owned
 user's OpenShell gateway is DefenseClaw's own user unit
 (`defenseclaw-openshell-gateway.service`, or the LaunchAgent on macOS), which
 runs the OpenShell gateway binary on that rendered file. The user's daemon
-starts the unit and registers the gateway when a run needs it, and stops it
-about a minute after the user's last sandbox stops, so the one gateway port is
-free for the next account. A stop, delete or list of a kept sandbox starts it
+starts the unit and registers the gateway when a run needs it. A successful
+stop or delete of the user's last running sandbox releases the one gateway
+port before the command returns, so the next account can start. A gateway
+started for preflight remains available briefly for the following create.
+A stop, delete or list of a kept sandbox starts it
 again when it needs it. In `prerequisite` mode the unit runs the binary you installed
 (`/usr/bin`, or `/usr/local/bin` on macOS); in `setup` mode it runs the user's
 `~/.local/bin` copy. NVIDIA's [upstream user unit](https://github.com/NVIDIA/OpenShell/blob/main/deploy/deb/openshell-gateway.service)
-uses `UMask=0077`. DefenseClaw's Linux user unit uses `UMask=0022` so the
-MicroVM driver can start. New files and folders the gateway creates under
+uses `UMask=0077`, and DefenseClaw never runs that unit. DefenseClaw's Linux user unit uses `UMask=0022` so the
+MicroVM driver can start; its start shim sets umask `0022` whatever the unit
+or a drop-in says, so a `UMask` drop-in for NVIDIA's unit changes nothing. New files and folders the gateway creates under
 the user's home can therefore have group or other read access when the
 gateway does not set an explicit mode; existing home permissions are not
 changed. The unit's gateway never reads the user's own
@@ -219,13 +252,12 @@ contact.
 | | Linux, Docker driver | Linux, MicroVM driver (optional) | macOS, MicroVM driver |
 | --- | --- | --- | --- |
 | Hardware | Any supported host | KVM. On EC2, a nested-virtualization type (for example m8i) or a `.metal` size. Graviton needs metal. | Apple silicon |
-| Group membership | The user is in `docker` | The user is in `kvm` (and `/dev/kvm` is readable and writable for them) and in `docker`, because the agent images are built in Docker for each user | None |
+| Group membership | The user is in `docker` | The user has read-write access to `/dev/kvm` through the `kvm` group or a named user ACL, and is in `docker` because the agent images are built in Docker for each user | None |
 | Also needed | Docker Engine 28 or newer with BuildKit, Landlock ABI 3 or newer (kernel 6.2 upstream; a distribution kernel may carry a backport, and `sandbox doctor` reports the ABI of the running kernel) | `e2fsprogs` 1.43 or newer, a Docker socket for image builds | `e2fsprogs` (see below), and Docker Desktop running for the user: the agent images are built there, and `sandbox doctor` checks it |
 | Service settings | Rendered `gateway.toml`, run by DefenseClaw's user unit | Rendered `gateway.toml`, run by DefenseClaw's user unit (it sets the umask the driver needs) | Rendered `gateway.toml`, run by DefenseClaw's LaunchAgent |
 
-`ensure` never adds anyone to a group. Adding people to `docker` or `kvm` is
-your decision, and `ensure` and `verify` only report a doctor row when a user
-who needs a group lacks it.
+`ensure` never changes group membership or device ACLs. Granting access is
+your decision; `ensure` and `verify` report accounts that lack it.
 
 ```bash
 sudo usermod -aG docker alice
@@ -307,11 +339,17 @@ and follow it with `sandbox logs NAME -f`; detached runs do not depend on the
 launching terminal, but still depend on those services. Linux linger keeps
 the services available after logout.
 
-**macOS `e2fsprogs`.** DefenseClaw ships none. The MicroVM driver finds it only
-in `enterprise.openshell.e2fsprogs_dir` (an absolute directory whose whole
-chain is owned by root) or in the user's own `~/.local/opt/e2fsprogs`.
-Anything else, such as a Homebrew keg owned by another account, is refused
-with `openshell_prerequisite_missing` and a message for the administrator.
+**macOS `e2fsprogs`.** The managed package includes `mke2fs`, `debugfs` and
+`e2fsck` with their GPL notice and source. When
+`enterprise.openshell.e2fsprogs_dir` is unset, the gateway uses an account's
+own `~/.local/opt/e2fsprogs/sbin` build if present, then the package tools.
+Set `e2fsprogs_dir` to an absolute root-owned install prefix to override the
+fallback with a host tool. A broken explicit setting is refused with
+`openshell_prerequisite_missing`; it never silently selects the package.
+Another account's Homebrew keg is not a managed gateway source.
+When a managed Mac uses the Docker compute driver, the gateway does not need
+`e2fsprogs`; `ensure`, the gateway exec shim and `sandbox doctor` skip this
+MicroVM prerequisite and identify the Docker driver.
 
 ### Recipe: prerequisite mode
 
@@ -343,8 +381,8 @@ and do nothing per account. The steps, as root:
    `ensure` renders `driver_dir` from the first of `/usr/libexec/openshell`,
    `/usr/lib/openshell` and `/usr/local/libexec/openshell` (macOS:
    `/opt/homebrew/libexec/openshell`, `/usr/local/libexec/openshell`) that holds
-   `openshell-driver-vm`. Also install `e2fsprogs` 1.43 or newer, and keep
-   Docker for the image builds.
+   `openshell-driver-vm`. On Linux also install `e2fsprogs` 1.43 or newer.
+   The macOS pkg supplies its fallback. Keep Docker for the image builds.
 3. **Run `ensure`** with the config (see [Turn it on](#turn-it-on)). It expects
    the policies folder to be `root:defenseclaw` mode 0750 and the rule pack
    folders to be owned by root.
@@ -373,8 +411,9 @@ that person, with no sudo. The steps, as root:
    install. NVIDIA publishes no tarballs for Intel Macs, so `setup` is refused
    there too.
 2. **Prepare what OpenShell needs and DefenseClaw does not bring.** Docker for the
-   agent images, the `docker` and `kvm` groups for the people who need them
-   (Linux), and `e2fsprogs` for the MicroVM driver ([the MicroVM driver](#the-microvm-driver)).
+   agent images, and the `docker` and `kvm` groups plus `e2fsprogs` for the
+   people who need them on Linux ([the MicroVM driver](#the-microvm-driver)).
+   The macOS pkg supplies `e2fsprogs` when no account build is present.
    `ensure` checks the driver prerequisites in this mode too.
 3. **Allow the download.** The daemon downloads NVIDIA's release tarballs, checks
    NVIDIA's SHA-256 file and a digest pinned in DefenseClaw, and uses the proxy
@@ -451,11 +490,11 @@ changes. See [Change the config](/docs/enterprise/lifecycle#change-the-config).
 | `enterprise.openshell` key | Meaning |
 | --- | --- |
 | `install` | `prerequisite` (default) or `setup`. |
-| `driver` | `docker`, `vm` or `auto`. The default is `vm` on macOS and `docker` on Linux. `auto` is the MicroVM driver where the user's KVM probe passes when a sandbox starts, and `docker` where it does not (Linux; macOS runs the MicroVM driver only, so `auto` is `vm` there). `vm` or `auto` with `install: prerequisite` on Linux is judged by `ensure`: it needs the driver binary, and the stock OpenShell rpm has none (see [Recipe: prerequisite mode](#recipe-prerequisite-mode)). |
+| `driver` | `docker`, `vm` or `auto`. The default is `vm` on macOS and `docker` on Linux. On Linux, `auto` chooses the MicroVM driver where the user's KVM probe passes and `docker` where it does not. On macOS, `auto` resolves to `vm`; an explicit `docker` setting uses Docker and does not need MicroVM `e2fsprogs`. `vm` or `auto` with `install: prerequisite` on Linux is judged by `ensure`: it needs the driver binary, and the stock OpenShell rpm has none (see [Recipe: prerequisite mode](#recipe-prerequisite-mode)). |
 | `driver_fallback` | Linux, `driver: vm` or `auto`. What a sandbox gets when KVM is not available for the user: `docker` (the default) or `none`. See [The docker fallback](#the-docker-fallback). |
 | `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.3"`; `prerequisite` also accepts a range inside `>=0.1.1 <0.2.0`. |
 | `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. |
-| `e2fsprogs_dir` | macOS only. An absolute directory whose chain is owned by root: the e2fsprogs install prefix (`mke2fs` and `debugfs` in its `sbin` or `bin`) or the folder that holds both. `ensure` names the folder the gateway uses and refuses one without both tools. |
+| `e2fsprogs_dir` | macOS only. Optional override: an absolute root-owned e2fsprogs install prefix (`mke2fs` and `debugfs` in its `sbin` or `bin`) or the folder that holds both. `ensure` names the folder the gateway uses and refuses a broken explicit value. When unset, an account build or the package tools are used. |
 
 These keys are lifecycle settings: changing one is applied by `ensure` and
 needs a restart of the user daemons, which waits for running sandboxes. The
@@ -494,6 +533,34 @@ Other combinations that cannot be satisfied are refused the same way: two
 leaves no destination once the floor is applied, `allowed_credentials: [none]`
 together with other providers, an unknown `required_for` connector, or a pack
 outside `<policy_dir>/sandbox/` or looser than the floor's.
+
+### Behind a TLS-inspecting proxy
+
+When your network decrypts TLS, sandboxes need the proxy's root CA. Put it in
+an administrator-owned PEM file (root-owned, not writable by group or others,
+with root-owned parent folders) and name it in the admin `config.yaml`:
+
+```yaml
+openshell:
+  trusted_ca_bundle: /etc/defenseclaw/proxy-root-ca.pem   # /Library/... on macOS
+```
+
+The managed gateway reads the file and hands its certificates to each
+user's sandbox daemon, which builds every harness image with them in its
+system store. A user cannot add a CA of their own: their own configuration
+is not read. A file that fails the ownership check, or holds anything but
+CA certificates, stops image builds for everyone, and each user's
+`defenseclaw sandbox doctor` shows the reason in the Sandbox TLS trust row.
+
+The CA covers what programs in a sandbox reach (package installs, git, MCP
+servers, the agent's tools). It does not cover the agents' model calls:
+OpenShell's sandbox supervisor makes those, adding the credential, and
+verifies the provider with its own trust store, which takes no extra CA.
+Exempt the model provider hosts your agents use from TLS inspection on the
+proxy (for example `api.anthropic.com`, `api.openai.com`,
+`api.githubcopilot.com` and `bedrock-mantle.<region>.api.aws`). The Sandbox
+TLS trust row fails, by name, while any of the hosts it checks is
+inspected, with or without the CA.
 
 ### The docker fallback
 
@@ -536,8 +603,8 @@ default (`driver_fallback: docker`).
   `fallback ...` rows for the fallback's own prerequisites. A MicroVM
   prerequisite the host lacks while the fallback is ready is the warning
   `openshell_driver_fallback`, not `openshell_prerequisite_missing`: users still
-  get sandboxes. The groups row asks for both `kvm` (where `/dev/kvm` is not
-  open to everyone) and `docker`.
+  get sandboxes. The groups row asks for `/dev/kvm` access through the `kvm`
+  group or a named user ACL, plus `docker`.
 
 This is the launch banner of a person on a Linux computer where the CPU shows no
 hardware virtualization, with the default fallback:
@@ -563,7 +630,7 @@ the lifecycle checks for it.
 | Hardware | `/dev/kvm` exists and the CPU shows `vmx` or `svm`. On a cloud VM that takes nested virtualization or a bare-metal size. | Apple silicon. An Intel Mac is refused (`os_unsupported`). |
 | Access | `/dev/kvm` is readable and writable for the person, directly or through the `kvm` group | Nothing to arrange |
 | Driver binary | `openshell-driver-vm` at the OpenShell release you run. In `prerequisite` mode you extract NVIDIA's tarball ([the recipe](#recipe-prerequisite-mode)); in `setup` mode each person's daemon downloads it. | The same, from NVIDIA's macOS build |
-| `e2fsprogs` | 1.43 or newer on the host (`mke2fs`) | In `e2fsprogs_dir` (a root-owned directory) or the person's `~/.local/opt/e2fsprogs`. Another account's Homebrew keg is refused. |
+| `e2fsprogs` | 1.43 or newer on the host (`mke2fs`) | The root-owned `e2fsprogs_dir` override, the person's `~/.local/opt/e2fsprogs`, or the package fallback. Another account's Homebrew keg is refused. |
 | Docker | Needed for the agent images, and for the fallback | Docker Desktop running for the person: the agent images are built there |
 | Gateway settings | Rendered `gateway.toml`, run by DefenseClaw's user unit, which sets the umask the driver needs | Rendered `gateway.toml`, run by DefenseClaw's LaunchAgent |
 | When it can't run | The Docker fallback (default) or a refusal with `driver_fallback: none` | No fallback: the sandbox is refused with the reason |
@@ -725,7 +792,18 @@ approvals modes, workspace, MCP, `hooks.fail_mode`, `on_tamper`, `on_silence`,
 `silence_after` and the egress lists, and must match its
 `required_pack_digest` when it has one; `ensure` and the config load refuse
 anything else and keep the previous config, and every create checks again and
-fails closed. A run whose profile names no pack gets the default pack
+fails closed. A pack edited in place, with `config.yaml` unchanged, is applied
+by the next `ensure`: the effective policy the config computes to differs from
+the one the running gateway reports, so `ensure` records the next
+`config_generation` and starts the gateway again, and `policy.applied` reads
+`true` once the gateway reports the new digest. The gateway reads each
+required pack once, with its configuration, so an edit takes effect at that
+`ensure`, not before. An edit that no longer loads (a value the pack does not
+build with, say) is refused: `ensure` fails with `config_refused` and the
+reason, records no `config_generation` and leaves the gateway running the last
+good pack; correct or restore the file and run `ensure` again. A gateway
+started on a pack that does not load refuses to start, and a reload keeps the
+previous configuration. A run whose profile names no pack gets the default pack
 (`openshell.pack`, else `balanced`; never `open`). Managed computers run every
 sandbox on a copy of the project, so a profile's pack that sets
 `workspace.mode: mount` is refused as looser than the default pack, and a
@@ -965,8 +1043,19 @@ the user's OpenShell CLI that answers: everything those run is foreign.
   shown in `status` and `list`:
 
   ![defenseclaw sandbox status and sandbox list after raw openshell created a sandbox: Sandbox raw1 was removed: it wasn't started with defenseclaw sandbox run, which your organization requires, shown above the Sandboxes and OpenShell rows and again above the list, which holds only the sandbox DefenseClaw started](/images/sandboxes/managed/foreign-sandbox-removed.png)
+  Under `alert`, a foreign sandbox on the person's managed OpenShell gateway
+  keeps running while the gateway does, but it does not hold the one gateway
+  port for itself: when the person's last DefenseClaw sandbox stops or is
+  deleted, the gateway stops after the foreign sandboxes on it were recorded
+  (within about 45 seconds), and the foreign sandbox stops with it, so the
+  next account can start. A gateway that only a foreign sandbox keeps is
+  checked again every 15 seconds and stops soon after that sandbox ends.
   The record reaches the managed gateway even when the person has no
   registered sandbox, so someone who only runs raw `openshell` is audited too.
+  Before any of the person's registrations names a floor (no managed sandbox
+  yet, or just after the daemon started), the person's own
+  `foreign_sandboxes` from the managed gateway's settings decides; without
+  that answer the default, stop, applies.
   The administrator's `sandbox list` shows registrations only, and a foreign
   sandbox never had one, so it is not listed there: look for
   `sandbox.foreign_sandbox` in the audit log, or `log.sandbox.foreign_sandbox`
@@ -1003,6 +1092,11 @@ learns of it from the next relayed hook or from a poll every 60 seconds. A
 renamed or recycled account is different: the registration is revoked (see the
 last paragraph of this section), not re-matched.
 
+An unblock or an answer to an ask confirms the sandbox's policy with the
+managed gateway first, as a new connection does, so it is judged under the
+profile `sandbox policy explain` names for that sandbox, which the managed
+gateway checks again before it keeps the decision.
+
 A running managed sandbox takes a changed live field before its next
 connection: its egress proxy decides each new connection with the policy the
 managed gateway confirmed for it within the last second, and confirms it again
@@ -1024,9 +1118,36 @@ connection picks the change up on its next poll.
 
 | Kind of field | What happens |
 | --- | --- |
-| Live fields (egress lists, approvals, `request_access`, silence, process tree, retention) | Switch at once, tighter or looser, and the person sees a status line |
-| Tighter create-time fields (for example mounts no longer allowed) | The violating sandbox is stopped; the notice begins "This sandbox was stopped: your profile no longer allows" and names the field and the command to start again. Only after a verified match, never on a failed lookup. |
+| Live fields (egress lists, approvals, `request_access`, silence, process tree, retention) | Switch at once and the person sees a status line. An edit of a profile's own settings applies tighter or looser; an assignment change only tightens a running sandbox (see below) |
+| Tighter create-time fields (for example mounts no longer allowed) | The violating sandbox is stopped; the notice begins "This sandbox was stopped: your profile no longer allows" and names the field and the command to start again. A sandbox started with `--host-port` under a profile that no longer allows host ports gets "no longer allows host ports" and the advice to start it again without `--host-port`. The agent's session ends with it, `sandbox activity` shows it, and `sandbox status NAME` repeats it on a `Stopped` row. Only after a verified match, never on a failed lookup. |
 | Looser create-time fields | Apply at the next run |
+
+`sandbox status NAME` shows the organization profile the sandbox's
+registration matches now on its `Your policy` row, with the digest of that
+same match, as `sandbox policy explain` names them. For a running sandbox,
+`sandbox status NAME` first asks your organization's gateway for the
+sandbox's current policy, so after a regroup it names the new profile at once,
+or shows the stop when the new profile no longer allows the sandbox; if the
+gateway does not answer within 2 seconds, it shows the policy DefenseClaw last
+confirmed. The `Policy` row above it keeps naming the policy pack and network
+profile the sandbox runs under. A sandbox the organization's policy stopped
+keeps showing the pack and network profile it ran with, also after the
+sandbox service restarts.
+
+Floors are pinned per sandbox when it is created. When a person's profile
+assignment changes (a regroup, an edit of `profile_assignments`), each running
+sandbox is re-matched to the new profile, but it runs under the stricter of
+the two floors: the floor of the profile it was created under and the floor of
+the new one, combined as `openshell.admin` and a profile combine. A sandbox
+created under a strict profile keeps its blocked destinations after the person
+moves to a looser profile, and one created under a looser profile is tightened
+at once when the person moves to a stricter one. `sandbox status` and the
+refusals name the profile the person is assigned to now. The person's next
+sandbox takes the new profile alone; to loosen a running sandbox, stop it and
+run a new one. If the profile a sandbox was created under is removed from the
+configuration, that sandbox's policy no longer loads and it is refused until
+it is started again. Two sandboxes of one person created under different
+profiles therefore keep different floors side by side.
 
 A person whose group changes to one that no longer allows sandboxes sees this
 when the sandbox stops under them. The session summary says where the work is,
@@ -1040,7 +1161,9 @@ and then starts under `default_profile`, marked
 or failed group lookup never refuses a create or a hook. The computer must
 still know the account itself: OpenShell reaches every sandbox over ssh as the
 person, and ssh refuses an account the computer can't look up (on Linux, SSSD
-stopped, or no cached entry for the account). Then a new `sandbox run` stops
+stopped, or no cached entry for the account). A new `sandbox run` then waits
+up to 10 seconds for the computer to name the account again, and starts if it
+does (an SSSD restart, say). Otherwise it stops
 with "Your account can't be looked up on this computer right now. Try again in
 a moment.", says that this isn't the organization's sandbox policy and names
 the request-access contact for when it lasts, although `sandbox policy
@@ -1277,7 +1400,11 @@ instead. They show:
   `--user`, filtered with `--state pending|expired|live|stopped|revoked`, with
   `--json`. Each row shows the state now: a pending registration that no sandbox
   bound to within 30 minutes is `expired` (a run that never started), and a registration whose
-  sandbox is not running is `stopped`;
+  sandbox is not running is `stopped`. A foreign sandbox has no registration,
+  so it is absent from this list. Managed `foreign_sandboxes` controls whether
+  it is stopped or reported; see
+  [Foreign sandboxes, rules and containers](#foreign-sandboxes-rules-and-containers)
+  for the audit record;
 - `sandbox explain` shows one registration the way the person sees it, then the
   sources: organization (the floor for everyone) and profile;
 - `policy verify --user` adds the sandbox rows: each required agent, the
@@ -1350,20 +1477,29 @@ running sandbox counts again within the next minute.
   compatibility bridge: `ensure` also renders the 1.0.1 docker configuration
   (`gateway-docker-default-namespace.toml`, next to `gateway.toml`), and a
   user's gateway keeps starting on it, in the `default` namespace, while that
-  user still keeps a sandbox there. The user's kept sandboxes list, start,
-  connect and pull as before, running or stopped, and the upgrade is a plain
+  user still keeps a sandbox there and none in `defenseclaw-managed`. A user
+  who keeps sandboxes in both (after a downgrade to 1.0.1 and an upgrade
+  again, for example) starts in `defenseclaw-managed`, because one gateway
+  serves one namespace: the 1.0.1 sandboxes then report "not found", the
+  gateway's log names the cause, and they start again once no sandbox is left
+  in `defenseclaw-managed` (pull, then delete each). Pull and delete the
+  sandboxes in `defenseclaw-managed` before a downgrade to 1.0.1: a 1.0.1
+  gateway does not know that namespace, and such a sandbox can come back in
+  OpenShell's error state (ComputeResourceMissing), with its work no longer
+  readable. The user's kept
+  sandboxes list, start, connect and pull as before, running or stopped, and
+  the upgrade is a plain
   restart ("pending restart" while a sandbox runs), not a switch. A user who
   never ran sandboxes moves straight to `defenseclaw-managed`, and so does a
   user at the gateway's next start once their last 1.0.1 sandbox is deleted
   (`defenseclaw sandbox delete NAME`, after `defenseclaw sandbox pull NAME
   --apply` for work to keep) or purged. One account runs sandboxes at a time
-  either way. The bridge lives in the setup's applied record, which an uninstall
-  removes, so it does not come back with a later install: before an uninstall,
-  pull the work you want to keep from the sandboxes kept under 1.0.1
-  (`defenseclaw sandbox pull NAME --apply`), because after the install their
-  gateway starts in `defenseclaw-managed` and no longer lists them (a known
-  limit). This is the 1.0.1 upgrade bridge; it is removed when 1.0.1 is out of
-  support.
+  either way. A sandbox folder of the docker driver whose containers are gone
+  (removed outside OpenShell) does not keep a user on the bridge. The bridge
+  lives in the setup's applied record. A non-purge uninstall keeps that record
+  while an account keeps sandboxes, so the bridge comes back with the next
+  `ensure`, also after a package reinstall; a purge removes it. This is the
+  1.0.1 upgrade bridge; it is removed when 1.0.1 is out of support.
 - **Roll back.** The lifecycle snapshot covers the user units and the launcher. A
   `setup`-installed OpenShell under `~/.local` is removed with the user's
   teardown.
@@ -1376,19 +1512,22 @@ running sandbox counts again within the next minute.
   `/opt/cisco/defenseclaw/runtime` on macOS) also keeps the gateway's sandbox
   registrations and decisions (`sandbox/registrations` and `sandbox/decisions`)
   and their key (`redaction-correlation.key`); the rest of the machine state
-  goes. If the uninstall removed the service account, those files are root's
+  goes. The lifecycle directory (`/var/lib/defenseclaw-enterprise` on Linux,
+  `/opt/cisco/defenseclaw/lifecycle` on macOS) keeps the root-only record of
+  the sandbox setup they were made under (`openshell-state.kept.json`). If
+  the uninstall removed the service account, the store and key are root's
   until the next `ensure`, which adopts them and gives them to the service
-  account, also after a package reinstall (`rpm -e` or `apt remove`, then an
-  install). The kept sandboxes then start, review and pull as before, except
-  the sandboxes kept under 1.0.1 (the 1.0.1 upgrade bridge): the bridge lives in
-  the setup's applied record, which an uninstall removes, so after the reinstall
-  their gateway starts in `defenseclaw-managed` and no longer lists them. Before
-  an uninstall, pull the work you want to keep from the sandboxes kept under
-  1.0.1 (`defenseclaw sandbox pull NAME --apply`); they do not survive an
-  uninstall and reinstall (a known limit). Only
+  account, also after a package reinstall
+  (`rpm -e` or `apt remove`, then an install) and after a reinstall whose first
+  `ensure` failed and rolled back. That `ensure` compares the new setup with
+  the kept record, so a driver or version change is a switch that waits for
+  running sandboxes, and it keeps the 1.0.1 upgrade bridge. The kept sandboxes
+  then start, review and pull as before, the sandboxes kept under 1.0.1
+  included, on the bridge's terms above. Only
   `--purge` runs each user's teardown as that user and removes the daemon
   state, MicroVM disks, images, both stores and the rendered `gateway.toml`;
-  it also removes the kept registrations, decisions and key. On Linux, purge
+  it also removes the kept registrations, decisions and key, and the kept
+  setup record. On Linux, purge
   first asks host Docker as root to remove the containers and volumes of each
   account's sandboxes in both managed Docker namespaces, OpenShell's `default`
   (the sandboxes kept under 1.0.1) and `defenseclaw-managed`, matched by

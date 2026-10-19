@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // unixLifecycleOptions are the flags of `enterprise linux|macos <action>`.
@@ -47,7 +48,8 @@ type enterpriseSecretOptions struct {
 	fromFile  string
 	json      bool
 	// lockWait is how long set and remove wait for another lifecycle run
-	// (Linux and macOS).
+	// (Linux and macOS) or for a policy bundle run to release bundle.lock
+	// (Windows).
 	lockWait time.Duration
 }
 
@@ -236,7 +238,7 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		addLockWaitFlag(flags, &opts.lockWait)
 	case "uninstall":
 		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); an account's own DefenseClaw install from before the enrollment is moved to ~/.defenseclaw-backup-<UTC time> in its home first; the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
-		flags.BoolVar(&opts.keepState, "keep-state", false, "keep the machine state (config, secrets, gateway and guardian state, logs, lifecycle state) and the service account, so a reinstall resumes with them; without it uninstall removes all of it")
+		flags.BoolVar(&opts.keepState, "keep-state", false, unixKeepStateUsage(platform))
 		flags.BoolVar(&opts.keepServiceAccount, "keep-service-account", false, "keep the gateway service account, which uninstall deletes otherwise")
 		addLockWaitFlag(flags, &opts.lockWait)
 	case "reconcile", "rotate-credentials":
@@ -244,6 +246,23 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	}
 	flags.BoolVar(&opts.json, "json", false, "print the lifecycle result as JSON")
 	return cmd
+}
+
+// unixKeepStateUsage is the uninstall --keep-state help. It names the paths
+// of the sandbox state a plain uninstall keeps, as the uninstall summary
+// does (GAP-0067).
+func unixKeepStateUsage(platform string) string {
+	goos := "linux"
+	if platform == "macos" {
+		goos = "darwin"
+	}
+	kept := "the gateway's sandbox registrations, their key and the lifecycle's sandbox setup record"
+	if layout, err := managed.StandaloneLayoutFor(goos); err == nil {
+		store, key, record := layout.KeptSandboxStatePaths()
+		kept = "the gateway's sandbox registrations (" + store + "), their key (" + key + ") and the lifecycle's sandbox setup record (" + record + ")"
+	}
+	return "keep the config, secrets, gateway and guardian state, logs and the service account, so a reinstall resumes with them (the deployment record goes either way); without it uninstall removes that state except " +
+		kept + " while an account keeps sandboxes; --purge removes those too"
 }
 
 // invalidLifecycleArguments labels err with the lifecycle's invalid-arguments
@@ -275,32 +294,58 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		},
 	}
 	if action != "status" {
-		cmd.Flags().StringVar(&opts.name, "name", "", "credential name (lowercase letters, digits and dashes)")
+		cmd.Flags().StringVar(&opts.name, "name", "", "credential name (1-63 lowercase letters, digits or dashes; starts with a letter or digit)")
+		cmd.Flags().Lookup("name").Annotations = map[string][]string{
+			secureClientUsageAnnotation: {"credential name (lowercase letters, digits and dashes)"},
+		}
 		_ = cmd.MarkFlagRequired("name")
 	}
 	if action == "set" {
 		cmd.Flags().BoolVar(&opts.fromStdin, "from-stdin", false, "read the value from standard input")
 		cmd.Flags().StringVar(&opts.fromFile, "from-file", "", "read the value from this file")
 	}
-	if action != "status" && runtime.GOOS != "windows" {
+	if action != "status" {
 		addLockWaitFlag(cmd.Flags(), &opts.lockWait)
+		if runtime.GOOS == "windows" {
+			cmd.Flags().Lookup("lock-wait").Usage = windowsSecretLockWaitUsage
+		}
 	}
 	cmd.Flags().BoolVar(&opts.json, "json", false, "print JSON")
-	if runtime.GOOS != "windows" {
-		// An unknown flag, a malformed value, a stray argument or a missing
-		// --name is invalid arguments: exit 2 with the usage line and the
-		// --help pointer, as on enterprise linux|macos (GAP-2095).
-		cmd.SetFlagErrorFunc(lifecycleFlagError)
-		cmd.Args = lifecycleNoArgs
-		cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
-			if err := cmd.ValidateRequiredFlags(); err != nil {
-				return lifecycleFlagError(cmd, err)
-			}
-			return nil
+	// An unknown flag, a malformed value, a stray argument or a missing
+	// --name is invalid arguments: exit 2 (Windows 1639) with the usage line
+	// and the --help pointer, as on enterprise linux|macos (GAP-2095).
+	// Windows set, remove and status also print their --json failure
+	// document.
+	flagError := func(c *cobra.Command, err error) error {
+		err = lifecycleFlagError(c, err)
+		if enterpriseSecretArgumentRefusal != nil {
+			return enterpriseSecretArgumentRefusal(c, action, opts, err)
 		}
+		return err
+	}
+	cmd.SetFlagErrorFunc(flagError)
+	cmd.Args = func(c *cobra.Command, args []string) error {
+		if err := strayArgumentError(c, args); err != nil {
+			return flagError(c, err)
+		}
+		return nil
+	}
+	cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
+		if err := cmd.ValidateRequiredFlags(); err != nil {
+			return flagError(cmd, err)
+		}
+		return nil
 	}
 	return cmd
 }
+
+// windowsSecretLockWaitUsage is --lock-wait of Windows `secret set|remove`.
+const windowsSecretLockWaitUsage = "wait up to this long for a policy bundle run to release bundle.lock (default: no wait, at most 15m) before exiting 1618; the installer's lifecycle.lock is waited for up to 30s either way"
+
+// enterpriseSecretArgumentRefusal reports an argument error of `enterprise
+// secret` the way the platform documents it: Windows prints the --json
+// failure document (enterprise_secret_windows.go); nil elsewhere.
+var enterpriseSecretArgumentRefusal func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error
 
 func init() {
 	enterpriseSecretCmd.AddCommand(

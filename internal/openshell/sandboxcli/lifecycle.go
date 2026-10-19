@@ -199,7 +199,7 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		a.printStatus(st)
 		return nil
 	}
-	sb, err := api.Get(ctx, name)
+	sb, err := api.GetConfirmed(ctx, name)
 	if err != nil {
 		return apiError(err)
 	}
@@ -341,6 +341,14 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	} else {
 		row("Policy", fmt.Sprintf("pack %s, network %s, approvals %s", joinNonEmpty(" ", firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest)), networkLabel(sb), approvals))
 	}
+	// On a managed computer: the organization profile the sandbox's
+	// registration matches now, with the digest of the same match, so a
+	// regroup shows here as in `policy explain` (#1199); and the
+	// organization's words for a stop its policy made.
+	if sb.OrganizationProfile != "" {
+		row("Your policy", organizationPolicyText(sb.OrganizationProfile, sb.Provisional, sb.PolicyDigest)+" — "+CommandName+" policy explain")
+	}
+	row("Stopped", sb.StopReason)
 	// What it was created with beyond the policy, which a resume keeps.
 	for _, c := range grantTexts(sb.Credentials) {
 		row("Secret", c)
@@ -1011,6 +1019,7 @@ func (a *App) Start(ctx context.Context, name string, o StartOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
+	sb = a.settledSandbox(ctx, api, sb)
 	if sb.Phase == "ready" {
 		a.ok(sb.Name + " is already running → attach with `" + CommandName + " connect " + sb.Name + "`")
 		return nil
@@ -1025,6 +1034,37 @@ func (a *App) Start(ctx context.Context, name string, o StartOptions) error {
 		a.note(a.undoPointText(sb, kept))
 	}
 	return nil
+}
+
+// sandboxSettlePolls and sandboxSettleInterval bound how long a start or a
+// pull waits for a sandbox OpenShell is still starting on its own.
+const (
+	sandboxSettlePolls    = 90
+	sandboxSettleInterval = time.Second
+)
+
+// settledSandbox waits while OpenShell is still starting sb on its own: a
+// gateway that restarts resumes a sandbox it kept, and a `start` or `pull`
+// right then failed with "is starting, not stopped; stop it before starting
+// a new session", which a stop could not do either (rel-1-0-3 BR-04 pass
+// point A). It returns the sandbox as it settled, or as last seen when it
+// did not settle in time or could not be read.
+func (a *App) settledSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox) *sandboxapi.Sandbox {
+	a.defaults()
+	for poll := 0; poll < sandboxSettlePolls && (sb.Phase == "starting" || sb.Phase == "provisioning"); poll++ {
+		if poll == 0 {
+			a.note(sb.Name + " is " + sb.Phase + " (OpenShell is starting it); waiting for it…")
+		}
+		if err := a.Sleep(ctx, sandboxSettleInterval); err != nil {
+			return sb
+		}
+		now, err := api.Get(ctx, sb.Name)
+		if err != nil {
+			return sb
+		}
+		sb = now
+	}
+	return sb
 }
 
 // DeleteOptions are the `sandbox delete` flags.

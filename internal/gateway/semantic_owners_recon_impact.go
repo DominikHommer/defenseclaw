@@ -2018,7 +2018,7 @@ func staticKubernetesExecOuter(command actionfacts.CommandFact) bool {
 	for index, argument := range command.Argv[1:] {
 		action := strings.ToLower(argument)
 		if action != "exec" && action != "debug" &&
-			!(action == "rsh" && oneOfFold(command.Program, "oc")) {
+			(action != "rsh" || !(oneOfFold(command.Program, "oc"))) {
 			continue
 		}
 		if workloadOperandIndex(command.Argv, index+2, "kube") >= 0 {

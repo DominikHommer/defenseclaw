@@ -5029,7 +5029,7 @@ function Get-NativeHookArguments([string]$RegisteredEvent) {
         $bridgeArguments = [string[]]@(if ($null -ne $bridge) { $bridge.Arguments })
         $contractIndex = [Array]::IndexOf($bridgeArguments, '--hook-contract')
         if ($contractIndex -lt 0 -or $contractIndex + 1 -ge $bridgeArguments.Count -or
-            $bridgeArguments[$contractIndex + 1] -notmatch '^codex-hooks-v[0-9]+$') {
+            $bridgeArguments[$contractIndex + 1] -notmatch '^codex-hooks-v[0-9]+(-generic)?$') {
             throw 'Codex registration has no finite installer-bound hook contract'
         }
         $arguments += @('--hook-contract', $bridgeArguments[$contractIndex + 1])
@@ -5609,6 +5609,7 @@ function Assert-CodexSynchronousWindowsHookCommand([object]$CodexCommand, [strin
         'codex-hooks-v1' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'Stop')
         'codex-hooks-v2' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'PreCompact', 'PostCompact', 'Stop')
         'codex-hooks-v3' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'Stop')
+        'codex-hooks-v3-generic' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'Stop')
         'codex-hooks-v4' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'Stop', 'SessionEnd')
     }
     $boundEvent = if ($arguments.Count -eq 7) { $arguments[4] } else { '' }

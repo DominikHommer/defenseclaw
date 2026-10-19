@@ -4134,6 +4134,30 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_SANDBOX_CA_BASE",
+      "category": "hook_internal",
+      "purpose": "Records OpenShell's original CA bundle path in a sandbox process tree so a nested login shell preserves a caller-set SSL_CERT_FILE while refreshing DefenseClaw's combined sandbox CA bundle. Set by the sandbox launcher or shell profile; do not override manually.",
+      "default": "unset (set by DefenseClaw in a trusted-CA sandbox)",
+      "accepted_values": [
+        "absolute path to OpenShell's CA bundle",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/openshell/trustedca.go",
+          "description": "Go constant naming the sandbox shell's original CA bundle variable"
+        },
+        {
+          "location": "internal/openshell/harness/shellenv.go",
+          "description": "Launcher and login-shell fragment records the original bundle to preserve caller overrides in nested shells"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
       "name": "DEFENSECLAW_SANDBOX_ID",
       "category": "hook_internal",
       "purpose": "The sandbox's DefenseClaw ingress binding id, which the sandbox manager sets inside every sandbox it launches, through the harness spec's environment. It is not the OpenShell sandbox id. It tells a nested DefenseClaw launch that it already runs sandboxed: a nested `sandbox run` runs the harness natively and needs no configuration, and the shell wrapper steps aside. Sandbox hooks drop it, and the gateway takes the sandbox id from the ingress binding instead.",
@@ -6663,6 +6687,29 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_VENV",
+      "category": "runtime_path",
+      "purpose": "Absolute Python runtime path selected by the macOS app and passed to its upgrade and gateway actions so each action stays on the selected installation.",
+      "default": "${DEFENSECLAW_HOME}/.venv (or the managed package runtime)",
+      "accepted_values": [
+        "any-absolute-path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "macos/DefenseClawMac/DefenseClawMac/DataLayer/InstallationContext.swift",
+          "description": "Selects and pins the app's Python runtime for subprocesses"
+        },
+        {
+          "location": "macos/DefenseClawMac/GatewayAdminHelper/main.swift",
+          "description": "Passes the selected runtime to the gateway action"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
       "name": "DEFENSECLAW_WEBEX_TOKEN",
       "category": "credential",
       "purpose": "Webex bot token default for webhook entries.",
@@ -7254,6 +7301,30 @@
       ],
       "since": "1.0.1",
       "security_note": "Skips recovery of a pending transaction, so it is honoured only in the environment the signed, elevated lifecycle CLI builds for the installer and cleared before any child starts."
+    },
+    {
+      "name": "DEFENSECLAW_STANDALONE_COLLECT_RUNTIME_GENERATIONS",
+      "category": "upgrade_internal",
+      "purpose": "Asks the standalone Windows installer's Verify, run by an elevated ensure that found the deployment compliant, to collect the old managed hook runtime copies a retire left and to name each per-user DefenseClaw folder still untrusted. It is not an installer parameter because the installer parameter set is the Secure Client command line. The installer reads it only for a Verify and clears it so no child process inherits it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/windows_enterprise_standalone.go",
+          "description": "Sets it in the strict installer environment only for the Verify of an elevated ensure that found the deployment compliant"
+        },
+        {
+          "location": "packaging/windows/install-enterprise.ps1",
+          "description": "Reads and clears it, and passes CollectRuntimeGenerations to the lifecycle only for the Verify action"
+        }
+      ],
+      "since": "1.0.3"
     },
     {
       "name": "DCLAW_FLEET_API_TOKEN",

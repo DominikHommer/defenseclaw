@@ -460,7 +460,10 @@ var pendingKinds = map[string]int{"restart": 1, "launchd": 2, "switch": 3, "stop
 // runs a sandbox keeps running it; its change waits.
 func (l *lifecycle) settleOpenShell(ctx context.Context, op *openshellPlan) {
 	env := l.env
-	state := env.loadOpenShellState()
+	state, kept := l.openShellStateForSettle()
+	if kept {
+		defer l.discardKeptOpenShellStateAfterSave(state, state.Applied != nil || len(state.Pending) != 0)
+	}
 	prev := state.Applied
 	cur := appliedOf(op)
 	kind, reason := "", ""
@@ -1004,10 +1007,12 @@ func (e *Env) digestBelowHome(a SandboxAccount, rel string) (digest string, pres
 // a change waits for, and the ones the hook manifest enrolls. The uninstall
 // calls it before it removes the per-user registrations, because removing
 // them deletes the eligible-accounts record that names an account whose only
-// trace is its sandbox state. It is empty when the subsystem was never on.
+// trace is its sandbox state. The active setup decides whether the subsystem
+// was on; after a failed uninstall of a recorded deployment, the kept setup
+// does. It is empty when neither setup records an active subsystem.
 func (l *lifecycle) sandboxAccounts(ctx context.Context) []SandboxAccount {
 	env := l.env
-	state := env.loadOpenShellState()
+	state := l.uninstallOpenShellState()
 	if state.Applied == nil && len(state.Pending) == 0 {
 		return nil
 	}
@@ -1075,10 +1080,11 @@ func (e *Env) manifestSandboxAccounts() []SandboxAccount {
 // and deletes the sandboxes, providers and profiles through them; only then
 // the account's units stop (stopping the daemon stops its sandboxes first),
 // and what the subsystem left in the account's home goes too. It never
-// deletes anything it did not create.
+// deletes anything it did not create. The active setup, or the kept setup on
+// a failed uninstall retry with a deployment record, decides whether it ran.
 func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAccount) {
 	env, r := l.env, l.result
-	state := env.loadOpenShellState()
+	state := l.uninstallOpenShellState()
 	if state.Applied == nil && len(state.Pending) == 0 {
 		// The sandbox subsystem was never on: no account has anything of
 		// it. The macOS pkg still installs both LaunchAgents with it off
@@ -1376,15 +1382,31 @@ func (e *Env) sandboxImageLogRels(a SandboxAccount) ([]string, error) {
 	return rels, nil
 }
 
-// removeOpenShellMachineState removes the lifecycle's own sandbox files that
-// no deployment record lists, and their directory unless the package owns it
-// (the package erase removes it then).
-func (e *Env) removeOpenShellMachineState(channel string) {
+// removeOpenShellMachineState removes the lifecycle's sandbox files that no
+// deployment record lists. When keepRecord is true it moves the applied
+// setup record aside for the kept sandboxes, where only settleOpenShell reads
+// it during activation; a retry of a failed uninstall keeps that valid moved
+// record. The OpenShell directory goes unless the package owns it.
+func (e *Env) removeOpenShellMachineState(channel string, keepRecord bool) (bool, error) {
 	_ = removeFile(e.P(e.prerequisitesPath()))
-	_ = removeFile(e.openshellStatePath())
+	var kept bool
+	var err error
+	if keepRecord {
+		if kept, err = e.keepOpenShellState(); err != nil {
+			// Nothing stale stays behind: the record goes, as it did before
+			// kept sandboxes carried it.
+			_ = removeFile(e.openshellStatePath())
+		}
+	} else {
+		_ = removeFile(e.openshellStatePath())
+		if err = removeFile(e.openshellKeptStatePath()); err != nil {
+			err = fmt.Errorf("could not remove the stale record of the sandbox setup %s: %w", e.openshellKeptStatePath(), err)
+		}
+	}
 	if !e.packageOwnsOpenShellDir(channel) {
 		_ = removeDirIfEmpty(e.P(e.openshellDir()))
 	}
+	return kept, err
 }
 
 // removeEmptyBelowHome removes the folder rel below the account's home when

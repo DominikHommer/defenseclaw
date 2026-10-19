@@ -240,6 +240,45 @@ func (e *Env) copyFileAtomic(src, path string, mode os.FileMode, owner fileOwner
 	})
 }
 
+// refreshFile replaces a regular file with a new file (a new inode) that has
+// the same bytes, mode and owner. The copy must hash to what the file held
+// when it was opened; a file that changes meanwhile is left as it is.
+func (e *Env) refreshFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	uid, gid, err := e.OwnerOf(path)
+	if err != nil {
+		return err
+	}
+	in, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if opened, err := in.Stat(); err != nil || !os.SameFile(info, opened) {
+		return fmt.Errorf("%s changed while it was opened", path)
+	}
+	want, err := sha256File(path)
+	if err != nil {
+		return err
+	}
+	return e.installAtomic(path, info.Mode().Perm(), fileOwner{UID: uid, GID: gid}, func(w io.Writer) error {
+		sum := sha256.New()
+		if _, err := io.Copy(io.MultiWriter(w, sum), in); err != nil {
+			return err
+		}
+		if hex.EncodeToString(sum.Sum(nil)) != want {
+			return fmt.Errorf("%s changed while it was copied", path)
+		}
+		return nil
+	})
+}
+
 func (e *Env) installAtomic(path string, mode os.FileMode, owner fileOwner, fill func(io.Writer) error) error {
 	dir := filepath.Dir(path)
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {

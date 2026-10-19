@@ -90,6 +90,31 @@ func (f *doctorFixture) onMicroVMs() {
 // macTempDir is a Mac user's $TMPDIR.
 const macTempDir = "/var/folders/1r/kq1tw76n1rv8s9wxygbgtglm0000gn/T/"
 
+// GAP-0252: a prepared disk's final size understates the host space its
+// first start uses. Doctor and the start preflight share this floor.
+func TestMicroVMFirstStartDiskFloor(t *testing.T) {
+	for _, tc := range []struct {
+		imageBytes       uint64
+		need, fail, warn uint64
+	}{
+		{0, 11 << 30, 12 << 30, 22 << 30},
+		{5 << 30, 11 << 30, 12 << 30, 22 << 30},
+		{12 << 30, 13 << 30, 14 << 30, 26 << 30},
+	} {
+		need, fail, warn := openshell.VMDiskRoom(tc.imageBytes)
+		if need != tc.need || fail != tc.fail || warn != tc.warn {
+			t.Errorf("image %d: got %d/%d/%d, want %d/%d/%d", tc.imageBytes, need, fail, warn, tc.need, tc.fail, tc.warn)
+		}
+	}
+	if openshell.VMDiskFailBytes != 12<<30 {
+		t.Fatal("doctor and preflight floors differ")
+	}
+	warning, err := openshell.VMDiskShortage("/vm/images", 10<<30, 5<<30, "this sandbox's first start")
+	if err == nil || warning != "" || !strings.Contains(err.Error(), "uses about 11.0 GiB") || !strings.Contains(err.Error(), "at least 12.0 GiB") {
+		t.Fatalf("10 GiB first start: warning %q, error %v", warning, err)
+	}
+}
+
 // TestDoctorOnAMacRunningMicroVMs: on a Mac whose gateway runs the
 // MicroVM driver, Landlock is the MicroVM kernel's (no Docker VM probe),
 // Docker Desktop's network does not matter and its file sharing only for
@@ -207,14 +232,14 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 			f.doctor.Gateway.Managed = true
 			_ = os.RemoveAll(f.e2fsprogs)
 		}, want: checkWant{"vm-driver", fail, "e2fsprogs is not installed where the MicroVM driver looks for it"},
-			fix: &fixWant{text: "ask your administrator to install e2fsprogs 1.43 or newer and set enterprise.openshell.e2fsprogs_dir", manual: true}},
+			fix: &fixWant{text: "ask your administrator to repair the managed package's e2fsprogs or set enterprise.openshell.e2fsprogs_dir", manual: true}},
 		// Managed accounts do not use a Homebrew keg, even when its files and
 		// directory chain look trusted by the old owner check.
 		{name: "managed host: a Homebrew keg is not used", setup: func(f *doctorFixture) {
 			f.doctor.Gateway.Managed = true
 			f.doctor.E2fsprogsDirs = []string{f.e2fsprogs}
 		}, want: checkWant{"vm-driver", fail, "enterprise.openshell.e2fsprogs_dir"},
-			fix: &fixWant{text: "ask your administrator to install e2fsprogs 1.43 or newer", manual: true}},
+			fix: &fixWant{text: "ask your administrator to repair the managed package's e2fsprogs", manual: true}},
 		{name: "managed host: the user's own e2fsprogs build", setup: func(f *doctorFixture) {
 			f.doctor.Gateway.Managed = true
 			_ = os.RemoveAll(f.e2fsprogs)
@@ -348,10 +373,10 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 		{name: "admin maximum below one MicroVM", setup: func(f *doctorFixture) { f.doctor.MaxCPUMillis = 500 },
 			want: checkWant{"vm-resources", fail, "below what any MicroVM gets"}, fix: &fixWant{text: "ask your administrator", manual: true}},
 
-		{name: "disk low", setup: func(f *doctorFixture) { f.diskFree = 8 << 30 },
-			want: checkWant{"disk", warn, "8.0 GiB free under"}, fix: &fixWant{text: "about 5 GB", manual: true}},
-		{name: "disk too full", setup: func(f *doctorFixture) { f.diskFree = 4 << 30 },
-			want: checkWant{"disk", fail, "MicroVM sandboxes need at least 6.0 GiB"}},
+		{name: "measured first start below floor", setup: func(f *doctorFixture) { f.diskFree = 10 << 30 },
+			want: checkWant{"disk", fail, "MicroVM sandboxes need at least 12.0 GiB"}, fix: &fixWant{text: "uses about 11 GiB", manual: true}},
+		{name: "disk low", setup: func(f *doctorFixture) { f.diskFree = 15 << 30 },
+			want: checkWant{"disk", warn, "15.0 GiB free under"}, fix: &fixWant{text: "uses about 11 GiB", manual: true}},
 		// Only the disks prepared from images count: the driver's overlay
 		// templates, the bootstrap rootfs every MicroVM boots with and a
 		// preparation under way are its own state.

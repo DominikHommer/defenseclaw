@@ -1066,8 +1066,9 @@ func (d *SandboxDaemon) keepOpenShellLocked(ctx context.Context) {
 // sandbox of the account runs and openShellGatewayLinger has passed since
 // the daemon last readied it, so the one gateway port is free for the next
 // account at once, not when the daemon idles out after 30 minutes
-// (GAP-0465). The caller holds the lifecycle.
-func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context) {
+// (GAP-0465). handover says a stop or delete of the account's last sandbox
+// asks (handoverOpenShell). The caller holds the lifecycle.
+func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context, handover bool) {
 	if since := time.Since(time.Unix(0, d.openShellUsed.Load())); since < openShellGatewayLinger {
 		d.scheduleCheck(openShellGatewayLinger - since + time.Second)
 		return
@@ -1082,15 +1083,29 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context) {
 		// are stopped and recorded for the managed gateway under the
 		// organization's foreign_sandboxes policy. Stopped at once, a raw
 		// sandbox went to error with its gateway and no foreign_sandbox
-		// record reached the administrator (GAP-0263). One the policy leaves
-		// running (alert) keeps its gateway.
+		// record reached the administrator (GAP-0263).
+		// The person's foreign_sandboxes in the managed settings decides
+		// while no registration names a floor (GAP-0058): read them again
+		// when they are stale.
+		d.refreshStaleSettings(ctx)
 		sweep, cancel := context.WithTimeout(ctx, foreignSweepTimeout)
-		err := d.rt.manager.Reconcile(sweep)
+		running, err := d.sweepForeign(sweep)
 		cancel()
 		switch {
 		case err != nil:
 			d.logf("check the OpenShell gateway for foreign sandboxes before stopping it: %v", err)
-		case d.rt.manager.ForeignSandboxesRunning():
+		case !running:
+		case handover:
+			// One the policy leaves running (alert) does not hold the one
+			// gateway port against the next account once the person's last
+			// sandbox ended: it was recorded above and stops with the
+			// gateway, so the hand-over still ends within the sweep's bound
+			// (GAP-0237).
+			d.logf("the last sandbox ended: stopping the OpenShell gateway with the sandboxes DefenseClaw did not start on it")
+		default:
+			// Otherwise it keeps its gateway while it runs; look again soon,
+			// so the port is free shortly after it ends (GAP-0237).
+			d.scheduleCheck(foreignRecheckEvery)
 			return
 		}
 	}
@@ -1099,9 +1114,51 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context) {
 	}
 }
 
+// sweepForeign reconciles the account's gateway, which stops or reports
+// the foreign sandboxes on it under foreign_sandboxes, and reports whether
+// the policy leaves one running there.
+func (d *SandboxDaemon) sweepForeign(ctx context.Context) (bool, error) {
+	if d.opts.sweepForeign != nil {
+		return d.opts.sweepForeign(ctx)
+	}
+	if err := d.rt.manager.Reconcile(ctx); err != nil {
+		return false, err
+	}
+	return d.rt.manager.ForeignSandboxesRunning(), nil
+}
+
+// handoverOpenShell releases the shared gateway port before a successful
+// stop or delete returns. A preflight still gets its linger; completed
+// lifecycle work does not keep the previous account's idle gateway alive.
+func (d *SandboxDaemon) handoverOpenShell(ctx context.Context) {
+	if d.stops.Load() != 1 {
+		d.openShellUsed.Store(0)
+		return // another stop or delete still uses the gateway
+	}
+	check, cancel := context.WithTimeout(context.WithoutCancel(ctx), foreignSweepTimeout+15*time.Second)
+	defer cancel()
+	if err := d.lockLifecycle(check); err != nil {
+		d.openShellUsed.Store(0)
+		d.scheduleCheck(time.Second)
+		return
+	}
+	defer d.unlockLifecycle()
+	n, err := d.runningSandboxes(check)
+	if err != nil || n != 0 {
+		return
+	}
+	d.releaseListeners()
+	d.openShellUsed.Store(0)
+	d.stopIdleOpenShellLocked(check, true)
+}
+
 // foreignSweepTimeout bounds the foreign-sandbox sweep before an idle
 // gateway stops.
 const foreignSweepTimeout = 30 * time.Second
+
+// foreignRecheckEvery is how often an idle gateway that a foreign sandbox
+// keeps is looked at again (stopIdleOpenShellLocked). A variable for tests.
+var foreignRecheckEvery = 15 * time.Second
 
 // accountBusyReportEvery paces the account-busy reports: a client that retries
 // in a loop sends at most one batch per interval, which carries every refusal

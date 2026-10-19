@@ -6,7 +6,6 @@ package enterprisestatus
 
 import (
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -26,15 +25,14 @@ func failOpenObserveConfig(profile string) *config.Config {
 	return cfg
 }
 
-// rel-1-0-3 GAP-0037: status, ensure and verify list on a standalone
-// deployment the resolved hook fail mode of each protected connector, so an
-// administrator can read that observe-mode Kiro and Cursor fail closed.
-func TestFailModePolicyListsEachConnectorsResolvedMode(t *testing.T) {
+// rel-1-0-3 GAP-0037: ensure, status and verify name each fail-open setting
+// a standalone deployment ignores with the fail_open_ignored code; Secure
+// Client keeps the configured fail mode and gets no warning. The resolved
+// fail mode of each connector is in the status v2 connectors block
+// (TestManagedHookFailModeIsTheRenderedValue).
+func TestFailModePolicyNamesEachIgnoredFailOpenSetting(t *testing.T) {
 	r := New("status", "standalone", "linux", "1.0.3")
-	r.AddFailModePolicyWarnings(failOpenObserveConfig(managed.ProfileStandalone), []string{"cursor", "kiro"})
-	if want := map[string]string{"cursor": "closed", "kiro": "closed"}; !reflect.DeepEqual(r.HookFailModes, want) {
-		t.Fatalf("HookFailModes = %v, want %v", r.HookFailModes, want)
-	}
+	r.AddFailModePolicyWarnings(failOpenObserveConfig(managed.ProfileStandalone))
 	if len(r.Warnings) == 0 || r.Warnings[0].Code != CodeFailOpenIgnored {
 		t.Fatalf("warnings = %v, want a %s warning", r.Warnings, CodeFailOpenIgnored)
 	}
@@ -42,13 +40,13 @@ func TestFailModePolicyListsEachConnectorsResolvedMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(document), `"hook_fail_modes":{"cursor":"closed","kiro":"closed"}`) {
-		t.Fatalf("status JSON %s does not list hook_fail_modes", document)
+	if strings.Contains(string(document), "hook_fail_modes") {
+		t.Fatalf("status JSON %s still carries hook_fail_modes", document)
 	}
 
 	sc := New("status", "secure-client", "linux", "1.0.3")
-	sc.AddFailModePolicyWarnings(failOpenObserveConfig(managed.ProfileSecureClient), []string{"cursor", "kiro"})
-	if sc.HookFailModes != nil || len(sc.Warnings) != 0 {
-		t.Fatalf("Secure Client: HookFailModes = %v, warnings = %v, want neither", sc.HookFailModes, sc.Warnings)
+	sc.AddFailModePolicyWarnings(failOpenObserveConfig(managed.ProfileSecureClient))
+	if len(sc.Warnings) != 0 {
+		t.Fatalf("Secure Client: warnings = %v, want none", sc.Warnings)
 	}
 }

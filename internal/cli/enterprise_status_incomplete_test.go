@@ -83,6 +83,15 @@ func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) 
 		t.Fatalf("warnings = %+v", result.Warnings)
 	}
 
+	// #1105 (GAP-0781): a per-user folder a retire skipped is a note, not
+	// why security is incomplete.
+	result.Warnings = nil
+	result.AddWarning("user_runtime_folder_untrusted", "skipped")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 2 || result.Warnings[1].Code != "security_incomplete" {
+		t.Fatalf("a skipped per-user folder suppressed the reason: %+v", result.Warnings)
+	}
+
 	// GAP-0536: the sandbox policy notes Windows now prints do not hide why
 	// security is incomplete.
 	result.Warnings = nil

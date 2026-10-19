@@ -57,11 +57,16 @@ def upstream_fail_open(cfg: Any, connector: str) -> bool:
     """Whether *connector*'s hooks fail open whatever is configured.
 
     Copilot CLI, Antigravity and Hermes have no fail-closed hook contract of
-    their own, so per-user and Secure Client hooks for them fail open. A
-    managed deployment outside Secure Client blocks their tool calls through
-    the connector's native deny instead (Config.managed_hooks_fail_closed).
+    their own. A managed deployment outside Secure Client blocks their tool
+    calls through the connector's native deny instead
+    (Config.managed_hooks_fail_closed). The per-user Hermes hook (the Linux
+    and macOS shell hook and the Windows native hook) blocks a call it cannot
+    check through Hermes' block directive when its fail mode is closed, so
+    an unset fail mode resolves closed there as for every other connector
+    (rel-1-0-3 GAP-0150, GAP-0269).
     """
-    if normalize(connector) not in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+    name = normalize(connector)
+    if name not in _UPSTREAM_FAIL_OPEN_CONNECTORS or name == "hermes":
         return False
     managed_closed = getattr(cfg, "managed_hooks_fail_closed", None)
     return not (callable(managed_closed) and managed_closed())

@@ -129,6 +129,9 @@ func purgeWindowsUserStateFolder(home string, sid *windows.SID, dataDir string) 
 		if !pinned.IsDir() || pinned.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !os.SameFile(pinned, opened) {
 			return fmt.Errorf("enterprise hooks: refusing to purge %s, which changed while it was opened", dataDir)
 		}
+		if err := keptManagedBackupsError(dataDir); err != nil {
+			return err
+		}
 		return connector.PurgeUserStateInRoot(root, func(rel string) error {
 			return removeWindowsUserStateDenied(windows.Handle(pin.Fd()), rel)
 		})

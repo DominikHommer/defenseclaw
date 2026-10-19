@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -66,7 +67,27 @@ type Readiness struct {
 // Inspection reports who decides verdicts.
 type Inspection struct {
 	Local     string `json:"local"`      // active, disabled
-	AIDefense string `json:"ai_defense"` // disabled, ok, unavailable:<code>
+	AIDefense string `json:"ai_defense"` // disabled, ok, unknown, unavailable:<code>
+}
+
+// CodeAIDefenseUnavailable warns that enabled Cisco AI Defense inspection is
+// failing, for example with a rejected key (unavailable:auth_failed).
+const CodeAIDefenseUnavailable = "ai_defense_unavailable"
+
+// AddAIDefenseWarning warns when Inspection.AIDefense is unavailable:<code>.
+// Not an error: the local policy engine keeps deciding, but the cloud
+// inspection the administrator enabled is not running.
+func (r *Result) AddAIDefenseWarning() {
+	if !strings.HasPrefix(r.Inspection.AIDefense, "unavailable") {
+		return
+	}
+	fix := "Check the enterprise.inspection.ai_defense credential and network access"
+	if r.Inspection.AIDefense == "unavailable:auth_failed" {
+		fix = "Cisco AI Defense rejected the stored API key (HTTP 401 or 403): store a valid key under the " +
+			"credential enterprise.inspection.ai_defense.credential names, with `enterprise secret set`"
+	}
+	r.AddWarning(CodeAIDefenseUnavailable, "Cisco AI Defense inspection is enabled but reports "+
+		r.Inspection.AIDefense+"; the local policy engine keeps deciding. "+fix)
 }
 
 // MachinePolicyState is the per-connector machine policy report.
@@ -179,13 +200,14 @@ type Result struct {
 	// installed config.yaml with their effective redaction profiles, from the
 	// compiler `defenseclaw observability plan` uses (GAP-1105).
 	Destinations []Destination `json:"destinations,omitempty"`
-	// HookFailModes is, on a standalone deployment, the resolved hook fail
-	// mode (open or closed) of each connector the installed config
-	// protects, from the resolver the hooks are rendered with
-	// (AddFailModePolicyWarnings, rel-1-0-3 GAP-0037).
-	HookFailModes map[string]string `json:"hook_fail_modes,omitempty"`
-	LogPath       string            `json:"log_path,omitempty"`
-	ExitCode      int               `json:"exit_code"`
+	// Connectors, OpenShell and Identity are the status v2 blocks of status
+	// and verify on the standalone profile (connector_block.go,
+	// openshell_block.go, identity_block.go); nil (omitted) elsewhere.
+	Connectors map[string]ConnectorState `json:"connectors,omitempty"`
+	OpenShell  *OpenShellCapability      `json:"openshell,omitempty"`
+	Identity   *IdentityHealth           `json:"identity,omitempty"`
+	LogPath    string                    `json:"log_path,omitempty"`
+	ExitCode   int                       `json:"exit_code"`
 	// ConfigRefused marks a run that refused the submitted config before it
 	// changed anything: the policy, services and advisories it reports are
 	// the running deployment's. Text output only (GAP-0564).
@@ -253,6 +275,15 @@ const (
 // generation of config.generation.json, not the gateway policy generation
 // that restarts at 1 with the gateway.
 type BundleState struct {
+	// ReceiptID names the receipt this block reports: the file name of its
+	// public receipt (<etc>/bundles/receipt-events/<receipt_id>.json) that a
+	// management agent forwards. A repeated delivery of the current bundle
+	// discards its own receipt, so the block names the confirmed one.
+	ReceiptID string `json:"receipt_id,omitempty"`
+	// DeliveryID is the --delivery-id of the delivery that receipt records
+	// (absent without it); a repeat names the confirmed receipt, so it is
+	// that delivery id, not the repeat one.
+	DeliveryID       string   `json:"delivery_id,omitempty"`
 	BundleID         string   `json:"bundle_id"`
 	DisabledByBundle []string `json:"disabled_by_bundle,omitempty"`
 	WarningCodes     []string `json:"warning_codes,omitempty"`
@@ -313,6 +344,28 @@ func (p *PolicyState) Line() string {
 	return line
 }
 
+// RunningDeploymentPrefix starts each warning of a run that refused the
+// submitted config before it changed anything: the warning is the running
+// deployment's, not the refused file's (GAP-0564, #1201).
+const RunningDeploymentPrefix = "running deployment (the refused config changed nothing): "
+
+// LabelRunningDeployment marks r as a run that refused the submitted config
+// (ConfigRefused) and labels each warning from index from on as the running
+// deployment's, except those whose code is in keep: they describe the
+// refused request itself. A warning already labelled stays as it is.
+func (r *Result) LabelRunningDeployment(from int, keep ...string) {
+	if r == nil {
+		return
+	}
+	r.ConfigRefused = true
+	for i := max(from, 0); i < len(r.Warnings); i++ {
+		if slices.Contains(keep, r.Warnings[i].Code) || strings.HasPrefix(r.Warnings[i].Message, RunningDeploymentPrefix) {
+			continue
+		}
+		r.Warnings[i].Message = RunningDeploymentPrefix + r.Warnings[i].Message
+	}
+}
+
 // PolicyLine is Policy.Line(), labelled as the running deployment's when the
 // run refused the submitted config (ConfigRefused); "" without a policy.
 func (r *Result) PolicyLine() string {
@@ -371,11 +424,19 @@ func (r *Result) AddWarning(code, message string) {
 // Finish sets OK from the error list and the exit code for goos, then
 // returns the code. failureCode overrides the generic failure code when a
 // more specific one applies (busy, invalid arguments).
+//
+// A result with an error is never security_complete: Windows verify
+// reported security_complete:true next to the error that the guardian could
+// not verify an enrolled target's hooks, so a script that read the flag
+// was told the host was protected (GAP-0664).
 func (r *Result) Finish(goos string, failureCode int) int {
 	if r.Bundle != nil && r.Bundle.SessionsRestartRequired != nil && r.Bundle.SessionsRestartRequired.Count > 0 {
 		r.CoverageComplete, r.SecurityComplete = false, false
 	}
 	r.OK = len(r.Errors) == 0
+	if !r.OK {
+		r.SecurityComplete = false
+	}
 	switch {
 	case r.OK:
 		r.ExitCode = ExitOK
@@ -415,7 +476,7 @@ const notRootCode = "not_root"
 // as "not installed" (GAP-0279).
 var deploymentStateFields = []string{
 	"installed", "installed_version", "transaction_pending", "services", "readiness", "inspection", "machine_policy", "enrollment",
-	"destinations",
+	"destinations", "connectors", "openshell", "identity",
 }
 
 func (r Result) refusedNotRoot() bool {

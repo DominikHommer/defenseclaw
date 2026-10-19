@@ -2063,6 +2063,10 @@ func emitManagedClaudeBlock(opts Options, reason string) int {
 	return 0
 }
 
+// managedRuntimeHomeMissingReason is the refusal of a managed hook whose
+// account has no DefenseClaw folder (troubleshooting.mdx).
+const managedRuntimeHomeMissingReason = "enterprise_managed_runtime_home_missing"
+
 // managedStandaloneFailClosedText is what a standalone managed hook (Unix or
 // Windows, managedPlainFailClosed) says when it fails closed: that DefenseClaw blocked the prompt or tool
 // call, why in plain words and what to do, e.g. "DefenseClaw blocked this
@@ -2100,6 +2104,12 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	case reason == managedHookSocketSELinuxDeniedReason:
 		cause, advice = "SELinux does not let your account reach the DefenseClaw gateway on this computer",
 			"Ask your administrator to run `enterprise linux repair`, which loads the DefenseClaw SELinux module that SELinux-confined accounts need."
+	case reason == managedRuntimeHomeMissingReason:
+		// It said only "not set up correctly" (GAP-0759); the guardian
+		// normally puts the folder back on its own.
+		cause, advice = "your DefenseClaw folder (.defenseclaw in your user profile) is missing",
+			"DefenseClaw normally puts it back on its own; try again in a minute. If this continues, contact your administrator."
+		code = reason
 	case strings.HasPrefix(reason, "enterprise_managed_runtime") ||
 		reason == "enterprise_managed_hook_socket_missing" ||
 		reason == "enterprise_machine_policy_summary_untrusted":
@@ -2394,31 +2404,31 @@ func validateCodexInvocationBinding(
 ) (string, error) {
 	event := strings.TrimSpace(explicitEvent)
 	if event == "" {
-		return "", errors.New("Codex hook command is missing its installer-bound event")
+		return "", errors.New("Codex hook command is missing its installer-bound event") //nolint:staticcheck // Match the shipped hook diagnostic.
 	}
 	contractID = strings.TrimSpace(contractID)
 	if contractID == "" {
-		return "", errors.New("Codex hook command is missing its installer-bound contract")
+		return "", errors.New("Codex hook command is missing its installer-bound contract") //nolint:staticcheck // Match the shipped hook diagnostic.
 	}
 	var envelope struct {
 		HookEventName string `json:"hook_event_name"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return "", errors.New("Codex hook stdin is not valid JSON")
+		return "", errors.New("Codex hook stdin is not valid JSON") //nolint:staticcheck // Match the shipped hook diagnostic.
 	}
 	stdinEvent := strings.TrimSpace(envelope.HookEventName)
 	if stdinEvent == "" {
-		return "", errors.New("Codex hook stdin is missing hook_event_name")
+		return "", errors.New("Codex hook stdin is missing hook_event_name") //nolint:staticcheck // Match the shipped hook diagnostic.
 	}
 	if stdinEvent != event {
-		return "", fmt.Errorf(
+		return "", fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Codex hook stdin event %q does not match installer-bound event %q",
 			stdinEvent,
 			event,
 		)
 	}
 	if !codexContractAllowsEvent(contractID, event) {
-		return "", fmt.Errorf(
+		return "", fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Codex hook event %q is not registered by installer-bound contract %q",
 			event,
 			contractID,
@@ -2776,7 +2786,7 @@ func copilotVSCodeLocalOutput(event, action, reason string) string {
 // denied, and a non-zero exit there only surfaces a warning, so it gets no
 // output and exit 0.
 func emitCopilotVSCodeLocalResult(opts Options, sp spec, result failResult) int {
-	if !(result.closed || result.exit != 0) {
+	if !result.closed && result.exit == 0 {
 		return emit(opts.Stdout, result)
 	}
 	reason := strings.TrimSpace(result.body)

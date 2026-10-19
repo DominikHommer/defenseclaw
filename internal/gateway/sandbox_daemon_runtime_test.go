@@ -281,11 +281,17 @@ func TestSandboxIngressForwardingNeedsRegistrations(t *testing.T) {
 // fakeRelay is a sandboxrelay.Client whose calls the test sets.
 type fakeRelay struct {
 	settings func() (sandboxrelay.DaemonSettings, error)
-	resolve  func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error)
-	current  func(string) (sandboxrelay.CurrentPolicy, error)
-	explain  func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
-	test     func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
-	packs    func(registration, connector, name string) ([]sandboxrelay.PackView, error)
+	// unchanged answers Settings when settings is nil: the managed
+	// gateway's settings as the daemon holds them (a create reads them).
+	unchanged func() sandboxrelay.DaemonSettings
+	resolve   func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error)
+	current   func(string) (sandboxrelay.CurrentPolicy, error)
+	// rawCurrent lets a test exercise an incomplete wire answer. Ordinary
+	// fake answers model the complete floor sent by the current gateway.
+	rawCurrent bool
+	explain    func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
+	test       func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
+	packs      func(registration, connector, name string) ([]sandboxrelay.PackView, error)
 	// decisions answers the saved-decisions list of a registration.
 	decisions func(registration string) ([]sandboxrelay.Decision, error)
 	deleted   atomic.Int64
@@ -304,6 +310,9 @@ func (f *fakeRelay) Settings(context.Context) (sandboxrelay.DaemonSettings, erro
 	if f.settings != nil {
 		return f.settings()
 	}
+	if f.unchanged != nil {
+		return f.unchanged(), nil
+	}
 	return sandboxrelay.DaemonSettings{}, errors.New("no settings")
 }
 func (f *fakeRelay) Resolve(_ context.Context, r sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error) {
@@ -317,10 +326,34 @@ func (f *fakeRelay) Bind(context.Context, string, sandboxrelay.BindRequest) (san
 }
 func (f *fakeRelay) Deleted(context.Context, string) error { f.deleted.Add(1); return nil }
 func (f *fakeRelay) Current(_ context.Context, id string) (sandboxrelay.CurrentPolicy, error) {
+	var cp sandboxrelay.CurrentPolicy
+	var err error
 	if f.current != nil {
-		return f.current(id)
+		cp, err = f.current(id)
 	}
-	return sandboxrelay.CurrentPolicy{}, nil
+	if err == nil && !cp.Revoked && cp.Floor == nil && !f.rawCurrent {
+		cp.Floor = &config.OpenShellAdminConfig{}
+	}
+	return cp, err
+}
+
+func TestSandboxDaemonRefusesIncompletePolicyAnswer(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	r := daemonRegistration{ID: "reg-1", Sandbox: "dc-a"}
+	if err := f.d.regs.put(r); err != nil {
+		t.Fatal(err)
+	}
+	f.relay.rawCurrent = true
+	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+		return sandboxrelay.CurrentPolicy{V: sandboxrelay.WireVersion}, nil
+	}
+	ans := f.d.askPolicy(context.Background(), r, false, false)
+	if ans.err == nil {
+		t.Fatal("incomplete policy answer was accepted")
+	}
+	if got, _ := f.d.regs.get(r.Sandbox); got.Confirmed {
+		t.Fatal("incomplete policy answer confirmed a cached floor")
+	}
 }
 
 // Report records the state report and answers like Current.
@@ -486,6 +519,7 @@ func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)
 		t.Fatal(err)
 	}
 	f.d = d
+	f.relay.unchanged = d.currentSettings
 	return f
 }
 
@@ -795,6 +829,27 @@ func TestSandboxDaemonPollReportsTheSandboxState(t *testing.T) {
 	}
 }
 
+func TestSandboxDaemonConfirmationReplacesUserCachedFloor(t *testing.T) {
+	regs := &daemonRegistrations{path: filepath.Join(t.TempDir(), "registrations.json"),
+		byName: map[string]daemonRegistration{"sandbox": {
+			ID: "reg-one", Sandbox: "sandbox",
+			Floor: config.OpenShellAdminConfig{MinProfile: "open"},
+		}}}
+	if regs.applyLive("sandbox", sandboxrelay.CurrentPolicy{V: 1}) {
+		t.Fatal("an answer without a full floor confirmed a user cached floor")
+	}
+	if got, _ := regs.get("sandbox"); got.Confirmed {
+		t.Fatal("a partial answer marked a registration confirmed")
+	}
+	strict := config.OpenShellAdminConfig{MinProfile: "strict"}
+	if !regs.applyLive("sandbox", sandboxrelay.CurrentPolicy{V: 1, Floor: &strict}) {
+		t.Fatal("a complete answer did not confirm the registration")
+	}
+	if got, _ := regs.get("sandbox"); !got.Confirmed || got.Floor.MinProfile != "strict" {
+		t.Fatalf("confirmed floor = %+v", got)
+	}
+}
+
 // GAP-0693: the policy poll never adopts the floor of a stopped sandbox's
 // registration. Its live fields follow each configuration change, so the
 // poll saw it changed and put the daemon, and a sandbox created since under
@@ -812,7 +867,7 @@ func TestSandboxDaemonPollAdoptsOnlyARunningSandboxFloor(t *testing.T) {
 	f.d.floorMu.Unlock()
 	f.d.reloadConfig()
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:new", Live: sandboxrelay.LiveFields{DeleteStoppedAfter: "14d"}}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:new", Floor: &config.OpenShellAdminConfig{DeleteStoppedAfter: "14d"}}, nil
 	}
 	f.d.pollOnce(context.Background())
 	if r, _ := f.d.regs.get("dc-old"); r.Digest != "sha256:new" || r.Floor.DeleteStoppedAfter != "14d" {
@@ -821,7 +876,7 @@ func TestSandboxDaemonPollAdoptsOnlyARunningSandboxFloor(t *testing.T) {
 	if admin := f.d.config().OpenShell.Admin; admin.RequiredPack != "" || admin.MinProfile != "balanced" {
 		t.Fatalf("the poll adopted the stopped sandbox's floor: %+v", admin)
 	}
-	if floor := f.d.regs.newestFloor(func(name string) bool { return name == "dc-old" }); floor == nil || floor.RequiredPack != stale.RequiredPack {
+	if floor := f.d.regs.newestFloor(func(name string) bool { return name == "dc-old" }); floor == nil || floor.DeleteStoppedAfter != "14d" || floor.RequiredPack != "" {
 		t.Fatalf("a running sandbox's floor = %+v", floor)
 	}
 	if floor := f.d.regs.newestFloor(func(string) bool { return false }); floor != nil {
@@ -880,14 +935,61 @@ func TestSandboxDaemonConfigIsCopyOnlyAndClosed(t *testing.T) {
 	}
 }
 
-// TestFloorConflictMessageNamesTheProvisionalPolicy pins GAP-0496: a run
-// refused because the directory did not answer (a provisional floor that
-// differs from the running sandboxes') says so, not that the policy changed.
-func TestFloorConflictMessageNamesTheProvisionalPolicy(t *testing.T) {
-	if got := floorConflictMessage(true); !strings.Contains(got, "directory couldn't be reached") || !strings.Contains(got, "provisional") {
-		t.Fatalf("provisional refusal = %q", got)
+// Two concurrent managed sandboxes keep their own confirmed floors. A
+// missing registration cannot inherit whichever floor was adopted last.
+func TestSandboxDaemonConfigForEachConfirmedSandbox(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	for _, tc := range []struct{ name, profile string }{{"dc-claude", "balanced"}, {"dc-codex", "strict"}} {
+		if err := f.d.regs.put(daemonRegistration{ID: "reg-" + tc.name, Sandbox: tc.name,
+			Floor: config.OpenShellAdminConfig{MinProfile: tc.profile}, Confirmed: true, UpdatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := floorConflictMessage(false); strings.Contains(got, "provisional") || !strings.Contains(got, "differs from the policy") {
-		t.Fatalf("changed-policy refusal = %q", got)
+	for _, tc := range []struct{ name, profile string }{{"dc-claude", "balanced"}, {"dc-codex", "strict"}} {
+		cfg := f.d.configForSandbox(tc.name)
+		if cfg == nil || cfg.OpenShell.Admin.MinProfile != tc.profile {
+			t.Fatalf("%s floor = %+v", tc.name, cfg)
+		}
+	}
+	closed := f.d.configForSandbox("unregistered").OpenShell.Admin
+	if closed.MinProfile != "strict" || closed.Allowed == nil || *closed.Allowed {
+		t.Fatalf("unregistered sandbox did not receive the closed floor: %+v", closed)
+	}
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-pending", Sandbox: "dc-pending",
+		Floor: config.OpenShellAdminConfig{MinProfile: "open"}, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dc-pending", "dc-claude"} {
+		if name == "dc-claude" {
+			f.d.regs.markRevoked(name, "profile removed")
+		}
+		cfg := f.d.configForSandbox(name)
+		if cfg.OpenShell.Admin.Allowed == nil || *cfg.OpenShell.Admin.Allowed {
+			t.Fatalf("%s borrowed a floor: %+v", name, cfg.OpenShell.Admin)
+		}
+	}
+}
+
+// #1195 (GAP-0123): on a managed computer the supported way to run agents on
+// an image of the organization's own is openshell.image.base in the
+// administrator config: every run of the daemon, a new one and an existing
+// sandbox resolved under its registration's floor alike, builds its agent
+// image on that base in the person's own Docker engine (docker build
+// --pull=false). No run takes an image of the person's choosing.
+func TestSandboxDaemonRunsOnTheAdministratorsBaseImage(t *testing.T) {
+	const base = "corp-sandbox-base:1"
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.Settings.Operational.Image.Base = base
+	})
+	if got := f.d.config().OpenShell.Image.Base; got != base {
+		t.Fatalf("a new run builds on %q, want %q", got, base)
+	}
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-1", Sandbox: "dc-a", UpdatedAt: time.Now(), Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dc-a", "dc-unregistered"} {
+		if got := f.d.configForSandbox(name).OpenShell.Image.Base; got != base {
+			t.Fatalf("sandbox %s builds on %q, want %q", name, got, base)
+		}
 	}
 }

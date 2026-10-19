@@ -15,6 +15,9 @@
 # failure. Deploy it with any tool that installs flat packages. Remove it with
 #   sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall [--purge]
 # Managed packages do not carry optional Fleet source.
+# A pinned e2fsprogs build is carried under share/e2fsprogs with its GPL
+# notice and source. The managed MicroVM uses it only when neither an explicit
+# administrator directory nor a user's own build supplies the tools.
 #
 # Called by the `packaging-macos-enterprise` Make target.
 #
@@ -107,13 +110,35 @@ else
     build defenseclaw-acp ./cmd/defenseclaw-acp "$version_flags"
 fi
 
+# The standard account cannot install Homebrew or Xcode tools. Build these on
+# the packaging Mac and carry the complete corresponding source and notice.
+# They stay under a root-owned package path and are selected only as fallback.
+e2fs_root="$ROOT/opt/cisco/defenseclaw/share/e2fsprogs"
+"$REPO_ROOT/scripts/build-macos-e2fsprogs.sh" "$e2fs_root"
+
 # The standard user's sandbox launcher: the gateway under the name defenseclaw
 # (internal/cli/launcher.go). A package-owned symlink, so only an installer or
 # administrator can change where it points.
 mkdir -p "$ROOT/$LAUNCHER_DIR"
 ln -s "/$INSTALL_BIN/defenseclaw-gateway" "$ROOT/$LAUNCHER_DIR/defenseclaw"
 
-# The per-user sandbox daemon's launch agents. launchd loads a launch agent
+# The per-user sandbox daemon's launch agents. A changed signed program gets
+# a new path as well as a new inode, so launchd cannot reuse an old signature
+# decision after an upgrade. The lifecycle renders the same path from the
+# installed gateway's SHA-256.
+if [ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]; then
+    sign_args=(--force --timestamp --options runtime --sign "$MACOS_APP_SIGN_IDENTITY")
+    [ -n "${MACOS_SIGN_KEYCHAIN:-}" ] && sign_args+=(--keychain "$MACOS_SIGN_KEYCHAIN")
+    for binary in "$ROOT/$INSTALL_BIN"/* "$e2fs_root/sbin"/*; do
+        codesign "${sign_args[@]}" --identifier "com.cisco.defenseclaw.$(basename "$binary")" "$binary"
+    done
+fi
+gateway_digest=$(shasum -a 256 "$ROOT/$INSTALL_BIN/defenseclaw-gateway" | awk '{print $1}')
+agent_program="/$INSTALL_BIN/launch-agents/$gateway_digest/defenseclaw-gateway"
+install -d -m 0755 "$ROOT/$INSTALL_BIN/launch-agents" "${ROOT}${agent_program%/*}"
+cp -p "$ROOT/$INSTALL_BIN/defenseclaw-gateway" "$ROOT$agent_program"
+
+# launchd loads a launch agent
 # only when root:wheel owns it and nobody else can write it, which pkgbuild
 # --ownership recommended gives (mode 0644 here). The agents load at each
 # account's next sign-in; the launcher bootstraps them on demand for an
@@ -122,16 +147,9 @@ mkdir -p "$ROOT/$LAUNCH_AGENTS_DIR"
 for label in com.cisco.defenseclaw.sandbox com.cisco.defenseclaw.openshell-gateway; do
     agent="$REPO_ROOT/packaging/launchd-standalone/agents/$label.plist"
     [ -f "$agent" ] || { echo "missing $agent" >&2; exit 1; }
-    install -m 0644 "$agent" "$ROOT/$LAUNCH_AGENTS_DIR/$label.plist"
+    sed "s|/$INSTALL_BIN/defenseclaw-gateway|$agent_program|" "$agent" >"$ROOT/$LAUNCH_AGENTS_DIR/$label.plist"
+    chmod 0644 "$ROOT/$LAUNCH_AGENTS_DIR/$label.plist"
 done
-
-if [ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]; then
-    sign_args=(--force --timestamp --options runtime --sign "$MACOS_APP_SIGN_IDENTITY")
-    [ -n "${MACOS_SIGN_KEYCHAIN:-}" ] && sign_args+=(--keychain "$MACOS_SIGN_KEYCHAIN")
-    for binary in "$ROOT/$INSTALL_BIN"/*; do
-        codesign "${sign_args[@]}" --identifier "com.cisco.defenseclaw.$(basename "$binary")" "$binary"
-    done
-fi
 
 # preinstall refuses before any file lands on a Secure Client host: the two
 # deployments share the gateway port and the lifecycle would refuse anyway.
@@ -215,25 +233,45 @@ sed -i.bak "s/@DC_PKG_VERSION@/${VERSION}/" "$SCRIPTS/preinstall" && rm -f "$SCR
 # result (exit 75) before that for the MDM wrapper to report it (GAP-1413).
 cat >"$SCRIPTS/postinstall" <<'EOF'
 #!/bin/sh
+prefix=/opt/cisco/defenseclaw
 gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
 state=/opt/cisco/defenseclaw/lifecycle
 umask 077
 mkdir -p "$state" && chmod 0700 "$state"
-# Installer may replace a signed payload file while an account's LaunchAgent
-# remains loaded. Give both DefenseClaw LaunchAgents a new program inode before
-# ensure reloads their loaded jobs. They both execute this gateway binary.
-refresh_signed_launchagent_binary() {
-    binary=$1
-    [ -f "$binary" ] && [ ! -L "$binary" ] || return 1
-    dir=${binary%/*}
-    tmp=$(mktemp "$dir/.${binary##*/}.pkg.XXXXXXXX") || return 1
-    if ! cp -p "$binary" "$tmp" || ! mv -f "$tmp" "$binary"; then
+# The Installer can write a payload file over the old one in place while a
+# daemon or an account's LaunchAgent still holds it. macOS keeps the code
+# signature it checked with that file and can kill every later start of the
+# new program for code signing (OS_REASON_CODESIGNING, GAP-0049). Give each
+# program the package installed a new file (a copy in the same folder renamed
+# over it) before ensure, which then reloads every account's loaded
+# LaunchAgent because the gateway file changed.
+refresh_program() {
+    file=$1
+    if [ ! -f "$file" ] || [ -L "$file" ]; then
+        return 1
+    fi
+    tmp=$(mktemp "${file%/*}/.${file##*/}.pkg.XXXXXXXX") || return 1
+    if ! cp -p "$file" "$tmp" || ! mv -f "$tmp" "$file"; then
         rm -f "$tmp"
         return 1
     fi
 }
-if ! refresh_signed_launchagent_binary "$gateway"; then
-    echo "DefenseClaw: could not replace the signed LaunchAgent gateway with a new file; reinstall the package." >&2
+refresh_programs() {
+    for program in "$1/bin/defenseclaw-gateway" "$1/bin/defenseclaw-hook" "$1/bin/defenseclaw-sensor-helper" \
+        "$1/bin/defenseclaw-acp" "$1"/bin/launch-agents/*/defenseclaw-gateway "$1"/share/e2fsprogs/sbin/*; do
+        case $program in
+        */bin/defenseclaw-acp | */bin/launch-agents/* | */share/e2fsprogs/sbin/*)
+            # Optional: an unmatched pattern stays literal and is skipped.
+            [ -e "$program" ] || [ -L "$program" ] || continue
+            ;;
+        esac
+        if ! refresh_program "$program"; then
+            echo "DefenseClaw: could not give $program a new file; reinstall the package." >&2
+            return 1
+        fi
+    done
+}
+if ! refresh_programs "$prefix"; then
     exit 1
 fi
 downgrade=""

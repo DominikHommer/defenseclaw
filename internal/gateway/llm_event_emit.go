@@ -2518,9 +2518,7 @@ func putBoundedHookLLMSpanPrompt(
 		for len(m) >= hookPromptCacheMaxEntries && len(*order) > 0 {
 			oldest := (*order)[0]
 			*order = (*order)[1:]
-			if _, stillThere := m[oldest]; stillThere {
-				delete(m, oldest)
-			}
+			delete(m, oldest)
 		}
 		*order = append(*order, key)
 	}

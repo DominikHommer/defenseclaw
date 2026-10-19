@@ -65,6 +65,7 @@ func TestSandboxDaemonSelectsTheDriverAtStart(t *testing.T) {
 	if err != nil || choice != (openshell.DriverChoice{Driver: openshell.DriverDocker, Reason: openshell.DriverReasonKVMMissing}) {
 		t.Fatalf("auto without KVM: %+v %v", choice, err)
 	}
+	d.settings.SelectedDriver, d.settings.DriverReason = string(choice.Driver), choice.Reason
 	st := d.managedStatus(context.Background())
 	if st.Driver != "docker" || st.DriverReason != "kvm_missing" || st.DriverFallback != "docker" {
 		t.Fatalf("status after a fallback start: %+v", st)
@@ -116,5 +117,47 @@ func TestSandboxDaemonSelectsTheDriverAtStart(t *testing.T) {
 	d.settings = settings("vm", "")
 	if choice, err := d.selectDriver(d.settings); err != nil || choice.Driver != openshell.DriverVM || probes != before {
 		t.Fatalf("macOS: %+v %v (probed %d)", choice, err, probes-before)
+	}
+}
+
+// A completed MicroVM run must not pin the doctor's driver after the
+// account loses KVM access. Status re-reads the managed gateway's current
+// decision when its settings age out, without restarting the daemon.
+func TestSandboxDaemonIdleDriverFollowsRefreshedAvailability(t *testing.T) {
+	regs, err := loadDaemonRegistrations(filepath.Join(t.TempDir(), "registrations.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vm := openshell.DriverChoice{Driver: openshell.DriverVM, Reason: openshell.DriverReasonKVMAvailable}
+	next := sandboxrelay.DaemonSettings{
+		Enabled: true, Available: true, SelectedDriver: "docker", DriverReason: openshell.DriverReasonKVMAccess,
+		Enterprise: sandboxrelay.EnterpriseOpenShell{Driver: "vm", DriverFallback: "docker"},
+	}
+	reads := 0
+	relay := &fakeRelay{settings: func() (sandboxrelay.DaemonSettings, error) {
+		reads++
+		return next, nil
+	}}
+	d := &SandboxDaemon{regs: regs, relay: relay, logf: t.Logf}
+	d.lastDriver.Store(&vm)
+	d.settings = next
+	d.settings.SelectedDriver, d.settings.DriverReason = "vm", openshell.DriverReasonKVMAvailable
+	d.settingsAt.Store(time.Now().UnixNano())
+	if st := d.managedStatus(context.Background()); st.Driver != "vm" || reads != 0 {
+		t.Fatalf("fresh decision: %+v; settings reads %d", st, reads)
+	}
+	d.settingsAt.Store(time.Now().Add(-sandboxDaemonSettingsTTL - time.Second).UnixNano())
+	if st := d.managedStatus(context.Background()); st.Driver != "docker" || st.DriverReason != openshell.DriverReasonKVMAccess || reads != 1 {
+		t.Fatalf("driver after availability changed: %+v; settings reads %d", st, reads)
+	}
+	if st := d.managedStatus(context.Background()); st.Driver != "docker" || reads != 1 {
+		t.Fatalf("fresh fallback decision: %+v; settings reads %d", st, reads)
+	} else {
+		// The connected gateway may still report the completed VM run.
+		// With no registration, it cannot override the next-run choice.
+		d.driverInForce(st, "vm")
+		if st.Driver != "docker" || st.DriverReason != openshell.DriverReasonKVMAccess {
+			t.Fatalf("idle gateway overrode the refreshed choice: %+v", st)
+		}
 	}
 }

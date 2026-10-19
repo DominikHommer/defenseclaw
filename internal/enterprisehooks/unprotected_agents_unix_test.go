@@ -83,7 +83,7 @@ func TestEnumerateUnixReportsInstalledAgentsItCannotEnroll(t *testing.T) {
 		t.Fatalf("unprotected = %+v, want the installed opencode only", report.Unprotected)
 	}
 	got := report.Unprotected[0]
-	if got.User != "alice" || got.Connector != "opencode" || got.Code != UnprotectedCodeAgentUnprotected ||
+	if got.User != "alice" || got.Connector != "opencode" || got.Code != UnprotectedCodeHookContractUnverified ||
 		got.UID == nil || *got.UID != uid || !strings.Contains(got.Reason, "runs without DefenseClaw hooks") {
 		t.Fatalf("unprotected entry = %+v", got)
 	}

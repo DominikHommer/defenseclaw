@@ -75,7 +75,9 @@ type Options struct {
 	// KeepState makes a (non-purge) uninstall keep the machine state: the
 	// config, secrets, gateway and guardian state, logs and lifecycle
 	// state, and the service account, so a reinstall resumes with them.
-	// Without it uninstall removes all of it.
+	// Without it uninstall removes that state except the gateway's sandbox
+	// registrations, their key and the sandbox setup record while an account
+	// keeps sandboxes. Purge removes those too.
 	KeepState bool
 	// KeepServiceAccount makes uninstall keep the gateway service account,
 	// which it removes otherwise.
@@ -97,6 +99,9 @@ type Options struct {
 	// BundleInbox makes an ensure apply the highest version in the bundle
 	// inbox (<etc>/bundles/inbox) and remove the processed files.
 	BundleInbox bool
+	// DeliveryID is the opaque `bundle apply --delivery-id` the bundle
+	// receipt records ("" for none; enterprisestatus.CheckDeliveryID).
+	DeliveryID string
 }
 
 // Error codes in the lifecycle result.
@@ -180,6 +185,20 @@ type lifecycle struct {
 	// gatewayKeptRunning is set when the gateway applied a config change
 	// itself (hotConfigApply) and was not restarted.
 	gatewayKeptRunning bool
+	// policyAssetsEdited is set when ensure found a policy asset the config
+	// names edited in place (policyAssetsChanged): the apply then records the
+	// next config_generation although config.yaml stayed the same.
+	policyAssetsEdited bool
+	// policyAssetRefusal is why the installed gateway binary refuses the
+	// policy of an up-to-date deployment (configRefusal), found by
+	// policyAssetsChanged: a policy asset the config names was edited in
+	// place into one that does not load. ensure applies nothing and reports
+	// it (GAP-0229).
+	policyAssetRefusal string
+	// noopPolicy is the policy ensureNoop computed for an up-to-date
+	// deployment, which the result's policy block reuses once
+	// (computePolicy) instead of building the generation again.
+	noopPolicy *computedPolicy
 	// failedInstallLeftovers is set when an uninstall removes what a failed
 	// first package install left, with no deployment committed.
 	failedInstallLeftovers bool
@@ -189,8 +208,9 @@ type lifecycle struct {
 	// sandboxesKept names the accounts whose sandboxes a non-purge
 	// uninstall kept; sandboxStoreKept is set once it kept the gateway's
 	// registrations of them with it (GAP-0598).
-	sandboxesKept    []string
-	sandboxStoreKept bool
+	sandboxesKept       []string
+	sandboxStoreKept    bool
+	openshellRecordKept bool
 	// configWrittenDuringRun holds a config.yaml another writer put in place
 	// while a transaction of this run planned its own (applyFiles kept it).
 	// A rollback restores the earlier file, so the newer one is put back
@@ -230,6 +250,9 @@ type lifecycle struct {
 	osPlan *openshellPlan
 	// bundle is the signed policy bundle this run applies (nil for none).
 	bundle *bundleRun
+	// confirmedLate are the manifest SHA-256s of the bundles this run's
+	// settle confirmed late (bundle_confirmed_after_interrupt).
+	confirmedLate map[string]bool
 	// inboxProcessed are the bundle inbox files this run removes at its end.
 	inboxProcessed []string
 }
@@ -520,6 +543,9 @@ func (l *lifecycle) ensureInstalled(ctx context.Context, record *Deployment, app
 		if !restored {
 			r.NoopReason = reason
 		}
+		if refusal := l.policyAssetRefusal; refusal != "" {
+			r.AddError(codeConfigRefused, env.policyAssetRefusedMessage(refusal))
+		}
 		if err := env.sealHookBinary(record); err != nil {
 			r.AddWarning(codeHookBinaryNotRestored, "could not keep a copy of the hook binary to restore it from: "+err.Error())
 		}
@@ -556,14 +582,18 @@ func (l *lifecycle) ensureInstalled(ctx context.Context, record *Deployment, app
 // uninstall that then failed to remove another state folder left no record,
 // so its rerun was a not_installed no-op and the leftovers needed
 // --adopt-existing (GAP-1440).
-func (e *Env) removeLifecycleStateKeepingLock() error {
+func (e *Env) removeLifecycleStateKeepingLock(keep ...string) error {
 	dir := e.P(e.Layout.LifecycleDir)
+	skip := map[string]bool{lockFileName: true, deploymentFileName: true}
+	for _, name := range keep {
+		skip[name] = true
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Name() == lockFileName || entry.Name() == deploymentFileName {
+		if skip[entry.Name()] {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
@@ -797,6 +827,14 @@ func (l *lifecycle) validateOptions() int {
 			return bad("--bundle must be an absolute path")
 		case o.ConfigFile != "" || o.PayloadDir != "" || o.FromPackage || o.NoStart || o.AdoptExisting || o.Mutate != nil:
 			return bad("a policy bundle carries the config: --config, --payload, --from-package, --no-start and --adopt-existing do not apply")
+		}
+	}
+	if o.DeliveryID != "" {
+		if o.Bundle == "" && !o.BundleInbox {
+			return bad("--delivery-id applies only to a policy bundle apply")
+		}
+		if err := enterprisestatus.CheckDeliveryID(o.DeliveryID); err != nil {
+			return bad(err.Error())
 		}
 	}
 	return 0
@@ -1973,7 +2011,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 	}
 
-	if !l.opts.NoStart && l.testFaultAfterServicesRequested() {
+	if !l.opts.NoStart && l.testFaultRequested(testFaultAfterServices) {
 		return failAndRollback(codeLifecycleTestFault, errors.New("the lifecycle test fault asked this run to fail after its services started"))
 	}
 	if !l.opts.NoStart {
@@ -1993,6 +2031,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	if err := env.saveDeployment(newRecord); err != nil {
 		return failAndRollback(codeApply, err)
+	}
+	if l.bundle != nil {
+		// The commit point of the bundle: the gateway reported its policy
+		// above. A step below that fails does not undo it (finishBundle).
+		l.bundle.committed = true
 	}
 	_ = env.clearPending()
 	_ = removeFile(env.rolledBackUpgradePath())
@@ -2022,6 +2065,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 	}
 	l.describe(ctx, newRecord, false)
+	if !l.opts.NoStart && l.testFaultRequested(testFaultAfterCommit) {
+		r.AddError(codeLifecycleTestFault, "the lifecycle test fault asked this run to fail after its deployment committed")
+	}
 	// The change that leaves the eligible users without a connector says so
 	// at once, as on Windows, not only at the next status (GAP-0266).
 	l.warnNoConnectorsEnabled(p.config)
@@ -2151,10 +2197,13 @@ func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Acc
 		// A bundle whose config is already installed is still recorded as
 		// the generation its principal installed.
 		bundleUnrecorded := l.bundle != nil && (state.BundleID != l.bundle.receipt.BundleID || state.BundleVersion != l.bundle.receipt.Version)
-		return changed[env.Layout.ConfigPath] || stateErr != nil || state.ConfigSHA256 != p.config.SHA || bundleUnrecorded, nil
+		return changed[env.Layout.ConfigPath] || stateErr != nil || state.ConfigSHA256 != p.config.SHA || bundleUnrecorded || l.policyAssetsEdited, nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	if l.policyAssetsEdited {
+		l.noteChange("recorded a policy asset the config names, changed in place, as the next config generation")
 	}
 	// The gateway service reads the generation record, as it reads config.yaml.
 	serviceGroup := fileOwner{UID: 0, GID: account.GID}
@@ -2850,6 +2899,7 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 // desired state. It never mutates the host.
 func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, string) {
 	env := l.env
+	l.noopPolicy, l.policyAssetsEdited, l.policyAssetRefusal = nil, false, ""
 	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
 	if err != nil || !ok || account.UID != record.ServiceUID || account.GID != record.ServiceGID {
 		return false, ""
@@ -2892,7 +2942,59 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	if l.machinePolicyDrift(p) {
 		return false, ""
 	}
+	if l.policyAssetsChanged(ctx, record, account) {
+		return false, ""
+	}
+	if l.policyAssetRefusal != "" {
+		return true, "policy_refused"
+	}
 	return true, "up_to_date"
+}
+
+// policyAssetsChanged reports whether the installed config computes to an
+// effective policy the running gateway does not report while config.yaml
+// and every file the lifecycle installs are as applied: a policy asset the
+// config names was edited in place (a sandbox pack under the policies
+// directory, whose folder the gateway does not watch). ensure then applies
+// again, which records the change as the next config_generation and loads it
+// into the gateway, instead of reporting a noop with applied false
+// (GAP-0133). A gateway that is down or not serving, that publishes no
+// digest (Secure Client), or that rejected its last reload, and a policy that
+// does not build, are not changes a run can apply; status and verify keep
+// reporting them, and ensure fails with the reason a policy does not build
+// (policyAssetRefusal).
+func (l *lifecycle) policyAssetsChanged(ctx context.Context, record *Deployment, account Account) bool {
+	if record.NoStart {
+		return false
+	}
+	env := l.env
+	gateway, ok := gatewayUnitOf(env.Services.Units())
+	if !ok || !env.Services.Active(ctx, gateway) {
+		return false
+	}
+	body, err := l.gatewayHealth(ctx, gateway, account.UID)
+	if err != nil {
+		return false
+	}
+	reported, reloadError := gatewayPolicyHealth(body)
+	if reported == "" || reloadError != "" {
+		return false
+	}
+	digest, generation, ok := l.computePolicy(ctx)
+	if !ok {
+		// A policy that does not build is no change ensure applies: the
+		// running gateway keeps the policy it loaded, and the run fails
+		// with the reason instead of restarting into a policy that does not
+		// load (GAP-0229).
+		l.policyAssetRefusal = l.configRefusal(ctx)
+		return false
+	}
+	if digest == reported {
+		l.noopPolicy = &computedPolicy{digest: digest, generation: generation}
+		return false
+	}
+	l.policyAssetsEdited = true
+	return true
 }
 
 func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
@@ -2940,9 +3042,10 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 
 // uninstall stops and removes the deployment, with its machine state (the
 // config, secrets, gateway and guardian state, logs and lifecycle state) and
-// the service account. Each account keeps its own ~/.defenseclaw and
-// per-user binaries unless purge is set. KeepState keeps the machine state
-// for a reinstall to resume with.
+// the service account. Without purge each account keeps its ~/.defenseclaw,
+// per-user binaries and sandboxes; the gateway's sandbox registrations and
+// key stay for those sandboxes, and Linux keeps administrator policies.
+// KeepState keeps the other machine state for a reinstall to resume with.
 func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
 	units := env.Services.Units()
@@ -3081,10 +3184,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	} else if record == nil && l.opts.Purge {
 		l.warnUnpurgedPerUser(ctx)
 	}
-	// The sandbox subsystem goes before the binaries it runs: each account's
-	// daemon and OpenShell gateway stop (its sandboxes first), the account's
-	// sandboxes are torn down as the account, and a purge removes what the
-	// subsystem left in the account's home.
+	// The sandbox subsystem goes before the binaries it runs: a non-purge
+	// uninstall stops and keeps each account's sandboxes, then its daemon
+	// and OpenShell gateway. A purge tears down the sandboxes as the account
+	// and removes what the subsystem left in its home.
 	l.teardownOpenShell(ctx, sandboxAccounts)
 	// DefenseClaw's vendor machine policy entries go next, while the hook
 	// binary they name still exists; administrator entries stay byte for
@@ -3309,7 +3412,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		if err := env.removeSensorState(); err != nil {
 			errs = append(errs, err)
 		}
-		if err := env.removeLifecycleStateKeepingLock(); err != nil {
+		var keepLifecycle []string
+		if l.openshellRecordKept {
+			keepLifecycle = append(keepLifecycle, openshellKeptStateFile)
+		}
+		if err := env.removeLifecycleStateKeepingLock(keepLifecycle...); err != nil {
 			errs = append(errs, err)
 		}
 		if !packageManaged {
@@ -3468,15 +3575,27 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	}
 	state := fmt.Sprintf("the managed config and secrets (%s), the gateway and guardian state (%s, %s), the logs (%s)",
 		layout.ConfigDir, layout.DataDir, layout.GuardianAuthDir, layout.LogDir)
+	if l.sandboxStoreKept {
+		state = fmt.Sprintf("the managed config and secrets (%s), the gateway and guardian state (%s except its sandbox registrations and their key, which stay, %s), the logs (%s)",
+			layout.ConfigDir, layout.DataDir, layout.GuardianAuthDir, layout.LogDir)
+	}
+	lifecycleState := "the lifecycle state (" + layout.LifecycleDir + ")"
+	if l.openshellRecordKept {
+		lifecycleState = "the lifecycle state (" + layout.LifecycleDir + " except the record of the sandbox setup the kept sandboxes were made under, " +
+			filepath.Join(layout.LifecycleDir, openshellKeptStateFile) + ")"
+	}
 	switch {
 	case l.opts.KeepState:
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
+		if l.openshellRecordKept {
+			lines = append(lines, "kept the record of the sandbox setup the kept sandboxes were made under in "+layout.LifecycleDir)
+		}
 	case l.opts.KeepServiceAccount:
-		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); kept the service account "+layout.ServiceUser)
+		lines = append(lines, "removed the machine state: "+state+" and "+lifecycleState+"; kept the service account "+layout.ServiceUser)
 	case l.serviceAccountKept:
-		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); the service account "+layout.ServiceUser+" stays (see the warning)")
+		lines = append(lines, "removed the machine state: "+state+" and "+lifecycleState+"; the service account "+layout.ServiceUser+" stays (see the warning)")
 	default:
-		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
+		lines = append(lines, "removed the machine state: "+state+", "+lifecycleState+" and the service account "+layout.ServiceUser)
 	}
 	if l.policiesKept {
 		// A package host keeps its binaries, so ensure --from-package turns

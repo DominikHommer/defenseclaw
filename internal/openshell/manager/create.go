@@ -50,6 +50,22 @@ import (
 // the sandbox user, which cannot create /work.
 const copyWorkRoot = "/sandbox/work"
 
+type createConfigKey struct{}
+
+// WithCreateConfig pins the configuration used by one Create call. A managed
+// daemon supplies the resolved registration floor before other registrations
+// can change its default configuration during gateway preparation.
+func WithCreateConfig(ctx context.Context, cfg *config.Config) context.Context {
+	return context.WithValue(ctx, createConfigKey{}, cfg)
+}
+
+func (m *Manager) createConfig(ctx context.Context) *config.Config {
+	if cfg, ok := ctx.Value(createConfigKey{}).(*config.Config); ok && cfg != nil {
+		return cfg
+	}
+	return m.config()
+}
+
 // rollback undoes the completed steps of a failed create, newest first.
 type rollback struct {
 	steps []rollbackStep
@@ -84,7 +100,7 @@ func (r *rollback) run(m *Manager, sandbox string) {
 // Create creates a sandbox, waits until it is ready and returns it. Every
 // step it completed is rolled back when a later one fails.
 func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error) {
-	cfg := m.config()
+	cfg := m.createConfig(ctx)
 	if !cfg.OpenShell.Enabled {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)
 	}
@@ -240,7 +256,7 @@ type createInput struct {
 }
 
 func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInput, rb *rollback) (*sandboxapi.Sandbox, error) {
-	cfg := m.config()
+	cfg := m.createConfig(ctx)
 	eff, spec, name := in.eff, in.harness, in.name
 	egressDec, err := m.egressDecider(cfg, eff)
 	if err != nil {
@@ -949,10 +965,17 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 		return image.Record{}, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable, "no image builder is configured")
 	}
 	uid, gid := m.runAs()
+	trusted, err := image.TrustedCAsFor(cfg)
+	if err != nil {
+		// Fail closed: no image without the CAs the operator named.
+		return image.Record{}, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable,
+			"the %s sandbox image cannot be built or used: %v; fix the file, or unset %s (`defenseclaw sandbox doctor` checks it)",
+			spec.DisplayName, err, openshell.TrustedCAKey)
+	}
 	bs := image.BuildSpec{
 		Harness: spec, HarnessVersion: cfg.OpenShell.Image.HarnessVersions[spec.Name], BaseImage: cfg.OpenShell.Image.Base,
 		UID: uid, GID: gid, IngressPort: m.opts.IngressPort, FailMode: connector.SandboxFailMode,
-		DefenseClawVersion: m.opts.DefenseClawVersion, MicroVM: image.MicroVMTarget(d),
+		DefenseClawVersion: m.opts.DefenseClawVersion, MicroVM: image.MicroVMTarget(d), TrustedCAs: trusted,
 	}
 	rec, err := m.opts.Images.Resolve(ctx, bs, build)
 	switch {
@@ -1244,7 +1267,7 @@ func provisioningFailure(d openshell.Driver, err error) error {
 	if d.ImageCache == "" || !errors.As(err, &e) || !strings.Contains(e.Detail, "ProvisioningTimedOut") {
 		return err
 	}
-	e.Detail += ". The first start of an image prepares a MicroVM disk of about 5 GB, and a full volume stops it: check Disk space in " +
+	e.Detail += ". The first start of an image uses about 11 GiB while preparing a MicroVM disk, and a full volume stops it: check Disk space in " +
 		"`defenseclaw sandbox doctor`, and free space with `defenseclaw sandbox image prune` (it also removes the half-prepared disks of failed starts)"
 	return e
 }

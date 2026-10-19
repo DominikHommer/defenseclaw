@@ -871,7 +871,7 @@ func TestTetragonStatusFollowsTheSchema(t *testing.T) {
 		"Observed, not enforced: 1 session\n", "    dcr-std1 (uid 1001): 1, looks like an agent by name only (heuristic_root) (langchain)",
 		"  Over the pid limit: 1 live root observed only\n",
 		// GAP-0096: the count and the verb agree for one session.
-		"1 live agent session is over the 8-session limit of the monitor controls (the controls do not count its opens, and its user's burn-in",
+		"1 live agent session is over the 4-session limit of the monitor controls (the controls do not count its opens, and its user's burn-in",
 		kernelpolicy.WarnOperatorOverride + ":connect",
 	} {
 		if !strings.Contains(text.String(), want) {

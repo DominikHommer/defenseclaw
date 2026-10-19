@@ -82,7 +82,6 @@ func sampleResults() map[string]*Result {
 		{Name: "local-sqlite", Kind: "local_sqlite", Enabled: true, Signals: []string{"logs"}, RedactionProfiles: []string{"none"}},
 		{Name: "galileo", Kind: "otlp", Enabled: true, Preset: "galileo", Signals: []string{"traces"}, RedactionProfiles: []string{"strict"}},
 	}
-	installed.HookFailModes = map[string]string{"codex": "closed", "kiro": "closed"}
 	installed.CoverageComplete = true
 	installed.SecurityComplete = true
 	installed.AddWarning("not_started", "installed with --no-start")

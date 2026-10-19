@@ -48,7 +48,7 @@ const managedFactsTimeout = 5 * time.Second
 // and every error on any other computer, is returned as it is. An exit
 // status err carries is kept.
 func (a *App) ManagedError(ctx context.Context, err error) error {
-	if err == nil || !(a.ManagedHost() || onManagedHost()) {
+	if err == nil || (!(a.ManagedHost()) && !(onManagedHost())) {
 		return err
 	}
 	var silent *Silent
@@ -101,10 +101,10 @@ func shellDockerHostHint(lookupEnv func(string) (string, bool)) string {
 // (GAP-0595).
 func (a *App) accountOutage(ctx context.Context, err error) error {
 	var lookup *openshell.AccountLookupError
-	if err == nil || !(errors.As(err, &lookup) || strings.Contains(err.Error(), "ssh found no user for it")) {
+	if err == nil || (!(errors.As(err, &lookup)) && !(strings.Contains(err.Error(), "ssh found no user for it"))) {
 		return err
 	}
-	if !(a.ManagedHost() || onManagedHost() || a.managedSeen != nil) {
+	if (!(a.ManagedHost()) && !(onManagedHost())) && a.managedSeen == nil {
 		return errors.New("your account can't be looked up on this computer right now (ssh found no user for it); try again in a moment")
 	}
 	return errors.New(sandboxapi.AccountUnknownText + " " + accountOutageNote + " " + accountOutageContact(a.managedFacts(ctx).RequestAccess))
@@ -132,13 +132,37 @@ func accountOutageContact(contact string) string {
 	return "If it lasts, tell IT: " + text
 }
 
+// accountRechecks and accountRecheckEvery are how long a managed run waits
+// for the computer to look the account up before it refuses: 10 seconds, as
+// long as a create waits for a cold group lookup. An SSSD that restarts, or
+// whose cache comes back, then starts the run instead of refusing it
+// (GAP-0507).
+const (
+	accountRechecks     = 5
+	accountRecheckEvery = 2 * time.Second
+)
+
 // checkAccount stops a managed run at its start when the account cannot be
-// looked up, before the project is copied.
+// looked up, before the project is copied. It asks again for up to 10
+// seconds first, and refuses (fails closed) if the computer still names no
+// account: ssh, over which OpenShell reaches every sandbox, cannot run for
+// it.
 func (a *App) checkAccount(ctx context.Context) error {
 	if a.AccountCheck == nil {
 		return nil
 	}
-	return a.accountOutage(ctx, a.AccountCheck())
+	err := a.AccountCheck()
+	var lookup *openshell.AccountLookupError
+	if errors.As(err, &lookup) {
+		a.note("This computer can't look your account up right now; waiting up to 10 seconds for it.")
+		for i := 0; i < accountRechecks && errors.As(err, &lookup); i++ {
+			if a.Sleep == nil || a.Sleep(ctx, accountRecheckEvery) != nil {
+				break
+			}
+			err = a.AccountCheck()
+		}
+	}
+	return a.accountOutage(ctx, err)
 }
 
 // managedFlagRefusal refuses, before the project is copied or anything is
@@ -241,6 +265,10 @@ var adminKeyNote = regexp.MustCompile(`\s*\(openshell\.admin\.[a-z_]+\)`)
 // whether it is a refusal ManagedError words; m is the caller's own
 // profile and contact.
 func managedErrorText(e *sandboxapi.Error, m *sandboxapi.ManagedStatus) (string, bool) {
+	if (e.Code == sandboxapi.CodeUpstream || e.Code == sandboxapi.CodeUnavailable) &&
+		gatewayTransportText(e.Detail) != e.Detail {
+		return "the connection to the OpenShell gateway closed; `defenseclaw sandbox doctor` checks it, then retry the command", true
+	}
 	if sandboxapi.IsPolicyRefusal(e.Message) {
 		// A refusal the daemon passed on complete (sandboxapi.AccessRefusedWhy
 		// and the other policy refusals) keeps its words: it already names
