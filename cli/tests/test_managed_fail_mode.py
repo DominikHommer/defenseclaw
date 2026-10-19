@@ -59,8 +59,11 @@ def test_secure_client_and_per_user_keep_configured_values(deployment_mode: str,
     assert not cfg.managed_hooks_fail_closed()
     for name in ("amp", "cursor", "kiro"):
         assert cfg.guardrail.effective_hook_fail_mode(name) == "open", name
-    for name in ("antigravity", "copilot", "hermes"):
+    for name in ("antigravity", "copilot"):
         assert upstream_fail_open(cfg, name), name
+    # The per-user Hermes hook blocks its own failures on every OS
+    # (GAP-0150, GAP-0269); only Secure Client keeps Hermes open.
+    assert upstream_fail_open(cfg, "hermes") is (deployment_mode == "managed_enterprise")
 
 
 def test_machine_marker_makes_any_managed_config_standalone(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -63,13 +63,18 @@ def upstream_fail_open(cfg: Any, connector: str) -> bool:
     and macOS shell hook and the Windows native hook) blocks a call it cannot
     check through Hermes' block directive when its fail mode is closed, so
     an unset fail mode resolves closed there as for every other connector
-    (rel-1-0-3 GAP-0150, GAP-0269).
+    (rel-1-0-3 GAP-0150, GAP-0269); only the Secure Client profile keeps
+    Hermes open, as its hook render does (CapableHookFailMode).
     """
     name = normalize(connector)
-    if name not in _UPSTREAM_FAIL_OPEN_CONNECTORS or name == "hermes":
+    if name not in _UPSTREAM_FAIL_OPEN_CONNECTORS:
         return False
     managed_closed = getattr(cfg, "managed_hooks_fail_closed", None)
-    return not (callable(managed_closed) and managed_closed())
+    if callable(managed_closed) and managed_closed():
+        return False
+    if name == "hermes":
+        return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    return True
 
 
 _SHARED_RUNTIME_CONNECTORS = frozenset({"claudecode", "codex"})

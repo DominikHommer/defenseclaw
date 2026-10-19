@@ -145,6 +145,11 @@ hermes_block_message() {
           "the DefenseClaw "*) ;;
           *) reason="the DefenseClaw gateway is not available. Try again in a moment; if this continues, contact your administrator." ;;
         esac
+      else
+        case "$reason" in
+          "the DefenseClaw "*) ;;
+          *) reason="the DefenseClaw gateway is unavailable. Run \`defenseclaw-gateway status\`." ;;
+        esac
       fi
       ;;
   esac
@@ -185,8 +190,9 @@ fail_unreachable() {
   defenseclaw_log_hook_failure hermes hermes-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "hermes tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    hermes_block transport "$1"
-    exit 2
+{{if .SecureClient}}    printf '{"action":"block","message":"DefenseClaw hook failed closed"}\n'
+{{else}}    hermes_block transport "$1"
+{{end}}    exit 2
   fi
   exit 0
 }

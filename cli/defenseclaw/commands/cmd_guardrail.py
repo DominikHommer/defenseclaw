@@ -1445,9 +1445,12 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     # whether it is an override or inherited from the global default.
     if mode is None:
         click.echo()
-        if normalize_connector(key) == "hermes":
-            # The Hermes hook follows its resolved value on every OS
-            # (GAP-0150, GAP-0269); it has no separate runtime record to read.
+        if normalize_connector(key) == "hermes" and upstream_fail_open(app.cfg, key):
+            runtime_value = "open (Hermes upstream; failures cannot be made fail-closed)"
+        elif normalize_connector(key) == "hermes":
+            # Outside Secure Client the Hermes hook follows its resolved
+            # value on every OS (GAP-0150, GAP-0269); it has no separate
+            # runtime record to read.
             runtime_value = current
         else:
             runtime_value = runtime_state.runtime or "unknown"
@@ -1480,7 +1483,17 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         ux.echo(
             f"  {ux.bold(f'Changing {label} hook fail mode:')} {configured_mode} {ux.dim('→')} {ux.accent(mode)}"
         )
-    if normalize_connector(key) == "hermes" and mode == "closed":
+    if normalize_connector(key) == "hermes" and mode == "closed" and upstream_fail_open(app.cfg, key):
+        ux.warn(
+            "Hermes will remain fail-open; this value is stored only as requested policy provenance.",
+            indent="  ",
+        )
+        ux.subhead(
+            "Timeout, nonzero exit, malformed output, authentication, and transport failures continue "
+            "in upstream Hermes. Only valid synchronous JSON can block.",
+            indent="    ",
+        )
+    elif normalize_connector(key) == "hermes" and mode == "closed":
         ux.warn(f"Invalid or unavailable gateway responses will now BLOCK {label} tool calls.", indent="  ")
         ux.subhead(_HERMES_UPSTREAM_TIMEOUT_NOTE, indent="    ")
     elif mode == "closed":
@@ -1785,11 +1798,15 @@ def fail_mode_cmd(
                 _eff = _state.runtime or "unknown"
                 if _state.drift:
                     _eff += f" (desired {_state.desired}; drift: {', '.join(_state.drift)})"
+            elif normalize_connector(_name) == "hermes" and upstream_fail_open(app.cfg, _name):
+                _eff = f"open (Hermes upstream; configured provenance: {_eff})"
             elif _is_proxy_connector(_name):
                 _eff = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
             elif _cursor_stays_fail_closed(gc, _name):
                 _eff = "closed (Cursor hooks always fail closed in action mode)"
-            if _eff.startswith("open"):
+            if _eff.startswith("open") and not (
+                normalize_connector(_name) == "hermes" and upstream_fail_open(app.cfg, _name)
+            ):
                 _open_names.append(_name)
             _eff_disp = ux._style(_eff, fg="yellow") if _eff == "closed" else _eff
             click.echo(f"      - {_connector_label(_name)} ({_name}): {_eff_disp}")
@@ -1804,9 +1821,15 @@ def fail_mode_cmd(
             )
             click.echo(f"  {ux.dim('Switch to closed:')} defenseclaw guardrail fail-mode closed")
         else:
+            # Name Hermes only when it is configured (GAP-2116).
+            _hermes_note = (
+                "; Hermes remains fail-open"
+                if any(normalize_connector(n) == "hermes" for n in _actives) and upstream_fail_open(app.cfg, "hermes")
+                else ""
+            )
             ux.subhead(
                 "Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors "
-                "that are closed above.",
+                f"that are closed above{_hermes_note}.",
                 indent="  ",
             )
             if _open_names:
@@ -1859,7 +1882,13 @@ def fail_mode_cmd(
         and mode == current
         and (single_state is None or (single_state.desired == mode and single_state.current))
     ):
-        ux.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
+        if normalize_connector(single_connector) == "hermes" and upstream_fail_open(app.cfg, single_connector):
+            ux.echo(
+                f"  {ux.dim('Configured Hermes fail-mode provenance is already')} {mode!r}"
+                f" {ux.dim('— runtime remains upstream fail-open.')}"
+            )
+        else:
+            ux.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
         return
 
     click.echo()
@@ -1945,10 +1974,24 @@ def fail_mode_cmd(
                 f"Switch to action with: {_mode_action_command(gc)}",
                 indent="  ",
             )
-    if mode == "closed" and guardrail_off:
+    hermes_targeted = any(normalize_connector(name) == "hermes" for name in active_names) and upstream_fail_open(
+        app.cfg, "hermes"
+    )
+    non_hermes_targeted = any(normalize_connector(name) != "hermes" for name in active_names)
+    if mode == "closed" and hermes_targeted and not non_hermes_targeted:
+        ux.warn(
+            "Hermes will remain fail-open; closed is stored only as requested policy provenance.",
+            indent="  ",
+        )
+        ux.subhead(
+            "Only valid synchronous Hermes JSON can block. Timeout, nonzero exit, malformed output, "
+            "authentication, and transport failures continue upstream.",
+            indent="    ",
+        )
+    elif mode == "closed" and guardrail_off:
         ux.subhead(
             "Once the guardrail is enabled, invalid or unavailable gateway responses will BLOCK "
-            "supported connectors.",
+            "supported connectors." + (" Hermes remains fail-open." if hermes_targeted else ""),
             indent="  ",
         )
     elif mode == "closed":
@@ -1958,7 +2001,8 @@ def fail_mode_cmd(
         )
         ux.subhead(
             "A 4xx, malformed/incomplete response, timeout, or connection failure blocks connectors "
-            "with a native fail-closed surface.",
+            "with a native fail-closed surface."
+            + (" Hermes remains fail-open." if hermes_targeted else ""),
             indent="    ",
         )
     elif all(_is_proxy_connector(name) for name in active_names):
