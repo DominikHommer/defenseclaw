@@ -321,8 +321,9 @@ def _destinations(observability: Any) -> list[Any] | None:
 def _fail_mode_text(cfg: Any) -> str:
     """What the active connectors' hooks do when the guardrail can't answer.
 
-    The effective value per connector (observe mode and agents that fail open
-    upstream stay open, as in ``defenseclaw status``), not the raw global
+    The effective value per connector (agents that fail open upstream, and
+    observe mode under Secure Client, stay open, as in ``defenseclaw
+    status``), not the raw global
     ``guardrail.hook_fail_mode`` (GAP-0152). A mixed set reads "fail closed,
     1 open".
     """

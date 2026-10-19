@@ -129,6 +129,20 @@ if [ -z "${HOME:-}" ]; then
   export HOME
 fi
 
+# The hook's start, for the restart budget of defenseclaw_await_gateway.
+# EPOCHREALTIME is a clock only from bash 5 on, where the environment cannot
+# set it; bash 3.2 (macOS) counts the whole seconds of SECONDS from here.
+_DC_HOOK_STARTED_US=""
+if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ]; then
+  _DC_HOOK_STARTED_US="${EPOCHREALTIME:-}"
+  _DC_HOOK_STARTED_US="${_DC_HOOK_STARTED_US/[.,]/}"
+  case "$_DC_HOOK_STARTED_US" in
+    ""|*[!0-9]*) _DC_HOOK_STARTED_US="" ;;
+  esac
+fi
+_DC_HOOK_STARTED_S="${SECONDS:-0}"
+_DC_GATEWAY_RESTART_WAITED=""
+
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
 # Use ulimit -S (soft) so the hook doesn't try to exceed kernel maxima
@@ -831,19 +845,18 @@ _dc_hook_post_response() {
   RESPONSE=$(defenseclaw_hook_post)
 }
 
-# defenseclaw_gateway_cold_start CURL_STATUS starts this account's per-user
-# gateway when the hook's request was refused (curl exit 7): nothing else
-# starts a per-user gateway after a reboot on Linux or macOS. It returns 0
-# once `defenseclaw-gateway start --hook-cold-start` reports the gateway
-# ready, and the caller retries its request once; any other outcome returns
-# 1 and the caller fails as unreachable. It never starts a gateway that was
-# stopped with `defenseclaw-gateway stop` (gateway.stopped), during an
-# install (.install.lock), for a managed or socket hook, or when
-# DEFENSECLAW_GATEWAY_AUTOSTART is 0. The start command serializes
-# concurrent hooks and backs off after a failure. This is the one helper
-# that calls out to the gateway's own CLI.
+# defenseclaw_gateway_cold_start starts this account's per-user gateway in
+# the background after the hook's request was refused: nothing else starts a
+# per-user gateway after a reboot on Linux or macOS. It returns at once;
+# defenseclaw_await_gateway sends the call again while the gateway starts,
+# and a start that takes longer than the hook's restart budget finishes
+# after the hook, so the next call finds the gateway running. It returns 1
+# without starting when the gateway was stopped with `defenseclaw-gateway
+# stop` (gateway.stopped), during an install (.install.lock), for a managed
+# or socket hook, or when DEFENSECLAW_GATEWAY_AUTOSTART is 0. The start
+# command serializes concurrent hooks with a restart and backs off after a
+# failure. This is the one helper that calls out to the gateway's own CLI.
 defenseclaw_gateway_cold_start() {
-  [ "${1:-}" = "7" ] || return 1
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
@@ -851,7 +864,7 @@ defenseclaw_gateway_cold_start() {
     0|false|FALSE|no|NO|off|OFF) return 1 ;;
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
-  local home="${DEFENSECLAW_AGENT_HOME:-}" data="" bin=""
+  local home="${DEFENSECLAW_AGENT_HOME:-}" data="" bin="" detach=""
   [ -n "$home" ] && [ -d "$home" ] || return 1
   data="${DEFENSECLAW_HOME:-${home}/.defenseclaw}"
   [ -d "$data" ] && [ -f "${data}/config.yaml" ] || return 1
@@ -859,16 +872,89 @@ defenseclaw_gateway_cold_start() {
   [ ! -e "${data}/.install.lock" ] || return 1
   [ ! -e "${data}/.disabled" ] || return 1
   bin="$(defenseclaw_gateway_binary "$data" "$home")" || return 1
+  # In its own session where setsid exists, so the agent ending the hook's
+  # process group does not end a start that is still running.
+  detach="$(command -v setsid 2>/dev/null)" || detach=""
   # The gateway keeps running after the hook exits: give it the account's
   # HOME and installer bin directory, drop the hook's git and locale pins,
   # and lift the hook's soft resource limits back to the hard ones.
   (
     ulimit -S -t "$(ulimit -H -t)" 2>/dev/null || true
     ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true
-    exec env -u GIT_CONFIG_NOSYSTEM -u GIT_CONFIG_GLOBAL -u LC_ALL -u LANG \
+    exec ${detach:+"$detach"} env -u GIT_CONFIG_NOSYSTEM -u GIT_CONFIG_GLOBAL -u LC_ALL -u LANG \
       HOME="$home" PATH="${home}/.local/bin:${PATH}" \
-      "$bin" start --hook-cold-start </dev/null >/dev/null 2>&1
-  )
+      "$bin" start --hook-cold-start
+  ) </dev/null >/dev/null 2>&1 &
+  return 0
+}
+
+# _dc_hook_elapsed_ms sets _DC_ELAPSED_MS to the time since the hook
+# started (whole seconds under bash 3.2).
+_dc_hook_elapsed_ms() {
+  local now=""
+  if [ -n "${_DC_HOOK_STARTED_US:-}" ]; then
+    now="${EPOCHREALTIME:-}"
+    now="${now/[.,]/}"
+    case "$now" in
+      ""|*[!0-9]*) ;;
+      *)
+        _DC_ELAPSED_MS=$(( (10#$now - 10#$_DC_HOOK_STARTED_US) / 1000 ))
+        return 0
+        ;;
+    esac
+  fi
+  _DC_ELAPSED_MS=$(( (${SECONDS:-0} - ${_DC_HOOK_STARTED_S:-0}) * 1000 ))
+}
+
+# defenseclaw_await_gateway CURL_STATUS POST sends a per-user hook call again
+# while this account's gateway restarts or starts (GAP-0094, GAP-0102,
+# GAP-0107). CURL_STATUS is the status of the first try; POST is a function
+# that sends the same call again and sets RESPONSE. A refused connection
+# (curl 7: nobody listens on the port yet), or one the gateway dropped
+# unanswered as it stopped (52, 55, 56), is sent again every 0.2 s until 3 s
+# after the hook started, so a restart that is over by then is answered by
+# the gateway that comes up, from its policy; the first refusal also starts
+# the gateway (defenseclaw_gateway_cold_start). Returns 0 when RESPONSE holds
+# an answer; otherwise the last curl status, and the caller fails as
+# unreachable within about 3 s instead of waiting for the restart to end:
+# blocked when the fail mode is closed, never allowed then. A timeout (28),
+# a gateway stopped with `defenseclaw-gateway stop` (unless an install or
+# upgrade, which stops it the same way, is in progress), and managed or
+# socket hooks are not sent again.
+defenseclaw_await_gateway() {
+  local status="${1:-1}" post="${2:-}" launched="" tries=0
+  local data="${DEFENSECLAW_HOME:-${DEFENSECLAW_AGENT_HOME:-${HOME}}/.defenseclaw}"
+  [ -n "$post" ] || return "$status"
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return "$status" ;;
+  esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return "$status"
+  while :; do
+    case "$status" in
+      0) return 0 ;;
+      7|52|55|56) ;;
+      *) return "$status" ;;
+    esac
+    # An operator stop is not a restart: the fail mode applies at once. An
+    # install or upgrade stops the gateway the same way and starts it again
+    # when it is done (.install.lock), so that one is (GAP-0140).
+    [ ! -e "${data}/gateway.stopped" ] || [ -e "${data}/.install.lock" ] || return "$status"
+    if [ "$status" = 7 ] && [ -z "$launched" ]; then
+      launched=1
+      defenseclaw_gateway_cold_start || true
+    fi
+    _dc_hook_elapsed_ms
+    tries=$((tries + 1))
+    # The next try must start inside the budget; the try count bounds the
+    # wait even if the clock does not move.
+    if [ $((_DC_ELAPSED_MS + 200)) -ge 3000 ] || [ "$tries" -gt 15 ]; then
+      _DC_GATEWAY_RESTART_WAITED=1
+      return "$status"
+    fi
+    sleep 0.2 2>/dev/null || return "$status"
+    status=0
+    "$post" || status=$?
+  done
 }
 
 # defenseclaw_own_gateway_stopped returns 0 when this account's per-user
@@ -1128,8 +1214,12 @@ defenseclaw_unreachable_notice_json() {
   next="$(defenseclaw_unreachable_next_step)"
   [ -n "$next" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-  if [ -e "${data}/gateway.stopped" ]; then
+  if [ -e "${data}/.install.lock" ]; then
+    text='DefenseClaw is not checking this session: DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done. If it does not come back, run `defenseclaw-gateway start`.'
+  elif [ -e "${data}/gateway.stopped" ]; then
     text='DefenseClaw is not checking this session: the gateway was stopped with `defenseclaw-gateway stop`. Run `defenseclaw-gateway start` to resume protection.'
+  elif [ -n "${_DC_GATEWAY_RESTART_WAITED:-}" ] && ! defenseclaw_own_config_invalid; then
+    text='DefenseClaw is not checking this session: this account'"'"'s gateway is restarting or not running (no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection.'
   elif defenseclaw_own_gateway_alive; then
     text='DefenseClaw is not checking this session: the gateway is running but did not answer. Run `defenseclaw-gateway restart` to resume protection.'
   elif defenseclaw_own_config_invalid; then
@@ -1157,10 +1247,14 @@ defenseclaw_unreachable_next_step() {
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-  if [ -e "${data}/gateway.stopped" ]; then
+  if [ -e "${data}/.install.lock" ]; then
+    printf '%s' 'DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run `defenseclaw-gateway start` if it does not come back'
+  elif [ -e "${data}/gateway.stopped" ]; then
     printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection'
   elif defenseclaw_own_gateway_stopped && defenseclaw_own_config_invalid; then
     printf '%s' 'the gateway could not start because config.yaml does not load; run `defenseclaw config validate`, fix the file, then run `defenseclaw-gateway start`'
+  elif [ -n "${_DC_GATEWAY_RESTART_WAITED:-}" ]; then
+    printf '%s' 'this account'"'"'s gateway is restarting or not running (no answer within 3 seconds); try again in a moment, or run `defenseclaw-gateway start`'
   elif defenseclaw_own_gateway_stopped; then
     printf '%s' 'this account'"'"'s gateway is not running; run `defenseclaw-gateway start`'
   elif defenseclaw_own_gateway_alive; then

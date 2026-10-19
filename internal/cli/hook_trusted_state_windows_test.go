@@ -230,7 +230,7 @@ func TestForeignHookSessionPreparesWindowsManagedGeneration(t *testing.T) {
 	if before := buildHookOptionsForRuntime("opencode", "tool.execute.before", "", "closed", true); before.ManagedRuntimeFailure == "" {
 		t.Fatal("test must start without an authenticated Windows generation")
 	}
-	_, err := exchangeForeignHookSession("opencode", "tool.execute.before", time.Now().Add(5*time.Second), enterprisepolicy.SessionExchange{})
+	_, err := exchangeForeignHookSession("opencode", "tool.execute.before", time.Now(), time.Now().Add(5*time.Second), enterprisepolicy.SessionExchange{})
 	if err == nil || strings.Contains(err.Error(), "managed hook runtime unavailable") || strings.Contains(err.Error(), "retired") {
 		t.Fatalf("exchange should reach the authenticated transport, got %v", err)
 	}
@@ -444,7 +444,7 @@ func TestRecognizedPerUserLauncherWithCachedManagedArgsNoopsAfterTombstone(t *te
 	if !prepareEnterpriseManagedHookRuntime("codex") {
 		t.Fatal("recognized per-user launcher with clean absent policy plus trusted disabled state did not no-op")
 	}
-	_, err := exchangeForeignHookSession("codex", "PreToolUse", time.Now().Add(time.Second), enterprisepolicy.SessionExchange{})
+	_, err := exchangeForeignHookSession("codex", "PreToolUse", time.Now(), time.Now().Add(time.Second), enterprisepolicy.SessionExchange{})
 	if err == nil || !strings.Contains(err.Error(), "retired") {
 		t.Fatalf("foreign session exchange with a retired launcher = %v, want an error", err)
 	}

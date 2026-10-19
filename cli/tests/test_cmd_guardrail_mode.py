@@ -109,10 +109,11 @@ def test_global_switch_sets_only_guardrail_mode(app) -> None:
 
 
 def test_global_switch_rerenders_hooks_without_a_restart(app, restarts, rerenders, monkeypatch) -> None:
-    # codex inherits hook_fail_mode=closed, which only applies in action mode:
-    # observe -> action flips its hooks from fail-open to fail-closed. The
-    # gateway reloads the mode hot and the script is re-rendered in place
-    # (GAP-0002); no restart.
+    # Under Secure Client codex inherits hook_fail_mode=closed, which only
+    # applies in action mode there: observe -> action flips its hooks from
+    # fail-open to fail-closed. The gateway reloads the mode hot and the script
+    # is re-rendered in place (GAP-0002); no restart.
+    app.cfg.guardrail._secure_client_observe_open = True
     result, payload = _run(app, "action", "--json")
     assert payload["gateway"] == "live" and rerenders == ["codex"] and restarts == []
     text, _ = _run(app, "observe")
@@ -134,6 +135,16 @@ def test_global_switch_rerenders_hooks_without_a_restart(app, restarts, rerender
     monkeypatch.setattr(cmd_guardrail, "reconcile_connector_registration", broken)
     _, payload = _run(app, "action", "--json")
     assert payload["gateway"] == "restarted" and restarts == [app.cfg.data_dir]
+
+
+def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restarts, rerenders) -> None:
+    # B-01 (owner rule): outside Secure Client observe and action mode fail
+    # the same way, so a mode switch re-renders no hook and restarts nothing.
+    _, payload = _run(app, "action", "--json")
+    assert payload["gateway"] == "live" and rerenders == [] and restarts == []
+    _, payload = _run(app, "observe", "--json")
+    assert rerenders == [] and restarts == []
+    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "closed"
 
 
 def test_connector_override_created_on_a_single_install(app, restarts, rerenders) -> None:
@@ -213,6 +224,8 @@ def test_action_switch_probes_versions_and_refuses_an_unverified_connector(
 
 
 def test_copilot_action_message_names_upstream_fail_open(app) -> None:
+    # The fail-mode flip of a mode switch exists only under Secure Client.
+    app.cfg.guardrail._secure_client_observe_open = True
     app.cfg.claw.mode = "copilot"
     app.cfg.guardrail.connector = "copilot"
     result, _ = _run(app, "action", "--connector", "copilot", "--no-restart")

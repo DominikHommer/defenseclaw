@@ -296,6 +296,9 @@ type hookRunSlotContextKey struct{}
 // pass the hook's deadline. resume takes a slot back before the request goes
 // on, and gives up when the request has ended.
 func yieldHookRunSlot(ctx context.Context) (resume func()) {
+	// The hook bounds its wait for a local decision; this one waits on a
+	// remote scanner, so it reports progress first (hook_progress.go).
+	reportHookProgress(ctx)
 	slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot)
 	if slot == nil {
 		return func() {}

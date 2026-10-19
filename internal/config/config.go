@@ -2244,18 +2244,20 @@ func (g *GuardrailConfig) EffectiveHookFailMode() string {
 }
 
 // EffectiveHookFailModeFor returns the hook fail mode for the named
-// connector. An explicit connector override wins even in observe mode: it is
-// an operator-selected response-integrity posture, not a policy verdict.
-// Observe-only connectors without an override retain the historical fail-open
-// behavior; action mode falls through to the global value. Pass "" to resolve
-// the global connector mode/value. Pure lookup — never errors, never mutates.
+// connector outside Secure Client: the connector's own value wins, then the
+// global guardrail.hook_fail_mode, in observe and action mode alike. A value
+// that is not set resolves closed (owner rule: hooks fail closed everywhere
+// except under Secure Client; only an explicit `open` opens them). Pass "" to
+// resolve the global value. Pure lookup — never errors, never mutates.
 func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
-	return g.effectiveHookFailModeForMode(connector, g.EffectiveMode(connector))
+	return g.effectiveHookFailModeForMode(connector, g.EffectiveMode(connector), false)
 }
 
 // effectiveHookFailModeForMode keeps the configured precedence when a request
 // profile selects a different decision mode from the connector default.
-func (g *GuardrailConfig) effectiveHookFailModeForMode(connector, mode string) string {
+// observeOpen is the Secure Client contract: there a connector in observe
+// mode without a value of its own stays fail-open.
+func (g *GuardrailConfig) effectiveHookFailModeForMode(connector, mode string, observeOpen bool) string {
 	if g == nil {
 		return "closed"
 	}
@@ -2272,7 +2274,7 @@ func (g *GuardrailConfig) effectiveHookFailModeForMode(connector, mode string) s
 			return "closed"
 		}
 	}
-	if !strings.EqualFold(strings.TrimSpace(mode), "action") {
+	if observeOpen && !strings.EqualFold(strings.TrimSpace(mode), "action") {
 		return "open"
 	}
 	return g.EffectiveHookFailMode()

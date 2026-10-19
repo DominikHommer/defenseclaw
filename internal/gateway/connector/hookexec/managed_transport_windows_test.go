@@ -8,6 +8,7 @@ package hookexec
 import (
 	"errors"
 	"io"
+	"math/bits"
 	"net"
 	"net/http"
 	"os"
@@ -255,3 +256,51 @@ type managedTransportTestError struct {
 }
 
 func (e *managedTransportTestError) Error() string { return e.message }
+
+// GAP-0155: a gateway service that runs but does not listen yet (it is
+// starting, or stopping) is tried again at once: the hook reads the listen
+// table instead of a connect that Windows answers only after about 2 s.
+func TestManagedEnterpriseTransportDoesNotDialAPortNobodyListensOn(t *testing.T) {
+	managedTransportTestMu.Lock()
+	defer managedTransportTestMu.Unlock()
+
+	listener := listenManagedTransportTest(t)
+	addr := listener.Addr().String()
+	_ = listener.Close()
+	restoreManagedTransportSeams(t,
+		func(string) (uint32, error) { return 101, nil },
+		func(net.Conn) (uint32, error) { return 101, nil },
+	)
+	client, err := managedEnterpriseHTTPClient(5*time.Second, addr, "DefenseClawGateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = client.Post("http://"+addr+"/api/v1/hook", "application/json", strings.NewReader(`{}`))
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("the try took %s, want the listen table read instead of a connect", elapsed)
+	}
+	if !errors.Is(err, errManagedGatewayNotRunning) || !gatewayRestartShaped(err) {
+		t.Fatalf("err = %v, want a restart-shaped not-running error", err)
+	}
+}
+
+func TestTCPTableListensOn(t *testing.T) {
+	port := uint16(18970)
+	wirePort := uint32(bits.ReverseBytes16(port))
+	loopback := uint32(127) | 1<<24
+	rows := []mibTCPRowOwnerPID{
+		{State: mibTCPStateEstab, LocalAddr: loopback, LocalPort: wirePort},
+		{State: mibTCPStateListen, LocalAddr: loopback, LocalPort: uint32(bits.ReverseBytes16(port + 1))},
+	}
+	if tcpTableListensOn(rows, [4]byte{127, 0, 0, 1}, port) {
+		t.Fatal("an established row or another port counted as a listener")
+	}
+	rows = append(rows, mibTCPRowOwnerPID{State: mibTCPStateListen, LocalAddr: 0, LocalPort: wirePort})
+	if !tcpTableListensOn(rows, [4]byte{127, 0, 0, 1}, port) {
+		t.Fatal("a listener on every address was not found")
+	}
+	if !tcpTableListensOn([]mibTCPRowOwnerPID{{State: mibTCPStateListen, LocalAddr: loopback, LocalPort: wirePort}}, [4]byte{127, 0, 0, 1}, port) {
+		t.Fatal("a loopback listener was not found")
+	}
+}

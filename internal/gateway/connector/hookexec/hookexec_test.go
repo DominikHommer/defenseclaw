@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +30,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -969,30 +969,36 @@ func TestConnectionRefusedColdStartsAndRetriesExactlyOnce(t *testing.T) {
 			Header:     make(http.Header),
 		}, nil
 	}
-	recoveries := 0
+	var recoveries atomic.Int64
 	r := run(t, "codex", rt, func(opts *Options) {
 		opts.GatewayRecovery = func(context.Context, error) error {
-			recoveries++
+			recoveries.Add(1)
 			return nil
 		}
 	})
-	if r.code != 0 || recoveries != 1 || rt.requests != 2 {
-		t.Fatalf("cold-start retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
+	if r.code != 0 || recoveries.Load() != 1 || rt.requests != 2 {
+		t.Fatalf("cold-start retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries.Load(), rt.requests, r.stderr)
 	}
 }
 
-func TestColdStartNeverRetriesMoreThanOnce(t *testing.T) {
+// A per-user hook starts its gateway once per call, then keeps sending the
+// call within the restart budget; a gateway still down at its end blocks
+// the call in fail mode closed (GAP-0107).
+func TestColdStartRunsOncePerCall(t *testing.T) {
+	fastRestartRetries(t)
 	rt := &stubRT{err: syscall.ECONNREFUSED}
-	recoveries := 0
+	var recoveries atomic.Int64
 	r := run(t, "claudecode", rt, func(opts *Options) {
 		opts.FailMode = "closed"
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 300*time.Millisecond)
 		opts.GatewayRecovery = func(context.Context, error) error {
-			recoveries++
+			recoveries.Add(1)
 			return nil
 		}
 	})
-	if r.code != 2 || recoveries != 1 || rt.requests != 2 {
-		t.Fatalf("bounded retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
+	if r.code != 2 || recoveries.Load() != 1 || rt.requests < 2 ||
+		!strings.Contains(r.stderr, "restarting or not running") {
+		t.Fatalf("bounded retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries.Load(), rt.requests, r.stderr)
 	}
 }
 
@@ -1033,53 +1039,58 @@ func TestColdStartFailurePreservesFailClosedPolicy(t *testing.T) {
 	}
 }
 
-func TestColdStartWaitRespectsOverallHookDeadline(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
-	defer cancel()
+// A start that takes longer than the restart budget (another start or a
+// restart holds the start lock) does not hold the call: it is blocked at
+// the end of the budget, never allowed (GAP-0094).
+func TestAColdStartThatOutlastsTheRestartBudgetDoesNotHoldTheCall(t *testing.T) {
+	fastRestartRetries(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	started := time.Now()
-	r := runWithContext(t, ctx, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
+	r := run(t, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		opts.FailMode = "closed"
-		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
-			<-ctx.Done()
-			return ctx.Err()
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 300*time.Millisecond)
+		opts.GatewayRecovery = func(context.Context, error) error {
+			<-release
+			return nil
 		}
 	})
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("hook exceeded bounded deadline: %s", elapsed)
+	if elapsed := time.Since(started); elapsed > 1500*time.Millisecond {
+		t.Fatalf("the call waited %s for the start", elapsed)
 	}
 	if r.code != 2 {
 		t.Fatalf("deadline fail-closed code=%d stderr=%q", r.code, r.stderr)
 	}
 }
 
-func TestDefaultTransportColdStartReceivesRegisteredHookDeadline(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	var remaining time.Duration
-	r := run(t, "claudecode", &stubRT{}, func(opts *Options) {
+// The start a per-user hook runs after a refused connection outlives the
+// call: a gateway that takes longer than the restart budget to start still
+// comes up for the next call. It keeps the registered hook deadline as its
+// bound.
+func TestPerUserColdStartOutlivesTheCall(t *testing.T) {
+	fastRestartRetries(t)
+	startCtx := make(chan context.Context, 1)
+	release := make(chan struct{})
+	r := run(t, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		opts.Event = "MessageDisplay"
-		opts.APIAddr = addr
-		opts.HTTPClient = nil
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 200*time.Millisecond)
 		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
-			deadline, ok := ctx.Deadline()
-			if !ok {
-				return errors.New("cold-start context has no registered hook deadline")
-			}
-			remaining = time.Until(deadline)
-			return errors.New("test stops before gateway start")
+			startCtx <- ctx
+			<-release // still starting when the call ends
+			return nil
 		}
 	})
+	defer close(release)
 	if r.code != 0 {
 		t.Fatalf("MessageDisplay fail-open code=%d stderr=%q", r.code, r.stderr)
 	}
-	if remaining <= 0 || remaining > hookRequestTimeout("claudecode", "MessageDisplay") {
-		t.Fatalf("cold-start deadline remaining=%s, want within registered request budget", remaining)
+	ctx := <-startCtx
+	if ctx.Err() != nil {
+		t.Fatalf("the cold start context ended with the call: %v", ctx.Err())
+	}
+	deadline, ok := ctx.Deadline()
+	if remaining := time.Until(deadline); !ok || remaining <= 0 || remaining > hookRequestTimeout("claudecode", "MessageDisplay") {
+		t.Fatalf("cold-start deadline remaining=%s (set %v), want within the registered request budget", remaining, ok)
 	}
 }
 
@@ -2620,7 +2631,9 @@ func TestRunChargesWorkBeforeRunToTheRequestBudget(t *testing.T) {
 	if r.rt.requests != 0 {
 		t.Fatalf("a spent budget must not contact the gateway: %d requests", r.rt.requests)
 	}
-	if r.code == 0 || !strings.Contains(r.stderr, "budget exhausted") {
+	// A tool call whose answer budget is spent too gets the answer
+	// watchdog's no-answer block at once.
+	if r.code == 0 || (!strings.Contains(r.stderr, "budget exhausted") && !strings.Contains(r.stderr, perUserGatewayNoAnswerReason)) {
 		t.Fatalf("a spent budget must fail closed: code=%d stderr=%q", r.code, r.stderr)
 	}
 	if fresh := run(t, "cursor", ok(`{"action":"allow"}`), func(o *Options) { o.FailMode = "closed" }); fresh.rt.requests != 1 {
