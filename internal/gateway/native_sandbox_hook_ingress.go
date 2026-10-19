@@ -156,18 +156,22 @@ func (endpoint *nativeSandboxHookIngress) ServeHTTP(w http.ResponseWriter, reque
 	endpoint.handler.ServeHTTP(w, forward)
 }
 
-// Close closes admission, revokes the ordinary binding, then cancels requests
-// and closes the listener. It waits for admitted handlers and Serve to finish.
-// A timeout retains ownership for retry; it never relabels a pending handler
-// as cleaned up. FileStore's synchronous filesystem operations, as elsewhere,
-// are not made hard-deadline-interruptible by this context.
-func (endpoint *nativeSandboxHookIngress) Close(ctx context.Context) error {
-	if endpoint == nil || ctx == nil {
-		return errNativeHookIngress
-	}
+// sealAdmission is an immediate in-memory barrier: no filesystem call can delay
+// the owner's native stop/wait. It does not yet cancel admitted handlers, revoke
+// the host-only credential durably or release the listener.
+func (endpoint *nativeSandboxHookIngress) sealAdmission() {
 	endpoint.mu.Lock()
 	endpoint.closing = true
 	endpoint.mu.Unlock()
+}
+
+// closeAdmission additionally revokes the ordinary host-only binding. Full
+// Close still drains handlers/listener before any hook asset is released.
+func (endpoint *nativeSandboxHookIngress) closeAdmission(ctx context.Context) error {
+	if endpoint == nil || ctx == nil {
+		return errNativeHookIngress
+	}
+	endpoint.sealAdmission()
 	var revokeErr error
 	select {
 	case endpoint.revoke <- struct{}{}:
@@ -181,6 +185,19 @@ func (endpoint *nativeSandboxHookIngress) Close(ctx context.Context) error {
 	case <-ctx.Done():
 		revokeErr = ctx.Err()
 	}
+	return revokeErr
+}
+
+// Close closes admission, revokes the ordinary binding, then cancels requests
+// and closes the listener. It waits for admitted handlers and Serve to finish.
+// A timeout retains ownership for retry; it never relabels a pending handler
+// as cleaned up. FileStore's synchronous filesystem operations, as elsewhere,
+// are not made hard-deadline-interruptible by this context.
+func (endpoint *nativeSandboxHookIngress) Close(ctx context.Context) error {
+	if endpoint == nil || ctx == nil {
+		return errNativeHookIngress
+	}
+	revokeErr := endpoint.closeAdmission(ctx)
 	endpoint.closeOnce.Do(func() {
 		endpoint.cancel()
 		serverErr := endpoint.server.Close()

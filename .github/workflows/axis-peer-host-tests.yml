@@ -165,6 +165,12 @@ jobs:
             TestNativeSandboxIdentityVocabulary
             TestUnifiedHookDispatch_SingleEntryPoint
             TestSandboxHookProfileUsesGuestPlatformWithoutChangingLegacyLinux
+            TestNativeHookAssetsCleanupOrderAndRetry
+            TestNativeHookAssetsRetainsPartialProcessAndTypedMountBinding
+            TestNativeHookAssetsCloseCancelsInFlightPreparationBeforeRelease
+            TestNativeHookAssetsCloseRacesUnconsumedHandoffWithoutCallbackRace
+            TestNativeHookAssetsRejectsIdentityAndAdmissionBeforeAssetHandoff
+            TestNativeHookAssetsDirectoryTerminalObservation
           )
           if [[ "$RUNNER_OS" == Windows ]]; then
             expected+=(
@@ -187,6 +193,12 @@ jobs:
               TestNativeHookOwnedSessionsCannotSelectEachOtherBindingOrReplay
               TestNativeHookStillUsesExistingRouteBodyCSRFAndRateChecks
               TestNativeHookOwnerAndCurrentIngressAuthorityLossFailClosed
+            )
+          fi
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            expected+=(
+              TestNativeHookAssetsLinuxHeldDirectoryAndNativeCleanupBarrier
+              TestNativeHookAssetsLinuxUncertainCloseRetainsPinAndStopsCleanup
             )
           fi
           selected="^($(IFS='|'; echo "${expected[*]}"))$"
