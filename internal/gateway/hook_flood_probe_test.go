@@ -43,6 +43,12 @@ const (
 	hookFloodCheckedTail   = 5
 	hookFloodFlatRatio     = 1.25
 	hookFloodMaxCall       = 5 * time.Second
+	// hookFloodWALBound is the sampled WAL file bound of the flood cells
+	// (rel-1-0-3 GAP-0136): the 256 MiB log limit plus about four seconds of
+	// flood writes.
+	hookFloodWALBound = 320 << 20
+	// hookFloodWALSample is how often the probe samples the WAL file size.
+	hookFloodWALSample = 250 * time.Millisecond
 )
 
 // hookFloodFlatnessViolations applies the flatness rule to a flood's minutes
@@ -116,10 +122,12 @@ func TestHookFloodFlatnessRule(t *testing.T) {
 	}
 }
 
-// hookFloodGuardMinute sums the WAL guard passes that ended in one minute.
+// hookFloodGuardMinute sums the WAL guard passes that ended in one minute and
+// the largest WAL file sampled in it.
 type hookFloodGuardMinute struct {
 	passes, writer, deferred, restarted, truncated, failed int
 	held, heldMax, passMax                                 time.Duration
+	walMax                                                 int64
 }
 
 // TestHookFloodProbe drives the real Claude Code hook handler, audit store and
@@ -136,9 +144,10 @@ type hookFloodGuardMinute struct {
 //	DEFENSECLAW_HOOK_FLOOD_IDLE   idle seconds after each flood (default 0)
 //	DEFENSECLAW_HOOK_FLOOD_OUT    directory for cpu, block, mutex and heap profiles
 //
-// Each minute's line has the latencies of the calls launched in it and the
-// WAL guard passes that ended in it: how often and how long a pass held the
-// audit writer connection.
+// Each minute's line has the latencies of the calls launched in it, the WAL
+// guard passes that ended in it (how often and how long a pass held the audit
+// writer connection) and the largest WAL file sampled every 250 ms. The probe
+// also fails when a sample is over 320 MiB (hookFloodWALBound).
 func TestHookFloodProbe(t *testing.T) {
 	if os.Getenv("DEFENSECLAW_HOOK_FLOOD_PROBE") != "1" {
 		t.Skip("set DEFENSECLAW_HOOK_FLOOD_PROBE=1 to run the hook flood probe")
@@ -189,7 +198,36 @@ func TestHookFloodProbe(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var loops sync.WaitGroup
 	defer func() { cancel(); loops.Wait() }()
-	loops.Add(2)
+	loops.Add(3)
+	var walPeak int64
+	go func() {
+		defer loops.Done()
+		tick := time.NewTicker(hookFloodWALSample)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+			info, err := os.Stat(fixture.path + "-wal")
+			if err != nil {
+				continue
+			}
+			guardMu.Lock()
+			if !guardStart.IsZero() {
+				index := int(time.Since(guardStart) / time.Minute)
+				minute := guardMinutes[index]
+				if minute == nil {
+					minute = &hookFloodGuardMinute{}
+					guardMinutes[index] = minute
+				}
+				minute.walMax = max(minute.walMax, info.Size())
+				walPeak = max(walPeak, info.Size())
+			}
+			guardMu.Unlock()
+		}
+	}()
 	go func() {
 		defer loops.Done()
 		tick := time.NewTicker(auditWALGuardInterval)
@@ -329,6 +367,7 @@ func TestHookFloodProbe(t *testing.T) {
 		guardMu.Lock()
 		guardStart = start
 		clear(guardMinutes)
+		walPeak = 0
 		guardMu.Unlock()
 		segmentCPU := cpuSeconds()
 		for index := range calls {
@@ -372,6 +411,7 @@ func TestHookFloodProbe(t *testing.T) {
 		for minute, stats := range guardMinutes {
 			guards[minute] = *stats
 		}
+		floodWALPeak := walPeak
 		guardMu.Unlock()
 		var minutes []hookFloodMinute
 		for first := 0; first+segment <= calls; first += segment {
@@ -387,15 +427,20 @@ func TestHookFloodProbe(t *testing.T) {
 			}
 			minutes = append(minutes, minute)
 			guard := guards[len(minutes)-1]
-			t.Logf("flood %d minute %d calls %d-%d average=%v p50=%v p99=%v max=%v guard passes=%d writer=%d deferred=%d restarted=%d truncated=%d failed=%d writer_held=%v writer_held_max=%v pass_max=%v",
+			t.Logf("flood %d minute %d calls %d-%d average=%v p50=%v p99=%v max=%v guard passes=%d writer=%d deferred=%d restarted=%d truncated=%d failed=%d writer_held=%v writer_held_max=%v pass_max=%v wal_max=%d",
 				flood, len(minutes), first, first+segment,
 				minute.average.Round(time.Microsecond), minute.p50.Round(time.Microsecond),
 				minute.p99.Round(time.Microsecond), minute.max.Round(time.Microsecond),
 				guard.passes, guard.writer, guard.deferred, guard.restarted, guard.truncated, guard.failed,
-				guard.held.Round(time.Millisecond), guard.heldMax.Round(time.Millisecond), guard.passMax.Round(time.Millisecond))
+				guard.held.Round(time.Millisecond), guard.heldMax.Round(time.Millisecond), guard.passMax.Round(time.Millisecond),
+				guard.walMax)
 		}
 		for _, violation := range hookFloodFlatnessViolations(minutes) {
 			t.Errorf("flood %d is not flat: %s", flood, violation)
+		}
+		t.Logf("flood %d sampled WAL peak %d bytes (bound %d)", flood, floodWALPeak, int64(hookFloodWALBound))
+		if floodWALPeak > hookFloodWALBound {
+			t.Errorf("flood %d: the WAL file reached %d bytes, over the %d-byte sampled bound", flood, floodWALPeak, int64(hookFloodWALBound))
 		}
 		memory(fmt.Sprintf("flood%d-end", flood))
 		for waited := 0; waited < idle; waited += 60 {
