@@ -129,3 +129,20 @@ The next changed-source run will use that peer's closed constructor stages and
 a Go dual-role signal diagnostic. The latter's two-package Windows race run
 passed 52 test/subtest rows with zero failures/skips; log SHA256
 `087538cead276d39df8e3aec88a44969f247097e53dc2a8490256241f5e45028`. These tests created no peer, child or PSEC.
+
+Outer attempt 08 used the independently reviewed 14ba5c32 peer and the
+dual-role diagnostic owner at 8bcf5d6d, with fresh canary-07. It failed
+before Prepared at windows_cwd_privacy. Both inner cleanup attempts reported
+successful TerminateJobObject followed by failed TerminateProcess, Win32 5.
+The outer supervisor independently observed root termination, empty Job and
+all outer handles closed in 4.828 seconds, without timeout/output overflow.
+The fixture remains retained; no contained payload ran.
+
+A read-only ACL readback of that fixed retained CWD found the current user
+as owner, a protected revision-2 DACL and four ordinary allow ACEs. SYSTEM
+and the current user each have an inherit-only OI/CI GENERIC_ALL entry plus
+an effective FILE_ALL_ACCESS entry. There are no other principals. The
+downstream SDK validator requires exactly two ACEs, so it rejects this
+Windows inheritance representation. This finding does not establish a
+defect in unmodified MXC. A changed validator must retain the same trusted
+principals, effective rights, protection and refusal of unsupported entries.
