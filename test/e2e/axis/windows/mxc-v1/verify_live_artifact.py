@@ -111,8 +111,11 @@ NATIVE_DIRECTORY_CUSTODY_TESTS = {
 def native_directory_custody_tests(mode: str) -> dict[str, list[str]]:
     tests = {binary: list(names) for binary, names in NATIVE_DIRECTORY_CUSTODY_TESTS.items()}
     if mode == "standalone-boundary":
-        tests["defenseclaw-axis-windows-psec-probe"].append(
-            "probe::native_identity::private_native_record::tests::private_record_create_is_exclusive_nonfollowing_and_owner_system_only"
+        tests["defenseclaw-axis-windows-psec-probe"].extend(
+            [
+                "probe::native_identity::private_native_record::tests::private_record_create_is_exclusive_nonfollowing_and_owner_system_only",
+                "probe::native_identity::private_native_record::tests::private_environment_subtree_is_exclusive_nonfollowing_private_and_pinned",
+            ]
         )
     return tests
 

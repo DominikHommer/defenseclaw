@@ -1078,3 +1078,46 @@ pure formatter gate raises the boundary inventory to thirty-four. All existing
 open-only, no-reparse, access, sharing and admission checks remain unchanged.
 No full boundary, realized child environment or customer-provider qualification
 is established.
+
+
+## Case15 identifies missing private Packages fixture directory
+
+The diagnostic build
+[39189445357](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39189445357)
+at `1cd45a63741b6296880deffe7cc4a8ff5ace6672` passed all thirty-four selected
+tests exactly once. Independent inert reviews verified thirty ZIP members,
+twenty-six manifest hashes, eighteen exact Git sources, all sixteen reconstructed
+SDK fingerprints, unchanged locks and three x64 console images. Artifact
+`12160046169` is 1,415,074 bytes, with ZIP SHA-256
+`ce43f94b8820b96106bbc0e2d2e52ffa94c73ac7e6b299e4ac39c4a6698d095d`
+and provenance SHA-256
+`697984cd00659a9d18a4c407ef41d2f12d448e9be7564d830fa0cad3019c4c1f`.
+These reviews executed no packaged image.
+
+ROOT ran the reviewed Case15 recipe once. Literal argv passed with
+`FIXED_ARGV_PASS`, empty child stderr, `Exited(0)` and its signaled retained
+handle. The boundary supervisor then refused with exactly
+`private native directory open refused: gate=private_environment component_index=3 ntstatus=0xc0000034`.
+Elapsed time was 4.269 seconds outside / 4.1986862 seconds in the probe; the
+outer Job was assigned before resume and observed empty with zero active
+processes. No outer deadline, output overflow, reader error or custody error
+occurred. The failed fixture remains retained. Result SHA-256 is
+`2a7ace9ef7fdded6eaaf7bd71c43653f19da46be3f42f453fbc22ab0564c5f92`.
+
+Source inspection identifies index three as literal `Packages` immediately
+below the held private `home/AppData/Local`. `Paths::create` creates only through
+Local; the exact status is `STATUS_OBJECT_NAME_NOT_FOUND`. The gate is reached
+after the same-child token/profile mapper, distinguishing this fixture omission
+from Case14's ambiguous refusal. The result still precedes the child environment
+and boundary assertions, so it grants no realized-environment, full containment
+or customer qualification.
+
+The changed source retains the exact native authority/mapping checks and
+revalidates the full branch against the held root before any creation. It uses
+NT-relative exclusive creation only for the four new private directories
+`Packages/<validated component>/AC/Temp`, with an atomic protected owner+SYSTEM
+DACL verified before use. A collision or link refuses without adoption; no
+native OS profile is opened, no existing host ACL is changed, and no runtime
+fallback is enabled. One added synthetic filesystem gate raises the boundary
+inventory to thirty-five. A reviewed new build and one native attempt are still
+required. Case14 and Case15 failures are preserved; no retry used their images.

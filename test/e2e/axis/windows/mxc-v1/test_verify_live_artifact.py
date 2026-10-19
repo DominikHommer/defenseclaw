@@ -399,6 +399,24 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
         with self.assertRaisesRegex(ValueError, "pure native environment test evidence"):
             self.run_verify()
 
+    def test_boundary_requires_exclusive_private_subtree_creation_gate(self) -> None:
+        if self.mode != "standalone-boundary":
+            return
+        current = self.provenance["native_directory_custody_tests"]
+        prior = {
+            binary: [
+                name
+                for name in names
+                if not name.endswith("private_environment_subtree_is_exclusive_nonfollowing_private_and_pinned")
+            ]
+            for binary, names in current.items()
+        }
+        self.assertEqual(sum(map(len, current.values())) - sum(map(len, prior.values())), 1)
+        self.provenance["native_directory_custody_tests"] = prior
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "native directory custody test evidence"):
+            self.run_verify()
+
     def test_private_native_record_cannot_enter_an_admitted_artifact(self) -> None:
         private = "native-folder-refusal.private.bin"
         for mode in ("standalone-boundary", "dll-startup-only", "claude-version-only", "claude-create-control-only"):

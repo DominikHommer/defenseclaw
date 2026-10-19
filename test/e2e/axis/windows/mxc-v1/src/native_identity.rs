@@ -1,8 +1,9 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-// Parent-only, read/query operations. No profile/namespace creation, token
-// adjustment, impersonation, ACL mutation or child environment lookup.
+// Parent-only token/profile queries and new private fixture directories. No
+// host profile/namespace creation, token adjustment, impersonation, existing
+// ACL mutation or child environment lookup.
 use super::native_environment::{
     ExpectedEnvironment, StartupEnvironment, classify_profile_refusal,
 };
@@ -437,10 +438,15 @@ fn open_directory(
         directory_open_refusal(gate, component_index, native_status.0)
     );
     let result = owned(result)?;
+    require_directory(&result)?;
+    Ok(result)
+}
+
+fn require_directory(result: &OwnedHandle) -> Result<()> {
     let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
     unsafe {
         GetFileInformationByHandleEx(
-            handle(&result),
+            handle(result),
             FileAttributeTagInfo,
             (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
             size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
@@ -452,7 +458,7 @@ fn open_directory(
             && info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
         "private native directory is redirected"
     );
-    Ok(result)
+    Ok(())
 }
 
 fn effective_fixed_volume(drive: u16) -> Result<Vec<u16>> {
@@ -558,6 +564,17 @@ fn pin_private_directories(
     fixture: &FixtureCustody,
     expected: &ExpectedEnvironment,
 ) -> Result<Vec<OwnedHandle>> {
+    // Revalidate the entire mapped value against this held root before any
+    // mutation. Neither a forged ExpectedEnvironment nor a native OS path may
+    // choose the new directory chain or bypass the one-component predicate.
+    let root = OsString::from_wide(&fixture.root_units);
+    ensure!(
+        ExpectedEnvironment::from_native_folder(
+            Path::new(&root),
+            expected.local_app_data.as_os_str()
+        )? == *expected,
+        "private environment subtree shape differs"
+    );
     ensure!(
         effective_fixed_volume(fixture.drive)? == fixture.volume,
         "fixed drive mapping changed before native folder query"
@@ -574,12 +591,26 @@ fn pin_private_directories(
         let parent = handles
             .last()
             .unwrap_or_else(|| fixture.directories.last().unwrap());
-        handles.push(open_directory(
-            handle(parent),
-            &mut part,
-            DirectoryGate::PrivateEnvironment,
-            index,
-        )?);
+        if index < 3 {
+            // home/AppData/Local already belong to Paths::create. Never adopt
+            // an existing Packages/profile/AC/Temp or create an outer path.
+            handles.push(open_directory(
+                handle(parent),
+                &mut part,
+                DirectoryGate::PrivateEnvironment,
+                index,
+            )?);
+        } else {
+            handles.push(
+                private_native_record::create_fixture_directory(parent, &mut part).map_err(
+                    |_| {
+                        anyhow::anyhow!(
+                            "private fixture directory creation refused: component_index={index}"
+                        )
+                    },
+                )?,
+            );
+        }
     }
     // Sample the effective/global mount again; no alias changes are performed.
     ensure!(

@@ -174,26 +174,38 @@ ordinary punctuation are preserved without normalization or expansion. The
 same predicate validates both the native suffix and the rebased private frame.
 The new pure component test runs in parent and child, and a separate pure test
 checks native profile-buffer count/NUL bounds. The corrected mapper artifact
-passed thirty-three selected gates. The next refusal-diagnostic build adds one
-pure formatter gate, requiring thirty-four for the boundary; ordinary DLL/Claude
-remain twenty-eight and the separate control twenty-nine. Old test inventories
-cannot admit these changed sources.
+passed thirty-three selected gates. The refusal-diagnostic build then passed
+thirty-four. The new exclusive private-subtree filesystem gate requires
+thirty-five for the boundary; ordinary DLL/Claude remain twenty-eight and the
+separate control twenty-nine. Old test inventories cannot admit these changed
+sources.
 
 A missing native identity, different User SID, API failure, unexpected caller
 thread identity, mismatched default prefix, missing private directory or unsafe
 component refuses before the fixed child can perform a mutation. The parent
-opens every mapped private directory and Temp through existing held-relative
-custody; it creates none. These queries create no AppContainer profile and grant
-no access to the host profile. The corrected mapper build and independent inert
-artifact reviews passed. One Case14 attempt passed literal argv, then refused
-with `private native directory open refused`; its outer Job was observed empty.
-That shared error can arise while pinning the fixture before boundary creation
-or while opening mapped directories afterward, so it does not prove the mapper
-passed or identify a missing component. The next source-only diagnostic records
-only the closed `fixture_root`/`private_environment` gate, component index and
-exact failed NtOpenFile status. Access, sharing, open-only/no-reparse behavior and
-admission remain unchanged. It creates no missing directory. A fresh diagnostic
-artifact and reviewed native attempt remain required.
+opens the existing `home/AppData/Local` through held-relative custody. After
+all token/profile mapping checks and a full root-bound branch revalidation, it
+exclusively creates only `Packages/<validated component>/AC/Temp` under that held
+private Local directory. Every new directory receives the protected owner and
+SYSTEM DACL atomically; the same exact DACL verifier used by the private-record
+writer validates it before use. Existing directories, files and links at those
+four new names refuse rather than being adopted. All seven directory handles
+remain pinned against rename until the case ends. The normal owned-fixture
+cleanup removes the new subtree only after those handles close. No native OS
+profile directory is opened or created; no existing ACL is changed.
+
+Case14's generic directory refusal did not distinguish fixture ancestry from
+the mapped branch. The reviewed thirty-four-test diagnostic artifact then ran
+Case15 once: its exact refusal was `gate=private_environment component_index=3
+ntstatus=0xc0000034`, identifying absent `Packages` under the held private Local
+directory. The initial fixture setup creates only through Local. Its literal
+argv case passed and its outer Job ended empty. This is a private fixture setup
+omission; the source fix above preserves the native mapping checks, filesystem
+grants and no-reparse rules. A fresh build and native boundary attempt remain
+required before it is qualified. The new synthetic filesystem test covers
+exclusive creation, private DACLs, rename custody/release, collisions, links and
+rejection of a forged branch before creation. See
+[Case15 evidence](manual-results.md#case15-identifies-missing-private-packages-fixture-directory).
 
 The resulting private expectation must match the fresh fixture's exact
 `home\AppData\Local\Packages\<one bounded native-profile component>\AC`
@@ -201,8 +213,9 @@ shape. Only `Temp` is appended to obtain TEMP/TMP. Before native child creation,
 the parent pins the original fixture directory through a direct NT device
 volume and held-relative directory opens. After the native folder query, it
 extends that same root capability to each profile directory and Temp; it never
-rebinds authority to a DOS, GLOBALROOT or observed child path. Opens request only
-list/attributes/synchronize access, refuse reparse points and deny delete
+rebinds authority to a DOS, GLOBALROOT or observed child path. Directory handles
+request list/attributes/synchronize access (plus read-control for new-directory
+DACL verification), refuse reparse points and deny delete
 sharing while the case runs. List access makes directory-name rename custody
 effective; attribute-only opens do not establish that property. Directory read
 and write sharing remain enabled so normal content operations can proceed.

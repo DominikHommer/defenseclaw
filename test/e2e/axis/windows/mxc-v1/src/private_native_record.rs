@@ -1,8 +1,9 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-// Contributor-only PRIVATE refusal evidence. Never format these bytes into an
-// error, log, result, receipt or uploaded artifact. This record grants nothing.
+// Contributor-only PRIVATE refusal evidence and an existing descriptor/verifier
+// reused for new fixture directories. Never format record bytes into an error,
+// log, result, receipt or uploaded artifact. The record grants nothing.
 use std::ffi::OsStr;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
@@ -309,6 +310,58 @@ fn create(root: &OwnedHandle, user: &UserSid) -> PrivateResult<OwnedHandle> {
     Ok(file)
 }
 
+pub(super) fn create_fixture_directory(
+    root: &OwnedHandle,
+    component: &mut [u16],
+) -> PrivateResult<OwnedHandle> {
+    // Only the fully validated, root-bound ExpectedEnvironment calls this.
+    // This local guard additionally makes the NT name one literal component.
+    if component.is_empty()
+        || component.len() > 128
+        || matches!(&*component, [46] | [46, 46])
+        || component.iter().any(|unit| [0, 47, 58, 92].contains(unit))
+    {
+        return Err(());
+    }
+    let user = current_user()?;
+    let descriptor = descriptor(&user)?;
+    let name = unicode(component).map_err(|_| ())?;
+    let mut attributes = attributes(handle(root), &name, 0x40 | 0x1000);
+    attributes.SecurityDescriptor = descriptor.0.0.cast_const().cast();
+    let mut raw = HANDLE::default();
+    let mut status = IO_STATUS_BLOCK::default();
+    let created = unsafe {
+        NtCreateFile(
+            &mut raw,
+            FILE_ACCESS_RIGHTS(0x0012_0081), // LIST | ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
+            &attributes,
+            &mut status,
+            None,
+            FILE_FLAGS_AND_ATTRIBUTES(0x10),
+            FILE_SHARE_MODE(3),                 // reads/writes, no delete sharing
+            NTCREATEFILE_CREATE_DISPOSITION(2), // FILE_CREATE, never OPEN_IF
+            NTCREATEFILE_CREATE_OPTIONS(0x0020_0021),
+            None,
+            0,
+        )
+    };
+    if created.0 < 0 {
+        return Err(());
+    }
+    let file = owned(raw).map_err(|_| ())?;
+    let released = descriptor.release();
+    if created.0 != 0
+        || status.Information != 2
+        || released.is_err()
+        || super::require_directory(&file).is_err()
+        || private_security(handle(&file), &user).is_err()
+    {
+        let _ = close(file);
+        return Err(());
+    }
+    Ok(file)
+}
+
 pub(super) fn capture(root: &OwnedHandle, caller: &OsStr, native: &OsStr) -> bool {
     // Only this boolean may leave the writer. Do not surface any inner error.
     (|| {
@@ -443,6 +496,65 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(!capture(held, caller, native));
+        drop(custody);
+    }
+
+    #[test]
+    fn private_environment_subtree_is_exclusive_nonfollowing_private_and_pinned() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("fixed-owned-fixture");
+        let local = root.join(r"home\AppData\Local");
+        std::fs::create_dir_all(&local).unwrap();
+        let custody = super::super::pin_fixture_root(&root).unwrap();
+        let folder = local.join(r"Packages\fixed public λ+$\AC");
+        let expected =
+            super::super::ExpectedEnvironment::from_native_folder(&root, folder.as_os_str())
+                .unwrap();
+        assert!(!local.join("Packages").exists());
+        let held = super::super::pin_private_directories(&custody, &expected).unwrap();
+        assert_eq!(held.len(), 7);
+        assert!(expected.temporary.is_dir());
+        let user = current_user().unwrap();
+        for file in &held[3..] {
+            private_security(handle(file), &user).unwrap();
+        }
+        let moved = local.join("fixed-renamed-packages");
+        assert_eq!(
+            std::fs::rename(local.join("Packages"), &moved)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(32)
+        );
+        // The existing branch cannot be adopted, even with its exact safe DACL.
+        assert!(super::super::pin_private_directories(&custody, &expected).is_err());
+        drop(held);
+        std::fs::rename(local.join("Packages"), &moved).unwrap();
+        std::fs::remove_dir_all(&moved).unwrap();
+
+        // A preexisting reparse target or regular file also cannot become the
+        // fixture's new Packages. Both positive canaries remain unchanged.
+        let outside = temp.path().join("fixed-public-target");
+        std::fs::create_dir(&outside).unwrap();
+        let canary = outside.join("fixed-public.txt");
+        std::fs::write(&canary, b"fixed public data").unwrap();
+        std::os::windows::fs::symlink_dir(&outside, local.join("Packages")).unwrap();
+        assert!(super::super::pin_private_directories(&custody, &expected).is_err());
+        assert_eq!(std::fs::read(&canary).unwrap(), b"fixed public data");
+        assert!(!outside.join("fixed public λ+$").exists());
+        std::fs::remove_dir(local.join("Packages")).unwrap();
+        std::fs::write(local.join("Packages"), b"fixed public collision").unwrap();
+        assert!(super::super::pin_private_directories(&custody, &expected).is_err());
+        assert_eq!(
+            std::fs::read(local.join("Packages")).unwrap(),
+            b"fixed public collision"
+        );
+        std::fs::remove_file(local.join("Packages")).unwrap();
+
+        // Reject a forged mapped branch before creating even Packages.
+        let mut forged = expected;
+        forged.local_app_data = outside.join("AC");
+        assert!(super::super::pin_private_directories(&custody, &forged).is_err());
+        assert!(!local.join("Packages").exists());
         drop(custody);
     }
 }
