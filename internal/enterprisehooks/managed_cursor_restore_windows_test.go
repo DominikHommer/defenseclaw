@@ -20,10 +20,15 @@ import (
 // require DefenseClaw's file trust of it; an administrator's folder inherits
 // ProgramData's user-create grant and fails that check, so the rollback
 // failed and the uninstall stayed pending with every service disabled.
+//
+// Standalone only: a Secure Client process keeps the earlier restore, which
+// writes the file back (Secure Client is out of scope for this fix).
 func TestWindowsCursorInactiveRestoreLeavesAnUntouchedAdministratorFile(t *testing.T) {
 	originalTrust := windowsManagedPolicyFileTrustCheck
 	originalRoot := windowsCursorManagedRootResolver
 	originalWriter := windowsManagedPolicyWriter
+	originalStandalone := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
 	root := t.TempDir() + `\Cursor`
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -48,6 +53,7 @@ func TestWindowsCursorInactiveRestoreLeavesAnUntouchedAdministratorFile(t *testi
 		windowsManagedPolicyFileTrustCheck = originalTrust
 		windowsCursorManagedRootResolver = originalRoot
 		windowsManagedPolicyWriter = originalWriter
+		windowsEnterpriseStandaloneProcess = originalStandalone
 	})
 
 	admin := []byte(`{"version":1,"hooks":{"beforeShellExecution":[{"command":"C:\\Tools\\audit.exe"}]}}`)
@@ -85,5 +91,18 @@ func TestWindowsCursorInactiveRestoreLeavesAnUntouchedAdministratorFile(t *testi
 	if !bytes.Equal(after.hooks.data, admin) || after.hooksMetadata != before.hooksMetadata {
 		t.Fatalf("administrator hooks.json changed: %q %+v, want %q %+v",
 			after.hooks.data, after.hooksMetadata, admin, before.hooksMetadata)
+	}
+
+	// Secure Client keeps the earlier restore: every file is written back.
+	windowsEnterpriseStandaloneProcess = func() bool { return false }
+	current, err = snapshotWindowsCursorManagedArtifacts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = restoreWindowsCursorManagedSnapshotUnlocked(
+		WindowsCursorManagedPolicyTeardownOptions{}, snapshot, current, true,
+	)
+	if len(writes) == 0 {
+		t.Fatal("a Secure Client restore no longer writes the administrator's hooks.json back")
 	}
 }
