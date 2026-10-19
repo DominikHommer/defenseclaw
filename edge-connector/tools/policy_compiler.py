@@ -412,6 +412,8 @@ def extract_dest_allowlist(policy: dict) -> list:
     dest_list = iot_ext.get("destination_allowlist")
     if dest_list is None:
         dest_list = []
+    if not isinstance(dest_list, list):
+        raise ValueError("iot_extensions.destination_allowlist must be a list")
     if len(dest_list) > MAX_DEST_ALLOWLIST:
         raise ValueError(
             f"destination_allowlist has {len(dest_list)} entries; the device "

@@ -74,6 +74,13 @@ class PolicyCompilerExitTest(unittest.TestCase):
                 ('runtime_block',
                  'skill_actions:\n  high:\n    runtime: block\n'
                  'iot_extensions:\n  destination_allowlist: []\n', ()),
+                ('allowlist_string',
+                 "iot_extensions:\n  destination_allowlist: '8.8.8.8'\n", ()),
+                ('allowlist_empty_string',
+                 "iot_extensions:\n  destination_allowlist: ''\n", ()),
+                ('allowlist_mapping',
+                 'iot_extensions:\n  destination_allowlist:\n    8.8.8.8: true\n', ()),
+                ('allowlist_scalar', 'iot_extensions:\n  destination_allowlist: 5\n', ()),
                 ('missing_allowlist', 'iot_extensions:\n  canary:\n    baseline_blocks_per_min: 2\n', ()),
                 ('reserved_version', VALID.read_text(), ('--version', '65535')),
                 ('oversize', VALID.read_text(), ('--target-partition-size', '1')),
