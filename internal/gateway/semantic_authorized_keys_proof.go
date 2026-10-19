@@ -734,6 +734,77 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		_, ok := protected[canonicalSemanticPath(path)]
 		return ok
 	}
+	// The client's opaque-scope facts stand in only for the link-scope walk;
+	// every other check sees the map as before.
+	var opaqueFacts map[string]string
+	request.ResolvedWriteTargets, opaqueFacts = hookpaths.SplitOpaqueScopeFacts(request.ResolvedWriteTargets)
+	// The operands the client described, before any connector scoping. A
+	// bounded or incomplete map omits the others; scoping below drops entries
+	// the client did describe, and does not make them omitted.
+	clientTargets := request.ResolvedWriteTargets
+	truncated := clientTargets[hookpaths.TruncatedKey] == "1"
+	// Whether an incomplete map also leaves an unlisted or dynamic redirect
+	// unknown (GAP-1395). For a managed Claude Code call that holds only for
+	// a map with no listed operand or a dynamic redirect next to a listed
+	// external operand; other dynamic redirects keep the header-free walk
+	// decision below.
+	unknownRedirects := truncated
+	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
+		len(request.ResolvedWriteTargets) != 0 {
+		// Keep the client's positive protected-path evidence and inspected copy
+		// sources. A directory proof is relevant once the hook observed a
+		// different logical directory or a protected starting directory.
+		// Generic ordinary or unknown write targets do not override the
+		// established shell-ordering decision. The process-cwd alias needs
+		// its own client target to be provable.
+		changedDirectory := false
+		for key := range request.ResolvedWriteTargets {
+			if strings.HasPrefix(key, hookpaths.DirectoryFactPrefix) &&
+				key != hookpaths.DirectoryFactPrefix+facts.CWD {
+				changedDirectory = true
+				break
+			}
+		}
+		command := request.Input.Command
+		if command == "" {
+			command, _ = trustedBashCommandInput(request.Input)
+		}
+		_, _, dynamicRedirect := hookpaths.ShellWriteOperands(command, facts.CWD, facts.ActiveHome)
+		home := filepath.Clean(facts.ActiveHome)
+		external := func(target string) bool {
+			return filepath.IsAbs(target) && filepath.Clean(target) != os.DevNull && target != home &&
+				!strings.HasPrefix(filepath.Clean(target), home+string(filepath.Separator))
+		}
+		unknownRedirects = truncated && len(request.ResolvedWriteTargets) <= 2
+		if truncated && dynamicRedirect {
+			for operand := range request.ResolvedWriteTargets {
+				if external(operand) {
+					unknownRedirects = true
+					break
+				}
+			}
+		}
+		// An incomplete map keeps its marker and the client's cwd, so an
+		// operand the client omitted is placed and denied as it is for Codex.
+		var scoped map[string]string
+		for operand, resolved := range request.ResolvedWriteTargets {
+			directoryFact := strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix)
+			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
+				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
+				directoryFact && (changedDirectory ||
+					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
+				operand == hookpaths.CWDKey && (changedDirectory || truncated) ||
+				operand == hookpaths.TruncatedKey ||
+				resolved == "" && external(operand) && !truncated ||
+				isProtected(resolved) {
+				if scoped == nil {
+					scoped = make(map[string]string)
+				}
+				scoped[operand] = resolved
+			}
+		}
+		request.ResolvedWriteTargets = scoped
+	}
 	clientCWD := facts.CWD
 	if !filepath.IsAbs(clientCWD) {
 		if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; filepath.IsAbs(cwd) {
@@ -741,16 +812,45 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
-	truncated := request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1"
+	if !request.ProtectedHomeHook {
+		// Only the managed hook client walks the user's home for the gateway.
+		opaqueFacts = nil
+	}
 	// The links the command creates, read as the hook reads them; set once
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
 	var safeRedirects []hookpaths.RedirectOccurrence
 	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
-		if !filepath.IsAbs(target) {
-			return false
+		if !filepath.IsAbs(target) && (target == "" || !filepath.IsAbs(clientCWD)) {
+			// No directory places this operand: the gateway cannot see the
+			// caller's cwd and the client evidence that would carry it is
+			// incomplete or was rejected as malformed. Such evidence never
+			// proves a write ordinary, so a gateway that cannot resolve the
+			// operand itself fails closed, as for an absolute operand the
+			// bounded map omits. A path fact with no name adds nothing once
+			// the shell operands are placed in a known cwd.
+			return truncated && cannotResolveLocally && !filepath.IsAbs(clientCWD)
 		}
+		// A relative path fact (the gateway could not validate the event
+		// cwd) is placed in the client's cwd, as the client keyed it.
 		target = hookpaths.OperandPath(target, clientCWD)
+		// Only the event cwd can interpret the process-dependent alias.
+		if hookpaths.ProcCWDWriteOperand(target) {
+			if !strings.HasPrefix(target, "/proc/self/cwd/") {
+				return true
+			}
+			if resolved, present := request.ResolvedWriteTargets[target]; present {
+				return resolved == "" || isProtected(resolved)
+			}
+			if cannotResolveLocally {
+				return true
+			}
+			mapped, ok := hookpaths.ResolveProcSelfCWDTarget(target, clientCWD)
+			if !ok {
+				return true
+			}
+			target = mapped
+		}
 		if isProtected(target) {
 			return true
 		}
@@ -765,8 +865,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// unknown, including where the gateway resolves targets itself and
 		// the link does not exist yet (GAP-1522). A character device such as
 		// /dev/null is not a link the command can replace; a link to one is,
-		// so the device is read without following links.
-		if !safeRedirect && (!ownCopy && links.OpaqueTarget(target) || ownCopy && links.OpaqueTargetExceptOwnCopy(target, target)) {
+		// so the device is read without following links. A managed gateway
+		// cannot walk the user's home (ProtectHome); the hook client's walk of
+		// the same operand replaces only that missing view (GAP-0278).
+		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
 			if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return true
 			}
@@ -786,8 +888,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			case truncated && cannotResolveLocally:
 				// The bounded map omits this operand, which may be a link
 				// into the protected home, in or outside the home. Its target
-				// is unknown, so fail closed.
-				return !windowsLocationOrdinaryWriteTarget(target)
+				// is unknown, so fail closed. An operand the client did list,
+				// which connector scoping removed, keeps the local checks.
+				if _, described := clientTargets[target]; !described {
+					return !windowsLocationOrdinaryWriteTarget(target)
+				}
 			}
 		}
 		if request.SkipLocalFilesystemResolution {
@@ -837,6 +942,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
+	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
+		return true
+	}
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
@@ -850,8 +958,20 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// not a static word) and cannot resolve one itself, the protected-path
 		// decision is unknown: fail closed (GAP-1395). Every write redirect
 		// operator contains a greater-than sign.
-		if truncated && cannotResolveLocally && strings.Contains(input.Command, ">") && (!parsed || dynamic) {
+		if unknownRedirects && cannotResolveLocally && strings.Contains(input.Command, ">") && (!parsed || dynamic) {
 			return true
+		}
+		if dynamic && request.Connector == "claudecode" && request.ProtectedHomeHook &&
+			request.ResolvedWriteTargets != nil {
+			// A physical-directory fact can resolve a static write after cd,
+			// but it cannot prove a dynamic redirect target is ordinary.
+			// Preserve the conservative decision from the header-free walk.
+			_, unknown := hookpaths.ShellDirectoryWriteOperands(
+				input.Command, input.CWD, input.ActiveHome, nil, false, cannotResolveLocally,
+			)
+			if unknown {
+				return true
+			}
 		}
 		for i, operand := range operands {
 			safe := i < len(safeRedirects) && safeRedirects[i].Safe
@@ -861,6 +981,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		for _, operand := range hookpaths.LiteralWriteOperands(input.Command, input.CWD, input.ActiveHome) {
 			if writeTarget(operand, false, false) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.QuotedDynamicCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand, false, true) {
 				return true
 			}
 		}
