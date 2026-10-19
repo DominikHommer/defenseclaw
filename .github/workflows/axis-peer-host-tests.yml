@@ -3,7 +3,7 @@
 
 name: AXIS private peer host contract tests
 
-# Inert/fake-custody tests only. No downloaded peer or workload is executed.
+# Host pipes, inert images and fake custody only. No downloaded peer/workload.
 on:
   push:
     branches: [codex/axis-native-build, codex/axis-peer-experiments, codex/axis-sandbox-feasibility]
@@ -146,6 +146,13 @@ jobs:
               TestWindowsImageRefusesWrongDigestAndCancelledAdmissionWithoutResidue
               TestWindowsImageCopyObservesCancellationBetweenBoundedChunks
               TestWindowsImageCleanupUncertaintyIsStickyAndNeverRetriesNativeClose
+            )
+          else
+            expected+=(
+              TestNativeHookIngressAllConnectorsUseExistingAuthenticatedDispatch
+              TestNativeHookIngressRefusesUnscopedBindingsAndUnboundedOwner
+              TestNativeHookIngressCannotGrantTCPAuthorityOrMutateGuestHeaders
+              TestNativeHookIngressCloseRevokesBeforeRetainedRequestDrain
             )
           fi
           selected="^($(IFS='|'; echo "${expected[*]}"))$"
