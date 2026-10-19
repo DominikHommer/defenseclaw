@@ -3,6 +3,11 @@
 name: AXIS Windows inert host capability facts
 on:
   workflow_dispatch:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths:
+      - .github/workflows/axis-windows-host-capability.yml
+      - test/e2e/axis/windows/native-peer/host_capability_probe.py
 permissions:
   contents: read
 concurrency:
@@ -10,6 +15,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   read-host-facts:
+    if: ${{ github.ref == 'refs/heads/codex/axis-sandbox-feasibility' }}
     runs-on: windows-2025
     timeout-minutes: 5
     steps:

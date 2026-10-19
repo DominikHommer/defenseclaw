@@ -377,10 +377,12 @@ def main():
         "RUNNER_ENVIRONMENT": "github-hosted",
         "GITHUB_REPOSITORY": "cisco-ai-defense/defenseclaw",
         "GITHUB_REF": "refs/heads/codex/axis-sandbox-feasibility",
-        "GITHUB_EVENT_NAME": "workflow_dispatch",
         "GITHUB_RUN_ATTEMPT": "1",
     }
-    if not all(os.environ.get(key) == value for key, value in allowed.items()):
+    if (
+        os.environ.get("GITHUB_EVENT_NAME") not in ("push", "workflow_dispatch")
+        or not all(os.environ.get(key) == value for key, value in allowed.items())
+    ):
         print(json.dumps({**scope(), "refusal_stage": "host_scope"}))
         return 2
     result = observe(Native())
