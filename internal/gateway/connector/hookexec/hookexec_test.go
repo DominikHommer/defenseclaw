@@ -2865,7 +2865,7 @@ func TestOSSOpenNativeDecisionMissingActionUsesOpenFailure(t *testing.T) {
 		{"opencode", "tool.execute.before", `{"action":"allow"}`, `{"action":"allow"}` + "\n"},
 	} {
 		var stdout, stderr bytes.Buffer
-		opts := Options{Connector: tc.connector, Event: tc.event, Stdout: &stdout, Stderr: &stderr}
+		opts := Options{Connector: tc.connector, Event: tc.event, FailMode: "open", Stdout: &stdout, Stderr: &stderr}
 		code := specs[tc.connector].decide(opts, []byte(tc.body))
 		if code != 0 || stdout.String() != tc.wantOutput {
 			t.Errorf("%s %s: code=%d stdout=%q stderr=%q, want %q", tc.connector, tc.body, code, stdout.String(), stderr.String(), tc.wantOutput)
