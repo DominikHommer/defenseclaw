@@ -829,6 +829,9 @@ func (reaper *RetentionReaper) deleteCorrelationBatch(
 		return 0, err
 	}
 	args = append(args, reaper.batchSize())
+	if err := reaper.store.awaitWALHeadroom(ctx); err != nil {
+		return 0, err
+	}
 	release, err := reaper.store.acquireReady()
 	if err != nil {
 		return 0, err
@@ -1007,6 +1010,9 @@ func (reaper *RetentionReaper) deleteAuditBatch(
 ) (int64, error) {
 	cutoffUnixNano, err := judgeBodyUnixNano(cutoff)
 	if err != nil {
+		return 0, err
+	}
+	if err := reaper.store.awaitWALHeadroom(ctx); err != nil {
 		return 0, err
 	}
 	release, err := reaper.store.acquireReady()
@@ -1568,6 +1574,9 @@ func (reaper *RetentionReaper) repairRetentionTimestamps(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if err := reaper.store.awaitWALHeadroom(ctx); err != nil {
+			return err
+		}
 		release, err := reaper.store.acquireReady()
 		if err != nil {
 			return err
@@ -1854,6 +1863,9 @@ func (reaper *RetentionReaper) verifyAuthoritativeJudgeCopies(ctx context.Contex
 }
 
 func (reaper *RetentionReaper) deleteLegacyJudgeIDs(ctx context.Context, ids []string) (int64, error) {
+	if err := reaper.store.awaitWALHeadroom(ctx); err != nil {
+		return 0, err
+	}
 	release, err := reaper.store.acquireReady()
 	if err != nil {
 		return 0, err

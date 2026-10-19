@@ -242,6 +242,9 @@ type Store struct {
 	walGuardMu      sync.Mutex
 	walGuardSeen    bool
 	walGuardVersion int64
+	// walPressure is true while the last WAL guard pass left the log over
+	// its limit; background writers wait for it (awaitWALHeadroom).
+	walPressure atomic.Bool
 
 	// plannerStatsRows is the history size at the last ANALYZE
 	// (RefreshPlannerStatistics).
@@ -323,8 +326,8 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //     returning SQLITE_BUSY, absorbing the
 //     vast majority of write contention.
 //   - wal_autocheckpoint=0      disables SQLite's connection-local commit
-//     hook. DefenseClaw checkpoints through the serialized Store connection
-//     in health and retention maintenance; running a second checkpoint from
+//     hook. DefenseClaw copies the log on a dedicated checkpoint connection
+//     (the WAL guard, health and retention maintenance); running a checkpoint from
 //     inside a commit can race a retiring sidecar process over the shared WAL
 //     mapping and terminate the gateway with SIGBUS.
 //   - journal_size_limit=64MiB  cuts the WAL file back to 64 MiB when a
