@@ -37,8 +37,8 @@ const bwrapSHA = "b4d1a59426c6a52e9f9a0d57d03d620e4dfc1beef976201a3afc0c1b492ee3
 // These are source literals, never environment, CLI or receipt values.
 const payloadSHA = "d1a812ce303b8eec3ba1dd9330ea5e338e1a413b41c2924ae060f68fc1144046"
 const payloadSize int64 = 11247742
-const testDriverSHA = "4b6f03634d6db339302a7c5b5aaddfc471419141a5b4c16c22b538e83a296808"
-const testDriverSize int64 = 141533310
+const testDriverSHA = "30d69276f09dd416b3fa224adf8a3512a5058317173c3309d20c0b2a73cfdb51"
+const testDriverSize int64 = 141721726
 
 type imagePin struct {
 	sha  string
