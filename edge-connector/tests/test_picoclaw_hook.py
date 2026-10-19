@@ -114,3 +114,29 @@ def test_picoclaw_destination_keeps_ipv6_brackets():
     dest = picoclaw_hook.extract_destination(
         "web_fetch", {"url": "http://[2606:4700:4700::1111]/x"})
     assert dest == "[2606:4700:4700::1111]"
+
+
+def _run_main(monkeypatch, capsys, lines):
+    import io
+    monkeypatch.setattr(picoclaw_hook, "log", lambda _msg: None)
+    monkeypatch.setattr(picoclaw_hook, "get_engine", lambda: object())
+    monkeypatch.setattr(picoclaw_hook, "_engine", None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("".join(l + "\n" for l in lines)))
+    assert picoclaw_hook.main() == 0
+    return [json.loads(l) for l in capsys.readouterr().out.splitlines()]
+
+
+def test_picoclaw_echoes_string_and_numeric_ids(monkeypatch, capsys):
+    hello = {"jsonrpc": "2.0", "method": "hook.hello", "params": {}}
+    out = _run_main(monkeypatch, capsys, [
+        json.dumps({**hello, "id": "abc"}),
+        json.dumps({**hello, "id": 6}),
+        json.dumps({**hello, "id": 0}),
+        json.dumps({**hello}),                     # notification: no reply
+        json.dumps({**hello, "id": None}),         # notification: no reply
+        json.dumps({"jsonrpc": "2.0", "id": "x-1", "method": "nope"}),
+        json.dumps({**hello, "id": [1]}),          # invalid id
+    ])
+    assert [r["id"] for r in out] == ["abc", 6, 0, "x-1", None]
+    assert out[0]["result"]["ok"] is True
+    assert "error" in out[3] and "error" in out[4]

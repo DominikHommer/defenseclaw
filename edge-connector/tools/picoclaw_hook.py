@@ -571,7 +571,7 @@ def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
     raise KeyError(f"method not found: {method}")
 
 
-def send_response(message_id: int, result: Any | None = None,
+def send_response(message_id: str | int | float | None, result: Any | None = None,
                   error: str | None = None) -> None:
     payload: dict[str, Any] = {"jsonrpc": "2.0", "id": message_id}
     if error is not None:
@@ -614,24 +614,33 @@ def main() -> int:
             except json.JSONDecodeError:
                 continue
 
+            if not isinstance(message, dict):
+                send_response(None, error="invalid request")
+                continue
             method = message.get("method")
-            message_id = message.get("id", 0)
+            # JSON-RPC ids may be strings or numbers (including 0); a
+            # request without an id (or with a null id) is a notification
+            # and gets no reply.  The id is echoed back unchanged.
+            message_id = message.get("id")
+            if message_id is None:
+                continue
+            if isinstance(message_id, bool) or not isinstance(message_id, (str, int, float)):
+                send_response(None, error="invalid request id")
+                continue
             params = message.get("params") or {}
             if not isinstance(params, dict):
                 params = {}
-            if not message_id:
-                continue
 
             try:
                 result = handle_request(str(method or ""), params)
             except KeyError as exc:
-                send_response(int(message_id), error=str(exc))
+                send_response(message_id, error=str(exc))
                 continue
             except Exception as exc:
                 log(f"ERROR handling {method}: {exc}")
-                send_response(int(message_id), error=f"error: {exc}")
+                send_response(message_id, error=f"error: {exc}")
                 continue
-            send_response(int(message_id), result=result)
+            send_response(message_id, result=result)
     except KeyboardInterrupt:
         pass
     finally:
