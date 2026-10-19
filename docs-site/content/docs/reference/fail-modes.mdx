@@ -52,9 +52,13 @@ When rule 2 keeps a connector open although the global value is `closed`,
 `defenseclaw status` and the `Mode` row of `defenseclaw doctor` say so next to
 `fail-mode=open`, so it does not read as drift.
 
-Hermes, GitHub Copilot CLI, and Antigravity have no fail-closed hook surface:
-their generated hooks stay open even when the effective mode is `closed`. See
-[Connector response shapes](#connector-response-shapes).
+GitHub Copilot CLI and Antigravity have no fail-closed hook surface: their
+generated hooks stay open even when the effective mode is `closed`. Hermes has
+none of its own either, but on Linux and macOS its DefenseClaw hook follows the
+effective mode: `closed` (also when no value is set) blocks a tool call while
+the gateway is down or gives an unusable answer. Hermes itself still lets a
+call run when the hook times out or cannot start. On Windows the Hermes hook
+stays open. See [Connector response shapes](#connector-response-shapes).
 
 A managed standalone host is stricter. There the administrator-owned hooks of
 GitHub Copilot CLI and Hermes block a tool call while the gateway service is

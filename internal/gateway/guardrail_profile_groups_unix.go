@@ -20,6 +20,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+func init() { directoryUsesWinbind = unixidentity.GroupDirectoryUsesWinbind }
+
 // profileGroupExists asks the platform's account database (NSS on Linux,
 // Open Directory on macOS) whether a group named in an assignment exists.
 // An error means the answer is unknown, not that the group is absent.
