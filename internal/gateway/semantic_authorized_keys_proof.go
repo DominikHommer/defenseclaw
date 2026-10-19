@@ -740,6 +740,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// the client did describe, and does not make them omitted.
 	clientTargets := request.ResolvedWriteTargets
 	truncated := clientTargets[hookpaths.TruncatedKey] == "1"
+	// The client resolved every operand the bounds omitted to an ordinary
+	// file of this home: an omitted operand is then judged as an operand a
+	// complete map does not name.
+	omittedOrdinary := truncated && facts.ActiveHome != "" &&
+		canonicalSemanticPath(clientTargets[hookpaths.OmittedOrdinaryKey]) == canonicalSemanticPath(facts.ActiveHome)
 	// Whether an incomplete map also leaves an unlisted or dynamic redirect
 	// unknown (GAP-1395). For a managed Claude Code call that holds only for
 	// a map with no listed operand or a dynamic redirect next to a listed
@@ -886,8 +891,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				// The bounded map omits this operand, which may be a link
 				// into the protected home, in or outside the home. Its target
 				// is unknown, so fail closed. An operand the client did list,
-				// which connector scoping removed, keeps the local checks.
-				if _, described := clientTargets[target]; !described {
+				// which connector scoping removed, or that the client's
+				// omitted-operand summary covers, keeps the local checks.
+				if _, described := clientTargets[target]; !described && !omittedOrdinary {
 					return !windowsLocationOrdinaryWriteTarget(target)
 				}
 			}

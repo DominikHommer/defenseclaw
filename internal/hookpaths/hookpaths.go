@@ -33,6 +33,12 @@ const CWDKey = "\x00cwd"
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
+// OmittedOrdinaryKey accompanies TruncatedKey when the map omits operands
+// only because of its bounds and the client resolved every omitted operand to
+// a file other than the protected ones of the home in its value. Without it an
+// omitted operand is unknown. The gateway accepts it only for the same home.
+const OmittedOrdinaryKey = "\x00omitted-ordinary"
+
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
 
@@ -394,6 +400,17 @@ func (files protectedFiles) has(resolved string) bool {
 	return false
 }
 
+// hasFolded reports a resolved target that names a protected path, compared
+// without case as the gateway compares protected names.
+func (files protectedFiles) hasFolded(resolved string) bool {
+	for _, p := range files {
+		if strings.EqualFold(filepath.Clean(resolved), filepath.Clean(p.path)) {
+			return true
+		}
+	}
+	return false
+}
+
 // target maps a resolved write target to the protected path when both name
 // the same file. When a protected file cannot be identified, a multiply
 // linked target may be an alias of it and is reported as unresolvable.
@@ -473,6 +490,9 @@ func Resolve(payload []byte) string {
 	var operands, literalOperands []string
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
+	// unlisted: the shell walk could not list every write operand. A
+	// command over the ActionFacts limits still has its operands walked.
+	var unlisted bool
 	links := shellLinks{known: true}
 	sourceFacts := map[string]string{}
 	if physicalCWD, ok := ResolveWriteTarget(cwd); ok {
@@ -509,15 +529,21 @@ func Resolve(payload []byte) string {
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
 					truncated = truncated || !links.known
 				}
+				unlisted = directoryUnknown || !parsed || !links.known
 				break
 			}
 		}
 	}
+	// Every operand the walk found is listed below unless a bound omits it;
+	// only then can the omitted-operand summary hold.
+	listed := !unlisted
+	omittedOrdinary := true
 	targets := map[string]string{CWDKey: cwd}
-	// The fixed part counts the truncation marker, so setting it never
-	// exceeds the budget.
+	// The fixed part counts the truncation marker and the omitted-operand
+	// summary, so setting them never exceeds the budget.
 	protected := newProtectedFiles(home)
-	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3
+	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3 +
+		len(jsonString(OmittedOrdinaryKey)) + 1 + len(jsonString(home)) + 1
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
 	add := func(path string, literal, safeRedirect bool) {
@@ -532,10 +558,7 @@ func Resolve(payload []byte) string {
 			size -= len(jsonString(path)) + 1 + len(jsonString(old)) + 1
 			delete(targets, path)
 		}
-		if len(path) > MaxWriteTargetPathBytes || len(targets)-1 >= MaxWriteTargets {
-			truncated = true
-			return
-		}
+		fits := len(path) <= MaxWriteTargetPathBytes && len(targets)-1 < MaxWriteTargets
 		resolved, ok := "", false
 		resolutionPath := path
 		aliasKnown := true
@@ -551,7 +574,7 @@ func Resolve(payload []byte) string {
 		} else if aliasKnown && links.opaque && (!links.opaqueTarget(resolutionPath) || !links.opaqueTargetExceptCopy(resolutionPath, resolutionPath) && slices.Contains(links.copyDestinations, resolutionPath)) {
 			resolved, ok = links.resolve(resolutionPath, protected)
 		}
-		if aliasKnown && links.opaque {
+		if fits && aliasKnown && links.opaque {
 			if fact := links.opaqueScopeFact(resolutionPath); fact != "" {
 				opaqueFacts[OpaqueScopeFactPrefix+resolutionPath] = fact
 			}
@@ -560,8 +583,11 @@ func Resolve(payload []byte) string {
 			resolved = ""
 		}
 		entry := len(jsonString(path)) + 1 + len(jsonString(resolved)) + 1
-		if size+entry > maxEncodedTargets {
+		if !fits || size+entry > maxEncodedTargets {
+			// The operand does not fit. The summary still says whether it
+			// is an ordinary file, compared as the gateway compares names.
 			truncated = true
+			omittedOrdinary = omittedOrdinary && resolved != "" && !protected.hasFolded(resolved)
 			return
 		}
 		size += entry
@@ -598,6 +624,7 @@ func Resolve(payload []byte) string {
 	// redirect. Unknown targets make the map incomplete.
 	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
 	truncated = truncated || !patchKnown
+	listed = listed && patchKnown
 	for _, target := range patchTargets {
 		add(target, true, false)
 	}
@@ -622,6 +649,9 @@ func Resolve(payload []byte) string {
 	}
 	if truncated {
 		targets[TruncatedKey] = "1"
+		if listed && omittedOrdinary && filepath.IsAbs(home) {
+			targets[OmittedOrdinaryKey] = home
+		}
 	}
 	encoded, err := json.Marshal(targets)
 	if err != nil || len(encoded) > maxEncodedTargets {
@@ -659,8 +689,11 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+2 ||
+	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+3 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") {
+		return nil, false
+	}
+	if home, present := targets[OmittedOrdinaryKey]; present && (targets[TruncatedKey] != "1" || !filepath.IsAbs(home)) {
 		return nil, false
 	}
 	for key, value := range targets {

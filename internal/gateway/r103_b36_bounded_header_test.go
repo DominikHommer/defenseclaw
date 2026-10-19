@@ -245,3 +245,46 @@ func TestCommandHookResolvedWritesScope(t *testing.T) {
 		t.Fatalf("per-user request = %v, want nil", got)
 	}
 }
+
+// TestR103B36BoundedHeaderOmittedOrdinarySummary: a benign command with more
+// write operands than the bounded map holds carries the client's summary that
+// every omitted operand resolved to an ordinary file of the same home, so it
+// is not blocked. The summary for another home, or one whose protected
+// operand was omitted, leaves the omitted operands unknown.
+func TestR103B36BoundedHeaderOmittedOrdinarySummary(t *testing.T) {
+	f := newB36ManagedHookFixture(t)
+	var command strings.Builder
+	command.WriteString("mkdir -p ordinary/gen")
+	for i := 0; i < 600; i++ {
+		fmt.Fprintf(&command, "\nprintf 'ok\\n' > ordinary/gen/file-%04d.txt", i)
+	}
+	payload := f.payload(t, command.String())
+	header := f.clientHeader(t, payload)
+	targets, ok := hookpaths.Decode(header)
+	if !ok || targets[hookpaths.TruncatedKey] != "1" || targets[hookpaths.OmittedOrdinaryKey] != f.home {
+		t.Fatalf("benign bounded header: truncated=%q summary=%q", targets[hookpaths.TruncatedKey], targets[hookpaths.OmittedOrdinaryKey])
+	}
+	other := map[string]string{}
+	for key, value := range targets {
+		other[key] = value
+	}
+	other[hookpaths.OmittedOrdinaryKey] = filepath.Join(f.homes, "bob")
+	for _, connector := range []string{"claudecode", "codex"} {
+		if got := f.post(t, connector, payload, header); got != "allow" {
+			t.Errorf("%s benign bounded header = %s, want allow", connector, got)
+		}
+		if got := f.post(t, connector, payload, encodeTargets(t, other)); got != "block" {
+			t.Errorf("%s summary for another home = %s, want block", connector, got)
+		}
+	}
+	for name, edit := range map[string]func(map[string]string){
+		"summary without marker": func(m map[string]string) { delete(m, hookpaths.TruncatedKey) },
+		"relative summary home":  func(m map[string]string) { m[hookpaths.OmittedOrdinaryKey] = "alice" },
+	} {
+		forged := map[string]string{hookpaths.CWDKey: f.project, hookpaths.TruncatedKey: "1", hookpaths.OmittedOrdinaryKey: f.home}
+		edit(forged)
+		if _, ok := hookpaths.Decode(encodeTargets(t, forged)); ok {
+			t.Errorf("%s: Decode accepted the header", name)
+		}
+	}
+}
