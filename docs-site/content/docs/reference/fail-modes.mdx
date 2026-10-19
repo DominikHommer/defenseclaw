@@ -28,10 +28,10 @@ DefenseClaw cannot check is blocked. A `hook_fail_mode: open` there (global,
 per connector, or under `application_protection`) and an ACP profile's
 `fail_mode: open` are ignored, and `enterprise <os> status`, `ensure`,
 `verify` and `defenseclaw-gateway config validate` name each ignored value
-with the warning code `fail_open_ignored`. Their `--json` output also lists
-the resolved fail mode of each connector the deployment protects under
-`hook_fail_modes` (for example `{"cursor": "closed", "kiro": "closed"}`). Only
-the Secure Client profile keeps the configured fail mode.
+with the warning code `fail_open_ignored`. `status --json` and `verify --json`
+also give the resolved fail mode of each connector the deployment protects as
+`connectors.<id>.effective_hook_fail_mode` (`closed` for every connector
+there). Only the Secure Client profile keeps the configured fail mode.
 
 On a managed standalone host both variables are *tighten-only*: a value that
 makes hooks stricter is honored, and one that would loosen the administrator's
@@ -63,11 +63,11 @@ When rule 2 keeps a connector open although the global value is `closed`,
 
 GitHub Copilot CLI and Antigravity have no fail-closed hook surface: their
 generated hooks stay open even when the effective mode is `closed`. Hermes has
-none of its own either, but on Linux and macOS its DefenseClaw hook follows the
+none of its own either, but on Linux, macOS and Windows its DefenseClaw hook follows the
 effective mode: `closed` (also when no value is set) blocks a tool call while
 the gateway is down or gives an unusable answer. Hermes itself still lets a
-call run when the hook times out or cannot start. On Windows the Hermes hook
-stays open. See [Connector response shapes](#connector-response-shapes).
+call run when the hook times out or cannot start. See
+[Connector response shapes](#connector-response-shapes).
 
 A managed standalone host is stricter. There the administrator-owned hooks of
 GitHub Copilot CLI and Hermes block a tool call DefenseClaw cannot check (the
