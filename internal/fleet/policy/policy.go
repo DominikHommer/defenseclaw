@@ -187,6 +187,31 @@ type Service struct {
 
 	policyReplayMu sync.Mutex
 	policyReplays  map[string]policyReplayAttempt
+
+	emergencyReplayMu sync.Mutex
+	emergencyReplays  map[string]*emergencyReplayState
+}
+
+// Emergency catch-up publishes to the fleet topic, so every device in the
+// fleet receives each replayed command. Passes are coalesced per fleet: at
+// most one runs at a time, a request already covered by a pass in the last
+// emergencyReplayCooldown is skipped, and at most
+// maxEmergencyReplaysPerWindow passes run per fleet per window. Each pass
+// publishes a contiguous, ordered page of the fleet's history, so devices
+// still apply commands in predecessor order.
+const (
+	emergencyReplayCooldown      = 30 * time.Second
+	maxEmergencyReplaysPerWindow = 4
+)
+
+type emergencyReplayPass struct {
+	after, last uint32
+	at          time.Time
+}
+
+type emergencyReplayState struct {
+	inFlight bool
+	passes   []emergencyReplayPass
 }
 
 type policyReplayAttempt struct {
@@ -219,6 +244,8 @@ func NewService(store PolicyStore, signer Signer, client mqtt.Client, cfg *Confi
 		compilerPath:  defaultCompilerPath(),
 		logger:        log.Default(),
 		policyReplays: make(map[string]policyReplayAttempt),
+
+		emergencyReplays: make(map[string]*emergencyReplayState),
 	}
 	if cfg != nil {
 		if cfg.CompilerPath != "" {
@@ -847,12 +874,19 @@ func (s *Service) ReplayLatestForDevice(ctx context.Context, tenantID, fleetID u
 		published = true
 		s.logger.Printf("[policy] replayed version=%d for lagging device (reported=%d)", latest.Version, devicePolicyVersion)
 	}
+	if !s.beginEmergencyReplay(tenantID, fleetID, deviceEmergencySeq) {
+		return deviceEmergencySeq, nil
+	}
+	lastPublished := deviceEmergencySeq
+	completed := false
+	defer func() {
+		s.completeEmergencyReplay(tenantID, fleetID, deviceEmergencySeq, lastPublished, completed)
+	}()
 	records, err := s.store.GetEmergenciesAfter(tenantID, fleetID, deviceEmergencySeq, 32)
 	if err != nil {
 		return deviceEmergencySeq, fmt.Errorf("read emergency history for replay: %w", err)
 	}
 	topic := fmt.Sprintf("defenseclaw/%d/%d/ota/emergency", tenantID, fleetID)
-	lastPublished := deviceEmergencySeq
 	for _, record := range records {
 		if err := s.client.Publish(ctx, topic, 1, record.Message); err != nil {
 			return lastPublished, fmt.Errorf("replay emergency sequence %d: %w", record.Sequence, err)
@@ -860,7 +894,64 @@ func (s *Service) ReplayLatestForDevice(ctx context.Context, tenantID, fleetID u
 		lastPublished = record.Sequence
 		s.logger.Printf("[policy] replayed emergency seq=%d to %s", record.Sequence, topic)
 	}
+	completed = true
 	return lastPublished, nil
+}
+
+// beginEmergencyReplay admits an emergency catch-up pass for a device that
+// last applied afterSeq, unless a pass is already running for the fleet, a
+// recent pass already republished the commands after afterSeq, or the
+// fleet's per-window pass budget is spent. A skipped device retries on a
+// later heartbeat.
+func (s *Service) beginEmergencyReplay(tenantID, fleetID uint64, afterSeq uint32) bool {
+	key := fleetKey(tenantID, fleetID)
+	now := time.Now()
+	s.emergencyReplayMu.Lock()
+	defer s.emergencyReplayMu.Unlock()
+	st := s.emergencyReplays[key]
+	if st == nil {
+		st = &emergencyReplayState{}
+		s.emergencyReplays[key] = st
+	}
+	live := st.passes[:0]
+	for _, p := range st.passes {
+		if now.Sub(p.at) < emergencyReplayCooldown {
+			live = append(live, p)
+		}
+	}
+	st.passes = live
+	if st.inFlight {
+		return false
+	}
+	for _, p := range st.passes {
+		if p.after <= afterSeq && afterSeq < p.last {
+			return false
+		}
+	}
+	if len(st.passes) >= maxEmergencyReplaysPerWindow {
+		return false
+	}
+	st.inFlight = true
+	return true
+}
+
+// completeEmergencyReplay records a finished pass. A failed pass is not
+// recorded, so the next heartbeat retries it.
+func (s *Service) completeEmergencyReplay(tenantID, fleetID uint64, afterSeq, lastSeq uint32, completed bool) {
+	key := fleetKey(tenantID, fleetID)
+	s.emergencyReplayMu.Lock()
+	defer s.emergencyReplayMu.Unlock()
+	st := s.emergencyReplays[key]
+	if st == nil {
+		return
+	}
+	st.inFlight = false
+	if completed && lastSeq > afterSeq {
+		st.passes = append(st.passes, emergencyReplayPass{after: afterSeq, last: lastSeq, at: time.Now()})
+	}
+	if len(st.passes) == 0 {
+		delete(s.emergencyReplays, key)
+	}
 }
 
 // One stale or compromised device can otherwise force a fleet-wide policy

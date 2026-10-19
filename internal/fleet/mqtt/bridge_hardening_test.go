@@ -17,6 +17,7 @@
 package mqtt
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
@@ -356,4 +357,44 @@ func TestDecodeVerdictRequestReportsNonces(t *testing.T) {
 	if err != nil || vr.HasNonces {
 		t.Fatalf("boot nonce only: HasNonces=%v err=%v", vr != nil && vr.HasNonces, err)
 	}
+}
+
+// Catch-up runs off the MQTT router: a slow replay must not block the
+// heartbeat handler (and so every other device's traffic).
+func TestReplayDoesNotBlockHeartbeatHandler(t *testing.T) {
+	key := []byte("12345678901234567890123456789012")
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 0, 0)
+	b := newTestBridge(t, newMockClient(), fm, verdict.NewCache(10, nil))
+	quietBridge(b)
+	b.SetHeartbeatRateLimit(0)
+	b.SetKeyProvider(&fixedKeyProvider{key: key})
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	b.SetReplayForDevice(func(ctx context.Context, _, _ uint64, _ uint16, _ uint32) (uint32, error) {
+		started <- struct{}{}
+		<-release
+		return 0, nil
+	})
+	topic := "defenseclaw/1/2/42/heartbeat"
+	done := make(chan struct{})
+	go func() {
+		b.handleHeartbeat(Message{Topic: topic, Payload: signedHB(topic, key, 42, 100, 1, 0)})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("heartbeat handler blocked on catch-up")
+	}
+	<-started
+	// While the replay is in flight a fresh heartbeat is processed without
+	// queuing a duplicate replay for the same device.
+	b.handleHeartbeat(Message{Topic: topic, Payload: signedHB(topic, key, 42, 101, 1, 0)})
+	if hb, _, _ := b.Stats(); hb != 2 {
+		t.Fatalf("heartbeats processed=%d, want 2", hb)
+	}
+	close(release)
+	b.replayPending.Wait()
 }

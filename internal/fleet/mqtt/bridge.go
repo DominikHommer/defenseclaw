@@ -226,6 +226,12 @@ type Bridge struct {
 	replayForDevice func(context.Context, uint64, uint64, uint16, uint32) (uint32, error)
 	replayMu        sync.Mutex
 	replayState     map[uint64]deviceReplayState
+	// Catch-up runs on a small worker pool, never on the MQTT router
+	// goroutine: replay publishes QoS 1 messages and must not stall other
+	// devices' heartbeats and verdicts.
+	replayJobs      chan replayJob
+	replayStartOnce sync.Once
+	replayPending   sync.WaitGroup
 
 	heartbeatMinInterval time.Duration
 	lastHeartbeat        map[uint64]time.Time
@@ -243,6 +249,20 @@ type Bridge struct {
 	decodeErrors        uint64
 	rateLimitDrops      uint64
 }
+
+type replayJob struct {
+	fullID           uint64
+	deviceID         uint32
+	tenantID         uint16
+	fleetID          uint16
+	policyVersion    uint16
+	lastEmergencySeq uint32
+}
+
+const (
+	replayQueueSize = 256
+	replayWorkers   = 4
+)
 
 type deviceReplayState struct {
 	bootCounter uint32
@@ -299,6 +319,7 @@ func NewBridge(client Client, fleet *manager.FleetManager, cache *verdict.Cache)
 		lastHeartbeat:        make(map[uint64]time.Time),
 		verdictRateMap:       make(map[uint64]*verdictRateEntry),
 		replayState:          make(map[uint64]deviceReplayState),
+		replayJobs:           make(chan replayJob, replayQueueSize),
 	}
 }
 
@@ -635,18 +656,54 @@ func (b *Bridge) maybeReplayForDevice(fullID uint64, parts *TopicParts, hw *Hear
 	b.replayState[fullID] = state
 	b.replayMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_, err := b.replayForDevice(ctx, uint64(parts.TenantID), uint64(parts.FleetID), hw.PolicyVersion, hw.LastEmergencySeq)
-	cancel()
+	job := replayJob{
+		fullID: fullID, deviceID: parts.DeviceID, tenantID: parts.TenantID, fleetID: parts.FleetID,
+		policyVersion: hw.PolicyVersion, lastEmergencySeq: hw.LastEmergencySeq,
+	}
+	b.replayStartOnce.Do(func() {
+		for i := 0; i < replayWorkers; i++ {
+			go b.replayWorker()
+		}
+	})
+	b.replayPending.Add(1)
+	select {
+	case b.replayJobs <- job:
+	default:
+		// Queue full: drop. A later heartbeat with advanced uptime retries.
+		b.replayPending.Done()
+		b.finishReplay(fullID)
+		b.logger.Printf("[mqtt-bridge] WARNING: OTA catch-up queue full; deferring device %d", parts.DeviceID)
+	}
+}
 
-	b.replayMu.Lock()
-	state = b.replayState[fullID]
-	state.inFlight = false
-	b.replayState[fullID] = state
-	b.replayMu.Unlock()
-	if err != nil {
-		b.logger.Printf("[mqtt-bridge] OTA catch-up failed for device %d: %v", parts.DeviceID, err)
+func (b *Bridge) replayWorker() {
+	for {
+		select {
+		case <-b.stopped:
+			return
+		case job := <-b.replayJobs:
+			b.runReplay(job)
+		}
+	}
+}
+
+func (b *Bridge) runReplay(job replayJob) {
+	defer b.replayPending.Done()
+	defer b.finishReplay(job.fullID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := b.replayForDevice(ctx, uint64(job.tenantID), uint64(job.fleetID), job.policyVersion, job.lastEmergencySeq); err != nil {
+		b.logger.Printf("[mqtt-bridge] OTA catch-up failed for device %d: %v", job.deviceID, err)
 		b.incErrors()
+	}
+}
+
+func (b *Bridge) finishReplay(fullID uint64) {
+	b.replayMu.Lock()
+	defer b.replayMu.Unlock()
+	if state, ok := b.replayState[fullID]; ok {
+		state.inFlight = false
+		b.replayState[fullID] = state
 	}
 }
 

@@ -44,31 +44,39 @@ func TestBridgeReplayOnlyOnFreshSignedDeviceFrames(t *testing.T) {
 	})
 	first := signedReplayFrame(register, key, 3600, 1)
 	bridge.handleRegistration(Message{Topic: register, Payload: first})
+	bridge.replayPending.Wait()
 	bridge.handleRegistration(Message{Topic: register, Payload: first})
+	bridge.replayPending.Wait()
 	if calls != 1 {
 		t.Fatalf("captured registration replay amplified OTA: %d callback calls", calls)
 	}
 	bridge.handleHeartbeat(Message{Topic: heartbeat, Payload: signedReplayFrame(heartbeat, key, 3600, 1)})
+	bridge.replayPending.Wait()
 	if calls != 1 {
 		t.Fatalf("same-time heartbeat duplicated OTA replay: %d calls", calls)
 	}
 	bridge.handleHeartbeat(Message{Topic: heartbeat, Payload: signedReplayFrame(heartbeat, key, 3601, 1)})
+	bridge.replayPending.Wait()
 	if calls != 2 || lastSeen != 0 {
 		t.Fatalf("fresh heartbeat did not use signed device emergency sequence: calls=%d lastSeq=%d", calls, lastSeen)
 	}
 	bridge.handleRegistration(Message{Topic: register, Payload: first})
+	bridge.replayPending.Wait()
 	if calls != 2 {
 		t.Fatalf("registration older than durable heartbeat caused OTA replay: %d calls", calls)
 	}
 	bridge.handleHeartbeat(Message{Topic: heartbeat, Payload: signedReplayFrame(heartbeat, key, 10, 2)})
+	bridge.replayPending.Wait()
 	if calls != 3 {
 		t.Fatalf("new boot did not trigger catch-up: %d calls", calls)
 	}
 	bridge.handleHeartbeat(Message{Topic: heartbeat, Payload: signedReplayFrame(heartbeat, key, 9999, 1)})
+	bridge.replayPending.Wait()
 	if calls != 3 {
 		t.Fatalf("old boot replay triggered catch-up: %d calls", calls)
 	}
 	bridge.handleRegistration(Message{Topic: register, Payload: makeHeartbeatPayload(42, 0, 0, 0)})
+	bridge.replayPending.Wait()
 	if calls != 3 {
 		t.Fatalf("unsigned development frame triggered catch-up: %d calls", calls)
 	}
