@@ -68,7 +68,7 @@ type WALCheckpoint struct {
 	// its start.
 	Restarted bool
 	// Truncated is true when the pass also cut the WAL file to zero bytes,
-	// which it does only when nothing was written since the previous pass.
+	// which it does only when the hooks are not flooding the store.
 	Truncated bool
 	// WriterHeld is how long the pass held the writer connection; zero when
 	// it did not need it.
@@ -102,10 +102,12 @@ type WALCheckpoint struct {
 //     copy, and the next write starts the log again from its start, where the
 //     commit cuts the file back to journal_size_limit. The file is not cut to
 //     zero under load: the writes would only have to grow it again.
-//   - Nothing was committed since the previous pass (PRAGMA data_version on
-//     the checkpoint connection), and the fully copied log's file is larger
-//     than walIdleTrimBytes. A TRUNCATE checkpoint cuts the idle file to zero
-//     bytes. A log that stops growing is never restarted by a writer.
+//   - The log is fully copied, its file is larger than walIdleTrimBytes, and
+//     the hooks are not flooding the store: nothing was committed since the
+//     previous pass (PRAGMA data_version on the checkpoint connection), or
+//     the log in use is at most walWriterCopyFrames long (a trickle of
+//     background writes restarted it). A TRUNCATE checkpoint cuts the file to
+//     zero bytes. A log that stops growing is never restarted by a writer.
 //
 // The idle trim used to run whenever a fully copied file was over
 // walIdleTrimBytes, and under a 10 calls/s hook flood the file stays over it,
@@ -117,8 +119,8 @@ type WALCheckpoint struct {
 // The writer copies only the backlog the copy passes left, at most
 // walWriterCopyFrames, unless the log is past walForcedRestartFactor times
 // the limit. The writer connection has no other writer to wait for, and its
-// busy timeout is zero for the statement. A reader on an older snapshot makes the
-// checkpoint busy; the next pass tries again.
+// busy timeout is zero for the statement. A reader on an older snapshot makes
+// the checkpoint busy; the next pass tries again.
 func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writerBudget time.Duration) (result WALCheckpoint, err error) {
 	if ctx == nil {
 		return result, fmt.Errorf("audit: WAL checkpoint context is required")
@@ -160,7 +162,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 		}
 	}
 	long := int64(frames)*walFrameBytes > limitBytes
-	idleOversized := quiet && frames == copied && s.walFileBytes() > walIdleTrimBytes
+	idleOversized := frames == copied && s.walFileBytes() > walIdleTrimBytes && (quiet || frames <= walWriterCopyFrames)
 	if !long && !idleOversized {
 		return result, nil
 	}
@@ -169,7 +171,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 		return result, nil
 	}
 	mode := walCheckpointRestart
-	if quiet {
+	if quiet || idleOversized {
 		mode = walCheckpointTruncate
 	}
 	started := time.Now()

@@ -125,6 +125,10 @@ func TestCheckpointWALIfLargeTrimsAnIdleOversizedFile(t *testing.T) {
 	original := walIdleTrimBytes
 	walIdleTrimBytes = grown / 2
 	t.Cleanup(func() { walIdleTrimBytes = original })
+	// The log is longer than a trickle's.
+	originalCopyFrames := walWriterCopyFrames
+	walWriterCopyFrames = 16
+	t.Cleanup(func() { walWriterCopyFrames = originalCopyFrames })
 	ctx := context.Background()
 	pass, err := store.CheckpointWALIfLarge(ctx, math.MaxInt64, testWALWriterBudget)
 	if err != nil || pass.Truncated || pass.WriterHeld != 0 || pass.FileBytes != grown {
@@ -133,6 +137,32 @@ func TestCheckpointWALIfLargeTrimsAnIdleOversizedFile(t *testing.T) {
 	pass, err = store.CheckpointWALIfLarge(ctx, math.MaxInt64, testWALWriterBudget)
 	if err != nil || !pass.Truncated || pass.FileBytes != 0 {
 		t.Fatalf("idle oversized WAL: %+v, %v; want it truncated", pass, err)
+	}
+}
+
+// A trickle of background writes after a flood restarts the log, so the
+// store is never quiet for a whole pass. The file is still trimmed once the
+// log in use is short and copied.
+func TestCheckpointWALIfLargeTrimsAnOversizedFileUnderATrickleOfWrites(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	logWALGuardEvents(t, store, 200)
+	grown := walFileSize(t, store)
+	original := walIdleTrimBytes
+	walIdleTrimBytes = grown / 2
+	t.Cleanup(func() { walIdleTrimBytes = original })
+	if _, err := store.CheckpointWALIfLarge(ctx, math.MaxInt64, testWALWriterBudget); err != nil {
+		t.Fatal(err)
+	}
+	// One write restarts the fully copied log; the file keeps its size.
+	logWALGuardEvents(t, store, 1)
+	if size := walFileSize(t, store); size != grown {
+		t.Fatalf("WAL file after the trickle write = %d bytes, want %d", size, grown)
+	}
+	pass, err := store.CheckpointWALIfLarge(ctx, math.MaxInt64, testWALWriterBudget)
+	if err != nil || !pass.Truncated || pass.FileBytes != 0 {
+		t.Fatalf("oversized file under a trickle: %+v, %v; want it truncated", pass, err)
 	}
 }
 
@@ -158,6 +188,10 @@ func TestCheckpointWALIfLargeDoesNotHoldTheWriterForAnOversizedFileUnderWrites(t
 	original := walIdleTrimBytes
 	walIdleTrimBytes = walFileSize(t, store) / 4
 	t.Cleanup(func() { walIdleTrimBytes = original })
+	// A flood writes more between two passes than the writer copy bound.
+	originalCopyFrames := walWriterCopyFrames
+	walWriterCopyFrames = 16
+	t.Cleanup(func() { walWriterCopyFrames = originalCopyFrames })
 	phases := countWriterPhases(t)
 	ctx := context.Background()
 	for pass := range 5 {
