@@ -328,9 +328,12 @@ func TestCheckpointWALIfLargeTakesTheWriterOnlyInAnIdleGap(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	logWALGuardEvents(t, store, 200)
-	originalWait := walIdleWait
-	walIdleWait = 150 * time.Millisecond
-	t.Cleanup(func() { walIdleWait = originalWait })
+	// The window is ten times the default so a commit that stalls behind a
+	// slow sync (hundreds of milliseconds on a Windows runner) is still no
+	// idle gap, and one sync before the catch-up keeps that exposure short.
+	originalWait, originalWindow, originalSettled := walIdleWait, walIdleWindow, walSettledSync
+	walIdleWait, walIdleWindow, walSettledSync = 600*time.Millisecond, 200*time.Millisecond, time.Hour
+	t.Cleanup(func() { walIdleWait, walIdleWindow, walSettledSync = originalWait, originalWindow, originalSettled })
 	writeDuringEveryCopy(t, store)
 	phases := countWriterPhases(t)
 	stop := make(chan struct{})
