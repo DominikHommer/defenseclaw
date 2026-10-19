@@ -309,3 +309,51 @@ func TestLockdownBlockRequiresAuthenticatedRequest(t *testing.T) {
 		t.Fatal("lockdown BLOCK not signed over the authenticated request")
 	}
 }
+
+// Outside development mode a signed verdict request without boot/request
+// nonces is rejected; one carrying both is answered.
+func TestProductionRejectsSignedVerdictRequestWithoutNonces(t *testing.T) {
+	productionEnv(t)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 1, 0)
+	ks := &mapKeyStore{keys: map[uint64][]byte{manager.ComposeID(1, 2, 42): key}}
+	c := newMockClient()
+	b := NewBridge(c, fm, allowCache())
+	quietBridge(b)
+	b.SetDeviceKeyStore(ks)
+	topic := "defenseclaw/1/2/42/verdict/req"
+	sign := func(body []byte) []byte {
+		mac := hmac.New(sha256.New, key)
+		mac.Write([]byte(topic))
+		mac.Write(body)
+		return append(body, mac.Sum(nil)...)
+	}
+	noNonce := EncodeVerdictRequestCBOR(&VerdictRequest{RequestID: 5, ToolHash: [32]byte{0xAA}})
+	b.handleVerdictRequest(Message{Topic: topic, Payload: sign(noNonce)})
+	bootOnly := EncodeVerdictRequestCBOR(&VerdictRequest{RequestID: 6, ToolHash: [32]byte{0xAA}, BootNonce: [16]byte{1}})
+	b.handleVerdictRequest(Message{Topic: topic, Payload: sign(bootOnly)})
+	zeroBoot := EncodeVerdictRequestCBOR(&VerdictRequest{RequestID: 7, ToolHash: [32]byte{0xAA}})
+	zeroBoot = append(zeroBoot, encodeCBORBytes(make([]byte, 16))...)
+	zeroBoot = append(zeroBoot, encodeCBORBytes([]byte{1, 2, 3, 4})...)
+	b.handleVerdictRequest(Message{Topic: topic, Payload: sign(zeroBoot)})
+	if n := len(verdictPublishes(c)); n != 0 {
+		t.Fatalf("nonce-less signed requests answered in production: %d", n)
+	}
+	b.handleVerdictRequest(Message{Topic: topic, Payload: signedVerdictReq(topic, key, newVR(8, [16]byte{9}, [4]byte{}))})
+	if n := len(verdictPublishes(c)); n != 1 {
+		t.Fatalf("request with both nonces not answered: %d", n)
+	}
+}
+
+func TestDecodeVerdictRequestReportsNonces(t *testing.T) {
+	full := append(EncodeVerdictRequestCBOR(newVR(1, [16]byte{1}, [4]byte{})), encodeCBORBytes(make([]byte, 4))...)
+	vr, err := DecodeVerdictRequest(full)
+	if err != nil || !vr.HasNonces {
+		t.Fatalf("full request: HasNonces=%v err=%v", vr != nil && vr.HasNonces, err)
+	}
+	vr, err = DecodeVerdictRequest(EncodeVerdictRequestCBOR(newVR(1, [16]byte{1}, [4]byte{})))
+	if err != nil || vr.HasNonces {
+		t.Fatalf("boot nonce only: HasNonces=%v err=%v", vr != nil && vr.HasNonces, err)
+	}
+}

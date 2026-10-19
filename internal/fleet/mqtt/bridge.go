@@ -876,6 +876,15 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		return
 	}
 
+	// The response MAC binds the boot and request nonces. Without them a
+	// response is tied only to a 16-bit request id and the tool hash, so a
+	// keyed device outside development mode must send both.
+	if isKeyed && isProductionMode() && !vr.HasNonces {
+		b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — device %d sent no boot/request nonce", parts.DeviceID)
+		b.incErrors()
+		return
+	}
+
 	// A lockdown device gets a signed BLOCK, but only for a request that
 	// passed the same authentication and rate limit as any other: the
 	// gateway must not sign responses over unauthenticated fields.
