@@ -2955,7 +2955,9 @@ threading.Event().wait()
         $nativeWorkflowText -match '''TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout''' -and
         $nativeWorkflowText -match 'foreach \(\$isolatedTest in \$connectorIsolatedTests\)' -and
         $nativeWorkflowText -match '''-run'', \(''\^'' \+ \[regex\]::Escape\(\$isolatedTest\) \+ ''\$''\), ''\./internal/gateway/connector''' -and
-        $nativeWorkflowText -match '\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway'' -and\s+\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector''' -and
+        $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway'',' -and
+        $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector'',' -and
+        $nativeWorkflowText -match '''--timings'', ''scripts/test-timings/go-windows\.json''' -and
         $nativeWorkflowText -match '\$remainingArguments = @\(') `
         'full native Go suite bounds gateway and connector selectors across sequential processes, isolates native lifecycle regressions, serializes gateway tests with process-global capture state, and separately selects every remaining package'
     Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
