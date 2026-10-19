@@ -245,3 +245,121 @@ func TestCommandHookResolvedWritesScope(t *testing.T) {
 		t.Fatalf("per-user request = %v, want nil", got)
 	}
 }
+
+// TestR103B36BoundedHeaderOmittedOperandsStayUnknown keeps every operand a
+// bounded map omits unknown on a managed host. The hook client sends no
+// summary of the omitted operands (owner decision 2026-10-19), so the
+// review rows for 1.0.3 block for both connectors: dynamic, case-variant
+// and link forms of a protected write after a full map, a Unicode HOME
+// alias of the account home, and a real bounded header reused on another
+// call. A large benign command whose write operands do not fit the map is
+// also denied: that is the known 1.0.3 limit for managed Claude Code (Codex
+// has denied it since 1.0.1), tracked for 1.0.4.
+func TestR103B36BoundedHeaderOmittedOperandsStayUnknown(t *testing.T) {
+	f := newB36ManagedHookFixture(t)
+	if err := os.Symlink("../.ssh", filepath.Join(f.project, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(f.project, "a"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(f.home, ".ssh", "d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../.ssh/d", filepath.Join(f.project, "a", "b")); err != nil {
+		t.Fatal(err)
+	}
+	var filler strings.Builder
+	filler.WriteString("echo hi")
+	for i := 0; i < 530; i++ {
+		fmt.Fprintf(&filler, " > ordinary/filler%03d", i)
+	}
+	bounded := func(header string) {
+		t.Helper()
+		targets, ok := hookpaths.Decode(header)
+		if !ok || targets[hookpaths.TruncatedKey] != "1" {
+			t.Fatal("real client header is not a bounded map")
+		}
+	}
+	for name, suffix := range map[string]string{
+		"dynamic_var":        `; x=keylink; echo hi > "$x"`,
+		"dynamic_home":       `; x=../.ssh/authorized_keys; echo hi > "$x"`,
+		"absolute_protected": " > " + f.keys,
+		"parent_link":        " > dirlink/authorized_keys",
+		"link_dotdot":        " > a/b/../authorized_keys",
+		"ascii_case":         " > ../.SSH/AUTHORIZED_KEYS",
+		"unicode_case":       " > ../.ssh/authorİzed_keys",
+	} {
+		payload := f.payload(t, filler.String()+suffix)
+		header := f.clientHeader(t, payload)
+		bounded(header)
+		for _, connector := range []string{"claudecode", "codex"} {
+			if got := f.post(t, connector, payload, header); got != "block" {
+				t.Errorf("%s/%s: bounded header verdict = %s, want block", connector, name, got)
+			}
+		}
+	}
+
+	// A real bounded header from a benign call, reused on a protected link
+	// write, and a header holding only the cwd and the marker.
+	benign := f.payload(t, filler.String())
+	benignHeader := f.clientHeader(t, benign)
+	bounded(benignHeader)
+	link := f.payload(t, "echo hi > keylink")
+	markerOnly := encodeTargets(t, map[string]string{hookpaths.CWDKey: f.project, hookpaths.TruncatedKey: "1"})
+	for _, connector := range []string{"claudecode", "codex"} {
+		for mode, header := range map[string]string{"reused_header": benignHeader, "cwd_and_marker": markerOnly} {
+			if got := f.post(t, connector, link, header); got != "block" {
+				t.Errorf("%s/%s: protected link write = %s, want block", connector, mode, got)
+			}
+		}
+		// Known 1.0.3 limit: the omitted benign operands stay unknown.
+		if got := f.post(t, connector, benign, benignHeader); got != "block" {
+			t.Errorf("%s: large benign command = %s, want block (known limit)", connector, got)
+		}
+	}
+}
+
+// TestR103B36UnicodeHomeAliasBlocks runs the hook client with a HOME that
+// differs from the account home only by a Unicode case fold, then writes a
+// link to the account key after a full map. Both connectors must deny it.
+func TestR103B36UnicodeHomeAliasBlocks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX managed hook evidence")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can search a mode 0 directory")
+	}
+	root := t.TempDir()
+	f := b36ManagedHookFixture{homes: filepath.Join(root, "homes")}
+	f.home = filepath.Join(f.homes, "ilice")
+	f.project = filepath.Join(f.home, "project")
+	f.keys = filepath.Join(f.home, ".ssh", "authorized_keys")
+	alias := filepath.Join(f.homes, "İlice")
+	for _, dir := range []string{filepath.Dir(f.keys), filepath.Join(f.project, "ordinary"), alias} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(f.keys, []byte("# decoy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(f.project, "keylink")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", alias)
+	t.Cleanup(func() { _ = os.Chmod(f.homes, 0o700) })
+	var command strings.Builder
+	command.WriteString("echo hi")
+	for i := 0; i < 530; i++ {
+		fmt.Fprintf(&command, " > ordinary/filler%03d", i)
+	}
+	command.WriteString(" > keylink")
+	payload := f.payload(t, command.String())
+	header := f.clientHeader(t, payload)
+	for _, connector := range []string{"claudecode", "codex"} {
+		if got := f.post(t, connector, payload, header); got != "block" {
+			t.Errorf("%s: Unicode HOME alias verdict = %s, want block", connector, got)
+		}
+	}
+}
