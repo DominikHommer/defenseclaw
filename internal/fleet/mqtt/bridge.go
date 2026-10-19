@@ -586,20 +586,21 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 
 	// Convert to the manager's Heartbeat type
 	hb := &manager.Heartbeat{
-		DeviceID:       hw.DeviceID,
-		UptimeSec:      hw.UptimeSec,
-		BootCounter:    hw.BootCounter,
-		PolicyVersion:  hw.PolicyVersion,
-		FWVersion:      hw.FWVersion,
-		DeniedCount:    uint32(hw.DeniedCount),
-		AllowedCount:   uint32(hw.AllowedCount),
-		WarnedCount:    uint32(hw.WarnedCount),
-		EscalatedCount: uint32(hw.EscalatedCount),
-		CacheHitPct:    hw.CacheHitPct,
-		SessionCount:   hw.SessionCount,
-		AuditHeadHMAC:  hw.AuditHeadHMAC,
-		Flags:          hw.Flags,
-		Capabilities:   hw.Capabilities,
+		DeviceID:         hw.DeviceID,
+		UptimeSec:        hw.UptimeSec,
+		BootCounter:      hw.BootCounter,
+		PolicyVersion:    hw.PolicyVersion,
+		FWVersion:        hw.FWVersion,
+		DeniedCount:      uint32(hw.DeniedCount),
+		AllowedCount:     uint32(hw.AllowedCount),
+		WarnedCount:      uint32(hw.WarnedCount),
+		EscalatedCount:   uint32(hw.EscalatedCount),
+		CacheHitPct:      hw.CacheHitPct,
+		SessionCount:     hw.SessionCount,
+		AuditHeadHMAC:    hw.AuditHeadHMAC,
+		Flags:            hw.Flags,
+		Capabilities:     hw.Capabilities,
+		LastEmergencySeq: hw.LastEmergencySeq,
 	}
 
 	if !b.fleet.ProcessHeartbeat(parts.TenantID, parts.FleetID, parts.DeviceID, hb) {

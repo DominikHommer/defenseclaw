@@ -73,6 +73,10 @@ type Device struct {
 	// restart we can distinguish "new boot" from "replay of old heartbeat
 	// with lower uptime".
 	BootEpoch uint32 `json:"boot_epoch"`
+	// LastEmergencySeq is the durable last-applied emergency command sequence
+	// from the latest accepted signed heartbeat: operators confirm a kill
+	// switch reached a device by comparing it with the fleet's latest seq.
+	LastEmergencySeq uint32 `json:"last_emergency_seq"`
 }
 
 // Heartbeat represents a parsed 40-byte device heartbeat.
@@ -91,6 +95,8 @@ type Heartbeat struct {
 	AuditHeadHMAC  uint64
 	Flags          uint8
 	Capabilities   uint8
+	// LastEmergencySeq is the device's durable last-applied emergency seq.
+	LastEmergencySeq uint32
 }
 
 // AlertType defines fleet alert categories.
@@ -529,6 +535,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	}
 	dev.BootCounter = hb.BootCounter
 	dev.LastUptime = hb.UptimeSec
+	dev.LastEmergencySeq = hb.LastEmergencySeq
 
 	dev.LastHeartbeat = time.Now()
 	dev.Flags = hb.Flags
