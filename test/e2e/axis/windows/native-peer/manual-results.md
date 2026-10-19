@@ -146,3 +146,12 @@ downstream SDK validator requires exactly two ACEs, so it rejects this
 Windows inheritance representation. This finding does not establish a
 defect in unmodified MXC. A changed validator must retain the same trusted
 principals, effective rights, protection and refusal of unsupported entries.
+
+The Job-first correction keeps the native owner after a successful Job
+signal and observes retained root-signaled plus JobActive0 before release.
+It calls direct root termination only after a failed Job signal, which still
+refuses cleanup because descendants may remain. Signal state survives a
+bounded wait retry; it is never completion evidence. Its two-package Windows
+race run passed 57 test/subtest rows, zero failures/skips; log SHA256
+`763aa46c09c86a0326fad00a3fb2302835773281a86a1730126872bdd8f90a60`. No peer, child or PSEC was created.
+The changed integrated native result remains pending.

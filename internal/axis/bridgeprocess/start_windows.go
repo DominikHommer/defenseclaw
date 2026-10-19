@@ -162,7 +162,29 @@ type windowsCustody struct {
 	preOwnerPipes                         []*os.File // only until bridgeowner.New accepts their ownership
 	pipeSetup                             []*bridgeowner.OverlappedPrivatePipe
 	starting, closed, complete, uncertain bool
+	jobTerminationIssued                  bool   // a successful Job signal still requires root+Job terminal proof
 	firstUncertainStage                   string // diagnostic only; first failed close never resets
+}
+
+// signalJobFirst is called with custody.mu held. A successful Job signal owns
+// termination of every associated process; the retained root handle and Job
+// count must still reach terminal states in StopAndWait before any release.
+// Direct root termination is solely a fallback for a failed Job signal. Even
+// if that fallback succeeds, the failed Job signal is an incomplete cleanup.
+func (custody *windowsCustody) signalJobFirst(
+	terminateJob func() error, fallbackRoot func() (bool, error),
+) (WindowsNativeSignalResult, error) {
+	if custody.jobTerminationIssued {
+		return WindowsNativeSignalResult{}, nil
+	}
+	jobErr := terminateJob()
+	if jobErr == nil {
+		custody.jobTerminationIssued = true
+		return closedWindowsNativeSignals(nil, nil, false), nil
+	}
+	rootAttempted, rootErr := fallbackRoot()
+	return closedWindowsNativeSignals(jobErr, rootErr, rootAttempted),
+		errors.Join(bridgeowner.ErrCleanup, jobErr, rootErr)
 }
 
 func (custody *windowsCustody) StopAndWait(ctx context.Context) (resultErr error) {
@@ -246,16 +268,18 @@ func (custody *windowsCustody) StopAndWait(ctx context.Context) (resultErr error
 		// The Job is never inherited, permits no breakaway, and was assigned
 		// atomically by JOB_LIST before the initial suspended process existed.
 		stage = "native_signal"
-		jobErr := windows.TerminateJobObject(custody.job, 1)
-		var rootErr error
-		if !rootDone {
-			rootErr = windows.TerminateProcess(custody.process, 1)
-		}
-		if jobErr != nil || rootErr != nil {
-			signals = closedWindowsNativeSignals(jobErr, rootErr, !rootDone)
-			// Both attempted native failures remain inspectable while the outer
-			// cleanup error still exposes only its fixed, bounded stage text.
-			return errors.Join(bridgeowner.ErrCleanup, jobErr, rootErr) // exact handles remain for explicit retry
+		signals, err = custody.signalJobFirst(func() error {
+			return windows.TerminateJobObject(custody.job, 1)
+		}, func() (bool, error) {
+			if rootDone {
+				return false, nil
+			}
+			return true, windows.TerminateProcess(custody.process, 1)
+		})
+		if err != nil {
+			// A failed Job signal is incomplete even if direct root fallback
+			// succeeds: descendants may still be active. Retain all handles.
+			return err
 		}
 		custody.mu.Unlock()
 		stage = "native_wait"
@@ -646,17 +670,22 @@ func (custody *windowsCustody) resumeIfOpen(ctx context.Context, resume func() e
 
 func (custody *windowsCustody) signalLateRoot() error {
 	// starting is still true: StopAndWait cannot close these handles yet.
+	custody.mu.Lock()
+	defer custody.mu.Unlock()
 	if custody.process == 0 {
 		return nil
 	}
-	jobErr := windows.TerminateJobObject(custody.job, 1)
-	state, waitErr := windows.WaitForSingleObject(custody.process, 0)
-	var rootErr error
-	if waitErr != nil || state != windows.WAIT_OBJECT_0 {
-		rootErr = windows.TerminateProcess(custody.process, 1)
-	}
-	if jobErr != nil || waitErr != nil || rootErr != nil {
-		return bridgeowner.ErrCleanup
+	_, err := custody.signalJobFirst(func() error {
+		return windows.TerminateJobObject(custody.job, 1)
+	}, func() (bool, error) {
+		state, waitErr := windows.WaitForSingleObject(custody.process, 0)
+		if waitErr == nil && state == windows.WAIT_OBJECT_0 {
+			return false, nil
+		}
+		return true, errors.Join(waitErr, windows.TerminateProcess(custody.process, 1))
+	})
+	if err != nil {
+		return bridgeowner.ErrCleanup // keep the existing pre-owner error surface
 	}
 	return nil
 }
