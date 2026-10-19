@@ -87,6 +87,10 @@ type ToolInspectRequest struct {
 	// the legacy public inspect API; native adapters opt in after establishing a
 	// prompt or tool-result boundary.
 	contentScope ruleContentScope
+	// callerCWD is the agent's working folder from a connector adapter's
+	// typed hook payload (never from the public inspect wire). It picks the
+	// project of an enrolled account's MCP server (mcpAccountRuntimeBlock).
+	callerCWD string
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
@@ -680,6 +684,16 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// a server-level block wins over a tool-level allow, and it fails closed
 	// + loud on a store lookup error.
 	if deny, _, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector, req.MCPServerName); deny {
+		return &ToolInspectVerdict{
+			Action:     "block",
+			Severity:   "HIGH",
+			Confidence: 1.0,
+			Reason:     reason,
+			Findings:   []string{"MCP-BLOCK"},
+		}
+	}
+	// An enrolled account's own admission verdict (GAP-0216).
+	if deny, reason := a.mcpAccountRuntimeBlock(ctx, pe, req); deny {
 		return &ToolInspectVerdict{
 			Action:     "block",
 			Severity:   "HIGH",

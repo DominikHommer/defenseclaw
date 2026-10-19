@@ -58,7 +58,10 @@ func serviceHomeDir() string {
 type enrolledWatchSet struct {
 	skillDirs  []string
 	pluginDirs []string
-	// skippedProfiles counts enrolled homes omitted from LocalSystem watching.
+	// skippedProfiles counts the enrolled skill and plugin folders inside
+	// user profiles, which the LocalSystem gateway does not watch, and the
+	// local MCP servers of an enrolled row without an account SID, which
+	// cannot start as their user.
 	skippedProfiles int
 	// roots maps each watched folder to the connector that owns it.
 	roots map[string]string
@@ -213,7 +216,14 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 	seenSkill := map[string]bool{}
 	seenPlugin := map[string]bool{}
 	seenMCP := map[string]bool{}
-	type userConnector struct{ home, connector, sid string }
+	type userConnector struct {
+		home, connector, sid string
+		// inProfile marks a home inside a user profile: the LocalSystem
+		// gateway reads nothing there. Its skill and plugin folders are not
+		// watched; its MCP servers come from the enumerator record and are
+		// scanned as the user (#1164).
+		inProfile bool
+	}
 	var targets []userConnector
 	ownedHomes := map[string]bool{}
 	for _, target := range authorization.ProtectedTargets {
@@ -225,11 +235,8 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		if !target.OK || home == "" || name == "" || !filepath.IsAbs(home) {
 			continue
 		}
-		if managed.RequireWindowsGatewayPathOutsideUserProfiles(home) != nil {
-			set.skippedProfiles++
-			continue
-		}
-		targets = append(targets, userConnector{filepath.Clean(home), name, strings.TrimSpace(target.SID)})
+		inProfile := managed.RequireWindowsGatewayPathOutsideUserProfiles(home) != nil
+		targets = append(targets, userConnector{filepath.Clean(home), name, strings.TrimSpace(target.SID), inProfile})
 		if key := strings.ToLower(filepath.Clean(home)); !ownedHomes[key] {
 			ownedHomes[key] = true
 			owner := watcher.AssetOwner{Home: filepath.Clean(home), Name: strings.TrimSpace(target.User)}
@@ -291,7 +298,10 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		}
 		// A server is the user's and the connector's: another user's (or
 		// connector's) server with the same name is admitted on its own.
-		entries := config.ReadUserMCPServersForHome(target.connector, target.home)
+		var entries []config.MCPServerEntry
+		if !target.inProfile {
+			entries = config.ReadUserMCPServersForHome(target.connector, target.home)
+		}
 		// The service cannot read these files of an enrolled user; the
 		// enumerator publishes their servers (GAP-0424, GAP-1468). A record
 		// it could not write or a file it could not read is recorded, not
@@ -306,9 +316,20 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		}
 		for _, entry := range entries {
 			entry.Home = target.home
-			if !gatewayMCPEntryOutsideProfiles(entry) {
-				set.skippedProfiles++
-				continue
+			// An enrolled user's server never runs with the gateway's
+			// rights: a local one starts as the user through the hook
+			// enumerator, which starts only what it published, so any
+			// other is refused there and blocked (#1164).
+			entry.RunAsSID = target.sid
+			if target.sid == "" {
+				if entry.Command != "" && entry.URL == "" {
+					set.skippedProfiles++
+					continue
+				}
+				if !gatewayMCPEntryOutsideProfiles(entry) {
+					set.skippedProfiles++
+					continue
+				}
 			}
 			key := watcher.MCPEventPath(entry)
 			if entry.Name == "" || entry.Bundled || seenMCP[key] {
@@ -325,7 +346,7 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 // watcher MCP entry to the scanner child. URLs and bare command names are
 // not filesystem paths.
 func gatewayMCPEntryOutsideProfiles(entry config.MCPServerEntry) bool {
-	for _, path := range []string{entry.Home, entry.Project, entry.WorkDir, entry.Source, entry.Command} {
+	for _, path := range []string{entry.Home, entry.Project, entry.Source, entry.Command} {
 		if filepath.IsAbs(path) && managed.RequireWindowsGatewayPathOutsideUserProfiles(path) != nil {
 			return false
 		}

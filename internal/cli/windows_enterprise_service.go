@@ -268,6 +268,9 @@ func init() {
 	// whole file is //go:build windows so a non-Windows build never
 	// reaches this registration.
 	enterpriseWindowsCmd.AddCommand(newEnterpriseWindowsEnumerateCommand())
+	// #1164: the stdio relay the scanner runtime starts for an enrolled
+	// user's MCP server, which the enumerator starts as that user.
+	enterpriseWindowsCmd.AddCommand(newEnterpriseWindowsMCPRelayCommand())
 	enterpriseCmd.AddCommand(enterpriseWindowsCmd)
 }
 

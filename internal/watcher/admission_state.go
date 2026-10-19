@@ -180,6 +180,30 @@ func (s *admissionState) clearIssue(path string) {
 	s.writeLocked()
 }
 
+// forgetMCPIssuesNotListed forgets the problems of MCP servers that are no
+// longer configured (GAP-0134). MCP issues are never due again (admission
+// of a server reruns at discovery), so nothing else removed the issue of a
+// server whose definition was deleted.
+func (s *admissionState) forgetMCPIssuesNotListed(listed map[string]bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	for path, issue := range s.issues {
+		if issue.Type != string(InstallMCP) || listed[path] {
+			continue
+		}
+		delete(s.issues, path)
+		delete(s.retry, path)
+		changed = true
+	}
+	if changed {
+		s.writeLocked()
+	}
+}
+
 // dueIssues returns the skills and plugins whose unfinished admission is
 // due, and forgets those no longer in their folder. Each waits a full delay
 // before it is due again.

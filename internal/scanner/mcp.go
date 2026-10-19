@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -232,6 +233,9 @@ func (s *MCPScanner) runtimeInput() ([]byte, error) {
 		Settings    json.RawMessage `json:"settings"`
 		RulePack    json.RawMessage `json:"rule_pack,omitempty"`
 		ServerEntry json.RawMessage `json:"server_entry,omitempty"`
+		// AsUserRelay is the command the runtime starts in place of the
+		// server, which then runs as its user (#1164).
+		AsUserRelay []string `json:"as_user_relay,omitempty"`
 	}{Settings: json.RawMessage(settings)}
 	if s.RulePack.Dir != "" {
 		pack, err := s.RulePack.runtimeArg()
@@ -246,6 +250,13 @@ func (s *MCPScanner) runtimeInput() ([]byte, error) {
 			return nil, fmt.Errorf("scanner: encode MCP server entry: %w", err)
 		}
 		input.ServerEntry = entry
+		if s.asUser() {
+			relay, err := s.asUserRelay()
+			if err != nil {
+				return nil, err
+			}
+			input.AsUserRelay = relay
+		}
 	}
 	return json.Marshal(input)
 }
@@ -292,7 +303,59 @@ func (s *MCPScanner) runtimeServerEntry() ([]byte, error) {
 		Args    []string          `json:"args"`
 		Env     map[string]string `json:"env"`
 		CWD     string            `json:"cwd"`
-	}{entry.Name, entry.Command, entry.Args, entry.Env, s.serverWorkDir()})
+	}{entry.Name, entry.Command, entry.Args, entry.Env, s.runtimeServerCWD()})
+}
+
+// runtimeServerCWD is the folder the runtime starts the server in: none for
+// a server that starts as its user, whose folder the hook enumerator checks
+// as that user.
+func (s *MCPScanner) runtimeServerCWD() string {
+	if s.asUser() {
+		s.workDirRefused = ""
+		return ""
+	}
+	return s.serverWorkDir()
+}
+
+// asUser reports a local server the managed Windows hook enumerator
+// published for an enrolled user. The gateway runs as LocalSystem and must
+// neither read that user's profile nor run the user's server with its own
+// rights, so the scanner runtime starts a relay instead and the enumerator
+// starts the server as the user (#1164).
+func (s *MCPScanner) asUser() bool {
+	entry := s.ServerEntry
+	return entry != nil && entry.RunAsSID != "" && entry.Command != "" && entry.URL == ""
+}
+
+// mcpAsUserRelayExecutable is the executable that hosts the relay: the
+// gateway itself. Tests replace it.
+var mcpAsUserRelayExecutable = os.Executable
+
+// asUserRelay is the relay command line: the gateway executable, which asks
+// the hook enumerator to start the server the request names. It carries no
+// command, only the account, connector, name, project and definition digest.
+func (s *MCPScanner) asUserRelay() ([]string, error) {
+	entry := s.ServerEntry
+	if !mcpasuser.PublishedConnector(entry.Connector) {
+		return nil, fmt.Errorf("scanner: MCP server %q of %s: only Claude Code and Kiro servers can be started as their user", entry.Name, entry.Connector)
+	}
+	service := strings.TrimSpace(os.Getenv(mcpasuser.GatewayServiceEnv))
+	if service == "" {
+		return nil, fmt.Errorf("scanner: MCP server %q cannot be started as its user: %s is not set", entry.Name, mcpasuser.GatewayServiceEnv)
+	}
+	executable, err := mcpAsUserRelayExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("scanner: MCP server %q cannot be started as its user: %w", entry.Name, err)
+	}
+	request, err := mcpasuser.NewRequest(service, entry.RunAsSID, *entry)
+	if err != nil {
+		return nil, fmt.Errorf("scanner: MCP server %q cannot be started as its user: %w", entry.Name, err)
+	}
+	arg, err := mcpasuser.EncodeRequestArg(request)
+	if err != nil {
+		return nil, fmt.Errorf("scanner: MCP server %q cannot be started as its user: %w", entry.Name, err)
+	}
+	return append([]string{executable}, mcpasuser.RelayArgs(arg)...), nil
 }
 
 // serverWorkDir is the folder the Windows scanner runtime starts a local
@@ -301,11 +364,9 @@ func (s *MCPScanner) runtimeServerEntry() ([]byte, error) {
 // folder; only the server's process starts here. A folder is used only when
 // it is absolute, inside the project or the user's home, and no folder on the
 // way down from there is a link or reparse point; otherwise the scan keeps
-// the scanner's folder, as before, and says so.
-//
-// On managed Windows the enumerator's spool record carries its checked
-// folder (entry.WorkDir, entry.WorkDirRefused). The LocalSystem gateway path
-// guard refuses a profile folder before a scanner child can start there.
+// the scanner's folder, as before, and says so. A server of an enrolled user
+// starts as that user instead (asUser), in a folder the hook enumerator
+// checks as the user.
 func (s *MCPScanner) serverWorkDir() string {
 	s.workDirRefused = ""
 	entry := s.ServerEntry
@@ -322,21 +383,6 @@ func (s *MCPScanner) serverWorkDir() string {
 			roots = append(roots, filepath.Clean(root))
 		}
 	}
-	if entry.WorkDir != "" || entry.WorkDirRefused != "" {
-		if entry.WorkDirRefused != "" {
-			fmt.Fprintf(os.Stderr, "[scan] MCP server %q: not starting it in %s\n", entry.Name, entry.WorkDirRefused)
-			s.workDirRefused = entry.WorkDirRefused
-		}
-		if entry.WorkDir == "" {
-			return ""
-		}
-		if err := verifiedWorkDir(entry.WorkDir, roots); err != nil {
-			refuse(entry.WorkDir, err)
-			return ""
-		}
-		s.workDirRefused = ""
-		return filepath.Clean(entry.WorkDir)
-	}
 	for _, dir := range []string{entry.CWD, entry.Project} {
 		if dir == "" {
 			continue
@@ -351,40 +397,8 @@ func (s *MCPScanner) serverWorkDir() string {
 	return ""
 }
 
-// verifiedWorkDir checks a folder the enumerator verified: its form, that it
-// is still inside the project or the home the gateway resolved, and that the
-// gateway can open it, since the server's process runs as the gateway.
-func verifiedWorkDir(dir string, roots []string) error {
-	if !filepath.IsAbs(dir) || strings.ContainsRune(dir, 0) || strings.HasPrefix(dir, `\\`) || strings.HasPrefix(dir, "//") {
-		return errors.New("the verified folder is not a local absolute path")
-	}
-	dir = filepath.Clean(dir)
-	inside := false
-	for _, root := range roots {
-		if rel, err := filepath.Rel(root, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			inside = true
-			break
-		}
-	}
-	if !inside {
-		return errors.New("the verified folder is outside the project and the user's home folder")
-	}
-	folder, err := workDirOpen(dir)
-	if err != nil {
-		if errors.Is(err, os.ErrPermission) {
-			return errors.New("the DefenseClaw gateway service cannot read this folder")
-		}
-		return err
-	}
-	return folder.Close()
-}
-
-// workDirOpen and workDirLstat are test seams for the gateway's access to a
-// server's folder.
-var (
-	workDirOpen  = os.Open
-	workDirLstat = os.Lstat
-)
+// workDirLstat is a test seam for the gateway's access to a server's folder.
+var workDirLstat = os.Lstat
 
 // containedWorkDir checks a folder for serverWorkDir.
 func containedWorkDir(dir string, roots []string) error {
@@ -442,8 +456,17 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 			return nil, err
 		}
 	}
-	if entry := s.ServerEntry; entry != nil {
-		for _, path := range []string{entry.Home, entry.Project, entry.WorkDir, entry.Source, entry.Command} {
+	if s.asUser() && !usesScannerRuntime(s.Config.Binary) {
+		// Only the managed Windows scanner runtime can start a server as
+		// its user; nothing else may start it with the gateway's rights.
+		return nil, fmt.Errorf("scanner: MCP server %q of an enrolled user starts only as that user, through the managed Windows scanner runtime", s.ServerEntry.Name)
+	}
+	if entry := s.ServerEntry; entry != nil && entry.RunAsSID == "" {
+		// The gateway neither reads nor starts anything at the paths of an
+		// enrolled user's server: a local one starts as the user, in a
+		// folder the hook enumerator checks as the user, and a URL one is
+		// scanned over the network.
+		for _, path := range []string{entry.Home, entry.Project, entry.Source, entry.Command} {
 			if filepath.IsAbs(path) {
 				if err := requireScannerTargetPath(path); err != nil {
 					return nil, err
