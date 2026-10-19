@@ -18,14 +18,15 @@ const (
 	// auditWALGuardInterval is how often the audit write-ahead log's active
 	// frame count is checked on its dedicated checkpoint connection.
 	auditWALGuardInterval = 2 * time.Second
-	// auditWALLimitBytes is the log length past which a pass restarts the log
-	// on the writer connection. One Claude Code PreToolUse decision writes about
-	// 2.3 MB of log (25 commits), so this is the log of roughly 115 hooks.
+	// auditWALLimitBytes bounds the log in use. A pass brings the log to its
+	// end from half of it, so SQLite restarts it, and background writers wait
+	// while it is over it. One Claude Code PreToolUse decision writes about
+	// 1.65 MB of log (16 commits), so this is the log of roughly 160 hooks.
 	auditWALLimitBytes = 256 << 20
-	// auditWALWriterBudget bounds the part of a pass that holds the audit
-	// store's only writer connection. Hooks need that connection for
-	// correlation and their verdict records, so never let maintenance consume
-	// a hook's three-second budget.
+	// auditWALWriterBudget bounds the idle-gap trim, the only statement a pass
+	// runs on the audit store's writer connection (the catch-up copy holds it
+	// for at most 100 ms). Hooks need that connection for correlation and their
+	// verdict records, so never let maintenance consume a hook's budget.
 	auditWALWriterBudget = 200 * time.Millisecond
 	// auditWALCopyTimeout bounds the copy on the dedicated checkpoint
 	// connection, which does not hold off the writer. SQLite keeps a
@@ -35,8 +36,8 @@ const (
 	// bound (rel-1-0-2:GAP-0709).
 	auditWALCopyTimeout = 2 * time.Minute
 	// auditWALAlarmBytes is the WAL file size that means checkpoints are not
-	// keeping up. A pass truncates the file once the log passes the limit, so
-	// a healthy gateway stays far below it.
+	// keeping up. SQLite restarts the log after a pass brings it to its end,
+	// so a healthy gateway stays far below it.
 	auditWALAlarmBytes = 4 * auditWALLimitBytes
 	// auditWALAlarmRepeat is how often a WAL that stays over the bound is
 	// reported again.
@@ -86,9 +87,12 @@ func auditWALGuardPass(ctx context.Context, store auditWALCheckpointer, alarm *a
 		fmt.Fprintf(log, "[sidecar] audit WAL checkpoint yielded: %v\n", err)
 	} else if err != nil {
 		fmt.Fprintf(log, "[sidecar] audit WAL checkpoint failed: %v\n", err)
-	} else if pass.WriterHeld > auditWALWriterBudget {
-		// The sync on the writer is not interrupted by the budget; hooks
-		// waited this long for their audit records.
+	}
+	// Whether or not the pass then yielded: a statement on the writer is not
+	// interrupted while SQLite syncs or truncates a file, so its real hold can
+	// be longer than the budget. Hooks waited this long for their audit
+	// records (rel-1-0-3 GAP-0288).
+	if pass.WriterHeld > auditWALWriterBudget {
 		fmt.Fprintf(log, "[sidecar] audit WAL checkpoint held the audit writer for %s (budget %s)\n",
 			pass.WriterHeld.Round(time.Millisecond), auditWALWriterBudget)
 	}
