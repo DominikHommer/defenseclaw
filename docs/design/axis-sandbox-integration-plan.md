@@ -6,7 +6,7 @@ credentials, and telemetry; runtime adapters supply the execution boundary.
 After selecting AXIS as the default, the customer continues to use
 `defenseclaw sandbox run claude`.
 
-Status: implementation draft, October 18, 2026. The single AXIS PR contains this
+Status: implementation draft, October 19, 2026. The single AXIS PR contains this
 plan, shared policy/configuration and native boundary work. Current native test
 results are recorded in [the manual evidence](../../test/e2e/axis/mxc-v1-manual-results.md)
 and [the Windows evidence](../../test/e2e/axis/windows/mxc-v1/manual-results.md).
@@ -25,8 +25,16 @@ one-use preparation and launch, canceled preparation, retired session IDs and
 independent native cleanup. Its installation catalog and policy compiler remain
 closed. The authenticated API has a bounded attachment transport for an already
 admitted process; it accepts no launch command or environment. The current
-manager does not expose native attachment yet. Latest Linux native outcomes and
-their limits are recorded in the [fixed peer evidence](../../test/e2e/axis/native-peer/live/README.md).
+manager now routes native attachment through the same WebSocket path and
+LaunchGate, with complete identity/policy checks, one consumer and retained
+cleanup on failure. A bounded headless run intent is copied into the existing
+host producer; the production factory, complete policy translation and native
+CLI launch remain unavailable. Latest Linux native outcomes and their limits
+are recorded in the [fixed peer evidence](../../test/e2e/axis/native-peer/live/README.md).
+The [twelve-connector acceptance matrix](axis-native-hook-acceptance.md)
+distinguishes real vendor hooks, native platform support and the tests still
+required. Vendor Windows instructions that require WSL do not qualify native
+Windows MXC. No real vendor hook is qualified by the synthetic schema tests.
 The shared host-policy handoff now captures one projected configuration,
 resolved evaluator and exact execution requirements for planning and binding,
 without rereading pack sources. It refuses stale or changed option binding.
@@ -161,8 +169,8 @@ The requested AXIS integration uses MXC on all three native host platforms:
 
 | Native host | Required MXC executor | Product qualification |
 | --- | --- | --- |
-| Windows | `ProcessContainerWindows` | Native contained Claude `--version` passed. The environment/boundary handshake still refuses; interactive Claude, hooks and model access remain pending. No WSL dependency or fallback. |
-| Linux | `BubblewrapLinux` | The downstream fixed strict filesystem/offline cases and two wait/cancellation cases passed. The descendant test stopped at its own syscall precondition; production policy, broker and Claude qualification remain pending. |
+| Windows | `ProcessContainerWindows` | Integrated fixed Go/Rust/AXIS/MXC canary and separate signed Claude `--version` passed. New pre-Resume token diagnostics are built and artifact-reviewed only. Real vendor hooks, interactive Claude and model access remain pending. No WSL dependency or fallback. |
+| Linux | `BubblewrapLinux` | Fixed filesystem/offline and wait/cancellation cases passed. The contained synthetic Claude hook test now passes actual allow/block, silence, admission loss and native cleanup; its outer run failed on the missing fixture audit logger. Real agent hooks, production policy and broker qualification remain pending. |
 | macOS | `Seatbelt` | Twelve fixed downstream SDK checks passed, including literal arguments, filesystem/network denials, pipes, PTY/resize and timeout. Production policy, broker and Claude qualification remain pending. |
 
 This is the desired support matrix, not a claim that the pinned AXIS artifact
