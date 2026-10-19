@@ -41,6 +41,16 @@ extern void dclaw_verdict_compute_expected_hmac(uint16_t request_id, uint8_t act
 extern void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len);
 extern void dclaw_sessions_reset_keep_revoked(void);
 
+static int fake_send_ok(const dclaw_tool_request_t *req, uint16_t request_id) {
+    (void)req; (void)request_id;
+    return 0; /* the transport accepted the request */
+}
+
+static int fake_send_fail(const dclaw_tool_request_t *req, uint16_t request_id) {
+    (void)req; (void)request_id;
+    return -1; /* offline, or the request could not be encoded */
+}
+
 static int g_cb_calls;
 static uint16_t g_cb_session;
 
@@ -170,6 +180,24 @@ static void test_full_slots_fall_back_to_sync(void) {
     printf("  PASS: no free speculative slot -> synchronous wait\n");
 }
 
+/* Regression: a speculative-class call whose verdict request was not sent
+ * (offline, or too large to encode) used to be allowed and never verified. */
+static void test_unsent_request_is_not_speculative(void) {
+    dclaw_register_verdict_sender(fake_send_fail);
+    dclaw_state_t *s = dclaw_get_state();
+    /* Free every slot so the call reaches the speculation decision. */
+    memset(s->speculative, 0, sizeof(s->speculative));
+    memset(s->pending, 0, sizeof(s->pending));
+    dclaw_tool_request_t req = make_request("get_sensors", DCLAW_CAP_SENSOR_READ, 40);
+    dclaw_verdict_t v = dclaw_evaluate(&req);
+    assert(v.action == DCLAW_ACTION_BLOCK);
+    assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
+    for (int i = 0; i < DCLAW_SPECULATIVE_SLOTS; i++) assert(s->speculative[i].request_id == 0);
+    (void)v;
+    dclaw_register_verdict_sender(fake_send_ok);
+    printf("  PASS: unsent request is not allowed speculatively\n");
+}
+
 static void test_session_reset_keeps_revocations(void) {
     /* Session 7 was revoked above; sessions 20.. have unverified
      * speculative calls in flight. */
@@ -194,6 +222,7 @@ int main(void) {
     memset(key, 0x42, 32);
     dclaw_verdict_set_device_key(key, 32);
     dclaw_register_retroactive_callback(on_revoked);
+    dclaw_register_verdict_sender(fake_send_ok);
 
     printf("test_speculative_revocation:\n");
     test_block_revokes_session();
@@ -202,7 +231,8 @@ int main(void) {
     test_sync_block_does_not_invoke_callback();
     test_full_slots_fall_back_to_sync();
     test_session_reset_keeps_revocations();
-    printf("  ALL PASSED (6 tests)\n");
+    test_unsent_request_is_not_speculative();
+    printf("  ALL PASSED (7 tests)\n");
 
     dclaw_shutdown();
     return 0;

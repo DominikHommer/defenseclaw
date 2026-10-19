@@ -56,7 +56,9 @@ extern bool dclaw_verdict_is_key_provisioned(void);
 #define MQTT_DEFAULT_PORT    1883
 #define MQTT_KEEPALIVE_SEC   60
 #define MQTT_RECV_BUF_SIZE   4224  /* 4096 (max OTA blob) + 128 (MQTT header overhead) */
-#define MQTT_SEND_BUF_SIZE   1024  /* heartbeats/verdicts are small */
+/* Largest outgoing publish: a verdict request with HMAC tag plus topic and
+ * MQTT header overhead. */
+#define MQTT_SEND_BUF_SIZE   (DCLAW_VERDICT_REQUEST_MAX + 32 + 128)
 #define MQTT_COMMAND_TIMEOUT 5000  /* 5s for connect/subscribe/publish */
 
 typedef struct {
@@ -897,10 +899,10 @@ int dclaw_mqtt_send_verdict_request(const dclaw_tool_request_t *req,
                                     uint16_t request_id) {
     if (!dclaw_mqtt_is_connected()) return -1;
 
-    uint8_t cbor_buf[512 + 32]; /* CBOR + optional 32-byte HMAC */
+    uint8_t cbor_buf[DCLAW_VERDICT_REQUEST_MAX + 32]; /* CBOR + optional 32-byte HMAC */
     size_t cbor_len;
     if (dclaw_cbor_encode_verdict_request(req, request_id, 0,
-                                          cbor_buf, &cbor_len, 512) != 0) {
+                                          cbor_buf, &cbor_len, DCLAW_VERDICT_REQUEST_MAX) != 0) {
         return -1;
     }
 

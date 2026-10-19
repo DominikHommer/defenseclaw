@@ -359,6 +359,16 @@ typedef void (*dclaw_retroactive_block_fn)(uint16_t session_id,
                                            const char *tool_name);
 void dclaw_register_retroactive_callback(dclaw_retroactive_block_fn cb);
 
+/* Encoded verdict request: fixed fields (<512 B) plus up to
+ * DCLAW_ESCALATION_PAYLOAD_MAX bytes of content; the HMAC tag is extra. */
+#define DCLAW_VERDICT_REQUEST_MAX (512 + DCLAW_ESCALATION_PAYLOAD_MAX)
+
+/* Sends an escalation to the gateway; returns 0 only if the request was
+ * handed to the transport. The default sender is MQTT (fails when offline).
+ * Register NULL to restore the default. Tests and other transports use this. */
+typedef int (*dclaw_verdict_sender_fn)(const dclaw_tool_request_t *req, uint16_t request_id);
+void dclaw_register_verdict_sender(dclaw_verdict_sender_fn fn);
+
 /* Invoked for every authenticated gateway verdict, after it is cached. */
 typedef void (*dclaw_verdict_ready_fn)(uint16_t request_id, const dclaw_verdict_t *v);
 void dclaw_register_verdict_ready_callback(dclaw_verdict_ready_fn cb);

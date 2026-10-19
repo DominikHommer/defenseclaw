@@ -61,6 +61,15 @@ extern void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len);
 #endif
 
 #define DEFAULT_ITERATIONS 20000
+
+#if DCLAW_MQTT_ENABLED
+/* The speculative path requires a request the transport accepted; the
+ * benchmark measures local cost only, so the send itself is not timed. */
+static int bench_send_ok(const dclaw_tool_request_t *req, uint16_t request_id) {
+    (void)req; (void)request_id;
+    return 0;
+}
+#endif
 #define WARMUP_ITERATIONS  200
 #define MAX_RESULTS        16
 #define REASON_ANY         0xFF
@@ -344,6 +353,7 @@ int main(int argc, char *argv[]) {
     uint8_t key[32];
     memset(key, 0x42, sizeof(key));
     dclaw_verdict_set_device_key(key, sizeof(key));
+    dclaw_register_verdict_sender(bench_send_ok);
 #endif
     dclaw_get_state()->online = true;
 

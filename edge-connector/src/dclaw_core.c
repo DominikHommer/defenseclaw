@@ -32,12 +32,12 @@ extern int dclaw_mqtt_send_verdict_request(const dclaw_tool_request_t *req,
                                            uint16_t request_id);
 extern int dclaw_verdict_register_pending(uint16_t request_id, const uint8_t *tool_hash);
 extern void dclaw_mqtt_pending_store(uint16_t request_id, const uint8_t *tool_hash);
-extern bool dclaw_mqtt_is_connected(void);
 #endif
 
 static dclaw_state_t g_state;
 static dclaw_retroactive_block_fn g_retroactive_cb = NULL;
 static dclaw_verdict_ready_fn g_verdict_ready_cb = NULL;
+static dclaw_verdict_sender_fn g_verdict_sender = NULL;
 
 static bool g_strict_mode = false;
 
@@ -189,6 +189,10 @@ void dclaw_register_retroactive_callback(dclaw_retroactive_block_fn cb) {
 
 dclaw_retroactive_block_fn dclaw_get_retroactive_callback(void) {
     return g_retroactive_cb;
+}
+
+void dclaw_register_verdict_sender(dclaw_verdict_sender_fn fn) {
+    g_verdict_sender = fn;
 }
 
 void dclaw_register_verdict_ready_callback(dclaw_verdict_ready_fn cb) {
@@ -527,16 +531,17 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_mqtt_pending_store(request_id, req->tool_hash);
 
         /* Attempt to send the verdict request to the cloud */
-        int send_rc = -1;
-        if (dclaw_mqtt_is_connected()) {
-            send_rc = dclaw_mqtt_send_verdict_request(req, request_id);
-        }
+        int send_rc = g_verdict_sender ? g_verdict_sender(req, request_id)
+                                       : dclaw_mqtt_send_verdict_request(req, request_id);
 
 #if DCLAW_SPECULATIVE_EXECUTION
-        if (!g_strict_mode && !is_sync_block_required(req->cap_flags) &&
+        /* Speculate only on a request the gateway will actually see: an
+         * unsent request (offline, or too large to encode) can never be
+         * verified or revoked, so it takes the synchronous path and fails
+         * closed below. */
+        if (send_rc == 0 && !g_strict_mode && !is_sync_block_required(req->cap_flags) &&
             speculative_track(req->session_id, request_id, req->cap_flags)) {
-            /* Speculative mode: allow the agent to proceed, cloud will respond async.
-             * If send failed, still return ALLOW — the request is logged for audit. */
+            /* Speculative mode: allow the agent to proceed, cloud will respond async. */
             dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CLOUD_BLOCK,
                               target_hash, req->session_id);
             g_state.eval_escalated_count++;

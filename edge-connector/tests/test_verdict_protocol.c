@@ -36,6 +36,9 @@ extern void dclaw_verdict_compute_expected_hmac(uint16_t request_id, uint8_t act
                                                 const uint8_t *request_nonce,
                                                 uint8_t *out_hmac_32bytes);
 extern void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len);
+extern int dclaw_cbor_encode_verdict_request(const dclaw_tool_request_t *req, uint16_t request_id,
+                                             uint8_t session_risk, uint8_t *buf, size_t *out_len,
+                                             size_t buf_size);
 extern bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out);
 
 static void build_valid_response(uint16_t request_id, uint8_t action,
@@ -221,6 +224,25 @@ static void test_signed_ttl_controls_cache(void) {
     printf("  PASS: signed TTL controls ALLOW/BLOCK expiry, zero/no-cache, ceiling, and tamper rejection\n");
 }
 
+/* Regression: the send path encoded into a 512-byte buffer although the
+ * profile allows DCLAW_ESCALATION_PAYLOAD_MAX bytes of content, so requests
+ * with more than ~450 bytes of content were never sent. */
+static void test_max_content_request_encodes(void) {
+    dclaw_tool_request_t req;
+    memset(&req, 0, sizeof(req));
+    memset(req.tool_name, 'a', DCLAW_TOOL_NAME_MAX - 1);
+    memset(req.tool_hash, 0x11, 32);
+    memset(req.destination, 'b', DCLAW_DESTINATION_MAX - 1);
+    memset(req.content_buf, 'c', DCLAW_CONTENT_MAX);
+    req.content = req.content_buf;
+    req.content_len = DCLAW_CONTENT_MAX; /* more than the payload cap: encoder truncates */
+    static uint8_t buf[DCLAW_VERDICT_REQUEST_MAX];
+    size_t len = 0;
+    assert(dclaw_cbor_encode_verdict_request(&req, 9, 0, buf, &len, sizeof(buf)) == 0);
+    assert(len > DCLAW_ESCALATION_PAYLOAD_MAX && len <= sizeof(buf));
+    printf("  PASS: maximum-size verdict request encodes (%zu bytes)\n", len);
+}
+
 int main(void) {
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
@@ -243,7 +265,8 @@ int main(void) {
     test_unknown_request_id_rejected();
     test_wrong_size_rejected();
     test_signed_ttl_controls_cache();
-    printf("  ALL PASSED (7 tests)\n");
+    test_max_content_request_encodes();
+    printf("  ALL PASSED (8 tests)\n");
 
     dclaw_shutdown();
     return 0;
