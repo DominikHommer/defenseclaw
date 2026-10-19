@@ -205,6 +205,15 @@ func TestStandaloneVerifyReportsAndRepairsAChangedHookScript(t *testing.T) {
 		}},
 		{"deleted _hardening.sh", filepath.Join(hooks, "_hardening.sh"), "missing", os.Remove},
 		{"deleted inspect-tool.sh", filepath.Join(hooks, "inspect-tool.sh"), "missing", os.Remove},
+		// The runtime records and the scoped token the hook script reads
+		// (GAP-0671, GAP-0424): moved aside, the guardian left them
+		// missing while status and verify stayed green.
+		{"moved .hookcfg.hermes", filepath.Join(hooks, ".hookcfg.hermes"), "missing", os.Remove},
+		{"moved .hookcfg", filepath.Join(hooks, ".hookcfg"), "missing", os.Remove},
+		{"moved .hook-hermes.token", filepath.Join(hooks, ".hook-hermes.token"), "missing", os.Remove},
+		{"edited .hook-hermes.token", filepath.Join(hooks, ".hook-hermes.token"), "does not hold the credential", func(path string) error {
+			return os.WriteFile(path, []byte(strings.Repeat("b", 64)+"\n"), 0o600)
+		}},
 		// After a package upgrade the script still matches the digest
 		// recorded at its last write but carries the previous release's
 		// render, so the digest alone kept verification green.

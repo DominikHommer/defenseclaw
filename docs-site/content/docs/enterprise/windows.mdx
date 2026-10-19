@@ -389,9 +389,12 @@ removed. `security_complete` stays `false` until that session restarts.
 Claude Code, Codex and Cursor use machine policy hooks, so this restore case
 does not apply to them.
 
-If the hook guardian's restore record cannot be read, Windows `status` and
-`verify` report `agent_sessions_restart_required` with "restart status unknown"
-and set `security_complete` to `false`, even when no session was listed. A
+If the hook guardian's restore record cannot be read, or its content is
+invalid, `status` and `verify` (on Windows, Linux and macOS) report
+`agent_sessions_restart_required` with "restart status unknown" and set
+`security_complete` to `false`, even when no session was listed. When the
+guardian replaces an invalid record, it dates every enrolled target at that
+pass, so the warning then names their sessions that started before it. A
 running agent with no account name is checked by its owner SID when available;
 with neither an account name nor a SID, its restart status is unknown.
 
@@ -749,8 +752,11 @@ lists them as well.
 On Windows, `agent_unprotected` also covers a running enabled agent whose
 account SID cannot be resolved; the warning names the account when known and
 otherwise says the owner is unknown. A per-user WinGet package listing that
-reaches its entry limit or deadline is reported as "not fully scanned" for
-that account, instead of as no install found.
+reaches its entry limit or deadline, or whose earlier listing has not
+returned, is reported as "not fully scanned" for that account, instead of as
+no install found. The message says which: too many entries (remove the
+packages the user no longer needs), or a folder whose storage does not answer
+(check that a redirected or network profile folder is reachable).
 Cursor's machine hooks file is published only while a user is enrolled for
 Cursor; see [Machine policy](/docs/enterprise/machine-policy#routes-by-connector).
 `include_groups` and `exclude_groups` apply on Windows as described there.
