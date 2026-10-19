@@ -907,7 +907,8 @@ type windowsCodexAdoption struct {
 //     way; an administrator's windows_managed_dir is left for reconcile to
 //     refuse;
 //   - groups that run the current hook binary, in any release's command form,
-//     and the current windows_managed_dir, are removed;
+//     are removed, and the current windows_managed_dir with them unless
+//     administrator hook entries that need it survive;
 //   - allow_managed_hooks_only and features.hooks are DefenseClaw's (every
 //     reconcile pins them) unless the discarded record's trustworthy preimage
 //     of this same requirements file shows they predate DefenseClaw. Without
@@ -956,7 +957,12 @@ func windowsCodexAdoptRequirements(
 	if err != nil {
 		return windowsCodexAdoption{}, fmt.Errorf("detect adopted Codex managed hooks: %w", err)
 	}
-	withoutCurrent, strippedCurrent, err := stripWindowsCodexLayout(adoption.base, opts.HookBinary, opts.ManagedDir)
+	// Only the current launcher's groups are DefenseClaw's evidence. A
+	// windows_managed_dir equal to ManagedDir with no DefenseClaw group is the
+	// administrator's and stays in the verbatim preimage; when DefenseClaw
+	// groups are present, removeWindowsCodexRequirementsOwnedChanges decides
+	// whether the directory goes with them (GAP-0022).
+	withoutCurrent, strippedCurrent, err := stripWindowsCodexLayout(adoption.base, opts.HookBinary, "")
 	if err != nil {
 		return windowsCodexAdoption{}, fmt.Errorf("strip current Codex managed layout: %w", err)
 	}

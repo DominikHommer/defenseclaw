@@ -526,6 +526,40 @@ func TestWindowsCodexReconcileForeignManagedDirNeedsDefenseClawEvidence(t *testi
 	}
 }
 
+// GAP-0022: with no ownership record and no DefenseClaw hook in the file,
+// an administrator's windows_managed_dir equal to DefenseClaw's ManagedDir
+// is administrator content: the preimage is the file byte for byte, so an
+// unchanged uninstall (exact postimage) restores exactly what was there.
+func TestWindowsCodexAdoptRequirementsKeepsAdministratorManagedDir(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	opts.HookContractID = KnownHookContracts("codex")[0].ContractID
+	administrator := []byte("allow_managed_hooks_only = true\n\n[features]\nhooks = true\n\n[hooks]\nwindows_managed_dir = 'C:\\Program Files\\DefenseClaw\\bin'\n\n[[hooks.PreToolUse]]\nmatcher = \"*\"\n\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = 'C:\\Tools\\audit.exe'\ntimeout = 5\n")
+	adoption, rendered, err := windowsCodexAdoptThenReconcile(t, administrator, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !adoption.preimageExisted || !bytes.Equal(adoption.preimage, administrator) {
+		t.Fatalf("administrator file not kept byte for byte as the preimage:\n%s", adoption.preimage)
+	}
+	if !bytes.Equal(adoption.base, administrator) {
+		t.Fatalf("adoption changed the live base:\n%s", adoption.base)
+	}
+	if err := verifyWindowsCodexRequirementsBytes(rendered, opts); err != nil {
+		t.Fatalf("reconciled requirements do not verify: %v", err)
+	}
+	// Once installed, the same administrator content next to DefenseClaw's
+	// groups is still recognized: re-adoption (record lost again) yields the
+	// same preimage, with the administrator's directory.
+	readopted, err := windowsCodexAdoptRequirements(rendered, true, nil, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := mustParseWindowsCodexRequirements(t, readopted.preimage)["hooks"].(map[string]interface{})
+	if hooks["windows_managed_dir"] != opts.ManagedDir || hooks["PreToolUse"] == nil {
+		t.Fatalf("re-adopted preimage lost administrator content: %s", readopted.preimage)
+	}
+}
+
 // Ownership-absent adoption: a file DefenseClaw created is recorded as
 // absent, so removal deletes it; a file with no DefenseClaw content is its
 // own preimage.
