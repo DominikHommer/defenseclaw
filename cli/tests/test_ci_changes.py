@@ -165,20 +165,9 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
         ),
         pytest.param(
             [
-                "scripts/connector_delta/connectors/claudecode/manifest.json",
+                "scripts/connector_delta/connectors.json",
                 "scripts/connector_delta_monitor.py",
-                "scripts/connector_delta/invariants.py",
-                "scripts/connector_delta/connectors/claudecode/provider.py",
-                "scripts/connector_delta/connectors/codex/provider.py",
-                "scripts/connector_delta/provider.py",
-                "scripts/connector_delta/history.py",
-                "scripts/connector_delta/inventory.py",
-                "scripts/connector_delta/platforms.py",
-                "scripts/connector_delta/platform_bindings.py",
-                "scripts/connector_delta/connectors/codex/platforms.py",
-                "scripts/connector_delta/connectors/claudecode/platforms.py",
-                "scripts/connector_delta/notifications.py",
-                "scripts/connector_delta/shared/notifications.json",
+                "scripts/connector_delta/README.md",
             ],
             {
                 "python",
