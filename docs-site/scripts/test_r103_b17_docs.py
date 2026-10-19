@@ -20,6 +20,8 @@ class R103B17DocsTest(unittest.TestCase):
     def test_1100_macos_pkg_fails_on_port_held(self):
         text = page("enterprise/macos.mdx")
         self.assertNotIn("the pkg install still completes", text)
+        self.assertNotIn("stops before it changes anything", text)
+        self.assertIn("stages the package files, but the postinstall refuses the managed deployment", text)
         self.assertIn("records no package receipt", text)
         self.assertIn("which records no package receipt", text)
         self.assertIn("prints a generic postinstall failure", text)
