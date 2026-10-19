@@ -140,6 +140,11 @@ func privateRootChild() (resultErr error) {
 	if err := b.privateMounts(); err != nil {
 		return fmt.Errorf("private propagation: %w", err)
 	}
+	// The original bootstrap already mounts this exact fresh PID view while
+	// the old root is visible. Move only this held mount into the private root.
+	if err := b.mountProc(); err != nil {
+		return fmt.Errorf("fresh proc before private pivot: %w", err)
+	}
 	options := fmt.Sprintf("size=4m,nr_inodes=256,mode=0700,uid=%d,gid=%d", os.Getuid(), os.Getgid())
 	if err := unix.Mount("tmpfs", "/tmp", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, options); err != nil {
 		return fmt.Errorf("private tmpfs mount: %w", err)
@@ -169,6 +174,33 @@ func privateRootChild() (resultErr error) {
 	if err := unix.Mkdir("/tmp/proc", 0700); err != nil {
 		return err
 	}
+	// The target is opened only after the new tmpfs exists. A covered old
+	// directory FD cannot become a mount target or pivot authority.
+	procTargetFD, err := unix.Open("/tmp/proc", unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("private proc target open: %w", err)
+	}
+	defer func() {
+		if procTargetFD >= 0 {
+			resultErr = errors.Join(resultErr, unix.Close(procTargetFD))
+		}
+	}()
+	var procTarget unix.Stat_t
+	if err := unix.Fstat(procTargetFD, &procTarget); err != nil || procTarget.Dev != before.Dev || procTarget.Mode&unix.S_IFMT != unix.S_IFDIR || procTarget.Mode&07777 != 0700 || procTarget.Uid != uint32(os.Getuid()) || procTarget.Gid != uint32(os.Getgid()) {
+		return errors.New("private proc target identity or mapped ownership refused")
+	}
+	if err := unix.MoveMount(b.proc, "", procTargetFD, "", unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
+		return fmt.Errorf("move held fresh proc into private root: %w", err)
+	}
+	var movedProcFS unix.Statfs_t
+	if err := unix.Statfs("/tmp/proc", &movedProcFS); err != nil || movedProcFS.Type != unix.PROC_SUPER_MAGIC {
+		return errors.New("moved private proc filesystem refused")
+	}
+	closeErr := unix.Close(procTargetFD)
+	procTargetFD = -1
+	if closeErr != nil {
+		return fmt.Errorf("private proc target close: %w", closeErr)
+	}
 	if err := unix.Fchdir(rootFD); err != nil {
 		return fmt.Errorf("new tmpfs root chdir: %w", err)
 	}
@@ -195,9 +227,6 @@ func privateRootChild() (resultErr error) {
 	var unexpected unix.Stat_t
 	if err := unix.Stat("/etc", &unexpected); !errors.Is(err, unix.ENOENT) {
 		return errors.New("old root pathname remains visible")
-	}
-	if err := b.mountProc(); err != nil {
-		return fmt.Errorf("fresh PID proc mount: %w", err)
 	}
 	if err := b.dropCaps(); err != nil {
 		return fmt.Errorf("all-thread capability drop: %w", err)

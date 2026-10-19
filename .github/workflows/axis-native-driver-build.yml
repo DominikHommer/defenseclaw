@@ -81,7 +81,7 @@ jobs:
           import subprocess
 
           roots = {
-              'internal/axis/namespaceinit': ['README.md', 'bootstrap_linux.go', 'bootstrap_linux_test.go', 'proof.go', 'proof_test.go'],
+              'internal/axis/namespaceinit': ['README.md', 'bootstrap_linux.go', 'bootstrap_linux_test.go', 'private_root_probe_linux_test.go', 'proof.go', 'proof_test.go'],
               'test/e2e/axis/native-peer/driver': ['README.md', 'cleanup.go', 'cleanup_test.go', 'custody_linux.go', 'driver_linux.go', 'driver_linux_test.go', 'images_linux.go', 'main.go', 'main_other.go', 'main_test.go', 'version.go', 'version_linux.go', 'version_linux_test.go', 'version_test.go'],
           }
           sources = ['go.mod', 'go.sum', 'LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt', '.github/workflows/axis-native-driver-build.yml']
