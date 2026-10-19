@@ -89,3 +89,16 @@ then passed all 18 test/subtest rows with the race detector, zero failures and
 zero skips. Its log SHA256 is
 `629543c9ae35424d1382ea96800a2488041f5ee7db08b803beb86b924b470c11`.
 This is host-filesystem and pure/fake protocol evidence only.
+
+Outer attempt 06 used that corrected Go owner at 7bb0851c, the same reviewed
+d0723346 peer and fixed payload, and fresh harness image
+`252a871de401593d11c6c974de264431f552d77aaa18cfd9d22f0095fd0720a2`.
+It passed Start and both host network positive controls, then failed during
+the protocol exchange before Prepared. The inner Session.Close reported
+owner cleanup and peer failure; its explicit StopAndWait retry did not confirm
+cleanup. Image copies and harness leases therefore remained retained. The
+outer supervisor independently observed its root terminal, empty Job and all
+of its handles closed, without timeout or output overflow. Elapsed time was
+16.578 seconds. The public canary-05 fixture and failed records are retained.
+The result does not qualify peer preparation, a contained workload or inner
+native cleanup; the protocol failure needs a bounded diagnostic before retry.
