@@ -9,6 +9,7 @@ import plistlib
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -41,7 +42,32 @@ def test_managed_package_recipes_exclude_fleet_compiler():
     assert "BUNDLED_COMPILER" not in mac_recipe
     assert 'install -m 0644 "$compiler_src"' not in mac_recipe
     assert "policy_compiler.py" not in windows_recipe
-    assert "$layout['CompilerPath']" not in windows_layout
+    # The layout still names where a 1.0.2 install put the compiler, so a
+    # Fleet-on host can keep it (GAP-0274), but no lifecycle creates that tree.
+    layout_directories = windows_layout[windows_layout.index("function New-DefenseClawLayoutDirectories {") :]
+    layout_directories = layout_directories[: layout_directories.index("\nfunction ")]
+    assert "Compiler" not in layout_directories
+
+
+def test_windows_standalone_retires_the_empty_compiler_tree():
+    # GAP-0270: 1.0.2 Setup created lib\defenseclaw for the Fleet compiler.
+    # The Fleet-off retire and every uninstall install-tree check use the same
+    # empty-only helper. A recorded compiler a Fleet-on host keeps (GAP-0274)
+    # is accepted only through its hash-checked helper.
+    module = (ROOT / "packaging/windows/DefenseClawEnterprise.psm1").read_text(encoding="utf-8")
+    retire = module[module.index("if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {") :]
+    assert retire.splitlines()[1].strip() == "Remove-DefenseClawRetiredStandaloneCompiler -Layout $Layout"
+    helper = module[module.index("function Get-DefenseClawEmptyRetiredCompilerDirectories {") :]
+    helper = helper[: helper.index("\n}\n")]
+    assert "ReparsePoint" in helper and "-notin $empty" in helper
+    for function in ("Assert-DefenseClawManagedInstallTree", "Remove-DefenseClawCommittedEmptyInstallRoot"):
+        body = module[module.index(f"function {function} {{") :]
+        body = body[: body.index("\nfunction ")]
+        assert "Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot" in body, function
+        assert "-Name CompilerPath" not in body, function
+    walk = module[module.index("function Assert-DefenseClawManagedInstallTree {") :]
+    walk = walk[: walk.index("\nfunction ")]
+    assert "Get-DefenseClawRecordedStandaloneCompilerPath -Layout $Layout" in walk
 
 
 def _unit(name: str) -> list[str]:
@@ -1809,7 +1835,7 @@ _USER_MANAGER_ANSWERS = {
 }
 
 
-@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.skipif(not sys.platform.startswith("linux") or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
 @pytest.mark.parametrize("answer", sorted(_USER_MANAGER_ANSWERS))
 def test_linux_preremove_stops_the_sandbox_user_units_in_every_user_manager(tmp_path: Path, answer: str) -> None:
     host = _Host(tmp_path)
@@ -1852,7 +1878,7 @@ case "$*" in {_USER_MANAGER_ANSWERS[answer]} esac""")
 # not skip a live user manager: its units stop as the uid and gid that own
 # its runtime directory, and a manager that then does not answer keeps the
 # package.
-@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.skipif(not sys.platform.startswith("linux") or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
 @pytest.mark.parametrize("answer", ["stopped", "no_answer"])
 def test_linux_preremove_stops_the_user_units_of_an_account_the_lookup_does_not_name(tmp_path: Path, answer: str) -> None:
     host = _Host(tmp_path)

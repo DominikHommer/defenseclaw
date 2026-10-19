@@ -1644,6 +1644,18 @@ function Stage-PackageData(
     foreach ($name in @('splunk_local_bridge', 'local_observability_stack', 'splunk_o11y_dashboards')) {
         Copy-Tree (Join-Path $WorkspaceRoot "bundles\$name") (Join-Path $data $name)
     }
+    # Same as make _bundle-data: the optional Fleet templates ship only in
+    # defenseclaw-fleet-assets.tar.gz, never in the default package data.
+    foreach ($fleetFile in @(
+        'docker-compose.fleet.yml',
+        'prometheus\examples\fleet.yml',
+        'grafana\dashboards\defenseclaw-fleet.json'
+    )) {
+        $stagedFleetFile = Join-Path $data "local_observability_stack\$fleetFile"
+        if (Test-Path -LiteralPath $stagedFleetFile -PathType Leaf) {
+            Remove-Item -LiteralPath $stagedFleetFile -Force
+        }
+    }
     $extensionSource = Join-Path $WorkspaceRoot 'extensions\defenseclaw'
     $extensionIndex = Join-Path $extensionSource 'dist\index.js'
     if (Test-Path -LiteralPath $extensionIndex -PathType Leaf) {
