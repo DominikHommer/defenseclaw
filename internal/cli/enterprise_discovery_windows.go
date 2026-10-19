@@ -60,10 +60,21 @@ func windowsEnterpriseAdminViewCommand(cmd *cobra.Command) (what, view, adminArg
 	adminArgs = view
 	if flag := cmd.Flags().Lookup("user"); flag != nil && flag.Changed {
 		if user := strings.TrimSpace(flag.Value.String()); user != "" {
-			adminArgs += " --user " + user
+			adminArgs += " --user " + windowsPowerShellArgument(user)
 		}
 	}
 	return what, view, adminArgs
+}
+
+// windowsPowerShellArgument quotes value for the PowerShell command a hint
+// asks the administrator to paste, when it holds a space or a character
+// PowerShell would read as syntax: the --user value was pasted bare
+// (rel-1-0-2 GAP-0086).
+func windowsPowerShellArgument(value string) string {
+	if !strings.ContainsAny(value, " \t'\"`$;&|(){}@,<>#") {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 // newWindowsDiscoveryCommand is `enterprise windows discovery`, the Windows

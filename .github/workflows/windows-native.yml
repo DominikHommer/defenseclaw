@@ -103,6 +103,15 @@ jobs:
           )
           $daclTestPattern = '^(' + ($daclTests -join '|') + ')$'
           Invoke-WindowsNativeProcess $go @('test', '-vet=off', '-v', '-count=1', '-run', $daclTestPattern, './internal/safefile', './internal/managed', './internal/gateway/connector') -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-dacl-test.log') | Out-Null
+          # The real-NTFS managed record guard must run here, not skip (#1300).
+          $recordTest = 'TestWindowsManagedRecordTrustUsesRealACLs'
+          $record = Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=1', '-run', ('^' + $recordTest + '$'), './internal/cli'
+          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-managed-record-acl-test.log')
+          $escapedRecordTest = [regex]::Escape($recordTest)
+          if ([string]$record.StdOut -notmatch "(?m)^--- PASS: $escapedRecordTest ") {
+            throw "$recordTest did not complete with PASS on the native Windows runner (a SKIP leaves the real-ACL guard unexercised)"
+          }
       - name: Run full native Windows redaction key package before downstream stress
         if: ${{ matrix.shard == 0 }}
         run: |

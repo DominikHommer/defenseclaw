@@ -403,6 +403,7 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
 	prepared := nativeEnterpriseHookRuntimeSnapshot.prepared
 	err := nativeEnterpriseHookRuntimeSnapshot.err
+	home := nativeEnterpriseHookRuntimeSnapshot.home
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	if !prepared || err == nil {
 		return ""
@@ -417,7 +418,26 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 		standaloneEnterpriseHookCheck(nativeHookExecutable()) {
 		return enterprisehooks.WindowsManagedEnrollmentPendingReason
 	}
+	// The account's DefenseClaw folder (renamed, moved or deleted) is gone:
+	// the documented code, not "state invalid" (GAP-0759). The standalone
+	// guardian recreates it in the account's session. Only a folder that is
+	// really absent counts, but whatever step failed on its absence: live, the
+	// failure did not always unwrap to a missing file, and the user read only
+	// "not set up correctly". A folder that is there stays state_invalid.
+	if standaloneEnterpriseHookCheck(nativeHookExecutable()) && windowsManagedRuntimeHomeAbsent(home) {
+		return "enterprise_managed_runtime_home_missing"
+	}
 	return "enterprise_managed_runtime_state_invalid"
+}
+
+// windowsManagedRuntimeHomeAbsent reports whether the account's DefenseClaw
+// data folder the protected policy names does not exist.
+func windowsManagedRuntimeHomeAbsent(home string) bool {
+	if strings.TrimSpace(home) == "" {
+		return false
+	}
+	_, err := os.Lstat(home)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // enterpriseManagedHookRuntimeConnection returns endpoint identity and the
