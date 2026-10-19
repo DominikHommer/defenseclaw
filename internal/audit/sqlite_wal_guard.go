@@ -52,6 +52,15 @@ var walTrickleFrames = 2048
 // gap still leaves it under the limit.
 const walCatchUpFraction = 2
 
+// walSettleRounds bounds the extra copy-and-sync rounds before a catch-up,
+// and walSettledSync is the sync time that ends them: a sync that fast left
+// only a few pages for the copy under the writer. Variables so tests can
+// change them.
+var (
+	walSettleRounds = 3
+	walSettledSync  = 20 * time.Millisecond
+)
+
 // walForcedCatchUpFactor: past this many times the limit the catch-up no
 // longer waits for walIdleWindow without a commit; it still takes the writer
 // only when no hook holds it and still gives it back at walCatchUpCap.
@@ -71,11 +80,13 @@ var (
 )
 
 // Test seams: walCopyPhaseHook runs inside each copy pass on the dedicated
-// connection, after the pass read the commit counter, and walWriterPhaseHook
-// while the writer connection is held, so tests can write during a copy or
-// hold the writer phase open.
+// connection, after the pass read the commit counter, walSyncPhaseHook before
+// each sync of the database file off the writer, and walWriterPhaseHook while
+// the writer connection is held, so tests can write during a copy, slow a
+// sync or hold the writer phase open.
 var (
 	walCopyPhaseHook   func(context.Context)
+	walSyncPhaseHook   func(context.Context)
 	walWriterPhaseHook func(context.Context)
 )
 
@@ -99,6 +110,10 @@ type WALCheckpoint struct {
 	// found no idle gap for it, or the catch-up reached walCatchUpCap and gave
 	// the writer back before the copy reached the end of the log.
 	WriterDeferred bool
+	// Syncs is how many times the pass synced the database file off the
+	// writer before a catch-up, and SyncLongest the longest of those syncs.
+	Syncs       int
+	SyncLongest time.Duration
 }
 
 // CheckpointWALIfLarge keeps the write-ahead log bounded under sustained hook
@@ -127,12 +142,15 @@ type WALCheckpoint struct {
 //
 //   - Once the log passes limit/walCatchUpFraction and the copy cannot reach
 //     its end, the pass syncs the database file from its own pinned handle,
-//     off the writer, waits for an idle gap (no commit for walIdleWindow and
-//     the writer free), and holds the writer only while one more PASSIVE copy
-//     on the checkpoint connection reaches the end: at most the backlog of
-//     the last pass and the pages written since the sync. It gives the writer
-//     back at walCatchUpCap whether or not that copy finished; an unfinished
-//     copy goes on without the writer and the next pass tries again.
+//     off the writer. While that sync takes longer than walSettledSync it
+//     copies what the hooks wrote meanwhile and syncs again (at most
+//     walSettleRounds more times), so the copy under the writer has only the
+//     pages of the last round to write and sync. Then it waits for an idle
+//     gap (no commit for walIdleWindow and the writer free) and holds the
+//     writer only while one more PASSIVE copy on the checkpoint connection
+//     reaches the end. It gives the writer back at walCatchUpCap whether or
+//     not that copy finished; an unfinished copy goes on without the writer
+//     and the next pass tries again.
 //   - A fully copied log whose file is larger than walIdleTrimBytes (or whose
 //     log is over the limit) is cut to zero bytes with a TRUNCATE checkpoint
 //     on the writer when the hooks are not flooding the store: nothing was
@@ -198,10 +216,36 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	if logBytes <= limitBytes/walCatchUpFraction {
 		return result, nil
 	}
-	// Sync the pages the copies left, off the writer, so the copy under the
-	// writer syncs only what it writes itself.
-	if err := s.syncDatabaseFile(); err != nil {
-		return result, fmt.Errorf("audit: sync the database file before the WAL catch-up: %w", err)
+	// Sync the pages the copies left, off the writer, and copy and sync again
+	// while the hooks write more during a sync than the copy under the writer
+	// can write and sync within walCatchUpCap (rel-1-0-3 GAP-0247, GAP-0136).
+	for round := 0; ; round++ {
+		began := time.Now()
+		if walSyncPhaseHook != nil {
+			walSyncPhaseHook(ctx)
+		}
+		if err := s.syncDatabaseFile(); err != nil {
+			return result, fmt.Errorf("audit: sync the database file before the WAL catch-up: %w", err)
+		}
+		took := time.Since(began)
+		result.Syncs++
+		result.SyncLongest = max(result.SyncLongest, took)
+		if took <= walSettledSync || round == walSettleRounds {
+			break
+		}
+		ckpt, err = s.copyWAL(ctx, db, walCopyPhaseHook)
+		if err != nil {
+			return result, err
+		}
+		if ckpt.busy != 0 {
+			return result, nil
+		}
+		logBytes = int64(ckpt.frames) * walFrameBytes
+		if ckpt.complete {
+			// The hooks paused: this copy brought the log to its end.
+			result.Restarted = ckpt.frames > 0
+			return result, nil
+		}
 	}
 	window := walIdleWindow
 	if logBytes > walForcedCatchUpFactor*limitBytes {

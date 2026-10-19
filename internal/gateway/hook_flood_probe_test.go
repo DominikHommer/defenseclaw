@@ -125,9 +125,9 @@ func TestHookFloodFlatnessRule(t *testing.T) {
 // hookFloodGuardMinute sums the WAL guard passes that ended in one minute and
 // the largest WAL file sampled in it.
 type hookFloodGuardMinute struct {
-	passes, writer, deferred, restarted, truncated, failed int
-	held, heldMax, passMax                                 time.Duration
-	walMax                                                 int64
+	passes, writer, deferred, restarted, truncated, failed, syncs int
+	held, heldMax, passMax, syncMax                               time.Duration
+	walMax                                                        int64
 }
 
 // TestHookFloodProbe drives the real Claude Code hook handler, audit store and
@@ -146,7 +146,8 @@ type hookFloodGuardMinute struct {
 //
 // Each minute's line has the latencies of the calls launched in it, the WAL
 // guard passes that ended in it (how often and how long a pass held the audit
-// writer connection) and the largest WAL file sampled every 250 ms. The probe
+// writer connection, and how often and how long it synced the database file
+// off the writer) and the largest WAL file sampled every 250 ms. The probe
 // also fails when a sample is over 320 MiB (hookFloodWALBound).
 func TestHookFloodProbe(t *testing.T) {
 	if os.Getenv("DEFENSECLAW_HOOK_FLOOD_PROBE") != "1" {
@@ -267,6 +268,8 @@ func TestHookFloodProbe(t *testing.T) {
 				if result.Truncated {
 					minute.truncated++
 				}
+				minute.syncs += result.Syncs
+				minute.syncMax = max(minute.syncMax, result.SyncLongest)
 				minute.passMax = max(minute.passMax, time.Since(began))
 			}
 			guardMu.Unlock()
@@ -427,13 +430,13 @@ func TestHookFloodProbe(t *testing.T) {
 			}
 			minutes = append(minutes, minute)
 			guard := guards[len(minutes)-1]
-			t.Logf("flood %d minute %d calls %d-%d average=%v p50=%v p99=%v max=%v guard passes=%d writer=%d deferred=%d restarted=%d truncated=%d failed=%d writer_held=%v writer_held_max=%v pass_max=%v wal_max=%d",
+			t.Logf("flood %d minute %d calls %d-%d average=%v p50=%v p99=%v max=%v guard passes=%d writer=%d deferred=%d restarted=%d truncated=%d failed=%d writer_held=%v writer_held_max=%v pass_max=%v wal_max=%d syncs=%d sync_max=%v",
 				flood, len(minutes), first, first+segment,
 				minute.average.Round(time.Microsecond), minute.p50.Round(time.Microsecond),
 				minute.p99.Round(time.Microsecond), minute.max.Round(time.Microsecond),
 				guard.passes, guard.writer, guard.deferred, guard.restarted, guard.truncated, guard.failed,
 				guard.held.Round(time.Millisecond), guard.heldMax.Round(time.Millisecond), guard.passMax.Round(time.Millisecond),
-				guard.walMax)
+				guard.walMax, guard.syncs, guard.syncMax.Round(time.Millisecond))
 		}
 		for _, violation := range hookFloodFlatnessViolations(minutes) {
 			t.Errorf("flood %d is not flat: %s", flood, violation)

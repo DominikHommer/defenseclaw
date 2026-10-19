@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -342,9 +343,9 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //   - temp_store=MEMORY         spill temp tables to RAM instead of
 //     disk; eliminates a common contention
 //     source on writes that allocate temp.
-//   - mmap_size=268435456       map up to 256 MB of the DB into the
-//     process address space for read-heavy
-//     queries (audit views, exports).
+//   - mmap_size                 map up to 256 MB of the DB into the
+//     process address space for read-heavy queries (audit views, exports),
+//     except on Windows (auditMmapSizeBytes).
 //   - foreign_keys=ON           defenseclaw relies on the FK between
 //     findings and scan_results; turning
 //     this off at the DSN level would be a
@@ -373,8 +374,25 @@ func buildAuditPragmas() string {
 	for _, pragma := range auditMandatoryIntegerPragmas {
 		fmt.Fprintf(&result, "&_pragma=%s(%s)", pragma.name, pragma.dsnValue)
 	}
-	result.WriteString("&_pragma=mmap_size(268435456)")
+	fmt.Fprintf(&result, "&_pragma=mmap_size(%d)", auditMmapSizeBytes())
 	return result.String()
+}
+
+// auditMmapSizeBytes is the mmap_size of every audit connection: 256 MiB,
+// and 0 on Windows. On Windows a FlushFileBuffers of the memory-mapped
+// audit.db cost about as much with a few dirty pages as with many and grew
+// with the database: 120 ms at about 100 MB and 500 ms at 1.2 GB under a
+// 10 calls/s hook flood, while the same sync of the WAL file, which SQLite
+// does not map, took about 10 ms at 30 GB. The checkpoint that lets SQLite
+// restart the log ends with that database sync, so it never fit in the WAL
+// guard's hold of the writer, the log was never restarted and the WAL file
+// grew past 12 GB (rel-1-0-3 GAP-0247, GAP-0136). Windows reads the pages
+// through the file cache instead.
+func auditMmapSizeBytes() int64 {
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	return 256 << 20
 }
 
 // openSQLite opens a SQLite connection with the audit-tier hardening

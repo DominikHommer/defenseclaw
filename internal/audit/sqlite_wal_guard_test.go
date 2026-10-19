@@ -5,9 +5,12 @@ package audit
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math"
 	"os"
+	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -479,5 +482,115 @@ func TestAuditConnectionsBoundTheWALFile(t *testing.T) {
 	var limit int64
 	if err := store.db.QueryRow(`PRAGMA journal_size_limit`).Scan(&limit); err != nil || limit != auditWALJournalSizeLimitBytes {
 		t.Fatalf("journal_size_limit = %d, %v; want %d", limit, err, auditWALJournalSizeLimitBytes)
+	}
+}
+
+// walGuardSteps records the order of a pass's copies on the checkpoint
+// connection (each with a commit during it, as in a hook flood), its syncs of
+// the database file off the writer (each taking syncTakes) and its writer
+// phase.
+func walGuardSteps(t *testing.T, store *Store, syncTakes time.Duration) func() []string {
+	t.Helper()
+	var mu sync.Mutex
+	var steps []string
+	record := func(step string) {
+		mu.Lock()
+		defer mu.Unlock()
+		steps = append(steps, step)
+	}
+	originalCopy, originalSync, originalWriter := walCopyPhaseHook, walSyncPhaseHook, walWriterPhaseHook
+	walCopyPhaseHook = func(context.Context) {
+		if err := store.LogEvent(Event{Action: "hook_decision", Target: "wal-guard", Severity: "INFO", SessionID: "s"}); err != nil {
+			t.Errorf("LogEvent during the copy: %v", err)
+		}
+		record("copy")
+	}
+	walSyncPhaseHook = func(context.Context) {
+		record("sync")
+		time.Sleep(syncTakes)
+	}
+	walWriterPhaseHook = func(context.Context) { record("writer") }
+	t.Cleanup(func() { walCopyPhaseHook, walSyncPhaseHook, walWriterPhaseHook = originalCopy, originalSync, originalWriter })
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(steps)
+	}
+}
+
+// rel-1-0-3 GAP-0247, GAP-0136: on Windows a sync of audit.db took hundreds of
+// milliseconds, the hooks wrote that long's worth of log meanwhile, and the
+// copy under the writer then had too much to write and sync within
+// walCatchUpCap, so it never brought the log to its end. While a sync is
+// slower than walSettledSync the pass copies what was written during it and
+// syncs again, off the writer, before it takes the writer.
+func TestCheckpointWALIfLargeSettlesTheBacklogOffTheWriterWhileSyncsAreSlow(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	logWALGuardEvents(t, store, 200)
+	originalSettled := walSettledSync
+	walSettledSync = 5 * time.Millisecond
+	t.Cleanup(func() { walSettledSync = originalSettled })
+	steps := walGuardSteps(t, store, 4*walSettledSync)
+	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+	if err != nil || !pass.Restarted || pass.WriterDeferred {
+		t.Fatalf("pass with slow syncs: %+v, %v; want the catch-up to bring the log to its end", pass, err)
+	}
+	want := []string{"copy", "sync"}
+	for range walSettleRounds {
+		want = append(want, "copy", "sync")
+	}
+	want = append(want, "writer")
+	if got := steps(); !slices.Equal(got, want) {
+		t.Fatalf("pass steps = %v; want %v (each slow sync followed by a copy, at most %d more rounds, then the writer)", got, want, walSettleRounds)
+	}
+	if pass.Syncs != walSettleRounds+1 || pass.SyncLongest < 4*walSettledSync {
+		t.Fatalf("pass reported %d syncs, longest %v; want %d, at least %v", pass.Syncs, pass.SyncLongest, walSettleRounds+1, 4*walSettledSync)
+	}
+}
+
+// A sync within walSettledSync leaves the copy under the writer only a few
+// pages, so the pass takes the writer right after it.
+func TestCheckpointWALIfLargeTakesTheWriterAfterOneFastSync(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	logWALGuardEvents(t, store, 200)
+	originalSettled := walSettledSync
+	walSettledSync = time.Hour
+	t.Cleanup(func() { walSettledSync = originalSettled })
+	steps := walGuardSteps(t, store, 0)
+	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+	if err != nil || !pass.Restarted || pass.Syncs != 1 {
+		t.Fatalf("pass with a fast sync: %+v, %v; want one sync and the log brought to its end", pass, err)
+	}
+	if got, want := steps(), []string{"copy", "sync", "writer"}; !slices.Equal(got, want) {
+		t.Fatalf("pass steps = %v; want %v", got, want)
+	}
+}
+
+// rel-1-0-3 GAP-0247, GAP-0136: audit.db is never memory-mapped on Windows,
+// where a sync of a mapped database grew with its size and kept the log from
+// being restarted; elsewhere every audit connection maps up to 256 MiB.
+func TestAuditConnectionsMapTheDatabaseOnlyOffWindows(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	want := int64(256 << 20)
+	if runtime.GOOS == "windows" {
+		want = 0
+	}
+	if got := auditMmapSizeBytes(); got != want {
+		t.Fatalf("auditMmapSizeBytes() = %d on %s; want %d", got, runtime.GOOS, want)
+	}
+	checkpointDB, err := store.checkpointConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, db := range map[string]interface {
+		QueryRow(string, ...any) *sql.Row
+	}{"writer": store.db, "checkpoint": checkpointDB} {
+		var size int64
+		if err := db.QueryRow(`PRAGMA mmap_size`).Scan(&size); err != nil || size != want {
+			t.Fatalf("%s connection mmap_size = %d, %v; want %d", name, size, err, want)
+		}
 	}
 }
