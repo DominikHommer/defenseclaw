@@ -249,13 +249,15 @@ static uint32_t compute_target_hash(const uint8_t *tool_hash) {
 }
 
 
-#if DCLAW_SPECULATIVE_EXECUTION
 static bool is_sync_block_required(uint8_t cap_flags) {
     /* Safety-critical operations must never become speculative, including
-     * after an OTA that cannot carry escalation mode settings. */
+     * after an OTA that cannot carry escalation mode settings, and are
+     * never allowed from the verdict cache: each call is escalated. */
     return (cap_flags & (DCLAW_CAP_ACTUATE | DCLAW_CAP_EXEC_SHELL |
                          DCLAW_CAP_WRITE_FS)) != 0;
 }
+
+#if DCLAW_SPECULATIVE_EXECUTION
 
 extern void dclaw_speculative_expire(uint64_t now_ms);
 
@@ -406,6 +408,11 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_RATE_LIMIT, DCLAW_VERDICT_SYNC);
     }
 
+    /* Local results that a cached gateway ALLOW must not erase: a WARN is
+     * returned as WARN, an ESCALATE forces a fresh gateway escalation. */
+    bool local_warn = false;
+    bool local_escalate = false;
+
     /* Step 3: Content scan (if content provided) */
 #if DCLAW_CONTENT_SCAN
     if (req->content && req->content_len > 0) {
@@ -428,8 +435,14 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
                 rule != DCLAW_ACTION_ESCALATE) {
                 scan_action = DCLAW_ACTION_BLOCK;
                 blocked_by_rule = true;
+            } else if (rule == DCLAW_ACTION_WARN) {
+                local_warn = true;
+            } else if (rule == DCLAW_ACTION_ESCALATE) {
+                local_escalate = true;
             }
         }
+        if (scan_action == DCLAW_ACTION_WARN) local_warn = true;
+        else if (scan_action == DCLAW_ACTION_ESCALATE) local_escalate = true;
         if (scan_action == DCLAW_ACTION_BLOCK) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                               target_hash, req->session_id);
@@ -486,6 +499,8 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         in_eval = false;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, DCLAW_VERDICT_SYNC);
     }
+    if (seq_result == DCLAW_ACTION_WARN) local_warn = true;
+    else if (seq_result == DCLAW_ACTION_ESCALATE) local_escalate = true;
 
     /* Step 5b: A truncated body may hide a dangerous suffix. Run every
      * local destination and sequence guard first, then fail closed before a
@@ -501,9 +516,16 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
                             DCLAW_VERDICT_SYNC);
     }
 
-    /* Step 6: Verdict cache lookup */
+    /* Step 6: Verdict cache lookup. A cached BLOCK always applies. A cached
+     * ALLOW/WARN is not used for physical classes (actuation, shell, file
+     * writes: every call is escalated) or when a local rule asked for
+     * escalation; a local WARN is kept over a cached ALLOW. */
     dclaw_verdict_t cached;
-    if (dclaw_cache_lookup(req->tool_hash, &cached)) {
+    if (dclaw_cache_lookup(req->tool_hash, &cached) &&
+        (cached.action == DCLAW_ACTION_BLOCK ||
+         (!is_sync_block_required(req->cap_flags) && !local_escalate))) {
+        if (cached.action == DCLAW_ACTION_ALLOW && local_warn)
+            cached.action = DCLAW_ACTION_WARN;
         g_state.eval_cache_hit_count++;
         dclaw_audit_write(cached.action, cached.reason, target_hash, req->session_id);
         switch (cached.action) {
