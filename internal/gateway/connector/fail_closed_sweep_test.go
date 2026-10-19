@@ -53,7 +53,7 @@ func TestClosedShellHookRejectsMissingHome(t *testing.T) {
 		t.Skip("POSIX hooks")
 	}
 	dir := t.TempDir()
-	if err := writeHookScriptsCommonWithFailMode(dir, "127.0.0.1:1", "test-token", "closed", []string{"claude-code-hook.sh", "copilot-hook.sh", "hermes-hook.sh"}); err != nil {
+	if err := writeHookScriptsCommonWithFailMode(dir, "127.0.0.1:1", "test-token", "closed", []string{"claude-code-hook.sh", "copilot-hook.sh", "hermes-hook.sh", "antigravity-hook.sh"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -63,6 +63,7 @@ func TestClosedShellHookRejectsMissingHome(t *testing.T) {
 		{"claude-code-hook.sh", `{"hook_event_name":"PreToolUse"}`, "", nil},
 		{"copilot-hook.sh", `{}`, `"permissionDecision":"deny"`, []string{"--event", "preToolUse"}},
 		{"hermes-hook.sh", `{"event":"pre_tool_call"}`, `"action":"block"`, nil},
+		{"antigravity-hook.sh", `{}`, `"decision":"deny"`, []string{"PreToolUse"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := exec.Command("bash", append([]string{filepath.Join(dir, tc.name)}, tc.args...)...)
