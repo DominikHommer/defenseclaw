@@ -384,7 +384,7 @@ func (s *Store) catchUpWALOnIdleWriter(ctx context.Context, db *sql.DB, window t
 	}
 	// The writer goes back before the pass waits for an unfinished copy.
 	_ = conn.Close()
-	held = time.Since(acquired)
+	held = heldSince(acquired)
 	if capped {
 		outcome = <-done
 	}
@@ -393,6 +393,14 @@ func (s *Store) catchUpWALOnIdleWriter(ctx context.Context, db *sql.DB, window t
 	}
 	complete = !capped && outcome.ckpt.complete
 	return complete, held, !complete, nil
+}
+
+// heldSince is how long the pass has held the writer connection since it got
+// it at acquired, never zero: the Windows clock moves in steps of up to a
+// millisecond, so a short hold could read as zero there, which WALCheckpoint
+// reserves for a pass that did not take the writer.
+func heldSince(acquired time.Time) time.Duration {
+	return max(time.Since(acquired), time.Nanosecond)
 }
 
 type walCopyResult struct {
@@ -432,7 +440,7 @@ func (s *Store) checkpointWALOnWriter(ctx context.Context, conn *sql.Conn, budge
 	defer cancel()
 	defer func() {
 		_ = conn.Close()
-		held = time.Since(acquired)
+		held = heldSince(acquired)
 	}()
 	yielded := func(err error) error {
 		if errors.Is(writerCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {

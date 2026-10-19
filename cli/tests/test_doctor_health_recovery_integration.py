@@ -842,6 +842,7 @@ def test_moved_audit_store_report_names_the_archive_not_a_file_with_an_archive_n
 
 def test_archive_header_repair_names_a_command_for_the_platform(monkeypatch) -> None:
     # GAP-0647: the recovery hint repairs a zeroed header on the copy, with a command the host has.
+    monkeypatch.setattr(cmd_doctor.os, "name", "posix")
     assert "dd of=<copy> bs=16 count=1 conv=notrunc" in cmd_doctor._archive_header_repair()
     monkeypatch.setattr(cmd_doctor.os, "name", "nt")
     windows = cmd_doctor._archive_header_repair()
