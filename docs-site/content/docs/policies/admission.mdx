@@ -108,17 +108,66 @@ periodic rescan (`watch.rescan_enabled`, on by default).
 Until then a managed computer's `status` and `verify` warn with
 `asset_rejected_not_enforced`.
 
-On managed Windows, the LocalSystem install watcher skips skill, plugin and
-MCP server roots inside enrolled users' profiles, so assets there do not
-receive its install-admission scan. Gateway health reports
+On managed Windows, the LocalSystem install watcher skips skill and plugin
+roots inside enrolled users' profiles, so assets there do not receive its
+install-admission scan. Enrolled users' Claude Code and Kiro MCP servers,
+including those of projects in profiles, are admitted: the hook enumerator
+starts each server as its user for the scan
+([MCP servers in user profiles](/docs/enterprise/windows#mcp-servers-in-user-profiles)).
+Gateway health reports
 `watcher.details.profile_roots_skipped: true` when it skips those roots.
 Administrators can [scan a copy outside profiles](/docs/enterprise/windows#scan-skills-mcp-servers-and-plugins)
 and keep shared skills outside profiles. For policy on profile assets, set
 `runtime_detection.enabled: true` so hooks apply default, registry and
 approval rules to profile assets; use `asset_policy.mode: action` to block.
 Set `asset_policy.enabled: true` as well. Denied names are refused by hooks
-even with runtime detection off. A brokered scan as the enrolled user is
-planned for a later release.
+even with runtime detection off. A scan of profile skills and plugins as the
+enrolled user is planned for a later release.
+
+Each enrolled user's MCP server has its own verdict. The install block and
+runtime disable that admission records for one user's server apply to that
+user's server only (its connector, user and project), so another user's
+server with the same name is admitted, blocked and released on its own. A
+`denied` rule in `asset_policy` still applies by name to every user. If the
+gateway cannot tell which user made a tool call, any user's block of that
+server name refuses the call.
+
+A verdict is for a server's definition, not only its name. When the command,
+arguments, folder or environment of a server change under the same name,
+DefenseClaw refuses its tool calls ("is not scanned yet") until admission has
+scanned the new definition, and it starts that admission at once: at the
+first tool call, or within 30 seconds when no call comes first. The new
+verdict then decides. A rejected definition stays blocked. When a server
+that admission rejected is changed back to a definition that scans clean,
+DefenseClaw lifts its own block and the server's tool calls are allowed
+again. A block an administrator set stays. On a per-user gateway, two
+projects' servers of the same name share one block, which stays while
+another server of that name is configured.
+
+On a managed Windows computer the gateway service cannot read the users'
+profiles, so it learns their Claude Code and Kiro MCP servers from the hook
+enumerator service. Before it decides a Claude Code MCP tool call, the
+gateway has the enumerator read the users' server lists again, so the call
+is decided on the definition the user has now. If the enumerator is not
+running or does not answer within about 1.5 seconds, the call is refused as
+not scanned yet (the agent is told to try again in about a minute), never
+decided on the list read before, and the gateway log says why.
+
+Admission decides on tool calls, not on process starts. Claude Code starts
+the servers of a project it opens as soon as the user approves the
+project's `.mcp.json`, as the user and before DefenseClaw has scanned them.
+Until admission allows a server, DefenseClaw refuses every tool call to it
+("is not scanned yet"), and it keeps refusing the calls of a server that
+admission rejected or could not scan. The server process itself can run
+until Claude Code stops it. It runs with the user's own rights, the same
+rights the user has to start any program.
+
+On managed Windows, a project server whose `cwd` is a relative path, or
+names a folder the server cannot start in, is blocked as not scanned. The
+scan error says that the server is not started in that folder, and why. If the hook enumerator cannot parse a user's
+Claude Code server list (`~/.claude.json` or a project `.mcp.json`), it does
+not guess: it refuses all of that user's Claude Code MCP servers, and
+`status` names the file until it parses again.
 
 ## The admission block
 
@@ -791,6 +840,14 @@ device, which has no `enable` or `restore`, an `allowed` rule for a skill or
 plugin in the admin config clears its install block and runtime disable at
 the next admission or rescan. See
 [Release a blocked or quarantined skill](/docs/enterprise/windows#release-a-blocked-or-quarantined-skill).
+
+On managed Windows, the journal keeps an enrolled user's MCP server under
+its name, connector, user and project. When the gateway starts, it moves
+the rows that earlier versions kept under the bare server name to the user
+they were recorded for. A row whose user cannot be told stays under the
+name and keeps refusing that server name for every user. After a rollback
+to 1.0.2, those per-user rows are not read. 1.0.2 does not admit MCP
+servers in user profiles.
 
 ## Upgrading from config_version 8
 
