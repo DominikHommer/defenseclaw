@@ -6,13 +6,18 @@ name: AXIS private peer host contract tests
 # Inert/fake-custody tests only. No downloaded peer or workload is executed.
 on:
   push:
-    branches: [codex/axis-native-build, codex/axis-peer-experiments]
+    branches: [codex/axis-native-build, codex/axis-peer-experiments, codex/axis-sandbox-feasibility]
     paths:
       - .github/workflows/axis-peer-host-tests.yml
       - internal/axis/bridgeproto/**
       - internal/axis/bridgeowner/**
       - internal/axis/bridgeprocess/**
       - internal/axis/namespaceinit/**
+      - internal/audit/**
+      - internal/gateway/**
+      - internal/openshell/manager/**
+      - internal/openshell/sandboxcli/**
+      - internal/sandboxauth/**
       - test/e2e/axis/native-peer/harness/**
       - go.mod
       - go.sum
@@ -63,3 +68,96 @@ jobs:
           test "$(go env GOVERSION)" = "go1.26.5"
           go test -race -p 1 ./internal/axis/bridgeproto ./internal/axis/bridgeowner ./internal/axis/bridgeprocess ./internal/axis/namespaceinit ./test/e2e/axis/native-peer/harness -count=1 -timeout=120s
           go vet -p 1 ./internal/axis/bridgeproto ./internal/axis/bridgeowner ./internal/axis/bridgeprocess ./internal/axis/namespaceinit ./test/e2e/axis/native-peer/harness
+
+  control-plane-regressions:
+    name: Native control-plane regressions (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: 1.26.5
+          cache: false
+      - name: Race-test the owned lifecycle, binding, audit and all-connector hook routes
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          CGO_ENABLED: '1'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(go env GOVERSION)" = "go1.26.5"
+          packages=(
+            ./internal/axis/bridgeprocess
+            ./internal/openshell/manager
+            ./internal/openshell/sandboxcli
+            ./internal/sandboxauth
+            ./internal/audit
+            ./internal/gateway
+          )
+          expected=(
+            TestCreateRuntimeSelectionBeforeAnyLaunchPreparation
+            TestRunRuntimeSelection
+            TestRunAxisRefusesBeforeNestedInfoOrHostExecution
+            TestNativeCreateUsesOwnedPolicyGateAndLifecycle
+            TestNativeCreateRejectsUnqualifiedAndUnsupportedBeforeFactory
+            TestNativeReservationOwnsRouteBeforePreparation
+            TestNativeUnsupportedOperationsNeverSelectOpenShell
+            TestNativeCreateStaleGenerationCleansBeforeLaunch
+            TestNativeCreatePartialCancellationRetainsFailedCleanup
+            TestNativeCreateManagerShutdownDuringFactoryCannotLaunch
+            TestNativeGetCannotRepublishAfterOwnedStop
+            TestNativeDeleteRetainsRecordUntilCloseSucceeds
+            TestNativeDeleteSuccessRemainsCompleteAfterContextCancellation
+            TestNativeRevocationDoesNotTakeBoxOperationOrReenterGate
+            TestSandboxRuntimeOwnerRefusesLegacyOperations
+            TestSandboxRuntimeOwnerLifecycleUsesAPIWithoutLegacyPreflight
+            TestSandboxRuntimeOwnerAcceptsLegacyResponses
+            TestSandboxRuntimeOwnerDeleteWithoutGetDoesNotCleanLegacyState
+            TestBindingExecutionOSPreservesLegacyAndNativePlatforms
+            TestNativeWindowsBindingRejectsUnimplementedHostMappings
+            TestBindingExecutionOSPersistsAndCannotChangeWithLiveCredential
+            TestNativeSandboxIdentityVocabulary
+            TestUnifiedHookDispatch_SingleEntryPoint
+            TestSandboxHookProfileUsesGuestPlatformWithoutChangingLegacyLinux
+          )
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            expected+=(
+              TestWindowsBindingStoreMintRotateRevokeAndReopen
+              TestWindowsBindingStoreCrossInstanceWrites
+              TestWindowsBindingLockRefusesLinks
+              TestWindowsImageOwnedCopyIgnoresSourceWritableViewAndPreservesOffset
+              TestWindowsImageCloseRetainsOwnershipUntilDuplicatesRelease
+              TestWindowsImageCleanupNeverRecursivelyDeletesUnexpectedChildren
+              TestWindowsImageRefusesWrongDigestAndCancelledAdmissionWithoutResidue
+              TestWindowsImageCopyObservesCancellationBetweenBoundedChunks
+              TestWindowsImageCleanupUncertaintyIsStickyAndNeverRetriesNativeClose
+            )
+          fi
+          selected="^($(IFS='|'; echo "${expected[*]}"))$"
+          log="$RUNNER_TEMP/axis-control-plane-tests.log"
+          go test -race -p 1 -parallel 1 -count=1 -timeout=20m \
+            -gcflags=modernc.org/...=-d=checkptr=0 -v -run "$selected" \
+            "${packages[@]}" | tee "$log"
+          for root in "${expected[@]}"; do
+            if ! grep -Fq -- "--- PASS: $root (" "$log"; then
+              echo "Required control-plane regression did not pass: $root" >&2
+              exit 1
+            fi
+          done
+      - name: Vet the same six packages
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          CGO_ENABLED: '1'
+        run: |
+          set -euo pipefail
+          go vet -p 1 ./internal/axis/bridgeprocess ./internal/openshell/manager ./internal/openshell/sandboxcli ./internal/sandboxauth ./internal/audit ./internal/gateway
