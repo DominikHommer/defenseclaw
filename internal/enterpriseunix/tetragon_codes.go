@@ -374,6 +374,14 @@ var tetragonCodes = map[string]tetragonCodeText{
 			" restart " + plural(n, "it", "them") + " to be denied: after enforce starts, and after a Tetragon restart. " + gwStatus +
 			" lists " + plural(n, "it", "them") + " under Observed, not enforced"
 	}},
+	kernelpolicy.WarnSessionsUnconfirmed: {Message: func(f tetragonFacts) string {
+		count, n := sessionCount(f.Detail, "agent session of an enforced user", "agent sessions of enforced users")
+		return count + " fit the enforcing kernel controls, but Tetragon never reported " + plural(n, "its", "their") +
+			" start on the event stream (the stream was down, or the sensor helper restarted before it saw " + plural(n, "it", "them") +
+			"), so " + plural(n, "it is", "they are") + " not counted as denied and " + plural(n, "its user is", "their users are") +
+			" armed, not enforcing; restart " + plural(n, "it", "them") + " while the stream is connected. " + gwStatus +
+			" lists " + plural(n, "it", "them") + " under Observed, not enforced"
+	}},
 	kernelpolicy.WarnBinaryScopeLimited: {Message: func(tetragonFacts) string {
 		return "more than one user of a controls policy has a native agent install" +
 			" (in enforce it denies for one of them, the lowest uid; the others stay in monitor mode);" +
@@ -440,11 +448,12 @@ func tetragonMessage(fullCode string, f tetragonFacts) string {
 
 // observedReasonWords say why an agent session is observed, not enforced.
 var observedReasonWords = map[string]string{
-	kernelpolicy.ReasonIDEHosted:        "an IDE terminal",
-	kernelpolicy.ReasonHeuristicRoot:    "looks like an agent by name only",
-	kernelpolicy.ReasonNotEnrolled:      "user not enrolled",
-	kernelpolicy.ReasonGuardrailObserve: "connector in observe mode",
-	kernelpolicy.ReasonPredatesControls: "started before the kernel controls loaded; restart it to be denied",
+	kernelpolicy.ReasonIDEHosted:         "an IDE terminal",
+	kernelpolicy.ReasonHeuristicRoot:     "looks like an agent by name only",
+	kernelpolicy.ReasonNotEnrolled:       "user not enrolled",
+	kernelpolicy.ReasonGuardrailObserve:  "connector in observe mode",
+	kernelpolicy.ReasonPredatesControls:  "started before the kernel controls loaded; restart it to be denied",
+	kernelpolicy.ReasonKernelUnconfirmed: "Tetragon did not report its start; restart it to be denied",
 }
 
 // observedReason is the reason in words with the code in parentheses.

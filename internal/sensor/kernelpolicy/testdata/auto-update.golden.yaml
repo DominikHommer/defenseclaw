@@ -3,7 +3,7 @@
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-014341ca
+  name: defenseclaw-controls-3c9d992a
 spec:
   options:
     - name: policy-mode
@@ -98,19 +98,6 @@ spec:
             - action: Override
               argError: -1
             - action: Post
-    - hook: file_open
-      args:
-        - index: 0
-          type: file
-        - index: 0
-          type: uint32
-          resolve: f_mode
-          label: f_mode
-        - index: 0
-          type: uint32
-          resolve: f_cred.uid.val
-          label: opener_uid
-      selectors:
         - matchBinaries:
             - operator: In
               values:

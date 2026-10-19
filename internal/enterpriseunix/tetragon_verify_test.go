@@ -245,6 +245,12 @@ func TestTetragonReadinessChecks(t *testing.T) {
 			*in = withUsers(*in)
 			in.State.Roots.Observed = []kernelpolicy.Observed{{UID: 1001, Reason: kernelpolicy.ReasonPredatesControls, Connector: "claudecode", Count: 2}}
 		}, []want{{checkAgents, checkWarn, "2 agent sessions of dcr-std1 (uid 1001) started before the kernel controls loaded and are not denied until restarted"}}},
+		// GAP-0166: a session whose start Tetragon never reported is not
+		// counted as denied.
+		{"session start not reported by Tetragon", "enforce", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
+			*in = withUsers(*in)
+			in.State.Roots.Observed = []kernelpolicy.Observed{{UID: 1001, Reason: kernelpolicy.ReasonKernelUnconfirmed, Connector: "claudecode", Count: 1}}
+		}, []want{{checkAgents, checkWarn, "Tetragon did not report the start of 1 agent session of dcr-std1 (uid 1001), so it is not counted as denied until restarted"}}},
 		{"new session pending controls load", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) {
 			*in = withUsers(*in)
 			in.State.UIDs[0].Reason = kernelpolicy.WarnSessionPolicyPending
@@ -254,12 +260,12 @@ func TestTetragonReadinessChecks(t *testing.T) {
 		{"session over the limit", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) {
 			*in = withUsers(*in)
 			in.State.UIDs[0].Reason = kernelpolicy.WarnRootsOverLimit
-		}, []want{{checkAgents, checkWarn, "the user dcr-std1 runs more than 8 agent sessions at once; the monitor controls measure 8, so covered time is paused until fewer run"}}},
+		}, []want{{checkAgents, checkWarn, "the user dcr-std1 runs more than 4 agent sessions at once; the monitor controls measure 4, so covered time is paused until fewer run"}}},
 		{"sessions of two users over the limit", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) {
 			*in = withUsers(*in)
 			in.State.UIDs[0].Reason = kernelpolicy.WarnRootsOverLimit
 			in.State.UIDs[1].Reason = kernelpolicy.WarnRootsOverLimit
-		}, []want{{checkAgents, checkWarn, "the users dcr-std1 and dcr-std2 run more than 8 agent sessions at once"}}},
+		}, []want{{checkAgents, checkWarn, "the users dcr-std1 and dcr-std2 run more than 4 agent sessions at once"}}},
 		{"nobody enrolled", "observe", "observe", nil, []want{{checkAgents, checkWarn, "no user is enrolled"}}},
 		{"no agent for enforce", "enforce", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
 			in.State.UIDs = []kernelpolicy.UIDStatus{{UID: 1001, User: "dcr-std1", Connectors: []string{"claudecode"},

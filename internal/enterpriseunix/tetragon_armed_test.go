@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/kernelpolicy"
@@ -36,6 +37,16 @@ func TestArmedUserIsNotCalledEnforced(t *testing.T) {
 	want := "enforce is loaded for every enrolled user (1); 0 are enforced and 1 is armed with no running agent session anchored yet."
 	if got := enforceCounts([]TetragonUserReadiness{armed}, false); got != want {
 		t.Fatalf("counts = %q\nwant     %q", got, want)
+	}
+	// The reason names a session Tetragon never reported (GAP-0166).
+	_, unreported := userStateWords(TetragonUser{UID: 1001, State: kernelpolicy.UIDArmed, Reason: kernelpolicy.ReasonKernelUnconfirmed},
+		burnInProgress{Ready: true})
+	if unreported == why || !strings.Contains(unreported, "Tetragon has not reported the start") {
+		t.Fatalf("armed, start not reported = %q", unreported)
+	}
+	if got := tetragonMessage(kernelpolicy.WarnSessionsUnconfirmed+":1", tetragonFacts{}); !strings.HasPrefix(got,
+		"1 agent session of an enforced user fit the enforcing kernel controls, but Tetragon never reported its start") {
+		t.Fatalf("warning text = %q", got)
 	}
 	enforcing := TetragonUserReadiness{UID: 1000, User: "root2", State: kernelpolicy.UIDEnforcing, Ready: true}
 	if got := enforceCounts([]TetragonUserReadiness{enforcing}, false); got != "every enrolled user (1) is enforced." {

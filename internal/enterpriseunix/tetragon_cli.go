@@ -1441,6 +1441,9 @@ func userStateWords(user TetragonUser, progress burnInProgress) (state, why stri
 	case kernelpolicy.UIDEnforcing:
 		return "enforcing", ""
 	case kernelpolicy.UIDArmed:
+		if user.Reason == kernelpolicy.ReasonKernelUnconfirmed {
+			return "armed", "enforce is loaded; Tetragon has not reported the start of a running agent session, so none is counted as denied"
+		}
 		return "armed", "enforce is loaded; no running agent session is anchored yet"
 	case kernelpolicy.UIDBurnIn:
 		if progress.Reset {

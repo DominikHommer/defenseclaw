@@ -757,6 +757,13 @@ func setAgentsCheck(set func(id, status, message string, fix ...string), in tetr
 	if len(missing) > 0 {
 		message += "; no row for " + strings.Join(missing, ", ")
 	}
+	if unconfirmed, names := observedSessions(in.State, kernelpolicy.ReasonKernelUnconfirmed); unconfirmed > 0 {
+		// GAP-0166: only a session whose start Tetragon reported is marked
+		// by the binaries anchor; the helper does not call the others denied.
+		set(checkAgents, checkWarn, message+fmt.Sprintf("; Tetragon did not report the start of %d agent %s of %s, so %s not counted as denied until restarted",
+			unconfirmed, plural(unconfirmed, "session", "sessions"), strings.Join(names, ", "), plural(unconfirmed, "it is", "they are")))
+		return
+	}
 	if predating, names := predatingSessions(in.State); predating > 0 {
 		// GAP-0053: Tetragon marks an agent's processes when the agent
 		// starts; a session that was running when the controls loaded is
@@ -771,11 +778,17 @@ func setAgentsCheck(set func(id, status, message string, fix ...string), in tetr
 // predatingSessions counts the agent sessions the helper reports as started
 // before the enforcing controls loaded, and names their users.
 func predatingSessions(state kernelpolicy.State) (int, []string) {
+	return observedSessions(state, kernelpolicy.ReasonPredatesControls)
+}
+
+// observedSessions counts the observed-only agent sessions the helper
+// reports with reason, and names their users.
+func observedSessions(state kernelpolicy.State, reason string) (int, []string) {
 	count := 0
 	seen := map[int]bool{}
 	var names []string
 	for _, observed := range state.Roots.Observed {
-		if observed.Reason != kernelpolicy.ReasonPredatesControls {
+		if observed.Reason != reason {
 			continue
 		}
 		count += observed.Count
