@@ -102,6 +102,18 @@ class PolicyCompilerExitTest(unittest.TestCase):
             header = (work / 'policy_tables.h').read_text()
             self.assertIn('sequence_rules_count = 1;', header)
 
+    def test_checked_in_tables_match_compiler(self):
+        """generated/policy_tables.h is built from policies/strict.yaml."""
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            result = self.compile(work, VALID)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            generated = (work / 'policy_tables.h').read_text()
+        checked_in = (ROOT / 'generated' / 'policy_tables.h').read_text()
+        self.assertEqual(generated, checked_in,
+                         'regenerate generated/policy_tables.h from policies/strict.yaml')
+        self.assertIn('"ignore all previous instructions"', checked_in)
+
     def test_environment_fault_remains_distinct(self):
         with tempfile.TemporaryDirectory() as temp:
             work = Path(temp)

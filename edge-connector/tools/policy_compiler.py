@@ -194,6 +194,15 @@ CONTENT_DFA_PATTERNS = [
     ("${",                               5, 3, 1),
     ("eval(",                            5, 3, 1),
     ("exec(",                            5, 3, 1),
+    # Natural-language prompt injection.  Deliberately conservative: only
+    # full instruction-override / prompt-extraction phrases, matched with a
+    # word boundary before them and single spaces between words, so that
+    # ordinary text mentioning "instructions" or "prompt" is not flagged.
+    ("ignore previous instructions",         5, 3, 0),
+    ("ignore all previous instructions",     5, 3, 0),
+    ("disregard all previous instructions",  5, 3, 0),
+    ("disregard your instructions",          5, 3, 0),
+    ("reveal the system prompt",             5, 3, 0),
 
     # COMMAND category (category=6, severity=HIGH=3)
     ("rm ",                              6, 3, 0),
