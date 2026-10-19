@@ -22,8 +22,8 @@ from verify_native_artifact import static_elf  # noqa: E402
 REPOSITORY = "cisco-ai-defense/defenseclaw"
 BRANCH = "codex/axis-sandbox-feasibility"
 REF = "refs/heads/" + BRANCH
-SOURCE_CANARY = ""
-SOURCE_WRAPPER = ""
+SOURCE_CANARY = "ff281c211bcc014b3b80f00d5a27c16284b51e22"
+SOURCE_WRAPPER = "ff281c211bcc014b3b80f00d5a27c16284b51e22"
 PINS = {
     "peer": {
         "source": "36139fb98708b4cc021d1f20841ace231e058fa2",
@@ -37,22 +37,22 @@ PINS = {
     },
     "canary": {
         "source": SOURCE_CANARY,
-        "run": 0,
-        "artifact": 0,
-        "archive": "",
-        "provenance": "",
+        "run": 39274812188,
+        "artifact": 12197502768,
+        "archive": "1f955af6e14314d15dda1dd63125228f2ebeae1f2cbc1b024037e47312b3365a",
+        "provenance": "0940ed91303f03d2ff13effa842bc350e4834d37fa3483c7f9fe30042e438fbb",
         "workflow": ".github/workflows/axis-contained-hook-canary-build.yml",
-        "name": "",
+        "name": "axis-contained-hook-build-only-ff281c211bcc014b3b80f00d5a27c16284b51e22",
         "event": "workflow_dispatch",
     },
     "wrapper": {
         "source": SOURCE_WRAPPER,
-        "run": 0,
-        "artifact": 0,
-        "archive": "",
-        "provenance": "",
+        "run": 39274817331,
+        "artifact": 12197595882,
+        "archive": "1e17f3c9f5e319b0d68429c87891092ca8ba60579e1b968766cc30748fef20e3",
+        "provenance": "d67d2b1bc8e8d6f6300c111a3e9699d17b11cd28888f1b7bd187e9e251942221",
         "workflow": ".github/workflows/axis-contained-hook-live-wrapper-build.yml",
-        "name": "",
+        "name": "axis-contained-hook-outer-build-only-ff281c211bcc014b3b80f00d5a27c16284b51e22",
         "event": "workflow_dispatch",
     },
 }
@@ -73,9 +73,30 @@ IMAGES = {
         198584,
         0o400,
     ),
-    "payload": ("canary", "fixed-hook-payload", "native-hook-canary-inputs/payload", "", 0, 0o400),
-    "testdriver": ("canary", "fixed-contained-hook-driver.test", "fixed-contained-hook-driver.test", "", 0, 0o500),
-    "wrapper": ("wrapper", "fixed-contained-hook-outer", "fixed-contained-hook-outer", "", 0, 0o500),
+    "payload": (
+        "canary",
+        "fixed-hook-payload",
+        "native-hook-canary-inputs/payload",
+        "d1a812ce303b8eec3ba1dd9330ea5e338e1a413b41c2924ae060f68fc1144046",
+        11247742,
+        0o400,
+    ),
+    "testdriver": (
+        "canary",
+        "fixed-contained-hook-driver.test",
+        "fixed-contained-hook-driver.test",
+        "798ecf9f63032512dbcc9acfdf4cf4d668c27a8b7606869a531840754235bfd8",
+        141455486,
+        0o500,
+    ),
+    "wrapper": (
+        "wrapper",
+        "fixed-contained-hook-outer",
+        "fixed-contained-hook-outer",
+        "0775e17eb54dda7b0fe446dea6aab0d3a40d26f5c93e212752241d66982fa07d",
+        2936958,
+        0o500,
+    ),
 }
 
 

@@ -1,10 +1,13 @@
 # Windows integrated native peer attempts
 
-These fixed contributor canaries have **not passed**. AXIS customer execution
-remains unavailable. No attempt below observed Prepared, Started or a contained
-payload marker. The earlier direct MXC SDK/Claude evidence is separate.
+Outer attempt 09 **passed the fixed integrated canary** on 2026-10-19, after
+eight retained failures. It observed Prepared, the Started reply, the actual
+contained marker, exit 23, Destroyed and independent native/outer cleanup.
+AXIS customer execution remains unavailable: real agent hooks, authentication,
+terminal support and complete common policy are still unqualified. The earlier
+direct MXC SDK/Claude evidence is separate.
 
-The peer is built from DefenseClaw d0723346, AXIS fb5fd5f0 and MXC v1.0.1
+Attempts 01–07 used the peer built from DefenseClaw d0723346, AXIS fb5fd5f0 and MXC v1.0.1
 fda29ac6. Its image SHA256 is
 `dbd6f9f1ba179b450c4928d66c09c929f7e2ff132f7ed2b0f0a6e9928b6a01a9`.
 Three independent inert reviews checked the build and artifact before use.
@@ -18,6 +21,10 @@ The fixed payload SHA256 is
 | 03 | canary-02, retained | TCP/UDP positive controls passed; bridge Start refused before Prepared | Native wait succeeded after initial Close error; root terminal, Job empty, all handles closed |
 | 04 | canary-03, retained | TCP/UDP positive controls passed; Start diagnostic classified `process_admission` | Initial native Close succeeded; root terminal, Job empty, all handles closed |
 | 05 | canary-04, retained | The closed native diagnostic identified `asset_cwd` | Initial native Close succeeded; root terminal, Job empty, all handles closed |
+| 06 | canary-05, retained | Start passed; protocol failed before Prepared | Inner cleanup unconfirmed; outer root terminal, Job empty, handles closed |
+| 07 | canary-06, retained | Preparation failed; cleanup classified native signaling | Inner cleanup unconfirmed; outer root terminal, Job empty, handles closed |
+| 08 | canary-07, retained | CWD ACL form refused; Job signal succeeded and redundant root signal returned Win32 5 | Outer root terminal, Job empty, handles closed |
+| 09 | canary-08, retained | Fixed argv/environment/I/O/FS/network/lifecycle canary passed | Initial inner cleanup passed; image copies/views and harness handles closed; outer root terminal, Job empty, handles closed |
 
 The launcher admitted its exact held executable with ProcessImageFileMapping
 class 44 before resume, assigned its Job atomically at creation, and retained
@@ -71,9 +78,9 @@ also refuse rights absent from the original capability; its integrated native
 result is still pending.
 
 The full failed records and retained public fixtures remain on the test host.
-Native peer/workload execution, filesystem/network enforcement, real agent
-authentication, hooks, terminal support and production qualification remain
-unverified by these attempts.
+The failed attempts above do not establish native workload enforcement. Real
+agent authentication, hooks, terminal support and production qualification
+remain unverified by the later fixed canary as well.
 
 The directory correction uses an empty-name NT reopen relative to the held
 directory, checks the original granted access before reopening, and checks the
@@ -155,3 +162,29 @@ bounded wait retry; it is never completion evidence. Its two-package Windows
 race run passed 57 test/subtest rows, zero failures/skips; log SHA256
 `763aa46c09c86a0326fad00a3fb2302835773281a86a1730126872bdd8f90a60`. No peer, child or PSEC was created.
 The changed integrated native result remains pending.
+
+Outer attempt 09 passed on native Windows 11 Enterprise 26200.9457, amd64,
+on 2026-10-19. The Go host was bd3c55a0, with the reviewed ae8a670f peer
+SHA256 `e55aa67c7b4b7d208bf7e1bc6391fcd6937110681730390fec8267bfca2596e9`,
+the unchanged fixed payload above, and harness image
+`d9077acb69dc8d81f7c666e0da643ba969ef27282948e2a0433ac4209ef2ec1a`.
+Source13's two-package race run passed 57 rows, zero failures/skips; its log
+SHA256 is `c4b60153091241fdabd9378e2084af57c60c0b0a227165afa328d9c71e0b36b8`.
+
+The actual contained workload passed the fixed Unicode/literal argv,
+environment, binary input/EOF, exact output, readonly denial, workspace write,
+ungranted file denial and IPv4 loopback controls. The correlated lifecycle
+observed Prepared, Started reply, actual marker, exit 23 and Destroyed. Initial
+inner cleanup succeeded, image copies/views and harness handles closed, and
+the independent outer observed root termination, empty Job and all handles
+closed. Elapsed time was 7.375 seconds with no timeout or output overflow.
+Outer stdout was 961 bytes, SHA256
+`6a201a4cd2cdcd0dfd3b2a3f7d5a330150ca76bfd61348327ec995dc2114fba9`,
+and stderr was empty. The public canary-08 fixture remains retained.
+
+An independent GPT-6 Sol Max data-only review matched the saved record and
+staged image pins, required closed result fields, exact sentinel bytes and
+workspace write. No second native run was made. These finite observations
+qualify this fixed contributor canary only; they do not establish all network
+transports, real vendor hooks, authenticated model access, terminal support,
+the complete common policy or customer runtime availability.

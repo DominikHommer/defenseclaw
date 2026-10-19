@@ -6,7 +6,8 @@
 Failure diagnostics accept only validated request/binding correlation, closed
 protocol operation and reason codes, and the optional closed Windows native
 preparation/cleanup stages. They never print raw errors, paths, environment,
-arguments or peer stderr. The next fixed fixture basename is canary-08.
+arguments or peer stderr. Source13 uses the fixed fixture basename canary-08;
+the retained fixture prevents an unchanged rerun.
 
 This source draft exercises the existing bridgeprocess SealImageIn/Start and
 the shared Prepare/Launch/Input/InputEOF/Wait/Exited/Destroy protocol. It adds
