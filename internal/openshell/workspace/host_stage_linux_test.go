@@ -7,8 +7,10 @@ package workspace
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -398,8 +400,21 @@ func TestHostStageLinuxTrackedExecuteModeAgreementAndRefusal(t *testing.T) {
 				}
 				var decoded index.Index
 				decodeErr := index.NewDecoder(file).Decode(&decoded)
-				if err := errors.Join(decodeErr, file.Close()); err != nil || len(decoded.Entries) != 1 || decoded.Entries[0].Mode != row.indexMode {
-					t.Fatal("accepted baseline index changed executable mode")
+				if err := errors.Join(decodeErr, file.Close()); err != nil || len(decoded.Entries) != 0 {
+					t.Fatal("guest index no longer represents the original unborn HEAD")
+				}
+				// The guest index reflects original HEAD, while the separate
+				// synthetic baseline records the captured working tree.
+				commit := linuxHostReadBaselineObject(t, path, stage.Summary().Baseline, plumbing.CommitObject)
+				line, _, ok := bytes.Cut(commit, []byte{'\n'})
+				if !ok || len(line) != 45 || !bytes.HasPrefix(line, []byte("tree ")) {
+					t.Fatal("synthetic baseline has no exact tree object reference")
+				}
+				tree := linuxHostReadBaselineObject(t, path, string(line[5:]), plumbing.TreeObject)
+				prefix := []byte(fmt.Sprintf("%o script.sh\x00", row.indexMode))
+				blob := plumbing.ComputeHash(plumbing.BlobObject, []byte("fixed public executable mode bytes"))
+				if len(tree) != len(prefix)+len(blob) || !bytes.Equal(tree[:len(prefix)], prefix) || !bytes.Equal(tree[len(prefix):], blob[:]) {
+					t.Fatal("synthetic baseline tree changed the captured mode, path or public blob")
 				}
 				if err := stage.Close(); err != nil {
 					t.Fatal(err)
@@ -410,6 +425,37 @@ func TestHostStageLinuxTrackedExecuteModeAgreementAndRefusal(t *testing.T) {
 			}
 		})
 	}
+}
+
+func linuxHostReadBaselineObject(t *testing.T, tree, oid string, kind plumbing.ObjectType) []byte {
+	t.Helper()
+	if len(oid) != 40 || plumbing.NewHash(oid).String() != oid {
+		t.Fatal("invalid fixture baseline object identifier")
+	}
+	// This unborn fixture has no withheld historical objects, so its public
+	// baseline objects are loose in the guest repository's own object store.
+	file, err := os.Open(filepath.Join(tree, ".git", "objects", oid[:2], oid[2:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressed, readErr := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err := errors.Join(readErr, file.Close()); err != nil || len(compressed) > 1<<20 {
+		t.Fatal("baseline fixture object is unreadable or exceeds its bound")
+	}
+	reader, err := zlib.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, readErr := io.ReadAll(io.LimitReader(reader, (1<<20)+1))
+	if err := errors.Join(readErr, reader.Close()); err != nil || len(decoded) > 1<<20 {
+		t.Fatal("baseline fixture object inflate failed or exceeded its bound")
+	}
+	header, body, ok := bytes.Cut(decoded, []byte{0})
+	// SHA1 is the Git-format content address here, not runtime provenance.
+	if !ok || string(header) != fmt.Sprintf("%s %d", kind, len(body)) || plumbing.ComputeHash(kind, body).String() != oid {
+		t.Fatal("baseline fixture object header or Git content address disagrees")
+	}
+	return body
 }
 
 func TestHostStageLinuxInitialSourceSnapshotChangeRefusesBeforeCopy(t *testing.T) {

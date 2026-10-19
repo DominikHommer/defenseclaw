@@ -37,7 +37,16 @@ Linux fixtures at the initial source lookup with `EAGAIN` under the earlier
 full-path `RESOLVE_CACHED` implementation. That run did not qualify Linux
 capture; Windows and macOS workspace/backend race and vet gates passed. The
 component-only correction retains the four confinement flags
-without a cached/uncached retry; its new filesystem execution gate is pending.
+without a cached/uncached retry; the subsequent run is recorded below.
+
+The corrected lookup run `39178507434` at `72749796` reached Linux capture,
+sanitization and the held-assets custody regression (backend race package
+passed in 2.612 s). Its workspace package still failed: two accepted-mode
+subcases wrongly expected an unborn repository's guest index to contain the
+synthetic baseline. The index intentionally reflects the original empty HEAD;
+the separate baseline commit/tree records the captured working files. The
+test-only correction checks both representations and the copied POSIX mode.
+This remains a failed run, not a complete workspace regression pass.
 
 The staging parent must already belong to the current effective UID with no
 group/other mode permissions. No permissions repair occurs. Fresh artifact,
