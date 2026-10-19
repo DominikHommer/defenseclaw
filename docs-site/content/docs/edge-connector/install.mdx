@@ -149,7 +149,7 @@ The Edge Connector is framework-agnostic. Choose the integration that matches yo
 
 The simplest starting point for any Python agent. Three lines to add security enforcement:
 
-When using the source checkout, run your agent with `PYTHONPATH=/path/to/defenseclaw/edge-connector/tools`; after `sudo make install`, use the installed adapter directory (normally `/usr/local/lib/defenseclaw`). CMake copies the Python files there but does not add that directory to Python's import path. Set `DCLAW_LIB_PATH` if your shared library is not at `/usr/local/lib/libdclaw_core.so`.
+When using the source checkout, run your agent with `PYTHONPATH=/path/to/defenseclaw/edge-connector/tools`; after `sudo make install`, use the installed adapter directory (normally `/usr/local/lib/defenseclaw`). CMake copies the Python files there but does not add that directory to Python's import path. Set `DCLAW_SOCKET_PATH` if the daemon socket is not at `/run/defenseclaw/defenseclaw.sock`. `DCLAW_LIB_PATH` applies only to the in-process engine (`DCLAW_ALLOW_FFI=1`).
 
 ```python
 from generic_hook import EdgeConnector
@@ -206,7 +206,7 @@ Use with Claude Desktop or Claude Code by adding the proxy to your MCP client co
       "args": ["/usr/local/lib/defenseclaw/mcp_proxy.py"],
       "env": {
         "DCLAW_MCP_UPSTREAM": "[\"python3\", \"-m\", \"esp_claw.mcp_server\"]",
-        "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so"
+        "DCLAW_SOCKET_PATH": "/run/defenseclaw/defenseclaw.sock"
       }
     }
   }
@@ -486,7 +486,8 @@ The gateway rejects missing or invalid device HMAC keys by default. Pre-register
 | `DCLAW_CA_CERT_PATH` | (none) | Broker CA PEM file for TLS server verification. |
 | `DCLAW_DEVICE_CERT_PATH`, `DCLAW_DEVICE_KEY_PATH` | (none) | Client PEM certificate and private key when broker mTLS is enabled. |
 | `DCLAW_FLASH_PATH` | `/var/lib/defenseclaw/flash.bin` | Persistent flash backing file; production overrides must stay under `/var/lib/defenseclaw/` or `/etc/defenseclaw/`. Each engine takes an exclusive lock on its file: a second daemon or in-process library engine on the same file refuses to start. |
-| `DCLAW_IPC_SOCKET_PATH` | `/run/defenseclaw/defenseclaw.sock` | Local IPC socket path. |
+| `DCLAW_IPC_SOCKET_PATH` | `/run/defenseclaw/defenseclaw.sock` | Socket the C daemon listens on. |
+| `DCLAW_SOCKET_PATH` | `/run/defenseclaw/defenseclaw.sock` | Daemon socket the Python hooks and MCP proxy connect to. Set it to the daemon's `DCLAW_IPC_SOCKET_PATH` when that is not the default. |
 | `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to the Edge Connector shared library (in-process engine only). |
 | `DCLAW_ALLOW_FFI` | unset | `1` lets the Python hooks use the in-process engine when the daemon socket is missing or fails. It needs its own `DCLAW_FLASH_PATH`. |
 | `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file path. |

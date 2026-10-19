@@ -282,7 +282,7 @@ Add the proxy to your MCP client configuration. Instead of pointing directly at 
       "args": ["/usr/local/lib/defenseclaw/mcp_proxy.py"],
       "env": {
         "DCLAW_MCP_UPSTREAM": "[\"python3\", \"-m\", \"esp_claw.mcp_server\"]",
-        "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so"
+        "DCLAW_SOCKET_PATH": "/run/defenseclaw/defenseclaw.sock"
       }
     }
   }
@@ -575,7 +575,7 @@ cd edge-connector/build && ctest --output-on-failure
 
 # 3. Test the hook standalone
 echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
-  DCLAW_LIB_PATH=/usr/local/lib/libdclaw_core.so \
+  DCLAW_SOCKET_PATH=/run/defenseclaw/defenseclaw.sock \
   python3 /usr/local/lib/defenseclaw/picoclaw_hook.py
 # Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"edge-connector-gate"}}
 
