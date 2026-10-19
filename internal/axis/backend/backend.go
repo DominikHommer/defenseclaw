@@ -55,8 +55,13 @@ func actualCalls() nativeCalls {
 			return s.Protocol.Receive(ctx)
 		},
 		close: func(ctx context.Context, s *bridgeprocess.Session) cleanupObservation {
-			if s == nil || s.Protocol == nil {
+			if s == nil {
 				return cleanupObservation{err: ErrSession}
+			}
+			// Start may return retained native custody before its protocol owner
+			// exists. Native wait is still required before assets can be released.
+			if s.Protocol == nil {
+				return observeCleanup(ctx, nil, s.StopAndWait)
 			}
 			return observeCleanup(ctx, s.Protocol.Close, s.StopAndWait)
 		},
@@ -64,11 +69,13 @@ func actualCalls() nativeCalls {
 }
 
 func observeCleanup(ctx context.Context, closeProtocol, waitNative func(context.Context) error) cleanupObservation {
-	protocolErr := closeProtocol(ctx)
+	var protocolErr error
+	if closeProtocol != nil {
+		protocolErr = closeProtocol(ctx)
+	}
 	nativeErr := waitNative(ctx)
-	// Start returns a nonnil Session only with an initialized Owner.
-	// Close returns through Owner.done when this fresh context remains
-	// live: its workers have joined even if its protocol cause is sticky.
+	// A partial Start may have no protocol owner. When present, Close returns
+	// through Owner.done after its workers join on a live context.
 	// Independent native wait, never that protocol cause, proves custody.
 	return cleanupObservation{complete: ctx.Err() == nil && nativeErr == nil, err: errors.Join(protocolErr, nativeErr, ctx.Err())}
 }
