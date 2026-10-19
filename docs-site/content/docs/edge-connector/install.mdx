@@ -485,7 +485,7 @@ The gateway rejects missing or invalid device HMAC keys by default. Pre-register
 | `DCLAW_EMERGENCY_KEY` | (none) | Separate nonzero 32-byte hex secret for emergency commands. |
 | `DCLAW_CA_CERT_PATH` | (none) | Broker CA PEM file for TLS server verification. |
 | `DCLAW_DEVICE_CERT_PATH`, `DCLAW_DEVICE_KEY_PATH` | (none) | Client PEM certificate and private key when broker mTLS is enabled. |
-| `DCLAW_FLASH_PATH` | `/var/lib/defenseclaw/flash.bin` | Persistent flash backing file; production overrides must stay under `/var/lib/defenseclaw/` or `/etc/defenseclaw/`. |
+| `DCLAW_FLASH_PATH` | `/var/lib/defenseclaw/flash.bin` | Persistent flash backing file; production overrides must stay under `/var/lib/defenseclaw/` or `/etc/defenseclaw/`. Each engine takes an exclusive lock on its file: a second daemon or in-process library engine on the same file refuses to start. |
 | `DCLAW_IPC_SOCKET_PATH` | `/run/defenseclaw/defenseclaw.sock` | Local IPC socket path. |
 | `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to the Edge Connector shared library. |
 | `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file path. |

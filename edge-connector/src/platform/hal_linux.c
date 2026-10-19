@@ -29,6 +29,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 
 #define FLASH_TOTAL_SIZE   (16 * 1024)
 
@@ -377,8 +378,32 @@ int hal_init(void) {
      * especially important when falling back to /tmp.
      * O_NOFOLLOW: Prevent symlink attacks — if the path is a symlink, open()
      * will fail with ELOOP instead of following it. */
-    flash_fd = open(flash_path, O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
+    /* Re-initialisation in the same process reopens the file. */
+    if (flash_fd >= 0) {
+        close(flash_fd);
+        flash_fd = -1;
+    }
+    flash_fd = open(flash_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (flash_fd < 0) return -1;
+
+    /* Exactly one engine may own a flash file. Each engine keeps the audit
+     * ring head, HMAC chain, boot counter and emergency records in RAM, so
+     * two engines on one file (the daemon and an in-process library, or two
+     * daemons) overwrite each other's entries and break the audit chain. */
+    if (flock(flash_fd, LOCK_EX | LOCK_NB) != 0) {
+        if (errno == EWOULDBLOCK || errno == EAGAIN) {
+            fprintf(stderr, "[DCLAW] ERROR: flash file %s is in use by another DefenseClaw "
+                    "engine (daemon or in-process library); refusing to start. "
+                    "Use the daemon's IPC socket, or give this engine its own DCLAW_FLASH_PATH.\n",
+                    flash_path);
+        } else {
+            fprintf(stderr, "[DCLAW] ERROR: cannot lock flash file %s: %s\n",
+                    flash_path, strerror(errno));
+        }
+        close(flash_fd);
+        flash_fd = -1;
+        return -1;
+    }
 
     /* Ensure file is at least FLASH_TOTAL_SIZE */
     if (ftruncate(flash_fd, FLASH_TOTAL_SIZE) < 0) {
