@@ -1685,7 +1685,12 @@ cut to fit, with the harness and DefenseClaw ownership carried as labels.
 `internal/openshell/image` builds one image per harness, uid and ingress port
 (and every other input) on top of the digest-pinned NVIDIA community base
 (`ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:aeef1c63…`;
-`openshell.image.base` overrides it and must also be digest-pinned).
+`openshell.image.base` overrides it and must also be digest-pinned). When
+Docker already holds the base (its digest is the image ID or a repo digest of
+a local image, as for a base built on the computer), the build reads it under
+the local name `defenseclaw/sandbox-base:<image ID>` and checks that the
+overlay's layers start with the base's, because BuildKit resolves a
+`FROM name@digest` in the registry even with `--pull=false`.
 
 ### Build
 
@@ -2817,6 +2822,11 @@ section is the same type: `openshell.admin` is the floor, the profile can only
 tighten it (`config.TightenOpenShellAdmin`, `Config.SandboxFloor`). See
 [Managed hosts](#managed-hosts).
 
+The managed daemon re-resolves each kept sandbox against the floor of its own
+confirmed registration. Concurrent sandboxes can therefore use different
+profile floors. A missing, unconfirmed or revoked registration resolves
+against the closed floor instead of inheriting another sandbox's floor.
+
 `Effective.Allow` checks runtime actions against the same policy: unblock,
 approve, approve always, host port, mount, skip-permissions, learn mode and
 harness.
@@ -2902,7 +2912,11 @@ and answers `sandbox_*` reasons. A resolve creates a pending registration
 service-owned) that the daemon binds to the sandbox; a registration holds the
 `subject_key` (an HMAC of `v1|uid|account|sid`, so directory facts never turn a
 create into `sandbox_subject_changed`) and a `facts_digest` whose change
-triggers a re-match. Lookups are scoped to the caller's uid, so another uid's id
+triggers a re-match. It also records `create_profile`, the profile of the
+verified match at create, once: a re-match to another profile resolves the
+sandbox under that profile's floor tightened by the create profile's
+(`sandboxRegistrationFloor`), so an assignment change never loosens a running
+sandbox. Lookups are scoped to the caller's uid, so another uid's id
 behaves as unknown. Binding and sandbox IDs are reserved across accounts;
 tombstones keep a deleted ID from registering again. A confirmed registration's
 `policy/current` response supplies the complete organization floor. The daemon

@@ -200,8 +200,9 @@ func managedGatewaySandboxNote(cfg *config.Config) string {
 type sandboxRuntimeDeps struct {
 	// config is the configuration the manager reads: config.yaml for the
 	// per-user gateway, the managed gateway's settings for the daemon.
-	config func() *config.Config
-	health *SidecarHealth
+	config           func() *config.Config
+	configForSandbox func(string) *config.Config
+	health           *SidecarHealth
 	// telemetry records the v8 sandbox records: the per-user gateway's
 	// recorder, or a managed daemon's relay to the managed gateway
 	// (daemonRelayTelemetry). nil drops them.
@@ -211,6 +212,9 @@ type sandboxRuntimeDeps struct {
 	// persist keeps "always" decisions; nil refuses them.
 	persist    triage.Persister
 	syncConfig func(context.Context) error
+	// confirmPolicy is a managed daemon's manager.Options.ConfirmPolicy;
+	// nil for the per-user gateway, whose policy is local.
+	confirmPolicy func(context.Context, string)
 	// hostUser is the account sandboxes run as; nil is this process's.
 	hostUser         *manager.HostUser
 	discoveryRemoved func(string)
@@ -265,9 +269,10 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 			openshell.ClientOptions{Workspace: cfg.OpenShell.Gateway.Workspace})
 	}
 	mgr, err := manager.New(manager.Options{
-		DataDir: dataDir,
-		Owner:   owner,
-		Config:  deps.config,
+		DataDir:          dataDir,
+		Owner:            owner,
+		Config:           deps.config,
+		ConfigForSandbox: deps.configForSandbox,
 		Connect: manager.DiscoverConnector(
 			openshell.DiscoverOptions{Gateway: cfg.OpenShell.Gateway.Name},
 			openshell.ClientOptions{Workspace: cfg.OpenShell.Gateway.Workspace},
@@ -286,6 +291,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		Telemetry:          telemetry,
 		Persist:            deps.persist,
 		SyncConfig:         deps.syncConfig,
+		ConfirmPolicy:      deps.confirmPolicy,
 		Quiesce:            inflight,
 		ForgetBinding:      api.ForgetSandboxBinding,
 		IngressPort:        ingressPort,

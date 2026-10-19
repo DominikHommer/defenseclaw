@@ -111,6 +111,10 @@ type Options struct {
 	Owner string
 	// Config returns the current configuration snapshot. Required.
 	Config func() *config.Config
+	// ConfigForSandbox returns the policy snapshot for an existing sandbox.
+	// Managed daemons use its confirmed registration's floor. A nil result
+	// fails closed instead of applying another sandbox's floor.
+	ConfigForSandbox func(name string) *config.Config
 	// Connect opens the OpenShell gateway connection. Required.
 	Connect Connector
 	// Bindings is the ingress binding store. Required.
@@ -133,6 +137,14 @@ type Options struct {
 	// a decision that must see the user's latest write (the reload watcher
 	// follows the file a second or so later); nil decides on the snapshot.
 	SyncConfig func(context.Context) error
+	// ConfirmPolicy brings an existing sandbox's policy up to date before a
+	// decision its person makes for it is judged (an unblock, an answer to
+	// an ask): a managed daemon confirms the sandbox's registration with the
+	// managed gateway, as its egress proxy does before a new connection, so
+	// the decision and `sandbox policy explain` name the same profile after
+	// an administrator's change (GAP-0132). nil decides on the policy in
+	// force.
+	ConfirmPolicy func(ctx context.Context, sandbox string)
 	// Quiesce is the ingress in-flight tracker approvals wait on.
 	Quiesce triage.Quiescer
 	// ForgetBinding drops the ingress's per-binding state after a revoke.
@@ -888,6 +900,16 @@ func (m *Manager) config() *config.Config {
 		cfg = &config.Config{}
 	}
 	return cfg
+}
+
+// configForSandbox keeps fallback policy checks under the same floor as
+// normal resolution. A managed sandbox without a confirmed policy has no
+// configuration to borrow from another sandbox.
+func (m *Manager) configForSandbox(name string) *config.Config {
+	if m.opts.ConfigForSandbox != nil {
+		return m.opts.ConfigForSandbox(name)
+	}
+	return m.config()
 }
 
 // keepIgnored is what a mounted project's undo point keeps a copy of

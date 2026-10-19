@@ -81,8 +81,18 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		return b.verifyBuilt(ctx, c, rec, opts)
 	}
 
-	if err := buildImage(ctx, b.Docker, c.Files, c.Labels, c.Tag, b.Log); err != nil {
+	files, base, local, err := b.localBase(ctx, c)
+	if err != nil {
+		return Record{}, err
+	}
+	if err := buildImage(ctx, b.Docker, files, c.Labels, c.Tag, b.Log); err != nil {
 		return Record{}, fmt.Errorf("openshell image: docker build %s: %w", c.Tag, err)
+	}
+	if local {
+		if err := b.checkBuiltOn(ctx, c.Tag, base); err != nil {
+			_, _ = output(ctx, b.Docker, nil, "image", "rm", "-f", c.Tag)
+			return Record{}, err
+		}
 	}
 
 	id, err := b.imageID(ctx, c.Tag)

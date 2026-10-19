@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -86,6 +87,11 @@ type Generation struct {
 	// from the process-wide map the next generation rewrites (GAP-1466).
 	// Guarded by ruleCategoriesMu; nil for a generation never published.
 	registeredRules map[string]*compiledRulePackCategories
+	// sandboxPacks are the custom required sandbox packs the floors name,
+	// by reference, as loaded from sandboxPackDir (loadSandboxRequiredPacks);
+	// publishing the generation makes them the packs the sandbox routes use.
+	sandboxPacks   map[string]*packs.Pack
+	sandboxPackDir string
 	// opaError is why a non-strict build has no OPA ("" when it has one).
 	opaError string
 	// scannerPinError is why a non-strict build found a pinned scanner file

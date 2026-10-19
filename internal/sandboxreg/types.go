@@ -112,10 +112,17 @@ type Registration struct {
 	// provisional). A change triggers a re-match, never a refusal.
 	FactsDigest string `json:"facts_digest"`
 	// Profile is the matched guardrail profile; "" = openshell.admin alone.
-	Profile       string `json:"profile"`
-	ProfileMatch  string `json:"profile_match"`
-	MatchedGroup  string `json:"matched_group,omitempty"`
-	ProfileDigest string `json:"profile_digest"`
+	Profile string `json:"profile"`
+	// CreateProfile is the profile the sandbox was created under (the
+	// verified match at resolve). A re-match to another profile runs the
+	// sandbox under that profile's floor tightened by this one's, so a
+	// profile-assignment change tightens a running sandbox and never
+	// loosens it (GAP-0242). Nil for a registration made before 1.0.3 or
+	// under a provisional match: the next verified re-match sets it.
+	CreateProfile *string `json:"create_profile,omitempty"`
+	ProfileMatch  string  `json:"profile_match"`
+	MatchedGroup  string  `json:"matched_group,omitempty"`
+	ProfileDigest string  `json:"profile_digest"`
 	// Generation is the host config generation at resolve (admin-only).
 	Generation uint64 `json:"generation"`
 	// EffectiveDigest is packs.Effective.Digest(), the digest users see.
