@@ -632,18 +632,24 @@ async function defenseclawLogFailOpen(reason, category) {
 {{end}}      return null;
     }
     const data = await res.json();
-{{if not .SecureClient}}    // A reply without a known verdict is as untrustworthy as no reply.
+{{if .Sandbox}}    // A reply without a known verdict is as untrustworthy as no reply.
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
-{{end}}    const out = data && data.hook_output;
+{{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+      return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
+    }
+{{end}}{{end}}    const out = data && data.hook_output;
     if (out && (out.decision === "deny" || out.decision === "block")) {
       return { reason: out.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
-{{if not .SecureClient}}    if (data.action === "block" || data.action === "confirm") {
+{{if .Sandbox}}    if (data.action === "block") {
+      return { reason: data.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
+    }
+{{else}}{{if not .SecureClient}}    if (data.action === "block" || data.action === "confirm") {
       return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
     }
-{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
+{{end}}{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
