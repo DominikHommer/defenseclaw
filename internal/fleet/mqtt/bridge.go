@@ -17,7 +17,6 @@
 package mqtt
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -541,33 +540,14 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		return
 	}
 
-	now := time.Now()
-	b.lastHeartbeatMu.Lock()
-	minInterval := b.heartbeatMinInterval
-	if minInterval < 0 {
-		minInterval = time.Second
-	}
-	if minInterval > 0 {
-		if last, ok := b.lastHeartbeat[fullID]; ok && now.Sub(last) < minInterval {
-			b.lastHeartbeatMu.Unlock()
-			b.logger.Printf("[mqtt-bridge] WARNING: rate-limited heartbeat from device %d (interval=%v)",
-				parts.DeviceID, now.Sub(last))
-			b.mu.Lock()
-			b.rateLimitDrops++
-			b.mu.Unlock()
-			return
-		}
-	}
-	const maxHeartbeatEntries = 100000
-	if len(b.lastHeartbeat) >= maxHeartbeatEntries {
-		b.lastHeartbeatMu.Unlock()
-		b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rate-limit map full (%d entries), dropping heartbeat from device %d",
-			maxHeartbeatEntries, parts.DeviceID)
+	// Never allocate rate-limit state or spend a key lookup on an ID the
+	// manager would reject anyway.
+	if _, known := b.fleet.GetDevice(fullID); !known && !b.fleet.AutoRegister {
+		b.logger.Printf("[mqtt-bridge] rejected heartbeat from unregistered device %d (tenant=%d fleet=%d)",
+			parts.DeviceID, parts.TenantID, parts.FleetID)
 		b.incErrors()
 		return
 	}
-	b.lastHeartbeat[fullID] = now
-	b.lastHeartbeatMu.Unlock()
 
 	if parts.Suffix != "heartbeat" {
 		b.logger.Printf("[mqtt-bridge] unexpected suffix %q for heartbeat handler", parts.Suffix)
@@ -592,6 +572,12 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 	if err := b.verifyMessageHMAC(msg, parts, hw); err != nil {
 		b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — %v", err)
 		b.incErrors()
+		return
+	}
+
+	// Only authenticated frames consume the device's heartbeat slot, so a
+	// forged frame on its topic cannot suppress the genuine heartbeat.
+	if !b.allowHeartbeat(fullID, parts.DeviceID, time.Now()) {
 		return
 	}
 
@@ -805,51 +791,6 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		return
 	}
 
-	if dev.Status == manager.StatusLockdown {
-		b.logger.Printf("[mqtt-bridge] verdict request from lockdown device %d — returning BLOCK",
-			parts.DeviceID)
-		// Strip trailing 32-byte HMAC for keyed devices so the CBOR
-		// decoder in sendLockdownBlockResponse sees clean CBOR only.
-		lockdownPayload := msg.Payload
-		if b.keyProvider != nil {
-			dk := b.keyProvider.KeyForDevice(fullID)
-			var zk [32]byte
-			if dk != nil && !bytes.Equal(dk, zk[:]) && len(msg.Payload) >= 64 {
-				lockdownPayload = msg.Payload[:len(msg.Payload)-32]
-			}
-		}
-		b.sendLockdownBlockResponse(parts, lockdownPayload)
-		b.incErrors()
-		return
-	}
-
-	{
-		now := time.Now()
-		b.verdictRateMu.Lock()
-		entry, ok := b.verdictRateMap[fullID]
-		if !ok {
-			entry = &verdictRateEntry{windowAt: now}
-			b.verdictRateMap[fullID] = entry
-		}
-		if now.Sub(entry.windowAt) >= time.Second {
-			entry.count = 0
-			entry.windowAt = now
-		}
-		entry.count++
-		overLimit := entry.count > verdictRateLimit
-		overLimitCount := entry.count
-		b.verdictRateMu.Unlock()
-
-		if overLimit {
-			b.logger.Printf("[mqtt-bridge] WARNING: verdict request rate-limited for device %d (%d req/s exceeds limit %d)",
-				parts.DeviceID, overLimitCount, verdictRateLimit)
-			b.mu.Lock()
-			b.rateLimitDrops++
-			b.mu.Unlock()
-			return
-		}
-	}
-
 	if len(msg.Payload) < 32 {
 		b.logger.Printf("[mqtt-bridge] verdict request from device %d too short (%d bytes, need >= 32)",
 			parts.DeviceID, len(msg.Payload))
@@ -916,12 +857,32 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 			}
 		}
 	}
-	_ = isKeyed
+
+	// Charge the per-device budget only after authentication, so frames
+	// forged on a device's topic cannot exhaust its verdict budget.
+	if !b.allowVerdict(fullID, time.Now()) {
+		b.logger.Printf("[mqtt-bridge] WARNING: verdict request rate-limited for device %d (limit %d req/s)",
+			parts.DeviceID, verdictRateLimit)
+		b.mu.Lock()
+		b.rateLimitDrops++
+		b.mu.Unlock()
+		return
+	}
 
 	vr, err := DecodeVerdictRequest(payloadBody)
 	if err != nil {
 		b.logger.Printf("[mqtt-bridge] decode verdict request from device %d: %v", parts.DeviceID, err)
 		b.incErrors()
+		return
+	}
+
+	// A lockdown device gets a signed BLOCK, but only for a request that
+	// passed the same authentication and rate limit as any other: the
+	// gateway must not sign responses over unauthenticated fields.
+	if dev.Status == manager.StatusLockdown {
+		b.logger.Printf("[mqtt-bridge] verdict request from lockdown device %d — returning BLOCK",
+			parts.DeviceID)
+		b.sendLockdownBlockResponse(parts, vr)
 		return
 	}
 
@@ -988,6 +949,67 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	b.mu.Unlock()
 }
 
+// maxHeartbeatEntries bounds the heartbeat rate-limit map. Entries are only
+// created for authenticated frames, and entries older than the minimum
+// interval are swept when the map fills because they no longer limit anything.
+const maxHeartbeatEntries = 100000
+
+// allowHeartbeat applies the per-device minimum heartbeat interval. Callers
+// invoke it only after the frame has been authenticated.
+func (b *Bridge) allowHeartbeat(fullID uint64, deviceID uint32, now time.Time) bool {
+	b.lastHeartbeatMu.Lock()
+	defer b.lastHeartbeatMu.Unlock()
+	minInterval := b.heartbeatMinInterval
+	if minInterval < 0 {
+		minInterval = time.Second
+	}
+	if minInterval == 0 {
+		return true
+	}
+	if last, ok := b.lastHeartbeat[fullID]; ok && now.Sub(last) < minInterval {
+		b.logger.Printf("[mqtt-bridge] WARNING: rate-limited heartbeat from device %d (interval=%v)",
+			deviceID, now.Sub(last))
+		b.mu.Lock()
+		b.rateLimitDrops++
+		b.mu.Unlock()
+		return false
+	}
+	if _, ok := b.lastHeartbeat[fullID]; !ok && len(b.lastHeartbeat) >= maxHeartbeatEntries {
+		for id, ts := range b.lastHeartbeat {
+			if now.Sub(ts) >= minInterval {
+				delete(b.lastHeartbeat, id)
+			}
+		}
+		if len(b.lastHeartbeat) >= maxHeartbeatEntries {
+			b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rate-limit map full (%d entries), dropping heartbeat from device %d",
+				maxHeartbeatEntries, deviceID)
+			b.incErrors()
+			return false
+		}
+	}
+	b.lastHeartbeat[fullID] = now
+	return true
+}
+
+// allowVerdict charges one request against the device's per-second verdict
+// budget. Callers invoke it only for authenticated requests from registered
+// devices, so the map is bounded by the registered fleet.
+func (b *Bridge) allowVerdict(fullID uint64, now time.Time) bool {
+	b.verdictRateMu.Lock()
+	defer b.verdictRateMu.Unlock()
+	entry, ok := b.verdictRateMap[fullID]
+	if !ok {
+		entry = &verdictRateEntry{windowAt: now}
+		b.verdictRateMap[fullID] = entry
+	}
+	if now.Sub(entry.windowAt) >= time.Second {
+		entry.count = 0
+		entry.windowAt = now
+	}
+	entry.count++
+	return entry.count <= verdictRateLimit
+}
+
 // validateTopicIDs checks that the topic's tenant/fleet/device IDs are all non-zero,
 // preventing attackers from injecting zero-valued IDs that collide with other devices.
 func validateTopicIDs(parts *TopicParts) error {
@@ -1010,21 +1032,11 @@ func (b *Bridge) incErrors() {
 }
 
 // sendLockdownBlockResponse sends a BLOCK verdict response to a device that
-func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, rawPayload []byte) {
-	// Decode the verdict request to get the real RequestID, ToolHash, BootNonce, and RequestNonce.
-	var requestID uint16
-	var toolHash [32]byte
-	var bootNonce [16]byte
-	var requestNonce [4]byte
-	if vr, err := DecodeVerdictRequest(rawPayload); err == nil {
-		requestID = vr.RequestID
-		toolHash = vr.ToolHash
-		bootNonce = vr.BootNonce
-		requestNonce = vr.RequestNonce
-	} else {
-		b.logger.Printf("[mqtt-bridge] lockdown BLOCK: failed to decode verdict request: %v (using request_id=1)", err)
-		requestID = 1 // fallback to non-zero so the C agent does not discard
-	}
+func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, vr *VerdictRequest) {
+	requestID := vr.RequestID
+	toolHash := vr.ToolHash
+	bootNonce := vr.BootNonce
+	requestNonce := vr.RequestNonce
 
 	resp := &VerdictResponse{
 		RequestID: requestID,

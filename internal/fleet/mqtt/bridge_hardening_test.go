@@ -21,11 +21,13 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
@@ -158,5 +160,152 @@ func TestProductionVerdictRequiresHMACWithZeroKeyProvider(t *testing.T) {
 	b.handleVerdictRequest(Message{Topic: "defenseclaw/1/2/42/verdict/req", Payload: unsigned})
 	if n := len(verdictPublishes(c)); n != 0 {
 		t.Fatalf("verdict request answered without a key provider: %d", n)
+	}
+}
+
+// A forged frame on a device's heartbeat topic must not consume the rate-limit
+// slot of the genuine, correctly signed heartbeat that follows it.
+func TestForgedHeartbeatDoesNotConsumeRateLimitSlot(t *testing.T) {
+	productionEnv(t)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 1, 0)
+	ks := &mapKeyStore{keys: map[uint64][]byte{manager.ComposeID(1, 2, 42): key}}
+	b := NewBridge(newMockClient(), fm, verdict.NewCache(10, nil))
+	quietBridge(b)
+	b.SetDeviceKeyStore(ks)
+	b.SetHeartbeatRateLimit(time.Second)
+	topic := "defenseclaw/1/2/42/heartbeat"
+
+	b.handleHeartbeat(Message{Topic: topic, Payload: []byte{1, 2, 3}})
+	forged := signedHB(topic, []byte("WRONGKEYWRONGKEYWRONGKEYWRONGKEY"), 42, 90, 1, 0)
+	b.handleHeartbeat(Message{Topic: topic, Payload: forged})
+	b.handleHeartbeat(Message{Topic: topic, Payload: signedHB(topic, key, 42, 100, 1, 0)})
+	if hb, _, _ := b.Stats(); hb != 1 {
+		t.Fatalf("genuine heartbeat suppressed by forged frames: processed=%d", hb)
+	}
+	// The authenticated heartbeat does consume the slot.
+	b.handleHeartbeat(Message{Topic: topic, Payload: signedHB(topic, key, 42, 101, 1, 0)})
+	if hb, _, _ := b.Stats(); hb != 1 {
+		t.Fatalf("second heartbeat within the interval was not rate limited: processed=%d", hb)
+	}
+}
+
+// Frames on unregistered IDs must not allocate rate-limit state, so they
+// cannot fill the map and block heartbeats fleet-wide.
+func TestUnregisteredHeartbeatsDoNotFillRateLimitMap(t *testing.T) {
+	productionEnv(t)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 1, 0)
+	ks := &mapKeyStore{keys: map[uint64][]byte{manager.ComposeID(1, 2, 42): key}}
+	b := NewBridge(newMockClient(), fm, verdict.NewCache(10, nil))
+	quietBridge(b)
+	b.SetDeviceKeyStore(ks)
+	for i := uint32(1); i <= maxHeartbeatEntries+10; i++ {
+		b.handleHeartbeat(Message{Topic: fmt.Sprintf("defenseclaw/9/9/%d/heartbeat", i), Payload: []byte{0}})
+	}
+	b.lastHeartbeatMu.Lock()
+	n := len(b.lastHeartbeat)
+	b.lastHeartbeatMu.Unlock()
+	if n != 0 {
+		t.Fatalf("unauthenticated frames allocated %d rate-limit entries", n)
+	}
+	topic := "defenseclaw/1/2/42/heartbeat"
+	b.handleHeartbeat(Message{Topic: topic, Payload: signedHB(topic, key, 42, 100, 1, 0)})
+	if hb, _, _ := b.Stats(); hb != 1 {
+		t.Fatalf("registered device's heartbeat dropped: processed=%d", hb)
+	}
+}
+
+// A full map of stale entries is swept rather than blocking new devices.
+func TestHeartbeatRateMapSweepsStaleEntriesWhenFull(t *testing.T) {
+	b := NewBridge(newMockClient(), manager.New(nil), verdict.NewCache(10, nil))
+	quietBridge(b)
+	b.SetHeartbeatRateLimit(time.Second)
+	old := time.Now().Add(-time.Minute)
+	for i := uint64(0); i < maxHeartbeatEntries; i++ {
+		b.lastHeartbeat[i+1_000_000] = old
+	}
+	if !b.allowHeartbeat(7, 7, time.Now()) {
+		t.Fatal("heartbeat dropped although every map entry was stale")
+	}
+	if n := len(b.lastHeartbeat); n != 1 {
+		t.Fatalf("stale entries not swept: %d", n)
+	}
+}
+
+// Unauthenticated frames on the verdict topic must not exhaust the device's
+// per-second verdict budget.
+func TestForgedVerdictRequestsDoNotExhaustBudget(t *testing.T) {
+	productionEnv(t)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 1, 0)
+	ks := &mapKeyStore{keys: map[uint64][]byte{manager.ComposeID(1, 2, 42): key}}
+	c := newMockClient()
+	b := NewBridge(c, fm, allowCache())
+	quietBridge(b)
+	b.SetDeviceKeyStore(ks)
+	topic := "defenseclaw/1/2/42/verdict/req"
+	junk := make([]byte, 64)
+	for i := 0; i < 5*verdictRateLimit; i++ {
+		b.handleVerdictRequest(Message{Topic: topic, Payload: junk})
+	}
+	good := signedVerdictReq(topic, key, newVR(7, [16]byte{1}, [4]byte{1, 2, 3, 4}))
+	b.handleVerdictRequest(Message{Topic: topic, Payload: good})
+	if n := len(verdictPublishes(c)); n != 1 {
+		t.Fatalf("genuine request starved by forged frames: responses=%d", n)
+	}
+}
+
+// A device in lockdown gets a signed BLOCK only for an authenticated request:
+// the gateway must not sign responses over attacker-chosen fields, and the
+// lockdown path is rate limited like any other.
+func TestLockdownBlockRequiresAuthenticatedRequest(t *testing.T) {
+	productionEnv(t)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 1, 0)
+	full := manager.ComposeID(1, 2, 42)
+	ks := &mapKeyStore{keys: map[uint64][]byte{full: key}}
+	c := newMockClient()
+	b := NewBridge(c, fm, allowCache())
+	quietBridge(b)
+	b.SetDeviceKeyStore(ks)
+	b.SetHeartbeatRateLimit(0)
+	hbTopic := "defenseclaw/1/2/42/heartbeat"
+	b.handleHeartbeat(Message{Topic: hbTopic, Payload: signedHB(hbTopic, key, 42, 100, 1, 0x04)})
+	if d, _ := fm.GetDevice(full); d.Status != manager.StatusLockdown {
+		t.Fatalf("setup: status=%s", d.Status)
+	}
+	topic := "defenseclaw/1/2/42/verdict/req"
+	chosenNonce := [4]byte{0xDE, 0xAD, 0xBE, 0xEF}
+	vr := newVR(0x1234, [16]byte{0xB0, 0x07}, chosenNonce)
+	unsigned := append(EncodeVerdictRequestCBOR(vr), encodeCBORBytes(chosenNonce[:])...)
+	unsigned = append(unsigned, make([]byte, 32)...)
+	for i := 0; i < 50; i++ {
+		b.handleVerdictRequest(Message{Topic: topic, Payload: unsigned})
+	}
+	if n := len(verdictPublishes(c)); n != 0 {
+		t.Fatalf("lockdown path signed %d responses for unauthenticated requests", n)
+	}
+
+	good := signedVerdictReq(topic, key, vr)
+	for i := 0; i < 2*verdictRateLimit; i++ {
+		b.handleVerdictRequest(Message{Topic: topic, Payload: good})
+	}
+	pubs := verdictPublishes(c)
+	if len(pubs) != verdictRateLimit {
+		t.Fatalf("lockdown responses=%d, want %d (rate limited)", len(pubs), verdictRateLimit)
+	}
+	p := pubs[0].Payload
+	if p[2] != uint8(verdict.ActionBlock) || binary.BigEndian.Uint16(p[0:2]) != 0x1234 {
+		t.Fatalf("lockdown response is not a BLOCK for the request: % x", p[:12])
+	}
+	want := computeVerdictHMACFull(key, "42", 0x1234, p[2], p[3], binary.BigEndian.Uint16(p[4:6]), p[6], p[7],
+		binary.BigEndian.Uint32(p[8:12]), vr.ToolHash, vr.BootNonce, chosenNonce)
+	if !hmac.Equal(want[:], p[12:44]) {
+		t.Fatal("lockdown BLOCK not signed over the authenticated request")
 	}
 }
