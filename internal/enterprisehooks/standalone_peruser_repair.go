@@ -11,6 +11,7 @@
 package enterprisehooks
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -238,11 +239,41 @@ func verifyStandaloneHookRuntime(conn connector.Connector, setupOpts connector.S
 	if !rendersScript {
 		return nil // plugin-only connectors keep no per-connector runtime record
 	}
+	if err := verifyHookRuntimeToken(conn, opts); err != nil {
+		return err
+	}
 	rendered := expected.HookFailMode
 	if provider, ok := conn.(connector.HookCapabilityProvider); ok && rendered == "closed" && !provider.HookCapabilities(opts).SupportsFailClosed {
 		rendered = "open"
 	}
 	return verifyHookRuntimeRecords(hookDir, name, rendered)
+}
+
+// verifyHookRuntimeToken requires the connector-scoped token file the hook
+// script reads to hold the credential this pass renders. A user who moved
+// it aside left every hook call of the account refused for a missing token
+// while the guardian repaired nothing and status and verify read healthy
+// (GAP-0424). The token is never part of the error.
+func verifyHookRuntimeToken(conn connector.Connector, opts connector.SetupOpts) error {
+	name := conn.Name()
+	path, want, err := connector.HookRuntimeTokenFile(opts, conn)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: connector %s: resolve the hook token file: %w", name, err)
+	}
+	if path == "" {
+		return nil
+	}
+	body, exists, err := readUserRuntimeRecord(path, "hook token")
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: connector %s: %w", name, err)
+	}
+	if !exists {
+		return fmt.Errorf("enterprise hooks: connector %s hook token is missing: %s", name, path)
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(string(body))), []byte(strings.TrimSpace(want))) != 1 {
+		return fmt.Errorf("enterprise hooks: connector %s hook token does not hold the credential DefenseClaw issued to this account: %s", name, path)
+	}
+	return nil
 }
 
 // readSharedHookScriptDigests returns the digests of the scripts every

@@ -80,6 +80,7 @@ var (
 	windowsHookBinaryDigestRefusal     string
 	windowsHookBinaryLastDigestRefusal string
 	windowsHookBinarySharedDigestOK    bool
+	windowsHookBinaryLstat             = os.Lstat
 )
 
 // watchWindowsStandaloneHookBinary restores a damaged hook binary, and an
@@ -235,20 +236,22 @@ func windowsRecordedArtifactHash(metadataPath, name string) (string, error) {
 
 // keepWindowsManagedFileCopy refreshes copyPath from target while target is
 // the recorded file (sha256 want) and refresh is set, and restores target
-// from a copy that still is when target is missing, empty or another file.
+// from a copy that still is when target is missing, non-regular, empty or another file.
 // It reports what was wrong with the target it restored, or "".
 func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (string, error) {
 	damage := ""
 	missing := false
 	windowsHookBinaryDigestRefusal = ""
 	windowsHookBinarySharedDigestOK = false
-	info, err := os.Lstat(target)
+	info, err := windowsHookBinaryLstat(target)
+	classification, err := classifyGuardianTargetLstat(info, err)
+	if err != nil {
+		return "", fmt.Errorf("inspect the hook binary %s: %w", target, err)
+	}
+	damage, missing = classification.damage, classification.missing
 	switch {
-	case errors.Is(err, os.ErrNotExist):
-		damage = "missing"
-		missing = true
-	case err != nil || !info.Mode().IsRegular():
-		return "", nil
+	case damage != "":
+		// The protected copy is verified below before a damaged entry is touched.
 	case info.Size() == 0:
 		damage = "empty (0 bytes)"
 	default:
@@ -281,15 +284,83 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 		return "", fmt.Errorf("the hook binary %s is %s and the guardian has no copy of the recorded release; agents run tool calls without DefenseClaw until Setup /repair restores it", target, damage)
 	}
 	// A missing binary is put back without replacing one that appeared
-	// meanwhile; a damaged one is replaced.
-	if err := copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, !missing); err != nil {
-		return "", fmt.Errorf("restore the hook binary %s, which is %s: %w", target, damage, err)
+	// meanwhile. A non-regular entry needs a narrow fallback when Windows
+	// cannot replace a directory entry with a file.
+	var restoreErr error
+	if !missing && info != nil && !info.Mode().IsRegular() {
+		restoreErr = restoreWindowsNonRegularHookBinary(copyPath, target)
+	} else {
+		restoreErr = copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, !missing)
+	}
+	if restoreErr != nil {
+		return "", fmt.Errorf("restore the hook binary %s, which is %s: %w", target, damage, restoreErr)
+	}
+	structuralDamage, err := windowsHookBinaryStructuralDamage(target)
+	if err != nil {
+		_ = os.Remove(target)
+		return "", fmt.Errorf("inspect the restored hook binary %s: %w", target, err)
+	}
+	if structuralDamage != "" {
+		_ = os.Remove(target)
+		return "", fmt.Errorf("restore the hook binary %s: restored file structure is invalid (%s)", target, structuralDamage)
 	}
 	if sum, err := windowsFileSHA256Hex(target); err != nil || sum != want {
 		_ = os.Remove(target)
 		return "", fmt.Errorf("restore the hook binary %s: the restored file does not match the recorded release", target)
 	}
 	return damage, nil
+}
+
+// restoreWindowsNonRegularHookBinary first replaces a file-like entry through
+// the usual secured temporary sibling. Windows cannot replace a directory
+// entry with a file, so only then remove the link or empty directory entry.
+// A non-empty real directory is moved aside intact; its contents are never deleted.
+func restoreWindowsNonRegularHookBinary(copyPath, target string) error {
+	replaceErr := copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, true)
+	if replaceErr == nil {
+		return nil
+	}
+	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, false)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect target after failed replacement: %w", err)
+	}
+	if info.Mode().IsRegular() {
+		return replaceErr // another writer changed the entry; re-evaluate next tick
+	}
+	removeErr := os.Remove(target)
+	if removeErr == nil {
+		return copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, false)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("remove non-regular target after failed replacement: %w", removeErr)
+	}
+	name, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		return err
+	}
+	attributes, err := windows.GetFileAttributes(name)
+	if err != nil {
+		return err
+	}
+	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("remove reparse point after failed replacement: %w", removeErr)
+	}
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return err
+	}
+	aside := target + ".damaged-" + hex.EncodeToString(suffix)
+	to, err := windows.UTF16PtrFromString(aside)
+	if err != nil {
+		return err
+	}
+	if err := windows.MoveFileEx(name, to, windows.MOVEFILE_WRITE_THROUGH); err != nil {
+		return fmt.Errorf("move non-empty directory aside: %w", err)
+	}
+	return copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, false)
 }
 
 // windowsHookBinaryStructuralDamage inspects the named file without opening

@@ -2665,11 +2665,24 @@ func hermesConfigPath(SetupOpts) string {
 		return HermesConfigPathOverride
 	}
 	// A privileged service acting for another user (the managed guardian)
-	// must resolve that user's profile, not its own token's known folders.
-	if home := activeUserHomeOverride(); home != "" && runtime.GOOS == "windows" {
+	// must resolve that user's profile, not its own token's known folders
+	// or, on Linux and macOS, its own home: the root guardian watched
+	// root's ~/.hermes instead of the user's, so an in-place rewrite of the
+	// user's Hermes config waited for the interval pass (GAP-0122). In the
+	// process's own home HERMES_HOME still applies.
+	if home := activeUserHomeOverride(); home != "" && (runtime.GOOS == "windows" || !isProcessUserHome(home)) {
 		return hermespath.ConfigPathForUserHome(home)
 	}
 	return hermesConfigPathResolver()
+}
+
+// isProcessUserHome reports whether home is this process's own home folder.
+func isProcessUserHome(home string) bool {
+	own, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(own) == "" {
+		return false
+	}
+	return filepath.Clean(own) == filepath.Clean(strings.TrimSpace(home))
 }
 
 func validateHermesWindowsConfigPath(configPath string) error {
