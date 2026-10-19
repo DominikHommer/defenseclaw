@@ -58,3 +58,4 @@ jobs:
           path: contained-hook-build-artifact/
           if-no-files-found: error
           retention-days: 14
+          include-hidden-files: true

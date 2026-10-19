@@ -1,0 +1,115 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS fixed contained hook live canary
+
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths: [.github/workflows/axis-contained-hook-live.yml]
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Exact independently reviewed fixed suite; dispatch Claude first
+        type: choice
+        options: [claude, all12]
+        default: claude
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: axis-contained-hook-live-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fixed-live:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      FIXED_SUITE: ${{ inputs.suite }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.14.6'
+      - name: Refuse a different fixed run before acquisition
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = cisco-ai-defense/defenseclaw
+          test "$GITHUB_REF" = refs/heads/codex/axis-sandbox-feasibility
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          case "$FIXED_SUITE" in claude|all12) ;; *) exit 1 ;; esac
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          test "$(id -u)" != 0
+          test "$(uname -m)" = x86_64
+      - name: Prepare only exact independently reviewed images
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 -B -E -s test/e2e/axis/native-hook-canary/live/prepare.py
+      - name: One fixed run with pidfd and whole PID namespace custody
+        shell: bash
+        timeout-minutes: 17
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir live-evidence
+          uname -a >live-evidence/kernel.txt
+          id >live-evidence/runner-identity.txt
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          original=absent
+          if test -r "$knob"; then original="$(cat "$knob")"; fi
+          changed=0
+          restore_userns() {
+            result=$?
+            trap - EXIT
+            if test "$changed" = 1; then
+              if ! sudo -n /usr/sbin/sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$original" >live-evidence/userns-restore.log 2>&1; then result=1; fi
+              if test "$(cat "$knob")" != "$original"; then result=1; fi
+            fi
+            printf 'original=%s changed=%s current=%s\n' "$original" "$changed" "$(cat "$knob" 2>/dev/null || printf absent)" >live-evidence/userns-preparation.txt
+            exit "$result"
+          }
+          trap restore_userns EXIT
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          if test "$original" = 1; then
+            changed=1
+            sudo -n /usr/sbin/sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >live-evidence/userns-prepare.log 2>&1
+            test "$(cat "$knob")" = 0
+          else
+            test "$original" = absent -o "$original" = 0
+          fi
+          case "$FIXED_SUITE" in
+            claude) outer_limit=210s ;;
+            all12) outer_limit=850s ;;
+            *) exit 1 ;;
+          esac
+          /usr/bin/timeout --signal=TERM --kill-after=5s "$outer_limit" \
+            /usr/bin/env -i "$(pwd)/live-inputs/fixed-contained-hook-outer" --run-fixed --suite "$FIXED_SUITE" \
+            >live-evidence/DRIVER-RESULT.json 2>live-evidence/driver-stderr.log
+      - name: Retain bounded evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-contained-hook-live-${{ inputs.suite }}-${{ github.sha }}
+          path: |
+            live-evidence/**
+            live-inputs/preparation-evidence/**
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
