@@ -3048,9 +3048,11 @@ threading.Event().wait()
         $interactiveInstallDefaults -match '(?s)state == nil.*?return opts.*?opts\.Action = "repair"') `
         'plain interactive reruns route valid existing installs to roster-preserving repair while fresh installs retain the selector'
     Assert-True ($nativeHarnessText -match "Invoke-WizardConfigureLaterAcceptance" -and
-        $nativeHarnessText -match "(?s)Invoke-WizardConnectorAcceptance.*?'codex' 'observe'.*?Invoke-WizardConnectorAcceptance.*?'claudecode' 'action'.*?Invoke-WizardConnectorAcceptance.*?'amp' 'action'" -and
-        $nativeHarnessText -match "foreach \(\`$wizardConnector in @\('copilot', 'cursor'\)\)") `
-        'setup acceptance performs Configure Later, reference mode installs, and the established additive connector wizard lifecycle samples'
+        $nativeHarnessText -match "(?s)Part = 'wizard-1'; Connector = 'codex'; Mode = 'observe'.*?Part = 'wizard-2'; Connector = 'claudecode'; Mode = 'action'.*?Part = 'wizard-2'; Connector = 'amp'; Mode = 'action'.*?Part = 'wizard-3'; Connector = 'copilot'; Mode = 'observe'.*?Part = 'wizard-3'; Connector = 'cursor'; Mode = 'observe'" -and
+        $nativeHarnessText -match '\$fixtureSearchPath \$userPathBefore \$wizardCell\.Connector \$wizardCell\.Mode' -and
+        $nativeWorkflowText -match 'part: \[wizard-1, wizard-2, wizard-3, lifecycle\]' -and
+        $nativeWorkflowText -match '-SetupAcceptancePart \$\{\{ matrix\.part \}\}') `
+        'setup acceptance performs Configure Later, reference mode installs, and the established additive connector wizard lifecycle samples, split across every CI part'
     $antigravitySupportedAvailability = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Assert-PackagedAntigravitySupportedAvailability\b.*?(?=\r?\nfunction )'
