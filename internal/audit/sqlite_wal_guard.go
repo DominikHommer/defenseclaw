@@ -187,7 +187,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	if ckpt.complete {
 		result.Restarted = ckpt.frames > 0
 		oversized := s.walFileBytes() > walIdleTrimBytes || logBytes > limitBytes
-		if !oversized || !(quiet || ckpt.frames <= walTrickleFrames) {
+		if !oversized || (!quiet && ckpt.frames > walTrickleFrames) {
 			return result, nil
 		}
 		var truncated bool
