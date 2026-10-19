@@ -64,6 +64,9 @@ def _bare_connector(**overrides) -> EdgeConnector:
     ec._fail_open_start = None
     ec._FAIL_OPEN_MAX_DURATION = 300
     ec._FAIL_OPEN_MAX_COUNT = 1000
+    ec._allow_ffi = overrides.get("allow_ffi", False)
+    ec._socket_path = overrides.get("socket_path", "/nonexistent/dclaw.sock")
+    ec._lib_path = "/nonexistent/libdclaw_core.so"
     ec._backend = overrides.get("backend", None)
     return ec
 
@@ -278,6 +281,61 @@ class TestFallbackBehavior:
         v = ec.evaluate(tool_name="exec", arguments={"cmd": "ls"})
         assert v.blocked is True
         assert "ENGINE_ERROR" in v.reason
+
+
+# -----------------------------------------------------------------------
+# No silent switch from the daemon to an in-process engine
+# -----------------------------------------------------------------------
+class TestNoSilentFFIFallback:
+    @patch("generic_hook._FFIBackend.__init__", return_value=None)
+    @patch("generic_hook.Path.exists", return_value=False)
+    def test_missing_socket_fails_closed_without_opt_in(self, _exists, ffi, monkeypatch):
+        monkeypatch.delenv("DCLAW_ALLOW_FFI", raising=False)
+        with pytest.raises(ConnectionError):
+            EdgeConnector(fail_open=False)
+        ffi.assert_not_called()
+
+    @patch("generic_hook._FFIBackend.__init__", return_value=None)
+    @patch("generic_hook.Path.exists", return_value=False)
+    def test_missing_socket_uses_ffi_with_opt_in(self, _exists, ffi, monkeypatch):
+        monkeypatch.setenv("DCLAW_ALLOW_FFI", "1")
+        ec = EdgeConnector(fail_open=False)
+        ffi.assert_called_once()
+        assert isinstance(ec._backend, _FFIBackend)
+
+    @patch("generic_hook._FFIBackend.__init__", return_value=None)
+    def test_socket_error_fails_closed_without_opt_in(self, ffi):
+        backend = _SocketBackend("/nonexistent/dclaw.sock")
+        ec = _bare_connector(backend=backend)
+        v = ec.evaluate(tool_name="read_file", arguments={"path": "/tmp/x"})
+        assert v.blocked is True
+        assert "ENGINE_ERROR" in v.reason
+        ffi.assert_not_called()
+        assert ec._backend is backend
+
+    @patch("generic_hook._FFIBackend.evaluate", return_value=Verdict.allow())
+    @patch("generic_hook._FFIBackend.__init__", return_value=None)
+    def test_socket_error_falls_back_with_opt_in(self, ffi, _evaluate):
+        backend = _SocketBackend("/nonexistent/dclaw.sock")
+        ec = _bare_connector(backend=backend, allow_ffi=True)
+        v = ec.evaluate(tool_name="read_file", arguments={"path": "/tmp/x"})
+        ffi.assert_called_once()
+        assert v.blocked is False
+
+    @patch("generic_hook._FFIBackend.__init__", return_value=None)
+    def test_dead_socket_check_keeps_socket_without_opt_in(self, ffi):
+        backend = _SocketBackend("/nonexistent/dclaw.sock")
+        ec = _bare_connector(backend=backend)
+        ec._check_backend()
+        assert ec._backend is backend
+        ffi.assert_not_called()
+
+    def test_session_id_override_reaches_backend(self):
+        backend = MagicMock()
+        backend.evaluate.return_value = Verdict.allow()
+        ec = _bare_connector(backend=backend)
+        ec.evaluate(tool_name="read_file", arguments={"a": 1}, session_id=42)
+        assert backend.evaluate.call_args.kwargs["session_id"] == 42
 
 
 # -----------------------------------------------------------------------

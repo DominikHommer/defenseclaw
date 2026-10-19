@@ -36,10 +36,7 @@ from generic_hook import ACTION_ALLOW, ACTION_ESCALATE, ACTION_WARN, Verdict  # 
 # -----------------------------------------------------------------------
 def _pico_engine(action: int) -> MagicMock:
     engine = MagicMock()
-    engine.evaluate.return_value = {
-        "action": action, "reason": 0x06, "reason_name": "CLOUD_BLOCK",
-        "severity": 0, "mode": 0, "from_cache": False,
-    }
+    engine.evaluate.return_value = Verdict.from_raw(action, 0x06)
     return engine
 
 

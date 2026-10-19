@@ -199,7 +199,7 @@ The simplest way to integrate from any Python agent. Works with any framework â€
 ```python
 from generic_hook import EdgeConnector
 
-ec = EdgeConnector()  # auto-detects FFI or Unix socket
+ec = EdgeConnector()  # daemon Unix socket; fails closed when unavailable
 
 # Before executing any tool call:
 verdict = ec.evaluate(
@@ -215,7 +215,7 @@ else:
 ```
 
 **Features:**
-- Auto-detects backend: uses the running daemon's Unix socket first, then FFI (ctypes) when no daemon is available
+- Uses the running daemon's Unix socket; the in-process FFI engine is used only with `DCLAW_ALLOW_FFI=1` (see below)
 - Configurable fail-open / fail-closed behavior
 - Built-in Python capability hints; the C engine still rejects unknown names without a reviewed C mapping
 - Automatic destination extraction from URL arguments
@@ -225,14 +225,17 @@ else:
 
 ```python
 ec = EdgeConnector(
-    lib_path="/path/to/libdclaw_core.so",   # override FFI path
+    lib_path="/path/to/libdclaw_core.so",   # FFI path (used only with allow_ffi)
     socket_path="/run/defenseclaw/defenseclaw.sock", # default daemon socket
     fail_open=False,                         # block when engine is down
     session_id=42,                           # session correlation ID
+    allow_ffi=False,                         # no in-process engine (default)
 )
 ```
 
-Or via environment variables: `DCLAW_LIB_PATH`, `DCLAW_SOCKET_PATH`, `DCLAW_FAIL_OPEN`.
+Or via environment variables: `DCLAW_LIB_PATH`, `DCLAW_SOCKET_PATH`, `DCLAW_FAIL_OPEN`, `DCLAW_ALLOW_FFI`.
+
+The adapter uses the daemon's Unix socket (`DCLAW_SOCKET_PATH`). If the daemon is missing or stops answering, calls fail closed; the adapter does not silently switch to an in-process engine. Set `DCLAW_ALLOW_FFI=1` (or `allow_ffi=True`) to permit the in-process FFI engine when no daemon is running or as a fallback. That engine has its own cache, rate limits and revocation state and does not receive OTA policy, and it needs its own `DCLAW_FLASH_PATH`: the daemon holds an exclusive lock on its flash file.
 
 ---
 
@@ -389,7 +392,7 @@ Add to `hooks.processes`:
     "transport": "stdio",
     "command": ["python3", "/home/USERNAME/.picoclaw/hooks/defenseclaw_gate.py"],
     "env": {
-      "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so",
+      "DCLAW_SOCKET_PATH": "/run/defenseclaw/defenseclaw.sock",
       "DCLAW_LOG_PATH": "/home/USERNAME/edge-connector.log"
     },
     "intercept": ["before_tool", "before_llm", "after_llm"]
@@ -412,7 +415,7 @@ Replace `USERNAME` with the actual home directory. A process launcher need not e
 ```bash
 # Check that the hook protocol responds (this does not evaluate a tool)
 echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
-  DCLAW_LIB_PATH=/usr/local/lib/libdclaw_core.so \
+  DCLAW_SOCKET_PATH=/run/defenseclaw/defenseclaw.sock \
   python3 ~/.picoclaw/hooks/defenseclaw_gate.py
 # Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"edge-connector-gate"}}
 
@@ -544,7 +547,9 @@ TOOL_CAP_MAP = {
 
 | Variable | Default | Description |
 |---|---|---|
-| `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to shared library |
+| `DCLAW_SOCKET_PATH` | `/run/defenseclaw/defenseclaw.sock` | Daemon socket the hooks use |
+| `DCLAW_ALLOW_FFI` | unset | `1` permits the in-process engine when the daemon is unavailable (needs its own `DCLAW_FLASH_PATH`) |
+| `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to shared library (in-process engine only) |
 | `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file |
 
 **Compile-time constants** (set in `CMakeLists.txt`; changing these requires rebuilding the binary):

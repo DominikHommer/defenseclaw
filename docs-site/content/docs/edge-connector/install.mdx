@@ -154,7 +154,7 @@ When using the source checkout, run your agent with `PYTHONPATH=/path/to/defense
 ```python
 from generic_hook import EdgeConnector
 
-ec = EdgeConnector()  # auto-detects FFI or Unix socket
+ec = EdgeConnector()  # daemon Unix socket; fails closed when unavailable
 
 verdict = ec.evaluate(
     tool_name="exec_shell",
@@ -164,7 +164,7 @@ if verdict.blocked:
     print(f"Blocked: {verdict.reason}")
 ```
 
-Uses the Unix socket first when the daemon is running, then FFI (ctypes) when no daemon is available. The adapter fails closed if the engine is unavailable. In production, `DCLAW_FAIL_OPEN=1` also requires an authorized `DCLAW_FAIL_OPEN_TOKEN` tied to `DCLAW_AUDIT_KEY`; the flag alone does not enable fail-open.
+The adapter uses the daemon's Unix socket (`DCLAW_SOCKET_PATH`). If the daemon is missing or stops answering, calls fail closed; the adapter does not silently switch to an in-process engine. Set `DCLAW_ALLOW_FFI=1` (or `allow_ffi=True`) to permit the in-process FFI engine when no daemon is running or as a fallback. That engine has its own cache, rate limits and revocation state and does not receive OTA policy, and it needs its own `DCLAW_FLASH_PATH`: the daemon holds an exclusive lock on its flash file. In production, `DCLAW_FAIL_OPEN=1` also requires an authorized `DCLAW_FAIL_OPEN_TOKEN` tied to `DCLAW_AUDIT_KEY`; the flag alone does not enable fail-open.
 
 ### MCP proxy (Model Context Protocol)
 
@@ -279,7 +279,7 @@ Add to `hooks.processes`:
     "transport": "stdio",
     "command": ["python3", "/home/USERNAME/.picoclaw/hooks/defenseclaw_gate.py"],
     "env": {
-      "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so",
+      "DCLAW_SOCKET_PATH": "/run/defenseclaw/defenseclaw.sock",
       "DCLAW_LOG_PATH": "/home/USERNAME/edge-connector.log"
     },
     "intercept": ["before_tool", "before_llm", "after_llm"]
@@ -302,7 +302,7 @@ Replace `USERNAME` with the real home directory. Process launchers do not necess
 ```bash
 # Check that the hook protocol responds (this does not evaluate a tool)
 echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
-  DCLAW_LIB_PATH=/usr/local/lib/libdclaw_core.so \
+  DCLAW_SOCKET_PATH=/run/defenseclaw/defenseclaw.sock \
   python3 ~/.picoclaw/hooks/defenseclaw_gate.py
 
 # Observe a sensor-read decision; production waits for a Fleet verdict
@@ -487,7 +487,8 @@ The gateway rejects missing or invalid device HMAC keys by default. Pre-register
 | `DCLAW_DEVICE_CERT_PATH`, `DCLAW_DEVICE_KEY_PATH` | (none) | Client PEM certificate and private key when broker mTLS is enabled. |
 | `DCLAW_FLASH_PATH` | `/var/lib/defenseclaw/flash.bin` | Persistent flash backing file; production overrides must stay under `/var/lib/defenseclaw/` or `/etc/defenseclaw/`. Each engine takes an exclusive lock on its file: a second daemon or in-process library engine on the same file refuses to start. |
 | `DCLAW_IPC_SOCKET_PATH` | `/run/defenseclaw/defenseclaw.sock` | Local IPC socket path. |
-| `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to the Edge Connector shared library. |
+| `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to the Edge Connector shared library (in-process engine only). |
+| `DCLAW_ALLOW_FFI` | unset | `1` lets the Python hooks use the in-process engine when the daemon socket is missing or fails. It needs its own `DCLAW_FLASH_PATH`. |
 | `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file path. |
 | `DCLAW_AUDIT_KEY` | (none) | Nonzero 32-byte hex audit HMAC key. Production builds refuse to start without it. |
 
