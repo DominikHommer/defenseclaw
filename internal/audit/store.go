@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -236,6 +237,11 @@ type Store struct {
 	// checkpoints. It is opened on first use and closed with the store.
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
+	// walGuardMu guards the checkpoint connection's data_version as of the
+	// previous WAL guard pass (CheckpointWALIfLarge).
+	walGuardMu      sync.Mutex
+	walGuardSeen    bool
+	walGuardVersion int64
 
 	// plannerStatsRows is the history size at the last ANALYZE
 	// (RefreshPlannerStatistics).
@@ -321,6 +327,9 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //     in health and retention maintenance; running a second checkpoint from
 //     inside a commit can race a retiring sidecar process over the shared WAL
 //     mapping and terminate the gateway with SIGBUS.
+//   - journal_size_limit=64MiB  cuts the WAL file back to 64 MiB when a
+//     writer restarts the log, so a burst does not keep its disk space
+//     (rel-1-0-2:GAP-0709; see CheckpointWALIfLarge).
 //   - synchronous=NORMAL        the sweet spot for WAL: durable
 //     across crashes (loses only the last
 //     transaction on power loss) while ~3x
@@ -344,8 +353,9 @@ type auditIntegerPragma struct {
 }
 
 var auditMandatoryIntegerPragmas = [...]auditIntegerPragma{
-	{name: "busy_timeout", dsnValue: "5000", want: 5000},
+	{name: "busy_timeout", dsnValue: strconv.Itoa(auditBusyTimeoutMillis), want: auditBusyTimeoutMillis},
 	{name: "wal_autocheckpoint", dsnValue: "0", want: 0},
+	{name: "journal_size_limit", dsnValue: strconv.Itoa(auditWALJournalSizeLimitBytes), want: auditWALJournalSizeLimitBytes},
 	{name: "synchronous", dsnValue: "NORMAL", want: 1},
 	{name: "cache_size", dsnValue: "-20000", want: -20000},
 	{name: "temp_store", dsnValue: "MEMORY", want: 2},

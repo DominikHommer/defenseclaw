@@ -5,59 +5,263 @@ package audit
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
+	"os"
+	"time"
 )
 
 // walFrameBytes is the size of one WAL frame at the default 4096-byte page:
 // the page plus the 24-byte frame header.
 const walFrameBytes = 4096 + 24
 
-// CheckpointWALIfLarge copies the write-ahead log into the database once it
-// holds more than limitBytes of frames and reports whether it did, so the
-// next write restarts the log from its start instead of appending to it.
+// auditWALJournalSizeLimitBytes is the journal_size_limit of every audit
+// connection. When a writer restarts the log from its start, SQLite cuts the
+// WAL file back to this size at that commit, so a burst's disk space comes
+// back without waiting for the next WAL guard pass (rel-1-0-2:GAP-0709).
+const auditWALJournalSizeLimitBytes = 64 << 20
+
+// auditBusyTimeoutMillis is the busy_timeout of every audit connection.
+const auditBusyTimeoutMillis = 5000
+
+// walIdleTrimBytes is the WAL file size past which a fully copied log is cut
+// to zero bytes even though it is below the caller's limit: a log that stops
+// growing is never restarted by a writer, so its file kept its peak size
+// while the gateway was idle. A variable so tests can use a small file.
+var walIdleTrimBytes int64 = auditWALJournalSizeLimitBytes
+
+// walCopyPasses bounds the copy passes on the dedicated connection. Each pass
+// copies what was written during the one before, so the backlog shrinks pass
+// by pass while the disk copies faster than the hooks write. The passes stop
+// once the backlog is at most walCopyTargetFrames (about 1 MiB): the writer
+// copies that backlog while it holds the hooks, so a larger one made each
+// hold longer as the database grew.
+const (
+	walCopyPasses       = 6
+	walCopyTargetFrames = 256
+)
+
+// walWriterCopyFrames is the largest backlog (about 8 MiB) a pass leaves for
+// the writer connection to copy. With a larger backlog the pass does not take
+// the writer, unless the log is past walForcedRestartFactor times the limit:
+// copying it there would hold the hooks for as long as the copy takes. A
+// variable so tests can force a large backlog.
+var walWriterCopyFrames = 2048
+
+// walForcedRestartFactor bounds the log when the copy cannot get the backlog
+// under walWriterCopyFrames: past this many times the limit the pass restarts
+// the log on the writer whatever the backlog.
+const walForcedRestartFactor = 2
+
+// Test seams: walCopyPhaseHook runs before each copy pass and
+// walWriterPhaseHook while the writer connection is held, so tests can hold
+// either phase open.
+var (
+	walCopyPhaseHook   func(context.Context)
+	walWriterPhaseHook func(context.Context)
+)
+
+// WALCheckpoint reports one CheckpointWALIfLarge pass.
+type WALCheckpoint struct {
+	// LogBytes is the length of the log in use when the pass started.
+	LogBytes int64
+	// FileBytes is the size of the WAL file on disk when the pass ended.
+	FileBytes int64
+	// Restarted is true when the pass copied the whole log into the database
+	// on the writer connection, so the next write starts the log again from
+	// its start.
+	Restarted bool
+	// Truncated is true when the pass also cut the WAL file to zero bytes,
+	// which it does only when the hooks are not flooding the store.
+	Truncated bool
+	// WriterHeld is how long the pass held the writer connection; zero when
+	// it did not need it.
+	WriterHeld time.Duration
+	// WriterDeferred is true when the log was over the limit but the copy left
+	// more than walWriterCopyFrames for the writer, so the pass left the
+	// restart to a later pass.
+	WriterDeferred bool
+}
+
+// CheckpointWALIfLarge keeps the write-ahead log bounded under sustained hook
+// traffic. The store runs with wal_autocheckpoint=0, so nothing else restarts
+// the log while hooks keep writing.
 //
-// The store runs with wal_autocheckpoint=0 and its periodic PASSIVE checkpoint
-// (CollectSQLiteHealth) runs on a second connection, so it cannot restart the
-// log while hooks keep writing: SQLite restarts a log only when a writer finds
-// every frame already copied, and a busy gateway commits new frames before
-// that checkpoint finishes. The log then grew with every audit row (about
-// 3.4 MB per hook decision, 5 GB after 1,500 hooks) until the load stopped.
+// The pass first copies the log into the database on the dedicated checkpoint
+// connection with PASSIVE checkpoints, which never hold off the writer. That
+// copy is bounded only by ctx: SQLite records a checkpoint's progress when it
+// finishes, so a copy cut short by a deadline starts over at the next pass. A
+// 200 ms bound on the whole pass therefore stopped every copy once the log
+// passed what a disk copies in 200 ms, and the log grew to tens of GiB under
+// corpus load (rel-1-0-2:GAP-0709).
 //
-// The final restart checkpoint runs on the store's single writer connection,
-// so it takes its turn between statements: no other connection writes
-// meanwhile and the writer finds the log fully copied afterwards. A TRUNCATE
-// or RESTART checkpoint from the second connection waits for readers while holding off
-// the writer, and under load it stalled some appends for seconds. The pause is
-// bounded by the frames written since the second connection's copy. The
-// frames in use come from a PASSIVE checkpoint on the dedicated connection,
-// not from the file size: a restarted log keeps its length on disk. SQLite
-// treats an unknown checkpoint mode such as NOOP as PASSIVE, so using NOOP
-// on the single writer connection copies and syncs the WAL there.
-func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64) (bool, error) {
+// The writer phase holds the store's single writer connection, which every
+// hook needs for its correlation and verdict records, and it syncs the
+// database file there; the sync is not interrupted by writerBudget. So the
+// pass takes the writer only when it must:
+//
+//   - The log is longer than limitBytes. Under sustained writes a PASSIVE copy
+//     never catches up with the last commit, so SQLite never restarts the log
+//     by itself. A RESTART checkpoint copies the frames written since the
+//     copy, and the next write starts the log again from its start, where the
+//     commit cuts the file back to journal_size_limit. The file is not cut to
+//     zero under load: the writes would only have to grow it again.
+//   - The log is fully copied, its file is larger than walIdleTrimBytes, and
+//     the hooks are not flooding the store: nothing was committed since the
+//     previous pass (PRAGMA data_version on the checkpoint connection), or
+//     the log in use is at most walWriterCopyFrames long (a trickle of
+//     background writes restarted it). A TRUNCATE checkpoint cuts the file to
+//     zero bytes. A log that stops growing is never restarted by a writer.
+//
+// The idle trim used to run whenever a fully copied file was over
+// walIdleTrimBytes, and under a 10 calls/s hook flood the file stays over it,
+// so every pass held the writer for a sync. On Windows those syncs took a
+// growing share of the writer as the database grew, the hooks queued behind
+// them, and the hook latency rose for the whole flood (rel-1-0-3 GAP-0247,
+// GAP-0136).
+//
+// The writer copies only the backlog the copy passes left, at most
+// walWriterCopyFrames, unless the log is past walForcedRestartFactor times
+// the limit. The writer connection has no other writer to wait for, and its
+// busy timeout is zero for the statement. A reader on an older snapshot makes
+// the checkpoint busy; the next pass tries again.
+func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writerBudget time.Duration) (result WALCheckpoint, err error) {
 	if ctx == nil {
-		return false, fmt.Errorf("audit: WAL checkpoint context is required")
+		return result, fmt.Errorf("audit: WAL checkpoint context is required")
+	}
+	if writerBudget <= 0 {
+		return result, fmt.Errorf("audit: WAL checkpoint writer budget is required")
 	}
 	release, err := s.acquireReady()
 	if err != nil {
-		return false, err
+		return result, err
 	}
 	defer release()
+	defer func() { result.FileBytes = s.walFileBytes() }()
 	db, err := s.checkpointConn()
 	if err != nil {
-		return false, fmt.Errorf("audit: open SQLite checkpoint connection: %w", err)
+		return result, fmt.Errorf("audit: open SQLite checkpoint connection: %w", err)
 	}
+	quiet := s.walGuardQuiet(ctx, db)
 	var busy, frames, copied int
-	if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &frames, &copied); err != nil {
-		return false, fmt.Errorf("audit: read SQLite WAL length: %w", err)
+	for pass := 0; pass < walCopyPasses; pass++ {
+		if walCopyPhaseHook != nil {
+			walCopyPhaseHook(ctx)
+		}
+		if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &frames, &copied); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, fmt.Errorf("audit: copy SQLite WAL: %w", ctxErr)
+			}
+			return result, fmt.Errorf("audit: copy SQLite WAL: %w", err)
+		}
+		if busy != 0 {
+			// Another checkpoint holds the log; the next pass tries again.
+			return result, nil
+		}
+		if pass == 0 {
+			result.LogBytes = int64(frames) * walFrameBytes
+		}
+		if frames-copied <= walCopyTargetFrames {
+			break
+		}
 	}
-	if int64(frames)*walFrameBytes <= limitBytes {
-		return false, nil
+	long := int64(frames)*walFrameBytes > limitBytes
+	idleOversized := frames == copied && s.walFileBytes() > walIdleTrimBytes && (quiet || frames <= walWriterCopyFrames)
+	if !long && !idleOversized {
+		return result, nil
 	}
-	// The dedicated connection copied the bulk above without holding off the
-	// writer. The writer connection only has frames written meanwhile left to
-	// copy, which lets it restart the log without a long pause.
-	if err := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &frames, &copied); err != nil {
-		return false, fmt.Errorf("audit: checkpoint SQLite WAL: %w", err)
+	if frames-copied > walWriterCopyFrames && int64(frames)*walFrameBytes <= walForcedRestartFactor*limitBytes {
+		result.WriterDeferred = true
+		return result, nil
 	}
-	return busy == 0, nil
+	mode := walCheckpointRestart
+	if quiet || idleOversized {
+		mode = walCheckpointTruncate
+	}
+	busy, result.WriterHeld, err = s.checkpointWALOnWriter(ctx, writerBudget, mode)
+	if err != nil {
+		return result, err
+	}
+	result.Restarted = busy == 0
+	result.Truncated = busy == 0 && mode == walCheckpointTruncate
+	return result, nil
+}
+
+// The writer-phase checkpoint statements.
+const (
+	walCheckpointRestart  = "PRAGMA wal_checkpoint(RESTART)"
+	walCheckpointTruncate = "PRAGMA wal_checkpoint(TRUNCATE)"
+)
+
+// walGuardQuiet reports whether no connection committed since the previous
+// pass. PRAGMA data_version on the dedicated checkpoint connection changes
+// when another connection commits; checkpoints do not change it. The first
+// pass, and a pass after a failed read, is never quiet.
+func (s *Store) walGuardQuiet(ctx context.Context, db *sql.DB) bool {
+	var version int64
+	err := db.QueryRowContext(ctx, "PRAGMA data_version").Scan(&version)
+	s.walGuardMu.Lock()
+	defer s.walGuardMu.Unlock()
+	quiet := err == nil && s.walGuardSeen && version == s.walGuardVersion
+	s.walGuardVersion, s.walGuardSeen = version, err == nil
+	return quiet
+}
+
+// checkpointWALOnWriter runs the RESTART or TRUNCATE checkpoint statement on
+// the writer connection within budget and returns its busy column and how
+// long it held the connection, from getting it until giving it back. Both
+// checkpoints wait in SQLite's busy handler for readers on older snapshots,
+// and a deadline does not interrupt that wait, so the connection's busy
+// timeout is zero for the statement and restored afterwards. A connection
+// whose busy timeout cannot be restored is dropped from the pool.
+func (s *Store) checkpointWALOnWriter(ctx context.Context, budget time.Duration, statement string) (busy int, held time.Duration, err error) {
+	writerCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	yielded := func(err error) error {
+		if errors.Is(writerCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return fmt.Errorf("audit: WAL checkpoint yielded the writer after %s: %w", budget, context.DeadlineExceeded)
+		}
+		return fmt.Errorf("audit: checkpoint SQLite WAL on the writer: %w", err)
+	}
+	conn, err := s.db.Conn(writerCtx)
+	if err != nil {
+		return 0, 0, yielded(err)
+	}
+	defer conn.Close() //nolint:errcheck -- returns the connection to the pool.
+	acquired := time.Now()
+	defer func() { held = time.Since(acquired) }()
+	if _, err := conn.ExecContext(writerCtx, "PRAGMA busy_timeout = 0"); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		return 0, 0, yielded(err)
+	}
+	defer func() {
+		restoreCtx, cancelRestore := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		defer cancelRestore()
+		if _, err := conn.ExecContext(restoreCtx, fmt.Sprintf("PRAGMA busy_timeout = %d", auditBusyTimeoutMillis)); err != nil {
+			// Hook writes on a connection without its busy timeout would fail
+			// under contention. The pool opens a new one with the DSN pragmas.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}()
+	if walWriterPhaseHook != nil {
+		walWriterPhaseHook(writerCtx)
+	}
+	var frames, copied int
+	if err := conn.QueryRowContext(writerCtx, statement).Scan(&busy, &frames, &copied); err != nil {
+		return 0, 0, yielded(err)
+	}
+	return busy, 0, nil
+}
+
+func (s *Store) walFileBytes() int64 {
+	if s.dbPath == "" || s.dbPath == ":memory:" {
+		return 0
+	}
+	info, err := os.Stat(s.dbPath + "-wal")
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }

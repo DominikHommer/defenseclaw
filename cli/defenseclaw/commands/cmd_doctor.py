@@ -2216,6 +2216,36 @@ _ARCHIVE_COPY_FIRST = (
     "use SQLite tools, and work on the copy."
 )
 
+_ARCHIVE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def _archive_header_repair() -> str:
+    """Say how to write back a zeroed SQLite header on the copy, never on the
+    archive (rel-1-0-2:GAP-0647; audit.ArchiveRecoveryHint says the same). It
+    ends with the command, so callers put it last and add no period."""
+    if os.name == "nt":
+        command = (
+            "PowerShell: $f=[IO.File]::OpenWrite('<copy>'); "
+            '$f.Write([Text.Encoding]::ASCII.GetBytes("SQLite format 3`0"),0,16); $f.Close()'
+        )
+    else:
+        command = "printf 'SQLite format 3\\000' | dd of=<copy> bs=16 count=1 conv=notrunc"
+    return (
+        "If SQLite says the copy is not a database, its first 16 bytes were zeroed: write the SQLite header back "
+        f"on the copy, never on the archive, and run .recover again. To write it, run: {command}"
+    )
+
+
+def _archived_sidecars(archive: Path) -> str:
+    """Name the -wal, -shm and -journal files archived with ``archive``, as the
+    gateway's start warning does (GAP-0614)."""
+    names = [suffix for suffix in _ARCHIVE_SIDECAR_SUFFIXES if Path(str(archive) + suffix).is_file()]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f" together with its {names[0]} file"
+    return " together with its " + ", ".join(names[:-1]) + f" and {names[-1]} files"
+
 
 def _moved_store_block_allow_summary(moved: Path) -> str:
     """Say what the gateway's note (internal/audit/corrupt_store.go) recorded
@@ -2262,13 +2292,51 @@ def _report_pre_1_0_audit_archive(archive: Path, r: _DoctorResult) -> None:
         "pass",
         "0.x audit store archive",
         f"the audit store DefenseClaw 0.x wrote failed SQLite's integrity check during the upgrade, so it is kept as "
-        f"an archive in {archive} ({size}). 1.0 starts a new audit history after a 0.x upgrade in any case, and "
-        f"block/allow lists live in config.yaml, so they are not affected. {_ARCHIVE_COPY_FIRST} "
+        f"an archive in {archive}{_archived_sidecars(archive)} ({size}). 1.0 starts a new audit history after a 0.x "
+        f"upgrade in any case, and block/allow lists live in config.yaml, so they are not affected. "
+        f"{_ARCHIVE_COPY_FIRST} "
         f"Then read the copy with: sqlite3 <copy> .recover. Delete {archive} and its -wal, -shm and -journal "
-        "files when you no longer need them",
+        f"files when you no longer need them. {_archive_header_repair()}",
         r=r,
         check_id="doctor.state.audit-db-archive",
         reason_code="audit-db-0x-archive",
+    )
+
+
+def _moved_aside_audit_stores(db_path: str) -> list[Path]:
+    """The files named like a store the gateway moved aside next to ``db_path``
+    (``<db>.corrupt-<UTC time>[-<id>]``), oldest first; doctor and status
+    report them (internal/audit/corrupt_store.go, ``MovedCorruptStores``)."""
+    if not db_path:
+        return []
+    try:
+        return sorted(
+            path
+            for path in Path(db_path).parent.glob(Path(db_path).name + ".corrupt-*")
+            if not path.name.endswith(("-wal", "-shm", "-journal", _CARRY_OVER_NOTE_SUFFIX)) and path.is_file()
+        )
+    except OSError:
+        return []
+
+
+def _reported_moved_stores(moved: list[Path]) -> list[Path]:
+    """Keep the stores with the note the gateway writes next to every store it
+    moves; only when none has one keep all of them (an earlier version moved
+    them). A file that only has an archive's name is no record of a move, and
+    reporting the newest such name pointed recovery away from the archive
+    (rel-1-0-3:GAP-0106; ``ReportedMovedCorruptStores`` in Go)."""
+    recorded = [path for path in moved if Path(str(path) + _CARRY_OVER_NOTE_SUFFIX).is_file()]
+    return recorded or moved
+
+
+def _archive_recovery_hint(archive: Path) -> str:
+    """The copy-first recovery hint the gateway's start warning and
+    ``defenseclaw-gateway status`` print (``audit.ArchiveRecoveryHint``). It
+    ends with the repair command, so callers print nothing after it."""
+    return (
+        f"To read its audit records, first copy {archive} together with its -wal, -shm and any -journal files "
+        "to a new folder and work only on the copy, because SQLite can change the files it opens. "
+        f"Then run sqlite3 <copy> .recover on the copy. {_archive_header_repair()}"
     )
 
 
@@ -2279,20 +2347,11 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     starts a new one; only its log said so, so the reset audit history went
     unnoticed.
     """
-    if not db_path:
-        return
-    try:
-        moved = sorted(
-            path
-            for path in Path(db_path).parent.glob(Path(db_path).name + ".corrupt-*")
-            if not path.name.endswith(("-wal", "-shm", "-journal", _CARRY_OVER_NOTE_SUFFIX)) and path.is_file()
-        )
-    except OSError:
-        return
+    moved = _moved_aside_audit_stores(db_path)
     archives = [path for path in moved if _is_pre_1_0_archive(path)]
     if archives:
         _report_pre_1_0_audit_archive(archives[-1], r)
-    moved = [path for path in moved if path not in archives]
+    moved = _reported_moved_stores([path for path in moved if path not in archives])
     if not moved:
         return
     newest = moved[-1]
@@ -2305,13 +2364,15 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
         "warn",
         "Audit store moved aside",
         f"{count} moved aside by the gateway, which {_moved_store_block_allow_summary(newest)} "
-        f"Older audit records stay in {newest} ({size}). {recover}. "
-        f"Delete {newest} and its -wal, -shm and -journal files when they are no longer needed",
+        f"Older audit records stay in {newest}{_archived_sidecars(newest)} ({size}). {recover}. "
+        f"Delete {newest} and its -wal, -shm and -journal files when they are no longer needed. "
+        f"{_archive_header_repair()}",
         r=r,
         check_id="doctor.state.audit-db-moved-aside",
         reason_code="audit-db-moved-aside",
         remediation=(
             f"copy {newest} with its -wal, -shm and any -journal files to a new folder, "
+            "write a zeroed SQLite header back on the copy if SQLite says it is not a database, "
             "then run sqlite3 <copy> .recover on the copy"
         ),
     )
