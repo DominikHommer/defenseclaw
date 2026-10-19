@@ -406,3 +406,66 @@ class TestShutdown:
     def test_shutdown_no_backend(self):
         ec = _bare_connector()
         ec.shutdown()  # should not raise
+
+
+# -----------------------------------------------------------------------
+# DCLAW_PRODUCTION parsing matches the Go fleet (productionFlagSet)
+# -----------------------------------------------------------------------
+_PRODUCTION_VALUES = [
+    (None, False), ("", False), ("  ", False), ("0", False), ("false", False),
+    ("FALSE", False), ("no", False), ("off", False), (" Off ", False),
+    ("1", True), ("true", True), (" TRUE ", True), ("yes", True),
+    ("on", True), ("ON", True), ("enabled", True),
+]
+
+
+class TestProductionFlag:
+    @pytest.mark.parametrize("raw,expected", _PRODUCTION_VALUES)
+    def test_production_flag_set_matches_go(self, raw, expected):
+        from generic_hook import production_flag_set
+        assert production_flag_set(raw) is expected
+
+    @pytest.mark.parametrize("raw,expected", [v for v in _PRODUCTION_VALUES if v[0] is not None])
+    def test_is_production_reads_env(self, raw, expected, monkeypatch):
+        from generic_hook import is_production
+        monkeypatch.setenv("DCLAW_PRODUCTION", raw)
+        assert is_production() is expected
+
+    @pytest.mark.parametrize("raw,warns", [("on", True), (" TRUE ", True),
+                                           ("0", False), ("off", False)])
+    def test_check_http_production_uses_shared_parser(self, raw, warns, monkeypatch):
+        import warnings
+        from generic_hook import check_http_production
+        monkeypatch.setenv("DCLAW_PRODUCTION", raw)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            check_http_production("http://1.1.1.1/mcp")
+        assert bool(caught) is warns
+
+    @pytest.mark.parametrize("module,cls,kwargs", [
+        ("defenseclaw_ha", "HomeAssistantAdapter", {"host": "1.1.1.1"}),
+        ("defenseclaw_bubbaloop", "BubbaloopAdapter", {"host": "1.1.1.1"}),
+        ("defenseclaw_espclaw", "ESPClawAdapter", {"host": "1.1.1.1"}),
+    ])
+    @pytest.mark.parametrize("raw,rejects", [("on", True), (" TRUE ", True),
+                                             ("0", False), ("off", False)])
+    def test_integrations_use_shared_parser(self, module, cls, kwargs, raw, rejects,
+                                            monkeypatch):
+        import importlib
+        import warnings
+        integrations = Path(__file__).resolve().parent.parent / "integrations"
+        for sub in ("homeassistant", "bubbaloop", "espclaw"):
+            path = str(integrations / sub)
+            if path not in sys.path:
+                sys.path.insert(0, path)
+        adapter_cls = getattr(importlib.import_module(module), cls)
+        monkeypatch.setenv("DCLAW_EDGE_SCHEME", "http")
+        monkeypatch.delenv("DCLAW_ESPCLAW_ALLOW_HTTP", raising=False)
+        monkeypatch.setenv("DCLAW_PRODUCTION", raw)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            if rejects:
+                with pytest.raises(ValueError, match="production"):
+                    adapter_cls(connector=MagicMock(), **kwargs)
+            else:
+                adapter_cls(connector=MagicMock(), **kwargs)

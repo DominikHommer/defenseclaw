@@ -857,3 +857,14 @@ async def test_stdio_upstream_stderr_flood_does_not_deadlock(fake_upstream_scrip
         assert resp["result"] == {"echo": 1}
     finally:
         await upstream.stop()
+
+
+@pytest.mark.parametrize("raw,rejects", [("on", True), (" TRUE ", True), ("yes", True),
+                                         ("0", False), ("off", False)])
+def test_http_upstream_production_flag_matches_go_parser(raw, rejects, monkeypatch):
+    monkeypatch.setenv("DCLAW_PRODUCTION", raw)
+    if rejects:
+        with pytest.raises(ValueError, match="plaintext HTTP"):
+            _HttpUpstream("http://1.1.1.1/mcp")
+    else:
+        _HttpUpstream("http://1.1.1.1/mcp")

@@ -76,7 +76,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
-from generic_hook import EdgeConnector, Verdict, fail_open_attested
+from generic_hook import EdgeConnector, Verdict, fail_open_attested, is_production
 
 logger = logging.getLogger("defenseclaw.mcp_proxy")
 
@@ -360,8 +360,7 @@ class _HttpUpstream:
         _validate_upstream_url(url)
 
         # Reject plaintext HTTP in production to prevent credential leakage
-        is_production = os.environ.get("DCLAW_PRODUCTION", "").lower() in ("1", "true", "yes")
-        if is_production and url and url.startswith("http://"):
+        if is_production() and url and url.startswith("http://"):
             raise ValueError(
                 "DCLAW_PRODUCTION is set but upstream URL uses plaintext HTTP. "
                 "Use https:// for production upstream connections."
@@ -868,8 +867,7 @@ async def _run_http(proxy: MCPProxy, port: int) -> None:
             )
             sys.exit(1)
         # Bearer tokens travel in plaintext over HTTP; block non-loopback in production
-        _production = os.environ.get("DCLAW_PRODUCTION", "") in ("true", "1")
-        if _production:
+        if is_production():
             logger.critical(
                 "SECURITY: MCP proxy binding to non-loopback address %s in production mode. "
                 "Bearer token will be transmitted in CLEARTEXT over HTTP. "

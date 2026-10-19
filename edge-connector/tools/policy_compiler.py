@@ -687,6 +687,17 @@ def generate_binary_blob(policy: dict, version: int) -> bytes:
     return bytes(blob)
 
 
+def _production_mode() -> bool:
+    """Parse DCLAW_PRODUCTION like the Go fleet (productionFlagSet).
+
+    Kept in sync with generic_hook.production_flag_set; this compiler runs
+    as ``python -I policy_compiler.py`` and ships without the adapters, so
+    it cannot import them.
+    """
+    value = os.environ.get("DCLAW_PRODUCTION", "").strip().lower()
+    return value not in ("", "0", "false", "no", "off")
+
+
 def sign_blob(blob: bytes, key_path: str) -> Tuple[bytes, bool]:
     """Sign blob with Ed25519. Returns (signature, is_unsigned) tuple.
 
@@ -708,7 +719,7 @@ def sign_blob(blob: bytes, key_path: str) -> Tuple[bytes, bool]:
             print("WARNING: PyNaCl not installed. Using dev stub signature.",
                   file=sys.stderr)
             # Refuse silent fallback to dev stub in production mode
-            if os.environ.get("DCLAW_PRODUCTION", "").lower() in ("1", "true", "yes"):
+            if _production_mode():
                 raise RuntimeError(
                     "PyNaCl is required for signing in production mode "
                     "(DCLAW_PRODUCTION is set). Install with: pip install pynacl"
@@ -720,7 +731,7 @@ def sign_blob(blob: bytes, key_path: str) -> Tuple[bytes, bool]:
                 )
 
     # Also enforce when no key_path is provided at all
-    if os.environ.get("DCLAW_PRODUCTION", "").lower() in ("1", "true", "yes"):
+    if _production_mode():
         raise RuntimeError(
             "Signing key is required in production mode (DCLAW_PRODUCTION is set). "
             "Provide --signing-key with a valid Ed25519 key."

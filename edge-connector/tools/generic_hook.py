@@ -192,6 +192,22 @@ def _json_escaped_len(ch: str) -> int:
 _TWO_CHAR_ESCAPES = frozenset('"\\\b\f\n\r\t')
 
 
+def production_flag_set(raw: str | None) -> bool:
+    """Parse a DCLAW_PRODUCTION value the way the Go fleet does.
+
+    Mirrors ``productionFlagSet`` in internal/fleet/mqtt/bridge.go: the
+    value is trimmed and lowercased, and anything other than "", "0",
+    "false", "no" or "off" means production.
+    """
+    value = (raw or "").strip().lower()
+    return value not in ("", "0", "false", "no", "off")
+
+
+def is_production() -> bool:
+    """Return True when DCLAW_PRODUCTION selects production mode."""
+    return production_flag_set(os.environ.get("DCLAW_PRODUCTION"))
+
+
 def check_http_production(url: str, context: str = "adapter") -> None:
     """Warn when a non-loopback URL uses plain HTTP in production.
 
@@ -199,7 +215,7 @@ def check_http_production(url: str, context: str = "adapter") -> None:
     Loopback addresses (127.0.0.1, localhost, ::1) are exempt since
     they never leave the device.
     """
-    if not os.environ.get("DCLAW_PRODUCTION"):
+    if not is_production():
         return
     if not url.startswith("http://"):
         return

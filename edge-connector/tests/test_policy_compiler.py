@@ -131,6 +131,26 @@ class PolicyCompilerExitTest(unittest.TestCase):
             self.assertIn('"2606:4700:4700::1111"', header)
             self.assertNotIn('[2606:', header)
 
+    def test_production_flag_matches_go_parser(self):
+        """Without a signing key, any Go-production value refuses to compile."""
+        for raw, refuses in (('on', True), (' TRUE ', True), ('yes', True),
+                             ('0', False), ('off', False), ('', False)):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as temp:
+                work = Path(temp)
+                env = os.environ.copy()
+                env.pop('DCLAW_DEV_MODE', None)
+                env['DCLAW_PRODUCTION'] = raw
+                result = subprocess.run(
+                    [sys.executable, str(COMPILER), '--input', str(VALID),
+                     '--output-header', 'policy_tables.h', '--output-binary', 'policy.bin'],
+                    cwd=work, env=env, text=True, capture_output=True)
+                if refuses:
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('production mode', result.stderr)
+                    self.assertFalse((work / 'policy.bin').exists())
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_valid_policy_compiles(self):
         with tempfile.TemporaryDirectory() as temp:
             work = Path(temp)
