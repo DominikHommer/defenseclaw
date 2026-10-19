@@ -657,13 +657,10 @@ func TestCopilotHookRejectsMissingOrInvalidTrustedEvent(t *testing.T) {
 	}
 }
 
-// TestHandleAgentHook_FullChain_PanicFailsOpen is the M6 panic-
-// recovery integration assertion: a panicking evaluator in the
-// unified chain MUST NOT propagate; the HTTP response must remain
-// 200 OK with action=allow + would_block=true; the panic counter
-// must increment; the wire shape must still match the connector's
-// expected top-level key.
-func TestHandleAgentHook_FullChain_PanicFailsOpen(t *testing.T) {
+// TestHandleAgentHook_FullChain_PanicFailsClosed verifies that a panicking
+// evaluator returns a valid native denial for a blockable event. The panic
+// stays contained and the HTTP response still carries the connector shape.
+func TestHandleAgentHook_FullChain_PanicFailsClosed(t *testing.T) {
 	prev := hookEvaluatorPanicHook
 	hookEvaluatorPanicHook = func() { panic("synthetic panic in unified chain") }
 	defer func() { hookEvaluatorPanicHook = prev }()
@@ -684,32 +681,20 @@ func TestHandleAgentHook_FullChain_PanicFailsOpen(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("panic-path status=%d, want 200 (fail-open)", w.Code)
+		t.Fatalf("panic-path status=%d, want 200 with a closed verdict", w.Code)
 	}
 	var parsed map[string]interface{}
 	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
 		t.Fatalf("panic-path response not valid JSON: %v\nbody=%s", err, w.Body.String())
 	}
-	if action, _ := parsed["action"].(string); action != "allow" {
-		t.Errorf("panic-path action = %q, want allow", action)
+	if action, _ := parsed["action"].(string); action != "block" {
+		t.Errorf("panic-path action = %q, want block", action)
 	}
-	if wb, _ := parsed["would_block"].(bool); !wb {
-		t.Errorf("panic-path would_block = false, want true")
+	if wb, _ := parsed["would_block"].(bool); wb {
+		t.Errorf("panic-path would_block = true, want enforced block")
 	}
-	// The wire-shape key is still hook_output (devin), not a
-	// generic error stanza — the panic recovery preserves the
-	// connector contract.
-	if _, ok := parsed["hook_output"]; !ok {
-		// hook_output is conditional on resp.HookOutput being
-		// populated; the panic-path response has nil HookOutput
-		// so the field is omitempty-dropped, which is correct.
-		// We just verify NO other top-level output key was
-		// accidentally emitted.
-		for _, forbidden := range []string{"claude_code_output", "codex_output"} {
-			if _, bad := parsed[forbidden]; bad {
-				t.Errorf("panic-path leaked wrong top-level output %q (response: %+v)", forbidden, parsed)
-			}
-		}
+	if !decisionIsDenied(parsed["hook_output"]) {
+		t.Errorf("panic-path hook_output = %v, want native denial", parsed["hook_output"])
 	}
 }
 
