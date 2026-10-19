@@ -3,6 +3,8 @@
 
 package safefile
 
+import "os"
+
 // ManagedModeAdvisory lets a managed install downgrade a group/other mode
 // verdict on one of its own paths to an advisory. It returns true when the
 // verdict was reported and the caller should continue. The managed package
@@ -11,9 +13,17 @@ package safefile
 // verdict fatal. Owner, type and symlink verdicts never go through it.
 var ManagedModeAdvisory func(path, reason string) bool
 
-func relaxModeVerdict(path string, verdict error) error {
+// groupOtherWrite is the part of a too-broad mode that is never an advisory:
+// a group or world write bit lets someone other than the owner change the
+// path, which is exactly what the private-path check exists to refuse.
+const groupOtherWrite os.FileMode = 0o022
+
+func relaxModeVerdict(path string, perm os.FileMode, verdict error) error {
 	if verdict == nil {
 		return nil
+	}
+	if perm&groupOtherWrite != 0 {
+		return verdict
 	}
 	if hook := ManagedModeAdvisory; hook != nil && hook(path, verdict.Error()) {
 		return nil
