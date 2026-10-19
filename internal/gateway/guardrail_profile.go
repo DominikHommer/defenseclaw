@@ -590,6 +590,11 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 // profileRequestSubject returns the verified subject of ctx and where it
 // came from, or ("", "") when the request has none.
 func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
+	if nativeModelExchangeFromContext(ctx) != nil {
+		// A private host binding authenticates its connector, not a user,
+		// group, agent, or the gateway process owner.
+		return nil, "native_binding"
+	}
 	// A sandbox bearer names a host user for attribution, but it does not
 	// authenticate the process calling the loopback ingress. Never inherit
 	// the gateway owner's verified subject for these requests. The one

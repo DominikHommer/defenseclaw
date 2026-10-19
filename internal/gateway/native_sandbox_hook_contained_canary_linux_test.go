@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,18 +22,25 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/axis/bridgeowner"
 	"github.com/defenseclaw/defenseclaw/internal/axis/bridgeprocess"
 	"github.com/defenseclaw/defenseclaw/internal/axis/bridgeproto"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/test/e2e/axis/native-hook-canary/fixture"
 	"golang.org/x/sys/unix"
 )
@@ -96,6 +104,144 @@ func (owner *containedCleanup) Close(ctx context.Context) error {
 			containedRetained.owners[index] = nil
 			break
 		}
+	}
+	return nil
+}
+
+// containedAuditV8Fixture owns the actual local SQLite audit store, logger and
+// generated v8 runtime. The retained canary owner registers this value before
+// prepare can allocate anything, then closes it only after native/endpoint
+// shutdown and binding revocation. No sink or fake audit emitter is substituted.
+type containedAuditV8Fixture struct {
+	store   *audit.Store
+	logger  *audit.Logger
+	runtime *observabilityruntime.Runtime
+}
+
+func (f *containedAuditV8Fixture) prepare(ctx context.Context, directory string) error {
+	if f == nil || ctx == nil || directory == "" || f.store != nil {
+		return errors.New("fixed audit fixture admission refused")
+	}
+	path := filepath.Join(directory, config.DefaultAuditDBName)
+	var err error
+	f.store, err = audit.NewStore(path)
+	if err != nil {
+		return err
+	}
+	if err := f.store.Init(); err != nil {
+		return err
+	}
+	f.logger = audit.NewLogger(f.store)
+	retentionDays := 0
+	plan, err := config.CompileObservabilityV8(&config.ObservabilityV8Source{
+		Local: config.ObservabilityV8LocalSource{
+			Path: path, JudgeBodiesPath: filepath.Join(directory, "judge-bodies.db"),
+			RetentionDays: &retentionDays,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	engine, err := redaction.NewEngine(nil)
+	if err != nil {
+		return err
+	}
+	var failureIDs atomic.Uint64
+	builder, err := observability.NewRecordBuilder(
+		observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
+		observability.OccurrenceIDGeneratorFunc(func() (string, error) {
+			return fmt.Sprintf("fixed-hook-failure-%d", failureIDs.Add(1)), nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+	reaper, err := audit.NewRetentionReaper(f.store, nil, 0, audit.RetentionOptions{})
+	if err != nil {
+		return err
+	}
+	retention, err := observabilityruntime.NewRetentionController(
+		reaper, observabilityruntime.RetentionControllerOptions{},
+	)
+	if err != nil {
+		return err
+	}
+	f.runtime, err = observabilityruntime.New(
+		ctx, runtimegraph.ConfigFromPlan(plan, false),
+		observabilityruntime.Options{
+			Store: f.store, Engine: engine, RecordBuilder: builder,
+			Reporter: &discardSidecarGraphReporter{}, RetentionController: retention,
+			TelemetryProviderFactory: telemetry.NewV8ProviderFactory(telemetry.V8ProviderOptions{
+				Version: "8.0.0", Environment: "test",
+				ServiceInstanceID: "fixed-contained-hook", DefenseClawInstanceID: "fixed-contained-hook",
+			}),
+		},
+	)
+	if err != nil {
+		return err
+	}
+	f.logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{
+		runtime: f.runtime, redactionEngine: engine,
+	})
+	return nil
+}
+
+func (f *containedAuditV8Fixture) rows(connector, allowEvent, blockEvent string) error {
+	if f == nil || f.store == nil || connector == "" || allowEvent == "" || blockEvent == "" {
+		return errors.New("fixed audit store or event unavailable")
+	}
+	events, err := f.store.ListEvents(64)
+	if err != nil {
+		return err
+	}
+	if len(events) >= 64 {
+		return errors.New("fixed audit inventory exceeds complete bound")
+	}
+	allow, block := 0, 0
+	for _, event := range events {
+		if event.Action != string(audit.ActionConnectorHook) {
+			continue
+		}
+		if event.Connector != connector {
+			return errors.New("fixed connector audit identity differs")
+		}
+		if event.Enforced {
+			if event.Target != blockEvent {
+				return errors.New("fixed blocked audit event differs")
+			}
+			block++
+		} else {
+			if event.Target != allowEvent {
+				return errors.New("fixed allowed audit event differs")
+			}
+			allow++
+		}
+	}
+	if allow != 1 || block != 1 {
+		return fmt.Errorf("fixed durable connector audit rows allow=%d block=%d, want one each", allow, block)
+	}
+	return nil
+}
+
+func (f *containedAuditV8Fixture) close(ctx context.Context) error {
+	if f == nil {
+		return nil
+	}
+	if f.runtime != nil {
+		if err := f.runtime.Close(ctx); err != nil {
+			return err
+		}
+		f.runtime = nil
+	}
+	if f.logger != nil {
+		f.logger.Close()
+		f.logger = nil
+	}
+	if f.store != nil {
+		if err := f.store.Close(); err != nil {
+			return err
+		}
+		f.store = nil
 	}
 	return nil
 }
@@ -203,6 +349,42 @@ func TestFixedContainedHookCleanupRetainsUncertainOwnerWithoutNative(t *testing.
 	}
 	if got := containedKnownError(errors.Join(bridgeowner.ErrPeer, containedPrivateError{})); got != "peer" {
 		t.Fatal("private error text was consulted or exposed")
+	}
+	// The ordinary local v8 runtime must commit both connector verdicts to
+	// SQLite before the same retained owner releases its store. No native
+	// process, socket listener, or guest mount participates in this test.
+	auditFixture := &containedAuditV8Fixture{}
+	auditOwner := retainContainedCleanup(func(ctx context.Context) error {
+		return auditFixture.close(ctx)
+	})
+	if auditOwner == nil {
+		t.Fatal("fixed audit fixture owner unavailable")
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := auditOwner.Close(closeCtx); err != nil {
+			t.Error("fixed audit fixture cleanup incomplete")
+		}
+	}()
+	auditDirectory, err := os.MkdirTemp("", "fixed-hook-audit-")
+	if err != nil {
+		t.Fatal("fixed audit directory unavailable")
+	}
+	if err := auditFixture.prepare(context.Background(), auditDirectory); err != nil {
+		t.Fatal("fixed audit v8 runtime unavailable")
+	}
+	auditAPI := &APIServer{logger: auditFixture.logger}
+	for _, action := range []string{"allow", "block"} {
+		if err := auditAPI.logConnectorHookAuditEnvelope(context.Background(), HookAuditEnvelope{
+			Connector: "claudecode", Event: "PreToolUse",
+			Action: action, RawAction: action, Mode: "action", Enforced: action == "block",
+		}); err != nil {
+			t.Fatal("fixed generated v8 connector audit write refused")
+		}
+	}
+	if err := auditFixture.rows("claudecode", "PreToolUse", "PreToolUse"); err != nil {
+		t.Fatal("fixed generated v8 connector rows not durable")
 	}
 	failure := errors.New("fixed fake close uncertainty")
 	calls := 0
@@ -622,6 +804,7 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 	var assets *nativeSandboxHookAssets
 	var api *APIServer
 	var store *sandboxauth.FileStore
+	var auditFixture containedAuditV8Fixture
 	var binding sandboxauth.Binding
 	var token string
 	mintAttempted := false
@@ -659,6 +842,9 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 		}
 		if binding.ID != "" {
 			record["binding_revoked"] = true
+		}
+		if err := auditFixture.close(cleanup); err != nil {
+			return err
 		}
 		for _, image := range []**bridgeprocess.Image{&peer, &bwrap, &payload} {
 			if *image != nil {
@@ -791,9 +977,12 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 		t.Fatal("fixed host binding directory pin failed")
 	}
 	hostDirs = append(hostDirs, os.NewFile(uintptr(storeFD), "fixed-host-bindings"))
+	if err := auditFixture.prepare(lifetime, filepath.Join(path, "gateway")); err != nil {
+		t.Fatal("fixed private generated v8 audit runtime preparation failed")
+	}
 	cfg := &config.Config{DataDir: filepath.Join(path, "gateway"), Gateway: config.GatewayConfig{Token: sandboxTestMasterToken}}
 	cfg.Guardrail.Mode, cfg.Guardrail.Connector = "action", value.Name
-	api = NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil, cfg)
+	api = NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, auditFixture.store, auditFixture.logger, cfg)
 	store, err = sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(cfg.DataDir), sandboxauth.WithRefreshInterval(0))
 	if err != nil {
 		t.Fatal("fixed host binding store preparation failed")
@@ -928,6 +1117,11 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 		t.Fatal("actual Destroyed differs")
 	}
 	record["destroyed"] = true
+	if len(observed) != 2 || observed[0].Action != "allow" || observed[1].Action != "block" ||
+		auditFixture.rows(value.Name, observed[0].Event, observed[1].Event) != nil {
+		t.Fatal("actual allow/block connector audit rows not durable")
+	}
+	record["audit_allow_and_block_durable"] = true
 	cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
 	defer done()
 	if owner.Close(cleanup) != nil || !process.complete {

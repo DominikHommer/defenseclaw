@@ -224,6 +224,7 @@ func verifyCase(item map[string]any, name string) error {
 		item["prepared"] != true || item["started"] != true || item["exited"] != true || item["destroyed"] != true ||
 		item["native_and_endpoint_cleanup"] != true || item["binding_mint_attempted"] != true ||
 		item["binding_issued"] != true || item["binding_revoked"] != true ||
+		item["audit_allow_and_block_durable"] != true ||
 		item["vendor_runtime_qualification"] != false || item["production_qualification"] != false ||
 		item["actual_synthetic_payload"] != "sha256:"+payloadSHA {
 		return errors.New("fixed case lifecycle differs")

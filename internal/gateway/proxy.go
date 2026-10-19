@@ -592,12 +592,24 @@ func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
 			set = pinnedGeneration(ctx).Profiles
 		}
 	}
-	if _, verified := verifiedSubjectFromContext(ctx); !verified && !p.presentsOwnerCredential(r) {
+	if _, verified := verifiedSubjectFromContext(ctx); !verified && !p.presentsOwnerCredential(r) && nativeModelExchangeFromContext(ctx) == nil {
 		// A provider key admits model traffic but says nothing about who sent it.
 		// Keep the proxy's base guardrail and leave the owner's agent unclaimed.
 		return r.WithContext(context.WithValue(ctx, unverifiedProxyCallerKey{}, true))
 	}
 	connectorName := p.servedConnector()
+	if exchange := nativeModelExchangeFromContext(ctx); exchange != nil {
+		// The authenticated host binding, rather than a process-global agent
+		// registry entry, supplies this native session's correlation identity.
+		identity := AgentIdentityFromContext(ctx)
+		identity.AgentID = exchange.binding.Connector
+		identity.AgentName = exchange.binding.Connector
+		identity.AgentType = exchange.binding.Connector
+		identity.AgentInstanceID = exchange.adapter.grant.Identity.ID
+		identity.SidecarInstanceID = string(sandboxConnectorInstanceID(exchange.binding))
+		ctx = ContextWithAgentIdentity(ctx, identity)
+		return r.WithContext(withGuardrailProfile(ctx, set, exchange.binding.Connector))
+	}
 	if identity := AgentIdentityFromContext(ctx); identity.IdentityID == "" {
 		if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName}); facts.ID != "" {
 			identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
@@ -616,7 +628,11 @@ func (p *GuardrailProxy) profileModeFor(ctx context.Context, mode, blockMessage 
 	if mode == "passthrough" {
 		return mode, blockMessage
 	}
-	profileMode, profileMessage, ok := profileProxyOverride(ctx, p.servedConnector())
+	connectorName := p.servedConnector()
+	if exchange := nativeModelExchangeFromContext(ctx); exchange != nil {
+		connectorName = exchange.binding.Connector
+	}
+	profileMode, profileMessage, ok := profileProxyOverride(ctx, connectorName)
 	if !ok {
 		return mode, blockMessage
 	}
@@ -1104,6 +1120,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 
 	targetOrigin := r.Header.Get("X-DC-Target-URL")
+	privateModel := nativeModelExchangeFromContext(r.Context())
+	if privateModel != nil {
+		// Host-owned endpoint overrides every guest routing signal.
+		targetOrigin = privateModel.adapter.grant.Endpoint
+	}
 	// Native-binary connectors (codex, zeptoclaw) can't inject
 	// X-DC-Target-URL. Ask the active connector to resolve the
 	// upstream from its provider snapshot before bailing.
@@ -1257,12 +1278,23 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		Stream            bool            `json:"stream,omitempty"`
 	}
 	_ = json.Unmarshal(body, &partial)
+	if privateModel != nil {
+		// The private, bounded projection covers every accepted system, tool,
+		// history and tool-result text. Use one synthetic message as well as
+		// the raw text so message-aware managed inspectors see the same full
+		// input; the original provider body is retained independently.
+		partial.Messages = []ChatMessage{{Role: "user", Content: privateModel.inspection}}
+	}
 
 	p.rtMu.RLock()
 	mode := p.mode
 	customBlockMsg := p.blockMessage
 	p.rtMu.RUnlock()
 	mode, customBlockMsg = p.profileModeFor(r.Context(), mode, customBlockMsg)
+	if privateModel != nil && mode != "action" {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "model unavailable")
+		return
+	}
 
 	provider := inferProviderFromURL(targetForMatch)
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
@@ -1399,9 +1431,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
 	// payload from these allowlists while the original prompt still flows
 	// upstream.
-	if userText != "" &&
+	if privateModel != nil || (userText != "" &&
 		!isHeartbeatMessage(userText, partial.Messages) &&
-		!isSessionStartupMessage(userText) {
+		!isSessionStartupMessage(userText)) {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
 		passthroughPromptID = meta.PromptID
@@ -1448,10 +1480,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			// assistant turn the client persists in its local
 			// history informs the LLM — which is (a) client-dependent
 			// and (b) semantically weaker than a system directive.
-			p.enqueueBlockNotification(verdict, "prompt", partial.Model)
+			if privateModel == nil {
+				p.enqueueBlockNotification(verdict, "prompt", partial.Model)
+			}
 			// The OpenClaw event router marks the turn that carries this
 			// text as blocked (GAP-2231).
-			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
+			if privateModel == nil {
+				rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
+			}
 			// Return 200 with the block message as an assistant turn so
 			// the agent surfaces it to the user rather than treating it as
 			// an error and retrying with a different provider.
@@ -1484,7 +1520,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// cannot re-sign it, and Bedrock refuses every changed body with "The
 	// request signature we calculated does not match" (GAP-1893).
 	signedBody := requestBodyIsSigned(r)
-	if launderedBody, stripped := launderInboundHistory(json.RawMessage(body), r.URL.Path); !signedBody && stripped > 0 {
+	if launderedBody, stripped := launderInboundHistory(json.RawMessage(body), r.URL.Path); privateModel == nil && !signedBody && stripped > 0 {
 		fmt.Fprintf(os.Stderr, "[guardrail] laundered %d DefenseClaw block turn(s) from passthrough history (path=%s)\n", stripped, r.URL.Path)
 		body = []byte(launderedBody)
 		if p.logger != nil {
@@ -1503,7 +1539,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// notice on the next turn. With this block, every supported provider
 	// surface carries the notification forward as either a system
 	// message or merged instructions string.
-	if p.notify != nil && !signedBody {
+	if privateModel == nil && p.notify != nil && !signedBody {
 		if sysMsg := p.notify.FormatSystemMessage(); sysMsg != "" {
 			if patched, site, err := injectNotificationForPassthrough(json.RawMessage(body), sysMsg, r.URL.Path); err == nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into passthrough request (site=%s path=%s)\n", site, r.URL.Path)
@@ -1531,6 +1567,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// "Bearer <key>" regardless of the original header), (2) api-key (Azure),
 	// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
 	upstreamAuth := passthroughUpstreamAuth(r.Header)
+	if privateModel != nil {
+		// The real provider key exists only in the private host exchange.
+		upstreamAuth = "Bearer " + privateModel.adapter.grant.Credential
+	}
 	// Fallback: when the caller supplied X-DC-Target-URL but no credential
 	// headers (the "third_party_injected" mode used by ZeptoClaw/PulseClaw),
 	// consult the enterprise token resolver (secrets-sidecar hydrated key)
@@ -1618,6 +1658,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 		p.recordProxyForwardedHeadersV8(r.Context(), "passthrough", "ok", int64(forwardedHeaderCount))
 	}
+	if privateModel != nil {
+		// The shared proxy may forward configured headers for ordinary callers.
+		// A native exchange sends only host-pinned protocol headers; no guest,
+		// connector or global header can influence the provider request.
+		upstreamReq.Header = make(http.Header)
+		upstreamReq.Header.Set("Content-Type", "application/json")
+		upstreamReq.Header.Set("Anthropic-Version", "2023-06-01")
+	}
 	// Set the single resolved auth header for the upstream provider.
 	setPassthroughUpstreamAuth(upstreamReq.Header, provider, upstreamAuth)
 
@@ -1673,7 +1721,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 			if verdict.Action == "block" && mode == "action" {
 				msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
-				p.enqueueBlockNotification(verdict, "completion", partial.Model)
+				if privateModel == nil {
+					p.enqueueBlockNotification(verdict, "completion", partial.Model)
+				}
 				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
 				return
 			}
@@ -1692,7 +1742,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					verdict.Action == "block" && mode == "action")
 				if verdict.Action == "block" && mode == "action" {
 					msg := blockMessage(customBlockMsg, "tool_call", verdict.Reason)
-					p.enqueueBlockNotification(verdict, "tool_call", partial.Model)
+					if privateModel == nil {
+						p.enqueueBlockNotification(verdict, "tool_call", partial.Model)
+					}
 					p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
 					return
 				}
@@ -1821,6 +1873,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				}
 			}
 			if readErr != nil {
+				if privateModel != nil && readErr != io.EOF {
+					// A bounded native stream that stops on an upstream error
+					// cannot be completed as a successful model turn.
+					panic(http.ErrAbortHandler)
+				}
 				break
 			}
 		}
@@ -4357,6 +4414,12 @@ func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, mode
 // authenticateRequest returns r with its verified subject bound when the
 // caller proved an owner credential (presentsOwnerCredential).
 func (p *GuardrailProxy) authenticateRequest(r *http.Request) (*http.Request, bool) {
+	if exchange := nativeModelExchangeFromContext(r.Context()); exchange != nil {
+		if !exchange.adapter.admit() {
+			return r, false
+		}
+		return r.WithContext(contextWithSandboxUser(r.Context(), exchange.binding)), true
+	}
 	if !p.credentialsAccepted(r) {
 		return r, false
 	}

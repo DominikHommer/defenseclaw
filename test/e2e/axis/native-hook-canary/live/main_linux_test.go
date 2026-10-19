@@ -32,7 +32,7 @@ func validClaudeCase() map[string]any {
 		"exited": true, "destroyed": true, "native_and_endpoint_cleanup": true,
 		"binding_mint_attempted": true, "binding_issued": true, "binding_revoked": true,
 		"vendor_runtime_qualification": false, "production_qualification": false,
-		"binding_id": "fixed-binding",
+		"binding_id": "fixed-binding", "audit_allow_and_block_durable": true,
 		"rows": []any{row("A", 0, "", ""), row("B", 0, deniedClaude, ""),
 			row("S", 0, "", ""), row("L", 2, "", closedClaude503)},
 		"decisions": []any{decision("allow"), decision("block")},
@@ -61,6 +61,15 @@ func TestClaudeCaseRefusesFalsePass(t *testing.T) {
 		t.Fatal("valid strict fixture refused:", err)
 	}
 	changes := map[string]func(map[string]any){
+		"audit-durable-missing": func(item map[string]any) {
+			delete(item, "audit_allow_and_block_durable")
+		},
+		"audit-durable-false": func(item map[string]any) {
+			item["audit_allow_and_block_durable"] = false
+		},
+		"audit-durable-wrong-type": func(item map[string]any) {
+			item["audit_allow_and_block_durable"] = "true"
+		},
 		"policy-denial-code-two": func(item map[string]any) {
 			item["rows"].([]any)[1].(map[string]any)["hook_code"] = 2
 		},

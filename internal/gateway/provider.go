@@ -596,7 +596,16 @@ type providerEgressEmitter func(context.Context, gatewaylog.EgressPayload)
 // carried traffic rather than an earlier DNS guess.
 func doProviderRequest(req *http.Request, emit providerEgressEmitter) (*http.Response, error) {
 	observedReq, observer := observePrivateUpstreamPeers(req)
-	resp, err := providerHTTPClient.Do(observedReq)
+	client := providerHTTPClient
+	if exchange := nativeModelExchangeFromContext(req.Context()); exchange != nil {
+		// Native model traffic uses its own direct, non-loopback dial guard.
+		// It never inherits a process proxy or the generic Ollama allowance.
+		if !exchange.adapter.admit() || exchange.adapter.client == nil {
+			return nil, errNativeModelAdapter
+		}
+		client = exchange.adapter.client
+	}
+	resp, err := client.Do(observedReq)
 	for _, peer := range observer.allowedPrivatePeers() {
 		if emit != nil {
 			emit(req.Context(), gatewaylog.EgressPayload{

@@ -84,11 +84,36 @@ type PolicyReceipt struct {
 type ExecutionPolicy struct {
 	effective  *packs.Effective
 	options    PolicyOptions
+	llm        string
 	enabled    map[ID]bool
 	required   []Capability
 	components []PolicyComponent
 	canonical  []byte
 	digest     string
+}
+
+// ModelBrokerPolicy is a copied description of the host's resolved model
+// route. It is not an authorization handle: a native producer must capture it
+// with the policy and admitted launch, rather than reconstruct it from policy
+// Snapshot or a guest request. The model name itself is chosen by that host
+// producer; the sandbox policy has no model-name field.
+type ModelBrokerPolicy struct {
+	Authority       PolicyAuthorityBinding
+	PolicyDigest    string
+	Harness         string
+	HarnessIdentity HarnessIdentity
+	LLM             string
+	Profile         string
+	Offline         bool
+}
+
+func (p *ExecutionPolicy) ModelBrokerPolicy() (ModelBrokerPolicy, bool) {
+	if p == nil || p.effective == nil || p.digest == "" {
+		return ModelBrokerPolicy{}, false
+	}
+	return ModelBrokerPolicy{Authority: p.options.Authority, PolicyDigest: p.digest,
+		Harness: p.effective.Harness, HarnessIdentity: p.options.Harness,
+		LLM: p.llm, Profile: p.effective.Profile, Offline: p.options.Offline}, true
 }
 
 // HostResolvedRun binds one resolved policy to the host authority that was
@@ -236,6 +261,7 @@ func commonPolicyValues(o config.OpenShellConfig) (map[string]any, error) {
 
 func (p *ExecutionPolicy) freeze(source config.OpenShellConfig, flags packs.Flags) error {
 	eff := p.effective
+	p.llm = source.LLM
 	common, err := commonPolicyValues(source)
 	if err != nil {
 		return err

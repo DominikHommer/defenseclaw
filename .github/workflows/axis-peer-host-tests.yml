@@ -189,6 +189,24 @@ jobs:
             TestNativeHookAssetsCloseRacesUnconsumedHandoffWithoutCallbackRace
             TestNativeHookAssetsRejectsIdentityAndAdmissionBeforeAssetHandoff
             TestNativeHookAssetsDirectoryTerminalObservation
+            TestNativeModelAdapterUsesGuardrailAndHostOnlyRoute
+            TestNativeModelAdapterInspectsTextBlocksInMultiTurnHistory
+            TestNativeModelAdapterRefusesStaleAuthorityBindingAndMalformedInput
+            TestNativeModelAdapterConstructorRejectsForeignOrUnpinnedGrant
+            TestNativeModelAdapterRefusesOfflineHostPolicy
+            TestNativeModelAdapterCancelAndOutputLimit
+            TestNativeModelAdapterCloseReleasesStalledRequestBody
+            TestNativeModelAdapterLimitsConcurrentRequests
+            TestNativeModelAdapterCapsUpstreamBeforeProxyBuffering
+            TestNativeModelAdapterRotatedAuthorityAbortsStream
+            TestNativeModelAdapterCompleteProjectionAndHeartbeat
+            TestNativeModelAdapterConnectorProfileExcludesOwner
+            TestNativeModelAdapterPrivateNotificationAndBlockState
+            TestNativeModelAdapterRequiresSelectedAnthropicAndPinnedModel
+            TestNativeModelAdapterRevocationBeforeBufferedOutput
+            TestNativeModelWriterAbortAfterRevocation
+            TestHeartbeatBypass_RawTextGate
+            TestSessionStartupBypass_RawTextGate
           )
           if [[ "$RUNNER_OS" == Windows ]]; then
             expected+=(

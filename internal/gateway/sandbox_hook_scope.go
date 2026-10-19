@@ -250,6 +250,9 @@ func sandboxSessionStateKey(ctx context.Context, sessionID string) string {
 	if binding, ok := sandboxauth.FromContext(ctx); ok {
 		return "sandbox\x00" + sandboxBindingScope(binding) + "\x00" + sessionID
 	}
+	if exchange := nativeModelExchangeFromContext(ctx); exchange != nil {
+		return "sandbox\x00" + sandboxBindingScope(exchange.binding) + "\x00" + sessionID
+	}
 	return sessionID
 }
 
