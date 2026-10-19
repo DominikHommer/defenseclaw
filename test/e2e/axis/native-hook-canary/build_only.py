@@ -92,8 +92,8 @@ PINS = {
         "bytes": 18138,
     },
     "internal/gateway/native_sandbox_hook_contained_canary_linux_test.go": {
-        "sha256": "35cf4241d94f07ff36acc4d056753601f4a32077523916feb9a6180812252cda",
-        "bytes": 30055,
+        "sha256": "2751b8a84e080ed6bdd8dd7b975d6ce9ac8da983f53fa8eaa5c0d58b12182ad4",
+        "bytes": 31402,
     },
     "internal/gateway/native_sandbox_hook_contained_pin_linux_test.go": {
         "sha256": "33aedf3fc8b6afefc40f5252be3ba133f23080766a718f6990cf90569100fac2",
@@ -104,12 +104,12 @@ PINS = {
         "bytes": 8928,
     },
     "test/e2e/axis/native-hook-canary/fixture/cases.go": {
-        "sha256": "2acd06b5d29d00c8e7bbc6d2612e471a007589de7d66b371b910aaa1f114e2c8",
-        "bytes": 3814,
+        "sha256": "a29ebaf081a2f9c70cb8977207e5cb4c0db2ec377afed69099cf8b33995e316c",
+        "bytes": 6305,
     },
     "test/e2e/axis/native-hook-canary/fixture/cases_test.go": {
-        "sha256": "fd4911f135b769b8c0adc848ea783b9cdee2ccd9789a1648d0edf2810b25d0a4",
-        "bytes": 879,
+        "sha256": "ee967fd63cb014b3958a60df9ff6264a9c151a67ec1e54a02acced8f84b1702f",
+        "bytes": 3466,
     },
     "test/e2e/axis/native-hook-canary/payload/main_linux.go": {
         "sha256": "b7356ca99c7210b65d608bde8a30ae339786d77c3d7d76998561b8727d068214",

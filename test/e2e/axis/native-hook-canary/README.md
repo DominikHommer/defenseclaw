@@ -58,6 +58,22 @@ compiled or run. The corrected oracle requires exactly those two additional
 built-ins and refuses any other registry name. It does not add a vendor case or
 change a hook decision.
 
+The second build-only run, 39267098717 at 50c6be77, reached all twelve
+host oracle schemas: eleven passed, while Claude failed the fixture's incorrect
+exit-2 expectation for its structured PreToolUse denial. The existing producer
+and client express that denial as exit 0 with `hookSpecificOutput`, the exact
+`PreToolUse` event, `permissionDecision: deny` and a nonempty reason. The fixed
+oracle now checks that complete shape in both the host oracle and compiled
+native assertions; it rejects exit 0 alone, allow-shaped output, malformed or
+ambiguous JSON and the exit-2 fallback in the evaluated block phase. Allow
+requires empty streams and exit 0. A separately checked sealed endpoint returns
+HTTP 503, which the strict native client maps to exit 2, empty stdout and its
+fixed HTTP-503 fail-closed stderr line. The host oracle exercises that same
+closed-admission handler without a listener or child and requires no additional
+policy decision. The actual native admission-loss row uses the same assertion.
+These checks preserve all twelve schemas, actual evaluator binding/action
+checks, and the cleanup contract. The failed run made no native attempt.
+
 Source-only local checks may run the pure Python tests, formatting/actionlint and
 `build_only.py --dry-check <canonical-repo> <TASK-draft-root>`. The two dry-check
 paths only choose text to compare with fixed source hashes; this mode performs no

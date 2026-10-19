@@ -214,8 +214,28 @@ func TestFixedContainedHookSharedEvaluatorOracleWithoutNative(t *testing.T) {
 				default:
 					t.Fatal("request did not reach actual shared evaluator")
 				}
-				if value.Name == "claudecode" && (phase == 'A' && code != 0 || phase == 'B' && code != 2) {
-					t.Fatal("existing Claude hook result differs")
+				if value.Name == "claudecode" && fixture.ValidateClaudeRow(phase, fixture.Row{Phase: string(phase), Code: code, Stdout: stdout.String(), Stderr: stderr.String()}) != nil {
+					t.Fatal("existing Claude hook response differs")
+				}
+			}
+			if value.Name == "claudecode" {
+				// Exercise the actual closed-admission handler without a listener,
+				// child or evaluator call. The matching private context marker is
+				// normally installed by this endpoint's accepted connection.
+				sealed := &nativeSandboxHookIngress{closing: true}
+				handler := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					sealed.ServeHTTP(w, request.WithContext(context.WithValue(request.Context(), nativeHookConnectionKey{}, sealed)))
+				})
+				raw, _ := value.Payload('L')
+				var stdout, stderr bytes.Buffer
+				code := hookexec.Run(context.Background(), hookexec.Options{Connector: value.Name, Event: value.Event, HookContractID: profile.HookContract, NativeSandbox: profile, Stdin: bytes.NewReader(raw), Stdout: &stdout, Stderr: &stderr, HTTPClient: &http.Client{Transport: containedFixtureTransport{handler, token}}})
+				if fixture.ValidateClaudeRow('L', fixture.Row{Phase: "L", Code: code, Stdout: stdout.String(), Stderr: stderr.String()}) != nil {
+					t.Fatal("closed admission differs from existing Claude strict-client response")
+				}
+				select {
+				case <-decisions:
+					t.Fatal("host-only closed admission produced a policy decision")
+				default:
 				}
 			}
 		})
@@ -625,8 +645,8 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 			// Retain the actual observer value, including its owner binding,
 			// rather than synthesizing a verdict from a helper/HTTP status.
 			observed = append(observed, decision)
-			if value.Name == "claudecode" && (phase == 'A' && row.Code != 0 || phase == 'B' && row.Code != 2) {
-				t.Fatal("existing Claude helper return differs from actual shared decision")
+			if value.Name == "claudecode" && fixture.ValidateClaudeRow(phase, row) != nil {
+				t.Fatal("existing Claude helper response differs from actual shared decision")
 			}
 		} else {
 			select {
@@ -634,8 +654,8 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 				t.Fatal("silence/closed admission produced a policy decision")
 			default:
 			}
-			if value.Name == "claudecode" && phase == 'L' && row.Code != 2 {
-				t.Fatal("closed admission did not reach existing Claude failure mapping")
+			if value.Name == "claudecode" && phase == 'L' && fixture.ValidateClaudeRow(phase, row) != nil {
+				t.Fatal("closed admission differs from existing Claude strict-client response")
 			}
 		}
 	}
