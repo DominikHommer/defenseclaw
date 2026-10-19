@@ -1367,6 +1367,7 @@ function Save-Snapshot {
         return $false
     }
     Copy-BinDir (Join-Path $Snap "bin")
+    Install-HookFirst $Snap
     foreach ($entry in $entries) { Copy-Kept $entry.FullName (Join-Path $Snap "data") }
     Save-ExternalConfig $Snap
     if (Test-Path -LiteralPath $Venv) { Move-Path $Venv (Join-Path $Snap "venv") 60 }
@@ -1377,8 +1378,34 @@ function Save-Snapshot {
     return $true
 }
 
+function Install-HookFirst([string]$Slot) {
+    # The previous version's hook keeps answering the agents while the data
+    # folder is copied and the new Python environment is built, a minute or
+    # more on a busy host. A 1.0.2 hook takes the stopped gateway for an
+    # operator stop and tries to start it (GAP-0196); the new hook reads
+    # .install.lock, waits for the install and names it. So the new hook goes
+    # in as soon as the rollback copy holds the old one. HOOK_FIRST, written
+    # once that copy is whole, tells Undo-Snapshot to put the old hook back.
+    $live = Join-Path $BinDir "defenseclaw-hook.exe"
+    $saved = Join-Path $Slot "bin\defenseclaw-hook.exe"
+    $staged = Join-Path $Staging "bin\defenseclaw-hook.exe"
+    foreach ($path in @($live, $saved, $staged)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+    }
+    Set-Content -LiteralPath (Join-Path $Slot "HOOK_FIRST") -Value "" -Encoding Ascii
+    Install-File $staged $live
+}
+
+function Undo-HookFirst([string]$Slot) {
+    $saved = Join-Path $Slot "bin\defenseclaw-hook.exe"
+    if ((Test-Path -LiteralPath (Join-Path $Slot "HOOK_FIRST")) -and (Test-Path -LiteralPath $saved -PathType Leaf)) {
+        Install-File $saved (Join-Path $BinDir "defenseclaw-hook.exe")
+    }
+}
+
 function Undo-Snapshot([string]$Slot) {
     # Put back what an unfinished Save-Snapshot moved.
+    Undo-HookFirst $Slot
     if ((Test-Path -LiteralPath (Join-Path $Slot "venv")) -and -not (Test-Path -LiteralPath $Venv)) { Move-Path (Join-Path $Slot "venv") $Venv 60 }
     if ((Test-Path -LiteralPath (Join-Path $Slot "installer")) -and -not (Test-Path -LiteralPath $InstallerDir)) {
         Move-Path (Join-Path $Slot "installer") $InstallerDir

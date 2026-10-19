@@ -858,6 +858,22 @@ func (l *lifecycle) confirmRecoveredBundle(ctx context.Context) error {
 	if err := check(); err == nil {
 		return nil
 	}
+	if l.keepThroughRollback[gateway.Name] {
+		// The gateway kept running through the rollback of a hot change:
+		// give it the hot-apply wait to reload the restored config before
+		// it is restarted (GAP-0238).
+		deadline := env.Now().Add(min(hotApplyTimeout, env.ReadyTimeout))
+		for env.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(env.PollInterval):
+			}
+			if err := check(); err == nil {
+				return nil
+			}
+		}
+	}
 	// A hot applied gateway can retain the new policy after the files were
 	// restored. Restart it once to load the confirmed generation.
 	if err := restartUnit(ctx, env.Services, gateway); err != nil {

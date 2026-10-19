@@ -100,6 +100,17 @@ func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *p
 	return err == nil && gatewayPolicyDigest(body) != ""
 }
 
+// installedConfigReplaced reports an in-place config.yaml that changed after
+// this transaction planned it. A bundle or --config run brings its own
+// config and is never superseded this way.
+func (l *lifecycle) installedConfigReplaced() bool {
+	if l.bundle != nil || l.planned == nil || !l.planned.configFromInstalled {
+		return false
+	}
+	current, err := sha256File(l.env.P(l.env.Layout.ConfigPath))
+	return err == nil && current != l.planned.configSHA
+}
+
 func gatewayUnitOf(units []Unit) (Unit, bool) {
 	for _, unit := range units {
 		if unit.Kind == "gateway" {
@@ -126,6 +137,17 @@ func (l *lifecycle) settleHotGateway(ctx context.Context, gateway Unit) error {
 			if body, err := l.gatewayHealth(ctx, gateway, l.serviceUID); err == nil && gatewayPolicyDigest(body) == want {
 				l.gatewayKeptRunning = true
 				l.noteChange("applied the config change in the running %s; it was not restarted", gateway.Name)
+				return nil
+			}
+			if l.installedConfigReplaced() {
+				// Another push replaced config.yaml while this run applied
+				// the previous one (two pushes a few seconds apart): the
+				// gateway follows the newer file and never reports this
+				// run's policy. Restarting it applied a hot change cold
+				// (GAP-0738); the follow-up transaction of this run applies
+				// the newer config to the running gateway instead.
+				l.gatewayKeptRunning = true
+				l.noteChange("left %s running: config.yaml was replaced while it applied the previous version, and the follow-up applies the new one", gateway.Name)
 				return nil
 			}
 			if !env.Now().Before(deadline) {

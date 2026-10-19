@@ -2098,8 +2098,14 @@ _HERMES_UPSTREAM_TIMEOUT_NOTE = (
 
 
 def _observe_keeps_fail_open(gc, name: str) -> bool:
-    """Observe mode keeps a connector fail-open unless it has its own fail mode."""
+    """Under Secure Client, observe mode keeps a connector fail-open unless it has its own fail mode.
+
+    Elsewhere an observe-mode connector follows the configured fail mode
+    (closed when none is set), so this is never the reason it is open."""
     if normalize_connector(name) == "hermes":
+        return False
+    secure_client = getattr(gc, "secure_client_observe_open", None)
+    if not (callable(secure_client) and secure_client()):
         return False
     override = gc._connector_override(name) if hasattr(gc, "_connector_override") else None
     if override is not None and str(getattr(override, "hook_fail_mode", "") or "").strip():

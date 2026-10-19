@@ -30,6 +30,9 @@ import (
 	"io"
 	"os"
 
+	// Its init raises a Windows hook process to above-normal priority
+	// before the CLI packages initialize (GAP-0155).
+	_ "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-hook/internal/hookpriority"
 	"github.com/defenseclaw/defenseclaw/internal/cli"
 )
 

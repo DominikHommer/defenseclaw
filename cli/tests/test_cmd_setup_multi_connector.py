@@ -1307,6 +1307,9 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         gc.hook_fail_mode = "closed"
         _write_connector_identity(self.app.cfg, "codex", "add")
         self.assertEqual(gc.connectors["claudecode"].hook_fail_mode, "")
+        # Outside Secure Client observe mode follows the global closed too.
+        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
+        gc._secure_client_observe_open = True
         self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "open")
         gc.connectors["claudecode"].mode = "action"
         self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")

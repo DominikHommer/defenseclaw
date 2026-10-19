@@ -106,7 +106,7 @@ func TestForeignHookSessionPreparesUnixManagedTransport(t *testing.T) {
 	if before := buildHookOptionsForRuntime("opencode", "tool.execute.before", "", "closed", true); before.ManagedRuntimeFailure == "" {
 		t.Fatal("test must start without prepared managed state")
 	}
-	decision, err := exchangeForeignHookSession("opencode", "tool.execute.before", time.Now().Add(5*time.Second), enterprisepolicy.SessionExchange{})
+	decision, err := exchangeForeignHookSession("opencode", "tool.execute.before", time.Now(), time.Now().Add(5*time.Second), enterprisepolicy.SessionExchange{})
 	if err != nil || decision.Deny {
 		t.Fatalf("real hook socket exchange = %+v, error %v", decision, err)
 	}

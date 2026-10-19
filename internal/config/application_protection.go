@@ -397,11 +397,13 @@ func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecis
 		}
 	}
 	if configured == "" {
-		if actionDecision {
-			configured = c.Guardrail.effectiveHookFailModeForMode(connector, "action")
-		} else {
-			configured = c.Guardrail.EffectiveHookFailModeFor(connector)
+		mode := "action"
+		if !actionDecision {
+			mode = c.Guardrail.EffectiveMode(connector)
 		}
+		// Only Secure Client keeps an observe-mode connector without a value
+		// of its own fail-open; everywhere else an unset value is closed.
+		configured = c.Guardrail.effectiveHookFailModeForMode(connector, mode, c.SecureClientIntegration())
 	}
 	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured)
 }

@@ -2632,12 +2632,15 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Managed outside Secure Client > explicit connector posture > observe compatibility > global.
+        """Managed outside Secure Client > explicit connector value > global value > ``closed``.
 
-        A managed deployment outside Secure Client is always closed. Otherwise
-        Cursor follows its guardrail mode: action is closed and observe is
-        open. Other connector-scoped values remain explicit runtime
-        response-integrity choices in observe mode.
+        A managed deployment outside Secure Client is always closed (Go
+        ``Config.ManagedHooksFailClosed``). Otherwise this mirrors Go
+        ``EffectiveHookFailModeForConnector``: a fail mode that is not set is
+        ``closed``, in observe and action mode alike; only an explicit ``open``
+        opens a hook. Under Secure Client an observe-mode connector without a
+        value of its own stays ``open``. Cursor always follows its guardrail
+        mode: action is closed and observe is open.
         """
         # A managed deployment outside Secure Client fails closed for every
         # connector and mode (Go Config.ManagedHooksFailClosed).
@@ -2654,11 +2657,20 @@ class GuardrailConfig:
             if pc.hook_fail_mode.strip().lower() == "closed":
                 return "closed"
             return "open"
-        if self.effective_mode(connector).strip().lower() != "action":
+        if self.secure_client_observe_open() and self.effective_mode(connector).strip().lower() != "action":
             return "open"
-        if self.hook_fail_mode.strip().lower() == "closed":
-            return "closed"
-        return "open"
+        if self.hook_fail_mode.strip().lower() == "open":
+            return "open"
+        return "closed"
+
+    def secure_client_observe_open(self) -> bool:
+        """Whether this guardrail belongs to a Secure Client config.
+
+        Only there does an observe-mode connector without a fail mode of its
+        own stay fail-open. :func:`load` sets it; a config built in code is
+        not Secure Client.
+        """
+        return bool(getattr(self, "_secure_client_observe_open", False))
 
     def effective_block_message(self, connector: str = "") -> str:
         """Per-connector block message when set, else the global one."""
@@ -7320,6 +7332,10 @@ def load(
     # validated by their respective writers at write time.
     cfg.observability.validate()
     cfg.application_protection.validate()
+    # Not a dataclass field: never written back to config.yaml.
+    from defenseclaw import config_writer
+
+    cfg.guardrail._secure_client_observe_open = config_writer.secure_client_document(raw)
     if is_current_schema(source_config_version):
         cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg

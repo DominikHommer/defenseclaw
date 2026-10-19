@@ -1262,6 +1262,9 @@ $InstallerDir = Join-Path $DataDir 'installer'
 $NotData = @('previous')
 function Get-TreeSize {{ return 0 }}
 function Copy-BinDir {{}}
+# No bin folder in this fixture, so no hook to swap (test_install_ps1.py
+# covers Install-HookFirst).
+function Install-HookFirst([string]$Slot) {{}}
 function Save-ExternalConfig {{}}
 function Copy-Kept([string]$Source, [string]$To) {{ Copy-Item -LiteralPath $Source -Destination $To }}
 if (-not (Save-Snapshot)) {{ throw 'Fixture snapshot failed' }}

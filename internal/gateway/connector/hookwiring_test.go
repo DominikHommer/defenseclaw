@@ -1536,9 +1536,17 @@ func TestWindowsNativePowerShellHookCommandPreservesAntigravityFailureResponse(t
 	if got := strings.TrimSpace(stdout.String()); got != wantFailure {
 		t.Fatalf("Antigravity failure response = %q, want %s", got, wantFailure)
 	}
-	if diagnostic := strings.ToLower(stderr.String()); !strings.Contains(diagnostic, "missing gateway token") ||
-		!strings.Contains(diagnostic, "event-specific failure response") {
+	diagnostic := strings.ToLower(stderr.String())
+	if !strings.Contains(diagnostic, "event-specific failure response") {
 		t.Fatalf("Antigravity failure-response provenance was not preserved on stderr: %q", stderr.String())
+	}
+	// A tool call's hook answers within its budget counted from the first
+	// process of the call (the PowerShell bridge here). When a loaded runner
+	// spends that budget before the hook reads its token, the answer deadline
+	// blocks first with the same failure response and names the deadline
+	// instead of the token (B-01, GAP-0155).
+	if !strings.Contains(diagnostic, "missing gateway token") && !strings.Contains(diagnostic, "did not answer in time") {
+		t.Fatalf("Antigravity failure response names neither the missing token nor the answer deadline: %q", stderr.String())
 	}
 }
 

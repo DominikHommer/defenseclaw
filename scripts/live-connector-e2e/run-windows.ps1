@@ -5990,7 +5990,9 @@ function Assert-DoctorHookRegistration {
         $codexCommand = Get-CodexWindowsHookCommand $registration
         Assert-CodexSynchronousWindowsHookCommand $codexCommand 'setup-created Codex registration'
     } elseif ($Connector -eq 'amp') {
-        $expectedAmpFailMode = if ($script:LastSetupMode -eq 'action') { 'closed' } else { 'open' }
+        # An unset hook fail mode is closed outside Secure Client, in observe
+        # mode too; this Setup sets none.
+        $expectedAmpFailMode = 'closed'
         foreach ($marker in @(
             'DefenseClaw Amp policy bridge',
             '/api/v1/amp/hook',
