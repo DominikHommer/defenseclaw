@@ -153,6 +153,9 @@ jobs:
               TestNativeHookIngressRefusesUnscopedBindingsAndUnboundedOwner
               TestNativeHookIngressCannotGrantTCPAuthorityOrMutateGuestHeaders
               TestNativeHookIngressCloseRevokesBeforeRetainedRequestDrain
+              TestNativeHookOwnedSessionsCannotSelectEachOtherBindingOrReplay
+              TestNativeHookStillUsesExistingRouteBodyCSRFAndRateChecks
+              TestNativeHookOwnerAndCurrentIngressAuthorityLossFailClosed
             )
           fi
           selected="^($(IFS='|'; echo "${expected[*]}"))$"
