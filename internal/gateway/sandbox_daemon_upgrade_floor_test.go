@@ -58,10 +58,20 @@ var upgradeFloorPeer = managedHookPeer{UID: 94409901, Name: "test-engineer@direc
 
 func upgradeFloorFixture(t *testing.T, rc1 bool) (*sandboxDaemonFixture, *managedSandboxController, *sandboxFixture, func(bool)) {
 	t.Helper()
+	return upgradeFloorFixtureWith(t, rc1, nil)
+}
+
+// upgradeFloorFixtureWith is upgradeFloorFixture with edit applied to the
+// managed gateway's configuration before the sandbox is registered.
+func upgradeFloorFixtureWith(t *testing.T, rc1 bool, edit func(*sandboxFixture)) (*sandboxDaemonFixture, *managedSandboxController, *sandboxFixture, func(bool)) {
+	t.Helper()
 	gate := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
 	gate.setGroups(upgradeFloorPeer, "dc-sbx-devs")
 	gate.cfg.OpenShell.Admin = closedFloorRegFloor
 	gate.cfg.OpenShell.Admin.AllowedCredentials = []string{"none"}
+	if edit != nil {
+		edit(gate)
+	}
 	resp := gate.live(upgradeFloorPeer, 1)
 	id := resp.Registration.ID
 	var answer bool

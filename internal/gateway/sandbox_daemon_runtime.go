@@ -2827,6 +2827,23 @@ func (r *daemonRegistrations) applyStartFloor(name, id string, cp sandboxrelay.C
 	r.changes.Add(1)
 }
 
+// unconfirm puts registration id of sandbox name back on the closed floor
+// (configForSandbox) until an answer confirms it again (applyLive), and
+// reports whether it was confirmed. It counts as a change, so the next
+// adoption re-resolves the sandbox's policy.
+func (r *daemonRegistrations) unconfirm(name, id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reg, ok := r.byName[name]
+	if !ok || reg.ID != id || !reg.Confirmed {
+		return false
+	}
+	reg.Confirmed = false
+	r.byName[name] = reg
+	r.changes.Add(1)
+	return true
+}
+
 // nextSeq numbers a policy request of a registration, taken before it is
 // sent (applyOrdered).
 func (r *daemonRegistrations) nextSeq() uint64 { return r.seq.Add(1) }

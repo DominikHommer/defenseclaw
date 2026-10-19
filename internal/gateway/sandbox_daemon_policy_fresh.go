@@ -302,6 +302,14 @@ func (d *SandboxDaemon) askPolicy(ctx context.Context, r daemonRegistration, rep
 		return ans
 	}
 	if ans.err != nil {
+		if policyUnloadable(ans.err) && d.regs.unconfirm(r.Sandbox, r.ID) {
+			// The managed gateway answered and cannot state this
+			// sandbox's policy: the floor confirmed before may be looser
+			// than the organization's now (an alert where it now says
+			// stop, GAP-0058). The sandbox runs under the closed floor
+			// until an answer carries its policy again.
+			d.logf("sandbox %s: the managed gateway can't load its policy (%v); it runs under the closed floor until it can", r.Sandbox, ans.err)
+		}
 		return ans
 	}
 	if cp.Revoked {
@@ -325,6 +333,14 @@ func (d *SandboxDaemon) askPolicy(ctx context.Context, r daemonRegistration, rep
 		d.rt.manager.ReloadDecisions(ctx, r.ID)
 	}
 	return ans
+}
+
+// policyUnloadable reports the managed gateway's answer that it cannot load
+// the registration's policy (sandbox_policy_unloadable): an answer, not an
+// outage, so the policy confirmed before is not kept in force.
+func policyUnloadable(err error) bool {
+	var refused *sandboxrelay.Error
+	return errors.As(err, &refused) && refused.Reason == sandboxrelay.ReasonPolicyUnloadable
 }
 
 // adoptApplied puts every registration change applied so far in force
@@ -484,7 +500,7 @@ func (d *SandboxDaemon) confirmOnce(ctx context.Context, r daemonRegistration, c
 		d.askPoll()
 		return false, sandboxEgressRevoked(), true
 	case ans.err != nil:
-		if changing {
+		if changing || policyUnloadable(ans.err) {
 			d.logf("confirm the changed policy of sandbox %s: %v", r.Sandbox, ans.err)
 			return false, sandboxEgressRefusal(), true
 		}

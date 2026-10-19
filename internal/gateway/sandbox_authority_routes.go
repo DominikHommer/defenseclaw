@@ -825,12 +825,17 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 	}
 	var requiredPack json.RawMessage
 	if floor.RequiredPack != "" && !packs.IsBuiltin(floor.RequiredPack) && reg.State != sandboxreg.StateRevoked {
+		// The required pack as the run loaded it: the pack the sandbox
+		// runs, or the required one a stricter pack stands in for. Only
+		// the second case carried it before, so a sandbox that ran the
+		// required pack itself got policy_unloadable on every poll and
+		// kept the floor of its create (GAP-0058).
 		eff, _, err := sandboxRegistrationEffective(cfg, auth, peer, reg, floor)
-		if err != nil || eff.RequiredPackContent() == nil {
+		if err != nil || eff.RequiredPackLoaded() == nil {
 			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 			return
 		}
-		requiredPack, err = json.Marshal(eff.RequiredPackContent())
+		requiredPack, err = json.Marshal(eff.RequiredPackLoaded())
 		if err != nil {
 			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 			return

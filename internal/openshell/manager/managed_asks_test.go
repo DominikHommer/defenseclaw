@@ -1705,3 +1705,45 @@ func TestManagedForeignAlertUnderTheRegistrationFloor(t *testing.T) {
 		t.Fatalf("the registered sandbox is %s", p)
 	}
 }
+
+// GAP-0058 (T8, TST-2216): the registration floor of a running sandbox
+// tightens from alert to stop (the organization changed foreign_sandboxes
+// and the daemon's poll applied it). The next reconcile stops the foreign
+// sandbox it reported under alert before, and records it once more with
+// action stop.
+func TestManagedForeignStopAfterTheRegistrationFloorTightens(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	alert := e.config().OpenShell.Admin
+	alert.ForeignSandboxes = config.OpenShellForeignSandboxesAlert
+	auth.profile.Store(&alert)
+	e.live(sandboxapi.CreateRequest{Name: "mine"})
+	e.register("mine")
+	_, err := e.client.CreateSandbox(t.Context(), "devbox", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{})
+	must(t, err)
+	must(t, e.m.Reconcile(t.Context()))
+	must(t, e.m.Reconcile(t.Context()))
+	if got := auth.eventsOf(sandboxrelay.EventForeignSandbox); len(got) != 1 || !strings.Contains(string(got[0].Payload), `"action":"alert"`) {
+		t.Fatalf("foreign sandbox events under alert = %+v", got)
+	}
+
+	stop := alert
+	stop.ForeignSandboxes = config.OpenShellForeignSandboxesStop
+	auth.profile.Store(&stop)
+	e.m.RefreshPolicies()
+	must(t, e.m.Reconcile(t.Context()))
+	sb, err := e.client.GetSandbox(t.Context(), "devbox")
+	if err == nil {
+		if p := auditPhase(sb.Status.Phase); p != audit.SandboxPhaseStopped && p != audit.SandboxPhaseStopping {
+			t.Fatalf("after the floor said stop the foreign sandbox is %s", sb.Status.Phase)
+		}
+	} else if !openshell.IsNotFound(err) {
+		t.Fatal(err)
+	}
+	got := auth.eventsOf(sandboxrelay.EventForeignSandbox)
+	if len(got) != 2 || !strings.Contains(string(got[1].Payload), `"action":"stop"`) {
+		t.Fatalf("foreign sandbox events after the floor said stop = %+v", got)
+	}
+	if p := e.get("mine").Phase; p != string(audit.SandboxPhaseReady) {
+		t.Fatalf("the registered sandbox is %s", p)
+	}
+}

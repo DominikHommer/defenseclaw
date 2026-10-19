@@ -44,6 +44,78 @@ func pinnedFloorProfiles(f *sandboxFixture, to string) {
 	f.publishFirstGeneration()
 }
 
+// foreignFloorProfiles makes contractors the profile whose sandbox section
+// says foreign_sandboxes: stop and engineering one without a sandbox
+// section, assigned as pinnedFloorProfiles does (to), under the
+// organization's openshell.admin foreign_sandboxes org.
+func foreignFloorProfiles(f *sandboxFixture, to, org string) {
+	f.cfg.OpenShell.Admin.ForeignSandboxes = org
+	f.cfg.Guardrail.Profiles["contractors"] = config.GuardrailProfile{Description: "Contractors",
+		Sandbox: &config.OpenShellAdminConfig{ForeignSandboxes: config.OpenShellForeignSandboxesStop}}
+	f.cfg.Guardrail.Profiles["engineering"] = config.GuardrailProfile{Description: "Engineering"}
+	contractors, devs := "contractors", "engineering"
+	if to != "" {
+		contractors, devs = to, to
+	}
+	f.cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: contractors, Match: config.ProfileMatch{Groups: []string{"dc-sbx-contractors"}}},
+		{Profile: devs, Match: config.ProfileMatch{Groups: []string{"dc-sbx-devs"}}},
+	}
+	f.publishFirstGeneration()
+}
+
+// GAP-0058 with GAP-0242: foreign_sandboxes of a running sandbox's floor
+// only ever tightens. The organization's stop reaches a live registration
+// created under alert at its next answer. A sandbox created under the
+// profile that says stop keeps stop after its group moved to a profile
+// under the organization's alert, and the person's next sandbox takes
+// alert.
+func TestSandboxAuthorityForeignSandboxesOnlyTighten(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
+	f.setGroups(sbxBob, "dc-sbx-devs")
+	foreignFloorProfiles(f, "", config.OpenShellForeignSandboxesAlert)
+	strict := f.live(sbxAlice, 1)
+	loose := f.live(sbxBob, 2)
+	foreign := func(g *sandboxFixture, peer managedHookPeer, id string) (string, string) {
+		t.Helper()
+		code, cur := g.current(peer, id)
+		if code != http.StatusOK || cur.Revoked || cur.Floor == nil {
+			t.Fatalf("policy/current: %d %+v", code, cur)
+		}
+		return cur.Profile, cur.Floor.ForeignSandboxes
+	}
+	if _, got := foreign(f, sbxAlice, strict.Registration.ID); got != config.OpenShellForeignSandboxesStop {
+		t.Fatalf("the contractors sandbox says foreign_sandboxes %q", got)
+	}
+	if _, got := foreign(f, sbxBob, loose.Registration.ID); got != config.OpenShellForeignSandboxesAlert {
+		t.Fatalf("the engineering sandbox says foreign_sandboxes %q", got)
+	}
+
+	// The organization says stop: the live registration created under
+	// alert takes it at its next answer.
+	stop := newSandboxFixtureOn(t, f)
+	foreignFloorProfiles(stop, "", config.OpenShellForeignSandboxesStop)
+	if _, got := foreign(stop, sbxBob, loose.Registration.ID); got != config.OpenShellForeignSandboxesStop {
+		t.Fatalf("after the organization's stop the live engineering sandbox says foreign_sandboxes %q", got)
+	}
+
+	// Alert again, and both groups move to engineering: the sandbox
+	// created under contractors keeps stop; a new one takes alert.
+	moved := newSandboxFixtureOn(t, stop)
+	foreignFloorProfiles(moved, "engineering", config.OpenShellForeignSandboxesAlert)
+	if profile, got := foreign(moved, sbxAlice, strict.Registration.ID); profile != "engineering" || got != config.OpenShellForeignSandboxesStop {
+		t.Fatalf("after the move the contractors-created sandbox is profile %q with foreign_sandboxes %q", profile, got)
+	}
+	fresh := moved.live(sbxAlice, 3)
+	if profile, got := foreign(moved, sbxAlice, fresh.Registration.ID); profile != "engineering" || got != config.OpenShellForeignSandboxesAlert {
+		t.Fatalf("a sandbox created after the move: profile %q, foreign_sandboxes %q", profile, got)
+	}
+	if _, got := foreign(moved, sbxBob, loose.Registration.ID); got != config.OpenShellForeignSandboxesAlert {
+		t.Fatalf("the engineering-created sandbox under the organization's alert says %q", got)
+	}
+}
+
 // GAP-0242: floors are pinned at create per sandbox. A profile-assignment
 // change re-matches a running sandbox to the new profile but runs it under
 // the stricter of the two floors: a sandbox created under the strict
