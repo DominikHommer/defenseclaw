@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -34,6 +35,16 @@ const TruncatedKey = "\x00truncated"
 
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
+
+// OpaqueScopeFactPrefix keys the hook client's check of one write operand
+// against the scopes of a command that may create links it cannot read (an
+// extraction, a sync or a copy that keeps links). The client walks the operand
+// on the user's view of the filesystem. "0" means no traversed name or link
+// hop is inside a scope; "c" means only the operand's own copy scope covers
+// it. A gateway that cannot walk the user's home (ProtectHome) uses the fact
+// in place of its incomplete walk. A name lexically inside a scope stays
+// opaque, and a missing fact leaves the operand unknown.
+const OpaqueScopeFactPrefix = "\x00opaque-scope:"
 
 // maxWriteTargetLinkDepth matches the Linux kernel limit (MAXSYMLINKS) for
 // one path resolution. Every followed link counts, also in parent components,
@@ -470,6 +481,7 @@ func Resolve(payload []byte) string {
 		sourceFacts[DirectoryFactPrefix+cwd] = "?"
 	}
 	var safeRedirects []RedirectOccurrence
+	opaqueFacts := map[string]string{}
 	var toolArgs map[string]json.RawMessage
 	if json.Unmarshal(args, &toolArgs) == nil {
 		for _, key := range []string{"command", "cmd"} {
@@ -539,6 +551,11 @@ func Resolve(payload []byte) string {
 		} else if aliasKnown && links.opaque && (!links.opaqueTarget(resolutionPath) || !links.opaqueTargetExceptCopy(resolutionPath, resolutionPath) && slices.Contains(links.copyDestinations, resolutionPath)) {
 			resolved, ok = links.resolve(resolutionPath, protected)
 		}
+		if aliasKnown && links.opaque {
+			if fact := links.opaqueScopeFact(resolutionPath); fact != "" {
+				opaqueFacts[OpaqueScopeFactPrefix+resolutionPath] = fact
+			}
+		}
 		if !ok {
 			resolved = ""
 		}
@@ -593,6 +610,16 @@ func Resolve(payload []byte) string {
 		targets[key] = value
 		size += entry
 	}
+	// A fact that does not fit is omitted; the gateway reads a missing fact
+	// as unknown, so the map need not be marked truncated for it.
+	for _, key := range slices.Sorted(maps.Keys(opaqueFacts)) {
+		entry := len(jsonString(key)) + 1 + len(jsonString(opaqueFacts[key])) + 1
+		if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
+			break
+		}
+		targets[key] = opaqueFacts[key]
+		size += entry
+	}
 	if truncated {
 		targets[TruncatedKey] = "1"
 	}
@@ -641,6 +668,10 @@ func Decode(value string) (map[string]string, bool) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, SourceLinkFactPrefix) && (value != "0" && value != "1" && value != "?") {
+			return nil, false
+		}
+		if strings.HasPrefix(key, OpaqueScopeFactPrefix) && (value != "0" && value != "c" ||
+			!filepath.IsAbs(strings.TrimPrefix(key, OpaqueScopeFactPrefix))) {
 			return nil, false
 		}
 	}
@@ -745,6 +776,25 @@ func (l shellLinks) opaqueTarget(path string) bool {
 // opaqueTargetExceptCopy excludes only the copy operation's own destination
 // scope. An archive or another operation covering that path still wins.
 func (l shellLinks) opaqueTargetExceptCopy(path, ownCopy string) bool {
+	return l.opaqueTargetWithFacts(path, ownCopy, nil)
+}
+
+// opaqueScopeFact is the OpaqueScopeFactPrefix value for path, or "" when a
+// scope covers it or its walk is incomplete.
+func (l shellLinks) opaqueScopeFact(path string) string {
+	switch {
+	case !l.opaqueTarget(path):
+		return "0"
+	case !l.opaqueTargetExceptCopy(path, path):
+		return "c"
+	}
+	return ""
+}
+
+// opaqueTargetWithFacts is opaqueTargetExceptCopy for a caller that may not
+// see every component of path. facts is the hook client's evidence map; its
+// opaque-scope fact replaces only an incomplete walk.
+func (l shellLinks) opaqueTargetWithFacts(path, ownCopy string, facts map[string]string) bool {
 	// A second copy to the same name may follow a link created by the first.
 	// Only one copy statement can claim the own-destination exemption.
 	if ownCopy != "" {
@@ -766,7 +816,13 @@ func (l shellLinks) opaqueTargetExceptCopy(path, ownCopy string) bool {
 	}
 	forms, complete := writePathForms(path, 0)
 	if !complete {
-		return true
+		// The user's walk of the same operand stands in for one this process
+		// cannot finish; the scope check below still sees the name itself.
+		fact := facts[OpaqueScopeFactPrefix+path]
+		if fact != "0" && (fact != "c" || ownCopy == "" || ownCopy != path) {
+			return true
+		}
+		forms = []string{filepath.Clean(path)}
 	}
 	for _, scope := range l.opaqueScopes {
 		if scope.copy && scope.path == ownCopy {
@@ -1153,19 +1209,43 @@ func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]str
 	return links
 }
 
-// OpaqueTarget reports whether an unreadable link operation can affect path.
-// Such operations include a wrapper or multicall binary running ln, an
-// interpreter or Windows link call, an archive or sync link option, or an mv
-// or relative cd with a link. Archive and copy scopes narrow the affected
-// paths. A program word that is not static alone does not count (GAP-1523).
-func (l Links) OpaqueTarget(path string) bool {
-	return l.links.opaqueTarget(path)
+// OpaqueTargetWithFacts reports whether an unreadable link operation can
+// affect path. Such operations include a wrapper or multicall binary running
+// ln, an interpreter or Windows link call, an archive or sync link option, or
+// an mv or relative cd with a link. Archive and copy scopes narrow the
+// affected paths; ownCopy excludes the scope of the copy statement that writes
+// path as its own destination. A program word that is not static alone does
+// not count (GAP-1523). facts carries the managed hook client's
+// OpaqueScopeFactPrefix entries for a gateway that cannot walk the user's
+// home; nil keeps the local walk as the only evidence.
+func (l Links) OpaqueTargetWithFacts(path string, ownCopy bool, facts map[string]string) bool {
+	if ownCopy {
+		return l.links.opaqueTargetWithFacts(path, path, facts)
+	}
+	return l.links.opaqueTargetWithFacts(path, "", facts)
 }
 
-// OpaqueTargetExceptOwnCopy checks all scopes except the scope created by
-// this copy statement for its own destination.
-func (l Links) OpaqueTargetExceptOwnCopy(path, ownCopy string) bool {
-	return l.links.opaqueTargetExceptCopy(path, ownCopy)
+// SplitOpaqueScopeFacts separates the OpaqueScopeFactPrefix entries from the
+// rest of a decoded map. targets is returned unchanged when it has none.
+func SplitOpaqueScopeFacts(targets map[string]string) (rest, facts map[string]string) {
+	for key, value := range targets {
+		if strings.HasPrefix(key, OpaqueScopeFactPrefix) {
+			if facts == nil {
+				facts = make(map[string]string)
+			}
+			facts[key] = value
+		}
+	}
+	if facts == nil {
+		return targets, nil
+	}
+	rest = make(map[string]string, len(targets)-len(facts))
+	for key, value := range targets {
+		if !strings.HasPrefix(key, OpaqueScopeFactPrefix) {
+			rest[key] = value
+		}
+	}
+	return rest, facts
 }
 
 // Target maps an absolute write operand through the links the command

@@ -731,6 +731,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		_, ok := protected[canonicalSemanticPath(path)]
 		return ok
 	}
+	// The client's opaque-scope facts stand in only for the link-scope walk;
+	// every other check sees the map as before.
+	var opaqueFacts map[string]string
+	request.ResolvedWriteTargets, opaqueFacts = hookpaths.SplitOpaqueScopeFacts(request.ResolvedWriteTargets)
 	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
 		len(request.ResolvedWriteTargets) != 0 {
 		// Keep the client's positive protected-path evidence and inspected copy
@@ -793,6 +797,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
+	if !request.ProtectedHomeHook {
+		// Only the managed hook client walks the user's home for the gateway.
+		opaqueFacts = nil
+	}
 	truncated := request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1"
 	// The links the command creates, read as the hook reads them; set once
 	// the command is known, before the first writeTarget call.
@@ -834,8 +842,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// unknown, including where the gateway resolves targets itself and
 		// the link does not exist yet (GAP-1522). A character device such as
 		// /dev/null is not a link the command can replace; a link to one is,
-		// so the device is read without following links.
-		if !safeRedirect && (!ownCopy && links.OpaqueTarget(target) || ownCopy && links.OpaqueTargetExceptOwnCopy(target, target)) {
+		// so the device is read without following links. A managed gateway
+		// cannot walk the user's home (ProtectHome); the hook client's walk of
+		// the same operand replaces only that missing view (GAP-0278).
+		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
 			if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return true
 			}
