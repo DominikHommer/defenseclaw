@@ -271,10 +271,10 @@ from its policy. A restart or outage that lasts longer ends the call within
 those 3 seconds with `gateway restarting or not running` instead of holding it
 until the gateway is back: a fail-closed hook blocks it, never allows it. The
 same holds for the per-user hooks on Windows. On Windows a per-user hook for
-a tool call also waits at most about 4 seconds for the gateway's decision and
+a tool call also waits at most about 3.5 seconds for the gateway's decision and
 then applies its fail mode (`gateway did not answer in time`); a call the
 gateway is checking with Cisco AI Defense or the LLM judge gets up to about
-4.5 seconds. During
+4 seconds. During
 an install or upgrade, which stops the gateway and starts it again, the shell
 hooks treat the stop as a restart and say that an install or upgrade is
 under way, not that the gateway was stopped.

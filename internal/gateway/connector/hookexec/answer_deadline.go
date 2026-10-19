@@ -22,14 +22,21 @@ import (
 // 429 or a 401. When the budget ends the call fails: closed for a managed
 // hook whatever its fail mode, the account's fail mode for a per-user hook
 // (closed unless the account chose open). It is never allowed because the
-// gateway was slow. The agent's own tool call then waits at most about four
-// seconds plus the launch of the hook, inside the five seconds a tool call
-// may wait for DefenseClaw (GAP-0155, GAP-0167, GAP-0139, GAP-0160).
+// gateway was slow (GAP-0155, GAP-0167, GAP-0139, GAP-0160).
+//
+// The agent may wait at most 5 s for DefenseClaw, and the deadline itself
+// runs late on a loaded host: the answer is written by a process that the
+// system schedules, after the deadline, beside the work that holds the CPU.
+// With a 4 s budget, managed Windows calls during Setup ensures, a repair
+// and a gateway service start gave their block 1.1 to 1.75 s after it
+// (5.1-5.75 s; GAP-0155, GAP-0167, GAP-0171). The budget keeps 1.5 s of the
+// 5 s for that slip; the hook also runs above normal priority there
+// (cmd/defenseclaw-hook/internal/hookpriority).
 //
 // A gateway that waits on a remote scanner for the call (Cisco AI Defense,
 // the LLM judge) says so with an informational 102 response
 // (HookProgressHeader); the call then waits up to hookProgressCeiling.
-var hookAnswerBudget = 4 * time.Second
+var hookAnswerBudget = 3500 * time.Millisecond
 
 // hookProgressCeiling is how long, from the start of the hook process, a
 // tool call whose gateway reported (102) that it waits on a remote scanner
@@ -39,7 +46,8 @@ var hookAnswerBudget = 4 * time.Second
 // seconds for DefenseClaw. The scanner's late verdict is discarded, like any
 // late answer. Before it the 102 lifted the deadline altogether, so a judge
 // that took longer held the call to the agent's own hook timeout (GAP-0255).
-var hookProgressCeiling = 4500 * time.Millisecond
+// It keeps 1 s of the 5 s for the slip of a late deadline.
+var hookProgressCeiling = 4 * time.Second
 
 // HookProgressHeader asks the gateway to answer 102 Processing as soon as a
 // tool call it evaluates waits on a remote scanner. Only hooks that bound
