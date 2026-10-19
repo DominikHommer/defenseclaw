@@ -528,3 +528,47 @@ func TestConnectAdvertisesMaximumPacketSize(t *testing.T) {
 		t.Fatal("maximum packet size not set on a bare CONNECT")
 	}
 }
+
+func TestProductionFlagParsedCaseInsensitively(t *testing.T) {
+	for _, v := range []string{"1", "true", "TRUE", "True", " true ", "yes", "on", "typo"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			t.Setenv("DCLAW_DEV_MODE", "ON")
+			t.Setenv("DCLAW_PRODUCTION", v)
+			if !isProductionMode() {
+				t.Fatalf("DCLAW_PRODUCTION=%q with DCLAW_DEV_MODE=ON selected development mode", v)
+			}
+		})
+	}
+	for _, v := range []string{"", "0", "false", "FALSE", "no", "off"} {
+		t.Run("explicit-off-"+v, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			t.Setenv("DCLAW_DEV_MODE", "ON")
+			t.Setenv("DCLAW_PRODUCTION", v)
+			if isProductionMode() {
+				t.Fatalf("DCLAW_PRODUCTION=%q overrode explicit development mode", v)
+			}
+		})
+	}
+}
+
+// The fallback key comes from the caller (fleet.device_key_env), and is used
+// only in development mode.
+func TestDeviceKeyFallbackFromConfiguredEnv(t *testing.T) {
+	custom := strings.Repeat("cd", 32)
+	t.Setenv("DCLAW_DEVICE_KEY", strings.Repeat("ef", 32))
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DCLAW_PRODUCTION", "")
+	t.Setenv("DCLAW_DEV_MODE", "ON")
+	b := NewBridge(newMockClient(), manager.New(nil), verdict.NewCache(10, nil))
+	quietBridge(b)
+	b.SetDeviceKeyStoreWithFallback(&mapKeyStore{keys: map[uint64][]byte{}}, custom)
+	if got := hex.EncodeToString(b.keyProvider.KeyForDevice(1)); got != custom {
+		t.Fatalf("development fallback key = %s, want the configured one", got)
+	}
+	t.Setenv("DCLAW_DEV_MODE", "")
+	b.SetDeviceKeyStoreWithFallback(&mapKeyStore{keys: map[uint64][]byte{}}, custom)
+	if k := b.keyProvider.KeyForDevice(1); k != nil {
+		t.Fatal("configured fallback key used outside development mode")
+	}
+}

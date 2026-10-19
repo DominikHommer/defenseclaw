@@ -181,11 +181,23 @@ func isProductionMode() bool {
 	if managed.IsManagedEnterprise(managed.PinnedDeploymentMode()) || managed.IsStandaloneManagedHost() {
 		return true
 	}
-	v := os.Getenv("DCLAW_PRODUCTION")
-	if v == "true" || v == "1" {
+	if productionFlagSet(os.Getenv("DCLAW_PRODUCTION")) {
 		return true
 	}
 	return !strings.EqualFold(envvars.Getenv("DCLAW_DEV_MODE"), "ON")
+}
+
+// productionFlagSet parses DCLAW_PRODUCTION case-insensitively. "1" and
+// "true" (any case) force production; so does any other non-empty value
+// that is not an explicit "0", "false", "no" or "off", so a typo fails
+// closed instead of leaving development mode in effect.
+func productionFlagSet(raw string) bool {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	switch v {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
 }
 
 func (p *envDeviceKeyProvider) KeyForDevice(_ uint64) []byte {
@@ -392,6 +404,14 @@ func (b *Bridge) ResetDeviceLineage(fullDeviceID uint64) {
 // falling back to the fleet-wide DCLAW_DEVICE_KEY environment variable.
 func (b *Bridge) SetDeviceKeyStore(store DeviceKeyLookup) {
 	b.keyProvider = newStoreBackedKeyProvider(store)
+}
+
+// SetDeviceKeyStoreWithFallback is SetDeviceKeyStore with the fleet-wide
+// fallback key supplied by the caller (hex), as resolved from
+// fleet.device_key_env, instead of read from DCLAW_DEVICE_KEY. The fallback is
+// used only in explicit development mode.
+func (b *Bridge) SetDeviceKeyStoreWithFallback(store DeviceKeyLookup, fallbackKeyHex string) {
+	b.keyProvider = newStoreBackedKeyProviderWithFallback(store, fallbackKeyHex)
 }
 
 // SetKeyProvider overrides the default device key provider.
