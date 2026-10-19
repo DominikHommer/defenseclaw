@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"testing"
@@ -15,6 +16,40 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/axis/bridgeowner"
 	"github.com/defenseclaw/defenseclaw/internal/axis/bridgeproto"
 )
+
+func TestClaudeVersionFixtureEntriesRequireBoundedDirectoryEnd(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		withLoader bool
+		entries    []string
+		accepted   bool
+	}{
+		{"empty-baseline", false, nil, true},
+		{"single-loader", true, []string{claudeLoaderLeaf}, true},
+		{"missing-loader", true, nil, false},
+		{"loader-in-baseline", false, []string{claudeLoaderLeaf}, false},
+		{"wrong-leaf", true, []string{"other"}, false},
+		{"extra-entry", true, []string{claudeLoaderLeaf, "extra"}, false},
+		{"many-entries", true, []string{claudeLoaderLeaf, "extra", "third"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, name := range test.entries {
+				if err := os.WriteFile(filepath.Join(root, name), []byte("public inert fixture entry"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			directory, err := os.Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer directory.Close()
+			if err := verifyInitialFixtureEntries(directory, test.withLoader); (err == nil) != test.accepted {
+				t.Fatalf("initial fixture admission = %v, want accepted=%v", err, test.accepted)
+			}
+		})
+	}
+}
 
 func TestClaudeVersionSourcesRemainHeldUntilNativeWaitAndClose(t *testing.T) {
 	waitErr, closeErr := errors.New("native wait unavailable"), errors.New("source close uncertain")

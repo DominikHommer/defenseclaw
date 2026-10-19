@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/axis/bridgeproto"
@@ -18,6 +19,30 @@ const claudeImageSize = 245203032
 const claudeLoaderSHA = "76b812138a1d4be51ae095e94920e1fd1c5d25f793651baf834d05a2c455c040"
 const claudeLoaderSize = 853616
 const claudeLoaderLeaf = "claude-runtime-loader"
+
+// The caller supplies a fresh descriptor for the held private fixture root.
+// A positive Readdirnames limit can return its last nonempty batch with nil;
+// require a separate bounded end-of-directory observation in that case.
+func verifyInitialFixtureEntries(directory *os.File, withLoader bool) error {
+	entries, err := directory.Readdirnames(2)
+	if err != nil && err != io.EOF {
+		return err
+	}
+	want := 0
+	if withLoader {
+		want = 1
+	}
+	if len(entries) != want || withLoader && entries[0] != claudeLoaderLeaf {
+		return errors.New("fixed fixture initial entries differ")
+	}
+	if err == nil {
+		tail, end := directory.Readdirnames(1)
+		if len(tail) != 0 || end != io.EOF {
+			return errors.New("fixed fixture directory end was not observed")
+		}
+	}
+	return nil
+}
 
 // These fixed signed-release facts came from the independently reviewed inert
 // official inspector. They are not a full dlopen or agent compatibility claim.

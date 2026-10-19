@@ -430,13 +430,9 @@ func initializeFixtureWithLoader(parent, heldRoot *os.File, displayParent, nonce
 		return nil, err
 	}
 	empty := os.NewFile(uintptr(emptyFD), "fixed-fixture-empty-check")
-	entries, readErr := empty.Readdirnames(2)
-	wantEntries := 0
-	if loader != nil {
-		wantEntries = 1
-	}
-	if closeErr := empty.Close(); len(entries) != wantEntries || wantEntries == 1 && entries[0] != claudeLoaderLeaf || readErr != io.EOF || closeErr != nil {
-		return nil, errors.New("fixed fixture root is not fresh empty directory")
+	entryErr := verifyInitialFixtureEntries(empty, loader != nil)
+	if closeErr := empty.Close(); entryErr != nil || closeErr != nil {
+		return nil, errors.Join(entryErr, closeErr)
 	}
 	for _, item := range []struct {
 		name   string

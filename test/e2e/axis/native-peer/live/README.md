@@ -254,7 +254,8 @@ wrapper run `39196467675`, artifact `12161534865`, image
 `9e14ff770aea93fa7bff1d8af0f6fb8f6c9ee162e9373866a28cc86f1a68edfc`
 (3,244,158 bytes). The distinct receipt is
 `e24ee1736320e9df281e0ab7049b2df8cbacbf27d81d31fc46e21cef09b165b7`.
-These checks do not execute the images. No real version attempt is claimed here.
+These checks do not execute the images. The first real version attempt below
+failed before native peer admission.
 
 Preparation authenticates the four fixed Actions artifact identities and full
 ZIP/provenance inventories. The fixed musl
@@ -285,3 +286,29 @@ stderr, exit0, Destroyed and independently completed cleanup. Missing exact
 version output is not evidence that no execution occurred: a started child may
 have failed before producing it. This finite canary does not qualify an agent
 session, arbitrary dlopen, hooks, broker transport or the production launch gate.
+
+The first [version attempt](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39198761851)
+at source `b910df5e13246fc3a4eb0c2450b52cba46d54fb7` failed at
+`native_stage=fixture_capability`. Signed official release reacquisition and
+artifact preparation succeeded. Worker namespace bootstrap, READY/GRANT and
+receipt admission completed, but no Prepared, Started, version output or native
+case result was observed. The worker's `execution_performed=false` belongs to
+that pre-peer stage; it does not assert that the trusted wrapper never ran.
+
+Evidence artifact `12162847926` has 25 bounded members (131,518 bytes), SHA256
+`31b8316d6b9bfa9a6427a43d5be7af92bc4ecfc917fe3bb1f6f636c7cd24a33f`.
+Native, worker and whole-wrapper cleanup completed, with every reported pending
+custody count zero. The retained fixture contained only its registered loader:
+the collector revalidated and excluded that one visited entry, copying zero
+public bytes. The disposable AppArmor setting was restored from 0 to its saved
+value 1. Vendor and loader image bytes were absent from uploaded evidence.
+
+Source review found a deterministic fixture check error consistent with this
+failure: positive-limit `Readdirnames` can return the last nonempty batch with
+a nil error, while the initializer demanded `io.EOF` alongside its one allowed
+loader name. The corrected bounded check accepts only the exact initial entry
+set and separately requires an empty `io.EOF` read when needed. It preserves
+loader identity, held-root and cleanup checks. The portable ordinary filesystem regression passed
+eight race-test results on Windows with zero failures/skips. The corrected
+wrapper build remains pending; this failed attempt is preserved and the
+corrected pairing has not run.
