@@ -81,3 +81,44 @@ func TestBridgeReplayOnlyOnFreshSignedDeviceFrames(t *testing.T) {
 		t.Fatalf("unsigned development frame triggered catch-up: %d calls", calls)
 	}
 }
+
+// The bridge must tell the manager whether a heartbeat was HMAC-verified so
+// only signed frames update the operator-visible emergency sequence.
+func TestBridgeHeartbeatEmergencySeqOnlyFromSignedFrames(t *testing.T) {
+	const heartbeat = "defenseclaw/1/2/42/heartbeat"
+	key := []byte("12345678901234567890123456789012")
+	fleet := manager.New(nil)
+	fleet.RegisterDevice(1, 2, 42, "sbc", "1", 0, 0)
+	bridge := newTestBridge(t, newMockClient(), fleet, verdict.NewCache(10, nil))
+	bridge.SetHeartbeatRateLimit(0)
+	bridge.SetKeyProvider(&fixedKeyProvider{key: key})
+	seq := func() uint32 {
+		dev, ok := fleet.GetDevice(manager.ComposeID(1, 2, 42))
+		if !ok {
+			t.Fatal("device missing")
+		}
+		return dev.LastEmergencySeq
+	}
+
+	unsigned := makeHeartbeatPayload(42, 0, 0, 0)
+	binary.BigEndian.PutUint32(unsigned[36:40], 9)
+	bridge.handleHeartbeat(Message{Topic: heartbeat, Payload: unsigned})
+	if hb, _, _ := bridge.Stats(); hb != 1 {
+		t.Fatalf("unsigned development heartbeat not processed: %d", hb)
+	}
+	if got := seq(); got != 0 {
+		t.Fatalf("unsigned heartbeat set LastEmergencySeq = %d, want 0", got)
+	}
+
+	body := makeHeartbeatPayload(42, 0, 0, 0)
+	binary.BigEndian.PutUint32(body[4:8], 3700)
+	binary.BigEndian.PutUint32(body[36:40], 5)
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(heartbeat))
+	mac.Write(body)
+	bridge.handleHeartbeat(Message{Topic: heartbeat, Payload: append(body, mac.Sum(nil)...)})
+	bridge.replayPending.Wait()
+	if got := seq(); got != 5 {
+		t.Fatalf("signed heartbeat LastEmergencySeq = %d, want 5", got)
+	}
+}

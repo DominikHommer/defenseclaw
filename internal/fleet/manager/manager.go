@@ -111,6 +111,9 @@ type Heartbeat struct {
 	Capabilities   uint8
 	// LastEmergencySeq is the device's durable last-applied emergency seq.
 	LastEmergencySeq uint32
+	// Signed reports that the transport verified the frame's HMAC with the
+	// device key. Only signed heartbeats may update LastEmergencySeq.
+	Signed bool
 }
 
 // AlertType defines fleet alert categories.
@@ -385,12 +388,14 @@ func (fm *FleetManager) RotateDeviceKey(fullID uint64, key []byte) (*Device, err
 	return &updated, nil
 }
 
-// resetHeartbeatLineage clears the replay baseline (boot counter, uptime)
-// and per-boot counter baselines when a device receives a new key. Replay
+// resetHeartbeatLineage clears the replay baseline (boot counter, uptime),
+// per-boot counter baselines and the last-applied emergency seq when a
+// device receives a new key: a re-provisioned device restarts all three. Replay
 // protection still holds: frames signed with the previous key fail HMAC.
 func resetHeartbeatLineage(dev *Device) {
 	dev.BootCounter = 0
 	dev.LastUptime = 0
+	dev.LastEmergencySeq = 0
 	dev.PrevDenied = 0
 	dev.PrevAllowed = 0
 	dev.PrevWarned = 0
@@ -603,7 +608,21 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	}
 	dev.BootCounter = hb.BootCounter
 	dev.LastUptime = hb.UptimeSec
-	dev.LastEmergencySeq = hb.LastEmergencySeq
+	// Operators read LastEmergencySeq as proof that a kill switch reached the
+	// device, so an unauthenticated (legacy development) frame must not set
+	// it. Within one key lineage the device persists the seq durably across
+	// reboots, so it never legitimately decreases; a lower signed value is
+	// logged and ignored. A device whose flash was reset is re-provisioned
+	// with a new key (re-registration or key rotation), which resets the
+	// lineage, including this field, so its lower seq is then accepted.
+	if hb.Signed {
+		if hb.LastEmergencySeq >= dev.LastEmergencySeq {
+			dev.LastEmergencySeq = hb.LastEmergencySeq
+		} else {
+			log.Printf("[fleet] device %d reported emergency seq %d < last applied %d without re-provisioning, keeping %d",
+				deviceID, hb.LastEmergencySeq, dev.LastEmergencySeq, dev.LastEmergencySeq)
+		}
+	}
 
 	dev.LastHeartbeat = time.Now()
 	dev.Flags = hb.Flags

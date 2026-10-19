@@ -675,6 +675,7 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		Flags:            hw.Flags,
 		Capabilities:     hw.Capabilities,
 		LastEmergencySeq: hw.LastEmergencySeq,
+		Signed:           hw.Signed,
 	}
 
 	if !b.fleet.ProcessHeartbeat(parts.TenantID, parts.FleetID, parts.DeviceID, hb) {
