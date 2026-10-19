@@ -656,11 +656,12 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 		}
 		record["native_stage"] = "fixed_plan"
 		var plan bridgeproto.Preparation
-		if opts.suite == claudeVersionSuite {
+		switch opts.suite {
+		case claudeVersionSuite:
 			plan, err = claudeVersionPlan()
-		} else if opts.suite == "lifecycle" {
+		case "lifecycle":
 			plan, err = lifecyclePlan(mode)
-		} else {
+		default:
 			plan, err = fixedPlan(mode, f.path+"/outside")
 		}
 		if err != nil {

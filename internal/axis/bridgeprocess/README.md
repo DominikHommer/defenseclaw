@@ -54,6 +54,11 @@ Cancellation polls terminal completion without a blocking native wait; a timeout
 retains storage for retry. The Windows Rust transport must likewise own each
 buffer/event/OVERLAPPED through CancelIoEx and terminal GetOverlappedResult. It
 must not wrap these inherited endpoints in synchronous Rust File/stdin/stdout.
+Each Rust OVERLAPPED must set the low bit of its event handle to suppress a
+completion packet to any inherited host IOCP association, while retaining the
+untagged event for wait and close. Go's File.Fd disassociation attempt is not a
+proof that this association was cleared. See the documented
+[completion notification rule](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus).
 
 Cancellation latches closed admission while native creation is pending. A late
 creator signals its exact Job/root before completing startup; cleanup requires
