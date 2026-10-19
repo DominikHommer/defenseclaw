@@ -66,6 +66,7 @@ _FULL_SECTION = {
     "yolo": False,
     "llm": "bedrock",
     "keep_headless": True,
+    "trusted_ca_bundle": "/etc/defenseclaw/corp-root-ca.pem",
     "workdir": {
         "mode": "copy",
         "masks": [".env*"],
@@ -164,6 +165,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertIs(oc.yolo, False)
         self.assertEqual(oc.llm, "bedrock")
         self.assertTrue(oc.keep_headless)
+        self.assertEqual(oc.trusted_ca_bundle, "/etc/defenseclaw/corp-root-ca.pem")
         self.assertEqual(oc.workdir.mode, "copy")
         self.assertEqual(oc.workdir.masks, [".env*"])
         self.assertEqual(oc.workdir.on_exit, "keep")
@@ -291,6 +293,13 @@ class TestOpenShellValidation(unittest.TestCase):
             self.assertFalse(valid_binary(binary), binary)
         self.assertEqual(openshell_error({"openshell": {"binary": "bin/openshell"}})[0], "openshell.binary")
 
+    def test_trusted_ca_bundle_paths(self):
+        for path in ("", "~/certs/corp.pem", "/etc/defenseclaw/corp.pem"):
+            load_validate_v8({"config_version": 8, "openshell": {"trusted_ca_bundle": path}})
+        for path in ("corp.pem", "./corp.pem", "~alice/corp.pem", "~", " /etc/corp.pem", "C:/corp.pem"):
+            with self.assertRaises(V8ConfigError, msg=path):
+                load_validate_v8({"config_version": 8, "openshell": {"trusted_ca_bundle": path}})
+
     def test_pack_dir_paths(self):
         # The schema checks the spelling (TestDefenseClawConfigV8OpenShellValues).
         for pack_dir in ("", "~", "~/packs", "/etc/packs", "C:/packs", "D:\\packs", "\\\\server\\share\\packs"):
@@ -364,13 +373,16 @@ class TestOpenShellValidation(unittest.TestCase):
             ({"guardrail": {"block_at": 12}}, "$.guardrail.block_at",
              "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)"),
             ({"guardrail": {"mode": 5}}, "$.guardrail.mode", "use one of observe, action"),
+            # GAP-0760: hilt.min_severity takes the block_at words in any case.
             ({"guardrail": {"hilt": {"min_severity": "bogus"}}}, "$.guardrail.hilt.min_severity",
-             "use one of LOW, MEDIUM, HIGH, CRITICAL (empty inherits)"),
+             "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)"),
         ):
             with self.assertRaises(V8ConfigError) as caught:
                 load_validate_v8({"config_version": 9, **document})
             self.assertEqual(caught.exception.path, path)
             self.assertEqual(caught.exception.corrective_action, want)
+        # The lower case block_at takes is accepted for hilt.min_severity too.
+        load_validate_v8({"config_version": 9, "guardrail": {"hilt": {"min_severity": "high"}}})
 
 
 class TestPolicyConnectors(unittest.TestCase):
@@ -457,6 +469,7 @@ class TestOpenShellSave(unittest.TestCase):
             "shorthand IPv4 unblock": lambda oc: setattr(oc.egress, "unblocked", ["127.1"]),
             "relative binary": lambda oc: setattr(oc, "binary", "bin/openshell"),
             "relative pack dir": lambda oc: setattr(oc, "pack_dir", "packs"),
+            "relative trusted CA bundle": lambda oc: setattr(oc, "trusted_ca_bundle", "corp-root-ca.pem"),
             "zero cpu": lambda oc: setattr(oc.resources, "cpu", "0"),
             "equal explicit ports": lambda oc: (setattr(oc, "ingress_port", 19001), setattr(oc, "egress_port", 19001)),
             "derived port collision": lambda oc: (setattr(oc, "enabled", True), setattr(oc, "ingress_port", 18972)),

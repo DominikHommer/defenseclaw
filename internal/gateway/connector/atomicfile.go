@@ -38,23 +38,6 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return atomicWriteFileWithPublisher(path, data, perm, atomicFilePublish)
 }
 
-// atomicWriteFileWithReplace preserves the injectable replacement seam used by
-// durability-failure tests. Production writes use atomicFilePublish so Windows
-// can bind private-file validation and publication to the staged file handle.
-func atomicWriteFileWithReplace(
-	path string,
-	data []byte,
-	perm os.FileMode,
-	replace func(string, string) error,
-) error {
-	return atomicWriteFileWithPublisher(
-		path, data, perm,
-		func(source, destination string, _ os.FileInfo, _ os.FileMode) error {
-			return replace(source, destination)
-		},
-	)
-}
-
 type atomicFilePublisher func(string, string, os.FileInfo, os.FileMode) error
 
 func atomicWriteFileWithPublisher(
@@ -65,6 +48,16 @@ func atomicWriteFileWithPublisher(
 ) error {
 	writePath, err := resolveAtomicWritePath(path)
 	if err != nil {
+		return err
+	}
+	// In an account home bound for the enterprise per-user code, a path
+	// that leads out of the home is never changed, nor a folder created
+	// there; a write that would change nothing is still fine (rel-1-0-3
+	// GAP-0206).
+	if err := confineAtomicWritePath(path); err != nil {
+		if atomicFileAlreadyMatches(writePath, data, perm) {
+			return nil
+		}
 		return err
 	}
 

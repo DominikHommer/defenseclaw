@@ -41,6 +41,7 @@ func homeGoneFixture(t *testing.T) (f *standaloneFixture, resolver standaloneTes
 	uid, gid := os.Getuid(), os.Getgid()
 	resolver = standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 	f = newStandaloneFixture(t, resolver)
+	useReportingStandaloneRunner(t)
 	gone = filepath.Join(f.homes, "dcad-gone") // removed with the mobile account
 	kept = f.home(t, "dcad-kept", 0o700)
 	moved = f.home(t, "dcad-moved", 0o700)

@@ -44,8 +44,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const (
@@ -454,6 +456,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
+	removeRunningGatewayToken(config.DefaultDataPath())
 
 	refused, admissionRefused := guardrailHookContractAdmissionRefusal(snap.Guardrail)
 	if admissionRefused {
@@ -541,6 +544,22 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	cfg, cfgErr := loadDaemonConfig(cmd)
+	if cfgErr != nil && !rotationTransaction {
+		var secretErr *config.V8SecretReferenceError
+		if errors.As(cfgErr, &secretErr) && !secretErr.Credential {
+			// Stop needs only the verified listener identity and gateway token.
+			// An unset export destination must not strand a per-user uninstall.
+			cfg, cfgErr = loadShutdownConfigWithoutDestinations(config.ConfigPath())
+			if cfgErr == nil {
+				applyDaemonEndpointOverrides(cfg)
+			}
+		}
+		if cfgErr != nil {
+			// A damaged config cannot supply an authenticated listener, but a
+			// verified PID can still be stopped by the signal fallback.
+			cfg = config.DefaultConfig()
+		}
+	}
 	var running bool
 	var pid int
 	var err error
@@ -618,13 +637,22 @@ func runStop(cmd *cobra.Command, _ []string) error {
 	markGatewayStopped(config.DefaultDataPath())
 
 	if !running {
+		removeRunningGatewayToken(config.DefaultDataPath())
 		fmt.Println(Dim("Gateway sidecar is not running"))
 		return nil
 	}
 
 	fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
 
-	if err := stopGatewayGracefully(d, cfg, defaultStopTimeout); err != nil {
+	var stopErr error
+	if cfgErr != nil {
+		// With no verified listener configuration, never send a credential to
+		// the default port. The daemon still verifies its PID before signalling.
+		stopErr = d.StopGracefully(defaultStopTimeout, nil)
+	} else {
+		stopErr = stopGatewayGracefully(d, cfg, defaultStopTimeout)
+	}
+	if err := stopErr; err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		if rotationTransaction && watchdogWasRunning {
 			if restoreErr := runWatchdogStart(nil, nil); restoreErr != nil {
@@ -645,6 +673,7 @@ func runStop(cmd *cobra.Command, _ []string) error {
 	}
 
 	fmt.Println(Style("OK", "fg=green", "bold"))
+	removeRunningGatewayToken(config.DefaultDataPath())
 	printHint("Start again:  defenseclaw-gateway start")
 	return nil
 }
@@ -834,6 +863,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
+	removeRunningGatewayToken(config.DefaultDataPath())
 
 	printDaemonStartResult(pid, snap)
 	fmt.Println()
@@ -1275,13 +1305,43 @@ func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
 	}
 	// The child receives these as flags, so startup verification must inspect
 	// the same effective endpoint instead of the on-disk defaults.
+	applyDaemonEndpointOverrides(cfg)
+	return cfg, err
+}
+
+func applyDaemonEndpointOverrides(cfg *config.Config) {
 	if sidecarHost != "" {
 		cfg.Gateway.APIBind = sidecarHost
 	}
 	if sidecarPort > 0 {
 		cfg.Gateway.APIPort = sidecarPort
 	}
-	return cfg, err
+}
+
+// loadShutdownConfigWithoutDestinations decodes the same bounded, schema-
+// checked source used by startup, including the supported v8 migration, but
+// does not compile destination credentials. It is called only after strict
+// loading identified a missing destination secret, and only to stop an
+// already verified per-user process. Start and restart stay strict.
+func loadShutdownConfigWithoutDestinations(path string) (*config.Config, error) {
+	raw, err := readConfigV8Source(path)
+	if err != nil {
+		return nil, err
+	}
+	if raw, err = config.MigrateV8InMemory(path, raw, guardrail.RulePackDigest); err != nil {
+		return nil, err
+	}
+	if err := config.ValidateV8SchemaBytes(path, raw); err != nil {
+		return nil, err
+	}
+	candidate, err := config.LoadRuntimeV8FromBytes(path, raw)
+	if err != nil {
+		return nil, err
+	}
+	if !config.CurrentSchemaVersion(candidate.ConfigVersion) {
+		return nil, errors.New("configuration is from an older DefenseClaw; run defenseclaw migrate first")
+	}
+	return candidate, nil
 }
 
 func readDotEnv(path string) map[string]string {
@@ -1322,6 +1382,9 @@ func daemonGatewayToken(cfg *config.Config) string {
 	tokenEnv := ""
 	if cfg != nil {
 		tokenEnv = strings.TrimSpace(cfg.Gateway.TokenEnv)
+		if running := runningGatewayToken(cfg.DataDir); running != "" {
+			return running
+		}
 		if tokenEnv != "" && !daemonEnvironmentKeyEqual(tokenEnv, canonicalTokenEnv) && !daemonEnvironmentKeyEqual(tokenEnv, legacyTokenEnv) {
 			if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" {
 				return token
@@ -1349,6 +1412,51 @@ func daemonGatewayToken(cfg *config.Config) string {
 		return strings.TrimSpace(cfg.Gateway.ResolvedToken())
 	}
 	return ""
+}
+
+const runningGatewayTokenFilename = "gateway_running_token.json"
+
+// runningGatewayToken is an ephemeral, private credential for the process
+// still serving requests after .env changed. Its PID must match the daemon's
+// verified process identity; the new process reads .env after restart.
+func runningGatewayToken(dataDir string) string {
+	if dataDir == "" {
+		return ""
+	}
+	running, pid := daemon.New(dataDir).IsRunning()
+	if !running {
+		return ""
+	}
+	return readRunningGatewayToken(dataDir, pid)
+}
+
+func readRunningGatewayToken(dataDir string, pid int) string {
+	path := filepath.Join(dataDir, runningGatewayTokenFilename)
+	if err := safefile.ValidatePrivateFile(path); err != nil {
+		return ""
+	}
+	data, err := safefile.ReadRegularFileBounded(path, 4096)
+	if err != nil {
+		return ""
+	}
+	var record struct {
+		PID   int    `json:"pid"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil || record.PID <= 0 ||
+		len(record.Token) == 0 || len(record.Token) > 2048 {
+		return ""
+	}
+	if pid != record.PID {
+		return ""
+	}
+	return record.Token
+}
+
+func removeRunningGatewayToken(dataDir string) {
+	if dataDir != "" {
+		_ = os.Remove(filepath.Join(dataDir, runningGatewayTokenFilename))
+	}
 }
 
 func daemonEnvironmentKeyEqual(left, right string) bool {

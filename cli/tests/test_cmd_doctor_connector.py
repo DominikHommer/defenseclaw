@@ -61,6 +61,7 @@ from defenseclaw.commands.cmd_doctor import (
     _CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS,
     _CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
     _CURSOR_WINDOWS_RUNTIME_TREE_REAP_SECONDS,
+    _HERMES_HOOKS_LABEL,
     _active_connector,
     _check_amp_native_policy_surfaces,
     _check_codex_hooks,
@@ -2030,7 +2031,7 @@ class TestCheckHookHealth(unittest.TestCase):
                     _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
                 results[running] = r.checks[-1]
         self.assertEqual(results[True]["status"], "fail")
-        self.assertEqual(results[True]["label"], "Hermes hooks (fail-open)")
+        self.assertEqual(results[True]["label"], _HERMES_HOOKS_LABEL)
         self.assertIn(hook, results[True]["detail"])
         self.assertIn("live=false", results[True]["detail"])
         # With no Hermes host running there is nothing to reload.
@@ -3488,7 +3489,7 @@ class TestCheckHookHealth(unittest.TestCase):
         """``_check_connector_hooks`` must dispatch each generic connector
         unhandled connectors to the generic hook-health row."""
         for connector, label in (
-            ("hermes", "Hermes hooks (fail-open)"),
+            ("hermes", _HERMES_HOOKS_LABEL),
             ("cursor", "Cursor hooks"),
             ("devin", "Devin hooks"),
             ("opencode", "OpenCode hooks"),

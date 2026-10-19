@@ -24,7 +24,7 @@
     "product_version": { "type": "string", "description": "Version of the payload this run used; empty for read-only actions without a payload." },
     "installed_version": { "type": "string", "description": "Version installed on the host after the action; MDM detection compares this." },
     "installed": { "type": "boolean" },
-    "transaction_pending": { "type": "boolean", "description": "An interrupted transaction awaits recovery; the next mutating run repairs it first." },
+    "transaction_pending": { "type": "boolean", "description": "An interrupted transaction awaits recovery; the next mutating run repairs it first. Linux, macOS and Windows status also set it, with warning bundle_pending, when a policy bundle receipt is unfinished and no run holds the lock (a killed apply): ensure settles it, and the current or last good bundle enforces until then." },
     "services": { "type": "array", "items": { "$ref": "#/$defs/service" } },
     "readiness": {
       "type": "object",
@@ -43,7 +43,16 @@
       "required": ["local", "ai_defense"],
       "properties": {
         "local": { "type": "string", "enum": ["active", "disabled", "unknown", ""] },
-        "ai_defense": { "type": "string", "pattern": "^(|disabled|ok|unknown|unavailable(:[A-Za-z0-9_.-]+)?)$" }
+        "ai_defense": {
+          "type": "string",
+          "enum": [
+            "", "disabled", "ok", "unknown",
+            "unavailable:auth_failed", "unavailable:credential_unavailable", "unavailable:unreachable",
+            "unavailable:proxy_auth_required", "unavailable:proxy_config", "unavailable:not_initialized",
+            "unavailable:error", "unavailable:gateway_not_ready"
+          ],
+          "description": "Cisco AI Defense inspection, from the gateway's /health (standaloneInspectionPosture). disabled: enterprise.inspection.ai_defense is off. ok: AI Defense answered a request with the stored key. unknown: no request has been answered since the key was stored or the gateway restarted, or the gateway did not report. unavailable:auth_failed: AI Defense rejected the stored key (HTTP 401 or 403) on the last request. unavailable:credential_unavailable: the credential is missing or fails its trust check. unavailable:unreachable: no answer (connection failure or timeout). unavailable:proxy_auth_required / proxy_config: the egress proxy wants credentials (HTTP 407) or its setting is invalid. unavailable:error: another failure, for example an HTTP 5xx. unavailable:not_initialized: the client was never built. unavailable:gateway_not_ready (Windows): the gateway is not ready. Every unavailable value also adds warning ai_defense_unavailable; the local policy engine keeps deciding. The value never carries the key or the response body."
+        }
       }
     },
     "machine_policy": {
@@ -79,7 +88,7 @@
         }
       }
     },
-    "coverage_complete": { "type": "boolean", "description": "True only when required services are ready and no known running agent session still needs a restart to load managed hooks." },
+    "coverage_complete": { "type": "boolean", "description": "True only when required services are ready, no installed agent runs without a verified hook contract, and no known running agent session still needs a restart to load managed hooks." },
     "security_complete": { "type": "boolean" },
     "errors": { "type": "array", "items": { "$ref": "#/$defs/message" } },
     "warnings": { "type": "array", "items": { "$ref": "#/$defs/message" } },
@@ -100,6 +109,14 @@
       }
     },
     "destinations": { "type": "array", "items": { "$ref": "#/$defs/destination" }, "description": "status only: the observability destinations the installed config.yaml compiles to (the compiler of defenseclaw observability plan), with the effective redaction profiles of each one's send routes." },
+    "connectors": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/connectorState" },
+      "description": "status and verify, standalone profile, management_contract 1 builds from 1.0.3 (absent before): one entry per connector id the installed config enables, or that still has guardian targets or unprotected installs. Connector ids, codes, counts and versions only; never an account. Optional: absent under Secure Client and on older builds."
+    },
+    "openshell": { "$ref": "#/$defs/openshellCapability", "description": "status and verify, standalone profile, from 1.0.3: whether users on this host can run DefenseClaw sandboxes and on which driver. Windows always reports platform_unsupported. Optional." },
+    "identity": { "$ref": "#/$defs/identityHealth", "description": "status and verify, standalone profile, from 1.0.3: the gateway's directory lookups, from its /health. Source tokens, counts and ages only. Optional." },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },
@@ -111,13 +128,27 @@
     },
     {
       "if": { "properties": { "platform": { "const": "windows" } } },
-      "then": { "properties": { "exit_code": { "enum": [0, 1603, 1618, 1639, 3010] } } },
+      "then": { "properties": { "exit_code": { "enum": [0, 5, 1603, 1618, 1639, 3010] } } },
       "else": { "properties": { "exit_code": { "enum": [0, 1, 2, 75] } } }
     },
     {
       "if": { "properties": { "ok": { "const": true } } },
       "then": { "properties": { "exit_code": { "enum": [0, 3010] } } },
       "else": { "properties": { "exit_code": { "not": { "enum": [0, 3010] } } } }
+    },
+    {
+      "$comment": "Only Linux and macOS have machine-policy-only connectors (managed_hook true, no per-user target). On Windows every connector entry carries targets unless hooks_installed is unknown.",
+      "if": { "required": ["platform"], "properties": { "platform": { "const": "windows" } } },
+      "then": {
+        "properties": {
+          "connectors": {
+            "additionalProperties": {
+              "if": { "properties": { "hooks_installed": { "const": "unknown" } } },
+              "else": { "required": ["targets"] }
+            }
+          }
+        }
+      }
     },
     {
       "$comment": "A not_root result (Linux, macOS) checked nothing: a standard user cannot read the root-only deployment record, so it leaves out every field that reports the deployment. Every other result has them.",
@@ -128,7 +159,8 @@
       "then": {
         "properties": {
           "installed": false, "installed_version": false, "transaction_pending": false, "services": false,
-          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false
+          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false,
+          "connectors": false, "openshell": false, "identity": false
         }
       },
       "else": {
@@ -204,11 +236,16 @@
         "config_unrecorded": { "type": "boolean", "description": "True when config.yaml was changed outside the lifecycle: its generation is not recorded in config.generation.json, or the hook guardian recorded it there as a hand edit. Absent otherwise." }
       }
     },
+    "deliveryId": {
+      "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+      "description": "The opaque id the caller passed to `enterprise bundle apply --delivery-id` (management_contract 1): 1 to 128 bytes of A-Z a-z 0-9 . _ : -. Caller-supplied, so it names a delivery, not who made it: an MDM wrapper, a management agent and an administrator can all pass one. Absent when the apply had no --delivery-id (Setup BUNDLE=, `enterprise windows ensure --bundle`, the inbox path unit, the MDM kits) and on builds without the flag."
+    },
     "bundleRefusal": {
       "type": "object", "additionalProperties": false,
       "required": ["receipt_id", "error_code", "time"],
       "properties": {
         "receipt_id": { "type": "string", "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+        "delivery_id": { "$ref": "#/$defs/deliveryId", "description": "The --delivery-id of the refused delivery." },
         "bundle_id": { "type": "string", "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
         "version": { "type": "integer", "minimum": 0 },
         "error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
@@ -222,6 +259,8 @@
       "additionalProperties": false,
       "required": ["bundle_id", "version", "state"],
       "properties": {
+        "receipt_id": { "type": "string", "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$", "description": "The id of the receipt this block reports, the file name of <etc>/bundles/receipt-events/<receipt_id>.json (management_contract 1). Absent on older builds and when no receipt was kept (a refusal before the bundle was received). A repeated delivery of the current bundle (already_applied) writes no receipt and reports the current confirmed receipt's id." },
+        "delivery_id": { "$ref": "#/$defs/deliveryId", "description": "The --delivery-id of the delivery whose receipt this block reports. A repeated delivery of the current bundle (already_applied) reports the confirmed receipt, so this is that delivery's id (or absent), never the repeat's own." },
         "bundle_id": { "type": "string", "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$", "description": "Empty only for the receipt of a bundle whose manifest could not be read: received (a run in progress or interrupted) or failed." },
         "version": { "type": "integer", "minimum": 0 },
         "state": { "type": "string", "enum": ["received", "verified", "staged", "applied", "confirmed", "failed"] },
@@ -265,6 +304,98 @@
             }
           }
         }
+      }
+    },
+    "versionToken": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$" },
+    "connectorState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "hooks_installed"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "The installed config enables the connector's hooks." },
+        "detected": { "type": "boolean", "description": "The enumerator found the agent for at least one eligible account (a manifest target or an unprotected install). Absent when the connector is not enabled, the enumerator has not run, or the connector is in vendor machine policy only and the enumerator listed no install of it (Linux and macOS: no manifest target; an unprotected install makes it true)." },
+        "versions": { "type": "array", "uniqueItems": true, "maxItems": 8, "items": { "$ref": "#/$defs/versionToken" }, "description": "Distinct agent versions of the detected installs, sorted. A version that is not a plain version token is not shown (warning status_detail_unavailable counts it)." },
+        "hooks_installed": { "enum": ["all", "partial", "none", "unknown"], "description": "From the guardian's last reconcile: all, every target protected; partial, some; none, no target protected (also no target); unknown, no readable guardian state, or one the root-only attestation does not vouch for. A connector in vendor machine policy only (Linux and macOS: no per-user target, no targets member, also when it has an unprotected install) takes it from that machine policy: all, DefenseClaw's entries in place; partial, in place with conflicts; none, not in place; unknown, not read." },
+        "targets": { "$ref": "#/$defs/connectorTargets" },
+        "effective_mode": { "enum": ["observe", "action"], "description": "The connector's default guardrail mode; a guardrail profile can change it per request. Absent when the installed config cannot be loaded." },
+        "effective_hook_fail_mode": { "enum": ["open", "closed"], "description": "The fail mode the managed hooks are rendered with: the value the hook renderer resolves, not the configured one. Absent when the installed config cannot be loaded." },
+        "managed_hook": { "type": "boolean", "description": "true: the DefenseClaw hook is in administrator-owned vendor machine policy; false: a per-user registration the guardian keeps in each home. Absent when the connector is not enabled." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "hooks_installed": { "const": "unknown" } } },
+          "then": { "properties": { "targets": false } }
+        },
+        {
+          "if": { "anyOf": [
+            { "properties": { "hooks_installed": { "const": "unknown" } } },
+            { "required": ["managed_hook"], "properties": { "managed_hook": { "const": true } } }
+          ] },
+          "else": { "required": ["targets"] }
+        }
+      ]
+    },
+    "connectorTargets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "protected", "pending", "failed"],
+      "description": "The connector's guardian targets; total is protected + pending + failed.",
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "protected": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "integer", "minimum": 0, "description": "Waiting for the account's session (Windows)." },
+        "failed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "openshellCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "driver_available"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "enterprise.openshell.enabled as last applied." },
+        "install": { "enum": ["prerequisite", "setup"] },
+        "installed": { "type": "boolean", "description": "Prerequisite mode: the administrator's OpenShell CLI, gateway (and MicroVM driver when the driver wants VMs) are present and pass the root-owned trust check. Absent in setup mode and when disabled." },
+        "version": { "$ref": "#/$defs/versionToken", "description": "The one release every part reports (prerequisite) or the pinned release (setup); absent when unknown or the parts disagree." },
+        "driver": { "enum": ["vm", "docker", "auto"], "description": "The configured driver." },
+        "driver_available": { "enum": ["vm", "docker", "none"], "description": "The driver users get now: docker is the docker driver or the docker fallback of the MicroVM driver." },
+        "reason_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "Why driver_available is not the configured driver, or is none: openshell_prerequisite_missing, openshell_launcher_conflict, openshell_driver_fallback, openshell_disabled, platform_unsupported (Windows). Absent when everything is ready." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": false } } },
+          "then": { "required": ["reason_code"], "properties": { "install": false, "installed": false, "version": false, "driver": false, "driver_available": { "const": "none" } } },
+          "else": { "required": ["install", "driver"] }
+        }
+      ]
+    },
+    "identityHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": { "enum": ["ok", "failing", "idle", "unknown"], "description": "failing: failing_accounts > 0; idle: no lookup succeeded since the gateway started; unknown: reason_code says why." },
+        "sources": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/identitySource" }, "description": "The identity sources that answered a lookup since the gateway started, sorted by source." },
+        "failing_accounts": { "type": "integer", "minimum": 0 },
+        "stale_accounts": { "type": "integer", "minimum": 0 },
+        "serving_offline_cache": { "type": "boolean", "description": "stale_accounts > 0: directory facts are served past their 15-minute lifetime because their refresh fails; they are dropped at 60 minutes." },
+        "reason_code": { "enum": ["gateway_not_ready", "gateway_did_not_report"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "unknown" } } },
+          "then": { "required": ["reason_code"], "properties": { "sources": false, "failing_accounts": false, "stale_accounts": false, "serving_offline_cache": false } },
+          "else": { "required": ["failing_accounts", "stale_accounts", "serving_offline_cache"], "properties": { "reason_code": false } }
+        }
+      ]
+    },
+    "identitySource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "last_ok_age_seconds"],
+      "properties": {
+        "source": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$", "description": "The defenseclaw.user.identity.source token: nss_files, sssd, sssd_infopipe, winbind, nss_ldap, windows_lsa, windows_identity_store, macos_opendirectory, macos_platform_sso, hook_reported, or a newer token." },
+        "directory": { "enum": ["local", "ldap", "active_directory", "entra_id", "okta", "other"], "description": "The directory that owns the accounts the source answered for; absent when the OS did not say." },
+        "last_ok_age_seconds": { "type": "integer", "minimum": 0, "description": "Seconds since the source last answered, on the gateway clock." }
       }
     },
     "message": {

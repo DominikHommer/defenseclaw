@@ -396,7 +396,7 @@ func TestEveryDeclaredCorrelationSurfaceHasReviewedBindings(t *testing.T) {
 			case CorrelationSurfaceACP:
 				count = len(spec.ACPBindings)
 			}
-			if count == 0 && !(surface == CorrelationSurfaceNativeOTLP && spec.NativeTelemetry.BindingMode == NativeTelemetryBindingsExporterOnly) {
+			if count == 0 && (surface != CorrelationSurfaceNativeOTLP || spec.NativeTelemetry.BindingMode != NativeTelemetryBindingsExporterOnly) {
 				t.Errorf("%s declares %s without bindings", name, surface)
 			}
 		}

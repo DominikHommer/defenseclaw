@@ -62,6 +62,11 @@ func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {
 			config.EnterpriseSettingsReferenceURL); found {
 			return fmt.Errorf("%s; fix it and run again (nothing was changed)", refusal)
 		}
+		if candidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(configPath, raw); err == nil {
+			if err := config.ValidateManagedStandaloneLiteralCandidate(candidate, raw); err != nil {
+				return fmt.Errorf("%s; fix it and run again (nothing was changed)", err)
+			}
+		}
 	}
 	return windowsEnterpriseStandaloneConfigCompile(configPath)
 }

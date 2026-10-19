@@ -32,6 +32,10 @@ func GroupNameLookupDefinitive() bool {
 	return !OpenDirectoryOffline(ctx)
 }
 
+// GroupDirectoryUsesWinbind is false on macOS: Open Directory answers for a
+// bound Active Directory domain.
+func GroupDirectoryUsesWinbind() bool { return false }
+
 // QualifiedGroupName has nothing to offer on macOS, whose group names carry
 // no domain.
 func QualifiedGroupName(context.Context, Resolver, string) string { return "" }
@@ -93,6 +97,28 @@ func platformLocalAccounts(ctx context.Context) (map[string]int, error) {
 		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
 	}
 	return parseDSCLLocalAccounts(string(result.stdout)), nil
+}
+
+// platformLocalAccountRecords lists the local node's accounts with the
+// attributes that change when an account is replaced or moved: uid,
+// GeneratedUID, home and primary group. Any account may list them.
+func platformLocalAccountRecords(ctx context.Context) (map[string]LocalAccountRecord, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	attributes := []string{"UniqueID", "GeneratedUID", "NFSHomeDirectory", "PrimaryGroupID"}
+	listed := make([]map[string]string, len(attributes))
+	for i, attribute := range attributes {
+		result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-list", "/Users", attribute})
+		if err != nil {
+			return nil, err
+		}
+		if result.exitCode != 0 {
+			return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+		}
+		listed[i] = parseDSCLAttribute(string(result.stdout))
+	}
+	return mergeDSCLAccountRecords(listed[0], listed[1], listed[2], listed[3]), nil
 }
 
 // platformMobileAccounts lists the local node's mobile accounts with the

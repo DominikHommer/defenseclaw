@@ -29,6 +29,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -50,6 +52,8 @@ import (
 
 const (
 	// 2: the discover operation also answers app and extension surfaces.
+	// Remove reports are optional fields of this version. A mixed-version
+	// guardian rejects unknown fields or treats an absent report as unverified.
 	enterpriseHookWorkerProtocolVersion = 2
 	enterpriseHookWorkerRequestLimit    = 1 << 20
 	enterpriseHookWorkerResponseLimit   = 8 << 20
@@ -120,6 +124,10 @@ type enterpriseHookWorkerOptions struct {
 	HookCredentialIdentity             string `json:"hook_credential_identity,omitempty"`
 	ForeignHookGuardBinary             string `json:"foreign_hook_guard_binary,omitempty"`
 	ManagedHookBinary                  string `json:"managed_hook_binary,omitempty"`
+	// PreviousHome is the recorded home of a re-homed account whose current
+	// home a Remove cleans. Receipts copied from it act on this home's copy
+	// of the file, never on the other home (rel-1-0-3 GAP-0200).
+	PreviousHome string `json:"previous_home,omitempty"`
 }
 
 type enterpriseHookWorkerTarget struct {
@@ -226,13 +234,22 @@ type enterpriseHookWorkerTargetResult struct {
 	// Purged is what a purge target found and removed (booleans only, so
 	// nothing the account controls reaches the administrator's output).
 	Purged *enterpriseHookPurgeDetail `json:"purged,omitempty"`
+	// Remove reports are produced as the account, before and after teardown.
+	// Presence distinguishes an empty path set from an older worker response.
+	CleanedPaths  []string `json:"cleaned_paths,omitempty"`
+	PathsReported bool     `json:"paths_reported,omitempty"`
+	Remaining     string   `json:"remaining,omitempty"`
+	Unverified    string   `json:"unverified,omitempty"`
 }
 
 // enterpriseHookPurgeDetail is what uninstall --purge removed for one
 // account: its ~/.defenseclaw, its per-user binaries and launcher links in
 // ~/.local/bin, and whether it stopped a running per-user gateway first.
+// Backup says the data of the account's own per-user install was moved to a
+// ~/.defenseclaw-backup-<UTC time> folder before the purge.
 type enterpriseHookPurgeDetail struct {
 	Data     bool `json:"data,omitempty"`
+	Backup   bool `json:"backup,omitempty"`
 	Binaries bool `json:"binaries,omitempty"`
 	Gateway  bool `json:"gateway,omitempty"`
 	UVCache  bool `json:"uv_cache,omitempty"`
@@ -529,7 +546,7 @@ var (
 	enterpriseHookWorkerInstaller = enterprisehooks.Install
 	enterpriseHookWorkerVerifier  = enterprisehooks.Verify
 	enterpriseHookWorkerRemover   = enterprisehooks.RemoveUserHooks
-	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserStateSummary
+	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserState
 	// enterpriseHookWorkerStopPerUser stops the account's per-user gateway
 	// and watchdog before the purge removes the state they run from.
 	enterpriseHookWorkerStopPerUser = stopPerUserGatewayForPurge
@@ -546,7 +563,11 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			return enterpriseHookWorkerResponse{Targets: results}
 		}
 	}
-	removalFailed := false
+	// purgeBlocked names why a purge in this job must keep the account's
+	// state: a Remove before it failed, left a DefenseClaw entry the agent
+	// still loads, or could not be checked. The purge deletes the backups and
+	// receipts a later cleanup needs to restore those files (GAP-0632).
+	purgeBlocked := ""
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
@@ -568,7 +589,52 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				outcome.Repaired = err == nil
 			}
 		case enterpriseHookWorkerModeRemove:
-			err = enterpriseHookWorkerRemover(ctx, opts)
+			previousHome := strings.TrimSpace(target.Options.PreviousHome)
+			if previousHome != "" && (!filepath.IsAbs(previousHome) || filepath.Clean(previousHome) != previousHome) {
+				err = fmt.Errorf("enterprise hooks: previous home %q is not a clean absolute path", previousHome)
+				break
+			}
+			restorePreviousHome := connector.BindManagedBackupPreviousHome(previousHome)
+			conn, setupOpts, setupErr := enterpriseHookWorkerRemoveSetup(opts)
+			if setupErr == nil {
+				var reportErr error
+				outcome.CleanedPaths, reportErr = enterpriseHookWorkerRemovePaths(opts, conn, setupOpts)
+				if reportErr == nil {
+					outcome.PathsReported = true
+				} else {
+					outcome.CleanedPaths = nil
+					outcome.Unverified = enterpriseHookWorkerUnverifiedReason(reportErr)
+				}
+			}
+			// An agent config in the home that leads out of it is left
+			// alone, link and file, whoever owns that file: the removal
+			// fails with the remedy and no teardown runs (rel-1-0-3
+			// GAP-0206). The connector writes refuse it as well.
+			if err = enterpriseHookWorkerOutsideHomeConfig(opts.UserHome, setupOpts.DataDir, outcome.CleanedPaths); err != nil {
+				restorePreviousHome()
+				break
+			}
+			// A report is needed only for a re-homed row. An unreadable
+			// receipt must not prevent ordinary teardown.
+			if err = enterpriseHookWorkerRemover(ctx, opts); err != nil {
+				restorePreviousHome()
+				break
+			}
+			if setupErr != nil {
+				outcome.Unverified = enterpriseHookWorkerUnverifiedReason(setupErr)
+			}
+			if !outcome.PathsReported {
+				restorePreviousHome()
+				purgeBlocked = firstNonEmpty(purgeBlocked, "the removal of its "+opts.ConnectorName+
+					" entries could not be checked ("+outcome.Unverified+"); fix that, then rerun the purge")
+				break
+			}
+			outcome.Remaining = enterpriseHookWorkerRemainingAfterRemove(opts, conn, setupOpts, outcome.CleanedPaths)
+			restorePreviousHome()
+			if outcome.Remaining != "" {
+				purgeBlocked = firstNonEmpty(purgeBlocked, "DefenseClaw entries remain after the removal ("+outcome.Remaining+
+					"); remove them from that agent's config, then rerun the purge")
+			}
 		case enterpriseHookWorkerModeRemoveLeftover:
 			var leftover bool
 			if leftover, err = enterpriseHookWorkerManagedRegistration(opts); err == nil && leftover {
@@ -579,8 +645,8 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			err = blockPersonalClaudeHook(opts)
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
 		case enterpriseHookWorkerModePurge:
-			if removalFailed {
-				err = errors.New("a DefenseClaw hook registration of this account was not removed")
+			if purgeBlocked != "" {
+				err = errors.New("kept the per-user state for its backups: " + purgeBlocked)
 				break
 			}
 			var stopped bool
@@ -589,7 +655,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Backup: summary.Backup, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
 			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
@@ -602,7 +668,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			if !outcome.Pending {
 				outcome.Error = err.Error()
 			}
-			removalFailed = removalFailed || target.Mode == enterpriseHookWorkerModeRemove || target.Mode == enterpriseHookWorkerModeRemoveLeftover
+			if target.Mode == enterpriseHookWorkerModeRemove || target.Mode == enterpriseHookWorkerModeRemoveLeftover {
+				purgeBlocked = firstNonEmpty(purgeBlocked, "a DefenseClaw hook registration of this account was not removed")
+			}
 		} else {
 			outcome.OK = true
 			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModePurge {
@@ -653,6 +721,275 @@ func blockPersonalClaudeHook(opts enterprisehooks.InstallOptions) error {
 		return nil
 	}
 	return configwrite.WriteFileDurable(path, []byte(blocked), 0o700)
+}
+
+// enterpriseHookWorkerRemoveSetup resolves the same SetupOpts as
+// RemoveUserHooks. Its error never replaces the remover's own error.
+func enterpriseHookWorkerRemoveSetup(opts enterprisehooks.InstallOptions) (connector.Connector, connector.SetupOpts, error) {
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+	}
+	var err error
+	dataDir, err = filepath.Abs(dataDir)
+	if err != nil {
+		return nil, connector.SetupOpts{}, fmt.Errorf("resolve data dir: %w", err)
+	}
+	registry := opts.Registry
+	if registry == nil {
+		registry = connector.NewDefaultRegistry()
+	}
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	conn, ok := registry.Get(name)
+	if !ok {
+		return nil, connector.SetupOpts{}, fmt.Errorf("unknown connector %q", name)
+	}
+	setupOpts := connector.SetupOpts{
+		DataDir: dataDir, Interactive: false, ManagedEnterprise: true,
+		WorkspaceDir: strings.TrimSpace(opts.WorkspaceDir), AgentVersion: strings.TrimSpace(opts.AgentVersion),
+		HookContractID: strings.TrimSpace(opts.HookContractID),
+	}
+	return conn, setupOpts, nil
+}
+
+// enterpriseHookWorkerRemovePaths runs as the account whose receipts and
+// config it reads. A failed collection is unverified, never a clean report.
+func enterpriseHookWorkerRemovePaths(opts enterprisehooks.InstallOptions, conn connector.Connector, setupOpts connector.SetupOpts) ([]string, error) {
+	var paths []string
+	err := connector.WithUserHomeDir(opts.UserHome, func() error {
+		paths = append(paths, connector.CleanupConfigPathsForConnector(conn, setupOpts)...)
+		receipts, readErr := connector.ManagedFileBackupTargetsForConnector(setupOpts.DataDir, conn.Name())
+		if readErr != nil {
+			return readErr
+		}
+		paths = append(paths, receipts...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	paths = uniqueEnterpriseHookWorkerPaths(paths)
+	if err := validateEnterpriseHookWorkerRemoveReport(enterpriseHookWorkerTargetResult{PathsReported: true, CleanedPaths: paths}); err != nil {
+		return nil, err
+	}
+	return paths, nil
+}
+
+// enterpriseHookWorkerOutsideHomeConfig refuses a removal while one of the
+// agent config paths in the home leads out of it through a symlink (the
+// config, or a folder on the way) to a file that still holds DefenseClaw's
+// entries, or that cannot be checked as the account. A teardown would have
+// restored or deleted that file: the worker runs as the user, but a file
+// outside the home is not DefenseClaw's to change, whoever owns it
+// (rel-1-0-3 GAP-0206). Once the account removes those entries, the
+// teardown leaves that file as it is and the removal goes on. A dangling
+// link changes nothing outside; the check after the teardown reports it.
+func enterpriseHookWorkerOutsideHomeConfig(home, dataDir string, paths []string) error {
+	const maxConfigBytes = 4 << 20
+	customDataDir := ""
+	if filepath.Clean(dataDir) != filepath.Join(home, ".defenseclaw") {
+		customDataDir = filepath.Clean(dataDir)
+	}
+	for _, path := range paths {
+		target, outside, err := connector.AgentConfigOutsideHome(home, path)
+		if err != nil {
+			return fmt.Errorf("%s: the agent config link cannot be followed (%v); DefenseClaw left it alone: replace the link with the file it names, then rerun", path, err)
+		}
+		if !outside {
+			continue
+		}
+		refuse := func(detail string) error {
+			return &connector.AgentConfigOutsideHomeError{Path: path, Target: target, Detail: detail}
+		}
+		info, err := os.Stat(target)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || !info.Mode().IsRegular() {
+			return refuse("which cannot be checked as the account")
+		}
+		file, err := os.Open(target)
+		if err != nil {
+			return refuse("which cannot be read as the account")
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, maxConfigBytes+1))
+		_ = file.Close()
+		if readErr != nil || len(data) > maxConfigBytes {
+			return refuse("which could not be checked within the read limit")
+		}
+		if line, marker := enterpriseHookWorkerConfigReferenceLine(data, customDataDir); line != 0 {
+			return refuse(fmt.Sprintf("and that file still holds DefenseClaw's %s (line %d)", marker, line))
+		}
+	}
+	return nil
+}
+
+// enterpriseHookWorkerRemainingAfterRemove names the first DefenseClaw entry
+// the agent still loads after a teardown: one VerifyClean reports, or a
+// reference in a config path the worker resolved. Empty means checked clean.
+func enterpriseHookWorkerRemainingAfterRemove(opts enterprisehooks.InstallOptions, conn connector.Connector, setupOpts connector.SetupOpts, paths []string) string {
+	verifyErr := connector.WithUserHomeDir(opts.UserHome, func() error {
+		return conn.VerifyClean(setupOpts)
+	})
+	if verifyErr != nil {
+		path := opts.UserHome
+		for _, candidate := range paths {
+			if enterpriseHookWorkerPathWithin(opts.UserHome, candidate) {
+				path = candidate
+				break
+			}
+		}
+		return boundedString(strings.Join(strings.Fields(path+": "+verifyErr.Error()), " "), 1000)
+	}
+	// Some connectors validate only references to this data dir. A copied
+	// config can still name the former home's hook path.
+	return enterpriseHookWorkerRemainingConfigReference(opts.UserHome, setupOpts.DataDir, paths)
+}
+
+func enterpriseHookWorkerUnverifiedReason(err error) string {
+	value := strings.ToValidUTF8(err.Error(), "\ufffd")
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, value)
+	value = strings.TrimSpace(value)
+	if len(value) > enterpriseHookWorkerRemainingMax {
+		if path := enterpriseHookUnverifiedReceiptPath(value); path != "" {
+			value = strings.Replace(value, path, shortEnterpriseHookReportPath(path), 1)
+		}
+	}
+	if len(value) <= enterpriseHookWorkerRemainingMax {
+		return value
+	}
+	value = value[:enterpriseHookWorkerRemainingMax]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
+func uniqueEnterpriseHookWorkerPaths(paths []string) []string {
+	seen := make(map[string]bool, len(paths))
+	unique := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if !seen[path] {
+			seen[path] = true
+			unique = append(unique, path)
+		}
+	}
+	return unique
+}
+
+// enterpriseHookWorkerRemainingConfigReference is a conservative final check
+// of the config paths the worker resolved. It runs as the user and reads at
+// most 4 MiB from each regular file. An unreadable or nonregular config is
+// unverified rather than assumed clean.
+func enterpriseHookWorkerRemainingConfigReference(home, dataDir string, paths []string) string {
+	const maxConfigBytes = 4 << 20
+	customDataDir := ""
+	if filepath.Clean(dataDir) != filepath.Join(home, ".defenseclaw") {
+		customDataDir = filepath.Clean(dataDir)
+	}
+	for _, path := range paths {
+		if !enterpriseHookWorkerPathWithin(home, path) {
+			continue
+		}
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return path + ": cannot inspect agent config"
+		}
+		target := path
+		if info.Mode()&os.ModeSymlink != 0 {
+			// A dotfile manager links the agent config to a file elsewhere
+			// (~/.codex/config.toml -> ~/dotfiles/codex.toml). The worker
+			// runs as the user and reads that file, also one outside the
+			// home, which the removal never changes (GAP-0642, rel-1-0-3
+			// GAP-0206).
+			resolved, problem := enterpriseHookWorkerConfigLinkTarget(path)
+			if problem != "" {
+				return path + ": " + problem
+			}
+			target = resolved
+			if info, err = os.Lstat(target); err != nil {
+				return path + ": cannot inspect the file the agent config links to"
+			}
+		}
+		if !info.Mode().IsRegular() {
+			return path + ": agent config is not a regular file"
+		}
+		file, err := os.Open(target)
+		if err != nil {
+			return path + ": cannot read agent config"
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, maxConfigBytes+1))
+		_ = file.Close()
+		if readErr != nil || len(data) > maxConfigBytes {
+			return path + ": agent config could not be checked within the read limit"
+		}
+		if line, marker := enterpriseHookWorkerConfigReferenceLine(data, customDataDir); line != 0 {
+			return fmt.Sprintf("%s:%d: DefenseClaw %s remains in agent config", path, line, marker)
+		}
+	}
+	return ""
+}
+
+// enterpriseHookWorkerConfigLinkTarget resolves a symlinked agent config,
+// or says why it cannot.
+func enterpriseHookWorkerConfigLinkTarget(path string) (string, string) {
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", "agent config is a symlink that cannot be resolved; remove DefenseClaw's entries from the file it names, or replace the link with that file"
+	}
+	return target, ""
+}
+
+// enterpriseHookWorkerConfigReferenceLine matches only connector-owned
+// markers and data-dir paths. Agent comments, including the Codex bootstrap
+// header, are inert. It does no I/O and is safe to exercise for every agent.
+func enterpriseHookWorkerConfigReferenceLine(data []byte, customDataDir string) (int, string) {
+	markers := []string{
+		"defenseclaw-managed-hook", "x-defenseclaw-source", "x-defenseclaw-client",
+		"x-defenseclaw-token", "defenseclaw-hook", "defenseclaw-gateway",
+		"defenseclaw.js", "defenseclaw.ts", "defenseclaw.json",
+		"defenseclaw_omnigent_policy", "defenseclaw.listener-proof.v1",
+	}
+	for index, raw := range bytes.Split(data, []byte{'\n'}) {
+		line := strings.TrimSpace(string(raw))
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		lower := strings.ToLower(line)
+		for start := 0; start < len(lower); {
+			found := strings.Index(lower[start:], ".defenseclaw")
+			if found < 0 {
+				break
+			}
+			begin := start + found
+			end := begin + len(".defenseclaw")
+			if begin > 0 && !strings.ContainsRune("/\\\"'= \t([{,", rune(lower[begin-1])) {
+				start = end
+				continue
+			}
+			if end == len(lower) || strings.ContainsRune("/\\\"'", rune(lower[end])) {
+				return index + 1, "data-dir path"
+			}
+			start = end
+		}
+		if customDataDir != "" && strings.Contains(line, filepath.Clean(customDataDir)+string(filepath.Separator)) {
+			return index + 1, "data-dir path"
+		}
+		for _, marker := range markers {
+			if strings.Contains(lower, marker) {
+				return index + 1, "connector marker"
+			}
+		}
+	}
+	return 0, ""
 }
 
 // enterpriseHookWorkerManagedRegistration reports whether the user's hook

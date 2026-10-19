@@ -395,6 +395,18 @@ func (e *Effective) RequiredPackContent() *Pack {
 	return e.requiredLoaded
 }
 
+// RequiredPackLoaded is openshell.admin.required_pack as this resolution
+// loaded it: the pack the run uses, or the required pack itself when a
+// stricter one runs in its place (RequiredPackContent). nil when no pack is
+// required. The managed gateway's policy/current answer carries it, so the
+// daemon holds the required pack in both cases.
+func (e *Effective) RequiredPackLoaded() *Pack {
+	if e == nil || !e.requiredPack {
+		return nil
+	}
+	return e.requiredLoaded
+}
+
 // explainOrder is the order Explain reports settings in.
 var explainOrder = []string{
 	"pack", "profile", "network.mode", "approvals.mode", "observe.process_tree", "yolo", "harness", "harness.allowed",

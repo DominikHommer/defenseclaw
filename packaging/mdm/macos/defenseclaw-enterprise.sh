@@ -49,8 +49,11 @@
 # Signed policy bundles: --trust-anchor-file installs the trust anchor file
 # (root-only writable) and turns on bundle mode; --bundle-file applies a
 # signed bundle with `enterprise bundle apply` after the package step and the
-# credential. When the apply fails, the bundle in force keeps enforcing and
-# the trust anchor file this run replaced is put back. Script-only MDMs can
+# credential. When the installed gateway has `enterprise bundle anchors
+# install` (management_contract 1 in --version-json), the wrapper installs the
+# anchor file with it, under the lifecycle lock; with an older gateway it
+# writes the file itself. When the apply fails, the bundle in force keeps
+# enforcing and the trust anchor file this run replaced is put back. Script-only MDMs can
 # paste the anchor file and the base64 of the bundle into the settings below.
 # A bundle carries its own config. A config given with it (--config-file,
 # --config-stdin or the inline config) is the base config. Its guardrail:
@@ -126,9 +129,6 @@ LC_ALL=C
 export PATH LC_ALL
 unset IFS || true
 umask 077
-# Set by dc_trusted_path; empty until a check names an ACL entry. Messages
-# that a failed check reaches without running it read it too (GAP-0188).
-DC_TRUST_ACL=""
 
 readonly DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
 readonly DC_MAX_CONFIG_BYTES=1048576 DC_MAX_SECRET_BYTES=16384
@@ -149,8 +149,13 @@ DC_PACKAGE_VERSION=""  # the version it installed
 DC_INSTALL_ROOT=""     # the install tree whose volume the package fills
 DC_ANCHORS_PREVIOUS="" # staged copy of the trust anchor file this run replaced
 DC_ANCHORS_CHANGED=0   # 1 when this run installed a different trust anchor file
+DC_ANCHORS_COMMITTED=0 # 1 when that file stays after a successful run (dc_annotate_anchors_step)
+DC_ANCHORS_VERB=0      # 1 when the installed gateway installs it (enterprise bundle anchors install)
+DC_ANCHORS_SOURCE=""   # the private copy of the anchor file that command reads
+DC_ANCHORS_RESULT=""   # its result: installed, replaced or unchanged
 DC_DEPLOYMENT_RECORD="" # committed binary digests for same-version repair
 DC_PACKAGE_RESULT=""   # the result the package's own install scripts write
+DC_TRUST_ACL=""        # the ACL entry dc_trusted_path refused, for messages (set -u: read before any check ran)
 
 dc_platform() {
     case "$(uname -s)" in
@@ -203,6 +208,13 @@ dc_log() {
 }
 
 dc_cleanup() {
+    [ -z "$DC_ANCHORS_SOURCE" ] || rm -f "$DC_ANCHORS_SOURCE"
+    # A failed or interrupted apply must leave the as-found trust anchors.
+    if ! dc_restore_anchors; then
+        # Keep the root-only backup for an administrator if restoration failed.
+        dc_log "kept $DC_STAGE because the previous trust anchor could not be restored"
+        return 0
+    fi
     if [ -n "$DC_STAGE" ] && [ -d "$DC_STAGE" ]; then
         rm -rf "$DC_STAGE"
     fi
@@ -212,7 +224,10 @@ dc_cleanup() {
 # so the command does not finish (or store a credential) after the run was
 # reported failed.
 dc_stop_child() {
-    [ -z "$DC_CHILD" ] || kill "$DC_CHILD" 2>/dev/null || true
+    [ -n "$DC_CHILD" ] || return 0
+    kill "$DC_CHILD" 2>/dev/null || true
+    wait "$DC_CHILD" 2>/dev/null || true
+    DC_CHILD=""
 }
 
 # dc_sweep_stages <parent>: remove the staging folders of earlier runs that
@@ -240,7 +255,7 @@ dc_sweep_stages() {
 # payload's gateway cannot run, so on Linux the default is a root-only folder
 # of its own (GAP-0752); --staging-dir names another one.
 dc_stage_parent() {
-    DC_STAGE_PARENT=$DC_STAGING_DIR
+    DC_STAGE_PARENT=$DC_STAGING_DIR DC_TRUST_ACL=""
     if [ -z "$DC_STAGE_PARENT" ]; then
         if [ "$DC_SCRIPT_OS" = darwin ]; then
             DC_STAGE_PARENT=/var/tmp
@@ -254,10 +269,12 @@ dc_stage_parent() {
         /*) ;;
         *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--staging-dir must be an absolute path" ;;
     esac
-    if [ ! -d "$DC_STAGE_PARENT" ]; then
-        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT does not exist or is not a directory; create it as a root-owned directory that only root can write, or leave out --staging-dir"
+    if [ ! -e "$DC_STAGE_PARENT" ] && [ ! -L "$DC_STAGE_PARENT" ]; then
+        # The wrapper creates only its Linux default; a --staging-dir folder
+        # is the administrator's (GAP-0030: this read as a shell error).
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT does not exist; create it as a root-owned directory that only root can write (mkdir -m 0700), or leave out --staging-dir"
     fi
-    if ! dc_trusted_path "$DC_STAGE_PARENT"; then
+    if [ ! -d "$DC_STAGE_PARENT" ] || ! dc_trusted_path "$DC_STAGE_PARENT"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT is not a root-owned directory that only root can write$DC_TRUST_ACL"
     fi
 }
@@ -771,7 +788,11 @@ dc_install_package() {
             command -v rpm >/dev/null 2>&1 || dc_fail_result "$DC_EXIT_FAILURE" mdm_package_manager_missing "rpm is not installed; use the .deb or the payload archive"
             package=$(rpm -qp --qf '%{NAME}' "$file" 2>/dev/null || true)
             version=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$file" 2>/dev/null || true)
+            arch=$(rpm -qp --qf '%{ARCH}' "$file" 2>/dev/null || true)
+            host_arch=$(rpm --eval '%{_arch}' 2>/dev/null || true)
             [ "$package" = "$DC_LINUX_PACKAGE" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the .rpm is '$package', not $DC_LINUX_PACKAGE"
+            [ -n "$host_arch" ] && [ "$arch" = "$host_arch" ] ||
+                dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_architecture "the .rpm is for $arch; this host needs $host_arch"
             dc_require_product_version "$(dc_package_release_version "$version")"
             # An interrupted upgrade can leave multiple installed versions.
             # Use the newest one for the repair decision and result metadata.
@@ -958,6 +979,34 @@ dc_annotate_package_step() {
             /^  "noop_reason": / { next }
             /^  "warnings": \[$/ { print; print "    " warning ","; warned = 1; next }
             /^  "exit_code": / && !warned { print "  \"warnings\": [" warning "],"; warned = 1 }
+            { print }
+        ' "$DC_RESULT" >"$annotated"; then
+        DC_RESULT=$annotated
+    fi
+}
+
+# dc_annotate_anchors_step: after a successful run, make the result document
+# report the trust anchor file this run installed. The lifecycle result is
+# the ensure that ran before the anchors, or the bundle apply that found the
+# confirmed bundle again: its "noop": true ("compliant", "already_applied")
+# would tell the MDM nothing changed although the anchors did (GAP-0034). The
+# lifecycle prints the document with two-space indentation, one top-level
+# field per line.
+dc_annotate_anchors_step() {
+    { [ "$DC_ANCHORS_CHANGED" = 1 ] || [ "$DC_ANCHORS_COMMITTED" = 1 ]; } && [ -n "$DC_RESULT" ] || return 0
+    if [ -n "$DC_ANCHORS_PREVIOUS" ]; then
+        change="replaced the trust anchors in $DC_ANCHORS"
+    else
+        change="installed trust anchors in $DC_ANCHORS"
+    fi
+    annotated="$DC_STAGE/result.anchors.json"
+    if DC_AWK_CHANGE="\"$(dc_json_escape "$change")\"" \
+        awk '
+            BEGIN { change = ENVIRON["DC_AWK_CHANGE"] }
+            /^  "noop": true,$/ { print "  \"noop\": false,"; next }
+            /^  "noop_reason": / { next }
+            /^  "changes": \[$/ { print; print "    " change ","; noted = 1; next }
+            /^  "exit_code": / && !noted { print "  \"changes\": [" change "],"; noted = 1 }
             { print }
         ' "$DC_RESULT" >"$annotated"; then
         DC_RESULT=$annotated
@@ -1317,9 +1366,9 @@ dc_relabel_config_source() {
     DC_RESULT="$DC_STAGE/result-source.json"
 }
 
-# dc_put_anchors <src>: atomically replace the trust anchor file with src
-# (root-owned, 0644, in a root-owned 0755 trust folder next to the config).
-dc_put_anchors() {
+# dc_anchors_dir: create the root-owned 0755 trust folder next to the config
+# and set dir to it.
+dc_anchors_dir() {
     dir=$(dirname "$DC_ANCHORS")
     [ -d "$(dirname "$dir")" ] ||
         dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "$(dirname "$dir") is missing; install the deployment before the trust anchor file"
@@ -1330,6 +1379,70 @@ dc_put_anchors() {
     if [ -L "$dir" ] || ! chown 0:0 "$dir" || ! chmod 0755 "$dir"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "cannot make $dir a root-only folder"
     fi
+}
+
+# dc_anchors_verb: succeed when the installed gateway has `enterprise bundle
+# anchors install`. The probe is the management agent contract's (section
+# 3): --version-json reports management_contract 1 or later. Builds before
+# the contract (1.0.2 and earlier) print no such member. A --help probe
+# would not do: those builds answer `enterprise bundle anchors install
+# --help` with the enterprise help and exit 0.
+dc_anchors_verb() {
+    [ -x "$DC_GATEWAY" ] && dc_trusted_path "$DC_GATEWAY" || return 1
+    probe=$("$DC_GATEWAY" --version-json </dev/null 2>/dev/null) || return 1
+    contract=$(printf '%s\n' "$probe" |
+        sed -n 's/^{.*"management_contract":[[:space:]]*\([1-9][0-9]\{0,3\}\)[[:space:]]*[,}].*$/\1/p' | head -n 1)
+    [ -n "$contract" ]
+}
+
+# dc_run_anchors_verb <src>: install src with the installed gateway's
+# `enterprise bundle anchors install`, which takes the lifecycle lock, checks
+# the file and puts the previous one back when the installed file fails its
+# check; set DC_ANCHORS_RESULT. The command reads only a file that no account
+# but root can change, with no link on its path; the macOS staging folder
+# under /var/tmp (sticky, behind the /var link) is not one, so it reads a
+# private copy in the trust folder. A refusal is mdm_anchor_install_failed
+# with the command's exit code: 1 refused, 2 invalid arguments, 75 busy
+# after the lock wait.
+dc_run_anchors_verb() {
+    dc_anchors_dir
+    DC_ANCHORS_SOURCE="$dir/.bundle-anchors.json.mdm-source-$$"
+    if ! cp "$1" "$DC_ANCHORS_SOURCE" || ! chown 0:0 "$DC_ANCHORS_SOURCE" || ! chmod 0600 "$DC_ANCHORS_SOURCE"; then
+        rm -f "$DC_ANCHORS_SOURCE"
+        DC_ANCHORS_SOURCE=""
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "cannot write a copy of the trust anchor file in $dir"
+    fi
+    set +e
+    "$DC_GATEWAY" enterprise bundle anchors install --file "$DC_ANCHORS_SOURCE" --lock-wait 10m --json \
+        >"$DC_STAGE/anchors.json" 2>"$DC_STAGE/anchors.err" </dev/null &
+    DC_CHILD=$!
+    wait "$DC_CHILD"
+    status=$?
+    DC_CHILD=""
+    set -e
+    rm -f "$DC_ANCHORS_SOURCE"
+    DC_ANCHORS_SOURCE=""
+    document=$(tr -d '\n' <"$DC_STAGE/anchors.json")
+    [ -z "$document" ] || dc_log "anchors install $document"
+    DC_ANCHORS_RESULT=$(printf '%s\n' "$document" | sed -n 's/^[^[]*"result":[[:space:]]*"\([a-z]*\)".*$/\1/p')
+    [ "$status" != 0 ] || return 0
+    errors=""
+    case "$document" in *'"errors"'*) errors=${document##*'"errors"'} ;; esac
+    code=$(printf '%s\n' "$errors" | sed -n 's/^[^}]*"code":[[:space:]]*"\([a-z_]*\)".*$/\1/p')
+    message=$(printf '%s\n' "$errors" | sed -n 's/^[^}]*"message":[[:space:]]*"\([^"]*\)".*$/\1/p')
+    [ -n "$code$message" ] || message=$(head -c 1024 "$DC_STAGE/anchors.err" 2>/dev/null || true)
+    case "$status" in 1 | 2 | 75) ;; *) status=$DC_EXIT_FAILURE ;; esac
+    dc_fail_result "$status" mdm_anchor_install_failed "enterprise bundle anchors install did not install the trust anchor file${code:+ ($code)}: $message"
+}
+
+# dc_put_anchors <src>: atomically replace the trust anchor file with src
+# (root-owned, 0644, in a root-owned 0755 trust folder next to the config).
+# The writer for an installed gateway without `enterprise bundle anchors
+# install`; it stays while releases before the management contract (1.0.2
+# and earlier) are supported, since MDMs upload the kit apart from the
+# package and can run it against them.
+dc_put_anchors() {
+    dc_anchors_dir
     next="$dir/.bundle-anchors.json.mdm-$$"
     if ! cp "$1" "$next" || ! chown 0:0 "$next" || ! chmod 0644 "$next" || ! mv -f "$next" "$DC_ANCHORS"; then
         rm -f "$next"
@@ -1339,11 +1452,15 @@ dc_put_anchors() {
         dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "$DC_ANCHORS or one of its folders is not root-owned or is writable by other accounts$DC_TRUST_ACL"
 }
 
-# dc_install_anchors <staged>: install the staged trust anchor file unless the
-# installed one is identical, and keep the file it replaces for
-# dc_restore_anchors.
+# dc_install_anchors <staged>: install the staged trust anchor file and keep
+# the file it replaces for dc_restore_anchors. The installed gateway's
+# command (dc_anchors_verb) reports whether the file changed; without it the
+# wrapper writes the file itself and skips an identical one.
 dc_install_anchors() {
-    if [ -f "$DC_ANCHORS" ] && [ ! -L "$DC_ANCHORS" ] &&
+    DC_ANCHORS_VERB=0
+    if dc_anchors_verb; then
+        DC_ANCHORS_VERB=1
+    elif [ -f "$DC_ANCHORS" ] && [ ! -L "$DC_ANCHORS" ] &&
         [ "$(dc_sha256 "$1")" = "$(dc_sha256 "$DC_ANCHORS" 2>/dev/null || true)" ]; then
         dc_log "trust anchor file unchanged"
         return 0
@@ -1356,6 +1473,17 @@ dc_install_anchors() {
         cp "$DC_ANCHORS" "$DC_ANCHORS_PREVIOUS" ||
             dc_fail_result "$DC_EXIT_FAILURE" mdm_anchor_install_failed "cannot keep a copy of $DC_ANCHORS"
     fi
+    if [ "$DC_ANCHORS_VERB" = 1 ]; then
+        dc_run_anchors_verb "$1"
+        if [ "$DC_ANCHORS_RESULT" = unchanged ]; then
+            DC_ANCHORS_PREVIOUS=""
+            dc_log "trust anchor file unchanged"
+            return 0
+        fi
+        DC_ANCHORS_CHANGED=1
+        dc_log "installed trust anchor file $DC_ANCHORS with enterprise bundle anchors install"
+        return 0
+    fi
     DC_ANCHORS_CHANGED=1
     dc_put_anchors "$1"
     dc_log "installed trust anchor file $DC_ANCHORS"
@@ -1363,20 +1491,34 @@ dc_install_anchors() {
 
 # dc_restore_anchors: after a failed bundle apply, put back the trust anchor
 # file this run replaced (or remove the one it added), so a bad anchor file
-# never replaces the one that verified the bundle in force.
+# never replaces the one that verified the bundle in force. It uses the
+# writer that installed the file.
 dc_restore_anchors() {
     [ "$DC_ANCHORS_CHANGED" = 1 ] || return 0
-    DC_ANCHORS_CHANGED=0
     # A subshell: a restore that fails is logged, and the apply result stays
     # the document this run prints.
     if [ -n "$DC_ANCHORS_PREVIOUS" ]; then
-        ( dc_put_anchors "$DC_ANCHORS_PREVIOUS" ) >/dev/null || {
+        writer=dc_put_anchors
+        [ "$DC_ANCHORS_VERB" = 0 ] || writer=dc_run_anchors_verb
+        ( "$writer" "$DC_ANCHORS_PREVIOUS" ) >/dev/null || {
             dc_log "could not restore the previous trust anchor file $DC_ANCHORS"
-            return 0
+            # The final trust check can fail after the previous file was put
+            # back. Otherwise invalidate the new file without removing the
+            # path: its presence keeps bundle mode on and refuses the file.
+            if [ ! -L "$DC_ANCHORS" ] &&
+                ! cmp -s "$DC_ANCHORS_PREVIOUS" "$DC_ANCHORS"; then
+                ( : >"$DC_ANCHORS" ) 2>/dev/null ||
+                    dc_log "could not invalidate the trust anchor file $DC_ANCHORS"
+            fi
+            return 1
         }
     else
-        rm -f "$DC_ANCHORS"
+        rm -f "$DC_ANCHORS" || {
+            dc_log "could not remove the newly installed trust anchor file $DC_ANCHORS"
+            return 1
+        }
     fi
+    DC_ANCHORS_CHANGED=0
     dc_log "restored the previous trust anchor file after the failed bundle apply"
 }
 
@@ -1426,6 +1568,64 @@ dc_run_lifecycle_retry() {
         sleep 10
     done
     return "$status"
+}
+
+# Read the first error message from the gateway's lifecycle JSON. The CLI
+# writes a refused --json secret set only to stdout, with no stderr text.
+dc_secret_json_error() {
+    head -c 65536 "$1" 2>/dev/null | awk '
+        { document = document $0 }
+        END {
+            if (!match(document, /"errors"[[:space:]]*:[[:space:]]*\[[[:space:]]*\{/)) exit
+            document = substr(document, RSTART + RLENGTH)
+            if (!match(document, /"message"[[:space:]]*:[[:space:]]*"/)) exit
+            document = substr(document, RSTART + RLENGTH)
+            message = ""
+            for (i = 1; i <= length(document); i++) {
+                c = substr(document, i, 1)
+                if (c == "\"") { print message; exit }
+                if (c == "\\") {
+                    i++
+                    c = substr(document, i, 1)
+                    if (c == "n" || c == "r" || c == "t") c = " "
+                    else if (c == "b" || c == "f") c = ""
+                    else if (c == "u") {
+                        hex = substr(document, i + 1, 4)
+                        if (length(hex) != 4 || hex ~ /[^[:xdigit:]]/) exit
+                        value = 0
+                        for (j = 1; j <= 4; j++) value = value * 16 + index("0123456789abcdef", tolower(substr(hex, j, 1))) - 1
+                        c = value >= 32 && value <= 126 ? sprintf("%c", value) : "\\u" hex
+                        i += 4
+                    }
+                    else if (c != "\"" && c != "\\" && c != "/") exit
+                }
+                message = message c
+            }
+        }
+    '
+}
+
+dc_store_secret() {
+    gateway=$1
+    set +e
+    printf '%s' "$secret_data" |
+        "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
+    DC_CHILD=$!
+    wait "$DC_CHILD"
+    secret_status=$?
+    DC_CHILD=""
+    set -e
+    secret_data=""
+    if [ "$secret_status" != 0 ]; then
+        detail=$(head -c 1024 "$DC_STAGE/secret.err" 2>/dev/null || true)
+        if [ -z "$detail" ]; then
+            detail=$(dc_secret_json_error "$DC_STAGE/secret.json" || true)
+        fi
+        [ -n "$detail" ] || detail="the gateway returned no error message"
+        case "$secret_status" in 1 | 2 | 75) ;; *) secret_status=$DC_EXIT_FAILURE ;; esac
+        dc_fail_result "$secret_status" mdm_secret_failed "storing credential '$DC_SECRET_NAME' failed, so the config was not applied: $detail"
+    fi
+    dc_log "stored credential $DC_SECRET_NAME"
 }
 
 dc_main() {
@@ -1538,21 +1738,7 @@ dc_main() {
     # that the package's postinstall or the change itself started (the
     # apply path unit) instead of failing busy.
     if [ -n "$DC_SECRET_NAME" ]; then
-        set +e
-        printf '%s' "$secret_data" |
-            "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
-        DC_CHILD=$!
-        wait "$DC_CHILD"
-        secret_status=$?
-        DC_CHILD=""
-        set -e
-        secret_data=""
-        if [ "$secret_status" != 0 ]; then
-            detail=$(head -c 1024 "$DC_STAGE/secret.err" 2>/dev/null || true)
-            case "$secret_status" in 1 | 2 | 75) ;; *) secret_status=$DC_EXIT_FAILURE ;; esac
-            dc_fail_result "$secret_status" mdm_secret_failed "storing credential '$DC_SECRET_NAME' failed, so the config was not applied: $detail"
-        fi
-        dc_log "stored credential $DC_SECRET_NAME"
+        dc_store_secret "$gateway"
     fi
 
     # A bundle apply runs the ensure transaction itself, so with a bundle
@@ -1585,7 +1771,10 @@ dc_main() {
     fi
     [ -z "$anchors" ] || dc_install_anchors "$anchors"
     if [ -z "$bundle" ]; then
+        DC_ANCHORS_COMMITTED=$DC_ANCHORS_CHANGED
+        DC_ANCHORS_CHANGED=0
         dc_annotate_package_step
+        dc_annotate_anchors_step
         dc_emit_result
         return 0
     fi
@@ -1596,9 +1785,12 @@ dc_main() {
         dc_run_lifecycle_retry "$gateway" bundle apply --bundle "$bundle" --reason mdm --lock-wait 10m || status=$?
     fi
     if [ "$status" = 0 ]; then
+        DC_ANCHORS_COMMITTED=$DC_ANCHORS_CHANGED
+        DC_ANCHORS_CHANGED=0
         dc_annotate_package_step
+        dc_annotate_anchors_step
     else
-        dc_restore_anchors
+        dc_restore_anchors || true
     fi
     dc_emit_result
     return "$status"

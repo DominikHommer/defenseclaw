@@ -153,8 +153,7 @@ func serviceAccountCallerCWD(ctx context.Context, cwd string) string {
 	if home == "" || home == unresolvedCallerHome {
 		return ""
 	}
-	if !insideHome(home, cwd) && !(filepath.IsAbs(strings.TrimSpace(cwd)) && !hasParentElement(cwd) &&
-		projectRootKey(strings.TrimSpace(cwd)) == projectRootKey(home)) {
+	if !insideHome(home, cwd) && ((!(filepath.IsAbs(strings.TrimSpace(cwd))) || hasParentElement(cwd)) || projectRootKey(strings.TrimSpace(cwd)) != projectRootKey(home)) {
 		return ""
 	}
 	return filepath.Clean(strings.TrimSpace(cwd))

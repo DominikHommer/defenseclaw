@@ -617,6 +617,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	if sb.WorkdirMode != config.OpenShellWorkdirCopy {
 		return fmt.Errorf("%s works on your folder directly; use `%s review %s` or `%s undo %s`", o.Name, CommandName, o.Name, CommandName, o.Name)
 	}
+	sb = a.settledSandbox(ctx, api, sb)
 	// Where the work is to go is checked before the sandbox is started and
 	// read: a branch it cannot go on, a patch file that is there already.
 	if modes > 0 {

@@ -258,6 +258,7 @@ func TestRunDetachedStartsInBackground(t *testing.T) {
 		t.Fatal("a detached run attached the terminal")
 	}
 	has(t, ta.output(), "defenseclaw sandbox logs dc-claude-proj-1a2b -f")
+	has(t, ta.output(), "A completed detached Claude Code run may leave no saved conversation", "connect without --continue")
 	if n := ta.calls("POST", sbName+"/stop"); n != 0 {
 		t.Fatal("a detached run was stopped")
 	}
@@ -267,6 +268,7 @@ func TestRunDetachedStartsInBackground(t *testing.T) {
 	if last := sandboxCommand(ta.stream.runs[len(ta.stream.runs)-1]); slices.Contains(last, "stream-json") || last[4] != RunDir || last[5] != harness.CodexLauncherPath {
 		t.Fatalf("detached codex argv = %q", last)
 	}
+	lacks(t, ta.output(), "may leave no saved conversation")
 }
 
 // A refused run creates no sandbox and stages no copy, and says why: a
@@ -1448,14 +1450,16 @@ func TestRunOnTheMicroVMDriver(t *testing.T) {
 		// recommended space it is warned about (OC-F1).
 		{name: "a first boot on a full disk", setup: driver("vm", firstBoot, func(ta *testApp) {
 			ta.diskFree, ta.images.sizes = 2<<30, map[string]uint64{"claudecode": 7 << 30}
-		}), do: refused(run, "not enough free disk space for this sandbox's first start: the MicroVM driver prepares a disk of about 7.0 GiB from its image in "+
-			"~/.local/state/openshell/vm-driver/images, where 2.0 GiB is free and at least 8.0 GiB is needed; free space on that volume first "+
+		}), do: refused(run, "not enough free disk space for this sandbox's first start: the MicroVM driver's first start uses about 11.0 GiB while preparing a disk from its image in "+
+			"~/.local/state/openshell/vm-driver/images, where 2.0 GiB is free and at least 12.0 GiB is needed; free space on that volume first "+
 			"(`defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)")},
 		{name: "a first boot of an image to build on a full disk", setup: driver("vm", firstBoot, missing, func(ta *testApp) { ta.diskFree = 5 << 30 }),
-			do: refused(run, "a disk of about 5.0 GiB from its image in ~/.local/state/openshell/vm-driver/images, where 5.0 GiB is free and at least 6.0 GiB is needed")},
-		{name: "a first boot with little room", input: "a\n", setup: driver("vm", firstBoot, func(ta *testApp) { ta.diskFree = 10 << 30 }), opts: run,
-			want: []string{"only 10.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and this sandbox's first start prepares a MicroVM disk of about 5.0 GiB there " +
-				"(12.0 GiB or more is recommended; `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)"},
+			do: refused(run, "uses about 11.0 GiB while preparing a disk from its image in ~/.local/state/openshell/vm-driver/images, where 5.0 GiB is free and at least 12.0 GiB is needed")},
+		{name: "a first boot with measured peak shortfall", setup: driver("vm", firstBoot, func(ta *testApp) { ta.diskFree = 10 << 30 }),
+			do: refused(run, "uses about 11.0 GiB while preparing a disk from its image in ~/.local/state/openshell/vm-driver/images, where 10.0 GiB is free and at least 12.0 GiB is needed")},
+		{name: "a first boot with little room", input: "a\n", setup: driver("vm", firstBoot, func(ta *testApp) { ta.diskFree = 15 << 30 }), opts: run,
+			want: []string{"only 15.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and this sandbox's first start uses about 11.0 GiB while preparing a MicroVM disk there " +
+				"(22.0 GiB or more is recommended; `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)"},
 			check: func(t *testing.T, ta *testApp) {
 				if ta.creates() != 1 || !strings.HasPrefix(ta.diskProbed, ta.home) {
 					t.Fatalf("creates %d, disk probed at %q", ta.creates(), ta.diskProbed)

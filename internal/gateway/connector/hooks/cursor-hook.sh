@@ -159,6 +159,7 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
+  defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" transport
   defenseclaw_log_hook_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   echo "defenseclaw: sandbox ingress unreachable, blocking cursor tool (sandbox hooks fail closed): $1" >&2
   emit_cursor_deny "DefenseClaw hook failed closed"
@@ -166,6 +167,7 @@ fail_unreachable() {
 }
 
 fail_response() {
+  defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_failure cursor cursor-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: cursor hook error, blocking cursor tool (sandbox hooks fail closed): $1" >&2
   emit_cursor_deny "DefenseClaw hook failed closed"
@@ -173,6 +175,9 @@ fail_response() {
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   MISSING_TOKEN_REASON="missing gateway token: ${HOOK_DIR}/{{.TokenFile}} not found"
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event cursor cursor-hook "" "$PAYLOAD" "$MISSING_TOKEN_REASON" transport
+  fi
   defenseclaw_log_hook_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: ${MISSING_TOKEN_REASON}, blocking cursor tool (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
@@ -199,6 +204,9 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" transport
+  fi
   defenseclaw_log_hook_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "cursor tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
@@ -210,6 +218,8 @@ fail_unreachable() {
 }
 
 fail_response() {
+  [ "$FAIL_MODE" = "open" ] ||
+    defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_failure cursor cursor-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: cursor hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then

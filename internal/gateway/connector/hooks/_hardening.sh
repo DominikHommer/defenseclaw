@@ -451,9 +451,12 @@ defenseclaw_json_escape() {
 # defenseclaw_json_string_field extracts a simple top-level JSON string field.
 # It is intentionally small: hook block/allow parsing only needs fields like
 # "action" and "reason" when jq is unavailable (common in Git Bash on Windows).
+# A third argument "strict" also fails when text follows the object.
 defenseclaw_json_string_field() {
   local json="${1:-}"
   local field="${2:-}"
+  local strict="0"
+  [ "${3:-}" != "strict" ] || strict="1"
   local extracted status
   case "$field" in
     ""|*[!A-Za-z0-9_]*) return 1 ;;
@@ -461,7 +464,7 @@ defenseclaw_json_string_field() {
   if ! command -v awk >/dev/null 2>&1; then
     return 2
   fi
-  if extracted="$(printf '%s' "$json" | awk -v wanted="$field" '
+  if extracted="$(printf '%s' "$json" | awk -v wanted="$field" -v strict="$strict" '
     { text = text $0 "\n" }
     END {
       depth = 0
@@ -519,6 +522,7 @@ defenseclaw_json_string_field() {
           depth--
           if (depth < 0) exit 2
           if (depth == 0) {
+            if (strict == "1" && substr(text, i + 1) ~ /[^[:space:]]/) exit 2
             if (found) { print result; exit 0 }
             exit 1
           }
@@ -1064,6 +1068,108 @@ defenseclaw_should_fail_closed_on_unreachable() {
   esac
 }
 
+# defenseclaw_failed_stop_event CONNECTOR EVENT [PAYLOAD] returns 0 (true)
+# for a stop or session-end event, the exact set of the native hook runner
+# (hookexec.NeutralLifecycleEvent in lifecycle.go). Failing such an event
+# closed denies nothing: it keeps the agent running (Codex, Claude Code,
+# Devin and Copilot continue the turn when a stop hook blocks, Cursor submits
+# the block as the next prompt), every later turn fails closed and stops
+# again, and the agent loops on model turns until DefenseClaw is back
+# (#1140). EVENT is the event the registered command binds (Codex,
+# Copilot). When it is empty the event comes from the payload's
+# hook_event_name (or event); a payload that is not one JSON object, whose
+# event fields are not strings (_dc_hook_event_field) or disagree, names no
+# event. The Secure Client profile keeps its results. On success the event
+# is left in _DC_FAILED_STOP_EVENT.
+defenseclaw_failed_stop_event() {
+  local connector="${1:-}" event="${2:-}" payload="${3:-}" named="" other="" stop=0
+  _DC_FAILED_STOP_EVENT=""
+  [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ] || return 1
+  if [ -z "$event" ]; then
+    [ -n "$payload" ] || return 1
+    named="$(_dc_hook_event_field "$payload" hook_event_name)" || return 1
+    other="$(_dc_hook_event_field "$payload" event)" || return 1
+    if [ -n "$named" ] && [ -n "$other" ] && [ "$named" != "$other" ]; then
+      return 1
+    fi
+    event="${named:-$other}"
+  fi
+  case "${connector}:${event}" in
+    claudecode:Stop|claudecode:SubagentStop|claudecode:TeammateIdle|claudecode:StopFailure|claudecode:SessionEnd) stop=1 ;;
+    codex:Stop|codex:SubagentStop|codex:SessionEnd) stop=1 ;;
+    copilot:agentStop|copilot:subagentStop|copilot:sessionEnd|copilot:Stop|copilot:SubagentStop) stop=1 ;;
+    devin:Stop|devin:SessionEnd) stop=1 ;;
+    kiro:Stop) stop=1 ;;
+    cursor:[Ss][Tt][Oo][Pp]|cursor:[Ss][Uu][Bb][Aa][Gg][Ee][Nn][Tt][Ss][Tt][Oo][Pp]|cursor:[Ss][Ee][Ss][Ss][Ii][Oo][Nn][Ee][Nn][Dd]) stop=1 ;;
+  esac
+  [ "$stop" = "1" ] || return 1
+  _DC_FAILED_STOP_EVENT="$event"
+  return 0
+}
+
+# _dc_hook_event_field PAYLOAD FIELD prints the string value of the payload's
+# top-level FIELD (hook_event_name or event), or nothing when FIELD is absent
+# or null. It fails when the payload is not exactly one JSON object or FIELD
+# holds anything but a string, as the native runner's resolveHookEvent does
+# (it decodes both event fields as strings): jq's `// empty` would turn a
+# false value into an absent field.
+_dc_hook_event_field() {
+  local payload="${1:-}" field="${2:-}"
+  case "$field" in
+    hook_event_name|event) ;;
+    *) return 1 ;;
+  esac
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$payload" | jq -rs --arg f "$field" '
+      if length != 1 or (.[0] | type) != "object" then error("not one JSON object") else .[0][$f] end
+      | if . == null then empty elif type == "string" then . else error("not a string") end' 2>/dev/null
+    return
+  fi
+  if _dc_python3_usable; then
+    printf '%s' "$payload" | DCEV_FIELD="$field" python3 -c '
+import json,os,sys
+try:
+  d=json.loads(sys.stdin.read())
+except Exception:
+  sys.exit(1)
+if not isinstance(d,dict):
+  sys.exit(1)
+v=d.get(os.environ["DCEV_FIELD"])
+if v is None:
+  sys.exit(0)
+if not isinstance(v,str):
+  sys.exit(1)
+sys.stdout.write(v+"\n")' 2>/dev/null
+    return
+  fi
+  # Last resort (no jq, no python3): the string scanner fails on a value that
+  # is not a string, a repeated field or text after the object.
+  local value="" status=0
+  value="$(defenseclaw_json_string_field "$payload" "$field" strict)" || status=$?
+  case "$status" in
+    0) printf '%s\n' "$value" ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+}
+
+# defenseclaw_allow_failed_stop_event CONNECTOR HOOK_NAME EVENT PAYLOAD
+# REASON CATEGORY is called on a path that is about to fail closed. For a
+# stop or session-end event (defenseclaw_failed_stop_event) it answers the
+# connector's neutral allow (Cursor's is {}) and exits 0; the failure is
+# still logged, as fail mode open, like the native hook runner
+# (allowFailClosedStop). For any other event it returns 0 and the caller
+# fails closed as before.
+defenseclaw_allow_failed_stop_event() {
+  local connector="${1:-unknown}" hook_name="${2:-unknown}" event="${3:-}" payload="${4:-}"
+  local reason="${5:-unknown}" category="${6:-transport}"
+  defenseclaw_failed_stop_event "$connector" "$event" "$payload" || return 0
+  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" "$category" open
+  echo "DefenseClaw is not blocking the ${_DC_FAILED_STOP_EVENT:-stop} event, because a block there would keep the agent running; prompts and tool calls stay blocked until DefenseClaw is available. (${reason})" >&2
+  [ "$connector" != "cursor" ] || printf '{}\n'
+  exit 0
+}
+
 # defenseclaw_emit_unreachable_stderr writes a single stderr line whose
 # verb (allowing/blocking) ACTUALLY matches what the hook is about to
 # do on its next exit. The previous design unconditionally printed
@@ -1206,10 +1312,11 @@ defenseclaw_own_gateway_alive() {
 # missed inspection.
 #
 # Usage:
-#   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT [TOKEN_FILE]
+#   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT [TOKEN_FILE [EVENT PAYLOAD]]
 #
 # TOKEN_FILE is the token file the hook looked for; the message names it so
-# the user can find it (GAP-1425).
+# the user can find it (GAP-1425). EVENT and PAYLOAD, when the hook already
+# knows them, let a stop event through (defenseclaw_allow_failed_stop_event).
 #
 # Exits 0 for fail-open or 2 for fail-closed. Never returns to the caller.
 defenseclaw_handle_missing_token() {
@@ -1219,6 +1326,9 @@ defenseclaw_handle_missing_token() {
   local token_file="${4:-}"
   local reason="missing gateway token file"
   [ -z "$token_file" ] || reason="missing gateway token: ${token_file} not found"
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event "$connector" "$hook_name" "${5:-}" "${6:-}" "$reason" transport
+  fi
   defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)$(defenseclaw_missing_token_next_step "$connector")" >&2

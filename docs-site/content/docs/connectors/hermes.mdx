@@ -172,10 +172,13 @@ pre-tool-call hook blocks only when DefenseClaw returns valid synchronous
 Hermes block JSON. A `confirm` result is recorded and alerted but
 returns no hook output because Hermes has no native ask/approve or general
 message response; the TUI can review the audit event but cannot resume the
-call. The standalone enterprise profile blocks it instead (see above). A requested global/per-connector
-`fail_mode: closed`, strict availability, timeout, nonzero exit, malformed
-output, auth failure, or gateway outage cannot create Hermes enforcement and
-remains fail-open. Such a call is recorded in
+call. The standalone enterprise profile blocks it instead (see above). On
+Linux and macOS the hook follows the effective fail mode: with `closed`, the
+default when no `hook_fail_mode` is set, a gateway outage, an auth failure or
+an unusable gateway answer blocks the tool call with Hermes' block answer and
+names `defenseclaw-gateway status`; only an explicit `open` lets it run.
+Hermes itself still runs the call when the hook times out or cannot start.
+On Windows these failures stay open. A call that ran unchecked is recorded in
 `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports it as a
 `guardrail-degraded` alert when it starts again. On a managed standalone host
 the administrator-owned Hermes hook is stricter: it blocks `pre_tool_call`
@@ -331,6 +334,13 @@ only in the image; nothing on your host changes.
     `defenseclaw-bedrock-mantle-openai-<region>`, through the image's managed
     `defenseclaw` provider (`--provider defenseclaw -m <model>`)
   - `defenseclaw-anthropic`, through Hermes' built-in `anthropic` provider
+- **Model limit.** The image's pinned Hermes Agent 0.19.0 sends `max_tokens`
+  for models it does not know. The Bedrock `gpt-5.6-luna` model refuses it
+  (HTTP 400, `unsupported_parameter`) and accepts `max_completion_tokens`, so
+  a sandboxed Hermes cannot complete a call on that model, while Hermes 0.21
+  on the host can. This is the harness version's request shape, not a
+  DefenseClaw or OpenShell block. Use another model of the profile in the
+  sandbox, or run Hermes on the host.
 - **Launch flags.** Skip-permissions mode adds `--yolo`. A run with `--safe`
   drops `--yolo` and every prefix Hermes accepts for it. A headless run is
   `hermes chat -q <prompt> -Q`; pass `-- chat -q "TEXT"` to `sandbox run`

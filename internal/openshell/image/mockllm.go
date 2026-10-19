@@ -450,8 +450,8 @@ func (m *mockLLM) responses(w http.ResponseWriter, r *http.Request) {
 	prompt, turn := responsesPosition(req.Input)
 	items := []map[string]interface{}{responsesMessage(mockAuxText, seq)}
 	if sc := m.pick(prompt); sc != nil {
-		switch {
-		case turn == 0:
+		switch turn {
+		case 0:
 			call := responsesShellCall(sc.command, tools, seq)
 			if name, ok := pickShellTool(schemas); call == nil && ok {
 				// Any other known shell tool (OmniGent's sys_os_shell), filled

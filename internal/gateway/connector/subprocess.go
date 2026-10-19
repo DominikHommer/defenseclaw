@@ -657,6 +657,29 @@ func HookScriptRenderDrift(conn Connector, opts SetupOpts) (string, error) {
 	return "", nil
 }
 
+// HookRuntimeTokenFile returns the connector-scoped token file the hook
+// scripts of conn read after a managed setup with opts, and the credential
+// that setup writes in it; "" when the render keeps no scoped token file (a
+// plugin-only connector, a proxy connector or no data directory). The
+// standalone guardian verifies it (GAP-0424).
+func HookRuntimeTokenFile(opts SetupOpts, conn Connector) (path, token string, err error) {
+	if conn == nil || strings.TrimSpace(opts.DataDir) == "" {
+		return "", "", nil
+	}
+	if _, ok := conn.(HookScriptOwner); !ok || len(ManagedPluginArtifacts(conn, opts)) > 0 {
+		return "", "", nil
+	}
+	render := resolveConnectorHookRender(opts, conn)
+	if !render.scopedToken || strings.TrimSpace(render.token) == "" {
+		return "", "", nil
+	}
+	path, err = HookTokenFilePath(filepath.Join(opts.DataDir, "hooks"), conn.Name())
+	if err != nil {
+		return "", "", err
+	}
+	return path, render.token, nil
+}
+
 // renderedHookRuntimeFiles renders the files HookScriptRenderDrift compares,
 // as a managed install writes them.
 func renderedHookRuntimeFiles(conn Connector, opts SetupOpts) ([]renderedHookRuntimeFile, error) {
@@ -1478,7 +1501,9 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //  4. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
-//     vendor fail-closed fields.
+//     vendor fail-closed fields. The per-user Hermes shell hook is the
+//     exception (hookBlocksItsOwnFailures): it blocks through Hermes' block
+//     directive, so an unset or closed fail mode stays closed.
 //
 // Transport-layer failures (gateway unreachable / timeout / 5xx) follow
 // FailMode too. DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
@@ -1515,7 +1540,7 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 	render.failMode = resolveHookFailMode(opts, c)
 	if hp, ok := c.(HookCapabilityProvider); ok {
 		caps := hp.HookCapabilities(opts)
-		if render.failMode == "closed" && !caps.SupportsFailClosed {
+		if render.failMode == "closed" && !caps.SupportsFailClosed && !hookBlocksItsOwnFailures(opts, c) {
 			render.failMode = "open"
 		}
 	}
@@ -1742,7 +1767,8 @@ func failedSetupHookPlaceholder(vendorLabel string) string {
 // HookFailClosed reports whether conn blocks agent calls when its gateway is
 // unavailable under opts.
 func HookFailClosed(opts SetupOpts, conn Connector) bool {
-	if provider, ok := conn.(HookCapabilityProvider); ok && !provider.HookCapabilities(opts).SupportsFailClosed {
+	if provider, ok := conn.(HookCapabilityProvider); ok && !provider.HookCapabilities(opts).SupportsFailClosed &&
+		!hookBlocksItsOwnFailures(opts, conn) {
 		return false
 	}
 	return resolveHookFailMode(opts, conn) == "closed"

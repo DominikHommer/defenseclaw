@@ -499,7 +499,7 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 		sameVerifiedUser := verified && verifiedCaller.ID != "" && meta.UserID == verifiedCaller.ID
 		if (meta.UserID != "" && meta.UserID != caller.ID) ||
 			(meta.AgentIdentityID != "" && meta.AgentIdentityID != identityID &&
-				!(identityID == "" && sameVerifiedUser)) {
+				(identityID != "" || !(sameVerifiedUser))) {
 			found = false
 		}
 	}

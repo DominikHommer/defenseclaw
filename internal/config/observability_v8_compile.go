@@ -1475,10 +1475,7 @@ func observabilityV8ValidHeaderName(value string) bool {
 	}
 	for index := 0; index < len(value); index++ {
 		character := value[index]
-		if !((character >= 'a' && character <= 'z') ||
-			(character >= 'A' && character <= 'Z') ||
-			(character >= '0' && character <= '9') ||
-			strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
+		if (((character < 'a' || character > 'z') && (character < 'A' || character > 'Z')) && (character < '0' || character > '9')) && !(strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
 			return false
 		}
 	}
@@ -1498,8 +1495,7 @@ func observabilityV8ForbiddenTransportHeader(normalized string) bool {
 func observabilityV8ValidGRPCMetadataName(normalized string) bool {
 	for index := 0; index < len(normalized); index++ {
 		character := normalized[index]
-		if !((character >= 'a' && character <= 'z') ||
-			(character >= '0' && character <= '9') || character == '-' || character == '_' || character == '.') {
+		if ((((character < 'a' || character > 'z') && (character < '0' || character > '9')) && character != '-') && character != '_') && character != '.' {
 			return false
 		}
 	}
@@ -1747,11 +1743,22 @@ func compileObservabilityV8Warnings(
 				}
 			}
 		}
-		if destination.Transport.TLS != nil && (destination.Transport.TLS.Insecure || destination.Transport.TLS.InsecureSkipVerify) {
+		if destination.Transport.TLS != nil && (destination.Transport.TLS.Insecure || destination.Transport.TLS.InsecureSkipVerify) &&
+			!strings.HasPrefix(strings.ToLower(strings.TrimSpace(destination.Transport.Endpoint)), "http://") {
 			warnings = append(warnings, ObservabilityV8Warning{
 				Code: "tls_verification_disabled", Path: base + ".tls",
 				Summary: "destination transport uses an explicitly unsafe TLS mode",
 			})
+		}
+		if endpoint, err := url.Parse(destination.Transport.Endpoint); err == nil && endpoint.Scheme == "http" {
+			host := endpoint.Hostname()
+			ip := net.ParseIP(host)
+			if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+				warnings = append(warnings, ObservabilityV8Warning{
+					Code: "plaintext_transport", Path: base + ".endpoint",
+					Summary: "destination sends telemetry over plaintext HTTP to a non-loopback endpoint",
+				})
+			}
 		}
 		if destination.Transport.NetworkSafety != nil && destination.Transport.NetworkSafety.AllowPrivateNetworks {
 			warnings = append(warnings, ObservabilityV8Warning{

@@ -32,6 +32,41 @@ func editConfigInPlace(t *testing.T, h *testHost, from, to string) string {
 	return edited
 }
 
+func TestInstalledManagedLiteralUpgradeAdvisory(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	path := h.env.P(h.env.Layout.ConfigPath)
+	raw := h.read(h.env.Layout.ConfigPath) + `
+webhooks:
+  - url: https://example.test/hook
+    type: generic
+observability:
+  destinations:
+    - name: archive
+      kind: http_jsonl
+      enabled: false
+      endpoint: https://example.test/events
+      headers:
+        Authorization: provided by administrator
+`
+	if err := os.WriteFile(path, []byte(raw), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		report := h.run(Options{Action: action})
+		advisory := messagesOf(report.Warnings, "managed_literal_credentials")
+		for _, want := range []string{"webhooks[0].url", "observability.destinations[0].headers", "{credential: NAME}"} {
+			if !strings.Contains(advisory, want) {
+				t.Fatalf("%s advisory %q omits %q", action, advisory, want)
+			}
+		}
+		if strings.Contains(advisory, "provided by administrator") {
+			t.Fatalf("%s advisory includes a literal value", action)
+		}
+	}
+}
+
 // An MDM edits config.yaml in place and the apply trigger runs ensure. When
 // the lifecycle rejects the edit, the gateway (which follows the file) must
 // not keep running it, and a later gateway restart must not pick it up: the

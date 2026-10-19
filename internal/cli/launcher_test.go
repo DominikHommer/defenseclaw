@@ -434,3 +434,25 @@ func TestLauncherServiceEnvGivesSystemctlTheRuntimeDirectory(t *testing.T) {
 		t.Fatalf("env = %v, want it unchanged for an account without a runtime dir", env)
 	}
 }
+
+func TestLauncherReportsOnlyNamedManagedRefusals(t *testing.T) {
+	previous := reportManagedCommandRefusal
+	var reported []string
+	reportManagedCommandRefusal = func(command, reason string) {
+		reported = append(reported, command+":"+reason)
+	}
+	t.Cleanup(func() { reportManagedCommandRefusal = previous })
+	for _, args := range [][]string{
+		{"guardrail", "disable"}, {"uninstall", "--all"},
+		{"guardrail", "status"}, {"config", "set", "token=untrusted"},
+	} {
+		root := &cobra.Command{Use: "defenseclaw"}
+		root.SetErr(&bytes.Buffer{})
+		if code := executeLauncher(context.Background(), root, args); code != 2 {
+			t.Fatalf("%v: exit %d, want refusal", args, code)
+		}
+	}
+	if got, want := strings.Join(reported, ","), "guardrail disable:,uninstall:"; got != want {
+		t.Fatalf("reported %q, want %q", got, want)
+	}
+}

@@ -26,6 +26,23 @@ import (
 )
 
 func resolvePlatformServiceCredential(name, secretsDir string) ([]byte, CredentialSource, error) {
+	return resolveWindowsServiceCredential(name, secretsDir, os.Getenv(WindowsServiceAccountEnv))
+}
+
+// ResolveServiceCredentialAs is ResolveServiceCredential for a process that
+// does not carry the gateway service's environment pins (an administrator
+// or plain SYSTEM shell running bundle verify or apply): serviceAccount is
+// the gateway service account the installer pins (the layout's
+// ServiceUser), so the reader check accepts the same service ACE the
+// gateway's own read accepts (GAP-0009).
+func ResolveServiceCredentialAs(name, secretsDir, serviceAccount string) ([]byte, CredentialSource, error) {
+	if !ValidCredentialName(name) {
+		return nil, "", fmt.Errorf("credential name %q is not valid", name)
+	}
+	return resolveWindowsServiceCredential(name, secretsDir, serviceAccount)
+}
+
+func resolveWindowsServiceCredential(name, secretsDir, serviceAccount string) ([]byte, CredentialSource, error) {
 	if strings.TrimSpace(secretsDir) == "" {
 		return nil, "", ErrNoServiceCredential
 	}
@@ -36,24 +53,31 @@ func resolvePlatformServiceCredential(name, secretsDir string) ([]byte, Credenti
 		}
 		return nil, "", fmt.Errorf("inspect credential %s: %w", name, err)
 	}
-	if err := ValidateTrustedFilePath(path, "protected credential"); err != nil {
-		return nil, "", err
+	// An account the reader check cannot resolve says nothing about the
+	// stored file, so it is not a verdict on it (not unusable).
+	var gatewaySID *windows.SID
+	if account := strings.TrimSpace(serviceAccount); account != "" {
+		sid, err := WindowsServiceAccountSID(account)
+		if err != nil {
+			return nil, "", fmt.Errorf("%s: resolve gateway service SID: %w", path, err)
+		}
+		gatewaySID = sid
 	}
-	if err := rejectUntrustedCredentialReaders(path); err != nil {
-		return nil, "", err
-	}
-	data, err := readBoundedCredential(path)
+	data, err := readStoredCredential(name, path,
+		func(path string) error { return ValidateTrustedFilePath(path, "protected credential") },
+		func(path string) error { return rejectUntrustedCredentialReaders(path, gatewaySID) },
+	)
 	if err != nil {
-		return nil, "", fmt.Errorf("credential %s: %w", name, err)
+		return nil, "", err
 	}
 	return data, CredentialFromFile, nil
 }
 
 // rejectUntrustedCredentialReaders requires that only LocalSystem,
-// Administrators and the pinned gateway service SID hold any allow ACE on
-// the credential. ValidateTrustedFilePath only checks writers; a secret
-// also needs its readers constrained.
-func rejectUntrustedCredentialReaders(path string) error {
+// Administrators and the gateway service SID (gatewaySID; none when nil)
+// hold any allow ACE on the credential. ValidateTrustedFilePath only checks
+// writers; a secret also needs its readers constrained.
+func rejectUntrustedCredentialReaders(path string, gatewaySID *windows.SID) error {
 	extended, err := winpath.Extended(path)
 	if err != nil {
 		return fmt.Errorf("%s: encode extended Windows path: %w", path, err)
@@ -65,13 +89,6 @@ func rejectUntrustedCredentialReaders(path string) error {
 	dacl, _, err := sd.DACL()
 	if err != nil || dacl == nil {
 		return fmt.Errorf("%s: protected credential needs an explicit DACL", path)
-	}
-	var gatewaySID *windows.SID
-	if account := strings.TrimSpace(os.Getenv(WindowsServiceAccountEnv)); account != "" {
-		gatewaySID, err = WindowsServiceAccountSID(account)
-		if err != nil {
-			return fmt.Errorf("%s: resolve gateway service SID: %w", path, err)
-		}
 	}
 	for i := uint16(0); i < dacl.AceCount; i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE

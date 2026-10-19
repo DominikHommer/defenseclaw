@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -55,11 +56,99 @@ const (
 	dbusPropertiesGet = "org.freedesktop.DBus.Properties.Get"
 	dbusGetAll        = "org.freedesktop.DBus.Properties.GetAll"
 	infoPipeCallLimit = 5 * time.Second
+	infoPipeRoot      = "/org/freedesktop/sssd/infopipe"
+	// infoPipeFindDomain and infoPipeDomainOnline ask whether SSSD is
+	// online for a domain, as sssctl domain-status does.
+	infoPipeFindDomain   = "org.freedesktop.sssd.infopipe.FindDomainByName"
+	infoPipeDomainOnline = "org.freedesktop.sssd.infopipe.Domains.Domain.IsOnline"
 )
 
-// FlushDirectoryCaches has nothing to flush on Linux: SSSD refreshes the
-// entries it served offline at their next lookup once it is online again.
-func FlushDirectoryCaches(context.Context) error { return nil }
+// DirectoryCachesHoldOutageAnswers is false on Linux: SSSD never lists an
+// account without the name of its primary group, so the guardian starts no
+// return watch (DirectoryCachesStale). The reach check (DirectoryAnswers)
+// covers SSSD's outages.
+const DirectoryCachesHoldOutageAnswers = false
+
+// DirectoryAwayWithoutAnswer is true on Linux: SSSD itself reports a domain
+// offline, so a domain it reports offline is away also when the guardian
+// started during the outage.
+const DirectoryAwayWithoutAnswer = true
+
+// sssCacheTool is where SSSD installs sss_cache on every supported
+// distribution. It writes the cache databases in /var/lib/sss/db and the
+// memory cache in /var/lib/sss/mc, which the guardian unit lists in its
+// ReadWritePaths (GAP-0208).
+var sssCacheTool = "/usr/sbin/sss_cache"
+
+// sssCacheTimeout bounds one sss_cache run.
+const sssCacheTimeout = 30 * time.Second
+
+// FlushDirectoryCaches marks every entry SSSD caches as expired, its memory
+// cache included (sss_cache -E), which only root can do. The guardian calls
+// it when SSSD is online again for a domain it reported offline: SSSD and its
+// memory cache kept answering for minutes with what they held during the
+// outage, for an account whose memberships SSSD never looked up its primary
+// group alone, and the account stayed on the default profile (GAP-0191). An
+// offline SSSD still serves expired entries, so a domain still away keeps its
+// cached answers. The gateway's next lookup of an account then gets its
+// groups from the directory.
+func FlushDirectoryCaches(ctx context.Context) error {
+	tool := trustedIdentityTool(sssCacheTool)
+	if tool == "" {
+		return errors.New("sss_cache is not installed as a root-owned tool")
+	}
+	runCtx, cancel := context.WithTimeout(ctx, sssCacheTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, tool, "-E")
+	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C"}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s -E: %w: %s", tool, err, strings.TrimSpace(boundedOutput(out)))
+	}
+	return nil
+}
+
+// directoryReachDomain is the domain the guardian checks for an account's
+// record: the SSSD domain InfoPipe holds its uid in.
+func directoryReachDomain(record IdentitySpoolRecord) string {
+	return record.SSSDDomain
+}
+
+// DirectoryAnswers reports whether SSSD is online for its domain domain. It
+// is false only when InfoPipe answers that SSSD is offline for it: a host
+// where InfoPipe does not answer (sssd not active, sssd_ifp not configured,
+// a domain SSSD does not know) is never put in an outage by this check.
+func DirectoryAnswers(ctx context.Context, domain string) bool {
+	callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
+	defer cancel()
+	online, err := sssdDomainOnline(callCtx, domain)
+	return err != nil || online
+}
+
+// sssdDomainOnline asks InfoPipe whether SSSD is online for domain
+// (Domains.Domain.IsOnline, what sssctl domain-status reports). Tests
+// replace it.
+var sssdDomainOnline = func(ctx context.Context, domain string) (bool, error) {
+	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+	if err := infoPipeGate(sssdServiceState(ctx, conn)); err != nil {
+		return false, err
+	}
+	var path dbus.ObjectPath
+	if err := conn.Object(infoPipeService, infoPipeRoot).CallWithContext(ctx, infoPipeFindDomain, 0, domain).Store(&path); err != nil {
+		return false, err
+	}
+	if !path.IsValid() {
+		return false, errors.New("unexpected InfoPipe domain path")
+	}
+	var online bool
+	if err := conn.Object(infoPipeService, path).CallWithContext(ctx, infoPipeDomainOnline, 0).Store(&online); err != nil {
+		return false, err
+	}
+	return online, nil
+}
 
 func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, now time.Time) (IdentitySpoolRecord, error) {
 	resolver, err := unixidentity.NewNSSResolver(ctx)

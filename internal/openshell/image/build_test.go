@@ -28,7 +28,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -864,15 +863,13 @@ func TestStoreRoundTripAndStrictness(t *testing.T) {
 	if err := store.Put(Record{}); err == nil {
 		t.Fatal("record without tag accepted")
 	}
-	if runtime.GOOS != "windows" {
-		info, err := os.Stat(store.Path())
-		if err != nil || info.Mode().Perm() != 0o600 {
-			t.Fatalf("store mode = %v %v", info.Mode(), err)
-		}
-		dirInfo, _ := os.Stat(filepath.Dir(store.Path()))
-		if dirInfo.Mode().Perm()&0o077 != 0 {
-			t.Fatalf("store dir mode = %v", dirInfo.Mode())
-		}
+	info, err := os.Stat(store.Path())
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("store mode = %v %v", info.Mode(), err)
+	}
+	dirInfo, _ := os.Stat(filepath.Dir(store.Path()))
+	if dirInfo.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("store dir mode = %v", dirInfo.Mode())
 	}
 	if err := store.Remove("r:a"); err != nil {
 		t.Fatal(err)

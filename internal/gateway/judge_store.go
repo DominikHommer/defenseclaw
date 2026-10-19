@@ -771,7 +771,7 @@ type judgeBodyStoreInserter struct {
 }
 
 func (a *judgeBodyStoreInserter) InsertJudgeResponse(row audit.JudgeResponse) error {
-	return a.s.InsertJudgeResponse(row)
+	return a.s.InsertJudgeResponseCtx(context.Background(), row)
 }
 
 func (a *judgeBodyStoreInserter) BeginJudgeBatch(ctx context.Context) (JudgeBatch, error) {

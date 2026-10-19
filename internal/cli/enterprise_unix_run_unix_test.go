@@ -379,6 +379,21 @@ func TestEnterpriseSecretArgumentErrorsPrintUsage(t *testing.T) {
 	}
 }
 
+// The name flag help names the length limit; a Secure Client host keeps its
+// prior help text (GAP-0670). The --json refusals themselves are the
+// management contract's one failure document, pinned by
+// TestManagementContractUnixSecretFailuresPrintOneDocument and
+// TestManagementContractUnixSecretFlagErrorsPrintTheFailureDocument.
+func TestEnterpriseSecretNameHelpKeepsSecureClientUsage(t *testing.T) {
+	nameFlag := newEnterpriseSecretCommand("set", "").Flags().Lookup("name")
+	if !strings.Contains(nameFlag.Usage, "1-63") {
+		t.Fatalf("name help does not name the length limit: %q", nameFlag.Usage)
+	}
+	if legacy := nameFlag.Annotations[secureClientUsageAnnotation]; len(legacy) != 1 || legacy[0] != "credential name (lowercase letters, digits and dashes)" {
+		t.Fatalf("Secure Client name help changed: %v", legacy)
+	}
+}
+
 // secret set and secret remove both printed only "✓ ensure: done" and the
 // apply steps; each names the command and the credential it changed
 // (GAP-2305).
@@ -601,4 +616,33 @@ type noHostCommands struct{}
 
 func (noHostCommands) Run(context.Context, string, ...string) (enterpriseunix.CommandResult, error) {
 	return enterpriseunix.CommandResult{ExitCode: -1}, enterpriseunix.ErrCommandNotFound
+}
+
+func TestUnixLifecycleNotRootReportsManagedRefusal(t *testing.T) {
+	goos := enterpriseunix.CurrentGOOS()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Skip(err)
+	}
+	platform := "linux"
+	if goos == "darwin" {
+		platform = "macos"
+	}
+	previousEnv, previousReport := newUnixLifecycleEnv, reportManagedCommandRefusal
+	newUnixLifecycleEnv = func(string) (*enterpriseunix.Env, error) {
+		return &enterpriseunix.Env{GOOS: goos, Root: t.TempDir(), Layout: layout,
+			Geteuid: func() int { return 1000 }, Runner: noHostCommands{}}, nil
+	}
+	var reported []string
+	reportManagedCommandRefusal = func(command, reason string) { reported = append(reported, command+":"+reason) }
+	t.Cleanup(func() { newUnixLifecycleEnv, reportManagedCommandRefusal = previousEnv, previousReport })
+	cmd := &cobra.Command{Use: "ensure"}
+	cmd.SetContext(t.Context())
+	cmd.SetOut(&bytes.Buffer{})
+	if err := runUnixLifecycle(cmd, platform, "ensure", &unixLifecycleOptions{}); err == nil {
+		t.Fatal("non-root ensure succeeded")
+	}
+	if got, want := strings.Join(reported, ","), "enterprise "+platform+" ensure:not_root"; got != want {
+		t.Fatalf("refusal reports %q, want %q", got, want)
+	}
 }

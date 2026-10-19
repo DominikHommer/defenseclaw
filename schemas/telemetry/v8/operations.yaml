@@ -5391,7 +5391,7 @@ attributes:
     overrides:
       max_utf8_bytes: 64
       pattern: '^[a-z][a-z0-9_]{0,63}$'
-    notes: A registered snake_case code such as required_group, os_unsupported, no_docker_group, no_kvm, prerequisite_missing, offline_floor or floor_denied; display text never goes here
+    notes: A registered snake_case code such as required_for, os_unsupported, no_docker_group, no_kvm, prerequisite_missing, offline_floor or floor_denied; display text never goes here
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.managed.action
   type: string
