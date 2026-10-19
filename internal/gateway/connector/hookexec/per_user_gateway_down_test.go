@@ -34,9 +34,9 @@ func TestPerUserClaudeCodeGatewayDownShowsOnlyTheText(t *testing.T) {
 		stopped           bool
 		recovery          bool
 	}{
-		{name: "prompt, gateway down", event: "UserPromptSubmit", want: "the DefenseClaw gateway is not running or not answering"},
-		{name: "tool call, gateway down", event: "PreToolUse", want: "the DefenseClaw gateway is not running or not answering"},
-		{name: "session start, gateway down", event: "SessionStart", want: "the DefenseClaw gateway is not running or not answering"},
+		{name: "prompt, gateway down", event: "UserPromptSubmit", want: "this account's DefenseClaw gateway is restarting or not running"},
+		{name: "tool call, gateway down", event: "PreToolUse", want: "this account's DefenseClaw gateway is restarting or not running"},
+		{name: "session start, gateway down", event: "SessionStart", want: "this account's DefenseClaw gateway is restarting or not running"},
 		{name: "prompt, gateway stopped", event: "UserPromptSubmit", recovery: true, stopped: true,
 			want: "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop`"},
 		{name: "prompt, start failed", event: "UserPromptSubmit", recovery: true,
