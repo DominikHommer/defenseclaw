@@ -5,12 +5,7 @@ import re
 import unittest
 from pathlib import Path
 
-
-DOCS = Path(
-    os.environ.get(
-        "R102_DOCSFINAL5_DOCS_ROOT", Path(__file__).resolve().parents[1] / "content/docs"
-    )
-)
+DOCS = Path(os.environ.get("R102_DOCSFINAL5_DOCS_ROOT", Path(__file__).resolve().parents[1] / "content/docs"))
 
 
 def page(name):
@@ -117,9 +112,16 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
             "## Upgrades and changes",
             (
                 "most of its data and lifecycle state, and the `defenseclaw` account",
-                "When an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay",
+                (
+                    "When an account keeps sandboxes, "
+                    "`/var/lib/defenseclaw/sandbox` and "
+                    "`/var/lib/defenseclaw/redaction-correlation.key` stay"
+                ),
                 "They are root-owned while the service account is gone; the next `ensure` adopts them",
-                "store and `redaction-correlation.key` are root-owned while the service account is gone; the next `ensure` adopts them",
+                (
+                    "store and `redaction-correlation.key` are root-owned while "
+                    "the service account is gone; the next `ensure` adopts them"
+                ),
                 "Use `--purge` for a clean image",
                 "`apt remove defenseclaw-enterprise` | Runs plain `uninstall`",
                 "`apt purge defenseclaw-enterprise` | Runs the same plain lifecycle uninstall, then deletes",
@@ -137,7 +139,12 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
             "## Upgrades and changes",
             (
                 "most of its data and lifecycle state, and the `_defenseclaw` account",
-                "When an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay",
+                (
+                    "When an account keeps sandboxes, "
+                    "`/opt/cisco/defenseclaw/runtime/sandbox` and "
+                    "`/opt/cisco/defenseclaw/runtime/redaction-correlation.key` "
+                    "stay"
+                ),
                 "They are root-owned while the service account is gone; the next `ensure` adopts them",
                 "Use `--purge` for a clean image",
             ),
@@ -150,10 +157,23 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
             "## Uninstall",
             "## Simulate your MDM",
             (
-                "Without `--purge`, if an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` can stay",
-                "Without `--purge`, if an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` can stay",
+                (
+                    "Without `--purge`, if an account keeps sandboxes, "
+                    "`/var/lib/defenseclaw/sandbox` and "
+                    "`/var/lib/defenseclaw/redaction-correlation.key` can stay"
+                ),
+                (
+                    "Without `--purge`, if an account keeps sandboxes, "
+                    "`/opt/cisco/defenseclaw/runtime/sandbox` and "
+                    "`/opt/cisco/defenseclaw/runtime/redaction-correlation.key` "
+                    "can stay"
+                ),
                 "`--purge` removes them and each enrolled account's `~/.defenseclaw` and per-user binaries",
-                "the kept `sandbox` store and `redaction-correlation.key` are root-owned while the service account is gone; the next `ensure` adopts them",
+                (
+                    "the kept `sandbox` store and `redaction-correlation.key` are "
+                    "root-owned while the service account is gone; the next "
+                    "`ensure` adopts them"
+                ),
                 "Use `--purge` for a clean image",
                 "To keep the other machine state for a later reinstall",
             ),
@@ -211,7 +231,10 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
                 "missing Hermes `config.yaml` or Devin `config.json`",
                 "last known good copy or the pristine backup",
                 "recreates it with DefenseClaw's hooks only when no copy is available",
-                "settings changed after the copy may be missing; with no copy, the user may need to re-enter their settings",
+                (
+                    "settings changed after the copy may be missing; with no "
+                    "copy, the user may need to re-enter their settings"
+                ),
                 "does not make `security_complete` false or `verify` fail, change the exit code, or fail MDM detection",
                 "review their settings and restore missing values from a backup",
                 "[Warnings](/docs/enterprise/troubleshooting#warnings)",

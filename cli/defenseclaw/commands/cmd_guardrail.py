@@ -1448,8 +1448,9 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         if normalize_connector(key) == "hermes" and upstream_fail_open(app.cfg, key):
             runtime_value = "open (Hermes upstream; failures cannot be made fail-closed)"
         elif normalize_connector(key) == "hermes":
-            # The Linux and macOS Hermes hook follows its resolved value
-            # (GAP-0150); it has no separate runtime record to read.
+            # Outside Secure Client the Hermes hook follows its resolved
+            # value on every OS (GAP-0150, GAP-0269); it has no separate
+            # runtime record to read.
             runtime_value = current
         else:
             runtime_value = runtime_state.runtime or "unknown"

@@ -4,7 +4,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 DOCS = Path(__file__).resolve().parents[1] / "content/docs"
 
 
@@ -26,25 +25,31 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
     def test_gap_0038_write_proof_names_child_program_limit_without_recipes(self):
         text = page("guardrail/index.mdx")
         self.assertIn("### Protected-file write proof", text)
-        section = text.split("### Protected-file write proof", 1)[1].split(
-            "## Common follow-ups", 1
-        )[0]
+        section = text.split("### Protected-file write proof", 1)[1].split("## Common follow-ups", 1)[0]
         self.assertIn("child programs write", section)
         normalized = " ".join(section.split())
         self.assertIn(
             "A write inside a script, interpreter or shell built-in that the command only names "
-            "cannot be fully checked from the command text", normalized
+            "cannot be fully checked from the command text",
+            normalized,
         )
         self.assertIn(
             "A rule that needs the complete action cannot block that inner write; "
             "an eligible rule about the complete outer argument list can still block the call "
-            "in action mode", normalized
+            "in action mode",
+            normalized,
         )
         self.assertNotIn("reported as partly checked", normalized)
         self.assertIn("use a sandbox or file permissions", section)
         for forbidden in (
-            "xargs", "find -exec", "make", "git", "source", "ln -s",
-            "symlink", "authorized_keys",
+            "xargs",
+            "find -exec",
+            "make",
+            "git",
+            "source",
+            "ln -s",
+            "symlink",
+            "authorized_keys",
         ):
             self.assertNotIn(forbidden, section.lower())
 
@@ -60,8 +65,17 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
 
     def test_gap_0297_managed_windows_tool_names_are_exact(self):
         text = " ".join(page("policies/admission.mdx").split())
-        self.assertIn("Claude Code reports `Bash` for shell calls, `Read` for file reads, and `Skill` for skill calls", text)
-        self.assertIn("Codex reports `Bash` for shell commands. A Codex build that edits files with its own patch tool reports `apply_patch` for those edits", text)
+        self.assertIn(
+            ("Claude Code reports `Bash` for shell calls, `Read` for file reads, and `Skill` for skill calls"), text
+        )
+        self.assertIn(
+            (
+                "Codex reports `Bash` for shell commands. A Codex build that "
+                "edits files with its own patch tool reports `apply_patch` "
+                "for those edits"
+            ),
+            text,
+        )
         self.assertIn("Codex has no `Read` or `Skill` tool name", text)
         self.assertIn("Write these exact names, including capitals", text)
         self.assertNotIn("the Claude Code and Codex hooks receive the native tool names", text)
@@ -148,9 +162,7 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
 
     def test_gap_0350_current_kernel_feed_line_has_text_fallback(self):
         text = page("reference/sandbox-cli.mdx")
-        section = text.split("### `sandbox kernel-feed install`", 1)[1].split(
-            "### `sandbox kernel-feed status`", 1
-        )[0]
+        section = text.split("### `sandbox kernel-feed install`", 1)[1].split("### `sandbox kernel-feed status`", 1)[0]
         section = " ".join(section.split())
         self.assertIn("An install or update restarts the feed:", section)
         self.assertIn("own hook calls in full until you stop and start it", section)

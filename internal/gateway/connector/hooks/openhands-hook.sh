@@ -55,7 +55,8 @@ defenseclaw_harden_env
 # status, so no failed, refused or unparseable reply may turn into an allow.
 # OpenHands blocks on exit status 2, which every failure below returns.
 FAIL_MODE="closed"
-readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{if .Managed}}
+FAIL_MODE="{{.FailMode}}"{{end}}{{end}}
 DEFENSECLAW_HOOK_CONNECTOR="openhands"
 DEFENSECLAW_HOOK_NAME="openhands-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
@@ -183,7 +184,10 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-{{if .Sandbox}}# Every DefenseClaw verdict names its action: an empty or unknown one is a
+{{if or .Sandbox (not .SecureClient)}}{{/* Every DefenseClaw verdict names its action: an empty or unknown one is no
+verdict, never an allow (a sandbox workload may have shaped it; a hook in fail
+mode closed blocks on it, open lets the call run: rel-1-0-3 GAP-0037, GAP-0153;
+a Secure Client render keeps its own contract). */}}# Every DefenseClaw verdict names its action: an empty or unknown one is a
 # reply the workload may have shaped, never an allow. A block always exits 2,
 # the status OpenHands enforces, with or without a rendered directive.
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {

@@ -20,6 +20,8 @@ class R103B17DocsTest(unittest.TestCase):
     def test_1100_macos_pkg_fails_on_port_held(self):
         text = page("enterprise/macos.mdx")
         self.assertNotIn("the pkg install still completes", text)
+        self.assertNotIn("stops before it changes anything", text)
+        self.assertIn("stages the package files, but the postinstall refuses the managed deployment", text)
         self.assertIn("records no package receipt", text)
         self.assertIn("which records no package receipt", text)
         self.assertIn("prints a generic postinstall failure", text)
@@ -47,13 +49,19 @@ class R103B17DocsTest(unittest.TestCase):
         self.assertIn("installed `defenseclaw` launcher accepts only `sandbox` commands", normalized)
         self.assertIn("The managed Windows CLI has no `config get`", normalized)
         self.assertIn("A standard account is refused", normalized)
-        self.assertIn("sudo /opt/defenseclaw/bin/defenseclaw-gateway policy evaluate --target-type skill --target-name risky-skill", text)
+        self.assertIn(
+            (
+                "sudo /opt/defenseclaw/bin/defenseclaw-gateway policy "
+                "evaluate --target-type skill --target-name risky-skill"
+            ),
+            text,
+        )
         self.assertIn("sudo /opt/defenseclaw/bin/defenseclaw-gateway policy show", text)
         self.assertNotIn("sudo defenseclaw-gateway policy", text)
         self.assertEqual(text.count("defenseclaw.exe' policy evaluate"), 1)
         self.assertEqual(text.count("defenseclaw.exe' policy show"), 1)
         self.assertIn(
-            "--severity HIGH --findings 3\n```\n\n```text\n{\n  \"verdict\": \"rejected\"",
+            '--severity HIGH --findings 3\n```\n\n```text\n{\n  "verdict": "rejected"',
             text,
         )
 

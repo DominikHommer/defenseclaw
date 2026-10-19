@@ -2534,10 +2534,13 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if runtimeState.GatewayAddr != "127.0.0.1:18970" {
 				t.Errorf("hook config sidecar API address = %q, want 127.0.0.1:18970", runtimeState.GatewayAddr)
 			}
-			wantFailMode := resolveHookFailMode(opts, tt.conn)
-			if hp, ok := tt.conn.(HookCapabilityProvider); ok &&
-				wantFailMode == "closed" && !hp.HookCapabilities(opts).SupportsFailClosed {
-				wantFailMode = "open"
+			// The native hook reads this value: it keeps closed for a
+			// connector whose hook blocks its own failures (the per-user
+			// Hermes hook, GAP-0269) and is open for the other connectors
+			// without a fail-closed contract.
+			wantFailMode := CapableHookFailMode(opts, tt.conn, resolveHookFailMode(opts, tt.conn))
+			if tt.conn.Name() == "hermes" && wantFailMode != "closed" {
+				t.Errorf("per-user Hermes resolves fail mode %q, want closed", wantFailMode)
 			}
 			if got := runtimeState.FailModes[connectorName]; got != wantFailMode {
 				t.Errorf("hook config sidecar fail mode for %s = %q, want %q", connectorName, got, wantFailMode)

@@ -103,3 +103,21 @@ func StandaloneConnectors(cfg *config.Config) []string {
 	sort.Strings(names)
 	return names
 }
+
+// StandaloneConnectorPublished reports whether the standalone lifecycle
+// protects connector name (StandaloneConnectors, with the companions of
+// those connectors): the connectors the administrator's config publishes.
+// A hook installed for any other connector gets no usable answer from the
+// gateway, so every call of that agent is blocked (rel-1-0-3 GAP-0235).
+func StandaloneConnectorPublished(cfg *config.Config, name string) bool {
+	name = config.NormalizeConnectorName(name)
+	if name == "" {
+		return false
+	}
+	for _, published := range withCompanions(StandaloneConnectors(cfg)) {
+		if published == name {
+			return true
+		}
+	}
+	return false
+}

@@ -1390,7 +1390,7 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertNotIn("gateway.jsonl", out)
         self.assertNotIn("Get-Content -LiteralPath", out)
 
-    def test_hermes_action_summary_reports_fail_open_posture(self):
+    def test_hermes_action_summary_reports_its_fail_mode_on_windows(self):
         self._seed_map("hermes")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -1404,7 +1404,9 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
 
         self.assertIn("pre_tool deny; pre_verify continue", out)
         self.assertIn("hook failure posture:", out)
-        self.assertIn("upstream fail-open", out)
+        # rel-1-0-3 GAP-0269: the Windows native Hermes hook follows its fail mode.
+        self.assertIn("fail mode applies", out)
+        self.assertNotIn("upstream fail-open", out)
         self.assertIn("native ask/approve:", out)
         self.assertIn("unsupported", out)
         self.assertIn("native OTel:", out)

@@ -11,6 +11,30 @@ import (
 	"testing"
 )
 
+func TestRedirectOnlyStatementsDoNotPanic(t *testing.T) {
+	for _, tc := range []struct{ id, command string }{
+		{"PAN-0001", "> proj/out/build.log"},
+		{"PAN-0002", "> proj/out/build.log && echo done"},
+		{"PAN-0003", "> /tmp/x.log"},
+		{"PAN-0004", ": > proj/out/build.log"},
+		{"PAN-0005", "true && > proj/out/build.log"},
+		{"PAN-0006", "  >> proj/out/build.log"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"tool_name": "Bash", "cwd": "/home/test",
+				"tool_input": map[string]string{"command": tc.command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := Decode(Resolve(payload)); !ok {
+				t.Fatal("resolver returned no decodable proof")
+			}
+		})
+	}
+}
+
 // A hard link is compared by file identity (inode, or volume serial and file
 // index on Windows), not by its own pathname.
 func TestResolveHardLinkToAuthorizedKeys(t *testing.T) {
@@ -194,8 +218,8 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 	}
 }
 
-// A ".." in a link target must be interpreted after the preceding component
-// has been inspected. A linked or unreadable component makes that path unknown.
+// A ".." in a link target is interpreted after resolving the preceding
+// component. A missing component remains unknown.
 func TestRelativeLinkTargetDotDot(t *testing.T) {
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -225,8 +249,8 @@ func TestRelativeLinkTargetDotDot(t *testing.T) {
 		name, path, want string
 		known            bool
 	}{
-		{"keys hop", filepath.Join(home, "a", "l"), "", false},
-		{"extractor hop", filepath.Join(home, "a2", "l"), "", false},
+		{"keys hop", filepath.Join(home, "a", "l"), filepath.Join(home, ".ssh", "authorized_keys"), true},
+		{"extractor hop", filepath.Join(home, "a2", "l"), filepath.Join(home, "unpack", "q", "t"), true},
 		{"unknown hop", filepath.Join(home, "a", "missing") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out", "", false},
 		{"ordinary dot dot", filepath.Join(home, "ordinary") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out", filepath.Join(home, "out"), true},
 		{"ordinary link", filepath.Join(home, "ordinary", "lib", "x"), filepath.Join(home, "shared", "x"), true},

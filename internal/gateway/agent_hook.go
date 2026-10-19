@@ -386,7 +386,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			targets, ok := hookpaths.Decode(header)
 			if !ok {
 				// Evidence that is present but unreadable never proves a
-				// write safe: every operand is unknown.
+				// write safe: every operand is unknown. The marker also drops
+				// the client's cwd, so a gateway that cannot resolve an
+				// operand itself denies a write it cannot place (GAP-0278
+				// review): a malformed header is never more permissive than
+				// a valid one without the fact.
 				targets = map[string]string{hookpaths.TruncatedKey: "1"}
 			}
 			r = r.WithContext(context.WithValue(r.Context(), resolvedWritesContextKey{}, targets))

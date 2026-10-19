@@ -139,6 +139,14 @@ func runWithContext(
 
 func ok(body string) *stubRT { return &stubRT{status: 200, body: body} }
 
+// claudeBlocked reports a Claude Code result that blocks: exit 2, or the
+// structured deny or block a per-user hook whose gateway is down answers
+// with (emitPerUserClaudeGatewayDown).
+func claudeBlocked(r runResult) bool {
+	return r.code == blockExit || (r.code == 0 &&
+		(strings.Contains(r.stdout, `"permissionDecision":"deny"`) || strings.Contains(r.stdout, `"decision":"block"`)))
+}
+
 func TestRunPrefersConnectorScopedToken(t *testing.T) {
 	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
 		opts.Token = "generic-env"
@@ -769,12 +777,14 @@ func TestHermesMalformedOrMismatchedGatewayOutputFailsOpen(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// A per-user hook in fail mode open: these answers never block.
+			// In fail mode closed a tool call blocks instead
+			// (TestPerUserHermesToolCallFailsClosedUnlessOpen).
 			input := fmt.Sprintf(`{"event":%q}`, tc.event)
 			result := run(t, "hermes", ok(tc.response), func(opts *Options) {
 				opts.Event = ""
 				opts.Stdin = strings.NewReader(input)
-				opts.FailMode = "closed"
-				opts.StrictAvailability = true
+				opts.FailMode = "open"
 			})
 			if result.code != 0 || result.stdout != "" {
 				t.Fatalf(
@@ -991,7 +1001,7 @@ func TestColdStartNeverRetriesMoreThanOnce(t *testing.T) {
 			return nil
 		}
 	})
-	if r.code != 2 || recoveries != 1 || rt.requests != 2 {
+	if !claudeBlocked(r) || recoveries != 1 || rt.requests != 2 {
 		t.Fatalf("bounded retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
 	}
 }
@@ -1028,7 +1038,7 @@ func TestColdStartFailurePreservesFailClosedPolicy(t *testing.T) {
 			return errors.New("foreign process owns gateway state")
 		}
 	})
-	if r.code != 2 || rt.requests != 1 {
+	if !claudeBlocked(r) || rt.requests != 1 {
 		t.Fatalf("failed cold start code=%d requests=%d stderr=%q", r.code, rt.requests, r.stderr)
 	}
 }
@@ -1047,7 +1057,7 @@ func TestColdStartWaitRespectsOverallHookDeadline(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("hook exceeded bounded deadline: %s", elapsed)
 	}
-	if r.code != 2 {
+	if !claudeBlocked(r) {
 		t.Fatalf("deadline fail-closed code=%d stderr=%q", r.code, r.stderr)
 	}
 }
@@ -1178,6 +1188,9 @@ func TestMixedConnectorEffectiveFailModeResponseMatrix(t *testing.T) {
 		for _, connector := range connectors {
 			t.Run(failure.name+"/"+connector.name, func(t *testing.T) {
 				r := run(t, connector.name, failure.rt(), func(o *Options) { o.FailMode = connector.mode })
+				if connector.name == "claudecode" && claudeBlocked(r) {
+					return
+				}
 				if r.code != connector.code {
 					t.Fatalf("code = %d, want %d; stderr=%q", r.code, connector.code, r.stderr)
 				}
@@ -2052,25 +2065,43 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	}) {
 		t.Fatalf("refusal reports = %+v, want one codex PreToolUse shell refusal", reports)
 	}
-	// Hermes has no fail-closed contract: the same refusal allows, so the
-	// hook must not claim to block.
-	out.Reset()
-	errb.Reset()
-	code = Run(context.Background(), Options{
-		Connector:                "hermes",
-		APIAddr:                  "127.0.0.1:1",
-		Home:                     home,
-		HookDir:                  filepath.Join(home, "hooks"),
-		ManagedEnterprise:        true,
-		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
-		ExplainUnenrolledAccount: true,
-		Stdin:                    strings.NewReader("{}"),
-		Stdout:                   &out,
-		Stderr:                   &errb,
-		HTTPClient:               &http.Client{Transport: rt},
-	})
-	if code != 0 || rt.requests != 0 || strings.Contains(errb.String(), "blocking") {
-		t.Fatalf("unenrolled Hermes: code = %d requests = %d stderr = %q, want an allow that does not claim a block", code, rt.requests, errb.String())
+	// Hermes has no fail-closed contract: a Hermes event that cannot block
+	// gets the neutral result, and the hook must not claim to block. An
+	// invocation whose payload names no event may be a tool call (the
+	// installed command binds none), so the managed hook blocks it and names
+	// the enrollment (rel-1-0-3 B-20).
+	for _, tc := range []struct {
+		stdin  string
+		blocks bool
+	}{
+		{`{"hook_event_name":"pre_llm_call"}`, false},
+		{"{}", true},
+	} {
+		out.Reset()
+		errb.Reset()
+		code = Run(context.Background(), Options{
+			Connector:                "hermes",
+			APIAddr:                  "127.0.0.1:1",
+			Home:                     home,
+			HookDir:                  filepath.Join(home, "hooks"),
+			ManagedEnterprise:        true,
+			ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+			ExplainUnenrolledAccount: true,
+			Stdin:                    strings.NewReader(tc.stdin),
+			Stdout:                   &out,
+			Stderr:                   &errb,
+			HTTPClient:               &http.Client{Transport: rt},
+		})
+		if tc.blocks {
+			if code != 0 || rt.requests != 0 || !strings.Contains(out.String(), `"action":"block"`) ||
+				!strings.Contains(out.String(), "this account is not enrolled") {
+				t.Fatalf("unenrolled Hermes %s: code = %d requests = %d stdout = %q, want a block that names the enrollment", tc.stdin, code, rt.requests, out.String())
+			}
+			continue
+		}
+		if code != 0 || rt.requests != 0 || strings.Contains(errb.String(), "blocking") || strings.Contains(out.String(), "block") {
+			t.Fatalf("unenrolled Hermes %s: code = %d requests = %d stderr = %q, want an allow that does not claim a block", tc.stdin, code, rt.requests, errb.String())
+		}
 	}
 }
 

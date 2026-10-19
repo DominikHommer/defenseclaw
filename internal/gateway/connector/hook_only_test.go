@@ -3862,10 +3862,7 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 		{name: "cursor_observe_forces_fail_open", connector: NewCursorConnector(), guardrailMode: "observe", wantFailMode: "open"},
 		{name: "devin_supports_fail_closed", connector: NewDevinConnector(), wantFailMode: "closed"},
 		{name: "openhands_supports_fail_closed", connector: NewOpenHandsConnector(), wantFailMode: "closed"},
-		// The per-user Hermes shell hook blocks through Hermes' block
-		// directive (hookBlocksItsOwnFailures); the Windows native hook keeps
-		// the neutral result.
-		{name: "hermes_per_user_keeps_fail_closed", connector: NewHermesConnector(), wantFailMode: perUserHermesFailModeForTest()},
+		{name: "hermes_per_user_keeps_fail_closed", connector: NewHermesConnector(), wantFailMode: "closed"},
 		{name: "copilot_downgrades_to_fail_open", connector: NewCopilotConnector(), wantFailMode: "open"},
 	}
 
@@ -3910,7 +3907,7 @@ func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
 			t.Fatalf("path=%s want /api/v1/openhands/hook", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"hook_output":{"decision":"deny","reason":"policy denied"}}`))
+		_, _ = w.Write([]byte(`{"action":"block","hook_output":{"decision":"deny","reason":"policy denied"}}`))
 	}))
 	defer server.Close()
 	addr := strings.TrimPrefix(server.URL, "http://")
@@ -3953,7 +3950,7 @@ func TestOpenHandsHookScript_RetriesBusyGateway(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":"rate_limited","retry_after_seconds":"1"}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"hook_output":{"decision":"allow"}}`))
+		_, _ = w.Write([]byte(`{"action":"allow","hook_output":{"decision":"allow"}}`))
 	}))
 	defer server.Close()
 	dir := t.TempDir()
@@ -4150,13 +4147,4 @@ func TestAntigravityAcceptsUnicodeHookPath(t *testing.T) {
 	if want := hook + " Stop"; len(stop) != 1 || stop[0].Command != want {
 		t.Fatalf("Stop hook = %+v, want command %q", stop, want)
 	}
-}
-
-// perUserHermesFailModeForTest is the fail mode a per-user Hermes render keeps
-// for a resolved "closed" on this OS.
-func perUserHermesFailModeForTest() string {
-	if runtime.GOOS == "windows" {
-		return "open"
-	}
-	return "closed"
 }

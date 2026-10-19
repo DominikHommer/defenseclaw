@@ -408,15 +408,13 @@ def test_connector_fail_mode_report_uses_disposable_windows_runtime(
     assert report["current"] is True
 
 
-@pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
+@pytest.mark.parametrize("connector", ["antigravity", "copilot"])
 def test_connector_fail_mode_report_upstream_fail_open_preserves_configured_but_reports_open(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connector: str,
 ) -> None:
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
-    # The Windows native Hermes hook is the upstream fail-open one (GAP-0150).
-    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: True)
 
     report = connector_fail_mode_report(cfg, connector)
 
@@ -954,14 +952,17 @@ def test_rollback_skips_unchanged_immutable_config(tmp_path) -> None:
     replace.assert_not_called()
 
 
-def test_hermes_on_linux_and_macos_reports_its_configured_fail_mode(
+@pytest.mark.parametrize("windows", [False, True])
+def test_hermes_reports_its_configured_fail_mode_on_every_os(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    windows: bool,
 ) -> None:
-    # GAP-0150: the Linux and macOS Hermes hook blocks in fail mode closed,
-    # so it is not reported as upstream fail-open there.
+    # GAP-0150 (Linux, macOS) and GAP-0269 (the Windows native hook): the
+    # Hermes hook blocks in fail mode closed, so it is not reported as
+    # upstream fail-open.
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"hermes": "closed"})
-    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: windows)
 
     report = connector_fail_mode_report(cfg, "hermes")
 

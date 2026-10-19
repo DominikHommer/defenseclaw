@@ -246,11 +246,11 @@ try {
             [void][IO.Directory]::CreateDirectory($linkedTarget)
             [IO.File]::WriteAllText([IO.Path]::Combine($linkedTarget, 'policy_compiler.py'), 'print("outside")')
             if (New-TestLink ([IO.Path]::Combine((Get-RetiredLib $linked), 'defenseclaw')) $linkedTarget) {
-                # lib holding a link is not empty, so the walk refuses lib
-                # itself before it reaches the link.
+                # The walk's recorded-compiler check (GAP-0274) refuses the
+                # link before the walk reaches lib.
                 Test-Refused 'linked retired lib\defenseclaw (walk)' {
                     Assert-DefenseClawManagedInstallTree -Layout $linked
-                } 'unexpected directory from managed install root: .*\\lib$'
+                } 'reparse point'
                 Test-Refused 'linked retired lib\defenseclaw (retire)' {
                     Remove-DefenseClawRetiredStandaloneCompiler -Layout $linked
                 } 'reparse point'
@@ -258,6 +258,146 @@ try {
                     $failures.Add('the Fleet-off retire followed a link out of the install tree')
                 }
             }
+
+            # GAP-0274: a Fleet-enabled 1.0.2 host keeps the compiler it
+            # installed. Setup carries none, so an upgrade keeps the recorded
+            # compiler in place, unchanged, and records the same hash; the
+            # uninstall accepts and removes it only while it matches its
+            # record and refuses a changed one before anything changes. Fleet
+            # off still retires it with its directories (GAP-0270).
+            $script:SmokeMetadata = $null
+            function script:Get-DefenseClawDeploymentMetadata {
+                param([hashtable]$Layout, [switch]$Required)
+                return $script:SmokeMetadata
+            }
+            function New-FleetLayout([string]$Name) {
+                $layout = New-TestLayout $Name
+                foreach ($entry in @(
+                    @('ACPPath', 'bin', 'defenseclaw-acp.exe'),
+                    @('HookPath', 'bin', 'defenseclaw-hook.exe'),
+                    @('SensorHelperPath', 'bin', 'defenseclaw-sensor-helper.exe'),
+                    @('InstallerPath', 'libexec', 'install-enterprise.ps1'),
+                    @('ModulePath', 'libexec', 'DefenseClawEnterprise.psm1')
+                )) {
+                    $path = [IO.Path]::Combine($layout.InstallRoot, $entry[1], $entry[2])
+                    [IO.File]::WriteAllText($path, "stand-in $($entry[2])")
+                    $layout[$entry[0]] = $path
+                }
+                $layout['CLIPath'] = [IO.Path]::Combine($layout.BinDirectory, 'defenseclaw.exe')
+                $layout['Profile'] = 'Standalone'
+                $layout['BrokerEnabled'] = $false
+                $layout['MetadataPath'] = [IO.Path]::Combine($Root, $Name, 'deployment.json')
+                $layout['CompilerLibDirectory'] = [IO.Path]::Combine($layout.InstallRoot, 'lib')
+                $layout['CompilerDirectory'] = [IO.Path]::Combine($layout.InstallRoot, 'lib', 'defenseclaw')
+                $layout['CompilerPath'] = [IO.Path]::Combine($layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
+                [void][IO.Directory]::CreateDirectory($layout.CompilerDirectory)
+                [IO.File]::WriteAllText($layout.CompilerPath, 'print("1.0.2 compiler")')
+                return $layout
+            }
+            function New-FleetMetadata([hashtable]$Layout, [switch]$WithoutCompiler) {
+                $hashes = [ordered]@{}
+                foreach ($entry in @(
+                    @('gateway', $Layout.GatewayPath),
+                    @('compiler', $Layout.CompilerPath),
+                    @('acp', $Layout.ACPPath),
+                    @('hook', $Layout.HookPath),
+                    @('sensor_helper', $Layout.SensorHelperPath),
+                    @('installer', $Layout.InstallerPath),
+                    @('module', $Layout.ModulePath)
+                )) {
+                    if ($WithoutCompiler -and $entry[0] -ceq 'compiler') {
+                        continue
+                    }
+                    $hashes[$entry[0]] = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $entry[1] -Algorithm SHA256).Hash.ToLowerInvariant()
+                }
+                return [pscustomobject]@{ hashes = [pscustomobject]$hashes }
+            }
+            function Get-CompilerHash([hashtable]$Layout) {
+                return (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.CompilerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            # Setup replaces every payload artifact; it has no compiler.
+            $setupReplaces = @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module', 'cli')
+
+            # Fleet-on upgrade: the recorded compiler is kept and still matches.
+            $fleetOn = New-FleetLayout 'fleet-on'
+            $script:SmokeMetadata = New-FleetMetadata $fleetOn
+            $recordedCompiler = [string]$script:SmokeMetadata.hashes.compiler
+            $keptPath = Get-DefenseClawRecordedStandaloneCompilerPath -Layout $fleetOn
+            if (-not [string]::Equals($keptPath, [IO.Path]::GetFullPath($fleetOn.CompilerPath), [StringComparison]::OrdinalIgnoreCase)) {
+                $failures.Add("Fleet-on upgrade did not keep the recorded compiler: '$keptPath'")
+            }
+            if ((Get-DefenseClawArtifactPath -Layout $fleetOn -Name compiler) -ne $fleetOn.CompilerPath) {
+                $failures.Add('the recorded compiler hash does not map to the kept compiler')
+            }
+            try {
+                Assert-DefenseClawRecordedArtifactHashes -Metadata $script:SmokeMetadata -Layout $fleetOn -ReplacedArtifacts $setupReplaces -Action Upgrade
+            }
+            catch {
+                $failures.Add("Fleet-on upgrade refused the recorded compiler: $($_.Exception.Message)")
+            }
+            if ((Get-CompilerHash $fleetOn) -cne $recordedCompiler) {
+                $failures.Add('the Fleet-on upgrade checks changed the kept compiler')
+            }
+            # Fleet-on uninstall with the matching compiler: accepted, and the
+            # retired-tree allow-list removes it with its directories.
+            Test-Accepted 'Fleet-on tree with the recorded compiler' $fleetOn
+            try {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $fleetOn
+                Assert-DefenseClawRecordedArtifactHashes -Metadata $script:SmokeMetadata -Layout $fleetOn -Action Uninstall
+            }
+            catch {
+                $failures.Add("Fleet-on uninstall refused the recorded compiler: $($_.Exception.Message)")
+            }
+            $retiredAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist -Layout $fleetOn -RetiredRoot $fleetOn.InstallRoot
+            if ([IO.Path]::GetFullPath($fleetOn.CompilerPath) -notin $retiredAllowlist.files -or
+                [IO.Path]::GetFullPath($fleetOn.CompilerDirectory) -notin $retiredAllowlist.directories -or
+                [IO.Path]::GetFullPath($fleetOn.CompilerLibDirectory) -notin $retiredAllowlist.directories) {
+                $failures.Add('the retired install tree does not remove the kept compiler and its directories')
+            }
+
+            # Fleet-on with a changed compiler: Setup, the upgrade gate and the
+            # uninstall all refuse, and nothing is removed.
+            [IO.File]::AppendAllText($fleetOn.CompilerPath, "`nprint('changed')")
+            Test-Refused 'changed compiler (Setup keep check)' {
+                Get-DefenseClawRecordedStandaloneCompilerPath -Layout $fleetOn
+            } 'does not match the hash deployment metadata records for it: .*nothing was changed$'
+            Test-Refused 'changed compiler (upgrade gate)' {
+                Assert-DefenseClawRecordedArtifactHashes -Metadata $script:SmokeMetadata -Layout $fleetOn -ReplacedArtifacts $setupReplaces -Action Upgrade
+            } 'Upgrade refuses unrecorded artifact hash drift: compiler'
+            Test-Refused 'changed compiler (uninstall)' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $fleetOn
+            } 'does not match the hash deployment metadata records for it: .*nothing was changed$'
+            Test-Refused 'changed compiler (uninstall hash gate)' {
+                Assert-DefenseClawRecordedArtifactHashes -Metadata $script:SmokeMetadata -Layout $fleetOn -Action Uninstall
+            } 'Uninstall refuses unrecorded artifact hash drift: compiler'
+            if (-not [IO.File]::Exists($fleetOn.CompilerPath)) {
+                $failures.Add('a refused uninstall removed the changed compiler')
+            }
+
+            # A compiler with no record is not kept, and the uninstall refuses it.
+            $unrecorded = New-FleetLayout 'fleet-unrecorded'
+            $script:SmokeMetadata = New-FleetMetadata $unrecorded -WithoutCompiler
+            if (-not [string]::IsNullOrEmpty((Get-DefenseClawRecordedStandaloneCompilerPath -Layout $unrecorded))) {
+                $failures.Add('a compiler with no record was kept')
+            }
+            Test-Refused 'unrecorded compiler (uninstall)' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $unrecorded
+            } 'unexpected (file|directory) from managed install root: .*The uninstall stopped before it changed anything'
+
+            # Fleet off: unchanged, the retire removes even a recorded
+            # compiler with its directories and leaves the rest.
+            $fleetOff = New-FleetLayout 'fleet-off'
+            $script:SmokeMetadata = New-FleetMetadata $fleetOff
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $fleetOff
+            if ([IO.Directory]::Exists($fleetOff.CompilerLibDirectory)) {
+                $failures.Add('the Fleet-off retire kept the recorded compiler or its lib tree')
+            }
+            if (-not [IO.File]::Exists($fleetOff.GatewayPath) -or -not [IO.File]::Exists($fleetOff.ModulePath)) {
+                $failures.Add('the Fleet-off retire touched other artifacts')
+            }
+            $script:SmokeMetadata = New-FleetMetadata $fleetOff -WithoutCompiler
+            Test-Accepted 'tree after the Fleet-off retire of a recorded compiler' $fleetOff
+            $script:SmokeMetadata = $null
 
             # Anything other than the exact leaves stays refused, and a
             # refused removal deletes nothing.
@@ -435,6 +575,10 @@ try {
             $secureClient = New-TestLayout 'secure-client-lib'
             [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($secureClient.InstallRoot, 'lib', 'defenseclaw'))
             Test-Refused 'Secure Client allow-list (retired lib)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected directory'
+            [IO.File]::WriteAllText([IO.Path]::Combine($secureClient.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py'), 'print("compiler")')
+            if (-not [string]::IsNullOrEmpty((Get-DefenseClawRecordedStandaloneCompilerPath -Layout $secureClient))) {
+                $failures.Add('Secure Client kept a Fleet compiler')
+            }
             $secureClient = New-TestLayout 'secure-client-share'
             $secureClientPlugin = New-Plugin $secureClient
             Test-Refused 'Secure Client allow-list (share)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected directory'
