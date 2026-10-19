@@ -35,7 +35,7 @@ static int write_packet(Network *net, unsigned char *buf, int len, int timeout_m
 int main(void) {
     Network net = {.my_socket = -1, .tls_active = false,
                    .mqttread = read_packet, .mqttwrite = write_packet};
-    MQTTClient client;
+    MQTTClient client = {0};
     unsigned char sendbuf[128], readbuf[128];
     MQTTClientInit(&client, &net, 1000, sendbuf, sizeof(sendbuf),
                    readbuf, sizeof(readbuf));

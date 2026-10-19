@@ -143,8 +143,6 @@ if(DCLAW_MQTT_ENABLED)
     target_link_libraries(test_canary_attribution PRIVATE dclaw_core)
     add_test(NAME canary_attribution COMMAND test_canary_attribution)
     list(APPEND DCLAW_TEST_TARGETS test_canary_attribution)
-    set_tests_properties(canary_attribution PROPERTIES
-        ENVIRONMENT "DCLAW_FLASH_PATH=${DCLAW_TEST_FLASH_DIR}/flash-canary.bin")
 
     if(DCLAW_SPECULATIVE_EXECUTION)
         add_executable(test_speculative_revocation test_speculative_revocation.c)

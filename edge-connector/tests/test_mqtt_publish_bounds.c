@@ -91,7 +91,7 @@ static void test_cycle_does_not_deliver_malformed_publish(void) {
     incoming_pos = 0;
     Network net = {.my_socket = -1, .tls_active = false,
                    .mqttread = read_packet, .mqttwrite = write_packet};
-    MQTTClient client;
+    MQTTClient client = {0};
     unsigned char sendbuf[64], readbuf[sizeof(k_no_packet_id)];
     MQTTClientInit(&client, &net, 1000, sendbuf, sizeof(sendbuf),
                    readbuf, sizeof(readbuf));
@@ -103,9 +103,33 @@ static void test_cycle_does_not_deliver_malformed_publish(void) {
     puts("  PASS: malformed PUBLISH never reaches the message handler");
 }
 
+/* Control for the test above: the same harness delivers a valid PUBLISH. */
+static void test_cycle_delivers_valid_publish(void) {
+    memcpy(incoming, k_no_packet_id, sizeof(k_no_packet_id));
+    incoming[1] = 0x22;
+    incoming[sizeof(k_no_packet_id)] = 0x00;
+    incoming[sizeof(k_no_packet_id) + 1] = 0x07;
+    incoming_len = (int)sizeof(k_no_packet_id) + 2;
+    incoming_pos = 0;
+    callbacks = 0;
+    Network net = {.my_socket = -1, .tls_active = false,
+                   .mqttread = read_packet, .mqttwrite = write_packet};
+    MQTTClient client = {0};
+    unsigned char sendbuf[64], readbuf[sizeof(k_no_packet_id) + 2];
+    MQTTClientInit(&client, &net, 1000, sendbuf, sizeof(sendbuf),
+                   readbuf, sizeof(readbuf));
+    client.isconnected = 1;
+    client.messageHandlers[0].topicFilter = "defenseclaw/1/1/1/verdict/resp";
+    client.messageHandlers[0].fp = on_message;
+    (void)MQTTYield(&client, 10);
+    assert(callbacks == 1);
+    puts("  PASS: valid PUBLISH with packet id reaches the message handler");
+}
+
 int main(void) {
     printf("test_mqtt_publish_bounds:\n");
     test_deserialize_rejects_missing_packet_id();
     test_cycle_does_not_deliver_malformed_publish();
+    test_cycle_delivers_valid_publish();
     return 0;
 }

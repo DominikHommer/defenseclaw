@@ -190,8 +190,14 @@ static void test_rollback_restores_omitted_section(void) {
 }
 
 int main(void) {
-    const char *flash_path = getenv("DCLAW_FLASH_PATH");
-    if (flash_path) unlink(flash_path);
+    /* Start from an empty flash file this test owns. */
+    const char *tmp = getenv("TMPDIR");
+    char flash_dir[512], flash_path[600];
+    snprintf(flash_dir, sizeof(flash_dir), "%s/dclaw-canary-XXXXXX",
+             (tmp && *tmp) ? tmp : "/tmp");
+    assert(mkdtemp(flash_dir) != NULL);
+    snprintf(flash_path, sizeof(flash_path), "%s/flash.bin", flash_dir);
+    setenv("DCLAW_FLASH_PATH", flash_path, 1);
     setenv("DCLAW_OTA_HMAC_KEY", OTA_KEY_HEX, 1);
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
@@ -207,5 +213,7 @@ int main(void) {
     printf("  ALL PASSED (5 tests)\n");
 
     dclaw_shutdown();
+    unlink(flash_path);
+    rmdir(flash_dir);
     return 0;
 }
