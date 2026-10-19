@@ -1086,9 +1086,18 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 	env, r := l.env, l.result
 	state := l.uninstallOpenShellState()
 	if state.Applied == nil && len(state.Pending) == 0 {
-		// The sandbox subsystem was never on: no account has anything of it.
+		// The sandbox subsystem was never on: no account has anything of
+		// it. The macOS pkg still installs both LaunchAgents with it off
+		// (planPackagedMacOSSandbox), and launchd loads them at every
+		// sign-in, so they are unloaded all the same.
+		l.bootOutMacOSAgents(ctx, nil)
 		return
 	}
+	// A purge stops each account's units below, which on macOS boots its
+	// agents out of one domain before the sweep runs. What is loaded is read
+	// first, so the sweep names every agent the uninstall unloaded, also the
+	// ones the account's own stop took out (GAP-0113).
+	loaded := l.loadedMacOSAgents(ctx)
 	applied := state.Applied
 	ops := env.sandboxOps()
 	purge := l.opts.Purge
@@ -1129,6 +1138,7 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 			}
 		}
 	}
+	l.bootOutMacOSAgents(ctx, loaded)
 	switch {
 	case purge:
 	case len(kept) > 0:
@@ -1141,6 +1151,106 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 			strings.Join(kept, ", "), env.lifecycleCommand(ActionUninstall)))
 	case applied != nil && applied.Enabled:
 		r.Changes = append(r.Changes, "stopped the sandbox subsystem; no account had sandboxes to keep")
+	}
+}
+
+// macOSAgentJobs lists, in a fixed order, the domain/label of each of
+// DefenseClaw's two LaunchAgents in the gui and the user launchd domain of
+// every account that runs a process on the Mac.
+func (l *lifecycle) macOSAgentJobs(ctx context.Context) ([]string, error) {
+	res, err := l.env.Runner.Run(ctx, "ps", "-axo", "uid=")
+	if err != nil {
+		return nil, err
+	}
+	seen := map[int]bool{}
+	var uids []int
+	for _, field := range strings.Fields(string(res.Stdout)) {
+		uid, err := strconv.Atoi(field)
+		// 501 is the first macOS user account; below it are the system's.
+		if err != nil || uid < 501 || uid >= 4294967294 || seen[uid] {
+			continue
+		}
+		seen[uid] = true
+		uids = append(uids, uid)
+	}
+	sort.Ints(uids)
+	var jobs []string
+	for _, uid := range uids {
+		for _, domain := range []string{"gui/" + strconv.Itoa(uid), "user/" + strconv.Itoa(uid)} {
+			for _, label := range []string{labelSandbox, labelOpenShellGateway} {
+				jobs = append(jobs, domain+"/"+label)
+			}
+		}
+	}
+	return jobs, nil
+}
+
+// loadedMacOSAgents reads which of DefenseClaw's LaunchAgents launchd has
+// loaded in the signed-in accounts, before anything of the uninstall stops
+// them. Only a job launchd prints counts as loaded; one it cannot say about
+// does not, so the uninstall never claims to have unloaded it. A listing
+// that fails is left to the sweep to report.
+func (l *lifecycle) loadedMacOSAgents(ctx context.Context) map[string]bool {
+	if l.env.GOOS != "darwin" {
+		return nil
+	}
+	jobs, err := l.macOSAgentJobs(ctx)
+	if err != nil {
+		return nil
+	}
+	loaded := map[string]bool{}
+	for _, job := range jobs {
+		if _, err := l.env.Runner.Run(ctx, "launchctl", "print", job); err == nil {
+			loaded[job] = true
+		}
+	}
+	return loaded
+}
+
+// bootOutMacOSAgents boots DefenseClaw's two LaunchAgents out of the gui
+// and the user launchd domain of every account that runs a process on the
+// Mac, once the accounts' own teardown above is done and before the plists
+// and the binary they name go. launchd loads both agents (they are in
+// /Library/LaunchAgents) for every account that signs in, also one the
+// deployment never served, and a job can stay loaded in either domain, while
+// Stop boots out only one of them; a job left loaded named a deleted plist
+// and binary until the account logged out (#1210). An agent that is not
+// loaded is fine. The change line names every agent the uninstall unloaded:
+// the ones booted out here and the ones in loadedBefore (read before the
+// accounts' teardown) that an account's own stop already took out. What
+// could not be unloaded is a warning: it goes at the account's next logout.
+func (l *lifecycle) bootOutMacOSAgents(ctx context.Context, loadedBefore map[string]bool) {
+	env, r := l.env, l.result
+	if env.GOOS != "darwin" {
+		return
+	}
+	jobs, err := l.macOSAgentJobs(ctx)
+	if err != nil {
+		r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not list the accounts that run processes to unload the DefenseClaw LaunchAgents (%v); a loaded one unloads at that account's next logout", err))
+		return
+	}
+	var unloaded, failed []string
+	for _, job := range jobs {
+		res, err := env.Runner.Run(ctx, "launchctl", "bootout", job)
+		message := string(res.Stdout) + " " + string(res.Stderr)
+		switch {
+		case err == nil:
+			unloaded = append(unloaded, job)
+		case launchdNotLoaded(err), strings.Contains(message, "Could not find"), strings.Contains(message, "No such process"),
+			guiDomainUnsupported(res, message+" "+err.Error()):
+			// Not loaded there (any more), or no GUI session.
+			if loadedBefore[job] {
+				unloaded = append(unloaded, job)
+			}
+		default:
+			failed = append(failed, fmt.Sprintf("%s (%v)", job, err))
+		}
+	}
+	if len(unloaded) > 0 {
+		r.Changes = append(r.Changes, "unloaded the DefenseClaw sandbox LaunchAgents of the signed-in accounts ("+strings.Join(unloaded, ", ")+")")
+	}
+	if len(failed) > 0 {
+		r.AddWarning(codeSandboxUserState, "could not unload "+strings.Join(failed, ", ")+"; each unloads at that account's next logout, or run `launchctl bootout <domain>/<label>` as root")
 	}
 }
 

@@ -602,3 +602,32 @@ type noHostCommands struct{}
 func (noHostCommands) Run(context.Context, string, ...string) (enterpriseunix.CommandResult, error) {
 	return enterpriseunix.CommandResult{ExitCode: -1}, enterpriseunix.ErrCommandNotFound
 }
+
+func TestUnixLifecycleNotRootReportsManagedRefusal(t *testing.T) {
+	goos := enterpriseunix.CurrentGOOS()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Skip(err)
+	}
+	platform := "linux"
+	if goos == "darwin" {
+		platform = "macos"
+	}
+	previousEnv, previousReport := newUnixLifecycleEnv, reportManagedCommandRefusal
+	newUnixLifecycleEnv = func(string) (*enterpriseunix.Env, error) {
+		return &enterpriseunix.Env{GOOS: goos, Root: t.TempDir(), Layout: layout,
+			Geteuid: func() int { return 1000 }, Runner: noHostCommands{}}, nil
+	}
+	var reported []string
+	reportManagedCommandRefusal = func(command, reason string) { reported = append(reported, command+":"+reason) }
+	t.Cleanup(func() { newUnixLifecycleEnv, reportManagedCommandRefusal = previousEnv, previousReport })
+	cmd := &cobra.Command{Use: "ensure"}
+	cmd.SetContext(t.Context())
+	cmd.SetOut(&bytes.Buffer{})
+	if err := runUnixLifecycle(cmd, platform, "ensure", &unixLifecycleOptions{}); err == nil {
+		t.Fatal("non-root ensure succeeded")
+	}
+	if got, want := strings.Join(reported, ","), "enterprise "+platform+" ensure:not_root"; got != want {
+		t.Fatalf("refusal reports %q, want %q", got, want)
+	}
+}

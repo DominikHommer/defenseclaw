@@ -17,6 +17,14 @@ from defenseclaw import agent_selection
 from defenseclaw.commands import cmd_setup
 
 
+def test_codex_setup_rejects_versions_without_required_app_server_flag() -> None:
+    # Upstream rust-v0.135.0 has only --listen stdio://; rust-v0.136.0
+    # introduces the --stdio alias used by this connector's setup.
+    assert "0.136.0" in agent_selection.codex_setup_version_problem("codex-cli 0.124.0")
+    assert "0.136.0" in agent_selection.codex_setup_version_problem("codex-cli 0.135.0")
+    assert agent_selection.codex_setup_version_problem("codex-cli 0.136.0") == ""
+
+
 def test_openhands_protected_selection_roster_is_darwin_only(monkeypatch) -> None:
     connectors = ("codex", "openhands", "amp")
     monkeypatch.setattr(agent_selection.sys, "platform", "linux")

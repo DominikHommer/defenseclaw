@@ -99,6 +99,9 @@ type Options struct {
 	// BundleInbox makes an ensure apply the highest version in the bundle
 	// inbox (<etc>/bundles/inbox) and remove the processed files.
 	BundleInbox bool
+	// DeliveryID is the opaque `bundle apply --delivery-id` the bundle
+	// receipt records ("" for none; enterprisestatus.CheckDeliveryID).
+	DeliveryID string
 }
 
 // Error codes in the lifecycle result.
@@ -158,6 +161,11 @@ type lifecycle struct {
 	// reportChanges is set while a repair or ensure re-applies an installed
 	// deployment: the result then lists what the transaction changed.
 	reportChanges bool
+	// perUserStateKept names the accounts whose per-user state the purge
+	// left in place (remove-all's state_failed: a pending cleanup still
+	// needs it, or its home was not available). Their session-facts cache
+	// stays with that state (GAP-0582).
+	perUserStateKept map[string]bool
 	// perUserRemoved counts the per-user hook registrations an uninstall
 	// removed, for its summary.
 	perUserRemoved int
@@ -228,6 +236,9 @@ type lifecycle struct {
 	osPlan *openshellPlan
 	// bundle is the signed policy bundle this run applies (nil for none).
 	bundle *bundleRun
+	// confirmedLate are the manifest SHA-256s of the bundles this run's
+	// settle confirmed late (bundle_confirmed_after_interrupt).
+	confirmedLate map[string]bool
 	// inboxProcessed are the bundle inbox files this run removes at its end.
 	inboxProcessed []string
 }
@@ -328,6 +339,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	// removed file.
 	if err := env.ensureDir(env.P(env.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
 		r.AddError(codeState, err.Error())
+		l.reportNoSpace(err)
 		return 0
 	}
 	lock, err := env.acquireLock(ctx)
@@ -356,6 +368,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		r.AddError(codeState, err.Error())
+		l.reportNoSpace(err)
 		return 0
 	}
 	defer lock.release()
@@ -797,6 +810,14 @@ func (l *lifecycle) validateOptions() int {
 			return bad("--bundle must be an absolute path")
 		case o.ConfigFile != "" || o.PayloadDir != "" || o.FromPackage || o.NoStart || o.AdoptExisting || o.Mutate != nil:
 			return bad("a policy bundle carries the config: --config, --payload, --from-package, --no-start and --adopt-existing do not apply")
+		}
+	}
+	if o.DeliveryID != "" {
+		if o.Bundle == "" && !o.BundleInbox {
+			return bad("--delivery-id applies only to a policy bundle apply")
+		}
+		if err := enterprisestatus.CheckDeliveryID(o.DeliveryID); err != nil {
+			return bad(err.Error())
 		}
 	}
 	return 0
@@ -1593,6 +1614,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			committedConfig = l.inPlaceConfigEdit(record)
 		}
 		r.AddError(code, err.Error())
+		l.reportNoSpace(err)
 		if record == nil && account.Created {
 			// Refused before any change: the service account this run
 			// created goes too (GAP-0542).
@@ -1711,6 +1733,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			env.discardSnapshot(snap)
 		}
 		r.AddError(codeApply, err.Error())
+		l.reportDiskFull(err)
 		return 0
 	}
 	pending := &Pending{
@@ -1720,6 +1743,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := env.savePending(pending); err != nil {
 		env.discardSnapshot(snap)
 		r.AddError(codeApply, err.Error())
+		l.reportDiskFull(err)
 		return 0
 	}
 
@@ -1727,6 +1751,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 
 	failAndRollback := func(code string, cause error) int {
 		r.AddError(code, cause.Error())
+		// Before the rollback, which can free space: what was full when the
+		// step failed (GAP-0662).
+		l.reportDiskFull(cause)
 		// The previous deployment's sandbox settings are back, not the plan's.
 		l.osPlan = nil
 		// The rollback undoes this transaction's changes.
@@ -3645,18 +3672,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		args = append(args, "--purge")
 	}
 	out, err := env.runGatewayCLILong(ctx, removeAllTimeout, args...)
-	if err != nil && l.opts.Purge && !json.Valid(out.Stdout) {
-		// An installed binary from before remove-all took --purge: remove
-		// the registrations, which is what the binaries are kept for.
-		out, err = env.runGatewayCLILong(ctx, removeAllTimeout, args[:len(args)-1]...)
-	}
 	var report struct {
-		Pending     []string `json:"pending"`
-		Failed      []string `json:"failed"`
-		StateFailed []string `json:"state_failed"`
-		Purged      []string `json:"purged"`
-		Removed     int      `json:"removed"`
-		// PurgedDetail is absent from an installed binary that predates it.
+		Pending      []string                    `json:"pending"`
+		Failed       []string                    `json:"failed"`
+		StateFailed  []string                    `json:"state_failed"`
+		Purged       []string                    `json:"purged"`
+		Removed      int                         `json:"removed"`
 		PurgedDetail map[string]purgedUserDetail `json:"purged_detail"`
 	}
 	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
@@ -3695,16 +3716,16 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	}
 	for _, entry := range report.StateFailed {
 		user, reason, _ := strings.Cut(entry, ": ")
+		if l.perUserStateKept == nil {
+			l.perUserStateKept = map[string]bool{}
+		}
+		l.perUserStateKept[user] = true
 		r.AddWarning(codePerUserState, fmt.Sprintf("the DefenseClaw per-user data and binaries of user %s were not removed: %s; fix the cause and rerun %s", user, reason, rerun))
 	}
 	// A purge deletes data an account created before the install; name each
 	// account, instead of a bare "done".
 	for _, user := range report.Purged {
-		var detail *purgedUserDetail
-		if found, ok := report.PurgedDetail[user]; ok {
-			detail = &found
-		}
-		r.Changes = append(r.Changes, purgedUserChange(user, detail))
+		r.Changes = append(r.Changes, purgedUserChange(user, report.PurgedDetail[user]))
 	}
 	return left
 }
@@ -3712,6 +3733,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 // purgedUserDetail is what the purge found and removed for one account.
 type purgedUserDetail struct {
 	Data     bool `json:"data"`
+	Backup   bool `json:"backup"`
 	Binaries bool `json:"binaries"`
 	Gateway  bool `json:"gateway"`
 	UVCache  bool `json:"uv_cache"`
@@ -3719,13 +3741,10 @@ type purgedUserDetail struct {
 
 // purgedUserChange names what the purge removed for user: only what it
 // found, so an account that never had a per-user install is not said to
-// have lost per-user binaries and a gateway (GAP-1444). Without detail (an
-// installed binary from before it) it names everything the purge covers.
-func purgedUserChange(user string, detail *purgedUserDetail) string {
+// have lost per-user binaries and a gateway (GAP-1444), and where the data
+// of the account's own per-user install went (#1299).
+func purgedUserChange(user string, detail purgedUserDetail) string {
 	const data = "all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder)"
-	if detail == nil {
-		return fmt.Sprintf("removed "+data+" and its per-user binaries and launcher links in ~/.local/bin, after stopping its per-user gateway", user)
-	}
 	var text string
 	switch {
 	case detail.Data && detail.Binaries:
@@ -3746,6 +3765,9 @@ func purgedUserChange(user string, detail *purgedUserDetail) string {
 	}
 	if detail.Gateway {
 		text += ", after stopping its per-user gateway"
+	}
+	if detail.Backup {
+		text += "; the data of its own DefenseClaw install from before the managed deployment (config, secrets, audit history, policies) was moved to ~/.defenseclaw-backup-<UTC time> in its home first, with a DEFENSECLAW-BACKUP.txt that says how to restore it"
 	}
 	return text
 }

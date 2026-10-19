@@ -9238,11 +9238,6 @@ function Get-DefenseClawLayout {
         # treats an absent key as the Secure Client broker deployment.
         $layout['Profile'] = 'Standalone'
         $layout['BrokerEnabled'] = $false
-        # The Fleet compiler is executable Python source. Keep it in the
-        # protected installation, outside writable per-user runtimes.
-        $layout['CompilerLibDirectory'] = [IO.Path]::Combine($InstallRoot, 'lib')
-        $layout['CompilerDirectory'] = [IO.Path]::Combine($InstallRoot, 'lib', 'defenseclaw')
-        $layout['CompilerPath'] = [IO.Path]::Combine($InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
     }
     return $layout
 }
@@ -24513,6 +24508,29 @@ function Start-DefenseClawSelfUninstallHelper {
     )
 }
 
+function Remove-DefenseClawEmptyRetiredInstallDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Path `
+            -PathType Container)) {
+        return
+    }
+    Assert-DefenseClawNoReparsePath -Path $Path
+    # Never recurse: a non-recursive Remove-Item of a directory with children
+    # prompts, which a -NonInteractive engine reports only as "Read and Prompt
+    # functionality is not available". Name the survivor instead and keep it.
+    $child = Microsoft.PowerShell.Management\Get-ChildItem `
+        -LiteralPath $Path `
+        -Force |
+        Microsoft.PowerShell.Utility\Select-Object -First 1
+    if ($null -ne $child) {
+        throw "receipt-bound retired InstallRoot directory is not empty: $($child.FullName)"
+    }
+    Microsoft.PowerShell.Management\Remove-Item `
+        -LiteralPath $Path `
+        -Force
+}
+
 function Remove-DefenseClawRetiredInstallTree {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -24575,28 +24593,6 @@ function Remove-DefenseClawRetiredInstallTree {
             -LiteralPath $retiredIPCSocket `
             -Force
     }
-    $retiredIPCDirectory = Microsoft.PowerShell.Management\Join-Path `
-        $retired `
-        'ipc'
-    if (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $retiredIPCDirectory `
-        -PathType Container) {
-        Microsoft.PowerShell.Management\Remove-Item `
-            -LiteralPath $retiredIPCDirectory `
-            -Force
-    }
-    foreach ($directory in @(
-        (Microsoft.PowerShell.Management\Join-Path $retired 'agents'),
-        (Microsoft.PowerShell.Management\Join-Path $retired 'bin')
-    )) {
-        if (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $directory `
-            -PathType Container) {
-            Microsoft.PowerShell.Management\Remove-Item `
-                -LiteralPath $directory `
-                -Force
-        }
-    }
     if (Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $modulePath `
         -PathType Leaf) {
@@ -24612,21 +24608,20 @@ function Remove-DefenseClawRetiredInstallTree {
             -LiteralPath $modulePath `
             -Force
     }
-    $libexec = Microsoft.PowerShell.Management\Join-Path $retired 'libexec'
-    if (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $libexec `
-        -PathType Container) {
-        Microsoft.PowerShell.Management\Remove-Item `
-            -LiteralPath $libexec `
-            -Force
+    # Every allowlisted directory, deepest first (a child path is longer than
+    # its parent), then the root. Listing them by hand missed the standalone
+    # compiler's lib\defenseclaw and lib (GAP-0046): the root removal then
+    # prompted, the receipt survived, and every later recovery, including a
+    # published older Setup's, failed with lifecycle_error 1603.
+    foreach ($directory in @(
+        $allowlist.directories |
+            Microsoft.PowerShell.Utility\Sort-Object `
+                -Property Length `
+                -Descending
+    )) {
+        Remove-DefenseClawEmptyRetiredInstallDirectory -Path $directory
     }
-    if (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $retired `
-        -PathType Container) {
-        Microsoft.PowerShell.Management\Remove-Item `
-            -LiteralPath $retired `
-            -Force
-    }
+    Remove-DefenseClawEmptyRetiredInstallDirectory -Path $retired
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $retired) {
         throw 'receipt-bound retired InstallRoot survived final cleanup'
     }
@@ -27710,12 +27705,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             }
         }
         if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {
-            $compilerPath = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath
-            if (-not [string]::IsNullOrWhiteSpace($compilerPath)) {
-                Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
-                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
-                    [IO.File]::Delete($compilerPath)
-                }
+            # Retire a compiler left by an older standalone install.
+            $compilerPath = [IO.Path]::Combine($Layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
+            Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
+                [IO.File]::Delete($compilerPath)
             }
         }
         foreach ($requiredPath in @(

@@ -777,6 +777,9 @@
         "pack_dir": {
           "$ref": "#/$defs/openShellPackDir"
         },
+        "trusted_ca_bundle": {
+          "$ref": "#/$defs/openShellTrustedCABundle"
+        },
         "profile": {
           "$ref": "#/$defs/openShellProfileOrInherit"
         },
@@ -947,6 +950,12 @@
       "type": "string",
       "maxLength": 4096,
       "pattern": "^(|~|~/.*|[/\\\\].*|[A-Za-z]:[/\\\\].*)$"
+    },
+    "openShellTrustedCABundle": {
+      "description": "A PEM file of CA certificates sandboxes trust besides the image's public roots, such as the root of a TLS-inspecting proxy: an absolute path or one starting with \"~/\" (absolute, administrator-owned, in a managed configuration). Every sandbox image built while it is set carries them. Empty: none.",
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^(|~/.+|/.+)$"
     },
     "openShellHarnessVersionKey": {
       "description": "A harness name keying image.harness_versions. No \".\": the gateway's config loader reads a dotted key as a key path.",
@@ -1441,13 +1450,8 @@
         },
         "min_severity": {
           "type": "string",
-          "enum": [
-            "",
-            "LOW",
-            "MEDIUM",
-            "HIGH",
-            "CRITICAL"
-          ]
+          "pattern": "^(|[Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
+          "description": "Lowest finding severity that asks for approval: CRITICAL, HIGH, MEDIUM or LOW, in any case, as block_at takes them. Empty inherits (HIGH when nothing sets it)."
         }
       }
     },
@@ -5202,6 +5206,11 @@
         }
       }
     },
+    "ruleSeverity": {
+      "type": "string",
+      "pattern": "^([Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
+      "description": "A rule severity: CRITICAL, HIGH, MEDIUM or LOW, in any case, as block_at takes them. Rules have no INFO severity."
+    },
     "severityName": {
       "type": "string",
       "enum": [
@@ -5465,7 +5474,7 @@
             "$ref": "#/$defs/ruleId"
           },
           "additionalProperties": {
-            "$ref": "#/$defs/severityName"
+            "$ref": "#/$defs/ruleSeverity"
           }
         },
         "suppressions": {

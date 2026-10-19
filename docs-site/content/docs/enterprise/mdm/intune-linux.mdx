@@ -328,7 +328,9 @@ keeps sandboxes, the gateway's sandbox registration store
 (`/var/lib/defenseclaw/redaction-correlation.key`) stay, root-owned, until the
 next `ensure` adopts them. Set `DC_PURGE=1` in its settings block to also
 remove each enrolled user's `~/.defenseclaw`, per-user binaries and the kept
-sandbox store and key. On a host with nothing installed
+sandbox store and key, and the wrapper's staging folder `/var/lib/defenseclaw-mdm`
+once it is empty. A user's own DefenseClaw install from before the enrollment
+is moved to `~/.defenseclaw-backup-<UTC time>` in that home first. On a host with nothing installed
 it exits `0`, so repeated runs are harmless. To keep the machine state for a
 reinstall, see [Uninstall](/docs/enterprise/lifecycle#uninstall).
 

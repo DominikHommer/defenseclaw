@@ -429,17 +429,14 @@ func (l *lifecycle) describeGuardianCleanups() {
 	}
 }
 
-// codeEnrolledAccountDeleted names an account targets.yaml still enrolls
-// whose home no longer exists: the account was deleted, and its enrollment
-// lasts until the hook enumerator's next pass no longer finds the account.
-// It is a warning: verify and security_complete do not fail on it.
-const codeEnrolledAccountDeleted = "enrolled_account_deleted"
+// A missing home cannot establish whether the account was deleted or its
+// home is temporarily unavailable. Enrollment is retained for a retry.
+const codeEnrolledHomeUnavailable = "enrolled_home_unavailable"
 
-// describeDeletedEnrolledAccounts names each enrolled account whose home is
-// gone. Until the enumerator's next pass drops it, status listed it among
-// the healthy targets with its agents pending and said nothing about the
-// deletion (GAP-1867).
-func (l *lifecycle) describeDeletedEnrolledAccounts() {
+// describeUnavailableEnrolledHomes names enrolled targets whose home cannot
+// currently be found. The enumerator decides separately whether an account
+// has definitively disappeared.
+func (l *lifecycle) describeUnavailableEnrolledHomes() {
 	env, r := l.env, l.result
 	manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath))
 	if err != nil {
@@ -466,8 +463,8 @@ func (l *lifecycle) describeDeletedEnrolledAccounts() {
 	for _, account := range accounts {
 		names := connectors[account]
 		sort.Strings(names)
-		r.AddWarning(codeEnrolledAccountDeleted, fmt.Sprintf(
-			"user %s was deleted: its home no longer exists, but it is still enrolled for %s until the hook enumerator's next pass drops it (the hook guardian then removes it as well); nothing is left to protect in that home",
+		r.AddWarning(codeEnrolledHomeUnavailable, fmt.Sprintf(
+			"user %s: home is unavailable; enrollment for %s is retained and retried on the next hook enumerator pass",
 			account, strings.Join(names, ", ")))
 	}
 }

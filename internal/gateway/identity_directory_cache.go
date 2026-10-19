@@ -101,11 +101,17 @@ type identityCache[T any] struct {
 	// was written. Facts built from it are not served past that, also inside
 	// the TTL (GAP-1268).
 	trustedUntil func(key string, now time.Time) time.Time
+	// describe, when set, names the identity source and directory of an
+	// answer, for the per-source ages /health reports (identity_health.go).
+	describe func(T) (source, directory string)
 
 	mu      sync.Mutex
 	entries map[string]*identityCacheEntry[T]
 	// answeredAt is when a lookup of any key last succeeded.
 	answeredAt time.Time
+	// answered is when each (source, directory) pair describe names last
+	// answered a lookup, at most identitySourcesMax pairs.
+	answered map[[2]string]time.Time
 	// staleBefore makes facts fetched before it due for a refresh that a
 	// blocking request waits for (invalidate).
 	staleBefore time.Time
@@ -136,6 +142,7 @@ func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts
 	cache.gone = definitiveMissingAccount
 	cache.confirmGone = reliableMissingAccountConfirmation()
 	cache.trustedUntil = identitySpoolTrustedUntil
+	cache.describe = func(facts useridentity.DirectoryFacts) (string, string) { return facts.Source, string(facts.Directory) }
 	cache.logf = func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "[identity] "+format+"\n", args...)
 	}
@@ -225,7 +232,10 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		if entry.ok {
 			return entry.facts, true
 		}
-		return facts, true
+		// The lookup dropped the facts: nothing confirms them any more
+		// (identityFactsUnconfirmedError), so this request gets none either
+		// (GAP-0191).
+		return zero, false
 	}
 	wait := entry.inflight
 	c.mu.Unlock()
@@ -553,6 +563,7 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntry[T], err error, now time.Time) string {
 	if err == nil {
 		c.answeredAt = now
+		c.noteAnsweredLocked(entry.facts, now)
 		entry.gone = false
 		if entry.failedSince.IsZero() {
 			return ""

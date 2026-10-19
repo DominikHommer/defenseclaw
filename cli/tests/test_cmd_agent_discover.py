@@ -1486,6 +1486,35 @@ class AiUsageCommandFlagsTests(unittest.TestCase):
         self.assertEqual(windows.exit_code, 3, windows.output)
         self.assertIn("Linux and macOS only", windows.output)
 
+    def test_unknown_sandbox_is_an_error_with_discovery_disabled(self):
+        from defenseclaw.gateway import SandboxAPIError
+
+        class DisabledClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage(self):
+                return {"enabled": False, "signals": []}
+
+            def get_sandbox(self, name):
+                if name == "missing":
+                    raise SandboxAPIError("not_found", "sandbox not found", status=404)
+                return {"name": name}
+
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.gateway.token = "secret-token-123"
+        try:
+            with patch("defenseclaw.commands.cmd_agent.OrchestratorClient", DisabledClient), \
+                    patch("defenseclaw.platform_support.host_os", return_value="linux"):
+                missing = self.runner.invoke(agent, ["usage", "--sandbox", "missing"], obj=app)
+                existing = self.runner.invoke(agent, ["usage", "--sandbox", "fresh"], obj=app)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+        self.assertEqual(missing.exit_code, 1, missing.output)
+        self.assertIn("no sandbox missing", missing.output)
+        self.assertEqual(existing.exit_code, 0, existing.output)
+        self.assertIn("AI discovery is disabled", existing.output)
+
 
 if __name__ == "__main__":
     unittest.main()

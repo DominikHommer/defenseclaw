@@ -28,7 +28,29 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
+
+func TestActiveAgentContextScopesRelayedSessionsByRegistration(t *testing.T) {
+	api := activeClaudeCodeTestAPI()
+	for _, registration := range []string{"reg-alice", "reg-bob"} {
+		ctx := sandboxauth.WithRequest(authenticatedClaudeCodeTestContext(), sandboxauth.Binding{
+			ID: "same-caller-claim", RegistrationID: registration, Connector: "claudecode",
+		}, nil)
+		api.applyClaudeCodeActiveAgentContext(ctx, claudeCodeHookRequest{
+			HookEventName: "SessionStart", SessionID: "same-session",
+		})
+	}
+	api.activeAgentContext.mu.Lock()
+	defer api.activeAgentContext.mu.Unlock()
+	for _, registration := range []string{"reg-alice", "reg-bob"} {
+		key := activeAgentContextKey{scope: "registration\x00" + registration,
+			connector: "claudecode", sessionID: "same-session"}
+		if _, ok := api.activeAgentContext.sessions[key]; !ok {
+			t.Fatalf("missing isolated session for %s", registration)
+		}
+	}
+}
 
 func writeActiveAgentTestFile(t *testing.T, root, name string) string {
 	t.Helper()

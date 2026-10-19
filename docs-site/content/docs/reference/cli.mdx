@@ -1030,7 +1030,8 @@ new file's SHA-256; the second is the effective policy digest the gateway will
 report once it applies the change. Setting a key to the value it already has
 changes nothing and says so (`guardrail.block_at already has that value
 (generation 7).`). `VALUE` is read as `config.yaml` is: only `true` and `false`
-are booleans, so `off`, `on`, `yes` and `no` are text and
+are booleans; finite decimal numbers such as `3.5` are accepted. Thus `off`,
+`on`, `yes` and `no` are text and
 `defenseclaw config set ai_discovery.ide_inventory off` sets that enum value. `config unset` of a key that is not set says its default
 already applies, and exits `1` for a key that does not exist, such as a
 misspelled one. Neither command changes `config_version`: only
@@ -1367,7 +1368,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--for <duration>` | tetragon pause | How long the pause lasts. Default `4h`, at most `7d` |
 | `--until-reboot` | tetragon pause | Keep the pause in `/run`, so a reboot ends it. Not with `--for` |
 | `--lock-wait <duration>` | install, upgrade, repair, reconcile, rotate-credentials, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
-| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created in its home, its per-user binaries and launcher links in `~/.local/bin`, and the DefenseClaw entries in its uv cache (`~/.cache/uv`), after stopping its per-user gateway and watchdog. It removes the sandbox registration store and key for a clean image, and the sandbox setup record. Run it in the first removal: it needs the deployment's binaries. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun. Without `--purge`, uninstall removes the config, credentials, most state, logs and the service account, but may keep `sandbox` registrations and `redaction-correlation.key` when an account keeps sandboxes |
+| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created in its home, its per-user binaries and launcher links in `~/.local/bin`, and the DefenseClaw entries in its uv cache (`~/.cache/uv`), after stopping its per-user gateway and watchdog. An account's own DefenseClaw install from before the enrollment (its `~/.defenseclaw` has a `config.yaml`, `.env`, `audit.db` or `previous`) is moved to `~/.defenseclaw-backup-<UTC time>` in its home first; an account whose home folder is gone is reported as already clean. It removes the sandbox registration store and key for a clean image, and the sandbox setup record. Run it in the first removal: it needs the deployment's binaries. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun. Without `--purge`, uninstall removes the config, credentials, most state, logs and the service account, but may keep `sandbox` registrations and `redaction-correlation.key` when an account keeps sandboxes |
 | `--keep-state` | uninstall | Keep the config, credentials, gateway and guardian state (the sandbox registrations and key included), logs and the service account, so a reinstall resumes with them. The deployment record goes either way. Cannot combine with `--purge` |
 | `--keep-service-account` | uninstall | Keep the gateway service account, which uninstall deletes otherwise |
 | `--ready-for <mode>` | tetragon verify | The mode to check readiness for: `consume`, `observe` or `enforce` |

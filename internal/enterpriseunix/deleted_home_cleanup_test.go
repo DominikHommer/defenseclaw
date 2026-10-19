@@ -57,10 +57,9 @@ func TestGuardianCleanupOfAMissingRecordedHomeNamesCurrentFailure(t *testing.T) 
 	}
 }
 
-// GAP-1867: while targets.yaml still enrolls a deleted account (until the
-// enumerator's next pass), status and verify name the account as deleted
-// with its connectors; an account whose home exists is not named.
-func TestStatusNamesAnEnrolledAccountWhoseHomeWasDeleted(t *testing.T) {
+// A missing home may be a temporary mount failure even while the directory
+// account still exists. Status and verify must not declare it deleted.
+func TestStatusNamesAnUnavailableEnrolledHomeWithoutClaimingDeletion(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	if err := os.MkdirAll(h.env.P("/Users/kept"), 0o755); err != nil {
@@ -72,9 +71,12 @@ func TestStatusNamesAnEnrolledAccountWhoseHomeWasDeleted(t *testing.T) {
 		"  - user: kept\n    uid: 507\n    user_home: /Users/kept\n    connector: amp\n")
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		result := h.run(Options{Action: action})
-		got := messagesOf(result.Warnings, codeEnrolledAccountDeleted)
-		if !strings.Contains(got, "user gone (home /Users/gone) was deleted") || !strings.Contains(got, "amp, kiro") {
-			t.Fatalf("%s does not name the deleted account: %q", action, got)
+		got := messagesOf(result.Warnings, codeEnrolledHomeUnavailable)
+		if !strings.Contains(got, "user gone (home /Users/gone): home is unavailable") || !strings.Contains(got, "amp, kiro") {
+			t.Fatalf("%s does not name the unavailable home: %q", action, got)
+		}
+		if strings.Contains(got, "deleted") || !strings.Contains(got, "enrollment") {
+			t.Fatalf("%s claims an unavailable home was deleted: %q", action, got)
 		}
 		if strings.Contains(got, "kept") {
 			t.Fatalf("%s names an account whose home exists: %q", action, got)

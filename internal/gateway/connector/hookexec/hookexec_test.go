@@ -2330,8 +2330,14 @@ func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PostCompact") + "}\n",
 		},
 		{
+			// A blocked stop event keeps Codex running the turn (#1140):
+			// it gets the neutral allow.
 			event:      "SubagentStop",
-			wantStdout: `{"decision":"block","reason":` + gatewayDownReason("SubagentStop") + "}\n",
+			wantStdout: "",
+		},
+		{
+			event:      "Stop",
+			wantStdout: "",
 		},
 		{
 			event: "PreToolUse",
@@ -2383,8 +2389,8 @@ func TestCodexLegacyAndInvalidContractsDoNotBackfillLifecycleControls(t *testing
 		{name: "v1 SessionStart", event: "SessionStart", contractID: "codex-hooks-v1"},
 		{name: "v2 PreCompact", event: "PreCompact", contractID: "codex-hooks-v2"},
 		{name: "v2 PostCompact", event: "PostCompact", contractID: "codex-hooks-v2"},
-		{name: "missing contract", event: "SubagentStop"},
-		{name: "invalid contract", event: "SubagentStop", contractID: "codex-hooks-v999"},
+		{name: "missing contract", event: "PreCompact"},
+		{name: "invalid contract", event: "PreCompact", contractID: "codex-hooks-v999"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

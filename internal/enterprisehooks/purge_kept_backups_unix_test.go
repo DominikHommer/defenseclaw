@@ -65,7 +65,7 @@ func TestPurgeKeepsTheStateWhileATeardownKeepsAnEditedFile(t *testing.T) {
 		return home, plugin, receipt, opts
 	}
 	purge := func(home string) (PurgeSummary, error) {
-		return PurgeUserStateSummary(context.Background(), InstallOptions{
+		return PurgeUserState(context.Background(), InstallOptions{
 			UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(), Registry: connector.NewDefaultRegistry(),
 		})
 	}

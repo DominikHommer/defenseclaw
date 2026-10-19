@@ -213,6 +213,15 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			*capture = parsed.redirectTargets
 		}
 		if parsed.status == StatusPartial && dialect == DialectPOSIX {
+			// GAP-0651: inert ":" list members are set aside so the
+			// command they accompany is analyzed on its own.
+			if normalized, _, ok := normalizeTrustedHomeInertListSource(command); ok {
+				if simplified := parse(normalized); simplified.status == StatusComplete {
+					parsed = simplified
+				}
+			}
+		}
+		if parsed.status == StatusPartial && dialect == DialectPOSIX {
 			// A trusted ActiveHome makes a lone command's "~/" operands
 			// exact; the rewrite is kept only when nothing else is dynamic.
 			home, _ := normalizeActiveHome(input.ActiveHome)
