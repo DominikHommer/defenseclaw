@@ -248,10 +248,10 @@ The existing manual workflow now has a closed choice between the historical
 `lifecycle` suite (default) and the separate `claude-version` suite. The latter
 uses `prepare_version.py` and `REVIEWED-CLAUDE-VERSION.json`. Its exact wrapper
 and driver artifacts have passed author, root and independent inert reviews:
-wrapper run `39196467675`, artifact `12161534865`, image
-`63300aa074ad60c607b15fb7833a38dc3421a5616c73abdb54386a7045563912`
-(3,506,302 bytes); driver run `39197793107`, artifact `12163050120`, image
-`9e14ff770aea93fa7bff1d8af0f6fb8f6c9ee162e9373866a28cc86f1a68edfc`
+wrapper run `39199601189`, artifact `12162799813`, image
+`1493e1678ed0533a7a6fa81aa8bd04a0bad667aac43cbb10f3caec8f82d8c208`
+(3,510,398 bytes); driver run `39200076588`, artifact `12163566207`, image
+`31345e92f7e5ce7468cf78a81f04d8b4c3c400d86e6612c3388e877735955fa3`
 (3,244,158 bytes). The distinct receipt is
 `e24ee1736320e9df281e0ab7049b2df8cbacbf27d81d31fc46e21cef09b165b7`.
 These checks do not execute the images. The first real version attempt below
@@ -288,7 +288,8 @@ have failed before producing it. This finite canary does not qualify an agent
 session, arbitrary dlopen, hooks, broker transport or the production launch gate.
 
 The first [version attempt](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39198761851)
-at source `b910df5e13246fc3a4eb0c2450b52cba46d54fb7` failed at
+at source `b910df5e13246fc3a4eb0c2450b52cba46d54fb7`, using wrapper49c and
+driver017, failed at
 `native_stage=fixture_capability`. Signed official release reacquisition and
 artifact preparation succeeded. Worker namespace bootstrap, READY/GRANT and
 receipt admission completed, but no Prepared, Started, version output or native
@@ -310,5 +311,7 @@ loader name. The corrected bounded check accepts only the exact initial entry
 set and separately requires an empty `io.EOF` read when needed. It preserves
 loader identity, held-root and cleanup checks. The portable ordinary filesystem regression passed
 eight race-test results on Windows with zero failures/skips. The corrected
-wrapper build remains pending; this failed attempt is preserved and the
-corrected pairing has not run.
+wrapper build passed 32 inert tests across 14 roots, including the Linux
+directory regression; the new driver recorded 28 inert passes across 25 roots.
+Both artifacts passed three inert reviews. This failed attempt is preserved
+and the corrected f9/e01 pairing has not run.

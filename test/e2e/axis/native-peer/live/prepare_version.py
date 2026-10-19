@@ -40,30 +40,30 @@ PINS = {
         "event": "workflow_dispatch",
     },
     "wrapper": {
-        "commit": "49c24f42a5f01e426f0882a6f9df4441654289ba",
-        "run": 39196467675,
-        "artifact": 12161534865,
-        "archive": "399a239a759d81f068a37ec8dec2a5d0364c87152fce5268993ba8454530cafa",
-        "provenance": "c1b5e59400253e78a2c07579aed7db796325edbda5bb62629e439ad10d2caa9b",
+        "commit": "f9d907144b2adb97d33a3e5a8c8a89b22629ded1",
+        "run": 39199601189,
+        "artifact": 12162799813,
+        "archive": "acfe0492ecf2c2670aab32af1411d722fc1ffa4758eedf2e44809fb33c1dd0d3",
+        "provenance": "3b63059284ac539d0c903adc613759e4cc428ef501640a2b595a156fc176b191",
         "workflow": ".github/workflows/axis-native-harness-build.yml",
         "stem": "axis-reviewed-native-harness-linux-",
         "branch": "codex/axis-sandbox-feasibility",
         "event": "workflow_dispatch",
     },
     "driver": {
-        "commit": "017a8694615aefe499ee3a382818ef310b1777a6",
-        "run": 39197793107,
-        "artifact": 12163050120,
-        "archive": "ec12d9ef00063948b7e77623a919b6d6a169910593133574777d83d889822946",
-        "provenance": "7cbcd2c6c9eecd355635a42d99386cc42f480d22c8661f48f5a0f23f8de238da",
+        "commit": "e01a8838c43b06f02103c5bde65f32462895f34f",
+        "run": 39200076588,
+        "artifact": 12163566207,
+        "archive": "ea184cd5a84397bbe6d2306d24eccf5f5d2ace172189f4af59179cbc8e49d69a",
+        "provenance": "031f646cb5d45a7c2bf311218d0681350aee28603d1bd0405e19a4c12f73c8de",
         "workflow": ".github/workflows/axis-native-driver-build.yml",
         "stem": "axis-fixed-native-outer-driver-linux-",
         "branch": "codex/axis-sandbox-feasibility",
         "event": "push",
     },
 }
-WRAPPER_IMAGE = {"sha256": "63300aa074ad60c607b15fb7833a38dc3421a5616c73abdb54386a7045563912", "size": 3506302}
-DRIVER_IMAGE = {"sha256": "9e14ff770aea93fa7bff1d8af0f6fb8f6c9ee162e9373866a28cc86f1a68edfc", "size": 3244158}
+WRAPPER_IMAGE = {"sha256": "1493e1678ed0533a7a6fa81aa8bd04a0bad667aac43cbb10f3caec8f82d8c208", "size": 3510398}
+DRIVER_IMAGE = {"sha256": "31345e92f7e5ce7468cf78a81f04d8b4c3c400d86e6612c3388e877735955fa3", "size": 3244158}
 
 
 def inspector():
