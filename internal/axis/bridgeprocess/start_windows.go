@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -76,8 +77,46 @@ func wrapWindowsStartError(stage string, cause error) error {
 // Cleanup diagnostics retain cancellation and joined causes without formatting
 // private native error text. They do not change cleanup or permit retry bypass.
 type windowsCleanupError struct {
-	stage string
-	cause error
+	stage   string
+	cause   error
+	signals WindowsNativeSignalResult
+}
+
+// WindowsNativeSignalResult reports only whether each existing termination
+// call was attempted, whether it failed, and its Win32 status when available.
+// Zero status on a failed call means the error was not a syscall.Errno; it is
+// not proof of success. No native error string or handle escapes this record.
+type WindowsNativeSignalResult struct {
+	JobAttempted  bool   `json:"job_attempted"`
+	JobFailed     bool   `json:"job_failed"`
+	JobWin32      uint32 `json:"job_win32"`
+	RootAttempted bool   `json:"root_attempted"`
+	RootFailed    bool   `json:"root_failed"`
+	RootWin32     uint32 `json:"root_win32"`
+}
+
+func closedWindowsSignalCode(err error) (bool, uint32) {
+	if err == nil {
+		return false, 0
+	}
+	var code syscall.Errno
+	if errors.As(err, &code) {
+		return true, uint32(code)
+	}
+	return true, 0
+}
+
+func closedWindowsNativeSignals(jobErr, rootErr error, rootAttempted bool) WindowsNativeSignalResult {
+	jobFailed, jobCode := closedWindowsSignalCode(jobErr)
+	rootFailed, rootCode := closedWindowsSignalCode(rootErr)
+	return WindowsNativeSignalResult{true, jobFailed, jobCode, rootAttempted, rootFailed, rootCode}
+}
+
+func (err *windowsCleanupError) NativeCleanupSignals() WindowsNativeSignalResult {
+	if err == nil || err.NativeCleanupStage() != "native_signal" {
+		return WindowsNativeSignalResult{}
+	}
+	return err.signals
 }
 
 func knownWindowsCleanupStage(stage string) bool {
@@ -128,7 +167,13 @@ type windowsCustody struct {
 
 func (custody *windowsCustody) StopAndWait(ctx context.Context) (resultErr error) {
 	stage := "entry"
-	defer func() { resultErr = wrapWindowsCleanupError(stage, resultErr) }()
+	var signals WindowsNativeSignalResult
+	defer func() {
+		resultErr = wrapWindowsCleanupError(stage, resultErr)
+		if classified, ok := resultErr.(*windowsCleanupError); ok && stage == "native_signal" {
+			classified.signals = signals
+		}
+	}()
 	if ctx == nil {
 		return ErrAdmission
 	}
@@ -207,7 +252,10 @@ func (custody *windowsCustody) StopAndWait(ctx context.Context) (resultErr error
 			rootErr = windows.TerminateProcess(custody.process, 1)
 		}
 		if jobErr != nil || rootErr != nil {
-			return bridgeowner.ErrCleanup // exact handles remain for explicit retry
+			signals = closedWindowsNativeSignals(jobErr, rootErr, !rootDone)
+			// Both attempted native failures remain inspectable while the outer
+			// cleanup error still exposes only its fixed, bounded stage text.
+			return errors.Join(bridgeowner.ErrCleanup, jobErr, rootErr) // exact handles remain for explicit retry
 		}
 		custody.mu.Unlock()
 		stage = "native_wait"

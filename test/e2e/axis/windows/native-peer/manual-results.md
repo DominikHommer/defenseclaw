@@ -113,3 +113,19 @@ passed without creating a child, PE, PSEC or sandbox. The actual failed peer's
 cleanup cause remains unproven. All 38 Python build/archive/verifier tests and
 Rustfmt checks also passed; Rust compilation and a fresh integrated attempt
 are still required for this diagnostic revision.
+
+Outer attempt 07 used Go owner 50c6be77, the same reviewed d0723346 peer
+and fixed payload, and fresh canary-06. Start and host network controls passed;
+the correlated protocol failure was preparation_failed before Prepared. Inner
+Close and StopAndWait classified native_signal; they did not confirm cleanup.
+The outer supervisor observed its root terminal, empty Job and all handles
+closed in 9.406 seconds, without timeout or output overflow. The failed fixture
+and all leases remain retained. No contained workload ran.
+
+The 14ba5c32 Windows peer build passed 13 peer and 8 selected SDK tests. Root
+and an independent GPT-6 Sol Max inert review matched 44 Git source inputs,
+18 SDK overlay digests, manifest, logs and the PE image; neither review ran it.
+The next changed-source run will use that peer's closed constructor stages and
+a Go dual-role signal diagnostic. The latter's two-package Windows race run
+passed 52 test/subtest rows with zero failures/skips; log SHA256
+`087538cead276d39df8e3aec88a44969f247097e53dc2a8490256241f5e45028`. These tests created no peer, child or PSEC.

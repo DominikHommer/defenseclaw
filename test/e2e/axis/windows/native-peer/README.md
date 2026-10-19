@@ -6,7 +6,7 @@
 Failure diagnostics accept only validated request/binding correlation, closed
 protocol operation and reason codes, and the optional closed Windows native
 preparation/cleanup stages. They never print raw errors, paths, environment,
-arguments or peer stderr. The next fixed fixture basename is canary-06.
+arguments or peer stderr. The next fixed fixture basename is canary-07.
 
 This source draft exercises the existing bridgeprocess SealImageIn/Start and
 the shared Prepare/Launch/Input/InputEOF/Wait/Exited/Destroy protocol. It adds
@@ -123,3 +123,8 @@ now closes any nonnil refusal through that state's one-attempt sticky-close
 method. Access, names, dispositions, image admission and numeric status wording
 are unchanged. The native host-only asset test includes real allocated-handle
 control/native-error finalization and close checks; execution remains ROOT-owned.
+
+The next fixed diagnostic retains both original native termination failures as
+private causes and emits only attempted/failed flags and numeric Win32 codes
+for the Job and root roles at the native_signal cleanup stage. A failed call
+with code zero is unclassified, not success. Cleanup decisions remain unchanged.

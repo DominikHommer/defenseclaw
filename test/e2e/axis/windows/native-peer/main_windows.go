@@ -207,21 +207,30 @@ func writeFixedDiagnostic(writer io.Writer, stage string, err error) {
 			cleanupStage = "unclassified"
 		}
 	}
+	var signals *bridgeprocess.WindowsNativeSignalResult
+	var signaled interface {
+		NativeCleanupSignals() bridgeprocess.WindowsNativeSignalResult
+	}
+	if cleanupStage == "native_signal" && errors.As(err, &signaled) {
+		closed := signaled.NativeCleanupSignals()
+		signals = &closed
+	}
 	var native syscall.Errno
 	hasNative := errors.As(err, &native)
 	raw, _ := json.Marshal(struct {
-		Stage            string   `json:"fixed_diagnostic_stage"`
-		NativeStage      string   `json:"native_start_stage,omitempty"`
-		Operation        string   `json:"protocol_operation,omitempty"`
-		PeerKind         string   `json:"peer_frame_kind,omitempty"`
-		PeerFailure      string   `json:"peer_failure_code,omitempty"`
-		PreparationStage string   `json:"native_preparation_stage,omitempty"`
-		CleanupStage     string   `json:"native_cleanup_stage,omitempty"`
-		Present          bool     `json:"error_present"`
-		Classes          []string `json:"error_classes"`
-		Win32            uint32   `json:"win32_error"`
-		Unclassified     bool     `json:"unclassified_error"`
-	}{stage, nativeStage, operation, peerKind, peerFailure, preparationStage, cleanupStage, err != nil, classes, uint32(native), err != nil && len(classes) == 0 && !hasNative})
+		Stage            string                                   `json:"fixed_diagnostic_stage"`
+		NativeStage      string                                   `json:"native_start_stage,omitempty"`
+		Operation        string                                   `json:"protocol_operation,omitempty"`
+		PeerKind         string                                   `json:"peer_frame_kind,omitempty"`
+		PeerFailure      string                                   `json:"peer_failure_code,omitempty"`
+		PreparationStage string                                   `json:"native_preparation_stage,omitempty"`
+		CleanupStage     string                                   `json:"native_cleanup_stage,omitempty"`
+		Signals          *bridgeprocess.WindowsNativeSignalResult `json:"native_cleanup_signals,omitempty"`
+		Present          bool                                     `json:"error_present"`
+		Classes          []string                                 `json:"error_classes"`
+		Win32            uint32                                   `json:"win32_error"`
+		Unclassified     bool                                     `json:"unclassified_error"`
+	}{stage, nativeStage, operation, peerKind, peerFailure, preparationStage, cleanupStage, signals, err != nil, classes, uint32(native), err != nil && len(classes) == 0 && !hasNative})
 	raw = append(raw, '\n')
 	_, _ = writer.Write(raw) // already a failed measurement; outer stderr refuses.
 }

@@ -42,7 +42,7 @@ func (f *fakeProtocol) Receive(context.Context) (bridgeproto.Frame, error) {
 func fakeConversation() (*fakeProtocol, bridgeproto.Binding, bridgeproto.Preparation) {
 	h := "sha256:" + strings.Repeat("a", 64)
 	b := bridgeproto.Binding{SessionID: "fixed-test", SessionDigest: h, PolicyDigest: h, RuntimeDigest: h, HarnessDigest: h, PreparationHash: h}
-	plan := fixedPlan(`C:\fixed\windows-native-peer-canary-06\fixture\work`, `C:\Windows`)
+	plan := fixedPlan(`C:\fixed\windows-native-peer-canary-07\fixture\work`, `C:\Windows`)
 	f := &fakeProtocol{frames: []bridgeproto.Frame{
 		{Kind: bridgeproto.Prepared, Request: 1}, {Kind: bridgeproto.Started, Request: 2},
 		{Kind: bridgeproto.Output, Request: 2, Data: &bridgeproto.Data{Stream: "stdout", Bytes: []byte(fixedStdout)}},
@@ -85,7 +85,7 @@ func TestFixedCanaryRegistryIsClosedAndWindowsPlanIsExplicit(t *testing.T) {
 	if reviewed.valid() || (artifactRegistry{Enabled: true}).valid() {
 		t.Fatal("unreviewed artifact admitted")
 	}
-	plan := fixedPlan(`C:\fixed\windows-native-peer-canary-06\fixture\work`, `C:\Windows`)
+	plan := fixedPlan(`C:\fixed\windows-native-peer-canary-07\fixture\work`, `C:\Windows`)
 	if plan.Validate() != nil || plan.Backend != "windows_psec" || !plan.Offline || plan.Terminal != nil || len(plan.Environment) != 8 || len(plan.Filesystem.Read) != 1 || len(plan.Filesystem.Write) != 3 || len(plan.Filesystem.Deny) != 0 {
 		t.Fatal("fixed plan differs")
 	}
