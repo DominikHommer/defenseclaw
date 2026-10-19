@@ -59,15 +59,27 @@ type DeviceKeyChecker interface {
 }
 
 // storeBackedKeyProvider resolves per-device keys from the DeviceKeyStore.
-// Falls back to a fleet-wide key, or to a zero key only in explicit development mode.
+// Outside explicit development mode there is no fallback: a device without a
+// provisioned per-device key cannot authenticate. In development mode a
+// fleet-wide DCLAW_DEVICE_KEY (or, failing that, an all-zero key) is used for
+// devices without a per-device key.
 type storeBackedKeyProvider struct {
 	store       DeviceKeyLookup
 	fallbackKey []byte
 }
 
 func newStoreBackedKeyProvider(store DeviceKeyLookup) *storeBackedKeyProvider {
+	return newStoreBackedKeyProviderWithFallback(store, os.Getenv("DCLAW_DEVICE_KEY"))
+}
+
+func newStoreBackedKeyProviderWithFallback(store DeviceKeyLookup, raw string) *storeBackedKeyProvider {
+	if isProductionMode() {
+		if raw != "" {
+			log.Printf("[mqtt-bridge] ERROR: fleet-wide DCLAW_DEVICE_KEY is ignored outside development mode; provision per-device keys via POST /devices")
+		}
+		return &storeBackedKeyProvider{store: store}
+	}
 	var fallback []byte
-	raw := os.Getenv("DCLAW_DEVICE_KEY")
 	if raw != "" {
 		decoded, err := hex.DecodeString(raw)
 		if err == nil && nonzeroDeviceKey(decoded) {
@@ -77,12 +89,8 @@ func newStoreBackedKeyProvider(store DeviceKeyLookup) *storeBackedKeyProvider {
 		}
 	}
 	if fallback == nil {
-		if isProductionMode() {
-			log.Printf("[mqtt-bridge] ERROR: no valid fleet device key; per-device key lookup is required")
-		} else {
-			fallback = make([]byte, 32)
-			log.Printf("[mqtt-bridge] WARNING: explicit development mode is using an all-zero device key")
-		}
+		fallback = make([]byte, 32)
+		log.Printf("[mqtt-bridge] WARNING: explicit development mode is using an all-zero device key")
 	}
 	return &storeBackedKeyProvider{store: store, fallbackKey: fallback}
 }
@@ -124,8 +132,9 @@ func (p *storeBackedKeyProvider) HasDeviceKey(deviceID uint64) (bool, error) {
 	return key != nil, nil
 }
 
-// envDeviceKeyProvider reads DCLAW_DEVICE_KEY from the environment.
-// Falls back to a 32-byte zero key only in explicit unmanaged dev mode.
+// envDeviceKeyProvider reads DCLAW_DEVICE_KEY from the environment. It is
+// honoured only in explicit unmanaged development mode (falling back to a
+// 32-byte zero key there); outside it no shared key is ever used.
 // Deprecated: Use storeBackedKeyProvider for per-device key support.
 type envDeviceKeyProvider struct {
 	key []byte
@@ -133,16 +142,18 @@ type envDeviceKeyProvider struct {
 
 func newEnvDeviceKeyProvider() *envDeviceKeyProvider {
 	raw := os.Getenv("DCLAW_DEVICE_KEY")
+	if isProductionMode() {
+		if raw != "" {
+			log.Printf("[mqtt-bridge] ERROR: fleet-wide DCLAW_DEVICE_KEY is ignored outside development mode — HMAC verification will reject devices without per-device keys")
+		}
+		return &envDeviceKeyProvider{key: nil}
+	}
 	if raw != "" {
 		decoded, err := hex.DecodeString(raw)
 		if err == nil && nonzeroDeviceKey(decoded) {
 			return &envDeviceKeyProvider{key: decoded}
 		}
 		log.Printf("[mqtt-bridge] ERROR: DCLAW_DEVICE_KEY is invalid (want 64 hex chars / 32 bytes)")
-	}
-	if isProductionMode() {
-		log.Printf("[mqtt-bridge] ERROR: No DCLAW_DEVICE_KEY set in production mode — HMAC verification will reject all messages")
-		return &envDeviceKeyProvider{key: nil}
 	}
 	return &envDeviceKeyProvider{key: make([]byte, 32)}
 }
@@ -849,7 +860,12 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	payloadBody := msg.Payload
 	isKeyed := false
 
-	if b.keyProvider != nil {
+	if b.keyProvider == nil {
+		b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — device key provider is not configured")
+		b.incErrors()
+		return
+	}
+	{
 		vrFullID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
 		vrDeviceKey := b.keyProvider.KeyForDevice(vrFullID)
 		if vrDeviceKey == nil {
@@ -864,18 +880,21 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 				b.incErrors()
 				return
 			}
-			if hasKey {
-				isKeyed = true
-			} else {
-				b.logger.Printf("[mqtt-bridge] WARNING: processing verdict request from unkeyed device %d", parts.DeviceID)
-			}
+			// Any usable key (per-device, or a development fleet key) means
+			// the frame must carry a valid HMAC.
+			isKeyed = hasKey || nonzeroDeviceKey(vrDeviceKey)
 		} else {
 			// Legacy envDeviceKeyProvider: no DeviceKeyChecker interface.
 			// Verify HMAC if the key is non-zero (provisioned).
-			var zeroKey [32]byte
-			if len(vrDeviceKey) > 0 && !bytes.Equal(vrDeviceKey, zeroKey[:]) {
-				isKeyed = true
+			isKeyed = nonzeroDeviceKey(vrDeviceKey)
+		}
+		if !isKeyed {
+			if isProductionMode() {
+				b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — device %d has no signing key (unsigned requests are accepted only in development mode)", parts.DeviceID)
+				b.incErrors()
+				return
 			}
+			b.logger.Printf("[mqtt-bridge] WARNING: processing unsigned verdict request from unkeyed device %d (development mode)", parts.DeviceID)
 		}
 
 		if isKeyed {
