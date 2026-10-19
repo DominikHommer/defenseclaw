@@ -49,7 +49,8 @@ static bool g_strict_mode = false;
 /* External module functions */
 extern dclaw_action_t dclaw_policy_check_destination(const char *host);
 extern dclaw_action_t dclaw_policy_check_severity(dclaw_severity_t sev);
-extern dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags);
+extern dclaw_action_t dclaw_correlator_evaluate_ex(uint16_t session_id, uint8_t cap_flags,
+                                                   bool *ota_caused);
 extern uint8_t dclaw_policy_lookup_capability(const char *tool_name);
 extern bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out);
 extern bool dclaw_rate_limit_check(uint8_t cap_flags);
@@ -472,12 +473,15 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     }
 
     /* Step 5: Capability sequence correlation */
-    dclaw_action_t seq_result = dclaw_correlator_evaluate(req->session_id, req->cap_flags);
+    bool seq_by_ota = false;
+    dclaw_action_t seq_result = dclaw_correlator_evaluate_ex(req->session_id, req->cap_flags,
+                                                             &seq_by_ota);
     if (seq_result == DCLAW_ACTION_BLOCK) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
-        dclaw_canary_record_policy_block(target_hash, DCLAW_REASON_CAP_SEQUENCE);
+        if (seq_by_ota)
+            dclaw_canary_record_policy_block(target_hash, DCLAW_REASON_CAP_SEQUENCE);
         in_eval = false;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, DCLAW_VERDICT_SYNC);
     }

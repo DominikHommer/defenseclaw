@@ -145,7 +145,11 @@ static dclaw_action_t more_restrictive(dclaw_action_t cur, uint8_t candidate) {
     return (dclaw_action_t)candidate;
 }
 
-dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags) {
+/* *ota_caused is set when the result is BLOCK only because of a rule in the
+ * OTA-loaded runtime table; compiled-in rules cannot be changed by a push and
+ * must not count toward the canary. */
+dclaw_action_t dclaw_correlator_evaluate_ex(uint16_t session_id, uint8_t cap_flags,
+                                            bool *ota_caused) {
     dclaw_session_t *sess = find_session(session_id);
     if (!sess) {
         sess = create_session(session_id);
@@ -165,6 +169,7 @@ dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags)
         }
     }
 
+    dclaw_action_t compiled_worst = worst;
     dclaw_state_t *st = dclaw_get_state();
     dclaw_policy_table_t *rt = &st->rt_policy;
     for (size_t i = 0; i < rt->sequence_rules_count; i++) {
@@ -176,5 +181,12 @@ dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags)
         }
     }
 
+    if (ota_caused)
+        *ota_caused = rt->loaded && worst == DCLAW_ACTION_BLOCK &&
+                      compiled_worst != DCLAW_ACTION_BLOCK;
     return worst;
+}
+
+dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags) {
+    return dclaw_correlator_evaluate_ex(session_id, cap_flags, NULL);
 }

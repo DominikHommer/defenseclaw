@@ -131,6 +131,11 @@ static bool verify_signature(const uint8_t *message, size_t msg_len,
 
 /* === Policy OTA (REQ-33 through REQ-36) === */
 
+/* Live policy tables captured just before an OTA switch, restored verbatim by
+ * a canary rollback. */
+static dclaw_policy_table_t s_canary_prev_policy;
+static bool s_canary_prev_valid;
+
 int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
                        const uint8_t *signature) {
     dclaw_state_t *s = dclaw_get_state();
@@ -208,7 +213,10 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
         return -3;
     }
 
+    memcpy(&s_canary_prev_policy, &s->rt_policy, sizeof(s_canary_prev_policy));
+    s_canary_prev_valid = true;
     if (dclaw_config_switch_policy_partition(hdr.version) != 0) {
+        s_canary_prev_valid = false;
         fprintf(stderr, "[DCLAW] ERROR: OTA policy partition switch could not be persisted.\n");
         return -3;
     }
@@ -357,10 +365,19 @@ void dclaw_policy_rollback(void) {
     s->rollback_pending = true;
     dclaw_cache_flush_all();
 
-    if (dclaw_policy_reload_from_flash() != 0) {
-        fprintf(stderr, "[DCLAW] WARNING: Rollback partition is blank or corrupt. "
-                "Falling back to compiled-in policy defaults.\n");
+    if (s_canary_prev_valid) {
+        /* Restore the exact tables that were live before the rejected OTA.
+         * Re-reading the previous partition on top of the live (rejected)
+         * tables would keep every section the previous blob omits. */
+        memcpy(&s->rt_policy, &s_canary_prev_policy, sizeof(s->rt_policy));
+        s_canary_prev_valid = false;
+    } else {
+        /* No snapshot (e.g. reboot during the canary): boot semantics. */
         dclaw_policy_tables_init();
+        if (dclaw_policy_reload_from_flash() != 0) {
+            fprintf(stderr, "[DCLAW] WARNING: Rollback partition is blank or corrupt. "
+                    "Falling back to compiled-in policy defaults.\n");
+        }
     }
 
     dclaw_audit_write(DCLAW_ACTION_WARN, DCLAW_REASON_POLICY_TABLE, 0xFFFF, 0);

@@ -39,14 +39,21 @@ static const char *OTA_KEY_HEX =
 
 /* Apply a signed policy whose destination allowlist is empty, so every
  * network call with a public destination is a policy (DEST_DENY) denial. */
+static void apply_policy_sections(uint16_t version, uint16_t baseline, uint8_t sections);
 static void apply_policy(uint16_t version, uint16_t baseline) {
+    apply_policy_sections(version, baseline, 0x87);
+}
+
+/* sections: 0x80 marker | 0x01 severity | 0x02 sequence | 0x04 destination allowlist.
+ * An omitted section keeps the device's current table. */
+static void apply_policy_sections(uint16_t version, uint16_t baseline, uint8_t sections) {
     uint8_t key[32];
     for (int i = 0; i < 32; i++) key[i] = (uint8_t)(i + 1);
     uint8_t blob[64] = {0};
     blob[0] = (uint8_t)(version >> 8); blob[1] = (uint8_t)version;
     blob[3] = 56;
     blob[4] = (uint8_t)(baseline >> 8); blob[5] = (uint8_t)baseline;
-    blob[8] = 0x87; /* explicit (empty) severity/sequence/destination sections */
+    blob[8] = sections;
     uint8_t sig[64] = {0};
     dclaw_hmac_sha256(key, 32, blob, sizeof(blob), sig);
     assert(dclaw_apply_policy(blob, sizeof(blob), sig) == 0);
@@ -134,6 +141,54 @@ static void test_distinct_policy_denials_roll_back(void) {
     printf("  PASS: many distinct policy denials still trigger rollback\n");
 }
 
+extern void dclaw_policy_rollback(void);
+extern void dclaw_policy_tables_init(void);
+
+static const char *SHELL_TOOLS[] = {
+    "bash", "exec", "run_command", "terminal", "execute_code", "run_python",
+    "exec-shell", "run-command", "shell", "run_script",
+};
+
+/* Each minute: 10 distinct shell tools, each after an allowlisted fetch, all
+ * denied by the compiled-in NET_FETCH -> EXEC_SHELL rule, which no push can
+ * change. */
+static void compiled_rule_minute(void) {
+    static uint16_t session = 600;
+    for (size_t i = 0; i < sizeof(SHELL_TOOLS) / sizeof(SHELL_TOOLS[0]); i++) {
+        dclaw_tool_request_t fetch = make_request("api-call", "8.8.8.8", session);
+        dclaw_tool_request_t sh = make_request(SHELL_TOOLS[i], NULL, session);
+        evaluate_n(&fetch, 1);
+        evaluate_n(&sh, 1);
+        session++;
+    }
+}
+
+/* Regression: compiled-in sequence rules were counted as policy denials. */
+static void test_compiled_sequence_rules_do_not_count(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    dclaw_policy_tables_init(); /* earlier tests left an empty allowlist live */
+    apply_policy_sections(4, 1, 0x83); /* keeps the compiled destination allowlist */
+    run_minutes(4, compiled_rule_minute);
+    assert(s->canary.canary_active);
+    assert(s->canary.canary_blocks[0] == 0);
+    printf("  PASS: compiled-in sequence denials do not trigger rollback\n");
+}
+
+/* Regression: rollback re-read the previous partition on top of the
+ * rejected tables, so a section the previous policy omitted stayed rejected. */
+static void test_rollback_restores_omitted_section(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    dclaw_policy_tables_init();
+    apply_policy_sections(5, 1, 0x83); /* v5: no allowlist section -> compiled list */
+    size_t before = s->rt_policy.dest_allowlist_count;
+    assert(before > 0);
+    apply_policy_sections(6, 1, 0x87); /* v6: empty allowlist (deny all) */
+    assert(s->rt_policy.dest_allowlist_count == 0);
+    dclaw_policy_rollback();
+    assert(s->rt_policy.dest_allowlist_count == before);
+    printf("  PASS: rollback restores a section the previous policy omitted\n");
+}
+
 int main(void) {
     const char *flash_path = getenv("DCLAW_FLASH_PATH");
     if (flash_path) unlink(flash_path);
@@ -147,7 +202,9 @@ int main(void) {
     test_junk_does_not_roll_back();
     test_repeated_denial_counts_once();
     test_distinct_policy_denials_roll_back();
-    printf("  ALL PASSED (3 tests)\n");
+    test_compiled_sequence_rules_do_not_count();
+    test_rollback_restores_omitted_section();
+    printf("  ALL PASSED (5 tests)\n");
 
     dclaw_shutdown();
     return 0;
