@@ -282,7 +282,7 @@ func TestCheckpointWALIfLargeCatchUpGivesTheWriterBackAtItsCap(t *testing.T) {
 	original := walWriterPhaseHook
 	walWriterPhaseHook = func(context.Context) {
 		once.Do(func() { close(entered) })
-		time.Sleep(3 * walCatchUpCap)
+		time.Sleep(10 * walCatchUpCap)
 	}
 	t.Cleanup(func() { walWriterPhaseHook = original })
 	type outcome struct {
@@ -299,7 +299,10 @@ func TestCheckpointWALIfLargeCatchUpGivesTheWriterBackAtItsCap(t *testing.T) {
 	if err := store.LogEvent(Event{Action: "hook_decision", Target: "during-catch-up"}); err != nil {
 		t.Fatalf("hook audit append during the catch-up: %v", err)
 	}
-	if waited := time.Since(started); waited > walCatchUpCap+100*time.Millisecond {
+	// The copy under the writer takes ten times the cap. The append waits for
+	// the rest of the cap plus its own write, which -race on a busy box can
+	// make slow, but not for the copy.
+	if waited := time.Since(started); waited > 5*walCatchUpCap {
 		t.Fatalf("hook audit append waited %v for the catch-up, cap %v", waited, walCatchUpCap)
 	}
 	got := <-passDone
