@@ -41,14 +41,14 @@ import (
 //
 // The contract we assert: an empty POST body reaches the unified handler.
 // Most connectors then produce its generic "hook event name is required"
-// error. Codex and Copilot first enforce their installer-bound event
+// error. Antigravity, Codex and Copilot first enforce their installer-bound event
 // registrations inside that same unified handler, so their connector-specific
 // trust errors are pinned separately.
 func TestUnifiedHookDispatch_SingleEntryPoint(t *testing.T) {
 	api := &APIServer{}
 	connectors := map[string]string{
 		"amp":         "hook event name is required",
-		"antigravity": "hook event name is required",
+		"antigravity": "Antigravity hook event registration is required",
 		"codex":       "installer-bound Codex hook event is required",
 		"claudecode":  "hook event name is required",
 		"hermes":      "hook event name is required",
