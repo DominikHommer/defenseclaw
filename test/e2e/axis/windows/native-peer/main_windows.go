@@ -177,15 +177,26 @@ func writeFixedDiagnostic(writer io.Writer, stage string, err error) {
 			classes = append(classes, item.name)
 		}
 	}
+	nativeStage := ""
+	var staged interface{ NativeStartStage() string }
+	if errors.As(err, &staged) {
+		nativeStage = staged.NativeStartStage()
+		switch nativeStage {
+		case "allocated", "peer_duplicate", "peer_application", "payload_duplicate", "payload_metadata", "asset_cwd", "asset_read", "asset_write", "cwd_coverage", "private_pipe", "inheritable_capabilities", "bootstrap", "inheritable_stdio", "job_create", "job_limits", "protocol", "begin", "unclassified":
+		default:
+			nativeStage = "unclassified"
+		}
+	}
 	var native syscall.Errno
 	hasNative := errors.As(err, &native)
 	raw, _ := json.Marshal(struct {
 		Stage        string   `json:"fixed_diagnostic_stage"`
+		NativeStage  string   `json:"native_start_stage,omitempty"`
 		Present      bool     `json:"error_present"`
 		Classes      []string `json:"error_classes"`
 		Win32        uint32   `json:"win32_error"`
 		Unclassified bool     `json:"unclassified_error"`
-	}{stage, err != nil, classes, uint32(native), err != nil && len(classes) == 0 && !hasNative})
+	}{stage, nativeStage, err != nil, classes, uint32(native), err != nil && len(classes) == 0 && !hasNative})
 	raw = append(raw, '\n')
 	_, _ = writer.Write(raw) // already a failed measurement; outer stderr refuses.
 }

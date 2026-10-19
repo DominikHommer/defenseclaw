@@ -26,7 +26,7 @@ still preserved. No launch/policy behavior changes besides the fresh fixed label
 
 The only harness argument is `--run-fixed`. A separately reviewed root recipe
 must stage exact admitted files beneath one fresh protected private directory
-named `windows-native-peer-canary-03`: the fixed harness filename,
+named `windows-native-peer-canary-04`: the fixed harness filename,
 `REVIEWED-ARTIFACTS.json`, `peer.exe` and `payload.exe`. Their complete hashes
 and sizes are source constants, not runtime inputs. The recipe must own the
 harness image/ancestry and an atomic kill-on-close Job before its Resume, with
@@ -90,3 +90,12 @@ errors, paths, environment, SIDs and handles do not. The pure tests use syntheti
 protocol frames and input parsers only. Required next gates: ROOT/Max full source
 review, small local inert builds, exact Windows peer artifact review, fixed
 source-bound outer recipe review, then ROOT alone authorizes one actual run.
+
+Source07 adds a private Start substage wrapper after Session allocation and after
+its existing cleanup. The wrapper preserves Unwrap/errors.Is and formats only a
+closed source stage; it never formats the cause. The canary independently admits
+that interface's fixed vocabulary before emitting `native_start_stage` to stderr.
+No admission, rights, launch, protocol or cleanup operation is changed. Prior
+attempt04 reported only process_admission with successful initial Session.Close
+and native/outer cleanup; that failed fixture remains retained. Internal stage
+evidence is still pending a separately reviewed changed-source attempt.

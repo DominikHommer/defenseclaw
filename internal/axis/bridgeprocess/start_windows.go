@@ -34,6 +34,44 @@ var (
 // the explicit held-root fresh-copy constructor, never an ambient TEMP name.
 func sealImage(context.Context, *os.File, string) (*Image, error) { return nil, ErrUnavailable }
 
+// windowsStartError reports only a fixed substage. The original error remains
+// available through Unwrap; Error never formats its potentially private text.
+type windowsStartError struct {
+	stage string
+	cause error
+}
+
+func knownWindowsStartStage(stage string) bool {
+	switch stage {
+	case "allocated", "peer_duplicate", "peer_application", "payload_duplicate", "payload_metadata", "asset_cwd", "asset_read", "asset_write", "cwd_coverage", "private_pipe", "inheritable_capabilities", "bootstrap", "inheritable_stdio", "job_create", "job_limits", "protocol", "begin", "unclassified":
+		return true
+	default:
+		return false
+	}
+}
+
+func (err *windowsStartError) NativeStartStage() string {
+	if err == nil || !knownWindowsStartStage(err.stage) {
+		return "unclassified"
+	}
+	return err.stage
+}
+func (err *windowsStartError) Error() string {
+	return "private AXIS native start refused at " + err.NativeStartStage()
+}
+func (err *windowsStartError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.cause
+}
+func wrapWindowsStartError(stage string, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &windowsStartError{stage: stage, cause: cause}
+}
+
 // The same Session owns this native object before protocol workers or process
 // creation. There is no PID adoption, second supervisor, output-reader goroutine,
 // detached cleanup owner, or unbounded native wait. An error retains custody.
@@ -510,6 +548,7 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 	// immediately; helpers never close and discard it outside custody.
 	custody := &windowsCustody{serial: make(chan struct{}, 1), launchDone: make(chan struct{})}
 	result = &Session{native: custody}
+	stage := "allocated"
 	defer func() {
 		if resultErr != nil {
 			cleanup, cancel := context.WithTimeout(context.Background(), limits.CleanupTimeout)
@@ -519,6 +558,7 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 			} else {
 				resultErr = errors.Join(resultErr, result.Close(cleanup))
 			}
+			resultErr = wrapWindowsStartError(stage, resultErr)
 		}
 	}()
 	own := func(file *os.File) {
@@ -531,20 +571,24 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 			custody.startupCopies = append(custody.startupCopies, file)
 		}
 	}
+	stage = "peer_duplicate"
 	peer, err := inputs.Peer.duplicate()
 	own(peer)
 	if err != nil {
 		return result, err
 	}
+	stage = "peer_application"
 	application, err := windowsPeerApplication(peer)
 	if err != nil {
 		return result, err
 	}
+	stage = "payload_duplicate"
 	payload, err := inputs.Payload.duplicate()
 	own(payload)
 	if err != nil {
 		return result, err
 	}
+	stage = "payload_metadata"
 	payloadID, err := windowsImageMetadata(payload, false)
 	if err != nil {
 		return result, err
@@ -554,6 +598,12 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 	objects = append(objects, inputs.Write...)
 	for index, object := range objects {
 		write := index > len(inputs.Read)
+		stage = "asset_read"
+		if index == 0 {
+			stage = "asset_cwd"
+		} else if write {
+			stage = "asset_write"
+		}
 		file, directory, id, err := windowsAsset(object, write)
 		own(file) // includes allocated metadata/NTFS refusal
 		if err != nil {
@@ -570,6 +620,7 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 		}
 		caps = append(caps, windowsCapability{file: file, role: role, directory: directory, id: id})
 	}
+	stage = "cwd_coverage"
 	cwdGranted := false
 	paths := append(append([]string{}, plan.Filesystem.Read...), plan.Filesystem.Write...)
 	for index, path := range paths {
@@ -580,6 +631,7 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 	if !cwdGranted {
 		return result, ErrAdmission
 	}
+	stage = "private_pipe"
 	var channels []bridgeowner.PrivatePipe
 	for _, direction := range []bridgeowner.Direction{bridgeowner.ToPeer, bridgeowner.FromPeer, bridgeowner.FromPeer} {
 		setupCtx, cancel := context.WithTimeout(ctx, min(limits.WriteTimeout, time.Second))
@@ -603,6 +655,7 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 		channels = append(channels, channel)
 	}
 	launch := windowsPeerLaunch{application: application, input: channels[0].Parent, writeTimeout: limits.WriteTimeout}
+	stage = "inheritable_capabilities"
 	for index := range caps {
 		file, err := windowsInheritableCopy(caps[index].file)
 		ownChild(file) // preserves allocated Control/native-error refusal
@@ -612,10 +665,12 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 		caps[index].inherited = uint64(file.Fd())
 		launch.handles = append(launch.handles, windows.Handle(file.Fd()))
 	}
+	stage = "bootstrap"
 	launch.prefix, err = encodeWindowsCapabilities(plan, binding, caps)
 	if err != nil {
 		return result, err
 	}
+	stage = "inheritable_stdio"
 	for index, channel := range channels {
 		file, err := windowsInheritableCopy(channel.Child)
 		ownChild(file)
@@ -625,6 +680,7 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 		launch.stdio[index] = windows.Handle(file.Fd())
 		launch.handles = append(launch.handles, windows.Handle(file.Fd()))
 	}
+	stage = "job_create"
 	job, err := windows.CreateJobObject(nil, nil)
 	if job != 0 && job != windows.InvalidHandle {
 		custody.job = job
@@ -632,6 +688,7 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 	if err != nil || custody.job == 0 {
 		return result, ErrUnavailable
 	}
+	stage = "job_limits"
 	jobLimits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
 	jobLimits.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&jobLimits)), uint32(unsafe.Sizeof(jobLimits))); err != nil {
@@ -643,6 +700,7 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 	// calling it. A nil result starts no custody worker and restores ownership.
 	preOwner := custody.preOwnerPipes
 	custody.preOwnerPipes = nil
+	stage = "protocol"
 	owner, err := bridgeowner.New(ctx, binding, pipes, limits)
 	if owner == nil {
 		custody.preOwnerPipes = preOwner
@@ -652,6 +710,7 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 	if err != nil {
 		return result, err
 	}
+	stage = "begin"
 	if err = custody.begin(ctx, launch); err != nil {
 		return result, err
 	}

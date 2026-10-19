@@ -123,7 +123,7 @@ func run() (record result) {
 		return record
 	}
 	base := filepath.Dir(executable)
-	if filepath.Base(base) != "windows-native-peer-canary-03" {
+	if filepath.Base(base) != "windows-native-peer-canary-04" {
 		return record
 	}
 	if o.parents(executable) != nil {
