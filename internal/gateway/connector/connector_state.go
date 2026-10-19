@@ -405,7 +405,7 @@ func canonicalProtectedConnectorNames(field string, rawNames []string) ([]string
 // file. Callers that need teardown intent must use ConnectorExplicitlyInactive;
 // an empty active set alone never suppresses a connector guard.
 func ReadActiveConnectorState(dataDir string) (names []string, exists bool, err error) {
-	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, activeConnectorFile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -430,7 +430,7 @@ func ReadActiveConnectorState(dataDir string) (names []string, exists bool, err 
 // treated as intentional teardown: the hook guard continues to heal in those
 // cases. An explicit active entry wins over a stale inactive entry.
 func ConnectorExplicitlyInactive(dataDir, name string) bool {
-	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, activeConnectorFile))
 	if err != nil {
 		return false
 	}
@@ -489,7 +489,7 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 	want := strings.TrimSpace(name)
 	err = withActiveConnectorStateLock(path, func() error {
 		var readErr error
-		original, readErr = os.ReadFile(path)
+		original, readErr = readConnectorStateFile(path)
 		existed = true
 		if readErr != nil {
 			if !os.IsNotExist(readErr) {
@@ -528,7 +528,7 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 
 	return func() error {
 		return withActiveConnectorStateLock(path, func() error {
-			current, readErr := os.ReadFile(path)
+			current, readErr := readConnectorStateFile(path)
 			if readErr != nil && !os.IsNotExist(readErr) {
 				return readErr
 			}
@@ -565,8 +565,42 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 	}, nil
 }
 
+// A connector state file is published by atomic replacement. On Windows the
+// publisher keeps its renamed handle for a short validation step, and another
+// process (an indexer or antivirus scan) can hold the file briefly too, so a
+// reader waits a bounded time for such a lock before it reports the error
+// (rel-1-0-3 GAP-0300).
+const (
+	connectorStateReadAttempts   = 10
+	connectorStateReadRetryDelay = 100 * time.Millisecond
+)
+
+// connectorStateReadSleep is the wait between attempts; tests replace it.
+var connectorStateReadSleep = time.Sleep
+
+func openConnectorStateFileWithRetry(path string) (*os.File, error) {
+	for attempt := 1; ; attempt++ {
+		file, err := openConnectorStateFile(path)
+		if err == nil || !connectorStateFileBusy(err) || attempt >= connectorStateReadAttempts {
+			return file, err
+		}
+		connectorStateReadSleep(connectorStateReadRetryDelay)
+	}
+}
+
+// readConnectorStateFile is os.ReadFile with the sharing and bounded lock wait
+// of openConnectorStateFileWithRetry.
+func readConnectorStateFile(path string) ([]byte, error) {
+	file, err := openConnectorStateFileWithRetry(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(file)
+}
+
 func loadInactiveConnectorNames(path string) []string {
-	data, err := os.ReadFile(path)
+	data, err := readConnectorStateFile(path)
 	if err != nil {
 		return nil
 	}
@@ -2482,7 +2516,7 @@ func readStablePrivateStateFile(dataDir, name string, limit int64) ([]byte, bool
 	if err := hookAPIValidateOwner(path, before); err != nil {
 		return nil, false
 	}
-	file, err := os.Open(path)
+	file, err := openConnectorStateFileWithRetry(path)
 	if err != nil {
 		return nil, false
 	}
