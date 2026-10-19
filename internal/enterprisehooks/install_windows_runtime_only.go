@@ -22,12 +22,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// windowsOpenCodeMachinePolicy reports OpenCode's managed config path and
-// whether its machine policy is in force: the guardian installed the trusted
-// managed plugin and that config names it. enterprisepolicy owns the check
-// but imports this package on Windows, so the CLI installs it with
-// SetWindowsOpenCodeMachinePolicy. Unset, OpenCode stays on the per-user
-// route.
 // windowsRuntimeOnlyRuntimeFailMode is the delivery mode the guardian writes
 // into, and verify requires of, a runtime-only connector's per-user hook
 // runtime (.hookcfg and .hookcfg.<connector>). The vendor machine policy runs
@@ -37,6 +31,12 @@ import (
 // this value (GAP-0014).
 const windowsRuntimeOnlyRuntimeFailMode = "closed"
 
+// windowsOpenCodeMachinePolicy reports OpenCode's managed config path and
+// whether its machine policy is in force: the guardian installed the trusted
+// managed plugin and that config names it. enterprisepolicy owns the check
+// but imports this package on Windows, so the CLI installs it with
+// SetWindowsOpenCodeMachinePolicy. Unset, OpenCode stays on the per-user
+// route.
 var windowsOpenCodeMachinePolicy struct {
 	sync.Mutex
 	check func() (string, bool)
