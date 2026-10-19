@@ -14,6 +14,10 @@ weighs an estimate. Refresh after a large test change:
            scripts/update_test_timings.py go go.json
   python pytest --junitxml reports of the Python suite -> python-linux.json
            pytest cli/tests --junitxml=py.xml ...; scripts/update_test_timings.py python py.xml
+  go-ci-log  CI job logs of the Go race shards ("ok <package> <seconds>s"
+         lines): replaces the package times in go-linux.json with what the
+         hosted runners measured and keeps the per-test times
+           gh run view <run> --log > ci.log; scripts/update_test_timings.py go-ci-log ci.log
   windows-go  Windows Native CI job logs of the windows-go packages parts,
          which print "[go-package-time] <package> <result> <seconds>" ->
          go-windows.json (gh run view --log > win.log)
@@ -93,24 +97,49 @@ def python_timings(files: list[Path]) -> dict:
     return {"files": {path: round(value, 2) for path, value in sorted(seconds.items())}}
 
 
+# The Windows parts run one package at a time (-p=1), so every package also
+# pays for linking its test binary, which its reported elapsed time leaves out.
+WINDOWS_LINK_SECONDS = 6.0
+
+
+def go_ci_log_timings(files: list[Path], current: Path) -> dict:
+    # A package split into -run parts reports once per part: sum them.
+    pattern = re.compile(r"^\S*\s*(?:ok|FAIL)\s+(\S+)\s+([0-9.]+)s\b", re.MULTILINE)
+    measured: dict[str, float] = {}
+    for file in files:
+        seen: set[tuple[str, str]] = set()
+        for match in pattern.finditer(file.read_text(encoding="utf-8", errors="replace")):
+            if (match.group(1), match.group(2)) in seen:
+                continue
+            seen.add((match.group(1), match.group(2)))
+            measured[match.group(1)] = measured.get(match.group(1), 0.0) + float(match.group(2))
+    data = json.loads(current.read_text(encoding="utf-8")) if current.is_file() else {"packages": {}, "tests": {}}
+    data["packages"].update({package: round(seconds, 1) for package, seconds in measured.items()})
+    data["packages"] = dict(sorted(data["packages"].items()))
+    return data
+
+
 def windows_go_timings(files: list[Path]) -> dict:
     pattern = re.compile(r"\[go-package-time\] (\S+) (?:pass|fail|skip) ([0-9.]+)")
     packages: dict[str, float] = {}
     for file in files:
         for match in pattern.finditer(file.read_text(encoding="utf-8", errors="replace")):
-            packages[match.group(1)] = float(match.group(2))
+            packages[match.group(1)] = float(match.group(2)) + WINDOWS_LINK_SECONDS
     return {"packages": {package: round(value, 1) for package, value in sorted(packages.items())}}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("kind", choices=("go", "python", "windows-go"))
+    parser.add_argument("kind", choices=("go", "go-ci-log", "python", "windows-go"))
     parser.add_argument("inputs", nargs="+", type=Path)
     parser.add_argument("--out", type=Path, help="output file (default: scripts/test-timings/<kind>.json)")
     args = parser.parse_args()
     module = re.search(r"^module\s+(\S+)", (ROOT / "go.mod").read_text(encoding="utf-8"), re.MULTILINE).group(1)
     if args.kind == "go":
         data, default = go_timings(args.inputs, module), "go-linux.json"
+    elif args.kind == "go-ci-log":
+        default = "go-linux.json"
+        data = go_ci_log_timings(args.inputs, args.out or OUT_DIR / default)
     elif args.kind == "python":
         data, default = python_timings(args.inputs), "python-linux.json"
     else:
