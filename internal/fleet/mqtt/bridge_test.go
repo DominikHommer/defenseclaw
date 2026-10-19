@@ -541,6 +541,7 @@ func TestBridgeVerdictRequestRouting(t *testing.T) {
 	mc.simulateMessage("defenseclaw/10/20/100/verdict/req", payload, 1)
 
 	time.Sleep(50 * time.Millisecond)
+	bridge.responsePending.Wait()
 
 	_, verds, errs := bridge.Stats()
 	if verds != 1 {

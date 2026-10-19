@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
+	"github.com/eclipse/paho.golang/paho"
 )
 
 // mapKeyStore implements DeviceKeyLookup with rotation support.
@@ -86,7 +87,8 @@ func newVR(id uint16, boot [16]byte, rn [4]byte) *VerdictRequest {
 		Destination: "x", Content: "c", BootNonce: boot, RequestNonce: rn}
 }
 
-func verdictPublishes(c *mockClient) []Message {
+func verdictPublishes(b *Bridge, c *mockClient) []Message {
+	b.responsePending.Wait()
 	var out []Message
 	for _, m := range c.getPublished() {
 		if strings.HasSuffix(m.Topic, "/verdict/resp") {
@@ -130,7 +132,7 @@ func TestProductionIgnoresSharedDeviceKeyFallback(t *testing.T) {
 	unsigned := EncodeVerdictRequestCBOR(newVR(9, [16]byte{1}, [4]byte{1}))
 	unsigned = append(unsigned, make([]byte, 32)...)
 	b.handleVerdictRequest(Message{Topic: "defenseclaw/2/1/7/verdict/req", Payload: unsigned})
-	if n := len(verdictPublishes(c)); n != 0 {
+	if n := len(verdictPublishes(b, c)); n != 0 {
 		t.Fatalf("unsigned verdict request from an unkeyed device answered in production: %d", n)
 	}
 
@@ -154,12 +156,12 @@ func TestProductionVerdictRequiresHMACWithZeroKeyProvider(t *testing.T) {
 	unsigned := EncodeVerdictRequestCBOR(newVR(9, [16]byte{1}, [4]byte{1}))
 	unsigned = append(unsigned, make([]byte, 32)...)
 	b.handleVerdictRequest(Message{Topic: "defenseclaw/1/2/42/verdict/req", Payload: unsigned})
-	if n := len(verdictPublishes(c)); n != 0 {
+	if n := len(verdictPublishes(b, c)); n != 0 {
 		t.Fatalf("unsigned verdict request answered in production: %d", n)
 	}
 	b.SetKeyProvider(nil)
 	b.handleVerdictRequest(Message{Topic: "defenseclaw/1/2/42/verdict/req", Payload: unsigned})
-	if n := len(verdictPublishes(c)); n != 0 {
+	if n := len(verdictPublishes(b, c)); n != 0 {
 		t.Fatalf("verdict request answered without a key provider: %d", n)
 	}
 }
@@ -255,7 +257,7 @@ func TestForgedVerdictRequestsDoNotExhaustBudget(t *testing.T) {
 	}
 	good := signedVerdictReq(topic, key, newVR(7, [16]byte{1}, [4]byte{1, 2, 3, 4}))
 	b.handleVerdictRequest(Message{Topic: topic, Payload: good})
-	if n := len(verdictPublishes(c)); n != 1 {
+	if n := len(verdictPublishes(b, c)); n != 1 {
 		t.Fatalf("genuine request starved by forged frames: responses=%d", n)
 	}
 }
@@ -288,7 +290,7 @@ func TestLockdownBlockRequiresAuthenticatedRequest(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		b.handleVerdictRequest(Message{Topic: topic, Payload: unsigned})
 	}
-	if n := len(verdictPublishes(c)); n != 0 {
+	if n := len(verdictPublishes(b, c)); n != 0 {
 		t.Fatalf("lockdown path signed %d responses for unauthenticated requests", n)
 	}
 
@@ -296,7 +298,7 @@ func TestLockdownBlockRequiresAuthenticatedRequest(t *testing.T) {
 	for i := 0; i < 2*verdictRateLimit; i++ {
 		b.handleVerdictRequest(Message{Topic: topic, Payload: good})
 	}
-	pubs := verdictPublishes(c)
+	pubs := verdictPublishes(b, c)
 	if len(pubs) != verdictRateLimit {
 		t.Fatalf("lockdown responses=%d, want %d (rate limited)", len(pubs), verdictRateLimit)
 	}
@@ -338,11 +340,11 @@ func TestProductionRejectsSignedVerdictRequestWithoutNonces(t *testing.T) {
 	zeroBoot = append(zeroBoot, encodeCBORBytes(make([]byte, 16))...)
 	zeroBoot = append(zeroBoot, encodeCBORBytes([]byte{1, 2, 3, 4})...)
 	b.handleVerdictRequest(Message{Topic: topic, Payload: sign(zeroBoot)})
-	if n := len(verdictPublishes(c)); n != 0 {
+	if n := len(verdictPublishes(b, c)); n != 0 {
 		t.Fatalf("nonce-less signed requests answered in production: %d", n)
 	}
 	b.handleVerdictRequest(Message{Topic: topic, Payload: signedVerdictReq(topic, key, newVR(8, [16]byte{9}, [4]byte{}))})
-	if n := len(verdictPublishes(c)); n != 1 {
+	if n := len(verdictPublishes(b, c)); n != 1 {
 		t.Fatalf("request with both nonces not answered: %d", n)
 	}
 }
@@ -434,5 +436,95 @@ func TestResetDeviceLineageRestoresCatchup(t *testing.T) {
 	defer mu.Unlock()
 	if calls != 1 {
 		t.Fatalf("catch-up calls=%d, want 1", calls)
+	}
+}
+
+type countingKeyProvider struct {
+	mu    sync.Mutex
+	calls int
+	key   []byte
+}
+
+func (p *countingKeyProvider) KeyForDevice(uint64) []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	return p.key
+}
+
+// Oversized verdict frames are dropped before any key lookup or HMAC.
+func TestOversizedVerdictFrameRejectedBeforeHMAC(t *testing.T) {
+	productionEnv(t)
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 1, 0)
+	c := newMockClient()
+	b := NewBridge(c, fm, allowCache())
+	quietBridge(b)
+	kp := &countingKeyProvider{key: []byte("0123456789abcdef0123456789abcdef")}
+	b.SetKeyProvider(kp)
+	b.handleVerdictRequest(Message{Topic: "defenseclaw/1/2/42/verdict/req", Payload: make([]byte, maxVerdictFrame+1)})
+	if kp.calls != 0 {
+		t.Fatalf("oversized frame reached key lookup (%d calls)", kp.calls)
+	}
+	if _, _, errs := b.Stats(); errs != 1 {
+		t.Fatalf("oversized frame not counted as an error: %d", errs)
+	}
+	if n := len(verdictPublishes(b, c)); n != 0 {
+		t.Fatalf("oversized frame answered: %d", n)
+	}
+}
+
+// A slow broker publish does not block the verdict handler.
+func TestVerdictResponsePublishDoesNotBlockHandler(t *testing.T) {
+	productionEnv(t)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1", 1, 0)
+	slow := &blockingClient{mockClient: newMockClient(), release: make(chan struct{})}
+	b := NewBridge(slow, fm, allowCache())
+	quietBridge(b)
+	b.SetKeyProvider(&fixedKeyProvider{key: key})
+	topic := "defenseclaw/1/2/42/verdict/req"
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 3; i++ {
+			b.handleVerdictRequest(Message{Topic: topic, Payload: signedVerdictReq(topic, key, newVR(uint16(i+1), [16]byte{1}, [4]byte{1}))})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("verdict handler blocked on a slow publish")
+	}
+	close(slow.release)
+	if n := len(verdictPublishes(b, slow.mockClient)); n != 3 {
+		t.Fatalf("responses=%d, want 3", n)
+	}
+}
+
+type blockingClient struct {
+	*mockClient
+	release chan struct{}
+}
+
+func (c *blockingClient) Publish(ctx context.Context, topic string, qos byte, payload []byte) error {
+	select {
+	case <-c.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return c.mockClient.Publish(ctx, topic, qos, payload)
+}
+
+func TestConnectAdvertisesMaximumPacketSize(t *testing.T) {
+	cp, err := limitInboundPacketSize(&paho.Connect{Properties: &paho.ConnectProperties{SessionExpiryInterval: new(uint32)}}, nil)
+	if err != nil || cp.Properties.MaximumPacketSize == nil || *cp.Properties.MaximumPacketSize != maxInboundPacketSize ||
+		cp.Properties.SessionExpiryInterval == nil {
+		t.Fatalf("connect properties not limited correctly: %+v err=%v", cp.Properties, err)
+	}
+	cp, _ = limitInboundPacketSize(&paho.Connect{}, nil)
+	if cp.Properties == nil || cp.Properties.MaximumPacketSize == nil {
+		t.Fatal("maximum packet size not set on a bare CONNECT")
 	}
 }

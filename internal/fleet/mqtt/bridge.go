@@ -233,6 +233,12 @@ type Bridge struct {
 	replayStartOnce sync.Once
 	replayPending   sync.WaitGroup
 
+	// Verdict responses are published by a small worker pool so a slow
+	// broker round-trip cannot stall the MQTT router for every device.
+	responseJobs      chan responseJob
+	responseStartOnce sync.Once
+	responsePending   sync.WaitGroup
+
 	heartbeatMinInterval time.Duration
 	lastHeartbeat        map[uint64]time.Time
 	lastHeartbeatMu      sync.Mutex
@@ -262,7 +268,21 @@ type replayJob struct {
 const (
 	replayQueueSize = 256
 	replayWorkers   = 4
+
+	responseQueueSize = 1024
+	responseWorkers   = 2
 )
+
+type responseJob struct {
+	topic    string
+	payload  []byte
+	lockdown bool
+}
+
+// maxVerdictFrame bounds a verdict request (the decoder's 4096-byte CBOR
+// limit plus the 32-byte HMAC). Larger frames are dropped before any key
+// lookup or HMAC computation.
+const maxVerdictFrame = 4096 + 32
 
 type deviceReplayState struct {
 	bootCounter uint32
@@ -320,6 +340,7 @@ func NewBridge(client Client, fleet *manager.FleetManager, cache *verdict.Cache)
 		verdictRateMap:       make(map[uint64]*verdictRateEntry),
 		replayState:          make(map[uint64]deviceReplayState),
 		replayJobs:           make(chan replayJob, replayQueueSize),
+		responseJobs:         make(chan responseJob, responseQueueSize),
 	}
 }
 
@@ -863,6 +884,13 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		return
 	}
 
+	if len(msg.Payload) > maxVerdictFrame {
+		b.logger.Printf("[mqtt-bridge] verdict request from device %d too large (%d bytes, max %d)",
+			parts.DeviceID, len(msg.Payload), maxVerdictFrame)
+		b.incErrors()
+		return
+	}
+
 	if len(msg.Payload) < 32 {
 		b.logger.Printf("[mqtt-bridge] verdict request from device %d too short (%d bytes, need >= 32)",
 			parts.DeviceID, len(msg.Payload))
@@ -1015,16 +1043,51 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	respTopic := fmt.Sprintf("defenseclaw/%d/%d/%d/verdict/resp",
 		parts.TenantID, parts.FleetID, parts.DeviceID)
 
-	payload := EncodeVerdictResponse(resp)
+	b.enqueueResponse(responseJob{topic: respTopic, payload: EncodeVerdictResponse(resp)})
+}
 
-	pubCtx, pubCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer pubCancel()
-	if err := b.client.Publish(pubCtx, respTopic, 0, payload); err != nil {
-		b.logger.Printf("[mqtt-bridge] publish verdict response to %s: %v", respTopic, err)
+// enqueueResponse hands a signed response to the publisher pool. When the
+// queue is full the response is dropped; the device times out and fails
+// closed, exactly as for a lost QoS 0 message.
+func (b *Bridge) enqueueResponse(job responseJob) {
+	b.responseStartOnce.Do(func() {
+		for i := 0; i < responseWorkers; i++ {
+			go b.responseWorker()
+		}
+	})
+	b.responsePending.Add(1)
+	select {
+	case b.responseJobs <- job:
+	default:
+		b.responsePending.Done()
+		b.logger.Printf("[mqtt-bridge] WARNING: verdict response queue full; dropping response to %s", job.topic)
+		b.incErrors()
+	}
+}
+
+func (b *Bridge) responseWorker() {
+	for {
+		select {
+		case <-b.stopped:
+			return
+		case job := <-b.responseJobs:
+			b.publishResponse(job)
+		}
+	}
+}
+
+func (b *Bridge) publishResponse(job responseJob) {
+	defer b.responsePending.Done()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := b.client.Publish(ctx, job.topic, 0, job.payload); err != nil {
+		b.logger.Printf("[mqtt-bridge] publish verdict response to %s: %v", job.topic, err)
 		b.incErrors()
 		return
 	}
-
+	if job.lockdown {
+		return
+	}
 	b.mu.Lock()
 	b.verdictsProcessed++
 	b.mu.Unlock()
@@ -1141,13 +1204,7 @@ func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, vr *VerdictRequest
 
 	respTopic := fmt.Sprintf("defenseclaw/%d/%d/%d/verdict/resp",
 		parts.TenantID, parts.FleetID, parts.DeviceID)
-	payload := EncodeVerdictResponse(resp)
-
-	lockdownCtx, lockdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer lockdownCancel()
-	if err := b.client.Publish(lockdownCtx, respTopic, 0, payload); err != nil {
-		b.logger.Printf("[mqtt-bridge] publish lockdown BLOCK to %s: %v", respTopic, err)
-	}
+	b.enqueueResponse(responseJob{topic: respTopic, payload: EncodeVerdictResponse(resp), lockdown: true})
 
 	if b.onBlock != nil {
 		b.onBlock()
