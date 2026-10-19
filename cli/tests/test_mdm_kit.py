@@ -1075,6 +1075,18 @@ echo "changed=$DC_ANCHORS_CHANGED verb=$DC_ANCHORS_VERB"
     assert [line for line in calls if re.fullmatch(r"-[rwx-]{9}", line)] == ["-rw-------", "-rw-------"], calls
 
 
+# A lifecycle result that changed nothing (GAP-0034 tests).
+_NOOP_ENSURE_RESULT = {
+    "schema_version": 2, "ok": True, "action": "ensure", "noop": True, "noop_reason": "already_applied",
+    "profile": "standalone", "platform": "linux", "product_version": "1.0.3", "installed_version": "1.0.3",
+    "installed": True, "transaction_pending": False, "services": [],
+    "readiness": {"gateway": True, "guardian": True, "enumerator": True, "sensor_helper": True},
+    "inspection": {"local": "active", "ai_defense": "disabled"}, "machine_policy": {},
+    "enrollment": {"targets": 0, "pending": 0, "failed": 0, "exempt": 0},
+    "coverage_complete": True, "security_complete": True, "errors": [],
+}
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize("reason", ["already_applied", "compliant"])
 def test_unix_wrapper_result_reports_the_trust_anchors_it_installed(tmp_path: Path, reason: str) -> None:
@@ -1086,15 +1098,7 @@ def test_unix_wrapper_result_reports_the_trust_anchors_it_installed(tmp_path: Pa
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
     functions = "\n".join(_shell_function(text, name) for name in ("dc_json_escape", "dc_annotate_anchors_step"))
     anchors = tmp_path / "trust" / "bundle-anchors.json"
-    base = {
-        "schema_version": 2, "ok": True, "action": "ensure", "noop": True, "noop_reason": reason,
-        "profile": "standalone", "platform": "linux", "product_version": "1.0.3", "installed_version": "1.0.3",
-        "installed": True, "transaction_pending": False, "services": [],
-        "readiness": {"gateway": True, "guardian": True, "enumerator": True, "sensor_helper": True},
-        "inspection": {"local": "active", "ai_defense": "disabled"}, "machine_policy": {},
-        "enrollment": {"targets": 0, "pending": 0, "failed": 0, "exempt": 0},
-        "coverage_complete": True, "security_complete": True, "errors": [],
-    }
+    base = dict(_NOOP_ENSURE_RESULT, noop_reason=reason)
     validator = _schema_validator()
 
     def run(changed: str, previous: str, changes: list[str] | None = None) -> dict:
@@ -1124,6 +1128,103 @@ cat "$DC_RESULT"
     assert first["changes"] == [f"installed trust anchors in {anchors}", "restarted the gateway"], first
     unchanged = run("0", "")
     assert unchanged["noop"] is True and unchanged["noop_reason"] == reason and "changes" not in unchanged, unchanged
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("previous", [False, True])
+@pytest.mark.parametrize("applied", [True, False])
+def test_unix_wrapper_main_keeps_and_reports_the_anchors_of_a_confirmed_apply(
+    tmp_path: Path, os_dir: str, previous: bool, applied: bool
+) -> None:
+    # dc_main itself, in both copies, with a bundle and a trust anchor file:
+    # after the bundle apply succeeds the run commits the anchors (the EXIT
+    # trap's anchor restore must not undo them) and the result still names
+    # them although the apply found the bundle already applied (GAP-0034).
+    # A failed apply puts back the as-found file, which shows the restore is
+    # wired to the same run.
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh").rstrip()
+    entry = '\ndc_main "$@"'
+    assert text.endswith(entry)
+    gateway = tmp_path / "bin" / "defenseclaw-gateway"
+    gateway.parent.mkdir()
+    apply_stub = (
+        'if [ "$1 $2 $3" = "enterprise bundle apply" ]; then\n'
+        '    printf \'%s\\n\' "$*" >>"$STUB_LOG"\n'
+        '    cat "$STUB_APPLY"\n'
+        '    exit "$STUB_APPLY_EXIT"\n'
+        'fi\n'
+    )
+    gateway.write_text(_STUB_GATEWAY.replace("#!/bin/sh\n", "#!/bin/sh\n" + apply_stub, 1), encoding="utf-8")
+    gateway.chmod(0o755)
+    anchors = tmp_path / "etc" / "trust" / "bundle-anchors.json"
+    staged_anchors = tmp_path / "new-anchors.json"
+    staged_anchors.write_text('{"v": 2}', encoding="utf-8")
+    bundle = tmp_path / "policy.dcbundle"
+    bundle.write_bytes(b"signed bundle stand-in")
+    stage_parent = tmp_path / "stage"
+    stage_parent.mkdir()
+    document = dict(_NOOP_ENSURE_RESULT, exit_code=0) if applied else dict(
+        _NOOP_ENSURE_RESULT, ok=False, noop=False, noop_reason=None, exit_code=1,
+        errors=[{"code": "bundle_apply_failed", "message": "the bundle did not apply"}])
+    document = {key: value for key, value in document.items() if value is not None}
+    reply = tmp_path / "apply.json"
+    reply.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    log = tmp_path / "gateway.log"
+    # Stand-ins for the root, platform and trust steps; the anchor install,
+    # the bundle apply, the annotation and the EXIT trap run as shipped.
+    overrides = f"""
+dc_layout() {{
+    DC_GATEWAY='{gateway}'
+    DC_ANCHORS='{anchors}'
+    DC_PACKAGE_RESULT='{tmp_path}/last-package-result.json'
+    DC_OS_GROUP=linux
+    DC_LOG=''
+}}
+dc_parse_args() {{ DC_BUNDLE_FILE='{bundle}'; DC_TRUST_ANCHOR_FILE='{staged_anchors}'; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{stage_parent}'; }}
+dc_sweep_stages() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_trusted_path() {{ return 0; }}
+dc_binaries_damaged() {{ return 1; }}
+chown() {{ :; }}
+dc_main
+"""
+    script = text[: -len(entry)] + "\n" + overrides
+    env = _anchors_env(log, anchors, STUB_VERSION=_VERSION_CONTRACT, STUB_APPLY=str(reply),
+                       STUB_APPLY_EXIT="0" if applied else "1")
+    validator = _schema_validator()
+    for shell in ("sh", "bash"):
+        log.unlink(missing_ok=True)
+        shutil.rmtree(anchors.parent.parent, ignore_errors=True)
+        anchors.parent.mkdir(parents=True)
+        if previous:
+            anchors.write_text('{"v": 1}', encoding="utf-8")
+        result = subprocess.run([shell, "-c", script], env=env, capture_output=True, text=True, timeout=30)
+        out = json.loads(result.stdout)
+        assert not sorted(validator.iter_errors(out), key=str), (shell, out)
+        calls = log.read_text(encoding="utf-8").splitlines()
+        installs = [call for call in calls if call.startswith("enterprise bundle anchors install")]
+        applies = [call for call in calls if call.startswith("enterprise bundle apply")]
+        assert len(applies) == 1 and applies[0].startswith(f"enterprise bundle apply --bundle {stage_parent}/"), (shell, calls)
+        assert not list(stage_parent.iterdir()), (shell, result.stderr)
+        if not applied:
+            assert result.returncode == 1 and out["ok"] is False, (shell, result.stdout, result.stderr)
+            if previous:
+                assert anchors.read_text(encoding="utf-8") == '{"v": 1}' and len(installs) == 2, (shell, calls)
+            else:
+                assert not anchors.exists() and len(installs) == 1, (shell, calls)
+            continue
+        assert result.returncode == 0, (shell, result.stdout, result.stderr)
+        verb = "replaced the trust anchors in" if previous else "installed trust anchors in"
+        assert out["noop"] is False and "noop_reason" not in out, (shell, out)
+        assert out["changes"] == [f"{verb} {anchors}"], (shell, out)
+        # Committed: one install, no restore, and the new file in place.
+        assert len(installs) == 1, (shell, calls)
+        assert anchors.read_text(encoding="utf-8") == '{"v": 2}', shell
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
