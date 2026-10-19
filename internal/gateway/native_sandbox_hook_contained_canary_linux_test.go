@@ -158,13 +158,23 @@ func (transport containedFixtureTransport) RoundTrip(request *http.Request) (*ht
 
 func TestFixedContainedHookSharedEvaluatorOracleWithoutNative(t *testing.T) {
 	names := sharedDefaultRegistry().Names()
-	if len(names) != len(fixture.Cases()) {
+	// OpenClaw and ZeptoClaw are built-ins, but this fixed canary covers the
+	// twelve agent-hook connectors. Refuse any other registry addition.
+	if len(names) != len(fixture.Cases())+2 {
 		t.Fatal("fixed payload inventory differs from actual connector registry")
 	}
+	extra := map[string]bool{"openclaw": false, "zeptoclaw": false}
 	for _, name := range names {
+		if _, ok := extra[name]; ok {
+			extra[name] = true
+			continue
+		}
 		if _, err := fixture.Lookup(name); err != nil {
 			t.Fatal("actual connector absent from fixed payload inventory")
 		}
+	}
+	if !extra["openclaw"] || !extra["zeptoclaw"] {
+		t.Fatal("fixed non-canary built-in inventory differs")
 	}
 	for _, value := range fixture.Cases() {
 		t.Run(value.Name, func(t *testing.T) {

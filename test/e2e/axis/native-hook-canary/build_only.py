@@ -92,8 +92,8 @@ PINS = {
         "bytes": 18138,
     },
     "internal/gateway/native_sandbox_hook_contained_canary_linux_test.go": {
-        "sha256": "0d6a7b295903f0648c7fdebcf1c59567e50908e8edbc7e201099dbec3b6748d7",
-        "bytes": 29665,
+        "sha256": "35cf4241d94f07ff36acc4d056753601f4a32077523916feb9a6180812252cda",
+        "bytes": 30055,
     },
     "internal/gateway/native_sandbox_hook_contained_pin_linux_test.go": {
         "sha256": "33aedf3fc8b6afefc40f5252be3ba133f23080766a718f6990cf90569100fac2",

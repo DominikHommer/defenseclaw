@@ -50,6 +50,14 @@ manifest are retained together for ROOT, author and independent inert review.
 payload is executed. A failed build retains its available logs. Artifact and
 source review must finish before a separate concrete native recipe is considered.
 
+The first build-only run, 39212296154 at 1d2f72a8, failed in the safe host
+oracle before its connector subtests. The default registry has fourteen built-ins:
+the twelve fixed agent-hook cases plus OpenClaw and ZeptoClaw. Fixture and fake
+payload tests passed, and the synthetic payload was built; the driver was not
+compiled or run. The corrected oracle requires exactly those two additional
+built-ins and refuses any other registry name. It does not add a vendor case or
+change a hook decision.
+
 Source-only local checks may run the pure Python tests, formatting/actionlint and
 `build_only.py --dry-check <canonical-repo> <TASK-draft-root>`. The two dry-check
 paths only choose text to compare with fixed source hashes; this mode performs no
