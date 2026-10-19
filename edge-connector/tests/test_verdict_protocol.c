@@ -317,6 +317,24 @@ static void test_heartbeat_audit_head(void) {
     printf("  PASS: heartbeat carries the audit chain head after a BLOCK\n");
 }
 
+
+/* Regression: an emergency lockdown was not visible in heartbeats. */
+static void test_heartbeat_lockdown_flag(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    uint8_t hb[64];
+    size_t len = 0;
+    bool was = s->emergency.block_all_active;
+
+    s->emergency.block_all_active = true;
+    dclaw_get_health(hb, &len, sizeof(hb));
+    assert(len == 40 && (hb[30] & 0x40));
+    s->emergency.block_all_active = false;
+    dclaw_get_health(hb, &len, sizeof(hb));
+    assert(len == 40 && !(hb[30] & 0x40));
+    s->emergency.block_all_active = was;
+    printf("  PASS: heartbeat flag 0x40 reports an emergency lockdown\n");
+}
+
 int main(void) {
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
@@ -343,7 +361,8 @@ int main(void) {
     test_reconnect_backoff_bounds();
     test_production_requires_device_key();
     test_heartbeat_audit_head();
-    printf("  ALL PASSED (11 tests)\n");
+    test_heartbeat_lockdown_flag();
+    printf("  ALL PASSED (12 tests)\n");
 
     dclaw_shutdown();
     return 0;

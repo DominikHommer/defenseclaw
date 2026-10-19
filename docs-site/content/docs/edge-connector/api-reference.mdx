@@ -223,6 +223,17 @@ Returns the full device record for a specific device. The `{id}` is the 64-bit c
 }
 ```
 
+`flags` is the bit field from the device's last signed heartbeat:
+
+| Bit | Name | Set by the C engine when |
+| --- | --- | --- |
+| `0x02` | `POLICY_STALE` | No trusted gateway time has been received yet |
+| `0x04` | `TAMPER_DETECT` | Reserved; never set (the audit chain is not verified on the device) |
+| `0x08` | `CANARY_ROLLBACK` | A canary rollback is in effect |
+| `0x20` | `OFFLINE_MODE` | The device is not connected to the broker |
+| `0x40` | `EMERGENCY_LOCKDOWN` | A `BLOCK_ALL` or `ENTER_LOCKDOWN` command is in effect and every tool call is denied |
+| `0x80` | `SE_DEGRADED` | Reserved; never set |
+
 **Status codes**
 
 | Status | Condition |
