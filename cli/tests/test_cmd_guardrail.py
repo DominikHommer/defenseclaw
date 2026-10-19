@@ -346,25 +346,17 @@ class FailModeCommandTests(unittest.TestCase):
         self.assertIn("defenseclaw guardrail mode action", result.output)
         self.assertNotIn("--connector <name>", result.output)
 
-    def test_show_hermes_closed_provenance_reports_effective_open(self):
-        runner = CliRunner()
-        app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
-        with patch("defenseclaw.fail_mode._is_windows", return_value=True):
-            result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("guardrail.hook_fail_mode: closed", result.output)
-        self.assertIn("Hermes (hermes): open (Hermes upstream", result.output)
-        self.assertIn("Hermes remains fail-open", result.output)
-
-    def test_show_hermes_closed_on_linux_and_macos_is_closed(self):
-        # GAP-0150: no upstream fail-open claim where the hook blocks.
-        runner = CliRunner()
-        app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
-        with patch("defenseclaw.fail_mode._is_windows", return_value=False):
-            result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertNotIn("Hermes upstream", result.output)
-        self.assertNotIn("Hermes remains fail-open", result.output)
+    def test_show_hermes_closed_is_closed_on_every_os(self):
+        # GAP-0150 (Linux, macOS) and GAP-0269 (Windows): no upstream
+        # fail-open claim, the hook blocks.
+        for windows in (False, True):
+            runner = CliRunner()
+            app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
+            with patch("defenseclaw.fail_mode._is_windows", return_value=windows):
+                result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertNotIn("Hermes upstream", result.output)
+            self.assertNotIn("Hermes remains fail-open", result.output)
 
     def test_closed_view_omits_hermes_when_not_configured(self):
         # GAP-2116: the Hermes sentence only shows when Hermes is configured.
