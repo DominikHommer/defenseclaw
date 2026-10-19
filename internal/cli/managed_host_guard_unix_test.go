@@ -54,6 +54,25 @@ func TestManagedConfigPermissionErrorNamesAdministrator(t *testing.T) {
 	}
 }
 
+func TestManagedRootProvenanceShowDoesNotLoadPerUserConfig(t *testing.T) {
+	withUnixManagedHostDescriptor(t)
+	withManagedHostCallerUID(t, 0)
+	if provenanceShowCmd.Annotations["defenseclaw.skip-daemon-bootstrap"] != "true" {
+		t.Fatal("provenance show must skip the per-user gateway bootstrap on a managed host")
+	}
+	var out strings.Builder
+	provenanceShowCmd.SetOut(&out)
+	t.Cleanup(func() { provenanceShowCmd.SetOut(nil) })
+	if err := runProvenanceShow(provenanceShowCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"schema_version:", "content_hash:", "generation:", "binary_version:"} {
+		if !strings.Contains(out.String(), field) {
+			t.Fatalf("provenance missing %s", field)
+		}
+	}
+}
+
 func TestManagedStandardUserPolicyAndStatusRefuseBeforeUserConfig(t *testing.T) {
 	withUnixManagedHostDescriptor(t)
 	withManagedHostCallerUID(t, 1000)

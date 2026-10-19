@@ -110,6 +110,18 @@ type windowsEnterpriseLifecycleOptions struct {
 	payloadManifest string
 	allowedSigners  []string
 	productVersion  string
+	// suppliedConfigRefusal is why the supplied --config cannot be loaded
+	// when profile resolution found it unparseable. An install, ensure,
+	// upgrade or repair is refused with it once its installer is found and
+	// trusted, so the refusal reports the running deployment as a refused
+	// config that parses does (GAP-0103).
+	suppliedConfigRefusal error
+	// runningDeploymentLabel marks a run that refused its config before it
+	// changed anything: every warning from index
+	// runningDeploymentWarningsFrom on, those the finish adds included, is
+	// the running deployment's (GAP-0564, GAP-0103).
+	runningDeploymentLabel        bool
+	runningDeploymentWarningsFrom int
 	// payloadPins are the payload manifest's SHA-256 pins, read when a
 	// hash_pinned run verifies its installer. The scanner runtime the
 	// lifecycle installs itself is admitted by them too.
@@ -120,10 +132,26 @@ type windowsEnterpriseLifecycleOptions struct {
 	bundlePath           string
 	trustAnchors         string
 	refuseCapabilityLoss bool
+	// bundleLockWait is how long the run waits for another bundle run to
+	// release bundle.lock (`enterprise bundle apply --lock-wait`); 0 tries
+	// once, as Setup and `enterprise windows ensure` do.
+	bundleLockWait time.Duration
+	// bundleDeliveryID is the `enterprise bundle apply --delivery-id` the
+	// bundle receipt records ("" for none, and for Setup BUNDLE= and
+	// `enterprise windows ensure --bundle`).
+	bundleDeliveryID string
 	// bundle is the bundle state of the run; bundleRollback marks the
 	// internal ensure that puts the last good config back.
 	bundle         *windowsBundleRun
 	bundleRollback bool
+	// bundleSettle is what a changing run that delivers no bundle settled
+	// of the receipts a killed bundle run left (GAP-1302).
+	bundleSettle *windowsBundleSettle
+	// codexTargetTransaction is set by the config apply path when the
+	// supplied config turns Codex protection on or off. The lifecycle
+	// transaction owns Codex's machine policy, so the change, a signed
+	// bundle's included, goes to that transaction (GAP-0033).
+	codexTargetTransaction bool
 	// ignoredDeploymentRecords lists deployment records profile resolution
 	// found but ignored because an administrator did not write them. Only
 	// the standalone result reports them.

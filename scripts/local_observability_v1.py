@@ -26,6 +26,11 @@ except ModuleNotFoundError:  # direct ``python scripts/local_observability_v1.py
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = ROOT / "bundles/local_observability_stack"
 PACKAGED = ROOT / "cli/defenseclaw/_data/local_observability_stack"
+OPTIONAL_FLEET_FILES = {
+    Path("docker-compose.fleet.yml"),
+    Path("prometheus/examples/fleet.yml"),
+    Path("grafana/dashboards/defenseclaw-fleet.json"),
+}
 METRIC_MANIFEST = "schemas/telemetry/generated/compatibility/local-observability-v1.json"
 METRIC_EMITTER = ROOT / "internal/telemetry/metrics.go"
 FLEET_METRIC_EMITTER = ROOT / "internal/fleet/metrics.go"
@@ -118,6 +123,9 @@ EXPECTED_RESOURCE_ATTRIBUTE_ACTIONS = [
 # Loki filters on structured metadata without parsing the line, so the sandbox
 # name (which the canonical record keeps only inside its JSON body) is copied
 # onto the log record as an attribute. Nothing else about the record changes.
+# Loki indexes resource attributes only; the sandbox name moves onto the
+# resource of the records that carry it, so the Sandbox box can list it.
+EXPECTED_SANDBOX_GROUPING_PROCESSOR = {"keys": ["defenseclaw.sandbox.name"]}
 EXPECTED_SANDBOX_IDENTITY_PROCESSOR = {
     "error_mode": "ignore",
     "log_statements": [
@@ -171,12 +179,13 @@ LOKI_BUILTIN_FIELDS = {
     # `defenseclaw.event.name` as structured metadata. Loki normalizes dots
     # to underscores, so it is queryable before `| json` under this spelling.
     "defenseclaw_event_name",
-    # The local Collector adds the sandbox name of every record that names
-    # one as structured metadata (processors.transform/sandbox-identity).
+    # The local Collector lifts the sandbox name of every record that names
+    # one onto its resource (processors.transform/sandbox-identity, then
+    # groupbyattrs/sandbox-identity), and Loki indexes it (loki.yaml).
     "defenseclaw_sandbox_name",
-    # OTLP resource attributes: Loki indexes deployment.environment.name as a
-    # stream label and keeps host.name as structured metadata (the Sandboxes
-    # board's Environment and Host boxes).
+    # OTLP resource attributes that the shipped Loki indexes (loki.yaml
+    # otlp_config), so the Sandboxes board's Environment, Host and OS boxes
+    # can list them.
     "deployment_environment_name",
     # OTLP host.name is exposed by Loki as the normalized resource field.
     "host_name",
@@ -636,6 +645,7 @@ def _bundle_parity_errors() -> list[str]:
         for path in BUNDLE.rglob("*")
         if path.is_file()
         and not _is_runtime_source_file(relative := path.relative_to(BUNDLE))
+        and relative not in OPTIONAL_FLEET_FILES
     }
     packaged_files = {path.relative_to(PACKAGED) for path in PACKAGED.rglob("*") if path.is_file()}
     if source_files != packaged_files:
@@ -672,7 +682,7 @@ def _collector_errors() -> list[str]:
         },
         "logs": {
             "receivers": ["otlp"],
-            "processors": ["resource", "transform/sandbox-identity", "batch"],
+            "processors": ["resource", "transform/sandbox-identity", "groupbyattrs/sandbox-identity", "batch"],
             "exporters": ["otlphttp/loki", "debug"],
         },
     }
@@ -700,6 +710,10 @@ def _collector_errors() -> list[str]:
         errors.append(
             "transform/sandbox-identity must only copy the sandbox name from the record body onto the "
             "defenseclaw.sandbox.name log attribute (Loki structured metadata), never change the body",
+        )
+    if collector.get("processors", {}).get("groupbyattrs/sandbox-identity") != EXPECTED_SANDBOX_GROUPING_PROCESSOR:
+        errors.append(
+            "groupbyattrs/sandbox-identity must move only defenseclaw.sandbox.name onto the log resource",
         )
     resource_actions = collector.get("processors", {}).get("resource", {}).get("attributes")
     if resource_actions != EXPECTED_RESOURCE_ATTRIBUTE_ACTIONS:

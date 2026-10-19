@@ -47,12 +47,13 @@ The main window's sidebar groups the panels:
 | Group | Panels |
 | --- | --- |
 | Monitor | **Overview** (gateway health, connectors, enforcement counts, Doctor, AI Discovery), **Alerts**, **Logs**, **Audit**, **Activity** (output of the commands the app runs) |
-| Govern | **Skills**, **MCPs**, **Plugins**, **Tools**, [**Sandboxes**](#sandboxes-panel) |
+| Govern | **Skills**, **MCPs**, **Plugins**, **Tools**, **Policies**, [**Sandboxes**](#sandboxes-panel) |
 | Discover | **Inventory**, **AI Discovery**, **Runtime** (what actually ran), **Registries** |
 | Configure | **Setup**: the setup forms, including the [Sandbox wizard](#sandbox-wizard), and the config editor |
 
-Most panels match the [TUI](/docs/tui) panels. The app has no Policies panel:
-manage policies and rule packs in the TUI (`P`) or with the CLI.
+Most panels match the [TUI](/docs/tui) panels. **Policies** reads the installed
+runtime's policy catalog. A sandbox's **Inspect policy and events** button
+opens its effective policy, policy history, activity, and network details.
 **Settings** has General, Monitoring, Notifications, and Connection tabs.
 
 The menu-bar popover shows the gateway state, each connector's mode with its

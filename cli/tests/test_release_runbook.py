@@ -101,3 +101,25 @@ def test_dry_run_cannot_sign_publish_or_read_release_secrets() -> None:
                 if "secrets." in str(value):
                     guarded = str(value).startswith("${{ !inputs.dry_run && secrets.")
                     assert name == "legacy-channel" or guarded, (name, key)
+
+
+def test_windows_setup_signing_path_is_pinned_and_proven_in_the_dry_run() -> None:
+    # #1280: a signed standalone build needs the chain policy and the signer
+    # pin, and every dry run proves the signing path with a throwaway
+    # certificate, reading no secret and uploading nothing.
+    import yaml
+
+    workflow = yaml.safe_load(_text(".github/workflows/release.yaml"))
+    jobs = workflow["jobs"]
+    build = "\n".join(step.get("run", "") for step in jobs["enterprise-windows"]["steps"])
+    assert "signer=$(packaging/mdm/signing/authenticode-sign.sh --thumbprint)" in build
+    assert '--signing-type PROD --expected-signer-sha256 "$signer"' in build
+    proof = jobs["enterprise-windows-signing-proof"]
+    assert proof["if"] == "inputs.operation == 'release' && inputs.dry_run"
+    assert "environment" not in proof
+    for step in proof["steps"]:
+        assert "upload-artifact" not in step.get("uses", ""), step
+        assert "secrets." not in str(step), step
+    assert any("prove-signing-path.sh" in step.get("run", "") for step in proof["steps"])
+    assert "enterprise-windows-signing-proof" in jobs["dry-run-assets"]["needs"]
+    assert "enterprise-windows-signing-proof" not in str(jobs["sign"]["needs"])

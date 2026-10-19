@@ -308,7 +308,7 @@ func TestSetupSaysTheRestartYouMakeStopsSandboxes(t *testing.T) {
 			ta.GOOS = goos
 			ta.HostDoctor = unmanagedReport(mac, true)
 			ta.gateway.applyRes = &openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: ta.ConfigPath}}}
-			ta.App.Gateway = onDriver{ta.gateway, map[bool]openshell.ComputeDriver{true: openshell.DriverVM, false: ""}[mac]}
+			ta.Gateway = onDriver{ta.gateway, map[bool]openshell.ComputeDriver{true: openshell.DriverVM, false: ""}[mac]}
 			runningOn(t, ta, 2)
 			ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
 			out := ta.output()
@@ -367,7 +367,7 @@ func TestTeardownRestoresTheFilesOfAGatewayRunAnotherWay(t *testing.T) {
 			}
 			runningOn(t, ta, 1)
 			ta.daemon.status.Gateway.Driver = driver
-			ta.App.Gateway = noServiceGateway{ta.gateway}
+			ta.Gateway = noServiceGateway{ta.gateway}
 			ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true, KeepImages: true}))
 			out := ta.output()
 			has(t, out, "✓ restored the OpenShell gateway configuration; restart the gateway yourself, the way you started it, so it runs on it")

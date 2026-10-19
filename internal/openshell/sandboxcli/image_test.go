@@ -504,10 +504,10 @@ func TestImageBuildWarnsOfTheMicroVMDisk(t *testing.T) {
 		free   uint64
 		want   string
 	}{
-		{"full", "vm", 3 << 30, "not enough free disk space for the first start of a sandbox from it: the MicroVM driver prepares a disk of about 6.0 GiB " +
-			"from its image in ~/.local/state/openshell/vm-driver/images, where 3.0 GiB is free and at least 7.0 GiB is needed"},
-		{"low", "vm", 9 << 30, "only 9.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and the first start of a sandbox from it prepares " +
-			"a MicroVM disk of about 6.0 GiB there (14.0 GiB or more is recommended"},
+		{"full", "vm", 3 << 30, "not enough free disk space for the first start of a sandbox from it: the MicroVM driver's first start uses about 11.0 GiB " +
+			"while preparing a disk from its image in ~/.local/state/openshell/vm-driver/images, where 3.0 GiB is free and at least 12.0 GiB is needed"},
+		{"low", "vm", 15 << 30, "only 15.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and the first start of a sandbox from it uses " +
+			"about 11.0 GiB while preparing a MicroVM disk there (22.0 GiB or more is recommended"},
 		{"room", "vm", 40 << 30, ""},
 		{"docker", "docker", 1 << 30, ""},
 	} {

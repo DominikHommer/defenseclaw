@@ -20,11 +20,17 @@ This is the only upgrade code that stays on a machine between releases, so it
 must never need to change. It picks a release, downloads that release's
 installer, checks it against the release's ``checksums.txt``, and runs it.
 Everything else (what to download, how to swap, migrate, and roll back) lives
-in the installer of the release being installed, so a fix to any of it ships
-with the next release.
+in the installer. Windows downgrades first run the saved current installer,
+whose recovery checks must run before an older installer takes over.
 
 Standard library only, and imported before the rest of the CLI, so it keeps
 working when anything else in the installed version is broken.
+
+A downgrade is the one case the older release's installer cannot handle on
+its own: it refuses a config.yaml that sets a key it does not have. So this
+shim sets aside the keys of ``NEWER_CONFIG_KEYS`` the older release lacks
+(``SET_ASIDE_FILE`` in the data folder) before it runs that installer, and
+``defenseclaw migrate`` of a release that has them puts them back.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ import os
 import re
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -55,6 +62,13 @@ RELEASE_ISSUER = "https://token.actions.githubusercontent.com"
 # pass it to the installer as --local.
 LOCAL_DIR_ENV = "DEFENSECLAW_UPGRADE_LOCAL_DIR"
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+# Configuration keys added after 1.0.2, with the first release that has each.
+# The installer of an older release refuses a config.yaml that sets one
+# ("unknown field", GAP-0137), so a downgrade sets them aside first.
+NEWER_CONFIG_KEYS = (("openshell.trusted_ca_bundle", (1, 0, 3)),)
+# Where a downgrade keeps the keys it set aside, in the data folder:
+# {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
+SET_ASIDE_FILE = "config-set-aside.json"
 _TIMEOUT = 30
 
 RECOVER_CORRUPT_AUDIT_NOTE = (
@@ -309,13 +323,141 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
 
     print(f"  → Installing DefenseClaw {version} (installed: {installed})")
     workdir = tempfile.mkdtemp(prefix="defenseclaw-upgrade-")
+    extra = ["--local", local_dir] if local_dir else []
     try:
-        installer = _fetch_installer(repo, version, local_dir, workdir)
+        if os.name == "nt" and _key(version) < _key(installed):
+            # Older installers cannot read current recovery receipts. Let this
+            # install's controller quiesce the gateway and check them before
+            # it delegates to the verified installer of the requested release.
+            saved = os.path.join(_data_home(), "installer", "install.ps1")
+            installer = os.path.join(workdir, "install.ps1")
+            try:
+                _copy_windows_saved_installer(saved, installer)
+                _check_installer_version(installer, installed)
+            except (OSError, ShimError) as exc:
+                raise ShimError(
+                    f"cannot safely use the current saved installer {saved}: {exc}. "
+                    f"Repair DefenseClaw {installed} with its installer before retrying this downgrade"
+                ) from None
+            extra = ["--version", version, *extra]
+        else:
+            installer = _fetch_installer(repo, version, local_dir, workdir)
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
-    extra = ["--local", local_dir] if local_dir else []
+    if _key(version) < _key(installed):
+        try:
+            _set_aside_newer_keys(version)
+        except BaseException:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise
     return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir)
+
+
+def _active_config_path() -> str:
+    override = os.environ.get("DEFENSECLAW_CONFIG", "").strip()
+    return os.path.expanduser(override) if override else os.path.join(_data_home(), "config.yaml")
+
+
+def _set_aside_newer_keys(version: str) -> None:
+    """Take the keys DefenseClaw ``version`` does not have out of config.yaml.
+
+    Its installer would refuse the configuration ("unknown field", GAP-0137).
+    The values go to ``SET_ASIDE_FILE`` first, then one validated write
+    removes the keys; ``defenseclaw migrate`` of a release that has them
+    puts them back. When the keys cannot be set aside, the upgrade stops
+    with the command that removes them, and nothing is changed.
+    """
+
+    target = _key(version)
+    config = _active_config_path()
+    try:
+        import yaml
+
+        with open(config, encoding="utf-8") as stream:
+            raw = yaml.safe_load(stream)
+    except Exception:  # noqa: BLE001 - no config or one that does not parse: the installer's check names it
+        return
+    found: dict[str, object] = {}
+    for dotted, since in NEWER_CONFIG_KEYS:
+        if target >= since:
+            continue
+        node: object = raw
+        for part in dotted.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if node not in (None, ""):
+            found[dotted] = node
+    if not found:
+        return
+    names = ", ".join(found)
+    stop = (
+        f"DefenseClaw {version} does not have {names}, so its installer would refuse config.yaml; "
+        f"remove it with 'defenseclaw config unset {' '.join(found)}' and run the upgrade again"
+    )
+    held = os.path.join(_data_home(), SET_ASIDE_FILE)
+    try:
+        from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply
+    except Exception as exc:  # noqa: BLE001 - a broken install: say what to remove by hand
+        raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
+    previous: bytes | None = None
+    try:
+        with open(held, "rb") as stream:
+            previous = stream.read()
+        kept = json.loads(previous.decode("utf-8")).get("keys")
+    except FileNotFoundError:
+        kept = None
+    except (OSError, ValueError, AttributeError):
+        kept = None
+    keys = dict(kept) if isinstance(kept, dict) else {}
+    keys.update(found)
+    try:
+        _write_private_json(held, {"version": 1, "for": version, "keys": keys})
+    except OSError as exc:
+        raise ShimError(f"{stop} (could not write {held}: {exc})") from None
+    try:
+        apply(
+            [Change(key, unset=True) for key in found],
+            ACTOR_MIGRATION,
+            f"set aside for the downgrade to {version}",
+            path=config,
+        )
+    except Exception as exc:  # noqa: BLE001 - config.yaml is unchanged; so is the record
+        try:
+            if previous is None:
+                os.remove(held)
+            else:
+                _write_private_bytes(held, previous)
+        except OSError:
+            pass
+        raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
+    print(f"  → DefenseClaw {version} does not have {names}: set aside in {held}.")
+    print(
+        "    Installing a release that has it puts it back. If the installer stops, "
+        "or after a rollback, put it back with: defenseclaw migrate"
+    )
+
+
+def _write_private_json(path: str, document: dict[str, object]) -> None:
+    _write_private_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def _write_private_bytes(path: str, data: bytes) -> None:
+    """Write ``path`` owner-only and atomically."""
+
+    fd, tmp = tempfile.mkstemp(prefix=".config-set-aside.", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _data_home() -> str:
@@ -323,15 +465,94 @@ def _data_home() -> str:
     return os.path.normpath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
 
 
+def _windows_regular_file_info(path: str) -> os.stat_result:
+    """Validate the saved controller's locator without accepting reparse aliases."""
+    path = os.path.abspath(path)
+    ancestors = []
+    parent = os.path.dirname(path)
+    while True:
+        ancestors.append(parent)
+        above = os.path.dirname(parent)
+        if above == parent:
+            break
+        parent = above
+    for entry in [*reversed(ancestors), path]:
+        info = os.lstat(entry)
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise OSError(f"saved installer path contains a reparse point: {entry}")
+        expected_type = stat.S_ISREG if entry == path else stat.S_ISDIR
+        if not expected_type(info.st_mode):
+            raise OSError(f"saved installer path has an unexpected file type: {entry}")
+    return info
+
+
+def _read_windows_regular_file(path: str, limit: int) -> bytes:
+    before = _windows_regular_file_info(path)
+    if before.st_size > limit:
+        raise OSError(f"saved installer metadata exceeds its size limit: {path}")
+    with open(path, "rb") as source:
+        opened = os.fstat(source.fileno())
+        body = source.read(limit + 1)
+        after = os.fstat(source.fileno())
+    named = _windows_regular_file_info(path)
+    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    witness = tuple(getattr(before, field) for field in fields)
+    # On Windows Python can expose creation time through lstat's st_ctime
+    # and change time through fstat's. Compare each source with itself.
+    if (
+        len(body) != before.st_size
+        or before.st_ctime_ns != named.st_ctime_ns
+        or opened.st_ctime_ns != after.st_ctime_ns
+        or any(tuple(getattr(info, field) for field in fields) != witness for info in (opened, after, named))
+    ):
+        raise OSError(f"saved installer changed while being copied: {path}")
+    return body
+
+
+def _copy_windows_saved_installer(source: str, destination: str) -> None:
+    body = _read_windows_regular_file(source, 4 * 1024 * 1024)
+    with open(destination, "xb") as target:
+        target.write(body)
+
+
 def _rollback(*, yes: bool) -> int:
     home = _data_home()
     name = _installer_name()
     installer = os.path.join(home, "installer", name)
-    if not os.path.isfile(installer):
+    if os.name == "nt":
+        from defenseclaw import __version__ as installed
+
+        try:
+            _windows_regular_file_info(installer)
+            use_previous = False
+        except FileNotFoundError:
+            use_previous = True
+        except OSError as exc:
+            raise ShimError(
+                f"cannot safely use the current saved installer {installer}: {exc}. "
+                "Repair the current DefenseClaw install before retrying rollback"
+            ) from None
+    else:
+        use_previous = not os.path.isfile(installer)
+    if use_previous:
         # A source ('make all') install saves no installer. After a rollback to
         # one, the install it replaced (now in previous/) still has its own, and
         # that one rolls forward again (GAP-2459).
         installer = os.path.join(home, "previous", "installer", name)
+        if os.name == "nt":
+            try:
+                back_to = (
+                    _read_windows_regular_file(os.path.join(home, "previous", "VERSION"), 128)
+                    .decode("utf-8-sig")
+                    .strip()
+                )
+            except (OSError, UnicodeError):
+                back_to = ""
+            if not _VERSION.fullmatch(back_to) or _key(back_to) < _key(installed):
+                raise ShimError(
+                    "the current saved Windows installer is missing, and the previous install cannot safely control "
+                    "this rollback. Repair the current DefenseClaw install before retrying rollback"
+                )
     if not os.path.isfile(installer):
         saved = os.path.join(home, "installer")
         raise ShimError(
@@ -351,11 +572,16 @@ def _rollback(*, yes: bool) -> int:
     workdir = tempfile.mkdtemp(prefix="defenseclaw-rollback-")
     copy = os.path.join(workdir, name)
     try:
-        shutil.copyfile(installer, copy)
+        if os.name == "nt":
+            _copy_windows_saved_installer(installer, copy)
+            _check_installer_version(copy, back_to if use_previous else installed)
+        else:
+            shutil.copyfile(installer, copy)
     except BaseException as exc:
         shutil.rmtree(workdir, ignore_errors=True)
-        if isinstance(exc, OSError):
-            raise ShimError(f"could not copy the saved installer {installer}: {exc}") from None
+        if isinstance(exc, (OSError, ShimError)):
+            hint = ". Repair the current DefenseClaw install before retrying rollback" if os.name == "nt" else ""
+            raise ShimError(f"could not copy the saved installer {installer}: {exc}{hint}") from None
         raise
     return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir)
 
@@ -433,7 +659,7 @@ def _windows_terminal_without_desktop() -> bool:
 
 
 def _powershell_flag(arg: str) -> str:
-    return {"--yes": "-Yes", "--rollback": "-Rollback", "--local": "-Local"}.get(arg, arg)
+    return {"--yes": "-Yes", "--rollback": "-Rollback", "--local": "-Local", "--version": "-Version"}.get(arg, arg)
 
 
 def _installer_name() -> str:

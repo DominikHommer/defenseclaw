@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,7 +74,6 @@ func newSandboxFixture(t testing.TB, enrollment config.EnterpriseEnrollmentConfi
 	cfg.Enterprise.Enrollment = enrollment
 	f.cfg = cfg
 	f.api = NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
-	t.Cleanup(func() { sandboxAuthorities.Delete(f.api) })
 
 	restoreFacts, restoreBlocking := identityFactsEnabled.Load(), identityLookupBlocking.Load()
 	identityFactsEnabled.Store(true)
@@ -166,6 +166,7 @@ func (f *sandboxFixture) do(peer managedHookPeer, method, path string, body any,
 	req := httptest.NewRequest(method, path, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+	req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 	for k, v := range header {
 		if v == "" {
 			req.Header.Del(k)
@@ -488,6 +489,12 @@ func TestSandboxAuthorityColdCacheRematch(t *testing.T) {
 	if rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK {
 		t.Fatalf("hook on a cold cache: %d %s", rec.Code, rec.Body.String())
 	}
+	// policy/current carries the match's provisional flag with its profile,
+	// so the daemon's status follows a re-match (#1199).
+	if code, cur := f.current(sbxAlice, resp.Registration.ID); code != http.StatusOK || cur.Provisional == nil || !*cur.Provisional ||
+		cur.Profile != "offline-floor" {
+		t.Fatalf("current on a cold cache: %d profile %q provisional %v", code, cur.Profile, cur.Provisional)
+	}
 	f.setGroups(sbxAlice, "dc-sbx-contractors")
 	rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil)
 	if rec.Code != http.StatusOK || rec.Header().Get(sandboxrelay.ProfileHeader) != "contractors" {
@@ -497,6 +504,10 @@ func TestSandboxAuthorityColdCacheRematch(t *testing.T) {
 	reg, _, _ := auth.store.Get(sbxAlice.UID, resp.Registration.ID)
 	if reg.Provisional || reg.Profile != "contractors" || reg.ProfileMatch != sandboxreg.MatchGroup || reg.State != sandboxreg.StateLive {
 		t.Fatalf("re-matched registration: %+v", reg)
+	}
+	if code, cur := f.current(sbxAlice, resp.Registration.ID); code != http.StatusOK || cur.Provisional == nil || *cur.Provisional ||
+		cur.Profile != "contractors" {
+		t.Fatalf("current after the re-match: %d profile %q provisional %v", code, cur.Profile, cur.Provisional)
 	}
 	f.mu.Lock()
 	rematched := strings.Join(f.rematched, ";")
@@ -573,7 +584,7 @@ func TestSandboxAuthorityConfigChangeSwitchesLiveFields(t *testing.T) {
 	gen = &Generation{N: 2, Config: &next, Profiles: f.api.guardrailProfileSet()}
 	genMu.Unlock()
 	code, after := f.current(sbxAlice, resp.Registration.ID)
-	if code != http.StatusOK || len(after.Live.EgressBlock) != 1 || after.Generation == before.Generation || after.Revoked {
+	if code != http.StatusOK || after.Floor == nil || len(after.Floor.EgressBlock) != 1 || after.Generation == before.Generation || after.Revoked {
 		t.Fatalf("current after the change: %d %+v (before %+v)", code, after, before)
 	}
 	f.mu.Lock()
@@ -581,6 +592,53 @@ func TestSandboxAuthorityConfigChangeSwitchesLiveFields(t *testing.T) {
 	f.mu.Unlock()
 	if !strings.Contains(rematched, "floor") {
 		t.Fatalf("re-match record: %q", rematched)
+	}
+}
+
+// GAP-0224: once the organization raises the profile to strict, the
+// saved allow of a sandbox registered under the looser one is left out of
+// its decisions list (the store keeps the record), a user block stays, and
+// policy/current names the strict min_profile a restart takes.
+func TestSandboxAuthorityStrictFloorCapsSavedDecisions(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
+	gen := &Generation{N: 1, Config: f.cfg, Profiles: f.api.guardrailProfileSet()}
+	var genMu sync.Mutex
+	f.api.SetGenerationSource(func() *Generation { genMu.Lock(); defer genMu.Unlock(); return gen })
+	resp := f.live(sbxAlice, 1)
+	for _, kind := range []string{sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionEgressBlock} {
+		rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathDecisions, sandboxrelay.DecisionRequest{
+			V: 1, Registration: resp.Registration.ID, Kind: kind, Host: kind + ".example.com", Scope: sandboxrelay.DecisionScopeAlways,
+		}, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("save %s: %d %s", kind, rec.Code, rec.Body.String())
+		}
+	}
+	list := func() []sandboxrelay.Decision {
+		rec := f.do(sbxAlice, http.MethodGet, sandboxrelay.PathDecisions+"?registration="+resp.Registration.ID, nil, nil)
+		var listed []sandboxrelay.Decision
+		if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil || rec.Code != http.StatusOK {
+			t.Fatalf("decisions: %d %s", rec.Code, rec.Body.String())
+		}
+		return listed
+	}
+	if got := list(); len(got) != 2 {
+		t.Fatalf("decisions under the loose floor = %+v", got)
+	}
+	if _, cur := f.current(sbxAlice, resp.Registration.ID); cur.MinProfile == nil || *cur.MinProfile == config.OpenShellProfileStrict {
+		t.Fatalf("min_profile before the change = %v", cur.MinProfile)
+	}
+	next := *f.cfg
+	next.OpenShell.Admin.MinProfile = config.OpenShellProfileStrict
+	genMu.Lock()
+	gen = &Generation{N: 2, Config: &next, Profiles: f.api.guardrailProfileSet()}
+	genMu.Unlock()
+	code, cur := f.current(sbxAlice, resp.Registration.ID)
+	if code != http.StatusOK || cur.MinProfile == nil || *cur.MinProfile != config.OpenShellProfileStrict {
+		t.Fatalf("current after the strict change: %d min_profile %v", code, cur.MinProfile)
+	}
+	if got := list(); len(got) != 1 || got[0].Kind != sandboxrelay.DecisionEgressBlock {
+		t.Fatalf("decisions under the strict floor = %+v, want the user block only", got)
 	}
 }
 
@@ -687,7 +745,10 @@ func TestSandboxAuthorityNamesAMistakeInTheUsersOwnInput(t *testing.T) {
 // along and which it left out, so the administrator's view can list them.
 func TestSandboxAuthorityResolveKeepsTheMCPJudgment(t *testing.T) {
 	prev := sandboxFilterMCP
-	sandboxFilterMCP = func(context.Context, *APIServer, managedHookPeer, string, []sandboxrelay.MCPServerClaim) ([]string, []sandboxrelay.MCPSkip) {
+	sandboxFilterMCP = func(_ context.Context, _ *APIServer, _ managedHookPeer, _ string, claims []sandboxrelay.MCPServerClaim) ([]string, []sandboxrelay.MCPSkip) {
+		if len(claims) == 1 && claims[0].Name == "fresh-srv" {
+			return []string{"fresh-srv"}, nil
+		}
 		return []string{"ok-srv"}, []sandboxrelay.MCPSkip{{Name: "blocked-srv", Reason: sandboxrelay.MCPSkipOrganizationBlock}}
 	}
 	t.Cleanup(func() { sandboxFilterMCP = prev })
@@ -699,6 +760,16 @@ func TestSandboxAuthorityResolveKeepsTheMCPJudgment(t *testing.T) {
 	if !ok || len(reg.MCPKept) != 1 || reg.MCPKept[0] != "ok-srv" ||
 		len(reg.MCPSkipped) != 1 || reg.MCPSkipped[0].Name != "blocked-srv" || reg.MCPSkipped[0].Reason != sandboxrelay.MCPSkipOrganizationBlock {
 		t.Fatalf("registration MCP = kept %v skipped %v", reg.MCPKept, reg.MCPSkipped)
+	}
+	explain := postureExplain(t, f, sbxBob, sandboxrelay.ExplainRequest{Registration: resp.Registration.ID})
+	if !slices.Equal(explain.MCPIncluded, reg.MCPKept) || len(explain.MCPBlocked) != 1 ||
+		explain.MCPBlocked[0].Name != "blocked-srv" {
+		t.Fatalf("registered explain MCP = kept %v blocked %v", explain.MCPIncluded, explain.MCPBlocked)
+	}
+	explain = postureExplain(t, f, sbxBob, sandboxrelay.ExplainRequest{Registration: resp.Registration.ID,
+		MCP: []sandboxrelay.MCPServerClaim{{Name: "fresh-srv", Command: "npx"}}})
+	if !slices.Equal(explain.MCPIncluded, []string{"fresh-srv"}) || len(explain.MCPBlocked) != 0 {
+		t.Fatalf("registered MCP recheck = kept %v blocked %v", explain.MCPIncluded, explain.MCPBlocked)
 	}
 }
 
@@ -941,6 +1012,7 @@ func FuzzSandboxRelayHeaders(f *testing.F) {
 		req := httptest.NewRequest(http.MethodPost, sandboxrelay.PathHookPrefix+"claudecode", strings.NewReader(`{"hook_event_name":"PreToolUse"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+		req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 		req.Header.Set(sandboxrelay.RegistrationHeader, registration)
 		if files != "" {
 			req.Header.Set(sandboxrelay.FilesHeader, files)

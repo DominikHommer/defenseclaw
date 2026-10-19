@@ -100,8 +100,11 @@ func ValidateCandidate(configFile string, raw []byte) error {
 	if _, err := ParseCompileObservabilityV8(configFile, raw, ObservabilityV8CompileOptions{DefaultDataDir: dataDir}); err != nil {
 		return err
 	}
-	_, err = LoadRuntimeV8InspectionCandidateFromBytes(configFile, raw)
-	return err
+	cfg, err := LoadRuntimeV8InspectionCandidateFromBytes(configFile, raw)
+	if err != nil {
+		return err
+	}
+	return ValidateManagedStandaloneLiteralCandidate(cfg, raw)
 }
 
 // StandaloneManagedSource reports whether config bytes describe a managed

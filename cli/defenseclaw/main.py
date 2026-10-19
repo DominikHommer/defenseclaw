@@ -430,10 +430,11 @@ def cli(ctx: click.Context) -> None:
             return
         if cfg_mod.config_path().is_file():
             # GAP-0288: the file is there and refused; `init` would not fix it.
+            unchanged = " config.yaml was not changed." if invoked == "config" else ""
             ux.echo(
                 f"Failed to load config: {exc}. Fix it in {cfg_mod.config_path()}; "
                 "'defenseclaw config validate' shows the line. "
-                "A running gateway keeps its last good configuration.",
+                f"A running gateway keeps its last good configuration.{unchanged}",
                 err=True,
             )
         else:

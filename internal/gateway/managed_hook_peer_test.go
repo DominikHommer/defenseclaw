@@ -227,11 +227,15 @@ func TestManagedHookSocketRecordsAStandardUsersRefusal(t *testing.T) {
 	if code := send(`{"action":"skill-block","target":"p0-test-skill","details":"type=skill"}`); code != http.StatusNoContent {
 		t.Fatalf("refusal report: status %d", code)
 	}
+	if code := send(`{"action":"action","target":"enterprise linux ensure","details":"command=enterprise linux ensure","reason":"not_root"}`); code != http.StatusNoContent {
+		t.Fatalf("not_root refusal report: status %d", code)
+	}
 	for _, body := range []string{
 		`{"action":"scan","target":"x"}`,
 		`{"action":"skill-block","target":""}`,
 		`{"action":"skill-block","target":"x","actor":"root"}`,
 		`{"action":"skill-block","target":"x","details":"type=skill outcome=applied"}`,
+		`{"action":"action","target":"x","reason":"allowed"}`,
 	} {
 		if code := send(body); code != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want 400", body, code)
@@ -256,6 +260,13 @@ func TestManagedHookSocketRecordsAStandardUsersRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
+	var rootRefusal string
+	if err := database.QueryRow(`SELECT details FROM audit_events WHERE action = 'action' AND target = 'enterprise linux ensure' ORDER BY rowid DESC LIMIT 1`).Scan(&rootRefusal); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rootRefusal, "reason=not_root") || !strings.Contains(rootRefusal, "actor=uid:508") {
+		t.Fatalf("not_root row lost verified attribution: %q", rootRefusal)
+	}
 	var count int
 	var details string
 	if err := database.QueryRow(`SELECT COUNT(*), COALESCE(MAX(details), "") FROM audit_events WHERE action = "skill-block" AND target = "p0-test-skill"`).Scan(&count, &details); err != nil {

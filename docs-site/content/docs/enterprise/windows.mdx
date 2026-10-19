@@ -391,9 +391,12 @@ removed. `security_complete` stays `false` until that session restarts.
 Claude Code, Codex and Cursor use machine policy hooks, so this restore case
 does not apply to them.
 
-If the hook guardian's restore record cannot be read, Windows `status` and
-`verify` report `agent_sessions_restart_required` with "restart status unknown"
-and set `security_complete` to `false`, even when no session was listed. A
+If the hook guardian's restore record cannot be read, or its content is
+invalid, `status` and `verify` (on Windows, Linux and macOS) report
+`agent_sessions_restart_required` with "restart status unknown" and set
+`security_complete` to `false`, even when no session was listed. When the
+guardian replaces an invalid record, it dates every enrolled target at that
+pass, so the warning then names their sessions that started before it. A
 running agent with no account name is checked by its owner SID when available;
 with neither an account name nor a SID, its restart status is unknown.
 
@@ -751,8 +754,11 @@ lists them as well.
 On Windows, `agent_unprotected` also covers a running enabled agent whose
 account SID cannot be resolved; the warning names the account when known and
 otherwise says the owner is unknown. A per-user WinGet package listing that
-reaches its entry limit or deadline is reported as "not fully scanned" for
-that account, instead of as no install found.
+reaches its entry limit or deadline, or whose earlier listing has not
+returned, is reported as "not fully scanned" for that account, instead of as
+no install found. The message says which: too many entries (remove the
+packages the user no longer needs), or a folder whose storage does not answer
+(check that a redirected or network profile folder is reachable).
 Cursor's machine hooks file is published only while a user is enrolled for
 Cursor; see [Machine policy](/docs/enterprise/machine-policy#routes-by-connector).
 `include_groups` and `exclude_groups` apply on Windows as described there.
@@ -1160,6 +1166,34 @@ The next uninstall removes one that an earlier build left and says so in a
 make that uninstall fail with "managed-hook teardown journal does not match
 the protected deployment".
 
+A lifecycle also removes the old hook runtime copies it published for each
+account. When it cannot verify or apply the permissions of an account's
+`%USERPROFILE%\.defenseclaw` folder or its `hooks` folder (a stale or
+foreign profile, for example one whose folder denies even Administrators),
+it changes nothing in that folder, leaves that account's old copies there
+(they are inert: the protected selector names the copy in force), finishes
+the run for every other account, and names the account and the folder in a
+`user_runtime_folder_untrusted` warning. Such a folder used to roll the whole
+upgrade back with `1603`. An upgrade from 1.0.2, whose installed release
+stops at that folder before the new one runs, reports it in a
+`stale_lifecycle_journal_removed` warning instead. To remove the old copies,
+inspect the folder, reset its permissions or remove it if the account no
+longer uses DefenseClaw, then run Setup `/ensure` again. A Setup `/ensure`
+that finds the deployment compliant runs the same collection on its own: it
+keeps naming each folder that is still untrusted, removes the old copies of
+every account it can, and lists them under `changes`. With a pending
+transaction the run still fails with `1603` and names the same remedy.
+
+The same holds for an enrolled account that is signed out when the run
+starts and whose own `.defenseclaw` or `hooks` folder no longer has the
+owner or permissions DefenseClaw set. The guardian repairs that account's
+hooks only in its own Windows session, so an upgrade, Setup `/ensure` or
+`repair` goes on without it and names the account and the folder in a
+`user_runtime_folder_untrusted` warning; the account stays pending until its
+next sign-in, when the guardian repairs it. An upgrade from 1.0.2 used to
+fail with `1603` here. Any other failure of a signed-out account's hooks
+still stops the run and names the account.
+
 A hardening script that removes `NT SERVICE\DefenseClawGateway` from
 `C:\ProgramData\Cisco\DefenseClaw\runtime` or `etc` stops the gateway from
 starting. `status` and `verify` both fail and name the folder and the
@@ -1438,11 +1472,12 @@ uninstall, the marker key, the Add/Remove Programs entry and a
 `DisableSelfUpdate` value that the lifecycle wrote are gone, and so are their
 parent keys and `C:\Program Files\Cisco` when nothing else is left in them
 (after a CLI uninstall, once its cleanup finishes).
-The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. A default uninstall
-also keeps the administrator-only
-`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, which serializes
-lifecycle runs. Setup with `PURGE=1` removes that lock and its directory after
-cleanup; do not delete a lock while a lifecycle run is active. On a
+The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. A standalone Setup
+uninstall removes the administrator-only
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock` and its directory
+after cleanup, even without `PURGE=1`. The Secure Client profile keeps the lock
+unless `PURGE=1` is set. The lock serializes lifecycle runs; do not delete one
+while a lifecycle run is active. On a
 computer without DefenseClaw, uninstall succeeds and changes nothing.
 
 Run the CLI uninstall with `defenseclaw.exe`. The other installed binaries,
@@ -1476,6 +1511,20 @@ lists removals that failed, including a registration that a connector's
 removal left in the user's agent configuration (the message names the file).
 An uninstall that did not run as LocalSystem attempts no removal, so it
 reports only `user_registrations_pending`.
+
+Claude Code's DefenseClaw hooks are machine policy, but an older install
+registered a per-user hook in `%USERPROFILE%\.claude\settings.json`. The
+uninstall removes that exact hook (the command that runs the account's own
+`%USERPROFILE%\.local\bin\defenseclaw-hook.exe`) and keeps the account's
+other hooks, its owner and its permissions. `changes` lists each settings
+file it edited and how many commands it removed. A command that still names
+a DefenseClaw launcher in another shape (written by hand, or wrapped in a
+script) is kept, and a `claude_settings_hook_left` warning names the file,
+the hook event and the DefenseClaw launcher the command names (never the
+command's arguments, which can hold private values), so the administrator
+can remove it as that user: Claude Code would otherwise keep running a
+launcher that is gone. If the uninstall cannot read or check a user's
+settings file, that account is listed as a failed cleanup instead.
 To clean every user, run the uninstall as LocalSystem while they are signed
 in (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 

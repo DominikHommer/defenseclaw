@@ -196,6 +196,7 @@ func windowsEnterpriseHotConfigApply(
 	// bundle_apply_failed. Each refusal of a bundle says why, so a failed
 	// first apply names its cause and a held lock is retried (GAP-0104).
 	bundleChange := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
+	opts.codexTargetTransaction = false
 	failBundle := func(code, message string) {
 		if bundleChange {
 			result.AddError(code, message)
@@ -277,6 +278,14 @@ func windowsEnterpriseHotConfigApply(
 	if bytes.Equal(previous, next) {
 		return unavailable("the staged config is byte-identical to the installed config")
 	}
+	// Turning Codex protection on or off is the lifecycle transaction's:
+	// it owns Codex's machine policy. Nothing is written here, so the
+	// guardian never writes the Codex requirements for a deployment record
+	// that does not attest them (GAP-0033).
+	if windowsConfigCodexTargetChanged(previous, next) {
+		opts.codexTargetTransaction = true
+		return false, nil
+	}
 	// A file that changes no setting (line endings, comments, formatting)
 	// is installed the same way: the gateway reloads it to the same policy
 	// (GAP-0601). Who is enrolled and which connectors are is applied too:
@@ -286,15 +295,7 @@ func windowsEnterpriseHotConfigApply(
 	if err != nil {
 		return unavailable("cannot classify the config change: " + err.Error())
 	}
-	refreshTargets := false
-	var startOnly []string
-	for _, path := range restart {
-		if !windowsEnterpriseHotTargetsPath(path) {
-			startOnly = append(startOnly, path)
-			continue
-		}
-		refreshTargets = true
-	}
+	startOnly, refreshTargets := windowsBundleStartOnlyPaths(restart)
 	if len(startOnly) > 0 && !bundleChange {
 		return false, startOnly
 	}
@@ -449,26 +450,6 @@ func windowsEnterpriseHotConfigApply(
 	return true, nil
 }
 
-// windowsEnterpriseHotTargetsPath reports a restart-required change
-// (configwrite.ManagedRestartRequired) that the Windows hot path applies
-// all the same: an enrollment list (enterprise.enrollment include_users,
-// exclude_users, include_groups, exclude_groups, exempt_users) or the
-// connector set (guardrail.connectors.<name>[.enabled]). The gateway reads
-// neither at start here, the enumerator reads config.yaml on every cycle,
-// and the guardian reloads a changed config before it reconciles. Every
-// other enterprise key still goes through the upgrade transaction.
-func windowsEnterpriseHotTargetsPath(path string) bool {
-	switch path {
-	case "enterprise.enrollment.include_users", "enterprise.enrollment.exclude_users",
-		"enterprise.enrollment.include_groups", "enterprise.enrollment.exclude_groups",
-		"enterprise.enrollment.exempt_users":
-		return true
-	}
-	parts := strings.Split(path, ".")
-	return len(parts) >= 3 && len(parts) <= 4 && parts[0] == "guardrail" && parts[1] == "connectors" &&
-		(len(parts) == 3 || parts[3] == "enabled")
-}
-
 // windowsEnterpriseHotConfigRefreshTargets runs one enumerator cycle with
 // the installed CLI under the service pins, as the upgrade transaction does
 // (Invoke-DefenseClawEnumeratorRefresh). A seam for tests.
@@ -600,7 +581,7 @@ func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (s
 	if err != nil || windowsEnterpriseConfigParses(current) {
 		return "", nil
 	}
-	if _, err := os.Lstat(filepath.Join(filepath.Dir(layout.ConfigDir), "install", "pending.json")); err == nil {
+	if windowsBundleInstallTransactionPending(layout) {
 		return "", nil
 	}
 	if windowsEnterpriseHotConfigSourceCheck(supplied) != nil {

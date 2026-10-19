@@ -1631,7 +1631,7 @@ func readMCPConfigFile(path string, limit int64) ([]byte, error) {
 func readMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
 	data, ok := gatewayconnector.ReadStableInventoryFile(path, maxCodexInventoryConfigBytes)
 	if !ok {
-		return nil, fmt.Errorf("Codex MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxCodexInventoryConfigBytes, path)
+		return nil, fmt.Errorf("Codex MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxCodexInventoryConfigBytes, path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	var doc struct {
 		MCPServers map[string]struct {
@@ -1820,7 +1820,7 @@ func devinConfigHome() (string, error) {
 
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
-		return "", fmt.Errorf("Devin user home is unavailable")
+		return "", fmt.Errorf("Devin user home is unavailable") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if runtime.GOOS == "windows" {
 		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
@@ -1845,7 +1845,7 @@ func devinConfigHomeFor(home string) string {
 func ReadMCPFromDevinConfig(path string) ([]MCPServerEntry, error) {
 	data, ok := gatewayconnector.ReadStableInventoryFile(path, maxDevinInventoryConfigBytes)
 	if !ok {
-		return nil, fmt.Errorf("Devin MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxDevinInventoryConfigBytes, path)
+		return nil, fmt.Errorf("Devin MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxDevinInventoryConfigBytes, path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -2342,10 +2342,10 @@ func readStableAMPSettingsFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
-		return nil, fmt.Errorf("Amp settings source is not a regular file")
+		return nil, fmt.Errorf("Amp settings source is not a regular file") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if before.Size() > ampSettingsReadLimit {
-		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit)
+		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -2364,16 +2364,16 @@ func readStableAMPSettingsFile(path string) ([]byte, error) {
 		return nil, closeErr
 	}
 	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		return nil, fmt.Errorf("Amp settings source changed during inspection")
+		return nil, fmt.Errorf("Amp settings source changed during inspection") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if int64(len(data)) > ampSettingsReadLimit {
-		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit)
+		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	after, err := os.Lstat(path)
 	if err != nil || after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() ||
 		!os.SameFile(opened, after) || before.Size() != after.Size() ||
 		!before.ModTime().Equal(after.ModTime()) {
-		return nil, fmt.Errorf("Amp settings source changed during inspection")
+		return nil, fmt.Errorf("Amp settings source changed during inspection") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return data, nil
 }

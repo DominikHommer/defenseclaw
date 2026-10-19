@@ -1509,8 +1509,7 @@ func stdinInterpreterPipelineFallbackProof(
 		if source.PipelineID == 0 ||
 			!oneOfFold(source.Program, sourcePrograms...) ||
 			!hasOperation(source, operation) &&
-				!(operation == actionfacts.OperationFetch &&
-					hasOperation(source, actionfacts.OperationUpload)) ||
+				(operation != actionfacts.OperationFetch || !(hasOperation(source, actionfacts.OperationUpload))) ||
 			!actionfacts.ProvesPOSIXPipelineInterpreterSource(source) {
 			continue
 		}

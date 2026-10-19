@@ -105,6 +105,10 @@ func gatewayPolicyHealth(body []byte) (digest, reloadError string) {
 // runs, from the config and assets it loads. ok is false when that binary
 // cannot (an earlier release, or a status run that cannot read the inputs).
 func (l *lifecycle) computePolicy(ctx context.Context) (digest string, configGeneration uint64, ok bool) {
+	if c := l.noopPolicy; c != nil {
+		l.noopPolicy = nil
+		return c.digest, c.generation, true
+	}
 	out, err := l.env.runGatewayCLI(ctx, "policy", "digest", "--json")
 	if err != nil || out.ExitCode != 0 {
 		return "", 0, false
@@ -117,6 +121,12 @@ func (l *lifecycle) computePolicy(ctx context.Context) (digest string, configGen
 		return "", 0, false
 	}
 	return report.EffectiveDigest, report.ConfigGeneration, true
+}
+
+// computedPolicy is one computePolicy answer.
+type computedPolicy struct {
+	digest     string
+	generation uint64
 }
 
 // gatewayPolicyDigest is policy.effective_digest from a /health body.

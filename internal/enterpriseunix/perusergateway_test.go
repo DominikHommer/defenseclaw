@@ -136,7 +136,7 @@ func TestStatusNamesAgentSessionsOlderThanTheActivation(t *testing.T) {
 	agent("4325", "codex\x00", 100)
 	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart)
 	if !strings.Contains(got, "claude (pid 4321)") || !strings.Contains(got, "hermes (pid 4323)") ||
-		strings.Contains(got, "4322") || strings.Contains(got, "4324") || strings.Contains(got, "4325") {
+		strings.Contains(got, "(pid 4322)") || strings.Contains(got, "(pid 4324)") || strings.Contains(got, "(pid 4325)") {
 		t.Fatalf("status does not name exactly the older uninspected sessions: %q", got)
 	}
 	// A Codex background server started before the install keeps the

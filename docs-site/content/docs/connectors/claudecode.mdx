@@ -170,6 +170,11 @@ path and source without treating the observation as durable discovery authority.
 
 ### Settings that turn the hooks off
 
+Commands a user types into Claude Code's own bash mode are the user's input,
+not an agent tool call. Claude Code runs them without a pre-tool hook, so
+DefenseClaw does not check or block them, the same as a command the user runs
+in their own terminal. Guardrails cover the actions the agent takes.
+
 The per-user hooks live in Claude Code's own settings, so Claude Code's own
 switches apply to them:
 
@@ -185,6 +190,10 @@ switches apply to them:
   `defenseclaw status` or `defenseclaw doctor` in the project folder: both
   check that folder's project settings. DefenseClaw cannot see a
   `--settings` file.
+- A `~/.claude/settings.json` that keeps DefenseClaw's other hooks but not its
+  `PreToolUse` hook leaves tool calls uninspected: `defenseclaw doctor` fails
+  the **Claude Code hooks** row and `defenseclaw status` marks Claude Code
+  DEGRADED until `defenseclaw setup claude-code --yes` registers it again.
 - A `~/.claude/settings.json` that is a symlink into a dotfiles folder works
   when the link ends at a file in your home folder that you own. A link to
   anywhere else is refused before any hook is written.

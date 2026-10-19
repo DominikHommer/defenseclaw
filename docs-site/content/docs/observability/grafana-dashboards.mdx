@@ -66,7 +66,7 @@ The tables are read from the plane C `plane_health` records, the
 | Runtime Planes, first row | **Fleet: kernel controls per host** | Which computers run which Tetragon version and mode, whether `enforce_ack` approves their build, how many users are enforced, in burn-in or reset, who is paused, and which digest each runs. Stats count stale approvals, computers on fallback and paused computers |
 | Runtime Planes | **Kernel controls (Linux)** | Would-block and denial counts per cycle (complete, even when an event has no attributed record), the burn-in table with covered and needed hours, and the attributed series |
 | Runtime Planes | **Your Tetragon policies: events from AI agents** | Agent events and blocks by your policies, by policy, with the policy, the agent, the action, the outcome and the hook join |
-| Blocked Events | **Kernel denials**, **Blocked by your Tetragon policies** | Denials by control, connector, user and process; blocks by your own policies |
+| Blocked Events | **Kernel denials**, **Blocked by your Tetragon policies** | Denials by control, connector, resolved account name with uid, and process; blocks by your own policies. When account resolution fails, the table shows the uid alone. |
 
 The runtime dashboard has `host`, `user` and `connector` variables like the
 other boards. The local observability stack also ships five Prometheus rules
@@ -131,6 +131,16 @@ Some panels stay fleet-wide, and the box text on each board names the Loki ones:
 - **Metric panels** have no per-user label, so they never change.
 - **Records without a user** feed Discovery runs (Agent identity), AI discovery summary log (AI discovery), Relationship warnings observed and Relationship evidence and conflict chronology (Agent360), and the policy update stream inside Recent OPA + egress events (Policy decisions).
 
+## ID and hook surface boxes
+
+Some boxes filter on fields that only the record body carries: **Root session
+ID regex** (Activity), **Agent or root ID regex**, **Lifecycle (drilldown)**
+and **Execution (drilldown)** (Agent360), and **Hook surface regex** (Blocked
+Events). Loki cannot list the values of such a field, so these are text boxes
+that take a regex, not lists. The default `.+` matches every record that has
+the field. The table links on Agent identity, Activity and Agent360 fill them in
+for you, or you can paste an ID or type a pattern such as `PreToolUse|PostToolUse`.
+
 ## Identity & Users board
 
 The **Identity & Users** board (`defenseclaw-identity`) answers who runs which
@@ -180,10 +190,18 @@ The **Sandboxes** board (`defenseclaw-sandboxes`) shows what the
   their titles: **Active (all names)**, **Active sandboxes by connector (all
   names)** and **Egress by source and decision (metric, all names)**.
 
-The Sandbox list and every log filter read `defenseclaw.sandbox.name` as Loki
-structured metadata. The local Collector copies the name from each record's body
-onto the record (`transform/sandbox-identity`), so no panel parses every log line
-to find a sandbox. A record that names no sandbox has no such metadata. The
+The local Collector copies the sandbox name from each record's body
+(`transform/sandbox-identity`) and moves it onto the record's resource
+(`groupbyattrs/sandbox-identity`), so no panel parses every log line to find a
+sandbox. A record that names no sandbox keeps its resource unchanged.
+
+The Environment, Host, Sandbox and OS boxes list Loki index labels. Grafana
+fills a Loki box through Loki's label API, which lists index labels only. The
+bundled Loki indexes `deployment.environment.name`, `host.name`, `os.type` and
+`defenseclaw.sandbox.name` (`otlp_config` in `loki/loki.yaml`). If you import the
+dashboards into your own Loki, add the same `index_label` rule there, or the
+boxes list no values. The panels filter on these fields after the stream
+selector, so they show data either way. The
 records behind the panels, and the health codes of the integration row, are
 listed in [Sandbox telemetry](/docs/observability/sandbox-telemetry).
 

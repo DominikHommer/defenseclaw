@@ -1283,7 +1283,7 @@ func HookRuntimeRegistrationCurrent(
 		return true, nil
 	}
 	if strings.TrimSpace(opts.DataDir) == "" || !filepath.IsAbs(opts.DataDir) {
-		return false, errors.New("Codex runtime registration requires an absolute data directory")
+		return false, errors.New("Codex runtime registration requires an absolute data directory") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
@@ -1471,9 +1471,7 @@ func ResolvedConnectorLocations(opts SetupOpts, conn Connector) ConnectorLocatio
 		caps := hp.HookCapabilities(opts)
 		loc.HookConfigPaths = uniqueNonEmptyStrings(append(loc.HookConfigPaths, caps.ConfigPath))
 	}
-	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
-		loc.HookScriptPaths = append(loc.HookScriptPaths, path)
-	}
+	loc.HookScriptPaths = append(loc.HookScriptPaths, hookRuntimeArtifactPaths(opts, conn)...)
 	loc.HookScriptPaths = uniqueNonEmptyStrings(loc.HookScriptPaths)
 
 	cp, ok := conn.(ConnectorCapabilityProvider)
@@ -2020,6 +2018,7 @@ func stableManagedArtifactDigestWithAge(
 		!after.ModTime().Equal(opened.ModTime()) {
 		return "", true, fmt.Errorf("%s changed during bounded digest", label)
 	}
+	remember := stamped
 	if stamped {
 		stampOf := managedArtifactStampOf
 		if attributeOnly {
@@ -2030,11 +2029,44 @@ func stableManagedArtifactDigestWithAge(
 			later.USN = 0
 		}
 		if !ok || later != stamp {
-			return "", true, fmt.Errorf("%s changed during bounded digest", label)
+			if !ok || !managedArtifactStampMovedOnlyInJournal(stamp, later) {
+				return "", true, fmt.Errorf("%s changed during bounded digest", label)
+			}
+			// Only the change-journal number moved: another process ended
+			// the change epoch of the file during this read, as its own full
+			// read of the shared hook binary does (a status or verify call
+			// next to the guardian, GAP-0256). No handle could write the file
+			// while this deny-write handle was open, but the stamp no longer
+			// names this read, so it is not remembered. The two-pass check
+			// that unguarded files get confirms the bytes instead.
+			second, secondSize, err := hashOnce()
+			if err != nil {
+				return "", true, err
+			}
+			final, err := file.Stat()
+			if err != nil {
+				return "", true, err
+			}
+			current, err := os.Lstat(path)
+			if err != nil {
+				return "", true, fmt.Errorf("%s changed after open: %w", label, err)
+			}
+			last, ok := stampOf(file)
+			if attributeOnly {
+				last.USN = 0
+			}
+			if !ok || second != first || secondSize != firstSize ||
+				final.Size() != opened.Size() || !final.ModTime().Equal(opened.ModTime()) ||
+				current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() ||
+				!os.SameFile(opened, current) ||
+				(last != stamp && !managedArtifactStampMovedOnlyInJournal(stamp, last)) {
+				return "", true, fmt.Errorf("%s changed during bounded digest", label)
+			}
+			remember = false
 		}
 	}
 	digest := "sha256:" + hex.EncodeToString(first[:])
-	if stamped {
+	if remember {
 		rememberManagedArtifactDigest(path, stamp, digest, attributeOnly, fullStampAvailable)
 	}
 	return digest, true, nil

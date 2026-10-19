@@ -265,6 +265,11 @@ type FileState struct {
 	// stream).
 	CustomerPolicies []CustomerPolicy `json:"customer_policies,omitempty"`
 	CustomerEvents   *CustomerEvents  `json:"customer_events,omitempty"`
+	// ConfirmedSessions are the live agent sessions ("pid:start ticks")
+	// whose start Tetragon reported on the event stream. Only those count as
+	// anchored by the binaries anchor (GAP-0166); keeping them here carries
+	// them across a helper restart.
+	ConfirmedSessions []string `json:"confirmed_sessions,omitempty"`
 }
 
 // State is the helper's whole published state, read by the root CLI, verify

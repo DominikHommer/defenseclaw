@@ -37,17 +37,22 @@ from defenseclaw.context import pass_ctx
 from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 
 
-def _find_edge_connector_source() -> Path | None:
-    """Locate a trusted source tree from this checkout or the installed wheel."""
+def _find_edge_connector_source(source_dir: Path | None = None) -> Path | None:
+    """Locate Edge sources from a checkout or an explicit Fleet asset directory."""
     cli_pkg = Path(__file__).resolve().parent.parent
     candidates = []
+    if source_dir is not None:
+        candidates.append(source_dir / "edge-connector")
+        candidates.append(source_dir)
     # Editable source checkout: its CLI package must be directly below cli/.
-    if cli_pkg.parent.name == "cli" and (cli_pkg.parent.parent / "pyproject.toml").is_file():
+    if source_dir is None and cli_pkg.parent.name == "cli" and (cli_pkg.parent.parent / "pyproject.toml").is_file():
         candidates.append(cli_pkg.parent.parent / "edge-connector")
-    # Published wheels bundle precisely the C sources used for this release.
-    candidates.append(cli_pkg / "_data" / "edge-connector")
     for candidate in candidates:
-        if (candidate / "CMakeLists.txt").is_file() and (candidate / "src" / "main.c").is_file():
+        if (
+            (candidate / "CMakeLists.txt").is_file()
+            and (candidate / "src" / "main.c").is_file()
+            and not candidate.is_symlink()
+        ):
             return candidate
     return None
 
@@ -267,18 +272,15 @@ def _configure_remote_env(
         return False
 
 
-def _find_service_file() -> Path | None:
+def _find_service_file(source: Path) -> Path | None:
     """Locate the systemd unit file relative to the edge-connector source."""
-    source = _find_edge_connector_source()
-    if source is None:
-        return None
     candidate = source / "packaging" / "edge-connector.service"
     return candidate if candidate.is_file() else None
 
 
-def _install_systemd_unit(target: str, user: str) -> bool:
+def _install_systemd_unit(source: Path, target: str, user: str) -> bool:
     """Install the systemd unit file and enable/start the service on the remote device."""
-    service_file = _find_service_file()
+    service_file = _find_service_file(source)
     if service_file is None:
         ux.warn("Systemd unit file not found; skipping service installation.")
         return False
@@ -316,14 +318,14 @@ def _install_systemd_unit(target: str, user: str) -> bool:
     return True
 
 
-def _install_local_systemd_unit() -> bool:
+def _install_local_systemd_unit(source: Path) -> bool:
     """Install the systemd unit file and enable/start the service locally."""
     import platform
     if platform.system() != "Linux":
         ux.warn(f"Systemd is not available on {platform.system()}; skipping service installation.")
         return False
 
-    service_file = _find_service_file()
+    service_file = _find_service_file(source)
     if service_file is None:
         ux.warn("Systemd unit file not found; skipping service installation.")
         return False
@@ -480,7 +482,7 @@ def _verify_remote_daemon(target: str, user: str) -> bool:
     return False
 
 
-def _start_remote_daemon(target: str, user: str) -> bool:
+def _start_remote_daemon(source: Path, target: str, user: str) -> bool:
     """Install the systemd unit and start the service on the remote device.
 
     Falls back to printing manual instructions if the unit file is missing
@@ -488,7 +490,7 @@ def _start_remote_daemon(target: str, user: str) -> bool:
 
     Returns True if the daemon was started and verified, False otherwise.
     """
-    if _install_systemd_unit(target, user):
+    if _install_systemd_unit(source, target, user):
         if _verify_remote_daemon(target, user):
             return True
         ux.err(
@@ -578,6 +580,9 @@ def _build_local(source: Path, profile: str) -> bool:
 
 @click.command("install")
 @click.option("--target", default=None, help="IP or hostname of the remote device (SSH).")
+@click.option("--source-dir", type=click.Path(path_type=Path, exists=True, file_okay=False), default=None,
+              help=("Extract defenseclaw-fleet-assets.tar.gz and pass its directory, "
+                    "or use a source checkout (required for wheel installs)."))
 @click.option("--user", default="root", help="SSH user for the remote device.")
 @click.option(
     "--profile", default="STANDARD",
@@ -595,6 +600,7 @@ def _build_local(source: Path, profile: str) -> bool:
 def edge_install(
     app,
     target: str | None,
+    source_dir: Path | None,
     user: str,
     profile: str,
     tenant_id: str,
@@ -608,11 +614,11 @@ def edge_install(
     With ``--target <ip>``, copies the source to the device via SSH,
     builds remotely, configures env vars, and starts the daemon.
     """
-    source = _find_edge_connector_source()
+    source = _find_edge_connector_source(source_dir) if source_dir is not None else _find_edge_connector_source()
     if source is None:
         ux.err(
             "Could not locate edge-connector/ source directory.\n"
-            "  Install a CLI wheel built with 'make dist-cli', or run from\n"
+            "  Pass --source-dir with extracted defenseclaw-fleet-assets.tar.gz, or run from\n"
             "  a complete DefenseClaw source checkout."
         )
         raise SystemExit(1)
@@ -679,7 +685,7 @@ def edge_install(
             )
             raise SystemExit(1)
 
-        daemon_ok = _start_remote_daemon(target, user)
+        daemon_ok = _start_remote_daemon(source, target, user)
 
         ux.echo()
         if daemon_ok:
@@ -716,7 +722,7 @@ def edge_install(
             raise SystemExit(1)
 
         # Try to install the systemd service locally
-        svc_ok = _install_local_systemd_unit()
+        svc_ok = _install_local_systemd_unit(source)
 
         if svc_ok:
             if not _verify_local_service():

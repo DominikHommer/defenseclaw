@@ -98,7 +98,7 @@ enum ConfigFieldValidation {
             if field.key.hasPrefix("openshell."), number < 0 {
                 return Result(severity: "error", message: "value must be zero or greater")
             }
-            if ["timeout", "interval", "retries", "max_"].contains(where: field.key.contains), number < 0 {
+            if (field.key.hasPrefix("openshell.") || ["timeout", "interval", "retries", "max_"].contains(where: field.key.contains)), number < 0 {
                 return Result(severity: "error", message: "value must be zero or greater")
             }
         }
@@ -274,6 +274,8 @@ enum ConfigEditorCatalog {
             .init(label: "Blocklist Feed", key: "openshell.egress.feed", kind: .choice, options: ["", "builtin", "none"],
                   hint: "The pack's feeds unless set."),
             .init(label: "Base Image", key: "openshell.image.base", hint: "Overlay base image; empty is the pinned NVIDIA base."),
+            .init(label: "Trusted CA Bundle", key: "openshell.trusted_ca_bundle",
+                  hint: "PEM file of your TLS-inspecting proxy's root CA (absolute or ~/); images are rebuilt to trust it."),
             .init(label: "Approval Debounce ms", key: "openshell.approvals.debounce_ms", kind: .int,
                   hint: "Batch approvals until hooks are quiet."),
             .init(label: "Agent Proposals", key: "openshell.approvals.agent_proposals", kind: .choice, options: inheritBool,

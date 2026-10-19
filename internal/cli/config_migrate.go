@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +131,29 @@ func init() {
 		"mark migration-v9.json as read; a pending record is completed first, without its audit.db cleanup")
 	configCmd.AddCommand(configMigrateCmd)
 	rootCmd.AddCommand(configCmd)
+}
+
+// printProvidersFold reports the fold of a legacy custom-providers.json into
+// a config already at config_version 9 (GAP-0163).
+func printProvidersFold(out io.Writer, fold *config.ProvidersFold, written []string, dryRun bool) error {
+	switch {
+	case fold.Refused != "":
+		fmt.Fprintf(out, "config.yaml is config_version 9; %s was not folded into it.\n", fold.Overlay)
+	case dryRun:
+		fmt.Fprintf(out, "Would fold %s into config.yaml llm_providers.custom: %s.\n", fold.Overlay, strings.Join(fold.Folded, ", "))
+	default:
+		fmt.Fprintf(out, "Folded %s into config.yaml llm_providers.custom: %s.\n", fold.Overlay, strings.Join(fold.Folded, ", "))
+	}
+	for _, note := range fold.Notes {
+		fmt.Fprintf(out, "  note     %s\n", note)
+	}
+	if fold.Retired != "" {
+		fmt.Fprintf(out, "  retired  %s -> %s\n", fold.Overlay, fold.Retired)
+	}
+	if len(written) > 0 {
+		fmt.Fprintf(out, "Wrote %s.\n", strings.Join(written, ", "))
+	}
+	return nil
 }
 
 // rebaseRulePackForMigration is guardrail.PlanRulePackRebase in the config
@@ -315,11 +339,12 @@ func printConfigMigrateResult(cmd *cobra.Command, result *config.MigrateV9Result
 	already := result.Record.FromVersion == config.ConfigVersionV9
 	if configMigrateJSON {
 		payload := struct {
-			Migrated bool                   `json:"migrated"`
-			DryRun   bool                   `json:"dry_run"`
-			Written  []string               `json:"written"`
-			Record   config.MigrationRecord `json:"record"`
-		}{!already && !configMigrateDryRun, configMigrateDryRun, result.Written, result.Record}
+			Migrated      bool                   `json:"migrated"`
+			DryRun        bool                   `json:"dry_run"`
+			Written       []string               `json:"written"`
+			Record        config.MigrationRecord `json:"record"`
+			ProvidersFold *config.ProvidersFold  `json:"providers_fold,omitempty"`
+		}{!already && !configMigrateDryRun, configMigrateDryRun, result.Written, result.Record, result.ProvidersFold}
 		if payload.Written == nil {
 			payload.Written = []string{}
 		}
@@ -328,6 +353,9 @@ func printConfigMigrateResult(cmd *cobra.Command, result *config.MigrateV9Result
 		return enc.Encode(payload)
 	}
 	if already {
+		if fold := result.ProvidersFold; fold != nil {
+			return printProvidersFold(out, fold, result.Written, configMigrateDryRun)
+		}
 		_, err := fmt.Fprintln(out, "config.yaml is already config_version 9; nothing to migrate.")
 		return err
 	}

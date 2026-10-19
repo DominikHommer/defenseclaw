@@ -131,7 +131,13 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 	if result == nil {
 		return
 	}
-	switch result.Action {
+	action := result.Action
+	if opts != nil && opts.runningDeploymentLabel {
+		// A refused config installed nothing: report the running
+		// deployment's scanners as status does (GAP-0103).
+		action = "status"
+	}
+	switch action {
 	case "install", "upgrade", "repair", "ensure":
 		if len(result.Errors) != 0 || opts == nil {
 			return

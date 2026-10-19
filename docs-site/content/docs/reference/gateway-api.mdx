@@ -917,7 +917,7 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 | `GET` | `/api/v1/sandbox/status` | — | `Status`: `enabled`, `available` and `reason`, the OpenShell `gateway` (with the compute `driver` it runs: `docker`, or `vm` for OpenShell's MicroVM driver), `ingress_addr` and `egress_addr`, the configured `pack` and `profile`, `admin` (see below), counts of `sandboxes`, `running`, and `pending_approvals`, `last_reconcile`, `started_at` (when the sandbox runtime started: nothing keeps the sandboxes' hook and egress counters across a restart, so they count from then), `daemon_uid` (the uid the daemon runs as; absent on Windows), and `telemetry_failures` and `telemetry_error` (the sandbox telemetry records the recorder refused since then, and the last refusal). |
 | `GET` | `/api/v1/sandbox/sandboxes` | — | `{"sandboxes": [Sandbox]}` |
 | `POST` | `/api/v1/sandbox/sandboxes` | `CreateRequest` | `Sandbox` |
-| `GET` | `/api/v1/sandbox/sandboxes/{name}` | — | `Sandbox` |
+| `GET` | `/api/v1/sandbox/sandboxes/{name}` | Query `confirm=policy` (optional; managed computers): the daemon first asks the organization's gateway for a running sandbox's current policy, bounded at 2 seconds, as `sandbox status NAME` does | `Sandbox` |
 | `DELETE` | `/api/v1/sandbox/sandboxes/{name}` | Optional `{"keep_snapshot": bool}` | `DeleteResponse`: `name`, `deleted`, the removed `providers`, `warnings` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/stop` | Optional `{}` | `Sandbox` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/start` | Optional `{"no_snapshot": bool, "new_snapshot": bool}`; `409 conflict` when the sandbox is already running | `Sandbox` |

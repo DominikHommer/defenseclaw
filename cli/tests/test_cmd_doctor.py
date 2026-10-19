@@ -2004,7 +2004,7 @@ class DoctorJsonOutputTests(unittest.TestCase):
         self.assertNotIn("hidden", detail)
 
 
-def test_failed_llm_probe_with_malformed_url_still_emits_row():
+def test_malformed_llm_url_fails_before_probe():
     from defenseclaw.commands import cmd_doctor
 
     cfg = SimpleNamespace(
@@ -2012,11 +2012,12 @@ def test_failed_llm_probe_with_malformed_url_still_emits_row():
         resolve_llm=lambda _scope: SimpleNamespace(model="openai/test", base_url="http://[invalid"),
     )
     result = _DoctorResult()
-    with patch("defenseclaw.llm.ping", return_value=(False, "connection refused")):
+    with patch("defenseclaw.llm.ping") as ping:
         cmd_doctor._check_llm_reachable(cfg, result)
+    ping.assert_not_called()
     assert result.checks[0]["label"] == "LLM reachable"
-    assert result.checks[0]["status"] != "pass"
-    assert "connection refused" in result.checks[0]["detail"]
+    assert result.checks[0]["status"] == "fail"
+    assert "llm.base_url is malformed" in result.checks[0]["detail"]
     assert "http://[invalid" not in result.checks[0]["detail"]
 
 

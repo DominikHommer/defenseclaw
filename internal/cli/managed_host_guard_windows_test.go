@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -27,9 +28,24 @@ import (
 // real NTFS security descriptors: an administrator-owned record in an
 // administrator-only tree is trusted, and the same record owned by the Users
 // group, as a planted file would be, is not. It needs an elevated shell (to
-// set the owner) and a temp directory whose ancestors administrators own.
+// set the owners).
+//
+// The fixture is built so that the native CI runs it rather than skipping
+// (#1300): that job makes new objects owned by the runner user, which the
+// trust check rightly refuses, and its TEMP sits under user-owned folders.
+// So the root is created under %ProgramData%, whose stock ancestors the
+// production checks already accept, and the fixture is given the
+// BUILTIN\Administrators owner explicitly.
 func TestWindowsManagedRecordTrustUsesRealACLs(t *testing.T) {
-	root := t.TempDir()
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		t.Skipf("resolve ProgramData: %v", err)
+	}
+	root, err := os.MkdirTemp(programData, "dc-record-acl-test-")
+	if err != nil {
+		t.Skipf("create a fixture under ProgramData: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	icacls := func(args ...string) error {
 		out, err := exec.Command("icacls", args...).CombinedOutput()
 		if err != nil {
@@ -42,15 +58,18 @@ func TestWindowsManagedRecordTrustUsesRealACLs(t *testing.T) {
 	if err := icacls(root, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX"); err != nil {
 		t.Skip("cannot set an administrator-only ACL here")
 	}
-	if err := managed.ValidateTrustedRuntimeDir(root, "test root"); err != nil {
-		t.Skipf("temp root is not under administrator-owned ancestors: %v", err)
-	}
 	record := filepath.Join(root, "Cisco", "DefenseClaw", "install", "deployment.json")
 	if err := os.MkdirAll(filepath.Dir(record), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(record, []byte(`{"state":"installed"}`), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if err := icacls(root, "/setowner", "*S-1-5-32-544", "/T", "/C"); err != nil {
+		t.Skip("setting the Administrators owner needs an elevated shell")
+	}
+	if err := managed.ValidateTrustedRuntimeDir(root, "test root"); err != nil {
+		t.Fatalf("an Administrators-owned, administrator-only root under ProgramData is not trusted: %v", err)
 	}
 	validateFile := func(path string) error { return managed.ValidateTrustedFilePath(path, "managed deployment record") }
 	validateDir := func(dir string) error { return managed.ValidateTrustedRuntimeDir(dir, "managed deployment directory") }

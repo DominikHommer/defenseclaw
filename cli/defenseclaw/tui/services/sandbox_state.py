@@ -52,6 +52,15 @@ VIEW_TITLES = {"sandboxes": "Sandboxes", "activity": "Activity", "asks": "Asks"}
 _SELECTION_KEYS = frozenset({"u", "U", "R", "P", "s", "d", "c"})
 
 
+# The managed daemon's temporary setup-change notice (Go
+# sandboxapi.UnavailableSetupChanging): it says to retry, so the TUI adds no
+# exception contact to it.
+SETUP_CHANGING_NOTICE = (
+    "your organization changed how sandboxes run on this computer, and DefenseClaw is still setting that up; "
+    "try again in a few minutes"
+)
+
+
 @dataclass(frozen=True)
 class ComputeDriver:
     """The OpenShell compute driver a gateway runs, as far as the panel needs it.
@@ -2194,6 +2203,9 @@ class SandboxesPanelModel:
             text = f"Sandboxes aren't available on this computer: {current.unavailable}"
         else:
             text = "Sandboxes are off on this computer; your organization manages this setting"
+        if current.unavailable.strip().rstrip(".") == SETUP_CHANGING_NOTICE:
+            # A notice that clears by itself: retry, no exception to ask IT for (GAP-0187).
+            return f"{text.rstrip('.')}."
         contact = current.request_access.strip()
         return f"{text}. " + (f"Need an exception? Contact {contact}" if contact else "Need an exception? Please contact your IT help desk.")
 

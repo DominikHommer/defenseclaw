@@ -238,6 +238,49 @@ func TestHookContractResolution(t *testing.T) {
 // newer than every tested range is compatible with the newest contract, a
 // known-broken entry and exact-range (Secure Client) mode refuse it, and an
 // agent update to a compatible version is admitted instead of drifting.
+// GAP-0151: Hermes versions map to a contract by release or, for a git
+// install that prints only its release date, by the date tag of that
+// release. A version below the hermes-hooks-v1 floor, a date before its first
+// release, or a date between the two contracts has no contract; a date or
+// release after the newest one is an untested newer version on the
+// standalone profile (exact gating keeps it unknown).
+func TestHermesHookContractResolvesReleasesAndReleaseDates(t *testing.T) {
+	for _, tc := range []struct {
+		version, contract string
+		untested          bool
+	}{
+		{version: "0.18.0"},
+		{version: "Hermes Agent v0.18.0 (2026.5.1)"},
+		{version: "2026.5.1"},
+		{version: "2026.7.7"},
+		{version: "2026.8.29"},
+		{version: "vunknown"},
+		{version: "0.19.0", contract: "hermes-hooks-v1"},
+		{version: "2026.7.20", contract: "hermes-hooks-v1"},
+		{version: "2026.8.27", contract: "hermes-hooks-v1"},
+		{version: "2026.8.31", contract: "hermes-hooks-v2"},
+		{version: "2026.9.24", contract: "hermes-hooks-v2"},
+		{version: "0.21.5+4977.g12e4d3e", contract: "hermes-hooks-v2"},
+		{version: "2026.10.2", contract: "hermes-hooks-v2", untested: true},
+		{version: "0.99.0", contract: "hermes-hooks-v2", untested: true},
+	} {
+		got := resolveHookContractForOSMode("hermes", tc.version, "linux", false)
+		if tc.contract == "" {
+			if got.Status != HookCompatibilityUnknown || got.Contract.ContractID != "" {
+				t.Errorf("%q = %s %q (%s), want no contract", tc.version, got.Status, got.Contract.ContractID, got.Reason)
+			}
+			continue
+		}
+		if got.Status != HookCompatibilityKnown || got.Contract.ContractID != tc.contract || got.UntestedVersion != tc.untested {
+			t.Errorf("%q = %s %q untested=%t (%s), want %s untested=%t", tc.version, got.Status, got.Contract.ContractID, got.UntestedVersion, got.Reason, tc.contract, tc.untested)
+		}
+		strict := resolveHookContractForOSMode("hermes", tc.version, "linux", true)
+		if tc.untested && (strict.Status != HookCompatibilityUnknown || strict.Contract.ContractID != "") {
+			t.Errorf("strict %q = %s %q, want no contract", tc.version, strict.Status, strict.Contract.ContractID)
+		}
+	}
+}
+
 func TestUntestedNewerVersionPolicy(t *testing.T) {
 	got := ResolveHookContract("hermes", "Hermes Agent v0.30.1")
 	if got.Status != HookCompatibilityKnown || !got.UntestedVersion || got.Contract.ContractID != "hermes-hooks-v2" ||
