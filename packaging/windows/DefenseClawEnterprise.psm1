@@ -30596,7 +30596,60 @@ function Invoke-DefenseClawForcedUninstall {
     return Complete-DefenseClawForcedUninstall `
         -Result $recovery.result `
         -MovedStateRoot $preparation.moved_state_root `
-        -MovedInstallReceipt $preparation.moved_install_rollback_intent
+        -MovedInstallReceipt $preparation.moved_install_rollback_intent `
+        -Layout $Layout
+}
+
+function Restore-DefenseClawForcedUninstallCodexPolicy {
+    <#
+        Standalone Setup /uninstall FORCE=1 skips the managed-hook teardown,
+        so Codex requirements.toml is still DefenseClaw's merged postimage,
+        whose hooks run the defenseclaw-hook.exe the forced purge removed,
+        and the only copy of the administrator's original is the ownership
+        record in the StateRoot the preparation moved aside. That folder used
+        to be deleted with the record in it (GAP-0028). Before it goes, the
+        original is put back as the Secure Client purge does
+        (Invoke-DefenseClawNuclearCodexRequirements: only from a protected
+        record for a hook in this InstallRoot, and only while the file is
+        still byte for byte the recorded postimage), and DefenseClaw's Codex
+        state and lock go with it. Returns '' when nothing more needs the
+        moved StateRoot, or why it must stay: then the record is kept for a
+        restore by hand.
+    #>
+    param(
+        [hashtable]$Layout = @{},
+        [Parameter(Mandatory)][string]$MovedStateRoot
+    )
+    $ownershipPath = [IO.Path]::Combine($MovedStateRoot, 'install', 'codex-requirements-ownership.json')
+    if (-not (Test-DefenseClawPathPresentNoFollow -Path $ownershipPath)) {
+        return ''
+    }
+    $installRoot = [string]$Layout['InstallRoot']
+    if ([string]::IsNullOrWhiteSpace($installRoot)) {
+        return 'the forced uninstall did not resolve its InstallRoot, so it could not prove the Codex ownership record is this deployment''s'
+    }
+    $folder = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex')
+    $owner = Get-DefenseClawNuclearConnectorOwner `
+        -StatePath ([IO.Path]::Combine($folder, '.defenseclaw-managed-hooks.state')) `
+        -InstallRoot $installRoot
+    if ($owner.Owner -cin @('foreign', 'unknown')) {
+        return "the Codex machine policy in $folder is not this deployment's to restore ($($owner.Owner): $($owner.Detail))"
+    }
+    $scoped = $Layout.Clone()
+    $scoped['StateRoot'] = $MovedStateRoot
+    $warnings = [Collections.Generic.List[string]]::new()
+    $outcome = Invoke-DefenseClawNuclearCodexRequirements `
+        -Layout $scoped `
+        -Warnings $warnings `
+        -Operation 'forced uninstall'
+    if ($outcome -ceq 'kept') {
+        return ($warnings -join '; ')
+    }
+    foreach ($leaf in @('.defenseclaw-managed-hooks.state', '.defenseclaw-managed-hooks.lock')) {
+        $remaining = [Collections.Generic.List[string]]::new()
+        [void](Remove-DefenseClawNuclearPath -Path ([IO.Path]::Combine($folder, $leaf)) -Remaining $remaining)
+    }
+    return ''
 }
 
 function Complete-DefenseClawForcedUninstall {
@@ -30608,9 +30661,21 @@ function Complete-DefenseClawForcedUninstall {
     param(
         [Parameter(Mandatory)]$Result,
         [AllowEmptyString()][string]$MovedStateRoot,
-        [AllowEmptyString()][string]$MovedInstallReceipt
+        [AllowEmptyString()][string]$MovedInstallReceipt,
+        [hashtable]$Layout = @{}
     )
     $kept = ''
+    $codexKeep = ''
+    if (-not [string]::IsNullOrWhiteSpace($MovedStateRoot)) {
+        try {
+            $codexKeep = [string](Restore-DefenseClawForcedUninstallCodexPolicy `
+                -Layout $Layout `
+                -MovedStateRoot $MovedStateRoot)
+        }
+        catch {
+            $codexKeep = 'the Codex machine policy could not be checked: ' + $_.Exception.Message
+        }
+    }
     if (-not [string]::IsNullOrWhiteSpace($MovedInstallReceipt)) {
         try {
             Microsoft.PowerShell.Management\Remove-Item -LiteralPath $MovedInstallReceipt -Force -ErrorAction Stop
@@ -30620,7 +30685,13 @@ function Complete-DefenseClawForcedUninstall {
                 Microsoft.PowerShell.Utility\Add-Member -MemberType NoteProperty -Name forced_install_receipt_kept -Value ("${MovedInstallReceipt}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)) -Force
         }
     }
-    if (-not [string]::IsNullOrWhiteSpace($MovedStateRoot)) {
+    if ($codexKeep) {
+        # The ownership record in it is the only copy of the administrator's
+        # original Codex requirements.toml (GAP-0028).
+        $kept = "${MovedStateRoot}: kept because " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $codexKeep -MaxLength 768) +
+            "; the administrator's original is the base64 preimage in install\codex-requirements-ownership.json there"
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($MovedStateRoot)) {
         try {
             Remove-DefenseClawManagedTree `
                 -Path $MovedStateRoot `
@@ -31758,16 +31829,19 @@ function Invoke-DefenseClawNuclearCodexRequirements {
         administrator's preimage is put back, or a file DefenseClaw created
         is removed. Without such a record, or after anyone changed the file,
         it stays as found with a warning. Returns 'absent', 'removed',
-        'restored' or 'kept'.
+        'restored' or 'kept'. The standalone forced uninstall uses it too
+        (Restore-DefenseClawForcedUninstallCodexPolicy), with Operation
+        naming it in the warnings.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][AllowEmptyCollection()]
-        [Collections.Generic.List[string]]$Warnings
+        [Collections.Generic.List[string]]$Warnings,
+        [string]$Operation = 'nuclear uninstall'
     )
     $path = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex', 'requirements.toml')
     $ownershipPath = [IO.Path]::Combine([string]$Layout.StateRoot, 'install', 'codex-requirements-ownership.json')
-    $keep = "nuclear uninstall left the Codex machine policy $path as found"
+    $keep = "$Operation left the Codex machine policy $path as found"
     try {
         $current = Read-DefenseClawNuclearFileBytes -Path $path -MaximumBytes 4194304
         if ($null -eq $current) {

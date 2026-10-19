@@ -16,7 +16,10 @@ $WarningPreference = 'SilentlyContinue'
 # standalone deployment is installed and leave the services and machine
 # policy another profile owns as found (GAP-0012), and it must change an
 # agent's machine policy only as DefenseClaw's ownership records allow
-# (GAP-0017). The functions run from
+# (GAP-0017). The standalone forced uninstall (Setup /uninstall FORCE=1)
+# puts the administrator's Codex requirements.toml back from the ownership
+# record in the StateRoot it moved aside, by the same rules, before that
+# folder goes, and keeps the folder when it cannot (GAP-0028). The functions run from
 # the real module against throwaway ProgramFiles and ProgramData folders;
 # native helpers and service control are stand-ins, so the run needs neither
 # elevation nor a DefenseClaw install. Junctions need Windows.
@@ -57,6 +60,8 @@ foreach ($name in @(
     'Test-DefenseClawNuclearDropInOwned',
     'Test-DefenseClawNuclearCursorHooksOwnedOnly',
     'Invoke-DefenseClawNuclearCodexRequirements',
+    'Restore-DefenseClawForcedUninstallCodexPolicy',
+    'Complete-DefenseClawForcedUninstall',
     'Invoke-DefenseClawNuclearCursorHooks',
     'Invoke-DefenseClawNuclearAgentPolicy',
     'Invoke-DefenseClawNuclearUninstall',
@@ -140,6 +145,16 @@ function Assert-DefenseClawNuclearRecordTrusted {
     }
 }
 function Test-DefenseClawAdministrator { return $false }
+$script:removedTrees = [Collections.Generic.List[string]]::new()
+function Remove-DefenseClawManagedTree {
+    param([string]$Path, [string]$RequiredBase, [string]$Label)
+    $script:removedTrees.Add($Path)
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $Path -Recurse -Force
+}
+function ConvertTo-DefenseClawBoundedDiagnostic {
+    param($Value, [int]$MaxLength = 512)
+    return (@($Value) -join ' ')
+}
 function Test-DefenseClawServiceExists { param([string]$Name) return $false }
 
 $script:tmp = [IO.Path]::GetFullPath((
@@ -486,6 +501,62 @@ try {
     Write-SmokeJson -Path $ownershipPath -Value $created
     $result = Invoke-SmokeNuclear
     Assert-Smoke (-not [IO.File]::Exists($codexPolicy)) "a Codex policy DefenseClaw created stayed: $($result.warnings -join ' | ')"
+
+    # GAP-0028: a standalone forced uninstall. The managed-hook teardown did
+    # not run, so requirements.toml is still DefenseClaw's postimage for the
+    # standalone hook, and the administrator's original is only in the
+    # ownership record in the StateRoot the preparation moved aside.
+    $standaloneRoot = [IO.Path]::Combine($script:ProgramFiles, 'Cisco', 'DefenseClaw')
+    $standaloneHook = [IO.Path]::Combine($standaloneRoot, 'bin', 'defenseclaw-hook.exe')
+    $standaloneState = [IO.Path]::Combine($script:ProgramData, 'Cisco', 'DefenseClaw')
+    $forcedLayout = @{ InstallRoot = $standaloneRoot; StateRoot = $standaloneState }
+    $moved = $standaloneState + '.forced-uninstall-20261019T000000Z'
+    $movedOwnership = [IO.Path]::Combine($moved, 'install', 'codex-requirements-ownership.json')
+    $codexLockPath = [IO.Path]::Combine($codexDir, '.defenseclaw-managed-hooks.lock')
+    $forcedOwnership = [ordered]@{}
+    foreach ($key in $ownership.Keys) { $forcedOwnership[$key] = $ownership[$key] }
+    $forcedOwnership.hook_binary = $standaloneHook
+    $newForcedCase = {
+        param([byte[]]$Policy)
+        Reset-SmokeTree
+        $script:removedTrees.Clear()
+        New-SmokeFile -Path $codexPolicy -Text ([Text.Encoding]::UTF8.GetString($Policy))
+        Write-SmokeJson -Path $codexState -Value @{ schema_version = 1; hook_executable = $standaloneHook }
+        New-SmokeFile -Path $codexLockPath -Text ''
+        Write-SmokeJson -Path $movedOwnership -Value $forcedOwnership
+    }
+    & $newForcedCase $postimage
+    $result = Complete-DefenseClawForcedUninstall -Result ([pscustomobject]@{ ok = $true }) `
+        -MovedStateRoot $moved -MovedInstallReceipt '' -Layout $forcedLayout
+    Assert-Smoke (Test-SmokeSameBytes -Path $codexPolicy -Expected $adminCodex) 'the forced uninstall did not put the administrator''s Codex requirements.toml back'
+    Assert-Smoke (-not [IO.File]::Exists($codexState) -and -not [IO.File]::Exists($codexLockPath)) 'the forced uninstall left DefenseClaw''s Codex state beside the restored policy'
+    Assert-Smoke ($script:removedTrees -contains $moved -and $null -eq $result.PSObject.Properties['forced_state_root_kept']) 'the forced uninstall kept a StateRoot nothing needs'
+    Assert-Smoke ([bool]$result.forced) 'the forced uninstall result is not marked forced'
+
+    # The file changed after DefenseClaw wrote it: it stays as found, and so
+    # does the moved StateRoot with the only copy of the original.
+    $edited = [Text.Encoding]::UTF8.GetBytes("approval_policy = `"on-request`"`n[hooks]`nmanaged = true`n")
+    & $newForcedCase $edited
+    $result = Complete-DefenseClawForcedUninstall -Result ([pscustomobject]@{ ok = $true }) `
+        -MovedStateRoot $moved -MovedInstallReceipt '' -Layout $forcedLayout
+    Assert-Smoke (Test-SmokeSameBytes -Path $codexPolicy -Expected $edited) 'the forced uninstall changed a Codex policy edited after install'
+    Assert-Smoke ([IO.File]::Exists($movedOwnership) -and $script:removedTrees.Count -eq 0) 'the forced uninstall deleted the only copy of the administrator''s Codex original'
+    Assert-Smoke ([string]$result.forced_state_root_kept -like "$moved*codex-requirements-ownership.json*") "the kept StateRoot is not named: $($result.forced_state_root_kept)"
+
+    # A Codex state for another hook: not this deployment's to restore.
+    & $newForcedCase $postimage
+    Write-SmokeJson -Path $codexState -Value @{ schema_version = 1; hook_executable = $scHook }
+    $result = Complete-DefenseClawForcedUninstall -Result ([pscustomobject]@{ ok = $true }) `
+        -MovedStateRoot $moved -MovedInstallReceipt '' -Layout $forcedLayout
+    Assert-Smoke ((Test-SmokeSameBytes -Path $codexPolicy -Expected $postimage) -and [IO.File]::Exists($movedOwnership)) 'the forced uninstall restored a Codex policy another deployment owns'
+
+    # No Codex record: the moved StateRoot goes as before.
+    Reset-SmokeTree
+    $script:removedTrees.Clear()
+    New-SmokeFile -Path ([IO.Path]::Combine($moved, 'audit.db')) -Text 'x'
+    $result = Complete-DefenseClawForcedUninstall -Result ([pscustomobject]@{ ok = $true }) `
+        -MovedStateRoot $moved -MovedInstallReceipt '' -Layout $forcedLayout
+    Assert-Smoke ($script:removedTrees -contains $moved -and -not [IO.Directory]::Exists($moved)) 'the forced uninstall kept a StateRoot without a Codex record'
 
     Microsoft.PowerShell.Utility\Write-Output 'PASS enterprise-nuclear-purge-smoke'
 }
