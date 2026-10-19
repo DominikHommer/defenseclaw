@@ -119,7 +119,8 @@ func TestNativeModelAdapterUsesGuardrailAndHostOnlyRoute(t *testing.T) {
 			t.Error("private model call lost its owned session identity")
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"},
-			"Set-Cookie": {"should-not-reach-guest=1"}}, Body: io.NopCloser(strings.NewReader(`{"content":[{"type":"text","text":"answer"}]}`))}, nil
+			"Set-Cookie": {"should-not-reach-guest=1"}, "X-DefenseClaw-Blocked": {"true"},
+			"x-defenseclaw-blocked": {"true"}}, Body: io.NopCloser(strings.NewReader(`{"content":[{"type":"text","text":"answer"}]}`))}, nil
 	}))
 	req := nativeModelRequest(nativeModelTestBody)
 	req = req.WithContext(ContextWithAgentIdentity(req.Context(), AgentIdentity{AgentID: "guest-forgery", AgentInstanceID: "other-session"}))
@@ -132,7 +133,7 @@ func TestNativeModelAdapterUsesGuardrailAndHostOnlyRoute(t *testing.T) {
 	rec := httptest.NewRecorder()
 	adapter.ServeHTTP(rec, req)
 	if called != 1 || rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "answer") ||
-		rec.Header().Get("Set-Cookie") != "" || inspector.promptCalls != 1 {
+		rec.Header().Get("Set-Cookie") != "" || rec.Header().Get("X-DefenseClaw-Blocked") != "" || inspector.promptCalls != 1 {
 		t.Fatalf("private request did not use inspected provider path: calls=%d status=%d prompt_scans=%d", called, rec.Code, inspector.promptCalls)
 	}
 }
@@ -381,25 +382,52 @@ func TestNativeModelAdapterLimitsConcurrentRequests(t *testing.T) {
 	workers.Wait()
 }
 
+type nativeModelBoundedTestBody struct {
+	input  io.Reader
+	read   atomic.Int64
+	closed atomic.Bool
+}
+
+func (body *nativeModelBoundedTestBody) Read(data []byte) (int, error) {
+	n, err := body.input.Read(data)
+	body.read.Add(int64(n))
+	return n, err
+}
+func (body *nativeModelBoundedTestBody) Close() error {
+	body.closed.Store(true)
+	return nil
+}
+
 func TestNativeModelAdapterCapsUpstreamBeforeProxyBuffering(t *testing.T) {
 	adapter, _, _, _ := nativeModelFixture(t)
+	body := &nativeModelBoundedTestBody{input: strings.NewReader(strings.Repeat("x", nativeModelOutputLimit+1))}
+	called := 0
+	var requestContext context.Context
 	nativeModelSetTransport(t, adapter, nativeModelRoundTrip(func(req *http.Request) (*http.Response, error) {
+		called++
+		requestContext = req.Context()
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
-			Body: io.NopCloser(strings.NewReader(strings.Repeat("x", nativeModelOutputLimit+1)))}, nil
+			Body: body}, nil
+	}))
+	sink := &nativeModelCommitWriter{header: make(http.Header)}
+	nativeModelExpectAbort(t, func() { adapter.ServeHTTP(sink, nativeModelRequest(nativeModelTestBody)) })
+	if called != 1 || sink.status != 0 || sink.body.Len() != 0 || sink.flushes != 0 ||
+		body.read.Load() != int64(nativeModelOutputLimit+1) || !body.closed.Load() ||
+		requestContext == nil || requestContext.Err() == nil {
+		t.Fatalf("oversized provider body escaped its cap/cleanup: calls=%d status=%d bytes=%d read=%d closed=%v",
+			called, sink.status, sink.body.Len(), body.read.Load(), body.closed.Load())
+	}
+	headerBody := &nativeModelBoundedTestBody{input: strings.NewReader(`{}`)}
+	nativeModelSetTransport(t, adapter, nativeModelRoundTrip(func(req *http.Request) (*http.Response, error) {
+		called++
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"},
+			"X-Oversized": {strings.Repeat("h", nativeModelHeaderLimit+1)}}, Body: headerBody}, nil
 	}))
 	rec := httptest.NewRecorder()
 	adapter.ServeHTTP(rec, nativeModelRequest(nativeModelTestBody))
-	if rec.Code != http.StatusBadGateway || rec.Body.Len() > 1024 {
-		t.Fatalf("oversized provider response appeared successful: status=%d bytes=%d", rec.Code, rec.Body.Len())
-	}
-	nativeModelSetTransport(t, adapter, nativeModelRoundTrip(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"},
-			"X-Oversized": {strings.Repeat("h", nativeModelHeaderLimit+1)}}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
-	}))
-	rec = httptest.NewRecorder()
-	adapter.ServeHTTP(rec, nativeModelRequest(nativeModelTestBody))
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("oversized provider headers appeared successful: status=%d", rec.Code)
+	if rec.Code != http.StatusBadGateway || called != 2 || headerBody.read.Load() != 0 || !headerBody.closed.Load() {
+		t.Fatalf("oversized provider headers escaped refusal/cleanup: status=%d calls=%d read=%d closed=%v",
+			rec.Code, called, headerBody.read.Load(), headerBody.closed.Load())
 	}
 }
 

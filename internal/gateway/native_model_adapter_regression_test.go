@@ -93,10 +93,11 @@ rules:
 			cfg := &config.Config{}
 			cfg.Guardrail.Enabled = true
 			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.BlockAt = "CRITICAL"
 			cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
 				"owner": {Mode: "observe"},
 				"strict": {Connectors: map[string]config.PerConnectorGuardrailConfig{
-					"claudecode": {Mode: "action", RulePackDir: packDir},
+					"claudecode": {Mode: "action", BlockAt: "HIGH", RulePackDir: packDir},
 				}},
 			}
 			cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{

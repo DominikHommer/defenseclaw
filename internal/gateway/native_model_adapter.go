@@ -361,6 +361,17 @@ func (transport *nativeModelTransport) RoundTrip(req *http.Request) (*http.Respo
 		}
 		return nil, errNativeModelAdapter
 	}
+	// Only this gateway may assert its decision marker. Preserve the caller's
+	// response/header ownership while removing every upstream case alias.
+	filtered := new(http.Response)
+	*filtered = *resp
+	filtered.Header = resp.Header.Clone()
+	for name := range filtered.Header {
+		if strings.EqualFold(name, "X-DefenseClaw-Blocked") {
+			delete(filtered.Header, name)
+		}
+	}
+	resp = filtered
 	originalBody := resp.Body
 	stop := context.AfterFunc(req.Context(), func() { _ = originalBody.Close() })
 	resp.Body = &nativeModelResponseBody{body: originalBody, adapter: transport.adapter, cancel: exchange.cancel, stop: stop}
@@ -547,6 +558,11 @@ func (writer *nativeModelWriter) WriteHeader(status int) {
 	if value := writer.header.Get("Content-Type"); len(value) <= 128 &&
 		(strings.HasPrefix(value, "application/json") || strings.HasPrefix(value, "text/event-stream")) {
 		writer.target.Header().Set("Content-Type", value)
+	}
+	// The shared proxy authors this exact marker after inspection. Other
+	// response headers, including cookies and credentials, remain private.
+	if values := writer.header.Values("X-DefenseClaw-Blocked"); len(values) == 1 && values[0] == "true" {
+		writer.target.Header().Set("X-DefenseClaw-Blocked", "true")
 	}
 	writer.target.WriteHeader(status)
 }
