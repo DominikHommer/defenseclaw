@@ -310,6 +310,18 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 			return err
 		}
 	}
+	var loader *os.File
+	if opts.suite == claudeVersionSuite {
+		var err error
+		loader, err = inheritedVersionLoader(fixtureRoot, 10)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			resultErr = errors.Join(resultErr, retained.releaseResource(loader.Close))
+			record["pending_outer_loader_resources"] = len(retained.heldResources)
+		}()
+	}
 	observeProcPIDView(record)
 	image, hash, err := sealedRunningImage()
 	if image != nil {
@@ -356,7 +368,8 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 	childImage := os.NewFile(uintptr(copyFD), "fixed-child-sealed-wrapper")
 	command.ExtraFiles[3] = childImage
 	childFiles := []*os.File{proof, grantRead, readyWrite, childImage}
-	for _, file := range []*os.File{fixtureParent, fixtureRoot} {
+	fixtureInputs := versionFixtureInputs(fixtureParent, fixtureRoot, loader)
+	for _, file := range fixtureInputs {
 		fd, err := unix.FcntlInt(file.Fd(), unix.F_DUPFD_CLOEXEC, 3)
 		if err != nil {
 			for _, held := range childFiles {
@@ -412,7 +425,7 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 	record["owned_worker_exit_code"] = owner.exit
 	var child map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	if overflow || decoder.Decode(&child) != nil || decoder.Decode(new(any)) != io.EOF || child["scope"] != harnessScope || child["fixed_suite"] != opts.suite || child["production_certification"] != false || child["common_launch_gate_qualified"] != false {
+	if overflow || decoder.Decode(&child) != nil || decoder.Decode(new(any)) != io.EOF || child["scope"] != registry.Receipt.Scope || child["fixed_suite"] != opts.suite || child["production_certification"] != false || child["common_launch_gate_qualified"] != false {
 		return errors.New("fixed owned worker observation refused")
 	}
 	for key, value := range child {
@@ -426,7 +439,11 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 }
 
 func executeWorker(args []string) (map[string]any, *cleanupOwner, error) {
-	return executeWorkerWithRegistry(args, liveRegistry)
+	opts, err := workerOptions(args)
+	if err != nil {
+		return executeWorkerWithRegistry(args, reviewedRegistry{})
+	}
+	return executeWorkerWithRegistry(args, registryForSuite(opts.suite))
 }
 
 func executeWorkerWithRegistry(args []string, registry reviewedRegistry) (map[string]any, *cleanupOwner, error) {
@@ -442,6 +459,10 @@ func executeWorkerWithRegistry(args []string, registry reviewedRegistry) (map[st
 		return record, owner, err
 	}
 	record["fixed_suite"] = opts.suite
+	if !registry.supportsSuite(opts.suite) {
+		return record, owner, errUnreviewed
+	}
+	record["scope"] = registry.Receipt.Scope
 	record["worker_admission_stage"] = "namespace_identity"
 	if os.Getpid() != 1 || os.Getppid() != 0 || runtime.GOARCH != "amd64" {
 		return record, owner, errors.New("fixed worker requires its owned PID namespace")

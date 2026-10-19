@@ -64,7 +64,7 @@ func fixedBinding(session, fixtureIdentity string, plan bridgeproto.Preparation,
 	if err != nil {
 		return bridgeproto.Binding{}, err
 	}
-	policy := "sha256:" + digestBytes([]byte(harnessScope+"\x00strict-sparse-readonly-root-offline-no-broker-no-hooks\x00"+preparation))
+	policy := "sha256:" + digestBytes([]byte(receipt.Scope+"\x00strict-sparse-readonly-root-offline-no-broker-no-hooks\x00"+preparation))
 	runtime := "sha256:" + digestBytes(artifacts)
 	harness := "sha256:" + receipt.Images[2].SHA
 	full := session + "\x00" + fixtureIdentity + "\x00" + policy + "\x00" + runtime + "\x00" + harness
@@ -83,6 +83,7 @@ type caseResult struct {
 	Prepared       bool                   `json:"prepared"`
 	Started        bool                   `json:"started"`
 	PayloadMarker  bool                   `json:"fixed_payload_marker_observed"`
+	VersionOutput  bool                   `json:"claude_version_output_observed,omitempty"`
 	ExitCode       int32                  `json:"exit_code"`
 	Destroyed      bool                   `json:"destroyed"`
 	NativeCleanup  bool                   `json:"native_cleanup_observed"`
@@ -122,6 +123,10 @@ func expectReply(ctx context.Context, owner protocolOwner, binding bridgeproto.B
 
 func exercise(ctx context.Context, owner protocolOwner, binding bridgeproto.Binding, plan bridgeproto.Preparation, mode string) (result caseResult, resultErr error) {
 	result.Mode = mode
+	wantExit := int32(23)
+	if mode == claudeVersionSuite {
+		wantExit = 0
+	}
 	var stdout, stderr bytes.Buffer
 	defer func() {
 		// Retain counts and a closed diagnostic category even when a failed
@@ -178,7 +183,7 @@ func exercise(ctx context.Context, owner protocolOwner, binding bridgeproto.Bind
 		}
 		switch frame.Kind {
 		case bridgeproto.Output:
-			if stdout.Len()+stderr.Len()+len(frame.Data.Bytes) > outputLimit {
+			if stdout.Len()+stderr.Len()+len(frame.Data.Bytes) > min(outputLimit, int(plan.OutputLimit)) {
 				return result, errors.New("fixed output exceeded aggregate bound")
 			}
 			if frame.Data.Stream == "stdout" {
@@ -190,7 +195,7 @@ func exercise(ctx context.Context, owner protocolOwner, binding bridgeproto.Bind
 			return result, fixedPeerFailure(frame.Failure.Code)
 		case bridgeproto.Exited:
 			result.ExitCode = frame.Result.ExitCode
-			if frame.Result.ExitCode != 23 || frame.Result.TimedOut || frame.Result.Truncated {
+			if frame.Result.ExitCode != wantExit || frame.Result.TimedOut || frame.Result.Truncated {
 				return result, errors.New("fixed exit/timeout/truncation differed")
 			}
 			exited = true
@@ -208,10 +213,17 @@ func exercise(ctx context.Context, owner protocolOwner, binding bridgeproto.Bind
 	if mode == "stdio" {
 		wantErr = "FIXED_NATIVE_STDERR\n"
 	}
+	if mode == claudeVersionSuite {
+		want = claudeVersionOutput
+	}
 	if stdout.String() != want || stderr.String() != wantErr {
 		return result, errors.New("fixed byte streams differed")
 	}
-	result.PayloadMarker = true
+	if mode == claudeVersionSuite {
+		result.VersionOutput, result.NativeTerminal = true, true
+	} else {
+		result.PayloadMarker = true
+	}
 	result.ProtocolStage = "destroy"
 	destroy, err := owner.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Destroy})
 	if err != nil {

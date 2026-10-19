@@ -38,18 +38,21 @@ type imageIdentity struct {
 // artifactReceipt is a restricted external review result, not runtime or
 // policy authority. A caller cannot select its expected digest or contents.
 type artifactReceipt struct {
-	Version                 uint16          `json:"version"`
-	Scope                   string          `json:"scope"`
-	Verified                bool            `json:"verified"`
-	ExecutionPerformed      *bool           `json:"execution_performed"`
-	ProductionCertification *bool           `json:"production_certification"`
-	Axis                    string          `json:"axis_commit"`
-	MXC                     string          `json:"mxc_commit"`
-	Bubblewrap              string          `json:"bubblewrap_commit"`
-	StaticClosureSHA        string          `json:"static_closure_sha256"`
-	PayloadSourceSHA        string          `json:"payload_source_sha256"`
-	Builds                  []buildIdentity `json:"builds"`
-	Images                  []imageIdentity `json:"images"`
+	Version                 uint16                 `json:"version"`
+	Scope                   string                 `json:"scope"`
+	Verified                bool                   `json:"verified"`
+	ExecutionPerformed      *bool                  `json:"execution_performed"`
+	ProductionCertification *bool                  `json:"production_certification"`
+	Axis                    string                 `json:"axis_commit"`
+	MXC                     string                 `json:"mxc_commit"`
+	Bubblewrap              string                 `json:"bubblewrap_commit"`
+	StaticClosureSHA        string                 `json:"static_closure_sha256"`
+	PayloadSourceSHA        string                 `json:"payload_source_sha256"`
+	Builds                  []buildIdentity        `json:"builds"`
+	Images                  []imageIdentity        `json:"images"`
+	ClaudeVersion           *claudeReleaseIdentity `json:"claude_version,omitempty"`
+	Loader                  *imageIdentity         `json:"loader,omitempty"`
+	LoaderClosureSHA        string                 `json:"loader_closure_sha256,omitempty"`
 }
 
 type reviewedRegistry struct {
@@ -104,23 +107,34 @@ func digestBytes(data []byte) string {
 
 func (r reviewedRegistry) validate() error {
 	v := r.Receipt
-	if !r.Reviewed || !hexDigest.MatchString(r.ReceiptSHA) || v.Version != 1 || v.Scope != harnessScope ||
+	if !r.Reviewed || !hexDigest.MatchString(r.ReceiptSHA) || v.Version != 1 || (v.Scope != harnessScope && v.Scope != claudeVersionScope) ||
 		!v.Verified || v.ExecutionPerformed == nil || *v.ExecutionPerformed || v.ProductionCertification == nil || *v.ProductionCertification ||
 		v.Axis != "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c" || v.MXC != "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2" ||
 		v.Bubblewrap != "8e51677abd7e3338e4952370bf7d902e37d8cbb6" ||
-		!hexDigest.MatchString(v.StaticClosureSHA) || !hexDigest.MatchString(v.PayloadSourceSHA) || len(v.Builds) != 2 || len(v.Images) != 3 {
+		!hexDigest.MatchString(v.StaticClosureSHA) || len(v.Builds) != 2 || len(v.Images) != 3 {
 		return errUnreviewed
 	}
-	for i, role := range []string{"peer_and_static_bwrap", "fixed_payload"} {
+	roles := []string{"peer_and_static_bwrap", "fixed_payload"}
+	imageRoles := []string{"peer", "static_musl_bwrap", "fixed_payload"}
+	imagePaths := []string{"images/peer", "images/bwrap-static-musl", "images/fixed-payload"}
+	if v.Scope == claudeVersionScope {
+		if v.validateClaudeVersion() != nil {
+			return errUnreviewed
+		}
+		roles[1], imageRoles[2], imagePaths[2] = "shared_musl_loader", "claude_musl", "images/claude-musl"
+	} else if !hexDigest.MatchString(v.PayloadSourceSHA) || v.ClaudeVersion != nil || v.Loader != nil || v.LoaderClosureSHA != "" {
+		return errUnreviewed
+	}
+	for i, role := range roles {
 		b := v.Builds[i]
 		if b.Role != role || !gitCommit.MatchString(b.Commit) || b.Run == 0 || b.Artifact == 0 || !hexDigest.MatchString(b.ArchiveSHA) || !hexDigest.MatchString(b.ProvenanceSHA) {
 			return errUnreviewed
 		}
 	}
-	for i, role := range []string{"peer", "static_musl_bwrap", "fixed_payload"} {
+	for i, role := range imageRoles {
 		image := v.Images[i]
-		if image.Role != role || image.Path != []string{"images/peer", "images/bwrap-static-musl", "images/fixed-payload"}[i] ||
-			!hexDigest.MatchString(image.SHA) || image.Size < 64 || image.Size > 64<<20 {
+		if image.Role != role || image.Path != imagePaths[i] ||
+			!hexDigest.MatchString(image.SHA) || image.Size < 64 || image.Size > 512<<20 || (i != 2 || v.Scope != claudeVersionScope) && image.Size > 64<<20 {
 			return errUnreviewed
 		}
 	}

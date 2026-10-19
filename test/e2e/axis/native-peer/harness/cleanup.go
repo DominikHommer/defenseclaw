@@ -17,7 +17,10 @@ type retainedSession interface {
 // cleanupOwner keeps exact native custody reachable through final reporting.
 // A retry can discharge custody, but cannot turn the original failure into a
 // passed case. The separate outer PID namespace remains the last-resort owner.
-type cleanupOwner struct{ pending []retainedSession }
+type cleanupOwner struct {
+	pending       []retainedSession
+	heldResources []func() error
+}
 
 func (o *cleanupOwner) close(session retainedSession) error {
 	o.pending = append(o.pending, session)
@@ -44,5 +47,31 @@ func (o *cleanupOwner) retry() error {
 		}
 	}
 	o.pending = remaining
+	if len(o.pending) == 0 {
+		held := o.heldResources[:0]
+		for _, close := range o.heldResources {
+			if err := close(); err != nil {
+				held = append(held, close)
+				result = errors.Join(result, err)
+			}
+		}
+		o.heldResources = held
+	}
 	return result
+}
+
+// Only fixed version-fixture resources use this list. Native custody must be
+// discharged before these source descriptors are released. A close uncertainty
+// keeps the closure (and captured resource owner) reachable through reporting.
+func (o *cleanupOwner) releaseResource(close func() error) error {
+	if len(o.pending) == 0 {
+		if err := close(); err == nil {
+			return nil
+		} else {
+			o.heldResources = append(o.heldResources, close)
+			return err
+		}
+	}
+	o.heldResources = append(o.heldResources, close)
+	return nil
 }

@@ -39,7 +39,11 @@ func workerOptions(args []string) (options, error) {
 }
 
 func execute(args []string) (map[string]any, *cleanupOwner, error) {
-	return executeWithRegistry(args, liveRegistry, runSupervised)
+	opts, err := parseOptions(args)
+	if err != nil {
+		return executeWithRegistry(args, reviewedRegistry{}, runSupervised)
+	}
+	return executeWithRegistry(args, registryForSuite(opts.suite), runSupervised)
 }
 
 type supervisedRun func(context.Context, options, reviewedRegistry, map[string]any, *cleanupOwner) error
@@ -58,6 +62,10 @@ func executeWithRegistry(args []string, registry reviewedRegistry, supervise sup
 	if err := registry.validate(); err != nil {
 		return record, owner, err
 	}
+	if !registry.supportsSuite(opts.suite) {
+		return record, owner, errUnreviewed
+	}
+	record["scope"] = registry.Receipt.Scope
 	if supervise == nil {
 		return record, owner, errors.New("fixed contributor supervisor required")
 	}

@@ -296,3 +296,38 @@ values. Failures preserve fixtures and stop the suite.
 
 This suite does not qualify root-parent death, control-pipe loss, guest FD or
 namespace-ID assertions, terminals, Claude, hooks or broker/model credentials.
+
+
+## Separate real Claude version canary (source only)
+
+The new closed `claude-version` selector uses the existing owned peer/protocol,
+not another launcher. It is distinct from the synthetic baseline and lifecycle
+receipts: official signed Claude Code 2.1.292 `linux-x64-musl`, SHA256
+`d23f28ef84f5459a25d2d4cf999a7debd41df83507160446983d4ca65554e50f`
+(245,203,032 bytes), and independently reviewed shared musl 1.2.6 loader
+`76b812138a1d4be51ae095e94920e1fd1c5d25f793651baf834d05a2c455c040`
+(853,616 bytes; loader build 39193900521/artifact 12161286875). Peer c914,
+static Bubblewrap, seccomp and network policy are unchanged. The typed receipt
+also pins the signed manifest, signature, key, official inspection archive and
+loader build/closure provenance. No caller chooses image hashes or library paths.
+
+The only command is `/.defenseclaw/payload --version`, with offline/headless
+policy, HOME `/home`, TMPDIR `/tmp`, a ten-second workload deadline and 4096-byte
+output bound. A pass requires exactly the 22 stdout bytes
+`2.1.292 (Claude Code)\n`, empty stderr, exit zero, Destroyed and separately
+confirmed native/outer cleanup. It claims no hooks, authentication, network,
+agent-session, arbitrary dlopen or common-policy qualification.
+
+The host driver creates one exclusive `claude-runtime-loader` file under its
+held fresh 0700 fixture, closes its writer after fsync, and retains a verified
+readonly descriptor on the same local executable, non-idmapped creator mount.
+The fixed tables pass loader FD10 to the wrapper and FD9 to its worker. The
+wrapper/worker mark their copies CLOEXEC; only the first bootstrap deliberately
+keeps FD10 through its one fixed wrapper exec. Two owned source duplicates mount
+the same held file readonly at `/lib/ld-musl-x86_64.so.1` and
+`/lib/libc.musl-x86_64.so.1`; no library directory is granted. Held identity,
+size/hash, single-link status, flags and fixed entry correlation are rechecked.
+The existing cleanup owner retains version source descriptors while native wait
+is uncertain. These are sampled checks against same-UID host renames/mutation,
+not an atomic host filesystem snapshot. The new wrapper/driver/artifact chain
+and a separately approved actual run remain required; this source is unrun.

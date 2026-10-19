@@ -170,12 +170,17 @@ func admitImages(ctx context.Context, receiptPath string, registry reviewedRegis
 	if err != nil {
 		return receipt, nil, err
 	}
-	for _, proof := range []struct{ path, hash string }{
+	proofs := []struct{ path, hash string }{
 		{"proofs/STATIC-CLOSURE.json", receipt.StaticClosureSHA},
 		{"proofs/peer-PROVENANCE.json", receipt.Builds[0].ProvenanceSHA},
 		{"proofs/payload-PROVENANCE.json", receipt.Builds[1].ProvenanceSHA},
 		{"source/payload-main_linux.go", receipt.PayloadSourceSHA},
-	} {
+	}
+	if receipt.Scope == claudeVersionScope {
+		proofs = proofs[:2]
+		proofs = append(proofs, struct{ path, hash string }{"proofs/loader-PROVENANCE.json", receipt.Builds[1].ProvenanceSHA}, struct{ path, hash string }{"proofs/LOADER-CLOSURE.json", receipt.LoaderClosureSHA}, struct{ path, hash string }{"source/claude-manifest.json", receipt.ClaudeVersion.ManifestSHA}, struct{ path, hash string }{"source/claude-manifest.json.sig", receipt.ClaudeVersion.SignatureSHA}, struct{ path, hash string }{"source/claude-release-key.asc", receipt.ClaudeVersion.KeySHA})
+	}
+	for _, proof := range proofs {
 		f, _, err := boundedFile(root, proof.path, 4<<20, proof.hash)
 		if err != nil {
 			return receipt, nil, err
@@ -196,7 +201,11 @@ func admitImages(ctx context.Context, receiptPath string, registry reviewedRegis
 		if err != nil {
 			return receipt, nil, err
 		}
-		if int64(len(data)) != identity.Size || validateELF(data, index != 0) != nil {
+		elfErr := validateELF(data, index != 0)
+		if receipt.Scope == claudeVersionScope && index == 2 {
+			elfErr = validateClaudeELF(data, false)
+		}
+		if int64(len(data)) != identity.Size || elfErr != nil {
 			_ = source.Close()
 			return receipt, nil, errors.New("fixed admitted ELF differs")
 		}
@@ -215,6 +224,15 @@ func admitImages(ctx context.Context, receiptPath string, registry reviewedRegis
 			sealed.payload = image
 		}
 	}
+	if receipt.Scope == claudeVersionScope {
+		file, data, err := boundedFile(root, receipt.Loader.Path, receipt.Loader.Size, receipt.Loader.SHA)
+		if err != nil {
+			return receipt, nil, err
+		}
+		if err := errors.Join(validateClaudeELF(data, true), file.Close()); err != nil {
+			return receipt, nil, err
+		}
+	}
 	accepted = true
 	return receipt, sealed, nil
 }
@@ -228,6 +246,7 @@ type canary struct {
 type fixedFixture struct {
 	root, work, home, temporary, outside, readonly *os.File
 	parent                                         *os.File
+	loader                                         *os.File
 	name                                           string
 	path                                           string
 	canaries                                       []canary
@@ -299,7 +318,7 @@ func (f *fixedFixture) close() error {
 	for _, c := range f.canaries {
 		result = errors.Join(result, c.file.Close())
 	}
-	for _, object := range []*os.File{f.work, f.home, f.temporary, f.outside, f.root, f.parent} {
+	for _, object := range []*os.File{f.work, f.home, f.temporary, f.outside, f.loader, f.root, f.parent} {
 		if object != nil {
 			result = errors.Join(result, object.Close())
 		}
@@ -307,7 +326,7 @@ func (f *fixedFixture) close() error {
 	return result // retained synthetic names are never recursively removed here
 }
 
-func newFixture() (_ *fixedFixture, resultErr error) {
+func newFixture(suite string) (_ *fixedFixture, resultErr error) {
 	parent, root := os.NewFile(7, "fixed-inherited-fixture-parent"), os.NewFile(8, "fixed-inherited-fixture-root")
 	defer parent.Close()
 	defer root.Close()
@@ -325,6 +344,14 @@ func newFixture() (_ *fixedFixture, resultErr error) {
 	nonce := strings.TrimPrefix(name, "dc-axis-native-peer-")
 	if filepath.Dir(display) != "/tmp" || len(nonce) != 32 || strings.Trim(nonce, "0123456789abcdef") != "" || name != "dc-axis-native-peer-"+nonce {
 		return nil, errors.New("fixed fixture display refused")
+	}
+	if suite == claudeVersionSuite {
+		loader, err := inheritedVersionLoader(root, 9)
+		if err != nil {
+			return nil, err
+		}
+		defer loader.Close()
+		return initializeFixtureWithLoader(parent, root, "/tmp", nonce, loader)
 	}
 	return initializeFixture(parent, root, "/tmp", nonce)
 }
@@ -347,7 +374,11 @@ func newFixtureUnder(parent *os.File, displayParent, nonce string) (*fixedFixtur
 	return initializeFixture(parent, root, displayParent, nonce)
 }
 
-func initializeFixture(parent, heldRoot *os.File, displayParent, nonce string) (_ *fixedFixture, resultErr error) {
+func initializeFixture(parent, heldRoot *os.File, displayParent, nonce string) (*fixedFixture, error) {
+	return initializeFixtureWithLoader(parent, heldRoot, displayParent, nonce, nil)
+}
+
+func initializeFixtureWithLoader(parent, heldRoot *os.File, displayParent, nonce string, loader *os.File) (_ *fixedFixture, resultErr error) {
 	if parent == nil || heldRoot == nil || len(nonce) != 32 || strings.Trim(nonce, "0123456789abcdef") != "" {
 		return nil, errors.New("fixed held fixture identity refused")
 	}
@@ -382,6 +413,16 @@ func initializeFixture(parent, heldRoot *os.File, displayParent, nonce string) (
 	if err := errors.Join(idErr, heldErr, correlated.Close()); err != nil || d != hd || i != hi {
 		return nil, errors.New("fixed fixture held identity differs")
 	}
+	if loader != nil {
+		if err := verifyVersionLoader(root, loader); err != nil {
+			return nil, err
+		}
+		fd, err := unix.FcntlInt(loader.Fd(), unix.F_DUPFD_CLOEXEC, 3)
+		if err != nil {
+			return nil, err
+		}
+		f.loader = os.NewFile(uintptr(fd), "fixed-worker-held-loader")
+	}
 	// A fresh descriptor for "." avoids sharing an inherited directory offset.
 	// Only the already held, private, same-user root is traversed.
 	emptyFD, err := unix.Openat(int(root.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
@@ -389,8 +430,12 @@ func initializeFixture(parent, heldRoot *os.File, displayParent, nonce string) (
 		return nil, err
 	}
 	empty := os.NewFile(uintptr(emptyFD), "fixed-fixture-empty-check")
-	entries, readErr := empty.Readdirnames(1)
-	if closeErr := empty.Close(); len(entries) != 0 || readErr != io.EOF || closeErr != nil {
+	entries, readErr := empty.Readdirnames(2)
+	wantEntries := 0
+	if loader != nil {
+		wantEntries = 1
+	}
+	if closeErr := empty.Close(); len(entries) != wantEntries || wantEntries == 1 && entries[0] != claudeLoaderLeaf || readErr != io.EOF || closeErr != nil {
 		return nil, errors.New("fixed fixture root is not fresh empty directory")
 	}
 	for _, item := range []struct {
@@ -437,6 +482,11 @@ func initializeFixture(parent, heldRoot *os.File, displayParent, nonce string) (
 }
 
 func (f *fixedFixture) verify(writes bool) error {
+	if f.loader != nil {
+		if err := verifyVersionLoader(f.root, f.loader); err != nil {
+			return err
+		}
+	}
 	// Sample name correlation before/after each case; this does not claim an
 	// atomic guarantee against a concurrent same-UID rename during execution.
 	for _, item := range []struct {
@@ -487,6 +537,13 @@ func (f *fixedFixture) bindingIdentity() (string, error) {
 			return "", err
 		}
 		values = append(values, fmt.Sprintf("%d:%d", device, inode))
+	}
+	if f.loader != nil {
+		d, i, err := identity(f.loader)
+		if err != nil {
+			return "", err
+		}
+		values = append(values, fmt.Sprintf("%d:%d", d, i))
 	}
 	return digestBytes([]byte(strings.Join(values, "\x00"))), nil
 }
@@ -549,6 +606,9 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 	defer func() {
 		resultErr = errors.Join(resultErr, owner.retry())
 		record["pending_native_cleanup"] = len(owner.pending)
+		if opts.suite == claudeVersionSuite {
+			record["pending_version_resources"] = len(owner.heldResources)
+		}
 	}()
 	record["native_stage"] = "artifact_admission"
 	receipt, admitted, err := admitImages(ctx, opts.receipt, registry)
@@ -560,7 +620,7 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 	}
 	record["artifact_receipt_sha256"] = registry.ReceiptSHA
 	record["native_stage"] = "fixture_capability"
-	f, err := newFixture()
+	f, err := newFixture(opts.suite)
 	if err != nil {
 		var retained *fixtureSetupError
 		if errors.As(err, &retained) {
@@ -569,7 +629,13 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 		}
 		return err
 	}
-	defer func() { resultErr = errors.Join(resultErr, f.close()) }()
+	defer func() {
+		if opts.suite == claudeVersionSuite {
+			resultErr = errors.Join(resultErr, owner.releaseResource(f.close))
+		} else {
+			resultErr = errors.Join(resultErr, f.close())
+		}
+	}()
 	record["fixture_retained"] = true
 	record["synthetic_fixture"] = f.path
 	record["native_stage"] = "fixture_identity"
@@ -590,7 +656,9 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 		}
 		record["native_stage"] = "fixed_plan"
 		var plan bridgeproto.Preparation
-		if opts.suite == "lifecycle" {
+		if opts.suite == claudeVersionSuite {
+			plan, err = claudeVersionPlan()
+		} else if opts.suite == "lifecycle" {
 			plan, err = lifecyclePlan(mode)
 		} else {
 			plan, err = fixedPlan(mode, f.path+"/outside")
@@ -611,9 +679,13 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 		if record["execution_performed"] != true {
 			record["execution_performed"] = nil
 		}
+		readInputs := []*os.File{f.readonly}
+		if opts.suite == claudeVersionSuite {
+			readInputs = []*os.File{f.loader, f.loader}
+		}
 		session, startErr := bridgeprocess.Start(ownerCtx, binding, plan, bridgeprocess.Inputs{
 			Peer: admitted.peer, Bubblewrap: admitted.bwrap, Payload: admitted.payload, CWD: f.work,
-			Read: []*os.File{f.readonly}, Write: []*os.File{f.work, f.home, f.temporary},
+			Read: readInputs, Write: []*os.File{f.work, f.home, f.temporary},
 		}, bridgeowner.Limits{WriteTimeout: time.Second, CleanupTimeout: 10 * time.Second})
 		if session == nil && record["execution_performed"] != true {
 			record["execution_performed"] = false
@@ -645,6 +717,9 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 		}
 		if result.Started {
 			record["peer_started_reply_observed"] = true
+		}
+		if result.VersionOutput {
+			record["execution_performed"], record["claude_version_output_observed"] = true, true
 		}
 		if result.PayloadMarker {
 			record["execution_performed"] = true

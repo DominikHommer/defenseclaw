@@ -25,9 +25,14 @@ type treeHeartbeatEvidence struct {
 	StableSamples int       `json:"stable_samples"`
 }
 
-func validSuite(suite string) bool { return suite == "baseline" || suite == "lifecycle" }
+func validSuite(suite string) bool {
+	return suite == "baseline" || suite == "lifecycle" || suite == claudeVersionSuite
+}
 
 func casesForSuite(suite string) ([]string, error) {
+	if suite == claudeVersionSuite {
+		return []string{claudeVersionSuite}, nil
+	}
 	if suite == "baseline" {
 		return append([]string{}, fixedCases...), nil
 	}

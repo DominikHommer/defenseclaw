@@ -90,8 +90,8 @@ jobs:
               'internal/axis/namespaceinit': ['README.md', 'bootstrap_linux.go', 'bootstrap_linux_test.go', 'proof.go', 'proof_test.go'],
               'internal/axis/bridgeproto': ['README.md', 'codec.go', 'fuzz_test.go', 'message.go', 'protocol_test.go', 'state.go'],
               'internal/axis/bridgeowner': ['README.md', 'owner.go', 'owner_test.go', 'pipe.go', 'pipe_other.go', 'pipe_test.go', 'pipe_windows.go', 'pipe_windows_test.go'],
-              'internal/axis/bridgeprocess': ['README.md', 'image_linux.go', 'start.go', 'start_linux.go', 'start_linux_test.go', 'start_other.go', 'start_other_test.go', 'start_test.go'],
-              'test/e2e/axis/native-peer/harness': ['README.md', 'artifact.go', 'cleanup.go', 'cleanup_test.go', 'harness_test.go', 'lifecycle.go', 'lifecycle_linux.go', 'lifecycle_linux_test.go', 'lifecycle_test.go', 'main.go', 'outer_linux.go', 'outer_linux_test.go', 'platform_linux.go', 'platform_linux_test.go', 'platform_other.go', 'protocol.go'],
+              'internal/axis/bridgeprocess': ['README.md', 'image_linux.go', 'image_windows.go', 'image_windows_test.go', 'start.go', 'start_linux.go', 'start_linux_test.go', 'start_other.go', 'start_other_test.go', 'start_test.go'],
+              'test/e2e/axis/native-peer/harness': ['README.md', 'artifact.go', 'cleanup.go', 'cleanup_test.go', 'harness_test.go', 'lifecycle.go', 'lifecycle_linux.go', 'lifecycle_linux_test.go', 'lifecycle_test.go', 'main.go', 'outer_linux.go', 'outer_linux_test.go', 'platform_linux.go', 'platform_linux_test.go', 'platform_other.go', 'protocol.go', 'version.go', 'version_linux.go', 'version_linux_test.go', 'version_test.go'],
           }
           sources = ['go.mod', 'go.sum', 'LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt', '.github/workflows/axis-native-harness-build.yml']
           for root, names in roots.items():
@@ -121,9 +121,12 @@ jobs:
           registry = Path('test/e2e/axis/native-peer/harness/artifact.go').read_bytes()
           receipt_sha = '6db10d2a73ee7860bb0d7ad8a6155166d2b59e7d504513e1222a634aac55c668'
           registry_sha = hashlib.sha256(registry).hexdigest()
-          if registry_sha != 'd9250c55cfd1bf35b16f62c50926d51bbc4b22f1fa7761b0deefb1af83ed91f0' or registry.count(('const fixedContributorReceiptSHA = "' + receipt_sha + '"').encode()) != 1:
+          if registry_sha != '4e84953fcafb47c5edfb5f5c3084c91a99d1ab33897bc8fdf0c281114ffecc6d' or registry.count(('const fixedContributorReceiptSHA = "' + receipt_sha + '"').encode()) != 1:
               raise SystemExit('exact reviewed fixed-contributor registry source required')
-          (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'artifact_registry_closed': False, 'registry_source_sha256': registry_sha, 'reviewed_registry_receipt_sha256': receipt_sha, 'fixed_case_selectors': ['argv', 'stdio', 'exit23', 'boundaries'], 'fixed_suites': {'baseline': ['argv', 'stdio', 'exit23', 'boundaries'], 'lifecycle': ['wait-timeout', 'wait-cancel', 'tree-cancel']}, 'go_embed_or_native_inputs': False, 'wrapper_or_sandbox_execution': False}, indent=2) + '\n')
+          version_registry_sha = hashlib.sha256(Path('test/e2e/axis/native-peer/harness/version.go').read_bytes()).hexdigest()
+          if version_registry_sha != '944296eeca8b77bb919bbecd2c255191516fef95c0da0d1c7fcd0dcd77b3b9fc':
+              raise SystemExit('exact reviewed Claude version registry required')
+          (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'artifact_registry_closed': False, 'registry_source_sha256': registry_sha, 'reviewed_registry_receipt_sha256': receipt_sha, 'version_registry_source_sha256': version_registry_sha, 'reviewed_version_receipt_sha256': 'e24ee1736320e9df281e0ab7049b2df8cbacbf27d81d31fc46e21cef09b165b7', 'fixed_case_selectors': ['argv', 'stdio', 'exit23', 'boundaries'], 'fixed_suites': {'baseline': ['argv', 'stdio', 'exit23', 'boundaries'], 'lifecycle': ['wait-timeout', 'wait-cancel', 'tree-cancel'], 'claude-version': ['claude-version']}, 'go_embed_or_native_inputs': False, 'wrapper_or_sandbox_execution': False}, indent=2) + '\n')
           PY
       - name: Verify exact dependency closure without running the wrapper
         shell: bash
@@ -212,15 +215,29 @@ jobs:
               retained[key] = {'path': target.relative_to(artifact).as_posix(), 'sha256': hashlib.sha256(target.read_bytes()).hexdigest(), 'size': target.stat().st_size}
           (artifact / 'DEPENDENCY-CLOSURE.json').write_text(json.dumps({'module': expected, 'local_packages': sorted(local), 'package_count': count, 'retained': retained, 'module_verification': True, 'wrapper_or_sandbox_execution': False}, indent=2) + '\n')
           PY
-      - name: Run only source-reviewed inert lifecycle and registry unit tests
+      - name: Run only source-reviewed inert lifecycle, registry and version unit tests
         shell: bash
         run: |
           set -euo pipefail
-          go test -mod=readonly -p 1 -json ./test/e2e/axis/native-peer/harness -run '^Test(Lifecycle|ReviewedContributorRegistryMatchesExactCanonicalReceiptWithoutNativeCalls$)' -count=1 -timeout=20s > harness-artifact/INERT-LIFECYCLE-TESTS.jsonl
+          go test -mod=readonly -p 1 -json ./test/e2e/axis/native-peer/harness -run '^Test(Lifecycle|ClaudeVersion|ReviewedContributorRegistryMatchesExactCanonicalReceiptWithoutNativeCalls$)' -count=1 -timeout=20s > harness-artifact/INERT-LIFECYCLE-TESTS.jsonl
           python3 - <<'PY'
           import json
           from pathlib import Path
           expected = {
+              'TestClaudeVersionSourcesRemainHeldUntilNativeWaitAndClose',
+              'TestClaudeVersionWorkerFileTableIsAnExactTail',
+              'TestClaudeVersionRegistryIsSeparateAndClosedOverReviewedInputs',
+              'TestClaudeVersionPlanIsLiteralOfflineAndHasOnlyTwoLibraryFiles',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes',
+              'TestClaudeVersionELFRefusesChangedLoaderClosureWithoutExecution',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/none',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/bytes',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/stderr',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/exit',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/timeout',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/truncated',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/binding',
+              'TestClaudeVersionObservationUsesBoundProtocolAndExactBytes/request',
               'TestReviewedContributorRegistryMatchesExactCanonicalReceiptWithoutNativeCalls',
               'TestLifecycleSuiteAndPlansAreClosedAndBaselineUnchanged',
               'TestLifecycleMarkersRequireExactUniqueSetDespiteChunkOrder',
@@ -239,7 +256,7 @@ jobs:
           passed = [row['Test'] for row in rows if row.get('Action') == 'pass' and 'Test' in row]
           if set(passed) != expected or len(passed) != len(expected) or any(row.get('Action') in ('skip', 'fail') for row in rows) or not any(row.get('Action') == 'pass' and 'Test' not in row for row in rows):
               raise SystemExit('exact inert lifecycle test inventory refused')
-          Path('harness-artifact/INERT-LIFECYCLE-TESTS.json').write_text(json.dumps({'passed': sorted(passed), 'count': len(passed), 'root_count': 7, 'inert_filesystem_and_go_writer_only': True, 'wrapper_peer_payload_or_sandbox_execution': False, 'namespace_or_prctl_called': False}, indent=2) + '\n')
+          Path('harness-artifact/INERT-LIFECYCLE-TESTS.json').write_text(json.dumps({'passed': sorted(passed), 'count': len(passed), 'root_count': 13, 'inert_filesystem_and_go_writer_only': True, 'wrapper_peer_payload_or_sandbox_execution': False, 'namespace_or_prctl_called': False}, indent=2) + '\n')
           PY
       - name: Build two deterministic static wrapper images and retain evidence
         shell: bash
@@ -305,7 +322,7 @@ jobs:
               raw = path.read_bytes()
               files[path.relative_to(artifact).as_posix()] = {'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
           prebuild = json.loads((artifact / 'PREBUILD.json').read_text(encoding='utf-8'))
-          provenance = {'scope': 'reviewed_fixed_linux_native_peer_harness_build_only', 'repository': os.environ['GITHUB_REPOSITORY'], 'workflow': '.github/workflows/axis-native-harness-build.yml', 'build_commit': os.environ['GITHUB_SHA'], 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'go_version': 'go1.26.5', 'tool_sha256': tool_hashes, 'source_sha256': prebuild['source_sha256'], 'files': files, 'static_elf': True, 'two_independent_caches_byte_identical': True, 'artifact_registry_closed': False, 'registry_source_sha256': prebuild['registry_source_sha256'], 'reviewed_registry_receipt_sha256': prebuild['reviewed_registry_receipt_sha256'], 'fixed_case_selectors': prebuild['fixed_case_selectors'], 'fixed_suites': prebuild['fixed_suites'], 'inert_lifecycle_tests': json.loads((artifact / 'INERT-LIFECYCLE-TESTS.json').read_text(encoding='utf-8')), 'wrapper_peer_payload_or_sandbox_execution': False, 'production_certification': False}
+          provenance = {'scope': 'reviewed_fixed_linux_native_peer_harness_build_only', 'repository': os.environ['GITHUB_REPOSITORY'], 'workflow': '.github/workflows/axis-native-harness-build.yml', 'build_commit': os.environ['GITHUB_SHA'], 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'go_version': 'go1.26.5', 'tool_sha256': tool_hashes, 'source_sha256': prebuild['source_sha256'], 'files': files, 'static_elf': True, 'two_independent_caches_byte_identical': True, 'artifact_registry_closed': False, 'registry_source_sha256': prebuild['registry_source_sha256'], 'reviewed_registry_receipt_sha256': prebuild['reviewed_registry_receipt_sha256'], 'version_registry_source_sha256': prebuild['version_registry_source_sha256'], 'reviewed_version_receipt_sha256': prebuild['reviewed_version_receipt_sha256'], 'fixed_case_selectors': prebuild['fixed_case_selectors'], 'fixed_suites': prebuild['fixed_suites'], 'inert_lifecycle_tests': json.loads((artifact / 'INERT-LIFECYCLE-TESTS.json').read_text(encoding='utf-8')), 'wrapper_peer_payload_or_sandbox_execution': False, 'production_certification': False}
           (artifact / 'PROVENANCE.json').write_text(json.dumps(provenance, indent=2) + '\n')
           PY
       - name: Retain run identity even when the build refuses
