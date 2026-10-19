@@ -105,7 +105,7 @@ func newNativeModelAdapter(owner context.Context, proxy *GuardrailProxy, store *
 		grant.Binding.ExecutionOS != grant.Identity.Runtime.ExecutionOS || grant.Binding.Connector != "claudecode" ||
 		len(grant.Binding.Routes) != 1 || grant.Binding.Routes[0] != sandboxauth.RouteHook ||
 		grant.Authority.SnapshotID == "" || grant.Authority.Generation == 0 || grant.Current == nil ||
-		grant.Policy == nil || grant.Policy.AuthorityBinding() != grant.Authority ||
+		grant.Policy == nil || grant.Selection.Authority != grant.Authority ||
 		grant.Spec.Identity != grant.Identity || grant.Spec.Harness != "claudecode" ||
 		grant.Spec.HarnessIdentity != grant.Selection.HarnessIdentity || grant.Spec.BindingID != grant.Binding.ID ||
 		grant.Spec.CredentialProfile != grant.Profile || grant.Spec.Offline ||

@@ -217,6 +217,7 @@ func TestNativeModelAdapterConstructorRejectsForeignOrUnpinnedGrant(t *testing.T
 		{"empty secret", func(g *nativeModelGrant) { g.Credential = "" }},
 		{"header injection secret", func(g *nativeModelGrant) { g.Credential = "key\r\nX-Other: stolen" }},
 		{"stale authority", func(g *nativeModelGrant) { g.Authority.Generation++ }},
+		{"selection authority mismatch", func(g *nativeModelGrant) { g.Selection.Authority.Generation++ }},
 		{"policy authority mismatch", func(g *nativeModelGrant) { g.Policy = nil }},
 		{"unselected model", func(g *nativeModelGrant) { g.Model = "" }},
 		{"oversized model pin", func(g *nativeModelGrant) { g.Model = strings.Repeat("x", 257) }},
