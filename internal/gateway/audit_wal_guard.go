@@ -18,9 +18,9 @@ const (
 	// auditWALGuardInterval is how often the audit write-ahead log's active
 	// frame count is checked on its dedicated checkpoint connection.
 	auditWALGuardInterval = 2 * time.Second
-	// auditWALLimitBytes is the size past which the log is checkpointed and
-	// its file truncated. A busy gateway writes about 3.4 MB of log per hook
-	// decision, so this is the log of roughly 75 hooks.
+	// auditWALLimitBytes is the log length past which a pass restarts the log
+	// on the writer connection. One Claude Code PreToolUse decision writes about
+	// 2.3 MB of log (25 commits), so this is the log of roughly 115 hooks.
 	auditWALLimitBytes = 256 << 20
 	// auditWALWriterBudget bounds the part of a pass that holds the audit
 	// store's only writer connection. Hooks need that connection for
@@ -86,6 +86,11 @@ func auditWALGuardPass(ctx context.Context, store auditWALCheckpointer, alarm *a
 		fmt.Fprintf(log, "[sidecar] audit WAL checkpoint yielded: %v\n", err)
 	} else if err != nil {
 		fmt.Fprintf(log, "[sidecar] audit WAL checkpoint failed: %v\n", err)
+	} else if pass.WriterHeld > auditWALWriterBudget {
+		// The sync on the writer is not interrupted by the budget; hooks
+		// waited this long for their audit records.
+		fmt.Fprintf(log, "[sidecar] audit WAL checkpoint held the audit writer for %s (budget %s)\n",
+			pass.WriterHeld.Round(time.Millisecond), auditWALWriterBudget)
 	}
 	if line := alarm.observe(now, pass.FileBytes); line != "" {
 		fmt.Fprintln(log, line)

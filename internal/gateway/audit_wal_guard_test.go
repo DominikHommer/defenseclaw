@@ -58,6 +58,20 @@ func TestAuditWALGuardPassReportsAYieldedWriterPhase(t *testing.T) {
 	}
 }
 
+func TestAuditWALGuardPassReportsAWriterHoldOverTheBudget(t *testing.T) {
+	fake := &fakeWALCheckpointer{result: audit.WALCheckpoint{Restarted: true, WriterHeld: auditWALWriterBudget / 2}}
+	var log bytes.Buffer
+	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
+	if log.Len() != 0 {
+		t.Fatalf("a hold within the budget logged %q", log.String())
+	}
+	fake.result.WriterHeld = 3 * auditWALWriterBudget
+	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
+	if !strings.Contains(log.String(), "audit WAL checkpoint held the audit writer for 600ms (budget 200ms)") {
+		t.Fatalf("log = %q", log.String())
+	}
+}
+
 func TestAuditWALGuardPassIsQuietAfterShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
