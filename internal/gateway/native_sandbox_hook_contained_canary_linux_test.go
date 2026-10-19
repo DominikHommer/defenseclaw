@@ -101,6 +101,33 @@ func (owner *containedCleanup) Close(ctx context.Context) error {
 }
 
 func TestFixedContainedHookCleanupRetainsUncertainOwnerWithoutNative(t *testing.T) {
+	// These facts are all that a failed actual launch may publish. The
+	// underlying error text and any uncorrelated failure payload stay private.
+	binding := bridgeproto.Binding{SessionID: "fixed"}
+	failed := bridgeproto.Frame{Kind: bridgeproto.Failed, Request: 7, Binding: binding,
+		Failure: &bridgeproto.Failure{Code: "launch_failed"}}
+	if got := containedLaunchFrameObservation(failed, 7, binding); got.Step != "failed_frame" ||
+		got.FrameKind != "failed" || got.FailureCode != "launch_failed" || got.NativeStage != "" {
+		t.Fatal("correlated closed failure was lost")
+	}
+	failed.Request = 8
+	if got := containedLaunchFrameObservation(failed, 7, binding); got.Step != "correlation" || got.FailureCode != "" {
+		t.Fatal("uncorrelated peer data escaped")
+	}
+	failed.Request = 7
+	failed.Failure.Code = "private:/host/path"
+	if got := containedLaunchFrameObservation(failed, 7, binding); got.FailureCode != "" {
+		t.Fatal("unclosed peer code escaped")
+	}
+	stage := bridgeproto.NativePreparationStage("windows_cwd_privacy")
+	failed.Failure = &bridgeproto.Failure{Code: "preparation_failed", NativeStage: &stage}
+	if got := containedLaunchFrameObservation(failed, 7, binding); got.FailureCode != "preparation_failed" ||
+		got.NativeStage != string(stage) {
+		t.Fatal("closed native stage was lost")
+	}
+	if got := containedKnownError(errors.Join(bridgeowner.ErrPeer, containedPrivateError{})); got != "peer" {
+		t.Fatal("private error text was consulted or exposed")
+	}
 	failure := errors.New("fixed fake close uncertainty")
 	calls := 0
 	held := &struct{ value string }{"fixed retained resource"}
@@ -138,6 +165,97 @@ func TestFixedContainedHookCleanupRetainsUncertainOwnerWithoutNative(t *testing.
 		t.Fatal("successful cleanup did not relinquish its closure")
 	}
 	// The intentionally retained fake closure owns no native resource or file.
+}
+
+type containedPrivateError struct{}
+
+func (containedPrivateError) Error() string { panic("private error text was formatted") }
+
+// Only closed labels enter the public contributor result. Error() and raw
+// protocol strings are never consulted, even for an unexpected peer failure.
+type containedLaunchObservation struct {
+	Step        string `json:"step"`
+	FrameKind   string `json:"frame_kind,omitempty"`
+	FailureCode string `json:"failure_code,omitempty"`
+	NativeStage string `json:"native_stage,omitempty"`
+	OwnerError  string `json:"owner_error,omitempty"`
+}
+
+type containedCleanupObservation struct {
+	Step       string `json:"step"`
+	OwnerError string `json:"owner_error,omitempty"`
+}
+
+func containedKnownError(err error) string {
+	switch {
+	case err == nil:
+		return "none"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, bridgeowner.ErrCleanup):
+		return "owner_cleanup"
+	case errors.Is(err, bridgeowner.ErrPeer):
+		return "peer"
+	case errors.Is(err, bridgeowner.ErrBackpressure):
+		return "backpressure"
+	case errors.Is(err, bridgeowner.ErrClosed):
+		return "owner_closed"
+	case errors.Is(err, bridgeproto.ErrProtocol):
+		return "protocol"
+	case errors.Is(err, bridgeprocess.ErrAdmission):
+		return "native_admission"
+	case errors.Is(err, bridgeprocess.ErrUnavailable):
+		return "native_unavailable"
+	case errors.Is(err, errNativeHookAssets):
+		return "assets"
+	case errors.Is(err, io.EOF):
+		return "eof"
+	default:
+		return "other"
+	}
+}
+
+func containedClosedFrameKind(kind bridgeproto.Kind) string {
+	switch kind {
+	case bridgeproto.Prepare, bridgeproto.Launch, bridgeproto.Input, bridgeproto.InputEOF,
+		bridgeproto.Resize, bridgeproto.Cancel, bridgeproto.Wait, bridgeproto.Destroy,
+		bridgeproto.Prepared, bridgeproto.Started, bridgeproto.Output, bridgeproto.Exited,
+		bridgeproto.Destroyed, bridgeproto.Failed:
+		return string(kind)
+	default:
+		return "other"
+	}
+}
+
+func containedClosedFailureCode(code string) string {
+	switch code {
+	case "invalid_request", "unsupported", "preparation_failed", "launch_failed", "io_failed", "cleanup_failed":
+		return code
+	default:
+		return ""
+	}
+}
+
+func containedLaunchFrameObservation(frame bridgeproto.Frame, request uint64, binding bridgeproto.Binding) containedLaunchObservation {
+	if frame.Request != request || frame.Binding != binding {
+		return containedLaunchObservation{Step: "correlation"}
+	}
+	if frame.Kind == bridgeproto.Started {
+		return containedLaunchObservation{}
+	}
+	observation := containedLaunchObservation{Step: "unexpected_frame", FrameKind: containedClosedFrameKind(frame.Kind)}
+	if frame.Kind != bridgeproto.Failed || frame.Failure == nil {
+		return observation
+	}
+	observation.Step = "failed_frame"
+	observation.FailureCode = containedClosedFailureCode(frame.Failure.Code)
+	if observation.FailureCode == "preparation_failed" && frame.Failure.NativeStage != nil &&
+		bridgeproto.ValidNativePreparationStage(string(*frame.Failure.NativeStage)) {
+		observation.NativeStage = string(*frame.Failure.NativeStage)
+	}
+	return observation
 }
 
 // This host-only test checks the schema/evaluator oracle before any native
@@ -251,6 +369,8 @@ type containedHookProcess struct {
 	launched, complete bool
 	output             []byte
 	outputBytes        int
+	launchObservation  containedLaunchObservation
+	cleanupObservation containedCleanupObservation
 }
 
 func (process *containedHookProcess) Close(ctx context.Context) error {
@@ -259,17 +379,21 @@ func (process *containedHookProcess) Close(ctx context.Context) error {
 	}
 	if process.session != nil {
 		if err := process.session.Close(ctx); err != nil {
+			process.cleanupObservation = containedCleanupObservation{Step: "session_close", OwnerError: containedKnownError(err)}
 			return err
 		}
 		if err := process.session.StopAndWait(ctx); err != nil {
+			process.cleanupObservation = containedCleanupObservation{Step: "native_stop_wait", OwnerError: containedKnownError(err)}
 			return err
 		}
 	}
 	if ctx.Err() != nil {
+		process.cleanupObservation = containedCleanupObservation{Step: "cleanup_context", OwnerError: containedKnownError(ctx.Err())}
 		return ctx.Err()
 	}
 	if process.grant != nil {
 		if err := process.grant.Close(); err != nil {
+			process.cleanupObservation = containedCleanupObservation{Step: "grant_close", OwnerError: containedKnownError(err)}
 			return err
 		}
 		process.grant = nil
@@ -283,13 +407,21 @@ func (process *containedHookProcess) Launch(ctx context.Context, spec sandboxrun
 		return sandboxruntime.Instance{}, errors.New("fixed native launch is unavailable")
 	}
 	process.launched = true
+	process.launchObservation = containedLaunchObservation{Step: "send"}
 	request, err := process.session.Protocol.Send(ctx, bridgeowner.Command{Kind: bridgeproto.Launch})
 	if err != nil {
+		process.launchObservation.OwnerError = containedKnownError(err)
 		return sandboxruntime.Instance{}, err
 	}
 	process.launchRequest = request
+	process.launchObservation.Step = "receive"
 	frame, err := process.session.Protocol.Receive(ctx)
-	if err != nil || frame.Kind != bridgeproto.Started || frame.Request != request || frame.Binding != process.binding {
+	if err != nil {
+		process.launchObservation.OwnerError = containedKnownError(err)
+		return sandboxruntime.Instance{}, errors.New("fixed native Started correlation differs")
+	}
+	process.launchObservation = containedLaunchFrameObservation(frame, request, process.binding)
+	if process.launchObservation.Step != "" {
 		return sandboxruntime.Instance{}, errors.New("fixed native Started correlation differs")
 	}
 	return sandboxruntime.Instance{Identity: process.identity, Phase: "started", Workdir: "/work"}, nil
@@ -361,7 +493,14 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 		"prepared": false, "started": false, "exited": false, "destroyed": false, "native_and_endpoint_cleanup": false, "binding_mint_attempted": false, "binding_issued": false, "binding_revoked": false, "vendor_runtime_qualification": false, "production_qualification": false, "native_surface": value.NativeSurface}
 	var rows []fixture.Row
 	var observed []SandboxHookDecision
+	var process *containedHookProcess
 	defer func() {
+		if process != nil && process.launchObservation.Step != "" {
+			record["native_launch_observation"] = process.launchObservation
+		}
+		if process != nil && process.cleanupObservation.Step != "" {
+			record["native_cleanup_observation"] = process.cleanupObservation
+		}
 		record["rows"] = rows
 		record["decisions"] = observed
 		raw, err := json.Marshal(record)
@@ -380,7 +519,6 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 	var peer, bwrap, payload *bridgeprocess.Image
 	var sourceFiles, workspace, hostDirs []*os.File
 	var assets *nativeSandboxHookAssets
-	var process *containedHookProcess
 	var api *APIServer
 	var store *sandboxauth.FileStore
 	var binding sandboxauth.Binding
@@ -392,9 +530,13 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 	owner := retainContainedCleanup(func(cleanup context.Context) error {
 		if assets != nil {
 			if err := assets.Close(cleanup); err != nil {
+				if process == nil || process.cleanupObservation.Step == "" {
+					record["native_cleanup_observation"] = containedCleanupObservation{Step: "assets_close", OwnerError: containedKnownError(err)}
+				}
 				return err
 			}
 			if process != nil && !process.complete {
+				record["native_cleanup_observation"] = containedCleanupObservation{Step: "process_incomplete"}
 				return errors.New("fixed native cleanup observation incomplete")
 			}
 			if process != nil {
@@ -608,6 +750,9 @@ func runContainedHookCase(t *testing.T, value fixture.Case) {
 		t.Fatal("fixed actual peer preparation failed")
 	}
 	if _, err := assets.Launch(lifetime, spec); err != nil {
+		if process == nil || process.launchObservation.Step == "" {
+			record["native_launch_observation"] = containedLaunchObservation{Step: "assets_admission", OwnerError: containedKnownError(err)}
+		}
 		t.Fatal("fixed actual native launch failed")
 	}
 	record["started"] = true
