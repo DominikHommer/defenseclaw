@@ -65,6 +65,9 @@ deployment reads:
 
   - the Cisco AI Defense API key named by
     enterprise.inspection.ai_defense.credential;
+  - the API key of the LLM judge and the skill, MCP and plugin scanners
+    named by enterprise.inspection.llm.credential (they never read
+    llm.api_key_env or the service environment);
   - observability destination credentials named by a header value
     {credential: NAME} (otlp, http_jsonl), token_credential (splunk_hec)
     or bearer_credential (http_jsonl).
