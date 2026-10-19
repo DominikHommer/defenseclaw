@@ -34,6 +34,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
 // ---------------------------------------------------------------------------
@@ -265,5 +266,44 @@ func TestInspectToolPolicyUsesOneConfigAcrossMCPAndToolChecks(t *testing.T) {
 	}, trustedActionRequest{})
 	if verdict.Action != "block" || !hasFinding(verdict.Findings, "STATIC-BLOCK") {
 		t.Fatalf("mixed-generation verdict = %+v, want the pinned tool block", verdict)
+	}
+}
+
+// GAP-0216: on a managed gateway, the admission verdict of one enrolled
+// user's MCP server refused another user's clean server of the same name.
+// The account's own row refuses only that account's server in its project;
+// a caller whose home is not known is refused (fail closed).
+func TestInspectToolEnrolledAccountMCPVerdictIsThatAccountsOnly(t *testing.T) {
+	api, store := toolPolicyAPI(t, "action")
+	base := t.TempDir()
+	u1 := config.MCPServerEntry{Name: "gb05-benign", Connector: "claudecode",
+		Home: filepath.Join(base, "dcw-std1"), Project: filepath.Join(base, "dcw-std1", "proj")}
+	u2Home := filepath.Join(base, "dcw-std2")
+	if err := store.SetActionFieldForConnector("mcp", watcher.MCPJournalName(u1), "claudecode", "runtime", "disable",
+		"scanner failure (fail-closed): dcw-std1 is not signed in"); err != nil {
+		t.Fatal(err)
+	}
+	call := func(home, cwd string) *ToolInspectVerdict {
+		t.Helper()
+		ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+		return api.inspectToolPolicyCtx(ctx, &ToolInspectRequest{Tool: "mcp__gb05-benign__ping", Args: json.RawMessage(`{}`),
+			Direction: "tool_call", Connector: "claudecode", callerCWD: cwd})
+	}
+	if v := call(u2Home, filepath.Join(u2Home, "proj")); hasFinding(v.Findings, "MCP-BLOCK") {
+		t.Fatalf("dcw-std2's clean server refused by dcw-std1's verdict: %+v", v)
+	}
+	if v := call(u1.Home, filepath.Join(u1.Project, "src")); !hasFinding(v.Findings, "MCP-BLOCK") ||
+		!strings.Contains(v.Reason, "install admission rejected it") || !strings.Contains(v.Reason, "not signed in") {
+		t.Fatalf("dcw-std1's own server: %+v, want the admission refusal", v)
+	}
+	if v := call(u1.Home, filepath.Join(u1.Home, "other")); hasFinding(v.Findings, "MCP-BLOCK") {
+		t.Fatalf("another project of dcw-std1 refused: %+v", v)
+	}
+	if v := call("", ""); !hasFinding(v.Findings, "MCP-BLOCK") {
+		t.Fatalf("a caller whose home is not known: %+v, want refused", v)
+	}
+	codex := &ToolInspectRequest{Tool: "mcp__gb05-benign__ping", Args: json.RawMessage(`{}`), Direction: "tool_call", Connector: "codex"}
+	if v := api.inspectToolPolicyCtx(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: u1.Home}), codex); hasFinding(v.Findings, "MCP-BLOCK") {
+		t.Fatalf("another connector refused: %+v", v)
 	}
 }
