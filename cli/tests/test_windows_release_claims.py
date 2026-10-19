@@ -528,12 +528,26 @@ def test_hermes_latest_source_recheck_matches_the_pinned_contract() -> None:
     )["connectors"]["hermes"]
 
     assert len(contracts) == 2
+    # The exact pins are the release-date tags a Hermes git install prints
+    # ("Hermes Agent vunknown (2026.9.24)"), GAP-0151.
     assert contracts[0]["agent_version"] == {
+        "exact": [
+            "2026.7.20",
+            "2026.7.30",
+            "2026.8.3",
+            "2026.8.13",
+            "2026.8.16",
+            "2026.8.16.2",
+            "2026.8.18",
+            "2026.8.19",
+            "2026.8.27",
+        ],
         "min_inclusive": "0.19.0",
         "max_exclusive": "0.21.0",
     }
     assert contracts[1]["contract_id"] == "hermes-hooks-v2"
     assert contracts[1]["agent_version"] == {
+        "exact": ["2026.8.31", "2026.9.7", "2026.9.11", "2026.9.14", "2026.9.21", "2026.9.24"],
         "min_inclusive": "0.21.0",
         "max_exclusive": "0.22.0",
     }

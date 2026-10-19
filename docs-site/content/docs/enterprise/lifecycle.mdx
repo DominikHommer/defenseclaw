@@ -199,9 +199,10 @@ upgrade rewrites a `config_version: 8` administrator config as
 `config_version: 9` in place, and an older release refuses that file as
 written by a newer DefenseClaw. Give the older
 release a version 8 config explicitly: your own version 8 administrator
-config, or the copy the upgrade kept next to the installed file
-(`config.yaml.v8.bak`, root- or SYSTEM-only). That copy is the config as it
-was just before this host's last version 8 to 9 migration: changes made
+config, or the copy the upgrade kept next to the installed file when it
+migrated from version 8 (`config.yaml.v8.bak`, root- or SYSTEM-only). That copy
+exists only after a version 8 to 9 migration and holds the config as it
+was just before that migration: changes made
 since then are not in it, so prefer your own current administrator config
 when you have one. The commands below pass it as `CONFIG=` or `--config`.
 Without it, the older release reads the installed version 9 file and fails
@@ -217,9 +218,9 @@ version 8 file: it applies the installed config.
 | OS and channel | How to go back |
 | --- | --- |
 | Windows | `/ensure` refuses to install an older version (`downgrade_refused`, exit `1603`). Run the older release's Setup with `/upgrade CONFIG=<version 8 config> JSON=1`: an explicit `upgrade` does not compare versions. Uninstalling and installing the older release also works |
-| Debian and Ubuntu | Create the root-owned rollback marker, then install the older package: `sudo touch /var/lib/defenseclaw-enterprise/allow-downgrade`, then `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb`. A release that reads `config_version: 8` then needs `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --allow-downgrade --config /etc/defenseclaw/config.yaml.v8.bak --json` |
-| RHEL | Create the same marker, then `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm` (`rpm -U` refuses an older package). A release that reads `config_version: 8` then needs the same `ensure --from-package --allow-downgrade --config ...` |
-| Linux payload | Extract the older release as in [Upgrade](#linux), then run `sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --allow-downgrade --config /etc/defenseclaw/config.yaml.v8.bak --json` |
+| Debian and Ubuntu | Create the root-owned rollback marker, then install the older package: `sudo touch /var/lib/defenseclaw-enterprise/allow-downgrade`, then `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb`. Its postinstall applies the installed config if compatible. If it refuses a version 9 config, finish with `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --allow-downgrade --config <version 8 config> --json`, using your version 8 administrator config or `/etc/defenseclaw/config.yaml.v8.bak` if that file exists |
+| RHEL | Create the same marker, then `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm` (`rpm -U` refuses an older package). If its postinstall refuses a version 9 config, use the same `ensure --from-package --allow-downgrade --config <version 8 config>` recovery |
+| Linux payload | Extract the older release as in [Upgrade](#linux), then run `sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --allow-downgrade --config <compatible config> --json`; use `/etc/defenseclaw/config.yaml` if it is already compatible, or a version 8 administrator config or the v8 backup if one exists |
 | macOS | Create the root-owned rollback marker, then install the older package: `sudo touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`, then `sudo installer -pkg ./defenseclaw-enterprise-<older>-darwin-arm64.pkg -target /`. An older release that reads `config_version: 9` applies the installed config and is done (`last-package-result.json` reads `ok`). Only a release that reads version 8 fails on the version 9 config; then run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --from-package --allow-downgrade --config <version 8 config> --json` with your version 8 administrator config, or `/opt/cisco/defenseclaw/etc/config.yaml.v8.bak` (the config before this host's last migration) |
 
 - **Linux packages and macOS.** The package's preinstall script refuses an
@@ -230,8 +231,8 @@ version 8 file: it applies the installed config.
   rollback needs a new marker. An `ensure --from-package` that you run
   yourself, to finish an install or a rollback, records its result in
   `last-package-result.json` as the install script does.
-- **A release that reads `config_version: 8` (Linux).** Its install script
-  cannot apply the version 9 config, so it records the failure in
+- **A release that reads `config_version: 8` (Linux).** If the installed
+  config is version 9, its install script records the failure in
   `last-package-result.json`. Run the `ensure --from-package
   --allow-downgrade --config ...` command above right after the package
   manager finishes: until it runs, the older release cannot read a version 9

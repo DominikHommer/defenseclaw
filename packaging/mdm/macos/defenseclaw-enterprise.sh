@@ -258,7 +258,7 @@ dc_sweep_stages() {
 # payload's gateway cannot run, so on Linux the default is a root-only folder
 # of its own (GAP-0752); --staging-dir names another one.
 dc_stage_parent() {
-    DC_STAGE_PARENT=$DC_STAGING_DIR
+    DC_STAGE_PARENT=$DC_STAGING_DIR DC_TRUST_ACL=""
     if [ -z "$DC_STAGE_PARENT" ]; then
         if [ "$DC_SCRIPT_OS" = darwin ]; then
             DC_STAGE_PARENT=/var/tmp
@@ -791,7 +791,11 @@ dc_install_package() {
             command -v rpm >/dev/null 2>&1 || dc_fail_result "$DC_EXIT_FAILURE" mdm_package_manager_missing "rpm is not installed; use the .deb or the payload archive"
             package=$(rpm -qp --qf '%{NAME}' "$file" 2>/dev/null || true)
             version=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$file" 2>/dev/null || true)
+            arch=$(rpm -qp --qf '%{ARCH}' "$file" 2>/dev/null || true)
+            host_arch=$(rpm --eval '%{_arch}' 2>/dev/null || true)
             [ "$package" = "$DC_LINUX_PACKAGE" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the .rpm is '$package', not $DC_LINUX_PACKAGE"
+            [ -n "$host_arch" ] && [ "$arch" = "$host_arch" ] ||
+                dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_architecture "the .rpm is for $arch; this host needs $host_arch"
             dc_require_product_version "$(dc_package_release_version "$version")"
             # An interrupted upgrade can leave multiple installed versions.
             # Use the newest one for the repair decision and result metadata.
@@ -1569,6 +1573,64 @@ dc_run_lifecycle_retry() {
     return "$status"
 }
 
+# Read the first error message from the gateway's lifecycle JSON. The CLI
+# writes a refused --json secret set only to stdout, with no stderr text.
+dc_secret_json_error() {
+    head -c 65536 "$1" 2>/dev/null | awk '
+        { document = document $0 }
+        END {
+            if (!match(document, /"errors"[[:space:]]*:[[:space:]]*\[[[:space:]]*\{/)) exit
+            document = substr(document, RSTART + RLENGTH)
+            if (!match(document, /"message"[[:space:]]*:[[:space:]]*"/)) exit
+            document = substr(document, RSTART + RLENGTH)
+            message = ""
+            for (i = 1; i <= length(document); i++) {
+                c = substr(document, i, 1)
+                if (c == "\"") { print message; exit }
+                if (c == "\\") {
+                    i++
+                    c = substr(document, i, 1)
+                    if (c == "n" || c == "r" || c == "t") c = " "
+                    else if (c == "b" || c == "f") c = ""
+                    else if (c == "u") {
+                        hex = substr(document, i + 1, 4)
+                        if (length(hex) != 4 || hex ~ /[^[:xdigit:]]/) exit
+                        value = 0
+                        for (j = 1; j <= 4; j++) value = value * 16 + index("0123456789abcdef", tolower(substr(hex, j, 1))) - 1
+                        c = value >= 32 && value <= 126 ? sprintf("%c", value) : "\\u" hex
+                        i += 4
+                    }
+                    else if (c != "\"" && c != "\\" && c != "/") exit
+                }
+                message = message c
+            }
+        }
+    '
+}
+
+dc_store_secret() {
+    gateway=$1
+    set +e
+    printf '%s' "$secret_data" |
+        "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
+    DC_CHILD=$!
+    wait "$DC_CHILD"
+    secret_status=$?
+    DC_CHILD=""
+    set -e
+    secret_data=""
+    if [ "$secret_status" != 0 ]; then
+        detail=$(head -c 1024 "$DC_STAGE/secret.err" 2>/dev/null || true)
+        if [ -z "$detail" ]; then
+            detail=$(dc_secret_json_error "$DC_STAGE/secret.json" || true)
+        fi
+        [ -n "$detail" ] || detail="the gateway returned no error message"
+        case "$secret_status" in 1 | 2 | 75) ;; *) secret_status=$DC_EXIT_FAILURE ;; esac
+        dc_fail_result "$secret_status" mdm_secret_failed "storing credential '$DC_SECRET_NAME' failed, so the config was not applied: $detail"
+    fi
+    dc_log "stored credential $DC_SECRET_NAME"
+}
+
 dc_main() {
     dc_layout
     dc_log "start action=$DC_ACTION"
@@ -1679,21 +1741,7 @@ dc_main() {
     # that the package's postinstall or the change itself started (the
     # apply path unit) instead of failing busy.
     if [ -n "$DC_SECRET_NAME" ]; then
-        set +e
-        printf '%s' "$secret_data" |
-            "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
-        DC_CHILD=$!
-        wait "$DC_CHILD"
-        secret_status=$?
-        DC_CHILD=""
-        set -e
-        secret_data=""
-        if [ "$secret_status" != 0 ]; then
-            detail=$(head -c 1024 "$DC_STAGE/secret.err" 2>/dev/null || true)
-            case "$secret_status" in 1 | 2 | 75) ;; *) secret_status=$DC_EXIT_FAILURE ;; esac
-            dc_fail_result "$secret_status" mdm_secret_failed "storing credential '$DC_SECRET_NAME' failed, so the config was not applied: $detail"
-        fi
-        dc_log "stored credential $DC_SECRET_NAME"
+        dc_store_secret "$gateway"
     fi
 
     # A bundle apply runs the ensure transaction itself, so with a bundle

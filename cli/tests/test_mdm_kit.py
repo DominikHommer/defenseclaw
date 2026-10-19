@@ -125,6 +125,25 @@ def test_macos_trusted_path_refuses_write_acl_entries(tmp_path: Path) -> None:
         assert trusted("darwin", entry)[0], entry
     assert trusted("linux", write)[0]
 
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_missing_staging_folder_returns_structured_refusal(tmp_path: Path) -> None:
+    for platform in ("linux", "macos"):
+        wrapper = _text(MDM / platform / "defenseclaw-enterprise.sh")
+        stage = tmp_path / "missing"
+        functions = "\n".join(_shell_function(wrapper, name) for name in ("dc_stage_parent",))
+        script = (
+            "set -u\nDC_EXIT_FAILURE=1\n"
+            f"DC_SCRIPT_OS={platform}\nDC_STAGING_DIR='{stage}'\n"
+            "dc_trusted_path() { return 1; }\n"
+            "dc_fail_result() { printf '%s|%s|%s' \"$1\" \"$2\" \"$3\"; }\n"
+            f"{functions}\ndc_stage_parent\n"
+        )
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert "mdm_staging_untrusted" in result.stdout
+        assert "missing" in result.stdout
+
 def test_intune_entrypoints_refuse_constrained_language_before_native_helpers() -> None:
     entrypoints = {
         MDM / "intune" / "windows" / "Install-DefenseClawIntune.ps1": "1603",
@@ -214,6 +233,51 @@ def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
     # inline-secret setting.
     assert "DC_SECRET_VALUE" not in text
     assert "Never put credentials here" in text
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("", 'credential is empty (check "value" < 1)'),
+        ("gateway unavailable", "gateway unavailable"),
+    ],
+)
+def test_unix_wrapper_secret_refusal_carries_gateway_reason(
+    tmp_path: Path, os_dir: str, stderr: str, expected: str
+) -> None:
+    wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_log", "dc_fail_result",
+        "dc_secret_json_error", "dc_store_secret",
+    ))
+    gateway = tmp_path / "gateway"
+    gateway.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$DC_TEST_DOCUMENT"\n'
+        'if [ -n "$DC_TEST_STDERR" ]; then printf "%s\\n" "$DC_TEST_STDERR" >&2; fi\n'
+        'exit 2\n',
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    document = {"errors": [{"code": "secret_value_invalid", "message": 'credential is empty (check "value" < 1)'}]}
+    script = (
+        f'DC_ACTION=ensure DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"}\n'
+        f'DC_STAGE="{tmp_path}" DC_LOG="" DC_FORMAT=json DC_EXIT_FAILURE=1\n'
+        'DC_SECRET_NAME=test-key secret_data=placeholder\n'
+        f'{functions}\ndc_store_secret "{gateway}"\n'
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        env={"PATH": os.environ["PATH"], "DC_TEST_DOCUMENT": json.dumps(document).replace("<", "\\u003c"), "DC_TEST_STDERR": stderr},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 2, result.stderr
+    output = json.loads(result.stdout)
+    assert output["errors"] == [{
+        "code": "mdm_secret_failed",
+        "message": f"storing credential 'test-key' failed, so the config was not applied: {expected}",
+    }]
 
 
 def _run(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -411,7 +475,8 @@ _PACKAGE_TOOL_STUBS = {
     "dpkg": """case "$1" in --print-architecture) echo amd64 ;; -i) echo "dpkg -i" >>"$DC_TEST_LOG" ;; esac""",
     "dpkg-query": "exit 1",
     "rpm": """case "$1" in
-    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *ARCH*) echo x86_64 ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    --eval) echo x86_64 ;;
     -q) exit 1 ;;
     -U) echo "rpm -U" >>"$DC_TEST_LOG" ;;
 esac""",
@@ -501,7 +566,8 @@ def test_unix_wrapper_repairs_an_rpm_left_with_two_installed_versions(tmp_path: 
     rpm.write_text(
         """#!/bin/sh
 case "$1" in
-    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo 1.0.4101-1 ;; esac ;;
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *ARCH*) echo x86_64 ;; *) echo 1.0.4101-1 ;; esac ;;
+    --eval) echo x86_64 ;;
     -q) [ "$2" = --qf ] && printf '1.0.3602-1\\n1.0.4101-1\\n'; exit 0 ;;
     -U) case " $* " in *" --replacepkgs "*) echo "rpm -U --replacepkgs" >>"$DC_TEST_LOG" ;; *) echo "package is already installed" >&2; exit 1 ;; esac ;;
 esac

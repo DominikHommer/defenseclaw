@@ -1205,10 +1205,20 @@ func hookSidecarFiles(dataDir, connectorName string) ([]string, error) {
 }
 
 func validateHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) error {
-	if !strings.EqualFold(strings.TrimSpace(mode), "action") || envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
+	if envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
 		return nil
 	}
 	resolution := resolveHookContract(conn.Name(), opts.AgentVersion)
+	if !strings.EqualFold(strings.TrimSpace(mode), "action") {
+		// The standalone guardian installs no hooks for an agent version
+		// with no hook contract, in any guardrail mode: they were rendered
+		// without one and status and verify reported the agent as covered
+		// (GAP-0151). Status and verify name it hook_contract_unverified.
+		if standaloneProfileProcess() && resolution.Status == connector.HookCompatibilityUnknown {
+			return fmt.Errorf("enterprise hooks: connector %s agent version %q is not verified against a known hook contract: %s", conn.Name(), opts.AgentVersion, resolution.Reason)
+		}
+		return nil
+	}
 	if connector.HookContractNeedsActionOverride(resolution) {
 		return fmt.Errorf("enterprise hooks: connector %s agent version %q is not verified against a known hook contract: %s", conn.Name(), opts.AgentVersion, resolution.Reason)
 	}

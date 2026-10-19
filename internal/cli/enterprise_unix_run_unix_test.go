@@ -379,6 +379,21 @@ func TestEnterpriseSecretArgumentErrorsPrintUsage(t *testing.T) {
 	}
 }
 
+// The name flag help names the length limit; a Secure Client host keeps its
+// prior help text (GAP-0670). The --json refusals themselves are the
+// management contract's one failure document, pinned by
+// TestManagementContractUnixSecretFailuresPrintOneDocument and
+// TestManagementContractUnixSecretFlagErrorsPrintTheFailureDocument.
+func TestEnterpriseSecretNameHelpKeepsSecureClientUsage(t *testing.T) {
+	nameFlag := newEnterpriseSecretCommand("set", "").Flags().Lookup("name")
+	if !strings.Contains(nameFlag.Usage, "1-63") {
+		t.Fatalf("name help does not name the length limit: %q", nameFlag.Usage)
+	}
+	if legacy := nameFlag.Annotations[secureClientUsageAnnotation]; len(legacy) != 1 || legacy[0] != "credential name (lowercase letters, digits and dashes)" {
+		t.Fatalf("Secure Client name help changed: %v", legacy)
+	}
+}
+
 // secret set and secret remove both printed only "✓ ensure: done" and the
 // apply steps; each names the command and the credential it changed
 // (GAP-2305).

@@ -3861,7 +3861,10 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 		{name: "cursor_observe_forces_fail_open", connector: NewCursorConnector(), guardrailMode: "observe", wantFailMode: "open"},
 		{name: "devin_supports_fail_closed", connector: NewDevinConnector(), wantFailMode: "closed"},
 		{name: "openhands_supports_fail_closed", connector: NewOpenHandsConnector(), wantFailMode: "closed"},
-		{name: "hermes_downgrades_to_fail_open", connector: NewHermesConnector(), wantFailMode: "open"},
+		// The per-user Hermes shell hook blocks through Hermes' block
+		// directive (hookBlocksItsOwnFailures); the Windows native hook keeps
+		// the neutral result.
+		{name: "hermes_per_user_keeps_fail_closed", connector: NewHermesConnector(), wantFailMode: perUserHermesFailModeForTest()},
 		{name: "copilot_downgrades_to_fail_open", connector: NewCopilotConnector(), wantFailMode: "open"},
 	}
 
@@ -4146,4 +4149,13 @@ func TestAntigravityAcceptsUnicodeHookPath(t *testing.T) {
 	if want := hook + " Stop"; len(stop) != 1 || stop[0].Command != want {
 		t.Fatalf("Stop hook = %+v, want command %q", stop, want)
 	}
+}
+
+// perUserHermesFailModeForTest is the fail mode a per-user Hermes render keeps
+// for a resolved "closed" on this OS.
+func perUserHermesFailModeForTest() string {
+	if runtime.GOOS == "windows" {
+		return "open"
+	}
+	return "closed"
 }

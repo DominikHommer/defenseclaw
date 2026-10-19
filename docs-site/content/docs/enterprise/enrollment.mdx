@@ -136,9 +136,9 @@ the record itself is unreadable, or when an app or editor extension that
 
 | Code | Meaning |
 | --- | --- |
-| `hook_contract_unverified` | The installed version has no verified DefenseClaw hook contract |
+| `hook_contract_unverified` | The installed version has no verified DefenseClaw hook contract, or (Linux and macOS) its version could not be read, so no contract can be selected. The enumerator enrolls no row for it in any guardrail mode, so the guardian installs no hooks, and `coverage_complete` is `false` |
 | `surface_unverified` | A desktop app or editor extension has no engine version that selects a hook contract, or its hook delivery is not live-verified and `unverified_versions` is `refuse` |
-| `agent_unprotected` | The agent's version could not be read, it is below the platform minimum, its user's home is untrusted (Linux and macOS), its signed-in user's enrollment is pending (Windows), a Claude Code change to an older hook contract was not followed (Windows), or (Windows) it is not installed where the guardian can manage it |
+| `agent_unprotected` | The agent's version could not be read (Windows), it is below the platform minimum, its user's home is untrusted (Linux and macOS), its signed-in user's enrollment is pending (Windows), a Claude Code change to an older hook contract was not followed (Windows), or (Windows) it is not installed where the guardian can manage it |
 | `home_untrusted` | Linux and macOS: an eligible account whose home is untrusted and that has no agent the enumerator could list. It names the account and the reason: the account gets no hooks, IDE inventory or discovery until the home is fixed |
 
 A per-user agent in this state runs without DefenseClaw hooks. A
