@@ -42,7 +42,32 @@ def test_managed_package_recipes_exclude_fleet_compiler():
     assert "BUNDLED_COMPILER" not in mac_recipe
     assert 'install -m 0644 "$compiler_src"' not in mac_recipe
     assert "policy_compiler.py" not in windows_recipe
-    assert "$layout['CompilerPath']" not in windows_layout
+    # The layout still names where a 1.0.2 install put the compiler, so a
+    # Fleet-on host can keep it (GAP-0274), but no lifecycle creates that tree.
+    layout_directories = windows_layout[windows_layout.index("function New-DefenseClawLayoutDirectories {") :]
+    layout_directories = layout_directories[: layout_directories.index("\nfunction ")]
+    assert "Compiler" not in layout_directories
+
+
+def test_windows_standalone_retires_the_empty_compiler_tree():
+    # GAP-0270: 1.0.2 Setup created lib\defenseclaw for the Fleet compiler.
+    # The Fleet-off retire and every uninstall install-tree check use the same
+    # empty-only helper. A recorded compiler a Fleet-on host keeps (GAP-0274)
+    # is accepted only through its hash-checked helper.
+    module = (ROOT / "packaging/windows/DefenseClawEnterprise.psm1").read_text(encoding="utf-8")
+    retire = module[module.index("if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {") :]
+    assert retire.splitlines()[1].strip() == "Remove-DefenseClawRetiredStandaloneCompiler -Layout $Layout"
+    helper = module[module.index("function Get-DefenseClawEmptyRetiredCompilerDirectories {") :]
+    helper = helper[: helper.index("\n}\n")]
+    assert "ReparsePoint" in helper and "-notin $empty" in helper
+    for function in ("Assert-DefenseClawManagedInstallTree", "Remove-DefenseClawCommittedEmptyInstallRoot"):
+        body = module[module.index(f"function {function} {{") :]
+        body = body[: body.index("\nfunction ")]
+        assert "Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot" in body, function
+        assert "-Name CompilerPath" not in body, function
+    walk = module[module.index("function Assert-DefenseClawManagedInstallTree {") :]
+    walk = walk[: walk.index("\nfunction ")]
+    assert "Get-DefenseClawRecordedStandaloneCompilerPath -Layout $Layout" in walk
 
 
 def _unit(name: str) -> list[str]:

@@ -7983,6 +7983,7 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.InstallRoot -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.BinDirectory -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.LibexecDirectory -Kind InstallDirectory -GatewayServiceSID $gatewaySID
+    # A kept 1.0.2 Fleet compiler (GAP-0274) and its directories, when present.
     foreach ($directory in @(
         (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
         (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
@@ -9238,6 +9239,13 @@ function Get-DefenseClawLayout {
         # treats an absent key as the Secure Client broker deployment.
         $layout['Profile'] = 'Standalone'
         $layout['BrokerEnabled'] = $false
+        # Where a 1.0.2 standalone install put the Fleet policy compiler.
+        # Setup carries no compiler now; a Fleet-enabled host keeps the one it
+        # has, unchanged, while deployment metadata records it (GAP-0274).
+        # Keep through the 1.0.x upgrade bridge.
+        $layout['CompilerLibDirectory'] = [IO.Path]::Combine($layout.InstallRoot, 'lib')
+        $layout['CompilerDirectory'] = [IO.Path]::Combine($layout.InstallRoot, 'lib', 'defenseclaw')
+        $layout['CompilerPath'] = [IO.Path]::Combine($layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
     }
     return $layout
 }
@@ -9293,8 +9301,6 @@ function New-DefenseClawLayoutDirectories {
         $Layout.InstallRoot,
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory),
         $Layout.StateRoot,
         $Layout.ConfigDirectory,
         $Layout.RuntimeDirectory,
@@ -9607,6 +9613,8 @@ function New-DefenseClawDeploymentMetadata {
     foreach ($entry in @(
         @('broker', $Layout.BrokerPath),
         @('gateway', $Layout.GatewayPath),
+        # A kept 1.0.2 Fleet compiler keeps its record (GAP-0274); the
+        # Fleet-off retire deletes the file first, which drops the record.
         @('compiler', (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath)),
         @('acp', $Layout.ACPPath),
         @('hook', $Layout.HookPath),
@@ -10374,6 +10382,7 @@ function New-DefenseClawTransaction {
         $Layout.HookPath,
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
+        # A rollback restores a compiler the Fleet-off retire deleted.
         (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),
         $Layout.ConfigPath,
         $Layout.ManifestPath,
@@ -20914,6 +20923,12 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RequiredRights $serviceInstallRights `
             -AllowUsersRead
     }
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.LibexecDirectory `
+        -AllowedWriterSIDs $adminWriters `
+        -RequiredRights $installRights `
+        -AllowUsersRead
+    # A kept 1.0.2 Fleet compiler (GAP-0274) stays writable by admins only.
     foreach ($directory in @(
         (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
         (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
@@ -20936,11 +20951,6 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RequiredRights $serviceInstallRights `
             -AllowUsersRead
     }
-    Assert-DefenseClawPathAcl `
-        -Path $Layout.LibexecDirectory `
-        -AllowedWriterSIDs $adminWriters `
-        -RequiredRights $installRights `
-        -AllowUsersRead
     Assert-DefenseClawPathAcl `
         -Path $Layout.GatewayPath `
         -AllowedWriterSIDs $adminWriters `
@@ -22612,6 +22622,102 @@ function Remove-DefenseClawStandaloneManagedIPCDirectory {
     [IO.Directory]::Delete($directory, $false)
 }
 
+function Get-DefenseClawEmptyRetiredCompilerDirectories {
+    <#
+        GAP-0270: a 1.0.2 standalone install created InstallRoot\lib\defenseclaw
+        for the Fleet policy compiler, which this release no longer installs.
+        Returns those two retired directories that exist as plain directories
+        and hold nothing (lib may hold only an empty lib\defenseclaw), deepest
+        first. A directory with any other content, or a reparse point, is not
+        returned, so the callers keep refusing it.
+    #>
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    $lib = [IO.Path]::GetFullPath([IO.Path]::Combine($InstallRoot, 'lib')).TrimEnd('\')
+    $empty = [Collections.Generic.List[string]]::new()
+    foreach ($directory in @([IO.Path]::Combine($lib, 'defenseclaw'), $lib)) {
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item -or -not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            continue
+        }
+        $content = @(
+            Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force |
+                Microsoft.PowerShell.Core\Where-Object {
+                    [IO.Path]::GetFullPath([string]$_.FullName).TrimEnd('\') -notin $empty
+                }
+        )
+        if ($content.Count -eq 0) {
+            $empty.Add($directory)
+        }
+    }
+    return $empty.ToArray()
+}
+
+function Get-DefenseClawRecordedStandaloneCompilerPath {
+    <#
+        GAP-0274: Setup carries no Fleet policy compiler, so a Fleet-enabled
+        1.0.2 standalone host keeps the compiler it installed, unchanged.
+        Returns that compiler's full path when it is a plain file whose SHA-256
+        matches the hash the protected deployment metadata records for it, and
+        '' when there is no compiler file or no record (callers then refuse or
+        retire it as before). A compiler whose bytes differ from its record is
+        refused here, before anything changes.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return ''
+    }
+    $compilerPath = [IO.Path]::GetFullPath(
+        [IO.Path]::Combine($Layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
+    )
+    Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf)) {
+        return ''
+    }
+    $Metadata = $null
+    if (-not [string]::IsNullOrWhiteSpace((Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name MetadataPath))) {
+        $Metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    }
+    $recorded = ''
+    if ($null -ne $Metadata -and
+        $null -ne $Metadata.PSObject.Properties['hashes'] -and
+        $null -ne $Metadata.hashes) {
+        $property = $Metadata.hashes.PSObject.Properties['compiler']
+        if ($null -ne $property) {
+            $recorded = ([string]$property.Value).Trim()
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($recorded)) {
+        return ''
+    }
+    $actual = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $compilerPath -Algorithm SHA256).Hash
+    if (-not [string]::Equals($actual, $recorded, [StringComparison]::OrdinalIgnoreCase)) {
+        throw (
+            "the installed Fleet policy compiler does not match the hash deployment metadata records for it: $compilerPath. " +
+            'DefenseClaw keeps a recorded compiler only while it is unchanged; nothing was changed'
+        )
+    }
+    return $compilerPath
+}
+
+function Remove-DefenseClawRetiredStandaloneCompiler {
+    <#
+        Fleet-off Install, Upgrade and Repair remove the Fleet compiler an
+        older standalone install left, then lib\defenseclaw and lib once they
+        are empty, so a later uninstall finds no leftover tree (GAP-0270). A
+        directory with any other content stays for the uninstall to refuse.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $compilerPath = [IO.Path]::Combine($Layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
+    Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
+        [IO.File]::Delete($compilerPath)
+    }
+    foreach ($directory in @(Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot)) {
+        [IO.Directory]::Delete($directory, $false)
+    }
+}
+
 function Assert-DefenseClawManagedInstallTree {
     param([Parameter(Mandatory)][hashtable]$Layout)
     # ManagedIPCDirectory and ManagedIPCSocketPath live under InstallRoot
@@ -22625,8 +22731,6 @@ function Assert-DefenseClawManagedInstallTree {
     $allowedDirectories = @(
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory),
         $Layout.ManagedIPCDirectory
     )
     # Standalone keeps its managed IPC directory (sensor helper socket)
@@ -22635,6 +22739,11 @@ function Assert-DefenseClawManagedInstallTree {
     $standaloneIPCLeaves = @(Get-DefenseClawStandaloneIPCSocketLeaves -Layout $Layout)
     if ($standaloneIPCLeaves.Count -gt 0) {
         $allowedDirectories += [IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')
+    }
+    # The empty lib tree a 1.0.2 standalone install left for the retired
+    # Fleet compiler (GAP-0270). Anything inside it is still refused.
+    if (Test-DefenseClawStandaloneProfile) {
+        $allowedDirectories += @(Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot)
     }
     $allowedFiles = @(
         $Layout.BrokerPath,
@@ -22645,7 +22754,6 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.CLIPath,
         $Layout.InstallerPath,
         $Layout.ModulePath,
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),
         $managedIPCSocketPath
     )
     # Standalone also carries the managed OpenCode plugin under share\opencode.
@@ -22654,6 +22762,15 @@ function Assert-DefenseClawManagedInstallTree {
         $allowedDirectories += [string]$openCodePlugin.ShareDirectory
         $allowedDirectories += [string]$openCodePlugin.PluginDirectory
         $allowedFiles += [string]$openCodePlugin.PluginPath
+    }
+    # A Fleet-enabled 1.0.2 host keeps its compiler (GAP-0274). Only the
+    # recorded, unchanged compiler and its two directories are accepted; an
+    # unrecorded compiler stays refused and a changed one throws.
+    $recordedCompiler = Get-DefenseClawRecordedStandaloneCompilerPath -Layout $Layout
+    if (-not [string]::IsNullOrEmpty($recordedCompiler)) {
+        $allowedFiles += $recordedCompiler
+        $allowedDirectories += [IO.Path]::GetDirectoryName($recordedCompiler)
+        $allowedDirectories += [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($recordedCompiler))
     }
     $expectedIPCSocket = ''
     if (-not [string]::IsNullOrWhiteSpace($managedIPCSocketPath)) {
@@ -25833,14 +25950,7 @@ function Remove-DefenseClawCommittedEmptyInstallRoot {
         [IO.Path]::GetFullPath($Layout.ManagedIPCDirectory).TrimEnd('\')
     )
     if (Test-DefenseClawStandaloneProfile) {
-        foreach ($directory in @(
-            (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
-            (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
-        )) {
-            if (-not [string]::IsNullOrWhiteSpace([string]$directory)) {
-                $allowed += [IO.Path]::GetFullPath($directory).TrimEnd('\')
-            }
-        }
+        $allowed += @(Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot)
     }
     # A layout without the socket key tolerates no leaf file at all.
     $managedIPCSocketPath = Get-DefenseClawOptionalLayoutValue `
@@ -27705,12 +27815,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             }
         }
         if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {
-            # Retire a compiler left by an older standalone install.
-            $compilerPath = [IO.Path]::Combine($Layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
-            Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
-            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
-                [IO.File]::Delete($compilerPath)
-            }
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $Layout
         }
         foreach ($requiredPath in @(
             $Layout.GatewayPath,
@@ -30127,13 +30232,18 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     -Sources $sources
                 $standaloneFleetStateKnown = $true
                 if ($standaloneFleetEnabled) {
-                    if ([string]::IsNullOrWhiteSpace($PolicyCompiler)) {
-                        throw 'Fleet-enabled standalone Setup requires -PolicyCompiler from its signed payload'
+                    if (-not [string]::IsNullOrWhiteSpace($PolicyCompiler)) {
+                        Add-DefenseClawStandaloneFleetCompilerSource `
+                            -Sources $sources `
+                            -PolicyCompiler $PolicyCompiler `
+                            -AllowUnsigned:$AllowUnsigned
                     }
-                    Add-DefenseClawStandaloneFleetCompilerSource `
-                        -Sources $sources `
-                        -PolicyCompiler $PolicyCompiler `
-                        -AllowUnsigned:$AllowUnsigned
+                    elseif ([string]::IsNullOrEmpty((Get-DefenseClawRecordedStandaloneCompilerPath -Layout $layout))) {
+                        # GAP-0274: Setup carries no compiler. It keeps the
+                        # recorded compiler of a Fleet-enabled 1.0.2 install
+                        # in place, unchanged, and installs none.
+                        throw 'Fleet-enabled standalone Setup carries no Fleet policy compiler and this host has no recorded one to keep; turn Fleet off in the config, then run Setup again'
+                    }
                 }
             }
         }
