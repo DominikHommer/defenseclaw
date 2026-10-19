@@ -139,6 +139,9 @@ def test_doctor_reports_unreadable_dotenv_and_keeps_other_checks(
         return safe_read(path, max_bytes=max_bytes)
 
     monkeypatch.setattr(cmd_doctor, "read_regular_file_no_follow", refuse_dotenv)
+    # The row under test is the unreadable .env, not the ACL that the
+    # Windows temp folder hands the fixture (inherited Administrators/SYSTEM).
+    monkeypatch.setattr("defenseclaw.file_permissions.windows_acl_confidentiality_error", lambda path: None)
     result = cmd_doctor._DoctorResult()
     cfg = SimpleNamespace(data_dir=os.fspath(tmp_path))
     cmd_doctor._check_private_file_exposure(cfg, result)
@@ -151,6 +154,7 @@ def test_doctor_reports_unreadable_dotenv_and_keeps_other_checks(
     assert "placeholder" not in str(row)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes; Windows reports the .env ACL instead")
 def test_doctor_still_fails_exposed_dotenv_when_safe_read_rejects_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:
