@@ -107,7 +107,7 @@ func TestFixedContainedHookCleanupRetainsUncertainOwnerWithoutNative(t *testing.
 	defer cancelLifetime()
 	assets, spec := nativeHookAssetFake(t)
 	assets.lifetime = lifetime
-	var scoped, retained context.Context
+	var scoped, retainedSession context.Context
 	closed := false
 	preparedProcess := &nativeHookAssetFakeProcess{
 		close: func(context.Context) error { closed = true; return nil },
@@ -123,7 +123,7 @@ func TestFixedContainedHookCleanupRetainsUncertainOwnerWithoutNative(t *testing.
 				return preparedProcess, err
 			}
 			defer stopPrepare()
-			retained = owned
+			retainedSession = owned
 			preparedProcess.close = func(context.Context) error {
 				cancelOwned()
 				closed = true
@@ -133,13 +133,13 @@ func TestFixedContainedHookCleanupRetainsUncertainOwnerWithoutNative(t *testing.
 		}); err != nil {
 		t.Fatal("fake preparation refused owned lifetime")
 	}
-	if scoped == nil || scoped.Err() != context.Canceled || retained == scoped || retained.Err() != nil {
+	if scoped == nil || scoped.Err() != context.Canceled || retainedSession == scoped || retainedSession.Err() != nil {
 		t.Fatal("peer owner inherited canceled preparation context")
 	}
 	if _, err := assets.Launch(lifetime, spec); err != nil {
 		t.Fatal("prepared fake could not launch after prepare returned")
 	}
-	if err := assets.Close(context.Background()); err != nil || !closed || retained.Err() != context.Canceled {
+	if err := assets.Close(context.Background()); err != nil || !closed || retainedSession.Err() != context.Canceled {
 		t.Fatal("fake native cleanup did not cancel retained session lifetime")
 	}
 

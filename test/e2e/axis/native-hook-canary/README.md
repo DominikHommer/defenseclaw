@@ -16,7 +16,11 @@ starts the peer under a child of its retained 45-second session lifetime,
 forwards scoped cancellation during preparation, detaches that forwarding
 before successful handoff, and retains the child cancel through native cleanup.
 A fake host test covers successful handoff and canceled partial preparation.
-This changed canary source has not yet been built or run.
+The first changed build, 39285418590 at 66f0be0d, failed before the
+gateway host tests or driver compilation: the new context variable collided
+with an existing retained-owner boolean in the same test. The context is
+now named retainedSession. No native execution occurred in that build;
+the corrected host regression and driver still require a successful build.
 
 The fixed fixture lists all twelve current connector schemas. Version strings
 select the existing parser contracts; the executable is a synthetic Go payload,
