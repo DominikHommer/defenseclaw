@@ -32,7 +32,7 @@ class R102Delta13DocsTest(unittest.TestCase):
         self.assertNotIn("keep secrets in it as references only", text)
         self.assertNotIn("On the Docker driver a member of the `docker` group", text)
 
-    def test_gap_0498_names_the_refused_inline_fields_and_the_literals(self):
+    def test_gap_0498_names_refused_credentials_and_supported_literals(self):
         text = page("sandboxes.mdx")
         self.assertNotIn("a managed config already refuses inline keys and tokens", text)
         self.assertIn(
