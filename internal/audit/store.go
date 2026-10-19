@@ -1872,16 +1872,35 @@ func tableExists(ex dbExecer, table string) (bool, error) {
 
 // unreadAuditIndexes are audit_events indexes no query reads. Every hook
 // writes several audit rows, and each index is another B-tree page per row in
-// the write-ahead log (GAP-0246), so a store outside Secure Client drops them
-// after the migrations, which still create them as main does. The schema
+// the write-ahead log (GAP-0246, B-26), so a store outside Secure Client drops
+// them after the migrations, which still create them as main does. The schema
 // version does not move, so an older binary opened on the store after a
 // rollback runs without them.
+//
+// The readers of audit_events (the Go store, retention, export and alert
+// projection, the Python CLI and TUI, the evidence scripts) filter, join or
+// sort on id, timestamp, retention_timestamp_unix_nano, action, severity,
+// bucket, event_name, run_id, request_id, session_id, evaluation_id and
+// enforcement_action_id; their indexes stay. No reader filters on the columns
+// below: the session lifecycle lookup (connector, session_id, agent_id) uses
+// idx_audit_session_id, the scan-target join drives from the row id, and the
+// TUI filters connectors in memory. The last two are created by the Python
+// CLI, which no longer creates them (cli/defenseclaw/db.py); the gateway drops
+// what an older CLI left.
 var unreadAuditIndexes = []struct{ name, create string }{
 	{"idx_audit_policy_id", `CREATE INDEX IF NOT EXISTS idx_audit_policy_id ON audit_events(policy_id)`},
 	{"idx_audit_tool_name", `CREATE INDEX IF NOT EXISTS idx_audit_tool_name ON audit_events(tool_name)`},
 	{"idx_audit_generation", `CREATE INDEX IF NOT EXISTS idx_audit_generation ON audit_events(generation)`},
 	{"idx_audit_sidecar_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_sidecar_instance_id ON audit_events(sidecar_instance_id)`},
 	{"idx_audit_finding_id", `CREATE INDEX IF NOT EXISTS idx_audit_finding_id ON audit_events(finding_id)`},
+	{"idx_audit_trace_id", `CREATE INDEX IF NOT EXISTS idx_audit_trace_id ON audit_events(trace_id)`},
+	{"idx_audit_turn_id", `CREATE INDEX IF NOT EXISTS idx_audit_turn_id ON audit_events(turn_id)`},
+	{"idx_audit_agent_id", `CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_events(agent_id)`},
+	{"idx_audit_agent_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_agent_instance_id ON audit_events(agent_instance_id)`},
+	{"idx_audit_scan_id", `CREATE INDEX IF NOT EXISTS idx_audit_scan_id ON audit_events(scan_id)`},
+	{"idx_audit_source_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_source_timestamp ON audit_events(source, timestamp)`},
+	{"idx_audit_connector", `CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)`},
+	{"idx_audit_action_connector_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp ON audit_events(action, connector, timestamp DESC)`},
 }
 
 // trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client
