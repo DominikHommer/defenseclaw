@@ -20,6 +20,22 @@ type AttachController interface {
 	Attach(context.Context, string, sandboxapi.AttachRequest) (Attachment, error)
 }
 
+// AttachmentAvailability lets an otherwise shared controller keep the
+// attachment route closed when its optional native dependency is absent.
+// This is only a route-discovery hint; Attach must still admit each complete
+// session identity and current policy independently.
+type AttachmentAvailability interface {
+	AttachmentAvailable() bool
+}
+
+// AttachmentBackend is an optional operation on one already launched backend
+// record. It may neither create a process nor use the caller's name or session
+// ID as an authority. The manager passes its complete retained identity.
+// Admission must honor ctx and must not reenter the owner's LaunchGate.
+type AttachmentBackend interface {
+	OpenAttachment(context.Context, SessionIdentity, sandboxapi.AttachRequest) (Attachment, error)
+}
+
 // Attachment exchanges bounded frames with an existing process. Send and Receive
 // must honor ctx and use cancellable owned transports; wrapping arbitrary blocking
 // io.Reader/io.Writer in orphanable goroutines does not satisfy this contract.

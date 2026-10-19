@@ -13,6 +13,7 @@ on:
       - internal/axis/bridgeowner/**
       - internal/axis/bridgeprocess/**
       - internal/axis/namespaceinit/**
+      - internal/sandboxruntime/**
       - internal/audit/**
       - internal/gateway/**
       - internal/cli/**
@@ -134,6 +135,7 @@ jobs:
           test "$(go env GOVERSION)" = "go1.26.5"
           packages=(
             ./internal/axis/bridgeprocess
+            ./internal/sandboxruntime
             ./internal/openshell/manager
             ./internal/openshell/sandboxcli
             ./internal/sandboxauth
@@ -155,6 +157,13 @@ jobs:
             TestNativeDeleteRetainsRecordUntilCloseSucceeds
             TestNativeDeleteSuccessRemainsCompleteAfterContextCancellation
             TestNativeRevocationDoesNotTakeBoxOperationOrReenterGate
+            TestLaunchGateAttachmentNeedsCurrentCompletePolicyAndIdentity
+            TestLaunchGateAttachmentSerializesRotationWithNativeAdmission
+            TestNativeAttachmentUsesCompleteOwnedIdentityAndOneConsumer
+            TestNativeAttachmentRejectsChangedCatalogAndPublication
+            TestNativeAttachmentDisconnectRetainsFailedCleanupAfterCancellation
+            TestNativeAttachmentAdmissionPrecedesPolicyRotation
+            TestSandboxAttachmentOptionalNativeDependencyKeepsLegacyRouteClosed
             TestSandboxRuntimeOwnerRefusesLegacyOperations
             TestSandboxRuntimeOwnerLifecycleUsesAPIWithoutLegacyPreflight
             TestSandboxRuntimeOwnerAcceptsLegacyResponses
@@ -227,4 +236,4 @@ jobs:
           CGO_ENABLED: '1'
         run: |
           set -euo pipefail
-          go vet -p 1 ./internal/axis/bridgeprocess ./internal/openshell/manager ./internal/openshell/sandboxcli ./internal/sandboxauth ./internal/audit ./internal/gateway
+          go vet -p 1 ./internal/axis/bridgeprocess ./internal/sandboxruntime ./internal/openshell/manager ./internal/openshell/sandboxcli ./internal/sandboxauth ./internal/audit ./internal/gateway

@@ -39,6 +39,7 @@ type attachment struct {
 }
 
 var _ sandboxruntime.Attachment = (*attachment)(nil)
+var _ sandboxruntime.AttachmentBackend = (*Backend)(nil)
 
 // OpenAttachment is a trusted manager operation after its current-policy and
 // owner checks. ctx bounds only admission. There is exactly one consumer of an

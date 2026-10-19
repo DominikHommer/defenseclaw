@@ -6,7 +6,7 @@ name: AXIS workspace host regressions
 # Public synthetic Git/filesystem/process fixtures only. No AXIS/PSEC payload.
 on:
   push:
-    branches: [codex/axis-native-build, codex/axis-peer-experiments]
+    branches: [codex/axis-native-build, codex/axis-peer-experiments, codex/axis-sandbox-feasibility]
     paths:
       - .github/workflows/axis-workspace-host-tests.yml
       - internal/openshell/**

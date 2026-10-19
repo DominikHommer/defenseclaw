@@ -71,6 +71,10 @@ func nativeUnsupported() error {
 type nativeSession struct {
 	runtime          *NativeExecution
 	identity         sandboxruntime.SessionIdentity
+	harness          string
+	policy           *sandboxruntime.ExecutionPolicy
+	receipt          sandboxruntime.PolicyReceipt
+	attached         bool
 	prepared         sandboxruntime.PreparedProcess
 	registered       *sandboxruntime.PreparedLaunch
 	preparedComplete bool
@@ -189,7 +193,7 @@ func (m *Manager) createNative(ctx context.Context, req sandboxapi.CreateRequest
 		return nil, err
 	}
 	identity := sandboxruntime.SessionIdentity{Owner: m.opts.Owner, ID: hex.EncodeToString(nonce[:]), Name: sandboxName, Runtime: info.Identity}
-	session := &nativeSession{runtime: n, identity: identity, instance: sandboxruntime.Instance{Identity: identity, Phase: "bound"}}
+	session := &nativeSession{runtime: n, identity: identity, harness: name, instance: sandboxruntime.Instance{Identity: identity, Phase: "bound"}}
 	b, err := m.reserveExecution(sandboxName, project, effective.Workspace.Mode, session)
 	if err != nil {
 		return nil, err
@@ -270,6 +274,9 @@ func (m *Manager) createNative(ctx context.Context, req sandboxapi.CreateRequest
 		return nil, err
 	}
 	m.mu.Lock()
+	session.policy = policy
+	session.receipt = receipt
+	session.receipt.Components = slices.Clone(receipt.Components)
 	session.instance = instance
 	b.creating, b.phase, b.started = false, audit.SandboxPhaseReady, m.now()
 	b.rec.CreatedAt, b.rec.Workdir = instance.CreatedAt, instance.Workdir

@@ -24,6 +24,17 @@ import (
 // or unbounded queues. The manager separately limits session/consumer admission.
 var sandboxAttachSlots = make(chan struct{}, 32)
 
+func sandboxAttachController(c SandboxController) (sandboxruntime.AttachController, bool) {
+	controller, ok := c.(sandboxruntime.AttachController)
+	if !ok {
+		return nil, false
+	}
+	if availability, ok := c.(sandboxruntime.AttachmentAvailability); ok && !availability.AttachmentAvailable() {
+		return nil, false
+	}
+	return controller, true
+}
+
 func sandboxAttachOrigin(r *http.Request) bool {
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		return false
@@ -48,7 +59,7 @@ func (a *APIServer) handleSandboxAttach(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	c, release := a.leaseSandboxController()
-	_, supported := c.(sandboxruntime.AttachController)
+	_, supported := sandboxAttachController(c)
 	release()
 	if !supported {
 		writeSandboxError(w, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "this sandbox runtime has no qualified attachment transport"))
@@ -90,7 +101,7 @@ func (a *APIServer) handleSandboxAttach(w http.ResponseWriter, r *http.Request) 
 	// gateway controller replacement lock; the returned attachment remains
 	// owned/canceled by the previous manager until native cleanup completes.
 	c, release = a.leaseSandboxController()
-	controller, supported := c.(sandboxruntime.AttachController)
+	controller, supported := sandboxAttachController(c)
 	if !supported {
 		release()
 		_ = writeSandboxAttach(conn, sandboxapi.AttachEvent{Kind: "failure", Code: "unavailable"})

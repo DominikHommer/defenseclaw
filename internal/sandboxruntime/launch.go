@@ -137,6 +137,37 @@ func (g *LaunchGate) RegisterPrepared(policy *ExecutionPolicy, info RuntimeInfo,
 	}}, nil
 }
 
+// AdmitAttachment serializes an existing session's one-consumer admission with
+// policy publication. It checks fresh runtime evidence and the host-retained
+// policy/receipt while holding the same lock as Launch and Rotate. The backend
+// operation is bounded by ctx and must not reenter this gate. Successful stream
+// lifetime and native cleanup remain owned by the manager/backend after return.
+func (g *LaunchGate) AdmitAttachment(ctx context.Context, policy *ExecutionPolicy, info RuntimeInfo,
+	receipt PolicyReceipt, identity SessionIdentity, harness string, request sandboxapi.AttachRequest,
+	backend AttachmentBackend,
+) (Attachment, error) {
+	if g == nil || backend == nil || policy == nil || request.Validate() != nil ||
+		identity.Validate() != nil || request.SessionID != identity.ID || info.Identity != identity.Runtime {
+		return nil, sandboxapi.ErrAttachProtocol
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	current, err := g.ready()
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := info.RequireHarness(harness, receipt.Harness, Headless); err != nil {
+		return nil, err
+	}
+	if err := policy.AdmitPolicy(info, receipt, current); err != nil {
+		return nil, err
+	}
+	return backend.OpenAttachment(ctx, identity, request)
+}
+
 func absentPreparedProcess(process PreparedProcess) bool {
 	if process == nil {
 		return true
