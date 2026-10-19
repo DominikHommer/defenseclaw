@@ -3,7 +3,6 @@
 import unittest
 from pathlib import Path
 
-
 DOCS = Path(__file__).resolve().parents[1] / "content/docs/enterprise"
 
 
@@ -172,7 +171,13 @@ class R102EnterprisePagesDocsTest(unittest.TestCase):
     def test_gap_0316_windows_project_mcp_files_are_read_as_the_enrolled_user(self):
         text = page("windows.mdx")
         self.assertIn("under the\n  enrolled user's own token", text)
-        self.assertIn("A project the user cannot access contributes\n  neither its local-scope servers nor its `.mcp.json` servers", text)
+        self.assertIn(
+            (
+                "A project the user cannot access contributes\n  neither its "
+                "local-scope servers nor its `.mcp.json` servers"
+            ),
+            text,
+        )
 
 
 if __name__ == "__main__":

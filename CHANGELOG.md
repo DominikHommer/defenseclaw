@@ -35,10 +35,6 @@ for current behavior.
 - A failed Windows upgrade keeps connector recovery receipts before removing the failed runtime, including when restoring the retired 0.8.x Setup installation. The installer reports the private recovery archive instead of discarding evidence for partially updated agent settings.
 - Windows per-user skill scans use the scanner pinned in the current installation, so an older unrelated `skill-scanner.exe` on PATH cannot shadow the managed launcher. Broken installer identity or missing scanner files fail closed; unrelated executables are preserved.
 
-## [1.0.2] — managed sandbox telemetry
-
-### Fixed
-
 - Per-user setup now refuses a guardrail switch to an unregistered connector, verifies every connector in a batch, and names an unsafe OpenCode plugin folder. Config writes accept finite floating-point values, and status JSON includes healthy hook connector state. Gateway token edits keep CLI audit and restart aligned with the running gateway; an unset export secret no longer strands uninstall.
 
 - **A recovered hook evaluation error fails closed on a standalone managed device.** Before this fix an internal evaluator error followed the configured guardrail mode and fail mode, so on a standalone managed device a tool or prompt call was allowed in observe mode, or with `hook_fail_mode: open` (guardrail or `application_protection`) for every agent except Codex, Claude Code and Devin. It now gets the agent's native deny there in every guardrail mode and whatever `hook_fail_mode` says, as when the gateway gives no verdict; a stop or session-end event keeps its neutral allow. Per-user installs and the Secure Client profile are unchanged.

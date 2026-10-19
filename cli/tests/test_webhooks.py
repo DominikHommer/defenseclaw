@@ -723,7 +723,6 @@ if __name__ == "__main__":
 
 def test_private_webhook_target_refusal_explains_the_guard_and_next_step(monkeypatch):
     import pytest as _pytest
-
     from defenseclaw.webhooks.writer import validate_webhook_url
 
     monkeypatch.delenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", raising=False)

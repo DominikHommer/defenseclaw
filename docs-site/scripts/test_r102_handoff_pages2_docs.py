@@ -3,7 +3,6 @@
 import unittest
 from pathlib import Path
 
-
 DOCS = Path(__file__).resolve().parents[1] / "content/docs"
 
 
@@ -133,7 +132,8 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
 
     def test_fg02_duplicate_custom_providers_merge(self):
         section = page("reference/migrate-v9.mdx").split("### Custom providers", 1)[1]
-        self.assertIn("lists are unioned and the overlay's\nvalues win", section)
+        self.assertIn("lists are\nunioned and the later entry's values win", section)
+        self.assertIn("provider already in `llm_providers.custom` keeps the values `config.yaml` sets", section)
         self.assertIn("`migration-v9.json` notes each merged provider", section)
 
     def test_fg01_rollback_restores_data_and_prunes_hooks(self):

@@ -3,7 +3,6 @@
 import unittest
 from pathlib import Path
 
-
 DOCS = Path(__file__).resolve().parents[1] / "content/docs"
 
 
@@ -15,12 +14,16 @@ class R102HandoffDocsTest(unittest.TestCase):
     def test_fg01_absent_connector_cleanup(self):
         text = page("reference/cli.mdx")
         self.assertIn("the command removes DefenseClaw hook entries it left", text)
-        self.assertNotIn("Remove one connector from the active roster; the gateway restart tears down its hooks. Removing", text)
+        self.assertNotIn(
+            ("Remove one connector from the active roster; the gateway restart tears down its hooks. Removing"), text
+        )
 
     def test_fg01_doctor_orphaned_hooks_and_otlp(self):
         text = page("reference/cli.mdx")
         self.assertIn("| Orphaned hook entries [connector] | FAIL or WARN |", text)
-        self.assertIn("| Native OTLP credentials | WARN | An agent can keep an old credential after an upgrade, rollback", text)
+        self.assertIn(
+            ("| Native OTLP credentials | WARN | An agent can keep an old credential after an upgrade, rollback"), text
+        )
 
     def test_fg01_uninstall_teardown_receipt(self):
         text = page("get-started/install.mdx")
