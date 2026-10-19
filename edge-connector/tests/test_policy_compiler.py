@@ -120,6 +120,17 @@ class PolicyCompilerExitTest(unittest.TestCase):
             result = self.compile(work, work / 'missing.yaml')
             self.assertEqual(result.returncode, 1, result.stderr)
 
+    def test_bracketed_ipv6_allowlist_entry_is_normalized(self):
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            policy = work / 'v6.yaml'
+            policy.write_text("iot_extensions:\n  destination_allowlist:\n    - '[2606:4700:4700::1111]'\n")
+            result = self.compile(work, policy)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            header = (work / 'policy_tables.h').read_text()
+            self.assertIn('"2606:4700:4700::1111"', header)
+            self.assertNotIn('[2606:', header)
+
     def test_valid_policy_compiles(self):
         with tempfile.TemporaryDirectory() as temp:
             work = Path(temp)

@@ -105,9 +105,17 @@ SEVERITY_MAP = {
 }
 
 def validate_destination(dest: str) -> str:
-    """The local SSRF guard can enforce only explicit public IP literals."""
+    """The local SSRF guard can enforce only explicit public IP literals.
+
+    Returns the entry as the device compares it: an IPv6 literal may be
+    written with or without brackets ("[2606:4700::1111]"); the device strips
+    the brackets from a call's destination before matching, so the stored
+    entry is unbracketed.
+    """
     if not isinstance(dest, str):
         raise ValueError("destination allowlist entries must be strings")
+    if dest.startswith('[') and dest.endswith(']'):
+        dest = dest[1:-1]
     try:
         address = ipaddress.ip_address(dest)
     except ValueError as exc:
@@ -411,7 +419,7 @@ def extract_dest_allowlist(policy: dict) -> list:
         )
     for dest in dest_list:
         _validate_no_null_bytes(str(dest), "destination allowlist entry")
-    return dest_list
+    return [validate_destination(dest) for dest in dest_list]
 
 
 def extract_canary_baseline(policy: dict) -> int:
