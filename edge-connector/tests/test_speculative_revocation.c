@@ -200,6 +200,23 @@ static void test_unsent_request_is_not_speculative(void) {
     printf("  PASS: unsent request is not allowed speculatively\n");
 }
 
+/* A local WARN (here a MEDIUM content finding in tool output) is kept on the
+ * speculative path, as on the cache path. */
+static void test_speculative_keeps_local_warn(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    memset(s->speculative, 0, sizeof(s->speculative));
+    memset(s->pending, 0, sizeof(s->pending));
+    dclaw_tool_request_t req = make_request("check_status", DCLAW_CAP_SENSOR_READ, 41);
+    req.content = "contact: alice@example.com";
+    req.content_len = (uint16_t)strlen(req.content);
+    req.content_scope = DCLAW_CONTENT_SCOPE_TOOL_OUTPUT;
+    dclaw_verdict_t v = dclaw_evaluate(&req);
+    assert(v.mode == DCLAW_VERDICT_PENDING);
+    assert(v.action == DCLAW_ACTION_WARN);
+    (void)v;
+    printf("  PASS: speculative path keeps a local WARN\n");
+}
+
 static void test_session_reset_keeps_revocations(void) {
     /* Session 7 was revoked above; sessions 20.. have unverified
      * speculative calls in flight. */
@@ -360,6 +377,7 @@ int main(void) {
     test_full_slots_fall_back_to_sync();
     test_session_reset_keeps_revocations();
     test_unsent_request_is_not_speculative();
+    test_speculative_keeps_local_warn();
     test_late_block_survives_slot_pressure();
     test_speculative_deadline_revokes();
     printf("  ALL PASSED (9 tests)\n");

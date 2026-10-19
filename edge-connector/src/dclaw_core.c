@@ -568,13 +568,14 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
          * closed below. */
         if (send_rc == 0 && !g_strict_mode && !is_sync_block_required(req->cap_flags) &&
             speculative_track(req->session_id, request_id, req->cap_flags)) {
-            /* Speculative mode: allow the agent to proceed, cloud will respond async. */
+            /* Speculative mode: allow the agent to proceed, cloud will respond
+             * async. A local WARN (content or sequence rule) is kept. */
             dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CLOUD_BLOCK,
                               target_hash, req->session_id);
             g_state.eval_escalated_count++;
             in_eval = false;
-            return make_verdict(DCLAW_ACTION_ALLOW, DCLAW_REASON_CLOUD_BLOCK,
-                                DCLAW_VERDICT_PENDING);
+            return make_verdict(local_warn ? DCLAW_ACTION_WARN : DCLAW_ACTION_ALLOW,
+                                DCLAW_REASON_CLOUD_BLOCK, DCLAW_VERDICT_PENDING);
         }
 #endif
 
