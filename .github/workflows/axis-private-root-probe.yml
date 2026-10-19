@@ -1,0 +1,102 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: AXIS fixed private tmpfs root compatibility probe
+
+on:
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths: [.github/workflows/axis-private-root-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axis-fixed-private-root-probe
+  cancel-in-progress: false
+
+jobs:
+  fixed-probe:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/axis-sandbox-feasibility'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: 1.26.5
+          cache: false
+      - name: Refuse any nonfixed hosted attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = cisco-ai-defense/defenseclaw
+          test "$GITHUB_REF" = refs/heads/codex/axis-sandbox-feasibility
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          test "$(id -u)" != 0
+          test "$(uname -m)" = x86_64
+          test "$(go version)" = 'go version go1.26.5 linux/amd64'
+      - name: One fixed unprivileged private-root probe
+        shell: bash
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir private-root-probe-evidence
+          uname -a >private-root-probe-evidence/kernel.txt
+          id >private-root-probe-evidence/runner-identity.txt
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          original=absent
+          if test -r "$knob"; then original="$(cat "$knob")"; fi
+          changed=0
+          restore_userns() {
+            result=$?
+            trap - EXIT
+            if test "$changed" = 1; then
+              if ! sudo -n /usr/sbin/sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$original" >private-root-probe-evidence/userns-restore.log 2>&1; then result=1; fi
+              if test "$(cat "$knob")" != "$original"; then result=1; fi
+            fi
+            printf 'original=%s changed=%s current=%s\n' "$original" "$changed" "$(cat "$knob" 2>/dev/null || printf absent)" >private-root-probe-evidence/userns-preparation.txt
+            exit "$result"
+          }
+          trap restore_userns EXIT
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          if test "$original" = 1; then
+            changed=1
+            sudo -n /usr/sbin/sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >private-root-probe-evidence/userns-prepare.log 2>&1
+            test "$(cat "$knob")" = 0
+          else
+            test "$original" = absent -o "$original" = 0
+          fi
+          go_bin="$(command -v go)"
+          /usr/bin/timeout --signal=TERM --kill-after=5s 180s \
+            /usr/bin/env -i HOME="$RUNNER_TEMP" GOCACHE="$RUNNER_TEMP/axis-private-root-probe-go-cache" \
+              GOMODCACHE="$RUNNER_TEMP/axis-private-root-probe-mod-cache" PATH=/usr/bin:/bin \
+              CGO_ENABLED=0 GOTOOLCHAIN=local GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
+              "$go_bin" test -tags=axis_private_root_probe -p 1 -mod=readonly -count=1 -v -timeout=45s \
+                -run '^TestPrivateTmpfsRootProbe$' ./internal/axis/namespaceinit \
+            2>&1 | /usr/bin/head -c 65536 >private-root-probe-evidence/go-test.log
+          test "$(wc -c <private-root-probe-evidence/go-test.log)" -lt 65536
+          test "$(grep -c '^DCAX_PRIVATE_ROOT_CUSTODY pidfd=true namespace_init_reaped=true fixed_grant=true$' private-root-probe-evidence/go-test.log || true)" = 1
+          test "$(grep -c '^--- PASS: TestPrivateTmpfsRootProbe ' private-root-probe-evidence/go-test.log || true)" = 1
+          test "$(grep -c '^PASS$' private-root-probe-evidence/go-test.log || true)" = 1
+      - name: Retain bounded probe and restoration evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: axis-fixed-private-root-probe
+          path: private-root-probe-evidence/**
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
