@@ -90,6 +90,11 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	req.Unmask = slices.Clone(req.Unmask)
 	req.HostPorts = slices.Clone(req.HostPorts)
 	req.Context = slices.Clone(req.Context)
+	intent, err := sandboxapi.OwnRunIntent(req.RunIntent)
+	if err != nil {
+		return nil, err
+	}
+	req.RunIntent = intent
 	cfg := m.config()
 	selected, err := sandboxruntime.Select(sandboxruntime.ID(req.Runtime), sandboxruntime.ID(cfg.SandboxDefaultRuntime()))
 	if err != nil {
@@ -99,6 +104,9 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	// or unqualified dependency refuses before listeners, paths or credentials.
 	if selected == sandboxruntime.Axis {
 		return m.createNative(ctx, req)
+	}
+	if req.RunIntent != nil {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "native run intent is unsupported by the OpenShell runtime")
 	}
 	if !cfg.SandboxRuntimeEnabled(string(selected)) {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)

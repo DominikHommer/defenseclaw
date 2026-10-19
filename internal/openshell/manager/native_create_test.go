@@ -150,7 +150,10 @@ func nativeTransaction(t *testing.T) *nativeTransactionFixture {
 		policy, violations, err := sandboxruntime.BindResolvedExecutionPolicy(run, options)
 		return run, policy, violations, err
 	}
-	prepare := func(ctx context.Context, run *sandboxruntime.HostResolvedRun, policy *sandboxruntime.ExecutionPolicy, id sandboxruntime.SessionIdentity) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error) {
+	prepare := func(ctx context.Context, run *sandboxruntime.HostResolvedRun, policy *sandboxruntime.ExecutionPolicy, id sandboxruntime.SessionIdentity, intent *sandboxapi.RunIntent) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error) {
+		if intent != nil {
+			return sandboxruntime.Spec{}, nil, sandboxruntime.PolicyReceipt{}, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "synthetic fixed producer cannot compile run intent")
+		}
 		if run == nil || policy == nil {
 			t.Fatal("factory received no owned host resolution")
 		}
@@ -180,6 +183,67 @@ func nativeTransaction(t *testing.T) *nativeTransactionFixture {
 		ws: DefaultWorkspace{}, boxes: map[string]*box{}, records: newRecordStore(data), now: time.Now, runCtx: owner, logf: func(string, ...any) {}}
 	f.request = sandboxapi.CreateRequest{Runtime: "axis", Name: "native-transaction", Harness: "claudecode", Project: t.TempDir(), Copy: true, Safe: true, NoMCP: true}
 	return f
+}
+
+func TestNativeRunIntentRequiresHostCompiler(t *testing.T) {
+	f := nativeTransaction(t)
+	f.request.RunIntent = &sandboxapi.RunIntent{Mode: "headless", Prompt: "literal prompt"}
+	if _, err := f.m.Create(t.Context(), f.request); !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) {
+		t.Fatalf("fixed offline producer accepted run intent: %v", err)
+	}
+	if f.b.factories != 0 || f.b.launches != 0 || len(f.m.boxes) != 0 {
+		t.Fatal("unsupported run intent launched or retained native resources")
+	}
+}
+
+func TestNativeRunIntentInvalidValuesRefuseBeforeNativeCallbacks(t *testing.T) {
+	f := nativeTransaction(t)
+	f.request.RunIntent = &sandboxapi.RunIntent{Mode: "terminal", Prompt: "literal prompt"}
+	if _, err := f.m.Create(t.Context(), f.request); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
+		t.Fatalf("invalid native run intent accepted: %v", err)
+	}
+	if f.b.factories != 0 || f.b.launches != 0 || len(f.m.boxes) != 0 {
+		t.Fatal("invalid run intent reached native callbacks or reserved a name")
+	}
+}
+
+func TestNativeRunIntentForwardsOwnedDataToHostCompiler(t *testing.T) {
+	f := nativeTransaction(t)
+	previous := f.m.opts.Native
+	var received sandboxapi.RunIntent
+	producer, err := NewNativeExecution(previous.owner, previous.backend, previous.gate, previous.resolve,
+		func(_ context.Context, _ *sandboxruntime.HostResolvedRun, _ *sandboxruntime.ExecutionPolicy, _ sandboxruntime.SessionIdentity,
+			intent *sandboxapi.RunIntent,
+		) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error) {
+			if intent == nil {
+				return sandboxruntime.Spec{}, nil, sandboxruntime.PolicyReceipt{}, sandboxapi.Errorf(sandboxapi.CodeInvalid, "synthetic intent is missing")
+			}
+			received = *intent
+			received.Args = slices.Clone(intent.Args)
+			intent.Args[0] = "producer-mutated-copy"
+			return sandboxruntime.Spec{}, nil, sandboxruntime.PolicyReceipt{}, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "synthetic producer has no qualified launch compiler")
+		})
+	nativeMust(t, err)
+	f.m.opts.Native = producer
+	f.request.RunIntent = &sandboxapi.RunIntent{Mode: "headless", Prompt: "literal prompt", Args: []string{"--model", "sonnet"}}
+	view, err := f.m.Create(t.Context(), f.request)
+	if view != nil || !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || received.Mode != "headless" ||
+		received.Prompt != "literal prompt" || len(received.Args) != 2 || received.Args[0] != "--model" || f.request.RunIntent.Args[0] != "--model" ||
+		f.b.factories != 0 || f.b.launches != 0 || len(f.m.boxes) != 0 {
+		t.Fatalf("owned native run intent was lost, aliased or launched: view=%+v intent=%+v err=%v", view, received, err)
+	}
+}
+
+func TestOpenShellCreateRefusesNativeRunIntentBeforeProvisioning(t *testing.T) {
+	f := nativeTransaction(t)
+	f.request.Runtime = "openshell"
+	f.request.RunIntent = &sandboxapi.RunIntent{Mode: "headless", Prompt: "literal prompt"}
+	if _, err := f.m.Create(t.Context(), f.request); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
+		t.Fatalf("OpenShell route accepted native run intent: %v", err)
+	}
+	if f.b.factories != 0 || len(f.m.boxes) != 0 {
+		t.Fatal("OpenShell intent refusal reached provisioning")
+	}
 }
 
 func TestNativeCreateUsesOwnedPolicyGateAndLifecycle(t *testing.T) {

@@ -177,6 +177,10 @@ type CreateRequest struct {
 	// Runtime selects the provider for a new session. Empty/auto uses the
 	// configured default; an unavailable provider never selects another route.
 	Runtime string `json:"runtime,omitempty"`
+	// RunIntent is optional client data for one native headless workload.
+	// OpenShell explicitly refuses it; the native host producer must compile
+	// it against its held harness. It is never policy authority.
+	RunIntent *RunIntent `json:"run_intent,omitempty"`
 	// Name is the sandbox name, at most openshell.MaxSandboxNameLen
 	// characters; empty generates <repo>-<rand4>.
 	Name string `json:"name,omitempty"`

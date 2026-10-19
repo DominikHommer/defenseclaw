@@ -14,6 +14,7 @@ on:
       - internal/axis/bridgeprocess/**
       - internal/axis/namespaceinit/**
       - internal/sandboxruntime/**
+      - internal/openshell/sandboxapi/**
       - internal/audit/**
       - internal/gateway/**
       - internal/cli/**
@@ -136,6 +137,7 @@ jobs:
           packages=(
             ./internal/axis/bridgeprocess
             ./internal/sandboxruntime
+            ./internal/openshell/sandboxapi
             ./internal/openshell/manager
             ./internal/openshell/sandboxcli
             ./internal/sandboxauth
@@ -164,6 +166,13 @@ jobs:
             TestNativeAttachmentDisconnectRetainsFailedCleanupAfterCancellation
             TestNativeAttachmentAdmissionPrecedesPolicyRotation
             TestSandboxAttachmentOptionalNativeDependencyKeepsLegacyRouteClosed
+            TestRunIntentOwnsBoundedClientData
+            TestRunIntentRejectsMalformedOrUnboundedValues
+            TestRunIntentJSONRequiresExactUnambiguousKeys
+            TestNativeRunIntentRequiresHostCompiler
+            TestNativeRunIntentInvalidValuesRefuseBeforeNativeCallbacks
+            TestNativeRunIntentForwardsOwnedDataToHostCompiler
+            TestOpenShellCreateRefusesNativeRunIntentBeforeProvisioning
             TestSandboxRuntimeOwnerRefusesLegacyOperations
             TestSandboxRuntimeOwnerLifecycleUsesAPIWithoutLegacyPreflight
             TestSandboxRuntimeOwnerAcceptsLegacyResponses
@@ -236,4 +245,4 @@ jobs:
           CGO_ENABLED: '1'
         run: |
           set -euo pipefail
-          go vet -p 1 ./internal/axis/bridgeprocess ./internal/sandboxruntime ./internal/openshell/manager ./internal/openshell/sandboxcli ./internal/sandboxauth ./internal/audit ./internal/gateway
+          go vet -p 1 ./internal/axis/bridgeprocess ./internal/sandboxruntime ./internal/openshell/sandboxapi ./internal/openshell/manager ./internal/openshell/sandboxcli ./internal/sandboxauth ./internal/audit ./internal/gateway

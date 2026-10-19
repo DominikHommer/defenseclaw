@@ -29,13 +29,16 @@ import (
 // Resolution must be the owner's real publication transaction; the producer
 // must choose admitted immutable command/image objects and derive capture from
 // that same HostResolvedRun/ExecutionPolicy. No request digest or receipt enters
-// this dependency. It supports one headless offline launch, not restart/export.
+// this dependency. Bounded client run intent is only data; the host producer
+// must compile it against its held harness and effective policy, including
+// the admitted permission mode. This supports one headless offline launch,
+// not restart/export.
 type NativeExecution struct {
 	owner   context.Context
 	backend sandboxruntime.Backend
 	gate    *sandboxruntime.LaunchGate
 	resolve func(packs.Flags, sandboxruntime.PolicyOptions) (*sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, []packs.Violation, error)
-	prepare func(context.Context, *sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, sandboxruntime.SessionIdentity) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error)
+	prepare func(context.Context, *sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, sandboxruntime.SessionIdentity, *sandboxapi.RunIntent) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error)
 }
 
 // NewNativeExecution takes host-owned dependencies. The factory performs the
@@ -43,9 +46,11 @@ type NativeExecution struct {
 // nonnil PreparedProcess, including on error, transfers cleanup to the manager.
 // A nil process on error requires completed factory cleanup; uncertain partial
 // custody must return a nonnil cleanup-only process. No wire receipt is accepted.
+// prepare must refuse a nonnil run intent unless it can compile the exact
+// headless request from held harness assets and the resolved permission mode.
 func NewNativeExecution(owner context.Context, backend sandboxruntime.Backend, gate *sandboxruntime.LaunchGate,
 	resolve func(packs.Flags, sandboxruntime.PolicyOptions) (*sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, []packs.Violation, error),
-	prepare func(context.Context, *sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, sandboxruntime.SessionIdentity) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error),
+	prepare func(context.Context, *sandboxruntime.HostResolvedRun, *sandboxruntime.ExecutionPolicy, sandboxruntime.SessionIdentity, *sandboxapi.RunIntent) (sandboxruntime.Spec, sandboxruntime.PreparedProcess, sandboxruntime.PolicyReceipt, error),
 ) (*NativeExecution, error) {
 	if owner == nil || backend == nil || gate == nil || resolve == nil || prepare == nil {
 		return nil, nativeUnavailable()
@@ -232,7 +237,7 @@ func (m *Manager) createNative(ctx context.Context, req sandboxapi.CreateRequest
 		m.mu.Unlock()
 		result = errors.Join(result, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "native cleanup remains pending; delete the retained sandbox to retry"))
 	}()
-	spec, prepared, receipt, err := n.prepare(ctx, run, policy, identity)
+	spec, prepared, receipt, err := n.prepare(ctx, run, policy, identity, req.RunIntent)
 	session.prepared = prepared
 	if err != nil {
 		return nil, err
