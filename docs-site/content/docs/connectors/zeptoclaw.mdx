@@ -189,6 +189,16 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 
 `safety.allow_private_endpoints` is set to `true` so the rewritten api_base (a 127.0.0.1 URL) is accepted.
 
+## Model limits
+
+ZeptoClaw 0.9.2 sends `max_tokens` on its OpenAI-style chat requests. The
+Bedrock `gpt-5.6-luna` model refuses that parameter (HTTP 400,
+`unsupported_parameter`) and accepts `max_completion_tokens`, so a ZeptoClaw
+agent cannot use that model through the Bedrock OpenAI route until ZeptoClaw
+sends the newer parameter. This is the model's and the agent's request shape,
+not a DefenseClaw block: pick a model the agent can call, such as one served
+through the OpenAI-compatible route that accepts `max_tokens`.
+
 ## Hook capabilities
 
 The proxy can block inspected requests, responses, and tool-call payloads.

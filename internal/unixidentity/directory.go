@@ -213,6 +213,9 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 			if err == nil {
 				facts.Groups, err = r.groupNames(ids)
 			}
+			if err == nil && sssd != nil {
+				facts.OnlyPrimaryGroup, err = sssdListsOnlyPrimaryGroup(sssd, ids, account)
+			}
 		}
 		if err != nil {
 			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
@@ -651,6 +654,40 @@ func (r *NSSResolver) sssdGroupsOfDomain(sssd *sssdNSS, ids []int, account Accou
 	return kept, nil
 }
 
+// sssdDomainUsersRID ends the SID of an Active Directory domain's Domain
+// Users group, the primary group of its accounts in the directory.
+const sssdDomainUsersRID = "-513"
+
+// sssdListsOnlyPrimaryGroup reports whether the groups SSSD lists for an
+// account are only its primary group, the Domain Users group of its domain
+// (its directory primary group, when SSSD gives the account a private group)
+// and the /etc/group groups that list it. While SSSD cannot reach the
+// directory it answers from its cache, and for an account whose memberships
+// it never looked up (a first sign-in during the outage, or a cleared cache)
+// that answer is the primary group alone, with nothing to say the rest is
+// missing (GAP-0191). An account in no other group gets the same answer. A
+// SID lookup that fails says nothing, and the groups count as listed.
+func sssdListsOnlyPrimaryGroup(sssd *sssdNSS, ids []int, account Account) (bool, error) {
+	local, err := localGroupsListing(account.Name)
+	if err != nil {
+		return false, err
+	}
+	var others []int
+	for _, id := range ids {
+		if id != account.GID && !slices.Contains(local, id) {
+			others = append(others, id)
+		}
+	}
+	switch len(others) {
+	case 0:
+		return true, nil
+	case 1:
+		sid, err := sssd.sidByGID(others[0])
+		return err == nil && sid != "" && strings.HasSuffix(sid, sssdDomainUsersRID), nil
+	}
+	return false, nil
+}
+
 // otherNSSGroupMemberships asks each configured non-SSSD initgroups service
 // for this account's groups when that service does not resolve the name to a
 // different uid. Looking up a group by gid alone would prove only that the
@@ -895,6 +932,27 @@ func GroupNameLookupDefinitive() bool {
 		}
 	}
 	return true
+}
+
+// GroupDirectoryUsesWinbind reports whether this host looks directory groups
+// up through winbind rather than SSSD: the group line of nsswitch.conf names
+// winbind and not sss. Advice for a directory that does not answer names the
+// service the host uses (GAP-0712).
+func GroupDirectoryUsesWinbind() bool {
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if err != nil {
+		return false
+	}
+	winbind := false
+	for _, service := range ParseNSSwitchServices(string(data), "group") {
+		switch service {
+		case "sss":
+			return false
+		case "winbind":
+			winbind = true
+		}
+	}
+	return winbind
 }
 
 // QualifiedGroupName returns name@domain, as the host spells it, for the

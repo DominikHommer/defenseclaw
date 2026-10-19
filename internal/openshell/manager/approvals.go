@@ -273,7 +273,6 @@ func (m *Manager) triageSweep() {
 // credential carries, so a direct rule is approved only where the proxy
 // would let the sandbox through.
 func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
-	cfg := m.config()
 	m.mu.Lock()
 	d := b.decider
 	if b.eff != eff {
@@ -281,6 +280,10 @@ func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
 	}
 	rec := b.rec
 	m.mu.Unlock()
+	cfg := m.configForSandbox(rec.Name)
+	if cfg == nil {
+		return triage.Policy{} // Classify refuses an unresolved policy.
+	}
 	if d == nil {
 		d, _ = m.egressDeciderFor(cfg, eff, m.registrationOf(b))
 	}
@@ -971,6 +974,7 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 			m.mu.Unlock()
 		}
 	}()
+	m.confirmPolicy(ctx, a.sandbox)
 	eff, err := m.resolveBox(b)
 	if err != nil {
 		return nil, err
@@ -1715,6 +1719,52 @@ func (m *Manager) refreshDecisions(ctx context.Context) {
 		fresh[r] = st.decisions[r]
 	}
 	st.decisions = fresh
+}
+
+// ReloadDecisions loads the saved decisions of registration from the
+// managed gateway again, which caps them by the person's floor now, and
+// re-resolves the sandboxes' egress when they changed. The daemon calls it
+// when the gateway's answer moved the registration's policy and when its
+// sandbox starts, so a floor that no longer keeps a saved allow takes it
+// back from a running or restarted sandbox at once, not at the next
+// reconcile (GAP-0224). A reload that fails keeps only the user blocks: a
+// policy that moved is not decided under allows its new floor may refuse.
+// A registration the gateway no longer knows keeps none; one never loaded
+// is left for its first load.
+func (m *Manager) ReloadDecisions(ctx context.Context, registration string) {
+	auth := m.authority()
+	if auth == nil || registration == "" {
+		return
+	}
+	list, err := auth.Decisions(ctx, registration)
+	st := m.managedSide()
+	st.mu.Lock()
+	have, loaded := st.decisions[registration]
+	switch {
+	case err == nil:
+		if list == nil {
+			list = []sandboxrelay.Decision{}
+		}
+	case registrationGone(err):
+		list = []sandboxrelay.Decision{}
+	case !loaded:
+		st.mu.Unlock()
+		m.logf("reload the saved sandbox decisions of registration %s: %v", registration, err)
+		return
+	default:
+		list = slices.DeleteFunc(slices.Clone(have), func(d sandboxrelay.Decision) bool {
+			return d.Kind != sandboxrelay.DecisionEgressBlock
+		})
+	}
+	changed := !loaded || !slices.Equal(have, list)
+	st.decisions[registration] = list
+	st.mu.Unlock()
+	if err != nil {
+		m.logf("reload the saved sandbox decisions of registration %s: %v", registration, err)
+	}
+	if changed {
+		m.refreshEgress()
+	}
 }
 
 // maxPendingEvents bounds the records kept for the managed gateway

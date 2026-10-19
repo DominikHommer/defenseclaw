@@ -1751,11 +1751,17 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
     health_map = _fetch_health_connectors(health=health)
     for name, row in rows.items():
+        # The text roster already uses this authenticated runtime state. Keep
+        # the JSON projection in agreement, including manual hook connectors.
+        if row.get("enabled") and name in health_map and health_map[name].get("state"):
+            row["state"] = health_map[name]["state"]
+        elif not row.get("enabled"):
+            row["state"] = "disabled"
         if row.get("enabled") and _agent_missing(cfg, name):
             # As the text output: not running while doctor fails it (GAP-0513).
             row["state"] = "off"
             row["runtime_detail"] = _agent_missing_detail(name)
-    if "opencode" in rows and "runtime_detail" not in rows["opencode"]:
+    if "opencode" in rows and rows["opencode"].get("enabled") and "runtime_detail" not in rows["opencode"]:
         runtime_state, runtime_detail = _opencode_runtime_truth(
             health_map.get("opencode"),
             gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
@@ -1763,7 +1769,11 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
         rows["opencode"]["state"] = runtime_state
         rows["opencode"]["runtime_detail"] = runtime_detail
-    if "omnigent" in rows and (omnigent_health := health_map.get("omnigent")) is not None:
+    if (
+        "omnigent" in rows
+        and rows["omnigent"].get("enabled")
+        and (omnigent_health := health_map.get("omnigent")) is not None
+    ):
         runtime_state, readiness_detail = _omnigent_effective_runtime_state(
             cfg,
             str(omnigent_health.get("state") or ""),
@@ -1773,6 +1783,18 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             rows["omnigent"]["readiness_detail"] = readiness_detail
     cursor = rows.get("cursor")
     if cursor is not None:
+        if cursor.get("enabled") and cursor.get("state") == "running":
+            lock_path = Path(str(getattr(cfg, "data_dir", "") or ""), "hook_contract_lock.json")
+            try:
+                if lock_path.stat().st_size <= 4 << 20:
+                    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+                    entry = (lock.get("connectors") or {}).get("cursor")
+                    if isinstance(entry, dict) and entry.get("contract_id"):
+                        version = entry.get("raw_agent_version")
+                        if isinstance(version, str) and version.strip():
+                            cursor["agent_version"] = version.strip()
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         cursor["priority_conflict_detection"] = {
             "status": "unavailable",
             "conflict_inferred": False,

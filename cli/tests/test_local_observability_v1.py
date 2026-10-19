@@ -154,8 +154,11 @@ def test_local_logs_preserve_the_canonical_post_redaction_projection() -> None:
         assert collector["service"]["pipelines"]["logs"]["processors"] == [
             "resource",
             "transform/sandbox-identity",
+            "groupbyattrs/sandbox-identity",
             "batch",
         ]
+        # Grouping moves one named attribute onto the resource; it never edits the body.
+        assert collector["processors"]["groupbyattrs/sandbox-identity"] == compat.EXPECTED_SANDBOX_GROUPING_PROCESSOR
         assert forbidden_processors.isdisjoint(collector["processors"])
         assert all(mutation not in text for mutation in forbidden_mutations)
         # The one log statement set only adds an attribute; it never writes the body.
@@ -180,6 +183,21 @@ def test_collector_rejects_a_sandbox_identity_processor_that_changes_the_body(
     errors = compat._collector_errors()
 
     assert any("transform/sandbox-identity" in error for error in errors)
+
+
+def test_collector_rejects_a_sandbox_grouping_that_moves_other_attributes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    collector = yaml.safe_load(compat.COLLECTOR.read_text(encoding="utf-8"))
+    collector["processors"]["groupbyattrs/sandbox-identity"]["keys"].append("user.id")
+    path = tmp_path / "collector.yaml"
+    path.write_text(yaml.safe_dump(collector), encoding="utf-8")
+    monkeypatch.setattr(compat, "COLLECTOR", path)
+
+    errors = compat._collector_errors()
+
+    assert any("groupbyattrs/sandbox-identity" in error for error in errors)
 
 
 def test_loki_accepts_canonical_v8_records_without_silent_truncation() -> None:
@@ -387,6 +405,10 @@ def test_bundle_parity_covers_collector_rules_and_stateful_config(
     packaged = tmp_path / "packaged"
     shutil.copytree(compat.BUNDLE, source)
     shutil.copytree(compat.BUNDLE, packaged)
+    for relative in compat.OPTIONAL_FLEET_FILES:
+        # The wheel omits these templates; the separate Fleet asset carries them.
+        assert (source / relative).is_file()
+        (packaged / relative).unlink()
     target = packaged / "otel-collector/config.yaml"
     target.write_text(target.read_text(encoding="utf-8") + "\n# drift\n", encoding="utf-8")
     monkeypatch.setattr(compat, "BUNDLE", source)

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,9 +61,79 @@ func TestSandboxDaemonStopsGatewayWhenNoSandboxRuns(t *testing.T) {
 	}
 }
 
+// A completed stop or delete hands the shared port to the next account
+// before returning, even if the last preflight was less than a minute ago.
+func TestSandboxDaemonHandoverAfterLifecycle(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.run(t)
+	f.os.holder.Store(int64(os.Getuid()))
+	f.d.openShellUsed.Store(time.Now().UnixNano())
+	f.d.stops.Store(1)
+	f.running.Store(1)
+	f.d.handoverOpenShell(context.Background())
+	if n := f.os.stopped.Load(); n != 0 {
+		t.Fatalf("stopped under a running sandbox: %d", n)
+	}
+	f.running.Store(0)
+	f.d.handoverOpenShell(context.Background())
+	if n := f.os.stopped.Load(); n != 1 {
+		t.Fatalf("idle gateway was not handed over: %d", n)
+	}
+}
+
+// GAP-0237: a foreign sandbox that foreign_sandboxes: alert leaves running
+// keeps an idle gateway only while it runs: the daemon looks again soon and
+// stops the gateway once it ended. A stop or delete of the account's last
+// sandbox does not wait for it at all: the sweep records it and the gateway
+// stops with it, within the sweep's bound, so the next account can start.
+func TestSandboxDaemonForeignAlertSandboxDoesNotHoldTheHandover(t *testing.T) {
+	prev := foreignRecheckEvery
+	foreignRecheckEvery = 20 * time.Millisecond
+	t.Cleanup(func() { foreignRecheckEvery = prev })
+	var foreign atomic.Bool
+	var sweeps atomic.Int32
+	foreign.Store(true)
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.sweepForeign = func(context.Context) (bool, error) {
+			sweeps.Add(1)
+			return foreign.Load(), nil
+		}
+	})
+	f.run(t)
+	ctx := context.Background()
+	f.os.holder.Store(int64(os.Getuid()))
+	f.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())
+	if f.d.check(ctx); f.os.stopped.Load() != 0 || sweeps.Load() == 0 {
+		t.Fatalf("an idle check stopped the gateway of a running foreign sandbox: stopped %d, sweeps %d", f.os.stopped.Load(), sweeps.Load())
+	}
+	foreign.Store(false)
+	deadline := time.Now().Add(5 * time.Second)
+	for f.os.stopped.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if f.os.stopped.Load() != 1 {
+		t.Fatal("the gateway stayed up after the foreign sandbox ended")
+	}
+
+	foreign.Store(true)
+	f.os.holder.Store(int64(os.Getuid()))
+	f.d.openShellUsed.Store(time.Now().UnixNano())
+	f.d.stops.Store(1)
+	start := time.Now()
+	f.d.handoverOpenShell(ctx)
+	if n := f.os.stopped.Load(); n != 2 {
+		t.Fatalf("the hand-over kept the gateway for a foreign sandbox: stopped %d", n)
+	}
+	if took := time.Since(start); took > foreignSweepTimeout+15*time.Second {
+		t.Fatalf("the hand-over took %s", took)
+	}
+	f.d.stops.Store(0)
+}
+
 // A stop or delete of a kept sandbox starts the account's gateway the daemon
 // stopped; one that listens is used as it is; another account's is refused
-// with the one-account-at-a-time text (GAP-0492). Status says that text too,
+// with the one-account-at-a-time text (GAP-0492), except for a delete of a
+// name the account has no sandbox of, which says so (GAP-0126). Status says that text too,
 // not certificates and CAs, and shows no sandbox port the daemon does not
 // hold (GAP-0461).
 func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
@@ -80,9 +151,14 @@ func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
 		t.Fatal("readied a gateway that listens")
 	}
 	f.os.holder.Store(4242)
+	// kept1 is a name the account has no sandbox of: that is the answer,
+	// whoever holds the port (GAP-0126).
 	_, err := c.Delete(ctx, "kept1", sandboxapi.DeleteRequest{})
-	if err == nil || !strings.Contains(err.Error(), "one account at a time") || f.os.prepared.Load() != 2 {
-		t.Fatalf("delete while another account holds the port: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no DefenseClaw sandbox named") || f.os.prepared.Load() != 2 {
+		t.Fatalf("delete of an absent name while another account holds the port: %v", err)
+	}
+	if _, err := c.Stop(ctx, "kept1"); err == nil || !strings.Contains(err.Error(), "one account at a time") {
+		t.Fatalf("stop while another account holds the port: %v", err)
 	}
 	st, err := c.Status(ctx)
 	if err != nil || st.Available || st.GatewayElsewhere != "another account" || st.Reason != sandboxAccountBusyMessage ||
@@ -91,6 +167,32 @@ func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
 	}
 	if strings.Contains(st.Reason, "certificate") || strings.Contains(st.Reason, " CA") {
 		t.Fatalf("status reason: %q", st.Reason)
+	}
+}
+
+// A deleted sandbox with only a retained snapshot needs no gateway. A
+// different account can hold the shared port while its record is removed.
+func TestSandboxDaemonDeleteRetainedWhileOtherAccountHoldsGateway(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		seedSandboxRecord(t, o.StateDir, "retained", map[string]any{"retained": true})
+	})
+	f.run(t)
+	f.os.holder.Store(4242)
+	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	resp, err := ctl.Delete(t.Context(), "retained", sandboxapi.DeleteRequest{})
+	if err != nil || resp == nil || !resp.Deleted {
+		t.Fatalf("delete retained with another account's gateway: %+v, %v", resp, err)
+	}
+	if f.os.prepared.Load() != 0 {
+		t.Fatal("readied a gateway to delete only a retained snapshot")
+	}
+	if _, err := ctl.Manager.Get(t.Context(), "retained"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("retained record survived: %v", err)
+	}
+	// A name with no sandbox at all says so, not that another account is
+	// using the sandboxes (GAP-0126).
+	if _, err := ctl.Delete(t.Context(), "never-made", sandboxapi.DeleteRequest{}); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("delete of an absent name while another account holds the gateway: %v", err)
 	}
 }
 

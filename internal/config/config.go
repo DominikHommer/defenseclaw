@@ -286,6 +286,12 @@ type Config struct {
 	// (standaloneOpenShellPackDirDefault). Set only by the loader.
 	openShellPackDirDeclared bool
 	legacyOpenShellPackDir   string
+	// offlineInspection never probes a signer's filesystem for a device default.
+	offlineInspection bool
+	// offlineVendorPolicyDir and offlineVendorPolicyRoot redirect rule packs
+	// under the target layout's shipped policy folder to a private copy of
+	// the policies this binary embeds (UseOfflineVendorPolicies).
+	offlineVendorPolicyDir, offlineVendorPolicyRoot string
 	// legacyConnectorRouteSelectors names the observability route selectors
 	// that list a retired connector ID, for the migration notice.
 	legacyConnectorRouteSelectors []string
@@ -2820,7 +2826,7 @@ func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAM
 	if !has("openshell", "pack_dir") {
 		candidate.OpenShell.PackDir = join(dataDir, "policies", DefaultOpenShellPackDirName)
 		if candidate.StandaloneEnterprise() {
-			standaloneOpenShellPackDirDefault(candidate, dataDir)
+			standaloneOpenShellPackDirDefault(candidate, dataDir, goos)
 		}
 	}
 	if !has("gateway", "device_key_file") {
@@ -2955,6 +2961,7 @@ func loadConfigSourceCheckedWithLayout(
 		restoreEmptyGuardrailProfiles(&cfg)
 	}
 	cfg.ConfigFilePath = configFile
+	cfg.offlineInspection = inspection
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
 	cfg.openShellPackDirDeclared = viper.InConfig("openshell.pack_dir")
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
@@ -3530,7 +3537,7 @@ func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
 			"credential API on Windows, so any allowlist here would be silently "+
 			"discarded. Remove these keys from config.yaml; the socket DACL is "+
 			"the enforcement boundary until parity plan §4.4 lands the Windows "+
-			"peer-auth mechanism.",
+			"peer-auth mechanism",
 		strings.Join(offending, ", "),
 	)
 }
@@ -3588,6 +3595,16 @@ func warnPlaintextSecrets(cfg *Config) {
 		log.Printf("WARNING: %s.%s contains a plain-text secret in config.yaml — "+
 			"migrate it to ~/.defenseclaw/.env as %s and set %s.%s_env=%s instead",
 			section, field, envDefault, section, field, envDefault)
+	}
+	if cfg.StandaloneEnterprise() {
+		// A managed host has no per-user .env for the administrator's
+		// config: the key belongs in a protected credential (GAP-0138).
+		warn = func(section, field, _ string) {
+			log.Printf("WARNING: %s.%s contains a plain-text secret in the managed config.yaml — "+
+				"store the key with `enterprise secret set --name <name>`, name it in "+
+				"enterprise.inspection.llm.credential (the LLM key) or enterprise.inspection.ai_defense.credential "+
+				"(the AI Defense key), and remove %s.%s", section, field, section, field)
+		}
 	}
 	if cfg.LLM.APIKey != "" {
 		warn("llm", "api_key", DefenseClawLLMKeyEnv)

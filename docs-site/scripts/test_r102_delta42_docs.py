@@ -1,4 +1,4 @@
-"""Pin the 1.0.1 upgrade bridge for managed docker sandboxes (GAP-0587, GAP-0675, GAP-0026)."""
+"""Pin the 1.0.1 upgrade bridge for managed docker sandboxes (GAP-0587, GAP-0675, GAP-0666, GAP-0677, GAP-0026)."""
 
 import unittest
 from pathlib import Path
@@ -23,28 +23,31 @@ class Delta42DocsTest(unittest.TestCase):
             "the upgrade is a plain restart (\"pending restart\" while a sandbox runs), not a switch",
             "A user who never ran sandboxes moves straight to `defenseclaw-managed`",
             "once their last 1.0.1 sandbox is deleted",
-            "The bridge lives in the setup's applied record, which an uninstall removes",
-            "before an uninstall, pull the work you want to keep from the sandboxes kept under 1.0.1",
+            # rel-1-0-2:GAP-0666 and GAP-0677 (1.0.3): the bridge survives a
+            # non-purge uninstall; a folder whose containers are gone ends it.
+            "A sandbox folder of the docker driver whose containers are gone (removed outside OpenShell) does not keep a user on the bridge",
+            "A non-purge uninstall keeps that record while an account keeps sandboxes, so the bridge comes back with the next `ensure`, also after a package reinstall; a purge removes it",
             "This is the 1.0.1 upgrade bridge; it is removed when 1.0.1 is out of support.",
         ):
             self.assertIn(phrase, bullet)
+        self.assertNotIn("a known limit", bullet)
         for stale in ("cannot start, and OpenShell drops them", "before the upgrade", "pending switch"):
             self.assertNotIn(stale, bullet)
 
-    def test_sandboxes_uninstall_names_the_101_bridge_limit(self):
-        # rel-1-0-2:GAP-0675: kept sandboxes come back after a package
-        # reinstall, but not the ones kept under 1.0.1 (GAP-0666 limit).
+    def test_sandboxes_uninstall_keeps_the_101_bridge(self):
+        # rel-1-0-2:GAP-0675 and GAP-0666 (1.0.3): kept sandboxes, the ones
+        # kept under 1.0.1 included, come back after a package reinstall.
         text = flat("sandboxes.mdx")
         bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
         for phrase in (
-            "The kept sandboxes then start, review and pull as before, except the sandboxes kept under 1.0.1 (the 1.0.1 upgrade bridge)",
-            "the bridge lives in the setup's applied record, which an uninstall removes",
-            "after the reinstall their gateway starts in `defenseclaw-managed` and no longer lists them",
-            "Before an uninstall, pull the work you want to keep from the sandboxes kept under 1.0.1 (`defenseclaw sandbox pull NAME --apply`)",
-            "they do not survive an uninstall and reinstall (a known limit)",
+            "keeps the root-only record of the sandbox setup they were made under (`openshell-state.kept.json`)",
+            "after a reinstall whose first `ensure` failed and rolled back",
+            "a driver or version change is a switch that waits for running sandboxes, and it keeps the 1.0.1 upgrade bridge",
+            "The kept sandboxes then start, review and pull as before, the sandboxes kept under 1.0.1 included",
         ):
             self.assertIn(phrase, bullet)
-        self.assertNotIn("The kept sandboxes then start, review and pull as before. Only", bullet)
+        for stale in ("a known limit", "no longer lists them"):
+            self.assertNotIn(stale, bullet)
 
     def test_sandboxes_purge_removes_containers_in_both_namespaces(self):
         # rel-1-0-2:GAP-0026 (DELTA-52): a managed Linux purge removes the

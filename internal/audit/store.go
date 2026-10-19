@@ -2539,7 +2539,7 @@ func (s *Store) ListActivityEvents(limit int) ([]ActivityEventRow, error) {
 			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
 			COALESCE(schema_version,0), COALESCE(content_hash,''), COALESCE(generation,0),
 			COALESCE(binary_version,''), COALESCE(agent_id,''), COALESCE(sidecar_instance_id,'')
-		FROM activity_events ORDER BY timestamp DESC LIMIT ?`, limit)
+		FROM activity_events ORDER BY `+s.timeOrderForTable("activity_events", "", true)+` LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list activity events: %w", err)
 	}
@@ -3081,10 +3081,35 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 // v8 retention migration (an unmigrated 0.8.x store; kept while 0.8.x
 // upgrades are supported) has no such column and sorts by julianday instead.
 func (s *Store) auditEventsNewestFirst() string {
-	if ok, err := hasColumnDB(s.db, "audit_events", "retention_timestamp_unix_nano"); err == nil && ok {
-		return "retention_timestamp_unix_nano DESC, rowid DESC"
+	return s.auditEventsNewestFirstForAlias("")
+}
+
+func (s *Store) auditEventsNewestFirstForAlias(alias string) string {
+	if alias != "" {
+		alias += "."
 	}
-	return "julianday(timestamp) DESC, rowid DESC"
+	if ok, err := hasColumnDB(s.db, "audit_events", "retention_timestamp_unix_nano"); err == nil && ok {
+		return alias + "retention_timestamp_unix_nano DESC, " + alias + "rowid DESC"
+	}
+	return "julianday(" + alias + "timestamp) DESC, " + alias + "rowid DESC"
+}
+
+// timeOrderForTable uses the exact timestamp filled by the retention migration.
+// The date fallback keeps read-only access to older audit databases working.
+func (s *Store) timeOrderForTable(table, alias string, newest bool) string {
+	direction := " DESC"
+	if !newest {
+		direction = " ASC"
+	}
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	instant := "julianday(" + prefix + "timestamp)"
+	if ok, err := hasColumnDB(s.db, table, "retention_timestamp_unix_nano"); err == nil && ok {
+		instant = prefix + "retention_timestamp_unix_nano"
+	}
+	return instant + direction + ", " + prefix + "rowid" + direction
 }
 
 // scanAuditEventRow holds the column-scan logic of ListEvents so the
@@ -3939,7 +3964,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 			 SELECT 1 FROM alert_acknowledgement_projection AS projection
 			 WHERE projection.alert_id = event.id
 		 )
-		 ORDER BY event.timestamp DESC LIMIT ?`
+		 ORDER BY ` + s.auditEventsNewestFirstForAlias("event") + ` LIMIT ?`
 	args := make([]any, 0, len(legacyActions)+1)
 	for _, action := range legacyActions {
 		args = append(args, action)
@@ -3994,7 +4019,7 @@ func (s *Store) ListScanResults(limit int) ([]ScanResultRow, error) {
 	}
 	rows, err := s.queryDB(context.Background(), "audit",
 		`SELECT id, scanner, target, timestamp, duration_ms, finding_count, max_severity
-		 FROM scan_results ORDER BY timestamp DESC LIMIT ?`, limit,
+		 FROM scan_results ORDER BY `+s.timeOrderForTable("scan_results", "", true)+` LIMIT ?`, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list scan results: %w", err)
@@ -4206,16 +4231,18 @@ type LatestScanInfo struct {
 
 func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, error) {
 	rows, err := s.queryDB(context.Background(), "audit", `
-		SELECT sr.id, sr.target, sr.timestamp, sr.finding_count, sr.max_severity, sr.raw_json
-		FROM scan_results sr
-		INNER JOIN (
-			SELECT target, MAX(timestamp) as max_ts
-			FROM scan_results
-			WHERE scanner = ? AND COALESCE(exit_code, 0) = 0 AND COALESCE(error, '') = ''
-			GROUP BY target
-		) latest ON sr.target = latest.target AND sr.timestamp = latest.max_ts
-		WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0 AND COALESCE(sr.error, '') = ''
-	`, scannerName, scannerName)
+		SELECT id, target, timestamp, finding_count, max_severity, raw_json
+		FROM (
+			SELECT sr.id, sr.target, sr.timestamp, sr.finding_count,
+				sr.max_severity, sr.raw_json,
+				ROW_NUMBER() OVER (
+					PARTITION BY sr.target ORDER BY `+s.timeOrderForTable("scan_results", "sr", true)+`
+				) AS dc_rank
+			FROM scan_results sr
+			WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0
+				AND COALESCE(sr.error, '') = ''
+		)
+		WHERE dc_rank = 1`, scannerName)
 	if err != nil {
 		return nil, fmt.Errorf("audit: latest scans by scanner: %w", err)
 	}

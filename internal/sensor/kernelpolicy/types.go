@@ -119,11 +119,14 @@ const (
 	DefaultPauseFor = 4 * time.Hour
 	MaxPauseFor     = 7 * 24 * time.Hour
 
-	// MaxPIDs caps monitor roots at two four-PID groups. Larger renders
-	// load, but their file_open cost exceeds the measured host budget.
-	MaxPIDs = 8
+	// MaxPIDs caps the roots of a monitor controls policy at one PID group.
+	// The policy has one file_open hook (Tetragon 1.7.0 keeps only the last
+	// lsmhooks entry of a hook name, cilium/tetragon#4578), and its
+	// selectors (the SSH exemption, then the SSH key, shell profile and
+	// autostart selectors) fit MaxSelectors with one PID group only.
+	MaxPIDs = maxPIDsPerSelector
 	// Tetragon's process filter evaluates at most four matchPIDs values even
-	// when it accepts a longer list. Split the total budget across selectors.
+	// when it accepts a longer list.
 	maxPIDsPerSelector = 4
 	// MaxSelectors is Tetragon's per-hook selector budget (selector_limit.out).
 	MaxSelectors = 5
@@ -256,6 +259,20 @@ const (
 const (
 	WarnSessionsPredateControls = "kernel_sessions_predate_controls"
 	ReasonPredatesControls      = "predates_controls"
+)
+
+// WarnSessionsUnconfirmed:<n> counts the native agent sessions that fit an
+// enforcing controls policy (its binary, started after the load) but whose
+// start Tetragon never reported on the event stream, which is where its exec
+// hook marks the session (the stream was down, or the helper restarted).
+// They are not counted as anchored, and each is an observed-only root with
+// ReasonKernelUnconfirmed (GAP-0166). A user enforce is loaded for with no
+// denied session is armed: ReasonKernelUnconfirmed when such a session
+// runs, ReasonNoAnchoredSession otherwise.
+const (
+	WarnSessionsUnconfirmed = "kernel_sessions_unconfirmed"
+	ReasonKernelUnconfirmed = "kernel_unconfirmed"
+	ReasonNoAnchoredSession = "no_anchored_session"
 )
 
 // WarnCustomerEventsCapped:<policy> is one of the host's own Tetragon

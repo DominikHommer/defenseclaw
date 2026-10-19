@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -59,6 +60,57 @@ func driverFor(t *testing.T, f *fixture) *enterprisebundle.Driver {
 
 func enforcing(digest string) enterprisebundle.GatewayPolicy {
 	return enterprisebundle.GatewayPolicy{EffectiveDigest: digest, Digest: digest, Generation: 4, Applied: true}
+}
+
+func TestDriverConfirmedRollbackRecordsSignedProvenance(t *testing.T) {
+	const earlier = "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z29"
+	f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
+		in.RollbackOf = earlier
+	})
+	d := driverFor(t, f)
+	p, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Receipt.RollbackOf != earlier {
+		t.Fatalf("verified receipt rollback_of = %q", p.Receipt.RollbackOf)
+	}
+	if _, err := d.Finish(p, p.ConfigSHA256, nil, enforcing(p.Receipt.ExpectedDigest), false, nil); err != nil {
+		t.Fatal(err)
+	}
+	last, _, err := d.Store.Latest()
+	if err != nil || last == nil || last.RollbackOf != earlier {
+		t.Fatalf("stored receipt = %+v, %v", last, err)
+	}
+	raw, err := os.ReadFile(d.Store.PublicReceiptPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var public struct {
+		RollbackOf string `json:"rollback_of"`
+	}
+	if err := json.Unmarshal(raw, &public); err != nil || public.RollbackOf != earlier {
+		t.Fatalf("public receipt rollback_of = %q, %v", public.RollbackOf, err)
+	}
+}
+
+func TestDriverRefusesDeviceKeyMoveBeforePromotion(t *testing.T) {
+	for _, platform := range enterprisebundle.Platforms {
+		t.Run(platform, func(t *testing.T) {
+			f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) { in.HostPlatform = platform })
+			d := driverFor(t, f)
+			d.Platform = platform
+			d.EnforcedConfig = []byte("gateway:\n  device_key_file: /old/device.key\n")
+			p, err := d.Prepare(t.Context(), f.bundle, nil)
+			if enterprisebundle.CodeOf(err) != enterprisebundle.CodeInvalidArguments || p == nil || p.Receipt.State != enterprisebundle.StateFailed {
+				t.Fatalf("Prepare = %+v, %v", p, err)
+			}
+			version := d.Store.VersionDir(enterprisebundle.VersionDirNameForReceipt(p.Receipt.Version, p.Receipt.BundleID, p.Receipt.ReceiptID))
+			if _, err := os.Stat(version); !os.IsNotExist(err) {
+				t.Fatalf("bundle promoted before refusal: %v", err)
+			}
+		})
+	}
 }
 
 const gatewayDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -457,7 +509,7 @@ func TestRetryCrashWindowsKeepInstalledConfigFilesComplete(t *testing.T) {
 	switchConfig(first.Config)
 	assertInstalled(first.Receipt.Dir)
 	// Crash after the next delivery is staged, before promotion.
-	staged, err := d.Store.Receive(first.Receipt.BundleID, first.Receipt.Version)
+	staged, err := d.Store.Receive(first.Receipt.BundleID, first.Receipt.Version, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,5 +540,20 @@ func TestRetryCrashWindowsKeepInstalledConfigFilesComplete(t *testing.T) {
 	assertInstalled(retry.Receipt.Dir)
 	if _, err := os.Stat(d.Store.VersionDir(first.Receipt.Dir)); !os.IsNotExist(err) {
 		t.Fatalf("superseded directory was not collected after confirmation: %v", err)
+	}
+}
+
+// F10: Driver.DeliveryID (Windows `bundle apply --delivery-id`) is recorded
+// on the receipt Prepare starts, and the result bundle block names it.
+func TestDriverRecordsDeliveryID(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	d.DeliveryID = "agent-7:d.0042"
+	p, err := d.Prepare(context.Background(), f.bundle, nil)
+	if err != nil || p == nil || p.Receipt == nil {
+		t.Fatalf("prepare = %+v, %v", p, err)
+	}
+	if p.Receipt.DeliveryID != d.DeliveryID || p.Receipt.Status(nil).DeliveryID != d.DeliveryID {
+		t.Fatalf("receipt delivery id = %q", p.Receipt.DeliveryID)
 	}
 }

@@ -350,7 +350,7 @@ func stripOpenCodeJSONCComments(data []byte) []byte {
 		}
 		if ch == '/' && i+1 < len(data) && data[i+1] == '*' {
 			i += 2
-			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+			for i+1 < len(data) && (data[i] != '*' || data[i+1] != '/') {
 				if data[i] == '\n' || data[i] == '\r' {
 					out = append(out, data[i])
 				}

@@ -322,6 +322,51 @@ def test_standalone_purge_keeps_the_launching_cli_powershell_temp() -> None:
     )
 
 
+def test_compliant_ensure_verify_collects_old_runtime_generations() -> None:
+    """GAP-0211: a compliant ensure runs no retire, so its Verify collects the
+    old runtime copies a retire left in a per-user folder it could not trust
+    and names each folder still untrusted. The CLI asks through the strict
+    environment (not a parameter of the Secure Client command line), only a
+    standalone Verify accepts it, the collect runs under the lifecycle lock
+    between transactions, and a failure is reported in the result instead of
+    failing the Verify."""
+
+    installer = _text(INSTALLER)
+    standalone = installer[installer.index("if ($EnterpriseProfile -ceq 'Standalone') {") :]
+    standalone = standalone[: standalone.index("Invoke-DefenseClawEnterpriseLifecycle @arguments")]
+    variable = "DEFENSECLAW_STANDALONE_COLLECT_RUNTIME_GENERATIONS"
+    assert f"[Environment]::SetEnvironmentVariable('{variable}', $null, 'Process')" in standalone
+    assert "if ($Action -eq 'Verify' -and $collectRequest -ceq '1') {" in standalone
+    assert "$arguments['CollectRuntimeGenerations'] = $true" in standalone
+
+    module = _text(MODULE)
+    lifecycle = _function_body(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    assert "throw '-CollectRuntimeGenerations is valid only with a standalone Verify'" in lifecycle
+    verify = lifecycle[lifecycle.index("if ($Action -eq 'Verify') {") :]
+    verify = verify[: verify.index("return Get-DefenseClawLifecycleStatus")]
+    assert "Invoke-DefenseClawStandaloneRuntimeGenerationCollect" in verify
+
+    collect = _function_body(module, "Invoke-DefenseClawStandaloneRuntimeGenerationCollect")
+    assert "Test-DefenseClawStandaloneProfile" in collect and "Test-DefenseClawAdministrator" in collect
+    assert collect.index("Enter-DefenseClawLifecycleLock") < collect.index("-Action collect")
+    assert "$Layout.PendingPath" in collect and "Exit-DefenseClawLifecycleLock" in collect
+    assert "$script:DefenseClawRuntimeGenerationCollectError = ConvertTo-DefenseClawBoundedDiagnostic" in collect
+
+    snapshot = _function_body(module, "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand")
+    assert "'collect'," in snapshot and "'collect' { 'collected' }" in snapshot
+    assert "$report.PSObject.Properties['collected']" in snapshot
+
+    status = _function_body(module, "Get-DefenseClawLifecycleStatus")
+    assert "$status['lifecycle_retire_skipped']" in status
+    assert "$status['lifecycle_generations_collected']" in status
+    assert "$status['lifecycle_collect_error']" in status
+
+    go = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
+    assert f'windowsEnterpriseCollectGenerationsVariable = "{variable}"' in go
+    lifecycle_go = (ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go").read_text(encoding="utf-8")
+    assert '"capture", "classify-activation", "collect", "restore", "retire", "retire-committed",' in lifecycle_go
+
+
 def test_standalone_first_enumeration_has_a_longer_named_budget() -> None:
     """GAP-0561: the first run of a new gateway on a cold device took more
     than the default 300 seconds and the install failed with only "native
@@ -507,3 +552,185 @@ def test_secure_client_claude_floor_is_unchanged() -> None:
     body = _floor_function()
     returns = re.findall(r"return '([0-9.]+)'", body)
     assert returns[-1] == "2.1.152"
+
+
+# GAP-0046: the installed CLI's self-uninstall retires InstallRoot to a
+# receipt-bound sibling and a detached finalizer deletes it. The standalone
+# tree also holds lib\defenseclaw\policy_compiler.py. Cleanup deleted the
+# compiler but never the two compiler directories, so the final non-recursive
+# Remove-Item of the retired root prompted ("has children"), which a
+# -NonInteractive engine turns into a terminating error. The receipt survived
+# and every later Setup recovery (1.0.2 included) failed the same way with
+# lifecycle_error 1603. The cleanup must remove every allowlisted directory
+# bottom-up, only when empty, and must never delete unexpected content.
+_RETIRED_TREE_CLEANUP_HARNESS = r"""
+param([string]$ModulePath, [string]$Scratch, [string]$Case)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
+if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
+foreach ($name in @(
+    'Get-DefenseClawRetiredInstallTreeAllowlist',
+    'Assert-DefenseClawNoReparsePath',
+    'Remove-DefenseClawEmptyRetiredInstallDirectory',
+    'Remove-DefenseClawRetiredInstallTree'
+)) {
+    $definition = $ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq $name
+    }, $true)
+    if ($null -ne $definition) {
+        . ([ScriptBlock]::Create($definition.Extent.Text))
+    }
+}
+# ACL and ownership validation is Windows-only and covered elsewhere; the
+# allowlist itself stays the module's.
+function Test-DefenseClawStandaloneProfile { return $true }
+function Assert-DefenseClawRetiredInstallTree {
+    param([hashtable]$Layout, [string]$RetiredRoot, [switch]$SkipAclValidation)
+}
+$retired = Join-Path $Scratch 'DefenseClaw.retired-0123456789abcdef0123456789abcdef'
+$allowlist = Get-DefenseClawRetiredInstallTreeAllowlist -Layout @{} -RetiredRoot $retired
+foreach ($directory in $allowlist.directories) {
+    [void](New-Item -ItemType Directory -Path $directory -Force)
+}
+$modulePathInTree = [IO.Path]::GetFullPath((Join-Path $retired 'libexec\DefenseClawEnterprise.psm1'))
+switch ($Case) {
+    'full' {
+        foreach ($file in $allowlist.files) {
+            if ($file -like '*defenseclaw_ipc.sock') { continue }
+            [IO.File]::WriteAllText($file, "payload $file")
+        }
+    }
+    'compiler-residue' {
+        # What a 1.0.2 (or older candidate) self-uninstall left on dc-ent-win:
+        # only the two empty compiler directories.
+        $compilerDirectories = @(
+            [IO.Path]::GetFullPath((Join-Path $retired 'lib')).TrimEnd('\'),
+            [IO.Path]::GetFullPath((Join-Path $retired 'lib\defenseclaw')).TrimEnd('\')
+        )
+        foreach ($directory in $allowlist.directories) {
+            if ($directory -notin $compilerDirectories) {
+                [IO.Directory]::Delete($directory)
+            }
+        }
+    }
+    'unexpected' {
+        [IO.File]::WriteAllText((Join-Path $retired 'lib\defenseclaw\operator-notes.txt'), 'keep me')
+    }
+}
+$moduleHash = ''
+if ([IO.File]::Exists($modulePathInTree)) {
+    $moduleHash = (Get-FileHash -LiteralPath $modulePathInTree -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+$receipt = [pscustomobject]@{
+    retired_install_root = $retired
+    retired_module_sha256 = $moduleHash
+}
+$threw = ''
+try {
+    Remove-DefenseClawRetiredInstallTree -Layout @{} -Receipt $receipt
+}
+catch {
+    $threw = $_.Exception.Message
+}
+[pscustomobject]@{
+    threw = $threw
+    retired_exists = [IO.Directory]::Exists($retired)
+    unexpected_kept = [IO.File]::Exists((Join-Path $retired 'lib\defenseclaw\operator-notes.txt'))
+} | ConvertTo-Json -Compress
+"""
+
+
+def _portable_pwsh() -> str | None:
+    import os
+    import shutil
+
+    return os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
+
+
+@pytest.mark.parametrize("case", ["full", "compiler-residue", "unexpected"])
+def test_standalone_retired_tree_cleanup_removes_empty_compiler_directories(
+    tmp_path: Path, case: str
+) -> None:
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    harness = tmp_path / "retired-tree-cleanup.ps1"
+    harness.write_text(_RETIRED_TREE_CLEANUP_HARNESS, encoding="utf-8")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    completed = subprocess.run(
+        [
+            engine,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(harness),
+            "-ModulePath",
+            str(MODULE),
+            "-Scratch",
+            str(scratch),
+            "-Case",
+            case,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    if case == "unexpected":
+        # Content outside the allowlist is never deleted, and the refusal
+        # names it instead of surfacing a NonInteractive prompt error.
+        assert result["unexpected_kept"] is True, result
+        assert result["retired_exists"] is True, result
+        assert "not empty" in result["threw"], result
+        assert "NonInteractive" not in result["threw"], result
+    else:
+        assert result["threw"] == "", result
+        assert result["retired_exists"] is False, result
+
+
+def test_signed_out_untrusted_folder_is_classified_alike() -> None:
+    """#1105, GAP-0211: the 1.0.2 -> 1.0.3 upgrade with a signed-out account
+    whose hooks folder had one extra permission entry returned 1603. The
+    manifest adoption (PowerShell) and the lifecycle's guardian check (Go)
+    excuse exactly the same failure, report it, and nothing else."""
+
+    module = _text(MODULE)
+    block = module[module.index("$script:SignedOutUntrustedFolderPattern = [regex]::new(") :]
+    block = block[: block.index("[Text.RegularExpressions.RegexOptions]::CultureInvariant")]
+    powershell = "".join(part.replace("''", "'") for part in re.findall(r"'((?:[^']|'')*)'", block))
+    go_source = (ROOT / "internal" / "cli" / "enterprise_hooks_signed_out_folder.go").read_text(encoding="utf-8")
+    go_block = go_source[go_source.index("enterpriseHookSignedOutUntrustedFolderPattern = regexp.MustCompile(") :]
+    go_block = go_block[: go_block.index("\n)\n")]
+    go = "".join(re.findall(r"`([^`]*)`", go_block))
+    assert powershell == go
+    live = (
+        "enterprise hooks: protected target requires repair but its exact active Windows session is unavailable "
+        "(verification: enterprise hooks: managed hook directory verification failed: enterprise hooks: "
+        "managed Windows DACL on C:\\Users\\r103gb13-u1\\.defenseclaw\\hooks has 8 ACEs, expected 7)"
+    )
+    found = re.fullmatch(go, live)
+    assert found and found.group(1) == "hook" and found.group(2) == "C:\\Users\\r103gb13-u1\\.defenseclaw\\hooks"
+    assert not re.fullmatch(go, live + "; more")
+
+    adoption = _function_body(module, "Get-DefenseClawStandaloneManifestAdoption")
+    assert "Get-DefenseClawSignedOutUntrustedFolder -Row $row" in adoption
+    assert "$excused = $folderRows + $waitingRows" in adoption
+    for name in ("Assert-DefenseClawEnterpriseDeployment", "Sync-DefenseClawStandaloneManagedHooksActivationBinding"):
+        assert "Add-DefenseClawSignedOutUntrustedFolders -Adoption $adoption" in _function_body(module, name)
+    assert "$status['signed_out_untrusted_folders']" in _function_body(module, "Get-DefenseClawLifecycleStatus")
+
+    lifecycle = (ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go").read_text(encoding="utf-8")
+    assert "enterpriseHookSignedOutUntrustedFolder(row, target.DataDir)" in lifecycle
+    standalone = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
+    assert 'json:"signed_out_untrusted_folders"' in standalone

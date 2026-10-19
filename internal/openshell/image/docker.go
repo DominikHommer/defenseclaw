@@ -220,11 +220,12 @@ func tagImage(ctx context.Context, d Docker, source, target string) error {
 }
 
 // imageFacts is what docker reports of a local image: its ID, the diff IDs
-// of its layers, bottom first, and its labels.
+// of its layers, bottom first, its labels and its repo digests.
 type imageFacts struct {
-	ID     string
-	Layers []string
-	Labels map[string]string
+	ID          string
+	Layers      []string
+	Labels      map[string]string
+	RepoDigests []string
 }
 
 // inspectImage reports ref's imageFacts.
@@ -234,8 +235,9 @@ func inspectImage(ctx context.Context, d Docker, ref string) (imageFacts, error)
 		return imageFacts{}, fmt.Errorf("openshell image: inspect %s: %w", ref, err)
 	}
 	var doc struct {
-		ID     string `json:"Id"`
-		RootFS struct {
+		ID          string   `json:"Id"`
+		RepoDigests []string `json:"RepoDigests"`
+		RootFS      struct {
 			Layers []string `json:"Layers"`
 		} `json:"RootFS"`
 		Config struct {
@@ -245,7 +247,7 @@ func inspectImage(ctx context.Context, d Docker, ref string) (imageFacts, error)
 	if err := json.Unmarshal([]byte(out), &doc); err != nil || !imageIDRE.MatchString(doc.ID) {
 		return imageFacts{}, fmt.Errorf("openshell image: inspect %s returned no image", ref)
 	}
-	return imageFacts{ID: doc.ID, Layers: doc.RootFS.Layers, Labels: doc.Config.Labels}, nil
+	return imageFacts{ID: doc.ID, Layers: doc.RootFS.Layers, Labels: doc.Config.Labels, RepoDigests: doc.RepoDigests}, nil
 }
 
 func lastLines(s string, n int) string {

@@ -364,7 +364,10 @@ one now.
 A field of the lifecycle result. On Linux and macOS it is `true` when the
 gateway, the guardian, and the enumerator are ready. On Windows it is `true`
 when the deployment is installed, the guardian is ready, and no transaction is
-pending. It does not check that any user is enrolled.
+pending. It does not check that any user is enrolled. On every OS an
+installed agent whose version has no verified hook contract
+(`hook_contract_unverified`) makes it `false`: that agent has no DefenseClaw
+hook.
 
 ### security_complete
 

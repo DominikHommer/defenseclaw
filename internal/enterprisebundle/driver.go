@@ -47,6 +47,9 @@ type Driver struct {
 	// value means this is the first bundle on a device with no config.
 	EnforcedConfig       []byte
 	RefuseCapabilityLoss bool
+	// DeliveryID is the --delivery-id Prepare records on the receipt it
+	// starts ("" for none).
+	DeliveryID string
 }
 
 // Prepared is a bundle ready for the ensure transaction.
@@ -109,7 +112,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 			id, version = m.BundleID, m.Version
 		}
 	}
-	receipt, err := d.Store.Receive(id, version)
+	receipt, err := d.Store.Receive(id, version, d.DeliveryID)
 	if err != nil {
 		return nil, &Error{Code: CodeStateInvalid, Detail: "cannot write the policy bundle receipt: " + err.Error()}
 	}
@@ -178,7 +181,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	m := res.Manifest
 	if err := d.Store.Advance(receipt, StateVerified, func(rc *Receipt) {
 		rc.TenantID, rc.DeviceGroup, rc.Principal = m.TenantID, m.Target.DeviceGroup, m.CreatedBy
-		rc.ChangeSummary = m.ChangeSummary
+		rc.ChangeSummary, rc.RollbackOf = m.ChangeSummary, m.RollbackOf
 		rc.SignerKeyID, rc.ManifestSHA256, rc.ExpectedDigest = res.Signature.KeyID, sha256Hex(staged.Manifest), res.ExpectedDigest
 		rc.SetDigestComparison(res.DigestVerified, res.DigestUnverifiable, res.DigestLayoutUnverifiable)
 	}); err != nil {
@@ -190,6 +193,9 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 		return refuse(err)
 	}
 	p.Config, p.ConfigSHA256 = rendered, sha256Hex(rendered)
+	if err := RefuseDeviceKeyMove(d.EnforcedConfig, rendered, d.Platform, d.DeviceLayout); err != nil {
+		return refuse(err)
+	}
 	loss, err := DisabledByBundle(d.EnforcedConfig, rendered)
 	if err != nil {
 		return refuse(&Error{Code: CodeStateInvalid, Detail: err.Error()})

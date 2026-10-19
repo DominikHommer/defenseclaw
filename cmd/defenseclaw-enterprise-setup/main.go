@@ -55,9 +55,6 @@ const (
 	// its own embedded manifest (hash_pinned trust).
 	standaloneFlavor         = "standalone"
 	standaloneUnsignedFlavor = "standalone-unsigned"
-	// standalonePayloadTrustName is the hash-pinned trust anchor staged
-	// next to an unsigned standalone payload.
-	standalonePayloadTrustName = "payload-trust.json"
 )
 
 // standaloneSetupArtifactName is the file name the standalone Setup ships
@@ -68,6 +65,16 @@ const standaloneSetupArtifactName = "DefenseClawSetup-Enterprise-Standalone-x64.
 // enterpriseSetupPayloadLoader reads the embedded payload; tests replace it.
 var enterpriseSetupPayloadLoader = loadTrustedEnterprisePayload
 
+// standalonePayloadBinding is the setuppayload.PayloadBinding of the payload
+// and manifest identity (flavor, version, source commit)
+// this Setup image was built with. packaging/windows/standalone/build-setup.sh
+// links it in (-X main.standalonePayloadBinding=<hex>), so it lives in the
+// running image, which no other process can change. The Setup stages a
+// trailer payload only when it produces this value, whatever file the
+// trailer was read from (#1281). Empty in an image no standalone build
+// stamped: the Secure Client Setup and test binaries.
+var standalonePayloadBinding string
+
 // enterpriseSetupInvalidArguments marks a command-line error without changing
 // its text. The standalone Setup reports it as 1639 so an MDM does not retry
 // a command line that can never succeed; the Secure Client Setup never
@@ -75,6 +82,18 @@ var enterpriseSetupPayloadLoader = loadTrustedEnterprisePayload
 type enterpriseSetupInvalidArguments struct{ error }
 
 func (err enterpriseSetupInvalidArguments) Unwrap() error { return err.error }
+
+// setupCodeBundleRequired is enterprisebundle.CodeBundleRequired, the code
+// the lifecycle and the Unix kit report when a computer that takes signed
+// bundles is given a config. A test pins the two together.
+const setupCodeBundleRequired = "bundle_required"
+
+// enterpriseSetupBundleRequired is a command line that hands a config to a
+// run that installs bundle trust anchors. It is still a command line that
+// can never succeed (1639), reported with the bundle_required code.
+type enterpriseSetupBundleRequired struct{ error }
+
+func (err enterpriseSetupBundleRequired) Unwrap() error { return err.error }
 
 var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -92,8 +111,7 @@ var requiredPayloadFiles = []string{
 
 // standalonePayloadFiles is the standalone flavor's inventory: the Secure
 // Client set without the CMID credential broker, plus the scanner runtime
-// (skill, MCP and plugin scanners) and Fleet policy compiler the standalone
-// lifecycle installs into its own root.
+// (skill, MCP and plugin scanners).
 var standalonePayloadFiles = []string{
 	"DefenseClawEnterprise.psm1",
 	"defenseclaw-acp.exe",
@@ -103,7 +121,6 @@ var standalonePayloadFiles = []string{
 	"defenseclaw-sensor-helper.exe",
 	"defenseclaw.exe",
 	"install-enterprise.ps1",
-	policyCompilerPayloadName,
 }
 
 func isStandaloneFlavor(flavor string) bool {
@@ -175,9 +192,6 @@ type enterpriseSetupOptions struct {
 	Standalone         bool
 	StandaloneUnsigned bool
 	ProductVersion     string
-	// OmitPolicyCompiler is set when a signed standalone payload withheld
-	// its Fleet compiler (see enterprisePayload.withoutPolicyCompiler).
-	OmitPolicyCompiler bool
 }
 
 type enterprisePayloadManifest struct {
@@ -206,40 +220,6 @@ type enterprisePayload struct {
 	// carries the FS alongside the validated manifest so the loader
 	// stays the single boundary that decides what's trusted.
 	PayloadFS fs.FS
-}
-
-// policyCompilerPayloadName is the optional Fleet compiler in the standalone
-// payload. Python source cannot carry its own Authenticode signature.
-const policyCompilerPayloadName = "policy_compiler.py"
-
-// CarriesPolicyCompiler reports whether the payload still offers the Fleet
-// compiler to the lifecycle.
-func (payload enterprisePayload) CarriesPolicyCompiler() bool {
-	_, ok := payload.Files[policyCompilerPayloadName]
-	return ok
-}
-
-// withoutPolicyCompiler returns a copy of the payload that stages and offers
-// no Fleet compiler. A signed standalone Setup uses it when WinVerifyTrust
-// cannot verify the outer image offline (DAMAGE-678 A1): every binary and the
-// module keep their own Authenticode checks in the lifecycle, so a Fleet-off
-// install, upgrade or MDM ensure runs as it did before Fleet existed, while a
-// Fleet-enabled config fails closed for want of -PolicyCompiler.
-func (payload enterprisePayload) withoutPolicyCompiler() enterprisePayload {
-	required := make([]string, 0, len(payload.Required))
-	for _, name := range payload.Required {
-		if name != policyCompilerPayloadName {
-			required = append(required, name)
-		}
-	}
-	files := make(map[string]enterprisePayloadManifestFile, len(payload.Files))
-	for name, file := range payload.Files {
-		if name != policyCompilerPayloadName {
-			files[name] = file
-		}
-	}
-	payload.Required, payload.Files = required, files
-	return payload
 }
 
 // Standalone reports whether the payload is the standalone flavor.
@@ -273,6 +253,10 @@ var enterpriseSetupStandaloneFlavor = embeddedEnterpriseSetupStandalone
 // appended at assemble time as a deterministic trailer and read off
 // the running EXE here.
 func embeddedEnterpriseSetupStandalone() bool {
+	if standalonePayloadBinding != "" {
+		// Only the standalone build stamps a payload binding into the image.
+		return true
+	}
 	exePath, err := os.Executable()
 	if err != nil {
 		return false
@@ -511,6 +495,12 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	if strings.TrimSpace(opts.Bundle) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
 		return opts, false, errors.New("BUNDLE= cannot be combined with CONFIG= (or --mode/--connector): the signed bundle carries the config")
 	}
+	if strings.TrimSpace(opts.TrustAnchors) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
+		// Installing the anchors puts the computer in bundle mode, which takes
+		// its policy only from signed bundles: the same refusal, and code, as a
+		// CONFIG= on a computer in bundle mode (#1288).
+		return opts, false, enterpriseSetupBundleRequired{errors.New("TRUSTANCHORS= cannot be combined with CONFIG= (or --mode/--connector): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=")}
+	}
 	if opts.RefuseCapabilityLoss && strings.TrimSpace(opts.Bundle) == "" {
 		return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=")
 	}
@@ -688,7 +678,53 @@ func loadEmbeddedEnterprisePayload() (enterprisePayload, error) {
 		}
 		return enterprisePayload{}, fmt.Errorf("read enterprise payload trailer: %w", err)
 	}
-	return loadEnterprisePayload(result.AsPayloadFS())
+	return loadBoundEnterprisePayload(result, standalonePayloadBinding)
+}
+
+// loadBoundEnterprisePayload validates a trailer read off the Setup image and
+// requires its payload to match binding, the payload binding linked into
+// the running image.
+func loadBoundEnterprisePayload(result setuppayload.ReadResult, binding string) (enterprisePayload, error) {
+	payload, err := loadEnterprisePayload(result.AsPayloadFS())
+	if err != nil {
+		return enterprisePayload{}, err
+	}
+	if err := requireEnterprisePayloadBinding(payload, binding); err != nil {
+		return enterprisePayload{}, err
+	}
+	return payload, nil
+}
+
+// requireEnterprisePayloadBinding refuses a payload this Setup image was not
+// built with. A stamped image (the standalone build) takes only the payload
+// whose flavor, version, source commit and file digests produce its
+// binding, of any flavor: the lifecycle acts on the manifest version
+// (upgrade, compliant or downgrade refusal, and the recorded version), so a
+// trailer with the same bytes but another identity is refused too. An image
+// with no binding takes no standalone payload, since only the standalone
+// build produces one; the Secure Client flavors keep their own checks.
+func requireEnterprisePayloadBinding(payload enterprisePayload, binding string) error {
+	if binding == "" {
+		if payload.Standalone() {
+			return errors.New("this Setup image has no payload binding, so it cannot vouch for its standalone payload; " +
+				"build the standalone Setup with packaging/windows/standalone/build-setup.sh")
+		}
+		return nil
+	}
+	digests := make(map[string]string, len(payload.Files))
+	for name, file := range payload.Files {
+		digests[name] = file.SHA256
+	}
+	identity := setuppayload.PayloadIdentity{
+		DistributionFlavor: payload.Manifest.DistributionFlavor,
+		Version:            payload.Manifest.Version,
+		SourceCommit:       payload.Manifest.SourceCommit,
+	}
+	if !strings.EqualFold(setuppayload.PayloadBinding(identity, digests), binding) {
+		return errors.New("the payload this Setup read is not the payload its image was built with, so nothing was staged; " +
+			"copy the Setup file your MDM delivered to a folder only administrators can change and run it again")
+	}
+	return nil
 }
 
 func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
@@ -828,9 +864,12 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 	}
 	result := enterprisestatus.New(action, "standalone", "windows", opts.ProductVersion)
 	code := "setup_failed"
+	var bundleRequired enterpriseSetupBundleRequired
 	var invalid enterpriseSetupInvalidArguments
 	var timeout enterpriseSetupLifecycleTimeout
 	switch {
+	case errors.As(err, &bundleRequired):
+		code = setupCodeBundleRequired
 	case errors.As(err, &invalid):
 		code = "invalid_arguments"
 	case errors.As(err, &timeout):
@@ -905,7 +944,7 @@ func writeStandaloneSetupUsage(output io.Writer) {
 	fmt.Fprintln(output, "  CONFIG=<path>                  administrator config; required for the first install")
 	fmt.Fprintln(output, "  MANIFEST=<path>                target manifest you publish yourself; required for /install")
 	fmt.Fprintln(output, "  BUNDLE=<path>                  with /ensure on an installed computer: apply this signed policy bundle (not with CONFIG=)")
-	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure: install this administrator-only bundle trust anchor file first")
+	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure: install this administrator-only bundle trust anchor file first (not with CONFIG=)")
 	fmt.Fprintln(output, "  REFUSECAPABILITYLOSS=1         with /ensure: refuse a bundle that disables an enforced capability")
 	fmt.Fprintln(output, "  JSON=1                         print the result document on standard output")
 	fmt.Fprintln(output, "  NOSTART=1                      install or update with the services stopped and disabled")

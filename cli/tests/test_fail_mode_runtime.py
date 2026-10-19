@@ -415,6 +415,8 @@ def test_connector_fail_mode_report_upstream_fail_open_preserves_configured_but_
     connector: str,
 ) -> None:
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    # The Windows native Hermes hook is the upstream fail-open one (GAP-0150).
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: True)
 
     report = connector_fail_mode_report(cfg, connector)
 
@@ -950,3 +952,21 @@ def test_rollback_skips_unchanged_immutable_config(tmp_path) -> None:
     with patch.object(fail_mode_runtime.os, "replace", side_effect=PermissionError("immutable")) as replace:
         fail_mode_runtime.restore_fail_mode_transaction((snapshot,))
     replace.assert_not_called()
+
+
+def test_hermes_on_linux_and_macos_reports_its_configured_fail_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # GAP-0150: the Linux and macOS Hermes hook blocks in fail mode closed,
+    # so it is not reported as upstream fail-open there.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"hermes": "closed"})
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+
+    report = connector_fail_mode_report(cfg, "hermes")
+
+    assert report["configured"] == "closed"
+    assert report["effective"] == "closed"
+    assert report["provenance"] == "config"
+    assert fail_mode_runtime.upstream_fail_open(cfg, "hermes") is False
+    assert fail_mode_runtime.upstream_fail_open(cfg, "copilot") is True

@@ -62,6 +62,43 @@ def _cfg(actives, *, modes=None, disabled=None):
     return cfg
 
 
+def test_json_roster_carries_healthy_manual_hook_state():
+    cfg = _cfg(["codex", "hermes"])
+    health = {"connectors": [
+        {"name": "codex", "state": "running", "source": "manual"},
+        {"name": "hermes", "state": "running", "source": "manual"},
+    ]}
+    with patch.object(cmd_status, "_agent_missing", return_value=False):
+        rows = cmd_status._connector_roster(cfg, health)
+    assert {row["name"]: row.get("state") for row in rows} == {
+        "codex": "running", "hermes": "running"
+    }
+
+
+def test_json_roster_preserves_disabled_manual_state_even_with_stale_health():
+    cfg = _cfg(["codex"], disabled={"codex"})
+    health = {"connectors": [{"name": "codex", "state": "running", "source": "manual"}]}
+    with patch.object(cmd_status, "_agent_missing", return_value=False):
+        rows = cmd_status._connector_roster(cfg, health)
+    assert rows[0]["enabled"] is False
+    assert rows[0]["state"] == "disabled"
+
+
+def test_running_cursor_json_reports_version_from_gateway_lock(tmp_path):
+    cfg = _cfg(["cursor"], modes={"cursor": "action"})
+    cfg.data_dir = str(tmp_path)
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps({
+        "connectors": {"cursor": {
+            "contract_id": "cursor-hooks-v1",
+            "raw_agent_version": "2026.10.01-14929f9",
+        }}
+    }), encoding="utf-8")
+    health = {"connectors": [{"name": "cursor", "state": "running", "source": "manual"}]}
+    with patch.object(cmd_status, "_agent_missing", return_value=False):
+        rows = cmd_status._connector_roster(cfg, health)
+    assert rows[0]["agent_version"] == "2026.10.01-14929f9"
+
+
 def _render(cfg) -> str:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):

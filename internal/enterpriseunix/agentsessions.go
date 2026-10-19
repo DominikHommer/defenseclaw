@@ -335,7 +335,9 @@ func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, r
 		return fmt.Sprintf("runs %s, started before DefenseClaw was activated on this computer at %s; an agent reads its hooks when it starts, so these sessions run without DefenseClaw until they are restarted: ask that user to restart them", sessions, activationTime)
 	})
 	if l.env.GOOS == "darwin" {
-		restores := l.env.guardianRestores()
+		// An unreadable record is reported by
+		// describeAgentSessionsBeforeGuardianRestore below.
+		restores, _ := l.env.guardianRestores()
 		latestByUID := map[int]time.Time{}
 		latest := time.Time{}
 		for key, at := range restores {

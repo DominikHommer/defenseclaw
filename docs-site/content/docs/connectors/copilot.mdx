@@ -345,7 +345,11 @@ DefenseClaw's whenever it holds `true`, recorded or not (a build before
 1.0.0 wrote it without a record): the guardian removes it from a host where
 it is not wanted, and uninstall, with or without `PURGE=1`, removes it, then
 the settings file and the folder DefenseClaw created for it once nothing
-else is in them. DefenseClaw writes the files as the user.
+else is in them. On a computer that no longer has an enterprise deployment
+(one removed by a build before 1.0.0), nothing is left to remove the key:
+as an administrator, delete the `defenseclaw@defenseclaw` entry from
+`enabledPlugins` in that file, or the file when nothing else is in it.
+DefenseClaw writes the files as the user.
 The Local hook file is DefenseClaw's own: the hook guardian rewrites it when a
 user deletes or edits it (a directory or link at that name is replaced too),
 status and verify fail while it is missing or modified, and uninstall removes
@@ -446,7 +450,10 @@ replaces that list, so name every harness you want:
   `-- --model <model>`); `--llm bedrock`, and `auto` without it, shares a
   short-term Amazon Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK` for the
   Bedrock Mantle Anthropic
-  endpoint (default model Claude Haiku 4.5). OpenShell holds the secret, and
+  endpoint (default model Claude Haiku 4.5). That endpoint serves the
+  Anthropic models only: an OpenAI model on Bedrock, such as
+  `openai.gpt-5.6-luna`, is refused with HTTP 400 ("does not support the
+  /anthropic/v1/messages API"). OpenShell holds the secret, and
   the sandbox gets a placeholder that works only at that endpoint. Both run
   Copilot in offline mode, which skips GitHub sign-in, telemetry, web tools,
   the GitHub MCP server and updates. Copilot's own models through a

@@ -68,7 +68,7 @@ func mustEnrollment(t *testing.T, yaml string) Enrollment {
 
 // nativeProc is a native Claude Code session of uid.
 func nativeProc(pid, ppid int, ticks uint64, uid int, exe string) Proc {
-	return Proc{PID: pid, PPID: ppid, StartTicks: ticks, UID: uid, EUID: uid, Exe: exe, Host: true,
+	return Proc{PID: pid, PPID: ppid, StartTicks: ticks, UID: uid, EUID: uid, Exe: exe, Launch: exe, Host: true,
 		Cmdline: []string{exe}, Comm: "claude"}
 }
 

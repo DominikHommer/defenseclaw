@@ -65,7 +65,7 @@ func TestJudgeStore_PersistJudgeEventV7Columns(t *testing.T) {
 		t.Fatalf("Shutdown: %v", err)
 	}
 
-	rows, err := store.ListJudgeResponses(5)
+	rows, err := store.ListJudgeResponsesCtx(t.Context(), 5)
 	if err != nil {
 		t.Fatalf("ListJudgeResponses: %v", err)
 	}

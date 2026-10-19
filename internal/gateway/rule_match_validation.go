@@ -407,9 +407,7 @@ func credibleEmailContext(text, match string, start, end int) bool {
 		if colon := strings.IndexByte(tail, ':'); colon > 0 && (tail[0] == '.' || tail[0] == '-') {
 			hostSuffix := tail[:colon]
 			if strings.IndexFunc(hostSuffix, func(char rune) bool {
-				return !((char >= 'a' && char <= 'z') ||
-					(char >= 'A' && char <= 'Z') ||
-					(char >= '0' && char <= '9') || char == '.' || char == '-')
+				return (((((char < 'a' || char > 'z') && (char < 'A' || char > 'Z')) && (char < '0' || char > '9')) && char != '.') && char != '-')
 			}) == -1 {
 				return false
 			}
@@ -708,7 +706,7 @@ func validIBAN(candidate string) bool {
 		if character == ' ' {
 			continue
 		}
-		if !((character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9')) {
+		if (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
 			return false
 		}
 		compact = append(compact, character)

@@ -28,6 +28,20 @@ type View struct {
 	Groups  []Entry
 }
 
+// NamedUserAllows reports the effective permission of a named user entry.
+// Such an entry takes precedence over the owning group and other classes.
+func (v View) NamedUserAllows(uid int, want uint16) (found, allowed bool) {
+	if !v.Present {
+		return false, false
+	}
+	for _, entry := range v.Users {
+		if entry.ID == uid {
+			return true, entry.Perm&v.Mask&want == want
+		}
+	}
+	return false, false
+}
+
 type Reader interface {
 	Read(path string, mode os.FileMode) (View, error)
 }

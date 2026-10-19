@@ -46,7 +46,7 @@ func linuxKVMReport(driver openshell.ComputeDriver, edit func(*openshell.DoctorR
 // noLinuxLandlock is the Landlock check of RHEL 9's 5.14 kernel.
 var noLinuxLandlock = openshell.Check{ID: openshell.CheckIDLandlock, Title: "Landlock", Status: openshell.StatusFail,
 	Detail: "the kernel has no Landlock support: landlock_create_ruleset: function not implemented",
-	Fix:    &openshell.Fix{Summary: "use a Linux kernel 6.2 or newer with Landlock (ABI 3+)", Sudo: true}}
+	Fix:    &openshell.Fix{Summary: "use a kernel with Landlock ABI 3 or newer (Linux 6.2 upstream or a distribution backport)", Sudo: true}}
 
 // TestSetupOffersMicroVMsOnALinuxHostWithKVM: the docker driver stays a
 // Linux host's default (a no, and --yes, keep it); a yes plans the vm driver

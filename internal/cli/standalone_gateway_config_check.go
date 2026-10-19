@@ -191,7 +191,10 @@ func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, 
 			continue
 		}
 		if err := standaloneServiceCanWriteFile(path, gatewayAccount); err != nil {
-			folder := filepath.Dir(filepath.Clean(path))
+			// icacls cannot grant on a folder that is not there: name the
+			// nearest one that is, which the gateway creates the rest
+			// below (GAP-0027).
+			folder := standaloneNearestExistingFolder(path)
 			return &config.V8SemanticError{
 				Path:    "$.observability.destinations",
 				Summary: fmt.Sprintf("destination %q writes %s, but %v", destination.Name, path, err),
@@ -201,6 +204,22 @@ func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, 
 		}
 	}
 	return nil
+}
+
+// standaloneNearestExistingFolder is the deepest folder above path that
+// exists, or the root when none does.
+func standaloneNearestExistingFolder(path string) string {
+	folder := filepath.Dir(filepath.Clean(path))
+	for {
+		if info, err := os.Lstat(folder); err == nil && info.IsDir() {
+			return folder
+		}
+		parent := filepath.Dir(folder)
+		if parent == folder {
+			return folder
+		}
+		folder = parent
+	}
 }
 
 // standaloneServiceCanWriteFile checks that the gateway service account can

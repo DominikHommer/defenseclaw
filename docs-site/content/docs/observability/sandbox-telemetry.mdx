@@ -68,8 +68,9 @@ value is left out, never guessed.
 The sandbox name, id and binding are attributes of the log records only. The
 metrics carry the harness connector, the egress source and the decision, so a
 sandbox that is created and deleted a hundred times does not make a hundred
-series. Per-sandbox views read the logs, which is why the Collector copies
-`defenseclaw.sandbox.name` into Loki structured metadata.
+series. Per-sandbox views read the logs, which is why the local Collector
+moves `defenseclaw.sandbox.name` onto the log record's resource, where the
+bundled Loki indexes it.
 </Callout>
 
 ## Managed computers
