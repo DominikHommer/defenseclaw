@@ -240,3 +240,48 @@ workflow/helper source and the driver artifact. After one attempt, preserve
 the actual result before diagnosing or changing source/policy. A successful
 canary still leaves terminal, arbitrary prepared workloads, credential relay,
 agent hooks and actual Claude/model traffic as separate qualification gates.
+
+
+## Fixed real Claude version recipe
+
+The existing manual workflow now has a closed choice between the historical
+`lifecycle` suite (default) and the separate `claude-version` suite. The latter
+uses `prepare_version.py` and `REVIEWED-CLAUDE-VERSION.json`. Its exact wrapper
+and driver artifacts have passed author, root and independent inert reviews:
+wrapper run `39196467675`, artifact `12161534865`, image
+`63300aa074ad60c607b15fb7833a38dc3421a5616c73abdb54386a7045563912`
+(3,506,302 bytes); driver run `39197793107`, artifact `12163050120`, image
+`9e14ff770aea93fa7bff1d8af0f6fb8f6c9ee162e9373866a28cc86f1a68edfc`
+(3,244,158 bytes). The distinct receipt is
+`e24ee1736320e9df281e0ab7049b2df8cbacbf27d81d31fc46e21cef09b165b7`.
+These checks do not execute the images. No real version attempt is claimed here.
+
+Preparation authenticates the four fixed Actions artifact identities and full
+ZIP/provenance inventories. The fixed musl
+Claude 2.1.292 binary is reacquired only from its literal official release URL,
+with the exact reviewed manifest/signature/key hashes, pinned signing fingerprint,
+verified signature and binary SHA256/size. Fixed installed GPG is a host data
+reader with no options, no helper autostart, no auto-key import/retrieval and
+no dirmngr; missing readers refuse without installing anything. The image is
+never invoked during preparation. Vendor bytes, private keyring and staged
+images are excluded from the evidence upload paths; the fixed public license is
+retained. The existing empty-env driver, namespace custody, bounded deadline,
+disposable-runner-only AppArmor save/restore and no-retry recipe are reused.
+
+The version collector requires confirmed native, worker and whole-wrapper cleanup
+and zero pending source-resource custody before reading the retained private
+fixture. It holds the registered loader object while copying public canaries and
+excludes only the fixed root leaf whose full FileID, mode, owner, single-link
+status, size and digest revalidate against the trusted driver's record and the
+reviewed loader. A same-name replacement is refused. Other fixture files retain
+the existing nofollow, name/depth/count/size and aggregate byte bounds. The
+853,616 loader bytes and the vendor image are never copied into the result ZIP.
+The collection `members` count includes every visited source entry, including
+the one excluded loader; `bytes` counts only copied public file bytes, and
+`excluded_loader` records the separately revalidated object.
+
+A future pass requires exactly `2.1.292 (Claude Code)\n` (22 stdout bytes), empty
+stderr, exit0, Destroyed and independently completed cleanup. Missing exact
+version output is not evidence that no execution occurred: a started child may
+have failed before producing it. This finite canary does not qualify an agent
+session, arbitrary dlopen, hooks, broker transport or the production launch gate.

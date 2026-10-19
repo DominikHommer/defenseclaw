@@ -11,6 +11,13 @@ on:
     branches: [codex/axis-sandbox-feasibility]
     paths: [.github/workflows/axis-native-peer-live.yml]
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Exact independently reviewed fixed suite
+        type: choice
+        options: [lifecycle, claude-version]
+        default: lifecycle
+        required: true
 
 permissions:
   contents: read
@@ -25,6 +32,8 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      FIXED_SUITE: ${{ inputs.suite || 'lifecycle' }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -40,6 +49,7 @@ jobs:
           test "$GITHUB_REPOSITORY" = cisco-ai-defense/defenseclaw
           test "$GITHUB_REF" = refs/heads/codex/axis-sandbox-feasibility
           test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          case "$FIXED_SUITE" in lifecycle|claude-version) ;; *) exit 1 ;; esac
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain)"
           test "$(id -u)" != 0
@@ -52,7 +62,11 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          python test/e2e/axis/native-peer/live/prepare.py
+          case "$FIXED_SUITE" in
+            lifecycle) python test/e2e/axis/native-peer/live/prepare.py ;;
+            claude-version) python test/e2e/axis/native-peer/live/prepare_version.py ;;
+            *) exit 1 ;;
+          esac
       - name: One fixed run with bounded whole-wrapper custody
         timeout-minutes: 4
         shell: bash
@@ -92,14 +106,19 @@ jobs:
           # Its internal deadline is 120s, followed by bounded cleanup/retry.
           # This outer trusted timeout also bounds a failed driver implementation.
           /usr/bin/timeout --signal=TERM --kill-after=5s 160s \
-            /usr/bin/env -i "$(pwd)/live-inputs/images/fixed-driver" --run-fixed --suite lifecycle \
+            /usr/bin/env -i "$(pwd)/live-inputs/images/fixed-driver" --run-fixed --suite "$FIXED_SUITE" \
             --receipt "$(pwd)/live-inputs/REVIEWED-ARTIFACTS.json" \
             --evidence "$(pwd)/live-evidence/native-peer-fixed-wrapper" \
             >live-evidence/DRIVER-RESULT.json 2>live-evidence/driver-stderr.log
       - name: Collect only the exact fixed fixture after whole-wrapper cleanup
         if: ${{ always() }}
         shell: bash
-        run: python test/e2e/axis/native-peer/live/prepare.py --collect-fixed-evidence
+        run: |
+          case "$FIXED_SUITE" in
+            lifecycle) python test/e2e/axis/native-peer/live/prepare.py --collect-fixed-evidence ;;
+            claude-version) python test/e2e/axis/native-peer/live/prepare_version.py --collect-fixed-evidence ;;
+            *) exit 1 ;;
+          esac
       - name: Retain bounded evidence including failures
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

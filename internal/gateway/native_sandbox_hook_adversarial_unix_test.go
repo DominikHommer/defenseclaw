@@ -202,31 +202,48 @@ func TestNativeHookStillUsesExistingRouteBodyCSRFAndRateChecks(t *testing.T) {
 }
 
 func TestNativeHookOwnerAndCurrentIngressAuthorityLossFailClosed(t *testing.T) {
-	fixture := newSandboxIngressFixture(t)
-	endpoint, client, binding, token, cancel := adversarialNativeSession(t, fixture, "native-authority-loss")
-	if err := fixture.api.SetSandboxIngress(SandboxIngressConfig{}); err != nil {
-		t.Fatal(err)
-	}
-	if status, _ := adversarialNativePost(t, client, "/api/v1/claude-code/hook", `{}`, nil); status != http.StatusServiceUnavailable {
-		t.Fatalf("replaced API ingress still authorized the old native session: %d", status)
-	}
-	cancel()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", strings.NewReader(`{}`))
-	request = request.WithContext(context.WithValue(request.Context(), nativeHookConnectionKey{}, endpoint))
-	response := httptest.NewRecorder()
-	endpoint.ServeHTTP(response, request)
-	if response.Code != http.StatusServiceUnavailable {
-		t.Fatal("canceled owner re-admitted a native request")
-	}
-	cleanup, done := context.WithTimeout(context.Background(), 5*time.Second)
-	defer done()
-	if err := endpoint.Close(cleanup); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.store.Match(token); !errors.Is(err, sandboxauth.ErrUnauthenticated) {
-		t.Fatal("owner loss left the binding live")
-	}
-	if binding.SandboxID != "native-authority-loss" || binding.ExecutionOS != runtime.GOOS {
-		t.Fatal("test did not exercise an admitted native binding")
-	}
+	t.Run("api-generation-replaced", func(t *testing.T) {
+		fixture := newSandboxIngressFixture(t)
+		endpoint, client, binding, token, _ := adversarialNativeSession(t, fixture, "native-api-loss")
+		if err := fixture.api.SetSandboxIngress(SandboxIngressConfig{}); err != nil {
+			t.Fatal(err)
+		}
+		if status, _ := adversarialNativePost(t, client, "/api/v1/claude-code/hook", `{}`, nil); status != http.StatusServiceUnavailable {
+			t.Fatalf("replaced API ingress still authorized the old native session: %d", status)
+		}
+		cleanup, done := context.WithTimeout(context.Background(), 5*time.Second)
+		defer done()
+		if err := endpoint.Close(cleanup); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.Match(token); !errors.Is(err, sandboxauth.ErrUnauthenticated) {
+			t.Fatal("API authority loss left the binding live")
+		}
+		if binding.SandboxID != "native-api-loss" || binding.ExecutionOS != runtime.GOOS {
+			t.Fatal("test did not exercise an admitted native binding")
+		}
+	})
+	t.Run("owner-canceled", func(t *testing.T) {
+		fixture := newSandboxIngressFixture(t)
+		endpoint, _, binding, token, cancel := adversarialNativeSession(t, fixture, "native-owner-loss")
+		cancel()
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", strings.NewReader(`{}`))
+		request = request.WithContext(context.WithValue(request.Context(), nativeHookConnectionKey{}, endpoint))
+		response := httptest.NewRecorder()
+		endpoint.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatal("canceled owner re-admitted a native request")
+		}
+		cleanup, done := context.WithTimeout(context.Background(), 5*time.Second)
+		defer done()
+		if err := endpoint.Close(cleanup); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.Match(token); !errors.Is(err, sandboxauth.ErrUnauthenticated) {
+			t.Fatal("owner loss left the binding live")
+		}
+		if binding.SandboxID != "native-owner-loss" || binding.ExecutionOS != runtime.GOOS {
+			t.Fatal("test did not exercise an admitted native binding")
+		}
+	})
 }
