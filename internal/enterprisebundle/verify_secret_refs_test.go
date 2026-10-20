@@ -202,11 +202,11 @@ func TestVerifyRenderedPredictsTheApplyClassification(t *testing.T) {
 			if restart := configwrite.ManagedRestartRequired(between); len(restart) != 0 {
 				t.Fatalf("the verify and apply renderings differ in restart-required keys %v", restart)
 			}
-			predicted, err := configwrite.ManagedConfigRestartRequired(installed, res.Rendered)
+			predicted, err := configwrite.ManagedConfigRestartRequired(installed, res.Rendered, configwrite.ManagedDefaults{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			actual, err := configwrite.ManagedConfigRestartRequired(installed, applied)
+			actual, err := configwrite.ManagedConfigRestartRequired(installed, applied, configwrite.ManagedDefaults{})
 			if err != nil {
 				t.Fatal(err)
 			}

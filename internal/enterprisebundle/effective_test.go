@@ -680,3 +680,35 @@ func TestRenderConfig(t *testing.T) {
 		})
 	}
 }
+
+// A standard user on a managed device cannot open the service data_dir (0700,
+// owned by the service account). Offline sign and verify run as any account,
+// so they check the target's audit.db path by name there, as they do on a
+// computer without that folder; the gateway's own load still refuses a path
+// it cannot inspect (sidecar F02).
+func TestOfflineBundleLoadToleratesUnreadableDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a POSIX account that a mode 0 folder denies")
+	}
+	base := t.TempDir()
+	dataDir := filepath.Join(base, "runtime")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "audit.db"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dataDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dataDir, 0o700) })
+	root, b := writeBundle(t, bundleConfig(t))
+	layout := enterprisebundle.DeviceLayout{ConfigPath: filepath.Join(base, "etc", "config.yaml"), DataDir: dataDir, PolicyDir: filepath.Join(base, "policies")}
+	if _, _, err := enterprisebundle.LoadConfigForDeviceLayout(b, root, runtime.GOOS, layout); err != nil {
+		t.Fatalf("offline load as a standard user: %v", err)
+	}
+	_, err := config.ParseCompileObservabilityV8(layout.ConfigPath, b.Files[enterprisebundle.ConfigName], config.ObservabilityV8CompileOptions{DefaultDataDir: dataDir})
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("the gateway compile must still refuse an uninspectable audit.db: %v", err)
+	}
+}

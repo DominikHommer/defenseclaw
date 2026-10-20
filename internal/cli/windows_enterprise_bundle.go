@@ -1100,6 +1100,13 @@ func windowsBundleHasCode(messages []enterprisestatus.Message, code string) bool
 	return false
 }
 
+// windowsBundleRollbackTarget is the confirmed bundle whose config a
+// rollback installs again.
+type windowsBundleRollbackTarget struct {
+	store *enterprisebundle.Store
+	ref   *enterprisebundle.Ref
+}
+
 // rollbackWindowsBundle installs the last good config again (the current
 // bundle config, or the config installed before the run while no bundle is
 // current) with a second ensure whose result is not printed: the result of
@@ -1122,7 +1129,10 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 	}
 	defer os.Remove(path)
 	rollback := *opts
-	rollback.bundle, rollback.bundleRollback = nil, true
+	rollback.bundle, rollback.bundleRollback, rollback.bundleRollbackTo = nil, true, nil
+	if ref != nil {
+		rollback.bundleRollbackTo = &windowsBundleRollbackTarget{store: run.driver.Store, ref: ref}
+	}
 	rollback.bundlePath, rollback.trustAnchors, rollback.configPath = "", "", path
 	rollback.jsonOutput = true
 	out := cmd.OutOrStdout()
@@ -1222,6 +1232,24 @@ func platformBundleSessionStatus(parent context.Context) enterprisestatus.Sessio
 	if len(scanned.rows) > 4096 {
 		return unknown(fmt.Errorf("process cap reached"))
 	}
+	// Only sessions of the connectors the installed config enables can need
+	// a restart: an agent DefenseClaw does not manage on this device loads no
+	// DefenseClaw hook before or after a bundle (sidecar F04).
+	enabled, err := windowsEnterpriseEnrolledConnectors()
+	if err != nil {
+		return unknown(fmt.Errorf("read the installed config for its enabled connectors: %w", err))
+	}
+	managedConnector := make(map[string]bool, len(enabled))
+	for _, name := range enabled {
+		managedConnector[strings.ToLower(name)] = true
+	}
+	rows := make([]inventory.AgentProcess, 0, len(scanned.rows))
+	for _, row := range scanned.rows {
+		if managedConnector[strings.ToLower(row.Connector)] {
+			rows = append(rows, row)
+		}
+	}
+	scanned.rows = rows
 	layout, err := windowsBundleLayout()
 	if err != nil {
 		return unknown(err)

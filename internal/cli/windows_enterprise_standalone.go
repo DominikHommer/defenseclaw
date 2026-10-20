@@ -3311,6 +3311,13 @@ func planWindowsEnterpriseEnsure(
 	if err != nil {
 		return windowsEnterpriseEnsurePlan{}, err
 	}
+	if drift == "config" && windowsBundleRollbackWithoutPayload(opts) {
+		// The rollback of a bundle the installed CLI applied puts the last
+		// good config back on the running deployment, as the bundle was
+		// applied; refusing it for the missing payload left the refused
+		// bundle config enforcing (GAP-0008).
+		drift = "bundle"
+	}
 	if drift != "" {
 		if missing := missingWindowsEnterpriseSources(opts); len(missing) != 0 && drift != "bundle" {
 			if windowsEnterpriseStandalone(opts) && len(missing) == len(missingWindowsEnterpriseSources(&windowsEnterpriseLifecycleOptions{})) {
@@ -3373,6 +3380,14 @@ func missingWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) []
 		}
 	}
 	return missing
+}
+
+// windowsBundleRollbackWithoutPayload reports the nested ensure that puts
+// the last good config back after a bundle `enterprise bundle apply`
+// (the installed CLI) could not confirm: it carries no payload, so only the
+// running deployment can take the config, the way the bundle was applied.
+func windowsBundleRollbackWithoutPayload(opts *windowsEnterpriseLifecycleOptions) bool {
+	return opts != nil && opts.bundleRollback && len(missingWindowsEnterpriseSources(opts)) != 0
 }
 
 // windowsEnterpriseKeepsInstalledConfig reports a request that names no

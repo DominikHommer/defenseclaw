@@ -339,7 +339,7 @@ func TestObservabilityV8FileValidationAllowsSharedReadOnlyCA(t *testing.T) {
 		{Name: "one", Kind: ObservabilityV8DestinationHTTPJSONL, TLS: ObservabilityV8TLSSource{CACert: caPath}},
 		{Name: "two", Kind: ObservabilityV8DestinationOTLP, TLS: ObservabilityV8TLSSource{CACert: caPath}},
 	}}
-	if _, err := validateObservabilityV8FilePaths(source, nil, true); err != nil {
+	if _, err := validateObservabilityV8FilePaths(source, nil, true, false); err != nil {
 		t.Fatalf("shared read-only CA was treated as a writable collision: %v", err)
 	}
 }

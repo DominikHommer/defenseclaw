@@ -196,10 +196,16 @@ func windowsEnterpriseHotConfigApply(
 	// bundle_apply_failed. Each refusal of a bundle says why, so a failed
 	// first apply names its cause and a held lock is retried (GAP-0104).
 	bundleChange := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
+	payloadlessRollback := windowsBundleRollbackWithoutPayload(opts)
 	opts.codexTargetTransaction = false
 	failBundle := func(code, message string) {
-		if bundleChange {
+		switch {
+		case bundleChange:
 			result.AddError(code, message)
+		case payloadlessRollback:
+			// The rollback has no transaction fallback either: its result
+			// (in the lifecycle log) names why the last good config is not back.
+			result.AddError(code, "bundle rollback: "+message)
 		}
 	}
 	unavailable := func(reason string) (bool, []string) {
@@ -291,12 +297,15 @@ func windowsEnterpriseHotConfigApply(
 	// (GAP-0601). Who is enrolled and which connectors are is applied too:
 	// the gateway reads neither at start on Windows, and the targets are
 	// refreshed below (GAP-0716).
-	restart, err := configwrite.ManagedConfigRestartRequired(previous, next)
+	restart, err := configwrite.ManagedConfigRestartRequired(previous, next, configwrite.ManagedDefaultsFor(layout))
 	if err != nil {
 		return unavailable("cannot classify the config change: " + err.Error())
 	}
 	startOnly, refreshTargets := windowsBundleStartOnlyPaths(restart)
-	if len(startOnly) > 0 && !bundleChange {
+	// A bundle rollback by the installed CLI has no payload for the upgrade
+	// transaction: it restarts only the gateway, as the bundle it undoes did.
+	gatewayOnlyRestart := bundleChange || payloadlessRollback
+	if len(startOnly) > 0 && !gatewayOnlyRestart {
 		return false, startOnly
 	}
 
@@ -345,10 +354,14 @@ func windowsEnterpriseHotConfigApply(
 			result.AddWarning("bundle_reload_request_failed", "the direct gateway reload request failed; waiting for the gateway's file watcher and checking its reported policy: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		}
 	}
+	gatewayRestarted := false
 	if len(startOnly) > 0 {
 		restarted, restartErr := windowsEnterpriseHotConfigRestart()
 		if restarted {
-			opts.bundle.gatewayRestarted = true
+			gatewayRestarted = true
+			if opts.bundle != nil {
+				opts.bundle.gatewayRestarted = true
+			}
 		}
 		if restartErr != nil || !restarted {
 			undo()
@@ -357,14 +370,14 @@ func windowsEnterpriseHotConfigApply(
 				message += ": " + windowsEnterpriseBoundedDiagnostic(restartErr.Error())
 			}
 			failBundle("bundle_gateway_restart_failed", message)
-			if recovered, _ := windowsEnterpriseHotConfigRecover(); recovered {
+			if recovered, _ := windowsEnterpriseHotConfigRecover(); recovered && opts.bundle != nil {
 				opts.bundle.gatewayRestarted = true
 			}
 			return false, startOnly
 		}
 	}
 	adoptionWait := windowsEnterpriseHotConfigTimeout
-	if opts.bundle != nil && opts.bundle.gatewayRestarted {
+	if gatewayRestarted || (opts.bundle != nil && opts.bundle.gatewayRestarted) {
 		adoptionWait = windowsEnterpriseHotConfigRestartTimeout
 	}
 	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait, opts.bundle) {
@@ -649,6 +662,11 @@ func acquireWindowsEnterpriseLifecycleLock(path string) (func(), error) {
 // principal with the bundle fields, so config.generation.json and the
 // gateway's config.change.applied event name the bundle.
 func windowsHotConfigWriteOptions(opts *windowsEnterpriseLifecycleOptions, expectSHA string) configwrite.Options {
+	if opts != nil && opts.bundleRollbackTo != nil {
+		// A rollback to the confirmed bundle records it as that bundle again,
+		// so /health and the digest scope name the bundle that enforces.
+		return windowsBundleRestoreWriteOptions(opts.bundleRollbackTo.store, opts.bundleRollbackTo.ref, expectSHA)
+	}
 	if opts != nil && opts.bundle != nil && opts.bundle.prepared != nil && !opts.bundle.prepared.AlreadyApplied {
 		if opt, ok := enterprisebundle.GenerationOptions(opts.bundle.prepared.Receipt); ok {
 			opt.ExpectSHA256 = expectSHA

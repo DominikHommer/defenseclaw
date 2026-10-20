@@ -95,10 +95,14 @@ func observabilityV8ExpandHome(path string) string {
 // compared by its literal name, as a path whose folders do not exist yet is.
 // deferJSONL is false for a Secure Client source, which keeps main's startup
 // refusal.
+// tolerateDenied (an offline bundle sign or verify, which checks a target
+// device's paths and may run as any account) compares every role this account
+// may not inspect by its name, without a warning; the gateway checks the
+// files when it starts as the service account.
 func validateObservabilityV8FilePaths(
 	source *ObservabilityV8Source,
 	configuredFiles []string,
-	deferJSONL bool,
+	deferJSONL, tolerateDenied bool,
 ) ([]ObservabilityV8Warning, error) {
 	if source == nil {
 		return nil, nil
@@ -144,19 +148,20 @@ func validateObservabilityV8FilePaths(
 		}
 		// Both failures below describe the filesystem, not the document, so the
 		// cause is kept rather than reported as a semantic error.
-		resolved, denied, err := observabilityV8ResolveExistingPathPrefix(absolute, role.deferrable)
+		tolerate := role.deferrable || tolerateDenied
+		resolved, denied, err := observabilityV8ResolveExistingPathPrefix(absolute, tolerate)
 		if err != nil {
 			return nil, newV8ConfigPathError(role.name, absolute, err)
 		}
 		var info os.FileInfo
 		if candidate, err := os.Stat(resolved); err == nil {
 			info = candidate
-		} else if role.deferrable && errors.Is(err, fs.ErrPermission) {
+		} else if tolerate && errors.Is(err, fs.ErrPermission) {
 			denied = err
 		} else if !os.IsNotExist(err) {
 			return nil, newV8ConfigPathError(role.name, resolved, err)
 		}
-		if denied != nil {
+		if denied != nil && role.deferrable {
 			warnings = append(warnings, ObservabilityV8Warning{
 				Code: "destination_path_inaccessible", Path: role.name,
 				Summary: fmt.Sprintf("cannot inspect %s (%v); the gateway starts without this destination "+
