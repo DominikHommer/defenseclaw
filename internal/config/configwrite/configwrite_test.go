@@ -299,11 +299,11 @@ func TestManagedConfigRestartRequiredClassifiesBundleChanges(t *testing.T) {
 	restart := []byte("config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n")
 	for _, level := range []string{"CRITICAL", "HIGH", "LOW"} {
 		hot := []byte("config_version: 9\nguardrail:\n  block_at: " + level + "\n  hook_self_heal_debounce_ms: 500\n")
-		if keys, err := ManagedConfigRestartRequired(before, hot); err != nil || len(keys) != 0 {
+		if keys, err := ManagedConfigRestartRequired(before, hot, ManagedDefaults{}); err != nil || len(keys) != 0 {
 			t.Fatalf("MEDIUM to %s = %v, %v; want hot", level, keys, err)
 		}
 	}
-	if keys, err := ManagedConfigRestartRequired(before, restart); err != nil || strings.Join(keys, ",") != "guardrail.hook_self_heal_debounce_ms" {
+	if keys, err := ManagedConfigRestartRequired(before, restart, ManagedDefaults{}); err != nil || strings.Join(keys, ",") != "guardrail.hook_self_heal_debounce_ms" {
 		t.Fatalf("debounce change = %v, %v; want restart", keys, err)
 	}
 }
