@@ -89,8 +89,14 @@ func ManagedHookGroupsForOS(connectorName, agentVersion, goos string) ([]Managed
 		}
 		return out, nil
 	case "cursor":
-		out := make([]ManagedHookGroup, 0, len(cursorHookEvents))
-		for _, event := range cursorHookEvents {
+		// The Windows machine policy omits the events listed in
+		// cursorEnterpriseRetiredHookEvents (afterAgentThought); see there.
+		events := cursorHookEvents
+		if goos == "windows" {
+			events = cursorEnterpriseHookEvents
+		}
+		out := make([]ManagedHookGroup, 0, len(events))
+		for _, event := range events {
 			out = append(out, ManagedHookGroup{Event: event, Timeout: windowsCursorEnterpriseHookTimeoutSeconds})
 		}
 		return out, nil
@@ -112,10 +118,10 @@ func ManagedHookGroupsForOS(connectorName, agentVersion, goos string) ([]Managed
 	}
 }
 
-// WindowsCodexManagedHookCommand renders the exact Codex machine-requirements
-// command the Windows Secure Client installer certifies for hookBinary. The
-// standalone profile reuses it so both profiles launch the GUI-subsystem
-// hook through the same exit-code-preserving PowerShell boundary.
+// WindowsCodexManagedHookCommand renders the pre-1.0 unbound Codex
+// machine-requirements command for hookBinary. Neither profile publishes it
+// any more (both bind a contract, WindowsCodexManagedHookContract); it
+// stays so callers can recognize a command an earlier release wrote.
 func WindowsCodexManagedHookCommand(hookBinary string) string {
 	return windowsCodexManagedHookCommand(hookBinary)
 }

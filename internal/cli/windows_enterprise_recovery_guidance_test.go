@@ -133,15 +133,81 @@ func TestWindowsEnterpriseStandaloneNextStepAfterALocalSystemRecovery(t *testing
 	original := windowsEnterpriseRunningAsLocalSystem
 	t.Cleanup(func() { windowsEnterpriseRunningAsLocalSystem = original })
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return true }
-	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil)
+	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil, nil)
 	if strings.Contains(got, "Next step: run DefenseClaw Setup") || !strings.Contains(got, "running it again unchanged fails the same way") ||
 		!strings.Contains(got, `/ensure CONFIG=C:\stage\config.yaml JSON=1`) || strings.Contains(got, "(the path and the account)") ||
 		!strings.Contains(got, "/uninstall FORCE=1 JSON=1") {
 		t.Fatalf("next step = %q", got)
 	}
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
-	if got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil); !strings.Contains(got, "Next step: run DefenseClaw Setup") {
+	if got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil, nil); !strings.Contains(got, "Next step: run DefenseClaw Setup") {
 		t.Fatalf("an administrator run lost the LocalSystem step: %q", got)
+	}
+}
+
+// GAP-0029: a pending transaction says the services stay stopped only for
+// the ones that are stopped; a rollback that restarted every service said
+// they all stayed stopped. It says they keep enforcing only when every
+// standalone service is listed and running: a service the service manager
+// does not have (absent, so not listed) counts as not running.
+func TestWindowsEnterprisePendingLeadFollowsTheServiceStates(t *testing.T) {
+	service := func(name, state string) enterprisestatus.Service {
+		return enterprisestatus.Service{Name: name, State: state, Required: true}
+	}
+	roster := func(states map[string]string) []enterprisestatus.Service {
+		var services []enterprisestatus.Service
+		for _, name := range []string{"DefenseClawGateway", "DefenseClawHookGuardian", "DefenseClawHookEnumerator", "DefenseClawSensorHelper"} {
+			if state, ok := states[name]; ok {
+				services = append(services, service(name, state))
+			}
+		}
+		return services
+	}
+	allRunning := map[string]string{"DefenseClawGateway": "running", "DefenseClawHookGuardian": "running",
+		"DefenseClawHookEnumerator": "running", "DefenseClawSensorHelper": "running"}
+	with := func(changes map[string]string) map[string]string {
+		states := map[string]string{}
+		for name, state := range allRunning {
+			states[name] = state
+		}
+		for name, state := range changes {
+			if state == "" {
+				delete(states, name)
+			} else {
+				states[name] = state
+			}
+		}
+		return states
+	}
+	const enforcing = "services are running and keep enforcing"
+	const generic = "The transaction is still pending, so the deployment cannot be changed until it is recovered."
+	for _, tc := range []struct {
+		name     string
+		services []enterprisestatus.Service
+		want     string
+	}{
+		{"all running", roster(allRunning), enforcing},
+		{"gateway absent, the rest running", roster(with(map[string]string{"DefenseClawGateway": ""})), generic},
+		{"sensor helper absent, the rest running", roster(with(map[string]string{"DefenseClawSensorHelper": ""})), generic},
+		{"only gateway and guardian listed", roster(map[string]string{"DefenseClawGateway": "running", "DefenseClawHookGuardian": "running"}), generic},
+		{"gateway stopped", roster(with(map[string]string{"DefenseClawGateway": "stopped"})), "the DefenseClawGateway service stays stopped"},
+		{"gateway absent, guardian stopped", roster(with(map[string]string{"DefenseClawGateway": "", "DefenseClawHookGuardian": "stopped"})), "the DefenseClawHookGuardian service stays stopped"},
+		{"two stopped", roster(with(map[string]string{"DefenseClawGateway": "stopped", "DefenseClawHookGuardian": "stopped"})), "the DefenseClawGateway, DefenseClawHookGuardian services stay stopped"},
+		{"none present", nil, generic},
+		{"state unknown", roster(with(map[string]string{"DefenseClawGateway": "unknown"})), generic},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := windowsEnterprisePendingLead(tc.services)
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("lead = %q, want %q", got, tc.want)
+			}
+			if tc.want != enforcing && strings.Contains(got, "keep enforcing") {
+				t.Fatalf("lead = %q claims enforcement", got)
+			}
+			if tc.want == enforcing && strings.Contains(got, "stopped") {
+				t.Fatalf("lead = %q names a stopped service", got)
+			}
+		})
 	}
 }
 

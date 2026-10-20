@@ -81,13 +81,13 @@ type EnumerateOptions struct {
 	// without a discovered agent version does not auto-hook the
 	// user; the admin promotes it explicitly).
 	//
-	// Callers that want to force a from-scratch generation (e.g. F1
+	// Callers that want to force a from-scratch generation (e.g. a
 	// targeted-uninstall regeneration after the target user's rows
 	// have been removed) leave this empty.
 	ExistingManifestPath string
 
 	// ExcludeSIDs is a list of SID strings to drop from the output.
-	// Used by spec 005 F1 targeted-uninstall to regenerate the
+	// Used by the targeted uninstall to regenerate the
 	// manifest with a specific user excluded, without doing per-row
 	// surgery on the on-disk file.
 	ExcludeSIDs []string
@@ -148,8 +148,8 @@ type EnumerateOptions struct {
 	RunningAgents map[string]map[string]string
 }
 
-// EnumerateWindows walks the local user profile registry, filters per
-// spec 005 REQ-08 + REQ-11, and produces a Manifest matching the
+// EnumerateWindows walks the local user profile registry (ProfileList),
+// keeps only interactive-user profiles, and produces a Manifest matching the
 // shape the hook-guardian's LoadManifest already accepts.
 //
 // Filter chain (each step drops the profile with a logf line if opts.Logger is set):
@@ -160,8 +160,7 @@ type EnumerateOptions struct {
 //     Refuses well-known SIDs (Everyone S-1-1-0, Anonymous S-1-5-7,
 //     SYSTEM S-1-5-18, Authenticated Users S-1-5-11, BUILTIN
 //     S-1-5-32-*, NT SERVICE S-1-5-80-*, etc.) by construction.
-//     Belt-and-braces on top of the CLI-input filter at spec 005
-//     REQ-15.
+//     Belt-and-braces on top of the CLI's target-SID validation.
 //  3. ProfileImagePath registry value must resolve to an absolute
 //     path under the local filesystem.
 //  4. Home directory must exist as a real directory (not a reparse
@@ -169,9 +168,9 @@ type EnumerateOptions struct {
 //     checks from the volume root down and refuses an ancestor before
 //     reading anything below it).
 //  5. `opts.ExcludeSIDs`: any SID listed here is dropped. Used by
-//     spec 005 F1's targeted uninstall.
+//     the targeted uninstall.
 //
-// Deduplication (REQ-10): if two profiles have the same SID (e.g. a
+// Deduplication: if two profiles have the same SID (e.g. a
 // re-created account whose registry entry conflicts with a stale
 // row), the enumerator prefers the one whose `ProfileImagePath`
 // mtime is newer.
@@ -281,10 +280,9 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for _, profile := range profiles {
 		// Fast-fail per row so a wedged cycle never runs to
-		// completion after ctx has been cancelled — spec 005
-		// REQ-19's 60 s cycle ceiling depends on this loop
-		// noticing the deadline. See CR
-		// spec-005:PRRT_kwDORuAK-s6atyfD.
+		// completion after ctx has been cancelled — the 60 s
+		// cycle ceiling depends on this loop noticing the
+		// deadline.
 		if err := ctx.Err(); err != nil {
 			return Manifest{}, err
 		}
@@ -493,7 +491,7 @@ func reportRunningAgentsOfUnknownOwners(running map[string]map[string]string, ju
 //
 // Returns `changed=false, err=nil` when the on-disk file is
 // byte-identical to the newly-serialised manifest. This is the
-// no-op-no-write invariant from spec 005 REQ-05: without it, every
+// no-op-no-write invariant: without it, every
 // 5-min interval tick on a stable box would fsnotify-wake the
 // guardian and force it to re-reconcile identical rows (288
 // wakes/day on a stable 50-user fleet).
@@ -533,7 +531,31 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if _, statErr := os.Lstat(path); statErr == nil {
 		destinationExists = true
 		if err := validateWindowsTargetsManifestObject(path, false); err != nil {
-			return false, fmt.Errorf("enterprise hooks: validate existing hook guardian manifest: %w", err)
+			// Bulldoze: an existing manifest with a non-canonical owner or
+			// DACL (left behind by a prior unsigned certification install
+			// whose scoped guardian wrote it under a different token) must
+			// be re-protected before the reconcile cycle gives up. Call
+			// the authenticated protect helper (which has SeTakeOwnership /
+			// SeRestore privilege from the LocalSystem guardian token) to
+			// transfer ownership to Administrators and stamp the exact
+			// AdminFile DACL. If the second validate still fails after
+			// repair, propagate the original error.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] hook guardian manifest %s failed canonical "+
+					"validation (%v); re-stamping before replace\n",
+				path, err)
+			if protectErr := windowsTargetsManifestProtect(path, false); protectErr != nil {
+				return false, fmt.Errorf(
+					"enterprise hooks: validate existing hook guardian manifest: %w (repair also failed: %v)",
+					err, protectErr,
+				)
+			}
+			if revalidateErr := validateWindowsTargetsManifestObject(path, false); revalidateErr != nil {
+				return false, fmt.Errorf(
+					"enterprise hooks: validate existing hook guardian manifest: %w (after repair: %v)",
+					err, revalidateErr,
+				)
+			}
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return false, fmt.Errorf("enterprise hooks: inspect existing manifest %s: %w", path, statErr)
@@ -729,8 +751,20 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		return false
 	}
 	key := previousManifestKey(row.SID, row.Connector)
+	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
+	if version == "" && row.Connector == "copilot" {
+		if copilot := windowsSecureClientCopilotVersion(row.UserHome, row.SID); copilot != "" {
+			version, reason = copilot, ""
+		}
+	}
 	if prev, ok := previous[key]; ok {
+		// Secure Client preserves authorization, not stale compatibility
+		// evidence (#1163). Every other profile keeps the recorded version,
+		// so a version change goes through the install's contract gate.
 		row.AgentVersion = prev.AgentVersion
+		if secureClientHookDelivery() {
+			row.AgentVersion = version
+		}
 		row.Enabled = prev.Enabled
 		row.Deferred = prev.Deferred
 		row.User = prev.User
@@ -738,8 +772,10 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		row.GID = prev.GID
 		return true
 	}
-	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
-	if version == "" {
+	// Secure Client admits an unversioned row on static presence evidence and
+	// installs best-effort hooks for it (#1163); every other profile skips a
+	// user × connector without version evidence.
+	if version == "" && !(secureClientHookDelivery() && windowsAgentPresence(row.UserHome, row.Connector)) {
 		logfSafely(
 			logf,
 			row.SID,
@@ -755,13 +791,17 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	row.AgentVersion = version
 	row.Enabled = &enabled
 	row.Deferred = false
+	versionEvidence := version
+	if versionEvidence == "" {
+		versionEvidence = "unverified (static presence detected; best-effort hooks)"
+	}
 	logfSafely(
 		logf,
 		row.SID,
 		fmt.Sprintf(
 			"newly-discovered (SID, %s) row auto-authorized at version %s",
 			row.Connector,
-			version,
+			versionEvidence,
 		),
 	)
 	return true
@@ -1002,7 +1042,7 @@ func previousManifestKey(sid, connector string) string {
 type windowsUserProfile struct {
 	SID  string
 	Home string
-	// HomeMtime disambiguates duplicate-SID rows per REQ-10; the
+	// HomeMtime disambiguates duplicate-SID rows (newest wins); the
 	// registry doesn't have direct time-of-registration for a
 	// profile, but the ProfileImagePath directory's mtime is a
 	// reasonable proxy (it changes whenever the profile is
@@ -1010,24 +1050,18 @@ type windowsUserProfile struct {
 	HomeMtime int64
 }
 
-// WindowsStandaloneEligibleProfiles lists the interactive user profiles the
-// standalone profile's enrollment admits, for guardian work that needs no
+// WindowsStandaloneEligibleProfilesFor lists the interactive user profiles
+// the standalone profile's enrollment admits, for guardian work that needs no
 // per-user manifest row: a user whose connectors are all machine policy
 // still gets foreign hooks removed from their user-level config. It applies
-// the same decision EnumerateWindows does (windowsProfileEnrollmentDecision):
-// include_users is additive and filters nothing, excluded profiles are
-// skipped, and exempt profiles are kept because their machine-policy hooks
-// still run the foreign-hook guard. A profile whose name-form entries cannot
-// be evaluated (the account lookup failed) is skipped this pass, so a
-// directory outage never touches a user who may be excluded.
-func WindowsStandaloneEligibleProfiles(ctx context.Context, exclude, exempt []string) ([]TargetCredentials, error) {
-	return WindowsStandaloneEligibleProfilesFor(ctx, EnumerateOptions{ExcludeUsers: exclude, ExemptUsers: exempt})
-}
-
-// WindowsStandaloneEligibleProfilesFor is WindowsStandaloneEligibleProfiles
-// with opts' user lists and group filters, decided as EnumerateWindows
-// decides them. opts.GroupCache is read, never changed: the enumerator is
-// its only writer.
+// the same decision EnumerateWindows does (windowsProfileEnrollmentDecision)
+// with opts' user lists and group filters: include_users is additive and
+// filters nothing, excluded profiles are skipped, and exempt profiles are
+// kept because their machine-policy hooks still run the foreign-hook guard.
+// A profile whose name-form entries cannot be evaluated (the account lookup
+// failed) is skipped this pass, so a directory outage never touches a user
+// who may be excluded. opts.GroupCache is read, never changed: the
+// enumerator is its only writer.
 func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOptions) ([]TargetCredentials, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1079,11 +1113,11 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 // missing/reparse-point home) are dropped with a WARN via logf.
 //
 // Duplicate SIDs are deduplicated in-place — the newest
-// ProfileImagePath mtime wins, per REQ-10.
+// ProfileImagePath mtime wins.
 //
 // ctx bounds the walk: a per-subkey ctx.Err() check ensures a
 // wedged os.Stat on one profile cannot starve the interval-loop's
-// cycle timeout (spec 005 REQ-19).
+// 60 s cycle timeout.
 func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standalone bool) ([]windowsUserProfile, error) {
 	subkeyNames, err := windowsProfileListSubkeyReader()
 	if err != nil {
@@ -1275,11 +1309,11 @@ func expandProfileImagePathSystemDrive(profile string) (string, error) {
 // S-1-5-19, NetworkService S-1-5-20, IIS_IUSRS S-1-5-17, etc.) fails
 // both accepted authority-and-shape checks.
 //
-// Matches spec 005 REQ-11 and — together with the CLI-input
-// validator at spec 005 REQ-15 — provides belt-and-braces coverage.
-// Same discipline as spec 004's `sidIsNTService` (in
+// Together with the CLI's target-SID validator
+// (validateWindowsEnterpriseTargetSID) this provides belt-and-braces
+// coverage. Same discipline as `sidIsNTService` (in
 // internal/ipc/acl_windows.go), inverted: this filter admits ONLY
-// interactive users; spec 004's admitted ONLY NT SERVICE principals.
+// interactive users; that one admits ONLY NT SERVICE principals.
 func sidIsInteractiveUser(sid *windows.SID) bool {
 	if sid == nil {
 		return false
@@ -1334,7 +1368,7 @@ func sidIsEntraIDUser(sid *windows.SID) bool {
 // `guardrail.connector: claudecode` together with
 // `guardrail.connectors.claudecode.enabled: false` emits ZERO
 // per-user rows for claudecode — the disabled map entry is
-// authoritative. See CR spec-005:PRRT_kwDORuAK-s6atyfM.
+// authoritative.
 //
 // The per-user connectors count only in a standalone process (one that
 // carries the profile pin); use EffectiveWindowsStandaloneHookConnectors

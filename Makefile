@@ -38,10 +38,10 @@ SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-insta
 GO_TEST_TIMEOUT ?= 60m
 # Race-enabled, the gateway and audit packages each take well over an hour as
 # one test binary. gateway-test and go-test-cov run them as this many parallel
-# shards (the CI split, scripts/go_test_shards.py); each shard keeps
+# shards (scripts/go_test_shards.py, balanced on the recorded test times like CI); each shard keeps
 # GO_TEST_TIMEOUT.
 GO_TEST_SHARDS ?= 8
-GO_SHARD_RUN = $(HOST_PYTHON) scripts/go_test_shards.py --shard-count $(GO_TEST_SHARDS)
+GO_SHARD_RUN = $(HOST_PYTHON) scripts/go_test_shards.py --timings scripts/test-timings/go-linux.json --shard-count $(GO_TEST_SHARDS)
 # -race also turns on checkptr in every package. In the transpiled SQLite
 # (modernc.org) that every audit store runs, checkptr alone doubles the cost
 # of the race suites; race detection stays on everywhere. CI uses the same flags.
@@ -103,7 +103,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint go-lint-analyzers go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog skill-check check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
+        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog skill-check check-managed-paths check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-acp-refresh source-restart-gateway \
         proto proto-check proto-tools \
@@ -990,8 +990,7 @@ packaging-managed-windows-bundle: packaging-windows-managed-gateway-zip
 
 # packaging-windows-enterprise-installer:
 #   Local self-serve unsigned developer build. Under the AVC-approved
-#   Windows managed_enterprise handoff (spec 002:
-#   docs/specs/002-windows-avc-packaging), a signed Setup EXE is
+#   Windows managed_enterprise handoff, a signed Setup EXE is
 #   produced only by AVC's pipeline consuming a build kit; DefenseClaw-
 #   side runs are always unsigned. This target invokes the extended
 #   bundler with --allow-unsigned, which emits the kit AND runs
@@ -1027,13 +1026,13 @@ packaging-windows-enterprise-installer:
 #   ("build the AVC kit") find a matching target. Hand the kit to AVC
 #   per docs/WINDOWS-AVC-PACKAGING-HANDOFF.md; AVC signs the inner
 #   payload, runs the shipped assemble.sh, and signs the outer Setup
-#   EXE. See CR spec-002:PRRT_kwDORuAK-s6af8ii.
+#   EXE.
 packaging-windows-avc-buildkit: packaging-windows-managed-gateway-zip
 
 # Deprecated alias — remove once release runbooks are updated to use
 # `packaging-windows-avc-buildkit` (the AVC-facing kit target) or
 # `packaging-windows-enterprise-installer` (the local unsigned dev
-# build). See CR spec-002:PRRT_kwDORuAK-s6af8ie.
+# build).
 packaging-windows-managed-bundle: packaging-windows-avc-buildkit
 	@echo 'note: `packaging-windows-managed-bundle` is deprecated; use `packaging-windows-avc-buildkit` (for the AVC kit) or `packaging-windows-enterprise-installer` (for a local unsigned dev build).'
 
@@ -1169,7 +1168,7 @@ test-file: pycli
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-observability-v8-hard-cut check-grafana-dashboards check-provider-coverage check-llm-catalog check-guardrail-catalog skill-check
+check: check-v7 check-observability-v8-hard-cut check-grafana-dashboards check-provider-coverage check-llm-catalog check-guardrail-catalog skill-check check-managed-paths
 
 check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
@@ -1204,6 +1203,12 @@ check-guardrail-catalog:
 # network.
 skill-check: pycli
 	@$(VENV_BIN)/python$(EXE) .claude/skills/defenseclaw-develop/scripts/check_skill_fresh.py
+
+# check-managed-paths verifies that .github/managed-paths.txt (the paths whose
+# change runs the managed-mode CI) has no stale entry and covers
+# every tracked path that looks managed. Standard-library Python and git only.
+check-managed-paths: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/check_managed_paths.py
 
 # Semantic hard-cut gate: v7 may remain only inside the explicit
 # upgrade/recovery boundaries. It checks forbidden ownership paths and
@@ -1260,7 +1265,7 @@ lint: py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity
 # go-mod-no-toolchain refuses a `toolchain` directive in go.mod so the
 # managed-enterprise / AVC reproducibility pin (GOTOOLCHAIN in
 # packaging/scripts/lib/repro-flags.{sh,ps1}) cannot silently leak into
-# OSS builds. See docs/specs/001-windows-deterministic-build/design.md.
+# OSS builds.
 go-mod-no-toolchain:
 	@scripts/check-go-mod-no-toolchain.sh
 
@@ -1294,7 +1299,7 @@ check-quiet-startup:
 # repro-flags-parity refuses drift between the bash and pwsh copies of
 # repro-flags.* — both files must ship the same fixed env exports and
 # the same required-env list, or the byte-identical outer Setup EXE
-# contract that Workstream A depends on quietly breaks.
+# contract that the AVC handoff depends on quietly breaks.
 repro-flags-parity:
 	@scripts/check-repro-flags-parity.sh
 
@@ -1302,7 +1307,6 @@ repro-flags-parity:
 # assemble.* — both files must ship the same stage sequence, expected
 # payload filenames, and emitter subcommand set, or a kit built with
 # --script-host pwsh could silently diverge from --script-host bash.
-# See docs/specs/002-windows-avc-packaging/design.md § Risks.
 assemble-parity:
 	@scripts/check-assemble-parity.sh
 

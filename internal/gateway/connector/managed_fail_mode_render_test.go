@@ -70,14 +70,15 @@ func TestManagedShellHooksIgnoreTheEnvironmentFailMode(t *testing.T) {
 					continue
 				}
 				body := string(script.body)
-				// The baked line keeps its form for doctor and status; a
-				// managed hook pins the rendered value right after it.
-				if !strings.Contains(body, `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`) {
-					t.Errorf("%s managed=%v: baked fail-mode line missing", name, managed)
+				// A managed hook bakes only the rendered value; a per-user
+				// hook keeps the environment override.
+				override := strings.Contains(body, `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`)
+				pinned := strings.Contains(body, "\nFAIL_MODE=\"closed\"")
+				if managed && (override || !pinned) {
+					t.Errorf("%s managed: environment override = %v, rendered fail mode pinned = %v", name, override, pinned)
 				}
-				pinned := strings.Contains(body, "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-closed}\"\nFAIL_MODE=\"closed\"\n")
-				if managed != pinned {
-					t.Errorf("%s managed=%v: rendered fail mode pinned = %v", name, managed, pinned)
+				if !managed && !override {
+					t.Errorf("%s per-user: environment override missing", name)
 				}
 			}
 		}

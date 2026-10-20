@@ -292,7 +292,7 @@ func init() {
 	enterpriseWindowsCmd.AddCommand(newWindowsTargetRuntimeCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsNamespacePurgeCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHookContractCleanupCommand())
-	// Spec 005 D1: hook-enumerator subcommand. Windows-only; the
+	// Hook-enumerator subcommand. Windows-only; the
 	// whole file is //go:build windows so a non-Windows build never
 	// reaches this registration.
 	enterpriseWindowsCmd.AddCommand(newEnterpriseWindowsEnumerateCommand())
@@ -348,7 +348,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 			"standalone, last resort: remove the deployment without recovering a pending transaction that no ensure, repair or uninstall can recover; run it from Setup (FORCE=1) as LocalSystem")
 	}
 	flags.BoolVar(&opts.allowUnsigned, "allow-unsigned", false, "allow unsigned artifacts only for controlled test builds")
-	// Spec 003 Workstream B: UCB-friendly late-config install.
+	// UCB-friendly late-config install.
 	// Requires managed-enterprise deployment mode; enforced by the
 	// installer, not here (this flag is a passthrough).
 	flags.BoolVar(&opts.deferredConfig, "deferred-config", false,
@@ -1070,8 +1070,14 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 		}
 		// Keep this closed set aligned with the native Windows lifecycle. Each
 		// entry must have reconcile, trusted-runtime, rollback, and teardown
-		// coverage before it is accepted at this boundary.
+		// coverage before it is accepted at this boundary. Secure Client also
+		// manages GitHub Copilot (the CLI and the GitHub Copilot app).
 		supportedOnWindows := map[string]bool{"codex": true, "claudecode": true, "cursor": true}
+		supported := "codex, claudecode, cursor"
+		if !windowsEnterpriseStandalone(opts) {
+			supportedOnWindows["copilot"] = true
+			supported += ", copilot (GitHub Copilot)"
+		}
 		for _, entry := range strings.Split(opts.connector, ",") {
 			trimmed := strings.ToLower(strings.TrimSpace(entry))
 			if trimmed == "" {
@@ -1080,8 +1086,9 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 			if !supportedOnWindows[trimmed] {
 				return fmt.Errorf(
 					"--connector entry %q is not supported on Windows managed_enterprise; "+
-						"supported: codex, claudecode, cursor.",
+						"supported: %s.",
 					trimmed,
+					supported,
 				)
 			}
 		}

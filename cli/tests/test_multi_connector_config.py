@@ -247,6 +247,94 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
 
+    def _load_hook_fail_mode(
+        self, document: str, connector: str, *, pins: dict[str, str] | None = None
+    ) -> str:
+        import tempfile
+        from unittest import mock
+
+        from defenseclaw import config as config_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "config.yaml"), "w", encoding="utf-8") as fh:
+                fh.write(document)
+            env = {"DEFENSECLAW_HOME": tmp, **(pins or {})}
+            with mock.patch.dict(os.environ, env), mock.patch(
+                "defenseclaw.config_writer.machine_managed_standalone", return_value=False
+            ):
+                for pin in ("DEFENSECLAW_DEPLOYMENT_MODE", "DEFENSECLAW_ENTERPRISE_PROFILE"):
+                    if pin not in env:
+                        os.environ.pop(pin, None)
+                cfg = config_module.load(data_dir=tmp)
+                return cfg.guardrail.effective_hook_fail_mode(connector)
+
+    def test_secure_client_unset_hook_fail_mode_follows_guardrail_mode(self):
+        # The #1163 Secure Client unset-is-open default is not taken in 1.0.3:
+        # under Secure Client an observe-mode connector without a value of
+        # its own stays open, action mode is closed, and an explicit closed
+        # is always kept.
+        base = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise: {profile: secure_client}\n"
+        for mode, unset in (("observe", "open"), ("action", "closed")):
+            with self.subTest(mode=mode, policy="unset"):
+                doc = base + f"guardrail: {{mode: {mode}}}\n"
+                self.assertEqual(self._load_hook_fail_mode(doc, "amp"), unset)
+            with self.subTest(mode=mode, policy="closed"):
+                doc = base + f"guardrail: {{mode: {mode}, hook_fail_mode: closed}}\n"
+                self.assertEqual(self._load_hook_fail_mode(doc, "amp"), "closed")
+            with self.subTest(mode=mode, policy="override-closed"):
+                doc = base + (
+                    f"guardrail: {{mode: {mode}, connectors: {{amp: {{hook_fail_mode: closed}}}}}}\n"
+                )
+                self.assertEqual(self._load_hook_fail_mode(doc, "amp"), "closed")
+
+    def test_missing_enterprise_profile_uses_platform_default_and_pin(self):
+        # Observe mode tells the profiles apart: only Secure Client keeps an
+        # observe-mode connector without a value of its own open.
+        base = "config_version: 8\ndeployment_mode: managed_enterprise\nguardrail: {mode: observe}\n"
+        for platform, expected in (("linux", "closed"), ("win32", "open"), ("darwin", "open")):
+            with self.subTest(platform=platform), patch("defenseclaw.config_writer.sys.platform", platform):
+                self.assertEqual(self._load_hook_fail_mode(base, "amp"), expected)
+                self.assertEqual(
+                    self._load_hook_fail_mode(base, "amp", pins={"DEFENSECLAW_ENTERPRISE_PROFILE": "standalone"}),
+                    "closed",
+                )
+                if platform != "linux":  # Secure Client is unavailable on Linux.
+                    self.assertEqual(
+                        self._load_hook_fail_mode(base, "amp", pins={"DEFENSECLAW_ENTERPRISE_PROFILE": "secure_client"}),
+                        "open",
+                    )
+
+    def test_managed_environment_pin_selects_profile_without_document_mode(self):
+        doc = "config_version: 8\nguardrail: {mode: observe}\n"
+        for profile, expected in (("secure_client", "open"), ("standalone", "closed")):
+            with self.subTest(profile=profile):
+                self.assertEqual(
+                    self._load_hook_fail_mode(
+                        doc,
+                        "amp",
+                        pins={
+                            "DEFENSECLAW_DEPLOYMENT_MODE": "managed_enterprise",
+                            "DEFENSECLAW_ENTERPRISE_PROFILE": profile,
+                        },
+                    ),
+                    expected,
+                )
+
+    def test_non_secure_client_keeps_fail_closed_default(self):
+        # OSS and the standalone enterprise profile keep main's fail-closed
+        # default: unset resolves closed in action mode.
+        for doc in (
+            "guardrail: {mode: action}\n",
+            "config_version: 8\ndeployment_mode: managed_enterprise\n"
+            "enterprise: {profile: standalone}\nguardrail: {mode: action}\n",
+        ):
+            for overlay in (
+                "",
+                "application_protection: {enabled: true, guardrail: {hook_fail_mode: open}}\n",
+            ):
+                with self.subTest(doc=doc, overlay=overlay):
+                    self.assertEqual(self._load_hook_fail_mode(doc + overlay, "codex"), "closed")
+
     def test_empty_map_equals_absent(self):
         with_empty = GuardrailConfig(mode="action", connectors={})
         absent = GuardrailConfig(mode="action")

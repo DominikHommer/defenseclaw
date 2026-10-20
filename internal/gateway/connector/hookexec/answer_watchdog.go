@@ -118,12 +118,15 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 	rendered.Home = ""
 	code = failNoAnswer(rendered, sp, failMode)
 	logged := opts
+	// The rendered answer already carries any fail-open warning.
+	logged.Stderr = io.Discard
 	logFailure = func() {
 		if logged.ManagedEnterprise {
-			logHookFailure(logged, sp, managedGatewayNoAnswerReason, "transport", "closed")
+			logHookFailure(logged, sp, managedGatewayNoAnswerReason, "transport", "closed", true)
 			return
 		}
-		logHookFailure(logged, sp, perUserGatewayNoAnswerReason, "transport", failMode)
+		logHookFailure(logged, sp, perUserGatewayNoAnswerReason, "transport", failMode,
+			!sp.failOpenOnly && (logged.StrictAvailability || failMode == "closed"))
 	}
 	return out.Bytes(), errb.Bytes(), code, logFailure
 }

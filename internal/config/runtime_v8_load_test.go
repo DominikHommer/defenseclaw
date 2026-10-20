@@ -733,3 +733,38 @@ func TestSecureClientSkillScannerOmittedDefaults(t *testing.T) {
 		})
 	}
 }
+
+// An omitted guardrail.hook_fail_mode keeps the platform "closed" default in
+// action mode under every profile, Secure Client included (the #1163 Secure
+// Client open default is not taken in 1.0.3), and an explicit "closed" wins.
+func TestSecureClientHookFailModeOmittedDefault(t *testing.T) {
+	for _, source := range []struct {
+		name, yaml, profile, want string
+	}{
+		{"secure_client/omitted", "guardrail: {mode: action}", "secure_client", "closed"},
+		{"secure_client/explicit_closed", "guardrail: {mode: action, hook_fail_mode: closed}", "secure_client", "closed"},
+		{"standalone/omitted", "guardrail: {mode: action}", "standalone", "closed"},
+	} {
+		t.Run(source.name, func(t *testing.T) {
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			viper.SetConfigType("yaml")
+			setDefaults(t.TempDir())
+			if err := viper.ReadConfig(strings.NewReader(source.yaml)); err != nil {
+				t.Fatal(err)
+			}
+			var cfg Config
+			if err := viper.Unmarshal(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			cfg.DeploymentMode = "managed_enterprise"
+			cfg.Enterprise.Profile = source.profile
+			applySecureClientScannerDefaults(&cfg)
+			for _, connector := range []string{"codex", "claudecode", "amp"} {
+				if got := cfg.EffectiveHookFailModeForConnector(connector); got != source.want {
+					t.Fatalf("%s hook fail mode = %q, want %q", connector, got, source.want)
+				}
+			}
+		})
+	}
+}

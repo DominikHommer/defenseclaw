@@ -13,6 +13,7 @@ import (
 	"testing"
 )
 
+
 func TestNeutralLifecycleEventsExactSets(t *testing.T) {
 	want := map[string][]string{
 		"claudecode": {"Stop", "SubagentStop", "TeammateIdle", "StopFailure", "SessionEnd"},
@@ -135,10 +136,11 @@ func TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes(t *testi
 			covered[[3]string{want.Connector, want.Event, want.Profile}]++
 			continue
 		}
-		if code != want.Code || stdout.String() != want.Stdout || stderr.String() != want.Stderr {
+		gotStderr := stderr.String()
+		if code != want.Code || stdout.String() != want.Stdout || gotStderr != want.Stderr {
 			t.Errorf("%s/%s %s body=%s:\n got code=%d stdout=%q stderr=%q\nwant code=%d stdout=%q stderr=%q",
 				want.Connector, want.Event, want.Profile, want.Body,
-				code, stdout.String(), stderr.String(), want.Code, want.Stdout, want.Stderr)
+				code, stdout.String(), gotStderr, want.Code, want.Stdout, want.Stderr)
 		}
 		covered[[3]string{want.Connector, want.Event, want.Profile}]++
 	}

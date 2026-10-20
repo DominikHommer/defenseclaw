@@ -129,8 +129,6 @@ type psSignatureRecord struct {
 // and applies the trust matrix in classifyVerify; on Linux and macOS (the
 // release job's ubuntu runner) it verifies with osslsigncode under the
 // same chain policy and signer pin (verifyAuthenticodeWithOsslsigncode).
-// See docs/specs/003-windows-avc-standalone-assembler/ for the design
-// contract (AVC handoff, revision 2026-09-03).
 //
 // Errors are classified by cause so main.go's exit-code map does the
 // right thing:

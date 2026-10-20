@@ -76,7 +76,7 @@ const managedHermesEventConflictReason = "hook input names two different events"
 // logs fail_mode closed (rel-1-0-3 GAP-0202). The gateway is not asked: its
 // verdict would be for an event Hermes may not be running.
 func failHermesEventConflict(opts Options, sp spec) int {
-	logHookFailure(opts, sp, managedHermesEventConflictReason, "response", "closed")
+	logHookFailure(opts, sp, managedHermesEventConflictReason, "response", "closed", true)
 	code, _ := hermesFailClosed(opts, sp, "input", managedHermesEventConflictReason)
 	return code
 }

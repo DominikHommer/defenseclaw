@@ -215,7 +215,7 @@ type enterprisePayload struct {
 	// Required is the flavor's exact file inventory.
 	Required []string
 	// PayloadFS is the fs.FS the platform-specific stage step opens
-	// per-file readers against. Before spec 003 this was a package-
+	// per-file readers against. Before the payload trailer this was a package-
 	// level embed.FS held in `embeddedPayload`; the trailer refactor
 	// carries the FS alongside the validated manifest so the loader
 	// stays the single boundary that decides what's trusted.
@@ -249,7 +249,7 @@ var enterpriseSetupStandaloneFlavor = embeddedEnterpriseSetupStandalone
 // other than a readable standalone manifest is the Secure Client Setup;
 // executeEnterpriseSetup validates the whole payload before anything runs.
 //
-// Spec 003: the payload is no longer carried via //go:embed; it is
+// The payload is no longer carried via //go:embed; it is
 // appended at assemble time as a deterministic trailer and read off
 // the running EXE here.
 func embeddedEnterpriseSetupStandalone() bool {
@@ -383,7 +383,7 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	flags.BoolVar(&opts.CoreHardeningCertification, "core-hardening-certification", false, "run the unsigned core-only certification profile")
 	flags.BoolVar(&opts.AttestAgentApplicationControl, "attest-agent-application-control", false, "attest live WDAC or AppLocker enforcement")
 	flags.BoolVar(&opts.AttestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "attest Claude managed-policy precedence")
-	flags.BoolVar(&opts.DeferredConfig, "deferred-config", false, "spec 003 UCB-friendly install: --config and --manifest optional; services registered stopped")
+	flags.BoolVar(&opts.DeferredConfig, "deferred-config", false, "UCB-friendly install: --config and --manifest optional; services registered stopped")
 	if standalone {
 		flags.StringVar(&opts.AllowedSigners, "allowed-signers", "", "standalone: comma-separated SHA-256 thumbprints of accepted Authenticode signer certificates")
 		flags.BoolVar(&opts.Force, "force", false, "standalone /uninstall: remove the deployment without recovering a pending transaction (last resort)")
@@ -442,8 +442,14 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 		}
 		// Keep this closed set aligned with the native Windows lifecycle. Each
 		// entry must have reconcile, trusted-runtime, rollback, and teardown
-		// coverage before it is accepted at this boundary.
+		// coverage before it is accepted at this boundary. Secure Client also
+		// manages GitHub Copilot (the CLI and the GitHub Copilot app).
 		supportedOnWindows := map[string]bool{"codex": true, "claudecode": true, "cursor": true}
+		supported := "codex, claudecode, cursor"
+		if !standalone {
+			supportedOnWindows["copilot"] = true
+			supported += ", copilot (GitHub Copilot)"
+		}
 		for _, entry := range strings.Split(opts.Connector, ",") {
 			trimmed := strings.ToLower(strings.TrimSpace(entry))
 			if trimmed == "" {
@@ -452,8 +458,9 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 			if !supportedOnWindows[trimmed] {
 				return opts, false, fmt.Errorf(
 					"--connector entry %q is not supported on Windows managed_enterprise; "+
-						"supported: codex, claudecode, cursor.",
+						"supported: %s.",
 					trimmed,
+					supported,
 				)
 			}
 		}

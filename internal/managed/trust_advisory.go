@@ -19,6 +19,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // TrustStrictAncestorsEnv restores the pre-AIFW-34262 behaviour: ancestor
@@ -278,7 +280,61 @@ func relaxAncestorTrustJudgement(advisory bool, path, label string, err error) e
 	return relaxAncestorTrustVerdict(advisory, path, label, err)
 }
 
+func init() {
+	safefile.ManagedModeAdvisory = managedModeAdvisory
+	safefile.ManagedWriteModeAdvisory = secureClientInstallPath
+}
+
+// secureClientInstallPath reports whether path is in the Secure Client
+// install (/opt/cisco/secureclient, and /Library/Logs/Cisco/SecureClient on
+// macOS). A group or world write bit there still reaches managedModeAdvisory,
+// as before GAP-0026, because Secure Client is out of scope for that fix. The
+// standalone install below the same roots (/opt/cisco/defenseclaw,
+// /Library/Logs/Cisco/DefenseClaw) keeps write bits fatal.
+func secureClientInstallPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	roots := []string{"/opt/cisco/secureclient"}
+	if runtime.GOOS == "darwin" {
+		roots = append(roots, "/Library/Logs/Cisco/SecureClient")
+	}
+	clean := filepath.Clean(path)
+	for _, root := range roots {
+		if pathAtOrUnder(clean, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// managedModeAdvisory downgrades a safefile group/other read mode verdict on a
+// path inside PlatformInstallerOwnedRoots to an advisory; safefile keeps a
+// group or world write bit fatal before it asks, outside the Secure Client
+// install (secureClientInstallPath). The managed install below
+// those roots is root-owned and laid out by the platform installer (the macOS
+// runtime directory is root:wheel 0750, wheel holds only root); the managed
+// release line never enforced owner-only modes there, and enforcing them made
+// the gateway exit at every start. TrustStrictAncestorsEnv keeps them fatal.
+func managedModeAdvisory(path, reason string) bool {
+	if !PlatformInstallerOwnedPath(path) || trustStrictAncestors() {
+		return false
+	}
+	reportTrustAdvisory(path, "managed private path", reason)
+	return true
+}
+
 func trustStrictAncestors() bool {
+	return TrustStrictAncestors()
+}
+
+// TrustStrictAncestors reports whether the TrustStrictAncestorsEnv env
+// var is set to a truthy value. Exported so callers outside this
+// package (enterprisehooks reclaim paths, Windows filelock trust checks)
+// can honor the same strict/non-strict toggle without duplicating the
+// env-var parse, and so a future rename of the env var only has to
+// change the TrustStrictAncestorsEnv constant.
+func TrustStrictAncestors() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(TrustStrictAncestorsEnv))) {
 	case "1", "true", "yes", "on":
 		return true

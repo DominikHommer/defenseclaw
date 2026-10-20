@@ -129,17 +129,16 @@ readonly FAIL_MODE
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
-# A managed hook takes only its rendered fail mode, never one from the
-# environment (the shared inspect hooks do the same).
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{if .Managed}}
-FAIL_MODE="{{.FailMode}}"{{end}}
+{{if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
+# DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
+FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="cursor"
 DEFENSECLAW_HOOK_NAME="cursor-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 # Read stdin under a 1MB cap so a hostile / runaway agent can't OOM
 # the hook process before the gateway sees the payload.
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: cursor hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     emit_cursor_deny "DefenseClaw hook payload too large"
@@ -164,7 +163,7 @@ API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
   defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" transport
-  defenseclaw_log_hook_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   echo "defenseclaw: sandbox ingress unreachable, blocking cursor tool (sandbox hooks fail closed): $1" >&2
   emit_cursor_deny "DefenseClaw hook failed closed"
   exit 2
@@ -172,7 +171,7 @@ fail_unreachable() {
 
 fail_response() {
   defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" response
-  defenseclaw_log_hook_failure cursor cursor-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: cursor hook error, blocking cursor tool (sandbox hooks fail closed): $1" >&2
   emit_cursor_deny "DefenseClaw hook failed closed"
   exit 2
@@ -182,7 +181,7 @@ fail_response() {
   if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event cursor cursor-hook "" "$PAYLOAD" "$MISSING_TOKEN_REASON" transport
   fi
-  defenseclaw_log_hook_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: ${MISSING_TOKEN_REASON}, blocking cursor tool (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
     emit_cursor_deny "DefenseClaw hook failed closed"
@@ -211,7 +210,7 @@ fail_unreachable() {
   if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" transport
   fi
-  defenseclaw_log_hook_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "cursor tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     emit_cursor_deny "{{if .Managed}}DefenseClaw hook failed closed{{else}}DefenseClaw gateway unreachable; run defenseclaw-gateway start{{end}}"
@@ -224,7 +223,7 @@ fail_unreachable() {
 fail_response() {
   [ "$FAIL_MODE" = "open" ] ||
     defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" response
-  defenseclaw_log_hook_failure cursor cursor-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: cursor hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     emit_cursor_allow

@@ -2237,7 +2237,7 @@ func (g *GuardrailConfig) EffectiveHookFailMode() string {
 	if g == nil {
 		return "closed"
 	}
-	if g.HookFailMode == "open" {
+	if strings.EqualFold(strings.TrimSpace(g.HookFailMode), "open") {
 		return "open"
 	}
 	return "closed"
@@ -3535,11 +3535,11 @@ func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
 	}
 	return fmt.Errorf(
 		"config: %s cannot be set on Windows in the initial-cut managed IPC "+
-			"peer-auth posture (spec 004): the AF_UNIX socket has no peer-"+
+			"peer-auth posture: the AF_UNIX socket has no peer-"+
 			"credential API on Windows, so any allowlist here would be silently "+
 			"discarded. Remove these keys from config.yaml; the socket DACL is "+
-			"the enforcement boundary until parity plan §4.4 lands the Windows "+
-			"peer-auth mechanism",
+			"the enforcement boundary until the Windows peer-auth mechanism "+
+			"lands.",
 		strings.Join(offending, ", "),
 	)
 }

@@ -60,8 +60,9 @@ defenseclaw_harden_env
 # status, so no failed, refused or unparseable reply may turn into an allow.
 # OpenHands blocks on exit status 2, which every failure below returns.
 FAIL_MODE="closed"
-readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{if .Managed}}
-FAIL_MODE="{{.FailMode}}"{{end}}{{end}}
+readonly FAIL_MODE{{else if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
+# DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
+FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 DEFENSECLAW_HOOK_CONNECTOR="openhands"
 DEFENSECLAW_HOOK_NAME="openhands-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME

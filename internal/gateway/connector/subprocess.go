@@ -103,6 +103,11 @@ type templateData struct {
 	SandboxMaxTime           int
 	SandboxRetryMaxTime      int
 	SandboxSessionEndMaxTime int
+
+	// CursorTargetModesJSON64 is the canonical, token-free protected
+	// SID-to-delivery-mode map baked into the managed Windows Cursor adapter;
+	// empty for every other render.
+	CursorTargetModesJSON64 string
 }
 
 // defaultHookFailMode is injected into every hook when the caller does not
@@ -144,16 +149,24 @@ const cursorAdapterTimeoutMS = 10_000
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
 // the two values the hook scripts understand. Anything other than
-// "open" (case-sensitive — the env var contract is documented as
-// lowercase) collapses to "closed" so a typo never accidentally puts
-// the agent into fail-OPEN mode at the hook failure boundary
-// (CodeGuard rule codeguard-0-authorization-access-control: deny by
-// default).
+// "open" (matched case-insensitively after trimming, like the config
+// resolver) collapses to "closed", so an empty value or a typo never
+// accidentally puts the agent into fail-OPEN mode at the hook failure
+// boundary (CodeGuard rule codeguard-0-authorization-access-control: deny
+// by default).
 func normalizeHookFailMode(mode string) string {
-	if strings.TrimSpace(mode) == "open" {
+	if strings.EqualFold(strings.TrimSpace(mode), "open") {
 		return "open"
 	}
 	return "closed"
+}
+
+// setupHookFailMode is the delivery mode a render takes from opts without a
+// connector-specific rule: the explicit value normalized, and closed when it
+// is unset, under Secure Client too (the config resolver already applies the
+// Secure Client observe default; an unset render never opens).
+func setupHookFailMode(opts SetupOpts) string {
+	return normalizeHookFailMode(opts.HookFailMode)
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
@@ -837,7 +850,12 @@ func managedNativeHookRuntimeConnector(name string) bool {
 // Other platforms retain the existing private atomic writer.
 func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
+	failMode ...string,
 ) error {
+	mode := defaultHookFailMode
+	if len(failMode) > 0 {
+		mode = normalizeHookFailMode(failMode[0])
+	}
 	name := normalizeConnectorName(connectorName)
 	if !managedNativeHookRuntimeConnector(name) {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
@@ -854,16 +872,17 @@ func ReconcileManagedNativeHookRuntime(
 		hookDir,
 		apiAddr,
 		name,
-		"closed",
+		mode,
 		true,
 		writeFile,
 	)
 }
 
 // ValidateManagedNativeHookRuntime requires the v2 managed marker, protected
-// endpoint agreement, connector closed mode, flat record, and scoped token.
+// endpoint agreement, canonical delivery mode, flat record, and scoped token.
 func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
+	expectedFailMode ...string,
 ) error {
 	name := normalizeConnectorName(connectorName)
 	if !managedNativeHookRuntimeConnector(name) {
@@ -896,12 +915,14 @@ func ValidateManagedNativeHookRuntime(
 			apiAddr,
 		)
 	}
-	if state.FailModes[name] != "closed" {
+	mode := state.FailModes[name]
+	if (mode != "closed" && mode != "open") ||
+		(len(expectedFailMode) > 0 && mode != normalizeHookFailMode(expectedFailMode[0])) {
 		return fmt.Errorf(
 			"managed hook connector %s fail mode %q, want %q",
 			name,
 			state.FailModes[name],
-			"closed",
+			strings.Join(expectedFailMode, ","),
 		)
 	}
 	flat, _, err := readStableHookRuntimeSidecar(
@@ -915,8 +936,8 @@ func ValidateManagedNativeHookRuntime(
 	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
 		return fmt.Errorf("managed shell runtime connector %q, want %q", got, name)
 	}
-	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != "closed" {
-		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, "closed")
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != mode {
+		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, mode)
 	}
 	tokenPath, err := HookTokenFilePath(hookDir, name)
 	if err != nil {
@@ -1489,8 +1510,9 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //  0. A managed standalone render's "closed" stays closed: outside Secure
 //     Client the managed config resolves every connector closed
 //     (config.ManagedHooksFailClosed).
-//  1. Cursor observe mode always resolves to "open"; host failClosed and
-//     adapter transport failures must not enforce outside action mode.
+//  1. Outside Secure Client, Cursor observe mode always resolves to "open"
+//     and action mode to "closed"; host failClosed and adapter transport
+//     failures must not enforce outside action mode.
 //  2. Otherwise, an EXPLICIT operator value in opts.HookFailMode — either
 //     "open" or "closed" — wins. The operator answered
 //     `defenseclaw setup guardrail`'s fail-mode prompt (or used
@@ -1498,9 +1520,11 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
 //     “GuardrailConfig.HookFailMode“.
-//  3. EMPTY/unset opts.HookFailMode uses the connector default. Cursor uses
-//     "open" to match the vendor's documented command-hook default; other
-//     connectors use defaultHookFailMode ("closed").
+//  3. EMPTY/unset opts.HookFailMode uses the connector default:
+//     defaultHookFailMode ("closed"), upgraded from the codex/claudecode
+//     enforcement flags. Under Secure Client (opts.SecureClientHookDelivery)
+//     the explicit value wins for every connector, Cursor included, and an
+//     unset mode is "closed".
 //  4. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
@@ -1591,17 +1615,25 @@ func managedStandaloneRender(opts SetupOpts) bool {
 
 // resolveHookFailMode picks the delivery/response fail mode for a hook render
 // given the operator's setup opts and the connector identity.
-// The explicit string in opts.HookFailMode normally wins; Cursor first applies
-// its observe/action boundary because observe is never allowed to block.
-// An empty value falls back to the connector-default and is upgraded to
-// "closed" when the operator has set the matching enforcement flag for
-// codex / claudecode (avarice F-0681).
+//
+// Under Secure Client (opts.SecureClientHookDelivery) the explicit string in
+// opts.HookFailMode always wins and an empty value is closed: guardrail mode
+// and enforcement flags do not change availability policy.
+//
+// Everywhere else the explicit string in opts.HookFailMode normally wins;
+// Cursor first applies its observe/action boundary because observe is never
+// allowed to block. An empty value falls back to the connector-default and is
+// upgraded to "closed" when the operator has set the matching enforcement flag
+// for codex / claudecode (avarice F-0681).
 func resolveHookFailMode(opts SetupOpts, c Connector) string {
 	if managedStandaloneRender(opts) && strings.EqualFold(strings.TrimSpace(opts.HookFailMode), "closed") {
 		// A managed standalone config resolves every connector closed
 		// (config.ManagedHooksFailClosed); Cursor's observe boundary does
-		// not reopen it. Secure Client keeps the Cursor rule below.
+		// not reopen it.
 		return "closed"
+	}
+	if opts.SecureClientHookDelivery {
+		return setupHookFailMode(opts)
 	}
 	if c != nil && c.Name() == "cursor" {
 		// Cursor mode owns its availability posture: action registrations are
@@ -1808,13 +1840,6 @@ func disabledHookTombstone(vendorLabel string) string {
 		"# keep this hook path cached until restart, so exit successfully\n" +
 		"# without forwarding stale payloads.\n" +
 		"exit 0\n"
-}
-
-// ShimBinaries returns the list of binary names that are shimmed.
-func ShimBinaries() []string {
-	out := make([]string, len(shimBinaries))
-	copy(out, shimBinaries)
-	return out
 }
 
 func renderTemplate(tmpl string, data templateData) (string, error) {
