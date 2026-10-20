@@ -1643,6 +1643,13 @@ func deleteToolChainPending(
 	return err
 }
 
+// makePendingCapacity evicts the oldest pending actions once the table is at
+// maxPending. Every row expires pendingTTL after it was prepared, so the
+// expiry order is the preparation order, and the expiry index
+// (idx_guardrail_chain_pending_expiry, same tie-break columns) serves it: an
+// eviction reads only the rows it deletes. Ordering by prepared_time had no
+// index and sorted the whole table on every PreToolUse once a session held
+// maxPending unresolved calls (rel-1-0-3 GAP-0247).
 func (repo *ToolChainRepository) makePendingCapacity(ctx context.Context, tx *sql.Tx) error {
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*)
@@ -1660,7 +1667,7 @@ func (repo *ToolChainRepository) makePendingCapacity(ctx context.Context, tx *sq
 			SELECT connector_instance_id, session_value_digest,
 				tool_invocation_digest
 			FROM guardrail_chain_pending_actions
-			ORDER BY prepared_time_unix_nano, connector_instance_id,
+			ORDER BY expires_time_unix_nano, connector_instance_id,
 				session_value_digest, tool_invocation_digest
 			LIMIT ?
 		)`, excess)

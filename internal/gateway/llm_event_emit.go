@@ -1637,6 +1637,58 @@ func (a *APIServer) hookPhaseSnapshot(meta llmEventMeta) (llmEventMeta, bool) {
 	return llmEventMeta{}, false
 }
 
+// hookDeliveryPhaseSnapshot returns the lifecycle transition that this hook
+// delivery itself recorded, for the decision and audit rows of the same
+// request. The per-execution cursor that hookPhaseSnapshot reads is shared by
+// every hook of the session: with concurrent tool calls it already holds the
+// next call's transition when this call's decision is written, so a decision
+// keyed by arrival order linked to another call's operation (GAP-0246). The
+// delivery's own transition is found by its lifecycle identity (the hook's
+// own tool-use id within its session and agent). Only when that record is
+// gone (evicted from the bounded cache) does it fall back to the cursor, and
+// then never takes another tool call's operation, phase or sequence.
+func (a *APIServer) hookDeliveryPhaseSnapshot(meta llmEventMeta, payload map[string]interface{}) (llmEventMeta, bool) {
+	if a == nil {
+		return llmEventMeta{}, false
+	}
+	meta = hookPhaseDefaults(meta)
+	if key := hookLifecycleCanonicalStateKey(llmEventMeta{LifecycleDedupe: hookLifecycleDedupeKey(meta, payload)}); key != "" {
+		a.llmPromptMu.Lock()
+		state, ok := a.hookPhaseStates[key]
+		a.llmPromptMu.Unlock()
+		if ok && state.canonical && hookSnapshotIsSameOperation(state.canonicalMeta, meta) {
+			return state.canonicalMeta, true
+		}
+	}
+	snapshot, ok := a.hookPhaseSnapshot(meta)
+	if !ok || hookSnapshotIsSameOperation(snapshot, meta) {
+		return snapshot, ok
+	}
+	// The cursor belongs to another tool call of this session. Keep its
+	// execution identity, but this delivery's own operation and phase, and no
+	// borrowed sequence.
+	snapshot.ToolID = meta.ToolID
+	snapshot.OperationID = hookOperationID(meta)
+	snapshot.Phase = meta.Phase
+	snapshot.PreviousPhase = ""
+	snapshot.Sequence = 0
+	return snapshot, true
+}
+
+// hookSnapshotIsSameOperation reports whether a retained lifecycle snapshot
+// describes the operation of meta: the same source and session and, for a
+// tool call, the same tool-use id.
+func hookSnapshotIsSameOperation(snapshot, meta llmEventMeta) bool {
+	if snapshot.Source != meta.Source || snapshot.SessionID != meta.SessionID {
+		return false
+	}
+	if meta.AgentID != "" && snapshot.AgentID != "" && snapshot.AgentID != meta.AgentID {
+		return false
+	}
+	toolID := strings.TrimSpace(meta.ToolID)
+	return toolID == "" || strings.TrimSpace(snapshot.ToolID) == toolID
+}
+
 // prepareHookLifecycleTransition atomically decides whether a normalized
 // lifecycle transition is first-seen before advancing its per-execution phase
 // cursor. Exact replays reuse the first transition's logical metadata while

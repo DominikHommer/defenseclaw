@@ -120,7 +120,6 @@ type CorrelationMatchResult struct {
 	CandidateOnly          bool
 	MergeAllowed           bool
 	RelationshipType       CorrelationRelationshipType
-	CandidateCount         int
 }
 
 type correlationMatchRow struct {
@@ -246,7 +245,7 @@ func (repo *CorrelationRepository) MatchOccurrence(
 				return CorrelationMatchResult{
 					Rank: CorrelationMatchUniquePending, Method: CorrelationMethodDerived,
 					RuleID: "unique-compatible-pending", RuleVersion: "v1",
-					Ambiguous: true, CandidateCount: len(rows),
+					Ambiguous: true,
 				}, nil
 			}
 			return classifyCorrelationMatches(rows, CorrelationMatchUniquePending,
@@ -470,7 +469,7 @@ func (repo *CorrelationRepository) matchReceipt(ctx context.Context, connector C
 	return CorrelationMatchResult{
 		Rank: CorrelationMatchReceipt, Method: CorrelationMethodReported,
 		RuleID: "exact-source-receipt", RuleVersion: "v1", Conflict: true,
-		ConflictsWith: SemanticEventID(conflict), CandidateCount: 1,
+		ConflictsWith: SemanticEventID(conflict),
 	}, true, nil
 }
 
@@ -489,12 +488,34 @@ func (repo *CorrelationRepository) matchIdentifiers(ctx context.Context, connect
 		filters = " AND event.source_rail<>? AND event.event_name=?"
 		args = append(args, string(mirror.Rail), mirror.EventName)
 	}
-	return repo.queryCorrelationMatchRows(ctx, `SELECT DISTINCT event.semantic_event_id,
-		event.logical_group_id, event.received_time_unix_nano
-		FROM correlation_identifiers AS identifier
+	// A session or agent identifier matches every earlier event of that
+	// session. classifyCorrelationMatches needs only whether the matches span
+	// more than one logical group (then the result is ambiguous and uses no
+	// row) and, when they do not, the earliest match. So read any one match,
+	// then any match in another group; both reads stop at their first row.
+	// Only matches that all share one group are sorted for the earliest one.
+	// Sorting every match first made each hook of a long session read and sort
+	// all of the session's events, and the per-call cost grew with the session
+	// (rel-1-0-3 GAP-0247, GAP-0186).
+	const columns = `SELECT event.semantic_event_id, event.logical_group_id, event.received_time_unix_nano `
+	from := `FROM correlation_identifiers AS identifier
 		JOIN correlation_events AS event ON event.semantic_event_id=identifier.semantic_event_id
-		WHERE identifier.connector_instance_id=? AND (`+strings.Join(clauses, " OR ")+`)`+filters+`
-		ORDER BY event.received_time_unix_nano, event.semantic_event_id`, args...)
+		WHERE identifier.connector_instance_id=? AND (` + strings.Join(clauses, " OR ") + `)` + filters
+	rows, err := repo.queryCorrelationMatchRows(ctx, columns+from+` LIMIT 1`, args...)
+	if err != nil || len(rows) == 0 {
+		return rows, err
+	}
+	otherArgs := append(append(make([]any, 0, len(args)+1), args...), rows[0].logical)
+	other, err := repo.queryCorrelationMatchRows(ctx, columns+from+`
+		AND event.logical_group_id<>? LIMIT 1`, otherArgs...)
+	if err != nil {
+		return nil, err
+	}
+	if len(other) != 0 {
+		return append(rows, other...), nil
+	}
+	return repo.queryCorrelationMatchRows(ctx, columns+from+`
+		ORDER BY event.received_time_unix_nano, event.semantic_event_id LIMIT 1`, args...)
 }
 
 func (repo *CorrelationRepository) matchTraceSpan(ctx context.Context, connector ConnectorInstanceID, traceID, spanID string) ([]correlationMatchRow, error) {
@@ -577,7 +598,7 @@ func classifyCorrelationMatches(rows []correlationMatchRow, rank CorrelationMatc
 	result := CorrelationMatchResult{
 		Rank: rank, Method: method, RuleID: ruleID, RuleVersion: ruleVersion,
 		CandidateOnly: !mergeAllowed, MergeAllowed: mergeAllowed,
-		RelationshipType: relationshipType, CandidateCount: len(rows),
+		RelationshipType: relationshipType,
 	}
 	if len(rows) == 0 {
 		return result
