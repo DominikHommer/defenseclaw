@@ -191,14 +191,32 @@ def raw(repo, revision, path, fetch=request):
 
 def relevant(row, spec):
     paths = [row["filename"], row.get("previous_filename", "")]
-    edits = "\n".join(line[1:] for line in (row.get("patch") or "").splitlines() if line.startswith(("+", "-")))
-    return any(re.search(spec["paths"], path, re.I) for path in paths) or bool(
-        re.search(
-            r"hook|settings\.json|config\.toml|requirements\.toml|tool_use_id|"
-            r"(?-i:\b(?:Pre|Post)[A-Z]\w*\b)|Session(?:Start|End)|UserPrompt(?:Submit|Expansion)|Permission(?:Request|Denied)",
-            edits,
-            re.I,
+    patch = row.get("patch") or ""
+    edits = "\n".join(line[1:] for line in patch.splitlines() if line.startswith(("+", "-")))
+    # A hook request's type can be unchanged context while its identity/input fields change.
+    hook_payload = (
+        spec.get("name") == "codex"
+        and "codex_hooks::" in patch
+        and any(
+            re.search(r"\bcodex_hooks::\w+Request\s*\{", hunk)
+            and re.search(
+                r"(?m)^[+-][ \t]*(?:session_id|turn_id|cwd|transcript_path|tool_name|tool_input|tool_response)[ \t]*:",
+                hunk,
+            )
+            for hunk in re.split(r"(?m)^@@", patch)
         )
+    )
+    return (
+        any(re.search(spec["paths"], path, re.I) for path in paths)
+        or bool(
+            re.search(
+                r"hook|settings\.json|config\.toml|requirements\.toml|tool_use_id|"
+                r"(?-i:\b(?:Pre|Post)[A-Z]\w*\b)|Session(?:Start|End)|UserPrompt(?:Submit|Expansion)|Permission(?:Request|Denied)",
+                edits,
+                re.I,
+            )
+        )
+        or hook_payload
     )
 
 
