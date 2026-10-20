@@ -744,8 +744,6 @@ struct AIUsageSnapshot: Sendable {
     }
     var modelRows: [AIModelDiscoveryRow] { AIDiscoveryGrouping.modelRows(from: signals) }
 
-    var modelRows: [AIModelDiscoveryRow] { AIDiscoveryGrouping.modelRows(from: signals) }
-
     /// TUI `header_parts`: a reported zero remains `active=0`; churn counters
     /// only appear when non-zero.
     var discoveryHeaderParts: [String] {

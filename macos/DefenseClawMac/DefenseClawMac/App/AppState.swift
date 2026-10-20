@@ -289,13 +289,6 @@ final class AppState {
     var sessionTotalScans = 0
     /// True while a background diagnose probe is running (⇧⌘D).
     var diagnoseRunning = false
-    var sandbox = SandboxSnapshot()
-    var sandboxActionMessage: String?
-    var sandboxActionFailed = false
-    var sandboxActionsInFlight: Set<String> = []
-    @ObservationIgnored private var sandboxRefreshInProgress = false
-    @ObservationIgnored private var sandboxActivitySynced = false
-    @ObservationIgnored @AppStorage(SettingsKeys.notifySandboxEvents) var notifySandboxEvents = true
 
     var alertPanelRequest: AlertPanelRequest?
     var auditPresetRequest: String?
@@ -534,11 +527,6 @@ final class AppState {
         doctorCache = nil
         silentBypassCount = 0
         sessionTotalScans = 0
-        sandbox = SandboxSnapshot()
-        sandboxActionMessage = nil
-        sandboxActionFailed = false
-        sandboxActionsInFlight = []
-        sandboxActivitySynced = false
         alertPanelRequest = nil
         auditPresetRequest = nil
         logPanelRequest = nil
