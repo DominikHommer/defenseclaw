@@ -1172,7 +1172,7 @@ jobs:
   enterprise-fleet-compiler-payload:
     # Managed packages exclude the opt-in Fleet compiler on every platform.
     name: Enterprise Package Fleet Exclusion
-    needs: enterprise-install-assets
+    needs: [enterprise-install-assets, enterprise-install-assets-windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
