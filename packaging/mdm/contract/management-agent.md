@@ -417,7 +417,10 @@ Exit 0.
   - `not_required`: no changed setting needs a restart, so the gateway keeps
     running (`already_applied`: the apply changes nothing). The apply still
     restarts a gateway that is down or does not report the new policy in
-    time.
+    time. A bundle that omits `data_dir`, `gateway.api_bind` or
+    `gateway.api_port` while the installed config spells out the value the
+    device uses for it (the layout's data directory, `127.0.0.1:18970`)
+    changes no setting.
   - `unknown`: `installed_config_unreadable` (run as root or SYSTEM) or, on
     Windows, `fleet_setup_required` (the bundle changes `fleet.enabled`; the
     apply refuses it, deliver it with signed Setup).

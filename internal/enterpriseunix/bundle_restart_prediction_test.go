@@ -12,6 +12,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -85,9 +86,44 @@ func (b *bundleHost) predictRestart(version uint64, cfg string) bool {
 	if err != nil {
 		t.Fatalf("verify version %d: %v", version, err)
 	}
-	restart, err := configwrite.ManagedConfigRestartRequired(installed, res.Rendered)
+	restart, err := configwrite.ManagedConfigRestartRequired(installed, res.Rendered, configwrite.ManagedDefaultsFor(b.env.Layout))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return len(restart) > 0
+}
+
+// A bundle that omits a setting the device resolves to the value the
+// installed config spells out (data_dir, the layout data directory, and the
+// gateway API listener, 127.0.0.1:18970) changes nothing the gateway runs
+// with: verify predicts no restart and the apply keeps the gateway running,
+// in both directions (F03: every first bundle restarted the gateway).
+func TestBundleOmittingDeviceDefaultsKeepsTheGatewayRunning(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, _, _ := bundleConfigs(b.testHost)
+			dataDir := "data_dir: " + b.env.Layout.DataDir + "\n"
+			listener := "gateway:\n  api_bind: 127.0.0.1\n  api_port: 18970\n"
+			if !strings.Contains(v1, dataDir) || !strings.Contains(v1, listener) {
+				t.Fatalf("the installed default config no longer spells out data_dir and the listener:\n%s", v1)
+			}
+			noDataDir := strings.Replace(v1, dataDir, "", 1)
+			noListener := strings.Replace(strings.Replace(noDataDir, listener, "", 1), "mode: observe", "mode: action", 1)
+			explicitAgain := strings.Replace(noListener, "config_version: 9\n", "config_version: 9\n"+dataDir, 1)
+			b.mapPromotedBundleOwners(1)
+			requireOK(t, b.apply(b.dir(1, v1)))
+			for _, tc := range []struct {
+				version uint64
+				config  string
+			}{{2, noDataDir}, {3, noListener}, {4, explicitAgain}} {
+				predicted := b.predictRestart(tc.version, tc.config)
+				b.mapPromotedBundleOwners(tc.version)
+				requireOK(t, b.apply(b.dir(tc.version, tc.config)))
+				if rc := b.receipt(bundleID(tc.version)); predicted || rc.Restart {
+					t.Fatalf("version %d: predicted restart %v, the apply restarted the gateway %v; want neither", tc.version, predicted, rc.Restart)
+				}
+			}
+		})
+	}
 }
