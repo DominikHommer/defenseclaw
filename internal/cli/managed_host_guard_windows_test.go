@@ -24,6 +24,53 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestSecureClientClassificationIgnoresProcessMachineRootEnvironment(t *testing.T) {
+	want, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	if err != nil {
+		t.Skipf("machine roots unavailable: %v", err)
+	}
+	poison := `C:\Users\Sample\Controlled`
+	t.Setenv("ProgramFiles", poison)
+	t.Setenv("ProgramData", poison)
+	got, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	if err != nil || got != want {
+		t.Fatalf("process environment selected Secure Client roots: got=%+v err=%v want=%+v", got, err, want)
+	}
+	if secureClientServiceMatches(got, poison+`\bin\defenseclaw-gateway.exe`) {
+		t.Fatal("user-controlled service path selected Secure Client handling")
+	}
+	if secureClientServiceMatches(got, got.InstallRoot+`\bin\defenseclaw-gateway.exe`) != true {
+		t.Fatal("registered Secure Client service path not recognized")
+	}
+}
+
+func TestSecureClientLayoutClassificationWithProtectedMetadata(t *testing.T) {
+	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	if err != nil {
+		t.Skipf("machine roots unavailable: %v", err)
+	}
+	serviceImage := roots.InstallRoot + `\bin\defenseclaw-gateway.exe`
+	for _, tc := range []struct {
+		name  string
+		state winpath.EnterpriseDeploymentState
+		image string
+		want  bool
+	}{
+		{"installed", winpath.EnterpriseDeploymentInstalled, serviceImage, true},
+		{"standard user cannot read metadata", winpath.EnterpriseDeploymentUnknown, serviceImage, true},
+		{"no installation", winpath.EnterpriseDeploymentAbsent, serviceImage, false},
+		{"removed installation", winpath.EnterpriseDeploymentTombstone, serviceImage, false},
+		{"no service", winpath.EnterpriseDeploymentUnknown, "", false},
+		{"spoofed service path", winpath.EnterpriseDeploymentUnknown, `C:\Users\Sample\Controlled\bin\defenseclaw-gateway.exe`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := secureClientLayoutMatches(roots, tc.state, tc.image); got != tc.want {
+				t.Fatalf("Secure Client layout = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestWindowsManagedRecordTrustUsesRealACLs checks the guard's validators on
 // real NTFS security descriptors: an administrator-owned record in an
 // administrator-only tree is trusted, and the same record owned by the Users

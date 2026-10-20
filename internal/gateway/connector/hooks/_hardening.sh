@@ -448,6 +448,24 @@ defenseclaw_json_escape() {
   return 0
 }
 
+# Build the inspect tool request without placing tool content on argv. jq is
+# optional on host hooks; Python provides the same JSON string encoding when
+# jq is unavailable. Without either encoder the caller refuses the request.
+defenseclaw_inspect_tool_body() {
+  local tool="$1" field="$2"
+  case "$field" in args|output) ;; *) return 1 ;; esac
+  if command -v jq >/dev/null 2>&1; then
+    case "$field" in
+      args) jq -Rs --arg tool "$tool" '{tool: $tool, args: .}' ;;
+      output) jq -Rs --arg tool "$tool" '{tool: $tool, output: .}' ;;
+    esac
+  elif _dc_python3_usable; then
+    python3 -c 'import json,sys; print(json.dumps({"tool":sys.argv[1],sys.argv[2]:sys.stdin.read()}))' "$tool" "$field"
+  else
+    return 1
+  fi
+}
+
 # defenseclaw_json_string_field extracts a simple top-level JSON string field.
 # It is intentionally small: hook block/allow parsing only needs fields like
 # "action" and "reason" when jq is unavailable (common in Git Bash on Windows).
@@ -674,7 +692,7 @@ else:
   # String-only last resort: covers action / reason / block_reason. Object
   # fields cannot be decoded safely without jq or python3, so fail instead of
   # returning an empty value that could turn a structured deny into allow.
-  local _dcjq_field _dcjq_default _dcjq_default_kind _dcjq_value _dcjq_json _dcjq_status
+  local _dcjq_field _dcjq_default _dcjq_default_kind _dcjq_value _dcjq_json _dcjq_status _dcjq_strict
   case "$_dcjq_filter" in
     .|"") cat >/dev/null; return 1 ;;
   esac
@@ -703,7 +721,11 @@ else:
   case "$_dcjq_field" in
     action|reason|block_reason|decision|permissionDecision|permissionDecisionReason|hook_event_name)
       _dcjq_json="$(cat)"
-      if _dcjq_value="$(defenseclaw_json_string_field "$_dcjq_json" "$_dcjq_field")"; then
+      # An action decides whether a tool call proceeds. In the string-only
+      # fallback, require the entire response to be one complete object.
+      _dcjq_strict=""
+      [ "$_dcjq_field" != action ] || _dcjq_strict=strict
+      if _dcjq_value="$(defenseclaw_json_string_field "$_dcjq_json" "$_dcjq_field" "$_dcjq_strict")"; then
         printf '%s\n' "$_dcjq_value"
       else
         _dcjq_status=$?

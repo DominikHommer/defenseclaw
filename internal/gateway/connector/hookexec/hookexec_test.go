@@ -520,7 +520,7 @@ func TestDecisionGolden(t *testing.T) {
 		{
 			name:       "cursor allow echoes hook_output exit 0",
 			connector:  "cursor",
-			respBody:   `{"hook_output":{"permission":"allow"}}`,
+			respBody:   `{"action":"allow","hook_output":{"permission":"allow"}}`,
 			wantStdout: `{"permission":"allow"}` + "\n",
 			wantCode:   0,
 		},
@@ -534,35 +534,35 @@ func TestDecisionGolden(t *testing.T) {
 		{
 			name:       "cursor echoes hook_output exit 0",
 			connector:  "cursor",
-			respBody:   `{"hook_output":{"permission":"deny","user_message":"no","agent_message":"no"}}`,
+			respBody:   `{"action":"block","hook_output":{"permission":"deny","user_message":"no","agent_message":"no"}}`,
 			wantStdout: `{"permission":"deny","user_message":"no","agent_message":"no"}` + "\n",
 			wantCode:   0,
 		},
 		{
 			name:       "copilot allow echoes hook_output exit 0",
 			connector:  "copilot",
-			respBody:   `{"hook_output":{"permissionDecision":"allow"}}`,
+			respBody:   `{"action":"allow","hook_output":{"permissionDecision":"allow"}}`,
 			wantStdout: `{"permissionDecision":"allow"}` + "\n",
 			wantCode:   0,
 		},
 		{
 			name:       "copilot echoes hook_output exit 0",
 			connector:  "copilot",
-			respBody:   `{"hook_output":{"permissionDecision":"deny"}}`,
+			respBody:   `{"action":"block","hook_output":{"permissionDecision":"deny"}}`,
 			wantStdout: `{"permissionDecision":"deny"}` + "\n",
 			wantCode:   0,
 		},
 		{
 			name:       "openhands deny in hook_output exits 2",
 			connector:  "openhands",
-			respBody:   `{"hook_output":{"decision":"deny","reason":"no"}}`,
+			respBody:   `{"action":"block","hook_output":{"decision":"deny","reason":"no"}}`,
 			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
 			wantCode:   2,
 		},
 		{
 			name:       "openhands allow in hook_output exits 0",
 			connector:  "openhands",
-			respBody:   `{"hook_output":{"decision":"allow"}}`,
+			respBody:   `{"action":"allow","hook_output":{"decision":"allow"}}`,
 			wantStdout: `{"decision":"allow"}` + "\n",
 			wantCode:   0,
 		},
@@ -609,7 +609,7 @@ func TestDecisionGolden(t *testing.T) {
 		{
 			name:       "antigravity echoes hook_output deny exit 0",
 			connector:  "antigravity",
-			respBody:   `{"hook_output":{"decision":"deny","reason":"no"}}`,
+			respBody:   `{"action":"block","hook_output":{"decision":"deny","reason":"no"}}`,
 			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
 			wantCode:   0,
 		},
@@ -1454,7 +1454,7 @@ func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
 // Per-user Copilot hooks fail open on every DefenseClaw-side failure;
 // administrator-managed (standalone enterprise) Copilot hooks deny the tool
 // call with Copilot's native structured decision instead.
-func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
+func TestCopilotFailureContract(t *testing.T) {
 	type failureCase struct {
 		name   string
 		rt     *stubRT
@@ -1493,6 +1493,8 @@ func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
 				want := ""
 				if managedHook {
 					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw policy service is unavailable."}` + "\n"
+				} else if tc.name == "unavailable-home" {
+					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}` + "\n"
 				}
 				if result.code != 0 || result.stdout != want {
 					t.Fatalf(
@@ -1884,7 +1886,7 @@ func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
 			var out, errb bytes.Buffer
 			home := tc.home(t)
 			code := Run(context.Background(), Options{
-				Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home,
+				Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home, FailMode: "open",
 				HookDir: filepath.Join(home, "hooks"), Token: "t",
 				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
 				HTTPClient: &http.Client{Transport: rt},
@@ -2168,7 +2170,7 @@ func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
 			var out, errb bytes.Buffer
 			home := tc.home(t)
 			code := Run(context.Background(), Options{
-				Connector: "cursor", Home: home, HookDir: filepath.Join(home, "hooks"),
+				Connector: "cursor", Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "open",
 				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
 			})
 			if code != 0 {
@@ -2849,7 +2851,7 @@ func TestManagedNativeDecisionRejectsMissingActionAndOutput(t *testing.T) {
 	}
 }
 
-func TestOSSNativeDecisionMissingActionAndOutputUnchanged(t *testing.T) {
+func TestOSSOpenNativeDecisionMissingActionUsesOpenFailure(t *testing.T) {
 	for _, tc := range []struct {
 		connector, event, body, wantOutput string
 	}{
@@ -2857,7 +2859,7 @@ func TestOSSNativeDecisionMissingActionAndOutputUnchanged(t *testing.T) {
 		{"copilot", "preToolUse", `{}`, ""},
 		{"devin", "PreToolUse", `{}`, ""},
 		{"kiro", "PreToolUse", `{}`, ""},
-		{"opencode", "tool.execute.before", `{}`, "{}\n"},
+		{"opencode", "tool.execute.before", `{}`, ""},
 		{"cursor", "beforeShellExecution", `{"action":"allow"}`, `{"permission":"allow"}` + "\n"},
 		{"copilot", "preToolUse", `{"action":"allow"}`, ""},
 		{"devin", "PreToolUse", `{"action":"allow"}`, ""},
@@ -2865,7 +2867,7 @@ func TestOSSNativeDecisionMissingActionAndOutputUnchanged(t *testing.T) {
 		{"opencode", "tool.execute.before", `{"action":"allow"}`, `{"action":"allow"}` + "\n"},
 	} {
 		var stdout, stderr bytes.Buffer
-		opts := Options{Connector: tc.connector, Event: tc.event, Stdout: &stdout, Stderr: &stderr}
+		opts := Options{Connector: tc.connector, Event: tc.event, FailMode: "open", Stdout: &stdout, Stderr: &stderr}
 		code := specs[tc.connector].decide(opts, []byte(tc.body))
 		if code != 0 || stdout.String() != tc.wantOutput {
 			t.Errorf("%s %s: code=%d stdout=%q stderr=%q, want %q", tc.connector, tc.body, code, stdout.String(), stderr.String(), tc.wantOutput)

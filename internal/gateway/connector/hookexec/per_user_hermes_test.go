@@ -133,9 +133,9 @@ func TestPerUserHermesStoppedGatewaySaysHowToStartIt(t *testing.T) {
 	}
 }
 
-// Hermes events that cannot block keep the neutral result in every per-user
-// fail mode, and a per-user home that is missing or disabled stays the
-// operator-requested no-op.
+// Hermes events that cannot block keep the neutral result. A disabled home
+// leaves a registered closed hook without verified event identity, so it
+// must send its native block for a possible tool call.
 func TestPerUserHermesClosedKeepsNeutralResultsItCannotBlock(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -159,8 +159,9 @@ func TestPerUserHermesClosedKeepsNeutralResultsItCannotBlock(t *testing.T) {
 					tc.mutate(o)
 				}
 			})
-			if result.code != 0 || strings.Contains(result.stdout, `"block"`) {
-				t.Fatalf("code %d, stdout %q, want the neutral result", result.code, result.stdout)
+			blocked := strings.Contains(result.stdout, `"block"`)
+			if result.code != 0 || blocked != (tc.name == "disabled home") {
+				t.Fatalf("code %d, stdout %q, want block=%t", result.code, result.stdout, tc.name == "disabled home")
 			}
 		})
 	}

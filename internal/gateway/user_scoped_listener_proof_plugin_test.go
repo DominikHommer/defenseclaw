@@ -110,7 +110,7 @@ func TestInAgentPluginsProveTheGatewayListener(t *testing.T) {
 	for _, tc := range []struct {
 		asset, connectorName, hookPath, harness, file, allow string
 	}{
-		{"opencode-plugin.js", "opencode", "/api/v1/opencode/hook", openCodeGatewayProofHarness, "opencode-plugin.mjs", `{"hook_output":{"decision":"allow"}}`},
+		{"opencode-plugin.js", "opencode", "/api/v1/opencode/hook", openCodeGatewayProofHarness, "opencode-plugin.mjs", `{"action":"allow","hook_output":{"decision":"allow"}}`},
 		{"amp-plugin.ts", "amp", "/api/v1/amp/hook", ampGatewayProofHarness, "amp-plugin.mts", `{"action":"allow"}`},
 	} {
 		t.Run(tc.connectorName, func(t *testing.T) {
