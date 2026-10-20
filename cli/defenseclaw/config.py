@@ -2654,9 +2654,9 @@ class GuardrailConfig:
             return "closed" if self.effective_mode(connector).strip().lower() == "action" else "open"
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
-            if pc.hook_fail_mode.strip().lower() == "closed":
-                return "closed"
-            return "open"
+            # Only an explicit open opens; any other value (closed, a typo) is
+            # closed, as in Go.
+            return _normalize_hook_fail_mode(pc.hook_fail_mode)
         if self.secure_client_observe_open() and self.effective_mode(connector).strip().lower() != "action":
             return "open"
         if self.hook_fail_mode.strip().lower() == "open":
