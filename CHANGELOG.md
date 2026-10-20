@@ -17,6 +17,7 @@ for current behavior.
 ### Known limits
 
 - Managed Claude Code and Codex block a shell command with more than 512 write targets or 64 KiB of target paths. The refusal says DefenseClaw blocked the action under your organization's policy. Split the command into smaller calls. Per-user mode is not affected (GAP-0291).
+- A tool call that DefenseClaw allowed while the gateway was running still runs if you approve it in the agent after the gateway stops. Every call checked while the gateway is down is blocked.
 
 ### Added
 

@@ -313,6 +313,10 @@ target paths. The refusal says DefenseClaw blocked the action under your
 organization's policy and may name "SSH authorized keys mutation." Split the
 command into smaller calls. Per-user mode is not affected.
 
+A tool call that DefenseClaw allowed while the gateway was running still runs
+if you approve it in the agent after the gateway stops. Every call checked
+while the gateway is down is blocked.
+
 ## Symptoms
 
 Sandbox symptoms (`openshell_prerequisite_missing`, `sandbox_subject_changed`, a
