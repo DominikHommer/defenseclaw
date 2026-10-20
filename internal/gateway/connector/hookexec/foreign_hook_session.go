@@ -108,10 +108,20 @@ func ExchangeForeignHookSession(ctx context.Context, opts Options, connector str
 		}
 		return nil, err
 	}
-	stopAnswer()
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("session gateway returned HTTP %d", response.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	// The answer budget holds until the whole answer is read: a gateway that
+	// stalls in the body is cut off at the budget, like one that sends no
+	// headers.
+	body, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	stopAnswer()
+	if err != nil {
+		if cause := context.Cause(ctx); errors.Is(cause, errGatewayNoAnswer) {
+			return nil, fmt.Errorf("%w: %v", cause, err)
+		}
+		return nil, err
+	}
+	return body, nil
 }
