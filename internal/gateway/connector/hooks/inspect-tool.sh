@@ -41,6 +41,11 @@ export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  # A registered closed hook cannot treat missing local state as retirement.
+  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+    echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
+    exit 2
+  fi
   exit 0
 fi
 {{end}}
@@ -145,11 +150,9 @@ if [ -n "$RUNTIME_CONNECTOR" ]; then
   CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}")
 fi
 
-# The tool input reaches jq on stdin and the gateway on a curl descriptor:
-# on a command line it would be readable by every local account, and an
-# input over the argument size limit would make jq fail to start.
-INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | jq -Rs --arg tool "$TOOL_NAME" \
-  '{tool: $tool, args: .}')" || {
+# The tool input reaches the JSON encoder on stdin and the gateway on a curl
+# descriptor, never on a command line.
+INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | defenseclaw_inspect_tool_body "$TOOL_NAME" args)" || {
   fail_unreachable "failed to build inspect body"
 }
 {{if .Sandbox}}RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool" "$INSPECT_BODY" \
@@ -189,10 +192,18 @@ ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 [ -n "$ACTION" ] || fail_response "missing action in ingress response"
-{{else}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+{{else}}{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
-{{end}}if [ "$ACTION" = "block" ]; then
+{{else}}# Only a recognized string action is a usable gateway verdict.
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+  fail_response "failed to parse action from response"
+}
+case "$ACTION" in
+  allow|alert|block|confirm) ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
+{{end}}{{end}}if [ "$ACTION" = "block" ]; then
   REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "blocked by DefenseClaw"' 2>/dev/null)
   echo "DefenseClaw: $REASON" >&2
   exit 2

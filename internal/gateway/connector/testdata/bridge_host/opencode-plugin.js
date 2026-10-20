@@ -571,9 +571,20 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       return null;
     }
     const data = await res.json();
+    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+      if (DC_FAIL_MODE === "open") {
+        await defenseclawLogFailOpen("invalid gateway verdict", "response");
+        return null;
+      }
+
+      return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
+    }
     const out = data && data.hook_output;
     if (out && (out.decision === "deny" || out.decision === "block")) {
       return { reason: out.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
+    }
+    if (data.action === "block" || data.action === "confirm") {
+      return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
     }
     return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {

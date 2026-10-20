@@ -636,7 +636,12 @@ async function defenseclawLogFailOpen(reason, category) {
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
-{{else}}{{if and .Managed (not .SecureClient)}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+{{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+{{if not .Managed}}      if (DC_FAIL_MODE === "open") {
+        await defenseclawLogFailOpen("invalid gateway verdict", "response");
+        return null;
+      }
+{{end}}
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
 {{end}}{{end}}    const out = data && data.hook_output;
@@ -646,7 +651,7 @@ async function defenseclawLogFailOpen(reason, category) {
 {{if .Sandbox}}    if (data.action === "block") {
       return { reason: data.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
-{{else}}{{if and .Managed (not .SecureClient)}}    if (data.action === "block") {
+{{else}}{{if not .SecureClient}}    if (data.action === "block" || data.action === "confirm") {
       return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
     }
 {{end}}{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };

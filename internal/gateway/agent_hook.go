@@ -1507,13 +1507,10 @@ func safeHookPanicResponse(connectorName, eventName string) agentHookResponse {
 // hookPanicResponse renders one fail-mode verdict for every recovery path.
 // Sandbox ingress has its own mandatory closed verdict and is rendered once.
 //
-// A recovered error produced no policy verdict. On a standalone managed
-// device it is answered like every other missing verdict there (gateway
-// unreachable, invalid response): the administrator-owned hook fails closed
-// whatever the guardrail mode or hook_fail_mode says, so a blockable tool or
-// prompt event gets the connector's native deny in observe mode too, and a
-// stop or session-end event keeps its neutral allow. Per-user installs and
-// the Secure Client profile keep the configured mode and fail mode.
+// A recovered error produced no policy verdict. A closed hook denies a
+// blockable tool or prompt event even when policy verdicts are observed.
+// Stop and session-end events keep their neutral allow; explicit per-user
+// open and Secure Client keep their open failure behavior.
 func (a *APIServer) hookPanicResponse(
 	ctx context.Context,
 	connectorName string,
@@ -1537,10 +1534,11 @@ func (a *APIServer) hookPanicResponse(
 	}
 	cfg := a.decisionConfig(ctx)
 	standalone := cfg != nil && cfg.StandaloneEnterprise()
-	lifecycle := standalone && hookexec.NeutralLifecycleEvent(connectorName, req.HookEventName)
-	if standalone && action == "block" && !lifecycle {
-		// Observe mode lets policy verdicts through; it does not let a
-		// missing verdict through on a managed device.
+	lifecycle := hookexec.NeutralLifecycleEvent(connectorName, req.HookEventName)
+	failOpen := !standalone && cfg != nil &&
+		(cfg.SecureClientIntegration() || cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open")
+	if !failOpen && action == "block" && !lifecycle {
+		// Observe mode applies to policy verdicts, not failed checks.
 		mode = "action"
 	}
 	if mode != "action" {
@@ -1548,13 +1546,9 @@ func (a *APIServer) hookPanicResponse(
 	}
 	plain := "DefenseClaw could not complete its hook check because of an internal evaluator error. "
 	switch {
-	case mode != "action":
-		plain += "The call was allowed because the guardrail is in observe mode. Ask your administrator to review the hook and audit log."
-	case !standalone && cfg != nil && (cfg.SecureClientIntegration() || cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"):
+	case failOpen:
 		action, wouldBlock = "allow", true
 		plain += "The call was allowed because the hook fails open. Ask your administrator to review the hook and audit log."
-	case action != "block":
-		plain += "The call could not be blocked on this hook event. Ask your administrator to review the hook and audit log."
 	case lifecycle:
 		// A denied stop or session-end event keeps the session running
 		// instead of stopping a tool call. Standalone managed hooks answer
@@ -1562,6 +1556,8 @@ func (a *APIServer) hookPanicResponse(
 		// uses for foreign-hook failures and invalid gateway actions.
 		action, wouldBlock = "allow", true
 		plain += "The event was allowed because it ends the session, and a denial would keep the session running. Ask your administrator to review the hook and audit log."
+	case action != "block":
+		plain += "The call could not be blocked on this hook event. Ask your administrator to review the hook and audit log."
 	default:
 		plain += "The call was blocked because the hook fails closed. Retry the call; if this continues, contact your administrator."
 	}
