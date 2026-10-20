@@ -47,21 +47,41 @@ import (
 // registered service. An ordinary user may be unable to read the protected
 // deployment record; that does not demote an otherwise verified installation.
 var secureClientHost = func() bool {
-	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	return classifySecureClientHost(secureClientClassificationChecks{
+		roots:        winpath.TrustedEnterpriseRoots,
+		deployment:   winpath.InspectEnterpriseDeploymentAt,
+		trustedDir:   managed.ValidateTrustedRuntimeDir,
+		trustedFile:  managed.ValidateTrustedFilePath,
+		serviceImage: windowsServiceImagePath,
+	})
+}
+
+// The checks are supplied explicitly so Windows tests can represent a real
+// protected installation without replacing the runner's machine registration.
+type secureClientClassificationChecks struct {
+	roots        func(string) (winpath.EnterpriseRoots, error)
+	deployment   func(string, string) (winpath.EnterpriseDeployment, error)
+	trustedDir   func(string, string) error
+	trustedFile  func(string, string) error
+	serviceImage func(string) (string, error)
+}
+
+func classifySecureClientHost(checks secureClientClassificationChecks) bool {
+	roots, err := checks.roots(winpath.EnterpriseProfileSecureClient)
 	if err != nil {
 		return false
 	}
-	deployment, err := winpath.InspectEnterpriseDeploymentAt(roots.Profile, roots.MetadataPath)
+	deployment, err := checks.deployment(roots.Profile, roots.MetadataPath)
 	if err != nil || !secureClientDeploymentMayBeInstalled(deployment.State) {
 		return false
 	}
-	if err := managed.ValidateTrustedRuntimeDir(roots.InstallRoot, "Secure Client installation"); err != nil {
+	if err := checks.trustedDir(roots.InstallRoot, "Secure Client installation"); err != nil {
 		return false
 	}
-	if err := managed.ValidateTrustedFilePath(roots.InstallRoot+`\bin\defenseclaw-gateway.exe`, "Secure Client gateway executable"); err != nil {
+	if err := checks.trustedFile(roots.InstallRoot+`\bin\defenseclaw-gateway.exe`, "Secure Client gateway executable"); err != nil {
 		return false
 	}
-	image, err := windowsServiceImagePath(managed.StandaloneWindowsGatewaySvc)
+	image, err := checks.serviceImage(managed.StandaloneWindowsGatewaySvc)
 	return err == nil && secureClientLayoutMatches(roots, deployment.State, image)
 }
 
