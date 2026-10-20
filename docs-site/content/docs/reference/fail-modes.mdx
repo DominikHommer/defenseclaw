@@ -74,13 +74,13 @@ connector fail-open, set it explicitly:
 
 ### Secure Client
 
-Under the Secure Client integration only, a different hook delivery default
-applies: an unset `guardrail.hook_fail_mode` resolves to `open`, independent
-of the guardrail mode, and an explicit `closed` (global or per connector) is
-always kept. The administrator owns that config, and the gateway resolves its
-default. Every other install, including OSS, the standalone enterprise profile
-and its managed Codex, Claude Code and Devin hooks, keeps the fail-closed rules
-above.
+Under the Secure Client integration, an observe-mode connector without a fail
+mode of its own stays `open`; action mode is `closed` when no value is set, and
+the managed Codex and Claude Code hooks are always `closed`. A managed hook
+still blocks a call when the gateway is unreachable or its token is missing,
+whatever the fail mode. The administrator owns that config. Every other
+install, including OSS and the standalone enterprise profile, keeps the
+fail-closed rules above.
 
 GitHub Copilot CLI and Antigravity have no fail-closed hook surface: their
 generated hooks stay open even when the effective mode is `closed`. Hermes has
