@@ -247,7 +247,7 @@ func TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed(t *testi
 			authorizationsMu.Unlock()
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"hook_output":{"decision":"allow"}}`))
+		_, _ = w.Write([]byte(`{"action":"allow","hook_output":{"decision":"allow"}}`))
 	}))
 	defer server.Close()
 

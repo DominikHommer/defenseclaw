@@ -40,6 +40,11 @@ export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  # A registered closed hook cannot treat missing local state as retirement.
+  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+    echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
+    exit 2
+  fi
   exit 0
 fi
 {{end}}
@@ -121,7 +126,18 @@ fail_unauthorized() {
   exit 2
 }
 
-AUTH_HEADER_ARGS=()
+{{if not .SecureClient}}# Refuse a checked call when no complete JSON parser is available.
+if ! command -v jq >/dev/null 2>&1 && ! _dc_python3_usable; then
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_log_hook_failure inspect inspect-response "DefenseClaw needs jq or python3 to check this call" response closed
+    echo "defenseclaw: DefenseClaw needs jq or python3 to check this call; blocking response" >&2
+    exit 2
+  fi
+  defenseclaw_log_hook_failure inspect inspect-response "DefenseClaw needs jq or python3 to check this call" response open
+  echo "defenseclaw: DefenseClaw needs jq or python3 to check this call; allowing response (fail mode open)" >&2
+  exit 0
+fi
+{{end}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
 {{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to. Like
@@ -176,10 +192,18 @@ ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 [ -n "$ACTION" ] || fail_response "missing action in ingress response"
-{{else}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+{{else}}{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
-{{end}}if [ "$ACTION" = "block" ]; then
+{{else}}# Only a recognized string action is a usable gateway verdict.
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+  fail_response "failed to parse action from response"
+}
+case "$ACTION" in
+  allow|alert|block|confirm) ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
+{{end}}{{end}}if [ "$ACTION" = "block" ]; then
   REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "blocked by DefenseClaw"' 2>/dev/null)
   echo "DefenseClaw: $REASON" >&2
   exit 2

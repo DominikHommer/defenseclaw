@@ -24,6 +24,134 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestSecureClientClassificationIgnoresProcessMachineRootEnvironment(t *testing.T) {
+	want, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	if err != nil {
+		t.Skipf("machine roots unavailable: %v", err)
+	}
+	poison := `C:\Users\Sample\Controlled`
+	t.Setenv("ProgramFiles", poison)
+	t.Setenv("ProgramData", poison)
+	got, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	if err != nil || got != want {
+		t.Fatalf("process environment selected Secure Client roots: got=%+v err=%v want=%+v", got, err, want)
+	}
+	if secureClientServiceMatches(got, poison+`\bin\defenseclaw-gateway.exe`) {
+		t.Fatal("user-controlled service path selected Secure Client handling")
+	}
+	if !secureClientServiceMatches(got, `"`+got.InstallRoot+`\bin\defenseclaw-gateway.exe"`) {
+		t.Fatal("registered Secure Client service path not recognized")
+	}
+}
+
+func TestSecureClientLayoutClassificationWithProtectedMetadata(t *testing.T) {
+	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	if err != nil {
+		t.Skipf("machine roots unavailable: %v", err)
+	}
+	serviceImage := `"` + roots.InstallRoot + `\bin\defenseclaw-gateway.exe"`
+	for _, tc := range []struct {
+		name  string
+		state winpath.EnterpriseDeploymentState
+		image string
+		want  bool
+	}{
+		{"installed", winpath.EnterpriseDeploymentInstalled, serviceImage, true},
+		{"standard user cannot read metadata", winpath.EnterpriseDeploymentUnknown, serviceImage, true},
+		{"no installation", winpath.EnterpriseDeploymentAbsent, serviceImage, false},
+		{"removed installation", winpath.EnterpriseDeploymentTombstone, serviceImage, false},
+		{"no service", winpath.EnterpriseDeploymentUnknown, "", false},
+		{"spoofed service path", winpath.EnterpriseDeploymentUnknown, `C:\Users\Sample\Controlled\bin\defenseclaw-gateway.exe`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := secureClientLayoutMatches(roots, tc.state, tc.image); got != tc.want {
+				t.Fatalf("Secure Client layout = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSecureClientHostRequiresProtectedLayoutAndRegisteredService(t *testing.T) {
+	roots, err := winpath.EnterpriseRootsFor(winpath.EnterpriseProfileSecureClient, `C:\Program Files`, `C:\ProgramData`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceImage := `"` + roots.InstallRoot + `\bin\defenseclaw-gateway.exe"`
+	for _, tc := range []struct {
+		name   string
+		state  winpath.EnterpriseDeploymentState
+		failAt string
+		image  string
+		want   bool
+	}{
+		{"installed", winpath.EnterpriseDeploymentInstalled, "", serviceImage, true},
+		{"protected metadata unreadable", winpath.EnterpriseDeploymentUnknown, "", serviceImage, true},
+		{"metadata absent", winpath.EnterpriseDeploymentAbsent, "", serviceImage, false},
+		{"deployment removed", winpath.EnterpriseDeploymentTombstone, "", serviceImage, false},
+		{"machine roots unavailable", winpath.EnterpriseDeploymentInstalled, "roots", serviceImage, false},
+		{"metadata inspection fails", winpath.EnterpriseDeploymentInstalled, "deployment", serviceImage, false},
+		{"install directory untrusted", winpath.EnterpriseDeploymentInstalled, "directory", serviceImage, false},
+		{"gateway file untrusted", winpath.EnterpriseDeploymentInstalled, "file", serviceImage, false},
+		{"service lookup fails", winpath.EnterpriseDeploymentInstalled, "service", serviceImage, false},
+		{"service image unquoted", winpath.EnterpriseDeploymentInstalled, "", roots.InstallRoot + `\bin\defenseclaw-gateway.exe`, false},
+		{"service image elsewhere", winpath.EnterpriseDeploymentInstalled, "", `"C:\Users\Sample\Controlled\bin\defenseclaw-gateway.exe"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			failure := errors.New("fixture lookup failed")
+			checks := secureClientClassificationChecks{
+				roots: func(profile string) (winpath.EnterpriseRoots, error) {
+					if profile != winpath.EnterpriseProfileSecureClient {
+						t.Fatalf("requested profile %q", profile)
+					}
+					if tc.failAt == "roots" {
+						return winpath.EnterpriseRoots{}, failure
+					}
+					return roots, nil
+				},
+				deployment: func(profile, path string) (winpath.EnterpriseDeployment, error) {
+					if profile != roots.Profile || path != roots.MetadataPath {
+						t.Fatalf("inspected %q, %q", profile, path)
+					}
+					if tc.failAt == "deployment" {
+						return winpath.EnterpriseDeployment{}, failure
+					}
+					return winpath.EnterpriseDeployment{State: tc.state}, nil
+				},
+				trustedDir: func(path, _ string) error {
+					if path != roots.InstallRoot {
+						t.Fatalf("validated directory %q", path)
+					}
+					if tc.failAt == "directory" {
+						return failure
+					}
+					return nil
+				},
+				trustedFile: func(path, _ string) error {
+					if path != roots.InstallRoot+`\bin\defenseclaw-gateway.exe` {
+						t.Fatalf("validated file %q", path)
+					}
+					if tc.failAt == "file" {
+						return failure
+					}
+					return nil
+				},
+				serviceImage: func(name string) (string, error) {
+					if name != managed.StandaloneWindowsGatewaySvc {
+						t.Fatalf("queried service %q", name)
+					}
+					if tc.failAt == "service" {
+						return "", failure
+					}
+					return tc.image, nil
+				},
+			}
+			if got := classifySecureClientHost(checks); got != tc.want {
+				t.Fatalf("Secure Client host = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestWindowsManagedRecordTrustUsesRealACLs checks the guard's validators on
 // real NTFS security descriptors: an administrator-owned record in an
 // administrator-only tree is trusted, and the same record owned by the Users
