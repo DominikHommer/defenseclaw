@@ -442,10 +442,60 @@ func windowsEnterprisePendingInspectionStep(configPath string) string {
 		windowsEnterpriseStandaloneSetupCommand("ensure", configPath, false) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 }
 
+// windowsEnterpriseStandaloneServiceRoster is every service a standalone
+// deployment registers, by name and status kind.
+var windowsEnterpriseStandaloneServiceRoster = []struct{ name, kind string }{
+	{"DefenseClawGateway", "gateway"},
+	{"DefenseClawHookGuardian", "guardian"},
+	{"DefenseClawHookEnumerator", "enumerator"},
+	{"DefenseClawSensorHelper", "sensor_helper"},
+}
+
+// windowsEnterprisePendingLead says what a pending transaction means for the
+// DefenseClaw services, from their states when the result is written. It said
+// "the DefenseClaw services stay stopped" also after a rollback had restarted
+// every one of them (GAP-0029). It says they keep enforcing only when every
+// service of the standalone roster is listed and running: services omits
+// the ones the service manager does not have, and a gateway a pending
+// transaction left absent beside a running guardian read as enforcing.
+func windowsEnterprisePendingLead(services []enterprisestatus.Service) string {
+	switch stopped := windowsEnterpriseStoppedRequiredServices(services); {
+	case len(stopped) == 1:
+		return "The transaction is still pending: the " + stopped[0] + " service stays stopped until it is recovered."
+	case len(stopped) > 1:
+		return "The transaction is still pending: the " + strings.Join(stopped, ", ") + " services stay stopped until it is recovered."
+	}
+	if windowsEnterpriseStandaloneRosterRunning(services) {
+		return "The transaction is still pending: the DefenseClaw services are running and keep enforcing, but the deployment cannot be changed until the transaction is recovered."
+	}
+	return "The transaction is still pending, so the deployment cannot be changed until it is recovered."
+}
+
+// windowsEnterpriseStandaloneRosterRunning reports whether services lists
+// every service of the standalone roster as running. A service it does not
+// list (absent) counts as not running.
+func windowsEnterpriseStandaloneRosterRunning(services []enterprisestatus.Service) bool {
+	for _, required := range windowsEnterpriseStandaloneServiceRoster {
+		running := false
+		for _, service := range services {
+			if strings.EqualFold(strings.TrimSpace(service.Name), required.name) &&
+				strings.EqualFold(strings.TrimSpace(service.State), "running") {
+				running = true
+				break
+			}
+		}
+		if !running {
+			return false
+		}
+	}
+	return true
+}
+
 // windowsEnterpriseStandaloneNextStep names what the administrator runs
 // after a failed lifecycle left its transaction pending: the exact Setup
 // command, and when the recovery could not use this Setup's gateway, why.
-// It is empty when nothing is pending.
+// services are the DefenseClaw services as the service manager reports them
+// now. It is empty when nothing is pending.
 func windowsEnterpriseStandaloneNextStep(
 	action string,
 	configPath string,
@@ -453,12 +503,13 @@ func windowsEnterpriseStandaloneNextStep(
 	pending bool,
 	runs []windowsEnterpriseRecoveryGatewayRun,
 	refusal *windowsEnterpriseRecoveryGatewayRefusal,
+	services []enterprisestatus.Service,
 ) string {
 	if !pending {
 		return ""
 	}
 	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
-	const lead = "The transaction is still pending: the DefenseClaw services stay stopped until it is recovered."
+	lead := windowsEnterprisePendingLead(services)
 	const recovers = "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 	// The last resort when no recovery finishes: it removes the deployment
 	// without recovering the transaction (GAP-0920, GAP-1041).

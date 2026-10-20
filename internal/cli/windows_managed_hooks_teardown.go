@@ -580,13 +580,13 @@ func runWindowsManagedHooksTeardown(
 			if _, statErr := os.Lstat(cleanupReceiptPath); statErr == nil {
 				var existing windowsManagedHookContractCleanupReceipt
 				existing, err = readWindowsManagedHookContractCleanupReceipt(cleanupReceiptPath)
-				if err == nil && existing.Phase == windowsManagedHookContractCleanupPrepared {
-					err = validateWindowsManagedHookContractCleanupReceiptBinding(
+				if err == nil {
+					reusePrepared, err = windowsManagedHookContractCleanupPrepareReuses(
 						existing,
 						identity,
 						contractCleanupScope,
+						enterprisehooks.WindowsStandaloneProcess(),
 					)
-					reusePrepared = err == nil
 				}
 			} else if !errors.Is(statErr, os.ErrNotExist) {
 				err = statErr
