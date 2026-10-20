@@ -296,7 +296,10 @@ func windowsEnterpriseHotConfigApply(
 		return unavailable("cannot classify the config change: " + err.Error())
 	}
 	startOnly, refreshTargets := windowsBundleStartOnlyPaths(restart)
-	if len(startOnly) > 0 && !bundleChange {
+	// A bundle rollback by the installed CLI has no payload for the upgrade
+	// transaction: it restarts only the gateway, as the bundle it undoes did.
+	gatewayOnlyRestart := bundleChange || windowsBundleRollbackWithoutPayload(opts)
+	if len(startOnly) > 0 && !gatewayOnlyRestart {
 		return false, startOnly
 	}
 
@@ -345,10 +348,14 @@ func windowsEnterpriseHotConfigApply(
 			result.AddWarning("bundle_reload_request_failed", "the direct gateway reload request failed; waiting for the gateway's file watcher and checking its reported policy: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		}
 	}
+	gatewayRestarted := false
 	if len(startOnly) > 0 {
 		restarted, restartErr := windowsEnterpriseHotConfigRestart()
 		if restarted {
-			opts.bundle.gatewayRestarted = true
+			gatewayRestarted = true
+			if opts.bundle != nil {
+				opts.bundle.gatewayRestarted = true
+			}
 		}
 		if restartErr != nil || !restarted {
 			undo()
@@ -357,14 +364,14 @@ func windowsEnterpriseHotConfigApply(
 				message += ": " + windowsEnterpriseBoundedDiagnostic(restartErr.Error())
 			}
 			failBundle("bundle_gateway_restart_failed", message)
-			if recovered, _ := windowsEnterpriseHotConfigRecover(); recovered {
+			if recovered, _ := windowsEnterpriseHotConfigRecover(); recovered && opts.bundle != nil {
 				opts.bundle.gatewayRestarted = true
 			}
 			return false, startOnly
 		}
 	}
 	adoptionWait := windowsEnterpriseHotConfigTimeout
-	if opts.bundle != nil && opts.bundle.gatewayRestarted {
+	if gatewayRestarted || (opts.bundle != nil && opts.bundle.gatewayRestarted) {
 		adoptionWait = windowsEnterpriseHotConfigRestartTimeout
 	}
 	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait, opts.bundle) {

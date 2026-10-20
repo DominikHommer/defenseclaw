@@ -600,6 +600,39 @@ func TestWindowsBundleConfigApplyUsesSharedRestartClassification(t *testing.T) {
 	}
 }
 
+// GAP-0008: the rollback of a bundle that `enterprise bundle apply` (the
+// installed CLI, no payload) could not confirm puts the last good config
+// back on the running deployment, restarting only the gateway for a key it
+// reads at start. It used to be refused for the missing payload, which left
+// the refused bundle config installed and enforcing.
+func TestWindowsBundleRollbackByTheInstalledCLIPutsTheLastGoodConfigBack(t *testing.T) {
+	const bundleConfig = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n"
+	for _, tc := range []struct {
+		name, lastGood string
+		restarts       int
+	}{
+		{"policy only", "config_version: 9\nguardrail:\n  block_at: HIGH\n  hook_self_heal_debounce_ms: 500\n", 0},
+		{"start only", "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, bundleConfig, tc.lastGood)
+			host.adopted = true
+			opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", ""
+			opts.bundleRollback = true
+			savedRestart := windowsEnterpriseHotConfigRestart
+			t.Cleanup(func() { windowsEnterpriseHotConfigRestart = savedRestart })
+			restarts := 0
+			windowsEnterpriseHotConfigRestart = func() (bool, error) { restarts++; return true, nil }
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+			result := runHotConfigEnsure(t, host, opts, stub)
+			installed, _ := os.ReadFile(host.configPath)
+			if string(installed) != tc.lastGood || restarts != tc.restarts || len(stub.calls) != 2 || stub.calls[1][1] != "Verify" || !result.OK {
+				t.Fatalf("rollback installed %q, restarts %d, installer runs %q, ok %t errors %+v", installed, restarts, stub.calls, result.OK, result.Errors)
+			}
+		})
+	}
+}
+
 func TestWindowsHotConfigDoesNotApplyFleetEnablementWithoutCompilerLifecycle(t *testing.T) {
 	for _, tc := range []struct {
 		name, previous, next string
