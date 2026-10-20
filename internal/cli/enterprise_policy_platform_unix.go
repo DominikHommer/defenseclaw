@@ -156,36 +156,26 @@ func runAsEnterprisePolicyTarget(target enterprisehooks.TargetCredentials, fn fu
 	return enterprisehooks.RunAsTarget(target, fn)
 }
 
-// enterprisePolicyLiveCredential starts the agent as the target user.
+// enterprisePolicyLiveGeteuid is os.Geteuid; tests replace it.
+var enterprisePolicyLiveGeteuid = os.Geteuid
+
+// enterprisePolicyLiveCredential starts the agent as the target user. From
+// root it uses the hook worker's credential: the account resolver's groups,
+// primary group first, capped at the platform's setgroups limit. The live
+// check passed every group, and every macOS account has more than 16
+// (sharepoint groups, a directory account's AD groups), so setgroups failed
+// with EINVAL and Codex never started: "fork/exec ...: invalid argument"
+// (sidecar F09).
 func enterprisePolicyLiveCredential(target enterprisehooks.TargetCredentials) func(*exec.Cmd) error {
 	return func(cmd *exec.Cmd) error {
-		if os.Geteuid() != 0 {
-			if target.UID != os.Geteuid() {
+		if euid := enterprisePolicyLiveGeteuid(); euid != 0 {
+			if target.UID != euid {
 				return errors.New("live verification must run as root or as the target user")
 			}
 			return nil
 		}
-		groups := []uint32{}
-		if account, err := user.LookupId(strconv.Itoa(target.UID)); err == nil {
-			if ids, err := unixidentity.AccountGroupIDs(context.Background(), account); err == nil {
-				for _, id := range ids {
-					if value, err := strconv.ParseUint(id, 10, 32); err == nil {
-						groups = append(groups, uint32(value))
-					}
-				}
-			}
-		} else if ids, err := unixidentity.Default(context.Background()).GroupIDs(unixidentity.Account{
-			Name: target.Username, UID: target.UID, GID: target.GID, Home: target.UserHome}); err == nil {
-			// A directory account os/user cannot see keeps its groups too.
-			for _, id := range ids {
-				groups = append(groups, uint32(id))
-			}
-		}
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
-			Uid:    uint32(target.UID),
-			Gid:    uint32(target.GID),
-			Groups: groups,
-		}}
+		account := enterpriseHookWorkerAccount{UID: target.UID, GID: target.GID, User: target.Username, Home: target.UserHome}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: enterpriseHookWorkerCredential(account, enterpriseHookWorkerGroupIDs(account), enterpriseHookWorkerMaxGroups)}
 		return nil
 	}
 }

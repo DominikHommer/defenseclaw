@@ -50,7 +50,7 @@ func TestPredictBundleRestart(t *testing.T) {
 		{"empty installed config", "darwin", "", base, bundleRestartUnknown, []string{restartReasonInstalledUnreadable}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := predictBundleRestart(tc.goos, []byte(tc.installed), nil, []byte(tc.next))
+			got := predictBundleRestart(tc.goos, configwrite.ManagedDefaults{}, []byte(tc.installed), nil, []byte(tc.next))
 			if got.GatewayRestart != tc.want || !slices.Equal(got.ReasonCodes, tc.reasons) || !slices.Equal(got.Settings, tc.settings) {
 				t.Fatalf("prediction = %+v, want %s %v %v", got, tc.want, tc.reasons, tc.settings)
 			}
@@ -60,7 +60,7 @@ func TestPredictBundleRestart(t *testing.T) {
 		})
 	}
 	for _, goos := range []string{"linux", "darwin", "windows"} {
-		got := predictBundleRestart(goos, nil, errors.New("permission denied"), []byte(base))
+		got := predictBundleRestart(goos, configwrite.ManagedDefaults{}, nil, errors.New("permission denied"), []byte(base))
 		if got.GatewayRestart != bundleRestartUnknown || !slices.Equal(got.ReasonCodes, []string{restartReasonInstalledUnreadable}) {
 			t.Fatalf("%s unreadable installed config: %+v", goos, got)
 		}
@@ -73,11 +73,11 @@ func TestPredictBundleRestart(t *testing.T) {
 func TestPredictBundleRestartNamesNoMapKey(t *testing.T) {
 	installed := "config_version: 9\nenterprise:\n  enrollment:\n    include_groups:\n      - DCLAB\\eng-team-alice\nguardrail:\n  connectors:\n    claudecode:\n      enabled: true\n"
 	next := strings.Replace(installed, "eng-team-alice", "ops-team-bob", 1) + "    secret-agent-x:\n      enabled: true\n"
-	restart, err := configwrite.ManagedConfigRestartRequired([]byte(installed), []byte(next))
+	restart, err := configwrite.ManagedConfigRestartRequired([]byte(installed), []byte(next), configwrite.ManagedDefaults{})
 	if err != nil || len(restart) == 0 {
 		t.Fatalf("classifier: %v %v", restart, err)
 	}
-	got := predictBundleRestart("linux", []byte(installed), nil, []byte(next))
+	got := predictBundleRestart("linux", configwrite.ManagedDefaults{}, []byte(installed), nil, []byte(next))
 	if got.GatewayRestart != bundleRestartRequired {
 		t.Fatalf("prediction = %+v, classifier %v", got, restart)
 	}
@@ -114,6 +114,15 @@ func TestBundleVerifyRestartPrediction(t *testing.T) {
 	got = bundleVerifyRestartPrediction("darwin", &enterprisebundle.VerifyResult{Rendered: []byte(installed + "  hook_self_heal: false\n")})
 	if got.GatewayRestart != bundleRestartRequired || !slices.Equal(got.Settings, []string{"guardrail.hook_self_heal"}) {
 		t.Fatalf("restart bundle: %+v", got)
+	}
+	// The device layout's defaults resolve an omitted data_dir and listener
+	// the way the apply does (F03).
+	bundleInstalledConfig = func(string) ([]byte, error) {
+		return []byte("data_dir: /opt/cisco/defenseclaw/runtime\ngateway:\n  api_bind: 127.0.0.1\n  api_port: 18970\n" + installed), nil
+	}
+	got = bundleVerifyRestartPrediction("darwin", &enterprisebundle.VerifyResult{Rendered: []byte(installed)})
+	if got.GatewayRestart != bundleRestartNotRequired {
+		t.Fatalf("bundle omitting the device defaults: %+v", got)
 	}
 }
 

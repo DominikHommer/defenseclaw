@@ -3000,6 +3000,13 @@ func loadConfigSourceCheckedWithLayout(
 		cfg.CiscoAIDefense.protectedCredential = strings.TrimSpace(ai.Credential)
 		cfg.CiscoAIDefense.protectedSecretsDir = managed.StandaloneSecretsDirForConfig(runtime.GOOS, cfg.ConfigFilePath)
 	}
+	// Resolve an omitted managed API bind on every load, offline inspection
+	// included, so a bundle signer, the device verifier and the running
+	// gateway load and digest the same listener (GAP-0007). Secure Client
+	// keeps its loader as is: its strict loads resolve the bind below.
+	if !cfg.SecureClientIntegration() {
+		applyManagedEnterpriseListenerDefault(&cfg)
+	}
 	if enforceManagedTrust && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if !managed.IsManagedEnterprise(pinnedDeploymentMode) {
 			if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
@@ -3453,6 +3460,17 @@ func dropEmptyGuardrailConnectors(cfg *Config, raw []byte) {
 	}
 }
 
+// applyManagedEnterpriseListenerDefault persists the effective managed API
+// bind, 127.0.0.1, into the in-memory config when api_bind is omitted, so
+// standalone topology cannot later derive the API listener from an
+// independent IPv6 guardrail host, and a config that omits the bind loads
+// (and digests) like one that spells it out.
+func applyManagedEnterpriseListenerDefault(cfg *Config) {
+	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.Gateway.APIBind == "" {
+		cfg.Gateway.APIBind = "127.0.0.1"
+	}
+}
+
 // validateManagedEnterpriseListenerBindings keeps every inbound enterprise
 // surface on loopback. The managed hook transport is intentionally pinned to
 // canonical numeric IPv4, so the API listener must be exactly 127.0.0.1 rather
@@ -3463,14 +3481,8 @@ func validateManagedEnterpriseListenerBindings(cfg *Config) error {
 		return nil
 	}
 
+	applyManagedEnterpriseListenerDefault(cfg)
 	apiBind := cfg.Gateway.APIBind
-	if apiBind == "" {
-		// Persist the effective managed bind into the in-memory config so
-		// standalone topology cannot later derive the API listener from an
-		// independent IPv6 guardrail host.
-		cfg.Gateway.APIBind = "127.0.0.1"
-		apiBind = cfg.Gateway.APIBind
-	}
 	if apiBind != "127.0.0.1" {
 		return fmt.Errorf(
 			"config: managed_enterprise gateway API must bind to exact canonical 127.0.0.1, got %q",
