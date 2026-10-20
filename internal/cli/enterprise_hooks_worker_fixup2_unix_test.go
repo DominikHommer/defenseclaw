@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -264,9 +265,19 @@ func TestEnterpriseHookWorkerMatcherCoversInstallAndRemovalByConnector(t *testin
 			t.Setenv("XDG_CONFIG_HOME", "")
 			t.Setenv("OPENCODE_CONFIG_DIR", "")
 			t.Setenv("CODEX_HOME", "")
-			if name == "kiro" || name == "copilot" {
+			if name == "kiro" || name == "copilot" || name == "openhands" {
 				enterprisehooks.SetStandaloneUnix(true)
 				t.Cleanup(func() { enterprisehooks.SetStandaloneUnix(false) })
+			}
+			if name == "openhands" && runtime.GOOS == "darwin" {
+				// Standalone Install records this image before macOS OpenHands admission.
+				executable := filepath.Join(home, ".local", "bin", "openhands")
+				if err := os.MkdirAll(filepath.Dir(executable), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(executable, []byte("#!/bin/sh\necho 'OpenHands CLI 1.16.0'\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if name == "kiro" {
 				if err := os.MkdirAll(filepath.Join(home, ".kiro", "hooks"), 0o700); err != nil {
