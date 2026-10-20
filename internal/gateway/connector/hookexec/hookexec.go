@@ -457,7 +457,7 @@ func runHook(ctx context.Context, opts Options) int {
 				"enterprise_managed_runtime_home_missing",
 			)
 		}
-		return handleUnavailableHome(opts, sp, "DefenseClaw home is unavailable")
+		return handleUnavailableHome(opts, sp, failMode, "DefenseClaw home is unavailable")
 	}
 	if _, err := os.Stat(filepath.Join(opts.Home, ".disabled")); err == nil {
 		if opts.ManagedEnterprise {
@@ -469,7 +469,7 @@ func runHook(ctx context.Context, opts Options) int {
 				"enterprise_managed_runtime_disable_sentinel_forbidden",
 			)
 		}
-		return handleUnavailableHome(opts, sp, "DefenseClaw home is disabled")
+		return handleUnavailableHome(opts, sp, failMode, "DefenseClaw home is disabled")
 	}
 
 	payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody)
@@ -1247,28 +1247,39 @@ func (sp spec) decide(opts Options, body []byte) int {
 
 	action, ok := rawString(fields, "action")
 	if !ok || (action != "allow" && action != "alert" && action != "block" && action != "confirm") {
-		// The managed standalone profiles treat a lifecycle event as an
-		// allow here. Per-user and Secure Client hooks take the fail path:
-		// there a fail-closed per-user stop event gets its neutral allow,
-		// logged (failClosedStopEvent), and Secure Client keeps its result.
 		lifecycle := managedNativeDecision(opts) && NeutralLifecycleEvent(sp.connector, opts.Event)
-		if !lifecycle &&
-			(sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr || managedNativeDecision(opts)) {
+		if opts.SecureClient && (sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr) {
 			return failResponse(opts, sp, managedDecisionFailMode(opts), "invalid or missing action in gateway response")
+		}
+		if !opts.SecureClient && !lifecycle {
+			return failNativeDecision(opts, sp, "invalid or missing action in gateway response")
 		}
 		action = "allow"
 		if lifecycle && sp.style == stylePluginBridge {
-			// The plugin reads the echoed response itself; make the neutral
-			// lifecycle allow explicit instead of handing it an invalid verdict.
 			body = []byte(`{"action":"allow"}`)
 		}
 	}
 	reason := rawStringOr(fields, "reason", "")
 	output := compactField(fields, sp.outputField)
+	if sp.style == stylePluginBridge {
+		output = compactField(fields, "hook_output")
+	}
 	if managedNativeDecision(opts) && managedNativeBlockableEvent(sp.connector, opts.Event) && output == "" &&
 		(action == "block" || action == "confirm" || (sp.connector == "cursor" && action == "allow")) &&
 		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) {
 		return failResponse(opts, sp, "closed", "missing native output in gateway response")
+	}
+	if !opts.SecureClient && managedDecisionFailMode(opts) != "open" &&
+		(action == "block" || action == "confirm") &&
+		(sp.style == styleHookEcho || sp.style == styleHookEchoDecision || sp.style == styleHookDecisionStderr || sp.style == stylePluginBridge) &&
+		!nativeOutputAgrees(sp, opts.Event, action, output) {
+		return failNativeDecision(opts, sp, "native output contradicts gateway action")
+	}
+	if !opts.SecureClient && output != "" && (action == "block" || action == "confirm") &&
+		(sp.style == styleClaudeCode || sp.style == styleCodex) &&
+		(sp.style != styleCodex || codexEventCanControl(opts.HookContractID, opts.Event)) &&
+		!nativeOutputAgrees(sp, opts.Event, action, output) {
+		return failResponse(opts, sp, "closed", "native output contradicts gateway action")
 	}
 
 	switch sp.style {
@@ -1405,6 +1416,27 @@ func managedDecisionFailMode(opts Options) string {
 	return normalizeFailMode(opts.FailMode)
 }
 
+func failNativeDecision(opts Options, sp spec, reason string) int {
+	if sp.connector == "copilot" && managedDecisionFailMode(opts) != "open" && !opts.SecureClient {
+		// Copilot CLI ignores a failed hook process, but honors its native
+		// structured deny. An unusable 2xx verdict is a failed check.
+		if body := copilotVSCodeLocalOutput(opts.Event, "block", reason); sp.dialect == copilotVSCodeLocalSurface && body != "" {
+			fmt.Fprintln(opts.Stdout, body)
+			return 0
+		}
+		message := mustJSONString("DefenseClaw hook failed closed")
+		switch opts.Event {
+		case "preToolUse":
+			fmt.Fprintln(opts.Stdout, `{"permissionDecision":"deny","permissionDecisionReason":`+message+`}`)
+			return 0
+		case "permissionRequest":
+			fmt.Fprintln(opts.Stdout, `{"behavior":"deny","message":`+message+`}`)
+			return 0
+		}
+	}
+	return failResponse(opts, sp, managedDecisionFailMode(opts), reason)
+}
+
 func managedNativeBlockableEvent(connector, event string) bool {
 	switch connector {
 	case "cursor":
@@ -1420,6 +1452,97 @@ func managedNativeBlockableEvent(connector, event string) bool {
 		return event == "PreToolUse" || event == "UserPromptSubmit"
 	case "opencode":
 		return event == "tool.execute.before"
+	}
+	return false
+}
+
+// nativeOutputAgrees checks the vendor decision that actually reaches the
+// agent. A complete gateway response can still contain an allow-shaped native
+// directive beside a block action; the native directive wins at the agent.
+func nativeOutputAgrees(sp spec, event, action, output string) bool {
+	blockable := managedNativeBlockableEvent(sp.connector, event)
+	if sp.style == styleClaudeCode {
+		blockable = true
+	}
+	if sp.style == styleCodex {
+		blockable = codexEventCanControl("codex-hooks-v4", event)
+	}
+	if sp.dialect == copilotVSCodeLocalSurface && (event == "PreToolUse" || event == "UserPromptSubmit") {
+		blockable = true
+	}
+	if !blockable {
+		return true
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output), &fields); err != nil || fields == nil {
+		return false
+	}
+	want := "deny"
+	if action == "confirm" {
+		want = "ask"
+	}
+	switch sp.connector {
+	case "claudecode", "codex":
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(fields["hookSpecificOutput"], &nested) == nil && nested != nil {
+			if outputEvent := rawStringOr(nested, "hookEventName", ""); outputEvent != "" && outputEvent != event {
+				return false
+			}
+			switch event {
+			case "PreToolUse":
+				return rawStringOr(nested, "permissionDecision", "") == want
+			case "PermissionRequest":
+				var decision map[string]json.RawMessage
+				return json.Unmarshal(nested["decision"], &decision) == nil &&
+					rawStringOr(decision, "behavior", "") == want
+			case "Elicitation", "ElicitationResult":
+				return action == "block" && rawStringOr(nested, "action", "") == "decline"
+			case "UserPromptSubmit":
+				// Older Codex contracts also carry a prompt denial here.
+				if sp.style == styleCodex && rawStringOr(nested, "permissionDecision", "") == want {
+					return true
+				}
+			}
+		}
+		if event == "PreToolUse" || event == "PermissionRequest" || event == "Elicitation" || event == "ElicitationResult" {
+			return false
+		}
+		if action == "confirm" {
+			return rawStringOr(fields, "decision", "") == "ask"
+		}
+		if event == "SessionStart" || event == "PreCompact" || event == "PostCompact" {
+			var continued bool
+			return sp.style == styleCodex && json.Unmarshal(fields["continue"], &continued) == nil && !continued
+		}
+		return rawStringOr(fields, "decision", "") == "block"
+	case "cursor":
+		if event == "beforeSubmitPrompt" {
+			var continued bool
+			return action == "block" && json.Unmarshal(fields["continue"], &continued) == nil && !continued
+		}
+		return rawStringOr(fields, "permission", "") == want
+	case "copilot":
+		if sp.dialect == copilotVSCodeLocalSurface {
+			if event == "UserPromptSubmit" {
+				var continued bool
+				return action == "block" && json.Unmarshal(fields["continue"], &continued) == nil && !continued
+			}
+			var nested map[string]json.RawMessage
+			if err := json.Unmarshal(fields["hookSpecificOutput"], &nested); err != nil {
+				return false
+			}
+			return rawStringOr(nested, "permissionDecision", "") == want
+		}
+		if event == "permissionRequest" {
+			return rawStringOr(fields, "behavior", "") == want
+		}
+		return rawStringOr(fields, "permissionDecision", "") == want
+	case "devin", "kiro", "opencode":
+		decision := rawStringOr(fields, "decision", "")
+		if action == "confirm" {
+			return decision == "ask" || decision == "confirm"
+		}
+		return decision == "deny" || decision == "block"
 	}
 	return false
 }
@@ -1527,12 +1650,22 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	return emitHookResult(opts, sp, sp.openAllow)
 }
 
-// handleUnavailableHome answers a per-user hook whose DefenseClaw home is
-// missing or disabled: an operator-requested no-op unless strict
-// availability is set. Run blocks a managed hook's missing or disabled home
-// itself, so a managed hook never gets here.
-func handleUnavailableHome(opts Options, sp spec, reason string) int {
-	closes := !sp.failOpenOnly && opts.StrictAvailability
+// handleUnavailableHome refuses an unavailable registered per-user hook in
+// closed mode. Explicitly open hooks keep their no-op behavior. Run handles
+// managed hooks before this function.
+func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
+	if failMode == "closed" || opts.StrictAvailability {
+		if sp.connector == "hermes" {
+			if code, handled := hermesFailClosed(opts, sp, "transport", reason); handled {
+				return code
+			}
+		}
+		if sp.connector == "copilot" && managedNativeBlockableEvent(sp.connector, opts.Event) {
+			opts.FailMode = "closed"
+			return failNativeDecision(opts, sp, reason)
+		}
+	}
+	closes := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
 	if closes && failClosedStopEvent(opts, sp) {
 		return allowFailClosedStop(opts, sp, reason, "transport")
 	}
@@ -1540,7 +1673,11 @@ func handleUnavailableHome(opts Options, sp spec, reason string) int {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
 		} else {
-			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (strict availability)\n", reason, sp.subject)
+			basis := "fail mode closed"
+			if opts.StrictAvailability {
+				basis = "strict availability"
+			}
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (%s)\n", reason, sp.subject, basis)
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}

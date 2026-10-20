@@ -291,17 +291,13 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 						cfg.Guardrail.Mode, cfg.Guardrail.HookFailMode, cfg.Guardrail.Connector = mode, failMode, name
 						server := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 						response, _ := postPanicTestHook(t, server, name, event)
-						want, wantMode := "block", mode
-						reason := "action mode defaults closed"
-						if deployment.name == "standalone" {
-							wantMode, reason = "action", "a standalone managed device fails closed in every mode and fail mode"
-						} else if mode == "observe" {
-							want, reason = "allow", "observe mode never enforces"
-						} else if deployment.name == "secure_client" {
-							want, reason = "allow", "Secure Client allows recovered errors"
-						} else if failMode == "open" && name != "cursor" {
-							want, reason = "allow", "explicit open is effective for this connector"
-						} else if failMode == "open" {
+						want, wantMode := "block", "action"
+						reason := "a closed failed check blocks in every mode"
+						if deployment.name == "secure_client" {
+							want, wantMode, reason = "allow", mode, "Secure Client allows recovered errors"
+						} else if deployment.name != "standalone" && failMode == "open" && name != "cursor" {
+							want, wantMode, reason = "allow", mode, "explicit open is effective for this connector"
+						} else if failMode == "open" && name == "cursor" {
 							reason = "the cursor accessor keeps this connector closed"
 						}
 						wantWouldBlock := want == "allow"

@@ -180,7 +180,7 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 		t.Skip("shell scripts not supported on windows")
 	}
 	dir := t.TempDir()
-	if err := writeHookScriptsCommonWithFailMode(dir, "127.0.0.1:1", "tok-test", "closed", []string{"cursor-hook.sh"}); err != nil {
+	if err := writeHookScriptsCommonWithFailMode(dir, "127.0.0.1:1", "tok-test", "open", []string{"cursor-hook.sh"}); err != nil {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
 	dcHome := t.TempDir()
@@ -191,8 +191,7 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 	cmd := exec.Command("bash", filepath.Join(dir, "cursor-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"beforeShellExecution"}`)
 	// Sanitize inherited DEFENSECLAW_* so a leaked FAIL_MODE / strict
-	// override from the dev shell cannot flip .disabled's fail-open
-	// path into a spurious block.
+	// override from the dev shell cannot alter the explicit open path.
 	cmd.Env = append(sanitizedTestEnv(),
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,

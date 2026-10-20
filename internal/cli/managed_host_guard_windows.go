@@ -43,15 +43,61 @@ import (
 // Secure Client hosts are unaffected: only the standalone profile writes the
 // marker, and their record lives under the Secure Client roots, which this
 // profile's inspection never reads.
-// secureClientHost reports a Secure Client DefenseClaw install: its state
-// root under ProgramData exists. A seam for tests.
+// secureClientHost uses machine roots, a trusted installation, and its
+// registered service. An ordinary user may be unable to read the protected
+// deployment record; that does not demote an otherwise verified installation.
 var secureClientHost = func() bool {
-	roots, err := winpath.EnterpriseRootsFor(winpath.EnterpriseProfileSecureClient, os.Getenv("ProgramFiles"), os.Getenv("ProgramData"))
+	return classifySecureClientHost(secureClientClassificationChecks{
+		roots:        winpath.TrustedEnterpriseRoots,
+		deployment:   winpath.InspectEnterpriseDeploymentAt,
+		trustedDir:   managed.ValidateTrustedRuntimeDir,
+		trustedFile:  managed.ValidateTrustedFilePath,
+		serviceImage: windowsServiceImagePath,
+	})
+}
+
+// The checks are supplied explicitly so Windows tests can represent a real
+// protected installation without replacing the runner's machine registration.
+type secureClientClassificationChecks struct {
+	roots        func(string) (winpath.EnterpriseRoots, error)
+	deployment   func(string, string) (winpath.EnterpriseDeployment, error)
+	trustedDir   func(string, string) error
+	trustedFile  func(string, string) error
+	serviceImage func(string) (string, error)
+}
+
+func classifySecureClientHost(checks secureClientClassificationChecks) bool {
+	roots, err := checks.roots(winpath.EnterpriseProfileSecureClient)
 	if err != nil {
 		return false
 	}
-	_, err = os.Stat(roots.StateRoot)
-	return err == nil
+	deployment, err := checks.deployment(roots.Profile, roots.MetadataPath)
+	if err != nil || !secureClientDeploymentMayBeInstalled(deployment.State) {
+		return false
+	}
+	if err := checks.trustedDir(roots.InstallRoot, "Secure Client installation"); err != nil {
+		return false
+	}
+	if err := checks.trustedFile(roots.InstallRoot+`\bin\defenseclaw-gateway.exe`, "Secure Client gateway executable"); err != nil {
+		return false
+	}
+	image, err := checks.serviceImage(managed.StandaloneWindowsGatewaySvc)
+	return err == nil && secureClientLayoutMatches(roots, deployment.State, image)
+}
+
+func secureClientLayoutMatches(roots winpath.EnterpriseRoots, state winpath.EnterpriseDeploymentState, image string) bool {
+	return secureClientDeploymentMayBeInstalled(state) && secureClientServiceMatches(roots, image)
+}
+
+func secureClientDeploymentMayBeInstalled(state winpath.EnterpriseDeploymentState) bool {
+	return state == winpath.EnterpriseDeploymentInstalled || state == winpath.EnterpriseDeploymentUnknown
+}
+
+func secureClientServiceMatches(roots winpath.EnterpriseRoots, image string) bool {
+	if roots.Profile != winpath.EnterpriseProfileSecureClient {
+		return false
+	}
+	return standaloneGatewayServiceImageMatches(image, roots.InstallRoot+`\bin\defenseclaw-gateway.exe`) == nil
 }
 
 var managedHostWindowsStandalone = func() (string, bool) {
