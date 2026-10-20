@@ -52,6 +52,7 @@ WHEEL_SECURITY_FLOOR_CONTRACT = {
     "python-multipart": (">=0.0.31", None),
     "urllib3": (">=2.8.0", None),
     "idna": (">=3.15", None),
+    "certifi": (">=2026.10.19", None),
     "pydantic-settings": (">=2.14.2", None),
     "aiohttp": (">=3.14.4,<4", None),
     "multidict": (">=6.9.1,<7", None),

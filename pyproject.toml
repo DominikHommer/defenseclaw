@@ -20,6 +20,8 @@ dependencies = [
     "python-multipart>=0.0.31",
     "urllib3>=2.8.0",
     "idna>=3.15",
+    # GHSA-6q48-6c7w-9gw2 is fixed in 2026.10.19.
+    "certifi>=2026.10.19",
     "pydantic-settings>=2.14.2",
     # CVE-2026-59881 and CVE-2026-69243/69244 are fixed by 3.14.3;
     # GHSA-2g87-pp6c-29x5 and CVE-2026-111063/111064 by 3.14.4.
@@ -233,6 +235,7 @@ override-dependencies = [
     # CVE-2026-44431/44432 fixed in 2.7.0; CVE-2026-97687..97689 fixed in 2.8.0.
     "urllib3>=2.8.0",
     "idna>=3.15",               # CVE-2026-45409 fixed in 3.15
+    "certifi>=2026.10.19",     # GHSA-6q48-6c7w-9gw2 fixed in 2026.10.19
     "pydantic-settings>=2.14.2", # GHSA-4xgf-cpjx-pc3j fixed in 2.14.2
     # aiohttp 3.13.4 fixes a batch of HTTP-parser CVEs (CVE-2026-22815,
     # CVE-2026-34513..34520, CVE-2026-34525); 3.14.0 additionally fixes
