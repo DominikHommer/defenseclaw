@@ -43,23 +43,34 @@ import (
 // Secure Client hosts are unaffected: only the standalone profile writes the
 // marker, and their record lives under the Secure Client roots, which this
 // profile's inspection never reads.
-// secureClientHost reports an installed Secure Client profile only when its
-// roots come from machine registration and its protected gateway service is
-// registered for that profile. A state directory alone is not proof.
+// secureClientHost uses machine roots, a trusted installation, and its
+// registered service. An ordinary user may be unable to read the protected
+// deployment record; that does not demote an otherwise verified installation.
 var secureClientHost = func() bool {
 	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
 	if err != nil {
 		return false
 	}
 	deployment, err := winpath.InspectEnterpriseDeploymentAt(roots.Profile, roots.MetadataPath)
-	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled {
+	if err != nil || !secureClientDeploymentMayBeInstalled(deployment.State) {
 		return false
 	}
 	if err := managed.ValidateTrustedRuntimeDir(roots.InstallRoot, "Secure Client installation"); err != nil {
 		return false
 	}
+	if err := managed.ValidateTrustedFilePath(roots.InstallRoot+`\bin\defenseclaw-gateway.exe`, "Secure Client gateway executable"); err != nil {
+		return false
+	}
 	image, err := windowsServiceImagePath(managed.StandaloneWindowsGatewaySvc)
-	return err == nil && secureClientServiceMatches(roots, image)
+	return err == nil && secureClientLayoutMatches(roots, deployment.State, image)
+}
+
+func secureClientLayoutMatches(roots winpath.EnterpriseRoots, state winpath.EnterpriseDeploymentState, image string) bool {
+	return secureClientDeploymentMayBeInstalled(state) && secureClientServiceMatches(roots, image)
+}
+
+func secureClientDeploymentMayBeInstalled(state winpath.EnterpriseDeploymentState) bool {
+	return state == winpath.EnterpriseDeploymentInstalled || state == winpath.EnterpriseDeploymentUnknown
 }
 
 func secureClientServiceMatches(roots winpath.EnterpriseRoots, image string) bool {

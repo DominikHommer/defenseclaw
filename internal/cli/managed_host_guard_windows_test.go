@@ -44,6 +44,33 @@ func TestSecureClientClassificationIgnoresProcessMachineRootEnvironment(t *testi
 	}
 }
 
+func TestSecureClientLayoutClassificationWithProtectedMetadata(t *testing.T) {
+	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	if err != nil {
+		t.Skipf("machine roots unavailable: %v", err)
+	}
+	serviceImage := roots.InstallRoot + `\bin\defenseclaw-gateway.exe`
+	for _, tc := range []struct {
+		name  string
+		state winpath.EnterpriseDeploymentState
+		image string
+		want  bool
+	}{
+		{"installed", winpath.EnterpriseDeploymentInstalled, serviceImage, true},
+		{"standard user cannot read metadata", winpath.EnterpriseDeploymentUnknown, serviceImage, true},
+		{"no installation", winpath.EnterpriseDeploymentAbsent, serviceImage, false},
+		{"removed installation", winpath.EnterpriseDeploymentTombstone, serviceImage, false},
+		{"no service", winpath.EnterpriseDeploymentUnknown, "", false},
+		{"spoofed service path", winpath.EnterpriseDeploymentUnknown, `C:\Users\Sample\Controlled\bin\defenseclaw-gateway.exe`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := secureClientLayoutMatches(roots, tc.state, tc.image); got != tc.want {
+				t.Fatalf("Secure Client layout = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestWindowsManagedRecordTrustUsesRealACLs checks the guard's validators on
 // real NTFS security descriptors: an administrator-owned record in an
 // administrator-only tree is trusted, and the same record owned by the Users

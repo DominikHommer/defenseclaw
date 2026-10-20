@@ -637,6 +637,11 @@ async function defenseclawLogFailOpen(reason, category) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
 {{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+{{if not .Managed}}      if (DC_FAIL_MODE === "open") {
+        await defenseclawLogFailOpen("invalid gateway verdict", "response");
+        return null;
+      }
+{{end}}
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
 {{end}}{{end}}    const out = data && data.hook_output;

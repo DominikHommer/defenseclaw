@@ -20,6 +20,93 @@ func TestOpenCodeClosedPluginRejectsUnusableAnswers(t *testing.T) {
 	}
 }
 
+func TestOpenCodeExplicitPerUserOpenAllowsUnusableAnswer(t *testing.T) {
+	server := openCodeStubGateway(t, `{}`, `{"action":"unknown"}`)
+	data := openCodePluginTestData(t, server)
+	data.FailMode = "open"
+	lines := runOpenCodePluginHarness(t, data, 2)
+	if len(lines) != 2 || lines[0] != "allow" || lines[1] != "allow" {
+		t.Fatalf("explicit per-user open rejected unusable answers: %q", lines)
+	}
+}
+
+func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX hooks")
+	}
+	noJQPath := t.TempDir()
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.Name() == "jq" || entry.IsDir() {
+				continue
+			}
+			source := filepath.Join(dir, entry.Name())
+			target := filepath.Join(noJQPath, entry.Name())
+			if _, err := os.Lstat(target); err == nil {
+				continue
+			}
+			_ = os.Symlink(source, target)
+		}
+	}
+	for _, parser := range []struct {
+		name, path string
+	}{
+		{"jq available", os.Getenv("PATH")},
+		{"jq absent", noJQPath},
+	} {
+		if parser.name == "jq available" {
+			if _, err := exec.LookPath("jq"); err != nil {
+				continue
+			}
+		}
+		for _, verdict := range []struct {
+			name, body string
+			exitCode   int
+		}{
+			{"allow", `{"action":"allow"}`, 0},
+			{"block", `{"action":"block"}`, 2},
+			{"missing", `{}`, 2},
+			{"unknown", `{"action":"unrecognized"}`, 2},
+			{"non-string", `{"action":42}`, 2},
+		} {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, verdict.body)
+			}))
+			dir := t.TempDir()
+			if err := writeHookScriptsCommonWithFailMode(dir, strings.TrimPrefix(server.URL, "http://"), "test-token", "closed", nil); err != nil {
+				server.Close()
+				t.Fatal(err)
+			}
+			bakeHookPathForTest(t, filepath.Join(dir, "inspect-request.sh"), parser.path)
+			for _, name := range []string{"inspect-request.sh", "inspect-tool.sh", "inspect-response.sh", "inspect-tool-response.sh"} {
+				t.Run(parser.name+"/"+verdict.name+"/"+name, func(t *testing.T) {
+					cmd := exec.Command("bash", filepath.Join(dir, name))
+					cmd.Env = append(os.Environ(), "PATH="+parser.path, "DEFENSECLAW_HOME="+t.TempDir(), "DEFENSECLAW_FAIL_MODE=closed")
+					cmd.Stdin = strings.NewReader(`{"tool":"Bash","input":"echo marker","content":"marker"}`)
+					output, err := cmd.CombinedOutput()
+					got := 0
+					if err != nil {
+						exit, ok := err.(*exec.ExitError)
+						if !ok {
+							t.Fatalf("run hook: %v, output=%q", err, output)
+						}
+						got = exit.ExitCode()
+					}
+					if got != verdict.exitCode {
+						t.Fatalf("hook exit=%d, want=%d, output=%q", got, verdict.exitCode, output)
+					}
+				})
+			}
+			server.Close()
+		}
+	}
+}
+
 func TestInspectShellClosedRejectsMissingAndUnknownActions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hooks")

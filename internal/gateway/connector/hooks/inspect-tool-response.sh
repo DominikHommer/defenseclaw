@@ -191,7 +191,7 @@ ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 {{else}}# Only a recognized string action is a usable gateway verdict.
-ACTION=$(echo "$RESULT" | _dc_jq -r 'if (.action | type) == "string" then .action else empty end' 2>/dev/null) || {
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 case "$ACTION" in
