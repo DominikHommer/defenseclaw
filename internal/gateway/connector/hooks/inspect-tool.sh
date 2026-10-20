@@ -150,11 +150,9 @@ if [ -n "$RUNTIME_CONNECTOR" ]; then
   CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}")
 fi
 
-# The tool input reaches jq on stdin and the gateway on a curl descriptor:
-# on a command line it would be readable by every local account, and an
-# input over the argument size limit would make jq fail to start.
-INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | jq -Rs --arg tool "$TOOL_NAME" \
-  '{tool: $tool, args: .}')" || {
+# The tool input reaches the JSON encoder on stdin and the gateway on a curl
+# descriptor, never on a command line.
+INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | defenseclaw_inspect_tool_body "$TOOL_NAME" args)" || {
   fail_unreachable "failed to build inspect body"
 }
 {{if .Sandbox}}RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool" "$INSPECT_BODY" \

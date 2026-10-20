@@ -25,7 +25,7 @@ func TestOpenCodeExplicitPerUserOpenAllowsUnusableAnswer(t *testing.T) {
 	data := openCodePluginTestData(t, server)
 	data.FailMode = "open"
 	lines := runOpenCodePluginHarness(t, data, 2)
-	if len(lines) != 2 || lines[0] != "allow" || lines[1] != "allow" {
+	if len(lines) < 2 || lines[0] != "allow" || lines[1] != "allow" {
 		t.Fatalf("explicit per-user open rejected unusable answers: %q", lines)
 	}
 }

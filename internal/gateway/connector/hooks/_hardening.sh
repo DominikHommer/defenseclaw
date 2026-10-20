@@ -448,6 +448,24 @@ defenseclaw_json_escape() {
   return 0
 }
 
+# Build the inspect tool request without placing tool content on argv. jq is
+# optional on host hooks; Python provides the same JSON string encoding when
+# jq is unavailable. Without either encoder the caller refuses the request.
+defenseclaw_inspect_tool_body() {
+  local tool="$1" field="$2"
+  case "$field" in args|output) ;; *) return 1 ;; esac
+  if command -v jq >/dev/null 2>&1; then
+    case "$field" in
+      args) jq -Rs --arg tool "$tool" '{tool: $tool, args: .}' ;;
+      output) jq -Rs --arg tool "$tool" '{tool: $tool, output: .}' ;;
+    esac
+  elif _dc_python3_usable; then
+    python3 -c 'import json,sys; print(json.dumps({"tool":sys.argv[1],sys.argv[2]:sys.stdin.read()}))' "$tool" "$field"
+  else
+    return 1
+  fi
+}
+
 # defenseclaw_json_string_field extracts a simple top-level JSON string field.
 # It is intentionally small: hook block/allow parsing only needs fields like
 # "action" and "reason" when jq is unavailable (common in Git Bash on Windows).
