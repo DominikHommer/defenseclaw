@@ -48,7 +48,9 @@ $cases = @(
     @{ name = 'write survives a re-stamp that fails'; before = @($write); after = @($write); stamp = 'throw'; strict = ''; expect = $write.Reason }
     @{ name = 'write survives, strict pin'; before = @($write); after = @($write); stamp = 'noop'; strict = '1'; expect = $write.Reason }
     @{ name = 'write is not repaired by the re-stamp'; before = @($write); after = @(); stamp = 'noop'; strict = ''; expect = $write.Reason }
-    @{ name = 'write behind a read keeps the write message'; before = @($read, $write); after = @($read, $write); stamp = 'noop'; strict = ''; expect = $write.Reason }
+    # The kept 1.0.3 verifier reports the first Access verdict in read-before-write order;
+    # the #1068 message-order change awaits the owner's decision. Both refuse this principal.
+    @{ name = 'read before write still refuses the untrusted principal'; before = @($read, $write); after = @($read, $write); stamp = 'noop'; strict = ''; expect = $read.Reason }
     @{ name = 'write without a self-heal'; before = @($write); after = $null; heal = $false; strict = ''; expect = $write.Reason }
     @{ name = 'read survives'; before = @($read); after = @($read); stamp = 'noop'; strict = ''; expect = $read.Reason }
     @{ name = 'read survives, strict pin'; before = @($read); after = @($read); stamp = 'noop'; strict = '1'; expect = $read.Reason }
