@@ -177,3 +177,47 @@ func TestQueuedForeignHookSessionExchangeEndsAtTheRestartBudget(t *testing.T) {
 		t.Fatalf("exchange = %q, error %v; want no answer and the restart named", response, err)
 	}
 }
+
+// B-40: a gateway that sent the exchange's headers and part of its body,
+// then stalled, is cut off at the answer budget like one that sends no
+// headers; the guard then denies.
+func TestForeignHookSessionExchangeBodyStallEndsAtTheAnswerBudget(t *testing.T) {
+	shortAnswerBudget(t, 400*time.Millisecond)
+	previousProbe := standaloneGatewayServiceProbe
+	standaloneGatewayServiceProbe = func(context.Context) (gatewayServiceState, error) {
+		return gatewayServiceState{Active: "active", Sub: "running"}, nil
+	}
+	t.Cleanup(func() { standaloneGatewayServiceProbe = previousProbe })
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Length", "64")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"deny":false}`)
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { close(release); _ = server.Close() })
+
+	opts := standaloneExchangeOptions(socket, time.Now())
+	opts.Event = "PreToolUse"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	started := time.Now()
+	response, err := ExchangeForeignHookSession(ctx, opts, "claudecode", []byte(`{}`))
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("the exchange whose body stalled waited %s", elapsed)
+	}
+	if err == nil || response != nil || !ManagedGatewayNoAnswer(err) {
+		t.Fatalf("exchange = %q, error %v; want no answer and the no-answer cause", response, err)
+	}
+}
