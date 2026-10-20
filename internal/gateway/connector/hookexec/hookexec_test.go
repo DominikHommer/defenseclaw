@@ -159,20 +159,28 @@ func TestClaudeAndCodexNativeOutputAgreesWithGatewayAction(t *testing.T) {
 				mode = "managed"
 			}
 			for _, tc := range []struct {
-				name     string
-				action   string
-				decision string
-				blocked  bool
-				failed   bool
+				name        string
+				action      string
+				decision    string
+				outputEvent string
+				blocked     bool
+				failed      bool
 			}{
 				{name: "block with allow output", action: "block", decision: "allow", blocked: true, failed: true},
+				{name: "block for another event", action: "block", decision: "deny", outputEvent: "UserPromptSubmit", blocked: true, failed: true},
 				{name: "block with deny output", action: "block", decision: "deny", blocked: true},
+				{name: "confirm with allow output", action: "confirm", decision: "allow", blocked: true, failed: true},
+				{name: "confirm with ask output", action: "confirm", decision: "ask"},
 				{name: "allow", action: "allow", decision: "allow"},
 			} {
 				t.Run(connector+"/"+mode+"/"+tc.name, func(t *testing.T) {
 					var home string
-					body := fmt.Sprintf(`{"action":%q,"reason":"policy reason",%q:{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":%q}}}`,
-						tc.action, field, tc.decision)
+					outputEvent := tc.outputEvent
+					if outputEvent == "" {
+						outputEvent = "PreToolUse"
+					}
+					body := fmt.Sprintf(`{"action":%q,"reason":"policy reason",%q:{"hookSpecificOutput":{"hookEventName":%q,"permissionDecision":%q}}}`,
+						tc.action, field, outputEvent, tc.decision)
 					r := run(t, connector, ok(body), func(o *Options) {
 						o.FailMode = "closed"
 						o.ManagedEnterprise = managed
@@ -186,8 +194,8 @@ func TestClaudeAndCodexNativeOutputAgreesWithGatewayAction(t *testing.T) {
 						if !denied || strings.Contains(r.stdout, `"permissionDecision":"allow"`) {
 							t.Fatalf("block result: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
 						}
-					} else if r.code != 0 || !strings.Contains(r.stdout, `"permissionDecision":"allow"`) {
-						t.Fatalf("allow result: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+					} else if r.code != 0 || !strings.Contains(r.stdout, `"permissionDecision":"`+tc.decision+`"`) {
+						t.Fatalf("native result: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
 					}
 					log, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
 					if tc.failed {
