@@ -95,6 +95,10 @@ def request(url, payload=None, *, ai=False):
             raise ValueError("upstream response exceeds bound")
         text = content.decode("utf-8")
         return text if parsed.netloc == "raw.githubusercontent.com" else decode(text)
+    except urllib.error.HTTPError as error:
+        if error.code == 404 and parsed.netloc == "raw.githubusercontent.com":
+            raise FileNotFoundError("pinned source not found") from None
+        raise ValueError("upstream request failed; credentials and response withheld") from None
     except (urllib.error.URLError, OSError, UnicodeError, ValueError):
         raise ValueError("upstream request failed; credentials and response withheld") from None
 
@@ -157,10 +161,17 @@ def path_ok(path):
     )
 
 
-def files(repo, number, fetch=request):
+def files(repo, number, fetch=request, *, revision=None):
+    if revision is not None and not SHA.fullmatch(revision):
+        raise ValueError("invalid inventory revision")
+    resource = f"commits/{revision}" if revision else f"pulls/{number}/files"
     result = []
     for page in range(1, 11):
-        batch = api(repo, f"pulls/{number}/files?per_page=100&page={page}", fetch)
+        batch = api(repo, f"{resource}?per_page=100&page={page}", fetch)
+        if revision:
+            if not isinstance(batch, dict) or batch.get("sha") != revision:
+                raise ValueError("merge inventory revision mismatch")
+            batch = batch["files"]
         if not isinstance(batch, list) or len(batch) > 100:
             raise ValueError("invalid PR file inventory")
         for row in batch:
@@ -203,12 +214,18 @@ def dependency_path(path, spec):
         re.I,
     ):
         return False
-    if re.search(spec["notify_paths"], path):
-        return True
+    if re.search(spec["quiet_paths"], path):
+        return False
     # New source/config locations still get review; only known non-dependencies are quiet.
-    return bool(re.search(r"\.(?:rs|go|py|[cm]?[jt]sx?|json|toml|ya?ml|sh|ps1)$", path)) and not re.search(
-        spec["quiet_paths"], path
+    return bool(
+        re.search(spec["notify_paths"], path) or re.search(r"\.(?:rs|go|py|[cm]?[jt]sx?|json|toml|ya?ml|sh|ps1)$", path)
     )
+
+
+def has_content_edit(row):
+    edits = [line[1:] for line in (row.get("patch") or "").splitlines() if line.startswith(("+", "-"))]
+    # Missing patches and file moves/removals are not cosmetic. Blank-only edits stay local.
+    return row["status"] != "modified" or not edits or any(line.strip() for line in edits)
 
 
 def priority(row, spec):
@@ -368,13 +385,7 @@ def ai_review(packet, fetch=request):
     return result
 
 
-def inspect_pr(pr, spec, requirements, root, fetch=request, ai=False):
-    repo, revision = spec["repository"], pr["merge_commit_sha"]
-    position(pr)
-    inventory = files(repo, pr["number"], fetch)
-    selected = sorted((row for row in inventory if relevant(row, spec)), key=lambda row: priority(row, spec))
-    parent = api(repo, f"commits/{revision}", fetch)["parents"][0]["sha"] if selected else ""
-    contract, context = local_context(spec, root) if selected else ({}, {})
+def snapshots(repo, parent, revision, selected, fetch):
     changes = []
     for row in selected[:10]:
         previous = row.get("previous_filename", row["filename"])
@@ -385,11 +396,32 @@ def inspect_pr(pr, spec, requirements, root, fetch=request, ai=False):
                 "after": "" if row["status"] == "removed" else raw(repo, revision, row["filename"], fetch),
             }
         )
+    return changes
+
+
+def inspect_pr(pr, spec, requirements, root, fetch=request, ai=False):
+    repo, revision = spec["repository"], pr["merge_commit_sha"]
+    position(pr)
+    inventory = files(repo, pr["number"], fetch)
+    selected = sorted((row for row in inventory if relevant(row, spec)), key=lambda row: priority(row, spec))
+    parent = api(repo, f"commits/{revision}", fetch)["parents"][0]["sha"] if selected else ""
+    contract, context = local_context(spec, root) if selected else ({}, {})
+    inventory_source = "pull_request"
+    try:
+        changes = snapshots(repo, parent, revision, selected, fetch)
+    except FileNotFoundError:
+        # Merge conflict resolutions can make the PR's original paths stale. Normalize once;
+        # another missing source, transport error or incomplete inventory remains a visible gap.
+        inventory = files(repo, pr["number"], fetch, revision=revision)
+        selected = sorted((row for row in inventory if relevant(row, spec)), key=lambda row: priority(row, spec))
+        changes = snapshots(repo, parent, revision, selected, fetch)
+        inventory_source = "merge_commit"
     proven = conflicts(changes, contract, context, spec)
     result = {
         "connector": spec["name"],
         "number": pr["number"],
         "revision": revision,
+        "inventory_source": inventory_source,
         "files": [row["filename"] for row in inventory],
         "analyzed_files": [c["path"] for c in changes],
         "omitted_files": [row["filename"] for row in selected[10:]],
@@ -424,7 +456,8 @@ def inspect_pr(pr, spec, requirements, root, fetch=request, ai=False):
     notification_paths = [
         row["filename"]
         for row in selected
-        if any(dependency_path(path, spec) for path in (row["filename"], row.get("previous_filename", "")))
+        if has_content_edit(row)
+        and any(dependency_path(path, spec) for path in (row["filename"], row.get("previous_filename", "")))
     ]
     return result, notice(spec["name"], pr, notification_paths)
 

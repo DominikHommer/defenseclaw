@@ -33,7 +33,7 @@
       "repository": "anthropics/claude-code",
       "paths": "hook|settings|managed|policy",
       "notify_paths": "^(?:CHANGELOG\\.md$|mods/sec-default/hooks/|(?:src|lib)/|examples/settings/.*settings\\.json$)|(?:^|/)(?:managed-)?settings\\.json$",
-      "quiet_paths": "^(?:examples/|plugins/|mods/(?:diff|telemetry|agents-md)/)",
+      "quiet_paths": "^(?:examples/|plugins/|mods/(?:types/|tsconfig\\.json$|(?:diff|telemetry|agents-md)/))",
       "priority_paths": "^mods/sec-default/hooks/register\\.ts$",
       "local_files": [
         "internal/gateway/claude_code_hook.go",
