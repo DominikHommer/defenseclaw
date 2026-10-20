@@ -291,7 +291,7 @@ func windowsEnterpriseHotConfigApply(
 	// (GAP-0601). Who is enrolled and which connectors are is applied too:
 	// the gateway reads neither at start on Windows, and the targets are
 	// refreshed below (GAP-0716).
-	restart, err := configwrite.ManagedConfigRestartRequired(previous, next)
+	restart, err := configwrite.ManagedConfigRestartRequired(previous, next, configwrite.ManagedDefaultsFor(layout))
 	if err != nil {
 		return unavailable("cannot classify the config change: " + err.Error())
 	}

@@ -42,6 +42,16 @@ var bundleInstalledConfig = func(platform string) ([]byte, error) {
 	return safefile.ReadRegularFileBounded(layout.ConfigPath, bundleInstalledConfigMaxBytes)
 }
 
+// bundleManagedDefaults are the omitted-setting values of this device's
+// layout; none when the layout does not resolve, so every change counts.
+func bundleManagedDefaults(platform string) configwrite.ManagedDefaults {
+	layout, err := enterprisebundle.Layout(platform)
+	if err != nil {
+		return configwrite.ManagedDefaults{}
+	}
+	return configwrite.ManagedDefaultsFor(layout)
+}
+
 // bundleRestartPrediction is restart_prediction: whether applying the
 // verified bundle restarts the gateway (managed hooks fail closed while it
 // restarts), so an agent can apply a required one only in its maintenance
@@ -59,8 +69,9 @@ type bundleRestartPrediction struct {
 // change, runs the full transaction for a Codex protection change and
 // restarts the gateway alone for the start-only keys (Windows hot config).
 // not_required still restarts a gateway that is down or does not adopt the
-// change in time, as the apply does.
-func predictBundleRestart(goos string, installed []byte, readErr error, next []byte) *bundleRestartPrediction {
+// change in time, as the apply does. defaults are the device's, as the
+// apply passes them.
+func predictBundleRestart(goos string, defaults configwrite.ManagedDefaults, installed []byte, readErr error, next []byte) *bundleRestartPrediction {
 	unknown := &bundleRestartPrediction{GatewayRestart: bundleRestartUnknown, ReasonCodes: []string{restartReasonInstalledUnreadable}}
 	if readErr != nil || len(installed) == 0 {
 		return unknown
@@ -75,7 +86,7 @@ func predictBundleRestart(goos string, installed []byte, readErr error, next []b
 			return &bundleRestartPrediction{GatewayRestart: bundleRestartUnknown, ReasonCodes: []string{restartReasonFleetSetup}}
 		}
 	}
-	restart, err := configwrite.ManagedConfigRestartRequired(installed, next)
+	restart, err := configwrite.ManagedConfigRestartRequired(installed, next, defaults)
 	if err != nil {
 		return unknown
 	}
@@ -137,5 +148,5 @@ func bundleVerifyRestartPrediction(platform string, out *enterprisebundle.Verify
 		return &bundleRestartPrediction{GatewayRestart: bundleRestartNotRequired, ReasonCodes: []string{restartReasonAlreadyApplied}}
 	}
 	installed, err := bundleInstalledConfig(platform)
-	return predictBundleRestart(platform, installed, err, out.Rendered)
+	return predictBundleRestart(platform, bundleManagedDefaults(platform), installed, err, out.Rendered)
 }

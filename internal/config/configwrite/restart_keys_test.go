@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // A restart-required change is reported as the setting it belongs to: never
@@ -32,7 +34,7 @@ func TestRestartSettingPatterns(t *testing.T) {
 		{"guardrail:\n  mode: observe\n", "guardrail:\n  mode: action\n", nil},
 		{"fleet:\n  enabled: false\n", "fleet:\n  enabled: true\n", []string{"fleet.enabled"}},
 	} {
-		restart, err := ManagedConfigRestartRequired([]byte(tc.before), []byte(tc.after))
+		restart, err := ManagedConfigRestartRequired([]byte(tc.before), []byte(tc.after), ManagedDefaults{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -57,5 +59,37 @@ func TestRestartSettingPatternsShape(t *testing.T) {
 	}
 	if got := RestartSettingPatterns([]string{"enterprise.Section9"}); len(got) != 0 {
 		t.Fatalf("a section outside the schema key shape is reported: %v", got)
+	}
+}
+
+// A setting one config omits and the other spells out at the device's
+// default is no change; any other value, an unparseable installed config
+// and no defaults still count (F03).
+func TestManagedConfigRestartRequiredResolvesOmittedDefaults(t *testing.T) {
+	unix := ManagedDefaultsFor(managed.StandaloneLayout{GOOS: "linux", DataDir: "/var/lib/defenseclaw", APIAddr: "127.0.0.1:18970"})
+	windows := ManagedDefaults{GOOS: "windows", DataDir: `C:\ProgramData\Cisco\DefenseClaw\runtime`, APIBind: "127.0.0.1", APIPort: 18970}
+	const rest = "guardrail:\n  mode: observe\n"
+	const listener = "gateway:\n  api_bind: 127.0.0.1\n  api_port: 18970\n"
+	for _, tc := range []struct {
+		name          string
+		defaults      ManagedDefaults
+		before, after string
+		want          []string
+	}{
+		{"data_dir omitted", unix, "data_dir: /var/lib/defenseclaw\n" + rest, rest, nil},
+		{"data_dir spelled out", unix, rest, "data_dir: /var/lib/defenseclaw/\n" + rest, nil},
+		{"listener omitted", unix, listener + rest, rest, nil},
+		{"empty api_bind", unix, listener + rest, "gateway:\n  api_bind: \"\"\n" + rest, nil},
+		{"Windows data_dir spelling", windows, `data_dir: 'c:/programdata/cisco/defenseclaw/runtime\'` + "\n" + rest, rest, nil},
+		{"other data_dir", unix, "data_dir: /srv/dc\n" + rest, rest, []string{"data_dir"}},
+		{"other port", unix, listener + rest, "gateway:\n  api_port: 18971\n" + rest, []string{"gateway.api_port"}},
+		{"other gateway key", unix, listener + rest, "gateway:\n  port: 1\n" + rest, []string{"gateway.port"}},
+		{"no defaults", ManagedDefaults{}, "data_dir: /var/lib/defenseclaw\n" + rest, rest, []string{"data_dir"}},
+		{"unparseable installed config", unix, "data_dir: [", "data_dir: /var/lib/defenseclaw\n" + rest, []string{"data_dir"}},
+	} {
+		got, err := ManagedConfigRestartRequired([]byte(tc.before), []byte(tc.after), tc.defaults)
+		if err != nil || !slices.Equal(got, tc.want) {
+			t.Fatalf("%s: restart %v (%v), want %v", tc.name, got, err, tc.want)
+		}
 	}
 }

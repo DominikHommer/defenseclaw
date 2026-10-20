@@ -571,13 +571,16 @@ func ManagedRestartRequired(changed []string) []string {
 // ManagedConfigRestartRequired classifies a managed config change for the
 // gateway on every platform. Callers may have additional platform-specific
 // work (such as refreshing hook targets), but use this classification for
-// the gateway's reload decision.
-func ManagedConfigRestartRequired(before, after []byte) ([]string, error) {
+// the gateway's reload decision. A setting one config omits and the other
+// spells out at the value the device resolves the omission to (defaults)
+// is no change. Bundle verify's restart_prediction and the apply both
+// classify with it, so they agree (F03).
+func ManagedConfigRestartRequired(before, after []byte, defaults ManagedDefaults) ([]string, error) {
 	changed, err := ChangedPaths(before, after)
 	if err != nil {
 		return nil, err
 	}
-	return ManagedRestartRequired(changed), nil
+	return ManagedRestartRequired(defaults.dropUnchanged(before, after, changed)), nil
 }
 
 // RestartRequired returns the paths in changed that need a gateway restart.

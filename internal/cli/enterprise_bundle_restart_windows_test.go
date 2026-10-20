@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
@@ -40,7 +41,7 @@ func TestWindowsBundleRestartPredictionMatchesTheHotPath(t *testing.T) {
 		{"Fleet enabled", base, base + "fleet:\n  enabled: true\n", bundleRestartUnknown, restartReasonFleetSetup},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			predicted := predictBundleRestart("windows", []byte(tc.previous), nil, []byte(tc.next))
+			predicted := predictBundleRestart("windows", configwrite.ManagedDefaults{}, []byte(tc.previous), nil, []byte(tc.next))
 			if predicted.GatewayRestart != tc.want || (tc.reason != "" && !slices.Contains(predicted.ReasonCodes, tc.reason)) {
 				t.Fatalf("prediction = %+v, want %s %s", predicted, tc.want, tc.reason)
 			}
