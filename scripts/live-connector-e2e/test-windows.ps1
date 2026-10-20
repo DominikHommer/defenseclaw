@@ -2830,7 +2830,7 @@ threading.Event().wait()
         $invokeHookFunction -notmatch 'Start-Sleep -Milliseconds 800') `
         'hook evidence uses session, event, and tool-scoped bounded polling instead of a fixed 800ms delay'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
-    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'packaged-acceptance', 'connector-contract')) {
+    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'package-verify', 'packaged-acceptance', 'connector-contract')) {
         Assert-True ($nativeWorkflowText -match "(?m)^\s{6}- $([regex]::Escape($job))\s*$") "aggregate depends on $job"
         $requiredJob = [regex]::Match(
             $nativeWorkflowText,
@@ -2844,12 +2844,13 @@ threading.Event().wait()
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
         '(?m)^\s*run: \./scripts/initialize-windows-native-ci-paths\.ps1 '
-    ).Count -eq 6) 'every native Windows job uses the shared isolated-path initializer'
+    ).Count -eq 7) 'every native Windows job uses the shared isolated-path initializer'
     foreach ($leafContract in @(
         '-Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}"',
         "-Leaf ('py-' + `$env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + `$env:PYTHON_SHARD)",
         '-Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell',
         '-Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist',
+        '-Leaf pkv -DiagnosticsLeaf windows-native-diagnostics-package-verify -ArtifactLeaf windows-native-dist',
         '-Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist',
         "-Leaf ('ct-' + `$env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + `$env:CONNECTOR) -ArtifactLeaf windows-native-dist"
     )) {
@@ -2880,7 +2881,7 @@ threading.Event().wait()
         'native self-test rebinds child-only authority below the Profile Known Folder without weakening the shared guard'
     Assert-True ($nativePathInitializerText -match 'Join-Path \$env:RUNNER_TEMP \$DiagnosticsLeaf' -and
         $nativePathInitializerText -match 'Join-Path \$env:RUNNER_TEMP \$ArtifactLeaf' -and
-        [regex]::Matches($nativeWorkflowText, '-ArtifactLeaf windows-native-dist').Count -eq 3) `
+        [regex]::Matches($nativeWorkflowText, '-ArtifactLeaf windows-native-dist').Count -eq 4) `
         'shared initializer keeps diagnostics and artifacts under RUNNER_TEMP'
     Assert-True ($nativeHarnessText -match '\$approvedStateBase' -and
         $nativeHarnessText -match 'interactive setup acceptance requires StateRoot below RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT') `
@@ -2955,7 +2956,9 @@ threading.Event().wait()
         $nativeWorkflowText -match '''TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout''' -and
         $nativeWorkflowText -match 'foreach \(\$isolatedTest in \$connectorIsolatedTests\)' -and
         $nativeWorkflowText -match '''-run'', \(''\^'' \+ \[regex\]::Escape\(\$isolatedTest\) \+ ''\$''\), ''\./internal/gateway/connector''' -and
-        $nativeWorkflowText -match '\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway'' -and\s+\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector''' -and
+        $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway'',' -and
+        $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector'',' -and
+        $nativeWorkflowText -match '''--timings'', ''scripts/test-timings/go-windows\.json''' -and
         $nativeWorkflowText -match '\$remainingArguments = @\(') `
         'full native Go suite bounds gateway and connector selectors across sequential processes, isolates native lifecycle regressions, serializes gateway tests with process-global capture state, and separately selects every remaining package'
     Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
@@ -2976,8 +2979,8 @@ threading.Event().wait()
         'native process harness parses Go JSON only on failure, bounds collection, and reports the focused summary instead of the full JSON stream'
     Assert-True ($nativeWorkflowText -match 'Validate registered Windows Codex and Claude hook commands') 'native Windows workflow has a required Doctor hook-command step'
     Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests/test_cmd_doctor_windows_hooks\.py', '-q'") 'Doctor validates registered Windows hook commands explicitly'
-    Assert-True ($nativeWorkflowText -match 'shard: \[1, 2, 3, 4, 5, 6, 7, 8\]' -and
-        $nativeWorkflowText -match '''scripts/python_test_shards\.py'', ''--shard-count'', ''8'', ''--shard-index'', \[string\]\$shardIndex' -and
+    Assert-True ($nativeWorkflowText -match 'shard: \[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12\]' -and
+        $nativeWorkflowText -match '''scripts/python_test_shards\.py'', ''--shard-count'', ''12'', ''--shard-index'', \[string\]\$shardIndex' -and
         $nativeWorkflowText -match '\$shardSelectionArgs \+= @\(''--exclude'', \$telemetryFile\)' -and
         $nativeWorkflowText -match 'pytest-shard-\{0\}-files\.log' -and
         $nativeWorkflowText -match 'selected no ordinary test files' -and
@@ -2985,7 +2988,7 @@ threading.Event().wait()
         $nativeWorkflowText -match 'pytest-shard-\{0\}-ordinary\.log' -and
         $nativeWorkflowText -notmatch 'WINDOWS_TUI_MODE' -and
         $nativeWorkflowText -notmatch 'test_app_shell') `
-        'Windows Python suite balances every test file, the TUI suite included, across eight size-weighted shards'
+        'Windows Python suite balances every test file, the TUI suite included, across twelve time-weighted shards'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Local Splunk certification regressions') 'native Windows workflow has a required Local Splunk regression step'
     Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
     Assert-True ($nativeHarnessText -match 'function Initialize-WindowsNativeTestEnvironment' -and
@@ -3046,9 +3049,11 @@ threading.Event().wait()
         $interactiveInstallDefaults -match '(?s)state == nil.*?return opts.*?opts\.Action = "repair"') `
         'plain interactive reruns route valid existing installs to roster-preserving repair while fresh installs retain the selector'
     Assert-True ($nativeHarnessText -match "Invoke-WizardConfigureLaterAcceptance" -and
-        $nativeHarnessText -match "(?s)Invoke-WizardConnectorAcceptance.*?'codex' 'observe'.*?Invoke-WizardConnectorAcceptance.*?'claudecode' 'action'.*?Invoke-WizardConnectorAcceptance.*?'amp' 'action'" -and
-        $nativeHarnessText -match "foreach \(\`$wizardConnector in @\('copilot', 'cursor'\)\)") `
-        'setup acceptance performs Configure Later, reference mode installs, and the established additive connector wizard lifecycle samples'
+        $nativeHarnessText -match "(?s)Part = 'wizard-1'; Connector = 'codex'; Mode = 'observe'.*?Part = 'wizard-2'; Connector = 'claudecode'; Mode = 'action'.*?Part = 'wizard-2'; Connector = 'amp'; Mode = 'action'.*?Part = 'wizard-3'; Connector = 'copilot'; Mode = 'observe'.*?Part = 'wizard-3'; Connector = 'cursor'; Mode = 'observe'" -and
+        $nativeHarnessText -match '\$fixtureSearchPath \$userPathBefore \$wizardCell\.Connector \$wizardCell\.Mode' -and
+        $nativeWorkflowText -match 'part: \[wizard-1, wizard-2, wizard-3, lifecycle\]' -and
+        $nativeWorkflowText -match '-SetupAcceptancePart \$\{\{ matrix\.part \}\}') `
+        'setup acceptance performs Configure Later, reference mode installs, and the established additive connector wizard lifecycle samples, split across every CI part'
     $antigravitySupportedAvailability = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Assert-PackagedAntigravitySupportedAvailability\b.*?(?=\r?\nfunction )'

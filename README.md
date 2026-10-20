@@ -1,4 +1,3 @@
-<!-- doc-sync: last-spec=007 last-synced=2026-10-11 -->
 <div align="center">
 
 <pre>

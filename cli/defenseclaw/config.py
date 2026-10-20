@@ -2534,8 +2534,7 @@ class GuardrailConfig:
     # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
     # NEW-INSTALL-ONLY behavior change.
     #
-    # Secure Client exception (scoped to Secure Client by the owner
-    # decision on #1291): a config that resolves to the Secure Client profile
+    # Secure Client exception: a config that resolves to the Secure Client profile
     # and leaves ``hook_fail_mode`` unset loads as ``"open"``, and its
     # delivery fail mode is independent of the guardrail mode; an explicit
     # ``"closed"`` is always kept. See ``_apply_secure_client_hook_fail_default``.
@@ -6115,7 +6114,7 @@ def _normalize_hook_fail_mode(value: Any) -> str:
 def _apply_secure_client_hook_fail_default(cfg: Config, raw: dict[str, Any]) -> None:
     """Secure Client exception to the fail-closed hook default.
 
-    Per the owner decision on #1291, hooks fail open by default only under
+    Hooks fail open by default only under
     Secure Client: a document that resolves to the Secure Client profile
     (``deployment_mode: managed_enterprise`` and not the standalone profile,
     as Go ``SecureClientIntegration()``) loads an unset
@@ -7218,17 +7217,30 @@ def _exact_config_version(value: Any) -> int:
 
 
 def _audit_database_path(raw: dict[str, Any], data_dir: str) -> str:
-    """Resolve Python readers/writers to the same local store as config v8."""
+    """Resolve Python readers/writers to the same local store as config v8.
+
+    A leading ``~`` is the home folder and a relative path is under data_dir,
+    as the Go compiler resolves it. ``~/x`` used to be joined to data_dir
+    first, so it named ``<data_dir>/~/x`` (GAP-0005).
+    """
 
     observability = raw.get("observability")
     local = observability.get("local") if isinstance(observability, dict) else None
     configured = local.get("path") if isinstance(local, dict) else None
-    path = configured.strip() if isinstance(configured, str) else ""
+    path = _expand_store_home(configured.strip()) if isinstance(configured, str) else ""
     if not path:
         path = os.path.join(data_dir, AUDIT_DB_NAME)
     elif not os.path.isabs(path):
         path = os.path.join(data_dir, path)
-    return os.path.normpath(os.path.expanduser(path))
+    return os.path.normpath(path)
+
+
+def _expand_store_home(path: str) -> str:
+    """Expand ``~`` and ``~/`` (``~\\`` on Windows) like the Go compiler; not ``~user``."""
+    prefixes = ("~/", "~\\") if os.name == "nt" else ("~/",)
+    if path == "~" or path.startswith(prefixes):
+        return os.path.expanduser(path)
+    return path
 
 
 def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:

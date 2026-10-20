@@ -6083,7 +6083,7 @@ def _module_function(module: str, name: str) -> str:
 
 
 def test_gateway_service_logs_on_as_local_system() -> None:
-    """The gateway runs as LocalSystem, keeping its restricted
+    """The managed Windows gateway runs as LocalSystem, keeping its restricted
     service SID and single required privilege."""
     module = read(MODULE)
     assert "function Get-DefenseClawGatewayServiceAccount {\n    return 'LocalSystem'\n}" in module
@@ -6350,3 +6350,32 @@ def test_secure_client_user_runtime_cleanup_behavior(tmp_path: Path) -> None:
     assert outcome is not None and outcome["folder_removed"] is False
     assert (outside / "keep").exists()
     assert any("a link or junction; left as found" in entry for entry in outcome["remaining"])
+
+
+def test_production_uninstall_admits_native_cleanup_after_recorded_trust() -> None:
+    """GAP-0023: a production uninstall reads its deployment metadata only
+    under the lifecycle lock, so the unsigned installed CLI it passes as the
+    native cleanup executable is admitted there, after the hash-pinned trust
+    recorded in that metadata is loaded, and not by Authenticode at entry.
+    Standalone only: Secure Client is out of scope and keeps the entry check."""
+    module = read(MODULE)
+    lifecycle = _module_function(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    # Secure Client keeps admitting it at entry (out of scope for GAP-0023).
+    assert (
+        "$entryNativeCleanupBinary = if ($recoverProductionUninstallAcl -and\n"
+        "        (Test-DefenseClawStandaloneProfile)) {"
+    ) in lifecycle
+    entry = lifecycle.index("$sources = Get-DefenseClawLifecycleSources `")
+    entry_call = lifecycle[entry : lifecycle.index("-DeferredConfig:$DeferredConfig", entry)]
+    assert "-NativeCleanupBinary $entryNativeCleanupBinary `" in entry_call
+    assert "-NativeCleanupBinary $NativeCleanupBinary `" not in entry_call
+    repair = lifecycle.index("Repair-DefenseClawUninstallAdminFileAcl `")
+    admit = lifecycle.index("Add-DefenseClawProductionUninstallNativeCleanupSource `")
+    untrusted = lifecycle.index("return Invoke-DefenseClawUntrustedMetadataRecoveryPurge `")
+    forced = lifecycle.index("return Invoke-DefenseClawForcedUninstall `")
+    assert entry < repair < admit < untrusted < forced
+    helper = _module_function(module, "Add-DefenseClawProductionUninstallNativeCleanupSource")
+    assert helper.index("Initialize-DefenseClawRecordedPayloadTrust") < helper.index(
+        "Add-DefenseClawNativeCleanupSource"
+    )
+    assert "$MetadataTrusted" in helper and "Test-DefenseClawStandaloneProfile" in helper
