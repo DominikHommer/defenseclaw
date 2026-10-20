@@ -1222,6 +1222,24 @@ func platformBundleSessionStatus(parent context.Context) enterprisestatus.Sessio
 	if len(scanned.rows) > 4096 {
 		return unknown(fmt.Errorf("process cap reached"))
 	}
+	// Only sessions of the connectors the installed config enables can need
+	// a restart: an agent DefenseClaw does not manage on this device loads no
+	// DefenseClaw hook before or after a bundle (sidecar F04).
+	enabled, err := windowsEnterpriseEnrolledConnectors()
+	if err != nil {
+		return unknown(fmt.Errorf("read the installed config for its enabled connectors: %w", err))
+	}
+	managedConnector := make(map[string]bool, len(enabled))
+	for _, name := range enabled {
+		managedConnector[strings.ToLower(name)] = true
+	}
+	rows := make([]inventory.AgentProcess, 0, len(scanned.rows))
+	for _, row := range scanned.rows {
+		if managedConnector[strings.ToLower(row.Connector)] {
+			rows = append(rows, row)
+		}
+	}
+	scanned.rows = rows
 	layout, err := windowsBundleLayout()
 	if err != nil {
 		return unknown(err)
