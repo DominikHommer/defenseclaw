@@ -1100,6 +1100,13 @@ func windowsBundleHasCode(messages []enterprisestatus.Message, code string) bool
 	return false
 }
 
+// windowsBundleRollbackTarget is the confirmed bundle whose config a
+// rollback installs again.
+type windowsBundleRollbackTarget struct {
+	store *enterprisebundle.Store
+	ref   *enterprisebundle.Ref
+}
+
 // rollbackWindowsBundle installs the last good config again (the current
 // bundle config, or the config installed before the run while no bundle is
 // current) with a second ensure whose result is not printed: the result of
@@ -1122,7 +1129,10 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 	}
 	defer os.Remove(path)
 	rollback := *opts
-	rollback.bundle, rollback.bundleRollback = nil, true
+	rollback.bundle, rollback.bundleRollback, rollback.bundleRollbackTo = nil, true, nil
+	if ref != nil {
+		rollback.bundleRollbackTo = &windowsBundleRollbackTarget{store: run.driver.Store, ref: ref}
+	}
 	rollback.bundlePath, rollback.trustAnchors, rollback.configPath = "", "", path
 	rollback.jsonOutput = true
 	out := cmd.OutOrStdout()

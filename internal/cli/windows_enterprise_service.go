@@ -132,6 +132,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// internal ensure that puts the last good config back.
 	bundle         *windowsBundleRun
 	bundleRollback bool
+	// bundleRollbackTo is the confirmed bundle a rollback puts back (nil
+	// when the last good config is the one installed before any bundle),
+	// so the rollback write records that bundle's provenance again.
+	bundleRollbackTo *windowsBundleRollbackTarget
 	// bundleSettle is what a changing run that delivers no bundle settled
 	// of the receipts a killed bundle run left (GAP-1302).
 	bundleSettle *windowsBundleSettle
