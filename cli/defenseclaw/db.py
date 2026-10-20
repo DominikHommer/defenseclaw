@@ -500,7 +500,7 @@ class Store:
         self.db.commit()
 
     def _ensure_audit_connector_columns(self) -> None:
-        """Mirror Go's additive audit_events connector columns and indexes."""
+        """Mirror Go's additive audit_events connector columns."""
 
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()}
         for column, ddl in (
@@ -511,11 +511,11 @@ class Store:
         ):
             if column not in columns:
                 self.db.execute(ddl)
-        self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)")
-        self.db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp "
-            "ON audit_events(action, connector, timestamp DESC)"
-        )
+        # No reader filters audit_events on connector (the TUI filters it in
+        # memory), so neither idx_audit_connector nor
+        # idx_audit_action_connector_timestamp is created: each was one more
+        # B-tree page per audit row in the gateway's write-ahead log, and the
+        # gateway drops them (unreadAuditIndexes in internal/audit/store.go).
         self.db.commit()
 
     def _ensure_v8_alert_projection_schema(self) -> None:

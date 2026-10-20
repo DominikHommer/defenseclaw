@@ -354,3 +354,49 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 		t.Fatalf("alice's exchange = %d", code)
 	}
 }
+
+// GAP-0186: a managed flood of one account at 10 hook calls a second was
+// refused with enterprise_managed_rate_limited once each call took 6-7 s:
+// the calls held the caller's in-flight slots (8 on a host of two processors
+// or fewer) far past the rate budget. With the hook path back near 40 ms a
+// call, 10 calls a second hold under one slot and none is refused; the
+// in-flight bound still refuses a caller whose calls each take a second.
+func TestHookCallerLimiterAdmitsTenCallsASecondOfOneAccount(t *testing.T) {
+	flood := func(service time.Duration) (refused int) {
+		now := time.Unix(4_000_000, 0)
+		// The global minimum, as on a host of two processors.
+		limiter := &hookCallerLimiter{now: func() time.Time { return now }, globalInFlight: hookGlobalInFlightMin}
+		type held struct {
+			until   time.Time
+			release func()
+		}
+		var running []held
+		for call := range 600 {
+			now = time.Unix(4_000_000, 0).Add(time.Duration(call) * 100 * time.Millisecond)
+			kept := running[:0]
+			for _, request := range running {
+				if request.until.After(now) {
+					kept = append(kept, request)
+				} else {
+					request.release()
+				}
+			}
+			running = kept
+			release, _, refusal, _ := limiter.acquire("1001")
+			if refusal != "" {
+				refused++
+				continue
+			}
+			running = append(running, held{until: now.Add(service), release: release})
+		}
+		return refused
+	}
+	for _, service := range []time.Duration{40 * time.Millisecond, 500 * time.Millisecond} {
+		if refused := flood(service); refused != 0 {
+			t.Fatalf("10 calls a second taking %s each: %d of 600 refused, want 0", service, refused)
+		}
+	}
+	if refused := flood(time.Second); refused == 0 {
+		t.Fatal("10 calls a second taking 1 s each were all admitted; the in-flight bound did not apply")
+	}
+}

@@ -44,6 +44,11 @@ func (s *Store) RefreshPlannerStatistics(ctx context.Context) (bool, error) {
 	if ctx == nil {
 		return false, fmt.Errorf("audit: planner statistics context is required")
 	}
+	// ANALYZE holds the writer connection. While the WAL is over its limit it
+	// waits for the next interval, so the checkpoint copies get their gaps.
+	if s.walPressure.Load() {
+		return false, nil
+	}
 	release, err := s.acquireReady()
 	if err != nil {
 		return false, err
