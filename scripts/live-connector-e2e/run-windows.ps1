@@ -9478,11 +9478,12 @@ function Invoke-ContractRun {
     Invoke-Setup observe
     Assert-DoctorHookRegistration
     if ($Connector -eq 'amp') {
-        # Observe keeps a plugin without a connector override open outside
-        # Secure Client, even when the global delivery policy is closed.
-        # Round-trip the global policy and restore closed for the action phase,
-        # where the Windows registration assertion below verifies it takes effect.
-        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        # Outside Secure Client an unset or closed delivery policy is closed in
+        # observe mode too (owner rule); only an explicit open opens the
+        # plugin. Round-trip the global policy and restore closed for the
+        # action phase, where the Windows registration assertion below
+        # verifies it takes effect.
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
         # A failed restore must not mask the open-mode failure that caused
         # it: keep the primary error, warn about the restore, rethrow primary.
         $ampFailModeError = $null
@@ -9501,7 +9502,7 @@ function Invoke-ContractRun {
             Write-Warning "Amp fail-mode restore to closed failed after the open-mode check failed: $($_.Exception.Message)"
         }
         if ($null -ne $ampFailModeError) { throw $ampFailModeError }
-        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
     }
     Invoke-DangerousCommandCorpus observe
     $blockEvent = if ($Connector -eq 'amp') { 'tool.call' } else { 'PreTool-block' }
@@ -9518,7 +9519,7 @@ function Invoke-ContractRun {
     }
     Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
     if ($Connector -eq 'amp') {
-        Write-Result 'amp:delivery-mode-contract' pass 'global policy updates preserve observe compatibility; restored closed policy renders in action mode'
+        Write-Result 'amp:delivery-mode-contract' pass 'observe follows the global policy (closed, explicit open, restored closed); restored closed policy renders in action mode'
     }
     $session = Join-Path $golden 'session_start.json'
     $sessionEvent = if ($Connector -eq 'amp') { 'session.start' } else { 'SessionStart' }

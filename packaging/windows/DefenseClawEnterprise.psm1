@@ -22955,32 +22955,19 @@ function Assert-DefenseClawRecordedArtifactHashes {
     else {
         @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
     }
-    $strict = Test-DefenseClawTrustStrictAncestors
+    # Every gap below refuses the lifecycle action (rel-1-0-3: the retired
+    # Fleet compiler and the upgrade and uninstall hash gates); main's #1068
+    # warn-and-continue posture is not taken.
     foreach ($required in $requiredArtifacts) {
         if ($required -notin $ReplacedArtifacts -and
             $null -eq $Metadata.hashes.PSObject.Properties[$required]) {
-            if ($strict) {
-                throw "deployment metadata is missing required artifact hash: $required"
-            }
-            # Bulldoze posture: metadata is already corrupt. Refusing to
-            # proceed strands the install both ways (uninstall can't clean
-            # what install won't adopt; reinstall can't recover drift
-            # without a replacement upgrade). Warn and continue - the
-            # lifecycle caller re-records hashes on commit.
-            Write-DefenseClawAclSelfHealAdvisory `
-                -Path 'deployment.hashes' `
-                -Reason "metadata is missing required artifact hash: $required (continuing bulldoze)"
+            throw "deployment metadata is missing required artifact hash: $required"
         }
     }
     if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.CLIPath -PathType Leaf) -and
         'cli' -notin $ReplacedArtifacts -and
         $null -eq $Metadata.hashes.PSObject.Properties['cli']) {
-        if ($strict) {
-            throw 'deployment metadata does not authenticate the installed CLI'
-        }
-        Write-DefenseClawAclSelfHealAdvisory `
-            -Path 'deployment.hashes.cli' `
-            -Reason 'metadata does not authenticate the installed CLI (continuing bulldoze)'
+        throw 'deployment metadata does not authenticate the installed CLI'
     }
     foreach ($property in $Metadata.hashes.PSObject.Properties) {
         if ($property.Name -in $ReplacedArtifacts) {
@@ -22988,13 +22975,7 @@ function Assert-DefenseClawRecordedArtifactHashes {
         }
         $path = Get-DefenseClawArtifactPath -Layout $Layout -Name $property.Name
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
-            if ($strict) {
-                throw "recorded managed artifact is missing before lifecycle mutation: $($property.Name)"
-            }
-            Write-DefenseClawAclSelfHealAdvisory `
-                -Path $path `
-                -Reason "recorded artifact is missing before mutation: $($property.Name) (continuing bulldoze)"
-            continue
+            throw "recorded managed artifact is missing before lifecycle mutation: $($property.Name)"
         }
         Assert-DefenseClawNoReparsePath -Path $path
         $actual = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
@@ -23003,16 +22984,11 @@ function Assert-DefenseClawRecordedArtifactHashes {
             [string]$property.Value,
             [StringComparison]::OrdinalIgnoreCase
         )) {
-            if ($strict) {
-                throw (
-                    "$Action refuses unrecorded artifact hash drift: $($property.Name) " +
-                    "at $path does not match deployment metadata; run Upgrade with " +
-                    "the replacement for $($property.Name) to re-record it"
-                )
-            }
-            Write-DefenseClawAclSelfHealAdvisory `
-                -Path $path `
-                -Reason "$Action encountered artifact hash drift on $($property.Name) (continuing bulldoze; re-record on commit)"
+            throw (
+                "$Action refuses unrecorded artifact hash drift: $($property.Name) " +
+                "at $path does not match deployment metadata; run Upgrade with " +
+                "the replacement for $($property.Name) to re-record it"
+            )
         }
     }
 }
@@ -24313,6 +24289,7 @@ function Assert-DefenseClawManagedInstallTree {
     $managedIPCSocketPath = (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ManagedIPCSocketPath)
     $refuseUnexpected = (Test-DefenseClawTrustStrictAncestors) -or
         (Test-DefenseClawStandaloneProfile)
+    $retiredLibRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($Layout.InstallRoot, 'lib')).TrimEnd('\')
     $allowedDirectories = @(
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
@@ -24396,6 +24373,12 @@ function Assert-DefenseClawManagedInstallTree {
             )) {
             throw "refusing to remove managed install tree containing a reparse point: $($item.FullName)"
         }
+        # The retired lib tree (the 1.0.2 Fleet compiler's lib\defenseclaw)
+        # keeps its refusal on every profile, Secure Client included
+        # (rel-1-0-3 GAP-0270, GAP-0274): an unexpected item there is never
+        # bulldozed with the tree.
+        $inRetiredLib = [string]::Equals($full.TrimEnd('\'), $retiredLibRoot, [StringComparison]::OrdinalIgnoreCase) -or
+            $full.StartsWith($retiredLibRoot + '\', [StringComparison]::OrdinalIgnoreCase)
         if ($item.PSIsContainer) {
             if ($full -notin $allowedDirectories) {
                 # Bulldoze posture: unexpected directories inside InstallRoot
@@ -24407,7 +24390,7 @@ function Assert-DefenseClawManagedInstallTree {
                 # The standalone profile keeps its refusal (GAP-1190): an
                 # item DefenseClaw did not install there stops the uninstall
                 # before anything changes.
-                if ($refuseUnexpected) {
+                if ($refuseUnexpected -or $inRetiredLib) {
                     throw "refusing to remove unexpected directory from managed install root: $full"
                 }
                 Write-DefenseClawAclSelfHealAdvisory `
@@ -24417,7 +24400,7 @@ function Assert-DefenseClawManagedInstallTree {
             }
         }
         elseif ($full -notin $allowedFiles) {
-            if ($refuseUnexpected) {
+            if ($refuseUnexpected -or $inRetiredLib) {
                 throw "refusing to remove unexpected file from managed install root: $full"
             }
             Write-DefenseClawAclSelfHealAdvisory `
