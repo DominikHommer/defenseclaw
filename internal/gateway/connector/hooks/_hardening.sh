@@ -692,7 +692,7 @@ else:
   # String-only last resort: covers action / reason / block_reason. Object
   # fields cannot be decoded safely without jq or python3, so fail instead of
   # returning an empty value that could turn a structured deny into allow.
-  local _dcjq_field _dcjq_default _dcjq_default_kind _dcjq_value _dcjq_json _dcjq_status
+  local _dcjq_field _dcjq_default _dcjq_default_kind _dcjq_value _dcjq_json _dcjq_status _dcjq_strict
   case "$_dcjq_filter" in
     .|"") cat >/dev/null; return 1 ;;
   esac
@@ -721,7 +721,11 @@ else:
   case "$_dcjq_field" in
     action|reason|block_reason|decision|permissionDecision|permissionDecisionReason|hook_event_name)
       _dcjq_json="$(cat)"
-      if _dcjq_value="$(defenseclaw_json_string_field "$_dcjq_json" "$_dcjq_field")"; then
+      # An action decides whether a tool call proceeds. In the string-only
+      # fallback, require the entire response to be one complete object.
+      _dcjq_strict=""
+      [ "$_dcjq_field" != action ] || _dcjq_strict=strict
+      if _dcjq_value="$(defenseclaw_json_string_field "$_dcjq_json" "$_dcjq_field" "$_dcjq_strict")"; then
         printf '%s\n' "$_dcjq_value"
       else
         _dcjq_status=$?

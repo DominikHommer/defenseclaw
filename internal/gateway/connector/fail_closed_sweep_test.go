@@ -35,6 +35,7 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 		t.Skip("POSIX hooks")
 	}
 	noJQPath := t.TempDir()
+	noEncoderPath := t.TempDir()
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -50,6 +51,9 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 				continue
 			}
 			_ = os.Symlink(source, target)
+			if !strings.HasPrefix(entry.Name(), "python") {
+				_ = os.Symlink(source, filepath.Join(noEncoderPath, entry.Name()))
+			}
 		}
 	}
 	for _, parser := range []struct {
@@ -57,6 +61,7 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 	}{
 		{"jq available", os.Getenv("PATH")},
 		{"jq absent", noJQPath},
+		{"jq and python absent", noEncoderPath},
 	} {
 		if parser.name == "jq available" {
 			if _, err := exec.LookPath("jq"); err != nil {
@@ -68,6 +73,10 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 			exitCode   int
 		}{
 			{"allow", `{"action":"allow"}`, 0},
+			{"leading junk", `garbage{"action":"allow"}`, 2},
+			{"trailing junk", `{"action":"allow"}garbage`, 2},
+			{"second value", `{"action":"allow"}{"action":"block"}`, 2},
+			{"truncated", `{"action":"allow"`, 2},
 			{"block", `{"action":"block"}`, 2},
 			{"missing", `{}`, 2},
 			{"unknown", `{"action":"unrecognized"}`, 2},
@@ -97,8 +106,12 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 						}
 						got = exit.ExitCode()
 					}
-					if got != verdict.exitCode {
-						t.Fatalf("hook exit=%d, want=%d, output=%q", got, verdict.exitCode, output)
+					want := verdict.exitCode
+					if parser.name == "jq and python absent" && verdict.name == "allow" && (name == "inspect-tool.sh" || name == "inspect-tool-response.sh") {
+						want = 2 // The 1.0.2 tool hooks also needed jq to encode the body.
+					}
+					if got != want {
+						t.Fatalf("hook exit=%d, want=%d, output=%q", got, want, output)
 					}
 				})
 			}
