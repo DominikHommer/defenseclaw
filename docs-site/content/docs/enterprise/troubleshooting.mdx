@@ -312,11 +312,11 @@ organization's policy and may name "SSH authorized keys mutation." Split the
 command into smaller calls. Per-user mode is not affected.
 
 On Windows, a sustained flood of about 10 hook calls a second for many minutes
-can grow the DefenseClaw audit log (`audit.db-wal`) to several GB. It can grow
-faster than it is checkpointed. The gateway log warns that the audit WAL file
-is over its 1024 MiB bound. The `audit.db-wal` file shrinks back once calls slow down. Every
-hook call still gets a fail-closed decision, and no decision is dropped. Linux
-and macOS are not affected. This is fixed in 1.0.4.
+can grow the DefenseClaw audit log (`audit.db-wal`) up to about 20 GB. Hook
+answers can slow down as it grows, and a few calls can be blocked (fail closed)
+while the log resets. This never causes a call to be allowed. Keep several tens
+of GB free on the system drive if you expect such floods. The file shrinks back
+once the flood stops. This is fixed in 1.0.4.
 
 ## Symptoms
 
