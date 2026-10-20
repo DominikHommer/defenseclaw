@@ -147,6 +147,63 @@ func claudeBlocked(r runResult) bool {
 		(strings.Contains(r.stdout, `"permissionDecision":"deny"`) || strings.Contains(r.stdout, `"decision":"block"`)))
 }
 
+func TestClaudeAndCodexNativeOutputAgreesWithGatewayAction(t *testing.T) {
+	for _, connector := range []string{"claudecode", "codex"} {
+		field := "claude_code_output"
+		if connector == "codex" {
+			field = "codex_output"
+		}
+		for _, managed := range []bool{false, true} {
+			mode := "per-user closed"
+			if managed {
+				mode = "managed"
+			}
+			for _, tc := range []struct {
+				name     string
+				action   string
+				decision string
+				blocked  bool
+				failed   bool
+			}{
+				{name: "block with allow output", action: "block", decision: "allow", blocked: true, failed: true},
+				{name: "block with deny output", action: "block", decision: "deny", blocked: true},
+				{name: "allow", action: "allow", decision: "allow"},
+			} {
+				t.Run(connector+"/"+mode+"/"+tc.name, func(t *testing.T) {
+					var home string
+					body := fmt.Sprintf(`{"action":%q,"reason":"policy reason",%q:{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":%q}}}`,
+						tc.action, field, tc.decision)
+					r := run(t, connector, ok(body), func(o *Options) {
+						o.FailMode = "closed"
+						o.ManagedEnterprise = managed
+						home = o.Home
+					})
+					if tc.blocked {
+						denied := claudeBlocked(r)
+						if connector == "codex" {
+							denied = r.code == 0 && strings.Contains(r.stdout, `"permissionDecision":"deny"`)
+						}
+						if !denied || strings.Contains(r.stdout, `"permissionDecision":"allow"`) {
+							t.Fatalf("block result: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+						}
+					} else if r.code != 0 || !strings.Contains(r.stdout, `"permissionDecision":"allow"`) {
+						t.Fatalf("allow result: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+					}
+					log, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+					if tc.failed {
+						if err != nil || !strings.Contains(string(log), `"reason":"native output contradicts gateway action"`) ||
+							!strings.Contains(string(log), `"fail_mode":"closed"`) {
+							t.Fatalf("missing closed failure record: log=%q err=%v", log, err)
+						}
+					} else if err == nil && strings.Contains(string(log), "native output contradicts gateway action") {
+						t.Fatalf("valid decision recorded as contradiction: %q", log)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestRunPrefersConnectorScopedToken(t *testing.T) {
 	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
 		opts.Token = "generic-env"

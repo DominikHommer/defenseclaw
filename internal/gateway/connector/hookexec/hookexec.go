@@ -1275,6 +1275,12 @@ func (sp spec) decide(opts Options, body []byte) int {
 		!nativeOutputAgrees(sp, opts.Event, action, output) {
 		return failNativeDecision(opts, sp, "native output contradicts gateway action")
 	}
+	if !opts.SecureClient && output != "" && (action == "block" || action == "confirm") &&
+		(sp.style == styleClaudeCode || sp.style == styleCodex) &&
+		(sp.style != styleCodex || codexEventCanControl(opts.HookContractID, opts.Event)) &&
+		!nativeOutputAgrees(sp, opts.Event, action, output) {
+		return failResponse(opts, sp, "closed", "native output contradicts gateway action")
+	}
 
 	switch sp.style {
 	case styleClaudeCode:
@@ -1455,6 +1461,12 @@ func managedNativeBlockableEvent(connector, event string) bool {
 // directive beside a block action; the native directive wins at the agent.
 func nativeOutputAgrees(sp spec, event, action, output string) bool {
 	blockable := managedNativeBlockableEvent(sp.connector, event)
+	if sp.style == styleClaudeCode {
+		blockable = true
+	}
+	if sp.style == styleCodex {
+		blockable = codexEventCanControl("codex-hooks-v4", event)
+	}
 	if sp.dialect == copilotVSCodeLocalSurface && (event == "PreToolUse" || event == "UserPromptSubmit") {
 		blockable = true
 	}
@@ -1470,6 +1482,39 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 		want = "ask"
 	}
 	switch sp.connector {
+	case "claudecode", "codex":
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(fields["hookSpecificOutput"], &nested) == nil && nested != nil {
+			if outputEvent, ok := rawString(nested, "hookEventName"); ok && outputEvent != event {
+				return false
+			}
+			switch event {
+			case "PreToolUse":
+				return rawStringOr(nested, "permissionDecision", "") == want
+			case "PermissionRequest":
+				var decision map[string]json.RawMessage
+				return json.Unmarshal(nested["decision"], &decision) == nil &&
+					rawStringOr(decision, "behavior", "") == want
+			case "Elicitation", "ElicitationResult":
+				return action == "block" && rawStringOr(nested, "action", "") == "decline"
+			case "UserPromptSubmit":
+				// Older Codex contracts also carry a prompt denial here.
+				if sp.style == styleCodex && rawStringOr(nested, "permissionDecision", "") == want {
+					return true
+				}
+			}
+		}
+		if event == "PreToolUse" || event == "PermissionRequest" || event == "Elicitation" || event == "ElicitationResult" {
+			return false
+		}
+		if action == "confirm" {
+			return rawStringOr(fields, "decision", "") == "ask"
+		}
+		if event == "SessionStart" || event == "PreCompact" || event == "PostCompact" {
+			var continued bool
+			return sp.style == styleCodex && json.Unmarshal(fields["continue"], &continued) == nil && !continued
+		}
+		return rawStringOr(fields, "decision", "") == "block"
 	case "cursor":
 		if event == "beforeSubmitPrompt" {
 			var continued bool
