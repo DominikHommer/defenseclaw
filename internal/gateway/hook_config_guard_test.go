@@ -37,9 +37,11 @@ func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 		for _, tc := range []struct {
 			name, global, override, wantObserve, wantAction string
 		}{
-			{"default", "", "", "open", "closed"},
+			// A per-user fail mode that is not set is closed in observe mode
+			// too; only an explicit open opens (rel-1-0-3 resolver).
+			{"default", "", "", "closed", "closed"},
 			{"explicit-open", "open", "", "open", "open"},
-			{"global-closed", "closed", "", "open", "closed"},
+			{"global-closed", "closed", "", "closed", "closed"},
 			{"override-open", "closed", "open", "open", "open"},
 			{"override-closed", "open", "closed", "closed", "closed"},
 		} {

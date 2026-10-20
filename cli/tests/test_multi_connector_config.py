@@ -279,8 +279,11 @@ class TestEffectiveResolvers(unittest.TestCase):
                 doc = base + f"guardrail: {{mode: {mode}}}\n"
                 self.assertEqual(self._load_hook_fail_mode(doc, "amp"), unset)
             with self.subTest(mode=mode, policy="closed"):
+                # Under Secure Client observe mode a global closed is not the
+                # connector's own value, so it stays open there (Go
+                # effectiveHookFailModeForMode); action mode keeps it.
                 doc = base + f"guardrail: {{mode: {mode}, hook_fail_mode: closed}}\n"
-                self.assertEqual(self._load_hook_fail_mode(doc, "amp"), "closed")
+                self.assertEqual(self._load_hook_fail_mode(doc, "amp"), unset)
             with self.subTest(mode=mode, policy="override-closed"):
                 doc = base + (
                     f"guardrail: {{mode: {mode}, connectors: {{amp: {{hook_fail_mode: closed}}}}}}\n"

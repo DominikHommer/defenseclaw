@@ -927,7 +927,7 @@ func validateWindowsNamespacePurgeNode(
 	if directory != node.directory || identity != node.identity {
 		return fmt.Errorf("enterprise hooks: Windows namespace purge object identity changed: %s", node.label)
 	}
-	if allowACLDiff && !(root && rootQuarantined) {
+	if allowACLDiff && (!root || !rootQuarantined) {
 		// The uninstall purges are authorized by a protected
 		// identity-bound intent, not by each child's mutable DACL. Every
 		// inode is still pinned exclusively, type-checked without following,

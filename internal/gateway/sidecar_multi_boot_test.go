@@ -2817,6 +2817,9 @@ func assertPathMissing(t *testing.T, path string) {
 // TestConnectorSetupOptsHookFailModeOpenOnlyUnderSecureClient: the gateway
 // renders an unset hook fail mode open only under Secure Client (#1163), and
 // tells the renderer so; every other install renders it closed.
+// The setup opts carry the Secure Client delivery flag, and an unset action
+// mode fail mode is closed for every profile, Secure Client included (the
+// #1163 Secure Client unset-is-open default is not taken in 1.0.3).
 func TestConnectorSetupOptsHookFailModeOpenOnlyUnderSecureClient(t *testing.T) {
 	for _, tc := range []struct {
 		name, deploymentMode, profile, want string
@@ -2824,7 +2827,7 @@ func TestConnectorSetupOptsHookFailModeOpenOnlyUnderSecureClient(t *testing.T) {
 	}{
 		{"oss", "", "", "closed", false},
 		{"standalone", "managed_enterprise", "standalone", "closed", false},
-		{"secure_client", "managed_enterprise", "secure_client", "open", true},
+		{"secure_client", "managed_enterprise", "secure_client", "closed", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := multiBootSidecar(t)

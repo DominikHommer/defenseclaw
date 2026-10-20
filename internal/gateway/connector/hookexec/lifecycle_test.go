@@ -13,7 +13,6 @@ import (
 	"testing"
 )
 
-
 func TestNeutralLifecycleEventsExactSets(t *testing.T) {
 	want := map[string][]string{
 		"claudecode": {"Stop", "SubagentStop", "TeammateIdle", "StopFailure", "SessionEnd"},
