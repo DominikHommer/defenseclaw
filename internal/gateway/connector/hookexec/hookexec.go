@@ -1485,7 +1485,7 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 	case "claudecode", "codex":
 		var nested map[string]json.RawMessage
 		if json.Unmarshal(fields["hookSpecificOutput"], &nested) == nil && nested != nil {
-			if outputEvent, ok := rawString(nested, "hookEventName"); ok && outputEvent != event {
+			if outputEvent := rawStringOr(nested, "hookEventName", ""); outputEvent != "" && outputEvent != event {
 				return false
 			}
 			switch event {
