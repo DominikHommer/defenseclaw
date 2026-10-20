@@ -172,7 +172,7 @@ func loadConfigAtPath(b *Bundle, root, configPath, dataDir, platform string) (*c
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(message))
 	}
 	if _, err := config.ParseCompileObservabilityV8(configPath, rendered, config.ObservabilityV8CompileOptions{
-		DefaultDataDir: dataDir, Secrets: bundleSecretProbe{},
+		DefaultDataDir: dataDir, Secrets: bundleSecretProbe{}, TolerateDeniedPaths: true,
 	}); err != nil {
 		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
 	}
@@ -234,7 +234,7 @@ func validateTargetConfig(b *Bundle, cfg *config.Config, rendered []byte, platfo
 			return refuse(CodeConfigInvalid, ConfigName, "%s", boundedDetail(err.Error()))
 		}
 		compiled, err := config.ParseCompileObservabilityV8(cfg.ConfigFilePath, rendered, config.ObservabilityV8CompileOptions{
-			DefaultDataDir: layout.DataDir, Secrets: bundleSecretProbe{},
+			DefaultDataDir: layout.DataDir, Secrets: bundleSecretProbe{}, TolerateDeniedPaths: true,
 		})
 		if err != nil {
 			return refuse(CodeConfigInvalid, ConfigName, "%s: %s", platform, boundedDetail(err.Error()))
