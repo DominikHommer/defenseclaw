@@ -114,7 +114,7 @@ Installing as `root` is supported but discouraged — DefenseClaw is per-user by
 Agent-specific dependencies and quirks live on the
 [connector pages](/docs/connectors#platform-support).
 
-The shell inspect hooks need `jq` or `python3` and block tool calls when neither is installed.
+The shell inspect hooks need `jq` or `python3`. If neither is installed, they block every checked call (or, with an explicit per-user open, let it go ahead with a notice).
 
 ## What's bundled (LLM backends)
 

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -35,6 +36,7 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 		t.Skip("POSIX hooks")
 	}
 	noJQPath := t.TempDir()
+	jqOnlyPath := t.TempDir()
 	noEncoderPath := t.TempDir()
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		entries, err := os.ReadDir(dir)
@@ -42,7 +44,7 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 			continue
 		}
 		for _, entry := range entries {
-			if entry.Name() == "jq" || entry.IsDir() {
+			if entry.IsDir() {
 				continue
 			}
 			source := filepath.Join(dir, entry.Name())
@@ -50,21 +52,31 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 			if _, err := os.Lstat(target); err == nil {
 				continue
 			}
-			_ = os.Symlink(source, target)
-			if !strings.HasPrefix(entry.Name(), "python") {
+			if entry.Name() != "jq" {
+				_ = os.Symlink(source, target)
+			}
+			if !strings.HasPrefix(entry.Name(), "python") && entry.Name() != "jq" {
 				_ = os.Symlink(source, filepath.Join(noEncoderPath, entry.Name()))
+			}
+			if !strings.HasPrefix(entry.Name(), "python") {
+				_ = os.Symlink(source, filepath.Join(jqOnlyPath, entry.Name()))
 			}
 		}
 	}
 	for _, parser := range []struct {
 		name, path string
 	}{
-		{"jq available", os.Getenv("PATH")},
-		{"jq absent", noJQPath},
+		{"jq only", jqOnlyPath},
+		{"python only", noJQPath},
 		{"jq and python absent", noEncoderPath},
 	} {
-		if parser.name == "jq available" {
+		if parser.name == "jq only" {
 			if _, err := exec.LookPath("jq"); err != nil {
+				continue
+			}
+		}
+		if parser.name == "python only" {
+			if _, err := exec.LookPath("python3"); err != nil {
 				continue
 			}
 		}
@@ -75,6 +87,7 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 			{"allow", `{"action":"allow"}`, 0},
 			{"leading junk", `garbage{"action":"allow"}`, 2},
 			{"trailing junk", `{"action":"allow"}garbage`, 2},
+			{"invalid member", `{"action":"allow",garbage}`, 2},
 			{"second value", `{"action":"allow"}{"action":"block"}`, 2},
 			{"truncated", `{"action":"allow"`, 2},
 			{"block", `{"action":"block"}`, 2},
@@ -82,7 +95,9 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 			{"unknown", `{"action":"unrecognized"}`, 2},
 			{"non-string", `{"action":42}`, 2},
 		} {
+			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, verdict.body)
 			}))
@@ -94,8 +109,9 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 			bakeHookPathForTest(t, filepath.Join(dir, "inspect-request.sh"), parser.path)
 			for _, name := range []string{"inspect-request.sh", "inspect-tool.sh", "inspect-response.sh", "inspect-tool-response.sh"} {
 				t.Run(parser.name+"/"+verdict.name+"/"+name, func(t *testing.T) {
+					hookHome := t.TempDir()
 					cmd := exec.Command("bash", filepath.Join(dir, name))
-					cmd.Env = append(os.Environ(), "PATH="+parser.path, "DEFENSECLAW_HOME="+t.TempDir(), "DEFENSECLAW_FAIL_MODE=closed")
+					cmd.Env = append(os.Environ(), "PATH="+parser.path, "DEFENSECLAW_HOME="+hookHome, "DEFENSECLAW_FAIL_MODE=closed")
 					cmd.Stdin = strings.NewReader(`{"tool":"Bash","input":"echo marker","content":"marker"}`)
 					output, err := cmd.CombinedOutput()
 					got := 0
@@ -107,8 +123,15 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 						got = exit.ExitCode()
 					}
 					want := verdict.exitCode
-					if parser.name == "jq and python absent" && verdict.name == "allow" && (name == "inspect-tool.sh" || name == "inspect-tool-response.sh") {
-						want = 2 // The 1.0.2 tool hooks also needed jq to encode the body.
+					if parser.name == "jq and python absent" {
+						want = 2
+						if !strings.Contains(string(output), "DefenseClaw needs jq or python3 to check this call") {
+							t.Fatalf("missing dependency notice: %q", output)
+						}
+						failure, readErr := os.ReadFile(filepath.Join(hookHome, "logs", "hook-failures.jsonl"))
+						if readErr != nil || !strings.Contains(string(failure), `"fail_mode":"closed"`) {
+							t.Fatalf("missing closed failure record: %v %q", readErr, failure)
+						}
 					}
 					if got != want {
 						t.Fatalf("hook exit=%d, want=%d, output=%q", got, want, output)
@@ -116,7 +139,62 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 				})
 			}
 			server.Close()
+			if parser.name == "jq and python absent" && calls.Load() != 0 {
+				t.Fatalf("hook sent %d requests without a verdict parser", calls.Load())
+			}
 		}
+	}
+}
+
+func TestInspectShellNoParserExplicitOpenNotice(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX hooks")
+	}
+	path := t.TempDir()
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || entry.Name() == "jq" || strings.HasPrefix(entry.Name(), "python") {
+				continue
+			}
+			target := filepath.Join(path, entry.Name())
+			if _, err := os.Lstat(target); os.IsNotExist(err) {
+				_ = os.Symlink(filepath.Join(dir, entry.Name()), target)
+			}
+		}
+	}
+	for _, name := range []string{"inspect-request.sh", "inspect-tool.sh", "inspect-response.sh", "inspect-tool-response.sh"} {
+		t.Run(name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				_, _ = io.WriteString(w, `{"action":"allow"}`)
+			}))
+			defer server.Close()
+			dir := t.TempDir()
+			if err := writeHookScriptsCommonWithFailMode(dir, strings.TrimPrefix(server.URL, "http://"), "test-token", "open", nil); err != nil {
+				t.Fatal(err)
+			}
+			bakeHookPathForTest(t, filepath.Join(dir, name), path)
+			hookHome := t.TempDir()
+			cmd := exec.Command("bash", filepath.Join(dir, name))
+			cmd.Env = append(os.Environ(), "PATH="+path, "DEFENSECLAW_HOME="+hookHome, "DEFENSECLAW_FAIL_MODE=open")
+			cmd.Stdin = strings.NewReader(`{"tool":"Bash","content":"marker"}`)
+			output, err := cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(output), "DefenseClaw needs jq or python3 to check this call") || !strings.Contains(string(output), "allowing") {
+				t.Fatalf("open notice missing: err=%v output=%q", err, output)
+			}
+			failure, err := os.ReadFile(filepath.Join(hookHome, "logs", "hook-failures.jsonl"))
+			if err != nil || !strings.Contains(string(failure), `"fail_mode":"open"`) {
+				t.Fatalf("missing open failure record: %v %q", err, failure)
+			}
+			if calls.Load() != 0 {
+				t.Fatalf("hook sent %d requests without a verdict parser", calls.Load())
+			}
+		})
 	}
 }
 
