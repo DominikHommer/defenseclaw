@@ -250,6 +250,8 @@ final class AppState {
 
     // Alerts state
     var unackedAlerts: [AlertRow] = []
+    /// A failed canonical alert refresh leaves the last good rows visible.
+    var alertLoadError: String?
     var dismissedIDs: Set<String> = []
     var overviewEnforcementMetrics = OverviewEnforcementMetrics()
     /// Last `alerts acknowledge` failure, surfaced in the popover/panel.
@@ -289,6 +291,8 @@ final class AppState {
     var sessionTotalScans = 0
     /// True while a background diagnose probe is running (⇧⌘D).
     var diagnoseRunning = false
+    /// Reserves installation rebinding and mutating commands during a runtime replacement.
+    private(set) var runtimeUpgradeRunID: UUID?
 
     var alertPanelRequest: AlertPanelRequest?
     var auditPresetRequest: String?
@@ -476,6 +480,11 @@ final class AppState {
 
     private func installationSnapshotIsCurrent(_ generation: Int) -> Bool {
         !installationBindInProgress && generation == installationGeneration
+    }
+
+    /// Inspection reads must stop when their installation is rebound.
+    func sandboxInspectionMayRead(generation: Int) -> Bool {
+        installationSnapshotIsCurrent(generation) && runtimeUpgradeRunID == nil
     }
 
     /// No state derived from one config/data root may survive a path switch.
