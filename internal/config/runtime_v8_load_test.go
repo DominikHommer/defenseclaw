@@ -734,14 +734,14 @@ func TestSecureClientSkillScannerOmittedDefaults(t *testing.T) {
 	}
 }
 
-// An omitted guardrail.hook_fail_mode keeps the platform "closed" default in
-// action mode under every profile, Secure Client included (the #1163 Secure
-// Client open default is not taken in 1.0.3), and an explicit "closed" wins.
+// An omitted guardrail.hook_fail_mode resolves to open only under Secure
+// Client (#1163); other profiles keep the platform "closed" default, and an
+// explicit "closed" wins under Secure Client.
 func TestSecureClientHookFailModeOmittedDefault(t *testing.T) {
 	for _, source := range []struct {
 		name, yaml, profile, want string
 	}{
-		{"secure_client/omitted", "guardrail: {mode: action}", "secure_client", "closed"},
+		{"secure_client/omitted", "guardrail: {mode: action}", "secure_client", "open"},
 		{"secure_client/explicit_closed", "guardrail: {mode: action, hook_fail_mode: closed}", "secure_client", "closed"},
 		{"standalone/omitted", "guardrail: {mode: action}", "standalone", "closed"},
 	} {

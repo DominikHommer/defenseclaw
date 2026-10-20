@@ -2815,10 +2815,6 @@ func TestManagedCopilotHookDeniesWhenDefenseClawCannotDecide(t *testing.T) {
 // (#1163): open allows an unreachable gateway or an unreadable response and
 // logs fail_open; closed, strict availability and an enrollment refusal
 // still deny in Copilot's own shape.
-// A managed Copilot hook, Secure Client included, blocks a tool call DefenseClaw
-// cannot check: the #1163 Secure Client Copilot open delivery is not taken in
-// 1.0.3 (main-sync review rulings 1 and 2), so an open mode does not turn a
-// stopped gateway or an unreadable response into an allow.
 func TestSecureClientCopilotHookFollowsItsDeliveryMode(t *testing.T) {
 	sp := specs["copilot"]
 	run := func(mutate func(*Options), fail func(Options) int) (int, string, string) {
@@ -2833,13 +2829,13 @@ func TestSecureClientCopilotHookFollowsItsDeliveryMode(t *testing.T) {
 	}
 	open := func(*Options) {}
 	unreachable := func(opts Options) int { return failUnreachable(opts, sp, "open", managedGatewayNotRunningReason) }
-	if code, stdout, failures := run(open, unreachable); code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) ||
-		!strings.Contains(failures, `"outcome":"fail_closed"`) || !strings.Contains(failures, managedGatewayNotRunningReason) {
+	if code, stdout, failures := run(open, unreachable); code != 0 || strings.Contains(stdout, "deny") ||
+		!strings.Contains(failures, `"outcome":"fail_open"`) || !strings.Contains(failures, managedGatewayNotRunningReason) {
 		t.Fatalf("open, gateway stopped: code=%d stdout=%q failures=%q", code, stdout, failures)
 	}
 	response := func(opts Options) int { return failResponse(opts, sp, "open", "invalid JSON response") }
-	if code, stdout, failures := run(open, response); code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) ||
-		!strings.Contains(failures, `"outcome":"fail_closed"`) {
+	if code, stdout, failures := run(open, response); code != 0 || strings.Contains(stdout, "deny") ||
+		!strings.Contains(failures, `"outcome":"fail_open"`) {
 		t.Fatalf("open, unreadable response: code=%d stdout=%q failures=%q", code, stdout, failures)
 	}
 	closed := func(opts Options) int { return failUnreachable(opts, sp, "closed", managedGatewayPortHeldReason) }

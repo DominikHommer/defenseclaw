@@ -63,24 +63,26 @@ func TestManagedHookFailModeIsTheRenderedValue(t *testing.T) {
 	}
 }
 
-// Under Secure Client a connector whose agent cannot fail closed (Hermes,
-// Copilot) gets an open hook even when the config resolves closed, so status
-// must not say closed (GAP-0001). The native Codex and Claude Code hooks stay
-// closed, and an unset mode does not open (the #1163 unset-is-open default is
-// not taken in 1.0.3).
+// Under Secure Client (#1163) an unset hook fail mode resolves open for every
+// connector, Codex and Claude Code included, an explicit closed stays closed
+// except for an agent that cannot fail closed (Hermes, Copilot: status must
+// not say closed, GAP-0001), and an explicit open stays open.
 func TestSecureClientManagedHookFailModeFollowsTheConfig(t *testing.T) {
 	cfg := managedConfigForProfile(t, managed.ProfileSecureClient)
 	if !cfg.SecureClientIntegration() {
-		t.Fatal("the test needs the Secure Client profile")
+		t.Fatal("test config does not resolve to Secure Client")
 	}
 	closed := config.PerConnectorGuardrailConfig{HookFailMode: "closed"}
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"hermes": closed, "copilot": closed, "opencode": closed, "amp": {HookFailMode: "open"},
+		"claudecode": closed, "hermes": closed, "copilot": closed, "amp": {HookFailMode: "open"},
 	}
 	want := map[string]string{
-		"hermes": "open", "copilot": "open", // cannot fail closed
-		"codex": "closed", "claudecode": "closed", "opencode": "closed",
-		"amp": "open", // configured open stays open
+		"codex":      "open",   // unset
+		"opencode":   "open",   // unset
+		"claudecode": "closed", // explicit closed is kept
+		"hermes":     "open",   // explicit closed, but the agent cannot fail closed
+		"copilot":    "open",   // explicit closed, but the agent cannot fail closed
+		"amp":        "open",   // explicit open
 	}
 	for name, mode := range want {
 		if got := ManagedHookFailMode(cfg, name); got != mode {

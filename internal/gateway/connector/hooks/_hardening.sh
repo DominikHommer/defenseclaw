@@ -1115,7 +1115,11 @@ defenseclaw_response_failure_reason() {
 
 # defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
 # connector's effective fail mode is closed, for guardian-installed managed
-# hooks, or when strict availability is enabled. Fail mode therefore has one consistent meaning
+# hooks outside an authenticated Secure Client deployment, or when strict
+# availability is enabled. Under Secure Client managed status alone does not
+# select availability policy: the baked FAIL_MODE does (#1163,
+# _DC_SECURE_CLIENT_DELIVERY, rendered only on a verified Secure Client
+# host). Fail mode therefore has one consistent meaning
 # across malformed responses, auth failures, and transport failures instead of
 # silently opening only the latter class.
 defenseclaw_should_fail_closed_on_unreachable() {
@@ -1123,7 +1127,7 @@ defenseclaw_should_fail_closed_on_unreachable() {
     closed) return 0 ;;
   esac
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
-    1|true|TRUE|yes|YES) return 0 ;;
+    1|true|TRUE|yes|YES) [ "${_DC_SECURE_CLIENT_DELIVERY:-0}" = 1 ] || return 0 ;;
   esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;

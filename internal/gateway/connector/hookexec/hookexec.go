@@ -75,7 +75,8 @@ var (
 	errManagedGatewayPeerUnverified = errors.New("enterprise managed gateway peer unverified")
 	// errManagedGatewayNotRunning wraps a peer-verification failure whose
 	// cause is that the managed gateway service is not running (Windows SCM
-	// reports it stopped). The hook still fails closed.
+	// reports it stopped). The hook fails closed, except an authenticated
+	// Secure Client hook, which follows its fail mode (managedPeerFailMode).
 	errManagedGatewayNotRunning = errors.New("enterprise managed gateway service is not running")
 	// errManagedHookSocketSELinuxDenied wraps a Unix standalone peer failure
 	// where SELinux kept this account from the hook socket.
@@ -557,7 +558,7 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 			opts.HTTPClient, err = newManagedHookHTTPClient(ctx, opts, requestTimeout,
 				gatewayRestartDeadline(opts, startedAt))
 			if err != nil {
-				return failUnreachable(opts, sp, "closed", managedPeerFailureReason(opts, err))
+				return failUnreachable(opts, sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 			}
 		} else {
 			opts.HTTPClient = defaultHTTPClient(requestTimeout)
@@ -880,8 +881,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// Managed peer-verification failure fails closed on the transport
 			// surface too, mirroring the up-front client-build path: a managed
 			// hook launched with FailMode="open" must not let an unverified
-			// gateway peer surface as an allow-by-default.
-			return failUnreachable(opts, sp, "closed", managedPeerFailureReason(opts, err))
+			// gateway peer surface as an allow-by-default. The one exception
+			// is an authenticated Secure Client gateway service that is not
+			// running (see managedPeerFailMode).
+			return failUnreachable(opts, sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
@@ -1727,8 +1730,10 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	}
 	blocked := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
 	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
-		return code
+	if !secureClientCopilotOpen(opts, sp, failMode) {
+		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+			return code
+		}
 	}
 	if blocked {
 		if sp.connector == "antigravity" {
@@ -2086,8 +2091,10 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	if code, handled := hermesFailClosed(opts, sp, "response", reason); handled {
 		return code
 	}
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
-		return code
+	if !secureClientCopilotOpen(opts, sp, failMode) {
+		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+			return code
+		}
 	}
 	if sp.failOpenOnly || failMode == "open" {
 		return emitHookResult(opts, sp, sp.openAllow)
@@ -2305,6 +2312,35 @@ func managedPlainFailClosed(opts Options, sp spec) bool {
 		return true
 	}
 	return opts.ManagedEnterprise && opts.ExplainUnenrolledAccount && sp.connector != "copilot"
+}
+
+// managedPeerFailMode is the fail mode of a managed peer-verification
+// failure. An authenticated Secure Client hook (opts.SecureClient, set only
+// on a host the strict Secure Client classifier verified, and
+// secureClientHook) whose gateway service is simply not running (stopped,
+// crashed, or held stopped while Setup services the deployment) follows its
+// own fail mode, as a refused connection already does on macOS (#1163): the
+// hook contacted no peer, so nothing unverified can answer it, and only an
+// administrator can stop the service. Every other peer failure (another
+// process on the gateway port, a service the hook cannot query) and every
+// hook outside Secure Client fail closed.
+func managedPeerFailMode(opts Options, failMode string, err error) string {
+	if opts.SecureClient && secureClientHook(opts) && errors.Is(err, errManagedGatewayNotRunning) {
+		return failMode
+	}
+	return "closed"
+}
+
+// secureClientCopilotOpen reports an authenticated Secure Client GitHub
+// Copilot hook whose delivery mode is open (#1163): a gateway it cannot reach
+// and a response it cannot read allow the call, as they do for every other
+// Secure Client connector, instead of the managed deny. A closed mode
+// (configured, strict availability, or another program on the gateway port)
+// and the enrollment and policy refusals still deny, and outside Secure
+// Client a managed Copilot call always gets the managed deny.
+func secureClientCopilotOpen(opts Options, sp spec, failMode string) bool {
+	return sp.connector == "copilot" && opts.SecureClient && secureClientHook(opts) &&
+		!opts.StrictAvailability && normalizeFailMode(failMode) == "open"
 }
 
 // managedPeerFailureReason is the hook-failure reason of a managed

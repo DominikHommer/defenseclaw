@@ -12,7 +12,8 @@ import "testing"
 // or explicit closed, the effective hook fail mode is closed. The only
 // exceptions are an explicit per-user open and the per-user Cursor rule
 // (observe open, action closed, whatever is configured); the Secure Client
-// rows are pinned by TestEveryConnectorHookFailModeMatrix.
+// rows (open unless explicitly closed) are pinned by
+// TestEveryConnectorHookFailModeMatrix.
 func TestEveryConnectorFailsClosedUnlessPerUserExplicitOpen(t *testing.T) {
 	names := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode", "openhands"}
 	type setting struct {

@@ -176,12 +176,13 @@ func failOpenOnlyCloses(opts Options, sp spec) bool {
 }
 
 // loggedFailMode is the fail mode a hook-failure line records: the outcome
-// for a failOpenOnly connector (failOpenOnlyCloses), the given one otherwise.
+// for a failOpenOnly connector (failOpenOnlyCloses, except an open Secure
+// Client Copilot hook, secureClientCopilotOpen), the given one otherwise.
 func loggedFailMode(opts Options, sp spec, failMode string) string {
 	if !sp.failOpenOnly {
 		return failMode
 	}
-	if failOpenOnlyCloses(opts, sp) {
+	if failOpenOnlyCloses(opts, sp) && !secureClientCopilotOpen(opts, sp, failMode) {
 		return "closed"
 	}
 	return "open"

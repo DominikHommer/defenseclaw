@@ -24,8 +24,18 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+func init() {
+	// The Secure Client fail-open render defaults (#1163) need an
+	// authenticated Secure Client deployment, the strict host classifier
+	// (secureClientHost), not a process or config profile alone (main-sync
+	// review finding 5). Every binary that renders or runs hooks links this
+	// package.
+	connector.SecureClientDeploymentVerified = func() bool { return secureClientHost() }
+}
 
 // managedHostDescriptorPath is where a standalone managed deployment
 // publishes its runtime descriptor on this OS ("" where the check does not

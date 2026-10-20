@@ -1514,10 +1514,13 @@ func canonicalHookFailMode(mode string) string {
 }
 
 // canonicalHookFailModeFor is canonicalHookFailMode for an explicit profile:
-// an unset mode is open only under Secure Client (#1163).
+// an unset mode is open only under Secure Client (#1163) on an authenticated
+// Secure Client deployment (connector.SecureClientDeploymentVerified, the
+// strict host classifier): a process or config profile alone never opens an
+// unset mode (main-sync review finding 5).
 func canonicalHookFailModeFor(mode string, secureClient bool) string {
 	trimmed := strings.TrimSpace(mode)
-	if strings.EqualFold(trimmed, "open") || (trimmed == "" && secureClient) {
+	if strings.EqualFold(trimmed, "open") || (trimmed == "" && secureClient && connector.SecureClientDeploymentVerified()) {
 		return "open"
 	}
 	return "closed"

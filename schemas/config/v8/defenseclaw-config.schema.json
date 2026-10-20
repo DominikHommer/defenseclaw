@@ -1879,6 +1879,7 @@
         },
         "hook_fail_mode": {
           "type": "string",
+          "description": "Hook delivery failure mode. Unset resolves to closed for OSS and every managed install outside Secure Client; under the Secure Client profile an unset value resolves to open. An explicit closed always wins, and a managed install outside Secure Client ignores open.",
           "enum": [
             "open",
             "closed"

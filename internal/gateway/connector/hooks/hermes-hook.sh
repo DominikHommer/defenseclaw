@@ -36,6 +36,7 @@ unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 {{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+_DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
@@ -86,8 +87,10 @@ hermes_sandbox_block() {
   echo "defenseclaw: hermes hook: $1, blocking (sandbox hooks fail closed)" >&2
   printf '{"action":"block","message":"%s"}\n' "$(defenseclaw_json_escape "DefenseClaw blocked this tool call because its policy check failed: $1")"
   exit 2
-}{{else if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
-# DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
+}{{else if and .Managed (not .SecureClientDelivery)}}# Managed hooks outside an authenticated Secure Client deployment use the
+# installer-owned delivery policy; an inherited DEFENSECLAW_FAIL_MODE cannot
+# weaken an explicitly closed managed hook. Secure Client hooks keep the
+# environment override (#1163).
 FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 
 # Bail early on missing token via the shared helper so the bypass is

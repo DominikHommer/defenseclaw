@@ -220,9 +220,10 @@ class TestEffectiveResolvers(unittest.TestCase):
         # Outside Secure Client a fail mode that is not set is closed, in
         # observe mode too (mirrors Go EffectiveHookFailModeForConnector).
         self.assertEqual(g.effective_hook_fail_mode(""), "closed")
-        g._secure_client_observe_open = True
+        # Under Secure Client an unset fail mode is open (#1163).
+        g._secure_client = True
         self.assertEqual(g.effective_hook_fail_mode(""), "open")
-        g._secure_client_observe_open = False
+        g._secure_client = False
         self.assertEqual(g.effective_block_message(""), "")
         self.assertEqual(g.effective_rule_pack_dir(""), "")
 
@@ -241,9 +242,14 @@ class TestEffectiveResolvers(unittest.TestCase):
         g.hook_fail_mode = "open"
         self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
-        # Under Secure Client an observe connector without its own value is open.
+        # Under Secure Client an explicit value wins too: the global closed
+        # closes a connector without its own value, and an unset global is
+        # open (#1163).
         g.hook_fail_mode = "closed"
-        g._secure_client_observe_open = True
+        g._secure_client = True
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+        g.hook_fail_mode = ""
         self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
 
@@ -268,22 +274,20 @@ class TestEffectiveResolvers(unittest.TestCase):
                 cfg = config_module.load(data_dir=tmp)
                 return cfg.guardrail.effective_hook_fail_mode(connector)
 
-    def test_secure_client_unset_hook_fail_mode_follows_guardrail_mode(self):
-        # The #1163 Secure Client unset-is-open default is not taken in 1.0.3:
-        # under Secure Client an observe-mode connector without a value of
-        # its own stays open, action mode is closed, and an explicit closed
-        # is always kept.
+    def test_secure_client_unset_hook_fail_mode_is_open(self):
+        # #1163 (owner rule: hooks fail open under Secure Client): an unset
+        # fail mode loads as open for every connector, Codex and Claude Code
+        # included, in observe and action mode alike, and an explicit closed
+        # (global or per connector) is always kept, as in Go.
         base = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise: {profile: secure_client}\n"
-        for mode, unset in (("observe", "open"), ("action", "closed")):
-            with self.subTest(mode=mode, policy="unset"):
-                doc = base + f"guardrail: {{mode: {mode}}}\n"
-                self.assertEqual(self._load_hook_fail_mode(doc, "amp"), unset)
+        for mode in ("observe", "action"):
+            for connector in ("amp", "codex", "claudecode"):
+                with self.subTest(mode=mode, policy="unset", connector=connector):
+                    doc = base + f"guardrail: {{mode: {mode}}}\n"
+                    self.assertEqual(self._load_hook_fail_mode(doc, connector), "open")
             with self.subTest(mode=mode, policy="closed"):
-                # Under Secure Client observe mode a global closed is not the
-                # connector's own value, so it stays open there (Go
-                # effectiveHookFailModeForMode); action mode keeps it.
                 doc = base + f"guardrail: {{mode: {mode}, hook_fail_mode: closed}}\n"
-                self.assertEqual(self._load_hook_fail_mode(doc, "amp"), unset)
+                self.assertEqual(self._load_hook_fail_mode(doc, "amp"), "closed")
             with self.subTest(mode=mode, policy="override-closed"):
                 doc = base + (
                     f"guardrail: {{mode: {mode}, connectors: {{amp: {{hook_fail_mode: closed}}}}}}\n"

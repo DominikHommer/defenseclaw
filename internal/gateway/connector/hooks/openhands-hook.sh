@@ -33,6 +33,7 @@ unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 {{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+_DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
@@ -60,8 +61,10 @@ defenseclaw_harden_env
 # status, so no failed, refused or unparseable reply may turn into an allow.
 # OpenHands blocks on exit status 2, which every failure below returns.
 FAIL_MODE="closed"
-readonly FAIL_MODE{{else if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
-# DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
+readonly FAIL_MODE{{else if and .Managed (not .SecureClientDelivery)}}# Managed hooks outside an authenticated Secure Client deployment use the
+# installer-owned delivery policy; an inherited DEFENSECLAW_FAIL_MODE cannot
+# weaken an explicitly closed managed hook. Secure Client hooks keep the
+# environment override (#1163).
 FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 DEFENSECLAW_HOOK_CONNECTOR="openhands"
 DEFENSECLAW_HOOK_NAME="openhands-hook"

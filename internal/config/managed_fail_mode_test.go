@@ -56,15 +56,15 @@ func TestManagedStandaloneHooksFailClosedForEveryConnector(t *testing.T) {
 	}
 }
 
-// Secure Client keeps its configured fail modes (only its native Codex and
-// Claude Code hooks are pinned closed), and per-user installs keep theirs.
+// Secure Client keeps its configured fail modes for every connector, Codex
+// and Claude Code included (#1163), and per-user installs keep theirs.
 func TestSecureClientAndPerUserKeepConfiguredHookFailModes(t *testing.T) {
 	for _, test := range []struct {
 		name, mode, profile string
 		want                map[string]string
 	}{
 		{"secure client", managed.DeploymentModeManagedEnterprise, managed.ProfileSecureClient,
-			map[string]string{"amp": "open", "kiro": "open", "cursor": "open", "codex": "closed", "claudecode": "closed"}},
+			map[string]string{"amp": "open", "kiro": "open", "cursor": "open", "codex": "open", "claudecode": "open"}},
 		{"per-user", "", "",
 			map[string]string{"amp": "open", "kiro": "open", "cursor": "open", "codex": "open", "claudecode": "open"}},
 	} {

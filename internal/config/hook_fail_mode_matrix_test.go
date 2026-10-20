@@ -5,11 +5,13 @@ package config
 
 import "testing"
 
-// The effective hook fail mode of every connector (B-01 merge review matrix):
+// The effective hook fail mode of every connector (owner rule 2026-10-14,
+// restated 2026-10-20: open under Secure Client, closed everywhere else):
 // per-user unset is closed (Cursor observe follows its guardrail mode),
-// explicit open opens, managed standalone is always closed, and Secure
-// Client keeps an unset observe connector open except the pinned native
-// Claude Code and Codex hooks; Secure Client action is closed.
+// explicit open opens, managed standalone is always closed, and Secure Client
+// resolves an unset value open for every connector, Codex and Claude Code
+// included, in observe and action mode alike, while its explicit closed
+// stays closed.
 func TestEveryConnectorHookFailModeMatrix(t *testing.T) {
 	names := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode", "openhands"}
 	for _, name := range names {
@@ -46,13 +48,18 @@ func TestEveryConnectorHookFailModeMatrix(t *testing.T) {
 			cfg.Guardrail.Connectors = nil
 			check(cfg, "standalone observe unset", "closed")
 			cfg.Enterprise.Profile = "secure_client"
-			want = "open"
-			if name == "codex" || name == "claudecode" {
-				want = "closed"
-			}
-			check(cfg, "Secure Client observe unset", want)
+			check(cfg, "Secure Client observe unset", "open")
 			cfg.Guardrail.Mode = "action"
-			check(cfg, "Secure Client action unset", "closed")
+			check(cfg, "Secure Client action unset", "open")
+			cfg.Guardrail.HookFailMode = "closed"
+			check(cfg, "Secure Client action global closed", "closed")
+			cfg.Guardrail.Mode = "observe"
+			check(cfg, "Secure Client observe global closed", "closed")
+			cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{name: {HookFailMode: "open"}}
+			check(cfg, "Secure Client connector open over global closed", "open")
+			cfg.Guardrail.HookFailMode = ""
+			cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{name: {HookFailMode: "closed"}}
+			check(cfg, "Secure Client connector closed", "closed")
 		})
 	}
 }

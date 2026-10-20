@@ -255,7 +255,7 @@ func TestRotationConnectorStateNormalizesManagedNativeHooksClosed(t *testing.T) 
 
 // Secure Client honors an explicit open delivery policy for the native
 // hooks (#1163).
-func TestRotationConnectorStateKeepsSecureClientNativeHooksClosed(t *testing.T) {
+func TestRotationConnectorStatePreservesManagedNativeHooksOpen(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.DeploymentMode = "managed_enterprise"
 	cfg.Enterprise.Profile = "secure_client"
@@ -275,11 +275,8 @@ func TestRotationConnectorStateKeepsSecureClientNativeHooksClosed(t *testing.T) 
 		t.Fatalf("connector state rows = %d, want 2: %#v", len(state.Connectors), state.Connectors)
 	}
 	for _, row := range state.Connectors {
-		// The Secure Client native Codex and Claude Code hooks stay closed
-		// whatever the source config says (the #1163 Secure Client open
-		// policy is not taken in 1.0.3).
-		if row.HookFailMode != "closed" {
-			t.Errorf("managed %s persisted fail mode = %q, want closed", row.Name, row.HookFailMode)
+		if row.HookFailMode != "open" {
+			t.Errorf("managed %s persisted fail mode = %q, want open", row.Name, row.HookFailMode)
 		}
 	}
 }

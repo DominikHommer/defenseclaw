@@ -151,12 +151,12 @@ class ConnectorFailModeState:
     def note(self) -> str:
         """Why the effective mode is not the configured guardrail.hook_fail_mode, or "".
 
-        Under Secure Client a connector in observe mode without a value of its
-        own stays fail-open whatever the global value says
+        Per-user Cursor follows its guardrail mode (observe open, action
+        closed) whatever the global value says
         (GuardrailConfig.effective_hook_fail_mode), so ``closed`` in
-        config.yaml next to ``open`` in the hooks is intended; reporting says
-        so instead of looking like drift (GAP-0129). Elsewhere the configured
-        value applies in observe mode too.
+        config.yaml next to ``open`` in its observe-mode hooks is intended;
+        reporting says so instead of looking like drift (GAP-0129). Every
+        other connector follows its configured value in observe mode too.
         """
 
         if self.configured == self.desired or self.effective != self.desired:

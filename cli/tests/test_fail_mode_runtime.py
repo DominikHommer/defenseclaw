@@ -607,14 +607,14 @@ def test_stale_closed_never_reports_already_closed(monkeypatch: pytest.MonkeyPat
     reconcile.assert_called_once()
 
 
-def test_raw_global_closed_observe_runtime_open_creates_scoped_override(
+def test_secure_client_unset_global_runtime_open_creates_scoped_override(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "open", "codex": "open"})
-    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.hook_fail_mode = ""
     cfg.guardrail.connectors["claudecode"].hook_fail_mode = ""
-    # Only Secure Client keeps an observe connector without its own value open.
-    cfg.guardrail._secure_client_observe_open = True
+    # Under Secure Client an unset fail mode is open (#1163).
+    cfg.guardrail._secure_client = True
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
     app = AppContext()
     app.cfg = cfg
@@ -915,12 +915,12 @@ def test_unix_registration_freshness_checks_each_connectors_own_script(
 def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_modes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # GAP-1370: under Secure Client observe connectors already run fail-open,
-    # and a mixed roster (hermes has no runtime registration) must not start a
-    # stopped gateway.
+    # GAP-1370: under Secure Client connectors with an unset fail mode
+    # already run fail-open (#1163), and a mixed roster (hermes has no
+    # runtime registration) must not start a stopped gateway.
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "hermes": ""})
-    cfg.guardrail.hook_fail_mode = "closed"
-    cfg.guardrail._secure_client_observe_open = True
+    cfg.guardrail.hook_fail_mode = ""
+    cfg.guardrail._secure_client = True
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
@@ -934,7 +934,9 @@ def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_m
     restart.assert_not_called()
     reconcile.assert_called_once_with(cfg, "claudecode")
     assert "closed → open" not in result.output
-    assert "(hermes): already open; saved as its own setting" in result.output
+    # Neither connector is listed as a closed -> open change: both already
+    # resolve open.
+    assert "Hermes (hermes): " in result.output
     assert "left stopped" in result.output and "defenseclaw-gateway start" in result.output
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
 

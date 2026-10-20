@@ -16,8 +16,7 @@ import (
 )
 
 // Exercise the generated managed scripts, not just their rendered FAIL_MODE.
-// Under the Secure Client delivery contract only an explicit open delivers
-// open; unset and closed block.
+// This is the Secure Client delivery contract (#1163): unset delivers open.
 func TestManagedHookDeliveryDefaultAndExplicitClosed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("native Windows uses the authenticated hook executor")
@@ -78,14 +77,7 @@ func TestManagedHookDeliveryDefaultAndExplicitClosed(t *testing.T) {
 						cmd.Env = append(cmd.Env, "DEFENSECLAW_HOOK_MAX_BODY=1")
 					}
 					out, err := cmd.CombinedOutput()
-					// Unset is closed under Secure Client too (the #1163 Secure
-					// Client open default is not taken in 1.0.3); only an explicit
-					// open delivers open.
-					// A managed hook fails closed on an unreachable gateway or a
-					// missing token whatever its mode (the managed shell pin), so
-					// only a response failure follows an explicit open.
-					closed := mode != "open" || scenario == "strict-outage" || scenario == "policy-deny" ||
-						scenario == "outage" || scenario == "missing-token"
+					closed := mode == "closed" || scenario == "strict-outage" || scenario == "policy-deny"
 					blocked := err != nil || strings.Contains(string(out), `"decision":"block"`) || strings.Contains(string(out), `"permission":"deny"`)
 					if blocked != closed {
 						t.Fatalf("blocked=%t want=%t err=%v output=%s", blocked, closed, err, out)
@@ -263,11 +255,11 @@ func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 	}
 }
 
-// TestResolveHookFailModeUnsetNeverOpens is the renderer half of the owner
-// rule: an unset mode never renders open, Secure Client included, and
-// Cursor's action/observe rule applies outside Secure Client. Under Secure
-// Client an explicit mode wins for every connector.
-func TestResolveHookFailModeUnsetNeverOpens(t *testing.T) {
+// TestResolveHookFailModeSecureClientOnlyOpenDefault is the renderer half of
+// the owner rule: an unset mode renders open only under Secure Client, and
+// Cursor's action/observe rule applies everywhere else. Under Secure Client
+// an explicit mode wins for every connector (#1163).
+func TestResolveHookFailModeSecureClientOnlyOpenDefault(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		opts SetupOpts
@@ -280,9 +272,9 @@ func TestResolveHookFailModeUnsetNeverOpens(t *testing.T) {
 		{"oss cursor action explicit open", SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, NewCursorConnector(), "closed"},
 		{"oss cursor observe explicit closed", SetupOpts{GuardrailMode: "observe", HookFailMode: "closed"}, NewCursorConnector(), "open"},
 		{"oss explicit Open", SetupOpts{HookFailMode: " Open "}, NewCodexConnector(), "open"},
-		{"secure client codex unset", SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true}, NewCodexConnector(), "closed"},
-		{"secure client claudecode unset with enforcement", SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true, ClaudeCodeEnforcement: true}, NewClaudeCodeConnector(), "closed"},
-		{"secure client cursor action unset", SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true, GuardrailMode: "action"}, NewCursorConnector(), "closed"},
+		{"secure client codex unset", SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true}, NewCodexConnector(), "open"},
+		{"secure client claudecode unset with enforcement", SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true, ClaudeCodeEnforcement: true}, NewClaudeCodeConnector(), "open"},
+		{"secure client cursor action unset", SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true, GuardrailMode: "action"}, NewCursorConnector(), "open"},
 		{"secure client cursor observe explicit closed", SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true, GuardrailMode: "observe", HookFailMode: "closed"}, NewCursorConnector(), "closed"},
 		{"secure client codex explicit closed", SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true, HookFailMode: "closed"}, NewCodexConnector(), "closed"},
 	} {

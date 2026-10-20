@@ -166,9 +166,9 @@ func TestWindowsStandaloneHeldAPIPortFailsClosedNamingThePort(t *testing.T) {
 // A Windows standalone managed hook (ExplainUnenrolledAccount) whose gateway
 // service is stopped fails closed with the plain text and says the service
 // is not running, in the agent's denial and in hook-failures.jsonl
-// (GAP-0013). A Secure Client hook fails closed too, in open mode as well
-// (the #1163 open exception is not taken in 1.0.3), with the generic text;
-// both log the not-running reason.
+// (GAP-0013). An authenticated Secure Client hook follows its fail mode
+// instead (#1163): open allows the call, closed keeps the generic text; both
+// log the not-running reason.
 func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T) {
 	run := func(explain bool, failMode string) (int, string, string, string) {
 		home := t.TempDir()
@@ -204,10 +204,10 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 	if !strings.Contains(failures, managedGatewayNotRunningReason) {
 		t.Fatalf("hook-failures.jsonl = %q, want %s", failures, managedGatewayNotRunningReason)
 	}
-	_, stdout, _, failures = run(false, "open")
-	if !strings.Contains(stdout, failedClosed) || !strings.Contains(failures, managedGatewayNotRunningReason) ||
-		!strings.Contains(failures, `"outcome":"fail_closed"`) {
-		t.Fatalf("secure client open: stdout = %q failures = %q, want a fail-closed answer logged as not running", stdout, failures)
+	code, stdout, _, failures = run(false, "open")
+	if code != 0 || strings.Contains(stdout, "deny") || strings.Contains(stdout, failedClosed) ||
+		!strings.Contains(failures, managedGatewayNotRunningReason) || !strings.Contains(failures, `"outcome":"fail_open"`) {
+		t.Fatalf("secure client open: code = %d stdout = %q failures = %q, want an allow logged as not running", code, stdout, failures)
 	}
 	_, stdout, _, failures = run(false, "closed")
 	if !strings.Contains(stdout, failedClosed) || !strings.Contains(failures, managedGatewayNotRunningReason) {

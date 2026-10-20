@@ -31,7 +31,14 @@ per connector, or under `application_protection`) and an ACP profile's
 with the warning code `fail_open_ignored`. `status --json` and `verify --json`
 also give the resolved fail mode of each connector the deployment protects as
 `connectors.<id>.effective_hook_fail_mode` (`closed` for every connector
-there). Only the Secure Client profile keeps the configured fail mode.
+there). Only the Secure Client profile keeps the configured fail mode, and
+there an unset fail mode is `open` (see [Secure Client](#secure-client)).
+
+In short: hooks fail open under Secure Client and fail closed everywhere else
+(the OSS per-user install, the standalone enterprise profile and MDM-managed
+standalone hosts). Outside Secure Client only an explicit per-user
+`hook_fail_mode: open` opens a hook, and a managed standalone host ignores
+even that.
 
 On a managed standalone host both variables are *tighten-only*: a value that
 makes hooks stricter is honored, and one that would loosen the administrator's
@@ -53,16 +60,15 @@ action mode alike (a managed computer outside Secure Client is always
 1. The connector's own value (`guardrail.connectors.<name>.hook_fail_mode`),
    set with `guardrail fail-mode open|closed --connector <name>`.
 2. Otherwise, the global `guardrail.hook_fail_mode`.
-3. Otherwise `closed`. A fail mode that is not set never opens a hook, also
-   for a connector in observe mode.
+3. Otherwise `closed` outside Secure Client. A fail mode that is not set never
+   opens a hook there, also for a connector in observe mode. Under Secure
+   Client an unset value is `open`.
 
-Only an explicit `hook_fail_mode: open` on a per-user install opens a hook.
-On a standalone managed host every connector fails closed whatever the config
-says. Under Secure Client a connector in observe mode without a value of its
-own stays `open`; there `defenseclaw status` and the `Mode` row of
-`defenseclaw doctor` say so next to `fail-mode=open`, so it does not read as
-drift. Cursor follows its guardrail mode on a per-user install: action writes
-`failClosed: true` and observe writes `failClosed: false`.
+Outside Secure Client only an explicit `hook_fail_mode: open` on a per-user
+install opens a hook. On a standalone managed host every connector fails
+closed whatever the config says. Cursor follows its guardrail mode on a
+per-user install: action writes `failClosed: true` and observe writes
+`failClosed: false`.
 
 <Callout type="info" title="Changed in 1.0.3">
 Before 1.0.3 a per-user connector in observe mode without its own fail mode
@@ -74,13 +80,18 @@ connector fail-open, set it explicitly:
 
 ### Secure Client
 
-Under the Secure Client integration, an observe-mode connector without a fail
-mode of its own stays `open`; action mode is `closed` when no value is set, and
-the managed Codex and Claude Code hooks are always `closed`. A managed hook
-still blocks a call when the gateway is unreachable or its token is missing,
-whatever the fail mode. The administrator owns that config. Every other
-install, including OSS and the standalone enterprise profile, keeps the
-fail-closed rules above.
+Under the Secure Client integration only, hooks fail open: an unset
+`guardrail.hook_fail_mode` resolves to `open` for every connector (Codex and
+Claude Code included), independent of the guardrail mode, and an explicit
+`closed` (global or per connector) is always kept. With `open`, a Secure Client
+hook allows the call when the gateway is unreachable, its service is stopped
+or its answer cannot be used, and records the failure.
+Only an authenticated Secure Client deployment gets this: the profile the
+protected config resolves and, for the native Windows hook, a host whose
+Secure Client installation, deployment record and gateway service check out.
+The administrator owns that config, and the gateway resolves its default.
+Every other install, including OSS, the standalone enterprise profile and
+MDM-managed standalone hosts, keeps the fail-closed rules above.
 
 GitHub Copilot CLI and Antigravity have no fail-closed hook surface: their
 generated hooks stay open even when the effective mode is `closed`. Hermes has
@@ -127,7 +138,7 @@ sandbox hooks and standalone managed hooks do not persist that failure row;
 that logging gap is a P3 follow-up for 1.0.4. The agent ends the turn, and the
 next prompt or tool call is blocked as before until DefenseClaw is available.
 The neutral allow holds for per-user, OpenShell sandbox and standalone managed
-hooks on Linux, macOS and Windows. Secure Client hooks keep their results.
+hooks on Linux, macOS and Windows. Secure Client hooks follow their fail mode.
 
 The hook has to know the event first. Codex and GitHub Copilot name it in the
 registered hook command; the other connectors read it from the payload's
