@@ -18,6 +18,7 @@ for current behavior.
 
 - Managed Claude Code and Codex block a shell command with more than 512 write targets or 64 KiB of target paths. The refusal says DefenseClaw blocked the action under your organization's policy. Split the command into smaller calls. Per-user mode is not affected (GAP-0291).
 - On Windows, a sustained flood of about 10 hook calls a second for many minutes can grow the DefenseClaw audit log (`audit.db-wal`) up to about 20 GB. Hook answers can slow down as it grows, and a few calls can be blocked (fail closed) while the log resets. This never causes a call to be allowed. Keep several tens of GB free on the system drive if you expect such floods. The file shrinks back once the flood stops. Fixed in 1.0.4.
+- A tool call that DefenseClaw allowed while the gateway was running still runs if you approve it in the agent after the gateway stops. Every call checked while the gateway is down is blocked.
 
 ### Added
 
