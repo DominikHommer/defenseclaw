@@ -504,6 +504,21 @@ stop_gateway() {
     [[ -z "$(gateway_pid || true)" ]]
 }
 
+refresh_hook_fail_modes() {
+    # Set the installed hooks' outage fail modes (hooks/.hookcfg, its flat
+    # records and the open a connector script bakes) from the config with the
+    # staged gateway: an earlier release may have recorded or baked open for a
+    # mode nobody set, which its hooks follow while the gateway is down for
+    # the swap. An open the config sets stays open, from a DEFENSECLAW_CONFIG
+    # outside the data directory too. A release without the command (a
+    # downgrade) sets its own when its gateway starts.
+    [[ -d "${DEFENSECLAW_HOME}/hooks" ]] || return 0
+    # An older gateway prints the connector help for an unknown subcommand.
+    "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --help 2>/dev/null \
+        | grep "connector refresh-fail-modes" >/dev/null || return 0
+    "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}"
+}
+
 warn_running_sandboxes() {
     # A running sandbox's hooks fail closed while the gateway restarts, so its
     # agent's tool calls are refused until the gateway is back. Name them
@@ -885,9 +900,18 @@ fi
 WAS_RUNNING=false
 RESTORED_NOTE="Your previous install is back."
 [[ -n "$(gateway_pid || true)" ]] && WAS_RUNNING=true
+refresh_hook_fail_modes \
+    || die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
 if [[ "${WAS_RUNNING}" == true ]]; then
     info "Stopping the gateway"
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The running gateway did not stop; nothing was changed"
+    # Again once it is stopped: it may have rendered them while it ran.
+    if ! refresh_hook_fail_modes; then
+        restart_old
+        rm -rf "${STAGING}"
+        drop_new_uv
+        die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down. ${RESTORED_NOTE}"
+    fi
 fi
 
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then

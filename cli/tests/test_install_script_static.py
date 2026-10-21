@@ -1857,6 +1857,59 @@ def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configu
     assert 'prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"' in swap  # an upgrade heals a host already hit
 
 
+def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_path: Path) -> None:
+    # An earlier release's hooks can hold or bake an open nobody chose, which
+    # they follow while the gateway is down for the swap. The staged gateway
+    # sets their modes from the config before the old gateway stops and,
+    # once it is stopped, again before the snapshot. An older staged gateway
+    # (a downgrade) prints the connector help and is skipped; a failure
+    # refuses the swap.
+    calls = tmp_path / "calls"
+    home = tmp_path / "dc"
+    (home / "hooks").mkdir(parents=True)
+
+    def run(gateway: Path) -> subprocess.CompletedProcess[str]:
+        staging = tmp_path / f"staging-{gateway.name}"
+        (staging / "bin").mkdir(parents=True, exist_ok=True)
+        shutil.copy(gateway, staging / "bin" / "defenseclaw-gateway")
+        script = tmp_path / f"refresh-{gateway.name}.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            + _install_sh_functions("refresh_hook_fail_modes")
+            + f'DEFENSECLAW_HOME="{home}" STAGING="{staging}"\nrefresh_hook_fail_modes\n',
+            encoding="utf-8",
+        )
+        return _run([str(script)], tmp_path)
+
+    newer = _fake_gateway(tmp_path / "newer", "defenseclaw-gateway connector refresh-fail-modes [flags]", calls)
+    assert run(newer).returncode == 0
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "connector refresh-fail-modes --help",
+        f"connector refresh-fail-modes --data-dir {home}",
+    ]
+    calls.unlink()
+    older = _fake_gateway(tmp_path / "older", "defenseclaw-gateway connector [command]", calls)
+    assert run(older).returncode == 0
+    assert calls.read_text(encoding="utf-8").splitlines() == ["connector refresh-fail-modes --help"]
+    failing = tmp_path / "failing"
+    failing.write_text(
+        '#!/bin/sh\ncase "$*" in *--help*) echo "  defenseclaw-gateway connector refresh-fail-modes [flags]"; exit 0;; esac\nexit 1\n',
+        encoding="utf-8",
+    )
+    failing.chmod(0o755)
+    assert run(failing).returncode != 0
+
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    swap = text[text.index('[[ -n "$(gateway_pid || true)" ]] && WAS_RUNNING=true') : text.index("if ! snapshot; then")]
+    first = swap.index("refresh_hook_fail_modes \\\n    || die")
+    stop = swap.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die')
+    second = swap.index("if ! refresh_hook_fail_modes; then")
+    assert first < stop < second, swap
+    assert "nothing was changed (see above)" in swap[first:stop]
+    after = swap[second:]
+    assert after.index("restart_old") < after.index("${RESTORED_NOTE}"), after
+
+
 def test_rollback_says_a_later_upgrade_keeps_the_data_instead_of_bringing_it_back() -> None:
     # rel-1-0-1:GAP-0008: the rollback said the data comes back "if you roll
     # forward", but 'defenseclaw upgrade' after it parks that data in backups/.

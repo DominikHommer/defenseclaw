@@ -1468,6 +1468,21 @@ function Save-Snapshot {
     return $true
 }
 
+function Update-HookFailModes([string]$Gateway) {
+    # Set the hooks' outage fail modes (hooks\.hookcfg) from the config with
+    # this release's gateway before the running gateway stops and before the
+    # new hook goes in: an earlier release may have recorded open for a mode
+    # nobody set (0.8.x and 1.0.2 resolved an unset mode from the guardrail
+    # mode), and the old hook would follow it while the gateway is down. An
+    # open the config sets stays open, from a DEFENSECLAW_CONFIG outside the
+    # data folder too. False when the hooks could not be made safe. A release
+    # without the command (a downgrade) sets its own when its gateway starts.
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) { return $true }
+    # An older gateway prints the connector help for an unknown subcommand.
+    if ((Get-NativeOutput $Gateway @("connector", "refresh-fail-modes", "--help")) -notmatch "connector refresh-fail-modes") { return $true }
+    return ((Invoke-Native $Gateway @("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0)
+}
+
 function Install-HookFirst([string]$Slot) {
     # The previous version's hook keeps answering the agents while the data
     # folder is copied and the new Python environment is built, a minute or
@@ -2669,11 +2684,21 @@ function Invoke-Install {
         if ($Setup.ClaudeConfigDir -and -not $env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR = $Setup.ClaudeConfigDir }
     }
     $WasRunning = [bool](Get-GatewayProcess)
+    if (-not (Update-HookFailModes $stagedGateway)) {
+        if ($Setup) { Restore-SetupInstall }
+        Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
+    }
     if ($WasRunning) {
         Write-Info "Stopping the gateway [$(Get-UtcClock)]"
         if (-not (Stop-Gateway)) {
             if ($Setup) { Restore-SetupInstall }
             Die "The running gateway did not stop; nothing was changed"
+        }
+        # Again once it is stopped: it may have rendered them while it ran.
+        if (-not (Update-HookFailModes $stagedGateway)) {
+            Clear-StagedRelease
+            Restart-Old
+            Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down. $(Get-RestoredNote)"
         }
     }
     Stop-Watchdog

@@ -293,6 +293,7 @@ func TestHookConfigSidecarSecondWriteFailureRollsBackBothFiles(t *testing.T) {
 		"127.0.0.1:18970",
 		"claudecode",
 		"closed",
+		HookFailModeSourceConfig,
 		false,
 		failSecond,
 	); err == nil {
@@ -383,6 +384,7 @@ func TestManagedHookRuntimeWriteRejectsOversizedSparseSnapshotBeforeMutation(t *
 		"127.0.0.1:18970",
 		"codex",
 		"closed",
+		"",
 		true,
 		func(string, []byte, os.FileMode) error {
 			writes++
@@ -2543,16 +2545,25 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if runtimeState.GatewayAddr != "127.0.0.1:18970" {
 				t.Errorf("hook config sidecar API address = %q, want 127.0.0.1:18970", runtimeState.GatewayAddr)
 			}
-			// The native hook reads this value: it keeps closed for a
-			// connector whose hook blocks its own failures (the per-user
-			// Hermes hook, GAP-0269) and is open for the other connectors
-			// without a fail-closed contract.
-			wantFailMode := CapableHookFailMode(opts, tt.conn, resolveHookFailMode(opts, tt.conn))
+			// The rendered mode keeps closed for a connector whose hook
+			// blocks its own failures (the per-user Hermes hook, GAP-0269)
+			// and is open for the other connectors without a fail-closed
+			// contract. That open has no config source: the native hook
+			// fails it closed while the gateway is down (OutageHookFailMode).
+			resolved := resolveHookFailMode(opts, tt.conn)
+			wantFailMode := CapableHookFailMode(opts, tt.conn, resolved)
 			if tt.conn.Name() == "hermes" && wantFailMode != "closed" {
 				t.Errorf("per-user Hermes resolves fail mode %q, want closed", wantFailMode)
 			}
 			if got := runtimeState.FailModes[connectorName]; got != wantFailMode {
 				t.Errorf("hook config sidecar fail mode for %s = %q, want %q", connectorName, got, wantFailMode)
+			}
+			wantSource := ""
+			if wantFailMode == resolved {
+				wantSource = HookFailModeSourceConfig
+			}
+			if got := runtimeState.FailModeSources[connectorName]; got != wantSource {
+				t.Errorf("hook config sidecar fail mode source for %s = %q, want %q", connectorName, got, wantSource)
 			}
 
 			if err := tt.conn.Teardown(context.Background(), opts); err != nil {

@@ -237,15 +237,33 @@ func (t tetragonIntent) dropin() []byte {
 }
 
 // noteTetragonRestart says, when a run rewrote or removed the helper's
-// Tetragon drop-in, that the sensor helper restarted into the new mode: the
+// Tetragon drop-in, or restarted a helper that ran another mode
+// (helperModeDrift), that the sensor helper restarted into the new mode: the
 // one thing an administrator pushing enterprise.tetragon wants to read back.
 func (l *lifecycle) noteTetragonRestart(ctx context.Context, p *plan, changed map[string]bool) {
-	if l.env.GOOS != "linux" || p == nil || p.config == nil || !changed[filepath.Join("/etc/systemd/system", unitSensorHelper+".d", dropinTetragon)] {
+	if l.env.GOOS != "linux" || p == nil || p.config == nil ||
+		(!changed[filepath.Join("/etc/systemd/system", unitSensorHelper+".d", dropinTetragon)] && !l.helperModeRestart) {
 		return
 	}
 	if unit, ok := l.helperUnit(); ok && l.env.Services.Active(ctx, unit) {
 		l.noteChange("the sensor helper restarted into enterprise.tetragon mode %s", p.config.Tetragon.helperMode())
 	}
+}
+
+// helperModeDrift reports whether the running sensor helper published a
+// Tetragon mode other than the one p renders: it started before its drop-in
+// changed, or an earlier release left it on its built-in default. ensure is
+// then not a no-op and its transaction restarts the helper, which is what
+// kernel_policy_not_applied tells the administrator to run.
+func (l *lifecycle) helperModeDrift(ctx context.Context, p *plan) bool {
+	if l.env.GOOS != "linux" || p == nil || p.config == nil || !l.helperRunning(ctx) {
+		return false
+	}
+	state, err := kernelpolicy.ReadState(l.env.sensorDirs())
+	if err != nil || state.UpdatedAt.IsZero() || state.Intent.Mode == "" {
+		return false
+	}
+	return string(state.Intent.Mode) != p.config.Tetragon.helperMode()
 }
 
 // sensorDirs are the helper's state and runtime directories on this host.

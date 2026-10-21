@@ -1344,7 +1344,11 @@ func HookRuntimeRegistrationCurrent(
 	if err != nil || !exists {
 		return false, err
 	}
-	if !hookRuntimeFlatEvidenceCurrent(flatBody, "codex", wantMode) {
+	flatSource := HookFailModeSourceConfig
+	if opts.ManagedEnterprise {
+		flatSource = ""
+	}
+	if !hookRuntimeFlatEvidenceCurrent(flatBody, "codex", wantMode, flatSource) {
 		return false, nil
 	}
 
@@ -1408,13 +1412,12 @@ func HookRuntimeRegistrationCurrent(
 	return true, nil
 }
 
-func hookRuntimeFlatEvidenceCurrent(body []byte, connectorName, failMode string) bool {
-	expected := fmt.Sprintf(
-		"DEFENSECLAW_CONNECTOR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
+func hookRuntimeFlatEvidenceCurrent(body []byte, connectorName, failMode, source string) bool {
+	return bytes.Equal(body, hookRuntimeFlatRecord(
 		normalizeConnectorName(connectorName),
 		normalizeHookFailMode(failMode),
-	)
-	return bytes.Equal(body, []byte(expected))
+		source,
+	))
 }
 
 // RequiresHookRuntimeRegistrationEvidence identifies the concrete Windows

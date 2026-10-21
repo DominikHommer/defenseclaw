@@ -657,6 +657,52 @@ func TestTetragonStatusOfTheDefaultBlockWithPlaneCOff(t *testing.T) {
 	}
 }
 
+// The default block on a host without Plane C renders the off drop-in, so
+// the helper runs the mode status and verify report. A helper that still
+// runs another mode (an upgrade from a release that rendered no drop-in left
+// it on its built-in consume) makes ensure apply and restart it, the step
+// kernel_policy_not_applied names, instead of a no-op; once the helper runs
+// the rendered mode ensure settles and the warning is gone.
+func TestEnsureRestartsAHelperThatRunsAnotherTetragonMode(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: tetragonTestConfig(t, h, "", false)}))
+	if got, want := h.read(tetragonDropinPath), expectedTetragonDropin("off", "168h", "", ""); got != want {
+		t.Fatalf("drop-in of the default block without Plane C:\n%s\nwant:\n%s", got, want)
+	}
+	h.services.active[unitSensorHelper] = true
+	published := func(mode kernelpolicy.Mode) {
+		h.writeTetragonState(kernelpolicy.FileState{Version: 1, UpdatedAt: time.Now(), KernelPolicy: kernelpolicy.Digest(),
+			Effective: string(mode), InSync: true, Intent: kernelpolicy.IntentStatus{Mode: mode}})
+	}
+	published(kernelpolicy.ModeConsume)
+	status := h.run(Options{Action: ActionStatus})
+	if got := messagesOf(status.Warnings, codeKernelPolicyNotApplied); !strings.Contains(got, "runs Tetragon mode consume") || !strings.Contains(got, "renders off") {
+		t.Fatalf("status does not report the helper's other mode: %+v", status.Warnings)
+	}
+	calls := len(h.services.calls)
+	r := h.run(Options{Action: ActionEnsure})
+	if r.Noop {
+		t.Fatalf("ensure is a no-op while the helper runs another mode: %+v", r)
+	}
+	restarted := strings.Join(h.services.calls[calls:], "\n")
+	if !strings.Contains(restarted, "stop "+unitSensorHelper) || !strings.Contains(restarted, "start "+unitSensorHelper) {
+		t.Fatalf("ensure did not restart the helper: %v", h.services.calls[calls:])
+	}
+	if !strings.Contains(strings.Join(r.Changes, "\n"), "the sensor helper restarted into enterprise.tetragon mode off") {
+		t.Fatalf("ensure does not report the helper restart: %v", r.Changes)
+	}
+	published(kernelpolicy.ModeOff)
+	if r := h.run(Options{Action: ActionEnsure}); !r.Noop {
+		t.Fatalf("ensure does not settle once the helper runs the rendered mode: %+v", r)
+	}
+	if status := h.run(Options{Action: ActionStatus}); hasWarning(status, codeKernelPolicyNotApplied) {
+		t.Fatalf("status still reports the mode: %+v", status.Warnings)
+	}
+	if verify := h.run(Options{Action: ActionVerify}); strings.Contains(messagesOf(verify.Warnings, codeKernelPolicyNotApplied)+messagesOf(verify.Errors, codeVerify), "kernel_policy_not_applied") {
+		t.Fatalf("verify still reports the mode: %+v %+v", verify.Warnings, verify.Errors)
+	}
+}
+
 // GAP-0046: a pause or resume that wrote its file succeeds whatever else
 // the host reports (here a recorded policy with no helper running, which
 // status fails on), and prints the change, not the whole status: the fleet

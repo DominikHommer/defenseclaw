@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"text/template"
 
@@ -332,13 +333,6 @@ var hookScripts = func() []string {
 	return all
 }()
 
-// WriteHookScript generates the shared inspect-tool.sh hook script.
-// Kept for backward compatibility — calls WriteHookScriptsWithToken with
-// an empty token (loopback-allow path).
-func WriteHookScript(hookDir, apiAddr string) error {
-	return WriteHookScriptsWithToken(hookDir, apiAddr, "")
-}
-
 // hookHelperScripts lists support files that hooks `source` at runtime.
 // They are written into the hook dir alongside the executable hooks but
 // NEVER appear in HookScripts() / connector enumerations — agents do
@@ -535,14 +529,6 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	return nil
 }
 
-// WriteAllHookScripts generates every hook script with no gateway token
-// baked in (loopback-allow path). Kept for connectors that don't need
-// the API bearer — e.g. the inspect-* hooks reach the chat-completions
-// proxy on port 4000, which has its own X-DC-Auth path.
-func WriteAllHookScripts(hookDir, apiAddr string) error {
-	return WriteHookScriptsWithToken(hookDir, apiAddr, "")
-}
-
 // writeHookScriptsCommon shares the on-disk dance (mkdir, .token,
 // helpers) between every variant. `extras` is the per-connector list
 // of basenames stacked on top of the generic ones. Returning an error
@@ -558,15 +544,17 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 }
 
 func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool) error {
-	return writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, extras, managed, connectorName, scopedToken, "", "", false, false)
+	return writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, HookFailModeSourceConfig, extras, managed, connectorName, scopedToken, "", "", false, false)
 }
 
 // writeHookScriptsCommonWithTransport is writeHookScriptsCommonWithOptions
 // plus the connector scripts' standalone socket transport block (empty for
 // TCP) and foreign-hook guard block (empty unless the connector's standalone
 // shell hook runs the guard). The shared inspect-* scripts keep TCP: no
-// per-user enterprise hook registration invokes them.
-func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool) error {
+// per-user enterprise hook registration invokes them. failModeSource is the
+// sidecar source of failMode (HookFailModeSourceConfig, or "" for an open
+// CapableHookFailMode lowered).
+func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, failModeSource string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -599,6 +587,7 @@ func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode strin
 		apiAddr,
 		connectorName,
 		normalizeHookFailMode(failMode),
+		failModeSource,
 		managed,
 		writeFile,
 	); err != nil {
@@ -831,12 +820,28 @@ type hookConfigSidecar struct {
 	Version     int               `json:"version"`
 	GatewayAddr string            `json:"gateway_addr"`
 	FailModes   map[string]string `json:"fail_modes,omitempty"`
-	Managed     bool              `json:"managed_enterprise,omitempty"`
+	// FailModeSources says, per connector entry, where its mode came from:
+	// HookFailModeSourceConfig for a mode this release resolved from the
+	// config. Earlier releases wrote no such field; the native hook does not
+	// trust their open (it may be an unset mode resolved from the guardrail
+	// mode) unless the config sets open. Unmanaged sidecars only: a managed
+	// hook takes its mode from protected runtime state.
+	FailModeSources map[string]string `json:"fail_mode_sources,omitempty"`
+	Managed         bool              `json:"managed_enterprise,omitempty"`
 	// LegacyMode is migration-only fallback for connectors that do not yet
 	// have a map entry. Connector entries always win, so it cannot collapse a
 	// mixed-mode runtime and becomes inert after every peer is refreshed.
 	LegacyMode string `json:"legacy_fail_mode,omitempty"`
+	// LegacySource is FailModeSources for LegacyMode.
+	LegacySource string `json:"legacy_fail_mode_source,omitempty"`
 }
+
+// HookFailModeSourceConfig marks a sidecar fail mode the config chose: the
+// mode resolveHookFailMode resolved, which keeps an unset mode closed outside
+// Secure Client. An open CapableHookFailMode lowered for a vendor hook surface
+// that cannot fail closed has no source: that is the vendor's limit, not an
+// operator's open, and a hook that answers for itself fails it closed.
+const HookFailModeSourceConfig = "config"
 
 // writeHookConfigSidecar persists the gateway address and connector fail mode
 // resolved at runtime. Connector entries always win; the legacy fallback is
@@ -847,6 +852,7 @@ func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string, ma
 		apiAddr,
 		connectorName,
 		failMode,
+		HookFailModeSourceConfig,
 		managed,
 		hookRuntimeFileWriter(managed),
 	)
@@ -898,6 +904,7 @@ func ReconcileManagedNativeHookRuntime(
 		apiAddr,
 		name,
 		mode,
+		"",
 		true,
 		writeFile,
 	)
@@ -1059,11 +1066,18 @@ func carryableHookConfigSidecar(data []byte) (hookConfigSidecar, error) {
 	return prior, nil
 }
 
+// writeHookConfigSidecarUsing records source (HookFailModeSourceConfig, or ""
+// for a mode the config did not choose) with an unmanaged entry. A managed
+// hook takes its mode from protected state, and the managed readers decode
+// the sidecar strictly, so a managed sidecar records no source.
 func writeHookConfigSidecarUsing(
-	hookDir, apiAddr, connectorName, failMode string,
+	hookDir, apiAddr, connectorName, failMode, source string,
 	managed bool,
 	writeFile func(string, []byte, os.FileMode) error,
 ) error {
+	if managed {
+		source = ""
+	}
 	path := filepath.Join(hookDir, hookConfigSidecarName)
 	return withFileLockMode(path, managed, func() error {
 		name := normalizeConnectorName(connectorName)
@@ -1098,12 +1112,26 @@ func writeHookConfigSidecarUsing(
 					state.FailModes = prior.FailModes
 				}
 				state.LegacyMode = prior.LegacyMode
+				if !managed {
+					state.FailModeSources = prior.FailModeSources
+					state.LegacySource = prior.LegacySource
+				}
 			}
 		}
+		mode := normalizeHookFailMode(failMode)
 		if name != "" {
-			state.FailModes[name] = normalizeHookFailMode(failMode)
+			state.FailModes[name] = mode
+			if source == "" {
+				delete(state.FailModeSources, name)
+			} else {
+				if state.FailModeSources == nil {
+					state.FailModeSources = map[string]string{}
+				}
+				state.FailModeSources[name] = source
+			}
 		} else {
-			state.LegacyMode = normalizeHookFailMode(failMode)
+			state.LegacyMode = mode
+			state.LegacySource = source
 		}
 		body, err := json.MarshalIndent(state, "", "  ")
 		if err != nil {
@@ -1117,12 +1145,7 @@ func writeHookConfigSidecarUsing(
 		// python3 are not guaranteed on the hardened macOS/Linux PATH.  One flat
 		// file per connector preserves mixed modes; an unscoped legacy record is
 		// a fallback only and never overrides a connector file.
-		runtimeBody := fmt.Sprintf(
-			"DEFENSECLAW_CONNECTOR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
-			name,
-			normalizeHookFailMode(failMode),
-		)
-		if err := writeFile(flatPath, []byte(runtimeBody), 0o600); err != nil {
+		if err := writeFile(flatPath, hookRuntimeFlatRecord(name, mode, source), 0o600); err != nil {
 			if restoreErr := restoreHookRuntimeFilesUsing(snapshots, writeFile); restoreErr != nil {
 				return fmt.Errorf("write shell hook runtime sidecar: %v (%v)", err, restoreErr)
 			}
@@ -1130,6 +1153,211 @@ func writeHookConfigSidecarUsing(
 		}
 		return nil
 	})
+}
+
+// hookRuntimeFlatRecord is a connector's flat shell runtime record. Its
+// source line says the config chose the mode (HookFailModeSourceConfig); the
+// shared shell readers follow an open only with it.
+func hookRuntimeFlatRecord(name, mode, source string) []byte {
+	body := "DEFENSECLAW_CONNECTOR=" + name + "\nDEFENSECLAW_FAIL_MODE=" + mode + "\n"
+	if source != "" {
+		body += "FAIL_MODE_SOURCE=" + source + "\n"
+	}
+	return []byte(body)
+}
+
+// HookFailModeRefresh is what RefreshHookFailModes changed.
+type HookFailModeRefresh struct {
+	// Sidecar names the entries rewritten in hooks/.hookcfg and its flat
+	// records ("legacy" for the unscoped entry).
+	Sidecar []string
+	// Scripts names the connector hook scripts whose baked open was closed.
+	Scripts []string
+}
+
+// RefreshHookFailModes sets the fail mode every per-user hook in hookDir
+// follows while its gateway is down to mode(connector), the mode the config
+// chooses (OutageHookFailMode). Every hooks/.hookcfg entry and flat record
+// gets that mode with its config source, and a connector script that bakes
+// an open (or lets the environment open it) is closed when its mode is
+// closed. Scripts are only tightened: the gateway renders them when it
+// starts. The installers run it with the new release's gateway before the
+// running gateway stops and again once it is stopped, before the new hooks go
+// in: an earlier release may have recorded or baked open for a mode nobody
+// set, which the old hooks would follow while the gateway is down. mode
+// returns "" for a connector it cannot resolve, which is left as it is;
+// mode("") is the unscoped legacy entry. A managed sidecar is not touched.
+func RefreshHookFailModes(hookDir string, mode func(connector string) string) (HookFailModeRefresh, error) {
+	var out HookFailModeRefresh
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	var state hookConfigSidecar
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		prior, err := carryableHookConfigSidecar(data)
+		if err != nil {
+			// The writer keeps an unmanaged sidecar it cannot read (it is the
+			// only record of peer modes), so its hooks cannot be made safe here.
+			return out, fmt.Errorf("%s: %w; remove it and run the upgrade again (the gateway writes it when it starts)", path, err)
+		}
+		if prior.Managed {
+			return out, nil
+		}
+		state = prior
+		if state.GatewayAddr == "" {
+			state.GatewayAddr = legacyHookConfigValue(data, "DEFENSECLAW_GATEWAY_ADDR")
+		}
+	case !os.IsNotExist(err):
+		return out, fmt.Errorf("read hook config sidecar: %w", err)
+	}
+	names := map[string]bool{}
+	for name := range state.FailModes {
+		names[name] = true
+	}
+	for _, name := range flatHookRuntimeRecordNames(hookDir) {
+		names[name] = true
+	}
+	for _, name := range sortedNames(names) {
+		want := mode(name)
+		if want == "" {
+			continue
+		}
+		if err := writeHookConfigSidecar(hookDir, state.GatewayAddr, name, want, false); err != nil {
+			return out, fmt.Errorf("refresh %s hook fail mode: %w", name, err)
+		}
+		out.Sidecar = append(out.Sidecar, name)
+	}
+	if state.LegacyMode != "" || hookRuntimeRecordFile(filepath.Join(hookDir, hookConfigSidecarName+".legacy")) {
+		if want := mode(""); want != "" {
+			if err := writeHookConfigSidecar(hookDir, state.GatewayAddr, "", want, false); err != nil {
+				return out, fmt.Errorf("refresh the legacy hook fail mode: %w", err)
+			}
+			out.Sidecar = append(out.Sidecar, "legacy")
+		}
+	}
+	scriptOwners := map[string]bool{}
+	for name := range connectorHookScripts {
+		scriptOwners[name] = true
+	}
+	for _, name := range sortedNames(scriptOwners) {
+		if mode(name) != "closed" {
+			continue
+		}
+		for _, script := range connectorHookScripts[name] {
+			closed, err := closeBakedHookFailMode(filepath.Join(hookDir, script))
+			if err != nil {
+				return out, err
+			}
+			if closed {
+				out.Scripts = append(out.Scripts, script)
+			}
+		}
+	}
+	return out, nil
+}
+
+func sortedNames(set map[string]bool) []string {
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// flatHookRuntimeRecordNames lists the connectors with a flat runtime record
+// in hookDir (.hookcfg.<name> naming its own connector), as the shared shell
+// readers find them.
+func flatHookRuntimeRecordNames(hookDir string) []string {
+	entries, err := os.ReadDir(hookDir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, entry := range entries {
+		name, ok := strings.CutPrefix(entry.Name(), hookConfigSidecarName+".")
+		if !ok || name == "legacy" || name == "lock" || !validFlatHookRuntimeName(name) {
+			continue
+		}
+		path := filepath.Join(hookDir, entry.Name())
+		if !hookRuntimeRecordFile(path) {
+			continue
+		}
+		if body, err := os.ReadFile(path); err == nil && legacyHookConfigValue(body, "DEFENSECLAW_CONNECTOR") == name {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func validFlatHookRuntimeName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// hookRuntimeRecordFile reports a regular, bounded runtime record (never a
+// link).
+func hookRuntimeRecordFile(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular() && info.Size() <= hookRuntimeSidecarMaxBytes
+}
+
+// bakedHookFailModeOpens are the forms in which a per-user connector hook
+// script of 0.8.10 up to this release bakes an open fail mode or lets the
+// environment open it, each with its closed form. "_DC_HOME_FAIL_MODE" and
+// "[ "open" = "closed" ]" are the missing-home checks.
+var bakedHookFailModeOpens = strings.NewReplacer(
+	`FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-open}"`, `FAIL_MODE="closed"`,
+	`FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`, `FAIL_MODE="closed"`,
+	`FAIL_MODE="open"`, `FAIL_MODE="closed"`,
+	`[ "open" = "closed" ]`, `[ "closed" = "closed" ]`,
+)
+
+// hookScriptMaxBytes bounds the hook script closeBakedHookFailMode reads.
+const hookScriptMaxBytes = 1 << 20
+
+// closeBakedHookFailMode rewrites the open a hook script bakes as closed. A
+// missing script, a link or an oversized file is left alone.
+func closeBakedHookFailMode(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect hook %s: %w", filepath.Base(path), err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > hookScriptMaxBytes {
+		return false, nil
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read hook %s: %w", filepath.Base(path), err)
+	}
+	closed := bakedHookFailModeOpens.Replace(string(body))
+	if closed == string(body) {
+		return false, nil
+	}
+	if err := atomicWriteFile(path, []byte(closed), info.Mode().Perm()); err != nil {
+		return false, fmt.Errorf("close hook %s: %w", filepath.Base(path), err)
+	}
+	return true, nil
+}
+
+// OutageHookFailMode is the fail mode conn's hooks follow while the gateway
+// is down when they answer for themselves (the native hook, the shared shell
+// readers, the installers' pre-swap refresh): the mode resolveHookFailMode
+// takes from the config. CapableHookFailMode's lowering of closed to open for
+// a vendor hook surface that cannot fail closed is not applied: that is the
+// vendor's limit, not an operator's open.
+func OutageHookFailMode(opts SetupOpts, conn Connector) string {
+	return resolveHookFailMode(opts, conn)
 }
 
 // clearHookConfigSidecarEntry removes only one connector's runtime selection.
@@ -1185,6 +1413,7 @@ func clearHookConfigSidecarEntryLocked(
 			}
 			if _, ok := state.FailModes[name]; ok {
 				delete(state.FailModes, name)
+				delete(state.FailModeSources, name)
 				body, err := json.MarshalIndent(state, "", "  ")
 				if err != nil {
 					return nil, fmt.Errorf("marshal hook config sidecar: %w", err)
@@ -1563,7 +1792,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // force-closed override.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	render := resolveConnectorHookRender(opts, c)
-	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, render.token, render.failMode, render.extras, opts.ManagedEnterprise,
+	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, render.token, render.failMode, render.failModeSource, render.extras, opts.ManagedEnterprise,
 		c.Name(), render.scopedToken, render.socketTransport, render.foreignGuard, shellHookSecureClientProfile(opts),
 		shellHookSecureClientDelivery(opts))
 }
@@ -1571,8 +1800,12 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 // connectorHookRender is what WriteHookScriptsForConnectorObjectWithOpts
 // renders a connector's hook scripts with.
 type connectorHookRender struct {
-	extras          []string
-	failMode        string
+	extras   []string
+	failMode string
+	// failModeSource is failMode's sidecar source: HookFailModeSourceConfig,
+	// or "" for an open CapableHookFailMode lowered, which the native hook
+	// and the shared shell readers fail closed.
+	failModeSource  string
 	token           string
 	scopedToken     bool
 	socketTransport string
@@ -1602,7 +1835,11 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 	if owner, ok := c.(HookScriptOwner); ok {
 		render.extras = owner.HookScriptNames(opts)
 	}
-	render.failMode = CapableHookFailMode(opts, c, resolveHookFailMode(opts, c))
+	resolved := resolveHookFailMode(opts, c)
+	render.failMode = CapableHookFailMode(opts, c, resolved)
+	if render.failMode == resolved {
+		render.failModeSource = HookFailModeSourceConfig
+	}
 	render.token = opts.HookAPIToken
 	render.scopedToken = opts.HookAPITokenScoped
 	if strings.TrimSpace(render.token) == "" {

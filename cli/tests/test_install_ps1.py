@@ -1148,6 +1148,29 @@ def test_the_new_hook_goes_in_before_the_data_copy() -> None:
     assert 'Restore-BinDir (Join-Path $Slot "bin")' in _ps1_function("Restore-Slot")
 
 
+def test_hook_fail_modes_are_rendered_before_the_gateway_stops_and_the_hook_swaps() -> None:
+    # An earlier release's sidecar can hold an open nobody chose; the new
+    # gateway sets the modes from the config before the old gateway stops
+    # (the old hook then fails closed) and, once it is stopped, again before
+    # the new hook goes in. Hooks it cannot make safe refuse the swap: before
+    # the stop nothing changed, after it the old gateway comes back.
+    install = _ps1_function("Invoke-Install")
+    first = install.index("if (-not (Update-HookFailModes $stagedGateway))")
+    second = install.index("if (-not (Update-HookFailModes $stagedGateway))", first + 1)
+    stop = install.index("if (-not (Stop-Gateway))")
+    assert first < stop < second < install.index("$saved = Save-Snapshot"), install
+    assert install.index("$stagedGateway = Join-Path $Staging") < first
+    before = install[first:stop]
+    assert "Restore-SetupInstall" in before and "nothing was changed (see above)" in before, before
+    after = install[second : install.index("Stop-Watchdog", second)]
+    assert after.index("Clear-StagedRelease") < after.index("Restart-Old") < after.index("$(Get-RestoredNote)"), after
+    update = _ps1_function("Update-HookFailModes")
+    assert '@("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0' in update, update
+    assert 'Join-Path $DataDir "hooks\\.hookcfg"' in update, update
+    # A downgrade's older gateway prints the connector help instead.
+    assert '-notmatch "connector refresh-fail-modes") { return $true }' in update, update
+
+
 @pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
 @pytest.mark.parametrize("shell", _POWERSHELLS)
 @pytest.mark.parametrize("case", ["upgrade", "first-install", "interrupted-before-marker"])

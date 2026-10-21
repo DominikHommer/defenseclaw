@@ -341,9 +341,13 @@ defenseclaw_shared_hook_token_file() {
 # an open record of its own; with none selected (several records, or none),
 # only the unscoped legacy mode (.hookcfg.legacy, legacy_fail_mode) can open
 # the call. After an upgrade, a kept legacy open therefore never reopens a
-# connector recorded closed. An inherited DEFENSECLAW_FAIL_MODE can only
-# tighten (GAP-0315); guardian-managed hooks trust only installer-owned
-# state. Malformed, ambiguous or missing state fails closed.
+# connector recorded closed. A record counts as open only with its config
+# source (FAIL_MODE_SOURCE=config, fail_mode_sources, legacy_fail_mode_source):
+# an earlier release's open may be an unset mode it resolved open, and an
+# open lowered for a vendor that cannot fail closed is not an operator's
+# choice. An inherited DEFENSECLAW_FAIL_MODE can only tighten (GAP-0315);
+# guardian-managed hooks trust only installer-owned state. Malformed,
+# ambiguous or missing state fails closed.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
@@ -353,7 +357,7 @@ defenseclaw_shared_runtime_fail_mode() {
     esac
   fi
   local config="${hook_dir}/.hookcfg"
-  local candidate suffix recorded mode selected="" summary=""
+  local candidate suffix recorded mode source selected="" summary=""
   for candidate in "${hook_dir}"/.hookcfg.*; do
     [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
     suffix="${candidate##*.hookcfg.}"
@@ -365,7 +369,8 @@ defenseclaw_shared_runtime_fail_mode() {
     recorded="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_CONNECTOR 2>/dev/null || true)"
     [ "$recorded" = "$suffix" ] || continue
     mode="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
-    if [ "$mode" != "open" ]; then
+    source="$(defenseclaw_flat_hookcfg_value "$candidate" FAIL_MODE_SOURCE 2>/dev/null || true)"
+    if [ "$mode" != "open" ] || [ "$source" != "config" ]; then
       printf closed
       return 0
     fi
@@ -374,27 +379,31 @@ defenseclaw_shared_runtime_fail_mode() {
     fi
   done
   # The JSON state, as four words: connector entries, whether all of them
-  # are open, the selected connector's entry, and the legacy mode. A parser
-  # that runs and fails means malformed state; no parser leaves only the flat
-  # records.
+  # are open with a config source, the selected connector's entry, and the
+  # legacy mode. A parser that runs and fails means malformed state; no
+  # parser leaves only the flat records.
   if [ -f "$config" ]; then
     if command -v jq >/dev/null 2>&1; then
       summary="$(jq -r --arg connector "$connector" '
-        def word: if . == null or . == "" then "none" elif . == "open" then "open" else "closed" end;
+        def word($source): if . == null or . == "" then "none" elif . == "open" and $source == "config" then "open" else "closed" end;
         if type == "object" and (.version | type) == "number" and .version >= 2
-          and ((.fail_modes // {}) | type) == "object" then
+          and ((.fail_modes // {}) | type) == "object"
+          and ((.fail_mode_sources // {}) | type) == "object" then
           (.fail_modes // {}) as $modes
-          | "\($modes | length) \(if [$modes[]] | all(. == "open") then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word) end) \(.legacy_fail_mode | word)"
+          | (.fail_mode_sources // {}) as $sources
+          | .legacy_fail_mode_source as $legacy_source
+          | "\($modes | length) \(if [$modes | to_entries[] | .value == "open" and $sources[.key] == "config"] | all then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word($sources[$connector])) end) \(.legacy_fail_mode | word($legacy_source))"
         else "invalid" end' "$config" 2>/dev/null)" || summary="invalid"
     elif _dc_python3_usable; then
       summary="$(python3 -c 'import json,sys
 d=json.load(open(sys.argv[1],encoding="utf-8"))
 assert isinstance(d,dict) and type(d.get("version")) is int and d["version"]>=2
 m=d.get("fail_modes") or {}
-assert isinstance(m,dict)
-w=lambda v:"none" if v in (None,"") else ("open" if v=="open" else "closed")
+s=d.get("fail_mode_sources") or {}
+assert isinstance(m,dict) and isinstance(s,dict)
+w=lambda v,src:"none" if v in (None,"") else ("open" if v=="open" and src=="config" else "closed")
 c=sys.argv[2]
-print(len(m),"open" if all(v=="open" for v in m.values()) else "closed",w(m.get(c)) if c else "none",w(d.get("legacy_fail_mode")))' "$config" "$connector" 2>/dev/null)" || summary="invalid"
+print(len(m),"open" if all(v=="open" and s.get(k)=="config" for k,v in m.items()) else "closed",w(m.get(c),s.get(c)) if c else "none",w(d.get("legacy_fail_mode"),d.get("legacy_fail_mode_source")))' "$config" "$connector" 2>/dev/null)" || summary="invalid"
     fi
   fi
   local json_count=0 json_all=open json_selected=none json_legacy=none
@@ -429,7 +438,8 @@ print(len(m),"open" if all(v=="open" for v in m.values()) else "closed",w(m.get(
   local legacy_flat=none
   if [ -f "${hook_dir}/.hookcfg.legacy" ]; then
     legacy_flat="$(defenseclaw_flat_hookcfg_value "${hook_dir}/.hookcfg.legacy" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
-    [ "$legacy_flat" = "open" ] || legacy_flat=closed
+    source="$(defenseclaw_flat_hookcfg_value "${hook_dir}/.hookcfg.legacy" FAIL_MODE_SOURCE 2>/dev/null || true)"
+    [ "$legacy_flat" = "open" ] && [ "$source" = "config" ] || legacy_flat=closed
   fi
   case "$legacy_flat/$json_legacy" in
     open/open|open/none|none/open) printf open ;;

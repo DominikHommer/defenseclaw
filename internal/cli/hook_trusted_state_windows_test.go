@@ -127,6 +127,8 @@ func stageTrustedNativeHookForTest(t *testing.T, failMode string) (string, strin
 		"version":      2,
 		"gateway_addr": "127.0.0.1:18971",
 		"fail_modes":   map[string]string{"claudecode": failMode},
+		// This release renders the sidecar with the source of each mode.
+		"fail_mode_sources": map[string]string{"claudecode": "config"},
 	}
 	data, err = json.Marshal(sidecar)
 	if err != nil {

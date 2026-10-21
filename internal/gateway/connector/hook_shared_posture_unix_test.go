@@ -34,13 +34,18 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 	}
 	python, pyErr := exec.LookPath("python3")
 	_, jqErr := exec.LookPath("jq")
+	// Records as 1.0.4 writes them: an open counts only with its config
+	// source (G3-upg); the unsourced cases below check that rule.
 	flat := func(name, mode string) string {
+		return "DEFENSECLAW_CONNECTOR=" + name + "\nDEFENSECLAW_FAIL_MODE=" + mode + "\nFAIL_MODE_SOURCE=config\n"
+	}
+	unsourced := func(name, mode string) string {
 		return "DEFENSECLAW_CONNECTOR=" + name + "\nDEFENSECLAW_FAIL_MODE=" + mode + "\n"
 	}
-	mixedJSON := `{"version":2,"gateway_addr":"127.0.0.1:1","fail_modes":{"codex":"closed","claudecode":"open"}}`
-	closedLegacyOpenJSON := `{"version":2,"gateway_addr":"127.0.0.1:1","fail_modes":{"codex":"closed","claudecode":"closed"},"legacy_fail_mode":"open"}`
-	openJSON := `{"version":2,"gateway_addr":"127.0.0.1:1","fail_modes":{"codex":"open","claudecode":"open"},"legacy_fail_mode":"closed"}`
-	legacyOpenJSON := `{"version":2,"gateway_addr":"127.0.0.1:1","legacy_fail_mode":"open"}`
+	mixedJSON := `{"version":2,"gateway_addr":"127.0.0.1:1","fail_modes":{"codex":"closed","claudecode":"open"},"fail_mode_sources":{"codex":"config","claudecode":"config"}}`
+	closedLegacyOpenJSON := `{"version":2,"gateway_addr":"127.0.0.1:1","fail_modes":{"codex":"closed","claudecode":"closed"},"fail_mode_sources":{"codex":"config","claudecode":"config"},"legacy_fail_mode":"open","legacy_fail_mode_source":"config"}`
+	openJSON := `{"version":2,"gateway_addr":"127.0.0.1:1","fail_modes":{"codex":"open","claudecode":"open"},"fail_mode_sources":{"codex":"config","claudecode":"config"},"legacy_fail_mode":"closed","legacy_fail_mode_source":"config"}`
+	legacyOpenJSON := `{"version":2,"gateway_addr":"127.0.0.1:1","legacy_fail_mode":"open","legacy_fail_mode_source":"config"}`
 	type state map[string]string
 	for _, tc := range []struct {
 		name     string
@@ -83,7 +88,7 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 		{"all-open/no-selector-legacy-open", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg.claudecode": flat("claudecode", "open"),
 			".hookcfg": strings.Replace(openJSON, `"legacy_fail_mode":"closed"`, `"legacy_fail_mode":"open"`, 1)},
 			"", [3]string{"open", "open", "closed"}},
-		{"single-open-record", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"open"}}`},
+		{"single-open-record", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"open"},"fail_mode_sources":{"codex":"config"}}`},
 			"codex", [3]string{"open", "open", "open"}},
 		{"all-open/selector-recorded", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": openJSON},
 			"codex", [3]string{"open", "open", "open"}},
@@ -100,6 +105,14 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 		{"legacy-flat-closed-json-open", state{".hookcfg.legacy": flat("", "closed"), ".hookcfg": legacyOpenJSON},
 			"", [3]string{"closed", "closed", "closed"}},
 		{"nothing", state{}, "", [3]string{"closed", "closed", "closed"}},
+		// An open no config chose (an earlier release resolved it, or it was
+		// lowered for a vendor): closed on every parser path (G3-upg).
+		{"unsourced/single-open-record", state{".hookcfg.codex": unsourced("codex", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"open"}}`},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"unsourced/json-open-flat-sourced", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"open"}}`},
+			"codex", [3]string{"closed", "closed", "open"}},
+		{"unsourced/legacy-only-open", state{".hookcfg.legacy": unsourced("", "open"), ".hookcfg": `{"version":2,"legacy_fail_mode":"open"}`},
+			"", [3]string{"closed", "closed", "closed"}},
 	} {
 		for i, parser := range []string{"jq", "python3", "none"} {
 			t.Run(tc.name+"/"+parser, func(t *testing.T) {
@@ -183,7 +196,8 @@ func TestSharedInspectHooksNeverTakeAPeersOpenMode(t *testing.T) {
 		{"upgrade-1.0-open-one-closed-one-open", "v2", []install{{NewCodexConnector(), "closed"}, {NewClaudeCodeConnector(), "open"}},
 			[]string{"", "claudecode"}, false},
 		// Controls: a connector of an install every connector chose open
-		// stays open, and so does an older open install (legacy open) no
+		// stays open, and so does a legacy open the config chose
+		// (writeHookConfigSidecar records its config source) that no
 		// connector refresh has rewritten yet or whose records are all open.
 		{"both-open", "", []install{{NewCodexConnector(), "open"}, {NewClaudeCodeConnector(), "open"}},
 			[]string{"claudecode", "codex"}, true},

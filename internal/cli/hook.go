@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -334,7 +335,7 @@ func hookPreRunFailsClosed(failure hookFailureContext) bool {
 	}
 	mode := strings.TrimSpace(failure.failMode)
 	if mode == "" {
-		mode = hookSidecarFailMode(readHookSidecar(filepath.Join(home, "hooks", ".hookcfg")), failure.connector)
+		mode = hookSidecarFailMode(readHookSidecar(filepath.Join(home, "hooks", ".hookcfg")), failure.connector, home)
 	}
 	if hookEnvTightensFailMode() {
 		mode = "closed"
@@ -582,7 +583,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	}
 
 	if failMode == "" {
-		failMode = hookSidecarFailMode(sidecar, connector)
+		failMode = hookSidecarFailMode(sidecar, connector, home)
 	}
 	if hookEnvTightensFailMode() {
 		failMode = "closed"
@@ -684,15 +685,21 @@ func readHookSidecar(path string) map[string]string {
 		Version     int               `json:"version"`
 		GatewayAddr string            `json:"gateway_addr"`
 		FailModes   map[string]string `json:"fail_modes"`
+		Sources     map[string]string `json:"fail_mode_sources"`
 		LegacyMode  string            `json:"legacy_fail_mode"`
+		LegacySrc   string            `json:"legacy_fail_mode_source"`
 	}
 	if json.Unmarshal(data, &current) == nil && current.Version >= 2 {
 		out["DEFENSECLAW_GATEWAY_ADDR"] = current.GatewayAddr
 		for connector, mode := range current.FailModes {
 			out[hookSidecarFailModeKey(connector)] = mode
 		}
+		for connector, source := range current.Sources {
+			out[hookSidecarFailModeSourceKey(connector)] = source
+		}
 		if current.LegacyMode != "" {
 			out["DEFENSECLAW_FAIL_MODE"] = current.LegacyMode
+			out[hookSidecarFailModeSourceKey("")] = current.LegacySrc
 		}
 		return out
 	}
@@ -713,24 +720,80 @@ func readHookSidecar(path string) map[string]string {
 		} else {
 			val = strings.Trim(val, `"'`)
 		}
-		if key != "" {
+		// Only this release's JSON records a source.
+		if key != "" && !strings.HasPrefix(key, hookSidecarSourcePrefix) {
 			out[key] = val
 		}
 	}
 	return out
 }
 
-func hookSidecarFailMode(sidecar map[string]string, connector string) string {
-	if mode := sidecar[hookSidecarFailModeKey(connector)]; mode != "" {
+// hookSidecarFailMode is connector's fail mode in the hook sidecar. An open
+// counts only when the sidecar records that the config chose it
+// (fail_mode_sources, written by this release). Any other open is closed
+// unless home's config.yaml sets open for the connector: an earlier release's
+// (the 0.8.x KEY=value file, a 1.0.x file without that field, an unscoped
+// legacy mode), which may be an unset mode resolved from the guardrail mode,
+// and one CapableHookFailMode lowered for a vendor that cannot fail closed,
+// which is that vendor's limit, not an operator's open. The installers
+// refresh the sidecar from the config before the gateway stops; this covers
+// one that was not refreshed.
+func hookSidecarFailMode(sidecar map[string]string, connector, home string) string {
+	mode := sidecar[hookSidecarFailModeKey(connector)]
+	source := sidecar[hookSidecarFailModeSourceKey(connector)]
+	if mode == "" {
+		mode, source = sidecar["DEFENSECLAW_FAIL_MODE"], sidecar[hookSidecarFailModeSourceKey("")]
+	}
+	if nativeHookFailMode(mode) != "open" || source == gwconnector.HookFailModeSourceConfig {
 		return mode
 	}
-	return sidecar["DEFENSECLAW_FAIL_MODE"]
+	if hookConfigSetsOpen(home, connector) {
+		return "open"
+	}
+	return "closed"
+}
+
+// hookConfigMaxBytes bounds the config.yaml read of readHookConfigDocument.
+const hookConfigMaxBytes = 4 << 20
+
+// readHookConfigDocument returns the config.yaml document at path, or nil
+// when it is missing, not a regular file or larger than hookConfigMaxBytes.
+func readHookConfigDocument(path string) []byte {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > hookConfigMaxBytes {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+// hookConfigSetsOpen reports whether home's config.yaml sets hook fail mode
+// open for connector (config.ConfiguredHookFailModeInDocument). Only the
+// data directory's own config.yaml is read, never DEFENSECLAW_CONFIG: the
+// environment can only tighten a hook.
+func hookConfigSetsOpen(home, connector string) bool {
+	data := readHookConfigDocument(filepath.Join(home, "config.yaml"))
+	return data != nil && config.ConfiguredHookFailModeInDocument(data, connector) == "open"
 }
 
 func hookSidecarFailModeKey(connector string) string {
+	return "DEFENSECLAW_FAIL_MODE_" + hookSidecarConnectorKey(connector)
+}
+
+// hookSidecarSourcePrefix keys readHookSidecar's sources. No KEY=value
+// sidecar line can set one.
+const hookSidecarSourcePrefix = "source:"
+
+func hookSidecarFailModeSourceKey(connector string) string {
+	return hookSidecarSourcePrefix + hookSidecarConnectorKey(connector)
+}
+
+func hookSidecarConnectorKey(connector string) string {
 	name := strings.ToUpper(strings.TrimSpace(connector))
-	name = strings.NewReplacer("-", "", "_", "", " ", "").Replace(name)
-	return "DEFENSECLAW_FAIL_MODE_" + name
+	return strings.NewReplacer("-", "", "_", "", " ", "").Replace(name)
 }
 
 // hookIsLoopbackAddr reports whether addr ("host:port" or a bare host) targets
