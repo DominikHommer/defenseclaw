@@ -147,6 +147,7 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 	accounts := []enterprisehooks.IdentitySpoolAccount{}
 	keys := []string{}
 	seen := map[int]bool{}
+	var leftUIDs []int
 	// Manifest names may be NSS aliases. Only a name resolved by UID can
 	// distinguish a reassigned UID from an alias of the same account in the
 	// spool; an unavailable lookup leaves the name empty and preserves the
@@ -183,7 +184,13 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 			fmt.Fprintf(stderr, "[hook-guardian] identity spool: eligible accounts: %v\n", err)
 		}
 		if enterpriseHookManifestEnrollment() {
-			extra = enterprisehooks.ManifestEnrolledAccounts(extra, enterprisehooks.Manifest{Targets: run.Targets})
+			enrolled := enterprisehooks.ManifestEnrolledAccounts(extra, enterprisehooks.Manifest{Targets: run.Targets})
+			for _, account := range extra {
+				if !slices.ContainsFunc(enrolled, func(e enterprisehooks.UnixEligibleAccount) bool { return e.UID == account.UID }) {
+					leftUIDs = append(leftUIDs, account.UID)
+				}
+			}
+			extra = enrolled
 		}
 		for _, account := range extra {
 			if account.UID <= 0 || seen[account.UID] {
@@ -193,6 +200,31 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 			user := canonicalUser(account.UID)
 			accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: account.UID, User: user})
 			keys = append(keys, strconv.Itoa(account.UID)+":"+user)
+		}
+	}
+	// The accounts the enrollment settings leave out (excluded, exempt, out
+	// of the manifest) lose their record at once. A directory account the
+	// pass merely does not list keeps it until the directory shows that it
+	// left, since a listing can be partial (GAP-1113, GAP-1236).
+	if cfg != nil {
+		for _, entry := range append(slices.Clone(cfg.Enterprise.Enrollment.ExcludeUsers), cfg.Enterprise.Enrollment.ExemptUsers...) {
+			entry = strings.TrimSpace(entry)
+			if uid, err := strconv.Atoi(entry); err == nil {
+				leftUIDs = append(leftUIDs, uid)
+			} else if account, err := enterprisehooks.StandaloneResolver().LookupUser(entry); entry != "" && err == nil {
+				leftUIDs = append(leftUIDs, account.UID)
+			}
+		}
+	}
+	for _, uid := range leftUIDs {
+		if uid > 0 && !seen[uid] {
+			seen[uid] = true
+			accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: uid, Left: true})
+			// A newly left account changes the keys, so its record goes at
+			// the next tick, also when no listing named it before (a
+			// partial listing omitted it) and the enrolled keys stay the
+			// same.
+			keys = append(keys, "left:"+strconv.Itoa(uid))
 		}
 	}
 	return accounts, keys
@@ -210,8 +242,9 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	// gateway does on reload (GAP-1255).
 	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
 	accounts, keys := enterpriseHookIdentitySpoolAccounts(stderr, run)
-	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, accounts)
-	startEnterpriseHookDirectoryReachWatch(ctx, stderr, dir, accounts)
+	enrolled := slices.DeleteFunc(slices.Clone(accounts), func(a enterprisehooks.IdentitySpoolAccount) bool { return a.Left })
+	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, enrolled)
+	startEnterpriseHookDirectoryReachWatch(ctx, stderr, dir, enrolled)
 	sort.Strings(keys)
 	fingerprint := strings.Join(keys, ";")
 	now := time.Now()

@@ -50,9 +50,15 @@ const (
 // each new file before it is renamed into place.
 //
 // ctx is the enumerator cycle: the pass stops at its deadline, and no
-// lookup runs past it. The accounts it did not reach keep their previous
-// records, and the next pass starts with the oldest records, so a slow
-// directory cannot keep the same accounts from being refreshed.
+// lookup holds it past it. The lookups of an account run in the background
+// (the native calls cannot be canceled) and the pass waits for them only
+// until the deadline, and for one account at most windowsIdentityAccountWait;
+// an answer that comes later is not used. An account whose earlier lookup
+// still runs is skipped. The accounts it did not reach or refresh keep their
+// previous records, and the next pass starts with the oldest records and
+// takes the accounts whose last lookup did not answer in time last, so
+// neither a slow directory nor one account it never answers for can keep
+// the other accounts from being refreshed.
 func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEnrollmentGroupCache, excluded []string,
 	emails map[string]map[string]string, setOwnership func(string) error, logf func(string, ...any)) error {
 	if dir == "" || cache == nil {
@@ -77,6 +83,8 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 		sid, key    string
 		previous    IdentitySpoolRecord
 		hasPrevious bool
+		// late: the account's last lookup did not answer in time.
+		late bool
 	}
 	keep := map[string]bool{}
 	accounts := make([]account, 0, len(cache.Users))
@@ -86,52 +94,74 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 			continue
 		}
 		keep[strings.ToLower(key+".json")] = true
-		entry := account{sid: sid, key: key}
+		entry := account{sid: sid, key: key, late: windowsIdentityLookupGate.isLate(key)}
 		if previous, err := ReadIdentitySpoolRecord(dir, key, nil); err == nil {
 			entry.previous, entry.hasPrevious = previous, true
 		}
 		accounts = append(accounts, entry)
 	}
-	// Oldest record first (none at all before any): a pass the cycle deadline
-	// stops refreshes the accounts it reached, and the next starts with the
-	// rest.
+	// Oldest record first (none at all before any), and the accounts whose
+	// last lookup did not answer in time after all the others: a pass the
+	// cycle deadline stops refreshes the accounts it reached, the next starts
+	// with the rest, and a slow account cannot use up every pass.
 	sort.Slice(accounts, func(i, j int) bool {
+		if accounts[i].late != accounts[j].late {
+			return accounts[j].late
+		}
 		if !accounts[i].previous.UpdatedAt.Equal(accounts[j].previous.UpdatedAt) {
 			return accounts[i].previous.UpdatedAt.Before(accounts[j].previous.UpdatedAt)
 		}
 		return accounts[i].key < accounts[j].key
 	})
+	lookups := windowsIdentityLookups{
+		facts: windowsIdentityDirectoryFacts, groupNames: windowsIdentityGroupNames, settledName: windowsSettledAccountName,
+	}
 	var stopped error
+	var unanswered []string
 	for i, entry := range accounts {
-		if err := ctx.Err(); err != nil {
-			stopped = fmt.Errorf("identity facts of %d of %d accounts were not refreshed before the enumerator cycle ended; their previous records stay: %w",
-				len(accounts)-i, len(accounts), err)
-			break
-		}
 		sid, key := entry.sid, entry.key
 		name := key + ".json"
 		now := time.Now().UTC()
-		facts := windowsIdentityDirectoryFacts(key, 0)
+		groupSIDs := cache.Users[sid]
 		// The enrollment cache retains last-session groups for enrollment
 		// decisions, but they cannot verify the membership of a new SSH or
 		// task token. Publish groups only from an active session this cycle.
-		facts.GroupsPartial = !cache.SignedIn[sid]
-		if !facts.GroupsPartial {
-			groupSIDs := cache.Users[sid]
-			names := windowsIdentityGroupNames(groupSIDs, windowsIdentityGroupNameLimit, windowsIdentityLookupBudget(ctx, windowsIdentityGroupNameBudget))
-			groups := make([]string, 0, 2*len(groupSIDs))
-			for i, groupSID := range groupSIDs {
-				groups = append(groups, groupSID)
-				if i < len(names) && names[i] != groupSID {
-					groups = append(groups, names[i])
+		signedIn := cache.SignedIn[sid]
+		// One account gets at most windowsIdentityAccountWait of the cycle,
+		// so an account whose directory does not answer leaves time for the
+		// others.
+		accountCtx, cancel := context.WithTimeout(ctx, windowsIdentityAccountWait)
+		resolved, err := windowsIdentityBounded(accountCtx, key, func(ctx context.Context) windowsIdentityResolved {
+			facts := lookups.facts(key, 0)
+			facts.GroupsPartial = !signedIn
+			if signedIn {
+				names := lookups.groupNames(groupSIDs, windowsIdentityGroupNameLimit, windowsIdentityLookupBudget(ctx, windowsIdentityGroupNameBudget))
+				groups := make([]string, 0, 2*len(groupSIDs))
+				for i, groupSID := range groupSIDs {
+					groups = append(groups, groupSID)
+					if i < len(names) && names[i] != groupSID {
+						groups = append(groups, names[i])
+					}
 				}
+				facts.Groups = groups
 			}
-			facts.Groups = groups
+			return windowsIdentityResolved{facts: facts, user: lookups.spoolUser(ctx, key)}
+		})
+		cancel()
+		if err != nil {
+			if cycleErr := ctx.Err(); cycleErr != nil {
+				stopped = fmt.Errorf("identity facts of %d of %d accounts were not refreshed before the enumerator cycle ended; their previous records stay: %w",
+					len(accounts)-i, len(accounts), cycleErr)
+				break
+			}
+			unanswered = append(unanswered, fmt.Sprintf("%s (%v)", key, err))
+			continue
 		}
+		facts := resolved.facts
 		if facts.ResolvedAt.IsZero() {
 			facts.ResolvedAt = now
 		}
-		record := IdentitySpoolRecord{Key: key, User: windowsIdentitySpoolUser(ctx, key), UpdatedAt: now, Facts: facts,
+		record := IdentitySpoolRecord{Key: key, User: resolved.user, UpdatedAt: now, Facts: facts,
 			ConnectorEmails: emails[key]}
 		switch {
 		case facts.UPN != "" && facts.Source == useridentity.SourceWindowsIdentityStore:
@@ -153,6 +183,10 @@ func WriteWindowsIdentitySpool(ctx context.Context, dir string, cache *WindowsEn
 			}
 		}
 	}
+	if len(unanswered) > 0 {
+		stopped = errors.Join(stopped, fmt.Errorf("the directory lookups of %d account(s) did not answer in time; their previous records stay: %s",
+			len(unanswered), strings.Join(unanswered, ", ")))
+	}
 	return stopped
 }
 
@@ -173,21 +207,59 @@ var (
 	windowsIdentityGroupNames     = useridentity.WindowsGroupNames
 )
 
-// windowsIdentitySpoolUser names a record's account DOMAIN\account, as the
-// Linux and macOS records name theirs, so a record maps to an account
-// without a SID lookup; "" when the SID no longer resolves. While the user
-// is signed in with a UPN the LSA names the account by that UPN as typed;
-// the record then takes the sAMAccountName the directory translates it to
-// (windowsSettledAccountName), which the gateway's service account cannot
-// ask for itself (GAP-0382).
-func windowsIdentitySpoolUser(ctx context.Context, sid string) string {
-	names := windowsIdentityGroupNames([]string{sid}, 1, windowsIdentityLookupBudget(ctx, windowsIdentityGroupNameBudget))
+// windowsIdentityLookups are the directory lookups one pass uses, read once
+// so a lookup still running after the pass ended uses the pass's own.
+type windowsIdentityLookups struct {
+	facts       func(sid string, wait time.Duration) useridentity.DirectoryFacts
+	groupNames  func(sids []string, limit int, budget time.Duration) []string
+	settledName func(sid, account, domain string) string
+}
+
+// windowsIdentityResolved is what the lookups of one account found.
+type windowsIdentityResolved struct {
+	facts useridentity.DirectoryFacts
+	user  string
+}
+
+// windowsIdentityAccountWait bounds the wait for one account's lookups;
+// tests replace it.
+var windowsIdentityAccountWait = 10 * time.Second
+
+// windowsIdentityLookupGate holds the account lookups of the passes, by SID.
+var windowsIdentityLookupGate identityLookupGate
+
+// windowsIdentityBounded runs lookup for the account key in the background
+// (identityLookupGated) and waits for it until ctx ends. It returns ctx's
+// error when ctx ended first, also when the answer arrived just as it ended:
+// the pass does not run past its cycle. While an earlier lookup of key still
+// runs it starts none and returns errIdentityLookupStillRunning.
+func windowsIdentityBounded(ctx context.Context, key string, lookup func(context.Context) windowsIdentityResolved) (windowsIdentityResolved, error) {
+	resolved, err := identityLookupGated(ctx, &windowsIdentityLookupGate, key, func(ctx context.Context) (windowsIdentityResolved, error) {
+		return lookup(ctx), nil
+	})
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		return windowsIdentityResolved{}, err
+	}
+	return resolved, nil
+}
+
+// spoolUser names a record's account DOMAIN\account, as the Linux and macOS
+// records name theirs, so a record maps to an account without a SID lookup;
+// "" when the SID no longer resolves. While the user is signed in with a
+// UPN the LSA names the account by that UPN as typed; the record then takes
+// the sAMAccountName the directory translates it to (settledName), which
+// the gateway's service account cannot ask for itself (GAP-0382).
+func (l windowsIdentityLookups) spoolUser(ctx context.Context, sid string) string {
+	names := l.groupNames([]string{sid}, 1, windowsIdentityLookupBudget(ctx, windowsIdentityGroupNameBudget))
 	if len(names) != 1 || names[0] == sid {
 		return ""
 	}
 	domain, account, qualified := strings.Cut(names[0], `\`)
 	if qualified && strings.Contains(account, "@") {
-		if sam := windowsSettledAccountName(sid, account, domain); sam != "" {
+		if sam := l.settledName(sid, account, domain); sam != "" {
 			return domain + `\` + sam
 		}
 	}

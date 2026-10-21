@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -30,6 +31,10 @@ import (
 type IdentitySpoolAccount struct {
 	UID  int
 	User string
+	// Left marks an account the enrollment settings leave out (excluded,
+	// exempt, out of the manifest): it is not resolved, and its record
+	// goes at once.
+	Left bool
 }
 
 // checkMacOSRecordUID refuses the Open Directory record dscl returned for an
@@ -65,14 +70,22 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // every listed account resolved: the account left the enrollment (excluded,
 // out of the manifest) or was deleted, nothing refreshes its record again,
 // and status and verify warned identity_records_stale about it 30 minutes
-// later (GAP-1113, GAP-1103). A directory account's record stays until it is
-// older than IdentitySpoolMaxAge, when the gateway ignores it anyway, unless
-// two successive passes resolved an account in that same directory and
-// listed it in neither. An outage can remove accounts from one directory's
-// enumeration while another still answers, and one lookup can miss an
-// account its directory still holds; removing those records would lose
-// their UPN facts (GAP-0145, GAP-1228, GAP-1236). A failed pass removes
-// nothing young.
+// later (GAP-1113, GAP-1103). Every pass that does not list a young
+// directory account's record checks it against the directory
+// (identitySpoolDirectoryDeparture): it goes at once when its uid now names
+// another account, the same name in another domain or directory, or a local
+// account, since its verified identity (UPN, domain) is then another
+// account's. Otherwise it stays until it is older than IdentitySpoolMaxAge,
+// when the gateway ignores it anyway, unless two successive passes resolved
+// an account in that same directory and listed it in neither, and its uid
+// then no longer resolves. An outage can remove accounts from one
+// directory's enumeration while another still answers, a listing can be
+// partial, and one lookup can miss an account its directory still holds;
+// removing those records would lose their UPN facts, and a profile assigned
+// by UPN would fall to the default (GAP-0145, GAP-1228, GAP-1236). An account
+// marked Left goes at once. A failed pass removes nothing else young. The
+// checks end with ctx: a record whose check did not finish stays, with its
+// mark, for the next pass.
 func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoolAccount, setOwnership func(string) error,
 	logf func(string, ...any)) error {
 	if dir == "" {
@@ -89,11 +102,16 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			return fmt.Errorf("set identity spool ownership: %w", err)
 		}
 	}
-	keep := map[string]bool{}
+	keep, left := map[string]bool{}, map[string]bool{}
 	var passErr error
 	answeredDirectories := map[string]bool{}
 	for _, account := range accounts {
-		if account.UID <= 0 || keep[strconv.Itoa(account.UID)+".json"] {
+		if account.UID > 0 && account.Left {
+			left[strconv.Itoa(account.UID)+".json"] = true
+		}
+	}
+	for _, account := range accounts {
+		if account.UID <= 0 || account.Left || keep[strconv.Itoa(account.UID)+".json"] {
 			continue
 		}
 		name := strconv.Itoa(account.UID) + ".json"
@@ -134,9 +152,15 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			}
 		} else if record.Key != "" {
 			// Keep a previous verified UPN through a transient lookup
-			// failure. For a newly enrolled account, still provide its
-			// basic NSS facts while the privileged lookup is retried.
-			if _, statErr := os.Stat(filepath.Join(dir, name)); errors.Is(statErr, os.ErrNotExist) {
+			// failure, but only while the facts the lookup did get name the
+			// same directory identity: a uid reused by the same name in
+			// another domain must not keep the other account's UPN. For a
+			// newly enrolled account, still provide its basic NSS facts
+			// while the privileged lookup is retried.
+			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil &&
+				identitySpoolSameIdentity(previous, record, false) == identitySpoolDepartureOther {
+				err = errors.Join(err, writeIdentitySpoolFile(dir, name, record, setOwnership))
+			} else if _, statErr := os.Stat(filepath.Join(dir, name)); errors.Is(statErr, os.ErrNotExist) {
 				err = errors.Join(err, writeIdentitySpoolFile(dir, name, record, setOwnership))
 			} else if statErr != nil {
 				err = errors.Join(err, statErr)
@@ -153,31 +177,47 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	if err != nil {
 		return errors.Join(passErr, fmt.Errorf("read identity spool: %w", err))
 	}
+	// The marks are read and stored under the lock; the departure lookups
+	// run without it. A stored mark map is never changed afterwards.
 	identitySpoolOmitted.Lock()
-	defer identitySpoolOmitted.Unlock()
-	omittedBefore, omitted := identitySpoolOmitted.byDir[dir], map[string]bool{}
+	omittedBefore := identitySpoolOmitted.byDir[dir]
+	identitySpoolOmitted.Unlock()
+	omitted := map[string]bool{}
 	for _, entry := range entries {
 		if keep[entry.Name()] {
 			continue
 		}
-		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge {
-			if passErr != nil {
-				omitted[entry.Name()] = omittedBefore[entry.Name()]
-				continue
-			}
-			left, directory := identitySpoolRecordLeft(dir, entry, answeredDirectories)
-			if !left {
-				continue
-			}
-			if directory && !omittedBefore[entry.Name()] {
-				// The first pass that omits the account: it goes at the next
-				// one that still does not list it.
-				omitted[entry.Name()] = true
+		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge && !left[entry.Name()] {
+			gone, directory := identitySpoolRecordLeft(dir, entry, answeredDirectories)
+			if directory {
+				departure := identitySpoolDirectoryDeparture(ctx, dir, entry.Name())
+				switch {
+				case departure == identitySpoolDepartureOther:
+					// The uid now names another account, or the same name in
+					// another domain or directory: the record's verified
+					// identity is no longer this uid's, whatever the pass or
+					// the record's own directory says. It goes now.
+				case passErr != nil:
+					omitted[entry.Name()] = omittedBefore[entry.Name()]
+					continue
+				case !gone:
+					continue
+				case !omittedBefore[entry.Name()] || departure != identitySpoolDepartureNotFound:
+					// The first pass that omits the account marks it; a later
+					// one removes it only when its uid no longer resolves. A
+					// check that did not finish keeps the mark. Until then the
+					// record ages out (GAP-1236).
+					omitted[entry.Name()] = true
+					continue
+				}
+			} else if passErr != nil || !gone {
 				continue
 			}
 		}
 		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
 	}
+	identitySpoolOmitted.Lock()
+	defer identitySpoolOmitted.Unlock()
 	for name, marked := range omitted {
 		if !marked {
 			delete(omitted, name)
@@ -193,6 +233,117 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 
 // identitySpoolCollect is collectIdentitySpoolRecord; tests replace it.
 var identitySpoolCollect = collectIdentitySpoolRecord
+
+// identitySpoolDeparture is what the directory shows about the account of a
+// young directory record that a pass did not list.
+type identitySpoolDeparture int
+
+const (
+	// identitySpoolDepartureUnknown: a lookup failed, timed out or was cut
+	// short by the pass, or nothing could be compared. It shows nothing: an
+	// error is never a deletion.
+	identitySpoolDepartureUnknown identitySpoolDeparture = iota
+	// identitySpoolDepartureStays: the uid still names the record's account
+	// in the record's directory.
+	identitySpoolDepartureStays
+	// identitySpoolDepartureNotFound: the uid does not resolve. One answer
+	// can miss an account its directory still holds (GAP-1236).
+	identitySpoolDepartureNotFound
+	// identitySpoolDepartureOther: the uid names another account, the same
+	// name in another domain or directory, or a local account.
+	identitySpoolDepartureOther
+)
+
+// identitySpoolDirectoryDeparture looks up the uid of the record name and,
+// when it still names the record's account, that account's directory facts,
+// and compares them with the record's. The name alone does not bind the
+// record: a uid can be reused by the same short name in another domain, and
+// the gateway, which checks only the name, would then select a profile by
+// the other domain's UPN. The lookups end with ctx and after
+// identitySpoolLookupTimeout.
+func identitySpoolDirectoryDeparture(ctx context.Context, dir, name string) identitySpoolDeparture {
+	key, _ := strings.CutSuffix(name, ".json")
+	uid, err := strconv.Atoi(key)
+	if err != nil || uid <= 0 || ctx.Err() != nil {
+		return identitySpoolDepartureUnknown
+	}
+	record, err := ReadIdentitySpoolRecord(dir, key, nil)
+	if err != nil {
+		return identitySpoolDepartureUnknown
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
+	defer cancel()
+	account, err := identityLookupGated(lookupCtx, &identitySpoolDepartureGate, key, func(ctx context.Context) (unixidentity.Account, error) {
+		return identitySpoolLookupUID(ctx, uid)
+	})
+	switch {
+	case err != nil && lookupCtx.Err() == nil && unixidentity.IsNotFound(err):
+		return identitySpoolDepartureNotFound
+	case err != nil:
+		return identitySpoolDepartureUnknown
+	case account.UID != uid || (record.User != "" && !strings.EqualFold(account.Name, record.User)):
+		return identitySpoolDepartureOther
+	}
+	fresh, err := identityLookupGated(lookupCtx, &identitySpoolDepartureGate, key, func(ctx context.Context) (IdentitySpoolRecord, error) {
+		return identitySpoolCollect(ctx, IdentitySpoolAccount{UID: uid, User: account.Name}, time.Now().UTC())
+	})
+	if lookupCtx.Err() != nil || (err != nil && fresh.Key == "") {
+		return identitySpoolDepartureUnknown
+	}
+	return identitySpoolSameIdentity(record, fresh, err == nil)
+}
+
+// identitySpoolSameIdentity compares a record's directory identity with
+// fresh, what the directory answers for its uid now; complete says every
+// lookup of fresh succeeded. Each fact both name must agree. A complete
+// answer that is no directory account's (the uid is a local account now)
+// is another identity; an incomplete one that names nothing to compare
+// shows nothing.
+func identitySpoolSameIdentity(record, fresh IdentitySpoolRecord, complete bool) identitySpoolDeparture {
+	if !identitySpoolDirectoryRecord(record) {
+		return identitySpoolDepartureUnknown
+	}
+	if !identitySpoolDirectoryRecord(fresh) {
+		if complete {
+			return identitySpoolDepartureOther
+		}
+		return identitySpoolDepartureUnknown
+	}
+	compared := false
+	for _, pair := range [][2]string{
+		{record.SSSDDomain, fresh.SSSDDomain},
+		{record.AccountDomain, fresh.AccountDomain},
+		{record.Facts.Domain, fresh.Facts.Domain},
+		{record.Facts.Realm, fresh.Facts.Realm},
+		{string(record.Facts.Directory), string(fresh.Facts.Directory)},
+		{record.Facts.UPN, fresh.Facts.UPN},
+		{record.Facts.TenantID, fresh.Facts.TenantID},
+	} {
+		if pair[0] == "" || pair[1] == "" {
+			continue
+		}
+		if !strings.EqualFold(pair[0], pair[1]) {
+			return identitySpoolDepartureOther
+		}
+		compared = true
+	}
+	if !compared {
+		return identitySpoolDepartureUnknown
+	}
+	return identitySpoolDepartureStays
+}
+
+// identitySpoolLookupUID is the guardian's account lookup by uid, bounded by
+// ctx; tests replace it.
+var identitySpoolLookupUID = func(ctx context.Context, uid int) (unixidentity.Account, error) {
+	return unixidentity.Default(ctx).LookupUID(uid)
+}
+
+// identitySpoolDepartureGate holds the departure lookups of the passes, by
+// uid: a lookup that does not stop with its deadline (an Open Directory or
+// NSS call) is left to finish on its own, and until it returns only its own
+// account's check is skipped (identityLookupGated).
+var identitySpoolDepartureGate identityLookupGate
 
 // identitySpoolOmitted holds, per spool directory, the young directory
 // records the last successful pass did not list although their directory

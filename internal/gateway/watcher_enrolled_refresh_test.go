@@ -204,3 +204,58 @@ func TestRefreshDeadlineKeepsAMarginBeforeTheRequestDeadline(t *testing.T) {
 		t.Fatalf("request ends in 1 min: %s, want the budget", got.Sub(now))
 	}
 }
+
+// GAP-0216 for Kiro (W2B-G-enum review): a managed Windows gateway knows an
+// enrolled user's Kiro servers only from the enumerator's record, and the
+// Kiro hook decided an MCP tool call on the definition it last read, up to
+// a 30 second poll old, so a server changed under the same name ran on its
+// old admitted verdict. The call now refreshes that record first and waits
+// for the changed server's own scan; a refresh that fails refuses it.
+func TestKiroMCPToolCallIsDecidedOnTheRefreshedDefinition(t *testing.T) {
+	saved := agentHookMCPFromEnrolledSpool
+	agentHookMCPFromEnrolledSpool = func(*config.Config) bool { return true }
+	t.Cleanup(func() { agentHookMCPFromEnrolledSpool = saved })
+	api := &APIServer{scannerCfg: &config.Config{}}
+	refreshed, refreshErr := 0, error(nil)
+	api.SetMCPRefreshBeforeCall(func(_ context.Context, connector string) error {
+		if connector != "kiro" {
+			t.Errorf("refreshed for %q", connector)
+		}
+		refreshed++
+		return refreshErr
+	})
+	// The gateway still holds the old, admitted definition until the
+	// refresh; the refreshed list holds the changed one, not scanned yet.
+	api.SetMCPAdmissionPending(func(connector, server, _, _ string) (string, bool) {
+		return server, connector == "kiro" && refreshed > 0
+	})
+	call := agentHookRequest{ConnectorName: "kiro", HookEventName: "preToolUse", ToolName: "mcp__notes__read"}
+	ctx := context.Background()
+	if decision, refused := api.agentHookMCPAssetDecision(ctx, call); !refused || decision.Action != "block" || refreshed != 1 {
+		t.Fatalf("changed server: refused=%v action=%q after %d refreshes; want it refused after one", refused, decision.Action, refreshed)
+	}
+
+	api.SetMCPAdmissionPending(func(_, server, _, _ string) (string, bool) { return server, false })
+	refreshErr = errors.New("the hook enumerator did not answer")
+	if decision, refused := api.agentHookMCPAssetDecision(ctx, call); !refused || decision.Action != "block" {
+		t.Fatalf("failed refresh: refused=%v action=%q; want the call refused", refused, decision.Action)
+	}
+	refreshErr = nil
+	if decision, _ := api.agentHookMCPAssetDecision(ctx, call); decision.Action == "block" {
+		t.Fatalf("current, admitted server: action=%q, want it allowed", decision.Action)
+	}
+
+	result := call
+	result.HookEventName = "postToolUse"
+	before := refreshed
+	api.agentHookMCPAssetDecision(ctx, result)
+	if refreshed != before {
+		t.Fatal("a tool result refreshed the servers")
+	}
+	// A gateway that reads its users' files itself has nothing to refresh.
+	agentHookMCPFromEnrolledSpool = func(*config.Config) bool { return false }
+	api.agentHookMCPAssetDecision(ctx, call)
+	if refreshed != before {
+		t.Fatal("a gateway without enrolled-user records refreshed them")
+	}
+}

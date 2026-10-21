@@ -247,21 +247,26 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	// cycle: it tells which users can have a changed agent version followed
 	// now, and carries their group membership.
 	var sessions map[string][]string
+	var sessionErr error
 	var groups *windowsEnrollmentGroups
 	if standalone {
-		var sessionErr error
 		sessions, sessionErr = windowsActiveSessionGroups()
 		if sessionErr != nil {
-			logfSafely(opts.Logger, "sessions", fmt.Sprintf("active sessions are unreadable; known rows keep their agent versions and group membership comes from the cache this cycle: %v", sessionErr))
-			sessions = map[string][]string{}
+			logfSafely(opts.Logger, "sessions", fmt.Sprintf("the groups of some active sessions are unreadable; a user whose group decision rests on groups cached at an earlier sign-in keeps their rows and gets no new ones this cycle, and a user whose session was not listed keeps their agent versions: %v", sessionErr))
+			if sessions == nil {
+				sessions = map[string][]string{}
+			}
 		}
-		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, opts.GroupCache, opts.Logger)
+		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, sessionErr, opts.GroupCache, opts.Logger)
 		listed := make(map[string]struct{}, len(profiles))
 		for _, profile := range profiles {
 			listed[canonicalManifestTargetSID(profile.SID)] = struct{}{}
 		}
 		groups.pruneCache(listed)
 	}
+	// The users signed in now whose token groups were not read still have an
+	// active session.
+	unreadSessions, _ := windowsSessionGroupsInDoubt(sessionErr)
 	running := map[string]map[string]string{}
 	for sid, agents := range opts.RunningAgents {
 		if canon := canonicalManifestTargetSID(sid); canon != "" {
@@ -302,8 +307,14 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			// is reported with its owner unknown after the loop (GAP-0556),
 			// unless enterprise.enrollment.exclude_users names the account
 			// (GAP-0673): the admin chose to leave it alone.
+			// An excluded one is reported excluded like any other, so the
+			// cycle removes its identity record and the gateway's read
+			// access on its profile folder.
 			if windowsEnrollmentListMatches(opts.ExcludeUsers, []string{profile.SID, filepath.Base(filepath.Clean(profile.Home))}) {
 				judged[canonicalManifestTargetSID(profile.SID)] = true
+				if opts.ReportExcluded != nil {
+					opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
+				}
 			}
 			logfSafely(opts.Logger, profile.SID,
 				"the local account no longer exists; its rows are revoked although its profile folder remains")
@@ -311,7 +322,17 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
 		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() {
-			if groupDecision, groupReason := groups.decide(canonicalManifestTargetSID(profile.SID)); groupDecision != windowsEnrollmentEnrolled {
+			sid := canonicalManifestTargetSID(profile.SID)
+			groupDecision, groupReason, inDoubt := groups.evaluate(sid)
+			if inDoubt && (groupDecision != windowsEnrollmentExcluded || windowsHasPreviousRows(previous, sid)) {
+				// The decision rests on groups cached at an earlier sign-in,
+				// and the user may be signed in now with groups this cycle
+				// could not read: nothing changes for them. Their rows stay,
+				// they get no new ones, and a user without rows whom the
+				// cache excludes stays excluded.
+				groupDecision, groupReason = windowsEnrollmentUndecided, groups.inDoubtReason(sid)
+			}
+			if groupDecision != windowsEnrollmentEnrolled {
 				decision, reason = groupDecision, groupReason
 			}
 		}
@@ -327,6 +348,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			logfSafely(opts.Logger, profile.SID, reason)
 		}
 		_, sessionActive := sessions[canonicalManifestTargetSID(profile.SID)]
+		sessionActive = sessionActive || unreadSessions[canonicalManifestTargetSID(profile.SID)]
 		rowContext := windowsStandaloneRowContext{
 			sessionActive: sessionActive,
 			user:          filepath.Base(filepath.Clean(profile.Home)),
@@ -413,6 +435,18 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	return Manifest{Version: 1, Targets: targets}, nil
 }
 
+// windowsHasPreviousRows reports whether the previous manifest has a row of
+// the canonical SID sid.
+func windowsHasPreviousRows(previous map[string]ManifestTarget, sid string) bool {
+	prefix := sid + "\x00"
+	for key := range previous {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // reportUnenrolledRunningAgents reports each agent session running for the
 // profile whose connector is enabled but got no row and no other report this
 // cycle: DefenseClaw found no install of it under the profile that it can
@@ -458,8 +492,8 @@ func windowsRunsConnector(running map[string]string, connectors []string) bool {
 
 // windowsSignedInCheck returns a check of whether a user has a session now,
 // active or disconnected. The sessions are read once per cycle, at the first
-// check; when they cannot be read every user counts as signed in, so no
-// warning is suppressed on a guess.
+// check; when they cannot be read, or a session's user cannot be identified,
+// every user counts as signed in, so no warning is suppressed on a guess.
 func windowsSignedInCheck(logf EnumerationLogger) func(sid string) bool {
 	var users map[string]bool
 	read, unreadable := false, false
@@ -899,7 +933,11 @@ var (
 // budget counts only time spent waiting on lookups, not the profile probing
 // between them, so a slow host does not starve later profiles of a lookup a
 // healthy domain controller would answer. Once the budget is spent, further
-// lookups fail at once and their profiles keep their existing rows.
+// lookups fail at once and their profiles keep their existing rows. A SID
+// whose lookup of an earlier cycle has not returned fails at once without a
+// new one (windowsEnrollmentAccountLookupGate), so one account the domain
+// controller never answers for neither uses up every cycle's budget nor piles
+// up native calls.
 func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 	var spent time.Duration
 	return func(sid string) (string, string, error) {
@@ -914,32 +952,34 @@ func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 		defer func() { spent += time.Since(started) }()
 		type result struct {
 			account, domain string
-			err             error
 		}
-		done := make(chan result, 1)
+		ctx, cancel := context.WithTimeout(context.Background(), remaining)
+		defer cancel()
 		lookup := windowsEnrollmentLookupAccountSID
-		go func() {
+		r, err := identityLookupGated(ctx, &windowsEnrollmentAccountLookupGate, strings.ToUpper(strings.TrimSpace(sid)), func(context.Context) (result, error) {
 			account, domain, err := lookup(sid)
 			if err == nil {
 				// The sAMAccountName, also while its user is signed in with a
 				// UPN, as the gateway names the account (GAP-0533).
 				account = useridentity.CanonicalWindowsAccountName(sid, account, domain)
 			}
-			done <- result{account, domain, err}
-		}()
-		timer := time.NewTimer(remaining)
-		defer timer.Stop()
-		select {
-		case r := <-done:
-			if r.err == nil && strings.TrimSpace(r.account) == "" {
-				r.err = errors.New("account name lookup returned no name")
-			}
-			return r.account, r.domain, r.err
-		case <-timer.C:
+			return result{account, domain}, err
+		})
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
 			return "", "", errors.New("account name lookup timed out")
+		case err != nil:
+			return "", "", err
+		case strings.TrimSpace(r.account) == "":
+			return "", "", errors.New("account name lookup returned no name")
 		}
+		return r.account, r.domain, nil
 	}
 }
+
+// windowsEnrollmentAccountLookupGate holds the enrollment account name
+// lookups, by SID.
+var windowsEnrollmentAccountLookupGate identityLookupGate
 
 // windowsDeletedLocalAccount reports a local account SID that no longer
 // names an account. A domain or Entra account lookup also fails while its
@@ -1096,9 +1136,10 @@ type windowsUserProfile struct {
 // filters nothing, excluded profiles are skipped, and exempt profiles are
 // kept because their machine-policy hooks still run the foreign-hook guard.
 // A profile whose name-form entries cannot be evaluated (the account lookup
-// failed) is skipped this pass, so a directory outage never touches a user
-// who may be excluded. opts.GroupCache is read, never changed: the
-// enumerator is its only writer.
+// failed), or whose group decision rests on cached groups an unreadable
+// session token puts in doubt, is skipped this pass, so neither a directory
+// outage nor a stale cache ever touches a user who may be excluded.
+// opts.GroupCache is read, never changed: the enumerator is its only writer.
 func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOptions) ([]TargetCredentials, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1110,7 +1151,7 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 	var groups *windowsEnrollmentGroups
 	if len(opts.IncludeGroups)+len(opts.ExcludeGroups) > 0 {
 		sessions, sessionErr := windowsActiveSessionGroups()
-		if sessionErr != nil {
+		if sessions == nil {
 			sessions = map[string][]string{}
 		}
 		cache := NewWindowsEnrollmentGroupCache()
@@ -1122,7 +1163,7 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 				cache.Names[name] = sid
 			}
 		}
-		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, cache, nil)
+		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, sessionErr, cache, nil)
 	}
 	lookupAccount := newWindowsEnrollmentAccountLookup()
 	out := make([]TargetCredentials, 0, len(profiles))

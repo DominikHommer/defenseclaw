@@ -13,6 +13,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,7 +40,11 @@ import (
 // cannot join a directory group) and directory users who are direct members.
 // A directory user whose membership is not known this way (they have not
 // signed in since DefenseClaw was installed) is left pending: no new rows,
-// existing rows kept, never revoked, until they next sign in. Well-known
+// existing rows kept, never revoked, until they next sign in. The same
+// holds for a user signed in now whose token groups cannot be read, and, while
+// a session's user cannot be identified, for every user the cache alone
+// decides: the groups cached at an earlier sign-in may be out of date, so a
+// decision that rests on them changes nothing that cycle. Well-known
 // groups other than Everyone (Authenticated Users, INTERACTIVE, NETWORK,
 // Local account, ...) are assigned at sign-in and appear in no account
 // database, so they are decided from a token only; Everyone is in every
@@ -188,6 +193,9 @@ func canonicalWindowsGroupSIDs(values []string) []string {
 // RefreshWindowsManifestIdentityGroups keeps group facts for administrator
 // enrolled users without changing their targets manifest. The cache is
 // filtered to the current manifest before it is published to the gateway.
+// An incomplete session read still applies the sessions it read and returns
+// its error; a user whose token groups were not read keeps the cached groups
+// and is not marked signed in, so the gateway gets no groups for them.
 func RefreshWindowsManifestIdentityGroups(manifest Manifest, cache *WindowsEnrollmentGroupCache) (*WindowsEnrollmentGroupCache, error) {
 	if cache == nil {
 		cache = NewWindowsEnrollmentGroupCache()
@@ -211,16 +219,13 @@ func RefreshWindowsManifestIdentityGroups(manifest Manifest, cache *WindowsEnrol
 		}
 	}
 	sessions, err := windowsActiveSessionGroups()
-	if err != nil {
-		return fresh, err
-	}
 	for sid, groups := range sessions {
 		if canon := canonicalManifestTargetSID(sid); allowed[canon] {
 			fresh.Users[canon] = canonicalWindowsGroupSIDs(groups)
 			fresh.SignedIn[canon] = true
 		}
 	}
-	return fresh, nil
+	return fresh, err
 }
 
 // windowsGroupMembership is one user's membership of one configured group.
@@ -277,6 +282,13 @@ type windowsEnrollmentGroups struct {
 	// machineSID is this computer's account domain SID: users below it
 	// are local accounts.
 	machineSID string
+	// unread names the users signed in now whose token groups this cycle
+	// could not read. unreadAnyone: a session's user could not be
+	// identified, or the sessions could not be listed, so any user without a
+	// session read this cycle may be signed in. The cached groups of those
+	// users may be out of date.
+	unread       map[string]bool
+	unreadAnyone bool
 }
 
 // Seams: session tokens, name resolution, local group members and the
@@ -293,10 +305,13 @@ var (
 
 // newWindowsEnrollmentGroups resolves the configured groups. cache is
 // updated in place: the resolved names, and the token groups of every user
-// signed in now.
+// signed in now whose token was read. sessionErr is the error of the
+// session read that gave sessions (windowsActiveSessionGroups): the users
+// it leaves unread are decided as windowsSessionGroupsInDoubt says.
 func newWindowsEnrollmentGroups(
 	include, exclude []string,
 	sessions map[string][]string,
+	sessionErr error,
 	cache *WindowsEnrollmentGroupCache,
 	logf EnumerationLogger,
 ) *windowsEnrollmentGroups {
@@ -318,6 +333,14 @@ func newWindowsEnrollmentGroups(
 		cache.SignedIn[canon] = true
 	}
 	groups := &windowsEnrollmentGroups{sessions: signedIn, cache: cache}
+	unread, anyone := windowsSessionGroupsInDoubt(sessionErr)
+	groups.unreadAnyone = anyone
+	groups.unread = make(map[string]bool, len(unread))
+	for sid := range unread {
+		if canon := canonicalManifestTargetSID(sid); canon != "" {
+			groups.unread[canon] = true
+		}
+	}
 	if len(include) == 0 && len(exclude) == 0 {
 		return groups
 	}
@@ -372,6 +395,11 @@ func newWindowsEnrollmentGroups(
 	return groups
 }
 
+// boundedWindowsGroupNameLookup resolves name, waiting at most remaining
+// and windowsGroupNameLookupTimeout. A name whose lookup of an earlier cycle
+// has not returned fails at once without a new one
+// (windowsGroupNameLookupGate), so one name the directory never answers for
+// neither uses up every cycle's budget nor piles up native calls.
 func boundedWindowsGroupNameLookup(name string, remaining time.Duration) (string, error) {
 	if remaining <= 0 {
 		return "", errors.New("group name lookup budget for this cycle is exhausted")
@@ -379,30 +407,27 @@ func boundedWindowsGroupNameLookup(name string, remaining time.Duration) (string
 	if remaining > windowsGroupNameLookupTimeout {
 		remaining = windowsGroupNameLookupTimeout
 	}
-	type result struct {
-		sid string
-		err error
-	}
-	done := make(chan result, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), remaining)
+	defer cancel()
 	lookup := windowsResolveGroupName
-	go func() {
-		sid, err := lookup(name)
-		done <- result{sid, err}
-	}()
-	timer := time.NewTimer(remaining)
-	defer timer.Stop()
-	select {
-	case r := <-done:
-		if r.err == nil {
-			if r.sid = canonicalWindowsGroupSID(r.sid); r.sid == "" {
-				r.err = errors.New("group name lookup returned no SID")
-			}
-		}
-		return r.sid, r.err
-	case <-timer.C:
+	sid, err := identityLookupGated(ctx, &windowsGroupNameLookupGate, strings.ToLower(strings.TrimSpace(name)), func(context.Context) (string, error) {
+		return lookup(name)
+	})
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
 		return "", errors.New("group name lookup timed out")
+	case err != nil:
+		return "", err
 	}
+	if sid = canonicalWindowsGroupSID(sid); sid == "" {
+		return "", errors.New("group name lookup returned no SID")
+	}
+	return sid, nil
 }
+
+// windowsGroupNameLookupGate holds the group name lookups, by lower-case
+// name.
+var windowsGroupNameLookupGate identityLookupGate
 
 // active reports whether groups filter anything.
 func (g *windowsEnrollmentGroups) active() bool {
@@ -439,9 +464,12 @@ func (g *windowsEnrollmentGroups) groupKind(sid string) windowsGroupKind {
 	}
 }
 
-func (g *windowsEnrollmentGroups) membership(userSID string, entry windowsEnrollmentGroupEntry) windowsGroupMembership {
+// membership is userSID's membership of entry. inDoubt says the answer
+// comes only from the groups cached at an earlier sign-in while the user may
+// be signed in now with a token this cycle could not read.
+func (g *windowsEnrollmentGroups) membership(userSID string, entry windowsEnrollmentGroupEntry) (membership windowsGroupMembership, inDoubt bool) {
 	if entry.sid == "" {
-		return windowsGroupUnresolved
+		return windowsGroupUnresolved, false
 	}
 	inList := func(groups []string) windowsGroupMembership {
 		for _, group := range groups {
@@ -454,11 +482,27 @@ func (g *windowsEnrollmentGroups) membership(userSID string, entry windowsEnroll
 	// A session token lists every group of the user, nested and
 	// well-known ones included; the cache holds the last one seen.
 	if groups, signedIn := g.sessions[userSID]; signedIn {
-		return inList(groups)
+		return inList(groups), false
 	}
-	if groups, cached := g.cache.Users[userSID]; cached {
-		return inList(groups)
+	groups, cached := g.cache.Users[userSID]
+	if !cached {
+		return g.recordedMembership(userSID, entry), false
 	}
+	if !g.unread[userSID] && !g.unreadAnyone {
+		return inList(groups), false
+	}
+	// The user may be signed in with a token this cycle could not read: the
+	// account database's answer stands, and one only the cache gives is in
+	// doubt.
+	if recorded := g.recordedMembership(userSID, entry); recorded != windowsGroupMembershipUnknown {
+		return recorded, false
+	}
+	return inList(groups), true
+}
+
+// recordedMembership is userSID's membership of entry as far as it is known
+// without a token: from the group's kind and the local account database.
+func (g *windowsEnrollmentGroups) recordedMembership(userSID string, entry windowsEnrollmentGroupEntry) windowsGroupMembership {
 	local := g.localAccount(userSID)
 	switch g.groupKind(entry.sid) {
 	case windowsGroupKindEveryone:
@@ -500,45 +544,83 @@ func (g *windowsEnrollmentGroups) membership(userSID string, entry windowsEnroll
 // unknown membership leaves the profile undecided (pending), never
 // excluded. An exclude_groups entry that does not resolve excludes no one;
 // an include_groups entry that does not resolve leaves undecided the users
-// no other entry admits.
+// no other entry admits. A decision that rests on cached groups in doubt
+// (evaluate) is pending too.
 func (g *windowsEnrollmentGroups) decide(userSID string) (windowsEnrollmentDecision, string) {
+	decision, reason, inDoubt := g.evaluate(userSID)
+	if inDoubt {
+		return windowsEnrollmentUndecided, g.inDoubtReason(userSID)
+	}
+	return decision, reason
+}
+
+// evaluate is decide before the doubt is applied: inDoubt says the decision
+// rests on a membership only the cache gives while the user may be signed in
+// with a token this cycle could not read.
+func (g *windowsEnrollmentGroups) evaluate(userSID string) (decision windowsEnrollmentDecision, reason string, inDoubt bool) {
 	if !g.active() {
-		return windowsEnrollmentEnrolled, ""
+		return windowsEnrollmentEnrolled, "", false
 	}
 	userSID = strings.ToUpper(strings.TrimSpace(userSID))
 	var unknown []string
+	// excludeDoubt: an exclude_groups non-membership came from the cache in
+	// doubt; doubtfulExclusion: so did the only exclusion found.
+	excludeDoubt, doubtfulExclusion := false, ""
 	for _, entry := range g.exclude {
-		switch g.membership(userSID, entry) {
+		membership, doubt := g.membership(userSID, entry)
+		switch membership {
 		case windowsGroupMember:
-			return windowsEnrollmentExcluded, fmt.Sprintf("member of %q (enterprise.enrollment.exclude_groups)", entry.raw)
+			if !doubt {
+				return windowsEnrollmentExcluded, fmt.Sprintf("member of %q (enterprise.enrollment.exclude_groups)", entry.raw), false
+			}
+			if doubtfulExclusion == "" {
+				doubtfulExclusion = entry.raw
+			}
 		case windowsGroupMembershipUnknown:
 			unknown = append(unknown, entry.raw)
+		case windowsGroupNotMember:
+			excludeDoubt = excludeDoubt || doubt
 		}
 	}
+	if doubtfulExclusion != "" {
+		return windowsEnrollmentExcluded, fmt.Sprintf("member of %q (enterprise.enrollment.exclude_groups)", doubtfulExclusion), true
+	}
 	if len(unknown) > 0 {
-		return windowsEnrollmentUndecided, windowsGroupsPendingReason("exclude_groups", unknown)
+		return windowsEnrollmentUndecided, windowsGroupsPendingReason("exclude_groups", unknown), false
 	}
 	if len(g.include) == 0 {
-		return windowsEnrollmentEnrolled, ""
+		return windowsEnrollmentEnrolled, "", excludeDoubt
 	}
 	var unresolved []string
+	includeDoubt := false
 	for _, entry := range g.include {
-		switch g.membership(userSID, entry) {
+		membership, doubt := g.membership(userSID, entry)
+		switch membership {
 		case windowsGroupMember:
-			return windowsEnrollmentEnrolled, ""
+			return windowsEnrollmentEnrolled, "", excludeDoubt || doubt
 		case windowsGroupMembershipUnknown:
 			unknown = append(unknown, entry.raw)
 		case windowsGroupUnresolved:
 			unresolved = append(unresolved, entry.raw)
+		case windowsGroupNotMember:
+			includeDoubt = includeDoubt || doubt
 		}
 	}
 	switch {
 	case len(unresolved) > 0:
-		return windowsEnrollmentUndecided, windowsGroupsUnresolvedReason(unresolved)
+		return windowsEnrollmentUndecided, windowsGroupsUnresolvedReason(unresolved), false
 	case len(unknown) > 0:
-		return windowsEnrollmentUndecided, windowsGroupsPendingReason("include_groups", unknown)
+		return windowsEnrollmentUndecided, windowsGroupsPendingReason("include_groups", unknown), false
 	}
-	return windowsEnrollmentExcluded, "not a member of any enterprise.enrollment.include_groups group"
+	return windowsEnrollmentExcluded, "not a member of any enterprise.enrollment.include_groups group", excludeDoubt || includeDoubt
+}
+
+// inDoubtReason is the pending reason of a decision evaluate put in doubt.
+func (g *windowsEnrollmentGroups) inDoubtReason(userSID string) string {
+	if g.unread[strings.ToUpper(strings.TrimSpace(userSID))] {
+		return "the groups of this user's active session could not be read this cycle, so the membership cached at an earlier sign-in may be out of date; pending: existing rows kept, no new rows"
+	}
+	return "an active session's user could not be identified this cycle and may be this user, so the membership cached at an earlier sign-in may be out of date; pending: existing rows kept, no new rows"
 }
 
 func windowsGroupsPendingReason(list string, groups []string) string {
@@ -566,36 +648,87 @@ func (g *windowsEnrollmentGroups) pruneCache(profiles map[string]struct{}) {
 
 // readWindowsActiveSessionGroups maps the SID of each user with an active
 // session to the group SIDs of that session's token (logon SIDs excluded;
-// deny-only groups count, since the user is a member).
+// deny-only groups count, since the user is a member). When a session's
+// user cannot be identified, or an identified user's token groups cannot be
+// read, it returns the users it did read with a
+// *windowsSessionGroupsIncomplete error that names what it missed: such a
+// user is signed in now with groups this read did not see, so the groups
+// cached at their earlier sign-in may be out of date. A user with two active
+// sessions is read only when both tokens are.
 func readWindowsActiveSessionGroups() (map[string][]string, error) {
 	out := map[string][]string{}
+	unread := map[string]bool{}
+	var problems []string
 	err := visitWindowsSessionTokens(func(state uint32) bool { return state == windows.WTSActive }, func(sid string, token windows.Token) {
-		groups, err := token.GetTokenGroups()
+		groups, err := windowsSessionAPI.tokenGroups(token)
 		if err != nil {
+			unread[sid] = true
+			problems = append(problems, fmt.Sprintf("token groups of %s: %v", sid, err))
 			return
 		}
-		for _, group := range groups.AllGroups() {
-			if group.Sid == nil || group.Attributes&windows.SE_GROUP_LOGON_ID == windows.SE_GROUP_LOGON_ID {
-				continue
-			}
-			out[sid] = append(out[sid], group.Sid.String())
-		}
-		if _, ok := out[sid]; !ok {
-			out[sid] = []string{}
-		}
+		out[sid] = append(out[sid], groups...)
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, errWindowsSessionsUnidentified) {
 		return nil, err
 	}
 	for sid, groups := range out {
 		out[sid] = canonicalWindowsGroupSIDs(groups)
 	}
-	return out, nil
+	for sid := range unread {
+		delete(out, sid)
+	}
+	if err == nil && len(unread) == 0 {
+		return out, nil
+	}
+	if err != nil {
+		problems = append(problems, err.Error())
+	}
+	return out, &windowsSessionGroupsIncomplete{unread: unread, unidentified: err != nil, detail: strings.Join(problems, "; ")}
+}
+
+// windowsSessionGroupsIncomplete is the error of an active-session read
+// that missed some active sessions' groups.
+type windowsSessionGroupsIncomplete struct {
+	// unread names the users with an active session whose token groups
+	// could not be read.
+	unread map[string]bool
+	// unidentified: an active session's user could not be identified, so
+	// any user may be signed in with groups the read did not see.
+	unidentified bool
+	detail       string
+}
+
+func (e *windowsSessionGroupsIncomplete) Error() string {
+	return "the groups of some active Windows sessions could not be read: " + e.detail
+}
+
+// Is matches errWindowsSessionsUnidentified when a session's user could not
+// be identified.
+func (e *windowsSessionGroupsIncomplete) Is(target error) bool {
+	return e.unidentified && target == errWindowsSessionsUnidentified
+}
+
+// windowsSessionGroupsInDoubt says whose cached groups the error of an
+// active-session read puts in doubt: the users it names unread, and anyone
+// it did not read (anyone) when a session's user was not identified or the
+// sessions could not be listed.
+func windowsSessionGroupsInDoubt(err error) (unread map[string]bool, anyone bool) {
+	if err == nil {
+		return nil, false
+	}
+	var incomplete *windowsSessionGroupsIncomplete
+	if errors.As(err, &incomplete) {
+		return incomplete.unread, incomplete.unidentified
+	}
+	return nil, true
 }
 
 // readWindowsSignedInSessionUsers lists the SIDs of the users who have a
 // session now, active or disconnected. A disconnected session keeps running
-// the user's processes, so it can still start the user's agents.
+// the user's processes, so it can still start the user's agents. When a
+// session's user cannot be identified it returns the users it did identify
+// and an errWindowsSessionsUnidentified error: that session may be any
+// user's, so no one may be judged signed out on this answer.
 func readWindowsSignedInSessionUsers() (map[string]bool, error) {
 	out := map[string]bool{}
 	err := visitWindowsSessionTokens(func(state uint32) bool {
@@ -603,41 +736,114 @@ func readWindowsSignedInSessionUsers() (map[string]bool, error) {
 	}, func(sid string, _ windows.Token) {
 		out[sid] = true
 	})
+	return out, err
+}
+
+// errWindowsSessionsUnidentified is a session whose user could not be read.
+var errWindowsSessionsUnidentified = errors.New("the user of a Windows session could not be identified")
+
+// windowsSession is one terminal services session.
+type windowsSession struct {
+	id, state uint32
+}
+
+// windowsSessionAPI lists the sessions and reads a session's user token,
+// the token's user SID and its group SIDs; tests replace it.
+var windowsSessionAPI = struct {
+	list        func() ([]windowsSession, error)
+	userToken   func(session uint32) (windows.Token, error)
+	tokenUser   func(token windows.Token) (string, error)
+	tokenGroups func(token windows.Token) ([]string, error)
+	close       func(token windows.Token)
+}{
+	list: listWindowsSessions,
+	userToken: func(session uint32) (windows.Token, error) {
+		var token windows.Token
+		err := windows.WTSQueryUserToken(session, &token)
+		return token, err
+	},
+	tokenUser: func(token windows.Token) (string, error) {
+		user, err := token.GetTokenUser()
+		if err != nil {
+			return "", err
+		}
+		return user.User.Sid.String(), nil
+	},
+	tokenGroups: readWindowsTokenGroups,
+	close:       func(token windows.Token) { _ = token.Close() },
+}
+
+// readWindowsTokenGroups lists the group SIDs of token, logon SIDs excluded.
+func readWindowsTokenGroups(token windows.Token) ([]string, error) {
+	groups, err := token.GetTokenGroups()
 	if err != nil {
 		return nil, err
+	}
+	out := []string{}
+	for _, group := range groups.AllGroups() {
+		if group.Sid == nil || group.Attributes&windows.SE_GROUP_LOGON_ID == windows.SE_GROUP_LOGON_ID {
+			continue
+		}
+		out = append(out, group.Sid.String())
 	}
 	return out, nil
 }
 
-// visitWindowsSessionTokens calls visit with the canonical user SID and the
-// user token of each session whose state accept admits. A session whose
-// token or user cannot be read is skipped. The token is closed after visit.
-func visitWindowsSessionTokens(accept func(state uint32) bool, visit func(sid string, token windows.Token)) error {
+// listWindowsSessions lists this computer's terminal services sessions.
+func listWindowsSessions() ([]windowsSession, error) {
 	var sessions *windows.WTS_SESSION_INFO
 	var count uint32
 	if err := windows.WTSEnumerateSessions(0, 0, 1, &sessions, &count); err != nil {
-		return fmt.Errorf("enumerate Windows sessions: %w", err)
+		return nil, err
 	}
 	if sessions != nil {
 		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessions)))
 	}
 	if count == 0 || sessions == nil {
-		return nil
+		return nil, nil
 	}
+	out := make([]windowsSession, 0, count)
 	for _, session := range unsafe.Slice(sessions, count) {
-		if !accept(session.State) {
+		out = append(out, windowsSession{id: session.SessionID, state: session.State})
+	}
+	return out, nil
+}
+
+// visitWindowsSessionTokens calls visit with the canonical user SID and the
+// user token of each session whose state accept admits. The token is closed
+// after visit. Session 0 (services) and a session without a signed-in user
+// (ERROR_NO_TOKEN) have no user to visit. Any other session whose token or
+// user cannot be read is not visited either, but the walk then returns an
+// errWindowsSessionsUnidentified error after visiting the rest, so a caller
+// can tell a complete answer from one that may be missing a user.
+func visitWindowsSessionTokens(accept func(state uint32) bool, visit func(sid string, token windows.Token)) error {
+	sessions, err := windowsSessionAPI.list()
+	if err != nil {
+		return fmt.Errorf("enumerate Windows sessions: %w", err)
+	}
+	var unidentified []string
+	for _, session := range sessions {
+		if session.id == 0 || !accept(session.state) {
 			continue
 		}
-		var token windows.Token
-		if err := windows.WTSQueryUserToken(session.SessionID, &token); err != nil {
+		token, err := windowsSessionAPI.userToken(session.id)
+		if errors.Is(err, windows.ERROR_NO_TOKEN) {
 			continue
 		}
-		if user, err := token.GetTokenUser(); err == nil {
-			if sid := canonicalManifestTargetSID(user.User.Sid.String()); sid != "" {
-				visit(sid, token)
-			}
+		if err != nil {
+			unidentified = append(unidentified, fmt.Sprintf("session %d: %v", session.id, err))
+			continue
 		}
-		token.Close()
+		user, err := windowsSessionAPI.tokenUser(token)
+		if err != nil {
+			unidentified = append(unidentified, fmt.Sprintf("session %d: token user: %v", session.id, err))
+		} else if sid := canonicalManifestTargetSID(user); sid != "" {
+			visit(sid, token)
+		}
+		windowsSessionAPI.close(token)
+	}
+	if len(unidentified) > 0 {
+		return fmt.Errorf("%w: %s", errWindowsSessionsUnidentified, strings.Join(unidentified, "; "))
 	}
 	return nil
 }

@@ -254,7 +254,9 @@ func TestWindowsEnrollmentGroupPrimitivesAgainstThisHost(t *testing.T) {
 	if _, err := readWindowsLocalGroupDirectMembers(machine + "-500"); err == nil {
 		t.Fatal("a user SID must not read as a local group")
 	}
-	if _, err := readWindowsActiveSessionGroups(); err != nil {
+	// A test runner without the privilege to read session tokens leaves
+	// every session's user unidentified.
+	if _, err := readWindowsActiveSessionGroups(); err != nil && !errors.Is(err, errWindowsSessionsUnidentified) {
 		t.Fatalf("active sessions: %v", err)
 	}
 }

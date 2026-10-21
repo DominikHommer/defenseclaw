@@ -244,9 +244,15 @@ decides the domain of an SSSD account from its uid, not from its name:
   guardian record for an hour by the wall clock; the guardian rewrites the
   records every 15 minutes, and within about a minute after the clock is
   stepped (an NTP correction, a resume from suspend). It removes the record of
-  an account it no longer publishes (excluded, left the manifest, or deleted)
-  after its next pass; while the directory does not answer it keeps a domain
-  account's record for up to an hour. While the oldest record of an account it
+  an account the enrollment leaves out (excluded, exempt, or out of the
+  manifest) at its next pass, and that of a deleted local account at its next
+  pass in which every enrolled account resolves. A directory account that a
+  pass does not list (a partial listing, an account that is not signed in)
+  keeps its record for at most an hour. The record goes sooner when the
+  account's uid now names another account, the same name in another domain,
+  or a local account, or when its uid no longer resolves at a second pass in a
+  row that does not list it. While the directory does not answer, the record
+  stays until the hour is up. While the oldest record of an account it
   still publishes looks older than 30 minutes, or any record is dated in the
   future, `status` and `verify` warn `identity_records_stale` and name that
   account's uid: the directory lookup for it keeps failing (the guardian's log

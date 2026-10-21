@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"go.opentelemetry.io/otel/attribute"
@@ -2710,11 +2711,32 @@ func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHook
 	}
 	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, toolInput)
 	probe.WorkspaceDir = req.CWD
+	// Kiro's servers on a managed Windows gateway are known only from the
+	// record the hook enumerator publishes: they are read again before a
+	// call about to run is decided, and a changed one waits for its own
+	// scan, as for Claude Code, never decided on the definition admitted
+	// before (GAP-0216). A refresh that fails refuses the call.
+	published := mcpasuser.PublishedConnector(req.ConnectorName) && agentHookMCPFromEnrolledSpool(a.liveConfig())
+	if published {
+		if decision, refused := a.mcpDefinitionRefreshDecision(ctx, req.ConnectorName, req.HookEventName, probe); refused {
+			return decision, true
+		}
+	}
 	if decision, refused := a.mcpStateUnreadableDecision(ctx, req.ConnectorName, req.HookEventName, probe); refused {
 		return decision, true
 	}
+	if published {
+		if decision, refused := a.mcpAdmissionPendingDecision(ctx, req.ConnectorName, req.HookEventName, probe); refused {
+			return decision, true
+		}
+	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 }
+
+// agentHookMCPFromEnrolledSpool reports a gateway that knows its enrolled
+// users' MCP servers only from the hook enumerator's records
+// (watcherUsesEnrolledUserDirs); tests replace it.
+var agentHookMCPFromEnrolledSpool = watcherUsesEnrolledUserDirs
 
 func (a *APIServer) agentHookSkillAssetDecision(ctx context.Context, req agentHookRequest) (config.AssetPolicyDecision, bool) {
 	toolInput := decodeAgentHookToolInput(req.ToolArgs)

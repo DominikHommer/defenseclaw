@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1553,8 +1554,9 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 		Targets:  []enterprisehooks.ManifestTarget{{User: "alice", UID: &alice, Connector: "opencode"}, {User: "carol", Connector: "opencode"}},
 		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
 	})
-	if len(accounts) != 2 || accounts[0].UID != 1001 || accounts[1].UID != 1003 {
-		t.Fatalf("manifest mode published identity records for %+v, want alice and carol only", accounts)
+	if len(accounts) != 3 || accounts[0].UID != 1001 || accounts[1].UID != 1003 || accounts[0].Left || accounts[1].Left ||
+		accounts[2].UID != 94401104 || !accounts[2].Left {
+		t.Fatalf("manifest mode identity accounts %+v, want alice and carol published and bob's record withdrawn", accounts)
 	}
 }
 
@@ -1699,5 +1701,43 @@ func TestRemoveAllReportKeepsTheWorkerErrorCause(t *testing.T) {
 	got := boundedWorkerError(cause)
 	if len(got) > workerErrorMaxBytes || !utf8.ValidString(got) || !strings.HasPrefix(got, "enterprise hooks: connector cursor") || !strings.HasSuffix(got, ": operation not permitted") {
 		t.Fatalf("bounded worker error = %q", got)
+	}
+}
+
+// W2B-G-enum review loop 1: an account a partial listing already omitted
+// has no key, so adding it to exclude_users (or exempt_users, or leaving the
+// manifest) changed nothing the guardian compares, and its record stayed
+// until the 15-minute refresh. A left account now has a key of its own.
+func TestIdentitySpoolKeysChangeWhenAnOmittedAccountLeaves(t *testing.T) {
+	previousCfg := cfg
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterprisehooks.SetStandaloneResolver(nil)
+	})
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"alice": {Name: "alice", UID: 4242, GID: 4242},
+		"bob":   {Name: "bob", UID: 4243, GID: 4243},
+	}})
+	run := enterpriseHookReconcileRun{Rows: []enterpriseHookReconcileRow{{UID: 4242, User: "alice", Connector: "codex", OK: true}}}
+	fingerprint := func() string {
+		_, keys := enterpriseHookIdentitySpoolAccounts(io.Discard, run)
+		slices.Sort(keys)
+		return strings.Join(keys, ";")
+	}
+	cfg = &config.Config{}
+	before := fingerprint()
+	for _, tc := range []struct {
+		name            string
+		exclude, exempt []string
+	}{
+		{name: "excluded by name", exclude: []string{"bob"}},
+		{name: "excluded by uid", exclude: []string{"4243"}},
+		{name: "exempt", exempt: []string{"bob"}},
+	} {
+		cfg = &config.Config{}
+		cfg.Enterprise.Enrollment.ExcludeUsers, cfg.Enterprise.Enrollment.ExemptUsers = tc.exclude, tc.exempt
+		if got := fingerprint(); got == before {
+			t.Errorf("%s: the identity pass keys stayed %q, so the left account's record waits for the refresh interval", tc.name, got)
+		}
 	}
 }
