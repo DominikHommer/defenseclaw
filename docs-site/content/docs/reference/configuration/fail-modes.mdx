@@ -163,6 +163,8 @@ Administrator-managed hooks force the relevant unavailable-home and transport fa
 
 The one exception is an authenticated Secure Client deployment: there the Antigravity, Devin, Hermes and Kiro shell hooks still take `DEFENSECLAW_FAIL_MODE` as a full override (`open` opens them and `closed` closes them for that agent process). Its Claude Code, Codex and Cursor shell hooks and its OpenCode plugin ignore the variable, and the native Windows hook only tightens. On every other managed install the shell hooks ignore it, and the OpenCode plugin and the native Windows hook only tighten.
 
+The shared `inspect-*.sh` scripts serve every connector of one data directory, and `DEFENSECLAW_CONNECTOR` only picks the connector they report as. They run open only when every connector recorded there is open: one connector set to `closed` closes them for all, also after an upgrade that kept an older global `open`.
+
 On Windows, environment keys are case-insensitive; do not define case-variants with different values.
 
 ## Reporting and diagnosis

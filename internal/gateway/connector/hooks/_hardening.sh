@@ -249,10 +249,11 @@ defenseclaw_harden_env() {
 # before it can participate in a token filename or HTTP header.
 defenseclaw_shared_runtime_connector() {
   local connector="${DEFENSECLAW_CONNECTOR:-}"
-  # Non-managed shells may supply an ephemeral connector selection, matching
-  # the existing fail-mode/token override contract. Guardian-managed hooks do
-  # not trust process environment for connector identity and use only the
-  # installer-owned sidecars below.
+  # Non-managed shells may supply an ephemeral connector selection. It picks
+  # the token and the identity the hook sends; it never opens the hook's fail
+  # mode (defenseclaw_shared_runtime_fail_mode can only tighten for it).
+  # Guardian-managed hooks do not trust process environment for connector
+  # identity and use only the installer-owned sidecars below.
   if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ]; then
     connector=""
   fi
@@ -292,7 +293,7 @@ defenseclaw_shared_runtime_connector() {
   if [ -f "$config" ]; then
     if command -v jq >/dev/null 2>&1; then
       connector="$(jq -r '.fail_modes | keys | if length == 1 then .[0] else empty end' "$config" 2>/dev/null || true)"
-    elif command -v python3 >/dev/null 2>&1; then
+    elif _dc_python3_usable; then
       connector="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); k=list((d.get("fail_modes") or {}).keys()); print(k[0] if len(k)==1 else "")' "$config" 2>/dev/null || true)"
     fi
     case "$connector" in
@@ -329,43 +330,111 @@ defenseclaw_shared_hook_token_file() {
   fi
 }
 
-# Resolve the selected connector's fail mode from the connector-aware shared
-# runtime state. An inherited DEFENSECLAW_FAIL_MODE can only tighten it to
-# closed (GAP-0315); guardian-managed hooks trust only installer-owned state.
-# Malformed, ambiguous, or missing state fails closed.
+# Resolve the availability posture of the shared inspect-* scripts. One
+# physical script serves every connector of this data directory, and nothing
+# authenticates which connector an invocation runs for: DEFENSECLAW_CONNECTOR
+# is the agent's environment, and two connector records leave the sidecars
+# ambiguous. So any connector record (the flat .hookcfg.<connector> files or
+# the JSON fail_modes map) that is not open closes the hook, whichever
+# connector is selected: a selector can only tighten. With every record open,
+# a selected connector (the single record, or the environment's choice) needs
+# an open record of its own; with none selected (several records, or none),
+# only the unscoped legacy mode (.hookcfg.legacy, legacy_fail_mode) can open
+# the call. After an upgrade, a kept legacy open therefore never reopens a
+# connector recorded closed. An inherited DEFENSECLAW_FAIL_MODE can only
+# tighten (GAP-0315); guardian-managed hooks trust only installer-owned
+# state. Malformed, ambiguous or missing state fails closed.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
-  local mode=""
   if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != "1" ]; then
     case "${DEFENSECLAW_FAIL_MODE:-}" in
       [Cc][Ll][Oo][Ss][Ee][Dd]) printf closed; return 0 ;;
     esac
   fi
   local config="${hook_dir}/.hookcfg"
-  local flat_config="${hook_dir}/.hookcfg.legacy"
-  if [ -n "$connector" ]; then
-    flat_config="${hook_dir}/.hookcfg.${connector}"
-  fi
-  if [ "$mode" != "open" ] && [ "$mode" != "closed" ]; then
-    mode="$(defenseclaw_flat_hookcfg_value "$flat_config" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
-  fi
-  if [ "$mode" != "open" ] && [ "$mode" != "closed" ] && [ -f "$config" ]; then
+  local candidate suffix recorded mode selected="" summary=""
+  for candidate in "${hook_dir}"/.hookcfg.*; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    suffix="${candidate##*.hookcfg.}"
+    [ "$suffix" != "legacy" ] && [ "$suffix" != "lock" ] || continue
+    case "$suffix" in
+      ""|*[!a-z0-9_-]*) continue ;;
+    esac
+    # A record names itself; lock files and interrupted-write debris do not.
+    recorded="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_CONNECTOR 2>/dev/null || true)"
+    [ "$recorded" = "$suffix" ] || continue
+    mode="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
+    if [ "$mode" != "open" ]; then
+      printf closed
+      return 0
+    fi
+    if [ "$suffix" = "$connector" ]; then
+      selected=open
+    fi
+  done
+  # The JSON state, as four words: connector entries, whether all of them
+  # are open, the selected connector's entry, and the legacy mode. A parser
+  # that runs and fails means malformed state; no parser leaves only the flat
+  # records.
+  if [ -f "$config" ]; then
     if command -v jq >/dev/null 2>&1; then
-      if [ -n "$connector" ]; then
-        mode="$(jq -r --arg connector "$connector" '.fail_modes[$connector] // empty' "$config" 2>/dev/null || true)"
-      else
-        mode="$(jq -r '.legacy_fail_mode // empty' "$config" 2>/dev/null || true)"
-      fi
-    elif command -v python3 >/dev/null 2>&1; then
-      mode="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); c=sys.argv[2]; print((d.get("fail_modes") or {}).get(c, "") if c else d.get("legacy_fail_mode", ""))' "$config" "$connector" 2>/dev/null || true)"
+      summary="$(jq -r --arg connector "$connector" '
+        def word: if . == null or . == "" then "none" elif . == "open" then "open" else "closed" end;
+        if type == "object" and (.version | type) == "number" and .version >= 2
+          and ((.fail_modes // {}) | type) == "object" then
+          (.fail_modes // {}) as $modes
+          | "\($modes | length) \(if [$modes[]] | all(. == "open") then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word) end) \(.legacy_fail_mode | word)"
+        else "invalid" end' "$config" 2>/dev/null)" || summary="invalid"
+    elif _dc_python3_usable; then
+      summary="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8"))
+assert isinstance(d,dict) and type(d.get("version")) is int and d["version"]>=2
+m=d.get("fail_modes") or {}
+assert isinstance(m,dict)
+w=lambda v:"none" if v in (None,"") else ("open" if v=="open" else "closed")
+c=sys.argv[2]
+print(len(m),"open" if all(v=="open" for v in m.values()) else "closed",w(m.get(c)) if c else "none",w(d.get("legacy_fail_mode")))' "$config" "$connector" 2>/dev/null)" || summary="invalid"
     fi
   fi
-  if [ "$mode" = "open" ]; then
-    printf open
-  else
-    printf closed
+  local json_count=0 json_all=open json_selected=none json_legacy=none
+  if [ -n "$summary" ]; then
+    # shellcheck disable=SC2086 # four fixed words, split on purpose
+    set -- $summary
+    json_count="${1:-}"
+    json_all="${2:-}"
+    json_selected="${3:-}"
+    json_legacy="${4:-}"
+    case "$json_count" in
+      ""|*[!0-9]*) printf closed; return 0 ;;
+    esac
   fi
+  if [ "$json_all" != "open" ]; then
+    printf closed
+    return 0
+  fi
+  # Every recorded connector is open. A selected connector (the one record,
+  # or the environment's choice) must have an open record of its own.
+  if [ -n "$connector" ]; then
+    if [ "$selected" = "open" ] || [ "$json_selected" = "open" ]; then
+      printf open
+    else
+      printf closed
+    fi
+    return 0
+  fi
+  # No selected connector: several records (an ambiguous identity) or none.
+  # Only the unscoped legacy mode can open such a call, as before connector
+  # records existed; a closed record already closed it above.
+  local legacy_flat=none
+  if [ -f "${hook_dir}/.hookcfg.legacy" ]; then
+    legacy_flat="$(defenseclaw_flat_hookcfg_value "${hook_dir}/.hookcfg.legacy" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
+    [ "$legacy_flat" = "open" ] || legacy_flat=closed
+  fi
+  case "$legacy_flat/$json_legacy" in
+    open/open|open/none|none/open) printf open ;;
+    *) printf closed ;;
+  esac
 }
 
 # _defenseclaw_sweep_stale_hook_dirs removes orphaned hook-tmp.*
@@ -778,9 +847,13 @@ else:
 # never fail the hook.
 #
 # Usage:
-#   defenseclaw_log_hook_failure CONNECTOR HOOK_NAME REASON CATEGORY FAIL_MODE [OUTCOME]
-# OUTCOME records the actual delivery decision, not merely configured policy.
-# Legacy diagnostic-only callers default to unknown rather than guessing.
+#   defenseclaw_log_hook_failure CONNECTOR HOOK_NAME REASON CATEGORY FAIL_MODE OUTCOME
+# OUTCOME records the actual delivery decision, not merely configured policy:
+# fail_open (the call ran unchecked), fail_closed (it was blocked) or
+# diagnostic (a record that is no delivery decision: the call still went to
+# the gateway). Every caller passes one; the gateway counts fail_open lines
+# as unchecked calls and keeps the fail_mode rule only for lines older hooks
+# wrote without one (unknown).
 #
 # CATEGORY is one of: "transport" (gateway unreachable / 5xx) or
 # "response" (4xx / parse error). The category lets operators tell the
@@ -794,7 +867,7 @@ defenseclaw_log_hook_failure() {
   local fail_mode="${5:-${FAIL_MODE:-open}}"
   local outcome="${6:-unknown}"
   case "$outcome" in
-    fail_open|fail_closed) : ;;
+    fail_open|fail_closed|diagnostic) : ;;
     *) outcome=unknown ;;
   esac
   if [ "$outcome" = "fail_open" ]; then
@@ -1539,7 +1612,7 @@ defenseclaw_missing_token_next_step() {
 #     0.2 s per MiB on Linux, 0.3 s on macOS bash 3.2) and starts no program.
 #
 # Usage:
-#   PAYLOAD="$(defenseclaw_read_stdin_capped)" || exit $?
+#   PAYLOAD="$(defenseclaw_read_stdin_capped fail_closed)" || exit 2
 #
 # Returns 0 with the body on stdout. Returns 1 (overflow or NUL) with an
 # empty stdout. If `head` is missing we read the body with a bounded
@@ -1547,8 +1620,8 @@ defenseclaw_missing_token_next_step() {
 # absent is the read unbounded (the cap and NUL checks still apply after
 # it), logged as a transport-category event so operators can spot it.
 defenseclaw_read_stdin_capped() {
-  # Caller supplies its actual oversized-payload outcome. Legacy callers and
-  # reader/tooling diagnostics remain unknown, not presumed fail-open.
+  # The caller passes the outcome its oversized-payload branch applies
+  # (fail_open or fail_closed); an older caller without one logs unknown.
   local overflow_outcome="${1:-unknown}"
   local cap="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
   case "$cap" in
@@ -1593,7 +1666,7 @@ sys.stdout.buffer.write(data+b"x")')"
   # condition; the cap and NUL refusals still apply.
   defenseclaw_log_hook_failure "${DEFENSECLAW_HOOK_CONNECTOR:-unknown}" "${DEFENSECLAW_HOOK_NAME:-unknown}" \
     "head(1)/python3 missing; reading stdin unbounded (set DEFENSECLAW_HOOK_MAX_BODY)" \
-    transport "${FAIL_MODE:-open}"
+    transport "${FAIL_MODE:-open}" diagnostic
   _dc_read_stdin_exact "$cap" "$overflow_outcome"
 }
 
@@ -1724,7 +1797,7 @@ defenseclaw_extract_trace_context() {
     else
       defenseclaw_log_hook_failure "$connector" "$hook_name" \
         "rejected malformed traceparent (length=${#tp})" \
-        response "${FAIL_MODE:-open}"
+        response "${FAIL_MODE:-open}" diagnostic
     fi
   fi
 
@@ -1737,7 +1810,7 @@ defenseclaw_extract_trace_context() {
     else
       defenseclaw_log_hook_failure "$connector" "$hook_name" \
         "rejected malformed tracestate (length=${#ts})" \
-        response "${FAIL_MODE:-open}"
+        response "${FAIL_MODE:-open}" diagnostic
     fi
   fi
 }

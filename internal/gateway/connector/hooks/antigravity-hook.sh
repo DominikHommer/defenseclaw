@@ -39,6 +39,11 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would switch off the per-user closed-mode
+# tightening.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
@@ -120,14 +125,14 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 {{if .Sandbox}}# The image registers exactly one documented lifecycle event per handler.
 if [ "$#" -ne 1 ]; then
-  defenseclaw_log_hook_failure antigravity antigravity-hook "unexpected registered command arguments" response closed
+  defenseclaw_log_hook_failure antigravity antigravity-hook "unexpected registered command arguments" response closed fail_closed
   antigravity_emit_fallback 1 "DefenseClaw hook was called with unexpected arguments, so the tool call is blocked."
   exit 0
 fi
 case "$HOOK_EVENT" in
   PreInvocation|PreToolUse|PostToolUse|PostInvocation|Stop) ;;
   *)
-    defenseclaw_log_hook_failure antigravity antigravity-hook "unregistered event" response closed
+    defenseclaw_log_hook_failure antigravity antigravity-hook "unregistered event" response closed fail_closed
     antigravity_emit_fallback 1
     exit 0
     ;;
@@ -136,14 +141,14 @@ esac
 # The binding token is the only credential a sandbox hook may present.
 case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
   ''|*$'\n'*|*$'\r'*)
-    defenseclaw_log_hook_failure antigravity antigravity-hook "missing or malformed sandbox binding token" transport closed
+    defenseclaw_log_hook_failure antigravity antigravity-hook "missing or malformed sandbox binding token" transport closed fail_closed
     echo "defenseclaw: missing or malformed sandbox binding token (DEFENSECLAW_SANDBOX_TOKEN), blocking antigravity tool (sandbox hooks fail closed)" >&2
     antigravity_emit_fallback 1 "DefenseClaw hook has no valid sandbox binding token, so the tool call is blocked."
     exit 0
     ;;
 esac
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_log_hook_failure antigravity antigravity-hook "missing gateway token" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "missing gateway token" transport "$FAIL_MODE"
   if defenseclaw_should_fail_closed_on_unreachable; then
     antigravity_emit_fallback 1
   else
@@ -152,7 +157,7 @@ esac
   exit 0
 fi
 {{end}}
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: antigravity hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     antigravity_emit_fallback 1{{if .Sandbox}} "DefenseClaw hook payload is too large, so the tool call is blocked."{{end}}
@@ -179,7 +184,7 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 fail_unreachable() {
-  defenseclaw_log_hook_failure antigravity antigravity-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "antigravity tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     antigravity_emit_fallback 1
@@ -190,7 +195,7 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_log_hook_failure antigravity antigravity-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: antigravity hook error: $1" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     antigravity_emit_fallback 1{{if .Sandbox}} "${2:-DefenseClaw answered the hook request without a verdict, so the tool call is blocked.}"{{end}}

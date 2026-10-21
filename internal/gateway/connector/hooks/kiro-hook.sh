@@ -36,6 +36,11 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would switch off the per-user closed-mode
+# tightening.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
@@ -125,7 +130,7 @@ fi
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token kiro kiro-hook "kiro tool"
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: kiro hook refusing oversized payload, blocking kiro tool (sandbox hooks fail closed)" >&2
   exit 2
 }
@@ -136,14 +141,14 @@ API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
   defenseclaw_allow_failed_stop_event kiro kiro-hook "" "${PAYLOAD:-}" "$1" transport
-  defenseclaw_log_hook_failure kiro kiro-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_failure kiro kiro-hook "$1" transport "$FAIL_MODE" fail_closed
   echo "defenseclaw: sandbox ingress unreachable, blocking kiro tool (sandbox hooks fail closed): $1" >&2
   exit 2
 }
 
 fail_response() {
   defenseclaw_allow_failed_stop_event kiro kiro-hook "" "${PAYLOAD:-}" "$1" response
-  defenseclaw_log_hook_failure kiro kiro-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_failure kiro kiro-hook "$1" response "$FAIL_MODE" fail_closed
   echo "defenseclaw: kiro hook error, blocking kiro tool (sandbox hooks fail closed): $1" >&2
   exit 2
 }
@@ -151,7 +156,7 @@ fail_response() {
   defenseclaw_handle_missing_token kiro kiro-hook "kiro hook" "${HOOK_DIR}/{{.TokenFile}}"
 fi
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: kiro hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     exit 2
@@ -177,7 +182,7 @@ fail_unreachable() {
   if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event kiro kiro-hook "" "${PAYLOAD:-}" "$1" transport
   fi
-  defenseclaw_log_hook_failure kiro kiro-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure kiro kiro-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "kiro hook" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
@@ -188,7 +193,7 @@ fail_unreachable() {
 fail_response() {
   [ "$FAIL_MODE" = "open" ] ||
     defenseclaw_allow_failed_stop_event kiro kiro-hook "" "${PAYLOAD:-}" "$1" response
-  defenseclaw_log_hook_failure kiro kiro-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure kiro kiro-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: kiro hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0

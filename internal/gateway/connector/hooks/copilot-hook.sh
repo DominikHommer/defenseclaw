@@ -78,6 +78,11 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)" || {{$failure}}
 export DEFENSECLAW_HOME
 {{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would switch off the per-user closed-mode
+# tightening.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
@@ -173,7 +178,7 @@ esac
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token copilot copilot-hook "copilot tool"
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: copilot hook refusing oversized payload, blocking copilot tool (sandbox hooks fail closed)" >&2
   exit 2
 }
@@ -184,24 +189,24 @@ API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
   defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" transport
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" fail_closed
   echo "defenseclaw: sandbox ingress unreachable, blocking copilot tool (sandbox hooks fail closed): $1" >&2
   exit 2
 }
 
 fail_response() {
   defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" response
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE" fail_closed
   echo "defenseclaw: copilot hook error, blocking copilot tool (sandbox hooks fail closed): $1" >&2
   exit 2
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_log_hook_failure copilot copilot-hook "missing gateway token" transport "$FAIL_MODE"
+  defenseclaw_log_hook_failure copilot copilot-hook "missing gateway token" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
   echo "defenseclaw: missing gateway token{{if .SecureClient}}, allowing copilot tool{{end}}" >&2
   {{$failure}}
 fi
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: copilot hook refusing oversized payload" >&2
   {{if .Managed}}{{$failure}}{{else}}copilot_hook_failure "it is too large for DefenseClaw to inspect. Make it smaller and try again."{{end}}
 }
@@ -221,7 +226,7 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
   defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
 {{if .Managed}}  {{$failure}}
 {{else}}  local next=""
@@ -230,7 +235,7 @@ fail_unreachable() {
 {{end}}}
 
 fail_response() {
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
   echo "defenseclaw: copilot hook error: $1" >&2
   {{if .Managed}}{{$failure}}{{else}}copilot_hook_failure "the DefenseClaw gateway returned an answer DefenseClaw could not use. Run \`defenseclaw doctor\` to see why."{{end}}
 }

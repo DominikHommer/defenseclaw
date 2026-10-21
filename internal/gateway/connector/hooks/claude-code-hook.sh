@@ -46,6 +46,11 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would switch off the per-user closed-mode
+# tightening.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 {{if not .Sandbox}}
 # A personal hook left on a managed computer must not fall back to its

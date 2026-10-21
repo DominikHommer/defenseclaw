@@ -36,6 +36,11 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would switch off the per-user closed-mode
+# tightening.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
@@ -100,7 +105,7 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token devin devin-hook "devin tool"
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: devin hook refusing oversized payload, blocking devin tool (sandbox hooks fail closed)" >&2
   printf 'DefenseClaw hook payload too large\n'
   exit 2
@@ -112,7 +117,7 @@ API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
   defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" transport
-  defenseclaw_log_hook_failure devin devin-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_failure devin devin-hook "$1" transport "$FAIL_MODE" fail_closed
   echo "defenseclaw: sandbox ingress unreachable, blocking devin tool (sandbox hooks fail closed): $1" >&2
   printf 'DefenseClaw hook failed closed\n'
   exit 2
@@ -120,7 +125,7 @@ fail_unreachable() {
 
 fail_response() {
   defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" response
-  defenseclaw_log_hook_failure devin devin-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_failure devin devin-hook "$1" response "$FAIL_MODE" fail_closed
   echo "defenseclaw: devin hook error, blocking devin tool (sandbox hooks fail closed): $1" >&2
   printf 'DefenseClaw hook failed closed\n'
   exit 2
@@ -129,7 +134,7 @@ fail_response() {
   defenseclaw_handle_missing_token devin devin-hook "devin hook" "${HOOK_DIR}/{{.TokenFile}}"
 fi
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: devin hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     printf 'DefenseClaw hook payload too large\n'
@@ -156,7 +161,7 @@ fail_unreachable() {
   if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" transport
   fi
-  defenseclaw_log_hook_failure devin devin-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure devin devin-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "devin hook" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     printf 'DefenseClaw hook failed closed\n'
@@ -168,7 +173,7 @@ fail_unreachable() {
 fail_response() {
   [ "$FAIL_MODE" = "open" ] ||
     defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" response
-  defenseclaw_log_hook_failure devin devin-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure devin devin-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: devin hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
