@@ -37,7 +37,7 @@ func TestOrderedCorrelationIDs(t *testing.T) {
 		t.Fatalf("ordered ID %q does not start with the anchor's time and counter", a)
 	}
 	b := orderedCorrelationID("rel_", string(second), "semantic_event", string(second), "session", "s")
-	if !(a < b) {
+	if a >= b {
 		t.Fatalf("a later event's ID %q sorts before %q", b, a)
 	}
 	for _, anchor := range []string{"", "not-a-uuid", uuid.NewString(), strings.ToUpper(string(first))} {
