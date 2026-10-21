@@ -1402,6 +1402,50 @@ func TestLinkedOrUnmovableSkillReportsWhatHappened(t *testing.T) {
 	})
 }
 
+// GAP-0133: a skill on asset_policy.skill.denied whose quarantine folder the
+// gateway cannot enter stays in place and blocked. skill info said
+// quarantined: a pending quarantine record stayed and the journal did not
+// say the quarantine failed.
+func TestDeniedSkillWhoseQuarantineFailsSaysSo(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions as a non-root user")
+	}
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.AssetPolicy = config.DefaultAssetPolicy()
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "denied-skill"}}
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	path := filepath.Join(skillDir, "denied-skill")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("---\nname: denied-skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cfg.QuarantineDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg.QuarantineDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cfg.QuarantineDir, 0o700) })
+
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "denied-skill", Path: path, Timestamp: time.Now()})
+	if res.Verdict != VerdictBlocked {
+		t.Fatalf("verdict = %q, want blocked", res.Verdict)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("expected the skill to stay in place: %v", err)
+	}
+	records, err := store.ListQuarantineRecordsForConnector(context.Background(), "skill", "denied-skill", "")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("quarantine records = %+v (err %v), want none for files that never moved", records, err)
+	}
+	entry, err := store.GetAction("skill", "denied-skill")
+	if err != nil || entry == nil || entry.Actions.Install != "block" || !strings.HasPrefix(entry.Reason, "quarantine failed: ") {
+		t.Fatalf("journal = %+v (err %v), want install block with quarantine failed", entry, err)
+	}
+}
+
 // blockingScanner waits until its scan context ends and reports that.
 type blockingScanner struct{ countingScanner }
 

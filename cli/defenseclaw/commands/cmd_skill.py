@@ -5526,6 +5526,16 @@ def _rollback_skill_install_paths(paths: list[str]) -> None:
             )
 
 
+def _decision_generation(app: AppContext) -> str:
+    """The `` config_generation=N`` an install audit row carries: the config
+    generation the CLI's admission decision used. A gateway reload during
+    the install applies a newer one, and the row said generation 0 (r103
+    GAP-0021). ``unknown`` when the loaded config.yaml was not the recorded
+    generation."""
+    generation = getattr(app.cfg, "_loaded_generation", -1)
+    return f" config_generation={generation if generation >= 0 else 'unknown'}"
+
+
 def _scan_installed_skill_for_connector(
     app: AppContext,
     pe: Any,
@@ -5571,7 +5581,8 @@ def _scan_installed_skill_for_connector(
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "install-rejected", skill_name,
-                f"connector={connector} source={post_decision.source} reason={post_decision.reason}",
+                f"connector={connector} source={post_decision.source} reason={post_decision.reason}"
+                + _decision_generation(app),
             )
         raise SystemExit(1)
 
@@ -5586,7 +5597,7 @@ def _scan_installed_skill_for_connector(
             saved_change_audit(app.logger).log_action(
                 "install-allowed",
                 skill_name,
-                f"reason=admission-action-allow connector={connector}",
+                f"reason=admission-action-allow connector={connector}" + _decision_generation(app),
             )
         return
 
@@ -5599,7 +5610,7 @@ def _scan_installed_skill_for_connector(
             saved_change_audit(app.logger).log_action(
                 "install-allowed",
                 skill_name,
-                f"reason=allow-listed-post-scan connector={connector}",
+                f"reason=allow-listed-post-scan connector={connector}" + _decision_generation(app),
             )
         return
 
@@ -5607,12 +5618,12 @@ def _scan_installed_skill_for_connector(
         click.echo(f"[install] {skill_name!r} installed and clean (connector={connector})")
         if app.logger:
             saved_change_audit(app.logger).log_action(
-                "install-clean", skill_name, f"verdict=clean connector={connector}",
+                "install-clean", skill_name, f"verdict=clean connector={connector}" + _decision_generation(app),
             )
         return
 
     sev = result.max_severity()
-    detail = f"severity={sev} findings={len(result.findings)} connector={connector}"
+    detail = f"severity={sev} findings={len(result.findings)} connector={connector}" + _decision_generation(app)
 
     if not take_action:
         ux.echo(
@@ -5747,7 +5758,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
         if decision.verdict == "blocked":
             if app.logger:
                 saved_change_audit(app.logger).log_action(
-                    "install-rejected", skill_name, f"reason=blocked connector={connector}",
+                    "install-rejected", skill_name, f"reason=blocked connector={connector}" + _decision_generation(app),
                 )
             ux.echo(
                 f"error: skill {skill_name!r} is on the block list for connector={connector}"
@@ -5759,7 +5770,8 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
         if decision.verdict == "rejected" and decision.source == "quarantine":
             if app.logger:
                 saved_change_audit(app.logger).log_action(
-                    "install-rejected", skill_name, f"reason=quarantined connector={connector}",
+                    "install-rejected", skill_name,
+                    f"reason=quarantined connector={connector}" + _decision_generation(app),
                 )
             ux.echo(
                 f"error: skill {skill_name!r} is quarantined for connector={connector}"
@@ -5827,7 +5839,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 saved_change_audit(app.logger).log_action(
                     "install-allowed",
                     skill_name,
-                    f"reason=allow-listed connector={connector}",
+                    f"reason=allow-listed connector={connector}" + _decision_generation(app),
                 )
             continue
 

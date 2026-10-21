@@ -3084,7 +3084,6 @@ def _interactive_mcp_setup(mc, cfg) -> None:
 
     click.echo()
     ux.section("MCP Scanner Configuration")
-    click.echo(f"  {ux.dim('Binary:')} {mc.binary}")
     click.echo()
 
     while True:

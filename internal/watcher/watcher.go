@@ -1670,6 +1670,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	policyID := enforce.PolicyStableID(w.cfg.PolicyDir)
 	decisionPolicy := w.admissionPolicySnapshot()
 	ctx, admissionTrace := w.startAdmissionTraceV8(ctx, evt, targetType, policyID, decisionPolicy)
+	ctx = withDecisionPolicy(ctx, decisionPolicy)
 	// SLO timer: measure watcher-detection → admission-decision wall
 	// time so every run feeds defenseclaw.slo.block.latency. Blocked
 	// verdicts drive the <2000ms SLO dashboard; allowed/clean still
@@ -1699,7 +1700,12 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		if assetDecision.Action == "block" {
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s", targetType, assetDecision.Reason, assetDecision.Source))
-			w.enforceBlock(ctx, evt)
+			if err := w.enforceBlockWith(ctx, evt, true, ""); err != nil && !w.secureClientActive() {
+				// skill list and skill info say the quarantine of a
+				// denied asset failed, as they do for a scan verdict;
+				// they said quarantined (GAP-0133).
+				w.journalFailedQuarantine(evt, targetType, err)
+			}
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
 			return res
@@ -1844,6 +1850,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// allow added while the scan was running wins.
 	decisionPolicy = w.admissionPolicySnapshot()
 	admissionTrace.policyDigest, admissionTrace.policyGeneration = decisionPolicy.Digest, decisionPolicy.Generation
+	ctx = withDecisionPolicy(ctx, decisionPolicy)
 	input = w.admissionInputFor(decisionPolicy.Config, evt, targetType, connector)
 	input.ScanResult = &policy.ScanResultInput{
 		MaxSeverity:   string(result.MaxSeverity()),
@@ -2111,14 +2118,10 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 					// The journal says quarantined only once the files are
 					// in quarantine storage; a failed move says so, plainly,
 					// and the block and runtime disable stay (GAP-0394).
-					switch {
-					case err == nil:
+					if err == nil {
 						_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "file", "quarantine", blockReason)
-					case errors.Is(err, errLinkRemoved):
-						_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", err.Error())
-					default:
-						_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block",
-							quarantineFailedReason+err.Error())
+					} else {
+						w.journalFailedQuarantine(evt, targetType, err)
 					}
 				}
 			}
@@ -2481,6 +2484,21 @@ func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType st
 	}
 }
 
+// journalFailedQuarantine records on the journal that the quarantine of a
+// blocked asset failed (err), or that its link was removed: install block,
+// with the reason skill list and skill info show.
+func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType string, err error) {
+	if w.store == nil {
+		return
+	}
+	reason := quarantineFailedReason + err.Error()
+	if errors.Is(err, errLinkRemoved) {
+		reason = err.Error()
+	}
+	scope := w.journalScope(w.eventConnector(evt))
+	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", reason)
+}
+
 // quarantineFailedReason and errLinkRemoved lead the journal reason of a
 // blocked asset the watcher could not move into quarantine storage, and of a
 // linked one it took out of the folder; skill list and skill info show them
@@ -2595,7 +2613,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	if err := enforce.ExecuteAssetQuarantine(plan, record.ID); err != nil {
 		// Roll back only an unmaterialized journal. A verified destination is
 		// authoritative recovery data and must retain its pending provenance.
-		if _, statErr := os.Lstat(plan.QuarantinePath); os.IsNotExist(statErr) {
+		if quarantineUnmaterialized(plan) {
 			_ = w.store.DeleteQuarantineRecord(ctx, record.ID)
 		}
 		w.emitQuarantineFailure(ctx, evt, err)
@@ -3225,6 +3243,23 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, err)
 }
 
+// quarantineUnmaterialized reports that a failed quarantine moved nothing:
+// its destination does not exist, or cannot be inspected (a quarantine
+// folder the gateway may not enter) while the asset is still at its
+// source. The pending record of such a quarantine is rolled back; kept, it
+// made skill info say quarantined for files that never moved (GAP-0133).
+func quarantineUnmaterialized(plan enforce.AssetQuarantinePlan) bool {
+	_, err := os.Lstat(plan.QuarantinePath)
+	if os.IsNotExist(err) {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	_, err = os.Lstat(plan.SourcePath)
+	return err == nil
+}
+
 func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit.Action, evt InstallEvent, destPath string) {
 	details := fmt.Sprintf("dest=%s", destPath)
 	if owner, ok := w.ownerOf(evt.Path); ok && owner.Name != "" {
@@ -3242,7 +3277,14 @@ func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit
 		_ = w.logger.LogEventCtx(ctx, event)
 		return
 	}
-	_ = w.logger.LogEnforcementQuarantineApplied(ctx, event, audit.EnforcementQuarantineAppliedInput{
+	_ = w.logger.LogEnforcementQuarantineApplied(ctx, event, quarantineAppliedInput(ctx, evt, destPath))
+}
+
+// quarantineAppliedInput is the asset.quarantined input of a quarantine,
+// stamped with the policy of the admission decision that ordered it when
+// ctx carries one (withDecisionPolicy).
+func quarantineAppliedInput(ctx context.Context, evt InstallEvent, destPath string) audit.EnforcementQuarantineAppliedInput {
+	input := audit.EnforcementQuarantineAppliedInput{
 		EnforcementID:   uuid.NewString(),
 		RequestedAction: "quarantine",
 		EffectiveAction: "quarantine",
@@ -3252,7 +3294,25 @@ func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit
 		AssetType:       evt.Type.String(),
 		SourcePath:      evt.Path,
 		DestinationPath: destPath,
-	})
+	}
+	if stamp, ok := ctx.Value(decisionPolicyKey{}).(decisionPolicyStamp); ok {
+		input.PolicyStamped, input.PolicyDigest, input.PolicyGeneration = true, stamp.digest, stamp.generation
+	}
+	return input
+}
+
+type decisionPolicyKey struct{}
+
+type decisionPolicyStamp struct {
+	digest     observability.Optional[string]
+	generation observability.Optional[int64]
+}
+
+// withDecisionPolicy records on ctx the policy generation an admission
+// decision used, so the quarantine it orders names that generation and not
+// one a reload applied while the files were being moved (p0 GAP-1000).
+func withDecisionPolicy(ctx context.Context, snapshot AdmissionPolicySnapshot) context.Context {
+	return context.WithValue(ctx, decisionPolicyKey{}, decisionPolicyStamp{snapshot.Digest, snapshot.Generation})
 }
 
 // isDirectChildDir returns true if path is a directory and a direct child

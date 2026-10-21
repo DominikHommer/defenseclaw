@@ -18,6 +18,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -326,6 +327,42 @@ runtime_action := "allow"
 	out, err := capturePolicyPathTestOutput(t, func() error { return policyEvaluateCmd.RunE(policyEvaluateCmd, nil) })
 	if err != nil || !strings.Contains(out, `"verdict": "allowed"`) {
 		t.Fatalf("evaluate legacy bundle: output %q, error %v", out, err)
+	}
+}
+
+// p0 GAP-0945: with registry_required on, the dry run refuses an MCP server
+// the catalog does not list, as the runtime does, and says an approved one
+// is registered; before, both read scan / awaiting scan.
+func TestPolicyEvaluateAppliesTheRegistryRequirement(t *testing.T) {
+	c := &config.Config{PolicyDir: t.TempDir(), AssetPolicy: config.DefaultAssetPolicy()}
+	c.AssetPolicy.Enabled = true
+	c.AssetPolicy.Mode = config.AssetPolicyModeAction
+	c.AssetPolicy.MCP.RegistryRequired = true
+	c.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "acme-notes"}}
+	setPolicyPathTestConfig(t, c)
+	setPolicyPathTestFlag(t, policyEvaluateCmd, "target-type", "mcp")
+	evaluate := func(name string) policy.AdmissionOutput {
+		t.Helper()
+		setPolicyPathTestFlag(t, policyEvaluateCmd, "target-name", name)
+		raw, err := capturePolicyPathTestOutput(t, func() error { return policyEvaluateCmd.RunE(policyEvaluateCmd, nil) })
+		if err != nil {
+			t.Fatalf("evaluate %s: %v", name, err)
+		}
+		var out policy.AdmissionOutput
+		if err := json.Unmarshal([]byte(raw), &out); err != nil {
+			t.Fatalf("evaluate %s output %q: %v", name, raw, err)
+		}
+		return out
+	}
+	if out := evaluate("wiki-rogue"); out.Verdict != "blocked" || !strings.Contains(out.Reason, "not in the approved registry") {
+		t.Fatalf("wiki-rogue = %+v, want refused as not in the approved registry", out)
+	}
+	if out := evaluate("acme-notes"); out.Verdict != "scan" || !strings.Contains(out.Reason, `"acme-notes" is registered`) {
+		t.Fatalf("acme-notes = %+v, want registered and awaiting scan", out)
+	}
+	c.AssetPolicy.Mode = config.AssetPolicyModeObserve
+	if out := evaluate("wiki-rogue"); out.Verdict != "scan" || !strings.Contains(out.Reason, "asset policy would block") {
+		t.Fatalf("observe wiki-rogue = %+v, want a would-block note", out)
 	}
 }
 

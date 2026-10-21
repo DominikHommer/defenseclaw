@@ -74,11 +74,13 @@ def fetch_clawhub(
     except json.JSONDecodeError as exc:
         raise IngestError(f"npm metadata is not valid JSON: {exc}") from exc
 
-    plugins = (
-        meta.get("openclaw", {}).get("plugins")
-        or meta.get("plugins")
-        or {}
-    )
+    # openclaw.plugins, else a top-level plugins map. Metadata with neither
+    # is an error, not an empty catalog: a sync that read none used to
+    # report ok with 0 fetched (GAP-0131). An empty map is a valid catalog.
+    openclaw_meta = meta.get("openclaw") if isinstance(meta, dict) else None
+    plugins = openclaw_meta.get("plugins") if isinstance(openclaw_meta, dict) else None
+    if plugins is None and isinstance(meta, dict):
+        plugins = meta.get("plugins")
     if not isinstance(plugins, dict):
         raise IngestError(
             "openclaw package metadata is missing the plugins map; "

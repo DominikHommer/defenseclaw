@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import codecs
 import copy
+import hashlib
 import json
 import locale
 import logging
@@ -4002,6 +4003,10 @@ class Config:
     # document must never serialize the legacy audit_db/otel model over
     # the canonical observability graph.
     _source_config_version: int = field(default=0, repr=False, compare=False)
+    # config_generation of the config.yaml bytes load() read, -1 when not
+    # known (_generation_of_loaded_text). Audit rows of a decision made on
+    # this config name it (r103 GAP-0021).
+    _loaded_generation: int = field(default=-1, repr=False, compare=False)
     _loaded_v8_modeled_snapshot: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
@@ -4718,6 +4723,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     d.pop("_loaded_authoritative_dicts", None)
     d.pop("_loaded_owned_nested_values", None)
     d.pop("_source_config_version", None)
+    d.pop("_loaded_generation", None)
     d.pop("_loaded_v8_modeled_snapshot", None)
     d.pop("enterprise_openshell", None)
     gw = d.get("gateway")
@@ -7245,8 +7251,13 @@ def load(
     cfg_file = str(config_path_for_data_dir(data_dir))
 
     raw: dict[str, Any] = {}
+    loaded_text: str | None = None
     try:
-        raw = parsed_source if parsed_source is not None else parse_config_yaml(read_config_text(cfg_file)) or {}
+        if parsed_source is not None:
+            raw = parsed_source
+        else:
+            loaded_text = read_config_text(cfg_file)
+            raw = parse_config_yaml(loaded_text) or {}
     except (FileNotFoundError, NotADirectoryError):
         pass
     except OSError as exc:
@@ -7373,6 +7384,7 @@ def load(
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     cfg._loaded_owned_nested_values = _snapshot_owned_nested_values(raw)
     cfg._source_config_version = source_config_version
+    cfg._loaded_generation = _generation_of_loaded_text(cfg_file, loaded_text)
     _apply_secure_client_hook_fail_default(cfg, raw)
     _migrate_llm_fields(cfg)
     _warn_plaintext_secrets(cfg)
@@ -7394,6 +7406,22 @@ def load(
     if is_current_schema(source_config_version):
         cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
+
+
+def _generation_of_loaded_text(cfg_file: str, text: str | None) -> int:
+    """config_generation of the config.yaml text load() read: the one
+    config.generation.json records when it records these bytes, -1 when a
+    writer changed the file since or nothing recorded it."""
+    if text is None:
+        return -1
+    from defenseclaw import config_writer
+
+    try:
+        state = config_writer.read_generation_state(cfg_file)
+    except (OSError, ValueError):
+        return -1
+    recorded = state.config_sha256.strip().lower().removeprefix("sha256:")
+    return state.generation if recorded == hashlib.sha256(text.encode("utf-8")).hexdigest() else -1
 
 
 _GUARDRAIL_PROFILE_KEYS = ("profiles", "profile_assignments", "default_profile")

@@ -3780,6 +3780,9 @@ func warnUnenforcedAssetPolicy(cfg *config.Config, skillDirs, pluginDirs []strin
 	for _, message := range cfg.UnenforcedAssetPolicyRules(watched) {
 		fmt.Fprintf(os.Stderr, "[sidecar] warning: %s\n", message)
 	}
+	for _, message := range cfg.EmptyRequiredAssetRegistries(watched) {
+		fmt.Fprintf(os.Stderr, "[sidecar] warning: %s\n", message)
+	}
 }
 
 // watcherHealthDetails adds to details the project skill folders that could

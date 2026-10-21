@@ -230,12 +230,20 @@ class TestClawhubAdapter(unittest.TestCase):
             manifest, _ = fetch_clawhub(self._src(), resolver=_stub_resolver())
         self.assertEqual([e.name for e in manifest.entries], ["ok-name"])
 
-    def test_missing_plugins_map_yields_empty_manifest(self):
-        # An openclaw package without a plugins map is a valid (if
-        # unusual) state — it means "no skills published". We surface
-        # that as an empty manifest rather than an error so a
-        # mid-bootstrap registry doesn't permanently fail sync.
-        body = b'{"name":"openclaw"}'
+    def test_missing_plugins_map_raises(self):
+        # GAP-0131: package metadata with no plugins map (the public
+        # openclaw package today) is not a catalog; sync reported ok with 0
+        # fetched. It fails with the missing-map error instead.
+        for body in (b'{"name":"openclaw"}', b'{"openclaw":{"version":"1"}}', b'{"openclaw":"x"}'):
+            with patch.object(
+                adapter_base.requests, "get",
+                _MockTransport(responses=[_FakeResp(body)]),
+            ), self.assertRaises(IngestError) as cm:
+                fetch_clawhub(self._src(), resolver=_stub_resolver())
+            self.assertIn("missing the plugins map", str(cm.exception))
+
+    def test_empty_plugins_map_yields_empty_manifest(self):
+        body = b'{"openclaw":{"plugins":{}}}'
         with patch.object(
             adapter_base.requests, "get",
             _MockTransport(responses=[_FakeResp(body)]),
