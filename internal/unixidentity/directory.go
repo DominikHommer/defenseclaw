@@ -825,8 +825,10 @@ var memberListServices = map[string]bool{"ldap": true, "nis": true, "nisplus": t
 // plus the groups a member-list directory (memberListServices) lists it in
 // and the directory's names of the gids /etc/group does not name (GAP-0550).
 // A service that resolves the name to another uid is skipped: its answer is
-// that account's. A directory that does not answer adds nothing, so the
-// local account's facts never fail with it.
+// that account's. A directory that does not answer fails the lookup, as it
+// does for a directory account: the groups it would list are unknown, and
+// facts without them could select a less strict profile than the account's
+// (fail closed).
 func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, []string, error) {
 	ids, names, err := localAccountGroups(account)
 	if err != nil {
@@ -834,7 +836,7 @@ func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, [
 	}
 	services, err := nssInitgroupsServices()
 	if err != nil {
-		return ids, names, nil
+		return nil, nil, err
 	}
 	named := make(map[int]string, len(ids))
 	for i, id := range ids {
@@ -848,12 +850,18 @@ func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, [
 			continue
 		}
 		holder, lookupErr := r.LookupUserInService(service, account.Name)
-		if lookupErr != nil && !IsNotFound(lookupErr) || lookupErr == nil && holder.UID != account.UID {
+		if lookupErr != nil && !IsNotFound(lookupErr) {
+			return nil, nil, fmt.Errorf("%s account %s: %w", service, account.Name, lookupErr)
+		}
+		if lookupErr == nil && holder.UID != account.UID {
 			continue
 		}
 		listed, listErr := r.groupIDsInService(service, account.Name)
-		if listErr != nil {
+		if IsNotFound(listErr) {
 			continue
+		}
+		if listErr != nil {
+			return nil, nil, listErr
 		}
 		for _, id := range listed {
 			if !slices.Contains(ids, id) {
@@ -875,11 +883,13 @@ func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, [
 		}
 	}
 	if len(unnamed) > 0 && slices.ContainsFunc(services, func(service string) bool { return service != "files" }) {
-		if resolved, nameErr := r.groupNames(unnamed); nameErr == nil {
-			for i, id := range unnamed {
-				if resolved[i] != strconv.Itoa(id) {
-					named[id] = resolved[i]
-				}
+		resolved, nameErr := r.groupNames(unnamed)
+		if nameErr != nil {
+			return nil, nil, nameErr
+		}
+		for i, id := range unnamed {
+			if resolved[i] != strconv.Itoa(id) {
+				named[id] = resolved[i]
 			}
 		}
 	}
@@ -1139,7 +1149,8 @@ func QualifiedUserName(ctx context.Context, r Resolver, name string) string {
 // twin found and none of those, while NSS asks a directory for accounts,
 // the answer is a *useridentity.NamesakesUnknownError: a directory twin may
 // exist and cannot be looked up, and taking the local account alone hid it
-// (GAP-1131, GAP-1132).
+// (GAP-1131, GAP-1132). So is a candidate lookup that failed rather than
+// found nothing: the twin it would have found is unknown.
 func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Account, error) {
 	bare, _ := useridentity.SplitQualifiedName(account.Name)
 	if r == nil || bare == "" {
@@ -1157,28 +1168,44 @@ func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Accou
 	}
 	seen := map[int]bool{account.UID: true}
 	var twins []Account
+	lookupErr := realmErr
 	for _, candidate := range candidates {
 		found, err := r.LookupUser(candidate)
 		var mismatch *NameMismatchError
 		if errors.As(err, &mismatch) {
 			found, err = mismatch.Answered, nil
 		}
+		if err != nil {
+			if !IsNotFound(err) && lookupErr == nil {
+				lookupErr = fmt.Errorf("look up %s: %w", candidate, err)
+			}
+			continue
+		}
 		foundBare, _ := useridentity.SplitQualifiedName(found.Name)
-		if err != nil || seen[found.UID] || !useridentity.EqualFold(foundBare, bare) {
+		if seen[found.UID] || !useridentity.EqualFold(foundBare, bare) {
 			continue
 		}
 		seen[found.UID] = true
 		twins = append(twins, found)
 	}
-	if len(twins) == 0 && realmErr != nil {
-		return nil, &useridentity.NamesakesUnknownError{Name: bare, Err: realmErr}
+	if len(twins) == 0 && lookupErr != nil {
+		return nil, &useridentity.NamesakesUnknownError{Name: bare, Err: lookupErr}
 	}
 	return twins, nil
 }
 
+// errNoJoinedDomain is the reason a bare name is refused when realmd lists no
+// joined domain while a directory configuration may still serve one.
+var errNoJoinedDomain = errors.New("realmd lists no joined domain")
+
 // sameNameRealms returns the joined realms SameNameAccounts qualifies a
-// bare name with, and an error only when they are unknown: realmd failed,
-// nothing stands in for it, and NSS consults a directory for accounts.
+// bare name with, and an error only when they are unknown: realmd failed or
+// listed none, nothing stands in for it, and NSS consults a directory that
+// may serve a domain (directoryDomainsPossible). realmd lists no realm for
+// an SSSD set up without it, and a bare name was then taken for the local
+// account although SSSD could name a directory twin (GAP-1131). A host with
+// the sss module but no SSSD configuration, the RHEL default, has no domain
+// for realmd to miss.
 func sameNameRealms(ctx context.Context) ([]Realm, error) {
 	realms, err := hostRealms(ctx)
 	if err == nil && len(realms) > 0 {
@@ -1187,16 +1214,52 @@ func sameNameRealms(ctx context.Context) ([]Realm, error) {
 	if fallback := fallbackRealms(); len(fallback) > 0 {
 		return fallback, nil
 	}
-	if err != nil && nssConsultsDirectory() {
+	if !nssConsultsDirectory() || !directoryDomainsPossible() {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
-	return nil, nil
+	return nil, errNoJoinedDomain
 }
 
 var (
 	krb5ConfPath = "/etc/krb5.conf"
 	sssdConfPath = "/etc/sssd/sssd.conf"
+	sssdConfDir  = "/etc/sssd/conf.d"
 )
+
+// qualifiedNameServices are the NSS passwd services that name accounts by a
+// domain-qualified name without an sssd.conf.
+var qualifiedNameServices = map[string]bool{"winbind": true, "himmelblau": true, "aad": true}
+
+// directoryDomainsPossible reports whether a directory may serve a joined
+// domain that fallbackRealms cannot name: sssd.conf or a conf.d snippet
+// exists but names no domain DefenseClaw can read (sssd.conf is readable
+// by root only), or NSS asks winbind or an Entra ID module, whose domains
+// only realmd names here. A plain host with the sss module configured but no
+// SSSD configuration (the RHEL default) has none.
+func directoryDomainsPossible() bool {
+	if _, err := os.Stat(sssdConfPath); !errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	entries, err := os.ReadDir(sssdConfDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".conf") {
+			return true
+		}
+	}
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	return slices.ContainsFunc(ParseNSSwitchServices(string(data), "passwd"), func(service string) bool {
+		return qualifiedNameServices[service]
+	})
+}
 
 // fallbackRealms names the joined domains without realmd: the realms
 // realmd last listed (lastListedRealms), the default realm of krb5.conf and

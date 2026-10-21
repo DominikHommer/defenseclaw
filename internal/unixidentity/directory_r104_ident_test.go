@@ -22,12 +22,13 @@ import (
 func sameNameHost(t *testing.T, realms func(context.Context) ([]Realm, error), krb5, nss string) {
 	t.Helper()
 	dir := t.TempDir()
-	oldRealms, oldListed, oldKrb5, oldSSSD, oldNSS := hostRealms, lastListedRealms, krb5ConfPath, sssdConfPath, nsswitchPath
+	oldRealms, oldListed, oldKrb5, oldSSSD, oldSSSDDir, oldNSS := hostRealms, lastListedRealms, krb5ConfPath, sssdConfPath, sssdConfDir, nsswitchPath
 	t.Cleanup(func() {
-		hostRealms, lastListedRealms, krb5ConfPath, sssdConfPath, nsswitchPath = oldRealms, oldListed, oldKrb5, oldSSSD, oldNSS
+		hostRealms, lastListedRealms, krb5ConfPath, sssdConfPath, sssdConfDir, nsswitchPath = oldRealms, oldListed, oldKrb5, oldSSSD, oldSSSDDir, oldNSS
 	})
 	hostRealms, lastListedRealms = realms, func() []Realm { return nil }
 	krb5ConfPath, sssdConfPath, nsswitchPath = filepath.Join(dir, "krb5.conf"), filepath.Join(dir, "sssd.conf"), filepath.Join(dir, "nsswitch.conf")
+	sssdConfDir = filepath.Join(dir, "conf.d")
 	if krb5 != "" {
 		if err := os.WriteFile(krb5ConfPath, []byte(krb5), 0o644); err != nil {
 			t.Fatal(err)
@@ -63,6 +64,7 @@ func TestSameNameAccountsWithoutRealmd(t *testing.T) {
 	}
 	t.Run("nothing names the domains", func(t *testing.T) {
 		sameNameHost(t, func(context.Context) ([]Realm, error) { return nil, errors.New("realmd timed out") }, "", "passwd: files sss\n")
+		writeTestFile(t, sssdConfPath, "[sssd]\nservices = nss, pam\n")
 		twins, err := SameNameAccounts(context.Background(), r, local)
 		var unknown *useridentity.NamesakesUnknownError
 		if len(twins) != 0 || !errors.As(err, &unknown) || !strings.Contains(err.Error(), "qualified name") {
@@ -174,4 +176,118 @@ func TestDirectoryLookupBudgetNamesAColdLargeMembership(t *testing.T) {
 	if err := run(directoryLookupBase); err == nil {
 		t.Fatal("the fixed base budget named 700 cold groups; the control does not reproduce the timeout")
 	}
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Review of GAP-1131: realmd answering an empty list without an error, with
+// no realm file to stand in, refuses a bare name while an SSSD configuration
+// may serve a domain DefenseClaw cannot name (sssd.conf it cannot read, a
+// conf.d snippet, winbind); a host with the sss module and no SSSD
+// configuration (the RHEL default) keeps the bare name.
+func TestSameNameAccountsEmptyRealmdAnswer(t *testing.T) {
+	r := newFakeNSS(&fakeRun{results: map[string]commandResult{
+		"passwd alice": {stdout: []byte("alice:x:1001:1001::/home/alice:/bin/bash\n")},
+	}})
+	local := Account{Name: "alice", UID: 1001}
+	empty := func(context.Context) ([]Realm, error) { return nil, nil }
+	for name, setup := range map[string]func(t *testing.T){
+		"sssd.conf names no readable domain": func(t *testing.T) { writeTestFile(t, sssdConfPath, "[sssd]\nservices = nss\n") },
+		"a conf.d snippet": func(t *testing.T) {
+			writeTestFile(t, filepath.Join(sssdConfDir, "corp.conf"), "[domain/corp.example]\n")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sameNameHost(t, empty, "", "passwd: files sss\n")
+			setup(t)
+			twins, err := SameNameAccounts(context.Background(), r, local)
+			var unknown *useridentity.NamesakesUnknownError
+			if len(twins) != 0 || !errors.As(err, &unknown) {
+				t.Fatalf("twins = %+v, %v; want the bare name refused", twins, err)
+			}
+		})
+	}
+	t.Run("winbind", func(t *testing.T) {
+		sameNameHost(t, empty, "", "passwd: files winbind\n")
+		var unknown *useridentity.NamesakesUnknownError
+		if twins, err := SameNameAccounts(context.Background(), r, local); len(twins) != 0 || !errors.As(err, &unknown) {
+			t.Fatalf("twins = %+v, %v; want the bare name refused", twins, err)
+		}
+	})
+	t.Run("sss without an SSSD configuration", func(t *testing.T) {
+		for _, realms := range []func(context.Context) ([]Realm, error){empty, func(context.Context) ([]Realm, error) { return nil, errors.New("realm: command not found") }} {
+			sameNameHost(t, realms, "", "passwd: sss files systemd\n")
+			if twins, err := SameNameAccounts(context.Background(), r, local); err != nil || len(twins) != 0 {
+				t.Fatalf("twins = %+v, %v; a host with no SSSD configuration serves no domain", twins, err)
+			}
+		}
+	})
+}
+
+// Review of GAP-1131: a qualified candidate lookup that fails, rather than
+// finding nothing, leaves the twin it would have found unknown.
+func TestSameNameAccountsKeepsCandidateLookupErrors(t *testing.T) {
+	r := newFakeNSS(&fakeRun{
+		results: map[string]commandResult{"passwd alice": {stdout: []byte("alice:x:1001:1001::/home/alice:/bin/bash\n")}},
+		errs:    map[string]error{"passwd alice@corp.example": errors.New("sssd timed out")},
+	})
+	sameNameHost(t, func(context.Context) ([]Realm, error) {
+		return []Realm{{Name: "CORP.EXAMPLE", Domain: "corp.example"}}, nil
+	}, "", "passwd: files sss\n")
+	twins, err := SameNameAccounts(context.Background(), r, Account{Name: "alice", UID: 1001})
+	var unknown *useridentity.NamesakesUnknownError
+	if len(twins) != 0 || !errors.As(err, &unknown) || !strings.Contains(err.Error(), "sssd timed out") {
+		t.Fatalf("twins = %+v, %v; want the bare name refused with the lookup error", twins, err)
+	}
+}
+
+// Review of GAP-0550: a member-list directory that does not answer for a
+// local account fails its groups instead of dropping the groups it lists,
+// so a strict-profile LDAP group is never lost to an outage (fail closed).
+func TestLocalAccountGroupsFailWhenTheDirectoryDoesNotAnswer(t *testing.T) {
+	oldPasswd, oldGroup, oldNSS := localPasswdPath, localGroupPath, nsswitchPath
+	t.Cleanup(func() { localPasswdPath, localGroupPath, nsswitchPath = oldPasswd, oldGroup, oldNSS })
+	dir := t.TempDir()
+	localPasswdPath, localGroupPath, nsswitchPath = filepath.Join(dir, "passwd"), filepath.Join(dir, "group"), filepath.Join(dir, "nsswitch.conf")
+	writeTestFile(t, localPasswdPath, "alice:x:1001:5100::/home/alice:/bin/sh\n")
+	writeTestFile(t, localGroupPath, "local-team:x:7000:alice\n")
+	writeTestFile(t, nsswitchPath, "passwd: files ldap\ninitgroups: files ldap\ngroup: files ldap\n")
+	localLine := []byte("alice:x:1001:5100::/home/alice:/bin/sh\n")
+	base := map[string]commandResult{
+		"passwd 1001":              {stdout: localLine},
+		"passwd alice":             {stdout: localLine},
+		"-s ldap initgroups alice": {stdout: []byte("alice 5100 5200\n")},
+		"group 5100 5200":          {stdout: []byte("staff:x:5100:\nstrict-ai:x:5200:alice\n")},
+	}
+	for name, failing := range map[string]string{
+		"account lookup times out": "-s ldap passwd alice",
+		"member lookup times out":  "-s ldap initgroups alice",
+		"group naming times out":   "group 5100 5200",
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newFakeNSS(&fakeRun{results: base, errs: map[string]error{failing: context.DeadlineExceeded}})
+			if ids, err := r.GroupIDs(Account{Name: "alice", UID: 1001, GID: 5100}); err == nil {
+				t.Fatalf("group ids = %v without an error while the directory does not answer", ids)
+			}
+			if facts, err := r.DirectoryFactsForUID(1001, time.Now()); err == nil {
+				t.Fatalf("facts = %+v without an error while the directory does not answer", facts)
+			}
+		})
+	}
+	t.Run("a directory that holds no such member", func(t *testing.T) {
+		quiet := map[string]commandResult{"passwd 1001": {stdout: localLine}, "passwd alice": {stdout: localLine}}
+		r := newFakeNSS(&fakeRun{results: quiet})
+		facts, err := r.DirectoryFactsForUID(1001, time.Now())
+		if err != nil || !reflect.DeepEqual(facts.Groups, []string{"5100", "local-team"}) {
+			t.Fatalf("facts = %+v, %v; a definitive not-found keeps the local groups", facts, err)
+		}
+	})
 }

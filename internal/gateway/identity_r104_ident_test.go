@@ -14,9 +14,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// GAP-1130: at the bound, the identity.observed throttle kept its recent
-// users instead of forgetting all of them, and admits a new user once a mark
-// ages out.
+// GAP-1130: at the bound, the identity.observed throttle keeps its recent
+// users instead of forgetting all of them, and a user seen for the first time
+// still gets its record: the oldest mark makes room for it.
 func TestIdentityObservedThrottleKeepsRecentUsersAtItsBound(t *testing.T) {
 	identityObservedState.Lock()
 	saved, savedPending := identityObservedState.last, identityObservedState.pending
@@ -30,23 +30,89 @@ func TestIdentityObservedThrottleKeepsRecentUsersAtItsBound(t *testing.T) {
 	now := time.Now()
 	facts := useridentity.DirectoryFacts{Domain: "corp.example"}
 	for i := 0; i < identityObservedMaxUsers; i++ {
-		finish, due := identityObservedBegin(fmt.Sprint(i), facts, now)
+		finish, due := identityObservedBegin(fmt.Sprint(i), facts, now.Add(time.Duration(i)*time.Microsecond))
 		if !due {
 			t.Fatalf("user %d was not due", i)
 		}
 		finish(true)
 	}
-	if _, due := identityObservedBegin("overflow", facts, now.Add(time.Second)); due {
-		t.Fatal("a user past the bound was admitted while every mark is recent")
-	}
-	if _, due := identityObservedBegin("0", facts, now.Add(2*time.Second)); due {
-		t.Fatal("a recent user was let out again at the bound")
-	}
-	finish, due := identityObservedBegin("overflow", facts, now.Add(identityDirectoryTTL))
+	finish, due := identityObservedBegin("overflow", facts, now.Add(time.Second))
 	if !due {
-		t.Fatal("a new user was not admitted after the marks aged out")
+		t.Fatal("the first identity.observed record of a user past the bound was suppressed")
 	}
 	finish(true)
+	if _, due := identityObservedBegin("overflow", facts, now.Add(2*time.Second)); due {
+		t.Fatal("the new user's record went out twice")
+	}
+	if n := len(identityObservedState.last); n > identityObservedMaxUsers {
+		t.Fatalf("%d users remembered, past the bound %d", n, identityObservedMaxUsers)
+	}
+	recent := 0
+	for i := 1; i < identityObservedMaxUsers; i++ {
+		if _, due := identityObservedBegin(fmt.Sprint(i), facts, now.Add(3*time.Second)); !due {
+			recent++
+		}
+	}
+	if recent != identityObservedMaxUsers-1 {
+		t.Fatalf("%d of %d recent users kept their mark; one new user let out more than one", recent, identityObservedMaxUsers-1)
+	}
+	if _, due := identityObservedBegin("0", facts, now.Add(3*time.Second)); !due {
+		t.Fatal("the oldest mark was not the one dropped for the new user")
+	}
+}
+
+// newProfileGroupSIDs is buildProfileGroupSIDs without a local-only lookup:
+// bare names take the directory lane, as everywhere but on Windows.
+func newProfileGroupSIDs(assignments []config.ProfileAssignment, lookup func(string) (string, error), wait time.Duration) *profileGroupSIDs {
+	return buildProfileGroupSIDs(assignments, lookup, nil, wait)
+}
+
+// Review of GAP-1261: a bare group name is looked up among this computer's
+// groups first, in the local lane, as the LSA reads a bare name, so a stalled
+// domain controller does not keep a bare local group without its SID; a bare
+// name that is no local group still goes to the directory once a slot frees.
+func TestBareLocalGroupSIDResolvesWhileDirectoryLookupsStall(t *testing.T) {
+	stalled := make(chan struct{})
+	profileGroupSIDLookups.Lock()
+	var keys []string
+	for i := 0; len(profileGroupSIDLookups.calls)-profileGroupSIDLookups.local < profileGroupSIDLookupsMax; i++ {
+		key := foldKey(fmt.Sprintf(`CORP\stalled-bare-%d`, i))
+		profileGroupSIDLookups.calls[key] = &profileGroupSIDLookupCall{done: stalled}
+		keys = append(keys, key)
+	}
+	profileGroupSIDLookups.Unlock()
+	release := func() {
+		profileGroupSIDLookups.Lock()
+		for _, key := range keys {
+			delete(profileGroupSIDLookups.calls, key)
+		}
+		keys = nil
+		profileGroupSIDLookups.Unlock()
+	}
+	t.Cleanup(func() {
+		release()
+		close(stalled)
+	})
+	directory := func(name string) (string, error) { return "S-1-5-21-1-2-3-1105", nil }
+	local := func(name string) (string, error) {
+		if strings.EqualFold(name, "strict-users") {
+			return "S-1-5-21-9-9-9-1001", nil
+		}
+		return "", errProfileGroupUnknown
+	}
+	assignments := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"strict-users", "ai-team"}}}}
+	sids := buildProfileGroupSIDs(assignments, directory, local, time.Second)
+	if sid, ok := sids.sid("strict-users"); !ok || sid != "S-1-5-21-9-9-9-1001" {
+		t.Fatalf("bare local group while directory lookups stall: sid %q, %v", sid, ok)
+	}
+	if _, ok := sids.sid("ai-team"); ok {
+		t.Fatal("a bare directory group resolved past the directory bound")
+	}
+	release()
+	sids.refresh(time.Now(), true)
+	if sid, ok := sids.sid("ai-team"); !ok || sid != "S-1-5-21-1-2-3-1105" {
+		t.Fatalf("bare directory group once a slot freed: sid %q, %v", sid, ok)
+	}
 }
 
 // GAP-1128: child-session exclusions stay within the sub-session bound

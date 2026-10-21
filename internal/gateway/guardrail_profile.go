@@ -214,7 +214,7 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 		matches:        newProfileMatchCache(),
 	}
 	if runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && profileGroupSIDLookup != nil {
-		set.groupSIDs = newProfileGroupSIDs(set.assignments, profileGroupSIDLookup, profileGroupSIDWait)
+		set.groupSIDs = buildProfileGroupSIDs(set.assignments, profileGroupSIDLookup, profileGroupLocalSIDLookup, profileGroupSIDWait)
 	}
 	if cache == nil {
 		cache = guardrail.NewRulePackCache()

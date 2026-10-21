@@ -53,10 +53,11 @@ const (
 	// reloads must not pile them up.
 	profileGroupSIDLookupsMax = 256
 	// profileGroupSIDLocalLookupsMax bounds the lookups of this computer's
-	// own groups (.\name, COMPUTER\name, BUILTIN\name) apart from the rest.
-	// The LSA answers those from the local account database, so lookups a
-	// stalled domain controller holds cannot use up their slots, and a
-	// reload that assigns a local group still resolves it (GAP-1261).
+	// own groups (.\name, COMPUTER\name, BUILTIN\name, and a bare name
+	// while it is looked up among them) apart from the rest. The LSA answers
+	// those from the local account database, so lookups a stalled domain
+	// controller holds cannot use up their slots, and a reload that assigns
+	// a local group still resolves it (GAP-1261).
 	profileGroupSIDLocalLookupsMax = 64
 )
 
@@ -78,13 +79,34 @@ func profileGroupLocalName(name string) bool {
 	return computer != "" && strings.EqualFold(domain, computer)
 }
 
+// profileGroupBareName reports whether an assignment group name has no
+// domain part.
+func profileGroupBareName(name string) bool {
+	return !strings.ContainsAny(strings.TrimSpace(name), `\@`)
+}
+
 // errProfileGroupUnknown is the answer of profileGroupSIDLookup for a name
 // that maps to no group.
 var errProfileGroupUnknown = errors.New("no group of that name")
 
+// errProfileGroupLookupsFull is the answer for a bare name that is no group
+// of this computer while every directory lookup slot is in use; the name is
+// tried again on the next request.
+var errProfileGroupLookupsFull = errors.New("every directory lookup is in use")
+
 // profileGroupSIDLookup resolves an assignment group name to its SID
 // (LookupAccountName). It is set on Windows only.
 var profileGroupSIDLookup func(name string) (string, error)
+
+// profileGroupLocalSIDLookup resolves a bare group name among this
+// computer's own groups only (BUILTIN, then its account database), which the
+// LSA answers without a domain controller; errProfileGroupUnknown when none
+// of them has the name. The LSA looks a bare name up in that order before
+// it asks a domain, so a bare name is first looked up in the local lane and
+// moves to the directory lane only when it is no group of this computer: a
+// stalled domain controller kept a bare local group without a SID
+// (GAP-1261). It is set on Windows only.
+var profileGroupLocalSIDLookup func(name string) (string, error)
 
 // profileGroupSIDLookupCall is one name lookup in flight. Profile sets that
 // name the same group share it.
@@ -92,6 +114,9 @@ type profileGroupSIDLookupCall struct {
 	done chan struct{}
 	sid  string
 	err  error
+	// local is whether the call holds a slot of the local lane; it is read
+	// and written under profileGroupSIDLookups.
+	local bool
 }
 
 var profileGroupSIDLookups = struct {
@@ -102,12 +127,14 @@ var profileGroupSIDLookups = struct {
 }{calls: map[string]*profileGroupSIDLookupCall{}}
 
 // startProfileGroupSIDLookup returns the lookup in flight for name, starting
-// one if none is; nil when the lane of name is full: profileGroupSIDLookupsMax
+// one if none is (a bare name with localLookup first among this computer's
+// groups); nil when the lane of name is full: profileGroupSIDLookupsMax
 // lookups of directory names, or profileGroupSIDLocalLookupsMax of this
 // computer's groups, are outstanding.
-func startProfileGroupSIDLookup(lookup func(string) (string, error), name string) *profileGroupSIDLookupCall {
+func startProfileGroupSIDLookup(lookup, localLookup func(string) (string, error), name string) *profileGroupSIDLookupCall {
 	key := foldKey(name)
-	local := profileGroupLocalName(name)
+	localFirst := localLookup != nil && profileGroupBareName(name)
+	local := localFirst || profileGroupLocalName(name)
 	lookups := &profileGroupSIDLookups
 	lookups.Lock()
 	defer lookups.Unlock()
@@ -118,20 +145,41 @@ func startProfileGroupSIDLookup(lookup func(string) (string, error), name string
 		!local && len(lookups.calls)-lookups.local >= profileGroupSIDLookupsMax {
 		return nil
 	}
-	call := &profileGroupSIDLookupCall{done: make(chan struct{})}
+	call := &profileGroupSIDLookupCall{done: make(chan struct{}), local: local}
 	lookups.calls[key] = call
 	if local {
 		lookups.local++
 	}
 	go func() {
-		sid, err := lookup(name)
+		var sid string
+		var err error
+		if localFirst {
+			sid, err = localLookup(name)
+			if errors.Is(err, errProfileGroupUnknown) {
+				// No group of this computer: the LSA asks the domain next,
+				// so the name moves to the directory lane.
+				sid, err = "", errProfileGroupLookupsFull
+				lookups.Lock()
+				moved := len(lookups.calls)-lookups.local < profileGroupSIDLookupsMax
+				if moved {
+					lookups.local--
+					call.local = false
+				}
+				lookups.Unlock()
+				if moved {
+					sid, err = lookup(name)
+				}
+			}
+		} else {
+			sid, err = lookup(name)
+		}
 		call.sid, call.err = strings.ToUpper(strings.TrimSpace(sid)), err
 		if call.err == nil && !strings.HasPrefix(call.sid, "S-1-") {
 			call.sid, call.err = "", errProfileGroupUnknown
 		}
 		lookups.Lock()
 		delete(lookups.calls, key)
-		if local {
+		if call.local {
 			lookups.local--
 		}
 		lookups.Unlock()
@@ -143,8 +191,10 @@ func startProfileGroupSIDLookup(lookup func(string) (string, error), name string
 // profileGroupSIDs holds the SID of every group name the assignments of one
 // profile set write.
 type profileGroupSIDs struct {
-	lookup func(string) (string, error)
-	mu     sync.Mutex
+	// lookup resolves any name, localLookup a bare name among this
+	// computer's groups only (nil: bare names take the directory lane).
+	lookup, localLookup func(string) (string, error)
+	mu                  sync.Mutex
 	// entries is keyed by the folded name.
 	entries map[string]*profileGroupSIDEntry
 	// unresolved counts the entries without a SID, so a request skips the
@@ -175,10 +225,10 @@ type profileGroupSIDEntry struct {
 	lostSID string
 }
 
-// newProfileGroupSIDs resolves the group names of assignments, waiting at most
-// wait for them. SIDs need no lookup; numeric names still require one.
-func newProfileGroupSIDs(assignments []config.ProfileAssignment, lookup func(string) (string, error), wait time.Duration) *profileGroupSIDs {
-	s := &profileGroupSIDs{lookup: lookup, entries: map[string]*profileGroupSIDEntry{}}
+// buildProfileGroupSIDs resolves the group names of assignments, waiting at
+// most wait for them. SIDs need no lookup; numeric names still require one.
+func buildProfileGroupSIDs(assignments []config.ProfileAssignment, lookup, localLookup func(string) (string, error), wait time.Duration) *profileGroupSIDs {
+	s := &profileGroupSIDs{lookup: lookup, localLookup: localLookup, entries: map[string]*profileGroupSIDEntry{}}
 	now := time.Now()
 	for _, assignment := range assignments {
 		for _, group := range assignment.Match.Groups {
@@ -191,7 +241,7 @@ func newProfileGroupSIDs(assignments []config.ProfileAssignment, lookup func(str
 				continue
 			}
 			entry := &profileGroupSIDEntry{name: name, nextTry: now.Add(profileGroupSIDRetryInterval)}
-			if entry.call = startProfileGroupSIDLookup(lookup, name); entry.call == nil {
+			if entry.call = startProfileGroupSIDLookup(lookup, localLookup, name); entry.call == nil {
 				entry.nextTry = now
 			}
 			s.entries[key] = entry
@@ -243,14 +293,14 @@ func (s *profileGroupSIDs) refresh(now time.Time, wait bool) {
 	var waitUntil time.Time
 	for _, entry := range s.entries {
 		if entry.sid == "" && entry.call == nil && !now.Before(entry.nextTry) {
-			entry.call = startProfileGroupSIDLookup(s.lookup, entry.name)
+			entry.call = startProfileGroupSIDLookup(s.lookup, s.localLookup, entry.name)
 			entry.nextTry = now.Add(profileGroupSIDRetryInterval)
 			if entry.call != nil {
 				entry.retryWaitUntil = now.Add(profileGroupSIDRetryWait)
 			}
 		}
 		if recheck && entry.sid != "" && entry.call == nil && !now.Before(entry.checkAt) {
-			entry.call = startProfileGroupSIDLookup(s.lookup, entry.name)
+			entry.call = startProfileGroupSIDLookup(s.lookup, s.localLookup, entry.name)
 			entry.checkAt = now.Add(profileGroupSIDRecheckInterval)
 			if entry.call != nil {
 				entry.retryWaitUntil = now.Add(profileGroupSIDRetryWait)
@@ -319,12 +369,16 @@ func (s *profileGroupSIDs) absorbLocked(now time.Time) {
 			continue
 		}
 		entry.sid, entry.err = sid, err
-		if entry.sid != "" {
+		switch {
+		case entry.sid != "":
 			entry.lostSID = ""
 			entry.checkAt = now.Add(profileGroupSIDRecheckInterval)
 			s.unresolved.Add(-1)
 			s.generation.Add(1)
-		} else {
+		case errors.Is(err, errProfileGroupLookupsFull):
+			// As when no slot was free to start it: the next request tries.
+			entry.nextTry = now
+		default:
 			entry.nextTry = now.Add(profileGroupSIDRetryInterval)
 		}
 	}
