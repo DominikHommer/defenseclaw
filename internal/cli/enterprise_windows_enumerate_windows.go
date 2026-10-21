@@ -20,7 +20,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -327,12 +326,18 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(manifest, "", !cfg.SecureClientIntegration(), logf); grantErr != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 	}
-	if previousErr == nil {
-		// A profile this cycle no longer enrolls (its account was added to
-		// exclude_users, or no enrolled agent is left) loses the gateway's
-		// read access now, so its inventory rows go at the next scan
-		// (GAP-0717).
-		revokeEnterpriseWindowsDroppedInventoryRead(stderr, enterprisehooks.ManifestHomesDropped(previous, manifest), manifest)
+	if standalone {
+		// A profile this cycle no longer grants (its account was added to
+		// exclude_users, no enrolled agent is left, or its rows are all
+		// disabled) loses the gateway's read access now, so its inventory
+		// rows go at the next scan (GAP-0717, GAP-1193). A revoke that
+		// fails stays in the grant ledger beside the manifest and is
+		// retried, also after a restart (GAP-1269).
+		var last *enterprisehooks.Manifest
+		if previousErr == nil {
+			last = &previous
+		}
+		reconcileEnterpriseWindowsInventoryGrants(stderr, manifestPath, last, manifest)
 	}
 	if standalone {
 		revokeEnterpriseWindowsExcludedInventoryRead(stderr, excluded)
@@ -350,54 +355,41 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	return nil
 }
 
-// enterpriseWindowsDroppedRevokes holds the profiles a cycle stopped
-// enrolling whose inventory read access a revoke could not take away yet.
-// The next manifest no longer lists them, so without this a transient
-// failure left the gateway's access in place for good (GAP-1269).
-var enterpriseWindowsDroppedRevokes = struct {
-	sync.Mutex
-	targets map[string]enterprisehooks.ManifestTarget
-}{targets: map[string]enterprisehooks.ManifestTarget{}}
+// reconcileEnterpriseWindowsInventoryGrants revokes the gateway's inventory
+// read access on the profiles the grant ledger holds that current gives no
+// grant to, and records current's grants (enterprisehooks.
+// ReconcileInventoryGrants).
+func reconcileEnterpriseWindowsInventoryGrants(stderr io.Writer, manifestPath string, previous *enterprisehooks.Manifest, current enterprisehooks.Manifest) {
+	result := enterprisehooks.ReconcileInventoryGrants(enterprisehooks.InventoryGrantLedger{
+		Load: func() ([]enterprisehooks.ManifestTarget, error) {
+			return enterpriseWindowsInventoryGrantLedgerLoader(manifestPath)
+		},
+		Save: func(targets []enterprisehooks.ManifestTarget) error {
+			return enterpriseWindowsInventoryGrantLedgerSaver(manifestPath, targets)
+		},
+	}, previous, current, enterpriseWindowsInventoryReadRevoker)
+	if result.LoadErr != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN the inventory grant ledger is unreadable; revoking from the last manifest: %s\n", enumeratorErrorText(result.LoadErr))
+	}
+	if result.RevokeErr != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway keeps read access on %d profile(s) no longer enrolled; the revoke failed and is retried at the next cycle: %s\n",
+			countDistinctSIDs(result.Pending), enumeratorErrorText(result.RevokeErr))
+	}
+	if len(result.Revoked) > 0 {
+		fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d profile(s) no longer enrolled\n", countDistinctSIDs(result.Revoked))
+	}
+	if result.SaveErr != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not save the inventory grant ledger: %s\n", enumeratorErrorText(result.SaveErr))
+	}
+}
 
-// revokeEnterpriseWindowsDroppedInventoryRead revokes the gateway's
-// inventory read access on the profiles this cycle dropped and on those an
-// earlier cycle failed to revoke, except a profile current enrolls again. A
-// failed revoke is retried at the next cycle.
-func revokeEnterpriseWindowsDroppedInventoryRead(stderr io.Writer, dropped, current enterprisehooks.Manifest) {
-	key := func(home string) string { return strings.ToLower(filepath.Clean(strings.TrimSpace(home))) }
-	enrolled := map[string]bool{}
-	for _, target := range current.Targets {
-		enrolled[key(target.UserHome)] = true
+// enumeratorErrorText is err's message, at most 512 bytes of it.
+func enumeratorErrorText(err error) string {
+	message := err.Error()
+	if len(message) > 512 {
+		message = message[:512] + "..."
 	}
-	state := &enterpriseWindowsDroppedRevokes
-	state.Lock()
-	defer state.Unlock()
-	for home := range state.targets {
-		if enrolled[home] {
-			delete(state.targets, home)
-		}
-	}
-	for _, target := range dropped.Targets {
-		state.targets[key(target.UserHome)] = target
-	}
-	if len(state.targets) == 0 {
-		return
-	}
-	homes := make([]string, 0, len(state.targets))
-	for home := range state.targets {
-		homes = append(homes, home)
-	}
-	sort.Strings(homes)
-	var pending enterprisehooks.Manifest
-	for _, home := range homes {
-		pending.Targets = append(pending.Targets, state.targets[home])
-	}
-	if revokeErr := enterpriseWindowsInventoryReadRevoker(pending); revokeErr != nil {
-		fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway keeps read access on %d profile(s) no longer enrolled; the revoke failed and is retried at the next cycle\n", countDistinctSIDs(pending.Targets))
-		return
-	}
-	fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d profile(s) no longer enrolled\n", countDistinctSIDs(pending.Targets))
-	clear(state.targets)
+	return message
 }
 
 // enterpriseWindowsExcludedRevoked holds the excluded profiles whose
@@ -437,12 +429,8 @@ func revokeEnterpriseWindowsExcludedInventoryRead(stderr io.Writer, excluded []e
 		return
 	}
 	if err := enterpriseWindowsInventoryReadRevoker(pending); err != nil {
-		message := err.Error()
-		if len(message) > 512 {
-			message = message[:512] + "..."
-		}
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway may keep read access on %d excluded profile(s); the revoke failed: %s\n",
-			len(pending.Targets), message)
+			len(pending.Targets), enumeratorErrorText(err))
 		return
 	}
 	for _, target := range pending.Targets {
@@ -744,6 +732,9 @@ var (
 	// enterpriseWindowsInventoryReadRevoker takes the gateway's inventory
 	// ACEs from the profiles a cycle stopped enrolling.
 	enterpriseWindowsInventoryReadRevoker = enterprisehooks.RevokeGatewayInventoryReadForManifest
+	// The grant ledger beside the manifest.
+	enterpriseWindowsInventoryGrantLedgerLoader = enterprisehooks.LoadWindowsInventoryGrantLedger
+	enterpriseWindowsInventoryGrantLedgerSaver  = enterprisehooks.SaveWindowsInventoryGrantLedger
 )
 
 // isEnterpriseWindowsEnumerateConfigMissing recognises the specific
