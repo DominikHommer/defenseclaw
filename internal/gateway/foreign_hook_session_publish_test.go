@@ -89,7 +89,7 @@ func TestForeignHookSessionGatewayWithdrawsAnAllowWhoseRemovalLedgerChanged(t *t
 	writeLedger := func(path string) {
 		t.Helper()
 		now := time.Now().UTC()
-		data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
+		data, _, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
 			Identity: server.bob, Connector: "claudecode", Path: path, At: now.Format(time.RFC3339), Mark: agentprocess.Now(),
 		}}, now)
 		if err != nil {
@@ -239,7 +239,7 @@ func TestForeignHookSessionGatewayAnswerFollowsARemovalRecordedDuringTheExchange
 	replace := func(path, identity, file string) {
 		t.Helper()
 		now := time.Now().UTC()
-		data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
+		data, _, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
 			Identity: identity, Connector: "claudecode", Path: file, At: now.Format(time.RFC3339), Mark: runtime.GOOS + ":b:200",
 		}}, now)
 		if err != nil {

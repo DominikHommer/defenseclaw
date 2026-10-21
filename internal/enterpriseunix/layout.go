@@ -130,7 +130,9 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 		// when it runs without socket activation.
 		{Path: l.HookSocketDir, Mode: 0o755, Owner: service},
 		// The gateway's protected foreign-hook session records (GAP-0352);
-		// tmpfiles recreates it at boot with the hook socket directory.
+		// tmpfiles recreates it at boot with the hook socket directory, and
+		// only at boot: every other run would put back the mode of a tree
+		// the lifecycle must check first (hookSessionRecordsProblem).
 		{Path: l.HookSessionDir, Mode: 0o711, Owner: service},
 	}
 }

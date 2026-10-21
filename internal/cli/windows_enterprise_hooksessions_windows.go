@@ -17,11 +17,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -63,13 +66,29 @@ func windowsHookSessionSDDL(gateway *windows.SID) string {
 	return "O:BAG:SY" + windowsHookSessionDACL(gateway)
 }
 
-// windowsHookSessionClosedSDDL is the folder while the lifecycle invalidates
-// its records: no entry for standard users, so the hook cannot read the
-// folder's access list and refuses every record until the final DACL is
-// back.
+// windowsHookSessionClosedSDDL closes a folder the lifecycle retires when it
+// cannot give it windowsHookSessionRetiredSDDL: no entry for standard users,
+// so the hook cannot read the folder's access list and refuses every record
+// in it.
 func windowsHookSessionClosedSDDL(gateway *windows.SID) string {
 	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;" + gateway.String() + ")"
 }
+
+// windowsHookSessionRetiredSDDL is a record root the lifecycle retires: owned
+// by LOCAL SERVICE, which neither the hook nor this lifecycle trusts as an
+// owner (windowsPathOwnedByAdministrators), and which no standard user can
+// put back (an owner other than oneself needs SeRestorePrivilege), so an
+// account that holds a handle with WRITE_DAC on the folder cannot make the
+// hook trust it again; no entry for standard users or the gateway.
+const windowsHookSessionRetiredSDDL = "O:LSG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+
+// windowsHookSessionRetiredInfix names a retired record root next to the
+// root: <root>.retired-<nanoseconds>. The hook never reads it.
+const windowsHookSessionRetiredInfix = ".retired-"
+
+// windowsHookSessionOwnerRestorePrivilege runs fn with SeRestorePrivilege,
+// which setting the retired owner needs (replaceable in tests).
+var windowsHookSessionOwnerRestorePrivilege = enterprisehooks.RunWithWindowsAdministratorOwnerRestorePrivilege
 
 // windowsHookSessionTreeProblem reports what in the record tree under root
 // the hook would refuse (enterprisepolicy.PublishedSessionTreeProblem);
@@ -89,9 +108,15 @@ var windowsHookSessionTreeProblem = func(root string) error {
 // refuses, another account could have changed: with write access to the
 // folder, an account can move its own folder away while the guardian
 // revokes its records and bring it back after, until the access is put
-// back. So the folder is closed first (a DACL without standard users, which
-// the hook refuses), then every record in it is invalidated (GAP-0352
-// review); restoring the access never restores trust in them.
+// back. Changing the DACL of that folder is not enough (GAP-0352 review
+// loop round 4): an account that opened it with WRITE_DAC while it could
+// keeps that access through its handle, so it could open the folder again
+// after the invalidation and bring its folder back before the final DACL.
+// So the folder object itself is retired (retireWindowsHookSessionRoot) and
+// a new, empty one is created; a folder another account owns is moved
+// aside the same way. When the folder cannot be moved (a handle that does
+// not share delete access), it keeps the retired owner, which the hook
+// refuses, and the step fails, so the next repair tries again.
 func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 	info, err := os.Lstat(root)
 	if err == nil {
@@ -103,17 +128,15 @@ func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 			return fmt.Errorf("read the owner of %s: %w", root, ownerErr)
 		}
 		if !trusted {
-			if err := removeWindowsHookSessionRoot(); err != nil {
-				return fmt.Errorf("replace %s, which an unprivileged account created: %w", root, err)
+			if err := moveWindowsHookSessionRootAside(root); err != nil {
+				return fmt.Errorf("replace %s, which an account other than Administrators or SYSTEM owns: %w", root, err)
 			}
 			err = os.ErrNotExist
 		} else if problem := windowsHookSessionTreeProblem(root); problem != nil {
-			if err := applyWindowsSDDL(root, windowsHookSessionClosedSDDL(gateway)); err != nil {
-				return fmt.Errorf("close %s: %w", root, err)
+			if err := retireWindowsHookSessionRoot(root, gateway); err != nil {
+				return fmt.Errorf("replace %s, which another account could change (%v): %w", root, problem, err)
 			}
-			if err := enterprisepolicy.InvalidatePublishedSessionRecords(root); err != nil {
-				return fmt.Errorf("invalidate the records in %s, which another account could change (%v): %w", root, problem, err)
-			}
+			err = os.ErrNotExist
 		}
 	}
 	if errors.Is(err, os.ErrNotExist) {
@@ -138,7 +161,73 @@ func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 	if err := applyWindowsSDDL(root, windowsHookSessionSDDL(gateway)); err != nil {
 		return fmt.Errorf("protect %s: %w", root, err)
 	}
+	// Earlier retired roots: best effort, the hook never reads them.
+	_ = removeWindowsRetiredHookSessionRoots(root)
 	return nil
+}
+
+// retireWindowsHookSessionRoot takes the record root folder object out of
+// use for good. It first gets windowsHookSessionRetiredSDDL, so the hook
+// refuses it whatever a handle that kept WRITE_DAC does to its DACL (without
+// SeRestorePrivilege it is closed to standard users instead), then it is
+// moved aside, where the hook never reads it, and removed. The caller
+// creates a new root.
+func retireWindowsHookSessionRoot(root string, gateway *windows.SID) error {
+	retireErr := windowsHookSessionOwnerRestorePrivilege(func() error { return applyWindowsSDDL(root, windowsHookSessionRetiredSDDL) })
+	if retireErr != nil {
+		if err := applyWindowsSDDL(root, windowsHookSessionClosedSDDL(gateway)); err != nil {
+			return fmt.Errorf("give it an owner the hook refuses: %v; close it: %w", retireErr, err)
+		}
+	}
+	if err := moveWindowsHookSessionRootAside(root); err != nil {
+		if retireErr != nil {
+			return fmt.Errorf("%w; it is closed to standard users, but it could not get an owner the hook refuses either (%v)", err, retireErr)
+		}
+		return fmt.Errorf("%w; it keeps an owner the hook refuses, so guarded calls block during an outage until a repair can replace it", err)
+	}
+	return nil
+}
+
+// moveWindowsHookSessionRootAside renames root to a retired name next to it
+// (windowsHookSessionRetiredInfix) and removes what it can of it. A handle
+// opened without FILE_SHARE_DELETE refuses the rename.
+func moveWindowsHookSessionRootAside(root string) error {
+	retired := root + windowsHookSessionRetiredInfix + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err := os.Rename(root, retired); err != nil {
+		return fmt.Errorf("move it aside: %w", err)
+	}
+	_ = os.RemoveAll(retired)
+	return nil
+}
+
+// removeWindowsRetiredHookSessionRoots removes the retired roots next to
+// root that are still there (a handle kept one open). Only real folders
+// whose name is the root's with windowsHookSessionRetiredInfix go.
+func removeWindowsRetiredHookSessionRoots(root string) error {
+	parent := filepath.Dir(root)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	prefix := strings.ToLower(filepath.Base(root) + windowsHookSessionRetiredInfix)
+	var errs []error
+	for _, entry := range entries {
+		if !strings.HasPrefix(strings.ToLower(entry.Name()), prefix) {
+			continue
+		}
+		path := filepath.Join(parent, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func removeWindowsHookSessionRoot() error {
@@ -146,9 +235,12 @@ func removeWindowsHookSessionRoot() error {
 	if err != nil {
 		return err
 	}
+	if !strings.EqualFold(filepath.Base(root), windowsHookSessionFolderName) {
+		return fmt.Errorf("refusing to remove %s", root)
+	}
 	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return removeWindowsRetiredHookSessionRoots(root)
 	}
 	if err != nil {
 		return err
@@ -156,10 +248,7 @@ func removeWindowsHookSessionRoot() error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s is not a real folder", root)
 	}
-	if !strings.EqualFold(filepath.Base(root), windowsHookSessionFolderName) {
-		return fmt.Errorf("refusing to remove %s", root)
-	}
-	return os.RemoveAll(root)
+	return errors.Join(os.RemoveAll(root), removeWindowsRetiredHookSessionRoots(root))
 }
 
 // windowsHookSessionRootProblem names a missing or untrusted folder, or "".

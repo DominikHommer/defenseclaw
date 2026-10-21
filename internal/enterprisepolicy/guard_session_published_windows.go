@@ -148,7 +148,9 @@ func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) erro
 // every folder above it the way ValidatePublishedSessionPath checks a record
 // (PublishedSessionTreeProblem): the folder and the named DefenseClaw
 // folders above it (1 for an account folder, 0 for the record root) get the
-// strict rule, the rest the narrow fatal one.
+// strict rule, the rest the narrow fatal one. named -1 is a folder above
+// the record root (publishedSessionMissingRootProblem): it and every folder
+// above it get the narrow fatal rule, as the hook gives them.
 func validatePublishedSessionFolder(path string, trust PublishedSessionTrust, named int) error {
 	return managed.ValidateStrictServiceRuntimeDirPath(path, "protected foreign-hook session record folder", trust.ServiceAccount, named)
 }

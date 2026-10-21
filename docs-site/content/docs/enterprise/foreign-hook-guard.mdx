@@ -96,7 +96,11 @@ Codex's on Windows, which DefenseClaw always sets; see
    that sends its session-start event only with the first prompt (Hermes)
    takes its snapshot after the file was cleaned. Restart the agent to clear
    it. Agents started after the removal, other accounts and other connectors
-   are not affected, and the record lasts 7 days.
+   are not affected, and the record lasts 7 days. The ledger holds 1,024
+   entries. When it is full, it keeps each account's latest removal for each
+   connector first, so one account's removals never push out another
+   account's. An account whose removals still do not fit is blocked like an
+   account whose removal could not be recorded (below).
 5. **Follows redirected user config.** An agent whose environment moves its
    user configuration (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`,
    `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `APPDATA`,
@@ -257,8 +261,11 @@ full), it marks the account in the gateway's own session store instead, in
 the gateway's data directory, which no user can reach. The mark changes only
 a folder's metadata, so it needs no free space. The guardian also sets the
 mark when it removes a hook while the hook would refuse the account's part
-of the record folder: a user could have moved their folder aside before the
-removal and could bring it back once the permissions are fixed. While the
+of the record folder, when it cannot find the record folder, and when it
+cannot revoke the account's records: a user could have moved their folder
+(or, with the folder above it loosened, the whole record folder) aside
+before the removal and could bring it back once the permissions are fixed,
+and an answer that was not revoked would still count. While the
 mark is set, the gateway blocks every guarded call of that account. The next
 guardian pass for the account that can write the ledger, with a record
 folder the hook trusts, records the removal for every connector, deletes the
@@ -284,7 +291,16 @@ empty. If the hook would refuse anything (for example, standard users could
 add or delete folders in it), it first closes the folder to every user and
 then deletes every account's records. Otherwise a user could move their
 folder aside while the guardian revoked it, bring it back, and have the old
-allow trusted again once the permissions are fixed. Windows `status` and
+allow trusted again once the permissions are fixed. On Windows the folder
+itself is replaced by a new, empty one: a user who opened the folder while
+it allowed changing its permissions keeps that access through the open
+handle, so new permissions on the same folder would not be enough. If the
+folder cannot be moved aside (a program holds it open), it gets an owner
+the hook refuses, the step fails, and guarded calls block during an outage
+until a later `repair` replaces it. On Linux, a package upgrade does not put
+the folder's permissions back before the lifecycle checks it: the
+package's tmpfiles.d entries for `/run/defenseclaw-hook` and its
+`sessions` folder apply only at boot. Windows `status` and
 `verify` use the hook's rule too, so they warn
 `hook_session_records_untrusted` when, for example, `C:\ProgramData\Cisco`
 lets users delete folders in it. If you fix the permissions by hand instead,

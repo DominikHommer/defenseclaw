@@ -317,7 +317,10 @@ func PublishForeignHookSessionDecision(root, identity string, key SessionKey, de
 func RemovePublishedForeignHookSessions(root, identity string, connectors []string) error {
 	dir, ok := PublishedSessionIdentityDir(root, identity)
 	if !ok {
-		return nil
+		// An unknown record folder is not "no records": the caller must
+		// not trust a revocation it could not make (GAP-0352 review loop
+		// round 4).
+		return fmt.Errorf("no protected session record folder of %q under %q", identity, root)
 	}
 	info, err := os.Lstat(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -836,7 +839,8 @@ func MarkForeignHookRemovalPending(dataDir, identity string) error {
 // first (the ledger now denies the agent processes they were answers for),
 // and the emptied record folder goes, so the gateway makes its own again. A
 // record that cannot be revoked keeps the mark. An empty store (one the
-// mark created) goes too.
+// mark created) goes too. A record folder that cannot be named (no absolute
+// root) keeps the mark: the account's records were not revoked.
 func ClearForeignHookRemovalPending(dataDir, root, identity string) error {
 	dir, ok := foreignHookRemovalPendingDir(dataDir, identity)
 	if !ok {
@@ -852,24 +856,26 @@ func ClearForeignHookRemovalPending(dataDir, root, identity string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !publishedSessionPendingFlag(info) {
 		return nil
 	}
-	if records, ok := PublishedSessionIdentityDir(root, identity); ok {
-		recordsInfo, err := os.Lstat(records)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-		case err != nil:
+	records, ok := PublishedSessionIdentityDir(root, identity)
+	if !ok {
+		return fmt.Errorf("no protected session record folder of %q under %q, so its records cannot be revoked", identity, root)
+	}
+	recordsInfo, err := os.Lstat(records)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return err
+	case !recordsInfo.IsDir() || recordsInfo.Mode()&os.ModeSymlink != 0:
+		if err := os.Remove(records); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
-		case !recordsInfo.IsDir() || recordsInfo.Mode()&os.ModeSymlink != 0:
-			if err := os.Remove(records); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return err
-			}
-		default:
-			if err := revokePublishedSessionFolder(records); err != nil {
-				return err
-			}
-			// Only an empty folder goes: a record that could not be
-			// deleted stays revoked, with its marker.
-			_ = os.Remove(records)
 		}
+	default:
+		if err := revokePublishedSessionFolder(records); err != nil {
+			return err
+		}
+		// Only an empty folder goes: a record that could not be
+		// deleted stays revoked, with its marker.
+		_ = os.Remove(records)
 	}
 	if err := publishedSessionSetPending(dir, false); err != nil {
 		return err
@@ -929,14 +935,17 @@ var (
 // a tree another account could change, that account may have moved the
 // folder away, to bring it back once the access is put back, so the
 // revocation is not trusted and the account stays held
-// (MarkForeignHookRemovalPending). A missing root is no problem.
+// (MarkForeignHookRemovalPending). A missing root is a problem only when
+// the folder above it is one another account could change
+// (publishedSessionMissingRootProblem). A root or identity that names no
+// record folder is a problem: nothing can be checked.
 func PublishedSessionAccountProblem(root, identity string, trust PublishedSessionTrust) error {
 	dir, ok := PublishedSessionIdentityDir(root, identity)
 	if !ok {
-		return nil
+		return fmt.Errorf("no protected session record folder of %q under %q", identity, root)
 	}
 	if _, err := os.Lstat(root); errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return publishedSessionMissingRootProblem(root, trust)
 	}
 	if err := publishedSessionFolderTrust(root, trust, 0); err != nil {
 		return err
@@ -958,10 +967,12 @@ func PublishedSessionAccountProblem(root, identity string, trust PublishedSessio
 // and invalidates the records (InvalidatePublishedSessionRecords) before it
 // restores the access. The root and the folders above it are checked even
 // when the root is empty: the folder that was moved away can come back
-// until the root is closed. A missing root is no problem.
+// until the root is closed. A missing root is a problem only when the folder
+// above it is one another account could change
+// (publishedSessionMissingRootProblem).
 func PublishedSessionTreeProblem(root string, trust PublishedSessionTrust) error {
 	if _, err := os.Lstat(root); errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return publishedSessionMissingRootProblem(root, trust)
 	}
 	if err := publishedSessionFolderTrust(root, trust, 0); err != nil {
 		return err
@@ -979,6 +990,26 @@ func PublishedSessionTreeProblem(root string, trust PublishedSessionTrust) error
 		if checked, err = publishedSessionFolderProblem(path, trust, checked); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// publishedSessionMissingRootProblem reports whether a missing record root
+// can come back with what it held: an account that can change the nearest
+// existing folder above it may have moved the whole root away (during a
+// revocation, say) and can move it back once the access is put back
+// (GAP-0352 review loop round 4). That folder and every one above it get
+// the rule the hook gives the folders above the root (named -1).
+func publishedSessionMissingRootProblem(root string, trust PublishedSessionTrust) error {
+	dir := filepath.Dir(filepath.Clean(root))
+	for {
+		if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) || dir == filepath.Dir(dir) {
+			break
+		}
+		dir = filepath.Dir(dir)
+	}
+	if err := publishedSessionFolderTrust(dir, trust, -1); err != nil {
+		return fmt.Errorf("%s is missing, and %w", root, err)
 	}
 	return nil
 }

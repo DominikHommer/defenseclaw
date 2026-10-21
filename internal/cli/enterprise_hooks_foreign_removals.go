@@ -49,19 +49,20 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 // The account is held closed (enterprisepolicy.MarkForeignHookRemovalPending:
 // the gateway denies every guarded call of the account) when the ledger
 // does not take the removals (the process clock is unavailable, or the
-// storage refuses the write), and when the account's protected session
-// records are in a tree the hook refuses
+// storage refuses the write), when the account's protected session records
+// are in a tree the hook refuses or in one the guardian cannot locate
 // (enterprisepolicy.PublishedSessionAccountProblem): another account could
 // have moved the account's folder away before the revocation, to bring the
-// old allow back once the access is put back (GAP-0352 review). The mark is
-// metadata of the account's private session store in the gateway's data
-// directory: it needs no free space, and no standard user can reach it,
-// whatever it can do to the record tree. Each later pass for the account,
-// removals or not, records it once the ledger takes it and the tree is
-// trusted: the files are not known any more, so it denies every agent
-// process of the account that started before that pass, for every
-// connector; then it revokes the account's records again and clears the
-// mark.
+// old allow back once the access is put back (GAP-0352 review), and when
+// the revocation itself fails. The mark is metadata of the account's
+// private session store in the gateway's data directory: it needs no free
+// space, and no standard user can reach it, whatever it can do to the
+// record tree. Each later pass for the account, removals or not, records it
+// once the ledger takes it and the located tree is trusted: the files are
+// not known any more, so it denies every agent process of the account that
+// started before that pass, for every connector; then it revokes the
+// account's records again and clears the mark. A mark that cannot be read
+// is treated as set and never cleared.
 //
 // Then it revokes the account's protected session records of those
 // connectors (GAP-0352), after the ledger or mark write; all of them while
@@ -86,7 +87,7 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: read the pending removal mark of %s: %v\n",
 			foreignGuardLogField(account, 256), pendingErr)
 	}
-	if len(paths) == 0 && !pending {
+	if len(paths) == 0 && !pending && pendingErr == nil {
 		return
 	}
 	connectors := enterprisepolicy.StandaloneConnectors(cfg)
@@ -103,24 +104,23 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		affected = append(affected, names)
 		invalidated = append(invalidated, names...)
 	}
-	treeErr := enterpriseForeignHookSessionTreeProblem(identity)
+	// The record tree is located once for the pass: a lookup that fails is a
+	// tree the guardian cannot check or revoke in (GAP-0352 review loop
+	// round 4), never "no records".
+	root, treeErr := enterpriseForeignHookSessionRoot()
+	if treeErr == nil {
+		treeErr = enterpriseForeignHookSessionTreeProblem(root, identity)
+	}
 	// A held account is recorded only once its records can be revoked in a
 	// tree the hook trusts.
 	var unrecorded []string
 	if pending && treeErr == nil {
 		unrecorded = every
 	}
-	if pending {
+	if pending || pendingErr != nil {
 		invalidated = append(invalidated, every...)
 	}
-	defer func() {
-		slices.Sort(invalidated)
-		invalidated = slices.Compact(invalidated)
-		if err := enterpriseForeignHookRevokeSessionRecords(identity, invalidated); err != nil {
-			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: revoke the protected session records of %s: %v\n",
-				foreignGuardLogField(account, 256), err)
-		}
-	}()
+	var evicted []string
 	err := func() error {
 		mark := agentprocess.Now()
 		if mark == "" {
@@ -145,28 +145,63 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		if len(added) == 0 {
 			return nil
 		}
-		return writeEnterpriseForeignHookRemovalLedger(stderr, added, now)
+		var err error
+		evicted, err = writeEnterpriseForeignHookRemovalLedger(stderr, added, now)
+		return err
 	}()
-	switch {
-	case err == nil && treeErr == nil:
-		if pending {
-			if clearErr := enterpriseForeignHookClearRemovalPending(identity); clearErr != nil {
-				err = fmt.Errorf("clear the pending removal mark, which the ledger now covers: %w", clearErr)
-			}
-		}
-	default:
+	held := pending || pendingErr != nil
+	recorded := err == nil && treeErr == nil
+	if !recorded {
 		// The account stays held: the gateway denies every guarded call
 		// of it, and all its records go.
 		invalidated = append(invalidated, every...)
 		if treeErr != nil {
-			err = errors.Join(err, fmt.Errorf("its protected session records are in a folder another account could change: %w", treeErr))
+			err = errors.Join(err, fmt.Errorf("its protected session records are in a folder another account could change, or one DefenseClaw cannot locate: %w", treeErr))
 		}
-		if !pending {
+		if !held {
 			if markErr := enterpriseForeignHookMarkRemovalPending(identity); markErr != nil {
 				err = errors.Join(err, fmt.Errorf("hold the account's guarded calls closed: %w", markErr))
 			} else {
+				held = true
 				err = fmt.Errorf("%w (the account's guarded calls are denied until a later pass records the removal)", err)
 			}
+		}
+	}
+	slices.Sort(invalidated)
+	invalidated = slices.Compact(invalidated)
+	revokeErr := treeErr
+	if root != "" {
+		revokeErr = enterpriseForeignHookRevokeSessionRecords(root, identity, invalidated)
+	}
+	if revokeErr != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: revoke the protected session records of %s: %v\n",
+			foreignGuardLogField(account, 256), revokeErr)
+		// An allow that could not be revoked stands for an outage: hold the
+		// account, so a later pass revokes it before the mark is cleared.
+		if !held {
+			if markErr := enterpriseForeignHookMarkRemovalPending(identity); markErr != nil {
+				err = errors.Join(err, fmt.Errorf("hold the account's guarded calls closed until its records are revoked: %w", markErr))
+			} else {
+				held = true
+				err = errors.Join(err, errors.New("the account's guarded calls are denied until a later pass revokes its records"))
+			}
+		}
+	}
+	if recorded && revokeErr == nil && pending && pendingErr == nil {
+		if clearErr := enterpriseForeignHookClearRemovalPending(root, identity); clearErr != nil {
+			err = errors.Join(err, fmt.Errorf("clear the pending removal mark, which the ledger now covers: %w", clearErr))
+		}
+	}
+	// Accounts whose denial the full ledger could not keep were held before
+	// the write (writeEnterpriseForeignHookRemovalLedger); their allows go
+	// now, as a held account's do.
+	for _, other := range evicted {
+		if root == "" {
+			break
+		}
+		if revokeEvictedErr := enterpriseForeignHookRevokeSessionRecords(root, other, every); revokeEvictedErr != nil {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: revoke the protected session records of %s, held because the removal ledger is full: %v\n",
+				foreignGuardLogField(other, 256), revokeEvictedErr)
 		}
 	}
 	if err != nil {
@@ -181,11 +216,15 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 const enterpriseForeignHookUnrecordedRemoval = "a hook file DefenseClaw could not record at the time"
 
 // writeEnterpriseForeignHookRemovalLedger adds added to the removal ledger
-// in the guardian's authorization directory.
-func writeEnterpriseForeignHookRemovalLedger(stderr io.Writer, added []enterprisepolicy.ForeignHookRemoval, now time.Time) error {
+// in the guardian's authorization directory. A ledger too full to keep the
+// denial of every account and connector
+// (enterprisepolicy.EncodeForeignHookRemovals) names the accounts it drops:
+// each is held closed before the ledger is written, or nothing is written,
+// and the caller revokes their records after the write. It returns them.
+func writeEnterpriseForeignHookRemovalLedger(stderr io.Writer, added []enterprisepolicy.ForeignHookRemoval, now time.Time) ([]string, error) {
 	dataDir := cfg.DataDir
 	if !filepath.IsAbs(managed.HookGuardianAuthorizationDir(dataDir)) {
-		return errors.New("the data directory is not an absolute path")
+		return nil, errors.New("the data directory is not an absolute path")
 	}
 	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
 	existing, loadErr := loadEnterpriseForeignHookRemovals(path)
@@ -194,54 +233,60 @@ func writeEnterpriseForeignHookRemovalLedger(stderr io.Writer, added []enterpris
 		// the new removals.
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: replacing the removal ledger: %v\n", loadErr)
 	}
-	data, err := enterprisepolicy.EncodeForeignHookRemovals(existing, added, now)
+	data, evicted, err := enterprisepolicy.EncodeForeignHookRemovals(existing, added, now)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	for _, identity := range evicted {
+		if err := enterpriseForeignHookMarkRemovalPending(identity); err != nil {
+			return nil, fmt.Errorf("hold %s closed, whose removals the full ledger cannot keep: %w", foreignGuardLogField(identity, 256), err)
+		}
 	}
 	if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
-		return err
+		return evicted, err
 	}
 	if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
-		return err
+		return evicted, err
 	}
 	if err := os.Chmod(path, 0o640); err != nil {
-		return err
+		return evicted, err
 	}
 	if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
-		return err
+		return evicted, err
 	}
-	return enterpriseHookAuthorizationFileTrustCheck(path)
+	return evicted, enterpriseHookAuthorizationFileTrustCheck(path)
 }
 
 // enterpriseForeignHookSessionRoot is the folder of the protected session
-// records (managed.StandaloneLayout.HookSessionDir), or false without the
-// standalone layout (replaceable in tests).
-var enterpriseForeignHookSessionRoot = func() (string, bool) {
+// records (managed.StandaloneLayout.HookSessionDir). A layout that cannot be
+// resolved (on Windows, a failed ProgramData lookup) is an error: the
+// guardian then can neither check nor revoke the account's records, so it
+// holds the account (replaceable in tests).
+var enterpriseForeignHookSessionRoot = func() (string, error) {
 	layout, _, _, err := standaloneEnterprisePolicyLayout()
-	if err != nil || strings.TrimSpace(layout.HookSessionDir) == "" {
-		return "", false
+	if err != nil {
+		return "", fmt.Errorf("locate the protected session record folder: %w", err)
 	}
-	return layout.HookSessionDir, true
+	if strings.TrimSpace(layout.HookSessionDir) == "" {
+		return "", errors.New("the standalone layout names no protected session record folder")
+	}
+	return layout.HookSessionDir, nil
 }
 
 // enterpriseForeignHookSessionTreeProblem reports what the hook would refuse
-// in the part of the protected session record tree that identity's records
-// depend on (enterprisepolicy.PublishedSessionAccountProblem), with the
-// accounts the hook trusts as owners; nil without the standalone layout.
-// Replaceable in tests.
-var enterpriseForeignHookSessionTreeProblem = func(identity string) error {
+// in the part of the protected session record tree under root that
+// identity's records depend on (enterprisepolicy.PublishedSessionAccountProblem),
+// with the accounts the hook trusts as owners. Replaceable in tests.
+var enterpriseForeignHookSessionTreeProblem = func(root, identity string) error {
 	layout, _, _, err := standaloneEnterprisePolicyLayout()
-	if err != nil || strings.TrimSpace(layout.HookSessionDir) == "" {
-		return nil
-	}
-	if _, err := os.Lstat(layout.HookSessionDir); errors.Is(err, os.ErrNotExist) {
-		return nil
+	if err != nil {
+		return fmt.Errorf("the accounts that may own the protected session records are unknown: %w", err)
 	}
 	trust, err := enterpriseForeignHookSessionTrust(layout)
 	if err != nil {
 		return fmt.Errorf("the accounts that may own the protected session records are unknown: %w", err)
 	}
-	return enterprisepolicy.PublishedSessionAccountProblem(layout.HookSessionDir, identity, trust)
+	return enterprisepolicy.PublishedSessionAccountProblem(root, identity, trust)
 }
 
 // enterpriseForeignHookRemovalPending, enterpriseForeignHookMarkRemovalPending
@@ -256,18 +301,14 @@ func enterpriseForeignHookMarkRemovalPending(identity string) error {
 	return enterprisepolicy.MarkForeignHookRemovalPending(cfg.DataDir, identity)
 }
 
-func enterpriseForeignHookClearRemovalPending(identity string) error {
-	root, _ := enterpriseForeignHookSessionRoot()
+func enterpriseForeignHookClearRemovalPending(root, identity string) error {
 	return enterprisepolicy.ClearForeignHookRemovalPending(cfg.DataDir, root, identity)
 }
 
 // enterpriseForeignHookRevokeSessionRecords revokes identity's protected
-// session records of connectors (replaceable in tests). Without the
-// standalone layout the hook finds no records either, so there is nothing
-// to revoke.
-var enterpriseForeignHookRevokeSessionRecords = func(identity string, connectors []string) error {
-	root, ok := enterpriseForeignHookSessionRoot()
-	if !ok || len(connectors) == 0 {
+// session records of connectors under root (replaceable in tests).
+var enterpriseForeignHookRevokeSessionRecords = func(root, identity string, connectors []string) error {
+	if len(connectors) == 0 {
 		return nil
 	}
 	return enterprisepolicy.RemovePublishedForeignHookSessions(root, identity, connectors)

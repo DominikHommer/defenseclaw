@@ -301,6 +301,13 @@ func TestPublishedSessionRecordsAreInvalidatedWhereAnotherAccountCouldChangeThem
 	if err := PublishedSessionTreeProblem(filepath.Join(root, "missing"), PublishedSessionTrust{}); err != nil {
 		t.Fatalf("a missing root is no problem: %v", err)
 	}
+	// Review P1 (loop round 4): unless the folder above it is one another
+	// account could change, which can move the root back.
+	refused = root
+	if err := PublishedSessionTreeProblem(filepath.Join(root, "missing"), PublishedSessionTrust{}); err == nil || !strings.Contains(err.Error(), "is missing") {
+		t.Fatalf("a missing root under a folder the hook refuses must be a problem: %v", err)
+	}
+	refused = ""
 	// Review P1 (loop round 3): the root is checked whatever it holds. An
 	// account that could change it may have moved its folder out, to bring
 	// it back after the check; and a file in it is no account folder.
@@ -417,6 +424,19 @@ func TestPublishedSessionAccountProblemSeesWhatTheHookWouldRefuse(t *testing.T) 
 	t.Cleanup(func() { publishedSessionFileTrust, publishedSessionFolderTrust = previousFile, previousFolder })
 	if err := PublishedSessionAccountProblem(filepath.Join(root, "missing"), identity, PublishedSessionTrust{}); err != nil {
 		t.Fatalf("a missing root is no problem: %v", err)
+	}
+	// Review P1 (loop round 4): the account moved the whole root away
+	// while the folder above it was loosened. Until that folder is trusted
+	// again, the root can come back with the old allow. A missing folder
+	// above the root is checked at the nearest one that exists.
+	refused = root
+	for _, missing := range []string{filepath.Join(root, "missing"), filepath.Join(root, "a", "b", "missing")} {
+		if err := PublishedSessionAccountProblem(missing, identity, PublishedSessionTrust{}); err == nil || !strings.Contains(err.Error(), root) {
+			t.Fatalf("a missing root under a folder the hook refuses must be a problem: %v", err)
+		}
+	}
+	if err := PublishedSessionAccountProblem("", identity, PublishedSessionTrust{}); err == nil {
+		t.Fatal("a root that names no folder must be a problem")
 	}
 	refused = root
 	if err := PublishedSessionAccountProblem(root, identity, PublishedSessionTrust{}); err == nil {

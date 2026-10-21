@@ -912,6 +912,11 @@ func TestValidateStrictServiceRuntimeDirPathRefusesADriftedCiscoFolder(t *testin
 	if err := validateStrictServiceRuntimePath(root, true, "folder", self, 0); err != nil {
 		t.Skipf("the temp folder chain is not trusted on this host: %v", err)
 	}
+	// Review P1 (loop round 4): the folder above a missing record root gets
+	// the rule the hook gives it (namedDirs -1, the narrow ancestor mask).
+	if err := validateStrictServiceRuntimePath(cisco, true, "folder", self, -1); err != nil {
+		t.Fatalf("the trusted folder above the record root: %v", err)
+	}
 	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + self.String() + ")(A;;0x40;;;WD)")
 	if err != nil {
 		t.Fatal(err)
@@ -928,5 +933,9 @@ func TestValidateStrictServiceRuntimeDirPathRefusesADriftedCiscoFolder(t *testin
 	var untrusted *UntrustedPrincipalError
 	if !errors.As(err, &untrusted) || !strings.EqualFold(untrusted.Path, cisco) {
 		t.Fatalf("the drifted Cisco folder must refuse the record root: %v", err)
+	}
+	err = validateStrictServiceRuntimePath(cisco, true, "folder", self, -1)
+	if !errors.As(err, &untrusted) || !strings.EqualFold(untrusted.Path, cisco) {
+		t.Fatalf("the drifted Cisco folder must be refused when the record root is missing: %v", err)
 	}
 }
