@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
 
 func TestHookCallerLimiterBoundsEachCallerSeparately(t *testing.T) {
@@ -332,7 +333,7 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 		return done
 	}
 
-	unlock := api.foreignHookSessionLocks.lock(foreignHookSessionStateDir(dataDir, alice))
+	unlock := api.foreignHookSessionLocks.lock(enterprisepolicy.ForeignHookSessionStoreDir(dataDir, alice))
 	aliceDone := exchange(alice)
 	select {
 	case code := <-exchange(bob):
