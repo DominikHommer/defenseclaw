@@ -13,6 +13,10 @@
 # commits, a full standalone purge keeps a selector shared with another
 # deployment and works under the selector lock, and a deny for an account
 # that is not enrolled or no longer exists does not block the vendor check.
+# Loop round 1: a deny for a domain SID the lookup cannot map still counts
+# (only this computer's own SAM proves a SID retired), and a program that
+# opens a file in InstallRoot after the pre-commit probe defers the
+# retirement to the finalizer instead of failing the committed uninstall.
 # Runs elevated in a disposable directory; no service or machine root is
 # touched.
 
@@ -183,6 +187,85 @@ $stream.Dispose()
                 $failures.Add('the InstallRoot retirement probe does not run inside the uninstall transaction before its commit')
             }
 
+            # Loop round 1: a program that opens a file in InstallRoot after
+            # the probe passed, and holds it past the retry window, no longer
+            # fails the committed retirement: it is deferred, with InstallRoot
+            # in place. A free InstallRoot is retired, and a missing one is
+            # still an error.
+            $late = [IO.Path]::Combine($Root, 'late-install')
+            $lateRetired = [IO.Path]::Combine($Root, 'late-install-retired')
+            $lateBinary = [IO.Path]::Combine($late, 'bin', 'defenseclaw-hook.exe')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($lateBinary))
+            [IO.File]::WriteAllText($lateBinary, 'stand-in')
+            $script:InstallRootRetirementRetryMilliseconds = 1000
+            Assert-DefenseClawInstallRootRetirable -Source $late -Destination $lateRetired
+            $holder = Start-TestHolder -Path $lateBinary -Mode Read -HoldMilliseconds 8000
+            try {
+                $deferred = Invoke-DefenseClawCommittedInstallRootRetirement -Source $late -Destination $lateRetired
+                if ([string]::IsNullOrEmpty($deferred) -or -not [IO.File]::Exists($lateBinary) -or [IO.Directory]::Exists($lateRetired)) {
+                    $failures.Add("a holder that opened InstallRoot after the probe was not deferred: '$deferred'")
+                }
+            }
+            catch {
+                $failures.Add("a holder that opened InstallRoot after the probe failed the committed retirement: $($_.Exception.Message)")
+            }
+            finally {
+                [void]$holder.WaitForExit(30000)
+            }
+            try {
+                $deferred = Invoke-DefenseClawCommittedInstallRootRetirement -Source $late -Destination $lateRetired
+                if (-not [string]::IsNullOrEmpty($deferred) -or [IO.Directory]::Exists($late) -or -not [IO.Directory]::Exists($lateRetired)) {
+                    $failures.Add("a free InstallRoot was not retired after the commit: '$deferred'")
+                }
+            }
+            catch {
+                $failures.Add("a free InstallRoot failed the committed retirement: $($_.Exception.Message)")
+            }
+            try {
+                [void](Invoke-DefenseClawCommittedInstallRootRetirement -Source ([IO.Path]::Combine($Root, 'absent')) -Destination ([IO.Path]::Combine($Root, 'absent-retired')))
+                $failures.Add('a missing InstallRoot was deferred instead of failing')
+            }
+            catch {
+                Microsoft.PowerShell.Utility\Write-Verbose "missing InstallRoot refused: $($_.Exception.Message)"
+            }
+            # The uninstall runs that retirement after its commit, never the
+            # bare rename, and hands a deferred one to the finalizer before it
+            # retires the teardown journal.
+            $committedRetirement = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'Invoke-DefenseClawCommittedInstallRootRetirement' })
+            $bareRename = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'Move-DefenseClawInstallRootForRetirement' })
+            $deferStart = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'Start-DefenseClawDeferredSelfUninstallRetirement' })
+            $journalRetire = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'Remove-DefenseClawCommittedManagedHooksTeardownJournal' })
+            if ($committedRetirement.Count -ne 1 -or $bareRename.Count -ne 0 -or $deferStart.Count -ne 1 -or $journalRetire.Count -lt 1 -or
+                $committedRetirement[0].Extent.StartOffset -le $commit[0].Extent.StartOffset -or
+                $deferStart[0].Extent.StartOffset -le $committedRetirement[0].Extent.StartOffset -or
+                $deferStart[0].Extent.StartOffset -ge $journalRetire[0].Extent.StartOffset) {
+                $failures.Add('the committed uninstall does not defer a held InstallRoot to the finalizer before the journal retirement')
+            }
+            # The finalizer of a deferred retirement runs the module from
+            # InstallRoot while the retired one is not there; the usual
+            # finalizer content is unchanged (the retired module only).
+            $helperLayout = @{ SelfUninstallReceiptPath = 'C:\ProgramData\Cisco\DefenseClaw-Lifecycle\self-uninstall-0.json' }
+            $helperReceipt = [pscustomobject]@{
+                install_root = 'C:\Program Files\Cisco\DefenseClaw'
+                retired_install_root = 'C:\Program Files\Cisco\DefenseClaw.retired-0'
+                retired_module_sha256 = ('0' * 64)
+            }
+            $usual = Get-DefenseClawSelfUninstallHelperContent -Layout $helperLayout -Receipt $helperReceipt
+            $deferredContent = Get-DefenseClawSelfUninstallHelperContent -Layout $helperLayout -Receipt $helperReceipt -DeferredRetirement
+            $canonicalModule = "'C:\Program Files\Cisco\DefenseClaw\libexec\DefenseClawEnterprise.psm1'"
+            foreach ($content in @($usual, $deferredContent)) {
+                $parseErrors = $null
+                [void][Management.Automation.Language.Parser]::ParseInput($content, [ref]$null, [ref]$parseErrors)
+                if (@($parseErrors).Count -gt 0) {
+                    $failures.Add("a self-uninstall finalizer does not parse: $($parseErrors -join '; ')")
+                }
+            }
+            if ($usual.Contains($canonicalModule) -or -not $deferredContent.Contains($canonicalModule) -or
+                $usual.Replace("`r", '') -cne $deferredContent.Replace("`r", '').Replace(
+                    "; if (-not [IO.File]::Exists(`$modulePath)) { `$modulePath = $canonicalModule }", '')) {
+                $failures.Add('the deferred finalizer is not the usual one plus the InstallRoot module')
+            }
+
             # GAP-1076: a run waiting for the lock while a purge holds it
             # with delete-on-close gets a new protected lock afterwards.
             $lockDirectory = [IO.Path]::Combine($Root, 'Cisco', 'DefenseClaw-Lifecycle')
@@ -205,6 +288,106 @@ $stream.Dispose()
             }
             finally {
                 [void]$purge.WaitForExit(30000)
+            }
+
+            # Loop round 1: the finalizer of a deferred retirement renames
+            # InstallRoot once per pass under the lifecycle lock, waits for a
+            # holder outside it, then commits; a holder that outlasts its
+            # deadline leaves InstallRoot and the receipt for the next
+            # Uninstall, and a receipt another run finished is left alone.
+            $deferInstall = [IO.Path]::Combine($Root, 'defer-install')
+            $deferRetired = [IO.Path]::Combine($Root, 'defer-install-retired')
+            $deferBinary = [IO.Path]::Combine($deferInstall, 'bin', 'defenseclaw-hook.exe')
+            $deferLayout = @{
+                InstallRoot = $deferInstall
+                LifecycleLockDirectory = $lockLayout.LifecycleLockDirectory
+                LifecycleLockPath = $lockLayout.LifecycleLockPath
+            }
+            $stubbed = @(
+                'Get-DefenseClawSelfUninstallReceipt',
+                'Test-DefenseClawSelfUninstallCallerRunning',
+                'Assert-DefenseClawDeferredRetirementState',
+                'Complete-DefenseClawCommittedManagedHooksFinalization',
+                'Complete-DefenseClawRetiredSelfUninstallCommit'
+            )
+            $savedFunctions = @{}
+            foreach ($name in $stubbed) {
+                $savedFunctions[$name] = (Microsoft.PowerShell.Management\Get-Item -LiteralPath "function:$name").ScriptBlock
+            }
+            $script:TestDeferredCommits = 0
+            $script:TestDeferredReceipt = $null
+            try {
+                function script:Get-DefenseClawSelfUninstallReceipt { param($Layout, $GatewayServiceName, $GuardianServiceName, [switch]$Required) return $script:TestDeferredReceipt }
+                function script:Test-DefenseClawSelfUninstallCallerRunning { param($Layout, $Receipt) return $false }
+                function script:Assert-DefenseClawDeferredRetirementState { param($Layout, $Receipt) }
+                function script:Complete-DefenseClawCommittedManagedHooksFinalization { param($Layout, $GatewayServiceName, $GuardianServiceName, [switch]$Purge, [switch]$NativeSealed) }
+                function script:Complete-DefenseClawRetiredSelfUninstallCommit {
+                    param($Layout, $Receipt)
+                    $script:TestDeferredCommits++
+                    $script:TestDeferredReceipt.phase = 'committed_install_retirement'
+                }
+                function New-TestDeferredRoot {
+                    if ([IO.Directory]::Exists($deferRetired)) {
+                        [IO.Directory]::Delete($deferRetired, $true)
+                    }
+                    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($deferBinary))
+                    [IO.File]::WriteAllText($deferBinary, 'stand-in')
+                    $script:TestDeferredCommits = 0
+                    $script:TestDeferredReceipt = [pscustomobject]@{
+                        phase = 'prepared_install_retirement'
+                        retired_install_root = $deferRetired
+                        gateway_service = 'DefenseClawW2BSmokeAbsent'
+                        guardian_service = 'DefenseClawW2BSmokeGuardianAbsent'
+                        purge_requested = $false
+                    }
+                }
+                New-TestDeferredRoot
+                $holder = Start-TestHolder -Path $deferBinary -Mode Read -HoldMilliseconds 3000
+                $clock = [Diagnostics.Stopwatch]::StartNew()
+                try {
+                    $outcome = Complete-DefenseClawDeferredSelfUninstallRetirement -Layout $deferLayout -Receipt $script:TestDeferredReceipt -Deadline ([DateTime]::UtcNow.AddSeconds(60)) -RetryIntervalMilliseconds 200
+                    if ($outcome -cne 'retired' -or [IO.Directory]::Exists($deferInstall) -or -not [IO.Directory]::Exists($deferRetired) -or
+                        $script:TestDeferredCommits -ne 1 -or $clock.ElapsedMilliseconds -lt 1000) {
+                        $failures.Add("the deferred retirement did not wait out the holder and commit once: $outcome, commits $($script:TestDeferredCommits), $($clock.ElapsedMilliseconds) ms")
+                    }
+                }
+                catch {
+                    $failures.Add("the deferred retirement failed while a holder was briefly open: $($_.Exception.Message)")
+                }
+                finally {
+                    [void]$holder.WaitForExit(30000)
+                }
+                New-TestDeferredRoot
+                $holder = Start-TestHolder -Path $deferBinary -Mode Read -HoldMilliseconds 8000
+                try {
+                    [void](Complete-DefenseClawDeferredSelfUninstallRetirement -Layout $deferLayout -Receipt $script:TestDeferredReceipt -Deadline ([DateTime]::UtcNow.AddSeconds(1)) -RetryIntervalMilliseconds 200)
+                    $failures.Add('the deferred retirement passed while a holder outlasted its deadline')
+                }
+                catch {
+                    if ($_.Exception.Message -notlike '*next Uninstall finishes it*' -or -not [IO.File]::Exists($deferBinary) -or
+                        [IO.Directory]::Exists($deferRetired) -or $script:TestDeferredCommits -ne 0 -or
+                        [string]$script:TestDeferredReceipt.phase -cne 'prepared_install_retirement') {
+                        $failures.Add("a holder past the deadline: $($_.Exception.Message)")
+                    }
+                }
+                finally {
+                    [void]$holder.WaitForExit(30000)
+                }
+                $script:TestDeferredReceipt.phase = 'committed_install_retirement'
+                if ((Complete-DefenseClawDeferredSelfUninstallRetirement -Layout $deferLayout -Receipt $script:TestDeferredReceipt -Deadline ([DateTime]::UtcNow.AddSeconds(5))) -cne 'not_deferred' -or
+                    -not [IO.File]::Exists($deferBinary)) {
+                    $failures.Add('the finalizer renamed InstallRoot for a receipt another run committed')
+                }
+                $script:TestDeferredReceipt = $null
+                if ((Complete-DefenseClawDeferredSelfUninstallRetirement -Layout $deferLayout -Receipt ([pscustomobject]@{ gateway_service = 'a'; guardian_service = 'b' }) -Deadline ([DateTime]::UtcNow.AddSeconds(5))) -cne 'finished' -or
+                    -not [IO.File]::Exists($deferBinary)) {
+                    $failures.Add('the finalizer acted on a receipt another run finished')
+                }
+            }
+            finally {
+                foreach ($name in $stubbed) {
+                    Microsoft.PowerShell.Management\Set-Item -Path "function:script:$name" -Value $savedFunctions[$name]
+                }
             }
 
             # GAP-0867: an administrator's identical Users entry survives
@@ -238,11 +421,47 @@ $stream.Dispose()
             if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor)) {
                 $failures.Add('a service SID deny entry blocked the users check')
             }
-            # Review of GAP-1142: a deny for an account no one has (a retired
-            # user) beside a valid Users entry does not block, so Grant
-            # converges; a deny for a built-in group or for an enrolled user
-            # (this account, which has a profile here) still does.
-            $retiredDeny = '(D;;0x1200a0;;;S-1-5-21-1000-2000-3000-1234)'
+            # Review of GAP-1142: a deny for an account of this computer that
+            # no one has (a retired local user) beside a valid Users entry
+            # does not block, so Grant converges; a deny for a built-in group
+            # or for an enrolled user (this account, which has a profile here)
+            # still does. Loop round 1: a domain SID the lookup does not map
+            # (a custom domain group above RID 999, while the domain
+            # controller does not answer) counts, since an enrolled user's
+            # token can hold it.
+            $nativeSecurity = Initialize-DefenseClawNativeSecurity
+            function Get-TestSidUse([string]$Sid) {
+                $identifier = [Security.Principal.SecurityIdentifier]::new($Sid)
+                $bytes = [byte[]]::new($identifier.BinaryLength)
+                $identifier.GetBinaryForm($bytes, 0)
+                return $nativeSecurity::LookupSidUse($bytes)
+            }
+            $unmappedDomainGroup = 'S-1-5-21-1000-2000-3000-1234'
+            $unmappedUse = Get-TestSidUse $unmappedDomainGroup
+            if ($unmappedUse -ne 0) {
+                $failures.Add("the lookup of an unknown domain SID returned $unmappedUse, not none-mapped")
+            }
+            if (-not (Test-DefenseClawUserTokenDenySID -SID $unmappedDomainGroup)) {
+                $failures.Add('a deny for an unmapped domain group above RID 999 was treated as a retired account')
+            }
+            Set-TestDirectorySddl $vendor ('O:BAG:BAD:P(D;;0x1200a0;;;' + $unmappedDomainGroup + ')(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a0;;;BU)')
+            if (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) {
+                $failures.Add('a deny entry for an unmapped domain group did not block the users check')
+            }
+            $accountDomain = Get-DefenseClawAccountDomainSID
+            if ($accountDomain -cnotmatch '^S-1-5-21-\d+-\d+-\d+$') {
+                $failures.Add("this computer's account domain SID was not read: '$accountDomain'")
+            }
+            $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+            if ($currentUser.Name -like "$env:COMPUTERNAME\*" -and $null -ne $currentUser.User.AccountDomainSid -and
+                $currentUser.User.AccountDomainSid.Value -cne $accountDomain) {
+                $failures.Add("the account domain SID $accountDomain is not the local account's $($currentUser.User.AccountDomainSid.Value)")
+            }
+            $retiredLocal = $accountDomain + '-2147483000'
+            if ((Get-TestSidUse $retiredLocal) -ne 0) {
+                $failures.Add("the retired local SID $retiredLocal is mapped")
+            }
+            $retiredDeny = '(D;;0x1200a0;;;' + $retiredLocal + ')'
             Set-TestDirectorySddl $vendor ('O:BAG:BAD:P' + $retiredDeny + '(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a0;;;BU)')
             if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor)) {
                 $failures.Add('a deny entry for a retired account blocked the users check')
@@ -288,6 +507,20 @@ $stream.Dispose()
                     Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4
                 [IO.File]::WriteAllText([IO.Path]::Combine($Directory, $stateLeaf), $document)
                 [IO.File]::WriteAllText([IO.Path]::Combine($Directory, $lockLeaf), '')
+                # Setup writes these as an administrator. A runner account
+                # whose token makes itself the owner of new files (the
+                # built-in Administrator) would make them untrusted.
+                foreach ($tree in @($selectorPF, $selectorPD)) {
+                    if (-not [IO.Directory]::Exists($tree)) {
+                        continue
+                    }
+                    foreach ($item in @(@(Microsoft.PowerShell.Management\Get-Item -LiteralPath $tree -Force) +
+                            @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $tree -Recurse -Force))) {
+                        $security = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $item.FullName
+                        $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+                        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $item.FullName -AclObject $security
+                    }
+                }
             }
             function Invoke-TestSelectorPurge {
                 @(Remove-DefenseClawRuntimeSelectorState -HookPath $ownHook -Directories @($claudeDir, $codexDir, $cursorDir)) +

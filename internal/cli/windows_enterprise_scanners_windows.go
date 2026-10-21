@@ -163,10 +163,10 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			// CLI): a runtime that is installed but not unpacked is prepared again, so a
 			// prepare that failed half way is not left for a hand clean-up (GAP-0263),
 			// and a missing one is reported with the Setup command that installs it.
-			reprepareInstalledWindowsScannerRuntime(result)
+			reprepareInstalledWindowsScannerRuntime(result, opts)
 		} else {
 			var superseded *windowsScannerRuntimeSupersededError
-			if err := installWindowsScannerRuntime(source, opts); errors.As(err, &superseded) {
+			if err := installWindowsScannerRuntime(source, action, opts); errors.As(err, &superseded) {
 				result.AddWarning("scanner_runtime_superseded", superseded.Error())
 			} else if err != nil {
 				result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
@@ -186,8 +186,14 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 		if len(result.Errors) != 0 {
 			return
 		}
-		if err := removeWindowsScannerRuntime(); err != nil {
+		// Under the scanner runtime lock, and only while no deployment is
+		// installed: a later install's runtime stays (GAP-1166 review).
+		kept, err := retireWindowsScannerRuntime(opts)
+		switch {
+		case err != nil:
 			result.AddWarning("scanner_runtime_left", "the scanner runtime folder could not be removed: "+err.Error())
+		case kept != "":
+			result.AddWarning("scanner_runtime_left", "the scanner runtime folder was kept: "+kept)
 		}
 	case "status", "verify":
 		// A request refused before its health checks ran reports only the
@@ -269,20 +275,102 @@ var windowsScannerRuntimeServiceCheck = func() error {
 }
 
 // windowsScannerRuntimeSupersededError is the scanner step of a lifecycle
-// run whose release is older than the deployment now installed: a later
-// run committed a newer release, and its own scanner step installs the
-// matching runtime.
+// run whose deployment is no longer the one installed: a later run
+// committed another release, whose own scanner step installs the matching
+// runtime, or uninstalled DefenseClaw.
 type windowsScannerRuntimeSupersededError struct {
 	run, installed string
+	uninstalled    bool
 }
 
 func (e *windowsScannerRuntimeSupersededError) Error() string {
-	return "a later lifecycle run installed DefenseClaw " + e.installed + "; this run (" + e.run +
-		") left the scanner runtime to it"
+	if e.uninstalled {
+		return "a later lifecycle run uninstalled DefenseClaw; this run (" + e.run + ") did not install the scanner runtime"
+	}
+	installed := "DefenseClaw"
+	if e.installed != "" {
+		installed += " " + e.installed
+	}
+	return "a later lifecycle run installed " + installed + "; this run (" + e.run + ") left the scanner runtime to it"
+}
+
+// windowsScannerRuntimeDeployment reads the standalone deployment record the
+// scanner step checks while it holds the scanner runtime lock; a seam for
+// tests.
+var windowsScannerRuntimeDeployment = readWindowsScannerRuntimeDeployment
+
+func readWindowsScannerRuntimeDeployment(opts *windowsEnterpriseLifecycleOptions) (winpath.EnterpriseDeployment, error) {
+	if opts != nil {
+		if stateRoot := strings.TrimSpace(opts.stateRoot); stateRoot != "" {
+			return winpath.InspectEnterpriseDeploymentAt(managed.ProfileStandalone,
+				filepath.Join(stateRoot, "install", "deployment.json"))
+		}
+	}
+	return windowsEnterpriseDeploymentInspector(managed.ProfileStandalone)
+}
+
+// windowsScannerRuntimeOwner is whose runtime the scanner root holds now.
+type windowsScannerRuntimeOwner struct {
+	// ours: the deployment this run installed or kept is still installed.
+	ours bool
+	// uninstalled: no deployment is installed (a later uninstall).
+	uninstalled bool
+	// installed is the release the deployment record names.
+	installed string
+}
+
+// windowsScannerRuntimeOwnerOf reads the deployment record. The scanner step
+// runs after the PowerShell lifecycle released its lock, so another run can
+// have uninstalled DefenseClaw or installed another release since this run
+// committed; a record that cannot be read is an error, so nothing is
+// published or removed on a guess (GAP-1166 review). A repair keeps the
+// installed binaries and records their release, which a newer Setup's
+// repair is not; any other run records its own.
+func windowsScannerRuntimeOwnerOf(action string, opts *windowsEnterpriseLifecycleOptions) (windowsScannerRuntimeOwner, error) {
+	deployment, err := windowsScannerRuntimeDeployment(opts)
+	if err != nil {
+		return windowsScannerRuntimeOwner{}, fmt.Errorf("read the deployment record: %w", err)
+	}
+	switch deployment.State {
+	case winpath.EnterpriseDeploymentAbsent, winpath.EnterpriseDeploymentTombstone:
+		return windowsScannerRuntimeOwner{uninstalled: true}, nil
+	case winpath.EnterpriseDeploymentInstalled:
+	default:
+		return windowsScannerRuntimeOwner{}, fmt.Errorf("the deployment record %s cannot be read", deployment.MetadataPath)
+	}
+	owner := windowsScannerRuntimeOwner{installed: strings.TrimSpace(deployment.ProductVersion)}
+	run := ""
+	if opts != nil {
+		run = strings.TrimSpace(opts.productVersion)
+	}
+	owner.ours = windowsScannerRuntimeReleaseMatches(action, run, owner.installed)
+	return owner, nil
+}
+
+// windowsScannerRuntimeReleaseMatches reports whether the installed release
+// is the one this run's action installed or kept.
+func windowsScannerRuntimeReleaseMatches(action, run, installed string) bool {
+	if run == installed {
+		return true
+	}
+	_, _, runOK := parseWindowsEnterpriseVersion(run)
+	_, _, installedOK := parseWindowsEnterpriseVersion(installed)
+	if !runOK || !installedOK {
+		return false
+	}
+	switch compare := compareWindowsEnterpriseVersions(installed, run); {
+	case compare == 0:
+		return true
+	case compare < 0:
+		return strings.EqualFold(strings.TrimSpace(action), "repair")
+	default:
+		return false
+	}
 }
 
 // windowsScannerRuntimeLockName is the file in the runtime root that
-// serializes the scanner step of overlapping lifecycle runs.
+// serializes the scanner step of overlapping lifecycle runs, and the
+// uninstall step that removes the root.
 const windowsScannerRuntimeLockName = "scanner-runtime.lock"
 
 // windowsScannerRuntimeLockWait bounds the wait for another run's scanner
@@ -310,40 +398,134 @@ func lockWindowsScannerRuntime(root string) (func(), error) {
 	}
 }
 
-// windowsScannerRuntimeSupersededBy is the installed release when it is
-// newer than this run's, "" otherwise (or when either cannot be read).
-func windowsScannerRuntimeSupersededBy(opts *windowsEnterpriseLifecycleOptions) string {
-	if opts == nil || strings.TrimSpace(opts.productVersion) == "" {
-		return ""
+// checkWindowsScannerRuntimeRootForRemoval refuses a root that is not the
+// runtime's own real folder.
+func checkWindowsScannerRuntimeRootForRemoval(root string) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return err
 	}
-	installed, err := windowsEnterpriseInstalledProductVersion(opts)
-	installed = strings.TrimSpace(installed)
-	if err != nil || installed == "" {
-		return ""
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is not a real folder", root)
 	}
-	if _, _, ok := parseWindowsEnterpriseVersion(installed); !ok {
-		return ""
+	if !strings.EqualFold(filepath.Base(root), "DefenseClaw-ScannerRuntime") {
+		return fmt.Errorf("refusing to remove %s", root)
 	}
-	if _, _, ok := parseWindowsEnterpriseVersion(strings.TrimSpace(opts.productVersion)); !ok {
-		return ""
+	return nil
+}
+
+// retireWindowsScannerRuntime removes the runtime root once no deployment is
+// installed. It takes the scanner runtime lock and reads the deployment
+// record under it, so it runs after a scanner step that started before it
+// and before one that starts after it, and an uninstall whose step runs after
+// a later install leaves that install's runtime alone: it returns what kept
+// the root instead.
+func retireWindowsScannerRuntime(opts *windowsEnterpriseLifecycleOptions) (string, error) {
+	root, err := windowsScannerRuntimeDir()
+	if err != nil {
+		return "", err
 	}
-	if compareWindowsEnterpriseVersions(installed, opts.productVersion) > 0 {
-		return installed
+	if err := checkWindowsScannerRuntimeRootForRemoval(root); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
 	}
-	return ""
+	release, err := lockWindowsScannerRuntime(root)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_PATH_NOT_FOUND) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+			return "", nil
+		}
+		return "", err
+	}
+	owner, err := windowsScannerRuntimeOwnerOf("uninstall", opts)
+	if err != nil {
+		release()
+		return "", err
+	}
+	if !owner.uninstalled {
+		release()
+		installed := "DefenseClaw"
+		if owner.installed != "" {
+			installed += " " + owner.installed
+		}
+		return "a later lifecycle run installed " + installed + ", whose runtime it is", nil
+	}
+	return "", removeWindowsScannerRuntimeLocked(root, release)
+}
+
+// removeWindowsScannerRuntimeLocked removes everything in root but the lock
+// while the lock is held, then releases it and removes the lock and root. A
+// run that opened the lock in between reads the record itself and either
+// leaves (nothing installed) or installs into the root, which then stays.
+func removeWindowsScannerRuntimeLocked(root string, release func()) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		release()
+		return err
+	}
+	var removeErr error
+	for _, entry := range entries {
+		if strings.EqualFold(entry.Name(), windowsScannerRuntimeLockName) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil && removeErr == nil {
+			removeErr = err
+		}
+	}
+	release()
+	if removeErr != nil {
+		return removeErr
+	}
+	if err := os.Remove(filepath.Join(root, windowsScannerRuntimeLockName)); err != nil &&
+		!errors.Is(err, os.ErrNotExist) && !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		return err
+	}
+	if err := os.Remove(root); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, windows.ERROR_DIR_NOT_EMPTY) {
+		return err
+	}
+	return nil
+}
+
+// windowsScannerRuntimeLeftTo is the scanner step of a run whose deployment
+// is no longer installed: after an uninstall the runtime is retired (the
+// uninstall's own step may have run first, or been skipped), and either way
+// the run reports that it left the runtime.
+func windowsScannerRuntimeLeftTo(owner windowsScannerRuntimeOwner, opts *windowsEnterpriseLifecycleOptions) error {
+	superseded := &windowsScannerRuntimeSupersededError{installed: owner.installed, uninstalled: owner.uninstalled}
+	if opts != nil {
+		superseded.run = strings.TrimSpace(opts.productVersion)
+	}
+	if owner.uninstalled {
+		if kept, err := retireWindowsScannerRuntime(opts); err != nil {
+			return fmt.Errorf("%s, and the scanner runtime folder could not be removed: %w", superseded.Error(), err)
+		} else if kept != "" {
+			return &windowsScannerRuntimeSupersededError{run: superseded.run}
+		}
+	}
+	return superseded
 }
 
 // installWindowsScannerRuntime copies source into the protected root unless
 // the installed copy already matches, then unpacks and compiles the runtime.
 // The staged executable is admitted on every run, like every other payload
-// file. Overlapping runs take the step in turn, and a run whose release is
-// older than the installed deployment leaves the runtime to the run that
-// installed it, so a delayed older upgrade cannot replace a newer runtime
-// (GAP-1166).
-func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycleOptions) error {
+// file. Overlapping runs, and the uninstall step that removes the root, take
+// the step in turn. The runtime is published only while the deployment
+// record names this run's deployment: a delayed older upgrade cannot replace
+// a newer runtime (GAP-1166), and a run that an uninstall overtook does not
+// recreate the runtime after it; that is checked before the root is made and
+// again under the lock.
+func installWindowsScannerRuntime(source, action string, opts *windowsEnterpriseLifecycleOptions) error {
 	root, err := windowsScannerRuntimeDir()
 	if err != nil {
 		return err
+	}
+	owner, err := windowsScannerRuntimeOwnerOf(action, opts)
+	if err != nil {
+		return err
+	}
+	if !owner.ours {
+		return windowsScannerRuntimeLeftTo(owner, opts)
 	}
 	gateway, err := managed.WindowsServiceAccountSID(windowsScannerGatewayAccount)
 	if err != nil || gateway == nil {
@@ -356,9 +538,27 @@ func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycl
 	if err != nil {
 		return err
 	}
-	defer release()
-	if installed := windowsScannerRuntimeSupersededBy(opts); installed != "" {
-		return &windowsScannerRuntimeSupersededError{run: strings.TrimSpace(opts.productVersion), installed: installed}
+	held := true
+	defer func() {
+		if held {
+			release()
+		}
+	}()
+	owner, err = windowsScannerRuntimeOwnerOf(action, opts)
+	if err != nil {
+		return err
+	}
+	if !owner.ours {
+		superseded := &windowsScannerRuntimeSupersededError{
+			run: strings.TrimSpace(opts.productVersion), installed: owner.installed, uninstalled: owner.uninstalled,
+		}
+		if owner.uninstalled {
+			held = false
+			if err := removeWindowsScannerRuntimeLocked(root, release); err != nil {
+				return fmt.Errorf("%s, and the scanner runtime folder could not be removed: %w", superseded.Error(), err)
+			}
+		}
+		return superseded
 	}
 	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
 	want, err := windowsEnterpriseFileSHA256(source)
@@ -507,8 +707,10 @@ func windowsScannerRuntimeUnavailable(scanners *enterprisestatus.ScannerRuntime)
 // reprepareInstalledWindowsScannerRuntime unpacks the runtime of an installed
 // scanners executable whose state is not_prepared. A ready runtime is left
 // alone. A missing one can only come from a Setup payload, which this run
-// does not have, so it is reported.
-func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
+// does not have, so it is reported. The prepare runs under the scanner
+// runtime lock and only while the deployment record names this run's
+// deployment, as the install from a payload does.
+func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
 	current := windowsScannerRuntimeReader()
 	if current.State == "ready" {
 		result.Scanners = current
@@ -519,21 +721,55 @@ func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
 		result.Scanners = current
 		return
 	}
-	root, err := windowsScannerRuntimeDir()
-	if err == nil {
-		target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
-		if err = windowsInstalledScannerRuntimeCheck(root, target); err == nil {
-			for _, step := range []string{"prepare", "prune"} {
-				if err = runWindowsScannerRuntime(target, step); err != nil {
-					break
-				}
-			}
+	if err := reprepareWindowsScannerRuntimeLocked(result.Action, opts); err != nil {
+		var superseded *windowsScannerRuntimeSupersededError
+		switch {
+		case errors.As(err, &superseded):
+			result.AddWarning("scanner_runtime_superseded", superseded.Error())
+		case errors.Is(err, windows.ERROR_PATH_NOT_FOUND):
+			// The root went (an uninstall step) after it was read.
+			current = windowsScannerRuntimeReader()
+			result.AddWarning("scanner_runtime_unavailable", windowsScannerRuntimeUnavailable(current))
+			result.Scanners = current
+			return
+		default:
+			result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
 		}
 	}
-	if err != nil {
-		result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
-	}
 	result.Scanners = windowsScannerRuntimeReader()
+}
+
+func reprepareWindowsScannerRuntimeLocked(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	root, err := windowsScannerRuntimeDir()
+	if err != nil {
+		return err
+	}
+	release, err := lockWindowsScannerRuntime(root)
+	if err != nil {
+		return err
+	}
+	defer release()
+	owner, err := windowsScannerRuntimeOwnerOf(action, opts)
+	if err != nil {
+		return err
+	}
+	if !owner.ours {
+		superseded := &windowsScannerRuntimeSupersededError{installed: owner.installed, uninstalled: owner.uninstalled}
+		if opts != nil {
+			superseded.run = strings.TrimSpace(opts.productVersion)
+		}
+		return superseded
+	}
+	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
+	if err := windowsInstalledScannerRuntimeCheck(root, target); err != nil {
+		return err
+	}
+	for _, step := range []string{"prepare", "prune"} {
+		if err := runWindowsScannerRuntime(target, step); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // windowsScannerRuntimePrepareFailed is the error of a lifecycle run whose
@@ -744,25 +980,20 @@ func removeStaleWindowsScannerCopies(root string) {
 	}
 }
 
-// removeWindowsScannerRuntime removes the scanner runtime root. It refuses
-// a root that is a link, so it never follows one out of ProgramData.
+// removeWindowsScannerRuntime removes a scanner runtime root an unprivileged
+// account created, before the lifecycle makes its own. It refuses a root that
+// is a link, so it never follows one out of ProgramData. The uninstall step
+// uses retireWindowsScannerRuntime.
 func removeWindowsScannerRuntime() error {
 	root, err := windowsScannerRuntimeDir()
 	if err != nil {
 		return err
 	}
-	info, err := os.Lstat(root)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
+	if err := checkWindowsScannerRuntimeRootForRemoval(root); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is not a real folder", root)
-	}
-	if !strings.EqualFold(filepath.Base(root), "DefenseClaw-ScannerRuntime") {
-		return fmt.Errorf("refusing to remove %s", root)
 	}
 	return os.RemoveAll(root)
 }

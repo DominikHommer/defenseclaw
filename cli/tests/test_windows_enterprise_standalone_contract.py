@@ -285,7 +285,9 @@ def test_standalone_uninstall_retry_binds_the_receipt_to_the_retrying_cli() -> N
     rebind = recovery.index("$receipt = Set-DefenseClawSelfUninstallReceiptCaller")
     guard = recovery.rindex("if ($SelfUninstallCallerPID -gt 0 -and", 0, rebind)
     assert "(Test-DefenseClawStandaloneProfile)" in recovery[guard:rebind]
-    move = recovery.index("Move-DefenseClawInstallRootForRetirement -Source $Layout.InstallRoot -Destination $retiredRoot")
+    move = recovery.index(
+        "Move-DefenseClawInstallRootForRetirement -Source $Layout.InstallRoot -Destination $retiredRoot"
+    )
     cleanup = recovery.index("$result = Invoke-DefenseClawCommittedUninstallCleanup")
     assert rebind < move < cleanup
     assert recovery.rindex("if ($reboundCaller) {", 0, cleanup) > move
@@ -438,6 +440,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-state-files-in-use-smoke.ps1",
     "enterprise-standalone-uninstall-cleanup-trust-smoke.ps1",
     "enterprise-standalone-user-cleanup-report-smoke.ps1",
+    "enterprise-standalone-w2b-lifecycle-smoke.ps1",
 )
 
 
