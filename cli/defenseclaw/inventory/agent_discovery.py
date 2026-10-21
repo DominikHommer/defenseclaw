@@ -1251,6 +1251,13 @@ def _keep_versions_of_slow_unchanged_agents(
     requires it) is under a trusted prefix; an agent that was removed has
     no file there and is reported as not installed. Windows keeps its
     protected selection rules.
+
+    An agent that is not probed is reported at its first binary candidate;
+    the last scan may have probed a later one (``cursor`` before ``agent``),
+    which still counts as the same binary while it is a candidate now
+    (GAP-0002). An installed agent that was never probed has no version to
+    keep; it keeps its binary path, so an upgrade run without the agents on
+    PATH does not report it as not installed (rel-1-0-3 GAP-0277).
     """
     not_found = not _is_windows_host()
     slow = [
@@ -1284,12 +1291,24 @@ def _keep_versions_of_slow_unchanged_agents(
             continue
         version = str(previous.get("version") or "")
         previous_binary = str(previous.get("binary_path") or "")
-        if not version or not previous_binary or (signal.binary_path and previous_binary != signal.binary_path):
+        if not previous_binary:
             continue
+        if signal.binary_path and previous_binary != signal.binary_path:
+            if signal.error != VERSION_NOT_PROBED or previous_binary not in _binary_candidates_for_agent(
+                signal.name, _SPECS.get(signal.name, _AgentSpec((), "", ("--version",)))
+            ):
+                continue
         if not signal.binary_path and (
             not os.path.isfile(previous_binary)
             or (require_trusted_binary_paths and not _is_trusted_binary_path(previous_binary, data_dir=data_dir))
         ):
+            continue
+        if not version:
+            never_probed = previous.get("installed") is True and previous.get("error") == VERSION_NOT_PROBED
+            if not signal.binary_path and never_probed:
+                signal.binary_path = previous_binary
+                signal.error = VERSION_NOT_PROBED
+                signal.installed = True
             continue
         try:
             changed_at = os.stat(os.path.realpath(previous_binary)).st_mtime

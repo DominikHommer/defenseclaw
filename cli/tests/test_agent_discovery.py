@@ -2826,6 +2826,81 @@ def test_a_refresh_that_cannot_find_an_unchanged_binary_keeps_its_version(monkey
     assert (gone.version, gone.installed) == ("", False)
 
 
+def test_an_unprobed_agent_keeps_the_version_of_the_candidate_last_probed(monkeypatch, tmp_path):
+    """GAP-0002: setup of one connector probes only it. A peer whose first
+    binary candidate is not the one the last scan probed lost its version,
+    and the restarted gateway stopped enforcing it."""
+    first, probed = tmp_path / "cursor", tmp_path / "agent"
+    for binary in (first, probed):
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        old = os.stat(binary).st_mtime - 600
+        os.utime(binary, (old, old))
+
+    def scan(probe: bool):
+        def fake(name: str, **_kwargs) -> ad.AgentSignal:
+            if name != "cursor":
+                return _signal(name)
+            if not probe:
+                return ad.AgentSignal(
+                    name=name, installed=True, config_path="", binary_path=str(first),
+                    version="", error=ad.VERSION_NOT_PROBED,
+                )
+            return ad.AgentSignal(
+                name=name, installed=True, config_path="", binary_path=str(probed),
+                version="2026.10.01-14929f9", error="",
+            )
+        return fake
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(first), str(probed)))
+    monkeypatch.setattr(ad, "_scan_agent", scan(True))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(ad, "_scan_agent", scan(False))
+    kept = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["cursor"]
+    assert (kept.version, kept.binary_path, kept.error) == ("2026.10.01-14929f9", str(probed), "")
+
+    # No longer a candidate: not the same binary, so no version.
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(first),))
+    gone = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["cursor"]
+    assert (gone.version, gone.binary_path) == ("", str(first))
+
+
+def test_a_refresh_that_cannot_find_an_unprobed_agent_keeps_it_installed(monkeypatch, tmp_path):
+    """rel-1-0-3 GAP-0277: an upgrade run with a PATH without the agents'
+    folder reported installed but unconfigured agents as not installed."""
+    binary = tmp_path / "amp"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def scan(found: bool):
+        def fake(name: str, **_kwargs) -> ad.AgentSignal:
+            if name != "amp":
+                return _signal(name)
+            if not found:
+                return ad.AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
+            return ad.AgentSignal(
+                name=name, installed=True, config_path="", binary_path=str(binary),
+                version="", error=ad.VERSION_NOT_PROBED,
+            )
+        return fake
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan(True))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(ad, "_scan_agent", scan(False))
+    kept = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["amp"]
+    assert (kept.installed, kept.binary_path, kept.version, kept.error) == (
+        True, str(binary), "", ad.VERSION_NOT_PROBED,
+    )
+    assert ad._read_cache(data_dir=tmp_path).agents["amp"].installed is True
+
+    # Removed: not installed.
+    binary.unlink()
+    gone = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["amp"]
+    assert (gone.installed, gone.binary_path) == (False, "")
+
+
 def test_cached_discovery_rechecks_config_files(monkeypatch, tmp_path):
     """GAP-1627: setup / setup remove change hook files after the cache was written."""
     _pin_home(monkeypatch, tmp_path)
