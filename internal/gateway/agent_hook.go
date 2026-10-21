@@ -673,9 +673,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
-		if !panicked {
-			dedupeTicket.complete(resp)
-		}
 		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 		defer cancelPersist()
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
@@ -683,6 +680,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
 		}
 		finalization := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, auditExtra)
+		// A verdict whose audit row could not be written comes back as the
+		// fail-mode verdict (finalizeAgentHook); the agent, a second Copilot
+		// delivery and the AID accounting all get that one.
+		resp = finalization.Response
+		if !panicked {
+			dedupeTicket.complete(resp)
+		}
 		if err := chainFinalization.attach(persistCtx, resp.EvaluationID); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
@@ -741,6 +745,11 @@ type hookFinalizationResult struct {
 	AuditPersisted       bool
 	EnforcementPersisted bool
 	Enforced             bool
+	// Response is the verdict to answer with: the evaluated one, or the
+	// fail-mode verdict when the audit row could not be written
+	// (AuditFailedClosed).
+	Response          agentHookResponse
+	AuditFailedClosed bool
 }
 
 func (result hookFinalizationResult) notificationReady() bool {
@@ -761,7 +770,7 @@ func (a *APIServer) finalizeAgentHook(
 	// Treat a block response as enforced unless identity stamping proves
 	// otherwise. If identity stamping itself panics, notification stays
 	// fail-closed behind canonical enforcement persistence.
-	result := hookFinalizationResult{Enforced: resp.Action == "block"}
+	result := hookFinalizationResult{Enforced: resp.Action == "block", Response: resp}
 	safeSection := func(section string, fn func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -853,30 +862,81 @@ func (a *APIServer) finalizeAgentHook(
 	// enforcement companion that #850 wanted to persist here is not
 	// forward-ported; the primary hook_decision log + audit row are the
 	// only durable artefacts of this decision in Part 1.
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
-		safeSection("observability_v8", func() {
-			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
-			// With no companion to persist, an enforced hook is
-			// notification-ready as soon as the audit row below lands.
-			result.EnforcementPersisted = env.Enforced
-			if !panicked {
-				a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
-			}
-		})
+	if req.SuppressCorrelationEmit && !req.CorrelationUnavailable {
+		return result
 	}
 	// Every verdict has its audit row, save the exact replay of a delivery
 	// whose row is already persisted: a hook whose correlation failed is
-	// audited too.
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
-		safeSection("audit", func() {
-			auditErr := a.logConnectorHookAuditEnvelope(ctx, env)
-			result.AuditPersisted = auditErr == nil
-			if !panicked {
-				a.alertSensitiveHookToolResult(ctx, connectorName, req, resp)
-			}
+	// audited too. The row is written before the decision is exported, so the
+	// export carries the verdict the agent gets.
+	var auditErr error
+	safeSection("audit", func() {
+		auditErr = a.logConnectorHookAuditEnvelope(ctx, env)
+		result.AuditPersisted = auditErr == nil
+	})
+	if !result.AuditPersisted && !panicked {
+		if auditErr == nil {
+			auditErr = errors.New("the audit section panicked")
+		}
+		closed, denied := a.hookAuditFailureResponse(ctx, connectorName, req, resp)
+		if denied {
+			resp = closed
+			env.adoptVerdict(resp)
+			result.Enforced, result.Response, result.AuditFailedClosed = env.Enforced, resp, true
+		}
+		fmt.Fprintf(os.Stderr, "[gateway] hook audit persistence failed connector=%s event=%s action=%s denied_for_audit=%t: %v\n",
+			connectorName, req.HookEventName, resp.Action, denied, auditErr)
+	}
+	if !panicked {
+		safeSection("sensitive_result", func() {
+			a.alertSensitiveHookToolResult(ctx, connectorName, req, resp)
 		})
 	}
+	safeSection("observability_v8", func() {
+		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+		// With no companion to persist, an enforced hook is
+		// notification-ready as soon as its audit row has landed.
+		result.EnforcementPersisted = env.Enforced
+		if !panicked {
+			a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
+		}
+	})
 	return result
+}
+
+// hookAuditFailureResponse is the verdict of an accepted hook whose audit row
+// could not be written: the disk is full, or the audit store stayed busy
+// through its busy timeout and retries. Every call DefenseClaw lets go ahead
+// has a durable audit row, so a failed write is a failed check: it follows the
+// connector's resolved fail mode, like a recovered evaluator error. Closed
+// (the default everywhere but Secure Client) denies a blockable tool or
+// prompt event; open (Secure Client's unset default, or an explicit open)
+// keeps the verdict, as do a block, a session-ending event and an event the
+// agent cannot block. It reports whether it changed the verdict.
+func (a *APIServer) hookAuditFailureResponse(
+	ctx context.Context,
+	connectorName string,
+	req agentHookRequest,
+	resp agentHookResponse,
+) (agentHookResponse, bool) {
+	if resp.Action == "block" {
+		return resp, false
+	}
+	failure := hookCheckFailure{
+		base: agentHookResponse{
+			Severity: "WARN",
+			Reason:   "defenseclaw audit record could not be written",
+			AdditionalContext: fmt.Sprintf("DefenseClaw could not write the audit record of %s/%s. Operators: check the free space of the DefenseClaw data directory and the gateway log for \"hook audit persistence failed\".",
+				connectorName, req.HookEventName),
+		},
+		cause: "because it could not write the call's audit record",
+	}
+	closed := a.hookFailedCheckResponse(ctx, connectorName, req, nil, req.Payload, failure)
+	if closed.Action != "block" {
+		return resp, false
+	}
+	closed.EvaluationID = resp.EvaluationID
+	return closed, true
 }
 
 // dispatchFinalizedAgentHookNotification prevents a user-visible notification
@@ -1409,6 +1469,16 @@ func hookCompatibilityExtra(profile connector.HookProfile) map[string]string {
 	return extra
 }
 
+// adoptVerdict replaces the envelope's verdict fields with resp, which took
+// the evaluated verdict's place after the envelope was stamped (a failed audit
+// write, hookAuditFailureResponse). The identity fields stamped once
+// (step_idx and the rule pack) stay.
+func (env *HookAuditEnvelope) adoptVerdict(resp agentHookResponse) {
+	env.Action, env.RawAction, env.Severity, env.Mode = resp.Action, resp.RawAction, resp.Severity, resp.Mode
+	env.Reason, env.WouldBlock = hookSourceReason(resp), resp.WouldBlock
+	env.Enforced = resp.Action == "block"
+}
+
 func mergeHookEnvelopeExtra(base map[string]string, extra map[string]string) map[string]string {
 	if len(extra) == 0 {
 		return base
@@ -1507,19 +1577,43 @@ func safeHookPanicResponse(connectorName, eventName string) agentHookResponse {
 }
 
 // hookPanicResponse renders one fail-mode verdict for every recovery path.
-// Sandbox ingress has its own mandatory closed verdict and is rendered once.
-//
-// A recovered error produced no policy verdict. A closed hook denies a
-// blockable tool or prompt event even when policy verdicts are observed.
-// Stop and session-end events keep their neutral allow; a resolved open
-// (explicit, or Secure Client's unset default) keeps its open failure
-// behavior.
 func (a *APIServer) hookPanicResponse(
 	ctx context.Context,
 	connectorName string,
 	req agentHookRequest,
 	rawBody []byte,
 	payload map[string]interface{},
+) agentHookResponse {
+	return a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, payload, hookCheckFailure{
+		base:  safeHookPanicResponse(connectorName, req.HookEventName),
+		cause: "because of an internal evaluator error",
+	})
+}
+
+// hookCheckFailure is why a hook check could not complete: base carries the
+// audit source reason and the operator context, and cause ends the plain
+// sentence "DefenseClaw could not complete its hook check ...".
+type hookCheckFailure struct {
+	base  agentHookResponse
+	cause string
+}
+
+// hookFailedCheckResponse renders the fail-mode verdict of a hook check that
+// could not complete. Sandbox ingress has its own mandatory closed verdict and
+// is rendered once.
+//
+// A failed check produced no usable policy verdict. A closed hook denies a
+// blockable tool or prompt event even when policy verdicts are observed.
+// Stop and session-end events keep their neutral allow; a resolved open
+// (explicit, or Secure Client's unset default) keeps its open failure
+// behavior.
+func (a *APIServer) hookFailedCheckResponse(
+	ctx context.Context,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	failure hookCheckFailure,
 ) (out agentHookResponse) {
 	if req.ConnectorName == "" {
 		req.ConnectorName = connectorName
@@ -1527,7 +1621,7 @@ func (a *APIServer) hookPanicResponse(
 	if req.Payload == nil {
 		req.Payload = payload
 	}
-	base := safeHookPanicResponse(connectorName, req.HookEventName)
+	base := failure.base
 	profile := a.hookProfileForRequest(ctx, connectorName)
 	mode := a.agentHookMode(ctx, connectorName)
 	action, wouldBlock := mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, req.Payload)
@@ -1549,7 +1643,7 @@ func (a *APIServer) hookPanicResponse(
 	if mode != "action" {
 		action, wouldBlock = mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
 	}
-	plain := "DefenseClaw could not complete its hook check because of an internal evaluator error. "
+	plain := "DefenseClaw could not complete its hook check " + failure.cause + ". "
 	switch {
 	case failOpen:
 		action, wouldBlock = "allow", true
