@@ -424,7 +424,7 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 					functionDepth++
 					walk(functions[name], s)
 					functionDepth--
-				} else {
+				} else if !recursiveSelfCallsOnly(functions[name], name, home) {
 					s.known, s.changed = false, true
 					unknown = true
 				}
@@ -472,6 +472,29 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 	}
 	walkList(file.Stmts, &state)
 	return operands, unknown
+}
+
+// A body made only of calls to itself cannot produce a file write or change
+// the working directory when the bounded walk reaches its depth limit.
+func recursiveSelfCallsOnly(body *syntax.Stmt, name, home string) bool {
+	if body == nil {
+		return false
+	}
+	safe := true
+	syntax.Walk(body, func(node syntax.Node) bool {
+		if !safe {
+			return false
+		}
+		switch item := node.(type) {
+		case *syntax.CallExpr:
+			program, _, static := shellCommandWord(item, home)
+			safe = static && program == name && len(item.Assigns) == 0
+		case *syntax.Redirect, *syntax.CmdSubst, *syntax.ProcSubst, *syntax.FuncDecl:
+			safe = false
+		}
+		return safe
+	})
+	return safe
 }
 
 // shellCommandWord returns the program a call runs in this shell after builtin

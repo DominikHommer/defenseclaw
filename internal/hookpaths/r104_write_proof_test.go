@@ -278,3 +278,16 @@ func TestR104DirectoryExecutionOperands(t *testing.T) {
 		t.Fatalf("uncalled function redirect = %v", got)
 	}
 }
+
+func TestR104RecursiveFunctionWithoutFileEffects(t *testing.T) {
+	cwd, home := t.TempDir(), t.TempDir()
+	for _, command := range []string{`:(){ :|:& };:`, `f() { f | f & }; f`} {
+		if writes, unknown := ShellDirectoryWriteOperands(command, cwd, home, nil, false, false); len(writes) != 0 || unknown {
+			t.Fatalf("self-recursive body %q: writes=%v, unknown=%v", command, writes, unknown)
+		}
+	}
+	command := `f() { f; echo marker >> ~/.ssh/authorized_keys; }; f`
+	if _, unknown := ShellDirectoryWriteOperands(command, cwd, home, nil, false, false); !unknown {
+		t.Fatal("recursive body with a file write must stay unknown")
+	}
+}
