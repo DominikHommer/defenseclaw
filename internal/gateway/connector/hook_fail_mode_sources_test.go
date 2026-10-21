@@ -108,17 +108,17 @@ func TestHookConfigSidecarRecordsTheSourceOfEachMode(t *testing.T) {
 	}
 }
 
-// A per-user connector whose vendor hook surface cannot fail closed (Copilot)
-// renders open for an unset mode (CapableHookFailMode). That open is the
-// vendor's limit, not the operator's: the sidecar records it without a
-// source, so the native hook fails it closed, and the outage mode the
-// installers' refresh writes is closed. An explicit open is the config's.
+// Copilot's per-user hook follows the configured mode (w3-g3-hooks): an
+// unset mode renders closed, so no open is recorded for it, and the outage
+// mode the installers' refresh writes is closed. An explicit open is the
+// config's and carries its source. (A vendor-lowered open, which must carry
+// no source, is left only under Secure Client.)
 func TestCapabilityLoweredOpenIsNotRecordedAsTheConfigs(t *testing.T) {
 	for _, test := range []struct {
-		name, failMode, wantSource, wantOutage string
+		name, failMode, wantMode, wantSource, wantOutage string
 	}{
-		{name: "unset", wantSource: "", wantOutage: "closed"},
-		{name: "explicit open", failMode: "open", wantSource: HookFailModeSourceConfig, wantOutage: "open"},
+		{name: "unset", wantMode: "closed", wantOutage: "closed"},
+		{name: "explicit open", failMode: "open", wantMode: "open", wantSource: HookFailModeSourceConfig, wantOutage: "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
@@ -129,11 +129,14 @@ func TestCapabilityLoweredOpenIsNotRecordedAsTheConfigs(t *testing.T) {
 				t.Fatal(err)
 			}
 			state := readHookConfigSidecarForTest(t, hookDir)
-			if state.FailModes["copilot"] != "open" || state.FailModeSources["copilot"] != test.wantSource {
-				t.Fatalf("copilot sidecar %+v, want open with source %q", state, test.wantSource)
+			if state.FailModes["copilot"] != test.wantMode {
+				t.Fatalf("copilot sidecar %+v, want %s", state, test.wantMode)
 			}
-			if got := strings.Contains(readFlatHookRecordForTest(t, hookDir, "copilot"), "FAIL_MODE_SOURCE=config"); got != (test.wantSource != "") {
-				t.Fatalf("copilot flat record source = %v, want %v", got, test.wantSource != "")
+			if test.wantSource != "" && state.FailModeSources["copilot"] != test.wantSource {
+				t.Fatalf("copilot sidecar %+v, want source %q", state, test.wantSource)
+			}
+			if test.wantMode == "open" && !strings.Contains(readFlatHookRecordForTest(t, hookDir, "copilot"), "FAIL_MODE_SOURCE=config") {
+				t.Fatalf("copilot flat record has no config source for the explicit open")
 			}
 			if got := OutageHookFailMode(opts, conn); got != test.wantOutage {
 				t.Fatalf("outage fail mode %q, want %q", got, test.wantOutage)
