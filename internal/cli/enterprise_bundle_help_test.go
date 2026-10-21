@@ -43,6 +43,7 @@ func TestEnterpriseBundleHelpNamesTheLimits(t *testing.T) {
 		}},
 		{"apply", newEnterpriseBundleApplyCommand(), []string{
 			"superseded", "bundle_state_unreadable", "On Linux and macOS, --inbox", "Windows has no inbox",
+			"ensure and repair on Linux and macOS keep the installed config", "On Windows they stop with bundle_restore_failed and repair nothing",
 		}},
 	}
 	for _, c := range cases {

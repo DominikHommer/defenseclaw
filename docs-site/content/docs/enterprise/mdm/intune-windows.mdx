@@ -134,7 +134,13 @@ first install. Deliver three apps, in this order:
    base app as its dependency (**Automatically install: Yes**). Upload the
    generated `detect-bundle.ps1` as its custom detection rule.
 
-Until the bundle app installs, the computer enforces the base app's policy. Keep the base config's rules the same as the bundle's (the packager checks this) so that window does not change what is blocked. See [Install order with a signed bundle](/docs/enterprise/mdm#install-order-with-a-signed-bundle).
+Until the bundle app installs, the computer enforces the base app's policy. The
+packager compares only the `guardrail:` block (apart from each custom pack's path)
+and the `claude_code:`, `codex:`, `connector_hooks:` and `application_protection:`
+blocks. No other setting is compared. Copy every other enforcement setting the
+bundle sets, such as `asset_policy:`, into the base config too, or the base app
+can allow what the bundle blocks until the bundle installs. See
+[Install order with a signed bundle](/docs/enterprise/mdm#install-order-with-a-signed-bundle).
 
 ```powershell
 ./New-DefenseClawIntunePackage.ps1 `

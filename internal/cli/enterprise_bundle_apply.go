@@ -54,9 +54,10 @@ apply of the current bundle is a no-op (already_applied). On Linux and macOS,
 files it processed; every lower version it processed gets a receipt that ends
 failed with superseded. One run processes at most 16 inbox files, in file-name
 order; the rest stay for the next run. Windows has no inbox: give --bundle.
-If the current-version directory is damaged, ensure and repair keep the
-installed config, warn bundle_state_unreadable and still repair the host:
-deliver a new signed bundle to replace it.
+If the current-version directory is damaged, ensure and repair on Linux and
+macOS keep the installed config, warn bundle_state_unreadable and still repair
+the host. On Windows they stop with bundle_restore_failed and repair nothing.
+Either way, deliver a new signed bundle to replace it.
 --defer-restart refuses a bundle whose config change restarts the gateway
 before anything changes (restart_deferred, exit 75, Windows 1618): the
 restart_prediction of bundle verify. --delivery-id records an opaque caller id (1 to 128 of A-Z a-z 0-9 . _ : -)

@@ -364,6 +364,9 @@ deliver a **base config** that matches the bundle:
   `claude_code`, `codex` or `connector_hooks.<connector>` overrides the guardrail
   mode for that agent, so a base config that sets `mode: observe` there only
   reports calls the bundle blocks. Comments and blank lines don't count.
+- No other setting is compared. Copy every other enforcement setting the bundle
+  sets, such as `asset_policy:`, into the base config too, or the base config can
+  allow what the bundle blocks until the bundle applies.
 - The wrapper compares these blocks as text, so write the base config plainly:
   ASCII only, with LF or CRLF line endings (a tab, a lone CR or a non-ASCII byte
   is refused, even in a comment; one UTF-8 byte order mark at the start is
