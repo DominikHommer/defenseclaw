@@ -280,6 +280,8 @@ install. Before you deploy, have each user run
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
 device enforces: `defenseclaw config get`, `guardrail`, `status` and other
 per-user commands exit `3` and name it, and `doctor` reports the device as managed.
+That is the per-user CLI, where one is still on the user's `PATH`; the packaged
+`defenseclaw` refuses those commands with exit `2`.
 
 A per-user gateway still running holds the managed port `127.0.0.1:18970` unless
 its user moved it. The install then stops before it changes anything with

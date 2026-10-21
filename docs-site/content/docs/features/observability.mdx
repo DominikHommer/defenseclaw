@@ -1,6 +1,6 @@
 ---
 title: Observability
-description: DefenseClaw records every event once, keeps local history, and sends redacted copies to the destinations you choose.
+description: DefenseClaw records every event once, keeps a local history of its logs, and sends redacted copies to the destinations you choose.
 keywords:
   - DefenseClaw observability
   - OTLP
@@ -9,19 +9,21 @@ keywords:
   - Grafana
 ---
 
-DefenseClaw collects each event once and builds one record from it. The record is stored in local history and sent to any destinations you add: an OpenTelemetry (OTLP) collector, Splunk, Galileo, a file, or a webhook. Each destination picks the buckets it wants and applies its own redaction.
+DefenseClaw collects each event once and builds one record from it. Log records are stored in local history. Every record, logs, traces and metrics, goes to the destinations you add: an OpenTelemetry (OTLP) collector, Splunk, Galileo, a file, or a webhook. Each destination picks the buckets it wants and applies its own redaction.
 
 <Flow
   direction="TB"
   compact
-  caption="Each event becomes one record. Local SQLite keeps every collected log. Each destination selects and redacts its own copy, limited to the signals its kind supports."
+  caption="Each event becomes one record. Local SQLite keeps every collected log; traces and metrics go only to destinations. Each destination selects and redacts its own copy, limited to the signals its kind supports."
 >
   <Node id="src" kind="agent">{`Event sources\nagent · guardrail · scan\npolicy · platform`}</Node>
   <Node id="collect" kind="gateway">{`Bucket collection\nlogs · traces · metrics`}</Node>
   <Node id="rec" kind="generic">Record</Node>
   <Node id="sqlite" kind="datastore">{`Local SQLite\nevery log`}</Node>
   <Node id="dest" kind="generic">{`Your destinations\nOTLP · Splunk HEC · Galileo\nfile · webhook`}</Node>
-  <Edge from="rec" to="sqlite" />
+  <Edge from="src" to="collect" />
+  <Edge from="collect" to="rec" label="collected buckets" />
+  <Edge from="rec" to="sqlite" label="logs only" />
   <Edge from="rec" to="dest" label="redacted copy" />
 </Flow>
 
@@ -39,7 +41,8 @@ With no redaction profile, an enabled destination receives prompts, responses, t
 
 ## What it does not do
 
-- It does not replace the audit log. Local history is the durable record; destinations are copies.
+- It does not keep traces or metrics locally. Local history holds logs; traces and metrics exist only at the destinations you send them to.
+- It does not replace the audit log. For logs, local history is the durable record; destinations are copies.
 - It does not backfill. Records that a destination missed while it was down or while the gateway restarted are not resent. Export the local history if you need them.
 - Dashboards add no redaction of their own. They show what the destination received.
 - Webhook alerts to Slack, PagerDuty or Webex are a separate feature. They notify; they do not export telemetry.

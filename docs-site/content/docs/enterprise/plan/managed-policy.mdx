@@ -13,7 +13,18 @@ the only policy. Only the lifecycle (and a migration it runs) writes the config.
 Under the Secure Client profile none of this applies. The model is in
 [Configuration: one source of truth](/docs/reference/configuration/source-of-truth).
 
-These attempts are refused, also for root, and write nothing:
+On Linux and macOS the enterprise package installs `defenseclaw` as a launcher
+that runs only `defenseclaw sandbox` commands. Every other command, readers
+included, prints this and exits `2`:
+
+```text
+This computer is managed; only `defenseclaw sandbox` commands are available here.
+```
+
+Windows has no launcher: `defenseclaw.exe` there is the administrator command.
+
+A per-user Python CLI left from an earlier install also finds the host managed.
+It refuses these attempts, also for root, and writes nothing:
 
 | Attempt | Result |
 | --- | --- |
@@ -24,12 +35,11 @@ These attempts are refused, also for root, and write nothing:
 | `POST` or `DELETE` on the gateway's `/enforce/block`, `POST` on `/enforce/allow` | HTTP `403` with `{"error": "managed_device", "detail": "policy changes are made in the management plane"}` |
 
 The gateway records each refusal in the audit log with
-`outcome=refused reason=managed_device`. On Linux and macOS the CLI reports
+`outcome=refused reason=managed_device`. On Linux and macOS the launcher (for
+`config`, `guardrail` and `policy` writers and `uninstall`) and the CLI report
 through the hook socket, so a standard user's refusal is recorded with the
 account the kernel reports (`actor=uid:501 user=alice`). Windows has no hook
 socket: only a refusal by an account that holds the gateway token is recorded.
-The enterprise packages ship no `defenseclaw` CLI, so these commands matter
-where a per-user install left one behind.
 
 To block or allow an asset, add it to `asset_policy` in the admin config and
 apply the config:

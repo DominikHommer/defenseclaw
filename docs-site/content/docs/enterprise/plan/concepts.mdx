@@ -131,8 +131,8 @@ Files on a host fall into four kinds. See
 The one code path that writes `config.yaml`, in Go and in the `defenseclaw` CLI.
 It takes `config.yaml.lock`, validates, writes atomically and records the write
 and its actor in `config.generation.json`. On a managed standalone host it
-refuses every actor but `lifecycle` and `migration`, so `defenseclaw config set`
-exits `3` there. See
+refuses every actor but `lifecycle` and `migration`, so a per-user `defenseclaw config set`
+exits `3` there (on Linux and macOS the packaged `defenseclaw` refuses it first, with exit `2`). See
 [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
 
 ### Config generation

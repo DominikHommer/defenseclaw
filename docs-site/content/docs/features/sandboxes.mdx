@@ -1,6 +1,6 @@
 ---
 title: Sandboxes
-description: Run Claude Code, Codex and other coding agents in skip-permissions mode inside NVIDIA OpenShell sandboxes, with DefenseClaw judging every tool call and every site.
+description: Run Claude Code, Codex and other coding agents in skip-permissions mode inside NVIDIA OpenShell sandboxes, with DefenseClaw judging every tool call and the sites its web traffic reaches.
 keywords:
   - DefenseClaw sandbox
   - NVIDIA OpenShell
@@ -9,7 +9,7 @@ keywords:
   - OpenShell MicroVM
 ---
 
-`defenseclaw sandbox run` runs a coding agent in its skip-permissions mode inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox. The agent sees only your project folder. DefenseClaw still checks every tool call and every site the agent contacts, and at the end you review what changed and keep it, undo it or pull it back.
+`defenseclaw sandbox run` runs a coding agent in its skip-permissions mode inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox. The agent sees only your project folder. DefenseClaw still checks every tool call and every site its web traffic reaches; model calls go straight to the model provider. At the end you review what changed and keep it, undo it or pull it back.
 
 ```bash
 cd ~/code/myapp
@@ -25,7 +25,7 @@ Use it when you want an agent to work without stopping to ask. Claude Code's ski
 The sandbox is a locked room that holds only your project folder. Two layers build it.
 
 - **OpenShell builds the room.** A container on Linux by default, a MicroVM on a Mac. The workload has no network of its own, runs as your uid with no capabilities, and is held in by Landlock and seccomp. Its only way out is OpenShell's supervisor.
-- **DefenseClaw adds the judgment.** Hooks inside the sandbox send every tool call to the DefenseClaw daemon, which applies the same rule packs, guardrails and judge as outside. The egress proxy decides and logs every site. DefenseClaw also hides secret files, protects git internals, snapshots the folder and reviews what changed.
+- **DefenseClaw adds the judgment.** Hooks inside the sandbox send every tool call to the DefenseClaw daemon, which applies the same rule packs, guardrails and judge as outside. The egress proxy decides and logs every site the web traffic reaches. Model calls bypass it: OpenShell sends them straight to the provider and adds the real key ([Sandbox network](/docs/reference/sandboxes/network)). DefenseClaw also hides secret files, protects git internals, snapshots the folder and reviews what changed.
 
 | Inside the room, the agent can | Outside the room, it cannot |
 | --- | --- |
@@ -41,7 +41,7 @@ The sandbox reaches your machine only at `host.openshell.internal`, through a ho
 <Flow direction="TB" caption="A sandbox's life, one stage per list item below, with review and keep shared in step 4. Setup is once per machine. Every run after it repeats steps 2 to 5.">
   <Node id="setup" kind="operator">{`Set up the machine\nonce: defenseclaw sandbox setup`}</Node>
   <Node id="run" kind="operator">{`Start or resume a sandbox\nsandbox run · sandbox connect`}</Node>
-  <Node id="session" kind="agent">{`The agent works\nevery tool call and site checked`}</Node>
+  <Node id="session" kind="agent">{`The agent works\ntool calls and web traffic checked`}</Node>
   <Node id="review" kind="decision">{`Review what changed\nfiles that can run code flagged`}</Node>
   <Node id="keep" kind="operator">{`Decide what to keep\nLinux: keep or undo · Mac: bring back`}</Node>
   <Node id="stop" kind="generic">{`Sandbox stopped and kept\nresume it later, or delete it`}</Node>
@@ -54,25 +54,18 @@ The sandbox reaches your machine only at `host.openshell.internal`, through a ho
 
 1. **Setup** checks the machine, installs OpenShell when you agree and builds the harness images.
 2. **Run** creates a sandbox for the folder you are in, or resumes the one that holds it.
-3. **During the session** every tool call and every site is checked. Blocks and asks appear in the activity feed.
+3. **During the session** every tool call, and every site reached through the egress proxy, is checked. Blocks and asks appear in the activity feed.
 4. **At the end** you review the changed files that could run code on your machine, then keep, undo or pull them. On Linux with Docker you keep or undo the changes. On a Mac, a MicroVM or with `--copy`, you apply them, put them on a branch, write a patch, or leave them in the sandbox.
 5. **Stop or delete.** The sandbox is kept: `defenseclaw sandbox connect NAME` resumes it, `defenseclaw sandbox delete NAME` removes it.
 
-## Linux and macOS
+## Where it runs
 
-Sandboxes run on Linux (amd64 and arm64) and on Macs with Apple silicon. They do not run on Windows, WSL2, Intel Macs or as root. The driver decides how a sandbox behaves. On Linux with Docker your folder is mounted live; on a Mac, or with any MicroVM, the agent works on a copy. Hooks, policy packs, the egress proxy, asks and telemetry are the same on both. [Platforms, agents and images](/docs/features/sandbox-details) compares the two and lists requirements and the agents that run.
+Linux (amd64 or arm64) with Docker Engine 28 and a Landlock kernel, or an Apple-silicon Mac with Docker Desktop and Homebrew, as your own user. Not on Windows, WSL2, Intel Macs or as root. Setup installs OpenShell 0.1.5 or later. On Linux with Docker your folder is mounted live; on a Mac, or with any MicroVM, the agent works on a copy.
 
-## Requirements
-
-OpenShell 0.1.5 or later (setup installs it), your own user rather than root, and Docker Engine 28 and a Landlock kernel on Linux, or Docker Desktop and Homebrew on an Apple-silicon Mac. See [Requirements](/docs/features/sandbox-details#requirements).
-
-## Which agents run
-
-Claude Code, Codex, GitHub Copilot CLI, OpenCode, Kiro CLI, Hermes Agent and Antigravity. Amp, Cursor Agent and Devin CLI cannot run yet. See [Which agents run](/docs/features/sandbox-details#which-agents-run).
+Claude Code, Codex, GitHub Copilot CLI, OpenCode, Kiro CLI, Hermes Agent and Antigravity run. Amp, Cursor Agent and Devin CLI cannot run yet. [Platforms, agents and images](/docs/features/sandbox-details) has the details.
 
 ## What it does not do
 
-- It does not run on Windows, WSL2 or Intel Macs.
 - It does not stop a program from using the model credential through the harness's own program, because OpenShell opens the model host around the egress proxy.
 - It does not inspect HTTPS paths or bodies.
 

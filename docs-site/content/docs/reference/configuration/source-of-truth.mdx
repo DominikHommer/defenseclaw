@@ -156,7 +156,7 @@ Evidence records what was applied. It is not policy; editing it makes a verifica
 
 Runtime state is what the product saw or did. `status` and `doctor` report it; it is never policy.
 
-- Approvals granted at a prompt ([HITL](/docs/features/hitl)).
+- Approvals granted at a prompt ([HITL](/docs/features/guardrail#which-agents-can-ask)).
 - The AI-discovery inventory ([AI discovery](/docs/reference/scanning/ai-discovery)).
 - Quarantine records and the quarantined files.
 - The enforcement journal in `audit.db`: the quarantine and runtime-disable
@@ -217,7 +217,7 @@ A managed host is a device on the standalone enterprise profile (`deployment_mod
 
 ### Local writers refuse
 
-Every local command that would change policy refuses on a managed standalone host, changes nothing and exits `3`:
+Every local command that would change policy refuses on a managed standalone host and changes nothing. On Linux and macOS the packaged `defenseclaw` runs only `sandbox` commands and refuses the rest with exit `2`. A per-user CLI left from an earlier install exits `3`:
 
 ```text
 error: This device is managed: change config.yaml in the admin config (MDM or management plane), not on the device

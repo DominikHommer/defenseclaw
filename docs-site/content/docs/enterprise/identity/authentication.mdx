@@ -122,7 +122,7 @@ defenseclaw agent ide-plugins --user alice --ai-only
 
 `subject` shows the user ID, the principal, the UPN and the groups as the gateway resolves them, the same way it does for a live request. `--user` takes the account name as `getent passwd` (or `id`) shows it, a uid or a SID, in any case.
 
-A managed install has no `defenseclaw` CLI. As root, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector codex` (macOS: `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ...`; Windows: `defenseclaw.exe enterprise windows ...` from an elevated prompt). The full set is in [Identity detail](/docs/enterprise/identity/reference#check-a-user-on-a-managed-install). For troubleshooting, see [Troubleshooting identity](/docs/enterprise/identity/sources#troubleshooting-identity).
+On a managed install, `defenseclaw` runs only `sandbox` commands. As root, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector codex` (macOS: `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ...`; Windows: `defenseclaw.exe enterprise windows ...` from an elevated prompt). The full set is in [Identity detail](/docs/enterprise/identity/reference#check-a-user-on-a-managed-install). For troubleshooting, see [Troubleshooting identity](/docs/enterprise/identity/sources#troubleshooting-identity).
 
 ## Turn off the principal or the IDE inventory
 

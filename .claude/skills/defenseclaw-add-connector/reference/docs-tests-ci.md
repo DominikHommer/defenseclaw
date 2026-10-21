@@ -21,7 +21,7 @@ Python: cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS
   +- cli/defenseclaw/platform_support.py WINDOWS_CONNECTOR_SUPPORT <-> Go platform_support.go
        checked by test_platform_support.py (regex against Go, plus hard-coded sets) and
        test_windows_release_claims.py test_windows_release_metadata_is_exact (hard-coded sets)
-       +- docs-site/content/docs/connectors/meta.json pages (minus index, compatibility)
+       +- docs-site/content/docs/connectors/(hook-connectors|proxy-connectors)/meta.json pages
        |    must equal the WINDOWS_CONNECTOR_SUPPORT keys
        +- each <id>.mdx "## Platform support" rows + connectors/index.mdx platform table
        |    checked by test_connector_pages_are_the_canonical_cross_platform_support_source
@@ -34,7 +34,7 @@ Python: cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS
 ### Connector page: `docs-site/content/docs/connectors/<id>.mdx`
 
 - **Frontmatter.** `title`, `description` and a `keywords:` list. The schema is in `docs-site/source.config.ts`.
-- **Navigation.** The sidebar comes from `meta.json` files. `docs-site/content/docs/meta.json` already lists the `connectors` folder, so a new page needs only its id in `connectors/meta.json` (§2).
+- **Navigation.** The sidebar comes from `meta.json` files. `docs-site/content/docs/meta.json` already lists the `connectors` folder, so a new page needs only a `../<id>` entry in the group folder that fits it: `connectors/(hook-connectors)/meta.json` or `connectors/(proxy-connectors)/meta.json`, and the same under `reference/connectors/` (§2). A group folder holds only its `meta.json`; the pages stay in `connectors/`, so URLs do not change.
 - **Section order.** Follow `copilot.mdx`, `claudecode.mdx`, `codex.mdx` or `hermes.mdx`:
   1. `## Platform support`
   2. `## Setup`, with `<Tabs items={['macOS / Linux', 'Windows']}>`
@@ -55,7 +55,7 @@ Python: cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS
 
 | File | What to add | Checked by |
 |---|---|---|
-| `docs-site/content/docs/connectors/meta.json` | the page id in `pages` | `test_windows_release_claims._active_connector_docs` (must equal the Windows taxonomy) |
+| `docs-site/content/docs/connectors/(hook-connectors)/meta.json` (or `(proxy-connectors)`) | `../<id>` in `pages` | `test_windows_release_claims._active_connector_docs` (must equal the Windows taxonomy) |
 | `docs-site/data/capability-matrix.json` | a row with `id`, `label`, `windowsSupport`, `windowsNote`, `summary`, `family`, `toolInspection`, `subprocessPolicy`, `hooks{canBlock,canAskNative,askEvents,blockEvents,supportsFailClosed,scope}`, `hilt`, `notes`; bump `_lastVerified` | Go test: `family` (from `LLMTrafficModeForConnector`), `toolInspection` (`ToolModeBoth` is spelled `"pre-execution + response-scan"`), `subprocessPolicy`, and the exact `HookCapabilities()`. `docs-site/scripts/test-feature-demos.ts` checks that `windowsSupport` is present. **Nothing** cross-checks `windowsSupport` against `platform_support.go`. |
 | `docs-site/data/connector-icons.ts` | LobeHub source, target and accent | `docs-site/scripts/sync-connector-icons.ts` runs at `postinstall`; commit `docs-site/public/connector-icons/<id>.svg` |
 | `docs-site/components/connector-brand.tsx` `FALLBACKS` | initials and color when there is no LobeHub icon (zeptoclaw, omnigent) | nothing |

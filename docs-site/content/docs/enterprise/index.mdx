@@ -10,7 +10,8 @@ keywords:
 ---
 
 Enterprise deployment installs DefenseClaw as operating-system services that
-administrators own. Users, and the agents they run, cannot turn it off.
+administrators own. Users, and the agents they run, cannot stop the services or change
+the policy.
 
 ## Is this for you?
 
@@ -62,7 +63,7 @@ the agent runs as the user.
   </Zone>
   <Zone id="z4" label="Z4 · User session (the user)" tone="untrusted">
     <Node id="agent" kind="agent">{`AI agent\nruns as the user`}</Node>
-    <Node id="hook" kind="connector">{`defenseclaw-hook\nruns on each tool call`}</Node>
+    <Node id="hook" kind="connector">{`defenseclaw-hook\nruns on each hooked tool call`}</Node>
   </Zone>
   <Zone id="z2" label="Z2 · Gateway (service account)" tone="restricted">
     <Node id="gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
@@ -77,6 +78,13 @@ the agent runs as the user.
   <Edge from="cfg" to="gw" label="read by" />
 </Flow>
 
+How far the hook reaches depends on the connector. Claude Code, Codex, Cursor, GitHub
+Copilot and OpenCode load DefenseClaw's hooks from administrator-owned machine policy,
+so a supported client starts with them. Per-user connectors (Devin, Antigravity, Hermes,
+Amp, Kiro) are registered only in the agent's default config: a session started with
+another config home, `devin --config <file>` or Hermes `--safe-mode` is not inspected or
+logged. The [threat model](/docs/enterprise/plan/threat-model#disable-hooks) lists each case.
+
 The gateway listens on `127.0.0.1:18970`; the guardian reconciles every minute and the
 enumerator runs every five. Service names per OS are in
 [Concepts](/docs/enterprise/plan/concepts#service-names-by-os), and the files in each zone
@@ -88,28 +96,29 @@ in the [threat model](/docs/enterprise/plan/threat-model#trust-zones) and the in
 ## Who can change what
 
 Administrators and the MDM write the config, policies, secrets, binaries, services and
-vendor machine policy. A standard user, and any agent they run, can write none of them:
-they run the hook and own their own agent config, where the guardian repairs
-DefenseClaw's entries and the [foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard)
-handles hooks the user adds. An agent has exactly the rights of its user, and an agent
-with unrestricted `sudo` or administrator rights is an administrator. The
+vendor machine policy. A standard user, and any agent they run, can write none of them;
+an agent with unrestricted `sudo` or administrator rights is an administrator. The
+guardian repairs DefenseClaw's entries in each user's agent config, and the
+[foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard) handles hooks a user adds. The
 [threat model](/docs/enterprise/plan/threat-model#what-a-standard-user-cannot-do) lists
 what a standard user cannot do and the risks that remain.
 
 ## Policy changes on a managed host
 
 On a managed standalone host, `config.yaml` and the policy assets it names are the
-only policy. Local writers refuse, also for root:
+only policy. On Linux and macOS, the `defenseclaw` command users get runs only
+sandbox commands:
 
 ```text
 $ defenseclaw config set guardrail.mode action
-error: This device is managed: change config.yaml in the admin config (MDM or management plane), not on the device
+This computer is managed; only `defenseclaw sandbox` commands are available here.
 ```
 
-The command exits `3` and writes nothing. The same applies to `skill`, `mcp`,
-`plugin` and `tool` `block` and `allow`, and to the gateway's `/enforce/*` calls
-(HTTP `403`, `managed_device`). To block or allow an asset, add it to `asset_policy`
-in the admin config and apply the config. Details: [Policy changes on a managed host](/docs/enterprise/plan/managed-policy).
+It exits `2` and writes nothing. A per-user CLI left from an earlier install refuses
+policy writers too, also for root, with exit `3` and `This device is managed: ...`.
+The gateway's `/enforce/*` calls answer HTTP `403` `managed_device`. To block or allow
+an asset, add it to `asset_policy` in the admin config and apply the config. Details:
+[Policy changes on a managed host](/docs/enterprise/plan/managed-policy).
 
 ## A minimal config
 

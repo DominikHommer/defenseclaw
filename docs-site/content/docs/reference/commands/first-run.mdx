@@ -12,21 +12,21 @@ After the [install](/docs/get-started/install), DefenseClaw is on disk but not c
 
 <Flow
   direction="TB"
-  caption="init asks its questions first; quickstart takes safe defaults. Both then run the same steps. --skip-gateway (quickstart) or --no-start-gateway (init) skips step 3."
+  caption="init asks its questions first; quickstart takes safe defaults. Both then run the same steps. --skip-gateway (quickstart) or --no-start-gateway (init) skips step 4."
 >
   <Node id="quick" kind="operator">{`defenseclaw quickstart\nuses safe defaults`}</Node>
   <Node id="init" kind="operator">{`defenseclaw init\nasks you questions`}</Node>
-  <Node id="env" kind="generic">{`1. Prepares the data dir\naudit DB, policies, scanners`}</Node>
-  <Node id="guard" kind="connector">{`2. Connects your agent\nhooks, plugin or proxy`}</Node>
-  <Node id="gw" kind="gateway">{`3. Starts the gateway\ndefenseclaw-gateway`}</Node>
-  <Node id="config" kind="generic">{`4. Saves config.yaml\nyour choices or defaults`}</Node>
+  <Node id="config" kind="generic">{`1. Saves config.yaml\nyour choices or defaults`}</Node>
+  <Node id="env" kind="generic">{`2. Prepares the data dir\naudit DB, policies, scanners`}</Node>
+  <Node id="guard" kind="connector">{`3. Connects your agent\nhooks, plugin or proxy`}</Node>
+  <Node id="gw" kind="gateway">{`4. Starts the gateway\ndefenseclaw-gateway`}</Node>
   <Node id="report" kind="generic">{`5. Checks readiness\nprints the report`}</Node>
-  <Edge from="quick" to="env" label="defaults" />
-  <Edge from="init" to="env" label="your answers" />
+  <Edge from="quick" to="config" label="defaults" />
+  <Edge from="init" to="config" label="your answers" />
+  <Edge from="config" to="env" />
   <Edge from="env" to="guard" />
   <Edge from="guard" to="gw" />
-  <Edge from="gw" to="config" />
-  <Edge from="config" to="report" />
+  <Edge from="gw" to="report" />
 </Flow>
 
 ## `defenseclaw init`

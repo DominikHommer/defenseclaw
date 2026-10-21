@@ -1,19 +1,7 @@
 {
   "title": "Connectors",
   "pages": [
-    "---Hook connectors---",
-    "claudecode",
-    "codex",
-    "copilot",
-    "cursor",
-    "devin",
-    "antigravity",
-    "kiro",
-    "opencode",
-    "amp",
-    "hermes",
-    "---Proxy connectors---",
-    "openclaw",
-    "zeptoclaw"
+    "(hook-connectors)",
+    "(proxy-connectors)"
   ]
 }

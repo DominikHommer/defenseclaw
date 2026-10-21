@@ -710,7 +710,7 @@ rejections.
 | `POST` | `/v1/traces` | Ingest OTLP traces. |
 | `POST` | `/otlp/{source}/{token}/v1/{signal}` | Connector-scoped logs, metrics, or traces for a native exporter that cannot set an auth header. The path token is accepted only over loopback and is removed from route telemetry. |
 
-Parsing is in `internal/gateway/otel_ingest.go`; operator setup is on [Local observability](/docs/how-to/local-observability).
+Parsing is in `internal/gateway/otel_ingest.go`; operator setup is on [Run Grafana locally](/docs/how-to/observability/run-grafana-locally).
 
 ### Sandbox management
 

@@ -34,11 +34,15 @@ def _active_connector_docs() -> dict[str, Path]:
     connectors_dir = ROOT / "docs-site/content/docs/connectors"
     reference_dir = ROOT / "docs-site/content/docs/reference/connectors"
     navigation = json.loads((connectors_dir / "meta.json").read_text(encoding="utf-8"))
-    return {
-        connector_id: reference_dir / f"{connector_id}.mdx"
-        for connector_id in navigation["pages"]
-        if connector_id != "index" and not connector_id.startswith("---")
-    }
+    connector_ids: list[str] = []
+    for item in navigation["pages"]:
+        if item.startswith("("):
+            # A sidebar group folder: its meta.json lists the pages as "../<id>".
+            group = json.loads((connectors_dir / item / "meta.json").read_text(encoding="utf-8"))
+            connector_ids.extend(page.removeprefix("../") for page in group["pages"])
+        elif item != "index" and not item.startswith("---"):
+            connector_ids.append(item)
+    return {connector_id: reference_dir / f"{connector_id}.mdx" for connector_id in connector_ids}
 
 
 def _connector_text(connector_id: str) -> str:

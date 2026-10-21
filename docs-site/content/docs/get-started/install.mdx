@@ -70,13 +70,10 @@ On a computer your organization manages, the per-user installer and `defenseclaw
 ## Check it worked
 
 ```bash
-defenseclaw --version
 defenseclaw version
 ```
 
 ```text
-defenseclaw, version X.Y.Z
-
   DefenseClaw versions
 
   COMPONENT  VERSION  STATUS   ORIGIN
@@ -88,7 +85,7 @@ defenseclaw, version X.Y.Z
   OK All components in sync.
 ```
 
-Then run `defenseclaw doctor`. Each row is `[PASS]`, `[WARN]`, `[FAIL]` or `[SKIP]`; the sidecar and hook rows are `[FAIL]` until you set up an agent and start the gateway.
+Then run `defenseclaw doctor`. Each row is `[PASS]`, `[WARN]`, `[FAIL]` or `[SKIP]`; the sidecar and hook rows are `[FAIL]` until you set up an agent and start the gateway. A trimmed example (your rows and counts differ):
 
 ```text
 DefenseClaw Doctor
