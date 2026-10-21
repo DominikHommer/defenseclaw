@@ -915,7 +915,7 @@ func TestOversizedPayload(t *testing.T) {
 		"claudecode": {stdout: `{"decision":"block","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
 		"codex":      {stdout: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook payload too large"}}` + "\n", code: 0},
 		"cursor":     {stdout: cursorFallbackOutput("PreToolUse", true, "DefenseClaw hook payload too large") + "\n", code: 2},
-		"copilot":    {stdout: "", code: 0},
+		"copilot":    {stdout: `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw blocked this tool call: it is too large for DefenseClaw to inspect. Make it smaller and try again."}` + "\n", code: 0},
 		"hermes":     {stdout: "", code: 0},
 	}
 	for connector, want := range cases {
@@ -1454,9 +1454,11 @@ func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
 	}
 }
 
-// Per-user Copilot hooks fail open on every DefenseClaw-side failure;
-// administrator-managed (standalone enterprise) Copilot hooks deny the tool
-// call with Copilot's native structured decision instead.
+// A Copilot hook denies the tool call on every DefenseClaw-side failure with
+// Copilot's native structured decision: an administrator-managed
+// (standalone enterprise) hook always, a per-user hook in fail mode closed
+// with a text that says why and what to do. A per-user hook in fail mode open
+// lets the call run.
 func TestCopilotFailureContract(t *testing.T) {
 	type failureCase struct {
 		name   string
@@ -1482,31 +1484,81 @@ func TestCopilotFailureContract(t *testing.T) {
 		}},
 	}
 	for _, tc := range cases {
-		for _, managedHook := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/managed=%t", tc.name, managedHook), func(t *testing.T) {
+		for _, hook := range []string{"managed", "per-user closed", "per-user open"} {
+			t.Run(tc.name+"/"+hook, func(t *testing.T) {
 				result := run(t, "copilot", tc.rt, func(o *Options) {
 					o.Event = "preToolUse"
 					o.FailMode = "closed"
-					o.StrictAvailability = true
-					o.ManagedEnterprise = managedHook
+					switch hook {
+					case "managed":
+						o.StrictAvailability = true
+						o.ManagedEnterprise = true
+					case "per-user open":
+						o.FailMode = "open"
+					}
 					if tc.mutate != nil {
 						tc.mutate(o)
 					}
 				})
-				want := ""
-				if managedHook {
-					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw policy service is unavailable."}` + "\n"
-				} else if tc.name == "unavailable-home" {
-					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}` + "\n"
+				if result.code != 0 {
+					t.Fatalf("Copilot failure result: code=%d stdout=%q stderr=%q, want 0", result.code, result.stdout, result.stderr)
 				}
-				if result.code != 0 || result.stdout != want {
-					t.Fatalf(
-						"Copilot failure result: code=%d stdout=%q stderr=%q, want stdout %q",
-						result.code, result.stdout, result.stderr, want,
-					)
+				switch {
+				case hook == "managed":
+					want := `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw policy service is unavailable."}` + "\n"
+					if result.stdout != want {
+						t.Fatalf("managed: stdout=%q stderr=%q, want %q", result.stdout, result.stderr, want)
+					}
+				case hook == "per-user open":
+					if result.stdout != "" {
+						t.Fatalf("per-user open: stdout=%q stderr=%q, want the fail-open result", result.stdout, result.stderr)
+					}
+				case tc.name == "unavailable-home":
+					want := `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}` + "\n"
+					if result.stdout != want {
+						t.Fatalf("per-user closed: stdout=%q, want %q", result.stdout, want)
+					}
+				default:
+					var answer struct {
+						Decision string `json:"permissionDecision"`
+						Reason   string `json:"permissionDecisionReason"`
+					}
+					if err := json.Unmarshal([]byte(result.stdout), &answer); err != nil || answer.Decision != "deny" ||
+						!strings.HasPrefix(answer.Reason, "DefenseClaw blocked this tool call: ") || strings.Contains(answer.Reason, "administrator") {
+						t.Fatalf("per-user closed: stdout=%q stderr=%q, want Copilot's deny with the per-user reason", result.stdout, result.stderr)
+					}
 				}
 			})
 		}
+	}
+}
+
+// A per-user Copilot permission request DefenseClaw cannot check in fail mode
+// closed gets Copilot's permissionRequest deny, and the hook-failure log says
+// the call was refused; the events Copilot cannot block keep the fail-open
+// result.
+func TestPerUserCopilotClosedDeniesPermissionRequestsAndLogsClosed(t *testing.T) {
+	for _, tc := range []struct{ event, want string }{
+		{"permissionRequest", `"behavior":"deny"`},
+		{"sessionStart", ""},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			var home string
+			result := run(t, "copilot", &stubRT{err: errors.New("connection refused")}, func(o *Options) {
+				o.Event = tc.event
+				o.FailMode = "closed"
+				home = o.Home
+			})
+			if result.code != 0 || (tc.want == "") != (result.stdout == "") || !strings.Contains(result.stdout, tc.want) {
+				t.Fatalf("code=%d stdout=%q stderr=%q, want %q", result.code, result.stdout, result.stderr, tc.want)
+			}
+			if tc.want == "" {
+				return
+			}
+			if logged := lastHookFailure(t, home)["fail_mode"]; logged != "closed" {
+				t.Fatalf("logged fail_mode = %q, want closed", logged)
+			}
+		})
 	}
 }
 

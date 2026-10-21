@@ -416,13 +416,71 @@ def test_connector_fail_mode_report_uses_disposable_windows_runtime(
     assert report["current"] is True
 
 
-@pytest.mark.parametrize("connector", ["antigravity", "copilot"])
-def test_connector_fail_mode_report_upstream_fail_open_preserves_configured_but_reports_open(
+@pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
+def test_native_deny_connector_reports_the_mode_its_hook_renders(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    connector: str,
+) -> None:
+    # A per-user Copilot CLI, Antigravity or Hermes hook follows its fail
+    # mode: closed blocks every failure DefenseClaw sees, and the report names
+    # the vendor limit it keeps.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    script = f"{connector}-hook.sh"
+    hook = Path(cfg.data_dir) / "hooks" / script
+    hook.write_text("\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8")
+
+    report = connector_fail_mode_report(cfg, connector)
+
+    assert report["configured"] == "closed"
+    assert report["effective"] == "closed"
+    assert report["runtime"] == "closed"
+    assert report["provenance"] == "hook-script"
+    assert report["current"] is True
+    label = {"antigravity": "Antigravity", "copilot": "Copilot", "hermes": "Hermes"}[connector]
+    assert report["note"] == (
+        f"DefenseClaw failures block; {label} itself lets a call run when the hook times out or cannot start"
+    )
+
+    # A hook rendered open while config says closed is drift, so doctor and
+    # verify report it instead of passing.
+    hook.write_text("\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/open"]) + "\n", encoding="utf-8")
+    report = connector_fail_mode_report(cfg, connector)
+    assert report["effective"] == "open"
+    assert report["desired"] == "closed"
+    assert report["current"] is False
+    assert report["drift"] == ["hook-script-open"]
+    assert report["note"] == ""
+
+
+@pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
+def test_native_deny_connector_reads_the_windows_hookcfg(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connector: str,
 ) -> None:
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    (Path(cfg.data_dir) / "hooks" / ".hookcfg").write_text(
+        json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {connector: "open"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: True)
+
+    report = connector_fail_mode_report(cfg, connector)
+
+    assert report["runtime"] == "open"
+    assert report["drift"] == ["windows-sidecar-open"]
+
+
+@pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
+def test_secure_client_native_deny_connector_stays_upstream_fail_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    connector: str,
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: False
 
     report = connector_fail_mode_report(cfg, connector)
 
@@ -1005,8 +1063,9 @@ def test_hermes_reports_its_configured_fail_mode_on_every_os(
     assert report["configured"] == "closed"
     assert report["effective"] == "closed"
     assert report["provenance"] == "config"
+    assert report["drift"] == [("windows-sidecar" if windows else "hook-script") + "-missing"]
     assert fail_mode_runtime.upstream_fail_open(cfg, "hermes") is False
-    assert fail_mode_runtime.upstream_fail_open(cfg, "copilot") is True
+    assert fail_mode_runtime.upstream_fail_open(cfg, "copilot") is False
 
 
 # ── 1.0.4 review (GAP-0315): the environment only tightens ──────────────────

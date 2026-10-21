@@ -55,7 +55,13 @@ _EXPECTED_CONTRACTS = {
     ),
     "devin": frozenset({"devin-hooks-v1"}),
 }
+# Copilot CLI, Antigravity and Hermes have no fail-closed hook contract of
+# their own: each lets a call run when its hook times out or cannot start.
+# Their hooks block every other failure through the agent's native deny when
+# the fail mode is closed, so they follow it everywhere except under Secure
+# Client (upstream_fail_open).
 _UPSTREAM_FAIL_OPEN_CONNECTORS = frozenset({"antigravity", "copilot", "hermes"})
+_UPSTREAM_LIMIT_LABELS = {"antigravity": "Antigravity", "copilot": "Copilot", "hermes": "Hermes"}
 # The hook script each Unix shell registration must name (the connectors in
 # _EXPECTED_CONTRACTS that _unix_registration_freshness checks).
 _UNIX_REGISTRATION_HOOK_SCRIPTS = {
@@ -68,16 +74,12 @@ _UNIX_REGISTRATION_HOOK_SCRIPTS = {
 def upstream_fail_open(cfg: Any, connector: str) -> bool:
     """Whether *connector*'s hooks fail open whatever is configured.
 
-    Copilot CLI, Antigravity and Hermes have no fail-closed hook contract of
-    their own. A managed deployment outside Secure Client blocks their tool
-    calls through the connector's native deny instead, so they follow the
-    administrator's fail mode there (Config.managed_outside_secure_client).
-    The per-user Hermes hook (the Linux
-    and macOS shell hook and the Windows native hook) blocks a call it cannot
-    check through Hermes' block directive when its fail mode is closed, so
-    an unset fail mode resolves closed there as for every other connector
-    (rel-1-0-3 GAP-0150, GAP-0269); only the Secure Client profile keeps
-    Hermes open, as its hook render does (CapableHookFailMode).
+    Only the Secure Client profile keeps Copilot CLI, Antigravity and Hermes
+    open, as its hook render does (CapableHookFailMode). Per-user hooks (the
+    Linux and macOS shell hooks and the Windows native hook) and a managed
+    deployment outside Secure Client (Config.managed_outside_secure_client)
+    block a call they cannot check through the agent's native deny, so they
+    follow the configured fail mode; an unset one is closed.
     """
     name = normalize(connector)
     if name not in _UPSTREAM_FAIL_OPEN_CONNECTORS:
@@ -85,9 +87,16 @@ def upstream_fail_open(cfg: Any, connector: str) -> bool:
     standalone = getattr(cfg, "managed_outside_secure_client", None)
     if callable(standalone) and standalone():
         return False
-    if name == "hermes":
-        return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
-    return True
+    return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+
+
+def upstream_hook_limit(connector: str) -> str:
+    """The vendor limit of a closed Copilot CLI, Antigravity or Hermes hook, or ""."""
+
+    label = _UPSTREAM_LIMIT_LABELS.get(normalize(connector))
+    if not label:
+        return ""
+    return f"DefenseClaw failures block; {label} itself lets a call run when the hook times out or cannot start"
 
 
 _SHARED_RUNTIME_CONNECTORS = frozenset({"claudecode", "codex"})
@@ -121,6 +130,9 @@ class ConnectorFailModeState:
     runtime: str | None
     sources: tuple[tuple[str, str | None], ...]
     drift: tuple[str, ...]
+    # The vendor limit a closed hook of this connector keeps
+    # (upstream_hook_limit), or "".
+    limit: str = ""
 
     @property
     def current(self) -> bool:
@@ -166,8 +178,12 @@ class ConnectorFailModeState:
         config.yaml next to ``open`` in its observe-mode hooks is intended;
         reporting says so instead of looking like drift (GAP-0129). Every
         other connector follows its configured value in observe mode too.
+        A closed Copilot CLI, Antigravity or Hermes hook names the vendor
+        limit it keeps instead.
         """
 
+        if self.limit and self.effective == "closed":
+            return self.limit
         if self.configured == self.desired or self.effective != self.desired:
             return ""
         return (
@@ -211,6 +227,9 @@ def resolve_connector_fail_mode(
     desired = normalize_fail_mode(resolver(name) if callable(resolver) else configured)
     sources: list[tuple[str, str | None]] = [("config", configured)]
     drift: list[str] = []
+
+    if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+        return _resolve_native_deny_fail_mode(cfg, name, configured, desired)
 
     runtime_source = _platform_runtime_source(cfg, name)
     sources.append(runtime_source)
@@ -287,6 +306,42 @@ def resolve_connector_fail_mode(
     )
 
 
+def _resolve_native_deny_fail_mode(cfg: Any, name: str, configured: str, desired: str) -> ConnectorFailModeState:
+    """Resolve a Copilot CLI, Antigravity or Hermes hook from what it renders.
+
+    Their hooks record the mode in the hook script (Linux, macOS) or in
+    .hookcfg (the Windows native hook). A rendered mode other than the
+    configured one is drift: an open hook while config says closed lets calls
+    run with the gateway down.
+    """
+
+    sources: list[tuple[str, str | None]] = [("config", configured)]
+    drift: list[str] = []
+    runtime_source = _platform_runtime_source(cfg, name)
+    sources.append(runtime_source)
+    runtime = runtime_source[1]
+    if runtime_source[0].endswith("-legacy"):
+        drift.append("windows-sidecar-legacy")
+    process_env = _inherited_fail_mode(cfg, name, os.environ.get("DEFENSECLAW_FAIL_MODE"))
+    if process_env is not None:
+        sources.append(("process-env", process_env))
+        runtime = process_env
+    for source, mode in sources[1:]:
+        if mode is None:
+            drift.append(f"{source}-missing")
+        elif mode != desired:
+            drift.append(f"{source}-{mode}")
+    return ConnectorFailModeState(
+        connector=name,
+        desired=desired,
+        configured=configured,
+        runtime=runtime,
+        sources=tuple(sources),
+        drift=tuple(dict.fromkeys(drift)),
+        limit=upstream_hook_limit(name),
+    )
+
+
 def connector_fail_mode_report(
     cfg: Any,
     connector: str,
@@ -314,7 +369,7 @@ def connector_fail_mode_report(
                 {"name": f"{name}-upstream", "mode": "open"},
             ],
         }
-    if name in _EXPECTED_CONTRACTS or name == "opencode":
+    if name in _EXPECTED_CONTRACTS or name == "opencode" or name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
         return resolve_connector_fail_mode(
             cfg,
             name,

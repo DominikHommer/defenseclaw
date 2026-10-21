@@ -74,6 +74,7 @@ from defenseclaw.fail_mode import (
     restore_fail_mode_transaction,
     snapshot_fail_mode_transaction,
     upstream_fail_open,
+    upstream_hook_limit,
 )
 
 # Note: ``defenseclaw.commands.cmd_setup._restart_services`` is
@@ -865,13 +866,24 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 fail_drift = f" (desired {runtime_state.desired}; drift: " + ", ".join(runtime_state.drift) + ")"
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
         elif upstream_fail_open(app.cfg, name):
-            # Copilot CLI, Antigravity and Hermes fail open upstream whatever
-            # is configured; `defenseclaw status` reports the same.
+            # Under Secure Client, Copilot CLI, Antigravity and Hermes fail
+            # open upstream whatever is configured; `defenseclaw status`
+            # reports the same.
             cfm = "open"
             runtime_limit_rows.append(
                 f"{_connector_label(name)} ({name}) is upstream-enforced fail-open"
                 f" (configured provenance: {configured_cfm})"
             )
+        elif upstream_hook_limit(name):
+            # Everywhere else their hooks follow the fail mode they render.
+            runtime_state = resolve_connector_fail_mode(app.cfg, name)
+            cfm = runtime_state.effective
+            enforcing = gc.enabled and (gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True)
+            if runtime_state.drift and enforcing:
+                fail_drift = f" (desired {runtime_state.desired}; drift: " + ", ".join(runtime_state.drift) + ")"
+                runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
+            if cfm == "closed":
+                runtime_limit_rows.append(f"{_connector_label(name)} ({name}) is closed: {runtime_state.limit}")
         elif _cursor_stays_fail_closed(gc, name):
             # Cursor hooks always fail closed in action mode, whatever is
             # saved; show that, like `guardrail fail-mode` (GAP-1717).
@@ -1455,13 +1467,12 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     # whether it is an override or inherited from the global default.
     if mode is None:
         click.echo()
-        if normalize_connector(key) == "hermes" and upstream_fail_open(app.cfg, key):
-            runtime_value = "open (Hermes upstream; failures cannot be made fail-closed)"
-        elif normalize_connector(key) == "hermes":
-            # Outside Secure Client the Hermes hook follows its resolved
-            # value on every OS (GAP-0150, GAP-0269); it has no separate
-            # runtime record to read.
-            runtime_value = current
+        if upstream_fail_open(app.cfg, key):
+            runtime_value = f"open ({label} upstream; failures cannot be made fail-closed)"
+        elif runtime_state.limit:
+            runtime_value = runtime_state.effective
+            if runtime_value == "closed":
+                runtime_value += f" ({runtime_state.limit})"
         else:
             runtime_value = runtime_state.runtime or "unknown"
         click.echo(f"  {ux.bold(f'{label} ({key}) hook_fail_mode:')} {ux.accent(runtime_value)}")
@@ -1809,9 +1820,17 @@ def fail_mode_cmd(
                 if _state.drift:
                     _eff += f" (desired {_state.desired}; drift: {', '.join(_state.drift)})"
             elif upstream_fail_open(app.cfg, _name):
-                # Copilot CLI, Antigravity and Hermes fail open upstream, as
-                # status, doctor and guardrail status say (GAP-0336).
+                # Under Secure Client, Copilot CLI, Antigravity and Hermes fail
+                # open upstream, as status, doctor and guardrail status say
+                # (GAP-0336).
                 _eff = f"open ({_connector_label(_name)} upstream; configured provenance: {_eff})"
+            elif upstream_hook_limit(_name):
+                _state = resolve_connector_fail_mode(app.cfg, _name)
+                _eff = _state.effective
+                if _state.drift:
+                    _eff += f" (desired {_state.desired}; drift: {', '.join(_state.drift)})"
+                elif _state.note:
+                    _eff += f" ({_state.note})"
             elif _is_proxy_connector(_name):
                 _eff = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
             elif _cursor_stays_fail_closed(gc, _name):

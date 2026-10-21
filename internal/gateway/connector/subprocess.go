@@ -1555,8 +1555,8 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     connectors stay fail-open and rely on their config writer to omit
 //     vendor fail-closed fields, except in a managed standalone render,
 //     whose hooks block through the native deny, and for the per-user
-//     Hermes hook, which blocks through Hermes' block directive
-//     (CapableHookFailMode, hookBlocksItsOwnFailures).
+//     Copilot CLI, Antigravity and Hermes hooks, which block through the
+//     agent's native deny (CapableHookFailMode, hookBlocksItsOwnFailures).
 //
 // Transport-layer failures (gateway unreachable / timeout / 5xx) follow
 // FailMode too. DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
@@ -1634,8 +1634,8 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 // resolved mode: open when mode is closed but the connector's hook surface
 // cannot fail closed (SupportsFailClosed). A managed standalone render keeps
 // closed (managedStandaloneRender): its hooks block a call they cannot check
-// through the connector's native deny. The per-user Hermes hook keeps closed
-// too (hookBlocksItsOwnFailures).
+// through the connector's native deny. The per-user Copilot CLI, Antigravity
+// and Hermes hooks keep closed too (hookBlocksItsOwnFailures).
 func CapableHookFailMode(opts SetupOpts, conn Connector, mode string) string {
 	if mode != "closed" || managedStandaloneRender(opts) || hookBlocksItsOwnFailures(opts, conn) {
 		return mode

@@ -849,6 +849,8 @@ def test_copilot_stale_launcher_returns_executable_invariant(monkeypatch, tmp_pa
         "_windows_native_hook_check",
         lambda *_args, **_kwargs: WindowsHookCheck("stale", "registered launcher executable is stale"),
     )
+    # os.name is faked: the Windows .hookcfg path cannot be built on this host.
+    monkeypatch.setattr("defenseclaw.fail_mode._platform_runtime_source", lambda *_args: ("windows-sidecar", None))
     readiness = cmd_doctor.connector_setup_readiness(cfg, "copilot")
     assert not readiness
     assert (readiness.connector, readiness.invariant) == ("copilot", "executable")

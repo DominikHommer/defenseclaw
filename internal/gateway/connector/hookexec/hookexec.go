@@ -1720,7 +1720,7 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 		return allowFailClosedStop(opts, sp, reason, "transport")
 	}
 	logHookFailure(opts, sp, reason, "transport", failMode, closes)
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+	if code, handled := copilotFailClosed(opts, sp, "transport", reason); handled {
 		return code
 	}
 	if closes {
@@ -1798,7 +1798,7 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 	if code, handled := hermesFailClosed(opts, sp, "oversized", "stdin body exceeded cap"); handled {
 		return code
 	}
-	if code, handled := managedCopilotFailClosed(opts, sp, "stdin body exceeded cap"); handled {
+	if code, handled := copilotFailClosed(opts, sp, "oversized", "stdin body exceeded cap"); handled {
 		return code
 	}
 	if closes {
@@ -1839,7 +1839,7 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	blocked := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
 	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
 	if !managedCopilotOpen(opts, sp, failMode) {
-		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		if code, handled := copilotFailClosed(opts, sp, "transport", reason); handled {
 			return code
 		}
 	}
@@ -2082,7 +2082,7 @@ func failUnenrolled(opts Options, sp spec, reason string) int {
 	}
 	reportUnenrolledRefusal(opts, sp, reason)
 	logHookFailure(opts, sp, reason, "transport", "closed", true)
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+	if code, handled := copilotFailClosed(opts, sp, "transport", reason); handled {
 		return code
 	}
 	why := unenrolledAccountExplanation
@@ -2210,7 +2210,7 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 		return code
 	}
 	if !managedCopilotOpen(opts, sp, failMode) {
-		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		if code, handled := copilotFailClosed(opts, sp, "response", reason); handled {
 			return code
 		}
 	}
@@ -2277,22 +2277,26 @@ func failInvalidManagedCopilotBinding(opts Options, sp spec) int {
 	return 0
 }
 
-// managedCopilotFailClosed denies an administrator-managed Copilot tool call
-// when DefenseClaw itself cannot decide. Copilot has no fail-closed hook
-// contract (its own timeouts and non-JSON errors allow), so per-user Copilot
-// hooks fail open; a managed hook still owns Copilot's native structured
-// deny for preToolUse and permissionRequest and uses it. Other events cannot
-// block and keep the fail-open result.
+// copilotFailClosed denies a Copilot tool call when DefenseClaw itself cannot
+// decide. Copilot has no fail-closed hook contract (its own timeouts and
+// non-JSON errors allow), but it honors its native structured deny for
+// preToolUse and permissionRequest, so a managed hook and a per-user hook in
+// fail mode closed (perUserCopilotFailClosed) use it. layer is the failure
+// layer (transport, response, oversized, policy) the per-user text names.
+// Other events cannot block and keep the fail-open result.
 //
 // The same transport failure paths give a Hermes tool call that fails closed
 // its block (hermesFailClosed): Hermes too has no fail-closed hook contract
 // and blocks only through its native directive.
-func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) {
+func copilotFailClosed(opts Options, sp spec, layer, reason string) (int, bool) {
 	if sp.connector == "hermes" {
 		return hermesFailClosed(opts, sp, "transport", reason)
 	}
-	if !opts.ManagedEnterprise || sp.connector != "copilot" {
+	if sp.connector != "copilot" {
 		return 0, false
+	}
+	if !opts.ManagedEnterprise {
+		return perUserCopilotFailClosed(opts, sp, layer, reason)
 	}
 	text := managedCopilotDenyMessage(reason)
 	if reason == managedUIDUnregisteredReason {
@@ -2323,6 +2327,38 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 		}
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s\n", sp.subject, reason)
+	fmt.Fprintln(opts.Stdout, body)
+	return 0, true
+}
+
+// perUserCopilotFailsClosed reports a per-user Copilot CLI hook that fails
+// closed: its fail mode is not explicitly open, or strict availability is on.
+// The VS Code Local surface has a fail-closed contract of its own.
+func perUserCopilotFailsClosed(opts Options, sp spec) bool {
+	return sp.connector == "copilot" && !opts.ManagedEnterprise && sp.dialect != copilotVSCodeLocalSurface &&
+		(opts.StrictAvailability || normalizeFailMode(opts.FailMode) == "closed")
+}
+
+// perUserCopilotFailClosed denies a per-user Copilot CLI tool call or
+// permission request that DefenseClaw could not check, in fail mode closed,
+// with Copilot's native deny and a text that says why and what to do
+// (perUserFailClosedText), as copilot-hook.sh does on Linux and macOS.
+// handled is false for every other invocation.
+func perUserCopilotFailClosed(opts Options, sp spec, layer, reason string) (int, bool) {
+	if !perUserCopilotFailsClosed(opts, sp) {
+		return 0, false
+	}
+	message := mustJSONString(perUserFailClosedText(opts, layer, reason))
+	var body string
+	switch opts.Event {
+	case "preToolUse":
+		body = `{"permissionDecision":"deny","permissionDecisionReason":` + message + `}`
+	case "permissionRequest":
+		body = `{"behavior":"deny","message":` + message + `}`
+	default:
+		return 0, false
+	}
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s (fail mode closed): %s\n", sp.subject, reason)
 	fmt.Fprintln(opts.Stdout, body)
 	return 0, true
 }
@@ -2372,7 +2408,7 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 		return emitHookResult(opts, sp, sp.openAllow)
 	}
 	logHookFailure(opts, sp, reason, "policy", "closed", true)
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+	if code, handled := copilotFailClosed(opts, sp, "policy", reason); handled {
 		return code
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s\n", sp.subject, reason)
