@@ -74,11 +74,9 @@ func TestClosedShellHookCutsAStalledAnswerAtTheToolCallBudget(t *testing.T) {
 			if !blocked {
 				t.Fatalf("a stalled answer did not block the call: err=%v output=%s", err, out)
 			}
-			if elapsed > 6*time.Second {
-				t.Logf("DBG %s %s", elapsed, out)
-				if false {
-					t.Fatalf("%s, ", elapsed)
-				}
+			if requests.Load() == 0 || elapsed < 3*time.Second || elapsed > 6*time.Second {
+				t.Fatalf("a stalled answer held the call %s (%d requests), want it cut at the tool-call budget (about 4 s); output=%s",
+					elapsed, requests.Load(), out)
 			}
 		})
 	}
