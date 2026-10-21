@@ -1,0 +1,282 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package cli
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+)
+
+// writeLegacyWindowsScannerRuntimeAdmission writes the schema 1 record
+// DefenseClaw 1.0.3 wrote, which an --allow-unsigned certification install
+// wrote alike for its unsigned scanner, naming path's digest.
+func writeLegacyWindowsScannerRuntimeAdmission(t *testing.T, root, path string) (record, digest string) {
+	t.Helper()
+	digest, err := windowsEnterpriseFileSHA256(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record = filepath.Join(root, managed.StandaloneWindowsScannerRuntimeAdmissionName)
+	body := `{"schema_version":1,"sha256":"` + digest + `","admitted_at":"2026-10-01T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(record, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return record, digest
+}
+
+// W2B-G-win review loop round 1: on 1.0.3 an --allow-unsigned
+// certification install published its unsigned scanner and a schema 1
+// admission record into the shared production runtime. Since round 3 a
+// certification run leaves that folder alone, so its uninstall no longer
+// removed the scanner and the production gateway kept running it. Every
+// mutating certification run, of every scope, now quarantines such a
+// record (a 1.0.3 gateway refuses the scanner then too); it never touches a
+// record that proves a production admission, makes no lock file when there
+// is nothing to quarantine, and status and verify stay read-only.
+func TestWindowsScannerRuntimeCertificationRunQuarantinesAnUnprovenAdmission(t *testing.T) {
+	root, runtimeFile := newWindowsScannerRuntimeRemovalTest(t)
+	deploymentSeam := windowsScannerRuntimeDeployment
+	t.Cleanup(func() { windowsScannerRuntimeDeployment = deploymentSeam })
+	windowsScannerRuntimeDeployment = func(*windowsEnterpriseLifecycleOptions) (winpath.EnterpriseDeployment, error) {
+		return winpath.EnterpriseDeployment{}, errors.New("a certification run read the production deployment record")
+	}
+	scopes := map[string]func(*windowsEnterpriseLifecycleOptions){
+		"state root": func(o *windowsEnterpriseLifecycleOptions) {
+			o.stateRoot = `C:\ProgramData\Cisco\DefenseClaw-Cert\r1\state`
+		},
+		"install root": func(o *windowsEnterpriseLifecycleOptions) {
+			o.installRoot = `C:\Program Files\Cisco\DefenseClaw-Cert\r1`
+		},
+		"gateway service name": func(o *windowsEnterpriseLifecycleOptions) { o.gatewayServiceName = "DefenseClawGatewayCert1" },
+		"guardian service":     func(o *windowsEnterpriseLifecycleOptions) { o.guardianServiceName = "DefenseClawGuardianCert1" },
+		"allow unsigned":       func(o *windowsEnterpriseLifecycleOptions) { o.allowUnsigned = true },
+		"codex home":           func(o *windowsEnterpriseLifecycleOptions) { o.certificationCodexHome = `C:\dc-cert\codex-home` },
+	}
+	run := func(name, action string, failed bool) *enterprisestatus.Result {
+		opts := &windowsEnterpriseLifecycleOptions{productVersion: "1.0.4"}
+		scopes[name](opts)
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		result.Installed = action != "uninstall"
+		if failed {
+			result.AddError("lifecycle_failed", "the lifecycle failed")
+		}
+		applyWindowsStandaloneScannerRuntime(result, opts)
+		return result
+	}
+	for name := range scopes {
+		for _, action := range []string{"install", "upgrade", "repair", "ensure", "uninstall"} {
+			// A failed run quarantines too: the scanner is no safer for it.
+			for _, failed := range []bool{false, true} {
+				label := fmt.Sprintf("%s %s (failed=%v)", name, action, failed)
+				record, _ := writeLegacyWindowsScannerRuntimeAdmission(t, root, runtimeFile)
+				result := run(name, action, failed)
+				if _, err := os.Lstat(record); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s kept the unproven admission record (%v): the production gateway still runs the scanner it names", label, err)
+				}
+				if !windowsEnterpriseResultHasWarning(result, "scanner_runtime_admission_quarantined") ||
+					windowsEnterpriseResultHasError(result, "scanner_runtime_admission_unproven") {
+					t.Fatalf("%s: errors %+v warnings %+v, want scanner_runtime_admission_quarantined", label, result.Errors, result.Warnings)
+				}
+				if err := managed.CheckScannerRuntimeAdmitted(root, runtimeFile); !errors.Is(err, managed.ErrScannerRuntimeNotAdmitted) {
+					t.Fatalf("%s: the scanner is still admitted: %v", label, err)
+				}
+				if _, err := os.Stat(runtimeFile); err != nil {
+					t.Fatalf("%s removed the production runtime: %v", label, err)
+				}
+			}
+		}
+		for _, action := range []string{"status", "verify"} {
+			record, _ := writeLegacyWindowsScannerRuntimeAdmission(t, root, runtimeFile)
+			result := run(name, action, false)
+			if _, err := os.Lstat(record); err != nil || windowsEnterpriseResultHasWarning(result, "scanner_runtime_admission_quarantined") {
+				t.Fatalf("%s %s is read-only but quarantined the record (%v)", name, action, err)
+			}
+		}
+	}
+	// A record that proves a production admission is the production
+	// deployment's: no certification run changes it or makes a lock file.
+	if err := os.Remove(filepath.Join(root, windowsScannerRuntimeLockName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	digest, err := windowsEnterpriseFileSHA256(runtimeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := managed.WriteScannerRuntimeAdmission(root, digest, managed.ScannerRuntimeTrustAuthenticode); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeAdmissionName)
+	want, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range scopes {
+		for _, action := range []string{"install", "uninstall"} {
+			result := run(name, action, false)
+			got, err := os.ReadFile(record)
+			if err != nil || string(got) != string(want) || len(result.Errors) != 0 ||
+				windowsEnterpriseResultHasWarning(result, "scanner_runtime_admission_quarantined") {
+				t.Fatalf("%s %s changed a production admission record (%v): %q, errors %+v", name, action, err, got, result.Errors)
+			}
+			if _, err := os.Lstat(filepath.Join(root, windowsScannerRuntimeLockName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s %s made a lock file in the production runtime (%v)", name, action, err)
+			}
+		}
+	}
+}
+
+// W2B-G-win review loop round 1: a production repair or ensure from the
+// installed CLI meets a schema 1 admission record before it runs the
+// scanner. It records the executable again as a production admission only
+// when the runtime passes the trust check, the executable still has the
+// recorded digest and this run's payload trust policy admits it; any other
+// record is quarantined, so the scanner is not run (prepare included) until
+// a production /repair admits the payload copy. A run whose deployment is
+// no longer installed leaves the record to the run that owns the runtime.
+func TestWindowsScannerRuntimeProductionRunProvesOrQuarantinesAnUnprovenAdmission(t *testing.T) {
+	root, runtimeFile := newWindowsScannerRuntimeRemovalTest(t)
+	aclSeam, sourceSeam := windowsScannerRuntimeACLCheck, windowsScannerSourceCheck
+	t.Cleanup(func() { windowsScannerRuntimeACLCheck, windowsScannerSourceCheck = aclSeam, sourceSeam })
+	windowsScannerSourceCheck = func(string, string) error { return nil }
+	aclErr := error(nil)
+	windowsScannerRuntimeACLCheck = func(string, string) error { return aclErr }
+	deployment := winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, ProductVersion: "1.0.4"}
+	setWindowsScannerRuntimeDeploymentTest(t, func() winpath.EnterpriseDeployment { return deployment })
+	digest, err := windowsEnterpriseFileSHA256(runtimeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := func(pin string) *windowsEnterpriseLifecycleOptions {
+		return &windowsEnterpriseLifecycleOptions{productVersion: "1.0.4", trustMode: windowsEnterpriseTrustHashPinned,
+			payloadPins: map[string]string{managed.StandaloneWindowsScannerRuntimeName: pin}}
+	}
+	authenticode := &windowsEnterpriseLifecycleOptions{productVersion: "1.0.4", trustMode: windowsEnterpriseTrustAuthenticode}
+	for _, tc := range []struct {
+		name       string
+		opts       *windowsEnterpriseLifecycleOptions
+		acl        error
+		changed    bool
+		quarantine string
+	}{
+		{name: "unsigned, authenticode", opts: authenticode, quarantine: "not admitted by the standalone payload trust policy"},
+		{name: "not pinned", opts: pinned(strings.Repeat("0", 64)), quarantine: "not admitted by the standalone payload trust policy"},
+		{name: "changed since its record", opts: pinned(""), changed: true, quarantine: "is not the executable its record names"},
+		{name: "untrusted folder", opts: pinned(digest), acl: errors.New("Users can write the runtime folder"), quarantine: "Users can write"},
+		{name: "pinned by this payload", opts: pinned(digest)},
+	} {
+		if err := os.WriteFile(runtimeFile, []byte("runtime"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		record, _ := writeLegacyWindowsScannerRuntimeAdmission(t, root, runtimeFile)
+		if tc.changed {
+			if err := os.WriteFile(runtimeFile, []byte("another program"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			changed, err := windowsEnterpriseFileSHA256(runtimeFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.opts.payloadPins[managed.StandaloneWindowsScannerRuntimeName] = changed
+		}
+		aclErr = tc.acl
+		why, err := settleUnprovenWindowsScannerRuntimeAdmission("repair", tc.opts)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if tc.quarantine == "" {
+			if got, err := managed.ReadScannerRuntimeAdmission(root); err != nil || got != digest || why != "" {
+				t.Fatalf("%s: the pinned executable was not recorded as a production admission: %q, %v (%s)", tc.name, got, err, why)
+			}
+			continue
+		}
+		if _, err := os.Lstat(record); !errors.Is(err, os.ErrNotExist) || !strings.Contains(why, tc.quarantine) {
+			t.Fatalf("%s: record kept (%v) or reason %q, want it quarantined because %q", tc.name, err, why, tc.quarantine)
+		}
+	}
+	aclErr = nil
+
+	// The whole repair from the installed CLI: the unsigned scanner is not
+	// prepared (run) and the run says why.
+	if err := os.WriteFile(runtimeFile, []byte("runtime"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeAdmissionName)
+	for _, action := range []string{"repair", "ensure"} {
+		writeLegacyWindowsScannerRuntimeAdmission(t, root, runtimeFile)
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		result.Installed = true
+		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{productVersion: "1.0.4", trustMode: windowsEnterpriseTrustAuthenticode})
+		if _, err := os.Lstat(record); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s kept the unproven record: %v", action, err)
+		}
+		if strings.Contains(fmt.Sprint(result.Errors), "could not be prepared") || result.Scanners == nil || result.Scanners.State != "untrusted" ||
+			!windowsEnterpriseResultHasWarning(result, "scanner_runtime_admission_quarantined") ||
+			!windowsEnterpriseResultHasWarning(result, "scanner_runtime_unavailable") {
+			t.Fatalf("%s ran or accepted the unproven scanner: scanners %+v errors %+v warnings %+v", action, result.Scanners, result.Errors, result.Warnings)
+		}
+	}
+
+	// Not this run's deployment any more: left to the run that owns it.
+	for _, later := range []winpath.EnterpriseDeployment{
+		{State: winpath.EnterpriseDeploymentInstalled, ProductVersion: "1.0.5"},
+		{State: winpath.EnterpriseDeploymentTombstone},
+	} {
+		deployment = later
+		record, _ := writeLegacyWindowsScannerRuntimeAdmission(t, root, runtimeFile)
+		if why, err := settleUnprovenWindowsScannerRuntimeAdmission("repair", authenticode); err != nil || why != "" {
+			t.Fatalf("%+v: %q, %v", later, why, err)
+		}
+		if _, err := os.Lstat(record); err != nil {
+			t.Fatalf("%+v: a superseded run changed the record: %v", later, err)
+		}
+	}
+}
+
+// W2B-G-win review loop round 1: a production install, upgrade, repair or
+// ensure with a staged payload settles a schema 1 record before it admits
+// the staged copy, so a staged copy the trust policy refuses does not leave
+// the unproven record (and the unsigned scanner it names) behind.
+func TestWindowsScannerRuntimeStagedRunQuarantinesAnUnprovenAdmission(t *testing.T) {
+	root, installer, _ := stageWindowsScannerRuntimeTest(t)
+	aclSeam := windowsScannerRuntimeACLCheck
+	t.Cleanup(func() { windowsScannerRuntimeACLCheck = aclSeam })
+	windowsScannerRuntimeACLCheck = func(string, string) error { return nil }
+	gateway, err := managed.WindowsServiceAccountSID(windowsScannerGatewayAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureWindowsScannerRuntimeRoot(root, gateway); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
+	setWindowsScannerRuntimeDeploymentTest(t, func() winpath.EnterpriseDeployment {
+		return winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, ProductVersion: "1.0.4"}
+	})
+	for _, action := range []string{"install", "upgrade", "repair", "ensure"} {
+		if err := os.WriteFile(target, []byte("unsigned certification scanner"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		record, _ := writeLegacyWindowsScannerRuntimeAdmission(t, root, target)
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{resolvedInstaller: installer,
+			trustMode: windowsEnterpriseTrustAuthenticode, productVersion: "1.0.4"})
+		if _, err := os.Lstat(record); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s kept the unproven record beside a refused staged copy: %v", action, err)
+		}
+		if !windowsEnterpriseResultHasError(result, "scanner_runtime_unavailable") {
+			t.Fatalf("%s: errors %+v, want the staged copy refused", action, result.Errors)
+		}
+	}
+}

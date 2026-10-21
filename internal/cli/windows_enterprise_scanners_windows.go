@@ -146,6 +146,19 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 		// (review loop round 3).
 		switch action {
 		case "install", "upgrade", "repair", "ensure", "uninstall":
+			// Such a run can only take trust away: an admission record that
+			// does not prove a production admission (the record a 1.0.3
+			// --allow-unsigned certification install wrote for its unsigned
+			// scanner) is removed, whatever else the run did, so no gateway
+			// runs that scanner (W2B-G-win review loop round 1).
+			if quarantined, err := quarantineUnprovenWindowsScannerRuntimeAdmission(); err != nil {
+				result.AddError("scanner_runtime_admission_unproven",
+					"the shared scanner runtime has an admission record that does not prove the production deployment admitted it, "+
+						"and this run could not quarantine it ("+err.Error()+"); remove "+managed.StandaloneWindowsScannerRuntimeAdmissionName+
+						" from the scanner runtime folder as an administrator, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair")
+			} else if quarantined {
+				result.AddWarning("scanner_runtime_admission_quarantined", windowsScannerRuntimeAdmissionQuarantined)
+			}
 			if len(result.Errors) == 0 {
 				result.AddWarning("scanner_runtime_not_scoped", windowsScannerRuntimeNotScoped)
 			}
@@ -259,6 +272,124 @@ var windowsScannerRuntimeReader = readWindowsScannerRuntime
 const windowsScannerRuntimeNotScoped = "this certification scope does not install, replace, prepare, remove or report the scanner runtime: " +
 	"its folder, admission record and access list belong to the production deployment, which every gateway on this computer runs scans from; " +
 	"scans in this scope fail closed unless the production deployment has a ready runtime"
+
+// windowsScannerRuntimeAdmissionQuarantined is the warning of a run that
+// removed an admission record no production admission proves.
+const windowsScannerRuntimeAdmissionQuarantined = "the shared scanner runtime had an admission record that does not prove the production deployment admitted it " +
+	"(DefenseClaw 1.0.3 and earlier wrote the same record for an --allow-unsigned or certification run's unsigned scanner), " +
+	"so the record was removed and no gateway runs that scanner; every scan fails closed until " +
+	"DefenseClawSetup-Enterprise-Standalone-x64.exe /repair admits the production payload copy again"
+
+// quarantineUnprovenWindowsScannerRuntimeAdmission removes an admission
+// record in the shared runtime root that does not prove a production
+// admission, under the scanner runtime lock. A certification or
+// --allow-unsigned run cannot prove anything for the production deployment,
+// so it never writes the record; removing one only makes every gateway,
+// a 1.0.3 one included, refuse the executable it named. A root that is not
+// the runtime's own real folder is refused. A record that already proves a
+// production admission, or none, leaves the root untouched (no lock file is
+// made).
+func quarantineUnprovenWindowsScannerRuntimeAdmission() (bool, error) {
+	root, err := windowsScannerRuntimeDir()
+	if err != nil {
+		return false, err
+	}
+	if _, unproven, err := managed.UnprovenScannerRuntimeAdmission(root); err != nil || !unproven {
+		return false, err
+	}
+	if err := checkWindowsScannerRuntimeRootForRemoval(root); err != nil {
+		return false, err
+	}
+	if err := winpath.RejectReparseChain(root); err != nil {
+		return false, err
+	}
+	release, err := lockWindowsScannerRuntime(root)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	if _, unproven, err := managed.UnprovenScannerRuntimeAdmission(root); err != nil || !unproven {
+		return false, err
+	}
+	if err := managed.RemoveScannerRuntimeAdmission(root); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// proveWindowsScannerRuntimeAdmissionLocked settles, under the scanner
+// runtime lock, in a production run whose deployment is installed, an
+// admission record that does not prove a production admission (one
+// DefenseClaw 1.0.3 or earlier wrote, which an --allow-unsigned run wrote
+// alike for an unsigned scanner). The executable it names is recorded again,
+// as a production admission, only when the runtime root and the executable
+// pass the trust check every run makes, the executable still has the digest
+// the record names, and this run's payload trust policy admits it as it
+// admits a staged copy. Otherwise the record is removed, so no gateway runs
+// the executable until a production /repair admits the payload copy, and
+// the reason is returned. A record that cannot be read is left: every reader
+// refuses it, and a staged copy replaces it.
+func proveWindowsScannerRuntimeAdmissionLocked(root string, opts *windowsEnterpriseLifecycleOptions) (string, error) {
+	recorded, unproven, err := managed.UnprovenScannerRuntimeAdmission(root)
+	if err != nil || !unproven {
+		return "", nil
+	}
+	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
+	proveErr := windowsScannerRuntimeACLCheck(root, target)
+	if proveErr == nil {
+		var got string
+		if got, proveErr = windowsEnterpriseFileSHA256(target); proveErr == nil && got != recorded {
+			proveErr = fmt.Errorf("%s (SHA-256 %s) is not the executable its record names (SHA-256 %s)", target, got, recorded)
+		}
+	}
+	trust := ""
+	if proveErr == nil {
+		trust, proveErr = admitWindowsScannerRuntimePayload(target, recorded, opts)
+	}
+	if proveErr == nil {
+		if err := managed.WriteScannerRuntimeAdmission(root, recorded, trust); err != nil {
+			return "", fmt.Errorf("record the proven scanner runtime: %w", err)
+		}
+		return "", nil
+	}
+	if err := managed.RemoveScannerRuntimeAdmission(root); err != nil {
+		return "", fmt.Errorf("quarantine the unproven scanner runtime admission record (%v): %w", proveErr, err)
+	}
+	return proveErr.Error(), nil
+}
+
+// settleUnprovenWindowsScannerRuntimeAdmission is
+// proveWindowsScannerRuntimeAdmissionLocked for a production run from the
+// installed CLI: it takes the scanner runtime lock and acts only while the
+// deployment record names this run's deployment. It returns why it
+// quarantined the record, or "".
+func settleUnprovenWindowsScannerRuntimeAdmission(action string, opts *windowsEnterpriseLifecycleOptions) (string, error) {
+	root, err := windowsScannerRuntimeDir()
+	if err != nil {
+		return "", err
+	}
+	if _, unproven, err := managed.UnprovenScannerRuntimeAdmission(root); err != nil || !unproven {
+		return "", nil
+	}
+	release, err := lockWindowsScannerRuntime(root)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_PATH_NOT_FOUND) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+			return "", nil
+		}
+		return "", err
+	}
+	defer release()
+	owner, err := windowsScannerRuntimeOwnerOf(action, opts)
+	if err != nil {
+		return "", err
+	}
+	if !owner.ours {
+		// The run that owns the runtime now settles it; the gateway refuses
+		// the record meanwhile.
+		return "", nil
+	}
+	return proveWindowsScannerRuntimeAdmissionLocked(root, opts)
+}
 
 // windowsScannerRuntimeCertificationRun reports a run that must leave the
 // scanner runtime alone: a certification scope (its own roots or service
@@ -590,6 +721,13 @@ func installWindowsScannerRuntime(source, action string, opts *windowsEnterprise
 		}
 		return superseded
 	}
+	// A record that does not prove a production admission is proven again
+	// or quarantined first, so a staged copy the trust policy refuses below
+	// does not leave it behind for a gateway to run (W2B-G-win review loop
+	// round 1).
+	if _, err := proveWindowsScannerRuntimeAdmissionLocked(root, opts); err != nil {
+		return err
+	}
 	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
 	want, err := windowsEnterpriseFileSHA256(source)
 	if err != nil {
@@ -602,7 +740,8 @@ func installWindowsScannerRuntime(source, action string, opts *windowsEnterprise
 	// installed (a copy changed in place is restored). The admission is
 	// recorded: every later run of the installed executable checks it
 	// against that record first (GAP-0311).
-	if err := admitWindowsScannerRuntimePayload(source, want, opts); err != nil {
+	trust, err := admitWindowsScannerRuntimePayload(source, want, opts)
+	if err != nil {
 		return err
 	}
 	got, gotErr := windowsEnterpriseFileSHA256(target)
@@ -615,7 +754,7 @@ func installWindowsScannerRuntime(source, action string, opts *windowsEnterprise
 			}
 			copied = true
 		}
-		if err := managed.WriteScannerRuntimeAdmission(root, want); err != nil {
+		if err := managed.WriteScannerRuntimeAdmission(root, want, trust); err != nil {
 			return fmt.Errorf("record the admitted scanner runtime: %w", err)
 		}
 	}
@@ -648,27 +787,31 @@ func installWindowsScannerRuntime(source, action string, opts *windowsEnterprise
 // --allowed-signer pins, when any is given) or, in hash_pinned mode, the
 // SHA-256 the payload manifest pins. An --allow-unsigned run never gets
 // here (windowsScannerRuntimeCertificationRun), so nothing waives the
-// signature. digest is the SHA-256 of source.
-func admitWindowsScannerRuntimePayload(source, digest string, opts *windowsEnterpriseLifecycleOptions) error {
+// signature. digest is the SHA-256 of source. It returns the trust basis
+// that admitted source, which the admission record names.
+func admitWindowsScannerRuntimePayload(source, digest string, opts *windowsEnterpriseLifecycleOptions) (string, error) {
+	if opts == nil || windowsScannerRuntimeCertificationRun(opts) {
+		return "", errors.New("only a production run admits a scanner runtime payload")
+	}
 	if err := windowsScannerSourceCheck(source, "scanner runtime payload"); err != nil {
-		return err
+		return "", err
 	}
 	status := "not valid"
 	if _, certificate, err := verifyWindowsAuthenticode(source); err == nil {
 		if len(opts.allowedSigners) == 0 {
-			return nil
+			return managed.ScannerRuntimeTrustAuthenticode, nil
 		}
 		thumbprint := sha256.Sum256(certificate)
 		if slices.Contains(opts.allowedSigners, hex.EncodeToString(thumbprint[:])) {
-			return nil
+			return managed.ScannerRuntimeTrustAuthenticode, nil
 		}
 		status = "valid, from a signer --allowed-signer does not pin"
 	} else if opts.trustMode == windowsEnterpriseTrustHashPinned {
 		if pin, ok := opts.payloadPins[strings.ToLower(filepath.Base(source))]; ok && pin == digest {
-			return nil
+			return managed.ScannerRuntimeTrustHashPinned, nil
 		}
 	}
-	return fmt.Errorf("%s is not admitted by the standalone payload trust policy (Authenticode %s; trust mode %s)",
+	return "", fmt.Errorf("%s is not admitted by the standalone payload trust policy (Authenticode %s; trust mode %s)",
 		source, status, opts.trustMode)
 }
 
@@ -718,8 +861,9 @@ func windowsScannerRuntimeUnavailable(scanners *enterprisestatus.ScannerRuntime)
 			"DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, which puts back the runtime folder's protected permissions and the payload copy"
 	}
 	if state == "untrusted" {
-		return "the skill, MCP and plugin scanner runtime executable is not the one the payload trust policy admitted " +
-			"(it was changed or replaced outside DefenseClaw), so DefenseClaw does not run it, " + blocked +
+		return "the skill, MCP and plugin scanner runtime executable is not one the production payload trust policy admitted " +
+			"(it was changed or replaced outside DefenseClaw, or its admission record, from DefenseClaw 1.0.3 or earlier, " +
+			"does not prove a production admission), so DefenseClaw does not run it, " + blocked +
 			"; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair to restore the payload copy"
 	}
 	if state == "not_prepared" {
@@ -737,6 +881,18 @@ func windowsScannerRuntimeUnavailable(scanners *enterprisestatus.ScannerRuntime)
 // runtime lock and only while the deployment record names this run's
 // deployment, as the install from a payload does.
 func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
+	// An admission record that does not prove a production admission is
+	// proven again by this run's payload trust policy, or quarantined, before
+	// the runtime is read (W2B-G-win review loop round 1).
+	why, err := settleUnprovenWindowsScannerRuntimeAdmission(result.Action, opts)
+	if err != nil {
+		result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
+		result.Scanners = windowsScannerRuntimeReader()
+		return
+	}
+	if why != "" {
+		result.AddWarning("scanner_runtime_admission_quarantined", windowsScannerRuntimeAdmissionQuarantined+" (not proven: "+why+")")
+	}
 	current := windowsScannerRuntimeReader()
 	if current.State == "ready" {
 		result.Scanners = current

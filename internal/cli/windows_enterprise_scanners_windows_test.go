@@ -246,7 +246,7 @@ func TestWindowsScannerRuntimeIsAdmittedByThePayloadTrustPolicy(t *testing.T) {
 	}
 	pinned := &windowsEnterpriseLifecycleOptions{trustMode: windowsEnterpriseTrustHashPinned,
 		payloadPins: map[string]string{managed.StandaloneWindowsScannerRuntimeName: digest}}
-	if err := admitWindowsScannerRuntimePayload(source, digest, pinned); err != nil {
+	if _, err := admitWindowsScannerRuntimePayload(source, digest, pinned); err != nil {
 		t.Fatalf("a pinned digest was refused: %v", err)
 	}
 }
@@ -355,7 +355,7 @@ func TestWindowsScannerRuntimeChangedInPlaceIsNotRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := managed.WriteScannerRuntimeAdmission(root, admitted); err != nil {
+	if err := managed.WriteScannerRuntimeAdmission(root, admitted, managed.ScannerRuntimeTrustAuthenticode); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(target, []byte("another program"), 0o755); err != nil {
