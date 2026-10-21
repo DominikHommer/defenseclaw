@@ -9,12 +9,51 @@ package enterprisepolicy
 import (
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/posixacl"
+	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
 )
+
+// Review P1/P2 (GAP-0352, 1.0.4 guard loop round 1): the guardian units run
+// under ProtectSystem=strict, so the hold folder of the record folder (the
+// folder above it) must be writable to them, or every hold the guardian
+// puts in place before a removal fails, and a pass that cannot bump leaves
+// nothing the hook sees.
+func TestTheGuardianUnitsCanHoldTheSessionRecords(t *testing.T) {
+	layout, err := managed.StandaloneLayoutFor("linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	holds, ok := PublishedSessionHoldDir(layout.HookSessionDir)
+	if !ok {
+		t.Fatal("no hold folder")
+	}
+	for _, unit := range []string{"defenseclaw-hook-guardian.service", "defenseclaw-hook-guardian-reconcile.service"} {
+		data, err := systemdunits.ReadFile(unit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writable := false
+		for _, line := range strings.Split(string(data), "\n") {
+			value, found := strings.CutPrefix(strings.TrimSpace(line), "ReadWritePaths=")
+			if !found {
+				continue
+			}
+			for _, path := range strings.Fields(value) {
+				path = strings.TrimPrefix(path, "-")
+				writable = writable || path == holds || strings.HasPrefix(holds, path+"/")
+			}
+		}
+		if !writable {
+			t.Errorf("%s cannot write the hold folder %s", unit, holds)
+		}
+	}
+}
 
 // The Linux per-account folder gets one named-user entry (r-x) and a mask
 // without write, so its mode reads 0750 and no group-class entry can write.

@@ -195,7 +195,7 @@ func publishedSessionTestHoldDir(t *testing.T, root string) string {
 	return dir
 }
 
-// Review P2 (GAP-0352, 1.0.4 loop round 5): a lifecycle run or guardian
+// Review P2 (GAP-0352, 1.0.4 guard loop round 1): a lifecycle run or guardian
 // pass never takes over a file at its hold path that it did not make. A
 // standard user who could put one there first (the Windows Cisco folder
 // under a stock ProgramData access list) could delete it once a repair
@@ -286,7 +286,7 @@ func TestPublishedSessionHoldReplacesAHoldDefenseClawDidNotMake(t *testing.T) {
 	}
 }
 
-// Review P1/P2 (GAP-0352, 1.0.4 loop round 5): the guardian's hold of one
+// Review P1/P2 (GAP-0352, 1.0.4 guard loop round 1): the guardian's hold of one
 // account blocks every outage allow, of every account, as the bump it
 // stands in for would; it names its account, so a later pass can tell
 // whose removal it covers, and releasing it, or the lifecycle's hold, leaves

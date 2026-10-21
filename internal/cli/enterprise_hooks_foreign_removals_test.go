@@ -501,7 +501,7 @@ func TestEnterpriseForeignHookRemovalHoldsAccountsTheFullLedgerDrops(t *testing.
 	}
 }
 
-// Review P1 and P2 (GAP-0352, 1.0.4 loop round 5): the guardian holds the
+// Review P1 and P2 (GAP-0352, 1.0.4 guard loop round 1): the guardian holds the
 // records where the hook sees them before it publishes a removal, and
 // releases them only after the bump. Between the ledger write and the bump
 // the gateway denies from the new ledger, so the hook must not accept a
@@ -569,7 +569,7 @@ func TestEnterpriseForeignHookRemovalHoldsTheRecordsUntilTheBumpSucceeds(t *test
 	foreignHookRemovalTestAllow(t, root, "1002", process)
 }
 
-// Review P2 (GAP-0352, 1.0.4 loop round 5): a pass that stopped after it
+// Review P2 (GAP-0352, 1.0.4 guard loop round 1): a pass that stopped after it
 // published the removal and before the bump (the guardian was stopped or
 // crashed) left only its hold: no pending mark, and the next pass has no
 // files to record. That pass still finishes the work: it records an
@@ -623,7 +623,7 @@ func TestEnterpriseForeignHookRemovalFinishesAnInterruptedPass(t *testing.T) {
 	}
 }
 
-// Review P2 (GAP-0352, 1.0.4 loop round 5): a hold another account's pass
+// Review P2 (GAP-0352, 1.0.4 guard loop round 1): a hold another account's pass
 // left (that account may never get another pass: it was removed) does not
 // hold every account for ever. The next pass for any account holds that
 // account closed in the gateway first, so nothing of it can be allowed
@@ -669,7 +669,7 @@ func TestEnterpriseForeignHookRemovalEndsAHoldAnotherAccountLeft(t *testing.T) {
 	}
 }
 
-// Review P1 (GAP-0352, 1.0.4 loop round 5): a guardian whose lookup of the
+// Review P1 (GAP-0352, 1.0.4 guard loop round 1): a guardian whose lookup of the
 // standalone layout fails (on Windows, the protected ProgramData
 // registration) finds the record folder from its data directory, so the
 // removal still bumps the generation the hook reads, and the old allow

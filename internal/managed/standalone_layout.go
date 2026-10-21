@@ -240,7 +240,7 @@ func HookSessionHoldPrefix(root string) string {
 // layout itself (on Windows, a failed lookup of the protected ProgramData
 // registration): the data directory it already runs with names the same
 // folder, so it can still hold and invalidate the records (GAP-0352, 1.0.4
-// review loop round 5). False when dataDir is not that layout's.
+// guard loop round 1). False when dataDir is not that layout's.
 func StandaloneHookSessionDirForDataDir(goos, dataDir string) (string, bool) {
 	dataDir = strings.TrimSpace(dataDir)
 	if dataDir == "" {

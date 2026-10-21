@@ -580,7 +580,7 @@ func TestWindowsLifecycleHoldsTheRecordsFromItsStart(t *testing.T) {
 	}
 }
 
-// Review P2 (GAP-0352, 1.0.4 loop round 5): status names a hold the hook
+// Review P2 (GAP-0352, 1.0.4 guard loop round 1): status names a hold the hook
 // guardian left as well as the lifecycle's, and uninstall removes both.
 func TestWindowsHookSessionStatusAndUninstallCoverTheGuardiansHold(t *testing.T) {
 	root, self, _, _ := windowsHookSessionReplacementTestRoot(t, false)

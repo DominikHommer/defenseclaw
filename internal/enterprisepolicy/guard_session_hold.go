@@ -27,7 +27,7 @@ import (
 )
 
 // The holds of the protected session records (GAP-0352, 1.0.4 review loop
-// rounds 4 and 5).
+// round 4, guard loop round 1).
 //
 // A hold is a file whose name starts with <name of the record folder>.hold
 // (managed.HookSessionHoldPrefix) in the hold folder of the record folder
@@ -44,7 +44,7 @@ import (
 //     Cisco folder above the record folder: a stock ProgramData access list
 //     lets standard users create files there, so an account could put its
 //     own file at the hold path before a lifecycle run and delete it once
-//     the run failed (1.0.4 review loop round 5).
+//     the run failed (1.0.4 guard loop round 1).
 //
 // There are two kinds of hold:
 //
@@ -64,8 +64,8 @@ import (
 //     followed the removal succeeded. A pass that stops, or cannot bump, in
 //     between leaves it: the gateway already denies from the new removal
 //     ledger, so an allow of the generation the bump would have ended must
-//     not prove anything during an outage either (1.0.4 review loop round
-//     5).
+//     not prove anything during an outage either (1.0.4 guard loop round
+//     1).
 //
 // A file already at a hold path that DefenseClaw did not make (not a
 // regular file of this account, or one another account may change or

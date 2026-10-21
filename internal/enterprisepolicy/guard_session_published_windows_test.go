@@ -220,7 +220,7 @@ func TestPublishedSessionHoldGivesStandardUsersNoAccess(t *testing.T) {
 	}
 }
 
-// Review P2 (GAP-0352, 1.0.4 loop round 5): the holds are in the hook
+// Review P2 (GAP-0352, 1.0.4 guard loop round 1): the holds are in the hook
 // runtime folder, to which only SYSTEM and Administrators can add a file,
 // not in the Cisco folder above the record folder, where a stock
 // ProgramData access list lets a standard user create one first.
@@ -239,7 +239,7 @@ func TestPublishedSessionHoldIsInTheHookRuntimeFolder(t *testing.T) {
 	}
 }
 
-// Review P2 (GAP-0352, 1.0.4 loop round 5): a file at the hold path whose
+// Review P2 (GAP-0352, 1.0.4 guard loop round 1): a file at the hold path whose
 // DACL lets another account change or delete it (a standard user's own
 // file) is replaced by a hold closed to them before the run changes
 // anything; the run never keeps it as its hold.

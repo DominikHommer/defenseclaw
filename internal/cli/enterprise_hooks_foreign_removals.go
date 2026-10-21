@@ -59,7 +59,7 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 // Before it publishes anything it holds the records for the account
 // (enterprisepolicy.HoldPublishedSessionRemoval: a hold the hook sees, in a
 // folder no standard user can change), and it releases that hold only
-// after the bump succeeded (GAP-0352, 1.0.4 review loop round 5). Between
+// after the bump succeeded (GAP-0352, 1.0.4 guard loop round 1). Between
 // the ledger write and the bump the gateway already denies from the new
 // ledger, while an allow it wrote earlier still carries the generation the
 // bump ends; a pass that stops or cannot bump there leaves the hold, so the

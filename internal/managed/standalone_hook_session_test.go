@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// Review P1 (GAP-0352, 1.0.4 loop round 5): a hook guardian that cannot
+// Review P1 (GAP-0352, 1.0.4 guard loop round 1): a hook guardian that cannot
 // resolve the standalone layout (on Windows, a failed lookup of the
 // protected ProgramData registration) finds the protected session record
 // folder from the data directory it runs with, so it can still hold the
