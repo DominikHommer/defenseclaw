@@ -174,6 +174,52 @@ def test_group_coverage_names_every_reason_before_a_later_allow_for_everyone(mon
         assert reason in output
 
 
+def test_group_coverage_skips_members_an_earlier_rule_allowed(monkeypatch, capsys):
+    """Okta stops at a member's first matching rule: a later deny or exclusion never reaches them."""
+    rules = [_rule("allow U1", 1, {"users": {"include": ["U1"]}}),
+             _rule("deny contractors", 2, {"groups": {"include": ["G2"]}}, "DENY"),
+             _rule("group allow", 3, {"groups": {"include": ["G1"]}})]
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U1"]}).problems == 0
+    assert "covers group engineering" in capsys.readouterr().out
+    # A member the earlier allow does not name still reaches the deny.
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U1", "U2"]}).problems == 1
+    assert "rule 'deny contractors' applies another sign-on to members also in other group(s)" in capsys.readouterr().out
+    # The covering rule's exclusions leave out no one an earlier rule allowed.
+    rules = [_rule("allow U1", 1, {"users": {"include": ["U1"]}}),
+             _rule("allow contractors", 2, {"groups": {"include": ["G2"]}}),
+             _rule("group allow", 3, {"groups": {"include": ["G1"], "exclude": ["G2"]},
+                                      "users": {"exclude": ["U1"]}})]
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2", "U3"], "G2": ["U3"]}).problems == 0
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2", "U3"], "G2": ["U2", "U3"]}).problems == 0
+    rules[1]["actions"]["appSignOn"] = {"access": "DENY"}
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2", "U3"], "G2": ["U3"]}).problems == 1
+    output = capsys.readouterr().out
+    assert "rule 'deny" not in output and "rule 'allow contractors' applies another sign-on" in output
+    assert "leaves out" not in output
+
+
+def test_group_coverage_names_a_member_once_for_its_first_deny(monkeypatch, capsys):
+    """A member an earlier deny decided for is not counted again by a later rule."""
+    rules = [_rule("deny U1", 1, {"users": {"include": ["U1"]}}, "DENY"),
+             _rule("deny contractors", 2, {"groups": {"include": ["G2"]}}, "DENY"),
+             _rule("group allow", 3, {"groups": {"include": ["G1"]}})]
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U1"]}).problems == 1
+    output = capsys.readouterr().out
+    assert "rule 'deny U1' applies another sign-on to some members" in output
+    assert "deny contractors" not in output.split("only in part:")[1]
+
+
+def test_group_coverage_conditional_password_allow_for_members_is_not_partial(monkeypatch):
+    """A password-only allow limited to a network zone gives no member another sign-on."""
+    zoned = _rule("allow U1 in office", 1, {"users": {"include": ["U1"]}})
+    zoned["conditions"]["network"] = {"connection": "ZONE", "include": ["office"]}
+    rules = [zoned, _rule("group allow", 2, {"groups": {"include": ["G1"]}})]
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"]}).problems == 0
+    # Outside the zone the member still reaches a later deny.
+    rules.insert(1, _rule("deny contractors", 2, {"groups": {"include": ["G2"]}}, "DENY"))
+    rules[2]["priority"] = 3
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U1"]}).problems == 1
+
 def test_signon_refuses_policy_assigned_to_another_app(monkeypatch):
     monkeypatch.setattr(okta, "find_ldap_app", lambda client: {"id": "ldap"})
     monkeypatch.setattr(okta, "find_user", lambda client, login: {"id": "bind"})
