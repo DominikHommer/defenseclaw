@@ -14,7 +14,18 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// ManagedEnterpriseDocument reports a config.yaml document whose
+// deployment_mode is managed_enterprise, without loading the config.
+func ManagedEnterpriseDocument(data []byte) bool {
+	var doc struct {
+		DeploymentMode string `yaml:"deployment_mode"`
+	}
+	return yaml.Unmarshal(data, &doc) == nil && managed.IsManagedEnterprise(doc.DeploymentMode)
+}
 
 // ConfiguredHookFailModeInDocument is the hook fail mode a config.yaml
 // document sets explicitly for a per-user connector, canonicalized as the

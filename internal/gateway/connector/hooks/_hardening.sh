@@ -332,11 +332,15 @@ defenseclaw_shared_hook_token_file() {
 # Resolve the selected connector's fail mode from the connector-aware shared
 # runtime state. An inherited DEFENSECLAW_FAIL_MODE can only tighten it to
 # closed (GAP-0315); guardian-managed hooks trust only installer-owned state.
-# Malformed, ambiguous, or missing state fails closed.
+# An open counts only with its config source (FAIL_MODE_SOURCE,
+# fail_mode_sources): an earlier release's open may be an unset mode it
+# resolved open, and an open lowered for a vendor that cannot fail closed is
+# not an operator's choice. Malformed, ambiguous, or missing state fails
+# closed.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
-  local mode=""
+  local mode="" source=""
   if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != "1" ]; then
     case "${DEFENSECLAW_FAIL_MODE:-}" in
       [Cc][Ll][Oo][Ss][Ee][Dd]) printf closed; return 0 ;;
@@ -349,19 +353,23 @@ defenseclaw_shared_runtime_fail_mode() {
   fi
   if [ "$mode" != "open" ] && [ "$mode" != "closed" ]; then
     mode="$(defenseclaw_flat_hookcfg_value "$flat_config" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
+    source="$(defenseclaw_flat_hookcfg_value "$flat_config" FAIL_MODE_SOURCE 2>/dev/null || true)"
   fi
   if [ "$mode" != "open" ] && [ "$mode" != "closed" ] && [ -f "$config" ]; then
     if command -v jq >/dev/null 2>&1; then
       if [ -n "$connector" ]; then
         mode="$(jq -r --arg connector "$connector" '.fail_modes[$connector] // empty' "$config" 2>/dev/null || true)"
+        source="$(jq -r --arg connector "$connector" '.fail_mode_sources[$connector] // empty' "$config" 2>/dev/null || true)"
       else
         mode="$(jq -r '.legacy_fail_mode // empty' "$config" 2>/dev/null || true)"
+        source="$(jq -r '.legacy_fail_mode_source // empty' "$config" 2>/dev/null || true)"
       fi
     elif command -v python3 >/dev/null 2>&1; then
-      mode="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); c=sys.argv[2]; print((d.get("fail_modes") or {}).get(c, "") if c else d.get("legacy_fail_mode", ""))' "$config" "$connector" 2>/dev/null || true)"
+      mode="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); c=sys.argv[2]; m=(d.get("fail_modes") or {}).get(c, "") if c else d.get("legacy_fail_mode", ""); s=(d.get("fail_mode_sources") or {}).get(c, "") if c else d.get("legacy_fail_mode_source", ""); print(m if s == "config" else "closed")' "$config" "$connector" 2>/dev/null || true)"
+      source="config"
     fi
   fi
-  if [ "$mode" = "open" ]; then
+  if [ "$mode" = "open" ] && [ "$source" = "config" ]; then
     printf open
   else
     printf closed
