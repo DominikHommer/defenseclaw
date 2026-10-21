@@ -58,3 +58,10 @@ def test_manual_downgrade_regenerates_connectors_before_start():
     assert 'defenseclaw quickstart --connector claudecode --mode action' in text
     assert 'contract' in text[regenerate:start]
     assert 'fail mode' in text[regenerate:start]
+
+
+def test_windows_enrollment_wait_starts_after_agent_first_start():
+    text = flat("enterprise/configure/enrollment.mdx")
+    assert "account is signed in and the agent is installed" in text
+    assert "Claude Code must also start once" in text
+    assert "five-minute wait starts then" in text

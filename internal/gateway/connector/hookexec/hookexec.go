@@ -2087,8 +2087,9 @@ const unixUnenrolledAccountExplanation = "this account is not enrolled in Defens
 // Claude Code, its first start, which records the build the enumerator
 // verifies; the next cycle (within five minutes) then enrolls the account.
 const unenrolledAccountExplanation = "this account is not enrolled yet; restart the agent in 5 minutes. " +
-	"DefenseClaw enrolls an account within 5 minutes of its desktop sign-in (console or Remote Desktop; " +
-	"not SSH, a scheduled task or runas) and, for Claude Code, of its first start. " +
+	"DefenseClaw enrolls an account within 5 minutes once you have signed in and the agent is installed " +
+	"(console or Remote Desktop; not SSH, a scheduled task or runas). " +
+	"For Claude Code, the wait starts at its first start if that is later. " +
 	"If this continues, the policy may exclude this account: ask your administrator"
 
 // failUnenrolled blocks, like failUnreachable in closed mode, a tool call of
