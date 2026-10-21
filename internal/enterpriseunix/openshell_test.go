@@ -558,6 +558,18 @@ func TestSandboxDeferredRestartAndPending(t *testing.T) {
 	if st, ok := rowState(r, "sandbox pending alice"); !ok || !strings.Contains(st, "2 sandboxes run") {
 		t.Errorf("pending row = %q %v", st, ok)
 	}
+	// status and verify only read that record: the user's own command may
+	// have restarted the idle daemon since, so they do not say a sandbox
+	// runs now (GAP-0679).
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		got := h.run(Options{Action: action})
+		st, ok := rowState(got, "sandbox pending alice")
+		warning := messagesOf(got.Warnings, codeSandboxPending)
+		if !ok || strings.Contains(st, "sandboxes run") || !strings.Contains(st, "2 sandboxes ran when it was last tried") ||
+			strings.Contains(warning, "sandboxes run") || !strings.Contains(warning, "until the next ensure") {
+			t.Errorf("%s pending row = %q, warning = %q", action, st, warning)
+		}
+	}
 
 	// Still busy: a run that applies nothing keeps waiting, and says so.
 	r = h.ensure(allowed)

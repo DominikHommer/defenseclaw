@@ -229,6 +229,21 @@ func (l *lifecycle) describePending(entry pending) {
 	case entry.Sandboxes == 0:
 		waiting = "waiting to be tried again"
 	}
+	if l.opts.Action == ActionStatus || l.opts.Action == ActionVerify {
+		// status and verify read the record the last ensure kept: the
+		// account's own sandbox command may have applied the change since
+		// (it restarts an idle daemon), so the count is that run's, not
+		// now's (GAP-0679).
+		switch {
+		case entry.Sandboxes == 1:
+			waiting = "1 sandbox ran when it was last tried"
+		case entry.Sandboxes > 1:
+			waiting = fmt.Sprintf("%d sandboxes ran when it was last tried", entry.Sandboxes)
+		}
+		if entry.Sandboxes > 0 {
+			waiting += "; a change the user's own sandbox command applied since stays listed until the next ensure"
+		}
+	}
 	l.result.Services = append(l.result.Services, enterprisestatus.Service{
 		Name: "sandbox pending " + entry.User, Kind: sandboxRowKind, State: fmt.Sprintf("%s since %s: %s", entry.Kind, entry.Since, waiting),
 	})
