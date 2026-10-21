@@ -136,8 +136,8 @@ func TestKeptOpenShellSetupSwitchEqualsDirectSwitch(t *testing.T) {
 				if got := sandboxSwitchLine(t, reactivated); got != wantLine {
 					t.Errorf("reactivated switch = %q\ndirect switch = %q", got, wantLine)
 				}
-				if got := strings.Join(kept.ops.stopped(), ","); got != "alice:daemon+gateway" {
-					t.Errorf("switch stopped %q, want daemon and gateway", got)
+				if got := strings.Join(kept.ops.stopped(), ","); got != "alice:daemon+socket,alice:daemon+gateway" {
+					t.Errorf("switch stopped %q, want the daemon and its socket, then daemon and gateway", got)
 				}
 				if physicalExists(kept.env.openshellKeptStatePath()) {
 					t.Error("successful adoption left the kept record")

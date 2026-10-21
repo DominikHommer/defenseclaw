@@ -668,6 +668,47 @@ func lingeringStartRefusal(name string, d openshell.Driver, sb *openshell.Sandbo
 			name + "` deletes it and its work"}
 }
 
+// migrateBootstrap moves the Docker bootstrap of the sandbox name (sb, as
+// OpenShell reports it) that an OpenShell before 0.1.5 wrote to the format
+// of the gateway's release, which is 0.1.5 or later here
+// (sandboxReleaseRefusal), through Options.MigrateBootstrap, before a start
+// on a docker gateway. One it cannot move refuses the start: OpenShell's
+// start would fail on it, and nothing has changed yet.
+func (m *Manager) migrateBootstrap(gw *Gateway, name string, sb *openshell.Sandbox) error {
+	if m.opts.MigrateBootstrap == nil || gw.Driver.Name != openshell.DriverDocker || sb == nil || sb.ID == "" {
+		return nil
+	}
+	moved, err := m.opts.MigrateBootstrap(sb.ID)
+	if err != nil {
+		return legacyBootstrapError(name, gw.Version, err)
+	}
+	if len(moved) > 0 {
+		m.logf("sandbox %s: moved the Docker bootstrap an OpenShell before 0.1.5 wrote to the format of OpenShell %s (%s)", name, gw.Version, strings.Join(moved, ", "))
+	}
+	return nil
+}
+
+// legacyBootstrapRefusal is the failed start of the sandbox name whose
+// Docker bootstrap OpenShell release could not read because an OpenShell
+// before 0.1.5 wrote it (one migrateBootstrap did not find: the gateway
+// keeps its state in another folder); nil for another error.
+func legacyBootstrapRefusal(name, release string, err error) error {
+	if err == nil || !strings.Contains(err.Error(), "unknown field `outer_fence`") {
+		return nil
+	}
+	return legacyBootstrapError(name, release, err)
+}
+
+// legacyBootstrapError refuses the start of the sandbox name, whose Docker
+// bootstrap is still the one an OpenShell before 0.1.5 wrote.
+func legacyBootstrapError(name, release string, err error) error {
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+		Message: "sandbox " + name + " was not started: an OpenShell older than 0.1.5 created it, and OpenShell " + release +
+			" cannot read the Docker bootstrap it kept for it: " + err.Error(),
+		Detail: "DefenseClaw moves that bootstrap to the new format at the start, in OpenShell's state folder ($XDG_STATE_HOME/openshell, else ~/.local/state/openshell, " +
+			"under docker-sandbox-tokens): once its files there are yours and writable, `defenseclaw sandbox start " + name + "` again; the sandbox and its work are kept"}
+}
+
 // sandboxReleaseRefusal refuses sandbox work (a create, a start) on a
 // gateway older than openshell.SupportedMin.
 func (m *Manager) sandboxReleaseRefusal(gw *Gateway) error {

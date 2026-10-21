@@ -148,7 +148,9 @@ func (e *Env) ownsConsole(uid int) bool {
 // RunAtLoad; an idle job remains idle until its next sandbox command.
 func (e *Env) reloadMacOSAgent(ctx context.Context, job loadedLaunchAgent, failed bool) error {
 	target := job.domain + "/" + job.label
-	if _, err := e.Runner.Run(ctx, "launchctl", "bootout", target); err != nil {
+	// The account's drain boots the sandbox agent out first
+	// (drainAccount): one that is not loaded any more is out already.
+	if res, err := e.Runner.Run(ctx, "launchctl", "bootout", target); err != nil && !bootoutNotLoaded(res, err) {
 		return fmt.Errorf("boot out %s: %w", target, err)
 	}
 	plist := e.P(filepath.Join("/Library/LaunchAgents", job.label+".plist"))
