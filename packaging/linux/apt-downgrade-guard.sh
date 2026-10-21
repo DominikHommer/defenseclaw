@@ -9,7 +9,9 @@
 # this: dpkg runs the installed package's prerm with the incoming version,
 # but when it fails dpkg falls back to the incoming package's own prerm and
 # unpacks the older files anyway. rpm has no such hook, and a plain
-# `dpkg -i` does not run apt hooks, so only an apt install is covered.
+# `dpkg -i` does not run apt hooks, so only an apt install is covered; there
+# the incoming package's preinstall checks (a release before 1.0.4 checks
+# neither the marker nor the bundle release floor).
 #
 # apt sends the "VERSION 2" protocol on stdin (see apt.conf(5)): the
 # configuration, a blank line, then one line per package action:
@@ -31,14 +33,43 @@ set -- $change
 installed=$1
 incoming=$2
 
-# Snapshot builds share a release number; compare the release only.
-release() { printf '%s' "$1" | sed 's/[-~+].*$//'; }
-dpkg --compare-versions "$(release "$incoming")" lt "$(release "$installed")" || exit 0
+# The product version of a deb version: no epoch, and the prerelease back
+# behind "-" (the deb writes 1.0.4-rc.1 as 1.0.4~rc.1). A prerelease is older
+# than its release: dropping it let 1.0.4 go to 1.0.4~SNAPSHOT unrefused.
+product() { printf '%s' "$1" | sed -e 's/^[0-9]*://' -e 's/~/-/'; }
+# not_older A B: A is not older than B, by the lifecycle's version order (the
+# package preinstall's not_older; enterpriseunix compareProductVersions).
+not_older() {
+    awk -v a="$1" -v b="$2" '
+        function norm(v) { sub(/^v/, "", v); sub(/\+.*/, "", v); return v }
+        BEGIN {
+            a = norm(a); b = norm(b); pa = ""; pb = ""
+            if (index(a, "-")) { pa = substr(a, index(a, "-") + 1); a = substr(a, 1, index(a, "-") - 1) }
+            if (index(b, "-")) { pb = substr(b, index(b, "-") + 1); b = substr(b, 1, index(b, "-") - 1) }
+            na = split(a, x, "."); nb = split(b, y, "."); n = na > nb ? na : nb
+            for (i = 1; i <= n; i++) {
+                xi = (i <= na) ? x[i] + 0 : 0; yi = (i <= nb) ? y[i] + 0 : 0
+                if (xi > yi) exit 0
+                if (xi < yi) exit 1
+            }
+            if (pa == pb || pa == "") exit 0
+            if (pb == "") exit 1
+            np = split(pa, u, "."); nq = split(pb, w, "."); m = np > nq ? np : nq
+            for (i = 1; i <= m; i++) {
+                if (u[i] == w[i]) continue
+                if (u[i] ~ /^[0-9]+$/ && w[i] ~ /^[0-9]+$/) exit (u[i] + 0 > w[i] + 0) ? 0 : 1
+                exit (u[i] > w[i]) ? 0 : 1
+            }
+            exit 0
+        }'
+}
+to=$(product "$incoming")
+not_older "$to" "$(product "$installed")" && exit 0
 
 # The rollback marker does not lift the release floor of a confirmed signed
 # policy bundle (min_product_version); exit 3 is the gateway's refusal.
 if [ -x "$gateway" ]; then
-    floor_msg=$("$gateway" enterprise bundle floor-check --product-version "$(release "$incoming")" 2>&1 >/dev/null)
+    floor_msg=$("$gateway" enterprise bundle floor-check --product-version "$to" 2>&1 >/dev/null)
     if [ $? -eq 3 ]; then
         echo "defenseclaw-enterprise: refusing to downgrade to $incoming: ${floor_msg#Error: } Nothing was changed." >&2
         exit 1

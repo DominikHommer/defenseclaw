@@ -1245,7 +1245,12 @@ def test_linux_postinstall_does_nothing_after_a_refused_removal(tmp_path: Path, 
     ("line", "marker", "backup", "exit_code"),
     [
         ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb < 1.0.47~SNAPSHOT-aaa f.deb", False, False, 0),
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.46~SNAPSHOT-aaa f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb = 1.0.46~SNAPSHOT-bbb f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46~rc.1 < 1.0.46 f.deb", False, False, 0),
+        # A prerelease is older than its release, as the lifecycle orders them.
+        ("defenseclaw-enterprise 1.0.46 > 1.0.46~SNAPSHOT-aaa f.deb", False, False, 1),
+        ("defenseclaw-enterprise 1.0.46~rc.2 > 1.0.46~rc.1 f.deb", False, False, 1),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.46~SNAPSHOT-aaa f.deb", False, False, 1),
         ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > - **REMOVE**", False, False, 0),
         ("other-package 1.0.46 > 1.0.45 f.deb", False, False, 0),
         ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, False, 1),
@@ -1258,12 +1263,6 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
 ) -> None:
     host = _Host(tmp_path)
     host.state.mkdir()
-    _write_stub(
-        host.bin,
-        "dpkg",
-        '[ "$1" = --compare-versions ] && [ "$3" = lt ] && [ "$2" != "$4" ] && '
-        '[ "$(printf \'%s\\n%s\\n\' "$2" "$4" | sort -V | head -n 1)" = "$2" ]',
-    )
     allow = host.state / "allow-downgrade"
     if marker:
         allow.write_text("", encoding="utf-8")
@@ -1294,10 +1293,52 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
     assert result.returncode == exit_code, (result.stdout, result.stderr)
     assert allow.exists() == marker  # left for the older package's preinstall and postinstall (GAP-1115)
     if exit_code:
-        assert "refusing to downgrade to 1.0.45~SNAPSHOT-aaa" in result.stderr
+        assert f"refusing to downgrade to {line.split()[3]}" in result.stderr
         assert f"sudo touch {allow}" in result.stderr
         assert "postinstall applies it" in result.stderr
         assert f"--config {previous_config if backup else config}" in result.stderr
+
+
+# The rollback marker does not lift the release floor of the confirmed signed
+# bundle: the hook asks the installed gateway with the full product version
+# (a prerelease of the floor release is below it) and refuses on its exit 3.
+@pytest.mark.parametrize(
+    ("line", "version", "rc", "exit_code"),
+    [
+        ("defenseclaw-enterprise 1.0.4 > 1.0.4~SNAPSHOT-aaa f.deb", "1.0.4-SNAPSHOT-aaa", 3, 1),
+        ("defenseclaw-enterprise 1.0.6 > 1.0.4~SNAPSHOT-aaa f.deb", "1.0.4-SNAPSHOT-aaa", 3, 1),
+        ("defenseclaw-enterprise 1.0.6 > 1:1.0.5 f.deb", "1.0.5", 3, 1),
+        ("defenseclaw-enterprise 1.0.6 > 1.0.5 f.deb", "1.0.5", 1, 0),
+        ("defenseclaw-enterprise 1.0.6 > 1.0.5 f.deb", "1.0.5", 0, 0),
+    ],
+)
+def test_linux_apt_hook_refuses_a_downgrade_below_the_bundle_release_floor(
+    tmp_path: Path, line: str, version: str, rc: int, exit_code: int
+) -> None:
+    host = _Host(tmp_path, gateway_rc=rc)
+    host.state.mkdir()
+    (host.state / "allow-downgrade").write_text("", encoding="utf-8")
+    script = _rooted(
+        (LINUX / "apt-downgrade-guard.sh").read_text(encoding="utf-8"),
+        {
+            "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+            "gateway=/opt/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
+        },
+    )
+    path = tmp_path / "guard.sh"
+    path.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        ["sh", str(path)],
+        input=f"VERSION 2\nAPT::Architecture=amd64\n\n{line}\n",
+        env={"PATH": f"{host.bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == exit_code, (result.stdout, result.stderr)
+    assert host.calls() == [f"gateway enterprise bundle floor-check --product-version {version}"]
+    if exit_code:
+        assert "Nothing was changed" in result.stderr
 
 
 def test_enterprise_deb_ships_the_apt_downgrade_hook_and_rpm_does_not() -> None:
@@ -1423,13 +1464,44 @@ def test_macos_pkg_preinstall_refusal_keeps_the_running_deployment_facts(tmp_pat
 cat '{tmp_path / "status.json"}'""")
     result = host.run(_macos_pkg_preinstall(host, "1.0.5"))
     assert result.returncode == 1
-    assert host.calls() == ["gateway enterprise macos status --json"]
+    assert host.calls() == ["gateway enterprise bundle floor-check --product-version 1.0.5", "gateway enterprise macos status --json"]
     document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
     assert document["ok"] is False and document["action"] == "ensure" and document["exit_code"] == 1
     assert document["product_version"] == "1.0.5" and document["installed_version"] == "1.0.6"
     assert document["readiness"] == status["readiness"] and document["services"] == [service]
     assert document["inspection"]["local"] == "active"
     assert [e["code"] for e in document["errors"]] == ["downgrade_refused"] + [e["code"] for e in standing_errors]
+    _validate_lifecycle_result(document)
+
+
+# The pkg preinstall checks the confirmed signed bundle's release floor
+# before the Installer replaces any file: with the rollback marker, and on a
+# reinstall after uninstall --keep-state (no deployment record). Only the
+# installed gateway's exit 3 refuses; an older gateway leaves it alone.
+@pytest.mark.parametrize(
+    ("rc", "record", "marker", "refused"),
+    [(3, True, True, True), (3, False, False, True), (1, True, True, False), (0, False, False, False)],
+)
+def test_macos_pkg_preinstall_refuses_below_the_bundle_release_floor(
+    tmp_path: Path, rc: int, record: bool, marker: bool, refused: bool
+) -> None:
+    host = _Host(tmp_path, gateway_rc=rc)
+    host.state.mkdir()
+    if record:
+        (host.state / "deployment.json").write_text('{"product_version": "1.0.6"}', encoding="utf-8")
+    if marker:
+        (host.state / "allow-downgrade").write_text("", encoding="utf-8")
+    result = host.run(_macos_pkg_preinstall(host, "1.0.5"))
+    assert host.calls()[0] == "gateway enterprise bundle floor-check --product-version 1.0.5"
+    result_path = host.state / "last-package-result.json"
+    assert (result.returncode == 1) == refused, (result.stdout, result.stderr)
+    if not refused:
+        assert not result_path.exists()
+        return
+    assert "Nothing was changed" in result.stderr
+    document = json.loads(result_path.read_text(encoding="utf-8"))
+    assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
+    assert document["installed"] is record and document["installed_version"] == ("1.0.6" if record else "")
     _validate_lifecycle_result(document)
 
 

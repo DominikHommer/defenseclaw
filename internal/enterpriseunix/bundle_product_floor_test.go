@@ -55,6 +55,42 @@ func TestRollbackBelowTheConfirmedBundleFloorIsRefused(t *testing.T) {
 	}
 }
 
+// A --keep-state uninstall removes the deployment record but keeps the trust
+// anchors and the confirmed bundle; a reinstall below that bundle's floor is
+// refused, one at the floor goes through.
+func TestKeepStateReinstallBelowTheConfirmedBundleFloorIsRefused(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.3")}))
+			anchors := h.env.bundleAnchorsPath()
+			if err := os.MkdirAll(filepath.Dir(anchors), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(anchors, []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, h.run(Options{Action: ActionUninstall, KeepState: true}))
+			if record, _ := h.env.loadDeployment(); record != nil {
+				t.Fatalf("--keep-state uninstall kept the deployment record: %+v", record)
+			}
+			if _, err := os.Lstat(anchors); err != nil {
+				t.Fatalf("--keep-state uninstall removed the trust anchors: %v", err)
+			}
+			useConfirmedProductFloor(t, "1.0.3", nil)
+			requireError(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.2")}), codeProductFloor)
+			if record, _ := h.env.loadDeployment(); record != nil {
+				t.Fatalf("refused reinstall wrote a deployment record: %+v", record)
+			}
+			r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.3")})
+			requireOK(t, r)
+			if r.InstalledVersion != "1.0.3" {
+				t.Fatalf("reinstall at the floor installed %q", r.InstalledVersion)
+			}
+		})
+	}
+}
+
 func TestBundleProductFloorNeedsTrustAnchors(t *testing.T) {
 	h := newTestHost(t, "linux")
 	useConfirmedProductFloor(t, "9.9.9", nil)

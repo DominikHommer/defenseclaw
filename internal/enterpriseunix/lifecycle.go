@@ -1123,7 +1123,11 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if record != nil && !l.opts.AllowDowngrade && compareProductVersions(p.version, record.ProductVersion) < 0 {
 		return nil, &codedError{code: codeDowngrade, err: fmt.Errorf("payload version %s is older than the installed %s; downgrades are refused (rerun with --allow-downgrade to roll back deliberately)", p.version, record.ProductVersion)}
 	}
-	if record != nil && compareProductVersions(p.version, record.ProductVersion) < 0 {
+	// The release floor of the confirmed signed bundle holds for a downgrade
+	// and for an install without a deployment record: a --keep-state
+	// uninstall removes the record but keeps the trust anchors and the
+	// confirmed bundle, so a reinstall resumes under that bundle.
+	if record == nil || compareProductVersions(p.version, record.ProductVersion) < 0 {
 		if err := env.BundleProductFloorRefusal(p.version); err != nil {
 			return nil, err
 		}

@@ -24,8 +24,8 @@ import (
 const bundleFloorRefusedExit = 3
 
 // newEnterpriseBundleFloorCheckCommand is the release floor check the Linux
-// package scripts run with the installed gateway before any file is
-// replaced: a device that takes signed bundles must not go below the release
+// and macOS package scripts run with the installed gateway before any file
+// is replaced: a device that takes signed bundles must not go below the release
 // its confirmed bundle requires (min_product_version).
 func newEnterpriseBundleFloorCheckCommand() *cobra.Command {
 	var version string
@@ -40,7 +40,10 @@ func newEnterpriseBundleFloorCheckCommand() *cobra.Command {
 			if strings.TrimSpace(version) == "" {
 				return bundleUsage("--product-version is required")
 			}
-			if bundleSecureClient() || !bundleManagedDevice() {
+			// The trust anchors decide, not the runtime descriptor: a
+			// --keep-state uninstall removes the descriptor and keeps the
+			// anchors and the confirmed bundle a reinstall resumes under.
+			if bundleSecureClient() {
 				return nil
 			}
 			env, err := newUnixLifecycleEnv(runtime.GOOS)
