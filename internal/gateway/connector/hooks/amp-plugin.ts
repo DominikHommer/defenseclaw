@@ -27,8 +27,7 @@
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
 import { execFile{{if not .Sandbox}}, execFileSync{{end}} } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-{{if not .Sandbox}}import { statSync } from 'node:fs'
-{{end}}import { lstat } from 'node:fs/promises'
+import { lstat{{if not .Sandbox}}, stat{{end}} } from 'node:fs/promises'
 import { {{if not .Sandbox}}homedir, {{end}}userInfo } from 'node:os'
 import { dirname{{if not .Sandbox}}, join{{end}} } from 'node:path'
 
@@ -90,7 +89,7 @@ const DC_MAX_BODY_BYTES = 900 * 1024
 // see whose session a request belongs to; the plugin is in-session and can.
 // A value that is not a safe header field is dropped rather than sanitized, so
 // a hostile account name cannot smuggle a second header into every hook call.
-function identityHeaders(): Record<string, string> {
+async function identityHeaders(): Promise<Record<string, string>> {
 	const headers: Record<string, string> = {}
 	let info: ReturnType<typeof userInfo>
 	try {
@@ -111,7 +110,7 @@ function identityHeaders(): Record<string, string> {
 		info.username.length <= 256 && /^[A-Za-z0-9._-]+$/.test(info.username)) {
 		headers["X-DefenseClaw-User-Name"] = info.username
 	}
-	const facts = sessionFactsHeader()
+	const facts = await sessionFactsHeader()
 	if (facts !== "") {
 		headers["X-DefenseClaw-Session-Facts"] = facts
 	}
@@ -134,8 +133,14 @@ let sessionFactsCache = { key: "", value: "", until: 0 }
 // cache is part of the session facts key: a new kinit into the same cache
 // changes the principal while every session variable stays the same
 // (GAP-1139). KCM, KEYRING and API caches have no file; the variables alone
-// key them.
-function credentialCacheStamp(): string {
+// key them. The stat runs off the event loop and gets
+// DC_CREDENTIAL_CACHE_STAT_MS; calls share one stat, and one still
+// unanswered after that (a stalled network or FUSE mount) reads as null: the
+// call sends the session variables alone.
+const DC_CREDENTIAL_CACHE_STAT_MS = 250
+let credentialCacheStat: { pending: Promise<string> | null; since: number } = { pending: null, since: 0 }
+
+async function credentialCacheStamp(): Promise<string | null> {
 	const name = String(process.env.KRB5CCNAME || "")
 	let path = name
 	if (name === "") path = typeof process.getuid === "function" ? "/tmp/krb5cc_" + process.getuid() : ""
@@ -143,16 +148,31 @@ function credentialCacheStamp(): string {
 	else if (name.startsWith("DIR::")) path = name.slice(5)
 	else if (name.startsWith("DIR:")) path = name.slice(4)
 	if (!path.startsWith("/")) return ""
+	const now = Date.now()
+	if (credentialCacheStat.pending === null) {
+		const pending = stat(path).then((info) => String(info.mtimeMs), () => "")
+		credentialCacheStat = { pending, since: now }
+		pending.then(() => {
+			if (credentialCacheStat.pending === pending) credentialCacheStat = { pending: null, since: 0 }
+		})
+	}
+	const left = credentialCacheStat.since + DC_CREDENTIAL_CACHE_STAT_MS - now
+	if (left <= 0) return null
+	let timer: ReturnType<typeof setTimeout> | undefined
+	const overdue = new Promise<null>((resolve) => { timer = setTimeout(resolve, left, null) })
 	try {
-		return String(statSync(path).mtimeMs)
-	} catch (_) {
-		return ""
+		return await Promise.race([credentialCacheStat.pending, overdue])
+	} finally {
+		clearTimeout(timer)
 	}
 }
 
-function fullSessionFacts(): string {
+async function fullSessionFacts(): Promise<string> {
 	const env = process.env
-	const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY, credentialCacheStamp()]
+	const stamp = await credentialCacheStamp()
+	// The binary would wait on a stalled credential cache too.
+	if (stamp === null) return ""
+	const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY, stamp]
 		.map((v) => String(v || "")).join("|")
 	const now = Date.now()
 	if (sessionFactsCache.key === key && now < sessionFactsCache.until) return sessionFactsCache.value
@@ -174,8 +194,8 @@ function fullSessionFacts(): string {
 {{end}}// sessionFactsHeader renders the claimed SSH and logind session facts as the
 // X-DefenseClaw-Session-Facts value the hook runner also sends. Each value is
 // dropped unless it matches the header's allowlisted charset.
-function sessionFactsHeader(): string {
-{{if not .Sandbox}}	const full = fullSessionFacts()
+async function sessionFactsHeader(): Promise<string> {
+{{if not .Sandbox}}	const full = await fullSessionFacts()
 	if (full !== "") return full
 {{end}}	const env = process.env
 	const address = String(env.SSH_CONNECTION || "").trim().split(/\s+/)[0] || ""
@@ -660,7 +680,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		const headers: Record<string, string> = {
 			"Content-Type": "application/json",
 			"X-DefenseClaw-Client": "amp-plugin/1.0",
-			...identityHeaders(),
+			...(await identityHeaders()),
 		}
 		if (token) headers.Authorization = `Bearer ${token}`
 

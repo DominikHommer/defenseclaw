@@ -919,10 +919,10 @@ _dc_hook_post_response() {
 # or socket hook, or when DEFENSECLAW_GATEWAY_AUTOSTART is 0. The start
 # command serializes concurrent hooks with a restart and backs off after a
 # failure. Of the account's hooks that find the gateway down together, only
-# the first launches a start: it takes .cold-start.lock, which the others
-# find younger than 15 s, so a restart runs one start, not one per hook
-# (GAP-0143). An older lock is a start that ended or died and is replaced.
-# This is the one helper that calls out to the gateway's own CLI.
+# the first launches a start: it takes .cold-start.lock and the start it
+# launches holds the lock until it ends, so a restart runs one start, not
+# one per hook (GAP-0143). See _dc_cold_start_lock. This is the one helper
+# that calls out to the gateway's own CLI.
 defenseclaw_gateway_cold_start() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
@@ -931,7 +931,7 @@ defenseclaw_gateway_cold_start() {
     0|false|FALSE|no|NO|off|OFF) return 1 ;;
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
-  local home="${DEFENSECLAW_AGENT_HOME:-}" data="" bin="" detach=""
+  local home="${DEFENSECLAW_AGENT_HOME:-}" data="" bin="" detach="" lock="" token=""
   [ -n "$home" ] && [ -d "$home" ] || return 1
   data="${DEFENSECLAW_HOME:-${home}/.defenseclaw}"
   [ -d "$data" ] && [ -f "${data}/config.yaml" ] || return 1
@@ -939,37 +939,78 @@ defenseclaw_gateway_cold_start() {
   [ ! -e "${data}/.install.lock" ] || return 1
   [ ! -e "${data}/.disabled" ] || return 1
   bin="$(defenseclaw_gateway_binary "$data" "$home")" || return 1
-  _dc_cold_start_lock "${data}/.cold-start.lock" || return 0
+  lock="${data}/.cold-start.lock"
+  token="$$.${RANDOM}${RANDOM}"
+  _dc_cold_start_lock "$lock" "$token" || return 0
   # In its own session where setsid exists, so the agent ending the hook's
   # process group does not end a start that is still running.
   detach="$(command -v setsid 2>/dev/null)" || detach=""
   # The gateway keeps running after the hook exits: give it the account's
   # HOME and installer bin directory, drop the hook's git and locale pins,
-  # and lift the hook's soft resource limits back to the hard ones.
+  # and lift the hook's soft resource limits back to the hard ones. The
+  # lock goes when the start ends.
   (
     ulimit -S -t "$(ulimit -H -t)" 2>/dev/null || true
     ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true
-    exec ${detach:+"$detach"} env -u GIT_CONFIG_NOSYSTEM -u GIT_CONFIG_GLOBAL -u LC_ALL -u LANG \
+    ${detach:+"$detach"} env -u GIT_CONFIG_NOSYSTEM -u GIT_CONFIG_GLOBAL -u LC_ALL -u LANG \
       HOME="$home" PATH="${home}/.local/bin:${PATH}" \
       "$bin" start --hook-cold-start
+    _dc_cold_start_unlock "$lock" "$token"
   ) </dev/null >/dev/null 2>&1 &
   return 0
 }
 
-# _dc_cold_start_lock LOCK returns 0 when this hook may launch the cold
-# start: it created LOCK (holding the time), or replaced one 15 s or more
-# old. It returns 1 while a start another hook launched is on its way.
+# _dc_cold_start_lock LOCK TOKEN returns 0 when this hook may launch the
+# cold start: it created LOCK, holding the time and TOKEN, or replaced a
+# stale one. The start it launches holds LOCK until that start ends
+# (_dc_cold_start_unlock), however long its readiness wait. A lock 120 s or
+# more old, or dated in the future, is a start that died. Replacing a stale
+# lock is serialized by LOCK.break, so of the hooks that find it stale
+# together only one launches. It returns 1 while another hook's start runs.
 _dc_cold_start_lock() {
-  local lock="$1" now="" stamp=""
+  local lock="$1" token="$2" guard="${1}.break" now="" won=1
   now="$(date +%s 2>/dev/null)" || now=""
   case "$now" in ''|*[!0-9]*) return 0 ;; esac
-  ( set -C; printf '%s\n' "$now" > "$lock" ) 2>/dev/null && return 0
-  [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
-  IFS= read -r -n 32 stamp < "$lock" 2>/dev/null || true
-  case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
-  [ $((now - stamp)) -ge 15 ] || return 1
-  rm -f "${lock:?}"
-  ( set -C; printf '%s\n' "$now" > "$lock" ) 2>/dev/null
+  ( set -C; printf '%s %s\n' "$now" "$token" > "$lock" ) 2>/dev/null && return 0
+  _dc_cold_start_lock_stale "$lock" "$now" 120 || return 1
+  if ! ( set -C; printf '%s\n' "$now" > "$guard" ) 2>/dev/null; then
+    # Another hook is replacing the lock. A guard 5 s old is one whose hook
+    # died in that step.
+    ! _dc_cold_start_lock_stale "$guard" "$now" 5 || rm -f "${guard:?}"
+    return 1
+  fi
+  if _dc_cold_start_lock_stale "$lock" "$now" 120; then
+    rm -f "${lock:?}"
+    ( set -C; printf '%s %s\n' "$now" "$token" > "$lock" ) 2>/dev/null && won=0
+  fi
+  rm -f "${guard:?}"
+  return "$won"
+}
+
+# _dc_cold_start_lock_stale FILE NOW MAX returns 0 when the lock FILE was
+# taken MAX seconds or more before NOW, or after it (a clock set back). A
+# FILE without a readable time is stale once its mtime is 2 minutes old: it
+# may be one another hook is still writing.
+_dc_cold_start_lock_stale() {
+  local stamp="" age=0
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  IFS= read -r -n 64 stamp < "$1" 2>/dev/null || true
+  stamp="${stamp%% *}"
+  case "$stamp" in
+    ''|*[!0-9]*) [ -n "$(find "$1" -prune -mmin +2 2>/dev/null)" ]; return ;;
+  esac
+  age=$(($2 - stamp))
+  [ "$age" -lt 0 ] || [ "$age" -ge "$3" ]
+}
+
+# _dc_cold_start_unlock LOCK TOKEN removes LOCK while it is still the one
+# this start took.
+_dc_cold_start_unlock() {
+  local line=""
+  [ -f "$1" ] && [ ! -L "$1" ] || return 0
+  IFS= read -r -n 128 line < "$1" 2>/dev/null || true
+  [ "${line#* }" = "$2" ] || return 0
+  rm -f "${1:?}"
 }
 
 # _dc_hook_elapsed_ms sets _DC_ELAPSED_MS to the time since the hook
@@ -1796,7 +1837,9 @@ defenseclaw_session_facts_value() {
 # as it is, so the binary runs at most once per five minutes per session,
 # unless the session's FILE or DIR credential cache changed after the record
 # was written: a new kinit into the same cache changes the principal while
-# the variables stay the same (GAP-1139). It
+# the variables stay the same (GAP-1139). A cache that does not answer that
+# check within a second (a stalled network or FUSE mount) sends the session
+# variables alone (_dc_ccache_changed). It
 # runs only when a credential cache can exist (KRB5CCNAME or /etc/krb5.conf;
 # always on macOS, whose default API: cache needs neither), and its answer is
 # used only when it matches the header charset. A standalone managed hook
@@ -1806,6 +1849,7 @@ defenseclaw_session_facts_value() {
 # sends the SSH and logind variables alone.
 defenseclaw_session_facts_full() {
   local home="${DEFENSECLAW_AGENT_HOME:-${HOME:-}}" env_key cache record="" re out="" bin="${DEFENSECLAW_SESSION_FACTS_BIN:-}" ccache=""
+  _DC_CCACHE_CHANGED=same
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) [ -n "$bin" ] || return 0 ;;
   esac
@@ -1830,8 +1874,10 @@ defenseclaw_session_facts_full() {
     DIR:/*) ccache="${KRB5CCNAME#DIR:}" ;;
     /*) ccache="$KRB5CCNAME" ;;
   esac
-  if [ -f "$cache" ] && [ ! -L "$cache" ] && { [ -z "$ccache" ] || [ ! "$ccache" -nt "$cache" ]; } &&
-    [ -n "$(find "$cache" -mmin -5 2>/dev/null)" ]; then
+  if [ -f "$cache" ] && [ ! -L "$cache" ] && [ -n "$(find "$cache" -mmin -5 2>/dev/null)" ] &&
+    { [ -z "$ccache" ] || _dc_ccache_changed "$ccache" "$cache"; } && [ "${_DC_CCACHE_CHANGED:-same}" != newer ]; then
+    # The binary would wait on a stalled cache too.
+    [ "${_DC_CCACHE_CHANGED:-same}" != stalled ] || return 0
     IFS= read -r -d '' -n 4096 record < "$cache" 2>/dev/null || true
     re='"env_key":"([^"]*)"'
     if [[ "$record" =~ $re ]] && [ "${BASH_REMATCH[1]}" = "$env_key" ]; then
@@ -1854,6 +1900,26 @@ defenseclaw_session_facts_full() {
     HOME="$home" exec "$bin" hook session-facts </dev/null 2>/dev/null
   )" || return 0
   defenseclaw_session_facts_checked "$out"
+  return 0
+}
+
+# _dc_ccache_changed CCACHE RECORD sets _DC_CCACHE_CHANGED to newer when the
+# credential cache CCACHE was modified after RECORD, same when not (or when
+# it is gone), and stalled when the check gave no answer within a second.
+# find runs the check in a process of its own, with none of the hook's
+# descriptors, so a cache on a stalled network or FUSE mount holds that
+# process, not the hook (bash 3.2 reads with whole seconds only).
+_dc_ccache_changed() {
+  local line="" status=0
+  _DC_CCACHE_CHANGED=stalled
+  IFS= read -r -t 1 line < <(exec find "$1" -prune -newer "$2" -print </dev/null 2>/dev/null) || status=$?
+  if [ "$status" -gt 128 ]; then
+    return 0
+  elif [ -n "$line" ]; then
+    _DC_CCACHE_CHANGED=newer
+  else
+    _DC_CCACHE_CHANGED=same
+  fi
   return 0
 }
 
@@ -1883,6 +1949,17 @@ defenseclaw_tool_gate_max_time() {
     PreToolUse|PermissionRequest) HOOK_MAX_TIME=4 ;;
     *) HOOK_MAX_TIME="$2" ;;
   esac
+}
+
+# defenseclaw_payload_tool_gate_max_time PAYLOAD DEFAULT is
+# defenseclaw_tool_gate_max_time for the event in the payload's top-level
+# hook_event_name (_dc_hook_event_field), so JSON spacing and a nested
+# hook_event_name key do not change the bound. A payload whose event cannot
+# be read keeps DEFAULT.
+defenseclaw_payload_tool_gate_max_time() {
+  local event=""
+  event="$(_dc_hook_event_field "$1" hook_event_name 2>/dev/null)" || event=""
+  defenseclaw_tool_gate_max_time "$event" "$2"
 }
 
 # defenseclaw_gateway_post URL MAX_TIME BODY [CURL_ARGS...]

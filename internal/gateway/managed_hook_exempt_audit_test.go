@@ -50,7 +50,7 @@ func TestExemptUserRowFollowsAnAnsweredCallAndAStoredWrite(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) })
 	serve := func() {
 		request := httptest.NewRequest(http.MethodPost, route, nil)
-		api.serveEnterpriseExemptHookCall(httptest.NewRecorder(), request, handler, peer, "claudecode", route)
+		api.serveEnterpriseExemptHookCall(httptest.NewRecorder(), request, handler, peer, "claudecode", route, false)
 	}
 	serve()
 	if rows := exemptAuditRows(t, store); rows != 0 {
@@ -73,5 +73,40 @@ func TestExemptUserRowFollowsAnAnsweredCallAndAStoredWrite(t *testing.T) {
 	retry.logger = logger
 	if !retry.auditEnterpriseExemptUser(t.Context(), peer, "codex", route, now.Add(time.Second)) {
 		t.Fatal("the call after a refused audit write wrote no row")
+	}
+}
+
+// A Codex notification is recorded, not inspected: an exempt account's
+// notification (malformed or not, the notifier answers 2xx) writes no
+// enterprise-exempt-user row and does not start the interval, so the
+// account's next inspected Codex call writes one.
+func TestExemptUserNotificationLeavesTheAuditIntervalOpen(t *testing.T) {
+	installCorrelationHMACForTest()
+	fixture := newSidecarRuntimeFixture(t, true)
+	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := fixture.store
+	logger := audit.NewLogger(store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
+	api := &APIServer{logger: logger}
+	peer := managedHookPeer{UID: 4286, Name: "dcm-exempt"}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	serve := func(route string, inspect bool) {
+		request := httptest.NewRequest(http.MethodPost, route, bytes.NewBufferString("{not json"))
+		api.serveEnterpriseExemptHookCall(httptest.NewRecorder(), request, handler, peer, "codex", route, inspect)
+	}
+	serve("/api/v1/codex/notify", false)
+	if rows := exemptAuditRows(t, store); rows != 0 {
+		t.Fatalf("a Codex notification wrote %d enterprise-exempt-user rows, want 0", rows)
+	}
+	serve("/api/v1/codex/hook", false)
+	if rows := exemptAuditRows(t, store); rows != 1 {
+		t.Fatalf("the inspected Codex call after a notification wrote %d rows, want 1", rows)
+	}
+	serve("/api/v1/inspect/tool", true)
+	if rows := exemptAuditRows(t, store); rows != 1 {
+		t.Fatalf("a second inspected call in the interval wrote %d rows in all, want 1", rows)
 	}
 }

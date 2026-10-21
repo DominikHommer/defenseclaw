@@ -302,14 +302,10 @@ fi
 # restarting or not running (after a reboot, for example): send the call
 # again for up to 3 seconds, starting the gateway after a refusal. See
 # defenseclaw_await_gateway in _hardening.sh.
-# A tool call's request is bounded like the native hook's answer budget
-# (defenseclaw_tool_gate_max_time); the event is read from the payload
-# without running jq.
+# A tool call's request is bounded like the native hook's answer budget, by
+# the payload's top-level event (defenseclaw_payload_tool_gate_max_time).
 HOOK_MAX_TIME=10
-{{if not .SecureClient}}case "$PAYLOAD" in
-  *'"hook_event_name":"PreToolUse"'*|*'"hook_event_name": "PreToolUse"'*) defenseclaw_tool_gate_max_time PreToolUse 10 ;;
-  *'"hook_event_name":"PermissionRequest"'*|*'"hook_event_name": "PermissionRequest"'*) defenseclaw_tool_gate_max_time PermissionRequest 10 ;;
-esac
+{{if not .SecureClient}}defenseclaw_payload_tool_gate_max_time "$PAYLOAD" 10
 {{end}}# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
 # payload on descriptors, never on its command line.
 defenseclaw_hook_post() {

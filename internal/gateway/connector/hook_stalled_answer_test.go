@@ -52,6 +52,8 @@ func TestClosedShellHookCutsAStalledAnswerAtTheToolCallBudget(t *testing.T) {
 		payload string
 	}{
 		{NewClaudeCodeConnector(), "claude-code-hook.sh", nil, `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ok"}}`},
+		// Spaced JSON keeps the bound: the event comes from the parsed payload.
+		{NewClaudeCodeConnector(), "claude-code-hook.sh", nil, `{"hook_event_name" : "PreToolUse", "tool_name" : "Bash", "tool_input" : {"command" : "echo ok"}}`},
 		{NewCodexConnector(), "codex-hook.sh", []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ok"}}`},
 	} {
 		t.Run(agent.conn.Name(), func(t *testing.T) {

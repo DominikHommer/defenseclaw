@@ -571,7 +571,7 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			ctx = withAuthenticatedHookConnector(ctx, connectorName)
 		}
 		if decision.Exempt {
-			a.serveEnterpriseExemptHookCall(w, r.WithContext(withEnterpriseExemptUser(ctx)), next, peer, connectorName, route)
+			a.serveEnterpriseExemptHookCall(w, r.WithContext(withEnterpriseExemptUser(ctx)), next, peer, connectorName, route, inspect)
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -579,18 +579,32 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 }
 
 // serveEnterpriseExemptHookCall serves an exempt account's hook call, then
-// writes its enterprise-exempt-user row when the handler answered it (2xx):
-// a call the handler refused, a malformed one for example, was not
-// inspected and writes none (GAP-1285).
+// writes its enterprise-exempt-user row when the handler answered it (2xx)
+// on a route that inspects the call: a call the handler refused, a
+// malformed one for example, was not inspected and writes none (GAP-1285).
+// Neither does a Codex notification or a foreign hook session report, which
+// the handler records without inspecting: the row would also start the
+// account's audit interval and hide its next inspected call.
 func (a *APIServer) serveEnterpriseExemptHookCall(
 	w http.ResponseWriter, r *http.Request, next http.Handler,
-	peer managedHookPeer, connectorName, route string,
+	peer managedHookPeer, connectorName, route string, inspect bool,
 ) {
+	if !inspect && !exemptAuditedHookPath(r.URL.Path) {
+		next.ServeHTTP(w, r)
+		return
+	}
 	sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 	next.ServeHTTP(sw, r)
 	if sw.status >= 200 && sw.status < 300 {
 		a.auditEnterpriseExemptUser(r.Context(), peer, connectorName, route, time.Now())
 	}
+}
+
+// exemptAuditedHookPath reports whether a hook socket route that is not an
+// inspect endpoint inspects the call: every connector hook route does; the
+// Codex notifier and the foreign hook session report do not.
+func exemptAuditedHookPath(path string) bool {
+	return path != "/api/v1/codex/notify" && !strings.HasPrefix(path, enterprisepolicy.ForeignHookSessionPathPrefix)
 }
 
 // refuseUnverifiedSurface refuses, on the standalone profile, a hook call
