@@ -1946,6 +1946,8 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 			c.hookCommand(opts),
 		); err != nil {
 			errs = append(errs, fmt.Sprintf("remove hook entries: %v", err))
+		} else if err := c.keepOperatorEmptyHooks(opts, logicalName, path); err != nil {
+			errs = append(errs, fmt.Sprintf("keep the empty hooks object: %v", err))
 		} else {
 			discardManagedFileBackup(opts.DataDir, c.name, logicalName)
 		}
@@ -2650,6 +2652,17 @@ func (c *hookOnlyConnector) removeConfigEntriesWithManagedBackup(
 		return fmt.Errorf("load Hermes pristine custody: %w", err)
 	}
 	return removeHermesHooks(path, hookScript, backup)
+}
+
+// keepOperatorEmptyHooks puts back the operator's empty hooks object after
+// the surgical removal of DefenseClaw's entries from a JSON hooks file.
+func (c *hookOnlyConnector) keepOperatorEmptyHooks(opts SetupOpts, logicalName, path string) error {
+	switch c.name {
+	case "cursor", "antigravity":
+		return keepPristineEmptyHooks(opts.DataDir, c.name, logicalName, path)
+	default:
+		return nil
+	}
 }
 
 func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts SetupOpts) error {

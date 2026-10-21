@@ -320,6 +320,39 @@ def test_running_sandboxes_are_named_before_the_gateway_restarts(tmp_path: Path,
         assert completed.stdout == "", completed.stdout
 
 
+@pytest.mark.parametrize("operator_stopped", [False, True])
+def test_the_install_stop_leaves_no_operator_stop_marker(tmp_path: Path, operator_stopped: bool) -> None:
+    # GAP-0140: hooks that run during an upgrade read gateway.stopped as an
+    # operator stop and fail at once with that text; the hooks of 1.0.2 do
+    # not read .install.lock. The install's own stop leaves no marker, and an
+    # operator's marker from before the install stays.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("stop_gateway() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    data = tmp_path / "data"
+    data.mkdir()
+    marker = data / "gateway.stopped"
+    if operator_stopped:
+        marker.write_text("stopped\n", encoding="utf-8")
+    gateway = tmp_path / "defenseclaw-gateway"
+    gone = tmp_path / "gone"
+    gateway.write_text(f'#!/bin/sh\n[ "$1" = stop ] && echo stopped > "{marker}" && : > "{gone}"\n', encoding="utf-8")
+    gateway.chmod(0o755)
+    script = tmp_path / "stop.sh"
+    script.write_text(
+        f'set -euo pipefail\nDEFENSECLAW_HOME="{data}"\n'
+        f'gateway_pid() {{ [ -e "{gone}" ] || printf 42; return 0; }}\n'
+        + func
+        + f'stop_gateway "{gateway}"\n',
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert marker.exists() == operator_stopped
+
+
 def test_install_makes_the_owned_bin_folders_private(tmp_path: Path) -> None:
     # A user-private-group umask (002) left ~/.local and ~/.local/bin
     # group-writable when another installer created them; the CLI then

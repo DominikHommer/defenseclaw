@@ -316,10 +316,14 @@ fi
 # restarting or not running (after a reboot, for example): send the call
 # again for up to 3 seconds, starting the gateway after a refusal. See
 # defenseclaw_await_gateway in _hardening.sh.
-# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
+# A tool call's request is bounded like the native hook's answer budget, by
+# the payload's top-level event (defenseclaw_payload_tool_gate_max_time).
+HOOK_MAX_TIME=10
+{{if not .SecureClient}}defenseclaw_payload_tool_gate_max_time "$PAYLOAD" 10
+{{end}}# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
 # payload on descriptors, never on its command line.
 defenseclaw_hook_post() {
-  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 10 "$PAYLOAD" \
+  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" "$HOOK_MAX_TIME" "$PAYLOAD" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
 {{if and .Managed (not .SecureClient)}}    "${RESOLVED_HEADER_ARGS[@]+"${RESOLVED_HEADER_ARGS[@]}"}" \

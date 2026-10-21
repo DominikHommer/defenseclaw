@@ -34,7 +34,8 @@ import { lstat } from "node:fs/promises";
 {{else}}import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, open } from "node:fs/promises";
 {{end}}import { {{if not .Sandbox}}homedir, {{end}}userInfo } from "node:os";
-{{if not .Sandbox}}import { dirname, join } from "node:path";
+{{if not .Sandbox}}import { stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 {{end}}
 // DC_-prefixed constants are non-secret values baked in at setup time, not
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
@@ -112,7 +113,7 @@ let DC_MCP_IDENTITY_STATUS = "unverified";
 // see whose session a request belongs to; the plugin is in-session and can.
 // A value that is not a safe header field is dropped rather than sanitized, so
 // a hostile account name cannot smuggle a second header into every hook call.
-function defenseclawIdentityHeaders() {
+async function defenseclawIdentityHeaders() {
   const headers = {};
   let info;
   try {
@@ -130,7 +131,7 @@ function defenseclawIdentityHeaders() {
   if (defenseclawSafeIdentityValue(info.username)) {
     headers["X-DefenseClaw-User-Name"] = info.username;
   }
-  const facts = defenseclawSessionFactsHeader();
+  const facts = await defenseclawSessionFactsHeader();
   if (facts !== "") {
     headers["X-DefenseClaw-Session-Facts"] = facts;
   }
@@ -149,9 +150,51 @@ const DC_SESSION_FACTS_TTL_MS = 300000;
 const DC_SESSION_FACTS_RETRY_MS = 30000;
 let DC_SESSION_FACTS = { key: "", value: "", until: 0 };
 
-function defenseclawFullSessionFacts() {
+// The modification time of this login's FILE or DIR Kerberos credential
+// cache is part of the session facts key: a new kinit into the same cache
+// changes the principal while every session variable stays the same
+// (GAP-1139). KCM, KEYRING and API caches have no file; the variables alone
+// key them. The stat runs off the event loop and gets
+// DC_CREDENTIAL_CACHE_STAT_MS; calls share one stat, and one still
+// unanswered after that (a stalled network or FUSE mount) reads as null: the
+// call sends the session variables alone.
+const DC_CREDENTIAL_CACHE_STAT_MS = 250;
+let DC_CREDENTIAL_CACHE_STAT = { pending: null, since: 0 };
+
+async function defenseclawCredentialCacheStamp() {
+  const name = String(process.env.KRB5CCNAME || "");
+  let path = name;
+  if (name === "") path = typeof process.getuid === "function" ? "/tmp/krb5cc_" + process.getuid() : "";
+  else if (name.startsWith("FILE:")) path = name.slice(5);
+  else if (name.startsWith("DIR::")) path = name.slice(5);
+  else if (name.startsWith("DIR:")) path = name.slice(4);
+  if (!path.startsWith("/")) return "";
+  const now = Date.now();
+  if (DC_CREDENTIAL_CACHE_STAT.pending === null) {
+    const pending = stat(path).then((info) => String(info.mtimeMs), () => "");
+    DC_CREDENTIAL_CACHE_STAT = { pending, since: now };
+    pending.then(() => {
+      if (DC_CREDENTIAL_CACHE_STAT.pending === pending) DC_CREDENTIAL_CACHE_STAT = { pending: null, since: 0 };
+    });
+  }
+  const left = DC_CREDENTIAL_CACHE_STAT.since + DC_CREDENTIAL_CACHE_STAT_MS - now;
+  if (left <= 0) return null;
+  let timer;
+  const overdue = new Promise((resolve) => { timer = setTimeout(resolve, left, null); });
+  try {
+    return await Promise.race([DC_CREDENTIAL_CACHE_STAT.pending, overdue]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function defenseclawFullSessionFacts() {
   const env = process.env;
-  const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY].map((v) => String(v || "")).join("|");
+  const stamp = await defenseclawCredentialCacheStamp();
+  // The binary would wait on a stalled credential cache too.
+  if (stamp === null) return "";
+  const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY, stamp]
+    .map((v) => String(v || "")).join("|");
   const now = Date.now();
   if (DC_SESSION_FACTS.key === key && now < DC_SESSION_FACTS.until) return DC_SESSION_FACTS.value;
   let value = "";
@@ -172,8 +215,8 @@ function defenseclawFullSessionFacts() {
 {{end}}// defenseclawSessionFactsHeader renders the claimed SSH and logind session
 // facts as the X-DefenseClaw-Session-Facts value the hook runner also sends.
 // Each value is dropped unless it matches the header's allowlisted charset.
-function defenseclawSessionFactsHeader() {
-{{if not .Sandbox}}  const full = defenseclawFullSessionFacts();
+async function defenseclawSessionFactsHeader() {
+{{if not .Sandbox}}  const full = await defenseclawFullSessionFacts();
   if (full !== "") return full;
 {{end}}  const env = process.env;
   const address = String(env.SSH_CONNECTION || "").trim().split(/\s+/)[0] || "";
@@ -602,7 +645,7 @@ async function defenseclawLogFailOpen(reason, category) {
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...(await defenseclawIdentityHeaders()) };
   if (token) headers["Authorization"] = "Bearer " + token;
   try {
     const payload = {
@@ -703,7 +746,7 @@ async function defenseclawPostLoadHeartbeat(cwd) {
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...(await defenseclawIdentityHeaders()) };
   if (token) headers["Authorization"] = "Bearer " + token;
   try {
 {{if .Sandbox}}    await defenseclawFetch(headers, JSON.stringify({
@@ -748,7 +791,7 @@ async function defenseclawPostLifecycle(event, cwd) {
   const info = properties.info || {};
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...(await defenseclawIdentityHeaders()) };
   if (token) headers["Authorization"] = "Bearer " + token;
   try {
     await {{if .Sandbox}}defenseclawFetch(headers, JSON.stringify({

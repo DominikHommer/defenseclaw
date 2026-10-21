@@ -25,7 +25,8 @@ import (
 // `defenseclaw-gateway hook session-facts` only when it is stale. A shell
 // cannot resolve the Go key, so the file also carries EnvKey, the raw
 // session variables (SessionFactsEnvKey); the shell reuses a header for the
-// same variables for five minutes, by the file's age.
+// same variables for five minutes, by the file's age, unless a FILE or DIR
+// credential cache is newer than the file (GAP-1139).
 
 // SessionFactsCacheTTL is how long the hook reuses its cached facts.
 const SessionFactsCacheTTL = 5 * time.Minute

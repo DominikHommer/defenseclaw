@@ -1584,6 +1584,11 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 		if action == "confirm" {
 			return rawStringOr(fields, "decision", "") == "ask"
 		}
+		if event == "PreCompact" && sp.style == styleClaudeCode {
+			// Claude Code stops a compaction on decision block, the shape
+			// the gateway renders for it (GAP-0326).
+			return rawStringOr(fields, "decision", "") == "block"
+		}
 		if event == "SessionStart" || event == "PreCompact" || event == "PostCompact" {
 			var continued bool
 			return sp.style == styleCodex && json.Unmarshal(fields["continue"], &continued) == nil && !continued
@@ -1902,10 +1907,10 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	switch {
 	case reason == "gateway unreachable":
 		text = "DefenseClaw is not checking this session: this account's gateway is not running. " +
-			"Run `defenseclaw-gateway start` to resume protection."
+			"Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint
 	case reason == perUserGatewayRestartingReason:
 		text = "DefenseClaw is not checking this session: this account's gateway is restarting or not running " +
-			"(no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection."
+			"(no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint
 	case reason == perUserGatewayNoAnswerReason:
 		text = "DefenseClaw is not checking this session: this account's gateway did not answer in time " +
 			"(it may be restarting or busy). Check it with `defenseclaw-gateway status`."
@@ -1918,6 +1923,10 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	}
 	return `{"systemMessage":` + mustJSONString(text) + `}`
 }
+
+// perUserGatewayStatusHint ends a per-user gateway-down notice: the command
+// that shows the gateway's state (GAP-0093), as the Unix hooks say it.
+const perUserGatewayStatusHint = " `defenseclaw-gateway status` shows its state."
 
 // unreachableLead starts the unreachable line. Another account's process on
 // the gateway port answers, so the gateway is not "unreachable" there; the
@@ -1988,7 +1997,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 		// The hook does not start a gateway the user stopped (GAP-0486:
 		// the agent showed only the cold-start error).
 		return lead + "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop` (fail mode closed). " +
-			"Start it with `defenseclaw-gateway start`, then try again."
+			"Start it with `defenseclaw-gateway start`, then try again." + perUserGatewayStatusHint
 	case strings.HasPrefix(reason, coldStartFailedReason):
 		return lead + "the DefenseClaw gateway is not running and could not be started (fail mode closed). " +
 			"Run `defenseclaw-gateway start` to see why, then try again."
