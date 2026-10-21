@@ -7,6 +7,26 @@
 set -euo pipefail
 
 HOOK_EVENT="${1:-}"
+# A failure before the helpers load (a hook path that does not resolve, a
+# missing or broken _hardening.sh, a set -e error) still answers: in fail
+# mode closed PreToolUse gets Antigravity's deny, which needs no helper. Other
+# events and fail mode open keep the exit status. A per-user closed mode is
+# tightened by DEFENSECLAW_FAIL_MODE=closed and strict availability, as every
+# later failure is (GAP-0315).
+{{if or .Sandbox (and .Managed (not .SecureClient) (not .SecureClientDelivery))}}_DC_BOOT_FAIL_MODE="closed"
+{{else if .Managed}}_DC_BOOT_FAIL_MODE="open"
+{{else}}_DC_BOOT_FAIL_MODE="{{.FailMode}}"
+case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) _DC_BOOT_FAIL_MODE="closed" ;; esac
+case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_BOOT_FAIL_MODE="closed" ;; esac
+{{end}}antigravity_bootstrap_failure() {
+  if [ "$_DC_BOOT_FAIL_MODE" = "closed" ] && [ "$HOOK_EVENT" = "PreToolUse" ]; then
+    echo "defenseclaw: antigravity hook could not start; blocking (fail mode closed)" >&2
+    printf '%s\n' '{"decision":"deny","reason":"DefenseClaw hook failed closed"}'
+    exit 0
+  fi
+  exit "$1"
+}
+trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ]; then antigravity_bootstrap_failure "$_dc_boot_rc"; fi' EXIT
 HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 HOOK_LINK_DEPTH=0
 while [ -L "$HOOK_SOURCE" ]; do
@@ -42,14 +62,9 @@ export DEFENSECLAW_HOME
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
-  # DEFENSECLAW_FAIL_MODE=closed and strict availability tighten this exit
-  # as they tighten every later failure (GAP-0315).
-  _DC_HOME_FAIL_MODE="{{.FailMode}}"
-  case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) _DC_HOME_FAIL_MODE="closed" ;; esac
-  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
-  if [ "$_DC_HOME_FAIL_MODE" = "closed" ]; then
+  if [ "$_DC_BOOT_FAIL_MODE" = "closed" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
-    if [ "${1:-}" = "PreToolUse" ]; then
+    if [ "$HOOK_EVENT" = "PreToolUse" ]; then
       printf '%s\n' '{"decision":"deny","reason":"DefenseClaw hook failed closed"}'
       exit 0
     fi
@@ -74,6 +89,8 @@ fi
 HOOK_EVENT="${1:-}"
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
+# defenseclaw_harden_env replaced the EXIT trap with its cleanup: keep both.
+trap '_dc_boot_rc=$?; _defenseclaw_hook_cleanup; if [ "$_dc_boot_rc" -ne 0 ]; then antigravity_bootstrap_failure "$_dc_boot_rc"; fi' EXIT
 
 {{if .Sandbox}}# OpenShell sandbox hooks always fail closed, with no environment override:
 # the workload can make the ingress, or the relay in front of it, answer any
@@ -290,7 +307,17 @@ ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 case "$ACTION" in
-  allow|alert|confirm) ;;
+  allow|alert) ;;
+  confirm)
+    # A confirmation is Antigravity's ask; without it the call would run.
+    if [ "$HOOK_EVENT" = "PreToolUse" ]; then
+      OUTPUT_DECISION=""
+      if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+        OUTPUT_DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || OUTPUT_DECISION=""
+      fi
+      [ "$OUTPUT_DECISION" = "ask" ] || fail_response "missing native confirmation in gateway response"
+    fi
+    ;;
   block)
     OUTPUT_DECISION=""
     if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then

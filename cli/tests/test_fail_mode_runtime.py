@@ -987,6 +987,8 @@ def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_m
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "hermes": ""})
     cfg.guardrail.hook_fail_mode = ""
     cfg.guardrail._secure_client = True
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: False
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
@@ -1178,3 +1180,112 @@ def test_opencode_fail_mode_reports_environment_closed(monkeypatch: pytest.Monke
     state = resolve_connector_fail_mode(cfg, "opencode")
     assert state.effective == "closed"
     assert state.provenance == "process-env"
+
+
+def _stale_native_deny_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connectors: list[str], *, multi: bool
+) -> AppContext:
+    # config.yaml says closed while each hook is still rendered open (an
+    # older install, or a fail-mode change the hook never received).
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, dict.fromkeys(connectors, "closed") if multi else {})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.active_connector = lambda: connectors[0]
+    cfg.active_connectors = lambda: list(connectors)
+    for name in connectors:
+        script = f"{name}-hook.sh"
+        (Path(cfg.data_dir) / "hooks" / script).write_text(
+            "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/open"]) + "\n", encoding="utf-8"
+        )
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    return app
+
+
+@pytest.mark.parametrize("connector", ["antigravity", "copilot"])
+def test_closed_fail_mode_re_renders_a_single_native_deny_hook_still_rendered_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, [connector], multi=False)
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" not in result.output
+    assert "Re-applying hook fail mode" in result.output
+    reconcile.assert_called_once_with(app.cfg, connector)
+    restart.assert_not_called()
+
+
+def test_closed_fail_mode_re_renders_native_deny_hooks_with_the_gateway_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["antigravity", "copilot"], multi=True)
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" not in result.output
+    assert sorted(call.args[1] for call in reconcile.call_args_list) == ["antigravity", "copilot"]
+    restart.assert_not_called()
+
+
+def test_secure_client_native_deny_hooks_need_no_fail_mode_refresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Under Secure Client they stay open whatever is configured, so their open
+    # hooks are no stale runtime.
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["antigravity", "copilot"], multi=True)
+    app.cfg.deployment_mode = "managed_enterprise"
+    app.cfg.managed_outside_secure_client = lambda: False
+    with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile:
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" in result.output
+    reconcile.assert_not_called()
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_doctor_fails_an_open_rendered_hook_that_its_own_environment_masks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool
+) -> None:
+    # DEFENSECLAW_FAIL_MODE=closed in doctor's process makes the effective
+    # mode closed, but an agent without it runs the hook fail-open.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"copilot": "closed"})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.mode = "action"
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+    hook_dir = Path(cfg.data_dir) / "hooks"
+    if windows:
+        monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: True)
+        (hook_dir / ".hookcfg").write_text(
+            json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {"copilot": "open"}}),
+            encoding="utf-8",
+        )
+    else:
+        (hook_dir / "copilot-hook.sh").write_text(
+            "\n".join(_HOOK_FAIL_MODE_LINES["copilot-hook.sh/open"]) + "\n", encoding="utf-8"
+        )
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "closed")
+    assert connector_fail_mode_report(cfg, "copilot")["effective"] == "closed"
+    emitted: list[tuple[str, str, str]] = []
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        cmd_doctor._check_connector_inventory(cfg, "copilot", cmd_doctor._DoctorResult())
+    mode_rows = [row for row in emitted if row[1] == "Mode"]
+    assert len(mode_rows) == 1 and mode_rows[0][0] == "fail", mode_rows
+    assert "the installed hook is rendered fail-mode=open" in mode_rows[0][2]

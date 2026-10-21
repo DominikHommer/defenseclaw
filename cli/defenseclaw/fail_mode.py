@@ -342,6 +342,28 @@ def _resolve_native_deny_fail_mode(cfg: Any, name: str, configured: str, desired
     )
 
 
+# The sources that record the mode a connector's installed hook or plugin was
+# rendered with (_platform_runtime_source).
+_RENDERED_SOURCES = frozenset(
+    {"hook-script", "windows-sidecar", "windows-sidecar-legacy", "amp-plugin", "opencode-plugin"}
+)
+
+
+def rendered_fail_mode(report: dict[str, Any]) -> str | None:
+    """The fail mode the installed hook of a connector_fail_mode_report was rendered with, or None.
+
+    ``effective`` also counts an inherited DEFENSECLAW_FAIL_MODE=closed, which
+    only the process reading the report has: the agent that runs the hook may
+    not. A hook rendered open is open for every agent without it.
+    """
+
+    for source in report.get("sources") or ():
+        if isinstance(source, dict) and source.get("name") in _RENDERED_SOURCES:
+            mode = source.get("mode")
+            return mode if mode in _VALID_MODES else None
+    return None
+
+
 def connector_fail_mode_report(
     cfg: Any,
     connector: str,

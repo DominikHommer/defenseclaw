@@ -108,6 +108,20 @@ _CONNECTOR_LABELS = {
 _RUNTIME_FAIL_MODE_CONNECTORS = frozenset({"amp", "claudecode", "codex", "opencode"})
 
 
+def _tracks_runtime_fail_mode(cfg, name: str) -> bool:
+    """Whether a fail-mode change must refresh and verify *name*'s installed hooks.
+
+    Copilot CLI, Antigravity and Hermes render the mode into their hook
+    outside Secure Client (upstream_hook_limit), so an older hook can still
+    render open while config.yaml says closed. Under Secure Client they stay
+    open whatever is configured, so there is nothing to refresh.
+    """
+    key = normalize_connector(name)
+    if key in _RUNTIME_FAIL_MODE_CONNECTORS:
+        return True
+    return bool(upstream_hook_limit(key)) and not upstream_fail_open(cfg, key)
+
+
 
 def _isatty(stream) -> bool:
     try:
@@ -1658,9 +1672,7 @@ def _apply_global_fail_mode_transaction(
                 # refresh or verify; its value is only saved for later.
                 disabled = frozenset(name for name in transaction_targets if _disabled_on_its_own(gc, name))
                 live_targets = [name for name in transaction_targets if name not in disabled]
-                runtime_targets = [
-                    name for name in live_targets if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS
-                ]
+                runtime_targets = [name for name in live_targets if _tracks_runtime_fail_mode(app.cfg, name)]
                 if live_targets and len(runtime_targets) == len(live_targets):
                     for name in runtime_targets:
                         reconcile_connector_registration(app.cfg, name)
@@ -1897,6 +1909,7 @@ def fail_mode_cmd(
         and all(target_modes[name] == desired_modes[name] for name in fail_mode_targets)
         and all(
             (runtime_states[name].desired == desired_modes[name] and runtime_states[name].current)
+            or upstream_fail_open(app.cfg, name)
             or _disabled_on_its_own(gc, name)
             or not gc.enabled
             for name in fail_mode_targets
@@ -1911,7 +1924,7 @@ def fail_mode_cmd(
         _refuse_cursor_fail_mode(gc, single_connector, mode, single_pinned)
     single_state = (
         resolve_connector_fail_mode(app.cfg, single_connector)
-        if not fail_mode_targets and normalize_connector(single_connector) in _RUNTIME_FAIL_MODE_CONNECTORS
+        if not fail_mode_targets and _tracks_runtime_fail_mode(app.cfg, single_connector)
         else None
     )
     if (
@@ -1973,7 +1986,7 @@ def fail_mode_cmd(
             # connector shows its installed runtime value (GAP-1370).
             shown = gc.effective_hook_fail_mode(name) if hasattr(gc, "effective_hook_fail_mode") else old
             installed = getattr(runtime_states[name], "runtime", None)
-            if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS and installed:
+            if _tracks_runtime_fail_mode(app.cfg, name) and installed:
                 shown = installed
             if _cursor_stays_fail_closed(gc, name) and mode == "open":
                 click.echo(

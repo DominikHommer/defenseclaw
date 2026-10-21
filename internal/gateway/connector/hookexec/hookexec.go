@@ -530,11 +530,15 @@ func runHook(ctx context.Context, opts Options) int {
 		// Copilot's official camelCase stdin bodies do not identify the
 		// event. Setup supplies the reviewed event through an exact --event
 		// binding; never infer it from a body field or forward an untrusted
-		// registration. Per-user and Secure Client hooks give Copilot its
-		// documented fail-open result for this local integration failure; a
-		// standalone hook refuses (failInvalidManagedCopilotBinding).
+		// registration. A standalone hook and a per-user hook in fail mode
+		// closed refuse with both of Copilot's denies; a Secure Client hook and
+		// a per-user hook in fail mode open give Copilot its documented
+		// fail-open result for this local integration failure.
 		if managedNativeDecision(opts) {
 			return failInvalidManagedCopilotBinding(opts, sp)
+		}
+		if perUserCopilotFailsClosed(opts, sp) {
+			return failInvalidPerUserCopilotBinding(opts, sp)
 		}
 		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), "missing or unsupported Copilot hook event binding")
 	}
@@ -1520,7 +1524,7 @@ func managedNativeBlockableEvent(connector, event string) bool {
 		}
 	case "copilot":
 		return event == "preToolUse" || event == "permissionRequest"
-	case "devin":
+	case "antigravity", "devin":
 		return event == "PreToolUse"
 	case "kiro":
 		return event == "PreToolUse" || event == "UserPromptSubmit"
@@ -1611,6 +1615,9 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 			return rawStringOr(fields, "behavior", "") == want
 		}
 		return rawStringOr(fields, "permissionDecision", "") == want
+	case "antigravity":
+		// Antigravity reads only its documented decision values.
+		return rawStringOr(fields, "decision", "") == want
 	case "devin", "kiro", "opencode":
 		decision := rawStringOr(fields, "decision", "")
 		if action == "confirm" {
@@ -2253,17 +2260,32 @@ const invalidManagedCopilotBindingReason = "enterprise_managed_copilot_event_bin
 // postToolUse, errorOccurred and the rest) cannot block in Copilot's
 // contract and ignores them. The answer is never an allow decision.
 func failInvalidManagedCopilotBinding(opts Options, sp spec) int {
-	opts.FailMode = "closed"
 	reason := invalidManagedCopilotBindingReason
-	// The call is refused, so it is logged closed: loggedFailMode counts a
-	// Copilot event it does not know as one that cannot block.
+	return refuseInvalidCopilotBinding(opts, sp, "managed "+sp.subject, reason,
+		"DefenseClaw blocked this Copilot call: its DefenseClaw hook is registered without a Copilot event DefenseClaw reviewed. "+
+			"Ask your administrator to run ensure, which rewrites the DefenseClaw policy hook. ("+reason+")")
+}
+
+// failInvalidPerUserCopilotBinding answers a per-user Copilot CLI hook in fail
+// mode closed whose command binds no reviewed Copilot event like
+// failInvalidManagedCopilotBinding, with the per-user next step, as
+// copilot-hook.sh does on Linux and macOS.
+func failInvalidPerUserCopilotBinding(opts Options, sp spec) int {
+	return refuseInvalidCopilotBinding(opts, sp, sp.subject, "missing or unsupported Copilot hook event binding",
+		"DefenseClaw blocked this tool call: its DefenseClaw hook is registered without a Copilot event DefenseClaw reviewed. "+
+			"Run `defenseclaw setup copilot` to register it again.")
+}
+
+// refuseInvalidCopilotBinding writes both of Copilot's denies with text and
+// logs the refusal closed: loggedFailMode counts a Copilot event it does not
+// know as one that cannot block.
+func refuseInvalidCopilotBinding(opts Options, sp spec, subject, reason, text string) int {
+	opts.FailMode = "closed"
 	logged := sp
 	logged.failOpenOnly = false
 	logHookFailure(opts, logged, reason, "response", "closed", true)
-	text := "DefenseClaw blocked this Copilot call: its DefenseClaw hook is registered without a Copilot event DefenseClaw reviewed. " +
-		"Ask your administrator to run ensure, which rewrites the DefenseClaw policy hook. (" + reason + ")"
 	message := mustJSONString(text)
-	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s (event %q)\n", sp.subject, reason, strings.TrimSpace(opts.Event))
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s (fail mode closed): %s (event %q)\n", subject, reason, strings.TrimSpace(opts.Event))
 	fmt.Fprintln(opts.Stdout, `{"permissionDecision":"deny","permissionDecisionReason":`+message+`,"behavior":"deny","message":`+message+`}`)
 	return 0
 }
