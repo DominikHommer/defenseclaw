@@ -427,19 +427,18 @@ func (s *scanner) openFile(path string) (*os.File, bool) {
 // open, so a folder swapped for a link to another profile in between would
 // otherwise put that profile's plugins in this home's inventory (GAP-1138).
 // It compares the path the system gives the opened handle with the home's.
-// A scan that follows links, the machine-wide scan and a system that cannot
-// name an opened file keep the checks made before the open.
+// Where the system cannot name an opened file (macOS), the folders above
+// path are checked again after the open and the opened object must be the
+// one path names now. A scan that follows links and the machine-wide scan
+// keep the checks made before the open.
 func (s *scanner) openedInPlace(f *os.File, path string) bool {
 	if s.limits.FollowSymlinks || s.layout.home == "" {
 		return true
 	}
-	home := s.resolvedHome()
-	if home == "" {
-		return true
-	}
 	got, ok := openedPath(f)
-	if !ok {
-		return true
+	home := s.resolvedHome()
+	if !ok || home == "" {
+		return s.openedObjectIsPath(f, path)
 	}
 	rel, err := filepath.Rel(s.layout.home, path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -450,6 +449,17 @@ func (s *scanner) openedInPlace(f *os.File, path string) bool {
 		return filepath.Clean(got) == want
 	}
 	return strings.EqualFold(filepath.Clean(got), want)
+}
+
+// openedObjectIsPath reports whether f is the object path names now, through
+// plain folders only.
+func (s *scanner) openedObjectIsPath(f *os.File, path string) bool {
+	opened, err := f.Stat()
+	if err != nil || !s.plainDirsAbove(path) {
+		return false
+	}
+	current, err := os.Lstat(path)
+	return err == nil && os.SameFile(opened, current)
 }
 
 // resolvedHome is the home's opened path, or "" when it cannot be named.

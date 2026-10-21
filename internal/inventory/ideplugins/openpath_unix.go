@@ -1,7 +1,7 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows && !darwin
+//go:build !windows
 
 package ideplugins
 
@@ -11,7 +11,7 @@ import (
 )
 
 // openedPath returns the path the kernel gives the opened file in
-// /proc/self/fd. A system without procfs names none.
+// /proc/self/fd. A system without procfs (macOS) names none.
 func openedPath(f *os.File) (string, bool) {
 	conn, err := f.SyscallConn()
 	if err != nil {
