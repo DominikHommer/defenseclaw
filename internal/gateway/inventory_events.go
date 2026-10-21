@@ -519,6 +519,29 @@ func inventoryIdentity(userID string) *llmEventIdentity {
 	if userID == "" || !identityFactsEnabled.Load() {
 		return nil
 	}
+	return inventoryIdentityFacts(userID)
+}
+
+// inventoryIdentityFor is inventoryIdentity for a record that names the
+// account it was found under. A POSIX uid can be handed to another account
+// once the first is removed, so a removal record for the earlier account
+// must not carry the new holder's verified directory facts (GAP-1233): they
+// are attached only while the uid's account is still the one the record
+// names. A Windows SID is never reused, so it is not checked.
+func inventoryIdentityFor(userID, userName string) *llmEventIdentity {
+	if userID == "" || !identityFactsEnabled.Load() {
+		return nil
+	}
+	if userName != "" && useridentity.KindForID(userID) == useridentity.KindPOSIXUID {
+		current := userScopedIdentityName(userID)
+		if current == "" || !strings.EqualFold(useridentity.BareAccountName(current), useridentity.BareAccountName(userName)) {
+			return nil
+		}
+	}
+	return inventoryIdentityFacts(userID)
+}
+
+func inventoryIdentityFacts(userID string) *llmEventIdentity {
 	facts, _ := verifiedIdentityDirectory(userID, true)
 	if facts.Empty() {
 		return nil
@@ -1160,7 +1183,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
 			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID, component.userName)),
 		}
-		inventoryIdentity(component.userID).applyTo(&input)
+		inventoryIdentityFor(component.userID, component.userName).applyTo(&input)
 		return builder.BuildLogAIComponentObserved(input)
 	})
 }
