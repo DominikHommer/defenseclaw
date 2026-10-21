@@ -752,7 +752,13 @@ func (a *App) adminCheck() openshell.Check {
 	if s.Authority == packs.AuthorityAuthoritative {
 		whose = "authoritative (an administrator owns config.yaml)"
 	}
-	c.Detail = whose + ": " + strings.Join(adminConstraints(packs.BaseFloor(a.Cfg)), ", ")
+	floor := packs.BaseFloor(a.Cfg)
+	c.Detail = whose + ": " + strings.Join(adminConstraints(floor), ", ")
+	if len(floor.RequiredFor) > 0 && !a.Cfg.StandaloneEnterprise() {
+		// Only a managed gateway refuses the host runs of a required agent
+		// (requireSandboxDecision); here the key changes nothing (#1209).
+		c.Detail += "; required_for has no effect on a per-user gateway: only a managed computer refuses host runs"
+	}
 	return c
 }
 
@@ -770,6 +776,9 @@ func adminConstraints(ad config.OpenShellAdminConfig) []string {
 			p += " (pinned)"
 		}
 		out = append(out, p)
+	}
+	if len(ad.RequiredFor) > 0 {
+		out = append(out, "sandbox required for "+strings.Join(ad.RequiredFor, ", "))
 	}
 	if ad.MinProfile != "" {
 		out = append(out, "profile "+ad.MinProfile+" or stricter")

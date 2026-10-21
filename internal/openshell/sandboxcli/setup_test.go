@@ -1742,6 +1742,20 @@ func TestDoctorNamesTheOrganizationConstraints(t *testing.T) {
 	}
 }
 
+// GAP-0087 (#1209): an openshell.admin block with only required_for
+// printed an empty constraint list on a per-user gateway, where the key
+// refuses no host run. The row names it and says it has no effect there.
+func TestDoctorSaysRequiredForHasNoEffectOnAPerUserGateway(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.Cfg.OpenShell.Admin = config.OpenShellAdminConfig{RequiredFor: []string{"claudecode"}}
+	c := ta.adminCheck()
+	want := "advisory (you own config.yaml and can change it): sandbox required for claudecode; " +
+		"required_for has no effect on a per-user gateway: only a managed computer refuses host runs"
+	if c.Status != openshell.StatusPass || c.Detail != want {
+		t.Fatalf("row = %s %q\nwant      %q", c.Status, c.Detail, want)
+	}
+}
+
 func TestDoctorCountsADownGatewayOnce(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.status.Available = false
