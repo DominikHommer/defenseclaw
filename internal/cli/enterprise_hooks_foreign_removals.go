@@ -182,7 +182,6 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 			if markErr := enterpriseForeignHookMarkRemovalPending(identity); markErr != nil {
 				err = errors.Join(err, fmt.Errorf("hold the account's guarded calls closed until its records are revoked: %w", markErr))
 			} else {
-				held = true
 				err = errors.Join(err, errors.New("the account's guarded calls are denied until a later pass revokes its records"))
 			}
 		}
