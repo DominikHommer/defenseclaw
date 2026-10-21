@@ -1460,14 +1460,12 @@ func writeWindowsBundleAdminFile(path string, data []byte) error {
 // installWindowsBundleAnchors installs the administrator anchor file src
 // as <state root>\etc\trust\bundle-anchors.json once it decodes and passes
 // the trust check, then checks the installed copy the same way. It returns
-// the bytes it wrote.
+// the bytes it wrote, which are the bytes it read and checked once.
 func installWindowsBundleAnchors(src, dst string) ([]byte, error) {
-	if _, err := enterprisebundle.LoadAnchors(src, bundleAnchorTrust); err != nil {
-		return nil, err
-	}
-	raw, err := safefile.ReadRegularFileBounded(src, windowsBundleMaxAnchors)
+	// One read: the bytes written are the ones decoded and trust-checked.
+	_, raw, err := enterprisebundle.ReadAnchorsFile(src, bundleAnchorTrust)
 	if err != nil {
-		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeAnchorInvalid, Detail: err.Error()}
+		return nil, err
 	}
 	if err := windowsBundleEnsurePrivateDirectory(filepath.Dir(dst)); err != nil {
 		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
