@@ -335,7 +335,7 @@ try {
             Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
             Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
             $usersRules = @(Get-TestUsersRules $vendor)
-            if ($usersRules.Count -ne 1 -or [int]$usersRules[0].FileSystemRights -ne 0x1200a0 -or
+            if ($usersRules.Count -ne 1 -or [int]$usersRules[0].FileSystemRights -ne 0x1200a8 -or
                 $usersRules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
                 -not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor)) {
                 $failures.Add('install did not give an existing vendor directory exactly one this-folder Users read entry')

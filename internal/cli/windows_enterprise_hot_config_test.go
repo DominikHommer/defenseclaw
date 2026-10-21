@@ -105,6 +105,10 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		return nil
 	}
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
+	custodySeam := windowsEnterpriseInstalledCLICustody
+	t.Cleanup(func() { windowsEnterpriseInstalledCLICustody = custodySeam })
+	// The installed CLI stands for an administrator-only image.
+	windowsEnterpriseInstalledCLICustody = func(string, string) error { return nil }
 	windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
 		return windowsServiceConfigValidation{}, nil
 	}

@@ -18,6 +18,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 )
@@ -54,6 +55,33 @@ func windowsEnterpriseLocalSystemRemedy(action string) string {
 	return "run DefenseClaw Setup /ensure and then " + action + ", both as LocalSystem " + windowsEnterpriseActiveSessionWhen + " " +
 		"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
 		"see \"Run Setup as LocalSystem\" in the Windows enterprise guide)"
+}
+
+// windowsEnterpriseInstallerExitFailure names an installer engine that
+// exited without its diagnostic. One another program ended (Task Manager,
+// Stop-Process, an antivirus, a shutdown) exits 4294967295 or with the
+// console-close status, and the raw code alone said nothing an operator
+// could act on (GAP-0888).
+func windowsEnterpriseInstallerExitFailure(code int) error {
+	switch uint32(code) {
+	case 0xFFFFFFFF, 0xC000013A:
+		return fmt.Errorf("the Windows enterprise installer was ended before it reported a result (exit code %d: "+
+			"another program stopped its PowerShell process, for example Task Manager, Stop-Process, an antivirus or a shutdown). "+
+			"Check the lifecycle log (%s), then run the same command again", code, windowsEnterpriseLifecycleLogPath)
+	}
+	return fmt.Errorf("the Windows enterprise installer exited with code %d without a diagnostic; check the lifecycle log (%s)",
+		code, windowsEnterpriseLifecycleLogPath)
+}
+
+// windowsEnterpriseUserStateRemainingMessage is the per_user_state_remaining
+// error of a LocalSystem purge that could not remove every enrolled
+// account's data. It ran as LocalSystem already, so it names what usually
+// holds the files and what a missing folder means (GAP-0888).
+func windowsEnterpriseUserStateRemainingMessage(count int, accounts string) string {
+	return fmt.Sprintf("--purge ran as LocalSystem but could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), "+
+		"which keep per-user hook tokens that nothing accepts any more. Usually an agent or editor that account runs still holds a file: "+
+		"sign the account out or close its agents, then run /uninstall PURGE=1 again as LocalSystem. "+
+		"An account whose profile folder no longer exists has nothing left to remove. Accounts: %s", count, accounts)
 }
 
 // windowsManagedHooksPurgedBinariesMarker separates a purged account's label

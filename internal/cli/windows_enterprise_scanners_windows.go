@@ -165,7 +165,10 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			// and a missing one is reported with the Setup command that installs it.
 			reprepareInstalledWindowsScannerRuntime(result)
 		} else {
-			if err := installWindowsScannerRuntime(source, opts); err != nil {
+			var superseded *windowsScannerRuntimeSupersededError
+			if err := installWindowsScannerRuntime(source, opts); errors.As(err, &superseded) {
+				result.AddWarning("scanner_runtime_superseded", superseded.Error())
+			} else if err != nil {
 				result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
 			}
 			result.Scanners = windowsScannerRuntimeReader()
@@ -265,9 +268,78 @@ var windowsScannerRuntimeServiceCheck = func() error {
 	return nil
 }
 
+// windowsScannerRuntimeSupersededError is the scanner step of a lifecycle
+// run whose release is older than the deployment now installed: a later
+// run committed a newer release, and its own scanner step installs the
+// matching runtime.
+type windowsScannerRuntimeSupersededError struct {
+	run, installed string
+}
+
+func (e *windowsScannerRuntimeSupersededError) Error() string {
+	return "a later lifecycle run installed DefenseClaw " + e.installed + "; this run (" + e.run +
+		") left the scanner runtime to it"
+}
+
+// windowsScannerRuntimeLockName is the file in the runtime root that
+// serializes the scanner step of overlapping lifecycle runs.
+const windowsScannerRuntimeLockName = "scanner-runtime.lock"
+
+// windowsScannerRuntimeLockWait bounds the wait for another run's scanner
+// step; a seam for tests.
+var windowsScannerRuntimeLockWait = 20 * time.Minute
+
+// lockWindowsScannerRuntime opens the scanner step lock exclusively,
+// waiting for another run that holds it.
+func lockWindowsScannerRuntime(root string) (func(), error) {
+	name, err := windows.UTF16PtrFromString(filepath.Join(root, windowsScannerRuntimeLockName))
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(windowsScannerRuntimeLockWait)
+	for {
+		handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil,
+			windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+		if err == nil {
+			return func() { _ = windows.CloseHandle(handle) }, nil
+		}
+		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) || !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("open the scanner runtime lock: %w", err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// windowsScannerRuntimeSupersededBy is the installed release when it is
+// newer than this run's, "" otherwise (or when either cannot be read).
+func windowsScannerRuntimeSupersededBy(opts *windowsEnterpriseLifecycleOptions) string {
+	if opts == nil || strings.TrimSpace(opts.productVersion) == "" {
+		return ""
+	}
+	installed, err := windowsEnterpriseInstalledProductVersion(opts)
+	installed = strings.TrimSpace(installed)
+	if err != nil || installed == "" {
+		return ""
+	}
+	if _, _, ok := parseWindowsEnterpriseVersion(installed); !ok {
+		return ""
+	}
+	if _, _, ok := parseWindowsEnterpriseVersion(strings.TrimSpace(opts.productVersion)); !ok {
+		return ""
+	}
+	if compareWindowsEnterpriseVersions(installed, opts.productVersion) > 0 {
+		return installed
+	}
+	return ""
+}
+
 // installWindowsScannerRuntime copies source into the protected root unless
 // the installed copy already matches, then unpacks and compiles the runtime.
-// A new executable is admitted first, like every other payload file.
+// The staged executable is admitted on every run, like every other payload
+// file. Overlapping runs take the step in turn, and a run whose release is
+// older than the installed deployment leaves the runtime to the run that
+// installed it, so a delayed older upgrade cannot replace a newer runtime
+// (GAP-1166).
 func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycleOptions) error {
 	root, err := windowsScannerRuntimeDir()
 	if err != nil {
@@ -280,23 +352,33 @@ func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycl
 	if err := ensureWindowsScannerRuntimeRoot(root, gateway); err != nil {
 		return err
 	}
+	release, err := lockWindowsScannerRuntime(root)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if installed := windowsScannerRuntimeSupersededBy(opts); installed != "" {
+		return &windowsScannerRuntimeSupersededError{run: strings.TrimSpace(opts.productVersion), installed: installed}
+	}
 	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
 	want, err := windowsEnterpriseFileSHA256(source)
 	if err != nil {
 		return err
 	}
-	// The installed copy is kept only when it has the staged bytes and the
-	// record says they were admitted. Otherwise the staged copy is admitted,
-	// installed when the bytes differ (a copy changed in place is restored),
-	// and recorded: every later run of the installed executable checks it
+	// The staged copy is admitted under the current trust policy even when
+	// the installed bytes match it: a signer restriction added since the
+	// last run applies to this run too (GAP-0919). The installed copy is
+	// kept when it has the staged bytes; otherwise the staged copy is
+	// installed (a copy changed in place is restored). The admission is
+	// recorded: every later run of the installed executable checks it
 	// against that record first (GAP-0311).
+	if err := admitWindowsScannerRuntimePayload(source, want, opts); err != nil {
+		return err
+	}
 	got, gotErr := windowsEnterpriseFileSHA256(target)
 	admitted, _ := managed.ReadScannerRuntimeAdmission(root)
 	copied := false
 	if gotErr != nil || got != want || admitted != want {
-		if err := admitWindowsScannerRuntimePayload(source, want, opts); err != nil {
-			return err
-		}
 		if gotErr != nil || got != want {
 			if err := copyWindowsScannerRuntime(source, target, root, want); err != nil {
 				return err
