@@ -580,7 +580,7 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
         # its env, and carries the same argv the managed entry got.
         assert servers["Kiro"]["command"] == guard
         assert servers["Kiro"]["env"] == {"KEEP": "me"}
-        assert servers["Kiro"]["args"] == servers["DefenseClaw · Kiro"]["args"]
+        assert "DefenseClaw · Kiro" not in servers
         # The wrapped agent is the one that was already configured (compare
         # basenames: macOS resolves the temp path through /private).
         assert any(str(value).endswith("kiro-cli") for value in servers["Kiro"]["args"])
@@ -589,10 +589,38 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
         assert servers["Foreign"] == {"command": "other", "args": []}
         assert app.cfg.acp.mode == "observe"
 
+        changed = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard,
+             "--agent-binary", agent, "--profile", "locked", "--activate", "--json-output"],
+            obj=app,
+        )
+        assert changed.exit_code == 0, changed.output
+        servers = json.loads(settings.read_text())["agent_servers"]
+        assert set(servers) == {"Kiro", "Foreign"}
+        assert "locked" in servers["Kiro"]["args"]
+        assert "action" in servers["Kiro"]["args"]
+        verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert verified.exit_code == 0, verified.output
+        # A copied guarded entry with stale metadata must also be checked.
+        servers["Stale"] = dict(servers["Kiro"], args=list(servers["Kiro"]["args"]))
+        profile_index = servers["Stale"]["args"].index("--profile") + 1
+        servers["Stale"]["args"][profile_index] = "default"
+        settings.write_text(json.dumps({"agent_servers": servers}))
+        cmd_acp_module._refresh_client_contract_digests(str(data_dir), "zed", settings)
+        verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert verified.exit_code != 0, verified.output
+        servers.pop("Stale")
+        settings.write_text(json.dumps({"agent_servers": servers}))
+        cmd_acp_module._refresh_client_contract_digests(str(data_dir), "zed", settings)
+
         # Re-running finds nothing to adopt rather than double-wrapping.
         again = CliRunner().invoke(acp_cmd, ["adopt", "--client", "zed", "--yes", "--json-output"], obj=app)
         assert again.exit_code == 0, again.output
         assert json.loads(again.output)["adopted"] == []
+        removed = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert removed.exit_code == 0, removed.output
+        assert json.loads(settings.read_text())["agent_servers"] == {"Foreign": {"command": "other", "args": []}}
     finally:
         cleanup_app(app, db_path, data_dir)
 

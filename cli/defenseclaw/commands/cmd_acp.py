@@ -249,32 +249,97 @@ def _managed_name(agent: str) -> str:
     return f"DefenseClaw · {agent.capitalize()}"
 
 
-def _set_client_entry(client: str, agent: str, command: str, args: list[str]) -> Path:
+def _guard_options(entry: dict[str, Any]) -> dict[str, str]:
+    args = entry.get("args")
+    if not isinstance(args, list) or "--" not in args:
+        return {}
+    prefix = args[:args.index("--")]
+    if len(prefix) % 2 or not all(isinstance(value, str) for value in prefix):
+        return {}
+    options = dict(zip(prefix[::2], prefix[1::2]))
+    return options if len(options) * 2 == len(prefix) else {}
+
+
+def _guarded_pair(entry: dict[str, Any]) -> tuple[str, str] | None:
+    options = _guard_options(entry)
+    client, agent = options.get("--client", ""), options.get("--agent", "")
+    if client not in _CLIENTS or agent not in _AGENTS:
+        return None
+    if not _entry_is_guarded(entry):
+        # An explicitly selected guard may have another filename. Its lock
+        # must identify that exact executable before we claim this entry.
+        lock_path = Path(options.get("--contract-lock", ""))
+        if not lock_path.is_absolute() or lock_path.name != f"{client}-{agent}.contract-lock.json":
+            return None
+        try:
+            lock = _read_json_object(lock_path)
+        except click.ClickException:
+            return None
+        identities = [lock.get(key) for key in ("guard", "client", "agent")]
+        if not all(isinstance(item, dict) for item in identities):
+            return None
+        if (
+            identities[0].get("path") != entry.get("command")
+            or identities[1].get("id") != client
+            or identities[2].get("id") != agent
+        ):
+            return None
+    return client, agent
+
+
+def _pair_entry_names(servers: dict[str, Any], client: str, agent: str) -> list[str]:
+    return [
+        name for name, entry in servers.items()
+        if name == _managed_name(agent) or isinstance(entry, dict) and _guarded_pair(entry) == (client, agent)
+    ]
+
+
+def _set_client_entry(
+    client: str, agent: str, command: str, args: list[str], entry_name: str | None = None,
+) -> Path:
     path = _client_path(client)
     document = _read_json_object(path)
     servers = document.setdefault("agent_servers", {})
     if not isinstance(servers, dict):
         raise click.ClickException(f"agent_servers must be an object in {path}")
-    entry: dict[str, Any] = {"command": command, "args": args, "env": {}}
-    if client == "zed":
-        entry["type"] = "custom"
-    servers[_managed_name(agent)] = entry
+    names = _pair_entry_names(servers, client, agent)
+    if entry_name is not None:
+        adopted = servers.get(entry_name)
+        if not isinstance(adopted, dict) or _agent_for_entry(adopted) != agent:
+            raise click.ClickException(
+                f"ACP entry {entry_name!r} changed before adoption; run defenseclaw acp adopt again"
+            )
+        names.append(entry_name)
+    aliases = [name for name in names if name != _managed_name(agent)]
+    if aliases and _managed_name(agent) in servers:
+        canonical = servers[_managed_name(agent)]
+        if not isinstance(canonical, dict) or _guarded_pair(canonical) != (client, agent):
+            raise click.ClickException("the duplicate ACP entry cannot be identified; run defenseclaw acp verify")
+        del servers[_managed_name(agent)]
+    for name in aliases or names or [_managed_name(agent)]:
+        entry = dict(servers.get(name) or {})
+        entry.update(command=command, args=args)
+        entry.setdefault("env", {})
+        if client == "zed":
+            entry["type"] = "custom"
+        servers[name] = entry
     _write_json(path, document)
     return path
 
 
 def _has_client_entry(client: str, agent: str) -> bool:
     servers = _read_json_object(_client_path(client)).get("agent_servers")
-    return isinstance(servers, dict) and _managed_name(agent) in servers
+    return isinstance(servers, dict) and bool(_pair_entry_names(servers, client, agent))
 
 
 def _remove_client_entry(client: str, agent: str) -> Path:
     path = _client_path(client)
     document = _read_json_object(path)
     servers = document.get("agent_servers")
-    if not isinstance(servers, dict) or _managed_name(agent) not in servers:
+    if not isinstance(servers, dict):
         return path
-    servers.pop(_managed_name(agent))
+    for name in _pair_entry_names(servers, client, agent):
+        servers.pop(name)
     if not servers:
         # Don't leave an empty agent_servers object (or a file that setup
         # created only for DefenseClaw) behind once the last entry is gone.
@@ -294,7 +359,7 @@ def _managed_pairs() -> set[tuple[str, str]]:
         if not isinstance(servers, dict):
             continue
         for agent in _AGENTS:
-            if _managed_name(agent) in servers:
+            if _pair_entry_names(servers, client, agent):
                 pairs.add((client, agent))
     return pairs
 
@@ -355,8 +420,8 @@ def _verify_binding(
     client_path = _client_path(client)
     document = _read_json_object(client_path)
     servers = document.get("agent_servers")
-    entry = servers.get(_managed_name(agent)) if isinstance(servers, dict) else None
-    if not isinstance(entry, dict):
+    names = _pair_entry_names(servers, client, agent) if isinstance(servers, dict) else []
+    if not names:
         problems.append("managed editor entry is missing")
     lock_path = _contract_lock_path(data_dir, client, agent)
     if lock_path.is_symlink() or not lock_path.is_file():
@@ -426,14 +491,29 @@ def _verify_binding(
                     f"contract lock mode {locked_mode!r} no longer matches profile "
                     f"{expected_profile!r} mode {expected_mode!r}; re-run acp setup"
                 )
-    if isinstance(entry, dict):
+    for name in names:
+        entry = servers[name]
+        if not isinstance(entry, dict):
+            problems.append(f"editor entry {name!r} is not an object")
+            continue
         args = entry.get("args")
+        options = _guard_options(entry)
         if (
             entry.get("command") != (lock_guard.get("path") if isinstance(lock_guard, dict) else None)
             or not isinstance(args, list)
-            or str(lock_path.resolve()) not in args
+            or not options
+            or args[args.index("--") + 1:] != [lock_agent.get("path"), *_AGENTS[agent][1]]
+            or any(options.get(flag) != expected for flag, expected in {
+                "--client": client, "--agent": agent,
+                "--contract-lock": str(lock_path.resolve()),
+                "--token-file": str(Path(data_dir) / "acp" / (
+                    f"{client}-{agent}.token" if isinstance(lock_guard, dict) and lock_guard.get("managed_custody")
+                    else ".token"
+                )),
+                "--profile": lock.get("profile"), "--mode": lock.get("mode"),
+            }.items())
         ):
-            problems.append("editor launch command does not match the lock")
+            problems.append(f"editor launch command does not match the lock: {name}")
     return problems
 
 
@@ -505,6 +585,7 @@ def setup_cmd(
     runtime_data_dir: Path | None,
     token_file: Path | None,
     json_output: bool,
+    entry_name: str | None = None,
 ) -> None:
     """Install a guarded agent entry into Zed or JetBrains."""
     if not app.cfg:
@@ -599,7 +680,7 @@ def setup_cmd(
     ]
     try:
         _progress(show, f"Writing the DefenseClaw {agent} entry to {client_path}...")
-        path = _set_client_entry(client, agent, guard, args)
+        path = _set_client_entry(client, agent, guard, args, entry_name)
         _progress(show, "Pinning the guard and agent executable digests...")
         lock_path = _write_contract_lock(
             data_dir=data_dir,
@@ -1085,15 +1166,6 @@ def _agent_for_entry(entry: dict[str, Any]) -> str:
     return ""
 
 
-def _guarded_entry_agent(entry_name: str) -> str:
-    """Recover the agent id from a DefenseClaw-managed entry name."""
-
-    for agent in sorted(_AGENTS):
-        if entry_name == _managed_name(agent):
-            return agent
-    return ""
-
-
 def _registry_entry_agent(entry_name: str) -> str:
     """Best-effort agent id for a client-registry entry name.
 
@@ -1136,8 +1208,9 @@ def _detect_acp_clients() -> list[dict[str, Any]]:
                 for name, entry in sorted(servers.items()):
                     if not isinstance(entry, dict):
                         continue
-                    if _entry_is_guarded(entry):
-                        record["guarded"].append({"entry": name, "agent": _guarded_entry_agent(name)})
+                    pair = _guarded_pair(entry)
+                    if pair is not None or _entry_is_guarded(entry):
+                        record["guarded"].append({"entry": name, "agent": pair[1] if pair else ""})
                         continue
                     if agent := _agent_for_entry(entry):
                         record["adoptable"].append(
@@ -1163,31 +1236,6 @@ def _detect_acp_clients() -> list[dict[str, Any]]:
         )
         findings.append(record)
     return findings
-
-
-def _point_entry_at_guard(client: str, entry_name: str, guard: str, args: list[str]) -> None:
-    """Route an existing client entry through the guard, in place.
-
-    The entry keeps its key and its `env`, so the operator's own picker entry
-    keeps working and simply stops reaching the agent unmediated. Leaving the
-    direct entry behind instead would preserve a bypass that the guard cannot
-    see, which is the opposite of taking over.
-    """
-
-    path = _client_path(client)
-    document = _read_json_object(path)
-    servers = document.get("agent_servers")
-    if not isinstance(servers, dict):
-        return
-    entry = servers.get(entry_name)
-    if not isinstance(entry, dict):
-        return
-    entry["command"] = guard
-    entry["args"] = args
-    if client == "zed":
-        entry["type"] = "custom"
-    servers[entry_name] = entry
-    _write_json(path, document)
 
 
 @acp_cmd.command("detect")
@@ -1297,9 +1345,7 @@ def adopt_cmd(
     if not assume_yes and not json_output and not click.confirm("Proceed?", default=True):
         raise click.Abort()
 
-    guard = _resolve_executable(guard_binary, "DefenseClaw ACP guard")
-
-    def _invoke_setup(target_client: str, agent: str, agent_binary: str = "") -> None:
+    def _invoke_setup(target_client: str, agent: str, agent_binary: str = "", entry_name: str | None = None) -> None:
         """Run `acp setup` for one pair without its output.
 
         Adoption owns the operator-facing summary, and with --json-output it
@@ -1320,18 +1366,12 @@ def adopt_cmd(
                 runtime_data_dir=None,
                 token_file=None,
                 json_output=True,
+                entry_name=entry_name,
             )
 
     adopted: list[dict[str, str]] = []
     for target_client, entry, agent, agent_binary in planned:
-        _invoke_setup(target_client, agent, agent_binary)
-        # Reuse the exact argv setup just wrote for the managed entry so the
-        # adopted entry cannot drift from it.
-        managed = _read_json_object(_client_path(target_client)).get("agent_servers", {})
-        written = managed.get(_managed_name(agent)) if isinstance(managed, dict) else None
-        if isinstance(written, dict) and entry != _managed_name(agent):
-            args = [str(value) for value in written.get("args", [])]
-            _point_entry_at_guard(target_client, entry, guard, args)
+        _invoke_setup(target_client, agent, agent_binary, entry)
         adopted.append({"client": target_client, "entry": entry, "agent": agent})
 
     beside: list[dict[str, str]] = []
