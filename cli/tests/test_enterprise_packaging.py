@@ -1545,8 +1545,9 @@ def test_macos_pkg_preinstall_refuses_below_the_bundle_release_floor(
 # binaries) the installed gateway is gone, but the trust anchors and the
 # confirmed bundle stay. Each package script then asks the root-only copy of
 # the gateway that uninstall kept in the lifecycle folder (floor-check/), before
-# any file is replaced; a copy that is not root-owned, or a floor-check folder
-# that is a symlink, is not asked.
+# any file is replaced. A copy that is not root-owned, or a floor-check folder
+# that is a symlink, is not run, and it does not count as no copy either: the
+# floor is unchecked, so the install is refused.
 def _floor_checker_case(tmp_path: Path, kind: str, rc: int, checker: str) -> tuple[_Host, subprocess.CompletedProcess[str]]:
     host = _Host(tmp_path)
     host.gateway.unlink()  # removed with the deployment's binaries
@@ -1605,7 +1606,13 @@ def _run_floor_script(host: _Host, kind: str, owner: str = "echo 0") -> subproce
 @pytest.mark.parametrize("kind", ["macos", "linux", "apt"])
 @pytest.mark.parametrize(
     ("rc", "checker", "asked", "refused"),
-    [(3, "root", True, True), (0, "root", True, False), (1, "root", True, True), (3, "not-root", False, False), (3, "symlink", False, False)],
+    [
+        (3, "root", True, True),
+        (0, "root", True, False),
+        (1, "root", True, True),
+        (0, "not-root", False, True),
+        (0, "symlink", False, True),
+    ],
 )
 def test_package_scripts_ask_the_kept_floor_checker_when_the_gateway_is_gone(
     tmp_path: Path, kind: str, rc: int, checker: str, asked: bool, refused: bool
@@ -1619,6 +1626,8 @@ def test_package_scripts_ask_the_kept_floor_checker_when_the_gateway_is_gone(
     assert "Nothing was changed" in result.stderr
     # Refused before any file changed: no other tool ran.
     assert [c for c in host.calls() if not c.startswith("checker ")] == []
+    if not asked:
+        assert "could not be checked" in result.stderr and "floor-check/defenseclaw-gateway" in result.stderr, result.stderr
     if kind == "macos":
         document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
         assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
@@ -1692,6 +1701,83 @@ exit {kept_rc}""")
     asked = [c for c in host.calls() if c.startswith("checker ")]
     assert asked == ([] if kept_rc is None else ["checker enterprise bundle floor-check --product-version 1.0.5"])
     assert (result.returncode == 1) == (kept_rc == 3), (result.stdout, result.stderr)
+
+
+# Only a gateway that was read and has no floor check marker is an older one,
+# which is not asked. Before, a gateway that could not be inspected counted
+# as one: its marker could not be read (no read permission, a read error, a
+# dangling symlink), or it carries the marker but is not a root-owned file
+# (another owner, a symlink, or an owner stat could not read). With no kept
+# copy each package script then let the transaction through with no floor
+# decision. It now refuses before any file changes, without running that
+# gateway; a root-owned kept copy still answers for it, and an older gateway
+# whose owner cannot be read is still not asked (the 0.8.10 and
+# 1.0.0-1.0.3 upgrades).
+@pytest.mark.parametrize("kind", ["macos", "linux", "apt"])
+@pytest.mark.parametrize(
+    "failure",
+    ["unreadable", "read-error", "dangling-symlink", "symlink", "not-root", "owner-unreadable", "older-owner-unreadable"],
+)
+@pytest.mark.parametrize("kept_rc", [None, 0, 3])
+def test_package_scripts_refuse_when_the_installed_gateway_cannot_be_inspected(
+    tmp_path: Path, kind: str, failure: str, kept_rc: int | None
+) -> None:
+    if failure == "unreadable" and os.geteuid() == 0:
+        pytest.skip("root reads a file without read permission")
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    gateway = str(host.gateway)
+    _floor_checker_stub(host.gateway, host.log, "ok", marker=failure != "older-owner-unreadable")
+    if failure in ("symlink", "dangling-symlink"):
+        target = tmp_path / "real-gateway"
+        host.gateway.rename(target)
+        if failure == "dangling-symlink":
+            target.unlink()
+        host.gateway.symlink_to(target)
+    elif failure == "unreadable":
+        host.gateway.chmod(0o311)
+    elif failure == "read-error":
+        # grep reports an I/O error (exit 2) for the gateway, as on a bad disk.
+        real = subprocess.run(["sh", "-c", "command -v grep"], capture_output=True, text=True, check=True).stdout.strip()
+        _write_stub(
+            host.bin,
+            "grep",
+            f"""for a in "$@"; do [ "$a" = '{gateway}' ] && {{ echo "grep: $a: Input/output error" >&2; exit 2; }}; done
+exec '{real}' "$@"
+""",
+        )
+    if kept_rc is not None:
+        (host.state / "floor-check").mkdir()
+        _write_stub(host.state / "floor-check", "defenseclaw-gateway", f"""echo "checker $*" >>'{host.log}'
+exit {kept_rc}""")
+    owner = {"not-root": "501", "owner-unreadable": "", "older-owner-unreadable": ""}.get(failure)
+    stat = "echo 0"
+    if owner is not None:
+        # The gateway's owner: stat prints another uid, or fails with no output.
+        fail = f"echo {owner}; exit 0" if owner else "echo 'stat: cannot stat' >&2; exit 1"
+        stat = f"""for a in "$@"; do [ "$a" = '{gateway}' ] && {{ {fail}; }}; done
+echo 0"""
+    result = _run_floor_script(host, kind, stat)
+    calls = host.calls()
+    # That gateway is not asked for the floor, and one that is not a
+    # root-owned file is not run as root at all (not for a status either).
+    assert not [c for c in calls if c.startswith("run enterprise bundle floor-check")], calls
+    if failure in ("symlink", "dangling-symlink", "not-root", "owner-unreadable"):
+        assert not [c for c in calls if c.startswith("run ")], calls
+    asked = [c for c in calls if c.startswith("checker ")]
+    assert asked == ([] if kept_rc is None else ["checker enterprise bundle floor-check --product-version 1.0.5"])
+    older = failure == "older-owner-unreadable"
+    refused = kept_rc == 3 or (kept_rc is None and not older)
+    assert (result.returncode == 1) == refused, (result.stdout, result.stderr)
+    if not refused:
+        return
+    assert "Nothing was changed" in result.stderr
+    if kept_rc is None:
+        assert "could not be checked" in result.stderr and gateway in result.stderr, result.stderr
+    if kind == "macos":
+        document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
+        assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
+        _validate_lifecycle_result(document)
 
 
 def test_package_scripts_look_for_the_gateway_floor_check_marker() -> None:

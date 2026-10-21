@@ -108,16 +108,39 @@ not_older() {
 # installed gateway is gone or older (uninstall --keep-state and then the
 # package removal, or an uninstall that failed after removing the binaries),
 # the root-only copy that uninstall kept in the lifecycle folder answers.
+# Only a gateway that was read and has no marker is an older one: a gateway
+# that cannot be read, and a gateway with the marker or a kept copy that is
+# not a root-owned file (or whose owner cannot be read), leave the floor
+# unchecked unless the other one answers, and the install is refused.
 # Only exit 0 lets the install go on: exit 3 is the refusal, and any other
 # result (application control denied the execution, the checker was killed
 # or crashed) leaves the floor unchecked, so the install is refused too.
-floor_check_marker=defenseclaw-package-floor-check/1
 gateway=/opt/defenseclaw/bin/defenseclaw-gateway
+floor_check_marker=defenseclaw-package-floor-check/1
+kept="$state/floor-check"
 checker=
-if root_owned "$gateway" && grep -qaF "$floor_check_marker" "$gateway" 2>/dev/null; then
-    checker=$gateway
-elif [ ! -L "$state/floor-check" ] && root_owned "$state/floor-check/defenseclaw-gateway"; then
-    checker="$state/floor-check/defenseclaw-gateway"
+unchecked=
+if [ -e "$gateway" ] || [ -L "$gateway" ]; then
+    grep -qaF "$floor_check_marker" "$gateway" 2>/dev/null
+    case $? in
+    0)
+        if root_owned "$gateway"; then
+            checker=$gateway
+        else
+            unchecked="$gateway has the floor check, but it is not a root-owned file or its owner could not be read"
+        fi
+        ;;
+    1) ;; # a gateway before 1.0.4: it has no floor check
+    *) unchecked="$gateway could not be read to tell whether it has the floor check" ;;
+    esac
+fi
+if [ -z "$checker" ]; then
+    if [ ! -L "$kept" ] && root_owned "$kept/defenseclaw-gateway"; then
+        checker="$kept/defenseclaw-gateway"
+        unchecked=
+    elif [ -L "$kept" ] || [ -e "$kept/defenseclaw-gateway" ] || [ -L "$kept/defenseclaw-gateway" ]; then
+        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file in a folder that is not a symlink, or its owner could not be read"
+    fi
 fi
 case "$package_version" in
     @*@) ;;
@@ -130,6 +153,9 @@ case "$package_version" in
                 echo "defenseclaw-enterprise: refusing to install $package_version: ${floor_msg#Error: } Nothing was changed." >&2
                 exit 1
             fi
+        elif [ -n "$unchecked" ]; then
+            echo "defenseclaw-enterprise: refusing to install $package_version: the release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file and install again. Nothing was changed." >&2
+            exit 1
         fi
         ;;
 esac
