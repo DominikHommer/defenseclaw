@@ -85,11 +85,26 @@ var (
 // up to walBoundedAcquireWait for the writer connection whatever the hooks
 // do, and holds it until its copy reaches the end of the log, at most
 // walBoundedCatchUpCap: the hooks wait that long for their audit records, and
-// the log restarts. Variables so tests can shorten them.
+// the log restarts.
+//
+// A bounded catch-up can still give the writer back before the log restarted:
+// no free writer within its wait, or a copy longer than its cap. The log then
+// kept growing, pass after pass, on a disk too slow for the 2 s cap. So each
+// such miss doubles the next bounded catch-up's wait and cap, up to
+// walBoundedAcquireMax and walBoundedCatchUpMax, until one restarts the log:
+// the hooks wait longer (one that waits past its own budget is denied, fail
+// closed), and the log cannot outgrow the disk. A restart, or a log back
+// under the limit, resets them. Variables so tests can shorten them.
 var (
 	walBoundedAcquireWait = time.Second
 	walBoundedCatchUpCap  = 2 * time.Second
+	walBoundedAcquireMax  = 10 * time.Second
+	walBoundedCatchUpMax  = 30 * time.Second
 )
+
+// walBoundedMissesMax bounds the miss count; the doubled wait and cap reach
+// their ceilings long before it.
+const walBoundedMissesMax = 16
 
 // Test seams: walCopyPhaseHook runs inside each copy pass on the dedicated
 // connection, after the pass read the commit counter, walSyncPhaseHook before
@@ -123,10 +138,14 @@ type WALCheckpoint struct {
 	// writer back before the copy reached the end of the log.
 	WriterDeferred bool
 	// Bounded is true when the log was over the limit, so the catch-up held
-	// the writer until its copy reached the end of the log (up to
-	// walBoundedCatchUpCap) instead of waiting for an idle gap and giving it
-	// back at walCatchUpCap.
+	// the writer until its copy reached the end of the log (up to HoldCap)
+	// instead of waiting for an idle gap and giving it back at walCatchUpCap.
 	Bounded bool
+	// HoldCap is how long a bounded catch-up could hold the writer:
+	// walBoundedCatchUpCap, doubled for each bounded catch-up before it that
+	// gave the writer back before the log restarted, up to
+	// walBoundedCatchUpMax.
+	HoldCap time.Duration
 	// Syncs is how many times the pass synced the database file off the
 	// writer before a catch-up, and SyncLongest the longest of those syncs.
 	Syncs       int
@@ -172,7 +191,9 @@ type WALCheckpoint struct {
 //     the hooks do and holds it until the copy reaches the end, at most
 //     walBoundedCatchUpCap, so a flood on a slow disk delays hooks by up to
 //     that long now and then instead of growing the WAL until the disk is
-//     full (rel-1-0-3 GAP-0320, GAP-0136).
+//     full (rel-1-0-3 GAP-0320, GAP-0136). Each bounded catch-up that still
+//     gives the writer back first doubles the next one's wait and cap, up to
+//     walBoundedAcquireMax and walBoundedCatchUpMax.
 //   - A fully copied log whose file is larger than walIdleTrimBytes (or whose
 //     log is over the limit) is cut to zero bytes with a TRUNCATE checkpoint
 //     on the writer when the hooks are not flooding the store: nothing was
@@ -223,6 +244,9 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	logBytes := int64(ckpt.frames) * walFrameBytes
 	defer func() {
 		s.walPressure.Store(err == nil && !result.Restarted && logBytes > limitBytes)
+		if err == nil {
+			s.noteBoundedCatchUp(result.Restarted || logBytes <= limitBytes, result.Bounded && result.WriterDeferred)
+		}
 	}()
 	if ckpt.complete {
 		result.Restarted = ckpt.frames > 0
@@ -271,9 +295,9 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 		}
 	}
 	policy := walCatchUpPolicy{window: walIdleWindow, acquire: walWriterAcquireWait, hold: walCatchUpCap}
-	if logBytes > gfwBoundFactor*limitBytes {
-		policy = walCatchUpPolicy{acquire: walBoundedAcquireWait, hold: walBoundedCatchUpCap, bounded: true}
-		result.Bounded = true
+	if logBytes > limitBytes {
+		policy = s.boundedCatchUpPolicy()
+		result.Bounded, result.HoldCap = true, policy.hold
 	}
 	result.Restarted, result.WriterHeld, result.WriterDeferred, err = s.catchUpWAL(ctx, db, policy)
 	return result, err
@@ -286,6 +310,47 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 type walCatchUpPolicy struct {
 	window, acquire, hold time.Duration
 	bounded               bool
+}
+
+// boundedCatchUpPolicy is the policy of a bounded catch-up: the free writer
+// within walBoundedAcquireWait, held for at most walBoundedCatchUpCap, both
+// doubled for each bounded catch-up in a row that gave the writer back before
+// the log restarted, up to walBoundedAcquireMax and walBoundedCatchUpMax.
+func (s *Store) boundedCatchUpPolicy() walCatchUpPolicy {
+	s.walGuardMu.Lock()
+	misses := s.walBoundedMisses
+	s.walGuardMu.Unlock()
+	return walCatchUpPolicy{
+		acquire: walEscalated(walBoundedAcquireWait, walBoundedAcquireMax, misses),
+		hold:    walEscalated(walBoundedCatchUpCap, walBoundedCatchUpMax, misses),
+		bounded: true,
+	}
+}
+
+// noteBoundedCatchUp records a pass's outcome for boundedCatchUpPolicy:
+// settled (the log restarted, or it is under the limit) resets the misses, and
+// missed (a bounded catch-up gave the writer back first) adds one.
+func (s *Store) noteBoundedCatchUp(settled, missed bool) {
+	s.walGuardMu.Lock()
+	defer s.walGuardMu.Unlock()
+	switch {
+	case settled:
+		s.walBoundedMisses = 0
+	case missed:
+		s.walBoundedMisses = min(s.walBoundedMisses+1, walBoundedMissesMax)
+	}
+}
+
+// walEscalated is base doubled misses times, at most ceiling.
+func walEscalated(base, ceiling time.Duration, misses int) time.Duration {
+	escalated := base
+	for range misses {
+		if escalated >= ceiling {
+			break
+		}
+		escalated *= 2
+	}
+	return min(escalated, ceiling)
 }
 
 // walCopy is one PASSIVE checkpoint on the dedicated connection: SQLite's
@@ -398,7 +463,7 @@ func (s *Store) catchUpWAL(ctx context.Context, db *sql.DB, policy walCatchUpPol
 	}
 	acquired := time.Now()
 	gfwTrace("writer taken bounded=%v window=%v", policy.bounded, policy.window)
-	defer func() { gfwTrace("writer phase bounded=%v complete=%v held=%v deferred=%v", policy.bounded, complete, held, deferred) }()
+	defer func() { gfwTrace("writer phase bounded=%v cap=%v acquire=%v complete=%v held=%v deferred=%v", policy.bounded, policy.hold, policy.acquire, complete, held, deferred) }()
 	holdCtx, cancelHold := context.WithTimeout(ctx, policy.hold)
 	defer cancelHold()
 	done := make(chan walCopyResult, 1)

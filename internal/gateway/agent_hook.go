@@ -821,6 +821,50 @@ func (a *APIServer) finalizeAgentHook(
 		enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
 	})
 
+	// Compose both durable-audit invariants:
+	// (a) GAP-1536: a hook whose correlation ledger write failed (disk full)
+	//     still exports its decision, without the cross-call join IDs,
+	//     otherwise every allow and block disappears from Grafana and Galileo
+	//     while the local audit is down. Only an exact replay stays unexported.
+	// (b) #850: an enforced block MUST write the audit row + enforcement
+	// Keep the observability_v8 and audit row gated by the same replay
+	// classification so a suppressed replay stays silent across both and
+	// notificationReady() does not fire on half of its invariants. The AVC
+	// enforcement companion that #850 wanted to persist here is not
+	// forward-ported; the primary hook_decision log + audit row are the
+	// only durable artefacts of this decision in Part 1.
+	replay := req.SuppressCorrelationEmit && !req.CorrelationUnavailable
+	// Every verdict has its audit row, save the exact replay of a delivery
+	// whose row is already persisted: a hook whose correlation failed is
+	// audited too. The row is written first, so the export, the status
+	// counters, the sandbox's record, the managed hook join and the span all
+	// carry the verdict the agent gets: a call whose row could not be written
+	// gets the fail-mode verdict instead of its computed allow.
+	if !replay {
+		var auditErr error
+		safeSection("audit", func() {
+			auditErr = a.logConnectorHookAuditEnvelope(ctx, env)
+			result.AuditPersisted = auditErr == nil
+		})
+		if !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured) {
+			if auditErr == nil {
+				auditErr = errors.New("the audit section panicked")
+			}
+			closed, denied := a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+			if denied {
+				resp = closed
+				env.adoptVerdict(resp)
+				result.Enforced, result.Response, result.AuditFailedClosed = env.Enforced, resp, true
+				safeSection("span", func() {
+					enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
+					enrichAgentHookSpan(ctx, req, resp, elapsed)
+				})
+			}
+			fmt.Fprintf(os.Stderr, "[gateway] hook audit persistence failed connector=%s event=%s action=%s denied_for_audit=%t: %v\n",
+				connectorName, req.HookEventName, resp.Action, denied, auditErr)
+		}
+	}
+
 	safeSection("health", func() {
 		if !a.recordsConnectorHealth(ctx) {
 			return
@@ -849,43 +893,8 @@ func (a *APIServer) finalizeAgentHook(
 			a.recordManagedHookDecision(ctx, connectorName, req, resp)
 		})
 	}
-
-	// Compose both durable-audit invariants:
-	// (a) GAP-1536: a hook whose correlation ledger write failed (disk full)
-	//     still exports its decision, without the cross-call join IDs,
-	//     otherwise every allow and block disappears from Grafana and Galileo
-	//     while the local audit is down. Only an exact replay stays unexported.
-	// (b) #850: an enforced block MUST write the audit row + enforcement
-	// Keep the observability_v8 and audit row gated by the same replay
-	// classification so a suppressed replay stays silent across both and
-	// notificationReady() does not fire on half of its invariants. The AVC
-	// enforcement companion that #850 wanted to persist here is not
-	// forward-ported; the primary hook_decision log + audit row are the
-	// only durable artefacts of this decision in Part 1.
-	if req.SuppressCorrelationEmit && !req.CorrelationUnavailable {
+	if replay {
 		return result
-	}
-	// Every verdict has its audit row, save the exact replay of a delivery
-	// whose row is already persisted: a hook whose correlation failed is
-	// audited too. The row is written before the decision is exported, so the
-	// export carries the verdict the agent gets.
-	var auditErr error
-	safeSection("audit", func() {
-		auditErr = a.logConnectorHookAuditEnvelope(ctx, env)
-		result.AuditPersisted = auditErr == nil
-	})
-	if !result.AuditPersisted && !panicked {
-		if auditErr == nil {
-			auditErr = errors.New("the audit section panicked")
-		}
-		closed, denied := a.hookAuditFailureResponse(ctx, connectorName, req, resp)
-		if denied {
-			resp = closed
-			env.adoptVerdict(resp)
-			result.Enforced, result.Response, result.AuditFailedClosed = env.Enforced, resp, true
-		}
-		fmt.Fprintf(os.Stderr, "[gateway] hook audit persistence failed connector=%s event=%s action=%s denied_for_audit=%t: %v\n",
-			connectorName, req.HookEventName, resp.Action, denied, auditErr)
 	}
 	if !panicked {
 		safeSection("sensitive_result", func() {
@@ -912,11 +921,15 @@ func (a *APIServer) finalizeAgentHook(
 // (the default everywhere but Secure Client) denies a blockable tool or
 // prompt event; open (Secure Client's unset default, or an explicit open)
 // keeps the verdict, as do a block, a session-ending event and an event the
-// agent cannot block. It reports whether it changed the verdict.
+// agent cannot block. It reports whether it changed the verdict. rawBody is
+// the hook's request body: Claude Code's native denial
+// (hookSpecificOutput.permissionDecision) is rendered from the event it
+// names, and without it the denial fell back to a generic decision:block.
 func (a *APIServer) hookAuditFailureResponse(
 	ctx context.Context,
 	connectorName string,
 	req agentHookRequest,
+	rawBody []byte,
 	resp agentHookResponse,
 ) (agentHookResponse, bool) {
 	if resp.Action == "block" {
@@ -931,7 +944,7 @@ func (a *APIServer) hookAuditFailureResponse(
 		},
 		cause: "because it could not write the call's audit record",
 	}
-	closed := a.hookFailedCheckResponse(ctx, connectorName, req, nil, req.Payload, failure)
+	closed := a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, req.Payload, failure)
 	if closed.Action != "block" {
 		return resp, false
 	}

@@ -243,6 +243,10 @@ type Store struct {
 	walGuardMu      sync.Mutex
 	walGuardSeen    bool
 	walGuardVersion int64
+	// walBoundedMisses counts the bounded catch-ups in a row that gave the
+	// writer back before the log restarted (boundedCatchUpPolicy). Guarded
+	// by walGuardMu.
+	walBoundedMisses int
 	// walPressure is true while the last WAL guard pass left the log over
 	// its limit; background writers wait for it (awaitWALHeadroom).
 	walPressure atomic.Bool

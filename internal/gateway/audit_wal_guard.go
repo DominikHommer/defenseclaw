@@ -25,7 +25,8 @@ const (
 	auditWALLimitBytes = 256 << 20
 	// auditWALWriterBudget bounds the idle-gap trim, the only statement a pass
 	// runs on the audit store's writer connection (the catch-up copy holds it
-	// for at most 100 ms, or up to 2 s to bring a log over the limit back).
+	// for at most 100 ms, or up to 2 s to bring a log over the limit back,
+	// doubled after each such hold that could not, up to 30 s).
 	// Hooks need that connection for correlation and their verdict records, so
 	// never let maintenance consume a hook's budget.
 	auditWALWriterBudget = 200 * time.Millisecond
@@ -97,8 +98,8 @@ func auditWALGuardPass(ctx context.Context, store auditWALCheckpointer, alarm *a
 	case pass.Bounded && pass.WriterHeld > 0:
 		// A flood on a slow disk: hooks waited this long so that the log
 		// restarts instead of growing until the disk is full.
-		fmt.Fprintf(log, "[sidecar] audit WAL over its %d MiB limit (%d MiB): held the audit writer for %s to bring it back (restarted %t)\n",
-			int64(auditWALLimitBytes)>>20, pass.LogBytes>>20, pass.WriterHeld.Round(time.Millisecond), pass.Restarted)
+		fmt.Fprintf(log, "[sidecar] audit WAL over its %d MiB limit (%d MiB): held the audit writer for %s of up to %s to bring it back (restarted %t)\n",
+			int64(auditWALLimitBytes)>>20, pass.LogBytes>>20, pass.WriterHeld.Round(time.Millisecond), pass.HoldCap, pass.Restarted)
 	case pass.WriterHeld > auditWALWriterBudget:
 		fmt.Fprintf(log, "[sidecar] audit WAL checkpoint held the audit writer for %s (budget %s)\n",
 			pass.WriterHeld.Round(time.Millisecond), auditWALWriterBudget)
