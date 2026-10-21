@@ -36,11 +36,13 @@ type ManagedHookGroup struct {
 // policy route are supported.
 func ManagedHookGroupsForOS(connectorName, agentVersion, goos string) ([]ManagedHookGroup, error) {
 	name := normalizeConnectorName(connectorName)
-	if name == "codex" && strings.TrimSpace(agentVersion) == "" {
+	if name == "codex" && strings.TrimSpace(agentVersion) == "" && goos == "windows" {
 		// A machine-wide requirements file serves every client version on
-		// the host. Without a pinned version, publish the exact ten-group
-		// matrix the Windows machine-requirements installer certifies,
-		// which every supported Codex release accepts.
+		// the host. Without a pinned version, Windows publishes the exact
+		// ten-group matrix its machine-requirements installer certifies and
+		// verifies. Linux and macOS publish the matrix of the default
+		// contract their commands bind (codex-hooks-v4: SessionStart with
+		// compact and SessionEnd), as per-user setup does (GAP-0008).
 		out := make([]ManagedHookGroup, 0, len(codexHookGroups))
 		for _, group := range codexHookGroups {
 			out = append(out, ManagedHookGroup{Event: group.eventType, Matcher: group.matcher, Timeout: group.timeout})
