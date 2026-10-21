@@ -41,6 +41,28 @@ func TestGatewayExitedBeforeReadinessNamesTheLoggedCause(t *testing.T) {
 	}
 }
 
+// GAP-0097: a jsonl destination path that became a directory stops the
+// gateway with runtime_unavailable; the start error names the destination,
+// the path and the rule the gateway logged, not only the code.
+func TestGatewayExitedBeforeReadinessNamesTheRefusedDestination(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "gateway.log")
+	offset := gatewayLogSize(logPath)
+	line := `defenseclaw: observability destination "lane-copy": /home/u/.defenseclaw/lane.jsonl is a directory; ` +
+		"point it at a file; fix the path or remove the destination\n"
+	body := "[gateway] starting\n" + line +
+		"Error: sidecar: observability v8 bootstrap: sidecar observability v8 bootstrap failed: runtime_unavailable\n"
+	if err := os.WriteFile(logPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probe := fmt.Errorf("%w (last health probe: dial tcp: connection refused)", errGatewayExitedBeforeReadiness)
+	msg := gatewayExitedBeforeReadinessError(probe, logPath, offset).Error()
+	for _, want := range []string{`observability destination "lane-copy"`, "lane.jsonl is a directory", "runtime_unavailable"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not contain %q", msg, want)
+		}
+	}
+}
+
 func writeGatewayMessageConfig(t *testing.T, body string) string {
 	t.Helper()
 	home := t.TempDir()

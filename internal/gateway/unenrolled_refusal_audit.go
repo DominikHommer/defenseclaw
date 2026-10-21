@@ -30,6 +30,10 @@ const (
 	unenrolledRefusalWindow     = time.Minute
 	unenrolledRefusalMaxEntries = 512
 	unenrolledRefusalSubject    = "named_pipe_client"
+	// unenrolledRefusalDrainTimeout bounds how long a stopping API server
+	// waits for the last refusal rows: naming a domain account can wait on a
+	// domain controller.
+	unenrolledRefusalDrainTimeout = 5 * time.Second
 )
 
 type unenrolledRefusalKey struct {
@@ -81,7 +85,7 @@ func (u *unenrolledRefusalAuditor) record(sid string, report refusalpipe.Report)
 		rows = append(rows, unenrolledRefusalRow{SID: sid, Report: entry.last, Attempts: entry.pending})
 	}
 	if entry == nil && len(u.entries) >= unenrolledRefusalMaxEntries {
-		rows = append(rows, u.expireLocked(now)...)
+		rows = append(rows, u.expireLocked(now, false)...)
 		if len(u.entries) >= unenrolledRefusalMaxEntries {
 			u.mu.Unlock()
 			u.writeAll(rows)
@@ -97,15 +101,24 @@ func (u *unenrolledRefusalAuditor) record(sid string, report refusalpipe.Report)
 // flush writes the counts of the windows that have ended.
 func (u *unenrolledRefusalAuditor) flush() {
 	u.mu.Lock()
-	rows := u.expireLocked(u.now())
+	rows := u.expireLocked(u.now(), false)
 	u.mu.Unlock()
 	u.writeAll(rows)
 }
 
-func (u *unenrolledRefusalAuditor) expireLocked(now time.Time) []unenrolledRefusalRow {
+// drain writes the counts of every window, ended or not. A stop calls it so
+// the refusals coalesced into an open window are not lost (GAP-1253).
+func (u *unenrolledRefusalAuditor) drain() {
+	u.mu.Lock()
+	rows := u.expireLocked(u.now(), true)
+	u.mu.Unlock()
+	u.writeAll(rows)
+}
+
+func (u *unenrolledRefusalAuditor) expireLocked(now time.Time, all bool) []unenrolledRefusalRow {
 	var rows []unenrolledRefusalRow
 	for key, entry := range u.entries {
-		if now.Sub(entry.start) < unenrolledRefusalWindow {
+		if !all && now.Sub(entry.start) < unenrolledRefusalWindow {
 			continue
 		}
 		if entry.pending > 0 {
@@ -135,6 +148,54 @@ func (u *unenrolledRefusalAuditor) run(ctx context.Context) {
 			u.flush()
 		}
 	}
+}
+
+// runUnenrolledRefusalAudit serves refusal reports until ctx ends and then,
+// before it returns, writes what a stop would otherwise lose: the rows still
+// queued and the counts of the windows still open (GAP-1253). serve returns
+// once ctx ends. Rows are written off the serving goroutines, since naming a
+// domain account can wait on a domain controller, and with a context that a
+// stop does not cancel, so the last rows still reach the audit log.
+func runUnenrolledRefusalAudit(
+	ctx context.Context,
+	serve func(context.Context, *unenrolledRefusalAuditor),
+	write func(context.Context, unenrolledRefusalRow),
+) {
+	rows := make(chan unenrolledRefusalRow, unenrolledRefusalMaxEntries)
+	var queueMu sync.Mutex
+	closed := false
+	writeCtx := context.WithoutCancel(ctx)
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for row := range rows {
+			write(writeCtx, row)
+		}
+	}()
+	auditor := newUnenrolledRefusalAuditor(func(row unenrolledRefusalRow) {
+		queueMu.Lock()
+		defer queueMu.Unlock()
+		if closed {
+			return // a report that arrived after the stop was drained
+		}
+		select {
+		case rows <- row:
+		default:
+		}
+	})
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		auditor.run(ctx)
+	}()
+	serve(ctx, auditor)
+	<-runDone
+	auditor.drain()
+	queueMu.Lock()
+	closed = true
+	close(rows)
+	queueMu.Unlock()
+	<-writerDone
 }
 
 // auditUnenrolledRefusal writes one refusal row for an account the pipe

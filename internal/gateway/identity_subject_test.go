@@ -752,7 +752,15 @@ func TestIDEPluginRecordsCarryTheOwnersDirectory(t *testing.T) {
 	}
 	original := managedHookPeerDirectory
 	managedHookPeerDirectory = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) { return facts, uid == 1201 }
-	t.Cleanup(func() { managedHookPeerDirectory = original })
+	// The uid's account is still the one the plugin record names (GAP-1233).
+	originalName := userScopedIdentityName
+	userScopedIdentityName = func(id string) string {
+		if id == "1201" {
+			return "dcad-o4ud"
+		}
+		return ""
+	}
+	t.Cleanup(func() { managedHookPeerDirectory, userScopedIdentityName = original, originalName })
 	capture := &endpointInventoryCapture{}
 	adapter := &aiDiscoveryV8Adapter{runtime: capture}
 	report := inventory.AIDiscoveryReport{

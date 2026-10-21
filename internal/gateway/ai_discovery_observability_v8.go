@@ -415,7 +415,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			DefenseClawSandboxID:   aiDiscoveryV8Optional(signal.SandboxID),
 			DefenseClawSandboxName: aiDiscoveryV8Optional(signal.SandboxName),
 		}
-		identity := inventoryIdentity(signal.UserID)
+		identity := inventoryIdentityFor(signal.UserID, signal.UserName)
 		identity.applyTo(&base)
 		if signal.Category == inventory.SignalLocalModel && signal.Model != nil && signal.Model.Provenance != nil {
 			provenance := signal.Model.Provenance
@@ -610,7 +610,7 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 			DefenseClawUserIDKind:        v8UserIDKind(discoveryUserIDKind(plugin.UserID)),
 			DefenseClawUserName:          v8UserName(plugin.UserName, ideV8UserName),
 		}
-		inventoryIdentity(plugin.UserID).applyTo(&base)
+		inventoryIdentityFor(plugin.UserID, plugin.UserName).applyTo(&base)
 		switch plugin.State {
 		case inventory.AIStateNew:
 			return builder.BuildLogIdePluginDiscovered(observability.LogIdePluginDiscoveredInput(base))

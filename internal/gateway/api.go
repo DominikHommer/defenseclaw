@@ -1358,10 +1358,21 @@ func (a *APIServer) Run(ctx context.Context) error {
 
 	// The Windows standalone hook reports the calls it refuses for an
 	// unenrolled account here (GAP-1242); a no-op on every other profile.
-	// It stops with this run of the API server.
+	// It stops with this run of the API server, which waits, bounded, for
+	// its last rows (GAP-1253).
 	refusalCtx, stopRefusals := context.WithCancel(ctx)
-	defer stopRefusals()
-	go a.serveUnenrolledRefusals(refusalCtx)
+	refusalsDone := make(chan struct{})
+	defer func() {
+		stopRefusals()
+		select {
+		case <-refusalsDone:
+		case <-time.After(unenrolledRefusalDrainTimeout):
+		}
+	}()
+	go func() {
+		defer close(refusalsDone)
+		a.serveUnenrolledRefusals(refusalCtx)
+	}()
 
 	errCh := make(chan error, 2)
 	if hookSrv != nil {
