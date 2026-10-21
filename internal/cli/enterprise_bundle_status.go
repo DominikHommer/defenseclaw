@@ -255,6 +255,8 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	if !res.BundleMode {
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "anchor_missing",
 			Message: "no trust anchor file is installed, so this device does not take bundles"})
+	} else if warning := bundleAnchorsFileWarning(anchorsErr); warning != nil {
+		res.Warnings = append(res.Warnings, *warning)
 	}
 	policy := bundleGatewayPolicy(ctx)
 	if policy == nil {
@@ -316,6 +318,22 @@ func bundleAnchorsSignerWarning(anchorsPath string, anchors *enterprisebundle.An
 		return &enterprisebundle.Warning{Code: "anchor_unreadable", Message: "the installed trust anchors could not be checked for the confirmed bundle signer"}
 	}
 	return bundleSignerWarning(anchors, signerKeyID)
+}
+
+// bundleAnchorsFileWarning explains an installed anchor file that fails its
+// checks (anchor_insecure, anchor_invalid), with or without a confirmed
+// bundle: anchors_summary is then absent and every bundle is refused until
+// the file is fixed. nil when the read succeeded.
+func bundleAnchorsFileWarning(loadErr error) *enterprisebundle.Warning {
+	if loadErr == nil {
+		return nil
+	}
+	code := enterprisebundle.CodeOf(loadErr)
+	if code != enterprisebundle.CodeAnchorInsecure {
+		code = enterprisebundle.CodeAnchorInvalid
+	}
+	return &enterprisebundle.Warning{Code: string(code),
+		Message: "the installed trust anchor file fails its checks, so this device refuses every bundle until the file is fixed: " + loadErr.Error()}
 }
 
 // bundleSignerWarning is key_unknown or key_revoked when anchors no longer

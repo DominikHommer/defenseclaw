@@ -409,8 +409,14 @@ Exit 0.
   and reads the stored credentials and the installed config.yaml).
 - Idempotency: pure; repeat freely.
 - stdout: `bundle-verify.schema.json`. `result` is `verified`,
-  `already_applied` (the bytes are the confirmed bundle: apply would be a
-  success no-op) or `refused`.
+  `already_applied` (the bytes are the confirmed bundle: apply writes no
+  new receipt) or `refused`.
+- Config drift, `config_drift` (from 1.0.4, optional): for `already_applied`
+  as root or SYSTEM, `true` when the installed config.yaml is not the
+  confirmed bundle's config (changed or deleted outside the lifecycle). The
+  apply of the same bundle then installs it again; `restart_prediction` says
+  whether that restarts the gateway. `false`: the apply is a no-op. Absent
+  when the installed config or the bundle store could not be read.
 - Exit: 0 ok; 1 / 1603 refused (`errors[0].code`, for example
   `anchor_missing`, `key_unknown`, `key_revoked`, `key_expired`,
   `signature_invalid`, `tenant_mismatch`, `target_mismatch`,
@@ -430,7 +436,10 @@ Exit 0.
   not only the first, and keeps the `secret_presence_unchecked` warning when
   another credential could not be checked. Absent off a device, when the store could
   not be read (`secret_presence_unchecked`) and on a refusal before the
-  credential check. Names only, never a value.
+  credential check. Names only, never a value. A required credential the
+  device could not check is only a warning in verify; apply refuses it
+  `secret_ref_missing` (from 1.0.4) with the same warning. Store it again
+  (4.7).
 - Restart prediction, `restart_prediction` (absent on builds before 1.0.3):
   on a device, for `verified` and `already_applied`, whether the apply
   restarts the gateway, from the installed config.yaml and the bundle
@@ -442,10 +451,10 @@ Exit 0.
     name) or, on Windows, `codex_machine_policy` (Codex protection turns on or
     off: every DefenseClaw service restarts, 4.3).
   - `not_required`: no changed setting needs a restart, so the gateway keeps
-    running (`already_applied`: the bundle is the confirmed one and the
-    installed config matches it). A repeat of the confirmed bundle over an
-    installed config that drifted in a restart-required setting is
-    `required`: the apply installs the bundle config again. The apply still
+    running (reason `already_applied`: the bundle is the confirmed one and
+    `config_drift` is `false`). A repeat over a drifted installed config is
+    classified like any change: `not_required` with no reason code for hot
+    settings, `required` for restart-required ones. The apply still
     restarts a gateway that is down or does not report the new policy in
     time. A bundle that omits `data_dir`, `gateway.api_bind` or
     `gateway.api_port` while the installed config spells out the value the
@@ -472,7 +481,10 @@ Exit 0.
   the apply. Do not compare digests computed by different product versions;
   the digest algorithm is not part of the contract.
 - Preflight before an apply:
-  1. Run verify. `already_applied`: done.
+  1. Run verify. `already_applied` with `config_drift` `false`: done. With
+     `config_drift` `true`, the installed config drifted: apply the same
+     bundle again, scheduled as in step 3. With `config_drift` absent, run
+     verify again as root or SYSTEM.
   2. `refused` with `secret_ref_missing`: store every name in
      `secret_refs_missing` (4.7), then run verify again. The refusal is
      final until the credentials change (2.2). A `verified` result can list
@@ -802,7 +814,9 @@ off the device. The agent does not read `/health` itself (section 7); the
   digest with no rejected reload. A refused status (`not_managed`,
   `not_root`, `state_invalid`) did not scan sessions and reports
   `sessions_restart_required` with state `unknown`. Warnings to act on:
-  `bundle_failed`, `bundle_pending`, `anchor_missing`, `key_unknown` /
+  `bundle_failed`, `bundle_pending`, `anchor_missing`, `anchor_insecure` /
+  `anchor_invalid` (from 1.0.4: the installed anchor file fails its checks,
+  so every bundle is refused; fix or reinstall it, 4.8), `key_unknown` /
   `key_revoked` (the confirmed bundle's signer, as the bundle state records
   it, is no longer trusted; checked also after its receipt was pruned),
   `policy_reload_rejected`, `gateway_unchecked`, `sessions_need_restart` /
@@ -1217,7 +1231,8 @@ Later bundles go through 5.2.
    exit 0 (2.5).
 2. If the anchors must change and the agent owns them (4.8), install them
    first.
-3. Run 4.2 verify. `already_applied`: done. `refused`: report
+3. Run 4.2 verify. `already_applied`: done, unless `config_drift` is
+   `true` (4.2 preflight, step 1). `refused`: report
    `errors[0].code` and stop (final).
 4. Record the delivery (4.3, across an agent restart), then run 4.3 apply on
    a worker thread, with that new `--delivery-id` and
