@@ -518,11 +518,16 @@ func (e *Env) jsonlMissingParentProblem(path string) string {
 		if !allowed {
 			return fmt.Sprintf("cannot create its missing directory below %s as the %s gateway service account", dir, e.Layout.ServiceUser)
 		}
-		create := map[string][]string{e.P(dir): {"add_file", "add_subdirectory", "search"}}
-		if _, entry, err := e.darwinServiceACLDenial(context.Background(), []string{e.P(dir)}, create); err != nil {
+		// The gateway creates the file in an existing parent, and a missing
+		// directory below an existing ancestor.
+		need, what := []string{"add_file", "search"}, "cannot create the file in"
+		if dir != parent {
+			need, what = []string{"add_subdirectory", "search"}, "cannot create its missing directory below"
+		}
+		if _, entry, err := e.darwinServiceACLDenial(context.Background(), []string{e.P(dir)}, map[string][]string{e.P(dir): need}); err != nil {
 			return fmt.Sprintf("cannot inspect the macOS ACL of %s: %v", dir, err)
 		} else if entry != "" {
-			return fmt.Sprintf("cannot create its missing directory below %s as the %s gateway service account: the macOS ACL entry %q denies it", dir, e.Layout.ServiceUser, entry)
+			return fmt.Sprintf("%s %s as the %s gateway service account: the macOS ACL entry %q denies it", what, dir, e.Layout.ServiceUser, entry)
 		}
 		return ""
 	}
