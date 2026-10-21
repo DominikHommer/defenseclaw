@@ -1819,6 +1819,7 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             },
         )
     health_map = _fetch_health_connectors(health=health)
+    not_started = _connectors_not_started(health)
     for name, row in rows.items():
         # The text roster already uses this authenticated runtime state. Keep
         # the JSON projection in agreement, including manual hook connectors.
@@ -1830,6 +1831,12 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             # As the text output: not running while doctor fails it (GAP-0513).
             row["state"] = "off"
             row["runtime_detail"] = _agent_missing_detail(name)
+        if row.get("enabled") and name in not_started:
+            row["state"] = "not running"
+            row["runtime_detail"] = (
+                "setup failed when the gateway started, so it is not enforced; "
+                f"run defenseclaw setup {'claude-code' if name == 'claudecode' else name}"
+            )
     if "opencode" in rows and rows["opencode"].get("enabled") and "runtime_detail" not in rows["opencode"]:
         runtime_state, runtime_detail = _opencode_runtime_truth(
             health_map.get("opencode"),
