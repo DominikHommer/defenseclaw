@@ -16,6 +16,27 @@ keywords:
 
 The guardrail proxy on `guardrail.port` has its own OpenAI-compatible and provider routes (`internal/gateway/proxy.go`). Sandbox management is under [Sandbox API](#sandbox-api); the two listeners sandboxes reach are under [Sandbox listeners](#sandbox-listeners).
 
+## Summary
+
+| Group | Example routes | Used by |
+| --- | --- | --- |
+| [Health and status](#health--status) | `GET /health`, `GET /status`, `GET /v1/connectors` | Probes, `doctor`, `status`, the TUI |
+| [Connector hooks](#connector-hooks) | `POST /api/v1/<agent>/hook`, for example `/api/v1/codex/hook` | Agent hooks and plugins |
+| [Inspection](#inspection-rate-limited) | `/api/v1/inspect/tool`, `/request`, `/response`, `/tool-response` | Plugins, shims, hooks |
+| [Scanning](#asset-scanning) | `/v1/skill/scan`, `/v1/plugin/scan`, `/v1/mcp/scan`, `/api/v1/scan/code` | CLI, TUI |
+| [Enable and disable](#asset-enable--disable) | `/skill/disable`, `/plugin/enable` | CLI, TUI |
+| [Lists, policy and guardrail control](#block-and-allow-lists) | `/enforce/blocked`, `/policy/evaluate`, `/v1/guardrail/config` | CLI, TUI |
+| [Audit and alerts](#audit) | `/audit/event`, `/alerts`, `/api/v1/alerts/disposition` | CLI, TUI |
+| [AI discovery](#ai-usage--discovery-aibom) | `/api/v1/ai-usage`, `/api/v1/ai-usage/scan` | CLI, TUI |
+| [Identity and profiles](#identity-profiles-and-ide-inventory) | `/api/v1/guardrail/profiles/resolve`, `/api/v1/agents/identities` | Hooks, CLI |
+| [ACP guard](#acp-guard) | `/api/v1/acp/challenge`, `/api/v1/acp/evaluate` | ACP guard only (signed requests) |
+| [Correlation ledger](#correlation-ledger) | `/api/v1/correlation/graph`, `/explain`, `/timeline` | CLI, TUI |
+| [OTLP receiver](#otlp-receiver) | `/v1/logs`, `/v1/metrics`, `/v1/traces` | Codex and Claude Code exporters |
+| [Sandbox API](#sandbox-api) | Sandbox run, approval, undo and activity routes | `defenseclaw sandbox` |
+| [Hook ingress](#hook-ingress) and [egress proxy](#egress-proxy) | Listeners the sandboxes reach | Sandboxed agents |
+
+Every route needs authentication except `GET /health` ([Auth](#auth)).
+
 ## Bind address
 
 | Knob | Config default | Effective value |

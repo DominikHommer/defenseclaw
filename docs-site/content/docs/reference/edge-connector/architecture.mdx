@@ -16,7 +16,7 @@ keywords:
 >
   <Node id="agent" kind="agent">{`AI agent\nPicoClaw, LangChain, MCP client`}</Node>
   <Node id="integ" kind="connector">{`Integration layer\nhook, middleware or FFI`}</Node>
-  <Node id="engine" kind="policy" emphasis>{`Edge Connector engine\nlibdclaw_core.so, 7 checks`}</Node>
+  <Node id="engine" kind="policy" emphasis>{`Edge Connector engine\nlibdclaw_core.so, 6 local checks`}</Node>
   <Node id="broker" kind="generic">{`MQTT broker\nTLS, per-device ACLs`}</Node>
   <Node id="fleet" kind="gateway">{`Fleet gateway\nverdict cache, policy push`}</Node>
   <Edge from="agent" to="integ" label="tool call + content" />

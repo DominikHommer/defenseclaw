@@ -9,35 +9,16 @@ keywords:
 
 Reference for the [Copilot CLI connector](/docs/connectors/copilot). DefenseClaw wires into [Copilot CLI hooks](https://docs.github.com/en/copilot/reference/hooks-reference). There is no proxy path: blocking happens only through the `preToolUse`, `permissionRequest`, `agentStop` and `subagentStop` responses.
 
-## Platform status
+## Install surface
+
+### Platform status
 
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Global or workspace command hooks using the portable DefenseClaw hook. |
 | Native Windows x64 | **Supported** | Copilot's official `powershell` hook field synchronously invokes the protected `defenseclaw-hook.exe`. `preToolUse` supports native ask. You still sign in to GitHub as usual. |
 
-## Hook contracts
-
-| Contract | Agent versions | Hook script | Events | Can block | Can ask |
-| --- | --- | --- | --- | --- | --- |
-| `copilot-hooks-v1` | `>=1.0.18, <1.0.76` | `v7` | 13 | 4 | 1 |
-| `copilot-hooks-v2` | `>=1.0.76` | `v7` | 14 | 4 | 1 |
-
-| Contract | Events registered | Block events | Ask events |
-| --- | --- | --- | --- |
-| `copilot-hooks-v1` | `sessionStart`, `sessionEnd`, `userPromptSubmitted`, `preToolUse`, `postToolUse`, `permissionRequest`, `agentStop`, `subagentStart`, `subagentStop`, `postToolUseFailure`, `errorOccurred`, `preCompact`, `notification` | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` |
-| `copilot-hooks-v2` | As the previous contract, plus `userPromptTransformed` | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` |
-
-| Fact | Value |
-| --- | --- |
-| Hook script | `copilot-hook.sh` |
-| Hook config paths | `~/.copilot/hooks/defenseclaw.json`, `<workspace>/.github/hooks/defenseclaw.json` |
-| Response field | `hook_output` |
-| Native OTLP | no |
-| W3C traceparent | yes |
-| Fail closed | no |
-
-## Setup details
+### Setup details
 
 By default setup writes global hooks to `~/.copilot/hooks/defenseclaw.json`. `--workspace /path/to/repo` writes `<workspace>/.github/hooks/defenseclaw.json` instead, pins the workspace for the whole install, and sets `claw.workspace_dir` (cleared for global setup). Setup refuses it once another connector is configured, because it would move that connector's hooks. To scope all connectors together, run `defenseclaw setup guardrail --workspace /path/to/repo`. Use `setup copilot --workspace` only on a Copilot-only install whose repository should carry the hook file. If `COPILOT_HOME` is set, DefenseClaw uses it instead of `~/.copilot` for hooks, MCP, skills and agents.
 
@@ -56,16 +37,7 @@ defenseclaw setup copilot
 defenseclaw setup guardrail --connector copilot --rule-pack strict --scanner-mode local --detection-strategy regex_judge --judge-model anthropic/claude-sonnet-4-20250514 --judge-api-key-env DEFENSECLAW_LLM_KEY --judge-hook-connectors copilot --restart
 ```
 
-## Hook behavior
-
-| Event | Behavior |
-| --- | --- |
-| `preToolUse` | Native ask when policy returns an eligible confirm verdict in action mode. Confirm findings on other events use a non-pausing audit and alert fallback. |
-| `permissionRequest`, `agentStop`, `subagentStop` | Return the official deny or block response. |
-| `postToolUseFailure` | Can add recovery `additionalContext`. Cannot block or reverse the failed tool. |
-| Prompt | No hook can stop a prompt. A matching prompt reaches the model in observe and action mode, and its alert reads `detected in the prompt (cannot block)`. |
-
-Copilot exposes no fail-closed hook transport. `--fail-mode closed`, inherited strict availability, missing auth, timeouts and malformed responses cannot make an unavailable hook block the agent. Such a call is recorded in `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports a `guardrail-degraded` alert when it starts again. On a managed standalone host the administrator-owned hook denies `preToolUse` and `permissionRequest` while the gateway service is not running. The gateway requires the exact trusted event-specific registration header and never infers the event from stdin fields.
+### Windows adapter, telemetry and teardown
 
 On native Windows the prepared contract invokes a managed `copilot-hook.ps1` byte-stream adapter. It reads Copilot's JSON from console stdin, launches `defenseclaw-hook.exe` without a console and with redirected handles, waits, and writes the decision back unchanged. It normalizes Windows PowerShell 5.1's leading encoding marker and uses UTF-8 without a BOM. It needs no Bash or WSL; WSL, Git Bash, Cygwin, MSYS, Docker and VM workarounds are outside the native path.
 
@@ -73,7 +45,7 @@ Copilot documents optional OpenTelemetry traces and metrics. DefenseClaw does no
 
 Teardown restores the exact pre-Setup hook document when its managed copy is unchanged. If you edited it, DefenseClaw removes only its recognized handlers and keeps foreign entries, unknown events and the rest of the file. The same rule applies to the pinned workspace hook file.
 
-## Files
+### Files
 
 | What | Where |
 | --- | --- |
@@ -82,7 +54,7 @@ Teardown restores the exact pre-Setup hook document when its managed copy is unc
 | Hook program, Linux and macOS | `~/.defenseclaw/hooks/copilot-hook.sh` |
 | Hook runtime, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
-## Inventory
+### Inventory
 
 DefenseClaw reads agents, skills, MCP servers and plugins without changing them ([AI Discovery](/docs/features/ai-discovery)).
 
@@ -96,7 +68,7 @@ DefenseClaw reads agents, skills, MCP servers and plugins without changing them 
 
 Plugin-contributed, built-in, organization and remote agents, skills and runtime MCP servers need a live official-client inspection. GitHub's custom-agent reference and plugin-reference diagram disagree on whether project or personal agents load first. DefenseClaw follows the custom-agent reference (project and ancestor first, `.github` before `.claude`). The effective order is unverified.
 
-## GitHub Copilot in VS Code
+### GitHub Copilot in VS Code
 
 VS Code runs Copilot agent sessions on one of two harnesses. The Copilot SDK harness reads the same `policy.d` hooks as Copilot CLI, so the enterprise drop-in covers it. The default Local harness does not read `policy.d`. It reads `.github/hooks/*.json` and `~/.copilot/hooks/*.json` in its own format: PascalCase event names, snake_case stdin fields (`tool_name`, `tool_input`, `tool_use_id`) and a `hookSpecificOutput.permissionDecision` of `allow`, `deny` or `ask` ([hooks](https://code.visualstudio.com/docs/copilot/customization/hooks), [reference](https://code.visualstudio.com/docs/agents/reference/hooks-reference), [policies](https://code.visualstudio.com/docs/enterprise/policies)).
 
@@ -106,7 +78,7 @@ VS Code runs Copilot agent sessions on one of two harnesses. The Copilot SDK har
 | Per-user hook file | The Local harness also runs `~/.copilot/hooks/defenseclaw.json`. It maps each CLI event to its own (`preToolUse` to `PreToolUse`, `userPromptSubmitted` to `UserPromptSubmit`, `agentStop` to `Stop`) and sends the Local payload. When `hook_event_name` is the Local event of the bound CLI event, the gateway judges in the Local dialect. |
 | Duplicate delivery | When the CLI runs the Local hook file while the machine policy is in force, the command allows without asking the gateway, because the machine policy hook already evaluates it. This includes VS Code's Copilot CLI agent host (engine `copilot-runtime`). Otherwise the gateway answers a second delivery of the same call with the first verdict, matched by `tool_use_id` or by session, event, tool and arguments within a few seconds. |
 
-### Enterprise standalone profile
+#### Enterprise standalone profile
 
 With `ownership: merge`, the Copilot machine policy also enables the VS Code policies `ChatHooks` (users cannot turn hooks off with `chat.useHooks`) and `ChatEditorPreferCopilotHarness` (VS Code 1.134 and later open new chats on the SDK harness).
 
@@ -141,7 +113,7 @@ Not covered yet:
 - `retire` does not pick the editor's harness for the user.
 - VS Code publishes no list of built-in tool names. The mapped names follow the current tool set.
 
-## OpenShell sandbox
+### OpenShell sandbox
 
 `defenseclaw sandbox run copilot` runs Copilot CLI in an OpenShell sandbox ([macOS](/docs/how-to/sandboxes/set-up-on-macos), [guide](/docs/how-to/sandboxes/run-an-agent)). The first run builds the image. `defenseclaw sandbox image build copilot` builds it ahead of time. `defenseclaw sandbox setup --harness claudecode --harness codex --harness copilot` builds several, and its `--harness` replaces the `openshell.harnesses` list.
 
@@ -154,3 +126,48 @@ Not covered yet:
 | Ctrl-Z | Copilot suspends itself by signalling its process group, which the sandbox refuses. DefenseClaw resumes Copilot at once. Copilot shows `✗ Error: kill EPERM` and keeps working, and the terminal title says Ctrl-Z cannot suspend a harness in an OpenShell sandbox. |
 | Hook latency | The sandbox refuses `pidfd_open`, so in the interactive TUI Copilot CLI 1.0.88 learns a hook exited only at the 30-second timeout. A small root-owned preload library answers the call for the pinned executable only, so hooks take milliseconds ([#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966)). |
 | Image | Copilot CLI 1.0.88, replacing the base image's 1.0.16, which no contract covers. Verified end to end against a mock model, also with hostile settings and planted packages. In a live run a blocked call got the gateway's verdict, the egress proxy blocked an exfiltration destination, and a connection around the proxy was refused. |
+
+## Hook events
+
+| Contract | Agent versions | Hook script | Events | Can block | Can ask |
+| --- | --- | --- | --- | --- | --- |
+| `copilot-hooks-v1` | `>=1.0.18, <1.0.76` | `v7` | 13 | 4 | 1 |
+| `copilot-hooks-v2` | `>=1.0.76` | `v7` | 14 | 4 | 1 |
+
+| Contract | Events registered | Block events | Ask events |
+| --- | --- | --- | --- |
+| `copilot-hooks-v1` | `sessionStart`, `sessionEnd`, `userPromptSubmitted`, `preToolUse`, `postToolUse`, `permissionRequest`, `agentStop`, `subagentStart`, `subagentStop`, `postToolUseFailure`, `errorOccurred`, `preCompact`, `notification` | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` |
+| `copilot-hooks-v2` | As the previous contract, plus `userPromptTransformed` | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` |
+
+| Fact | Value |
+| --- | --- |
+| Hook script | `copilot-hook.sh` |
+| Hook config paths | `~/.copilot/hooks/defenseclaw.json`, `<workspace>/.github/hooks/defenseclaw.json` |
+| Response field | `hook_output` |
+| Native OTLP | no |
+| W3C traceparent | yes |
+| Fail closed | no |
+
+## Verdict mapping
+
+| Event | Behavior |
+| --- | --- |
+| `preToolUse` | Native ask when policy returns an eligible confirm verdict in action mode. Confirm findings on other events use a non-pausing audit and alert fallback. |
+| `permissionRequest`, `agentStop`, `subagentStop` | Return the official deny or block response. |
+| `postToolUseFailure` | Can add recovery `additionalContext`. Cannot block or reverse the failed tool. |
+| Prompt | No hook can stop a prompt. A matching prompt reaches the model in observe and action mode, and its alert reads `detected in the prompt (cannot block)`. |
+
+## Native ask
+
+Only `preToolUse` supports native ask. In action mode a confirm verdict that is eligible becomes Copilot's ask prompt. Confirm findings on other events use a non-pausing audit and alert fallback.
+
+## Fail mode
+
+Copilot exposes no fail-closed hook transport. `--fail-mode closed`, inherited strict availability, missing auth, timeouts and malformed responses cannot make an unavailable hook block the agent. Such a call is recorded in `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports a `guardrail-degraded` alert when it starts again. On a managed standalone host the administrator-owned hook denies `preToolUse` and `permissionRequest` while the gateway service is not running. The gateway requires the exact trusted event-specific registration header and never infers the event from stdin fields.
+
+## Limits
+
+- No hook can stop a prompt. A matching prompt reaches the model in observe and action mode, and its alert reads `detected in the prompt (cannot block)`.
+- `postToolUseFailure` cannot block or reverse the failed tool.
+- GitHub states that per-path sandbox denials cannot be enforced on Windows (Copilot CLI 1.0.76 release notes), so do not treat Copilot's Windows sandbox as per-path containment.
+- Plugin-contributed, built-in, organization and remote agents, skills and runtime MCP servers need a live official-client inspection. The effective agent load order is unverified.
