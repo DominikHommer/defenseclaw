@@ -26,7 +26,14 @@ On Windows, use PowerShell and a Windows path such as `'C:\path\to\repo'`. Hooks
 
 Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
-{/* needs-live-capture: output of defenseclaw setup copilot */}
+## Check it
+
+```bash
+defenseclaw status
+```
+
+The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
+
 
 ## What it can block or ask
 

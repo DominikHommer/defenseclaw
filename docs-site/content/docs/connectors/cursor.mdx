@@ -24,7 +24,14 @@ defenseclaw setup cursor --mode action --no-human-approval
 
 On Windows, run the same commands in PowerShell. The default installs observe-mode hooks. Action mode turns on event-native deny and leaves native approval off. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
-{/* needs-live-capture: output of defenseclaw setup cursor */}
+## Check it
+
+```bash
+defenseclaw status
+```
+
+The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
+
 
 ## What it can block or ask
 
