@@ -72,6 +72,20 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 				})
 			}
 		}
+		// The gateway now denies this account's agent processes of these
+		// connectors that started before the removal, so no protected session
+		// record may keep proving one of them unblocked for a gateway outage
+		// (GAP-0352). Deleting a record only ever blocks.
+		invalidated := make([]string, 0, len(added))
+		for _, removal := range added {
+			invalidated = append(invalidated, removal.Connector)
+		}
+		if layout, _, _, layoutErr := standaloneEnterprisePolicyLayout(); layoutErr == nil {
+			if err := enterprisepolicy.RemovePublishedForeignHookSessions(layout.HookSessionDir, identity, invalidated); err != nil {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: clear the protected session records of %s: %v\n",
+					foreignGuardLogField(account, 256), err)
+			}
+		}
 		path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
 		existing, loadErr := loadEnterpriseForeignHookRemovals(path)
 		if loadErr != nil {

@@ -2284,6 +2284,7 @@ func finishWindowsEnterpriseStandalone(
 		result.Noop, result.NoopReason = false, ""
 	}
 	applyWindowsStandaloneScannerRuntime(result, opts)
+	applyWindowsStandaloneHookSessionRecords(result, opts)
 	addWindowsEnterpriseMigrationChange(result, opts)
 	addWindowsEnterpriseMissingCredentialWarnings(result)
 	applyWindowsEnterpriseAgentSessions(result, opts)

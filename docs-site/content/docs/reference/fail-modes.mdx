@@ -45,11 +45,21 @@ refuses its credential (HTTP 401 or 403, also when the rest of that answer is
 cut off or too large), when the call does not match the
 event or hook contract the hook was registered for (Codex, GitHub Copilot),
 and when the account is not enrolled. An unapproved hook that the foreign-hook
-guard finds blocks in every fail mode too, and so does a call the guard cannot
-check against the agent session's hook record because the gateway cannot
-answer (GitHub Copilot, Cursor, Devin, OpenCode, Amp and Hermes on a
-standalone host with `foreign_hooks: remove`): only the gateway holds that
-record, and a session it blocked may still run the hook it loaded.
+guard finds blocks in every fail mode too.
+
+The foreign-hook guard checks each call against the agent session's hook
+record, which the gateway keeps (GitHub Copilot, Cursor, Devin, OpenCode, Amp
+and Hermes on a standalone host with `foreign_hooks: remove`). After every
+check the gateway also writes its answer into a protected record that only
+that account can read and only the gateway service can change. During an
+outage under `open`, a guarded call runs only when that record shows the
+gateway did not block the agent process. These calls stay blocked:
+
+- a session the gateway blocked (it may still run the hook it loaded);
+- an agent that started while the gateway was down (no record yet);
+- a record that is missing, cannot be read or parsed, or that a user
+  account could change;
+- every guarded call under `closed` or an unset fail mode.
 
 On a managed standalone host `open` applies only to an outage: the gateway
 service is not running, is still restarting, or gives no answer in time.

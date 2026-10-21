@@ -8,6 +8,12 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.4
+
+### Changed
+
+- **Guarded connectors follow the administrator's `open` during a gateway outage (GAP-0352).** On a managed standalone host, GitHub Copilot and OpenCode (every OS) and Hermes (Linux, macOS), and the other guarded connectors, blocked every call while the gateway was down, even with `hook_fail_mode: open`. That was the 1.0.3 fail-safe fallback, and it is now removed. After every foreign-hook session check, the gateway writes its answer (a block, or the allow that clears it) into a protected per-account record. Only that account can read the record and only the gateway service can change it. The folder is `/run/defenseclaw-hook/sessions` on Linux, `/opt/cisco/defenseclaw/run/sessions` on macOS and `%ProgramData%\Cisco\DefenseClaw-HookSessions` on Windows. `ensure`, `repair` and Setup create it, uninstall removes it, and Windows `status`/`verify` report it when it is missing or untrusted. During an outage under `open`, a guarded call runs only when that record proves the gateway did not block the agent process. A blocked session, an agent started while the gateway was down, and a missing, unreadable, untrusted or corrupt record still block. When the hook guardian removes an unapproved hook, it deletes that account's records for the connector.
+
 ## [Unreleased] — 1.0.3
 
 ### Upgrade note for 1.0.3

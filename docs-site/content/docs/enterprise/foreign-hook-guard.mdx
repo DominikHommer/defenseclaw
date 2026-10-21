@@ -228,9 +228,29 @@ without the user's report.
 An approval you add while a session is blocked applies to the next agent
 session; the running one stays blocked.
 
-The session record is kept by the gateway. While the gateway cannot answer
-(it is stopped or restarting, or it ended without removing its hook socket),
-guarded tool calls are blocked whatever the fail mode, with this message:
+The session record is kept by the gateway. After every check the gateway
+also writes its answer for the agent process and the session into a protected
+record that only that account can read and only the gateway service can
+change:
+
+| OS | Folder |
+| --- | --- |
+| Linux | `/run/defenseclaw-hook/sessions/<account digest>/` |
+| macOS | `/opt/cisco/defenseclaw/run/sessions/<account digest>/` |
+| Windows | `%ProgramData%\Cisco\DefenseClaw-HookSessions\<account digest>\` |
+
+`ensure`, `repair` and Setup create the folder; uninstall removes it. The
+gateway creates each account's folder with one access entry for that account
+(a POSIX ACL entry on Linux, a macOS ACL entry, a protected DACL on Windows).
+
+While the gateway cannot answer (it is stopped or restarting, or it ended
+without removing its hook socket), a guarded tool call runs only when the
+fail mode is `open` and that record shows the gateway did not block the agent
+process. Otherwise the call is blocked. That covers `closed` and an unset
+fail mode, a session the gateway blocked, an agent that started while the
+gateway was down, and a record that is missing or that the account could
+change. A blocked session gets the gateway's own block message. Other calls
+get the outage message, for example:
 
 ```text
 enterprise_foreign_hook_blocked: DefenseClaw could not check this agent

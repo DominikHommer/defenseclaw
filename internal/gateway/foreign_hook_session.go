@@ -88,12 +88,44 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		RemovalsErr:  removalsErr,
 		Now:          time.Now(),
 	})
+	// Under the same lock, so the protected record follows the store's
+	// order: the hook reads it when the gateway is down (GAP-0352).
+	a.publishForeignHookSessionDecision(identity, exchange.Key, decision)
 	unlock()
 	if decision.Deny {
 		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(decision)
+}
+
+// foreignHookSessionPublishRoot is the folder of the protected session
+// records on a standalone host (managed.StandaloneLayout.HookSessionDir),
+// replaceable in tests.
+var foreignHookSessionPublishRoot = standaloneHookSessionDir
+
+// foreignHookSessionPublish writes the protected record (replaceable in
+// tests, whose folders cannot carry the per-account access list).
+var foreignHookSessionPublish = enterprisepolicy.PublishForeignHookSessionDecision
+
+// publishForeignHookSessionDecision writes the answer of one session
+// exchange into the caller's protected session record, which the hook reads
+// during a gateway outage under fail mode open (GAP-0352). Secure Client
+// and per-user gateways have no such record; a failure is logged and leaves
+// no allow behind, so the hook blocks during an outage.
+func (a *APIServer) publishForeignHookSessionDecision(identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision) {
+	cfg := a.scannerCfg
+	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
+		return
+	}
+	root, err := foreignHookSessionPublishRoot()
+	if err == nil {
+		err = foreignHookSessionPublish(root, identity, key, decision, time.Now())
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s was not written (the hook blocks during a gateway outage): %v\n",
+			clipForeignHookAuditField(key.Connector, 64), err)
+	}
 }
 
 // foreignHookAuditReasonLimit bounds the reason an audit row repeats, and
