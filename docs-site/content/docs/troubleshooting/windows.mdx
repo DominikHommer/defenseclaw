@@ -1,168 +1,13 @@
 ---
-title: Paths and troubleshooting
-description: Native Windows filesystem locations, supported overrides, safe diagnostics, and post-install and post-upgrade verification.
+title: Windows troubleshooting
+description: First diagnostics, fixes for common native Windows failures, and post-install and post-upgrade checklists.
 keywords:
-  - DefenseClaw Windows paths
   - DefenseClaw Windows troubleshooting
-  - DefenseClaw Windows logs
   - DefenseClaw Windows doctor
-  - DefenseClaw Windows verification
+  - DefenseClaw Windows logs
 ---
 
-DefenseClaw keeps its programs, its data, and each agent's own configuration
-in separate places. Keep those boundaries intact when you diagnose a problem:
-change things through `defenseclaw` commands rather than by editing or
-deleting files.
-
-## Filesystem reference
-
-### Programs
-
-These are in `%USERPROFILE%\.local\bin`. Do not replace or wrap them; run
-the [install command](/docs/get-started/windows/install-lifecycle#install)
-again to repair them.
-
-| File | What it is |
-| --- | --- |
-| `defenseclaw.exe` | The CLI and TUI launcher. PowerShell and cmd.exe run it for `defenseclaw`. |
-| `defenseclaw.cmd` | The same launcher as a batch file, for scripts that call `defenseclaw.cmd` by name. |
-| `defenseclaw` | The same launcher for Git Bash, which does not run `.cmd` files by bare name. cmd.exe and PowerShell ignore it. |
-| `defenseclaw-gateway.exe` | The gateway and its lifecycle commands. |
-| `defenseclaw-hook.exe` | The hook runner that agents call. It opens no console window. |
-| `defenseclaw-acp.exe` | The [ACP guard](/docs/acp-guard). |
-
-### Data
-
-These are in `%USERPROFILE%\.defenseclaw`, or in `DEFENSECLAW_HOME` when you
-set it.
-
-| Path | What it is | Can you edit it? |
-| --- | --- | --- |
-| `config.yaml` | Your DefenseClaw configuration. | Change it with `defenseclaw config set` or the setup commands. The running gateway applies a valid edit by itself and keeps the previous policy if an edit is invalid; run `defenseclaw config validate` first when you edit it by hand. |
-| `config.generation.json` | The generation, SHA-256, actor and time of each write to `config.yaml`. | **No.** DefenseClaw writes it. |
-| `custom-providers.json` | Custom LLM providers, derived from `llm_providers` in `config.yaml`. | **No.** It is rewritten for you and never read back; `defenseclaw doctor --fix` regenerates it if it drifts. |
-| `config.yaml.v8.bak`, `migration-v9.json` | Kept by the `config_version` 9 migration: your file as it was, and every value the migration moved. | Read them locally. `defenseclaw config migrate --ack` marks the record as read. |
-| `.env` | Protected tokens and API keys. | **No.** Never print it. Use `defenseclaw keys` and the setup commands. |
-| `audit.db` | The local audit database (SQLite). | No. Do not open it with a second writer or attach it to a support ticket. |
-| `gateway.log` | The gateway's output. | Read it locally; check excerpts for sensitive content before you share them. |
-| `logs\install-*.log` | One log per install, upgrade, or rollback. | Read it locally. |
-| `logs\hook-failures.jsonl` | Hook delivery failures, when there are any. | Read it locally; it can contain sensitive details. |
-| `.venv\` | The Python environment the installer manages. | No. Do not install other packages into it. |
-| `previous\` | The install the last upgrade replaced. | No. `defenseclaw rollback` swaps it back. |
-| `installer\install.ps1` | The installer of the current install. | No. `defenseclaw rollback` runs it. |
-| `hooks\` | Generated hook files and per-connector credentials. | **No.** Never print or copy them. `defenseclaw doctor` and setup repair them. |
-| `backups\`, `connector_backups\` | Copies DefenseClaw needs to restore agent files and earlier settings, including the timestamped `config.yaml.before-redaction-*` copies that `setup redaction` writes before each change. | No. They can contain credentials. |
-| `quarantine\` | Quarantined skills and plugins. | No. Use `defenseclaw skill restore` or `defenseclaw plugin restore`. |
-| `gateway.pid`, `watchdog.pid` | Records of the running gateway and watchdog. | No. Do not delete them while a process may be running. |
-| `gateway.jsonl` | Exists only if you configured a JSONL destination with that path. | Manage it through [observability](/docs/observability). |
-
-### Agent files DefenseClaw changes
-
-Setup adds DefenseClaw's own marked entries to each agent's configuration and
-leaves your other settings alone. Change those entries only with
-`defenseclaw setup <connector>` and `defenseclaw setup remove <connector>`,
-never by hand. Each [connector page](/docs/connectors#platform-support) has
-the details for its Windows tab.
-
-| Agent | Default file |
-| --- | --- |
-| Claude Code | `%USERPROFILE%\.claude\settings.json` (or `%CLAUDE_CONFIG_DIR%`) |
-| Codex | `%USERPROFILE%\.codex\config.toml` (or `%CODEX_HOME%`) |
-| Amp | `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` |
-| Antigravity | `%USERPROFILE%\.gemini\config\hooks.json` |
-| GitHub Copilot CLI | `%USERPROFILE%\.copilot\hooks\defenseclaw.json` (or `%COPILOT_HOME%`); with `--workspace`, `<workspace>\.github\hooks\defenseclaw.json` |
-| Cursor | `%USERPROFILE%\.cursor\hooks.json` |
-| Devin | `%APPDATA%\devin\config.json`; with a workspace, `<workspace>\.devin\hooks.v1.json` |
-| Hermes | `%LOCALAPPDATA%\hermes\config.yaml` (or `%HERMES_HOME%`) |
-| Kiro | `<project>\.kiro\hooks\defenseclaw.json` |
-| OmniGent | `%USERPROFILE%\.omnigent\config.yaml` (or `%OMNIGENT_CONFIG_HOME%`) |
-| OpenCode | `%USERPROFILE%\.config\opencode\plugins\defenseclaw.js` (or `%OPENCODE_CONFIG_DIR%`) |
-
-The Amp and OpenCode plugin files carry a connector credential: never print or
-copy them. Setup remembers the exact folder it used for each agent, and
-repair, upgrade, and uninstall use that folder later.
-
-## Supported path overrides
-
-Claude Code, Codex, GitHub Copilot CLI, Hermes, OmniGent, and OpenCode let you
-move their configuration folder with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
-`COPILOT_HOME`, `HERMES_HOME`, `OMNIGENT_CONFIG_HOME`, and
-`OPENCODE_CONFIG_DIR`. Set them to absolute native Windows paths before you
-install DefenseClaw or set up the connector. Setup checks and remembers them,
-and refuses a path that goes through a symbolic link or junction. Amp,
-Antigravity, Cursor, and Devin have no such variable; DefenseClaw uses their
-fixed paths in the table above.
-
-<Tabs items={['PowerShell', 'cmd']}>
-  <Tab value="PowerShell">
-
-```powershell
-$env:CODEX_HOME = "D:\Agent Profiles\Codex"
-$env:CLAUDE_CONFIG_DIR = "D:\Agent Profiles\Claude"
-$env:COPILOT_HOME = "D:\Agent Profiles\Copilot"
-$env:OPENCODE_CONFIG_DIR = "D:\Agent Profiles\OpenCode"
-$env:OMNIGENT_CONFIG_HOME = "D:\Agent Profiles\OmniGent"
-$env:HERMES_HOME = "D:\Agent Profiles\Hermes"
-```
-
-  </Tab>
-  <Tab value="cmd">
-
-```cmd
-set "CODEX_HOME=D:\Agent Profiles\Codex"
-set "CLAUDE_CONFIG_DIR=D:\Agent Profiles\Claude"
-set "COPILOT_HOME=D:\Agent Profiles\Copilot"
-set "OPENCODE_CONFIG_DIR=D:\Agent Profiles\OpenCode"
-set "OMNIGENT_CONFIG_HOME=D:\Agent Profiles\OmniGent"
-set "HERMES_HOME=D:\Agent Profiles\Hermes"
-```
-
-  </Tab>
-</Tabs>
-
-Changing one of these variables later does not move DefenseClaw's entries.
-To move an agent's folder, run its setup again; do not move the folder and
-edit DefenseClaw's state by hand.
-
-The installer and runtime honour `DEFENSECLAW_HOME`; the default data root is
-the current profile's `.defenseclaw`. Use the same value for every command,
-including `defenseclaw upgrade`, or DefenseClaw will look for a different
-install.
-
-`DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY` change runtime
-behavior; they are not path settings. For normal use, set the fail mode with
-`defenseclaw guardrail fail-mode open|closed`. OpenCode ignores the
-environment variables: its setup writes the saved fail mode into the plugin,
-and `defenseclaw status` and `defenseclaw doctor` report a difference.
-
-DefenseClaw restricts its private files to the current user, Administrators,
-and SYSTEM. The [Windows security model](/docs/get-started/windows/telemetry-security#ownership-and-filesystem-boundary)
-explains what that does and does not protect against.
-
-## Quoting and case
-
-Quote every path that can contain spaces. In PowerShell, use the call operator
-for an executable path:
-
-```powershell
-& "$env:USERPROFILE\.local\bin\defenseclaw-gateway.exe" status
-```
-
-In cmd, quote the executable itself:
-
-```cmd
-"%USERPROFILE%\.local\bin\defenseclaw-gateway.exe" status
-```
-
-Those examples are for your shell. The hook command that setup writes into
-Hermes `config.yaml` is different on purpose: a quoted absolute path to
-`defenseclaw-hook.exe` with forward slashes, followed by plain arguments.
-Hermes runs it without a shell, so do not add PowerShell's `&`, a `.ps1`
-script, or any other wrapper to it.
-
-Windows compares environment variable names and paths without regard to case.
-Do not use two agent folders, files, or variables whose names differ only by
-letter case.
+Change things through `defenseclaw` commands, not by editing or deleting files. Paths are in [Paths](/docs/reference/paths). For problems on every OS, see [Troubleshooting](/docs/troubleshooting).
 
 ## First diagnostics
 
@@ -286,7 +131,7 @@ not remove, leftovers of connectors you no longer use.
     connector's enablement or its hook fail mode) applies after
     `defenseclaw-gateway restart`; `defenseclaw config set` names such a key when
     you set it, and every other change applies without a restart. Enable or disable one connector at a time
-    (see [disabling](/docs/guardrail/disabling)) so the others are not changed.
+    (see [disabling](/docs/how-to/guardrail/turn-off-the-guardrail)) so the others are not changed.
   </Accordion>
   <Accordion title="A disabled skill or plugin still behaves unexpectedly">
     Run `defenseclaw skill list` or `defenseclaw plugin list` and check which
@@ -376,6 +221,4 @@ commands.
 - Leave the `previous` and `backups` folders alone until the gateway and every
   agent work.
 
-For broader context, see [CLI reference](/docs/reference/cli),
-[configuration](/docs/reference/configuration), [upgrade](/docs/get-started/upgrade),
-and [TUI](/docs/tui).
+For more, see the [CLI reference](/docs/reference/cli), [Paths](/docs/reference/paths), [Upgrade](/docs/get-started/upgrade) and [Windows](/docs/get-started/windows).
