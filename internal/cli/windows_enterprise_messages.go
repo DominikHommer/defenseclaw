@@ -69,7 +69,7 @@ func windowsEnterpriseInstallerExitFailure(code int) error {
 			"another program stopped its PowerShell process, for example Task Manager, Stop-Process, an antivirus or a shutdown). "+
 			"Check the lifecycle log (%s), then run the same command again", code, windowsEnterpriseLifecycleLogPath)
 	}
-	return fmt.Errorf("Windows enterprise installer exited with code %d without a diagnostic; check the lifecycle log (%s)",
+	return fmt.Errorf("the Windows enterprise installer exited with code %d without a diagnostic; check the lifecycle log (%s)",
 		code, windowsEnterpriseLifecycleLogPath)
 }
 
