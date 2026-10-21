@@ -11,18 +11,13 @@ keywords:
   - defenseclaw sandbox policy explain
 ---
 
-`defenseclaw sandbox` runs Claude Code, Codex, and other hook-based coding
-agents in NVIDIA OpenShell 0.1 sandboxes on Linux, and on Macs with Apple
-silicon in OpenShell MicroVMs, where every run works on a copy (see
-[macOS](/docs/sandboxes/guide#macos)). A Linux host with KVM can run the
-MicroVM driver too. This page lists every `sandbox` command and flag; for the
-walkthrough, see the [complete sandbox guide](/docs/sandboxes/guide). On a
-computer your organization manages, the same commands run under the policy of
-your directory group: see [On a managed computer](#on-a-managed-computer).
-Packs and organization limits are covered in
-[Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs), and
-the `openshell:` keys in
-[Configuration](/docs/reference/configuration#openshell-sandbox-settings).
+Every `defenseclaw sandbox` command and flag. For tasks see
+[sandboxes](/docs/features/sandboxes) and its how-tos. Packs and organization
+limits are in [Sandbox policy](/docs/reference/sandbox-policy), the egress rules
+in [Sandbox network](/docs/reference/sandbox-network), and the `openshell:` keys
+in [Configuration](/docs/reference/configuration#openshell-sandbox-settings).
+On a managed computer the same commands run under your directory group's policy
+([On a managed computer](#on-a-managed-computer)).
 
 The flag tables are generated from the `defenseclaw-gateway sandbox` command
 tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
@@ -31,43 +26,31 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 ## How the commands run
 
 - **One entry point.** Type `defenseclaw sandbox …`. The Python CLI checks the
-  command line against the same commands and flags, then replaces itself with
-  `defenseclaw-gateway sandbox …` and passes your arguments on exactly as
-  typed.
-- **Linux and macOS only.** On Windows every command stops with exit status 3
-  before doing anything; there the connector hooks guard your agents (see
-  [Windows](/docs/get-started/windows)). `setup`, `run`, `image build`, and `enable` also stop with status
-  3 under WSL2 and when run as root: sandboxes run as your own user. On a Mac
-  sandboxes run in OpenShell
-  MicroVMs, on Apple silicon only: on an Intel Mac every command except
-  `teardown` stops with exit status 3. A MicroVM mounts
-  no host folders, so every run on a MicroVM works on a copy, which includes
-  every run on a Mac (see [macOS](/docs/sandboxes/guide#macos)).
-- **Managed computers.** On a standalone enterprise install the same commands
-  work, through your own sandbox daemon and under your organization's policy
-  (see [On a managed computer](#on-a-managed-computer)).
-- **The daemon does the work.** Commands that create, change, or read
-  sandboxes call the DefenseClaw daemon's
-  [sandbox API](/docs/reference/gateway-api#sandbox-api) on the main API
-  port, using the gateway token. The daemon runs them only while
-  `openshell.enabled` is `true`, which `sandbox setup` turns on. The CLI keeps
-  the terminal, the copy-mode workspace, the image builds, and the installer.
-  `pack`, `image`, `disable`, and `doctor` work without the daemon. `enable`
-  checks first, as `run` does, that the daemon serves sandboxes.
+  command line, then replaces itself with `defenseclaw-gateway sandbox …` with
+  your arguments as typed.
+- **Platforms.** Linux and macOS only. On Windows every command stops with exit
+  status 3. `setup`, `run`, `image build` and `enable` also stop with status 3
+  under WSL2 and as root. On an Intel Mac every command except `teardown` stops
+  with status 3. A MicroVM mounts no host folders, so every run on a MicroVM
+  (every Mac) works on a copy.
+- **The daemon does the work.** Commands that create, change or read sandboxes
+  call the daemon's [sandbox API](/docs/reference/gateway-api#sandbox-api) on
+  the main API port with the gateway token, while `openshell.enabled` is
+  `true`. The CLI keeps the terminal, the copy-mode workspace, the image builds
+  and the installer. `pack`, `image`, `disable` and `doctor` work without the
+  daemon.
 - **Harness names.** A harness can be named by the command you type
   (`claude`, `codex`, `opencode`, `copilot`, `kiro-cli-chat`, `hermes`,
   `openhands`, `omnigent`, `agy`, `amp`, `cursor-agent`, `devin`), by its
   connector name (`claudecode`, `kiro`, `antigravity`), or by its display name.
-  OpenHands and OmniGent are deprecated: their names still resolve, but do not
-  choose them for new sandboxes.
-  Help and hints name Kiro and Antigravity by their connector names, as
-  `image build` and `image list` do. Setup and the image commands default to `openshell.harnesses`, and then to
-  Claude Code and Codex; `image rm` removes only the harnesses you name. Amp, Cursor Agent, and Devin CLI are not verified
+  OpenHands and OmniGent are deprecated and are being removed. Setup and the
+  image commands default to `openshell.harnesses`, then to Claude Code and Codex;
+  `image rm` removes only the harnesses you name. Amp, Cursor Agent, and Devin CLI are not verified
   end to end yet: their images build, but they never pass the hook check, so
   no sandbox runs them. The
   [capability matrix](/docs/connectors/capability-matrix) says why for each harness.
 - **Sandbox names.** A name is lowercase letters, digits, and `-`, at most
-  19 characters: OpenShell 0.1.1 refuses to create a sandbox with a longer
+  19 characters: OpenShell refuses to create a sandbox with a longer
   name. Without `--name`, `run` picks `<folder>-<random>`, the folder name cut
   to fit, for example `myapp-7f3a`. The harness is a label on the sandbox, not
   part of its name, and `sandbox list` shows both.
@@ -75,26 +58,18 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   `json`. While sandboxes are off, a JSON command that needs them (`list`,
   `policy show`) prints `{"enabled": false, "available": false, "reason": ...}`,
   the same fields as `sandbox status --json`, and exits `1`.
-- **Exit status.** `0` on success and `1` on an error. `setup` exits `1`
-  when it ends not ready for sandboxes yet (its last line says why and what
-  to do), as `doctor` does when a check fails. `run` and `connect`
-  return the exit status of the harness, and `exec` that of its command
-  (`connect --shell` exits `0` when the shell ends). When the harness exits
-  `0` but not one of the session's hooks reached DefenseClaw, so that every
-  tool call was blocked, `run` and `connect` exit `69`. A harness that sends
-  its first hook only with your first prompt (Kiro CLI, Hermes Agent,
-  Antigravity, GitHub Copilot CLI) and was never
-  prompted is not counted, unless the daemon saw it work without hooks.
-  Neither is an interactive session given harness arguments after `--`
-  that may start no session (`connect NAME -- --version`), unless the
-  daemon or the live check flagged it: it ends with a note instead.
-  `logs` does the same when it reports a finished detached run none of
-  whose hooks reached DefenseClaw. `pull --apply` exits `4` when it could not
-  merge in place (a conflict, or git older than 2.38) and left your working
-  tree alone: the changes went to a patch file and, in a git project, to a
-  `dc/<name>` branch instead. An interrupted command returns `130` (Ctrl-C at
-  the end-of-session question too), and an unsupported platform or setup
-  (an Intel Mac included) returns `3`.
+- **Exit status.** `0` on success and `1` on an error. `setup` exits `1` when it
+  ends not ready for sandboxes, as `doctor` does when a check fails. `run` and
+  `connect` return the harness's exit status, and `exec` that of its command.
+  When the harness exits `0` but not one of the session's hooks reached
+  DefenseClaw, so that every tool call was blocked, `run` and `connect` exit
+  `69`. A harness that sends its first hook only with your first prompt (Kiro
+  CLI, Hermes Agent, Antigravity, GitHub Copilot CLI) and was never prompted is
+  not counted. `pull --apply` exits `4` when it could not merge in place (a
+  conflict, or git older than 2.38) and left your working tree alone: the
+  changes went to a patch file and, in a git project, to a `dc/<name>` branch.
+  `stop` exits `5` when a MicroVM with a full disk keeps running. An interrupted
+  command returns `130`, and an unsupported platform or setup returns `3`.
 
 | Command | What it does |
 | --- | --- |
@@ -146,7 +121,7 @@ commands change in these ways. Everything else on this page works as written.
   The administrator turns sandboxes on with `openshell.enabled` and decides how
   OpenShell is provided; in `setup` install mode your daemon installs NVIDIA's
   release into `~/.local` at your first sandbox. The first-use progress line is
-  "Installing OpenShell 0.1.3 for your account and starting it (first run only)…".
+  "Installing OpenShell RELEASE for your account and starting it (first run only)…".
 - **`sandbox policy allow` and `block`** save one host decision at a time in
   the managed gateway. Start a sandbox first; if you have several, use
   `--sandbox NAME` to select the policy that checks the decision. The gateway
@@ -243,7 +218,7 @@ asking. Doctor exits `1` when a check fails, with `--output json` too, after it
 prints the result (so `ok` is `false` exactly when it exits `1`). The JSON holds `ok`,
 `ready` (`ok`, with sandboxes turned on), `openshell_install` (setup would offer
 to install OpenShell), `openshell_upgrade` (setup would offer to upgrade a
-supported OpenShell older than 0.1.3 in place) and `openshell_install_version`
+supported OpenShell older than the release setup installs, in place) and `openshell_install_version`
 (the release setup installs), then every check with its id, title, status,
 detail and fix, the OpenShell and Docker versions found, and the compute driver;
 the TUI's Setup wizard reads these fields. When sandboxes are on
@@ -349,37 +324,22 @@ defenseclaw sandbox image list --output json
 
 Removes superseded harness images.
 
-- **What it keeps.** The current images and the images the daemon's
-  sandboxes run. An image another DefenseClaw build made (before an upgrade)
-  is not current, so it goes unless a sandbox runs it. It leaves images that
-  another DefenseClaw data directory recorded, or that nothing recorded.
-- **Stale records.** It forgets, and names, the records of images Docker no
-  longer has.
-- **On a MicroVM (vm) gateway**, and only while the daemon answers (without
-  its list of sandboxes it leaves them alone), it also removes the run
-  images and aliases of superseded harness images. It counts every harness
-  image built for the docker driver as superseded, however new it is (images
-  recorded before DefenseClaw built MicroVM images are such images). Such an
-  image goes with its run images and aliases unless a sandbox runs it. Each
-  run configuration (a profile, `--safe`, a key) makes its own run image,
-  and the MicroVM driver prepares a disk of about 5 GB for each; of a
-  current image, prune keeps the run images sandboxes run and the newest
-  other one (for the next run), and removes the rest with their disks, so a
-  deleted sandbox's disk does not stay behind.
+- **Keeps** the current images and the images the daemon's sandboxes run. An
+  image another DefenseClaw build made is not current, so it goes unless a
+  sandbox runs it. Images another data directory recorded are left alone.
+- **Stale records.** It forgets, and names, records of images Docker no longer
+  has.
+- **On a MicroVM (vm) gateway**, while the daemon answers, it also removes the
+  run images and aliases of superseded images, every image built for the docker
+  driver included. Of a current image it keeps the run images sandboxes run and
+  the newest other one, and removes the rest with their MicroVM disks (about
+  5 GB each, in `~/.local/state/openshell/vm-driver/images`), but only when
+  Docker no longer has the image and no sandbox is recorded with it. It says how
+  much it freed. A start of an image whose disk is gone prepares it again.
+- **Half-prepared disks.** It removes `.staging` folders that a failed or
+  cancelled first start left, once nothing has written to them for 15 minutes.
 - **On a docker gateway**, or one whose driver it cannot tell, it keeps the
   newest image of both kinds.
-- **MicroVM disks.** With the daemon's list, it also removes the MicroVM
-  disk OpenShell prepared from each image it removed (about 5 GB each, in the
-  `images` folder of the MicroVM driver's state directory,
-  `~/.local/state/openshell/vm-driver` by default) and says how much it
-  freed. It removes a disk only when Docker no longer has its image and no
-  sandbox is recorded with that image, and it never removes the driver's
-  other state there. A start of an image whose disk is gone prepares it
-  again (about a minute).
-- **Half-prepared MicroVM disks.** It removes the `.staging` folders that
-  a first start which failed or was cancelled (a full volume, Ctrl-C) left
-  there, once nothing has written to them for 15 minutes, and says how much
-  it freed. The doctor's **Disk space** check counts them.
 - `--dry-run` says what it would remove, disks included.
 
 ```bash
@@ -489,8 +449,33 @@ disks OpenShell prepared from them, once no sandbox that could boot one is
 left, as `sandbox image prune` does. Teardown restores the OpenShell gateway
 config that setup changed, unless the file changed since. It also removes the
 shell wrappers and sets `openshell.enabled: false`. OpenShell itself stays
-installed. `defenseclaw uninstall` runs teardown for you. It works without a
-DefenseClaw config, so it can clean up a half-installed host.
+installed. It works without a DefenseClaw config, so it can clean up a
+half-installed host.
+
+`defenseclaw uninstall` runs teardown when sandbox state is present, and stops
+if teardown fails (where sandboxes are not supported, such as Windows, it skips
+it). A running sandbox stops `defenseclaw uninstall` before any change. Pull a
+copy-mode sandbox's work with `defenseclaw sandbox pull NAME --branch`, or
+review a mount-mode sandbox with `defenseclaw sandbox review NAME`, then
+`defenseclaw sandbox stop NAME` and uninstall again. `--stop-sandboxes` (also on
+`reset`) stops and deletes running sandboxes during teardown, unpulled copy work
+included. This preflight runs only when sandbox teardown is planned. If
+DefenseClaw cannot read the sandbox list because the gateway stopped, the list
+timed out or its output could not be read, `uninstall` and `reset` stop before
+any change. A sandbox in `error`, `stopping`, `creating` or `deleting` counts as
+running. A per-user uninstall for an account that never set up sandboxes
+completes without a teardown override: its sandbox directory is absent or holds
+only empty lock files and empty folders, no OpenShell state or user gateway
+config sits beside them, and no OpenShell sandbox setting or wrapper is enabled.
+Neither `uninstall` nor `reset` reads the sandbox list or runs teardown then.
+When Docker or OpenShell are gone or broken, `defenseclaw uninstall
+--skip-sandbox-teardown` leaves the sandboxes in place, and
+`defenseclaw sandbox teardown` removes them later as long as the data directory
+is kept (no `--all`). On a Mac, restoring the gateway configuration also takes
+the gateway off the MicroVM driver. If teardown failed during an uninstall with
+`--all` or `--binaries`, rerun uninstall with `--skip-sandbox-teardown` and
+without either flag, then run `defenseclaw-gateway sandbox teardown` once Docker
+and OpenShell work.
 
 ```bash
 defenseclaw sandbox teardown --dry-run
@@ -507,23 +492,39 @@ defenseclaw sandbox teardown --yes --keep-images
 
 ### `sandbox kernel-feed`
 
-On a Linux host whose administrator runs Tetragon, the sandbox kernel feed
-adds every process the kernel starts in your docker sandboxes to their process
-trees, including the many that live for milliseconds, which the 5-second
-sample never sees. It is a small root service
-(`defenseclaw-sandbox-feed.service`, the `defenseclaw-sensor-helper` binary in
-feed mode). It only reads Tetragon (its version and its exec and exit events,
-never a policy call), serves members of the `docker` group, and gives each of
-them only their own sandboxes' records. Members of the `docker` group can
-already see every container and run commands in it, so that filter is a
-courtesy between users, not a security boundary: one of them can also add
-process records, real or made up, to another account's sandbox tree and its
-`sandbox.process_tree` records (a container labelled as that sandbox is
-enough). Give the group only to accounts that trust each other. A sandbox's process tree must be on (`sandbox run
---process-tree`, or a pack's `observe.process_tree: true`); `sandbox ps` then
-says `source: kernel`. Without the feed nothing changes. macOS (MicroVM
-sandboxes) and the Linux vm driver are not covered: their guest kernel is not
-the host's.
+On a Linux host whose administrator runs Tetragon, the opt-in kernel feed adds
+every process the kernel starts in your docker sandboxes to their process trees,
+including those that live for milliseconds, which the 5-second sample never sees.
+It is a small root service (`defenseclaw-sandbox-feed.service`, the
+`defenseclaw-sensor-helper` binary in feed mode). Without the feed nothing
+changes.
+
+| Topic | Detail |
+| --- | --- |
+| Requirements | Docker sandboxes; Tetragon 1.6 or 1.7 serving its API on `unix:///var/run/tetragon/tetragon.sock` (its TCP default is refused) with a root-owned `tetragon-info.json`; systemd; you in the `docker` group. |
+| What it reads | Only the exec and exit of container processes. Tetragon drops ancestors, environment variables, capabilities, namespaces, credentials and pod data before it sends them. Command lines are redacted in the root process (secret flags and values, key-shaped words, URL passwords). |
+| Who sees what | Members of the `docker` group, each only their own sandboxes' records. This is a courtesy between users, not a security boundary: members of the group can already see every container, and one can add made-up process records to another account's sandbox tree. Give the group only to accounts that trust each other. |
+| Does not do | No Tetragon policy, no enforcement, no file or network events. macOS MicroVM sandboxes and the Linux vm driver are not covered. |
+| Turn it on | The process tree must be on (`sandbox run --process-tree`, or a pack's `observe.process_tree: true`). `sandbox ps` then says `source: kernel`. |
+| Records | One `sandbox.process_tree` start record and one exit record per process, at most 10 a second per sandbox (a burst of 200). Past that the tree still holds every process, and `sandbox ps` warns with the count (`records_not_sent` in `--json`). |
+| Hook calls | Each Claude Code hook call is folded into one row, the hook script, with `[hook tools: N]` after its command line. Calls are shown in full in a sandbox that was already running when the feed connected, until you stop and start it. |
+| Files | `/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper`, `/etc/systemd/system/defenseclaw-sandbox-feed.service`, the socket `/run/defenseclaw-sandbox-feed/feed.sock` (`root:docker 0660`). Its log is `journalctl -u defenseclaw-sandbox-feed`. |
+| After a reboot | The feed starts by itself after Tetragon and Docker. Your gateway does not start with the computer, so `source: kernel` returns once it runs. |
+
+If the feed answers but its Tetragon stream is not connected, `kernel-feed status`
+says `its Tetragon stream is unavailable (tetragon_unavailable)`, `sandbox ps` uses
+the 5-second sample and `defenseclaw doctor` warns on the **Sandbox kernel feed**
+row. Ask the administrator to check Tetragon (`sudo systemctl status tetragon`).
+The feed reconnects by itself.
+
+| Reason | Means |
+| --- | --- |
+| `kernel_feed_not_installed` | No feed on this computer. |
+| `kernel_feed_not_permitted` | You are not in the `docker` group, or your gateway started before you joined it. |
+| `kernel_feed_untrusted` | The socket or its directory is not root's, is writable by others, or root does not serve it. |
+| `kernel_feed_unavailable` | Installed but stopped, or running and not answering. `sudo systemctl restart defenseclaw-sandbox-feed.service` fixes both. |
+| `kernel_feed_version_skew` | The feed speaks another protocol: run the `install` command it prints. |
+| `kernel_feed_unsupported` | Not Linux. |
 
 ```bash
 defenseclaw sandbox kernel-feed status
@@ -610,110 +611,29 @@ This command has no flags.
 
 ### `sandbox run`
 
-Runs a harness in a new sandbox on the current folder. On Linux (OpenShell's
-Docker driver) the folder is mounted live by default, secret files are
-masked, `.git/hooks` and `.git/config` are read-only, and a snapshot is taken
-first so that `undo` can restore the folder. `--copy` works on a copy with
-secrets held back instead, and you bring its work back with `pull`. On a Mac,
-or wherever the gateway runs OpenShell's MicroVM driver (which mounts no host
-folders), every run works on a copy, and `run` says so in one line before it
-copies anything.
-Skip-permissions mode is on by default, and `--safe` keeps the harness's own
-prompts. The harness gets your terminal. Arguments after `--` go to the
-harness.
+Runs a harness in a new sandbox on the current folder. On Linux (Docker driver)
+the folder is mounted live by default, secret files are masked, `.git/hooks`
+and `.git/config` are read-only, and a snapshot is taken first for `undo`.
+`--copy` works on a copy with secrets held back, and you bring its work back
+with `pull`. On a Mac, or wherever the gateway runs the MicroVM driver, every
+run works on a copy. Skip-permissions mode is on by default and `--safe` keeps
+the harness's own prompts. The harness gets your terminal. Arguments after `--`
+go to the harness. The step-by-step version is
+[run an agent](/docs/how-to/sandboxes/run-an-agent).
 
-The rest of this section covers what happens during and after a run. For
-the same story told step by step, see
-[your first session](/docs/sandboxes/first-session).
-
-#### Notices during the session
-
-While the harness runs, the session announces what can't wait:
-
-- each ask (a port on your machine, a private address, a destination the
-  profile does not list), with its destination and the `sandbox approve`
-  command that answers it from another terminal (or `defenseclaw tui`, key
-  `7`, then `t` for the Asks view);
-- a destination DefenseClaw blocked, with the `sandbox unblock` command that
-  lifts the block;
-- a large upload the block did not cut (`⚠ large upload to
-  files.example.net (more than 25 MiB)`), because the block is off or the
-  destination is exempt from it;
-- a finding, such as an alert on a tool call or hook tamper;
-- a quarantined nested repository;
-- a DefenseClaw daemon that does not answer (the hooks fail closed until it
-  is back).
-
-Where the notices appear:
-
-- **In a terminal.** The harness draws its own screen, so the notices go to
-  the terminal's title, to a desktop notification where the terminal has
-  them, and to the bell, instead of lines written over the screen. A harness
-  that sets the title itself (Claude Code does) takes it back at once, so
-  the end-of-session summary repeats them.
-- **Without a terminal** (`--prompt`), they are lines on standard error.
-- A harness that sends its first hook only with your first prompt is not
-  warned about while it waits for one.
-
-#### Interrupts
-
-- **Before the harness runs** (while the image, the sandbox and a copy are
-  set up), Ctrl-C, a closed terminal window or a `kill` of the CLI end the
-  run and delete the sandbox it created.
-- **While the harness runs**, they end the harness, not the session: the
-  session then ends as below.
-- **At a question at the end of the session**, they leave the changes where
-  they are (kept in the folder, or in a copy-mode sandbox for `pull`), and
-  the session still ends as below. A second Ctrl-C ends the CLI at once.
-  `run` then exits with status 130.
-
-#### End of the session
-
-- **The sandbox stops first.** When the harness exits, the sandbox the
-  session started is stopped, so nothing it left running changes the folder
-  after the review. If the sandbox was stopped, undone or deleted from
-  elsewhere (another terminal, the TUI), which ends the harness, the summary
-  starts by saying so.
-- **The summary line** counts tool calls and blocks (the blocking rule's
-  title and ID), new sites contacted and sites blocked (destinations, each
-  counted once; the blocked ones are the `✗` lines that follow, invalid
-  destinations included), and files changed. The session's notices follow.
-  Changes that can run code on your machine are called out, and asks still
-  waiting are named.
-- **A mounted folder.** You keep the changes, undo them, or see the diff
-  first (a letter, then Enter; a long diff opens in `$PAGER`, by default
-  `less`), and a kept change is confirmed. `openshell.workdir.on_exit` can
-  decide for you. Without a terminal, or with `--yes`, the changes are kept.
-  Ctrl-C at the question decides nothing: the changes stay, the undo point is
-  kept for `undo`, the sandbox is stopped and kept, and the command exits
-  `130`. When the review fails, you are still asked.
-- **`--rm` on a mounted folder** keeps the undo point when the review failed
-  or when nobody accepted the changes (no terminal and no `--yes`), so
-  `sandbox undo` still reverts them. `sandbox delete` drops it.
-- **Copy mode.** You apply the changes (3-way), put them on branch
-  `dc/<name>`, write a patch, or skip, which leaves them in the sandbox for
-  `pull`. Without a terminal, or with `--yes`, copy mode skips: nothing is
-  applied, and the end says how many files changed and names the
-  `sandbox pull` that brings them back.
-- **`--rm` in copy mode** is not honored while changes are left in the
-  sandbox (you skipped, declined changes that can run code on your machine,
-  or the pull or apply failed), so they aren't lost, and the end says so.
-- **A full disk.** A pull that fails because the disk is full says whose
-  disk: this machine's, or on a Mac the MicroVM's own (`overlay_disk_mib`).
-  When it is the MicroVM's own, the end of the session leaves the MicroVM
-  running instead of stopping it, since a MicroVM stopped with its disk full
-  cannot start again: free some space in it (`sandbox connect <name>
-  --shell`), then `sandbox pull <name>`, then `sandbox stop <name>`.
-- **The sandbox is kept.** It is stopped and kept for `connect`, unless you
-  passed `--rm`.
+| During and after the session | What happens |
+| --- | --- |
+| Notices | Each ask, blocked destination, large upload the block did not cut, finding, quarantined nested repository and unreachable daemon is announced. In a terminal the notice goes to the terminal title, a desktop notification and the bell. Without a terminal (`--prompt`) it is a line on standard error. |
+| Interrupts | Before the harness runs, Ctrl-C or a closed terminal ends the run and deletes the sandbox it created. While it runs, they end the harness and the session ends normally. At an end-of-session question they leave the changes where they are and `run` exits `130`. |
+| End of session | The sandbox the session started is stopped first. The summary counts tool calls and blocks, new sites contacted, sites blocked and files changed, then names notices and changes that can run code. A mounted folder asks to keep, undo or show the diff. A copy asks to apply, branch, patch or skip. Without a terminal, or with `--yes`, a mount keeps the changes and a copy skips ([review, undo or pull](/docs/how-to/sandboxes/review-undo-or-pull)). |
+| `--rm` | On a mounted folder it keeps the undo point when the review failed or nobody accepted the changes. In copy mode it is not honored while changes are left in the sandbox. |
+| Full disk | A pull that fails because a MicroVM's own disk is full leaves the MicroVM running: free space (`sandbox connect NAME --shell`), `sandbox pull NAME`, then `sandbox stop NAME`. |
 
 #### Continue a conversation
 
 A kept sandbox's resume line is followed, last, by the command that
 continues the same conversation inside the sandbox, for every harness that
 can continue one:
-
-OpenHands and OmniGent are deprecated and are omitted from the resume examples.
 
 | Harness | Continue with |
 | --- | --- |
@@ -850,7 +770,7 @@ A few rules the flags follow:
   `defenseclaw sandbox run hermes --llm none --credential HERMES_DEFENSECLAW_API_KEY=HOST[:PORT] --env HERMES_DEFENSECLAW_BASE_URL=https://HOST/v1 -- --provider defenseclaw -m MODEL`.
 - `--pack`, `--profile`, `--copy`, `--safe`, `--unmask`, `--host-port`,
   `--no-mcp`, `--cpu`, and `--memory` go through the
-  [sandbox policy](/docs/sandboxes/policy-packs). An organization limit can
+  [sandbox policy](/docs/reference/sandbox-policy). An organization limit can
   refuse them ("blocked by your organization's DefenseClaw policy") or
   lower them ("limited by …; running with X instead of Y"), and
   `sandbox policy explain` shows the outcome before you run. A flag the
@@ -1168,32 +1088,22 @@ defenseclaw sandbox delete fix-tests docs --yes
 
 ### `sandbox activity`
 
-Shows the activity feed of every sandbox, or one: destinations reached (✓)
-and blocked (✗), large uploads, unblocks, asks and their answers, blocked tool
+Shows the activity feed of every sandbox, or one: destinations reached (✓) and
+blocked (✗), large uploads, unblocks, asks and their answers, blocked tool
 calls, findings such as hooks that stopped reaching DefenseClaw, lifecycle
-changes (a sandbox being created, becoming ready, stopping, or being deleted),
-and workspace events such as an undo or a copy-mode upload. The feed lives
-in the DefenseClaw daemon's memory: after the daemon restarts it starts
-over, and for a sandbox older than that, `activity` says so first (`the
-feed starts when the DefenseClaw daemon last started (HH:MM:SS); what
-happened before is in defenseclaw-gateway audit export …`). An empty feed
-says since when too (`no activity since the DefenseClaw daemon last started
-(HH:MM:SS) …`), also for a sandbox deleted before the restart. The audit
-store keeps every event. A plain `sandbox activity` listing leaves out events
-of sandboxes deleted since the daemon started; `--sandbox NAME` or `-o json`
-shows the whole feed. A destination
-shows its port unless that is 443 (HTTPS): a plain-HTTP request reads
-`example.com:80`, so an HTTPS and an HTTP request refused at the same host
-are two different lines. An IPv6 address with its port is bracketed:
-`[fd00:ec2::254]:80`. A blocked destination that can be unblocked shows
-the `unblock` command to run. A large upload is a ⚠ report, made as it crosses the threshold, so it says `more than`
-it (`⚠ large upload to files.example.net (more than 25 MiB)`), or, with
-[the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold)
-on, a ✗ that names the threshold, such as `✗ files.example.net (large upload
-blocked: this sandbox tried to send more than 10 MiB to a destination it had
-not contacted before)`, with its `unblock` command. `-f`
-keeps following the feed. The daemon keeps a bounded buffer of recent events. Each event has a
-sequence number, and `--since` starts after one.
+changes and workspace events such as an undo or a copy-mode upload. The feed
+lives in the daemon's memory, so it starts over when the daemon restarts, and
+`activity` says so (`the feed starts when the DefenseClaw daemon last started
+(HH:MM:SS); what happened before is in defenseclaw-gateway audit export …`). The
+audit store keeps every event. A plain listing leaves out sandboxes deleted since
+the daemon started. `--sandbox NAME` or `-o json` shows them. A destination shows
+its port unless it is 443, and an IPv6 address with its port is bracketed
+(`[fd00:ec2::254]:80`). A blocked destination that can be unblocked shows the
+`unblock` command. A large upload is a ⚠ report (`⚠ large upload to
+files.example.net (more than 25 MiB)`), or with
+[the large-upload block](/docs/reference/sandbox-policy#large-uploads) on, a ✗
+that names the threshold. `-f` follows the feed. Each event has a sequence
+number, and `--since` starts after one.
 
 ```bash
 defenseclaw sandbox activity -f
@@ -1212,62 +1122,32 @@ defenseclaw sandbox activity --sandbox myapp-7f3a --output json
 
 ### `sandbox destinations`
 
-Lists every host the sandbox reached or tried to reach since it was
-created, through the DefenseClaw egress proxy or OpenShell's own network
-boundary, and says what each one is:
+Lists every host the sandbox reached or tried to reach since it was created,
+through the egress proxy or OpenShell's own network boundary, and says what each
+one is. The KIND column is one of:
 
-- **model provider**: its model endpoint, reached under the model
-  provider's rule;
-- **credential**: the endpoint of a `--credential` binding (never shadow
-  AI: you bound a credential there);
-- **harness vendor**: a host of the harness's own vendor that DefenseClaw's
-  provider catalog lists, with its subdomains (for example `api.openai.com`
-  or `learn.chatgpt.com` in a Codex sandbox), and the harness's own request
-  to an AI host such as OpenCode's model catalog;
-- **shadow AI**: another AI provider DefenseClaw's provider catalog knows,
-  or **shadow AI?** for a host that only looks like an inference endpoint.
-  Each provider raises a `shadow_ai` finding once a session: LOW the first
-  time the policy refuses it, MEDIUM the first time the sandbox reaches it
-  (a refusal and then a contact raise one of each);
-- **this machine**: a port on this machine reached through
-  `host.openshell.internal` (a `--host-port` service you approved, a local
-  model endpoint), shown as `host.openshell.internal:PORT`;
-- otherwise **blocked** when it was only ever refused (the KIND cell says
-  whose list refused it, for example `blocked (paste site)`), else the
-  category the egress proxy allowed it under or, when it allowed it without
-  one (the open profile), the category DefenseClaw's curated allowlist gives
-  the host (for example `package registry` for `pypi.org`), else **other**.
+| Kind | Meaning |
+| --- | --- |
+| model provider | The sandbox's model endpoint. |
+| credential | The endpoint of a `--credential` binding. Never shadow AI. |
+| harness vendor | A host of the harness's own vendor in DefenseClaw's provider catalog, with its subdomains, and the harness's own request to an AI host. |
+| shadow AI, shadow AI? | Another catalog AI provider, or a host that only looks like an inference endpoint. Each provider raises a `shadow_ai` finding once a session: LOW when the policy first refuses it, MEDIUM when the sandbox first reaches it. |
+| this machine | A port on this machine through `host.openshell.internal` (an approved `--host-port` service, a local model endpoint). |
+| blocked (reason) | Only ever refused. The cell names whose list refused it. |
+| A category, or other | The category the proxy allowed it under, or the curated allowlist's category (`package registry` for `pypi.org`). |
 
-The PROVIDER column names the AI provider, or is `-`.
-
-Each row shows the requests and refusals both boundaries counted, the bytes
-the proxy relayed, and the last binary OpenShell named making the
-connection (a long path is cut from the left, so the program name stays).
-Requests the proxy allowed and the host did not take (it refused or
-dropped the connection, did not answer, or its name did not resolve) count
-as `N failed upstream` (`failed` in `--output json`): an outage, not a
-block. The first one of a host also puts a line on the activity feed
-(`example.org: the connection failed upstream, not blocked by DefenseClaw
-(it refused the connection)`), and the `Egress` line of `sandbox status`
-counts them.
-The binary is what the process in the sandbox claims to be.
-With the [process tree](/docs/sandboxes/policy-packs) on, the binary column
-shows that process and its parents instead (`curl ← bash ← claude`), and
-`--output json` adds them (`lineage`). OpenShell names no process id for a
-connection (on Linux and on the Mac), so the row finds the binary's process
-in the tree by its path (or its name: the sandbox seldom shows a process's
-executable): the one copy of it that started in the 5 seconds before the
-connection. A program that ran for less than one sample (5 seconds, 15 on a
-slow Mac), that ran in two copies then, or that connected long after it
-started (a package manager's later downloads) keeps only the binary: a
-program too short for the tree cannot be told from an older copy that is
-still running. A second table lists the
-models OpenShell's inference route reported calls to. The view survives
-daemon restarts and stops, keeps at most 512 hosts (the oldest that are not
-AI destinations make room; when every row is one, a provider the catalog
-knows takes the place of the oldest **shadow AI?** host), and is removed
-with the sandbox. The `Egress`
-line of `sandbox status NAME` sums it up.
+The PROVIDER column names the AI provider, or is `-`. Each row shows the
+requests and refusals both boundaries counted, the bytes the proxy relayed, and
+the last binary OpenShell named making the connection. Requests the proxy
+allowed and the host did not take (refused, dropped, no answer, no name) count as
+`N failed upstream` (`failed` in `--output json`): an outage, not a block. With
+the [process tree](/docs/reference/sandbox-policy#pack-file) on, the binary
+column shows the process and its parents (`curl ← bash ← claude`) when exactly
+one copy started in the 5 seconds before the connection. A program shorter than
+one sample, in two copies, or connecting long after it started keeps only the
+binary. A second table lists the models OpenShell's inference route reported
+calls to. The view survives daemon restarts and stops, keeps at most 512 hosts,
+and is removed with the sandbox.
 
 ```bash
 defenseclaw sandbox destinations myapp-7f3a
@@ -1357,38 +1237,23 @@ defenseclaw sandbox reject myapp-7f3a ap_5f2c9a1e7b3d4c60 --reason "not needed"
 
 Lifts an egress block for one sandbox (`--sandbox NAME`) or for every sandbox
 (`--always`, saved to `openshell.egress.unblocked`). With `--always`,
-`--sandbox NAME` names the sandbox whose policy checks the unblock. On a
-managed computer your organization's DefenseClaw gateway keeps an `--always`
-unblock for you through one of your sandboxes: with one running, it is used;
-with several, name one with `--sandbox`. Only blocks from the blocklist feed or the profile's default can be
-lifted: IP addresses under `open`, and hosts off the allowlist under
-`balanced`. Your own block list (remove an entry with
+`--sandbox NAME` names the sandbox whose policy checks the unblock. On a managed
+computer your organization's gateway keeps an `--always` unblock through one of
+your sandboxes: with several, name one. Only blocks from the blocklist feed or
+the profile's default can be lifted: IP addresses under `open`, and hosts off
+the allowlist under `balanced`. Your own block list (remove an entry with
 [`sandbox policy block --remove`](#sandbox-policy-block)), private networks,
-this machine, and your organization's lists can't be unblocked, and neither can anything under
-`strict`, which runs without the egress proxy. With
-`openshell.admin.allow_unblock: false`, nothing can be unblocked. The
-[decision order](/docs/sandboxes/policy-packs#how-a-destination-is-decided)
-has the details.
+this machine and your organization's lists cannot be unblocked, and neither can
+anything under `strict`. With `openshell.admin.allow_unblock: false`, nothing can
+be unblocked ([decision order](/docs/reference/sandbox-network#decision-order)).
+A managed `unblock HOST --sandbox NAME` without `--always` lasts only for that
+sandbox's current session.
 
-A managed `sandbox unblock HOST --sandbox NAME` without `--always` lasts only
-for that sandbox's current session. After `sandbox stop` and a start (or a
-connect of a stopped sandbox), DefenseClaw's destination rule applies again
-at the hook and egress proxy. An allowed `--always` unblock outlives the stop.
-
-An unblock also stops DefenseClaw's destination rules (such as
-`C2-WEBHOOK-SITE` for `webhook.site`, or `C2-NGROK`) from flagging or
-blocking tool calls that name the unblocked host, in the sandboxes the
-unblock covers: the agent is no longer told a destination is blocked that
-the proxy lets it reach, and the activity feed shows no finding for it. A
-call that names a subdomain you did not unblock, that another rule flags
-too, or that Cisco AI Defense or the LLM judge flags or blocks (even without
-naming a rule), keeps its verdict.
-
-The agent learns the command from DefenseClaw too. When the proxy refuses an
-HTTPS destination, the hook of the next shell or web-fetch tool call tells
-the agent the destination, why it is blocked, and the `sandbox unblock`
-command for you to run (Claude Code, Codex and GitHub Copilot CLI).
-Once you unblock the host, the agent is no longer told of that block.
+An unblock also stops DefenseClaw's destination rules (such as `C2-WEBHOOK-SITE`
+or `C2-NGROK`) from flagging or blocking tool calls that name the unblocked
+host, in the sandboxes the unblock covers. A call that names a subdomain you did
+not unblock, that another rule flags too, or that Cisco AI Defense or the LLM
+judge flags or blocks keeps its verdict.
 
 ```bash
 defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
@@ -1599,24 +1464,14 @@ Output from a real sandbox named `myapp-claude`:
 Lists the processes of a running sandbox whose process tree is on (the pack's
 `observe.process_tree: true`, or `sandbox run --process-tree`): pid, parent,
 uptime and command line, with the values of arguments that name secrets
-replaced. `--tree` shows each process under its parent. The daemon samples
-the sandbox every 5 seconds while it runs (every 15 seconds on a Mac when
-sampling its MicroVM is slow) and adds what OpenShell reports of processes
-starting and exiting, so a process that starts and ends between two samples,
-and that OpenShell does not report, is not seen. The agent chooses its
-processes' names and arguments: they are shown, never acted on. The same tree
-is in the TUI's sandbox detail and in the `sandbox.process_tree` telemetry
-records. A stopped sandbox lists no processes: `ps` says when it was last
-sampled, and `--json` lists the processes that ended. On a Linux host with
-the sandbox kernel feed installed
-([`sandbox kernel-feed`](#sandbox-kernel-feed)), every exec and exit the
-kernel sees in a docker sandbox is recorded as well, and the listing says
-`source: kernel`. A process the feed reported without its in-sandbox pid is
-listed among the ended ones with its `host_pid`; `--json` has a `kernel` block
-with the feed's state and counters. The `sandbox.process_tree` records are
-capped at 10 a second per sandbox (a burst of 200): past that the tree keeps
-every process, the records are not sent, and `ps` warns with the count
-(`records_not_sent` in `--json`).
+replaced. `--tree` shows each process under its parent. The daemon samples every
+5 seconds (15 on a Mac when sampling its MicroVM is slow) and adds what OpenShell
+reports of processes starting and exiting, so a process that starts and ends
+between samples, and that OpenShell does not report, is not seen. The agent
+chooses its processes' names and arguments: they are shown, never acted on. A
+stopped sandbox lists no processes: `ps` says when it was last sampled, and
+`--json` lists the ones that ended. With the [kernel feed](#sandbox-kernel-feed)
+the listing says `source: kernel` and `--json` has a `kernel` block.
 
 ```bash
 defenseclaw sandbox ps myapp-7f3a --tree
@@ -1642,7 +1497,7 @@ ran:
 
 The effective sandbox policy combines the pack, your `openshell` keys, the run
 flags, and the organization's `openshell.admin` limits. See
-[How the effective policy is computed](/docs/sandboxes/policy-packs#how-the-effective-policy-is-computed).
+[How the effective policy is computed](/docs/reference/sandbox-policy#how-the-policy-is-computed).
 
 ```bash
 defenseclaw sandbox policy show
@@ -1662,7 +1517,7 @@ defenseclaw sandbox policy show
 The policy can also come from the project itself: a `.defenseclaw/sandbox.yaml`
 repository policy may only tighten it, and a run is refused when it asks for
 anything looser. See
-[Repository policy](/docs/sandboxes/policy-packs#repository-policy-defenseclawsandboxyaml).
+[Repository policy](/docs/reference/sandbox-policy#repository-policy).
 
 ### `sandbox policy show`
 
@@ -1733,31 +1588,20 @@ defenseclaw sandbox policy explain --sandbox myapp-7f3a --output json
 
 ### `sandbox policy suggest`
 
-Record, then lock. Reads the destinations your sandboxes reached (the same
-view as [`sandbox destinations`](#sandbox-destinations), kept across daemon
-restarts and stops) and suggests a pack that extends `balanced` with every
-host they reached that the balanced pack's curated allowlist doesn't cover.
-Each host carries a comment with its request count and the programs that
-reached it. Hosts that were only ever refused, shadow AI, hosts on the
-blocklist feed, and the sandbox's own model provider and `--credential`
-endpoints are listed apart as comments, not suggested (OpenShell's provider
-rule already opens those to the programs they bind; an allow entry would open
-them to every program). Ports beyond balanced's 80 and 443 that the allowed
-hosts were reached on go in `egress.ports`. When the hosts don't fit in a
-pack (1024 allow entries with balanced's, 64 KiB), the most requested stay
-and a warning names how many were left out. Without `--pack-out` it prints
-the pack.
-
-`--pack-out FILE` writes the pack to a new file (never over an existing one;
-a relative FILE is in the current folder) and checks it as `sandbox pack
-validate` would, removing it if it doesn't load. `--diff` prints what the pack
-changes against the effective policy (the sandbox's, or a run's in this
-folder): the settings that differ, and every reached destination the pack
-would block. Settings a `sandbox run` flag or the gateway decides (such as
-the copy a Mac always works on) are left out, since the pack doesn't change
-them. Nothing is applied: lock a project to the pack with
-`sandbox run --pack FILE`. See
-[Record, then lock](/docs/sandboxes/policy-packs#record-then-lock).
+Record, then lock. Reads the destinations your sandboxes reached (the same view
+as [`sandbox destinations`](#sandbox-destinations)) and suggests a pack that
+extends `balanced` with every host they reached that the balanced allowlist does
+not cover, each with a comment naming its request count and the programs that
+reached it. Hosts only ever refused, shadow AI, blocklist hosts, and the model
+provider and `--credential` endpoints are listed as comments, not suggested.
+Ports beyond 80 and 443 that the allowed hosts were reached on go in
+`egress.ports`. A pack holds 1024 allow entries and 64 KiB: past that the most
+requested hosts stay and a warning names how many were left out. Without
+`--pack-out` it prints the pack. `--pack-out FILE` writes it to a new file (never
+over an existing one) and checks it as `pack validate` would. `--diff` prints
+what the pack changes against the effective policy and every reached destination
+it would block. Nothing is applied: lock a project with `sandbox run --pack FILE`
+([record, then lock](/docs/how-to/sandboxes/choose-a-policy-pack#record-then-lock)).
 
 ```bash
 defenseclaw sandbox policy suggest --sandbox myapp-7f3a --diff
@@ -1776,37 +1620,28 @@ defenseclaw sandbox policy suggest --sandbox myapp-7f3a --pack-out ~/.defensecla
 
 ### `sandbox policy test`
 
-Shows what the egress policy decides for a destination: allowed or blocked,
-the rule of the egress proxy's decision order that decides (`allow`, `block`,
-`feed`, `admin_block`, `network_allowlist`, and so on), the pattern or feed
-entry that matched, and the setting that holds it (the pack, your
-`openshell` keys, the repository policy, or the organization). It asks the
-same decider the egress proxy uses, so it can't disagree with it.
+Shows what the egress policy decides for a destination: allowed or blocked, the
+rule of the proxy's [decision order](/docs/reference/sandbox-network#decision-order)
+that decides (`allow`, `block`, `feed`, `admin_block`, `network_allowlist` and so
+on), the pattern or feed entry that matched, and the setting that holds it. It
+asks the same decider the egress proxy uses.
 
-`--sandbox NAME` tests that sandbox's policy, its unblocks included, through
-the daemon, and names a provider of the sandbox (its model endpoint, a
-`--credential` binding) that opens the destination directly around the proxy.
-A port the sandbox was started with `--host-port` (on
-`host.openshell.internal`) reads `asks` until you approve its first
-connection, then `allowed` (rule `host_port`).
-On an unmanaged computer, without `--sandbox`, `--pack`, `--profile`, and
-`--harness` resolve the policy a run in this folder would get, with this
-machine's `config.yaml` (or the defaults) and the folder's repository policy,
-and no daemon is needed, so CI can check a pack.
-
-On a managed computer, without `--sandbox`, the daemon tests your own policy
-for a new run in this folder. No sandbox is needed. `--harness` selects the
-agent to test your own policy for; `--pack` and `--profile` are refused, so
-omit them. With `--sandbox`, omit all three selection flags and test that
-sandbox's policy. See [managed policy tests](/docs/enterprise/sandboxes#what-users-see).
-
-The proxy decides by destination, the same for every program in the
-sandbox; `--binary` names the program in the report.
-
-`--fixture FILE` checks a YAML or JSON list of destinations, each
-`{host, port, binary, expect: allow|block, rule}` (`port` and `rule` are
-optional; `rule` pins the deciding rule), and exits 1 when any decision
-doesn't match. `--output json` reports every decision and whether it passed.
+- `--sandbox NAME` tests that sandbox's policy, unblocks included, through the
+  daemon. A `--host-port` port reads `asks` until you approve its first
+  connection, then `allowed` (rule `host_port`).
+- On an unmanaged computer, without `--sandbox`, `--pack`, `--profile` and
+  `--harness` resolve the policy a run in this folder would get, with
+  `config.yaml` (or the defaults) and the folder's repository policy. No daemon
+  is needed, so CI can check a pack.
+- On a managed computer, without `--sandbox`, the daemon tests your own policy for
+  a new run in this folder. `--harness` selects the agent. `--pack` and
+  `--profile` are refused, and with `--sandbox` omit all three
+  ([managed policy tests](/docs/enterprise/sandboxes#what-users-see)).
+- `--binary` names the program in the report. The proxy decides by destination.
+- `--fixture FILE` checks a YAML or JSON list of `{host, port, binary, expect:
+  allow|block, rule}` (`port` and `rule` optional; `rule` pins the deciding
+  rule) and exits 1 when any decision does not match. `--output json` reports
+  every decision.
 
 ```bash
 defenseclaw sandbox policy test --pack balanced --host registry.npmjs.org --port 443
@@ -1891,7 +1726,7 @@ that would make `config.yaml` invalid.
 ### `sandbox pack`
 
 Policy packs set the whole sandbox posture. See
-[Sandbox policy packs](/docs/sandboxes/policy-packs).
+[Sandbox policy](/docs/reference/sandbox-policy).
 
 ```bash
 defenseclaw sandbox pack list
