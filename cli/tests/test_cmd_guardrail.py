@@ -1180,14 +1180,17 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertIn("hook times out", result.output)
 
     def test_per_connector_closed_for_copilot_and_antigravity_is_provenance_not_a_block(self):
-        # 1.0.4 review (loop round 2): their per-user hooks render open under
-        # closed (no fail-closed hook contract), so the setter must not
-        # promise a block or an exit 2, and the view must say upstream
-        # fail-open, as the unscoped view, status and doctor do (GAP-0336).
+        # 1.0.4 review (loop round 2): under Secure Client their hooks render
+        # open under closed, so the setter must not promise a block or an
+        # exit 2, and the view must say upstream fail-open, as the unscoped
+        # view, status and doctor do (GAP-0336). Per-user hooks follow the
+        # closed mode (w3-g3-hooks), see the per-user test below.
         for connector, label in (("copilot", "GitHub Copilot CLI"), ("antigravity", "Antigravity")):
             with self.subTest(connector=connector):
                 runner = CliRunner()
                 app = make_multi_ctx({"codex": None, connector: None})
+                app.cfg.deployment_mode = "managed_enterprise"
+                app.cfg.managed_outside_secure_client = lambda: False
                 with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"):
                     result = runner.invoke(
                         cmd_guardrail.fail_mode_cmd,
@@ -1227,18 +1230,33 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertNotIn("will remain fail-open", result.output)
 
     def test_bare_closed_names_every_upstream_fail_open_connector(self):
-        # The unscoped setter named only Hermes; Copilot and Antigravity stay
-        # fail-open too.
+        # The unscoped setter named only Hermes; under Secure Client Copilot
+        # and Antigravity stay fail-open too.
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "copilot": None, "antigravity": None})
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.managed_outside_secure_client = lambda: False
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes", "--no-restart"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("BLOCK supported connectors", result.output)
         self.assertIn("Antigravity, GitHub Copilot CLI remain fail-open.", result.output)
 
+    def test_bare_closed_per_user_names_no_upstream_fail_open_connector(self):
+        # Per user, Copilot and Antigravity follow the closed mode
+        # (w3-g3-hooks), so the unscoped setter names none of them as
+        # remaining fail-open (hooks-upg loop 2 with the T3 train).
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "copilot": None, "antigravity": None})
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes", "--no-restart"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("BLOCK supported connectors", result.output)
+        self.assertNotIn("remain fail-open", result.output)
+
     def test_bare_closed_on_a_copilot_only_install_is_provenance_not_a_block(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="copilot", hook_fail_mode="open")
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.managed_outside_secure_client = lambda: False
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes", "--no-restart"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("GitHub Copilot CLI will remain fail-open; closed is stored only", result.output)
