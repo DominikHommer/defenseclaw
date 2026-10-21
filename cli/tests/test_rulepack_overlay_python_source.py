@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import re
 import shutil
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -250,6 +253,63 @@ class TestWindowedSearch(unittest.TestCase):
             self.assertEqual(rule.reach, reach, source)
         for source in (r"(?s:a.*b)", r"abc[^#]*def", r"(abc)\1", r"abc(?=[\s\S]*def)"):
             self.assertIsNone(_span_rule(source).anchors, source)
+
+
+    def test_window_growth_cost_does_not_grow_with_blank_runs(self):
+        """Many anchor hits beside a long run of blank lines stay cheap.
+
+        Growing each window line by line rescanned the blank run for every
+        hit: 200 hits before 100,000 blank lines took 3.5 s for one rule.
+        This text has 1,000 hits and 200,000 blank lines.
+        """
+        hits = "".join(f"anchor_word {i}\n" for i in range(1000))
+        blank = "\n" * 200_000
+        rule = _span_rule(r"anchor_word\s+missing")
+        self.assertIsNotNone(rule.anchors)
+        for text in (hits + blank, blank + hits, blank + hits + blank):
+            folded = rulepack._fold(text)
+            started = time.perf_counter()
+            self.assertIsNone(rulepack._search(rule, text, folded))
+            self.assertLess(time.perf_counter() - started, 1.0)
+        found = _span_rule(r"anchor_word\s+999")
+        text = hits + blank
+        self.assertEqual(rulepack._search(found, text, rulepack._fold(text)).span(), re.search(r"anchor_word\s+999", text).span())
+
+    def test_too_many_anchor_hits_give_a_plain_search(self):
+        text = "abc x\n" * (rulepack._WINDOW_MAX_HITS + 1) + "abc  \n\n def"
+        rule = _span_rule(r"abc\s+def")
+        self.assertEqual(rulepack._search(rule, text, rulepack._fold(text)).span(), re.search(r"abc\s+def", text).span())
+
+    def test_line_index_matches_a_line_walk(self):
+        rng = random.Random(2070)
+        for _ in range(300):
+            text = "".join(rng.choice(["\n", "\n", " ", "\t", "a", "\r"]) for _ in range(rng.randint(0, 40)))
+            index = rulepack._LineIndex(text)
+            for pos in range(len(text) + 1):
+                for lines in range(4):
+                    self.assertEqual(index.back(pos, lines), _walk_back(text, pos, lines), (text, pos, lines))
+                    self.assertEqual(index.forward(pos, lines), _walk_forward(text, pos, lines), (text, pos, lines))
+
+
+def _walk_back(text, pos, lines):
+    start = text.rfind("\n", 0, pos) + 1
+    while lines > 0 and start > 0:
+        prev = text.rfind("\n", 0, start - 1) + 1
+        if re.search(r"\S", text[prev : start - 1]):
+            lines -= 1
+        start = prev
+    return start
+
+
+def _walk_forward(text, pos, lines):
+    end = text.find("\n", pos)
+    while end >= 0 and lines > 0:
+        nxt = text.find("\n", end + 1)
+        stop = len(text) if nxt < 0 else nxt
+        if re.search(r"\S", text[end + 1 : stop]):
+            lines -= 1
+        end = nxt
+    return len(text) if end < 0 else end
 
 
 def _span_rule(source):

@@ -27,11 +27,10 @@ import (
 // action and its fallback handling unchanged.
 
 var (
-	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"]`)
+	trustedPathlibAuthorizedKeysAssign   = regexp.MustCompile(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];`)
 	trustedPathlibWriteText              = regexp.MustCompile(`\bp\.write_text\s*\(`)
-	trustedPathlibSafeReassignment       = regexp.MustCompile(`^\s*;\s*p\s*=\s*(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*;\s*$`)
-	trustedPathlibReassign               = regexp.MustCompile(`\bp\s*:?=[^=]|\bfor\s+p\s+in\b|\bas\s+p\b`)
-	trustedPythonDynamicCode             = regexp.MustCompile(`\b(?:exec\w*|eval|compile|getattr|globals|locals|vars|__dict__|__import__|__builtins__|builtins|importlib|runpy|subprocess|system|popen|spawn\w*|pty|marshal|pickle|ctypes|interact|InteractiveInterpreter|InteractiveConsole)\b`)
+	trustedPathlibReassign               = regexp.MustCompile(`\bp\s*=([^=])`)
+	trustedPythonOtherPath               = regexp.MustCompile(`^(?:(?:pathlib\.)?Path\s*\(\s*(?:"([^"\\\n]*)"|'([^'\\\n]*)')\s*\)|"([^"\\\n]*)"|'([^'\\\n]*)')$`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
@@ -176,10 +175,10 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 		if command.Argv[1] != "-c" || facts.ActiveHome == "" {
 			return false
 		}
-		code := trustedPythonExecutedText(command.Argv[2])
-		return trustedPathlibAuthorizedKeysWriteProof(code, facts.ActiveHome, facts.CWD) ||
-			trustedPythonPathAuthorizedKeysWrite.MatchString(code) ||
-			trustedInterpreterAuthorizedKeysWrite(code, facts.ActiveHome)
+		text, calls := trustedPythonExecutedViews(command.Argv[2])
+		return trustedPathlibAuthorizedKeysWrite(text, calls, facts.ActiveHome, facts.CWD) ||
+			trustedPythonPathExpandWrite(text, calls) ||
+			trustedInterpreterAuthorizedKeysWrite(text, facts.ActiveHome)
 	case "perl":
 		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			(trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
@@ -192,43 +191,101 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	}
 }
 
-// trustedPythonExecutedText is Python -c code with its comments and inert
-// triple-quoted strings blanked: a docstring that spells a write executes
-// nothing (GAP-1199); an f-string field runs and is kept. Code whose executed
-// text may run a string (exec, eval, compile, getattr, subprocess, ...) is
-// kept whole, so such a string still proves its write; the same words in a
-// comment or a docstring run nothing.
-func trustedPythonExecutedText(code string) string {
-	masked := guardrail.MaskPythonCommentsAndDocstrings(code)
-	if trustedPythonDynamicCode.MatchString(masked) {
-		return code
+// trustedPythonExecutedViews returns two views of Python -c code, both with
+// the offsets of code. text has its comments and inert triple-quoted strings
+// blanked (a docstring that spells a write executes nothing, GAP-1199): a
+// path operand is read there. calls has the text of every string blanked,
+// f-string fields kept (guardrail.MaskPythonStrings): a write call must start
+// there, since a call spelled in a string or in the literal text of an
+// f-string is data. When the code that runs may turn a string into code or
+// read one (guardrail.PythonStringsMayRun: exec, a child process, a file it
+// writes, its docstrings, ...), both views are the code whole, so such a
+// string still proves its write. An unused import runs nothing.
+func trustedPythonExecutedViews(code string) (text, calls string) {
+	calls = guardrail.MaskPythonStrings(code)
+	if guardrail.PythonStringsMayRun(calls) {
+		return code, code
 	}
-	return masked
+	return guardrail.MaskPythonCommentsAndDocstrings(code), calls
 }
 
-// trustedPathlibAuthorizedKeysWriteProof proves p = Path.home() / ".ssh" /
-// "authorized_keys"; ... p.write_text(...) in the executed text. A binding of
-// p between the two disproves it only when it is a literal Path("...") that
-// names an ordinary file, not the keys file or a link to it (G-hooks-wp), or
-// a binding of another form (GAP-1299: p = ..., for p in, as p).
-func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string) bool {
-	for _, assignment := range trustedPathlibAuthorizedKeysWrite.FindAllStringIndex(code, -1) {
-		rest := code[assignment[1]:]
-		write := trustedPathlibWriteText.FindStringIndex(rest)
-		if write == nil {
+// trustedPythonCodeAt reports whether text[i] is code in calls.
+func trustedPythonCodeAt(text, calls string, i int) bool {
+	return i >= 0 && i < len(text) && len(calls) == len(text) && calls[i] == text[i]
+}
+
+// trustedPathlibAuthorizedKeysWrite proves p = Path.home() / ".ssh" /
+// "authorized_keys"; ... p.write_text(...) unless p is bound to another path
+// before the write (trustedPathlibRebound, GAP-1299). Both start in code
+// (calls).
+func trustedPathlibAuthorizedKeysWrite(text, calls, home, cwd string) bool {
+	if len(calls) != len(text) {
+		return false
+	}
+	for _, assign := range trustedPathlibAuthorizedKeysAssign.FindAllStringIndex(text, -1) {
+		if !trustedPythonCodeAt(text, calls, assign[0]) {
 			continue
 		}
-		between := rest[:write[0]]
-		if safe := trustedPathlibSafeReassignment.FindStringSubmatch(between); len(safe) == 2 {
-			if trustedOrdinaryPathReassignment(safe[1], home, cwd) {
-				continue
-			}
+		write := trustedPathlibWriteText.FindStringIndex(calls[assign[1]:])
+		if write != nil && !trustedPathlibRebound(text, assign[1], assign[1]+write[0], home, cwd) {
 			return true
 		}
-		if trustedPathlibReassign.MatchString(between) {
+	}
+	return false
+}
+
+// trustedPathlibRebound reports whether text[from:to] binds p, in code, to a
+// literal path that is not a keys file: p = Path("notes.txt"), p =
+// pathlib.Path('notes.txt') or p = "notes.txt" as an unconditional statement
+// of its own. A binding spelled in a string or f"{p=}", a binding that may
+// not run, or any other value (p = p, p = q, the keys file again, a loop or
+// with target) may leave p the keys file, so the proof stands (fail closed).
+// So does a literal that resolves to the keys file through a link or hard
+// link (trustedOrdinaryPathReassignment, G-hooks-wp), and source whose
+// strings the masker cannot follow.
+func trustedPathlibRebound(text string, from, to int, home, cwd string) bool {
+	code := guardrail.MaskPythonStrings(text)
+	if len(code) != len(text) || code == text && strings.ContainsAny(text, "'\"#") {
+		return false
+	}
+	for _, hit := range trustedPathlibReassign.FindAllStringSubmatchIndex(code[from:to], -1) {
+		start := from + hit[2]
+		// An unconditional statement of its own: at column 0 or after a ";" of
+		// a simple statement at column 0, not after a backslash continuation.
+		// An attribute (x.p = ...), a chained target, an indented or
+		// compound-statement binding (if x: p = ...) may leave p bound.
+		line := strings.LastIndexByte(code[:from+hit[0]], '\n') + 1
+		prefix := code[line : from+hit[0]]
+		statement := strings.TrimRight(prefix, " \t")
+		if line >= 2 && code[line-2] == '\\' || strings.HasPrefix(prefix, " ") || strings.HasPrefix(prefix, "\t") ||
+			statement != "" && !strings.HasSuffix(statement, ";") || strings.Contains(prefix, ":") {
 			continue
 		}
-		return true
+		end := to
+		if i := strings.IndexAny(code[start:to], ";\n"); i >= 0 {
+			end = start + i
+		}
+		literal := trustedPythonOtherPath.FindStringSubmatch(strings.TrimSpace(text[start:end]))
+		if literal == nil {
+			continue
+		}
+		// The literal must also name an ordinary file: a link or hard link
+		// to the keys file still writes it (G-hooks-wp).
+		name := strings.Join(literal[1:], "")
+		if !strings.Contains(strings.ToLower(name), "authorized_keys") && trustedOrdinaryPathReassignment(name, home, cwd) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedPythonPathExpandWrite proves
+// Path("~/.ssh/authorized_keys").expanduser().write_text(...) in code.
+func trustedPythonPathExpandWrite(text, calls string) bool {
+	for _, hit := range trustedPythonPathAuthorizedKeysWrite.FindAllStringIndex(text, -1) {
+		if trustedPythonCodeAt(text, calls, hit[0]) {
+			return true
+		}
 	}
 	return false
 }

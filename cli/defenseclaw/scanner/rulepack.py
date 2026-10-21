@@ -62,6 +62,7 @@ the inner scanner untouched, so the common path has zero behavior change.
 
 from __future__ import annotations
 
+import bisect
 import logging
 import os
 import re
@@ -146,7 +147,12 @@ _WINDOW_SLACK = 512
 _ANCHOR_MIN_LEN = 3
 # A rule whose matches may cross more lines than this gets a plain search.
 _WINDOW_MAX_REACH = 32
-_NON_BLANK = re.compile(r"\S")
+# A rule whose anchors hit more often than this gets a plain search: the
+# windows would cover most of the text anyway.
+_WINDOW_MAX_HITS = 4096
+_NEWLINE = re.compile("\n")
+# The first non-blank character of each line that has one.
+_NON_BLANK_LINE = re.compile(r"^[^\S\n]*\S", re.MULTILINE)
 _MAXREPEAT = _sre_parse.MAXREPEAT
 # Categories that cannot match a newline; any other may.
 _NO_NEWLINE_CATEGORIES = {
@@ -210,6 +216,7 @@ class RulePack:
         folded = _fold(text)
         py: PySource | None | bool = False  # False: not built yet
         code = text
+        lines = _LineIndex(text)
         findings: list[Finding] = []
         for rule in self.rules:
             if rule.required is not None and not _holds(rule.required, folded):
@@ -224,7 +231,7 @@ class RulePack:
                 # command line, as in the Go install watcher (GAP-0641).
                 match_start = _first_line_match(rule.pattern, text)
             else:
-                m = _search(rule, text, folded)
+                m = _search(rule, text, folded, lines)
                 match_start = m.start() if m is not None else None
             if match_start is not None and python and rule.path_write:
                 if py is False:
@@ -359,26 +366,35 @@ def _holds(node: _Required, folded: str) -> bool:
     return not want
 
 
-def _search(rule: _CompiledRule, text: str, folded: str) -> re.Match[str] | None:
-    """``rule.pattern.search(text)``, limited to anchor windows in big files."""
+def _search(
+    rule: _CompiledRule, text: str, folded: str, lines: _LineIndex | None = None
+) -> re.Match[str] | None:
+    """``rule.pattern.search(text)``, limited to anchor windows in big files.
+
+    *lines* is the line index of *text*, shared by the rules of one scan.
+    """
     if rule.anchors is None or len(text) < _WINDOW_MIN_TEXT or len(folded) != len(text):
         return rule.pattern.search(text)
     spans: list[tuple[int, int]] = []
     for lit in rule.anchors:
         i = folded.find(lit)
         while i >= 0:
+            if len(spans) >= _WINDOW_MAX_HITS:
+                return rule.pattern.search(text)
             spans.append((i, i + len(lit)))
             i = folded.find(lit, i + 1)
     if not spans:
         return None
+    if lines is None or lines.text is not text:
+        lines = _LineIndex(text)
     spans.sort()
     windows: list[list[int]] = []
     for lo, hi in spans:
         # Whole lines, the lines a match can cross and one more line on each
         # side, so a match that spans a long line and the next one (a CSV
         # header and a row) fits.
-        lo = _lines_back(text, max(lo - _WINDOW_SLACK, 0), rule.reach + 1)
-        hi = _lines_forward(text, min(hi + _WINDOW_SLACK, len(text)), rule.reach + 1)
+        lo = lines.back(max(lo - _WINDOW_SLACK, 0), rule.reach + 1)
+        hi = lines.forward(min(hi + _WINDOW_SLACK, len(text)), rule.reach + 1)
         if windows and lo <= windows[-1][1]:
             windows[-1][1] = max(windows[-1][1], hi)
         else:
@@ -392,27 +408,58 @@ def _search(rule: _CompiledRule, text: str, folded: str) -> re.Match[str] | None
     return None
 
 
-def _lines_back(text: str, pos: int, lines: int) -> int:
-    """The start of the line *lines* non-blank lines before the one at *pos*."""
-    start = text.rfind("\n", 0, pos) + 1
-    while lines > 0 and start > 0:
-        prev = text.rfind("\n", 0, start - 1) + 1
-        if _NON_BLANK.search(text, prev, start - 1):
-            lines -= 1
-        start = prev
-    return start
+class _LineIndex:
+    """The newline and non-blank line offsets of a text, built on first use.
 
+    A window then grows by bisection, whatever lies between: walking line by
+    line rescanned a long run of blank lines (or a long line) for every
+    anchor hit, so the cost grew with hits times lines.
+    """
 
-def _lines_forward(text: str, pos: int, lines: int) -> int:
-    """The end of the line *lines* non-blank lines after the one at *pos*."""
-    end = text.find("\n", pos)
-    while end >= 0 and lines > 0:
-        nxt = text.find("\n", end + 1)
-        stop = len(text) if nxt < 0 else nxt
-        if _NON_BLANK.search(text, end + 1, stop):
-            lines -= 1
-        end = nxt
-    return len(text) if end < 0 else end
+    __slots__ = ("text", "_newlines", "_non_blank")
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._newlines: list[int] | None = None
+        self._non_blank: list[int] = []
+
+    def _index(self) -> list[int]:
+        if self._newlines is None:
+            self._newlines = [m.start() for m in _NEWLINE.finditer(self.text)]
+            self._non_blank = [m.start() for m in _NON_BLANK_LINE.finditer(self.text)]
+        return self._newlines
+
+    def _line_start(self, pos: int) -> int:
+        newlines = self._index()
+        k = bisect.bisect_left(newlines, pos)
+        return newlines[k - 1] + 1 if k else 0
+
+    def _line_end(self, pos: int) -> int:
+        """The offset of the newline that ends the line at *pos*, or -1."""
+        newlines = self._index()
+        k = bisect.bisect_left(newlines, pos)
+        return newlines[k] if k < len(newlines) else -1
+
+    def back(self, pos: int, lines: int) -> int:
+        """The start of the line *lines* non-blank lines before the one at *pos*."""
+        start = self._line_start(pos)
+        if lines <= 0 or start == 0:
+            return start
+        before = bisect.bisect_left(self._non_blank, start)
+        return self._non_blank[before - lines] if before >= lines else 0
+
+    def forward(self, pos: int, lines: int) -> int:
+        """The end of the line *lines* non-blank lines after the one at *pos*."""
+        end = self._line_end(pos)
+        if end < 0:
+            return len(self.text)
+        if lines <= 0:
+            return end
+        k = bisect.bisect_right(self._non_blank, end) + lines - 1
+        if k >= len(self._non_blank):
+            return len(self.text)
+        stop = self._line_end(self._non_blank[k])
+        return len(self.text) if stop < 0 else stop
 
 
 def _prefilter(pattern: re.Pattern[str]) -> tuple[_Required | None, list[str] | None, int]:
