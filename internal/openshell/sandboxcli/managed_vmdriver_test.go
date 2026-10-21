@@ -173,3 +173,15 @@ func TestManagedDoctorChecksTheAdministratorsMicroVMDriver(t *testing.T) {
 		}
 	})
 }
+
+// GAP-0005: before the managed gateway ran, `image build` read the account's
+// own gateway.toml (none: docker) and built a docker image that the MicroVM
+// run could not use. The daemon's managed driver decides.
+func TestImageBuildTargetsTheManagedDriverBeforeTheGatewayRuns(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.status.Gateway = nil
+	ta.daemon.status.Managed = &sandboxapi.ManagedStatus{Driver: string(openshell.DriverVM)}
+	if d := ta.gatewayDriverNow(bg); d.Name != openshell.DriverVM {
+		t.Fatalf("driver = %q, want the managed vm driver", d.Name)
+	}
+}
