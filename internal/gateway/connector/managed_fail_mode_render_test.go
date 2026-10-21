@@ -24,8 +24,9 @@ import (
 // rel-1-0-3 GAP-0037: a managed standalone render keeps the closed fail mode
 // the managed config resolved, for Cursor in observe mode and for the
 // connectors without a fail-closed hook contract of their own. Secure Client
-// and per-user renders keep their rules; the per-user Hermes hook blocks its
-// own failures, so it keeps closed (GAP-0150, GAP-0269).
+// and per-user renders keep their rules; the per-user Copilot CLI,
+// Antigravity and Hermes hooks block their own failures with the agent's
+// native deny, so they keep closed.
 func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 	standalone := SetupOpts{ManagedEnterprise: true, ManagedHookSocket: "/run/defenseclaw/hook.sock", HookFailMode: "closed", GuardrailMode: "observe"}
 	secureClient := SetupOpts{ManagedEnterprise: true, HookFailMode: "closed", GuardrailMode: "observe"}
@@ -43,7 +44,10 @@ func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 		{"secure client cursor observe", NewCursorConnector(), secureClient, "open"},
 		{"per-user cursor observe", NewCursorConnector(), perUser, "open"},
 		{"per-user hermes", NewHermesConnector(), perUser, "closed"},
-		{"per-user copilot", NewCopilotConnector(), perUser, "open"},
+		{"per-user copilot", NewCopilotConnector(), perUser, "closed"},
+		{"per-user antigravity", NewAntigravityConnector(), perUser, "closed"},
+		{"secure client copilot", NewCopilotConnector(), secureClient, "open"},
+		{"secure client antigravity", NewAntigravityConnector(), secureClient, "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := CapableHookFailMode(test.opts, test.conn, resolveHookFailMode(test.opts, test.conn)); got != test.want {

@@ -35,6 +35,9 @@ func TestUnixHookFailModeLinesMatchTheSharedGolden(t *testing.T) {
 		{NewClaudeCodeConnector(), "claude-code-hook.sh"},
 		{NewCodexConnector(), "codex-hook.sh"},
 		{NewDevinConnector(), "devin-hook.sh"},
+		{NewAntigravityConnector(), "antigravity-hook.sh"},
+		{NewCopilotConnector(), "copilot-hook.sh"},
+		{NewHermesConnector(), "hermes-hook.sh"},
 	} {
 		for _, mode := range []string{"open", "closed"} {
 			home := t.TempDir()
