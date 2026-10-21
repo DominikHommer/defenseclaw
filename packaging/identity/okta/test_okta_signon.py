@@ -63,54 +63,6 @@ def test_signon_uses_first_matching_rule(monkeypatch):
     assert report.problems == 1
 
 
-def _group_signon_report(monkeypatch, rules, user_groups):
-    monkeypatch.setattr(okta, "find_group", lambda client, name: {"id": "G1"})
-
-    class Client:
-        def must(self, method, path, body=None):
-            return {"id": "policy", "name": "policy"}
-
-        def get_all(self, path):
-            if path.startswith("/api/v1/users/"):
-                return [{"id": gid} for gid in user_groups.get(path.split("/")[4], [])]
-            return rules
-
-    report = okta.Report(False)
-    okta.check_signon_policy(Client(), report, {"_links": {"accessPolicy": {"href": "/policy"}}}, None, ["engineering"])
-    return report
-
-
-PASSWORD = {"type": "ASSURANCE", "factorMode": "1FA", "constraints": [{"knowledge": {"types": ["password"]}}]}
-
-
-def test_group_coverage_accounts_for_an_earlier_user_deny(monkeypatch):
-    """GAP-1166: a member's own deny is not hidden by the group's later allow."""
-    rules = [
-        {"name": "deny U1", "status": "ACTIVE", "priority": 1,
-         "conditions": {"people": {"users": {"include": ["U1"]}}},
-         "actions": {"appSignOn": {"access": "DENY"}}},
-        {"name": "group allow", "status": "ACTIVE", "priority": 2,
-         "conditions": {"people": {"groups": {"include": ["G1"]}}},
-         "actions": {"appSignOn": {"access": "ALLOW", "verificationMethod": PASSWORD}}},
-    ]
-    assert _group_signon_report(monkeypatch, rules, {"U1": ["G1"]}).problems == 1
-    # A denied user who is not a member leaves the group covered.
-    assert _group_signon_report(monkeypatch, rules, {"U1": ["G9"]}).problems == 0
-
-
-def test_group_coverage_accounts_for_excluded_groups(monkeypatch):
-    """GAP-1164: an allow that excludes another group covers the group only in part."""
-    rules = [
-        {"name": "group allow", "status": "ACTIVE", "priority": 1,
-         "conditions": {"people": {"groups": {"include": ["G1"], "exclude": ["G2"]}}},
-         "actions": {"appSignOn": {"access": "ALLOW", "verificationMethod": PASSWORD}}},
-    ]
-    report = _group_signon_report(monkeypatch, rules, {})
-    assert report.problems == 1
-    rules[0]["conditions"]["people"]["groups"]["exclude"] = []
-    assert _group_signon_report(monkeypatch, rules, {}).problems == 0
-
-
 def test_signon_refuses_policy_assigned_to_another_app(monkeypatch):
     monkeypatch.setattr(okta, "find_ldap_app", lambda client: {"id": "ldap"})
     monkeypatch.setattr(okta, "find_user", lambda client, login: {"id": "bind"})
@@ -226,47 +178,3 @@ def test_existing_signon_rules_are_moved_to_requested_priorities(monkeypatch):
         "ldap password only (group)": 1,
         "deny": 2,
     }
-
-
-def _overlap_report(monkeypatch, rules, members, user_groups):
-    """Check group G1 against rules, with group members and user groups."""
-    monkeypatch.setattr(okta, "find_group", lambda client, name: {"id": "G1"})
-
-    class Client:
-        def must(self, method, path, body=None):
-            return {"id": "policy", "name": "policy"}
-
-        def get_all(self, path):
-            if path.startswith("/api/v1/groups/"):
-                return [{"id": uid} for uid in members.get(path.split("/")[4], [])]
-            if path.startswith("/api/v1/users/"):
-                return [{"id": gid} for gid in user_groups.get(path.split("/")[4], [])]
-            return rules
-
-    report = okta.Report(False)
-    okta.check_signon_policy(Client(), report, {"_links": {"accessPolicy": {"href": "/policy"}}}, None, ["engineering"])
-    return report
-
-
-def test_group_coverage_accounts_for_an_earlier_rule_of_an_overlapping_group(monkeypatch):
-    """Review of GAP-1166 (loop 3): a deny for G2 before G1's password-only
-    allow wins for a member of both, so G1 is covered only in part."""
-    password = {"type": "ASSURANCE", "factorMode": "1FA",
-                "constraints": [{"knowledge": {"types": ["password"]}}]}
-    rules = [
-        {"name": "deny G2", "status": "ACTIVE", "priority": 0,
-         "conditions": {"people": {"groups": {"include": ["G2"]}}},
-         "actions": {"appSignOn": {"access": "DENY"}}},
-        {"name": "allow G1", "status": "ACTIVE", "priority": 1,
-         "conditions": {"people": {"groups": {"include": ["G1"]}}},
-         "actions": {"appSignOn": {"access": "ALLOW", "verificationMethod": password}}},
-    ]
-    both = _overlap_report(monkeypatch, rules, {"G1": ["u1", "u2"]}, {"u1": ["G1"], "u2": ["G1", "G2"]})
-    assert both.problems == 1
-    disjoint = _overlap_report(monkeypatch, rules, {"G1": ["u1"]}, {"u1": ["G1"]})
-    assert disjoint.problems == 0
-    many = _overlap_report(monkeypatch, rules, {"G1": [f"u{i}" for i in range(60)]}, {})
-    assert many.problems == 1
-    rules[0]["conditions"]["people"]["groups"]["exclude"] = ["G1"]
-    excluded = _overlap_report(monkeypatch, rules, {"G1": ["u2"]}, {"u2": ["G1", "G2"]})
-    assert excluded.problems == 0

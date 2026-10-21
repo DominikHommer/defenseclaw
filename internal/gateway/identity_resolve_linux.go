@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"time"
 
@@ -64,9 +65,44 @@ func holderSpoolRecord(key string, account unixidentity.Account, now time.Time) 
 	return record, true
 }
 
-// resolvePeerDirectoryFacts resolves a verified uid's facts through NSS and
-// merges the guardian's identity spool record for it.
+// resolvePeerDirectoryFacts is resolveNSSPeerFacts. It keeps the candidate
+// facts of a lookup that failed for want of a proof only
+// (unixidentity.UnprovenFactsError) for the profile matcher, and drops them
+// when a lookup ends any other way.
 func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) {
+	facts, err := resolveNSSPeerFacts(key)
+	var unproven *unixidentity.UnprovenFactsError
+	if errors.As(err, &unproven) {
+		noteUnprovenFacts(key, unproven.Candidate, err.Error(), time.Now())
+	} else {
+		forgetUnprovenFacts(key)
+	}
+	return facts, err
+}
+
+// noteUnprovenFacts keeps the candidate facts of key's failed lookup, for at
+// most identityDirectoryMax accounts (the oldest goes first).
+func noteUnprovenFacts(key string, facts useridentity.DirectoryFacts, reason string, now time.Time) {
+	unprovenFacts.Lock()
+	defer unprovenFacts.Unlock()
+	if unprovenFacts.entries == nil {
+		unprovenFacts.entries = map[string]unprovenFactsEntry{}
+	}
+	if _, known := unprovenFacts.entries[key]; !known && len(unprovenFacts.entries) >= identityDirectoryMax {
+		oldest := ""
+		for k, entry := range unprovenFacts.entries {
+			if oldest == "" || entry.at.Before(unprovenFacts.entries[oldest].at) {
+				oldest = k
+			}
+		}
+		delete(unprovenFacts.entries, oldest)
+	}
+	unprovenFacts.entries[key] = unprovenFactsEntry{facts: facts, reason: reason, at: now}
+}
+
+// resolveNSSPeerFacts resolves a verified uid's facts through NSS and
+// merges the guardian's identity spool record for it.
+func resolveNSSPeerFacts(key string) (useridentity.DirectoryFacts, error) {
 	uid, err := strconv.Atoi(key)
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err

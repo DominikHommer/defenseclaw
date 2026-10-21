@@ -569,6 +569,7 @@ func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) {
 	c.mu.Unlock()
 	if changed {
 		c.directoryCache().forget(key)
+		forgetUnprovenFacts(key)
 	}
 }
 

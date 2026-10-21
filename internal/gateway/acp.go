@@ -201,6 +201,10 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	// lazily, the request had no connector, so a connectors assignment never
 	// selected ACP traffic (GAP-0311).
 	ctx = a.withGuardrailProfileDecision(ctx, agent.ConnectorID)
+	if reason := profileRefusal(ctx); reason != "" {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": reason})
+		return
+	}
 	if slices.Contains(profile.DeniedMethods, req.Method) {
 		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: "method denied by ACP profile",
 			FailMode: acpProfileFailMode(profile, mode)}

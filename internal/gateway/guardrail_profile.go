@@ -76,6 +76,11 @@ type profileSubject struct {
 	// LookupError is why the lookup failed, when `explain` knows (the live
 	// path only records default_lookup_failed).
 	LookupError string
+	// unproven is the subject as the candidate facts of its failed lookup
+	// give it, and unprovenReason why that lookup failed (unprovenFactsFor);
+	// set by withUnprovenCandidate, for match only.
+	unproven       *profileSubject
+	unprovenReason string
 	// viaProcessOwner marks a subject verified as the per-user gateway's own
 	// account, so explain and telemetry report it as process_owner.
 	viaProcessOwner bool
@@ -162,6 +167,23 @@ type profileDecision struct {
 	// Assignment is the 1-based index of the assignment that matched, 0 for
 	// the default.
 	Assignment int
+	// Refused, when set, says why the request is refused: its account's
+	// lookup failed for want of a proof only, and the facts it has if the
+	// directory holds nothing more select another profile than the failed
+	// lookup does (matchUncached). The other fields are the failed lookup's
+	// decision, so a site that does not refuse is decided as before.
+	Refused string
+}
+
+// profileRefusal is why the request on ctx is refused (profileDecision.Refused),
+// or "". The hook, inspect, ACP, sandbox relay and LLM proxy entry points
+// answer 503 with it: a hook then fails closed, as it does while the gateway
+// cannot decide.
+func profileRefusal(ctx context.Context) string {
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil {
+		return resolved.decision.Refused
+	}
+	return ""
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -534,7 +556,12 @@ func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(r.Context(), "")))
+		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), ""))
+		if reason := profileRefusal(r.Context()); reason != "" {
+			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": reason})
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -881,6 +908,7 @@ func accountGroups(account *osuser.User) ([]string, error) {
 // naming the kernel-verified UID or SID, or a verified agent, can still
 // select its profile.
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
+	subject = withUnprovenCandidate(subject)
 	if set.matches == nil {
 		return set.matchUncached(subject, source, connectorName, agent)
 	}
@@ -900,7 +928,12 @@ func (set *guardrailProfileSet) match(subject *profileSubject, source, connector
 
 func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, connectorName, agent string) profileDecision {
 	if subject != nil && subject.LookupFailed {
-		return set.matchWithFailedLookup(subject, source, connectorName, agent)
+		decision := set.matchWithFailedLookup(subject, source, connectorName, agent)
+		if subject.unproven != nil && source != "" &&
+			set.matchUncached(subject.unproven, source, connectorName, agent).Name != decision.Name {
+			decision.Refused = unprovenRefusal(subject)
+		}
+		return decision
 	}
 	if subject != nil && subject.GroupsUnknown {
 		return set.matchWithUnknownGroups(subject, source, connectorName, agent)
@@ -924,6 +957,60 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 		reason = profileMatchDefaultUnverified
 	}
 	return set.decision(set.defaultProfile, reason, "", source)
+}
+
+// withUnprovenCandidate returns subject with the candidate facts of its
+// failed lookup attached (unprovenFacts), when its lookup failed for want of
+// a proof only: the subject as those facts give it is one possibility, and
+// any account or group the directory could not rule out is the other, which
+// the failed lookup stands for (matchUncached).
+func withUnprovenCandidate(subject *profileSubject) *profileSubject {
+	if subject == nil || !subject.LookupFailed || subject.unproven != nil || subject.UserID == "" ||
+		subject.IDKind != useridentity.KindPOSIXUID {
+		return subject
+	}
+	facts, reason, ok := unprovenFactsFor(subject.UserID, time.Now())
+	if !ok {
+		return subject
+	}
+	candidate := profileSubjectFromVerified(VerifiedSubject{
+		UserID: subject.UserID, IDKind: subject.IDKind,
+		UserName: firstNonEmpty(subject.accountName, subject.UserName), Directory: facts,
+	}, true)
+	if candidate.LookupFailed {
+		return subject
+	}
+	candidate.viaProcessOwner = subject.viaProcessOwner
+	with := *subject
+	with.unproven, with.unprovenReason = &candidate, reason
+	return &with
+}
+
+// unprovenRefusal is the refusal of a request whose account's lookup failed
+// for want of a proof (profileDecision.Refused).
+func unprovenRefusal(subject *profileSubject) string {
+	return fmt.Sprintf("DefenseClaw cannot confirm which account uid %s is or which groups it is in, because a directory service "+
+		"on this computer did not answer, and that decides its guardrail profile: the request is refused until the directory answers",
+		subject.UserID)
+}
+
+// unprovenRefusalNote is explain's account of a refusal: the profile the
+// candidate facts select, the one the failed lookup selects, and why.
+func unprovenRefusalNote(set *guardrailProfileSet, subject *profileSubject, decision profileDecision, connectorName, agent string) string {
+	subject = withUnprovenCandidate(subject)
+	if subject == nil || subject.unproven == nil {
+		return decision.Refused
+	}
+	candidate := set.matchUncached(subject.unproven, decision.SubjectSource, connectorName, agent)
+	name := func(profile string) string {
+		if profile == "" {
+			return "the base configuration"
+		}
+		return fmt.Sprintf("profile %q", profile)
+	}
+	return fmt.Sprintf("requests from this account are refused (hooks fail closed): its directory lookup failed for want of a proof (%s). "+
+		"If the directory holds nothing more of it, the account selects %s; a failed lookup selects %s. Neither applies until the directory answers; "+
+		"an assignment by uid selects a profile without the proof", subject.unprovenReason, name(candidate.Name), name(decision.Name))
 }
 
 // matchWithUnknownGroups preserves verified user and agent assignments in
@@ -1736,6 +1823,10 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["subject_source"] = decision.SubjectSource
 	out["assignment"] = decision.Assignment
 	warnings := profileExplainWarnings(set, decision, subject)
+	if decision.Refused != "" {
+		out["refused"] = decision.Refused
+		warnings = append(warnings, unprovenRefusalNote(set, subject, decision, connectorName, agent))
+	}
 	if agent != "" {
 		warnings = append(warnings, fmt.Sprintf("agent %q is not verified against a host identity record by profile-explain; confirm it with agent identities before relying on this answer", agent))
 	}
