@@ -304,7 +304,7 @@ type patchFeed struct {
 	quote      byte   // ' or " of a quoted argument or here-string
 	delim      string // here-document delimiter, or '@ / "@
 	powershell bool
-	expand     bool // $, ` and \ may run commands or join lines inside the feed
+	expand     bool // the feed can expand variables or command substitutions
 }
 
 // patchOpenerFeed reads the feed that an envelope's opener leaves open: the
@@ -360,7 +360,26 @@ func (f patchFeed) ends(line string) bool {
 
 // expands reports a body line that the shell may expand or join with the next.
 func (f patchFeed) expands(line string) bool {
-	return f.expand && strings.ContainsAny(line, "$`\\")
+	if !f.expand {
+		return false
+	}
+	if strings.ContainsAny(line, "$`") {
+		return true
+	}
+	if f.powershell {
+		return false // Backslash is literal in a PowerShell here-string.
+	}
+	for i := 0; i < len(line); i++ {
+		if line[i] != '\\' {
+			continue
+		}
+		// Bash removes these escapes, or joins a line ending in backslash
+		// with the next one. A backslash before an ordinary letter stays.
+		if i+1 == len(line) || strings.ContainsRune("$`\\", rune(line[i+1])) {
+			return true
+		}
+	}
+	return false
 }
 
 // closeAfter checks that the feed closes right after the envelope, on its End

@@ -82,6 +82,32 @@ func TestR104PatchDataIsNotAnEdit(t *testing.T) {
 	}
 }
 
+func TestR104PatchFeedLiteralBackslash(t *testing.T) {
+	cwd := t.TempDir()
+	patch := "*** Begin Patch\n*** Update File: ordinary.c\n@@\n-puts(\"a\");\n+printf(\"a\\n\");\n*** End Patch\n"
+	for _, tc := range []struct {
+		name, opener, closer string
+		known                bool
+	}{
+		{"unquoted here document", "apply_patch <<EOF", "EOF", true},
+		{"quoted here document", "apply_patch <<'EOF'", "EOF", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := tc.opener + "\n" + patch + tc.closer
+			targets, known := ApplyPatchWriteTargets("Bash", nil, command, cwd, cwd)
+			if known != tc.known || !slices.Equal(targets, []string{filepath.Join(cwd, "ordinary.c")}) {
+				t.Fatalf("patch targets = %q, known=%v", targets, known)
+			}
+		})
+	}
+	for _, line := range []string{"+$EXTRA", "+safe\\", "+safe\\\\"} {
+		command := "apply_patch <<EOF\n" + strings.Replace(patch, "+printf(\"a\\n\");", line, 1) + "EOF"
+		if targets, known := ApplyPatchWriteTargets("Bash", nil, command, cwd, cwd); known || len(targets) != 0 {
+			t.Fatalf("expanding patch line %q: targets = %q, known=%v", line, targets, known)
+		}
+	}
+}
+
 func TestR104ClientProofForProtectedAlias(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
