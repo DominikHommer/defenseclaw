@@ -20,7 +20,7 @@ connector runtime / operator CLI
 The diagram is deliberately topology-neutral: proxy connectors, hook
 connectors, and the OpenClaw extension do not share one universal request path.
 The published
-[connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/)
+[connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/hook-contracts/)
 defines the supported path for each connector.
 
 | Component | Source ownership |

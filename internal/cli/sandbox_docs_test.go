@@ -256,7 +256,7 @@ func TestSandboxDocsExitStatuses(t *testing.T) {
 		return strings.Join(strings.Fields(part), " ")
 	}
 	reference := read(filepath.Join("reference", sandboxDocsPage), "- **Exit status.**", "\n- ")
-	guide := read(filepath.Join("sandboxes", "guide.mdx"), "Exit statuses:", "\n\n")
+	guide := read(filepath.Join("troubleshooting", "sandboxes.mdx"), "Exit statuses:", "\n\n")
 	for _, c := range []struct {
 		code      int
 		reference string
@@ -272,7 +272,7 @@ func TestSandboxDocsExitStatuses(t *testing.T) {
 			t.Errorf("%s: the exit-status list lacks %q:\n%s", sandboxDocsPage, c.reference, reference)
 		}
 		if !strings.Contains(guide, c.guide) {
-			t.Errorf("sandbox.mdx: the exit statuses lack %q:\n%s", c.guide, guide)
+			t.Errorf("troubleshooting/sandboxes.mdx: the exit statuses lack %q:\n%s", c.guide, guide)
 		}
 	}
 }

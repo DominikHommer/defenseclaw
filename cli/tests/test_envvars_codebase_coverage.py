@@ -228,7 +228,7 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
     "DEFENSECLAW_OTEL_": frozenset(
         {
             "cli/defenseclaw/observability/v8_migration.py",
-            "docs-site/content/docs/observability/index.mdx",
+            "docs-site/content/docs/reference/observability.mdx",
         }
     ),
     # The sandbox wrappers' DEFENSECLAW_SANDBOX_* family: the test asserts
