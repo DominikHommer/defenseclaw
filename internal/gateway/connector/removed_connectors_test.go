@@ -1019,37 +1019,49 @@ func TestRemovedOpenHandsTeardownKeepsAScriptAHookMayStillRun(t *testing.T) {
 // .openhands/hooks.json) is checked even with no backup record for it: while
 // it runs the script, nothing changes and the script is not the tombstone.
 func TestRemovedOpenHandsTeardownChecksTheHooksFilesTheLockNames(t *testing.T) {
-	h := newOpenHandsHarness(t, false)
-	h.setUp(t, true)
-	workspace := filepath.Join(t.TempDir(), "repo", ".openhands", "hooks.json")
-	writeRemovedFixture(t, workspace, `{"stop":[{"matcher":"*","hooks":[{"type":"command","command":"`+h.script+`"}]}]}`, 0o600)
-	data, err := os.ReadFile(h.script)
-	if err != nil {
-		t.Fatal(err)
+	// Review fixes (loop round 1): a relative path in the lock was skipped;
+	// it is read from the working directory now.
+	for _, relative := range []bool{false, true} {
+		t.Run(map[bool]string{false: "absolute", true: "relative"}[relative], func(t *testing.T) {
+			h := newOpenHandsHarness(t, false)
+			h.setUp(t, true)
+			root := t.TempDir()
+			workspace := filepath.Join(root, "repo", ".openhands", "hooks.json")
+			named := workspace
+			if relative {
+				t.Chdir(root)
+				named = filepath.Join("repo", ".openhands", "hooks.json")
+			}
+			writeRemovedFixture(t, workspace, `{"stop":[{"matcher":"*","hooks":[{"type":"command","command":"`+h.script+`"}]}]}`, 0o600)
+			data, err := os.ReadFile(h.script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := SaveHookContractLockEntry(h.dataDir, HookContractLockEntry{
+				Connector:         removedOpenHandsID,
+				HookScriptDigests: map[string]string{removedOpenHandsHookScript: "sha256:" + sha256Hex(data)},
+				Locations:         ConnectorLocations{HookConfigPaths: []string{h.hooksPath, named}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before := h.state(t)
+			before[workspace] = removedSnapshot(t, workspace)[workspace]
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown = %v, want the state left for manual cleanup", err)
+			}
+			requireRemovedSnapshot(t, "a teardown with a workspace hooks file that runs the script", before)
+			if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(workspace) {
+				t.Fatalf("manual cleanup record = %+v, %v; want %s", record, ok, workspace)
+			}
+			writeRemovedFixture(t, workspace, `{}`, 0o600)
+			h.notices.Reset()
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown after the manual step: %v", err)
+			}
+			h.requireDone(t)
+			requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: openHandsOperatorHooks, workspace: `{}`})
+		})
 	}
-	if err := SaveHookContractLockEntry(h.dataDir, HookContractLockEntry{
-		Connector:         removedOpenHandsID,
-		HookScriptDigests: map[string]string{removedOpenHandsHookScript: "sha256:" + sha256Hex(data)},
-		Locations:         ConnectorLocations{HookConfigPaths: []string{h.hooksPath, workspace}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	before := h.state(t)
-	before[workspace] = removedSnapshot(t, workspace)[workspace]
-	if err := h.teardown(); err != nil {
-		t.Fatalf("Teardown = %v, want the state left for manual cleanup", err)
-	}
-	requireRemovedSnapshot(t, "a teardown with a workspace hooks file that runs the script", before)
-	if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(workspace) {
-		t.Fatalf("manual cleanup record = %+v, %v; want %s", record, ok, workspace)
-	}
-	writeRemovedFixture(t, workspace, `{}`, 0o600)
-	h.notices.Reset()
-	if err := h.teardown(); err != nil {
-		t.Fatalf("Teardown after the manual step: %v", err)
-	}
-	h.requireDone(t)
-	requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: openHandsOperatorHooks, workspace: `{}`})
 }
 
 // A changed hooks.json that provably runs nothing (gone, back to the copy
@@ -1638,6 +1650,72 @@ func TestRemovedOpenHandsTeardownChecksTheHooksItPutsBack(t *testing.T) {
 			path := wrapper(t, h, "exec \"$(dirname \"$0\")/run\"\n")
 			return path, []string{path, link}
 		}},
+		// Review fixes (loop round 1): a wrapper path the check read only in
+		// part (a blank in quotes, an escape, a joined quote, a character
+		// outside the plain set, a relative path, a PATH list) was ruled out
+		// through the parts it read, which are not there.
+		{"a wrapper that runs a double-quoted path with a blank", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay-zq93"))
+			path := wrapper(t, h, "exec \""+link+"\" \"$@\"\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a single-quoted path with a blank", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
+			path := wrapper(t, h, "exec '"+link+"'\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a quoted path with a blank under HOME", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
+			path := wrapper(t, h, "exec \"$HOME/audit dir/relay\" \"$@\"\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a path with an escaped blank", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
+			path := wrapper(t, h, "exec "+strings.ReplaceAll(link, " ", `\ `)+" \"$@\"\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a path joined from quoted parts", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
+			path := wrapper(t, h, "exec '"+filepath.Dir(link)+"'/relay\n")
+			return path, []string{path, link}
+		}},
+		{"a Python wrapper that runs a quoted path with a blank", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
+			path := wrapper(t, h, "import os, sys\nos.execv(\""+link+"\", [\""+link+"\"] + sys.argv[1:])\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a path with a character outside the plain set", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks#1", "relay"))
+			path := wrapper(t, h, "exec "+link+" \"$@\"\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a path with letters outside ASCII", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "h\u00e4kchen", "relay"))
+			path := wrapper(t, h, "exec "+link+"\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a relative path without ./", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
+			path := wrapper(t, h, "exec lib/run \"$@\"\n")
+			return path, []string{path, link}
+		}},
+		{"a Python wrapper that builds the path at run time", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "audit dir", "relay"))
+			path := filepath.Join(h.home, "tools", "audit")
+			writeRemovedFixture(t, path, "#!/usr/bin/env python3\nimport os, sys\nos.execv(os.path.join(os.environ[\"HOME\"], \"audit dir\", \"relay\"), sys.argv)\n", 0o700)
+			return path, []string{path, link}
+		}},
+		{"a Python script an interpreter runs", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
+			path := filepath.Join(h.home, "tools", "audit.py")
+			writeRemovedFixture(t, path, "import os, sys\nos.execv(os.path.join(os.environ[\"HOME\"], \"lib\", \"run\"), sys.argv)\n", 0o600)
+			return "/usr/bin/python3 " + path, []string{path, link}
+		}},
+		{"a wrapper that puts a directory on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "oh-relay"))
+			path := wrapper(t, h, "PATH=/usr/bin:"+filepath.Dir(link)+"\nexport PATH\nexec oh-relay \"$@\"\n")
+			return path, []string{path, link}
+		}},
 		{"a directory that holds a symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
 			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
 			return "/bin/ls " + filepath.Dir(link), []string{link}
@@ -1733,12 +1811,17 @@ func TestRemovedOpenHandsTeardownTombstonesWhenEverySavedHookIsRuledOut(t *testi
 			writeRemovedFixture(t, spaced, "#!/usr/bin/env sh\nexit 0\n", 0o700)
 			compiled := filepath.Join(h.home, "tools", "audit-bin")
 			writeRemovedFixture(t, compiled, "\x7fELF\x02\x01\x01\x00\x00/usr/lib/x\x00", 0o700)
+			// A wrapper that runs a quoted path with a blank (checked whole,
+			// and the rest of the string is part of it), a URL and /dev/null.
+			quoted := filepath.Join(h.home, "tools", "run-quoted.sh")
+			writeRemovedFixture(t, quoted, "#!/bin/sh\n# runs my audit hook\ncurl -fsS http://127.0.0.1:9/audit || true\nexec \""+spaced+"\" --audit \"$@\" 2>/dev/null\n", 0o700)
 			saved := openHandsHooksRunning(t,
 				"/usr/local/bin/audit-hook",
 				plain,
 				"/bin/sh "+plain+" --audit 30 --level=high -x",
 				"'"+spaced+"'",
 				compiled+" --config="+filepath.Join(h.home, "tools", "missing.toml"),
+				quoted,
 			)
 			h.setUpOver(t, saved, back)
 			if err := h.teardown(); err != nil {
@@ -1817,6 +1900,33 @@ func TestRemovedOmnigentTeardownChecksEveryConfigOmniGentMayRead(t *testing.T) {
 				t.Fatal(err)
 			}
 			return path
+		}},
+		// Review fixes (loop round 1): a relative or ~ OMNIGENT_CONFIG_HOME,
+		// and a relative config the lock names, were skipped, so the module
+		// and the .pth line went while that config still named them.
+		{"relative OMNIGENT_CONFIG_HOME", false, func(t *testing.T, h *omnigentHarness) string {
+			t.Chdir(h.home)
+			t.Setenv("OMNIGENT_CONFIG_HOME", "./policyhome")
+			return filepath.Join(h.home, "policyhome", "config.yaml")
+		}},
+		{"relative OMNIGENT_CONFIG_HOME with a config home", true, func(t *testing.T, h *omnigentHarness) string {
+			t.Chdir(h.home)
+			t.Setenv("OMNIGENT_CONFIG_HOME", "policyhome")
+			return filepath.Join(h.home, "policyhome", "config.yaml")
+		}},
+		{"OMNIGENT_CONFIG_HOME under ~", false, func(t *testing.T, h *omnigentHarness) string {
+			t.Setenv("OMNIGENT_CONFIG_HOME", "~/policyhome")
+			return filepath.Join(h.home, "policyhome", "config.yaml")
+		}},
+		{"a relative config the hook contract lock names", false, func(t *testing.T, h *omnigentHarness) string {
+			t.Chdir(h.home)
+			if err := SaveHookContractLockEntry(h.dataDir, HookContractLockEntry{
+				Connector: removedOmnigentID,
+				Locations: ConnectorLocations{HookConfigPaths: []string{filepath.Join("work", "omnigent.yaml")}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(h.home, "work", "omnigent.yaml")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2083,4 +2193,32 @@ func TestRemovedOpenHandsTeardownReadsAnUnrecordedHooksFileThroughALink(t *testi
 	}
 	h.requireDone(t)
 	requireRemovedSnapshot(t, "teardown", map[string]string{workspace: "symlink:" + target, target: `{}`})
+}
+
+// Review fixes (loop round 1): teardown skipped a config home or lock path
+// that was not absolute. It resolves each the ways an older release may have
+// read it: from the working directory, and ~ also as the user's home.
+func TestRemovedResolvedPaths(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	home := homePath()
+	absolute := filepath.Join(cwd, "abs", "config.yaml")
+	for _, tc := range []struct {
+		value string
+		want  []string
+	}{
+		{"", nil},
+		{"  ", nil},
+		{absolute, []string{absolute}},
+		{" " + absolute + " ", []string{absolute}},
+		{filepath.Join("policyhome", "..", "policyhome"), []string{filepath.Join(cwd, "policyhome")}},
+		{"./policyhome", []string{filepath.Join(cwd, "policyhome")}},
+		{"~", []string{home, filepath.Join(cwd, "~")}},
+		{"~/policyhome", []string{filepath.Join(home, "policyhome"), filepath.Join(cwd, "~", "policyhome")}},
+	} {
+		got := removedResolvedPaths(tc.value)
+		if strings.Join(got, "|") != strings.Join(tc.want, "|") {
+			t.Errorf("removedResolvedPaths(%q) = %q, want %q", tc.value, got, tc.want)
+		}
+	}
 }

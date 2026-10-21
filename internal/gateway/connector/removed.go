@@ -547,15 +547,17 @@ func (removedOpenHandsConnector) hookScript(opts SetupOpts) string {
 // hook contract lock says setup wrote (a workspace's .openhands/hooks.json).
 func (c removedOpenHandsConnector) hooksPaths(opts SetupOpts) []string {
 	var paths []string
-	if home := strings.TrimSpace(opts.ConfigHome); home != "" && filepath.IsAbs(home) {
-		paths = append(paths, filepath.Join(filepath.Clean(home), "hooks.json"))
+	if homes := removedResolvedPaths(opts.ConfigHome); len(homes) > 0 {
+		for _, home := range homes {
+			paths = append(paths, filepath.Join(home, "hooks.json"))
+		}
 	} else {
 		paths = append(paths, homePath(".openhands", "hooks.json"))
 	}
 	if entry, err := LoadHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise); err == nil {
 		for _, path := range entry.Locations.HookConfigPaths {
-			if filepath.IsAbs(path) && filepath.Base(path) == "hooks.json" {
-				paths = append(paths, filepath.Clean(path))
+			if filepath.Base(path) == "hooks.json" {
+				paths = append(paths, removedResolvedPaths(path)...)
 			}
 		}
 	}
@@ -643,10 +645,13 @@ func (c removedOpenHandsConnector) hooksThatMayRunScript(p *removedCleanupPlan, 
 // DefenseClaw or the script, is the script (through links or as a hard link),
 // is a directory that holds the script or names DefenseClaw, or is a file
 // whose bytes name either. A text file (a wrapper) may also run it through
-// the paths it names, checked the same way a few levels deep, and through
-// what the check cannot follow: a relative path or cd, a variable or a
-// command substitution in a path, or a command found on PATH while a PATH
-// directory holds the script.
+// the paths it names, checked the same way a few levels deep (a quoted path
+// with a blank whole, a list of paths part by part), and through what the
+// check cannot follow: a relative path or cd, a variable or a command
+// substitution in a path, a path that goes on past the plain characters the
+// check reads (an escape, a quote that joins more text, any other character)
+// or that ends a longer word, a script in a language other than the shell,
+// or a command found on PATH while a PATH directory holds the script.
 type removedScriptCheck struct {
 	script  os.FileInfo
 	needles [][]byte // lower case
@@ -917,6 +922,9 @@ func (c *removedScriptCheck) fileMayRun(path string, info os.FileInfo, depth int
 	if binary {
 		return false
 	}
+	if !removedShellText(path, text) {
+		return true
+	}
 	if len(text) > removedScriptCheckTextLimit || removedTextRelative.Match(text) || c.scriptOnPath() {
 		return true
 	}
@@ -925,16 +933,245 @@ func (c *removedScriptCheck) fileMayRun(path string, info os.FileInfo, depth int
 			return true
 		}
 	}
-	for _, match := range removedTextPath.FindAllSubmatch(text, -1) {
-		target := string(match[2])
-		if len(match[1]) > 0 {
-			target = filepath.Join(c.home, target)
+	quoting := newRemovedTextQuoting(text)
+	covered := 0
+	for _, match := range removedTextPath.FindAllSubmatchIndex(text, -1) {
+		if match[0] < covered {
+			// Part of a quoted path already checked whole.
+			continue
 		}
-		if depth+1 >= removedScriptCheckDepth || c.pathMayRun(target, depth+1) {
+		if depth+1 >= removedScriptCheckDepth {
 			return true
 		}
+		mayRun, through := c.textPathMayRun(text, quoting, match, depth+1)
+		if mayRun {
+			return true
+		}
+		covered = through
 	}
 	return false
+}
+
+// removedShells are the interpreters whose scripts the check reads.
+var removedShells = map[string]bool{"sh": true, "bash": true, "dash": true, "zsh": true, "ksh": true, "mksh": true, "ash": true}
+
+// removedScriptExtensions name scripts in a language other than the shell.
+var removedScriptExtensions = map[string]bool{
+	".py": true, ".pyw": true, ".js": true, ".mjs": true, ".cjs": true, ".ts": true, ".mts": true, ".cts": true,
+	".rb": true, ".pl": true, ".pm": true, ".php": true, ".lua": true, ".tcl": true, ".r": true, ".ps1": true,
+	".psm1": true, ".groovy": true, ".kts": true, ".swift": true, ".exs": true, ".jl": true, ".awk": true,
+}
+
+// removedShellText reports whether a text file is one the check can read: a
+// shell script (its #! line runs sh, bash, dash, zsh, ksh, mksh or ash,
+// directly or through env), or a file with no #! line whose name has no
+// extension of another language (a config file, say). A script in another
+// language may build the path it runs at run time (os.path.join, say), so
+// it may run the script.
+func removedShellText(path string, text []byte) bool {
+	if !bytes.HasPrefix(text, []byte("#!")) {
+		return !removedScriptExtensions[strings.ToLower(filepath.Ext(path))]
+	}
+	line, _, _ := bytes.Cut(text[2:], []byte("\n"))
+	fields := strings.Fields(string(line))
+	if len(fields) == 0 {
+		return false
+	}
+	interpreter := filepath.Base(fields[0])
+	if interpreter == "env" {
+		interpreter = ""
+		for _, field := range fields[1:] {
+			if !strings.HasPrefix(field, "-") && !strings.Contains(field, "=") {
+				interpreter = filepath.Base(field)
+				break
+			}
+		}
+	}
+	return removedShells[interpreter]
+}
+
+// textPathMayRun reports whether a path a wrapper names (match, a
+// removedTextPath match in text) may run the script. The pattern reads only
+// plain characters, so a path counts only when it is a word of its own: one
+// that goes on past what the pattern read (a blank inside its quotes, an
+// escape, a quote that joins more text, a character outside the plain set)
+// or that ends a longer word (a relative path such as lib/run, or
+// "dir"/run) is a path the check cannot see, and may run the script. A path
+// that starts a quoted string with a blank in it ("/tmp/audit dir/relay") is
+// checked whole as well; when that path is there, the rest of the string is
+// part of it (through is where the string ends, else 0). A list of paths
+// (a:b, a,b, a=b) is checked part by part. In a comment the path is only
+// read.
+func (c *removedScriptCheck) textPathMayRun(text []byte, quoting removedTextQuoting, match []int, depth int) (mayRun bool, through int) {
+	start, end := match[4], match[5]
+	home := match[2] >= 0
+	if home {
+		start = match[2]
+	}
+	if !quoting.comment(start) {
+		if !quoting.startsWord(text, start) {
+			return true, 0
+		}
+		if !quoting.endsWord(text, start, end) {
+			whole, closing, ok := quoting.quotedPath(text, start, c.home)
+			if !ok || c.pathMayRun(whole, depth) {
+				return true, 0
+			}
+			if _, err := os.Stat(whole); err == nil {
+				through = closing
+			}
+		}
+	}
+	path := string(text[match[4]:match[5]])
+	targets := []string{path}
+	if parts := strings.FieldsFunc(path, func(r rune) bool { return r == ':' || r == ',' || r == '=' }); len(parts) > 1 {
+		targets = append(targets, parts...)
+	}
+	for i, target := range targets {
+		switch {
+		case home && (i == 0 || i == 1):
+			target = filepath.Join(c.home, target)
+		case !strings.HasPrefix(target, "/"):
+			continue
+		}
+		if c.pathMayRun(target, depth) {
+			return true, 0
+		}
+	}
+	return false, through
+}
+
+// removedTextQuoting is how a shell reads the quotes in a wrapper's text:
+// for each byte, the quote it is in (' or ", the quote marks included), '#'
+// in a comment (from a # that starts a word outside quotes to the end of
+// the line) or '\\' for a byte a backslash escapes, else 0; and for each
+// opening quote mark, where its string ends (-1: it does not).
+type removedTextQuoting struct {
+	state  []byte
+	closes map[int]int
+}
+
+func newRemovedTextQuoting(text []byte) removedTextQuoting {
+	q := removedTextQuoting{state: make([]byte, len(text)), closes: map[int]int{}}
+	var quote byte
+	open := -1
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		switch {
+		case quote == 0 && ch == '#' && (i == 0 || q.state[i-1] == 0 && removedTextBreak(text[i-1])):
+			for ; i < len(text) && text[i] != '\n'; i++ {
+				q.state[i] = '#'
+			}
+		case quote != '\'' && ch == '\\' && i+1 < len(text):
+			q.state[i] = quote
+			i++
+			q.state[i] = '\\'
+		case quote == 0 && (ch == '\'' || ch == '"'):
+			quote, open = ch, i
+			q.state[i] = ch
+			q.closes[i] = -1
+		case quote != 0 && ch == quote:
+			q.state[i] = quote
+			q.closes[open] = i
+			quote = 0
+		default:
+			q.state[i] = quote
+		}
+	}
+	return q
+}
+
+// removedTextBreak reports whether a shell word ends before ch.
+func removedTextBreak(ch byte) bool {
+	return strings.IndexByte(" \t\r\n;&|()<>`", ch) >= 0
+}
+
+func (q removedTextQuoting) comment(i int) bool { return q.state[i] == '#' }
+
+// delimiter reports whether text[i] is a quote mark that opens or closes a
+// string (not one inside the other kind of quotes, nor an escaped one).
+func (q removedTextQuoting) delimiter(text []byte, i int) bool {
+	return (text[i] == '\'' || text[i] == '"') && q.state[i] == text[i]
+}
+
+// startsWord reports whether a path at start starts a word: what comes
+// before it (past its quote marks, and the slashes of a URL or a doubled
+// slash) is the start of the text, a blank, a shell break or one of = : , @
+// ! [ { that comes before a path in an option, a list or a document.
+func (q removedTextQuoting) startsWord(text []byte, start int) bool {
+	i := start - 1
+	for i >= 0 && text[i] == '/' && q.state[i] != '\\' {
+		i--
+	}
+	for i >= 0 && q.delimiter(text, i) {
+		i--
+	}
+	if i < 0 {
+		return true
+	}
+	return q.state[i] != '\\' && (removedTextBreak(text[i]) || strings.IndexByte("=:,@![{", text[i]) >= 0)
+}
+
+// endsWord reports whether a path that ends at end (and starts at start)
+// ends its word: what comes after it (past its trailing slashes and its
+// closing quote marks) is the end of the text, a shell break, or, after a
+// closing quote, one of , ] } : as in a list or a document. Inside a quoted
+// string a blank or a shell break ends it too ("run /x y"), but not when the
+// path starts the string: then the string is the path.
+func (q removedTextQuoting) endsWord(text []byte, start, end int) bool {
+	i := end
+	for i < len(text) && text[i] == '/' {
+		i++
+	}
+	closed := false
+	for i < len(text) && q.delimiter(text, i) {
+		i++
+		closed = true
+	}
+	switch {
+	case i >= len(text):
+		return true
+	case q.state[i] == '\\':
+		return false
+	case q.state[i] != 0:
+		_, startsString := q.closes[start-1]
+		return !closed && !startsString && removedTextBreak(text[i])
+	case text[i] == '\\':
+		return false
+	}
+	return removedTextBreak(text[i]) || closed && strings.IndexByte(",]}:", text[i]) >= 0
+}
+
+// quotedPath returns the whole quoted string a path at start opens
+// ("/tmp/audit dir/relay") and where it ends, when the check can read it: a
+// leading $HOME, ${HOME} or ~ is the user's home, it holds no other $, no `
+// and no backslash, and no text is joined to it after its closing quote.
+func (q removedTextQuoting) quotedPath(text []byte, start int, home string) (string, int, bool) {
+	open := start - 1
+	if open < 0 {
+		return "", 0, false
+	}
+	closing, ok := q.closes[open]
+	if !ok || closing < 0 {
+		return "", 0, false
+	}
+	whole := string(text[open+1 : closing])
+	if strings.ContainsAny(whole, "`\\") {
+		return "", 0, false
+	}
+	for _, prefix := range []string{"$HOME/", "${HOME}/", "~/"} {
+		if strings.HasPrefix(whole, prefix) {
+			whole = filepath.Join(home, whole[len(prefix)-1:])
+			break
+		}
+	}
+	if strings.Contains(whole, "$") || !filepath.IsAbs(whole) {
+		return "", 0, false
+	}
+	if next := closing + 1; next < len(text) && !removedTextBreak(text[next]) && strings.IndexByte(",]}:", text[next]) < 0 {
+		return "", 0, false
+	}
+	return filepath.Clean(whole), closing, true
 }
 
 // scriptOnPath reports whether a directory a command may be found in holds
@@ -1104,29 +1341,52 @@ func (removedOmnigentConnector) modulePath(opts SetupOpts) string {
 // the explicit config home native maintenance passes, the file
 // OMNIGENT_CONFIG selects (OmniGent reads it before any config home),
 // OMNIGENT_CONFIG_HOME, ~/.omnigent and every config file the hook contract
-// lock says setup wrote. All of them are checked, whichever is given: they are
+// lock says setup wrote, a relative or ~ one resolved (removedResolvedPaths). All of them are checked, whichever is given: they are
 // only read, and one that still names the module keeps every file in place.
 func (c removedOmnigentConnector) configPaths(opts SetupOpts) []string {
 	var paths []string
-	if home := strings.TrimSpace(opts.ConfigHome); home != "" && filepath.IsAbs(home) {
-		paths = append(paths, filepath.Join(filepath.Clean(home), "config.yaml"))
+	for _, home := range removedResolvedPaths(opts.ConfigHome) {
+		paths = append(paths, filepath.Join(home, "config.yaml"))
 	}
 	paths = append(paths, removedOmnigentExplicitConfig())
-	if home := strings.TrimSpace(os.Getenv("OMNIGENT_CONFIG_HOME")); home != "" && filepath.IsAbs(home) {
-		paths = append(paths, filepath.Join(filepath.Clean(home), "config.yaml"))
+	for _, home := range removedResolvedPaths(os.Getenv("OMNIGENT_CONFIG_HOME")) {
+		paths = append(paths, filepath.Join(home, "config.yaml"))
 	}
 	paths = append(paths, homePath(".omnigent", "config.yaml"))
 	if entry, err := LoadHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise); err == nil {
 		for _, path := range entry.Locations.HookConfigPaths {
 			switch strings.ToLower(filepath.Ext(path)) {
 			case ".yaml", ".yml":
-				if filepath.IsAbs(path) {
-					paths = append(paths, filepath.Clean(path))
-				}
+				paths = append(paths, removedResolvedPaths(path)...)
 			}
 		}
 	}
 	return uniqueNonEmptyStrings(paths)
+}
+
+// removedResolvedPaths resolves a config home or config file an older
+// release may have used, every way it may have read it (nil for ""): a
+// relative path from the working directory (the Go setup used the value as
+// given), and ~, ~/ or ~\ also as the user's home (the Python CLI expands
+// it). Teardown only reads these files, so checking one more costs nothing.
+func removedResolvedPaths(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	var paths []string
+	switch {
+	case value == "~":
+		paths = append(paths, homePath())
+	case strings.HasPrefix(value, "~/") || strings.HasPrefix(value, `~\`):
+		paths = append(paths, filepath.Join(homePath(), value[2:]))
+	}
+	if absolute, err := filepath.Abs(value); err == nil {
+		paths = append(paths, absolute)
+	} else if filepath.IsAbs(value) {
+		paths = append(paths, filepath.Clean(value))
+	}
+	return paths
 }
 
 // removedOmnigentExplicitConfig resolves OMNIGENT_CONFIG the way an older
