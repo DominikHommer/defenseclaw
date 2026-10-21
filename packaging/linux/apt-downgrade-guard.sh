@@ -35,6 +35,16 @@ incoming=$2
 release() { printf '%s' "$1" | sed 's/[-~+].*$//'; }
 dpkg --compare-versions "$(release "$incoming")" lt "$(release "$installed")" || exit 0
 
+# The rollback marker does not lift the release floor of a confirmed signed
+# policy bundle (min_product_version); exit 3 is the gateway's refusal.
+if [ -x "$gateway" ]; then
+    floor_msg=$("$gateway" enterprise bundle floor-check --product-version "$(release "$incoming")" 2>&1 >/dev/null)
+    if [ $? -eq 3 ]; then
+        echo "defenseclaw-enterprise: refusing to downgrade to $incoming: ${floor_msg#Error: } Nothing was changed." >&2
+        exit 1
+    fi
+fi
+
 marker=$state/allow-downgrade
 if [ -f "$marker" ] && [ ! -L "$marker" ]; then
     # Leave the marker: the older package's preinstall checks it too, and its

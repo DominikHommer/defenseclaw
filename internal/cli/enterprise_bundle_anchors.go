@@ -49,7 +49,7 @@ type bundleAnchorsResult struct {
 
 // platformBundleVerbs are the bundle verbs only Linux and macOS have.
 func platformBundleVerbs() []*cobra.Command {
-	return []*cobra.Command{newEnterpriseBundleAnchorsCommand()}
+	return []*cobra.Command{newEnterpriseBundleAnchorsCommand(), newEnterpriseBundleFloorCheckCommand()}
 }
 
 func newEnterpriseBundleAnchorsCommand() *cobra.Command {
