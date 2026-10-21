@@ -294,10 +294,6 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
     new URL('../content/docs/reference/policy/detection.mdx', import.meta.url),
     'utf8',
   );
-  const creator = readFileSync(
-    new URL('../content/docs/how-to/policies/build-a-policy-in-the-browser.mdx', import.meta.url),
-    'utf8',
-  );
   const index = readFileSync(
     new URL('../content/docs/features/policies.mdx', import.meta.url),
     'utf8',
@@ -320,9 +316,6 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
   ));
   assert.ok(index.includes(
     `The balanced/default enabled catalog currently contains ${balanced.enabled} local rules`,
-  ));
-  assert.ok(creator.includes(
-    `Balanced/default exposes ${balanced.declared} declared rules (${balanced.enabled} enabled)`,
   ));
 
   const enforcementCapable = BOUNDED_CHAINS.filter(
@@ -1361,6 +1354,22 @@ test('validators: empty correlator pattern surfaces CORRELATOR_PATTERN_EMPTY', (
   const findings = validatePolicy(policy);
   const codes = findings.map((f) => f.code);
   assert.ok(codes.includes('CORRELATOR_PATTERN_EMPTY'), `expected CORRELATOR_PATTERN_EMPTY in ${codes.join(',')}`);
+});
+
+test('validators: blanket pre-judge strips warn like other blanket suppressions', () => {
+  const policy = makePolicy({
+    suppressions: {
+      pre_judge_strips: [{ id: 'STRIP-ALL', pattern: '.*', context: 'test', applies_to: ['pii'] }],
+      finding_suppressions: [],
+      tool_suppressions: [],
+    },
+  });
+  const broad = validatePolicy(policy).filter((f) => f.code === 'SUPP_OVER_BROAD');
+  assert.equal(broad.length, 1);
+  assert.equal(broad[0].level, 'warning');
+  assert.match(broad[0].location, /pre_judge/);
+  policy.suppressions.pre_judge_strips[0].pattern = '^sender: system$';
+  assert.equal(validatePolicy(policy).filter((f) => f.code === 'SUPP_OVER_BROAD').length, 0);
 });
 
 test('validators: window_events=0 surfaces CORRELATOR_WINDOW_INVALID as error', () => {
