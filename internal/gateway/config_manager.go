@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -188,6 +189,17 @@ type ConfigManager struct {
 	// assetFiles lists its single-file assets (generation.assetFiles); the
 	// watcher follows their directories and matches these exact paths.
 	assetFiles func() []string
+	// candidateAssets lists the asset directories and files a candidate
+	// configuration references. While a reload stands rejected the watcher
+	// follows those of the rejected candidate too, so repairing an asset
+	// only it references rebuilds the generation (GAP-0881).
+	candidateAssets func(*config.Config) (dirs, files []string)
+	rejectedAssets  atomic.Pointer[candidateAssetSet]
+	// assetWatchFailures are the asset folders the watcher could not watch
+	// (GAP-0879); config health is degraded while there are any.
+	healthMu           sync.Mutex
+	lastConfigHealth   configHealthReport
+	assetWatchFailures []string
 	// startupSource is the digest of the bytes the gateway booted from; the
 	// startup reconcile skips its reload while the file still holds them.
 	startupSource [sha256.Size]byte
@@ -229,6 +241,79 @@ type ConfigManager struct {
 	current atomic.Value // *config.Config
 	gen     atomic.Uint64
 	mu      sync.Mutex
+}
+
+// candidateAssetSet is what candidateAssets listed for a rejected candidate.
+type candidateAssetSet struct {
+	dirs, files []string
+}
+
+// configHealthReport is the config health a reload last reported.
+type configHealthReport struct {
+	set     bool
+	state   SubsystemState
+	lastErr string
+	details map[string]interface{}
+}
+
+// setConfigHealth reports config health, degraded while asset folders are
+// not watched (setAssetWatchFailures).
+func (m *ConfigManager) setConfigHealth(state SubsystemState, lastErr string, details map[string]interface{}) {
+	if m == nil || m.health == nil {
+		return
+	}
+	m.healthMu.Lock()
+	m.lastConfigHealth = configHealthReport{set: true, state: state, lastErr: lastErr, details: details}
+	failures := m.assetWatchFailures
+	m.healthMu.Unlock()
+	m.health.SetConfig(withAssetWatchFailures(state, lastErr, details, failures))
+}
+
+// setAssetWatchFailures records the asset folders the watcher could not
+// watch and reports config health again when they change.
+func (m *ConfigManager) setAssetWatchFailures(failures []string) {
+	if m == nil {
+		return
+	}
+	m.healthMu.Lock()
+	if slices.Equal(m.assetWatchFailures, failures) {
+		m.healthMu.Unlock()
+		return
+	}
+	m.assetWatchFailures = slices.Clone(failures)
+	last := m.lastConfigHealth
+	m.healthMu.Unlock()
+	if len(failures) > 0 {
+		fmt.Fprintf(os.Stderr, "[config] WARNING: cannot watch policy asset folders %s; their edits are checked every 30 s\n",
+			strings.Join(failures, ", "))
+	}
+	if m.health != nil && last.set {
+		m.health.SetConfig(withAssetWatchFailures(last.state, last.lastErr, last.details, failures))
+	}
+}
+
+func withAssetWatchFailures(state SubsystemState, lastErr string, details map[string]interface{},
+	failures []string) (SubsystemState, string, map[string]interface{}) {
+	if len(failures) == 0 || state != StateRunning {
+		return state, lastErr, details
+	}
+	degraded := make(map[string]interface{}, len(details)+1)
+	for key, value := range details {
+		degraded[key] = value
+	}
+	degraded["asset_watch_failed"] = slices.Clone(failures)
+	return StateDegraded, "cannot watch policy asset folders " + strings.Join(failures, ", ") +
+		"; their edits are checked every 30 s", degraded
+}
+
+// noteRejectedCandidateAssets keeps the assets of a rejected candidate
+// watched until a reload builds (GAP-0881).
+func (m *ConfigManager) noteRejectedCandidateAssets(candidate *config.Config) {
+	if m.candidateAssets == nil || candidate == nil {
+		return
+	}
+	dirs, files := m.candidateAssets(candidate)
+	m.rejectedAssets.Store(&candidateAssetSet{dirs: dirs, files: files})
 }
 
 func (m *ConfigManager) bindObservabilityV8(runtime hookLifecycleMetricV8Runtime) {
@@ -368,7 +453,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 		return nil
 	}
 	if m.health != nil {
-		m.health.SetConfig(StateRunning, "", map[string]interface{}{
+		m.setConfigHealth(StateRunning, "", map[string]interface{}{
 			"path":       m.path,
 			"generation": m.gen.Load(),
 		})
@@ -380,7 +465,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 	if err != nil {
 		signalConfigStartupReady(startupReady, err)
 		if m.health != nil {
-			m.health.SetConfig(StateError, err.Error(), map[string]interface{}{"path": m.path})
+			m.setConfigHealth(StateError, err.Error(), map[string]interface{}{"path": m.path})
 		}
 		return fmt.Errorf("config watcher: %w", err)
 	}
@@ -390,7 +475,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 	if err := fsw.Add(dir); err != nil {
 		signalConfigStartupReady(startupReady, err)
 		if m.health != nil {
-			m.health.SetConfig(StateError, err.Error(), map[string]interface{}{"path": m.path})
+			m.setConfigHealth(StateError, err.Error(), map[string]interface{}{"path": m.path})
 		}
 		return fmt.Errorf("config watcher: watch %s: %w", dir, err)
 	}
@@ -400,7 +485,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 	// watchedAssets is the asset directory set currently registered with
 	// fsw; syncAssetWatches reconciles it after every reload and on the
 	// 30 s tick.
-	watchedAssets := &assetWatches{fsw: fsw, watched: map[string]struct{}{}}
+	watchedAssets := &assetWatches{fsw: fsw, watched: map[string]struct{}{}, failed: map[string]string{}}
 	// assetDirSet holds the directories whose policy files are assets and
 	// assetFileSet the single asset files, whose directories are watched too.
 	assetDirSet, assetFileSet := map[string]struct{}{}, map[string]struct{}{}
@@ -410,26 +495,35 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 		}
 		want := map[string]struct{}{}
 		dirs, files := map[string]struct{}{}, map[string]struct{}{}
+		var assetDirs, assetFiles []string
 		if m.assetDirs != nil {
-			for _, assetDir := range m.assetDirs() {
-				assetDir = filepath.Clean(assetDir)
-				dirs[assetDir] = struct{}{}
-				if assetDir != dir {
-					want[assetDir] = struct{}{}
-				}
-			}
+			assetDirs = m.assetDirs()
 		}
 		if m.assetFiles != nil {
-			for _, assetFile := range m.assetFiles() {
-				assetFile = filepath.Clean(assetFile)
-				files[assetFile] = struct{}{}
-				if parent := filepath.Dir(assetFile); parent != dir {
-					want[parent] = struct{}{}
-				}
+			assetFiles = m.assetFiles()
+		}
+		if rejected := m.rejectedAssets.Load(); rejected != nil {
+			assetDirs = append(slices.Clone(assetDirs), rejected.dirs...)
+			assetFiles = append(slices.Clone(assetFiles), rejected.files...)
+		}
+		for _, assetDir := range assetDirs {
+			assetDir = filepath.Clean(assetDir)
+			dirs[assetDir] = struct{}{}
+			if assetDir != dir {
+				want[assetDir] = struct{}{}
+			}
+		}
+		for _, assetFile := range assetFiles {
+			assetFile = filepath.Clean(assetFile)
+			files[assetFile] = struct{}{}
+			if parent := filepath.Dir(assetFile); parent != dir {
+				want[parent] = struct{}{}
 			}
 		}
 		assetDirSet, assetFileSet = dirs, files
-		return watchedAssets.sync(want)
+		added := watchedAssets.sync(want)
+		m.setAssetWatchFailures(watchedAssets.failedPaths())
+		return added
 	}
 	isAsset := func(path string) bool {
 		cleaned := filepath.Clean(path)
@@ -566,7 +660,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 		select {
 		case <-ctx.Done():
 			if m.health != nil {
-				m.health.SetConfig(StateStopped, "", map[string]interface{}{"path": m.path})
+				m.setConfigHealth(StateStopped, "", map[string]interface{}{"path": m.path})
 			}
 			return ctx.Err()
 		case event := <-fsw.Events:
@@ -659,8 +753,9 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			ensureEnvConfigWatched()
 			// An asset folder that was deleted and created again (or
 			// created after the generation named it) is watched again
-			// here; rebuild the generation from it.
-			if syncAssetWatches() {
+			// here; rebuild the generation from it. A folder that cannot
+			// be watched is polled instead (GAP-0879).
+			if syncAssetWatches() || watchedAssets.failedFoldersChanged() {
 				if !pending {
 					pendingTrigger = configDiffAssets
 					configReloadInFlight.begin()
@@ -688,6 +783,55 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 type assetWatches struct {
 	fsw     *fsnotify.Watcher
 	watched map[string]struct{}
+	// failed holds each wanted folder the watcher could not watch, with the
+	// fingerprint of its entries (assetFolderFingerprint) when it failed.
+	failed map[string]string
+}
+
+// failedPaths lists the folders the watcher could not watch, sorted.
+func (a *assetWatches) failedPaths() []string {
+	if len(a.failed) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(a.failed))
+	for path := range a.failed {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// failedFoldersChanged reports whether a folder the watcher could not watch
+// changed since it was last checked, the polling fallback for a watch that
+// keeps failing (inotify limits, permissions).
+func (a *assetWatches) failedFoldersChanged() bool {
+	changed := false
+	for path, before := range a.failed {
+		if now := assetFolderFingerprint(path); now != before {
+			a.failed[path] = now
+			changed = true
+		}
+	}
+	return changed
+}
+
+// assetFolderFingerprint digests the names, sizes, modes and modification
+// times of a folder's entries ("" when it cannot be read).
+func assetFolderFingerprint(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.New()
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			fmt.Fprintf(sum, "%s\x00?\x00", entry.Name())
+			continue
+		}
+		fmt.Fprintf(sum, "%s\x00%d\x00%d\x00%d\x00", entry.Name(), info.Size(), info.Mode(), info.ModTime().UnixNano())
+	}
+	return fmt.Sprintf("%x", sum.Sum(nil))
 }
 
 // sync watches exactly want. A watched folder that is gone lost its watch
@@ -704,13 +848,24 @@ func (a *assetWatches) sync(want map[string]struct{}) (added bool) {
 		_ = a.fsw.Remove(assetDir)
 		delete(a.watched, assetDir)
 	}
+	for assetDir := range a.failed {
+		if _, keep := want[assetDir]; !keep {
+			delete(a.failed, assetDir)
+		}
+	}
 	for assetDir := range want {
 		if _, done := a.watched[assetDir]; done {
 			continue
 		}
 		if err := a.fsw.Add(assetDir); err == nil {
 			a.watched[assetDir] = struct{}{}
+			delete(a.failed, assetDir)
 			added = true
+		} else if _, statErr := os.Stat(assetDir); statErr != nil {
+			// A folder that is not there yet is watched once it is.
+			delete(a.failed, assetDir)
+		} else if _, known := a.failed[assetDir]; !known && a.failed != nil {
+			a.failed[assetDir] = assetFolderFingerprint(assetDir)
 		}
 	}
 	return added
@@ -855,7 +1010,7 @@ func (m *ConfigManager) startupSourceUnchanged(ctx context.Context) bool {
 	m.noteAppliedGeneration(snapshot.raw)
 	version.SetContentHash(snapshot.raw)
 	if m.health != nil {
-		m.health.SetConfig(StateRunning, "", map[string]interface{}{
+		m.setConfigHealth(StateRunning, "", map[string]interface{}{
 			"path": m.path, "generation": m.gen.Load(), "reason": "startup_reconcile", "changed": []string{},
 		})
 	}
@@ -905,7 +1060,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		recordGenerationBuildError(err)
 		m.recordLoadError(ctx, "candidate_invalid")
 		if m.health != nil {
-			m.health.SetConfig(StateError, err.Error(), map[string]interface{}{
+			m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
 				"path":       m.path,
 				"generation": m.gen.Load(),
 				"reason":     reason,
@@ -1015,7 +1170,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		); err != nil {
 			m.recordLoadError(ctx, "managed_destination_rejected")
 			if m.health != nil {
-				m.health.SetConfig(StateError, err.Error(), map[string]interface{}{
+				m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
 					"path":       m.path,
 					"generation": m.gen.Load(),
 					"reason":     reason,
@@ -1096,7 +1251,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 			if len(pendingRestart) > 0 {
 				detail["restart_required"] = pendingRestart
 			}
-			m.health.SetConfig(state, msg, detail)
+			m.setConfigHealth(state, msg, detail)
 		}
 		return nil
 	}
@@ -1113,6 +1268,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		// after a digest mismatch), so clear its last_reload_error and error
 		// state; otherwise they stay until an unrelated config write.
 		m.rejected = false
+		m.rejectedAssets.Store(nil)
 		clearGenerationBuildError()
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
@@ -1122,7 +1278,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 			if envOverlayErr != nil {
 				state, msg = StateError, envOverlayErr.Error()
 			}
-			m.health.SetConfig(state, msg, map[string]interface{}{
+			m.setConfigHealth(state, msg, map[string]interface{}{
 				"path":       m.path,
 				"generation": m.gen.Load(),
 				"reason":     reason,
@@ -1133,11 +1289,12 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	}
 	if applyErr != nil {
 		m.rejected = true
+		m.noteRejectedCandidateAssets(next)
 		m.permissionRetry = errors.Is(applyErr, os.ErrPermission)
 		recordGenerationBuildError(applyErr)
 		m.recordLoadError(ctx, "apply_rejected")
 		if m.health != nil {
-			m.health.SetConfig(StateError, applyErr.Error(), map[string]interface{}{
+			m.setConfigHealth(StateError, applyErr.Error(), map[string]interface{}{
 				"path":             m.path,
 				"generation":       m.gen.Load(),
 				"reason":           reason,
@@ -1148,6 +1305,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		return applyErr
 	}
 	m.rejected = false
+	m.rejectedAssets.Store(nil)
 	gen := m.gen.Add(1)
 	m.current.Store(cloneConfig(next))
 	recordHandEdit(ctx, next, m.path, source.raw)
@@ -1198,7 +1356,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 			"restart_required": append(append([]string{}, diff.RestartRequired...), pendingRestart...),
 			"last_success":     time.Now().UTC().Format(time.RFC3339),
 		}
-		m.health.SetConfig(state, msg, detail)
+		m.setConfigHealth(state, msg, detail)
 	}
 	return nil
 }
