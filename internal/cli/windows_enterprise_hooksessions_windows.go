@@ -42,6 +42,19 @@ import (
 // under fail mode open, and blocks when the record is missing, untrusted or
 // of an earlier generation. Install, upgrade, repair and ensure bump the
 // generation when they start too (bumpWindowsHookSessionGeneration).
+//
+// They also hold the records from their start until the folder has been
+// replaced and bumped (enterprisepolicy.HoldPublishedSessionRecords: the
+// file DefenseClaw-HookSessions.hold next to the folder, in the Cisco folder
+// no standard user can change). While the hold is there the hook allows
+// nothing during an outage. An account that kept a handle with WRITE_DAC on
+// the folder can make it look trusted again and put an older generation
+// file and its allows back, and a run that cannot replace the folder (the
+// handle refuses the move) or cannot give it an owner the hook refuses (no
+// SeRestorePrivilege) has nothing in the folder to stop that; so a run that
+// fails before the folder was replaced leaves the hold, and status and
+// verify report it, until a later run replaces the folder (GAP-0352, 1.0.4
+// review loop round 4).
 
 var (
 	windowsHookSessionDir = func() (string, error) {
@@ -71,7 +84,10 @@ func windowsHookSessionSDDL(gateway *windows.SID) string {
 // windowsHookSessionClosedSDDL closes a folder the lifecycle retires when it
 // cannot give it windowsHookSessionRetiredSDDL: no entry for standard users,
 // so the hook cannot read the folder's access list and refuses every record
-// in it.
+// in it. Its owner is Administrators, so an account whose retained handle
+// writes a trusted DACL back makes the folder look trusted again: only the
+// hold, which stays when the folder cannot then be moved aside, keeps the
+// hook from trusting what the account puts back.
 func windowsHookSessionClosedSDDL(gateway *windows.SID) string {
 	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;" + gateway.String() + ")"
 }
@@ -99,11 +115,12 @@ var windowsHookSessionRootTrustProblem = func(root string) error {
 	return enterprisepolicy.ValidatePublishedSessionRoot(root, enterprisepolicy.PublishedSessionTrust{ServiceAccount: windowsHookSessionGatewayAccount})
 }
 
-// bumpWindowsHookSessionGeneration bumps the record generation of an
-// existing record folder before an install, upgrade, repair or ensure
-// changes anything (GAP-0352): no record written before the action proves
-// anything once it started. ensureWindowsHookSessionRoot replaces the folder
-// and bumps again at the end. Best effort.
+// bumpWindowsHookSessionGeneration holds the records and bumps the record
+// generation of an existing record folder before an install, upgrade,
+// repair or ensure changes anything (GAP-0352): no record written before
+// the action proves anything once it started, and the hook allows nothing
+// during an outage until ensureWindowsHookSessionRoot has replaced the
+// folder, bumped it again and removed the hold. Best effort.
 func bumpWindowsHookSessionGeneration(action string) {
 	switch action {
 	case "install", "upgrade", "repair", "ensure":
@@ -117,6 +134,7 @@ func bumpWindowsHookSessionGeneration(action string) {
 	if err != nil || strings.TrimSpace(root) == "" {
 		return
 	}
+	_ = enterprisepolicy.HoldPublishedSessionRecords(root)
 	if _, err := os.Lstat(root); err != nil {
 		return
 	}
@@ -143,14 +161,39 @@ func bumpWindowsHookSessionGeneration(action string) {
 // (a handle that does not share delete access), it keeps the retired owner,
 // which the hook refuses, and the step fails, so the next repair or ensure
 // tries again.
+//
+// The records are held from the start of the step
+// (enterprisepolicy.HoldPublishedSessionRecords), and the hold is removed
+// only once the new folder was bumped: a step that fails leaves it, so the
+// hook allows nothing during an outage even when the folder could get no
+// owner the hook refuses (a lifecycle without SeRestorePrivilege) and a
+// retained handle then wrote a trusted DACL back.
 func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
+	holdErr := enterprisepolicy.HoldPublishedSessionRecords(root)
+	if err := replaceWindowsHookSessionRoot(root, gateway); err != nil {
+		if holdErr != nil {
+			return fmt.Errorf("%w; the records could not be held either (%v), so run repair again as soon as the folder can be replaced", err, holdErr)
+		}
+		return fmt.Errorf("%w; the records stay held, so guarded calls block during a gateway outage until a repair replaces the folder", err)
+	}
+	if err := enterprisepolicy.ReleasePublishedSessionRecords(root); err != nil {
+		return fmt.Errorf("remove the hold of %s: %w", root, err)
+	}
+	// Earlier retired roots: best effort, the hook never reads them.
+	_ = removeWindowsRetiredHookSessionRoots(root)
+	return nil
+}
+
+// replaceWindowsHookSessionRoot is ensureWindowsHookSessionRoot without the
+// hold: it retires the folder at root, creates a new one and bumps it.
+func replaceWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 	var floor time.Time
 	info, err := os.Lstat(root)
 	if err == nil {
 		if !info.IsDir() || winpath.RejectReparseChain(root) != nil {
 			return fmt.Errorf("%s is not a real folder", root)
 		}
-		floor = windowsHookSessionGenerationFloor(root)
+		floor = enterprisepolicy.PublishedSessionGenerationFloor(root)
 		trusted, ownerErr := windowsPathOwnedByAdministrators(root)
 		if ownerErr != nil {
 			return fmt.Errorf("read the owner of %s: %w", root, ownerErr)
@@ -192,34 +235,7 @@ func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 	if err := enterprisepolicy.BumpPublishedSessionGenerationPast(root, floor); err != nil {
 		return fmt.Errorf("start a new record generation in %s: %w", root, err)
 	}
-	// Earlier retired roots: best effort, the hook never reads them.
-	_ = removeWindowsRetiredHookSessionRoots(root)
 	return nil
-}
-
-// windowsHookSessionGenerationFloorLimit bounds how far ahead of the clock
-// the generation of a replaced root is carried: further ahead it can only be
-// a time someone set, and carrying it could run the generation past what a
-// nanosecond count holds.
-const windowsHookSessionGenerationFloorLimit = 24 * time.Hour
-
-// windowsHookSessionGenerationFloor is the generation of the record root
-// about to be replaced, when the hook would trust its file and it is not far
-// ahead of the clock; the zero time otherwise.
-func windowsHookSessionGenerationFloor(root string) time.Time {
-	generation, err := enterprisepolicy.PublishedSessionGeneration(root)
-	if err != nil {
-		return time.Time{}
-	}
-	stamp, err := strconv.ParseInt(generation, 10, 64)
-	if err != nil {
-		return time.Time{}
-	}
-	at := time.Unix(0, stamp)
-	if at.After(time.Now().Add(windowsHookSessionGenerationFloorLimit)) {
-		return time.Time{}
-	}
-	return at
 }
 
 // retireWindowsHookSessionRoot takes the record root folder object out of
@@ -239,7 +255,7 @@ func retireWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 		if retireErr != nil {
 			return fmt.Errorf("%w; it is closed to standard users, but it could not get an owner the hook refuses either (%v)", err, retireErr)
 		}
-		return fmt.Errorf("%w; it keeps an owner the hook refuses, so guarded calls block during an outage until a repair can replace it", err)
+		return fmt.Errorf("%w; it keeps an owner the hook refuses", err)
 	}
 	return nil
 }
@@ -311,7 +327,7 @@ func removeWindowsHookSessionRoot() error {
 	}
 	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
-		return removeWindowsRetiredHookSessionRoots(root)
+		return errors.Join(removeWindowsRetiredHookSessionRoots(root), enterprisepolicy.ReleasePublishedSessionRecords(root))
 	}
 	if err != nil {
 		return err
@@ -319,7 +335,7 @@ func removeWindowsHookSessionRoot() error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s is not a real folder", root)
 	}
-	return errors.Join(os.RemoveAll(root), removeWindowsRetiredHookSessionRoots(root))
+	return errors.Join(os.RemoveAll(root), removeWindowsRetiredHookSessionRoots(root), enterprisepolicy.ReleasePublishedSessionRecords(root))
 }
 
 // windowsHookSessionRootProblem names a missing or untrusted folder, or "".
@@ -332,6 +348,13 @@ func windowsHookSessionRootProblem() string {
 		return root + " is missing. It holds the gateway's protected foreign-hook session records; without it a guarded connector " +
 			"(Copilot, OpenCode) blocks during a gateway outage even when the fail mode is open." +
 			" Fix: run " + windowsEnterpriseAdminCommand("repair")
+	}
+	if enterprisepolicy.PublishedSessionHeld(root) {
+		hold, _ := enterprisepolicy.PublishedSessionHoldPath(root)
+		return root + " is held (" + hold + "): a DefenseClaw lifecycle run did not finish replacing it, so a guarded connector's hook" +
+			" blocks during a gateway outage even when the fail mode is open." +
+			" Fix: close any program that keeps a file in the folder open, then run " + windowsEnterpriseAdminCommand("repair") +
+			", which replaces the folder and removes the hold"
 	}
 	trusted, err := windowsPathOwnedByAdministrators(root)
 	if err == nil && !trusted {

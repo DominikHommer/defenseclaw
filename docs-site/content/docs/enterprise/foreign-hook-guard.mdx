@@ -260,6 +260,19 @@ administrator left the folder writable only brings back answers that no
 longer count. On Linux the package's tmpfiles.d entries create the folder
 and a new generation file at boot, and only at boot.
 
+While a run works on the record folder, it holds the records: it puts a
+`.hold` file next to the folder (`sessions.hold`, or
+`DefenseClaw-HookSessions.hold` on Windows) and deletes it only after the
+folder is closed or replaced and has a new generation. While that file
+exists, guarded calls block during an outage. A run that fails before then
+leaves the file, so guarded calls keep blocking during an outage until a
+later `repair` succeeds. On Windows the hold starts when the action starts.
+
+On macOS, a macOS ACL entry grants access that the folder's mode does not.
+When such an entry lets another account change the record folder, or
+anything in it, `ensure` and `repair` replace the folder with a new, empty
+one before they start the new generation.
+
 A block that cannot replace or delete a record (on Windows the account can
 hold its record open) sets the record's modification time to 1970, which the
 hook reads as expired, and writes a `.deny` file next to it. Either one
@@ -277,21 +290,24 @@ account that can write the ledger and start a new generation records the
 removal for every connector and then clears the mark. Agents that were
 running then stay blocked until they restart. A Windows gateway that cannot
 find the record folder's protected registration blocks every guarded call.
+A check that was running when the guardian recorded a removal reads the
+removals again before it answers, so that call is blocked too.
 
 On Windows, the hook refuses a record when anyone but SYSTEM,
 Administrators or the gateway service can change the record, its folder,
 `DefenseClaw-HookSessions` or `C:\ProgramData\Cisco`, and a generation file
 that SYSTEM or Administrators do not own. If other software loosens the
 permissions on `C:\ProgramData\Cisco`, guarded calls block during an outage.
-`repair` replaces a `DefenseClaw-HookSessions` folder the hook refuses with a
-new, empty one: a user who opened the folder while it allowed changing its
-permissions keeps that access through the open handle. If the folder cannot
-be moved aside (a program holds it open), it gets an owner the hook refuses,
-the step fails, and guarded calls block during an outage until a later
-`repair` replaces it. Windows `status` and `verify` warn
-`hook_session_records_untrusted` when the hook would refuse the folder, a
-folder above it, or its generation file. If you fix the folder's permissions
-by hand, run `repair` afterwards, which starts a new generation.
+`ensure`, `repair`, an upgrade and Setup replace `DefenseClaw-HookSessions`
+with a new, empty folder every time: a user who opened the folder while it
+allowed changing its permissions keeps that access through the open handle.
+If the folder cannot be moved aside (a program holds it open), the step
+fails and the records stay held, so guarded calls block during an outage
+until a later `repair` replaces it. Windows `status` and `verify` warn
+`hook_session_records_untrusted` while the records are held, and when the
+hook would refuse the folder, a folder above it, or its generation file. If
+you fix the folder's permissions by hand, run `repair` afterwards, which
+starts a new generation.
 
 While the gateway cannot answer (it is stopped or restarting, or it ended
 without removing its hook socket), a guarded tool call runs only when the

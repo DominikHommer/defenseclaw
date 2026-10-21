@@ -467,3 +467,111 @@ func TestWindowsHookSessionRepairWithARecordHeldOpen(t *testing.T) {
 		t.Fatalf("after the repair the old allow must prove nothing: %v", err)
 	}
 }
+
+// Review P2 (GAP-0352, 1.0.4 loop round 4): a lifecycle without
+// SeRestorePrivilege cannot give the record root the retired owner and
+// closes it with an Administrators owner instead. A retained handle with
+// WRITE_DAC that does not share delete access refuses the move, so the
+// step fails and the old root stays, with its generation file and allow.
+// The handle then writes the trusted DACL back: the root looks trusted to
+// the hook again. The step now leaves the records held, and the hook allows
+// nothing during an outage until a repair replaces the root; status names
+// the hold. Once the handle is gone, the next repair replaces the root and
+// removes the hold, and the old allow proves nothing.
+func TestWindowsHookSessionRepairWithoutTheRestorePrivilegeHoldsTheRecords(t *testing.T) {
+	for name, drift := range map[string]bool{"drifted": true, "looks trusted": false} {
+		t.Run(name, func(t *testing.T) {
+			root, self, check, _ := windowsHookSessionReplacementTestRoot(t, drift)
+			previous := windowsHookSessionOwnerRestorePrivilege
+			windowsHookSessionOwnerRestorePrivilege = func(func() error) error {
+				return errors.New("a required privilege is not held by the client")
+			}
+			t.Cleanup(func() { windowsHookSessionOwnerRestorePrivilege = previous })
+			pointer, err := winpath.UTF16Ptr(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err := windows.CreateFile(pointer, windows.READ_CONTROL|windows.WRITE_DAC, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil,
+				windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closed := false
+			closeHandle := func() {
+				if !closed {
+					closed = true
+					_ = windows.CloseHandle(handle)
+				}
+			}
+			t.Cleanup(closeHandle)
+			if err := ensureWindowsHookSessionRoot(root, self); err == nil {
+				t.Fatal("a root that cannot be moved aside must fail the step")
+			}
+			// The account writes the trusted DACL back through its handle.
+			if err := setWindowsDACLThroughHandle(t, handle, windowsHookSessionSDDL(self)); err != nil {
+				t.Fatal(err)
+			}
+			if !enterprisepolicy.PublishedSessionHeld(root) {
+				t.Fatal("a step that could not replace the root must leave the records held")
+			}
+			if err := check(); !errors.Is(err, enterprisepolicy.ErrPublishedSessionUnavailable) {
+				t.Fatalf("while the records are held the old allow must prove nothing: %v", err)
+			}
+			if problem := windowsHookSessionRootProblem(); !strings.Contains(problem, "is held") {
+				t.Fatalf("status must name the hold: %q", problem)
+			}
+			closeHandle()
+			windowsHookSessionOwnerRestorePrivilege = previous
+			if err := ensureWindowsHookSessionRoot(root, self); err != nil {
+				t.Fatal(err)
+			}
+			if enterprisepolicy.PublishedSessionHeld(root) {
+				t.Fatal("the repair that replaced the root must remove the hold")
+			}
+			if err := check(); !errors.Is(err, enterprisepolicy.ErrPublishedSessionUnavailable) {
+				t.Fatalf("the old allow must prove nothing: %v", err)
+			}
+			if err := windowsHookSessionTestPublish(root, self.String(), windowsHookSessionTestKey); err != nil {
+				t.Fatal(err)
+			}
+			if err := check(); err != nil {
+				t.Fatalf("the next allow proves the process: %v", err)
+			}
+		})
+	}
+}
+
+// The lifecycle holds the records from its start (with its first bump),
+// so a run that stops before the record step leaves them held, and the
+// record step that replaced the folder removes the hold. Uninstall removes
+// it too.
+func TestWindowsLifecycleHoldsTheRecordsFromItsStart(t *testing.T) {
+	if !windowsEnterpriseIsElevated() {
+		t.Skip("the lifecycle holds the records only when it runs elevated")
+	}
+	root, self, check, _ := windowsHookSessionReplacementTestRoot(t, false)
+	bumpWindowsHookSessionGeneration("status")
+	if enterprisepolicy.PublishedSessionHeld(root) {
+		t.Fatal("status must not hold the records")
+	}
+	bumpWindowsHookSessionGeneration("repair")
+	if !enterprisepolicy.PublishedSessionHeld(root) {
+		t.Fatal("a repair must hold the records from its start")
+	}
+	if err := check(); !errors.Is(err, enterprisepolicy.ErrPublishedSessionUnavailable) {
+		t.Fatalf("while the records are held the allow must prove nothing: %v", err)
+	}
+	if err := ensureWindowsHookSessionRoot(root, self); err != nil {
+		t.Fatal(err)
+	}
+	if enterprisepolicy.PublishedSessionHeld(root) {
+		t.Fatal("the record step must remove the hold")
+	}
+	bumpWindowsHookSessionGeneration("upgrade")
+	if err := removeWindowsHookSessionRoot(); err != nil {
+		t.Fatal(err)
+	}
+	if enterprisepolicy.PublishedSessionHeld(root) {
+		t.Fatal("uninstall must remove the hold")
+	}
+}

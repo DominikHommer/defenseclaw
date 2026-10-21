@@ -79,7 +79,11 @@ import (
 //   - the answer is at most publishedSessionMaxAge old and dated no later
 //     than publishedSessionClockSkew after now;
 //   - no record and no deny marker blocks the call, and every record read is
-//     still the same file at the end.
+//     still the same file at the end;
+//   - no lifecycle holds the record folder: nothing is at <root>.hold, the
+//     hold a lifecycle puts next to the folder before it replaces or closes
+//     it and removes only once that succeeded (HoldPublishedSessionRecords),
+//     and the generation did not change while the hook checked the hold.
 //
 // A block the gateway decides on its own (a session start that found an
 // unapproved hook) bumps no generation: it replaces the record. When the
@@ -524,8 +528,9 @@ func ownPublishedSessionGeneration(path string) (time.Time, error) {
 // outage from the protected record of identity under root. It returns the
 // scan's decision when a trusted record of the agent process proves it not
 // blocked, carries the current generation, no record or deny marker blocks
-// it, and every record it read is still in place and fresh
-// (publishedSessionMaxAge, publishedSessionClockSkew); a denial with the
+// it, every record it read is still in place and fresh
+// (publishedSessionMaxAge, publishedSessionClockSkew), and no lifecycle
+// holds the folder (PublishedSessionHeld); a denial with the
 // gateway's reason when a record or marker blocks it; and
 // ErrPublishedSessionUnavailable otherwise. A session record alone never
 // proves an allow: an agent process the hook cannot name may be one that
@@ -613,6 +618,16 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 	}
 	if proof == "" || proof != generation {
 		return decision, fmt.Errorf("%w: the record is of an earlier generation of the record folder", ErrPublishedSessionUnavailable)
+	}
+	// Then the hold, and the generation once more: a lifecycle that could
+	// not replace or close the folder leaves its hold, and one that
+	// finished while this check ran bumped the generation before it removed
+	// the hold, so an allow read while the folder was held never passes.
+	if PublishedSessionHeld(root) {
+		return decision, fmt.Errorf("%w: a DefenseClaw lifecycle run holds the record folder: it is replacing or closing it, or could not finish", ErrPublishedSessionUnavailable)
+	}
+	if again, err := readPublishedSessionGeneration(root, trust); err != nil || again != generation {
+		return decision, fmt.Errorf("%w: the record folder's generation changed while the record was checked", ErrPublishedSessionUnavailable)
 	}
 	return decision, nil
 }

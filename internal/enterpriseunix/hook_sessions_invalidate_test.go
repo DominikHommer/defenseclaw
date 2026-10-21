@@ -152,13 +152,13 @@ func TestTheLifecycleBumpsTheHookSessionGenerationFirstAndWhileClosed(t *testing
 	root := h.env.P(h.env.Layout.HookSessionDir)
 	var events []string
 	previousBump := hookSessionBump
-	hookSessionBump = func(path string) error {
+	hookSessionBump = func(path string, floor time.Time) error {
 		info, err := os.Lstat(path)
 		if err != nil {
 			return err
 		}
 		events = append(events, "bump "+strconv.FormatUint(uint64(info.Mode().Perm()), 8))
-		return previousBump(path)
+		return previousBump(path, floor)
 	}
 	t.Cleanup(func() { hookSessionBump = previousBump })
 	// The account that owns the record folder opens it again while it still
@@ -210,7 +210,7 @@ func TestTheLifecycleBumpsTheHookSessionGenerationFirstAndWhileClosed(t *testing
 	// A bump that cannot run fails the run, and the folder is not opened:
 	// it stays closed, or the rollback gives it back the loosened mode,
 	// which the hook refuses just the same.
-	hookSessionBump = func(string) error { return errors.New("the volume is read-only") }
+	hookSessionBump = func(string, time.Time) error { return errors.New("the volume is read-only") }
 	if result := h.run(Options{Action: ActionRepair}); len(result.Errors) == 0 {
 		t.Fatal("a repair whose bump fails must fail")
 	}
@@ -355,9 +355,9 @@ func TestRepairNeverOpensAFolderAboveTheRecordsBeforeTheirBump(t *testing.T) {
 				}
 				t.Cleanup(func() { h.env.Lchown = previousLchown })
 				previousBump := hookSessionBump
-				hookSessionBump = func(path string) error {
+				hookSessionBump = func(path string, floor time.Time) error {
 					probe("at the bump of " + path)
-					err := previousBump(path)
+					err := previousBump(path, floor)
 					bumped = bumped || path == root
 					return err
 				}
@@ -393,5 +393,260 @@ func TestRepairNeverOpensAFolderAboveTheRecordsBeforeTheirBump(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Review P1 (GAP-0352, 1.0.4 loop round 4): on macOS an access-list entry
+// grants what the mode does not. An account with an entry that let it
+// change the record folder saved the folder's generation file and its own
+// record folder before a repair. The repair closed the folder (0700) and
+// bumped it, but removed the entry only later (removeACLs): through the
+// entry the account put the saved generation file and allow back after the
+// bump, and once the entry was gone the hook trusted the old allow. The
+// repair now replaces a record folder that such an entry reaches, on the
+// folder or on anything in it (an inherited entry on an account folder or
+// on the generation file included), and takes away any entry the new
+// folder inherits, before the bump. Whenever the account acts (at its first
+// chance, or only after the bump) the hook reaches the old allow at no
+// point of the run or after it, and no entry that lets another account
+// change anything is left in the record tree.
+func TestRepairReplacesARecordFolderAnAccessListLetsAnotherAccountChange(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	root := h.env.P(h.env.Layout.HookSessionDir)
+	generationPath, _ := enterprisepolicy.PublishedSessionGenerationPath(root)
+	accountDir, _ := enterprisepolicy.PublishedSessionIdentityDir(root, "1001")
+	type entryCase struct {
+		name, entry string
+		on          func() string
+		restore     bool   // the account can change the record folder itself
+		when        string // "first", "after the bump" or "into the new folder"
+		inheritNew  bool   // the new folder inherits an entry from the folder above
+	}
+	onRoot := func() string { return root }
+	cases := []entryCase{
+		{name: "folder write entry, first", entry: "user:developer allow add_file,add_subdirectory,delete_child", on: onRoot, restore: true, when: "first"},
+		{name: "folder write entry, after the bump", entry: "user:developer allow add_file,add_subdirectory,delete_child", on: onRoot, restore: true, when: "after the bump"},
+		{name: "folder writesecurity entry, after the bump", entry: "user:developer allow writesecurity", on: onRoot, restore: true, when: "after the bump"},
+		{name: "folder write entry, the new folder inherits one", entry: "user:developer allow add_file,delete_child", on: onRoot, restore: true, when: "into the new folder", inheritNew: true},
+		{name: "inherited entry on the account folder", entry: "user:developer inherited allow add_file,delete_child", on: func() string { return accountDir }},
+		{name: "entry on the generation file", entry: "user:developer allow write,writeattr", on: func() string { return generationPath }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			record := publishHookSessionTestAllow(t, root)
+			saved := t.TempDir()
+			h.runner.mu.Lock()
+			h.runner.acls = map[string][]string{c.on(): {c.entry}}
+			h.runner.mu.Unlock()
+			t.Cleanup(func() {
+				h.runner.mu.Lock()
+				h.runner.acls = nil
+				h.runner.mu.Unlock()
+			})
+			if c.restore {
+				// Through its entry the account saves the generation file and
+				// its record folder before the repair.
+				if err := os.Rename(generationPath, filepath.Join(saved, "generation")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Dir(record), filepath.Join(saved, "account")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			canChangeRoot := func() bool {
+				h.runner.mu.Lock()
+				defer h.runner.mu.Unlock()
+				return len(h.runner.acls[root]) > 0
+			}
+			treeEntry := func() string {
+				h.runner.mu.Lock()
+				defer h.runner.mu.Unlock()
+				for path, entries := range h.runner.acls {
+					if len(entries) > 0 && (path == root || strings.HasPrefix(path, root+"/")) {
+						if _, err := os.Lstat(path); err == nil {
+							return path
+						}
+					}
+				}
+				return ""
+			}
+			returned, sealed, renamed, reached := false, false, false, ""
+			probe := func(when string) {
+				if reached == "" && treeEntry() == "" && hookSessionTestReachable(h, root) {
+					reached = when
+				}
+			}
+			bringBack := func() error {
+				if !c.restore || returned || !canChangeRoot() || c.when == "after the bump" && !sealed || c.when == "into the new folder" && !renamed {
+					return nil
+				}
+				if _, err := os.Lstat(root); err != nil {
+					return nil
+				}
+				if err := os.RemoveAll(generationPath); err != nil {
+					return err
+				}
+				if err := os.RemoveAll(filepath.Dir(record)); err != nil {
+					return err
+				}
+				if err := os.Rename(filepath.Join(saved, "generation"), generationPath); err != nil {
+					return err
+				}
+				if err := os.Rename(filepath.Join(saved, "account"), filepath.Dir(record)); err != nil {
+					return err
+				}
+				if !hookSessionTestProves(root) && !enterprisepolicy.PublishedSessionHeld(root) {
+					return errors.New("the brought-back folder must still hold its own allow")
+				}
+				returned = true
+				return nil
+			}
+			// An access list stays with the folder it is on: the old one's
+			// goes aside with it.
+			previousRename := hookSessionRename
+			hookSessionRename = func(from, to string) error {
+				if err := previousRename(from, to); err != nil {
+					return err
+				}
+				h.runner.mu.Lock()
+				moved := map[string][]string{}
+				for path, entries := range h.runner.acls {
+					if path == from || strings.HasPrefix(path, from+"/") {
+						moved[to+strings.TrimPrefix(path, from)] = entries
+					} else {
+						moved[path] = entries
+					}
+				}
+				if c.inheritNew {
+					moved[from] = []string{"user:developer inherited allow add_file,add_subdirectory,delete_child"}
+				}
+				h.runner.acls = moved
+				h.runner.mu.Unlock()
+				renamed = true
+				return nil
+			}
+			t.Cleanup(func() { hookSessionRename = previousRename })
+			previousLchown := h.env.Lchown
+			h.env.Lchown = func(path string, uid, gid int) error {
+				if err := bringBack(); err != nil {
+					return err
+				}
+				probe("before the chown of " + path)
+				err := previousLchown(path, uid, gid)
+				probe("after the chown of " + path)
+				return err
+			}
+			t.Cleanup(func() { h.env.Lchown = previousLchown })
+			previousBump := hookSessionBump
+			hookSessionBump = func(path string, floor time.Time) error {
+				probe("at the bump of " + path)
+				info, statErr := os.Lstat(path)
+				err := previousBump(path, floor)
+				sealed = sealed || path == root && statErr == nil && info.Mode().Perm() == 0o700
+				if bringErr := bringBack(); bringErr != nil {
+					return bringErr
+				}
+				probe("after the bump of " + path)
+				return err
+			}
+			t.Cleanup(func() { hookSessionBump = previousBump })
+			requireOK(t, h.run(Options{Action: ActionRepair}))
+			probe("after the repair")
+			if !sealed {
+				t.Fatal("the repair must bump the closed record folder")
+			}
+			if c.restore && c.when != "after the bump" && !returned {
+				t.Fatal("the account must put its saved folder back while it can")
+			}
+			if reached != "" {
+				t.Fatalf("the hook could trust the old allow %s", reached)
+			}
+			if path := treeEntry(); path != "" {
+				t.Fatalf("an access-list entry that lets another account change %s is left in the record tree", path)
+			}
+			if enterprisepolicy.PublishedSessionHeld(root) {
+				t.Fatal("a repair that succeeded must remove its hold")
+			}
+			if info, err := os.Lstat(root); err != nil || info.Mode().Perm() != 0o711 {
+				t.Fatalf("the record folder's mode must be put back: %v %v", info, err)
+			}
+			entries, err := os.ReadDir(filepath.Dir(root))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if strings.Contains(entry.Name(), hookSessionRetiredInfix) {
+					t.Fatalf("a replaced record folder must not be left behind: %s", entry.Name())
+				}
+			}
+		})
+	}
+}
+
+// The same when the repair cannot replace the folder (the rename is
+// refused) or cannot read its access lists: the run fails with the records
+// held, so even an account whose entry lets it take that entry away again
+// (writesecurity) and put its saved generation file and allow back finds
+// the hook allowing nothing, on a host whose rollback gave the folder its
+// mode back. The next repair that succeeds removes the hold.
+func TestARepairThatCannotReplaceTheRecordFolderHoldsTheRecords(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	root := h.env.P(h.env.Layout.HookSessionDir)
+	generationPath, _ := enterprisepolicy.PublishedSessionGenerationPath(root)
+	entry := "user:developer allow add_file,add_subdirectory,delete_child,writesecurity"
+	for _, how := range []string{"rename refused", "access list unreadable"} {
+		t.Run(how, func(t *testing.T) {
+			record := publishHookSessionTestAllow(t, root)
+			saved := t.TempDir()
+			for from, to := range map[string]string{generationPath: filepath.Join(saved, "generation"), filepath.Dir(record): filepath.Join(saved, "account")} {
+				if err := os.Rename(from, to); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.runner.mu.Lock()
+			h.runner.acls = map[string][]string{root: {entry}}
+			h.runner.mu.Unlock()
+			previousRunner, previousRename := h.env.Runner, hookSessionRename
+			t.Cleanup(func() { h.env.Runner, hookSessionRename = previousRunner, previousRename })
+			if how == "rename refused" {
+				hookSessionRename = func(string, string) error { return errors.New("resource busy") }
+			} else {
+				h.env.Runner = failingLsRunner{Runner: previousRunner, path: root}
+			}
+			if result := h.run(Options{Action: ActionRepair}); result.OK {
+				t.Fatalf("a repair that cannot replace the record folder must fail: %+v", result)
+			}
+			if !enterprisepolicy.PublishedSessionHeld(root) {
+				t.Fatal("the failed repair must leave the records held")
+			}
+			// The account puts its saved folder back, takes its own entry
+			// away and gives the folder the mode the hook trusts.
+			_ = os.RemoveAll(generationPath)
+			_ = os.RemoveAll(filepath.Dir(record))
+			for from, to := range map[string]string{filepath.Join(saved, "generation"): generationPath, filepath.Join(saved, "account"): filepath.Dir(record)} {
+				if err := os.Rename(from, to); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.runner.mu.Lock()
+			h.runner.acls = nil
+			h.runner.mu.Unlock()
+			if err := os.Chmod(root, 0o711); err != nil {
+				t.Fatal(err)
+			}
+			if hookSessionTestReachable(h, root) {
+				t.Fatal("while the records are held the hook must allow nothing")
+			}
+			h.env.Runner, hookSessionRename = previousRunner, previousRename
+			requireOK(t, h.run(Options{Action: ActionRepair}))
+			if enterprisepolicy.PublishedSessionHeld(root) {
+				t.Fatal("the next repair that succeeds must remove the hold")
+			}
+			if hookSessionTestProves(root) {
+				t.Fatal("after that repair the old allow proves nothing")
+			}
+		})
 	}
 }
