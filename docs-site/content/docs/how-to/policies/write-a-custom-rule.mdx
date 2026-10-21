@@ -87,7 +87,14 @@ my-org:
   path: /home/alice/.defenseclaw/policies/guardrail/my-org
 ```
 
-Compilation does not prove a connector supplies the facts your expression reads. In observe mode, run a real command that reads the directory and a near miss, then check `defenseclaw alerts` for `ORG-PAYMENTS-SECRETS`. No CLI injects synthetic facts.
+Compilation does not prove a connector supplies the facts your expression reads. In observe mode, run a real command that reads the directory and a near miss, then inspect the connector's native decision and its recent alerts:
+
+```bash
+defenseclaw alerts --limit 25 --connector claudecode
+defenseclaw alerts --show 1
+```
+
+Use the connector you tested and the alert number from the list. Secret findings hide rule IDs and titles in both alert views: this rule can appear as `redacted.secret.id-…` with the title `Secret finding`. Searching alerts for `ORG-PAYMENTS-SECRETS` will not find that redacted entry. Check the original ID in the connector's native hook decision, then correlate its connector, time and session with the alert details. The pack path and files digest above establish which reviewed rules are configured; they do not prove a hook exercised this rule. No CLI injects synthetic facts.
 
 With the default pack's levels, this CRITICAL rule can block in action mode when the facts are complete. A HIGH rule would alert only.
 
