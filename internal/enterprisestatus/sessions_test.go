@@ -109,3 +109,16 @@ func TestBundleDigestUnverifiableMarkerReachesStatus(t *testing.T) {
 		t.Fatalf("digest marker omitted or duplicated: %+v", r)
 	}
 }
+
+// receipt_publish_failed reaches warnings[] next to a digest marker that is
+// already listed.
+func TestBundleReceiptPublishFailedReachesStatus(t *testing.T) {
+	r := &Result{Bundle: &BundleState{State: BundleConfirmed, WarningCodes: []string{"digest_unverifiable", "receipt_publish_failed"}}}
+	r.AddWarning("digest_unverifiable", "listed earlier")
+	r.SetBundleReceiptWarnings()
+	r.SetBundleReceiptWarnings()
+	if len(r.Warnings) != 2 || r.Warnings[1].Code != "receipt_publish_failed" ||
+		!strings.Contains(r.Warnings[1].Message, "bundle status are the record") {
+		t.Fatalf("publish failure omitted or duplicated: %+v", r.Warnings)
+	}
+}
