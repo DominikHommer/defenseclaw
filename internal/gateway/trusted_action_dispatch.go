@@ -634,20 +634,26 @@ type stdinFileReader struct {
 	pattern bool   // the first operand is a pattern, unless patternArgs gave one
 	// patternArgs are the short options whose argument is a pattern (grep -e).
 	patternArgs string
-	// long maps a long option to whether it takes the next word as its
-	// argument; true for the pattern options of longPattern.
+	// fileArgs are the short options whose argument is a file the program
+	// reads (grep -f), stdin when it is "-".
+	fileArgs string
+	// long maps a long option to whether it takes an argument (--name=value
+	// or the next word); longPattern and longFile mark the ones whose
+	// argument is a pattern or a file the program reads.
 	long        map[string]bool
 	longPattern map[string]bool
+	longFile    map[string]bool
 	anyFlag     bool // every option is a flag without an argument (cat)
 }
 
-var checksumReader = stdinFileReader{flags: "btcwz",
-	long: map[string]bool{"binary": false, "text": false, "check": false, "tag": false,
-		"quiet": false, "status": false, "strict": false, "warn": false, "zero": false, "ignore-missing": false}}
+// checksumReader leaves out -c (--check): a checksum list may name "-" or
+// /dev/stdin, which the tool then reads.
+var checksumReader = stdinFileReader{flags: "btwz",
+	long: map[string]bool{"binary": false, "text": false, "tag": false, "zero": false}}
 
 var grepReader = stdinFileReader{
 	flags: "EFGPiyvwxcLloqsbHhnTZzrRaIUuVJOSpM", args: "efmABCdD",
-	pattern: true, patternArgs: "ef",
+	pattern: true, patternArgs: "ef", fileArgs: "f",
 	long: map[string]bool{
 		"extended-regexp": false, "fixed-strings": false, "basic-regexp": false, "perl-regexp": false,
 		"ignore-case": false, "no-ignore-case": false, "invert-match": false, "word-regexp": false,
@@ -659,6 +665,7 @@ var grepReader = stdinFileReader{
 		"after-context": true, "before-context": true, "context": true, "label": true,
 	},
 	longPattern: map[string]bool{"regexp": true, "file": true},
+	longFile:    map[string]bool{"file": true},
 }
 
 // stdinFileReaders are the programs whose heredoc is unread when they have a
@@ -688,9 +695,15 @@ var stdinFileReaders = map[string]stdinFileReader{
 
 // literalStdinUnread reports whether command, fed a quoted heredoc, is known
 // never to read it: a program of stdinIgnoringPrograms, or a reader of
-// stdinFileReaders with a file operand and no word that names stdin. A
-// wrapper, an argument the parse did not resolve, an option the grammar does
-// not know, or any other program may read it (fail closed).
+// stdinFileReaders with a file operand and no file word that names stdin.
+// Each word is classified first: an option, an option's value (a file it
+// reads, as grep -f, or data such as a pattern, a count or a delimiter), the
+// pattern operand, or a file operand; only a file word can name stdin, so
+// grep -e - file reads file. With POSIXLY_CORRECT set, options end at the
+// first operand, so a later word that names stdin may be a file operand too.
+// A wrapper, an argument the parse did not resolve, an option the grammar
+// does not know, a missing option value, or any other program may read it
+// (fail closed).
 func literalStdinUnread(command actionfacts.CommandFact) bool {
 	if len(command.Wrappers) != 0 || !command.ArgvComplete || len(command.Argv) == 0 {
 		return false
@@ -702,65 +715,84 @@ func literalStdinUnread(command actionfacts.CommandFact) bool {
 	if !ok {
 		return false
 	}
-	for _, arg := range command.Argv[1:] {
-		if namesStdin(arg) {
-			return false
-		}
-	}
-	operands, patternGiven, options := 0, false, true
+	var operands []string
+	firstOperand, patternGiven, options := -1, false, true
 	args := command.Argv[1:]
+	// next takes the next word as the value of an option.
+	next := func(i *int) (string, bool) {
+		if *i+1 >= len(args) {
+			return "", false
+		}
+		*i++
+		return args[*i], true
+	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
-		case !options || !strings.HasPrefix(arg, "-"):
-			operands++
+		case !options || arg == "-" || !strings.HasPrefix(arg, "-"):
+			if firstOperand < 0 {
+				firstOperand = i
+			}
+			operands = append(operands, arg)
 		case arg == "--":
 			options = false
 		case reader.anyFlag:
 		case strings.HasPrefix(arg, "--"):
-			name, _, attached := strings.Cut(arg[2:], "=")
+			name, attached, hasValue := strings.Cut(arg[2:], "=")
 			takesArg, known := reader.long[name]
 			if !known {
 				return false
 			}
-			if reader.longPattern[name] {
-				patternGiven = true
+			if !takesArg {
+				continue // a flag; --color=auto has an optional value
 			}
-			if takesArg && !attached {
-				i++
+			word := attached
+			if !hasValue {
+				if word, ok = next(&i); !ok {
+					return false
+				}
+			}
+			patternGiven = patternGiven || reader.longPattern[name]
+			if reader.longFile[name] && namesStdinFile(word) {
+				return false
 			}
 		default:
 			for j := 1; j < len(arg); j++ {
-				switch letter := arg[j]; {
-				case strings.IndexByte(reader.flags, letter) >= 0:
+				letter := arg[j]
+				if strings.IndexByte(reader.flags, letter) >= 0 {
 					continue
-				case strings.IndexByte(reader.args, letter) >= 0:
-					if strings.IndexByte(reader.patternArgs, letter) >= 0 {
-						patternGiven = true
+				}
+				if strings.IndexByte(reader.args, letter) < 0 {
+					return false
+				}
+				word := arg[j+1:]
+				if word == "" {
+					if word, ok = next(&i); !ok {
+						return false
 					}
-					if j == len(arg)-1 {
-						i++ // the argument is the next word
-					}
-				default:
+				}
+				patternGiven = patternGiven || strings.IndexByte(reader.patternArgs, letter) >= 0
+				if strings.IndexByte(reader.fileArgs, letter) >= 0 && namesStdinFile(word) {
 					return false
 				}
 				break
 			}
 		}
 	}
-	if reader.pattern && !patternGiven {
-		operands--
+	if firstOperand >= 0 && slices.ContainsFunc(args[firstOperand+1:], namesStdinFile) {
+		return false
 	}
-	return operands > 0
+	if reader.pattern && !patternGiven && len(operands) > 0 {
+		operands = operands[1:] // the pattern
+	}
+	return len(operands) > 0 && !slices.ContainsFunc(operands, namesStdinFile)
 }
 
-// namesStdin reports whether word may name stdin as a file: "-", an option
-// whose value is "-" (--file=-, -f-), or a /dev or /proc file descriptor path.
-func namesStdin(word string) bool {
-	return word == "-" || strings.HasSuffix(word, "=-") ||
-		len(word) > 2 && word[0] == '-' && word[1] != '-' && strings.HasSuffix(word, "-") ||
-		strings.Contains(word, "/dev/stdin") || strings.Contains(word, "/dev/fd/") ||
-		strings.Contains(word, "/proc/")
+// namesStdinFile reports whether file, a word a program opens as a file,
+// may be its stdin: "-", or a /dev or /proc file descriptor path.
+func namesStdinFile(file string) bool {
+	return file == "-" || strings.Contains(file, "/dev/stdin") ||
+		strings.Contains(file, "/dev/fd/") || strings.Contains(file, "/proc/")
 }
 
 // appendJSONStrings appends every string of the JSON value raw, object keys

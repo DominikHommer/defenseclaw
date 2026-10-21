@@ -29,7 +29,8 @@ import (
 var (
 	trustedPathlibAuthorizedKeysAssign   = regexp.MustCompile(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];`)
 	trustedPathlibWriteText              = regexp.MustCompile(`\bp\.write_text\(`)
-	trustedPathlibReassign               = regexp.MustCompile(`\bp\s*:?=[^=]|\bfor\s+p\s+in\b|\bas\s+p\b`)
+	trustedPathlibReassign               = regexp.MustCompile(`\bp\s*=([^=])`)
+	trustedPythonOtherPath               = regexp.MustCompile(`^(?:(?:pathlib\.)?Path\s*\(\s*(?:"([^"\\\n]*)"|'([^'\\\n]*)')\s*\)|"([^"\\\n]*)"|'([^'\\\n]*)')$`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
@@ -214,8 +215,9 @@ func trustedPythonCodeAt(text, calls string, i int) bool {
 }
 
 // trustedPathlibAuthorizedKeysWrite proves p = Path.home() / ".ssh" /
-// "authorized_keys"; ... p.write_text(...) only when p is not bound again
-// before the write (GAP-1299). Both start in code (calls).
+// "authorized_keys"; ... p.write_text(...) unless p is bound to another path
+// before the write (trustedPathlibRebound, GAP-1299). Both start in code
+// (calls).
 func trustedPathlibAuthorizedKeysWrite(text, calls string) bool {
 	if len(calls) != len(text) {
 		return false
@@ -224,9 +226,45 @@ func trustedPathlibAuthorizedKeysWrite(text, calls string) bool {
 		if !trustedPythonCodeAt(text, calls, assign[0]) {
 			continue
 		}
-		rest := calls[assign[1]:]
-		write := trustedPathlibWriteText.FindStringIndex(rest)
-		if write != nil && !trustedPathlibReassign.MatchString(rest[:write[0]]) {
+		write := trustedPathlibWriteText.FindStringIndex(calls[assign[1]:])
+		if write != nil && !trustedPathlibRebound(text, assign[1], assign[1]+write[0]) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedPathlibRebound reports whether text[from:to] binds p, in code, to a
+// literal path that is not a keys file: p = Path("notes.txt"), p =
+// pathlib.Path('notes.txt') or p = "notes.txt" as an unconditional statement
+// of its own. A binding spelled in a string or f"{p=}", a binding that may
+// not run, or any other value (p = p, p = q, the keys file again, a loop or
+// with target) may leave p the keys file, so the proof stands (fail closed).
+// So does source whose strings the masker cannot follow.
+func trustedPathlibRebound(text string, from, to int) bool {
+	code := guardrail.MaskPythonStrings(text)
+	if len(code) != len(text) || code == text && strings.ContainsAny(text, "'\"#") {
+		return false
+	}
+	for _, hit := range trustedPathlibReassign.FindAllStringSubmatchIndex(code[from:to], -1) {
+		start := from + hit[2]
+		// An unconditional statement of its own: at column 0 or after a ";" of
+		// a simple statement at column 0, not after a backslash continuation.
+		// An attribute (x.p = ...), a chained target, an indented or
+		// compound-statement binding (if x: p = ...) may leave p bound.
+		line := strings.LastIndexByte(code[:from+hit[0]], '\n') + 1
+		prefix := code[line : from+hit[0]]
+		statement := strings.TrimRight(prefix, " \t")
+		if line >= 2 && code[line-2] == '\\' || strings.HasPrefix(prefix, " ") || strings.HasPrefix(prefix, "\t") ||
+			statement != "" && !strings.HasSuffix(statement, ";") || strings.Contains(prefix, ":") {
+			continue
+		}
+		end := to
+		if i := strings.IndexAny(code[start:to], ";\n"); i >= 0 {
+			end = start + i
+		}
+		literal := trustedPythonOtherPath.FindStringSubmatch(strings.TrimSpace(text[start:end]))
+		if literal != nil && !strings.Contains(strings.ToLower(strings.Join(literal[1:], "")), "authorized_keys") {
 			return true
 		}
 	}

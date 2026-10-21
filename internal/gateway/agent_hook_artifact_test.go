@@ -172,6 +172,11 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 		{"#!/bin/sh\ngrep acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
 		{"#!/bin/sh\ngrep -n -e acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
 		{"#!/bin/sh\nhead -n 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		// A "-" pattern or option value is not a stdin operand; a "-" file is.
+		{"#!/bin/sh\ngrep -e - /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		{"#!/bin/sh\ncut -d - -f 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		{"#!/bin/sh\ngrep -f - /dev/null > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ngrep -e - /dev/null - > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ngrep acme > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ngrep acme /dev/stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ncat /dev/stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},

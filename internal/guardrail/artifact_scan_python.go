@@ -170,8 +170,10 @@ func pythonCallEnd(line string, open int) int {
 // MaskPythonCommentsAndDocstrings blanks the comments and the triple-quoted
 // strings of Python source in place, so matches keep their offsets: they can
 // mention paths without executing a write. An f- or t-string runs the
-// expressions of its replacement fields, so those fields are kept whole and
-// only its literal text is blanked. Source whose strings the scan cannot
+// expressions of its replacement fields, so those are kept and its literal
+// text is blanked: the text around the fields, the literal text of a format
+// spec (f"{x:spec}", whose nested fields run), a conversion (!r) and a
+// self-documenting "=" (f"{x=}"). Source whose strings the scan cannot
 // follow (an unclosed string or field, nesting past pythonMaxStringNesting) is
 // returned unmasked: blanking from a wrong string boundary could hide code.
 func MaskPythonCommentsAndDocstrings(source string) string {
@@ -184,17 +186,17 @@ func MaskPythonCommentsAndDocstrings(source string) string {
 				i++
 			}
 		case '\'', '"':
-			var fields [][2]int
-			end, ok := pythonStringEnd(out, i, 0, &fields)
+			var exprs [][2]int
+			end, ok := pythonStringEnd(out, i, 0, &exprs)
 			if !ok {
 				return source
 			}
 			if pythonTripleQuoteAt(out, i) {
-				// Blank the literal text around the fields, which run.
+				// Blank the literal text around the field expressions, which run.
 				from := i
-				for _, field := range fields {
-					blankPythonText(out[from:field[0]])
-					from = field[1]
+				for _, expr := range exprs {
+					blankPythonText(out[from:expr[0]])
+					from = expr[1]
 				}
 				blankPythonText(out[from:end])
 			}
@@ -207,11 +209,12 @@ func MaskPythonCommentsAndDocstrings(source string) string {
 }
 
 // MaskPythonStrings blanks the comments of Python source and the text of
-// every string literal in place, quotes included, keeping the replacement
-// fields of f- and t-strings (whose own strings are blanked too): what is
-// left is the code that runs. A call spelled inside a string, or in the
-// literal text of a one-line f-string, is data, not a call. Source whose
-// strings the scan cannot follow is returned unmasked (fail closed).
+// every string literal in place, quotes included, keeping the expressions of
+// the replacement fields of f- and t-strings (whose own strings are blanked
+// too; format spec text is literal text): what is left is the code that
+// runs. A call spelled inside a string, or in the literal text of a one-line
+// f-string, is data, not a call. Source whose strings the scan cannot follow
+// is returned unmasked (fail closed).
 func MaskPythonStrings(source string) string {
 	out := []byte(source)
 	if !maskPythonStrings(out, 0, len(out), 0) {
@@ -229,18 +232,18 @@ func maskPythonStrings(out []byte, from, to, depth int) bool {
 				i++
 			}
 		case '\'', '"':
-			var fields [][2]int
-			end, ok := pythonStringEnd(out, i, depth, &fields)
+			var exprs [][2]int
+			end, ok := pythonStringEnd(out, i, depth, &exprs)
 			if !ok || end > to {
 				return false
 			}
 			text := i
-			for _, field := range fields {
-				blankPythonText(out[text:field[0]])
-				if !maskPythonStrings(out, field[0]+1, field[1]-1, depth+1) {
+			for _, expr := range exprs {
+				blankPythonText(out[text:expr[0]])
+				if !maskPythonStrings(out, expr[0], expr[1], depth+1) {
 					return false
 				}
-				text = field[1]
+				text = expr[1]
 			}
 			blankPythonText(out[text:end])
 			i = end
@@ -280,21 +283,92 @@ var pythonStringRunNames = map[string]bool{
 // docstrings: a name of pythonStringRunFragments or pythonStringRunNames
 // appears in it. A name in an import statement does not count when no name
 // that statement binds is used elsewhere: an unused import runs nothing.
+// Nor does a variable of the program's own (source = 1, def doc(x),
+// f(write=True)): a plain name, not an attribute, that is not a builtin or a
+// module dunder (exec, open, __doc__) and that no import may bind (named in
+// an import, or any "from m import *") holds only a value that code this scan
+// reads computed, so the name reaches no sink that code does not name.
 func PythonStringsMayRun(code string) bool {
 	names := pythonName.FindAllStringIndex(code, -1)
-	unused := pythonUnusedImports(code, names)
+	var unused [][2]int
+	imported, star := map[string]bool{}, false
+	for _, statement := range pythonImports(code) {
+		if statement.bound == nil {
+			star = true
+		} else if !pythonNamesUsed(code, names, statement.bound, statement.span[0], statement.span[1]) {
+			unused = append(unused, statement.span)
+		}
+		for _, name := range pythonName.FindAllString(code[statement.span[0]:statement.span[1]], -1) {
+			imported[name] = true
+		}
+	}
 	for _, name := range names {
-		if !pythonStringRunName(strings.ToLower(code[name[0]:name[1]])) {
+		word := code[name[0]:name[1]]
+		if !pythonStringRunName(strings.ToLower(word)) {
 			continue
 		}
-		if !slices.ContainsFunc(unused, func(span [2]int) bool {
+		if slices.ContainsFunc(unused, func(span [2]int) bool {
 			return name[0] >= span[0] && name[1] <= span[1]
 		}) {
-			return true
+			continue
 		}
+		if !star && !imported[word] && pythonProgramVariable(code, name[0], word) {
+			continue
+		}
+		return true
 	}
 	return false
 }
+
+// pythonProgramVariable reports whether the name word at code[at] is a plain
+// name (not an attribute, x.source) that is not a builtin or a module dunder.
+func pythonProgramVariable(code string, at int, word string) bool {
+	if strings.HasPrefix(word, "__") || pythonBuiltins[word] {
+		return false
+	}
+	i := at
+	for i > 0 && strings.IndexByte(" \t\r\n\\", code[i-1]) >= 0 {
+		i--
+	}
+	return i == 0 || code[i-1] != '.'
+}
+
+// pythonBuiltins are the names of the builtins module (Python 3.14, with the
+// Windows-only WindowsError and the names site adds); dunders are left out,
+// since no dunder counts as a program variable.
+var pythonBuiltins = func() map[string]bool {
+	set := map[string]bool{}
+	for _, name := range strings.Fields(`ArithmeticError AssertionError
+		AttributeError BaseException BaseExceptionGroup BlockingIOError
+		BrokenPipeError BufferError BytesWarning ChildProcessError
+		ConnectionAbortedError ConnectionError ConnectionRefusedError
+		ConnectionResetError DeprecationWarning EOFError Ellipsis
+		EncodingWarning EnvironmentError Exception ExceptionGroup False
+		FileExistsError FileNotFoundError FloatingPointError FutureWarning
+		GeneratorExit IOError ImportError ImportWarning IndentationError
+		IndexError InterruptedError IsADirectoryError KeyError
+		KeyboardInterrupt LookupError MemoryError ModuleNotFoundError
+		NameError None NotADirectoryError NotImplemented NotImplementedError
+		OSError OverflowError PendingDeprecationWarning PermissionError
+		ProcessLookupError PythonFinalizationError RecursionError
+		ReferenceError ResourceWarning RuntimeError RuntimeWarning
+		StopAsyncIteration StopIteration SyntaxError SyntaxWarning
+		SystemError SystemExit TabError TimeoutError True TypeError
+		UnboundLocalError UnicodeDecodeError UnicodeEncodeError UnicodeError
+		UnicodeTranslateError UnicodeWarning UserWarning ValueError Warning
+		WindowsError ZeroDivisionError _IncompleteInputError abs aiter all
+		anext any ascii bin bool breakpoint bytearray bytes callable chr
+		classmethod compile complex copyright credits delattr dict dir
+		divmod enumerate eval exec exit filter float format frozenset
+		getattr globals hasattr hash help hex id input int isinstance
+		issubclass iter len license list locals map max memoryview min next
+		object oct open ord pow print property quit range repr reversed
+		round set setattr slice sorted staticmethod str sum super tuple
+		type vars zip`) {
+		set[name] = true
+	}
+	return set
+}()
 
 func pythonStringRunName(name string) bool {
 	if pythonStringRunNames[name] {
@@ -308,12 +382,18 @@ func pythonStringRunName(name string) bool {
 	return false
 }
 
-// pythonUnusedImports returns the spans of the import statements of code
-// (strings blanked) none of whose bound names is used outside the statement.
-// A statement ends at a newline, ";" or ":" outside brackets ("if x: import
-// y"). "from m import *" binds unknown names, so it is never unused.
-func pythonUnusedImports(code string, names [][]int) [][2]int {
-	var unused [][2]int
+// pythonImport is an import statement of code: its span, and the names it
+// binds, nil when the scan cannot list them ("from m import *").
+type pythonImport struct {
+	span  [2]int
+	bound []string
+}
+
+// pythonImports returns the import statements of code (strings blanked). A
+// statement ends at a newline, ";" or ":" outside brackets ("if x: import
+// y").
+func pythonImports(code string) []pythonImport {
+	var imports []pythonImport
 	depth, start := 0, 0
 	for i := 0; i <= len(code); i++ {
 		if i < len(code) {
@@ -332,12 +412,13 @@ func pythonUnusedImports(code string, names [][]int) [][2]int {
 				continue
 			}
 		}
-		if bound, ok := pythonImportBindings(code[start:i]); ok && !pythonNamesUsed(code, names, bound, start, i) {
-			unused = append(unused, [2]int{start, i})
+		if words := strings.Fields(code[start:i]); len(words) > 0 && (words[0] == "import" || words[0] == "from") {
+			bound, _ := pythonImportBindings(code[start:i])
+			imports = append(imports, pythonImport{span: [2]int{start, i}, bound: bound})
 		}
 		start = i + 1
 	}
-	return unused
+	return imports
 }
 
 // pythonImportBindings returns the names an import statement binds, and
@@ -440,9 +521,10 @@ func pythonLetter(c byte) bool {
 // pythonStringEnd returns the offset just past the string literal whose
 // opening quote is at src[i], following the replacement fields of an f- or
 // t-string, whose expressions may hold strings with the same quotes
-// (Python 3.12). When fields is not nil, the span of each replacement field
-// of this string ("{" to its closing "}") is appended to it.
-func pythonStringEnd(src []byte, i, depth int, fields *[][2]int) (int, bool) {
+// (Python 3.12). When exprs is not nil, the span of the expression of each
+// replacement field of this string, and of each field nested in a format spec,
+// is appended to it in order (pythonFieldEnd): the code of the string.
+func pythonStringEnd(src []byte, i, depth int, exprs *[][2]int) (int, bool) {
 	if depth > pythonMaxStringNesting {
 		return 0, false
 	}
@@ -472,12 +554,9 @@ func pythonStringEnd(src []byte, i, depth int, fields *[][2]int) (int, bool) {
 				j += 2
 				continue
 			}
-			end, ok := pythonFieldEnd(src, j+1, depth+1)
+			end, ok := pythonFieldEnd(src, j+1, depth+1, exprs)
 			if !ok {
 				return 0, false
-			}
-			if fields != nil {
-				*fields = append(*fields, [2]int{j, end})
 			}
 			j = end
 			continue
@@ -488,9 +567,11 @@ func pythonStringEnd(src []byte, i, depth int, fields *[][2]int) (int, bool) {
 }
 
 // pythonFieldEnd returns the offset just past the "}" that closes the
-// replacement field whose expression starts at src[j].
-func pythonFieldEnd(src []byte, j, depth int) (int, bool) {
-	brackets := 0
+// replacement field whose expression starts at src[j]. When exprs is not nil,
+// it appends the span of the expression (pythonFieldExpression) and of the
+// expressions of the fields nested in its format spec.
+func pythonFieldEnd(src []byte, j, depth int, exprs *[][2]int) (int, bool) {
+	start, brackets, conversion := j, 0, -1
 	for j < len(src) {
 		switch src[j] {
 		case '\'', '"':
@@ -509,14 +590,20 @@ func pythonFieldEnd(src []byte, j, depth int) (int, bool) {
 			brackets++
 		case ')', ']':
 			brackets--
+		case '!':
+			if brackets == 0 && conversion < 0 && (j+1 >= len(src) || src[j+1] != '=') {
+				conversion = j // !r, !s or !a: text, not code
+			}
 		case '}':
 			if brackets == 0 {
+				pythonFieldExpression(src, start, conversion, j, exprs)
 				return j + 1, true
 			}
 			brackets--
 		case ':':
 			if brackets == 0 {
-				return pythonFormatSpecEnd(src, j+1, depth)
+				pythonFieldExpression(src, start, conversion, j, exprs)
+				return pythonFormatSpecEnd(src, j+1, depth, exprs)
 			}
 		}
 		j++
@@ -524,13 +611,35 @@ func pythonFieldEnd(src []byte, j, depth int) (int, bool) {
 	return 0, false
 }
 
+// pythonFieldExpression appends to exprs (when not nil) the span of the
+// expression of a replacement field from src[start] to its conversion, or to
+// end when it has none, less a self-documenting "=" (f"{x=}" prints the text
+// "x="; x= is not an assignment).
+func pythonFieldExpression(src []byte, start, conversion, end int, exprs *[][2]int) {
+	if exprs == nil {
+		return
+	}
+	if conversion >= 0 {
+		end = conversion
+	}
+	last := end
+	for last > start && strings.IndexByte(" \t\r\n", src[last-1]) >= 0 {
+		last--
+	}
+	if last > start && src[last-1] == '=' && (last-1 == start || strings.IndexByte("=!<>", src[last-2]) < 0) {
+		end = last - 1
+	}
+	*exprs = append(*exprs, [2]int{start, end})
+}
+
 // pythonFormatSpecEnd returns the offset just past the "}" that closes a
-// field whose format spec (literal text with nested fields) starts at src[j].
-func pythonFormatSpecEnd(src []byte, j, depth int) (int, bool) {
+// field whose format spec (literal text with nested fields) starts at src[j],
+// appending the expressions of the nested fields to exprs (when not nil).
+func pythonFormatSpecEnd(src []byte, j, depth int, exprs *[][2]int) (int, bool) {
 	for j < len(src) {
 		switch src[j] {
 		case '{':
-			end, ok := pythonFieldEnd(src, j+1, depth+1)
+			end, ok := pythonFieldEnd(src, j+1, depth+1, exprs)
 			if !ok {
 				return 0, false
 			}
