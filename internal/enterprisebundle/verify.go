@@ -252,14 +252,16 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 				}
 			}
 		}
-		if !unchecked {
+		// The warning comes before a refusal for another missing required
+		// credential, so the refusal still says the store was partly
+		// unreadable and the list is incomplete.
+		if unchecked {
+			res.Warnings = append(res.Warnings, Warning{Code: WarnSecretPresenceUnchecked, Message: "the enterprise secret store could not be read; credential presence was not checked"})
+		} else {
 			res.SecretRefsMissing = missing
 		}
 		if required != "" {
 			return res, refuse(CodeSecretRefMissing, "secret_refs", "this device has no credential %s", safePath(required))
-		}
-		if unchecked {
-			res.Warnings = append(res.Warnings, Warning{Code: WarnSecretPresenceUnchecked, Message: "the enterprise secret store could not be read; credential presence was not checked"})
 		}
 	}
 	root, err := in.Stage(b)

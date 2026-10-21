@@ -129,16 +129,6 @@ func (e *Env) bundleMode() bool {
 	return err == nil
 }
 
-// bundleSecretPresent reports whether the enterprise secret store holds the
-// credential name (the value is never read).
-func (e *Env) bundleSecretPresent(name string) (bool, error) {
-	names, _, err := e.listSecrets()
-	if err != nil {
-		return false, err
-	}
-	return slices.Contains(names, name), nil
-}
-
 // fault runs the bundle test fault seam at phase; nil in production.
 func (e *Env) fault(phase string) error {
 	if e.bundleFault == nil {
@@ -425,7 +415,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	}
 	res, err := enterprisebundle.Verify(ctx, enterprisebundle.VerifyInput{
 		Bundle: staged, Anchors: anchors, Platform: env.GOOS, Now: env.Now().UTC(), Confirmed: st.Confirmed(),
-		ProductVersion: env.ProductVersion, SecretPresent: env.bundleSecretPresent,
+		ProductVersion: env.ProductVersion, SecretPresent: env.SecretPresent,
 		DeviceLayout: func() *enterprisebundle.DeviceLayout {
 			layout := enterprisebundle.DeviceLayoutFromManaged(env.Layout)
 			return &layout

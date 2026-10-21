@@ -20,12 +20,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // maxSecretBytes bounds a protected credential.
@@ -87,15 +87,15 @@ func (e *Env) secretNames() ([]string, error) {
 }
 
 // SecretPresent reports whether the secrets directory holds the credential
-// name, from the listing `enterprise secret status` reads (bundle verify's
-// presence check); the credential is not opened.
+// name stored and usable: the gateway's read checks
+// (managed.StoredCredentialPresence) with this host's trust check. Bundle
+// verify and apply both use it, so a stored file the gateway would refuse
+// (empty, several lines, too large, readable by other users, untrusted) is
+// missing, not present. A store the caller cannot read is an error.
 func (e *Env) SecretPresent(name string) (bool, error) {
 	e.fillDefaults()
-	names, err := e.secretNames()
-	if err != nil {
-		return false, err
-	}
-	return slices.Contains(names, name), nil
+	return managed.StoredCredentialPresence(name, e.P(e.Layout.SecretsDir),
+		func(path string) error { return e.Trust(path, TrustAdminFile) })
 }
 
 // TrustedSecretSource refuses a --from-file credential that another account

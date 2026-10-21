@@ -32,7 +32,7 @@
         "already_applied",
         "refused"
       ],
-      "description": "already_applied: the bytes are the current confirmed bundle, and apply would be a success no-op."
+      "description": "already_applied: the bytes are the current confirmed bundle: apply writes no new receipt and re-installs the bundle config only when the installed config.yaml drifted from it (restart_prediction says whether that restarts the gateway)."
     },
     "platform": {
       "enum": [
@@ -265,7 +265,7 @@
               "installed_config_unreadable"
             ]
           },
-          "description": "restart_settings: settings lists the restart-required settings; codex_machine_policy (Windows): Codex protection turns on or off, which runs the full lifecycle transaction; fleet_setup_required (Windows): the bundle changes fleet.enabled, which the apply refuses (deliver it through signed Setup); already_applied: the bundle is the confirmed one, apply changes nothing; installed_config_unreadable: the installed config.yaml could not be read (run as root or SYSTEM) or, on Windows, parsed."
+          "description": "restart_settings: settings lists the restart-required settings; codex_machine_policy (Windows): Codex protection turns on or off, which runs the full lifecycle transaction; fleet_setup_required (Windows): the bundle changes fleet.enabled, which the apply refuses (deliver it through signed Setup); already_applied: the bundle is the confirmed one and the installed config.yaml matches it in every restart-required setting (an already_applied bundle over a drifted installed config is classified like any other bundle); installed_config_unreadable: the installed config.yaml could not be read (run as root or SYSTEM) or, on Windows, parsed."
         },
         "settings": {
           "type": "array",

@@ -141,12 +141,16 @@ func windowsEnterpriseHotTargetsPath(path string) bool {
 }
 
 // bundleVerifyRestartPrediction is the prediction for a verified bundle on
-// this device: the repeat of the confirmed bundle changes nothing, any
-// other bundle is classified against the installed config.
+// this device, classified against the installed config. The repeat of the
+// confirmed bundle is classified too: its apply re-installs the bundle
+// config, so an installed config that drifted in a restart-required setting
+// restarts the gateway. With no such drift it is not_required, reason
+// already_applied.
 func bundleVerifyRestartPrediction(platform string, out *enterprisebundle.VerifyResult) *bundleRestartPrediction {
-	if out.AlreadyApplied {
-		return &bundleRestartPrediction{GatewayRestart: bundleRestartNotRequired, ReasonCodes: []string{restartReasonAlreadyApplied}}
-	}
 	installed, err := bundleInstalledConfig(platform)
-	return predictBundleRestart(platform, bundleManagedDefaults(platform), installed, err, out.Rendered)
+	prediction := predictBundleRestart(platform, bundleManagedDefaults(platform), installed, err, out.Rendered)
+	if out.AlreadyApplied && prediction.GatewayRestart == bundleRestartNotRequired {
+		prediction.ReasonCodes = []string{restartReasonAlreadyApplied}
+	}
+	return prediction
 }

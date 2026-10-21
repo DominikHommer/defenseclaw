@@ -127,7 +127,8 @@ func TestVerifyCountsUnusableCredentialAsMissing(t *testing.T) {
 
 // The list is absent unless every reference was checked: off a device (no
 // presence reader) and with a store that cannot be read for one name, which
-// keeps today's warning, or today's refusal when a required one is missing.
+// warns secret_presence_unchecked, also on the refusal for another required
+// credential that is missing.
 func TestVerifyOmitsSecretRefsMissingWhenPresenceWasNotChecked(t *testing.T) {
 	f, b, a := secretRefsFixture(t)
 	res, err := enterprisebundle.Verify(context.Background(), f.input(t, b, a))
@@ -154,6 +155,9 @@ func TestVerifyOmitsSecretRefsMissingWhenPresenceWasNotChecked(t *testing.T) {
 	res, err = enterprisebundle.Verify(context.Background(), in)
 	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefMissing || !strings.Contains(err.Error(), "splunk-token") || res.SecretRefsMissing != nil {
 		t.Fatalf("unreadable credential and a missing required one: missing %#v, err %v", res.SecretRefsMissing, err)
+	}
+	if !hasWarning(res.Warnings, enterprisebundle.WarnSecretPresenceUnchecked) {
+		t.Fatalf("unreadable credential and a missing required one: the refusal dropped the unchecked warning: %+v", res.Warnings)
 	}
 	var be *enterprisebundle.Error
 	if !errors.As(err, &be) || be.Path != "secret_refs" {

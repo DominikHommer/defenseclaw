@@ -8,6 +8,7 @@ package cli
 
 import (
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -96,15 +97,26 @@ func TestPredictBundleRestartNamesNoMapKey(t *testing.T) {
 func TestBundleVerifyRestartPrediction(t *testing.T) {
 	saved := bundleInstalledConfig
 	t.Cleanup(func() { bundleInstalledConfig = saved })
-	bundleInstalledConfig = func(string) ([]byte, error) {
-		t.Fatal("an already-applied bundle read the installed config")
-		return nil, nil
-	}
-	got := bundleVerifyRestartPrediction("linux", &enterprisebundle.VerifyResult{AlreadyApplied: true})
+	const installed = "config_version: 9\nguardrail:\n  mode: observe\n"
+	// The repeat of the confirmed bundle is compared with the installed
+	// config: unchanged is not_required (already_applied); a drifted
+	// restart-required setting is required, as the apply re-installs it; an
+	// unreadable installed config is unknown.
+	bundleInstalledConfig = func(string) ([]byte, error) { return []byte(installed), nil }
+	got := bundleVerifyRestartPrediction("linux", &enterprisebundle.VerifyResult{AlreadyApplied: true, Rendered: []byte(installed)})
 	if got.GatewayRestart != bundleRestartNotRequired || !slices.Equal(got.ReasonCodes, []string{restartReasonAlreadyApplied}) {
 		t.Fatalf("already applied: %+v", got)
 	}
-	const installed = "config_version: 9\nguardrail:\n  mode: observe\n"
+	got = bundleVerifyRestartPrediction("linux", &enterprisebundle.VerifyResult{AlreadyApplied: true, Rendered: []byte(installed + "  hook_self_heal: false\n")})
+	if got.GatewayRestart != bundleRestartRequired || !slices.Equal(got.ReasonCodes, []string{restartReasonSettings}) ||
+		!slices.Equal(got.Settings, []string{"guardrail.hook_self_heal"}) {
+		t.Fatalf("already applied over a drifted installed config: %+v", got)
+	}
+	bundleInstalledConfig = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	got = bundleVerifyRestartPrediction("linux", &enterprisebundle.VerifyResult{AlreadyApplied: true, Rendered: []byte(installed)})
+	if got.GatewayRestart != bundleRestartUnknown || !slices.Equal(got.ReasonCodes, []string{restartReasonInstalledUnreadable}) {
+		t.Fatalf("already applied, installed config unreadable: %+v", got)
+	}
 	bundleInstalledConfig = func(platform string) ([]byte, error) {
 		if platform != "darwin" {
 			t.Fatalf("installed config read for %s", platform)

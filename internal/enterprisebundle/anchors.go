@@ -9,7 +9,9 @@ package enterprisebundle
 import (
 	"bytes"
 	"crypto"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,6 +65,42 @@ type AnchorKey struct {
 	public    crypto.PublicKey
 	notBefore time.Time
 	notAfter  time.Time
+}
+
+// AnchorsSummary is the anchors_summary member of bundle status: what the
+// installed trust anchor file says, without the public keys, so a
+// management agent reports it without reading and hashing the file itself.
+// SHA256 is the lowercase hex SHA-256 of the file bytes status decoded.
+type AnchorsSummary struct {
+	SHA256       string             `json:"sha256"`
+	TenantID     string             `json:"tenant_id"`
+	DeviceGroups []string           `json:"device_groups"`
+	MinVersion   uint64             `json:"min_version"`
+	Keys         []AnchorKeySummary `json:"keys"`
+}
+
+// AnchorKeySummary is one key of AnchorsSummary: never the public key.
+type AnchorKeySummary struct {
+	KeyID     string `json:"key_id"`
+	Alg       string `json:"alg"`
+	Status    string `json:"status"`
+	NotBefore string `json:"not_before"`
+	NotAfter  string `json:"not_after"`
+}
+
+// SummarizeAnchors summarizes decoded anchors and the bytes they were
+// decoded from (ReadAnchorsFile); nil anchors summarize to nil.
+func SummarizeAnchors(a *Anchors, raw []byte) *AnchorsSummary {
+	if a == nil {
+		return nil
+	}
+	sum := sha256.Sum256(raw)
+	out := &AnchorsSummary{SHA256: hex.EncodeToString(sum[:]), TenantID: a.TenantID,
+		DeviceGroups: append([]string{}, a.DeviceGroups...), MinVersion: a.MinVersion, Keys: []AnchorKeySummary{}}
+	for _, k := range a.Keys {
+		out.Keys = append(out.Keys, AnchorKeySummary{KeyID: k.KeyID, Alg: k.Alg, Status: k.Status, NotBefore: k.NotBefore, NotAfter: k.NotAfter})
+	}
+	return out
 }
 
 // Public returns the parsed public key (set by DecodeAnchors).
