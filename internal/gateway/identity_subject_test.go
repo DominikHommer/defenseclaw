@@ -251,15 +251,12 @@ func TestDiscoverySignalCarriesInventoryIdentity(t *testing.T) {
 			Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory, ResolvedAt: time.Now(),
 		}, true
 	}
-	// The uid's account is still the one the signal names (GAP-1233).
-	originalName := userScopedIdentityName
-	userScopedIdentityName = func(id string) string {
-		if id == self {
-			return "dcad-o4ud"
-		}
-		return ""
+	t.Cleanup(func() { managedHookPeerDirectory = original })
+	// The signal names the uid's own account (GAP-1233).
+	name := userScopedIdentityName(self)
+	if name == "" {
+		t.Skip("the test account has no name in the account database")
 	}
-	t.Cleanup(func() { managedHookPeerDirectory, userScopedIdentityName = original, originalName })
 	capture := &endpointInventoryCapture{}
 	report := inventory.AIDiscoveryReport{
 		Summary: inventory.AIDiscoverySummary{
@@ -269,7 +266,7 @@ func TestDiscoverySignalCarriesInventoryIdentity(t *testing.T) {
 		Signals: []inventory.AISignal{{
 			SignalID: "model-identity", SignatureID: "local-model", Category: inventory.SignalLocalModel,
 			Confidence: .9, State: inventory.AIStateNew, SupportedConnector: "claudecode", UserID: self,
-			UserName: "dcad-o4ud",
+			UserName: name,
 		}},
 	}
 	if err := (&aiDiscoveryV8Adapter{runtime: capture}).EmitReport(t.Context(), report, nil); err != nil {
