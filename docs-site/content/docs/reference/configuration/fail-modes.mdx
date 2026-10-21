@@ -21,7 +21,7 @@ One persisted setting, `guardrail.hook_fail_mode`, decides whether a hook allows
 
 An explicit value always wins, on every install: the OSS per-user install, the standalone enterprise profile, MDM-managed standalone hosts and Secure Client. On a managed computer the value comes from the administrator's config, so an `open` there is the administrator's choice and the managed hooks follow it. On a managed standalone host both variables are tighten-only: a stricter value is honored, a looser one is ignored ([Environment variables](/docs/reference/configuration/env-vars)).
 
-`status --json` and `verify --json` give each protected connector's resolved mode as `connectors.<id>.effective_hook_fail_mode`.
+On a per-user install, `defenseclaw status --json` returns a `connectors` array: identify the entry by `name` and read `connectors[].fail_mode.effective`. On a standalone enterprise install, `enterprise <os> status --json` and `verify --json` use a connector map: read `connectors.<id>.effective_hook_fail_mode`.
 
 ### Which value applies
 

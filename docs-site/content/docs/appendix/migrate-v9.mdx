@@ -959,7 +959,20 @@ forward again. To stay on 0.8.x, go back by hand:
    ```
 
    An overlay outside the data home was left in place and needs no rename.
-7. Start the 0.8.x gateway and verify the restored settings.
+7. Regenerate every connector with the restored 0.8.x CLI so its hook registrations
+   and contract lock match that release. Restoring config and data alone does not
+   restore the registrations that uninstall removed. For a Claude Code action
+   install, run:
+
+   ```bash
+   defenseclaw quickstart --connector claudecode --mode action
+   ```
+
+   Use each connector and mode from your restored configuration. `quickstart`
+   starts the gateway after regenerating the connector. Check the connector roster,
+   mode, fail mode and policy against your pre-upgrade record.
+8. Start the 0.8.x gateway if it is not already running, and verify the restored
+   settings and a safe blocked-call control.
 
 If you do not have a matching pre-upgrade backup, use `defenseclaw rollback`
 from the 1.x install instead (for a Windows 0.8.7-0.8.10 Setup install, the
