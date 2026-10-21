@@ -11,6 +11,7 @@
 package config
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,12 +29,14 @@ import (
 // a spelling the gateway denies.
 const pythonFoldTable = "../../cli/defenseclaw/enforce/_asset_name_fold.py"
 
+var updateFoldTable = flag.Bool("update-fold-table", false, "rewrite "+pythonFoldTable+" from Go's unicode tables")
+
 // TestPythonAssetNameFoldMatchesGo fails when the Python table and Go's
 // strings.EqualFold disagree. Regenerate with
-// DEFENSECLAW_UPDATE_FOLD_TABLE=1 go test ./internal/config -run TestPythonAssetNameFoldMatchesGo
+// go test ./internal/config -run TestPythonAssetNameFoldMatchesGo -update-fold-table
 func TestPythonAssetNameFoldMatchesGo(t *testing.T) {
 	want := renderPythonFoldTable()
-	if os.Getenv("DEFENSECLAW_UPDATE_FOLD_TABLE") == "1" {
+	if *updateFoldTable {
 		if err := os.WriteFile(pythonFoldTable, []byte(want), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -44,7 +47,7 @@ func TestPythonAssetNameFoldMatchesGo(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Fatalf("%s is out of date with Go's unicode tables (Unicode %s); regenerate it with "+
-			"DEFENSECLAW_UPDATE_FOLD_TABLE=1 go test ./internal/config -run TestPythonAssetNameFoldMatchesGo",
+			"go test ./internal/config -run TestPythonAssetNameFoldMatchesGo -update-fold-table",
 			pythonFoldTable, unicode.Version)
 	}
 }
@@ -110,7 +113,7 @@ func renderPythonFoldTable() string {
 
 Generated from Go's unicode tables by internal/config/asset_names_fold_test.go;
 do not edit. Regenerate with
-DEFENSECLAW_UPDATE_FOLD_TABLE=1 go test ./internal/config -run TestPythonAssetNameFoldMatchesGo
+go test ./internal/config -run TestPythonAssetNameFoldMatchesGo -update-fold-table
 Each run is start:count:stride:delta (start in hex): count code points from
 start, stride apart, each folding to itself plus delta.
 """

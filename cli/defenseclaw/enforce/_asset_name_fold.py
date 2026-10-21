@@ -12,7 +12,7 @@
 
 Generated from Go's unicode tables by internal/config/asset_names_fold_test.go;
 do not edit. Regenerate with
-DEFENSECLAW_UPDATE_FOLD_TABLE=1 go test ./internal/config -run TestPythonAssetNameFoldMatchesGo
+go test ./internal/config -run TestPythonAssetNameFoldMatchesGo -update-fold-table
 Each run is start:count:stride:delta (start in hex): count code points from
 start, stride apart, each folding to itself plus delta.
 """
