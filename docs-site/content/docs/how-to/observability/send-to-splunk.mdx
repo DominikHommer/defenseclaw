@@ -59,20 +59,9 @@ keywords:
        Redaction:   unredacted (none)
    ```
 
-   The sample output is from a run with `--skip-test`. Without it, setup sends one probe event first and stops if HEC does not return 200. Use `--skip-test` when HEC is behind a VPN.
+   The sample is from a run with `--skip-test`. Without it, setup sends one probe event and stops if HEC does not return 200. Use `--skip-test` behind a VPN.
 
-2. Set the sourcetype to `defenseclaw:json` only if you install this `props.conf` stanza:
-
-   ```ini
-   [defenseclaw:json]
-   KV_MODE = json
-   SHOULD_LINEMERGE = false
-   TIME_FORMAT = %Y-%m-%dT%H:%M:%S
-   MAX_TIMESTAMP_LOOKAHEAD = 30
-   TRUNCATE = 0
-   ```
-
-   Do not add `| spath` to searches on these sourcetypes; it doubles multivalue fields.
+2. Use sourcetype `_json`, or `defenseclaw:json` if you also install a `props.conf` stanza with `KV_MODE = json` and `SHOULD_LINEMERGE = false`. Do not add `| spath` to searches on these sourcetypes; it doubles multivalue fields.
 
 For a collector on a private network, use `defenseclaw setup observability add splunk-enterprise --endpoint <url> --allow-private-networks`.
 
@@ -113,8 +102,7 @@ Each command disables its own destination and leaves the others alone. `--logs` 
 
 - **Port 8000 or 8088 in use.** Free the port and run setup again. There is no port flag.
 - **HEC returns 403.** The token is wrong or HEC is off on that endpoint.
-- **Code 7 from `--write-probe`.** The index does not exist or the token cannot write to it. Create the index or correct `--index`.
-- **Events arrive without fields.** Use sourcetype `_json`, or install the `props.conf` stanza above.
+- **Code 7 from `--write-probe`.** The index does not exist or the token cannot write to it.
 - **O11y shows traces but no logs.** Log ingest is a separate entitlement. Run again with `--no-logs-export`.
 
 ## Next
