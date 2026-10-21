@@ -68,13 +68,15 @@ The administrator manages Codex in the managed `config.yaml` under `guardrail.co
 
 ## Turn it off
 
-These commands are for a per-user install.
+For a per-user, single-connector install:
 
 ```bash
-defenseclaw guardrail disable --connector codex --yes
+defenseclaw guardrail disable --yes
 ```
 
-This keeps Codex's settings. Turn it back on with `defenseclaw guardrail enable --connector codex`. To remove the connector, run `defenseclaw setup remove codex --yes` (add `--force` if it is the last one).
+This keeps Codex's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove codex --yes` (add `--force` if it is the last one).
+
+On a multi-connector install, add `--connector codex` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 

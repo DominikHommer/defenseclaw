@@ -69,13 +69,15 @@ The administrator manages Hermes in the managed `config.yaml`. `guardrail.connec
 
 ## Turn it off
 
-These commands are for a per-user install.
+For a per-user, single-connector install:
 
 ```bash
-defenseclaw guardrail disable --connector hermes --yes
+defenseclaw guardrail disable --yes
 ```
 
-This keeps Hermes's settings. Turn it back on with `defenseclaw guardrail enable --connector hermes`. To remove the connector, run `defenseclaw setup remove hermes --yes` (add `--force` if it is the last one). Then reload every Hermes host.
+This keeps Hermes's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove hermes --yes` (add `--force` if it is the last one). Then reload every Hermes host.
+
+On a multi-connector install, add `--connector hermes` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 

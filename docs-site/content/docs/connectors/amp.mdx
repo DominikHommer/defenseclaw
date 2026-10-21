@@ -68,11 +68,15 @@ It holds a connector-scoped token and is limited to your account. Setup keeps an
 
 ## Turn it off
 
+For a per-user, single-connector install:
+
 ```bash
-defenseclaw guardrail disable --connector amp --yes
+defenseclaw guardrail disable --yes
 ```
 
-This keeps Amp's settings. Turn it back on with `defenseclaw guardrail enable --connector amp`. To remove the connector, run `defenseclaw setup remove amp --yes` (add `--force` if it is the last one). `defenseclaw plugin remove defenseclaw --connector amp` is refused, because Amp would run unguarded. Relaunch Amp afterwards.
+This keeps Amp's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove amp --yes` (add `--force` if it is the last one). `defenseclaw plugin remove defenseclaw --connector amp` is refused, because Amp would run unguarded. Relaunch Amp afterwards.
+
+On a multi-connector install, add `--connector amp` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 

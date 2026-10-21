@@ -64,11 +64,17 @@ DefenseClaw backs up `openclaw.json` first. Teardown restores it, or removes onl
 
 ## Turn it off
 
+For a per-user, single-connector install:
+
 ```bash
 defenseclaw guardrail disable --yes
 ```
 
 This restores `openclaw.json`, removes the plugin entries and stops the proxy. To drop the connector from the configuration, run `defenseclaw setup remove openclaw --yes`.
+
+Turn it back on with `defenseclaw guardrail enable`.
+
+On a multi-connector install, add `--connector openclaw` to `guardrail disable` and `guardrail enable` to change only this agent.
 
 ## Details
 
