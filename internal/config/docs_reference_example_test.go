@@ -33,7 +33,8 @@ func TestReferenceConfigurationExampleMatchesSchema(t *testing.T) {
 	if err != nil {
 		t.Skipf("docs page not available: %v", err)
 	}
-	text := string(data)
+	// A Windows checkout has CRLF line ends; the example is read as LF.
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
 	const fence = "```yaml\nconfig_version: 9"
 	start := strings.Index(text, fence)
 	if start < 0 {

@@ -372,6 +372,9 @@ func TestWindowsBundleRepairChangesNothingWhenTheBundleStoreCannotRestore(t *tes
 	host := newWindowsBundleRestoreHost(t)
 	edited := host.tamper(t, false)
 	host.damageCurrentVersion(t)
+	// The installer stub clears the hook runtime seam, so the drift is set
+	// up after it.
+	stub := host.installer(t) // any installer run fails the test
 	runtimeDir := t.TempDir()
 	dir, inspect, repair := windowsEnterpriseHookRuntimeDir, windowsEnterpriseInspectPublicDir, windowsEnterpriseRepairPublicDir
 	t.Cleanup(func() {
@@ -386,7 +389,6 @@ func TestWindowsBundleRepairChangesNothingWhenTheBundleStoreCannotRestore(t *tes
 		repaired = append(repaired, path)
 		return nil
 	}
-	stub := host.installer(t) // any installer run fails the test
 	command := &cobra.Command{}
 	var stdout bytes.Buffer
 	command.SetOut(&stdout)
