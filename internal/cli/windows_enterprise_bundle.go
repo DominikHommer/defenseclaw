@@ -94,6 +94,8 @@ var (
 	windowsBundleEnsurePrivateDirectory = ensureWindowsBundlePrivateDirectory
 	windowsBundlePublishPrivateFile     = publishWindowsBundlePrivateFile
 	windowsBundleSyncMarker             = syncWindowsBundleMarker
+	// windowsBundleReadAnchors reads and checks an anchor file once.
+	windowsBundleReadAnchors = enterprisebundle.ReadAnchorsFile
 )
 
 func init() {
@@ -327,6 +329,7 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 	store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory
 	store.EnsurePrivateDirectory = windowsBundleEnsurePrivateDirectory
 	store.PublishPrivateFile = windowsBundlePublishPrivateFile
+	store.ReceiptEventReported = func(id string) bool { return enterprisestatus.ReceiptEventReported(layout.DataDir, id) }
 	return &enterprisebundle.Driver{
 		Store: store,
 		DeviceLayout: func() *enterprisebundle.DeviceLayout {
@@ -1463,7 +1466,7 @@ func writeWindowsBundleAdminFile(path string, data []byte) error {
 // the bytes it wrote, which are the bytes it read and checked once.
 func installWindowsBundleAnchors(src, dst string) ([]byte, error) {
 	// One read: the bytes written are the ones decoded and trust-checked.
-	_, raw, err := enterprisebundle.ReadAnchorsFile(src, bundleAnchorTrust)
+	_, raw, err := windowsBundleReadAnchors(src, bundleAnchorTrust)
 	if err != nil {
 		return nil, err
 	}

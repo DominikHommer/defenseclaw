@@ -146,8 +146,8 @@ anchors between download and install. The check then fails closed
 | Exit | Linux / macOS | Windows | Class | Agent action |
 |---|---|---|---|---|
 | `0` | success or nothing to do | success | done | use the result |
-| `75` | another lifecycle run holds the lock (`lifecycle_busy`), or a `bundle apply` whose gateway stopped reporting the bundle's policy before the receipt was confirmed (`not_confirmed` with `bundle.state` `applied`, section 4.3) | — | **retry** | back off (30 s, doubling, at most 10 min) and resubmit the same input |
-| `1618` | — | `lifecycle_busy` (`bundle.lock` not free within `--lock-wait`, or the installer's `lifecycle.lock` not free within its fixed 30 s), or a verified bundle that did not finish applying (`bundle_apply_failed`, `bundle_policy_not_adopted`, `bundle_post_verify_failed`, `bundle_targets_refresh_failed`) | **retry** | as for 75 |
+| `75` | another lifecycle run holds the lock (`lifecycle_busy`), or a `bundle apply` whose gateway stopped reporting the bundle's policy before the receipt was confirmed (`not_confirmed` with `bundle.state` `applied`, section 4.3), or a `bundle apply --defer-restart` that deferred a restart (`restart_deferred`) | — | **retry** | back off (30 s, doubling, at most 10 min) and resubmit the same input; for `restart_deferred` see below |
+| `1618` | — | `lifecycle_busy` (`bundle.lock` not free within `--lock-wait`, or the installer's `lifecycle.lock` not free within its fixed 30 s), or a verified bundle that did not finish applying (`bundle_apply_failed`, `bundle_policy_not_adopted`, `bundle_post_verify_failed`, `bundle_targets_refresh_failed`), or `restart_deferred` | **retry** | as for 75 |
 | `1` | failure, already rolled back; or a refusal | builds without `management_contract` only: a flag error on `enterprise secret` (section 2.3) | **final** | read `errors[].code`; do not retry until the bundle, anchors, credential or device changes |
 | `1603` | — | failure, already rolled back; or a refusal | **final** | as for 1 |
 | `2` | invalid arguments | — | **final, caller bug** | fix the call |
@@ -155,6 +155,10 @@ anchors between download and install. The check then fails closed
 | `5` | — | `elevation_required`: not SYSTEM and not elevated | **final, deployment bug** | the agent is not running as LocalSystem |
 | `3010` | — | reserved (success, reboot required); not returned today | done | treat as 0 |
 | any other code, or killed by a signal | | | **unknown** | do not resubmit blindly; reconcile (section 5.1) |
+
+`restart_deferred` changed nothing, and the same call is deferred again
+until the change no longer restarts the gateway. Resubmit the bundle in the
+device's maintenance window without `--defer-restart` (section 4.3).
 
 A refusal is final even when the same bytes are resubmitted:
 `version_not_newer`, `signature_invalid`, `key_unknown`, `secret_ref_missing`,
@@ -183,15 +187,18 @@ stderr, and the exit code is the only signal.
 | Case | Exit |
 |---|---|
 | Unknown flag, malformed value or stray argument on a lifecycle verb | 2 / 1639 |
-| `bundle apply` without `--bundle`; with both `--bundle` and `--inbox` (Linux, macOS); with `--inbox` (Windows) | 2 / 1639 |
-| `--lock-wait` outside 0 to 15m: every Linux and macOS verb but `bundle anchors install` (which prints a JSON `invalid_arguments` document), and Windows `bundle apply` | 2 / 1639 |
-| `bundle apply --delivery-id` empty, over 128 bytes, or with a byte outside `A-Z a-z 0-9 . _ : -` (2.6) | 2 / 1639 |
+| `--lock-wait` outside 0 to 15m: every Linux and macOS verb but `bundle anchors install` and `bundle apply` | 2 / 1639 |
+| Builds before 1.0.4: every `bundle apply` argument error (below) | 2 / 1639 |
 | `--version --json` (the flag is `--version-json`) | 2 |
 | Windows `secret set` / `remove` / `status` on a build without `management_contract`: every failure (5, 1639, 1603), and `--lock-wait` on set or remove (an unknown flag there, exit 1) | 5 / 1639 / 1603 / 1 |
 
-`bundle verify` and `bundle anchors install` print JSON for their own
-argument errors (`errors[0].code` `invalid_arguments`, exit 2 / 1639);
-`bundle apply` does not (the rows above). With
+`bundle verify`, `bundle anchors install` and `bundle apply` print JSON for
+their own argument errors (`errors[0].code` `invalid_arguments`, exit 2 /
+1639). For `bundle apply` (from 1.0.4, with `--json`) that is one
+`bundle-refused.schema.json` document, for every argument error: an unknown
+flag, a malformed value, a stray argument, no `--bundle`, `--bundle` with
+`--inbox` (Linux, macOS), `--inbox` on Windows, a `--lock-wait` out of range
+and a bad `--delivery-id` (2.6). With
 `management_contract` 1, `secret set`, `remove` and `status` print a JSON
 document on every outcome on every OS (section 4.7): on Linux and macOS a
 flag, argument, privilege, value or stdin read error prints the schema-1
@@ -322,6 +329,7 @@ member; use these fallbacks on it:
 |---|---|---|
 | `receipt_id` | apply and status results carry `bundle.receipt_id` | match the receipt by `bundle_id` and a `finished_at` after the apply started (section 4.9) |
 | `--delivery-id` | `bundle apply --delivery-id` records `delivery_id` (2.6) | an unknown flag: exit 2 / 1639 with no JSON; leave it out and match by `receipt_id` or as above |
+| `--defer-restart` (from 1.0.4) | `bundle apply --defer-restart` refuses a bundle that would restart the gateway (`restart_deferred`, 4.3) | an unknown flag: exit 2 / 1639 with no JSON; defer by not running the apply (4.2) |
 | Windows apply lock wait | Windows `bundle apply` waits up to `--lock-wait` for `bundle.lock` | the flag is accepted and ignored; a held `bundle.lock` returns 1618 at once, and the agent's backoff does the waiting |
 | Windows secret locks and JSON | Windows `secret set` / `remove` take `--lock-wait`, `bundle.lock` then `lifecycle.lock`, and print a JSON document on every outcome | do **not** pass `--lock-wait` (exit 1); the set takes no lock and can collide with an apply's confirm step or an installer run; failures print no JSON |
 | Linux and macOS secret failure JSON | `secret set` / `remove` / `status` print the schema-1 failure document for an argument, flag, privilege, value or stdin read error | those failures print one line on stderr and no JSON: classify them by the exit code (2 fix the call, 1 failed) |
@@ -472,8 +480,8 @@ Exit 0.
      they are stored.
   3. `verified` with `gateway_restart` `required` or `unknown`: apply only in
      the device's maintenance window. `not_required`: apply at any time.
-     There is no `--defer-restart` in this version: the agent defers a
-     restart by not running the apply.
+     Or apply with `--defer-restart` (4.3): the device then refuses the
+     bundle if it would restart the gateway.
 
 ```sh
 "$GW" enterprise bundle verify --bundle /var/lib/<vendor>/inbox/v13.dcbundle --json
@@ -485,11 +493,19 @@ Exit 0.
 ### 4.3 Apply a bundle: `enterprise bundle apply`
 
 - argv: `enterprise bundle apply --bundle <file> --reason management
-  --delivery-id <id> [--refuse-capability-loss] --lock-wait 10m --json`. Pass
+  --delivery-id <id> [--refuse-capability-loss] [--defer-restart]
+  --lock-wait 10m --json`. Pass
   `--refuse-capability-loss` on every apply after the first bundle: it refuses
   a bundle that turns off a capability the device enforces now
   (`capability_loss`). Pass a `--delivery-id` unique to this delivery (2.6);
   it is optional. Never use `--inbox`.
+- `--defer-restart` (from 1.0.4) refuses, before anything changes, a bundle
+  whose config change restarts the gateway: `restart_deferred`, exit 75 /
+  1618, receipt `failed`. It uses the `restart_prediction` of verify (4.2);
+  `unknown` is refused too. A repeat of the current bundle over an installed
+  config that drifted in such a setting is refused the same way. A gateway
+  that is down or does not take the change while running is still
+  restarted. Resubmit without the flag in the maintenance window.
 - Privilege: root on Linux and macOS (`not_root`); an elevated administrator
   or SYSTEM on Windows (`not_admin`).
 - Preconditions: a standalone managed device; trust anchors installed
@@ -549,7 +565,8 @@ Exit 0.
   "ensure"`) with the `bundle` block (and `last_refusal` for a refusal before
   staging), or `bundle-refused.schema.json` (schema_version 1) when it refused
   before the lifecycle ran (Secure Client, not managed, Windows not
-  elevated). Tell them apart by `schema_version`.
+  elevated) or on an argument error (`invalid_arguments`). Tell them apart
+  by `schema_version`.
 - **Success test**: `exit == 0 && ok && bundle.bundle_id == <submitted id> &&
   bundle.state == "confirmed"`. The submitted id is `bundle.bundle_id` of the
   4.2 result. A repeated delivery of the current bundle writes no receipt:
@@ -632,9 +649,11 @@ Exit 0.
 - Exit: 0; 1 / 1603 refused or failed (final): the bundle codes above plus
   `capability_loss`, `not_confirmed`, `apply_failed`, `interrupted`,
   `state_invalid`, `not_managed`, `not_root` / `not_admin`; 75 / 1618
-  `lifecycle_busy` (Linux and macOS also `not_confirmed` with `bundle.state`
-  `applied`; Windows also `bundle_apply_failed` and the codes in
-  section 2.2: retry); 2 / 1639 invalid arguments (no JSON, section 2.3).
+  `lifecycle_busy` and `restart_deferred` (Linux and macOS also
+  `not_confirmed` with `bundle.state` `applied`; Windows also
+  `bundle_apply_failed` and the codes in section 2.2: retry); 2 / 1639
+  invalid arguments (one `invalid_arguments` document from 1.0.4, no JSON
+  before, section 2.3).
 
 ```sh
 "$GW" enterprise bundle apply --bundle /var/lib/<vendor>/inbox/v13.dcbundle \
@@ -1071,6 +1090,12 @@ enforcing.
   state.
 - Refuse a link, a file over 16 KiB and a state other than `confirmed` /
   `failed`, as the gateway's own reader does.
+- `receipt-events/` keeps the newest 100 events, the events of the receipts
+  `bundle status` lists and of the current and last good bundle, and every
+  event the gateway has not reported yet (up to 1000). An agent that falls
+  more than 100 deliveries behind can miss events: read `bundle status`
+  then. When unreported events had to be removed, the receipt that removed
+  them carries `receipt_events_dropped`. A receipt id is never used twice.
 - Deduplicate by `receipt_id`; every delivery has its own id (the first
   delivery of a bundle uses the bundle id, later deliveries `r-<ULID>`).
   Receipts whose id is not in the agent's own list (4.3) came from MDM or an

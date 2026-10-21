@@ -183,7 +183,11 @@ func (r *bundleReceiptReporter) spoolDir() string {
 	return filepath.Join(filepath.Dir(r.receiptPath), enterprisestatus.PublicReceiptEventsDirName)
 }
 
-func (r *bundleReceiptReporter) seenDir() string { return r.markerPath + ".d" }
+// seenDir is <data_dir>/bundle-receipt.reported.d; the lifecycle reads it
+// before it removes a receipt event.
+func (r *bundleReceiptReporter) seenDir() string {
+	return filepath.Join(filepath.Dir(r.markerPath), enterprisestatus.ReportedReceiptsDirName)
+}
 
 func (r *bundleReceiptReporter) hasSeen(id string) bool {
 	if !enterprisestatus.ValidReceiptID(id) {
