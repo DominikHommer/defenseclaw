@@ -53,4 +53,12 @@ func TestBundleFloorCheckRefusesOnlyBelowTheFloorWithItsOwnExitCode(t *testing.T
 	if !errors.As(err, &coded) || coded.ExitCode() != bundleFloorRefusedExit {
 		t.Fatalf("unreadable floor = %v; want exit %d", err, bundleFloorRefusedExit)
 	}
+
+	// A --keep-state uninstall removes the runtime descriptor and keeps the
+	// trust anchors and the bundle state: the floor still holds.
+	bundleManagedDevice = func() bool { return false }
+	err = run("--product-version", "0.0.1")
+	if !errors.As(err, &coded) || coded.ExitCode() != bundleFloorRefusedExit {
+		t.Fatalf("without the runtime descriptor = %v; want exit %d", err, bundleFloorRefusedExit)
+	}
 }
