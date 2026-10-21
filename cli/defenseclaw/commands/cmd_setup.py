@@ -5612,7 +5612,7 @@ def _check_connector_version_supported_for_setup(
             # already-sealed version and contract status when the gateway
             # restarts every active connector.
             persist_cache=connector != "codex" and not (
-                connector in { "opencode", "amp"}
+                connector in {"opencode", "amp"}
                 and platform_support.host_os() == "windows"
             ),
         )
@@ -10379,7 +10379,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
         click.echo("                   only PreToolUse carries documented ask/deny output")
     else:
         ux.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → {_hook_api_path(connector)}")
-    native_otel_connectors = {"codex", "claudecode", }
+    native_otel_connectors = {"codex", "claudecode"}
     if connector in native_otel_connectors:
         if connector == "codex":
             ux.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
@@ -14500,7 +14500,6 @@ def _restart_services(
     if not gateway_restarted:
         failed.append("defenseclaw-gateway")
 
-    connector_registration_verified = False
     connector_runtime_pending_reload = False
     # Peers the restarted gateway refused: setup skipped them, so they are
     # not guarded now and the closing roster line leaves them out (GAP-2013).
@@ -14560,7 +14559,6 @@ def _restart_services(
             click.echo(f" ! ({_pending_reload_hint(getattr(readiness, 'connector', ''))})")
         elif readiness:
             ux.echo(" ✓")
-            connector_registration_verified = True
         else:
             ux.echo(f" ✗{f' ({diagnostic})' if diagnostic else ''}")
             if "registration-launcher-digest-missing" in diagnostic:

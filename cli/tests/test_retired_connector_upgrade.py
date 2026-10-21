@@ -1,6 +1,9 @@
 """Until 1.1, older config files naming removed connectors still load."""
 
+import copy
+
 import pytest
+import yaml
 from defenseclaw import config
 
 
@@ -79,3 +82,70 @@ def test_retired_connector_only_allow_lists_stay_restrictive():
     assert raw["openshell"]["admin"]["allowed"] is False
     assert raw["guardrail"]["profiles"]["workers"]["sandbox"]["allowed"] is False
     assert raw["guardrail"]["profile_assignments"] == []
+
+
+def test_retired_connector_v8_routes_drop_retired_only_and_keep_mixed(tmp_path):
+    from defenseclaw.observability.v8_config import load_validate_v8
+
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 8\n"
+        "guardrail:\n"
+        "  connector: codex\n"
+        "  connectors:\n"
+        "    codex: {}\n"
+        "observability:\n"
+        "  destinations:\n"
+        "    - name: console\n"
+        "      kind: console\n"
+        "      routes:\n"
+        "        - {name: retired-only, signals: [logs], selector: {connectors: [openhands]}}\n"
+        "        - {name: mixed, signals: [logs], selector: {connectors: [omnigent, codex]}}\n"
+        "        - {name: openhands-named, signals: [logs], selector: {connectors: [codex]}}\n",
+        encoding="utf-8",
+    )
+
+    loaded = config.load(data_dir=tmp_path)
+    loaded.save()
+
+    saved = (tmp_path / "config.yaml").read_bytes()
+    load_validate_v8(saved)
+    routes = yaml.safe_load(saved)["observability"]["destinations"][0]["routes"]
+    assert [route["name"] for route in routes] == ["mixed", "openhands-named"]
+    assert routes[0]["selector"]["connectors"] == ["codex"]
+
+
+def test_retired_connector_cleanup_keeps_values_outside_connector_fields():
+    raw = {
+        "skill_actions": {"allowed": ["openhands"]},
+        "mcp": {"servers": {"openhands": {"command": "npx"}}},
+        "asset_policy": {"mcp": {"allowed": [{"name": "omnigent"}]}},
+        "observability": {
+            "destinations": [{"name": "openhands", "routes": [{"name": "omnigent", "selector": {"connectors": ["codex"]}}]}],
+        },
+        "guardrail": {"connector": "codex", "connectors": {"codex": {}}},
+    }
+    before = copy.deepcopy(raw)
+
+    config._drop_retired_connector_settings(raw)
+
+    assert raw == before
+
+
+def test_retired_connector_only_profile_assignment_is_dropped_even_with_other_matchers():
+    # An emptied connectors list would match every connector of the group.
+    raw = {
+        "guardrail": {
+            "profile_assignments": [
+                {"profile": "strict", "match": {"groups": ["eng"], "connectors": ["openhands"]}},
+                {"profile": "strict", "match": {"groups": ["eng"], "connectors": ["omnigent", "codex"]}},
+                {"profile": "strict", "match": {"groups": ["ops"]}},
+            ]
+        }
+    }
+
+    config._drop_retired_connector_settings(raw)
+
+    assert raw["guardrail"]["profile_assignments"] == [
+        {"profile": "strict", "match": {"groups": ["eng"], "connectors": ["codex"]}},
+        {"profile": "strict", "match": {"groups": ["ops"]}},
+    ]

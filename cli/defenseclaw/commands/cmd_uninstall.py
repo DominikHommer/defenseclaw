@@ -109,6 +109,18 @@ _CREATED_DIRS_RECORD = "watcher-created-dirs.json"
 _CREATED_DIRS_RECORD_MAX_BYTES = 1 << 20
 _WIN_SYNCHRONIZE = 0x00100000
 _WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+# until 1.1: removed connectors whose older-release state uninstall still
+# tears down (connector_backups markers and active_connector.json names).
+_REMOVED_CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
+    "omnigent": (
+        os.path.join("connector_backups", "omnigent", "config.json"),
+        os.path.join("connector_backups", "omnigent", "module.json"),
+        os.path.join("connector_backups", "omnigent", "pth.json"),
+    ),
+    "openhands": (os.path.join("connector_backups", "openhands", "config.json"),),
+}
+_ACTIVE_CONNECTOR_STATE = "active_connector.json"
+_ACTIVE_CONNECTOR_STATE_MAX_BYTES = 64 * 1024
 _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "openclaw": (os.path.join("connector_backups", "openclaw", "openclaw.json.json"),),
     "codex": (
@@ -140,6 +152,10 @@ _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     ),
     "opencode": (os.path.join("connector_backups", "opencode", "config.json"),),
     "devin": (os.path.join("connector_backups", "devin", "config.json"),),
+    # until 1.1: OpenHands and OmniGent were removed in 1.0.4 (#1182). An older
+    # release's setup backup still selects gateway teardown, which Go resolves
+    # through its teardown-only connector.RetiredConnector adapters.
+    **_REMOVED_CONNECTOR_BACKUP_MARKERS,
     # A retired connector ID's setup backup still selects gateway teardown,
     # which Go resolves through connector.RetiredConnector.
     **legacy_connector.BACKUP_MARKERS,
@@ -1774,12 +1790,48 @@ def _teardown_connectors(
                 add(name)
                 break
 
+    for name in _removed_connectors_in_active_state(data_dir):
+        add(name)
+
     if include_openclaw and openclaw_config_file:
         pristine = _expand(openclaw_config_file) + ".pristine"
         if os.path.isfile(pristine):
             add("openclaw")
 
     return tuple(out)
+
+
+def _removed_connectors_in_active_state(data_dir: str) -> tuple[str, ...]:
+    """Removed connector names the gateway's active roster still lists.
+
+    until 1.1: config loading drops OpenHands and OmniGent, so the configured
+    roster no longer names them; the active roster an older gateway wrote
+    (``{"names": [...]}`` or ``{"name": ...}``) is the remaining evidence that
+    their agent-side state is installed. Only removed names are taken from it.
+    """
+    if not data_dir:
+        return ()
+    path = os.path.join(data_dir, _ACTIVE_CONNECTOR_STATE)
+    if not os.path.isfile(path) or _is_reparse_path(path):
+        return ()
+    try:
+        if os.path.getsize(path) > _ACTIVE_CONNECTOR_STATE_MAX_BYTES:
+            return ()
+        with open(path, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        return ()
+    if not isinstance(state, dict):
+        return ()
+    names = state.get("names")
+    if not isinstance(names, list) or not names:
+        names = [state.get("name")]
+    found: list[str] = []
+    for name in names:
+        folded = name.strip().lower() if isinstance(name, str) else ""
+        if folded in _REMOVED_CONNECTOR_BACKUP_MARKERS and folded not in found:
+            found.append(folded)
+    return tuple(found)
 
 
 _OPEN_SESSION_NOTE = (

@@ -124,3 +124,20 @@ func TestRetiredConnectorUpgradeDoesNotBroadenAllowLists(t *testing.T) {
 		t.Fatalf("retired-only allow-list became unrestricted: %+v", cfg)
 	}
 }
+
+// An assignment for a removed connector and a group must not turn into one
+// for every connector of that group.
+func TestRetiredConnectorUpgradeDropsRetiredOnlyAssignmentWithOtherMatchers(t *testing.T) {
+	cfg := &Config{}
+	cfg.Guardrail.ProfileAssignments = []ProfileAssignment{
+		{Profile: "strict", Match: ProfileMatch{Groups: []string{"eng"}, Connectors: []string{"openhands"}}},
+		{Profile: "mixed", Match: ProfileMatch{Groups: []string{"eng"}, Connectors: []string{"omnigent", "codex"}}},
+		{Profile: "groups", Match: ProfileMatch{Groups: []string{"eng"}}},
+	}
+	dropRetiredConnectorSettings(cfg)
+	got := cfg.Guardrail.ProfileAssignments
+	if len(got) != 2 || got[0].Profile != "mixed" || strings.Join(got[0].Match.Connectors, ",") != "codex" ||
+		got[1].Profile != "groups" {
+		t.Fatalf("profile assignments after cleanup = %+v", got)
+	}
+}

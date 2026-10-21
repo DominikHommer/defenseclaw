@@ -99,8 +99,9 @@ func dropRetiredConnectorSettings(cfg *Config) {
 		var dropped bool
 		assignment.Match.Connectors, dropped = dropRetiredNames(assignment.Match.Connectors)
 		changed = dropped || changed
-		if dropped && assignment.Match.Empty() {
-			changed = true
+		// until 1.1: an assignment that named only removed connectors applied
+		// to none that remain; an empty connector list would match them all.
+		if dropped && len(assignment.Match.Connectors) == 0 {
 			continue
 		}
 		assignments = append(assignments, assignment)

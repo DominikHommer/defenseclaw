@@ -30,7 +30,6 @@ import json
 import os
 import re
 import stat
-import sys
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -73,7 +72,7 @@ _CODEX_WINDOWS_PLATFORM_VARIANTS = (
 _MAX_AGENT_EXECUTABLE_BYTES = 512 * 1024 * 1024
 _WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION = 0x00010000
 _SUPPORTED_CONNECTORS = frozenset(
-    {"codex", "claudecode", "hermes",  "opencode", "amp", }
+    {"codex", "claudecode", "hermes", "opencode", "amp"}
 )
 _PROTECTED_LOCK_EXECUTABLE_NAMES = {
     "codex": frozenset({"codex.exe"}),

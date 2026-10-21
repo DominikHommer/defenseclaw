@@ -7215,76 +7215,109 @@ def _default_policy_dir(cfg_file: str, data_dir: str) -> str:
     return os.path.join(data_dir, "policies")
 
 
-def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
-    """Until 1.1, accept old rosters and discard removed connector settings."""
+# until 1.1: OpenHands and OmniGent were removed in 1.0.4 (#1182). Older
+# 0.8.x and 1.0.x files can still name them in connector fields.
+_RETIRED_CONNECTOR_NAMES = frozenset({"openhands", "omnigent", "open-hands", "open_hands"})
 
-    retired = {"openhands", "omnigent", "open-hands", "open_hands"}
+
+def _is_retired_connector_name(name: Any) -> bool:
+    return isinstance(name, str) and name.strip().lower() in _RETIRED_CONNECTOR_NAMES
+
+
+def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
+    """Until 1.1, accept old rosters and discard removed connector settings.
+
+    Only connector fields are touched (mirrors ``dropRetiredConnectorSettings``
+    and ``migrateObservabilityV8LegacyConnectors`` in Go): a skill, MCP server
+    or route that happens to share a removed connector's name is kept. A list
+    that named only removed connectors must not widen into "every connector"
+    when it empties, so its owner is disabled or dropped instead.
+    """
+
     changed = False
 
-    def only_retired(names: Any) -> bool:
-        return isinstance(names, list) and bool(names) and all(
-            isinstance(name, str) and name.strip().lower() in retired for name in names
-        )
+    def child(parent: Any, key: str) -> Any:
+        return parent.get(key) if isinstance(parent, dict) else None
 
-    application = raw.get("application_protection")
-    openshell = raw.get("openshell")
-    admin = openshell.get("admin") if isinstance(openshell, dict) else None
-    guardrail_source = raw.get("guardrail")
-    profiles = guardrail_source.get("profiles") if isinstance(guardrail_source, dict) else None
-    assignments = guardrail_source.get("profile_assignments") if isinstance(guardrail_source, dict) else None
-    disable_application = isinstance(application, dict) and only_retired(application.get("include_connectors"))
-    disable_openshell = isinstance(openshell, dict) and only_retired(openshell.get("harnesses"))
-    disable_admin = isinstance(admin, dict) and only_retired(admin.get("allowed_harnesses"))
-    disable_profiles = {
-        name for name, profile in profiles.items()
-        if isinstance(profile, dict) and isinstance(profile.get("sandbox"), dict)
-        and only_retired(profile["sandbox"].get("allowed_harnesses"))
-    } if isinstance(profiles, dict) else set()
-    drop_assignments = {
-        id(assignment) for assignment in assignments
-        if isinstance(assignment, dict) and isinstance(assignment.get("match"), dict)
-        and only_retired(assignment["match"].get("connectors"))
-        and not any(value for key, value in assignment["match"].items() if key != "connectors")
-    } if isinstance(assignments, list) else set()
-
-    def clean(value: Any) -> None:
+    def drop_keys(mapping: Any) -> None:
         nonlocal changed
-        if isinstance(value, dict):
-            for key in list(value):
-                if isinstance(key, str) and key.strip().lower() in retired:
-                    del value[key]
-                    changed = True
-                else:
-                    clean(value[key])
-        elif isinstance(value, list):
-            for item in list(value):
-                if isinstance(item, str) and item.strip().lower() in retired:
-                    value.remove(item)
-                    changed = True
-                else:
-                    clean(item)
-
-    clean(raw)
-    # until 1.1: empty allow-lists mean "all", so keep retired-only lists restrictive.
-    if disable_application:
-        application["enabled"] = False
-    if disable_openshell:
-        openshell["enabled"] = False
-    if disable_admin:
-        admin["allowed"] = False
-    if isinstance(profiles, dict):
-        for name in disable_profiles:
-            profiles[name]["sandbox"]["allowed"] = False
-    if isinstance(assignments, list) and drop_assignments:
-        assignments[:] = [assignment for assignment in assignments if id(assignment) not in drop_assignments]
-    guardrail = raw.get("guardrail")
-    if isinstance(guardrail, dict):
-        if str(guardrail.get("connector", "")).strip().lower() in retired:
-            remaining = guardrail.get("connectors")
-            guardrail["connector"] = sorted(remaining)[0] if isinstance(remaining, dict) and remaining else ""
+        if not isinstance(mapping, dict):
+            return
+        for key in [key for key in mapping if _is_retired_connector_name(key)]:
+            del mapping[key]
             changed = True
-    claw = raw.get("claw")
-    if isinstance(claw, dict) and str(claw.get("mode", "")).strip().lower() in retired:
+
+    def drop_names(parent: Any, key: str) -> bool:
+        """Strip removed names from parent[key]; True when only removed names were listed."""
+        nonlocal changed
+        names = child(parent, key)
+        if not isinstance(names, list) or not names:
+            return False
+        kept = [name for name in names if not _is_retired_connector_name(name)]
+        if len(kept) == len(names):
+            return False
+        parent[key] = kept
+        changed = True
+        return not kept
+
+    guardrail = child(raw, "guardrail")
+    application = child(raw, "application_protection")
+    observability = child(raw, "observability")
+    openshell = child(raw, "openshell")
+    admin = child(openshell, "admin")
+
+    for mapping in (
+        child(guardrail, "connectors"),
+        child(child(raw, "asset_policy"), "connectors"),
+        child(application, "connectors"),
+        child(observability, "connectors"),
+        child(raw, "connector_hooks"),
+        child(child(child(raw, "enterprise"), "machine_policy"), "connectors"),
+    ):
+        drop_keys(mapping)
+
+    drop_names(child(guardrail, "judge"), "hook_connectors")
+    drop_names(application, "exclude_connectors")
+    if drop_names(application, "include_connectors"):
+        application["enabled"] = False
+    if drop_names(openshell, "harnesses"):
+        openshell["enabled"] = False
+    drop_names(admin, "required_for")
+    if drop_names(admin, "allowed_harnesses"):
+        admin["allowed"] = False
+
+    profiles = child(guardrail, "profiles")
+    if isinstance(profiles, dict):
+        for profile in profiles.values():
+            drop_keys(child(profile, "connectors"))
+            sandbox = child(profile, "sandbox")
+            drop_names(sandbox, "required_for")
+            if drop_names(sandbox, "allowed_harnesses"):
+                sandbox["allowed"] = False
+
+    assignments = child(guardrail, "profile_assignments")
+    if isinstance(assignments, list):
+        # An assignment for only removed connectors would match every
+        # connector once its list empties, so it goes.
+        assignments[:] = [
+            assignment for assignment in assignments if not drop_names(child(assignment, "match"), "connectors")
+        ]
+
+    destinations = child(observability, "destinations")
+    if isinstance(destinations, list):
+        for destination in destinations:
+            routes = child(destination, "routes")
+            if isinstance(routes, list):
+                # A route for only removed connectors would select every
+                # connector (and fails the v8 schema's minItems) once emptied.
+                routes[:] = [route for route in routes if not drop_names(child(route, "selector"), "connectors")]
+
+    if isinstance(guardrail, dict) and _is_retired_connector_name(guardrail.get("connector")):
+        remaining = guardrail.get("connectors")
+        guardrail["connector"] = sorted(remaining)[0] if isinstance(remaining, dict) and remaining else ""
+        changed = True
+    claw = child(raw, "claw")
+    if isinstance(claw, dict) and _is_retired_connector_name(claw.get("mode")):
         claw["mode"] = ""
         changed = True
     if changed:

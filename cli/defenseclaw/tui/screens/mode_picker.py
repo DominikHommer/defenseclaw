@@ -298,7 +298,7 @@ def _choice_action(choice: ModeChoice, *, current_wire: str) -> MenuAction:
     guardrail = (
         "guardrail"
         if choice.guardrail_ok
-        else ("policy" if choice.wire in { "amp"} else "hooks")
+        else ("policy" if choice.wire == "amp" else "hooks")
     )
     return MenuAction(
         action_id=choice.wire,

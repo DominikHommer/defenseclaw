@@ -55,7 +55,6 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw import doctor_gateway
 from defenseclaw.commands.cmd_doctor import (
     _CURSOR_NATIVE_HOOK_TIMEOUT_SECONDS,
     _CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS,
@@ -78,16 +77,10 @@ from defenseclaw.commands.cmd_doctor import (
     _doctor_label_suffix,
     _DoctorResult,
     _fix_plugin_registry_required,
-    _hook_health_paths_from_lock,
     _opencode_load_heartbeat_status,
     _plugin_registry_required_offenders,
     _probe_cursor_windows_runtime,
     _run_cursor_windows_runtime_process,
-)
-from defenseclaw.file_permissions import (
-    UNSAFE_PATH_CHANGED,
-    UNSAFE_PATH_SYMLINK_OR_REPARSE,
-    UnsafePathError,
 )
 
 
@@ -1947,24 +1940,6 @@ class TestCheckHookHealth(unittest.TestCase):
     prefers the gateway's recorded ``hook_contract_lock.json`` paths and is
     format-agnostic (YAML for hermes, flat ``.js`` for opencode).
     """
-
-    def setUp(self) -> None:
-        # D:-rooted Windows CI workspaces commonly inherit an Authenticated
-        # Users write ACE above TemporaryDirectory. Existing connector tests
-        # isolate content behavior; custody-specific cases below override this
-        # seam explicitly with safe, denied, unavailable, and Darwin verdicts.
-        custody = patch(
-            "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-            return_value=("ok", ""),
-        )
-        custody.start()
-        self.addCleanup(custody.stop)
-        private_custody = patch(
-            "defenseclaw.commands.cmd_doctor.windows_acl_confidentiality_error",
-            return_value=None,
-        )
-        private_custody.start()
-        self.addCleanup(private_custody.stop)
 
     def _cfg(self, data_dir: str, connector: str, paths: list[str]) -> MagicMock:
         cfg = MagicMock()

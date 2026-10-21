@@ -102,7 +102,6 @@ from defenseclaw.doctor_gateway import (
     ListenerEvidence,
     PIDRecord,
     ProcessEvidence,
-    _pid_record_integrity_error,
     canonical_path,
     gateway_executable_name,
     parse_pid_record_bytes,
@@ -123,9 +122,6 @@ from defenseclaw.envvars import active_security_overrides
 from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
-    UNSAFE_PATH_CHANGED,
-    UNSAFE_PATH_EXCEEDS_LIMIT,
-    UnsafePathError,
     atomic_write_private_bytes,
     darwin_acl_confidentiality_error,
     darwin_acl_write_error,
@@ -135,7 +131,6 @@ from defenseclaw.file_permissions import (
     root_owned_private_regular_file,
     sudo_runtime_leftover_relpaths,
     trusted_system_subprocess_env,
-    windows_acl_confidentiality_error,
 )
 from defenseclaw.gateway import gateway_api_client_host
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
@@ -2113,7 +2108,7 @@ def _check_hilt_support(
             "intentionally does not implement or claim that surface",
             r=r,
         )
-    elif connector in {"hermes", "devin", }:
+    elif connector in {"hermes", "devin"}:
         _emit(
             "warn",
             "Human approval",
@@ -3745,7 +3740,7 @@ def _guardrail_health_mode(details: dict) -> str:
     if isinstance(connector_modes, dict) and connector_modes:
         return "mode=" + ", ".join(f"{name}:{connector_modes[name]}" for name in sorted(connector_modes))
     mode = details.get("policy_mode") or details.get("mode") or "?"
-    surface = {"agent_lifecycle_hooks": "hook-enforced", }.get(
+    surface = {"agent_lifecycle_hooks": "hook-enforced"}.get(
         details.get("enforcement_surface"), ""
     )
     if mode == "action" and surface and details.get("enforcement_enabled") is True:
@@ -9064,9 +9059,9 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
         if mode == "action":
             return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
         return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
-    if not ({ "amp"} & modes.keys()) and all(mode == "action" for mode in modes.values()):
+    if "amp" not in modes and all(mode == "action" for mode in modes.values()):
         return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
-    if not ({ "amp"} & modes.keys()) and all(mode != "action" for mode in modes.values()):
+    if "amp" not in modes and all(mode != "action" for mode in modes.values()):
         return f"hook-driven for {label} (mode=observe) — proxy port intentionally closed"
     parts = []
     for connector, mode in modes.items():

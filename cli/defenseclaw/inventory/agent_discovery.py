@@ -2095,11 +2095,11 @@ def _version_for_binary(
     binary_name = _binary_command_name(binary_path)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name in { "hermes"}:
-        # Hermes runs a synchronous update check (17.5 s on
-        # Windows), and a timeout made init drop an enrolled Hermes (GAP-1604).
+    if binary_name == "hermes":
+        # Hermes runs a synchronous update check (17.5 s on Windows), and a
+        # timeout made init drop an enrolled Hermes (GAP-1604).
         timeout = 30.0
-    elif binary_name in {"claude", } or (
+    elif binary_name == "claude" or (
         os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
     ):
         timeout = 8.0
@@ -2144,7 +2144,7 @@ def _version_for_binary(
         return "", f"version probe exited {result.returncode}"
     if not stdout:
         return "", "version probe returned empty stdout"
-    return _version_line_for_binary(binary_path, stdout), ""
+    return _version_line_for_binary(stdout), ""
 
 
 def _version_for_agent_binary(
@@ -2398,12 +2398,9 @@ def _windows_file_version_for_binary(
         return "", f"version metadata probe failed: {exc}"
 
 
-def _version_line_for_binary(binary_path: str, stdout: str) -> str:
+def _version_line_for_binary(stdout: str) -> str:
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    if not lines:
-        return ""
-    binary_name = _binary_command_name(binary_path)
-    return lines[0]
+    return lines[0] if lines else ""
 
 
 def _first_existing_file(candidates: tuple[str, ...]) -> str:
