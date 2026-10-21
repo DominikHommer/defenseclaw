@@ -1,0 +1,273 @@
+---
+title: Run an agent in a sandbox
+description: Start Claude Code or Codex in an OpenShell sandbox, read the launch banner, watch the activity feed and end the session.
+keywords:
+  - sandbox run
+  - skip permissions
+  - sandbox activity
+  - launch banner
+  - Claude Code sandbox
+---
+
+Run Claude Code or Codex in skip-permissions mode on your project folder, with DefenseClaw checking every tool call and every site.
+
+The whole session in one replay, then each step:
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.6}
+  height={520}
+  ariaLabel="Animated terminal replay of one Claude Code session in a Linux sandbox: the launch banner, the activity feed in a second terminal with two allowed sites, a flagged tool call, a blocked webhook site and its unblock, then the end-of-session summary that flags files able to run code and asks whether to keep the changes."
+  caption="Recorded from a real session on Linux (project name shortened). The banner is the first screen. The feed runs in a second terminal. The summary and the keep question come when you exit the harness."
+  frames={[
+    { type: 'cmd', text: "defenseclaw sandbox run claude", pauseMs: 700 },
+    { type: 'dim', text: "  Starting a Claude Code sandbox…" },
+    { type: 'spacer' },
+    { type: 'out', text: "Sandbox myapp-d74e · Claude Code · skip-permissions ON · network: open + blocklist" },
+    { type: 'out', text: "  Project   ~/code/myapp → /work/myapp (live)   undo point taken → `defenseclaw sandbox undo myapp-d74e` restores it" },
+    { type: 'out', text: "  Hidden    .env  (secret files appear empty inside; --unmask PATH to share)" },
+    { type: 'out', text: "  Protected .git/hooks .git/config .git/config.worktree (read-only)" },
+    { type: 'out', text: "            Not visible: everything else on this machine" },
+    { type: 'out', text: "  Model     anthropic.claude-sonnet-5 (the default; -- --model MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only (the sandbox sees a placeholder)" },
+    { type: 'out', text: "            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too" },
+    { type: 'out', text: "  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-d74e (or `defenseclaw tui`: 7, then t); each one also rings the bell here" },
+    { type: 'spacer' },
+    { type: 'dim', text: "# Claude Code opens here and the agent works. In a second terminal:", pauseMs: 600 },
+    { type: 'cmd', text: "defenseclaw sandbox activity -f", pauseMs: 700 },
+    { type: 'out', text: "12:30:11 myapp-d74e creating sandbox myapp-d74e" },
+    { type: 'out', text: "12:30:28 myapp-d74e sandbox myapp-d74e is ready" },
+    { type: 'ok', text: "12:31:12 myapp-d74e ✓ registry.npmjs.org" },
+    { type: 'ok', text: "12:31:18 myapp-d74e ✓ docs.python.org" },
+    { type: 'warn', text: "12:31:19 myapp-d74e ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))" },
+    { type: 'out', text: "12:31:19 myapp-d74e ✗ webhook.site (webhook catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-d74e" },
+    { type: 'out', text: "12:32:18 myapp-d74e unblocked webhook.site for sandbox myapp-d74e" },
+    { type: 'ok', text: "12:32:31 myapp-d74e ✓ webhook.site" },
+    { type: 'spacer' },
+    { type: 'dim', text: "# after you exit Claude Code, in the first terminal:", pauseMs: 600 },
+    { type: 'out', text: "Session ended · 4 tool calls · 3 new sites contacted · 1 site blocked · 2 files changed (+14 −1)" },
+    { type: 'warn', text: "  ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))" },
+    { type: 'out', text: "  ✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked since" },
+    { type: 'warn', text: "⚠ Changed files that can run code on your machine: package-lock.json, package.json, node_modules/  → review before running" },
+    { type: 'prompt', text: "Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter) ", reply: "", pauseMs: 600 },
+  ]}
+/>
+
+## Before you start
+
+- Setup is done on [Linux](/docs/how-to/sandboxes/set-up-on-linux) or [macOS](/docs/how-to/sandboxes/set-up-on-macos), and `defenseclaw sandbox doctor` ends with `ready for sandboxes`.
+- The DefenseClaw daemon is running (`defenseclaw-gateway start`).
+- You are in a project folder inside your home directory, not in the home directory itself.
+
+## Steps
+
+<Steps>
+
+<Step>
+
+### Start the run
+
+```bash
+cd ~/code/myapp
+defenseclaw sandbox run claude
+```
+
+`codex` works the same way. The sandbox is named after the folder plus a random suffix, such as `myapp-7f3a`, unless you pass `--name`. Arguments after `--` go to the harness:
+
+```bash
+defenseclaw sandbox run claude -- --model sonnet
+```
+
+The first run of a harness builds its image if setup did not: a few minutes and about 3 GB. Where the gateway runs the MicroVM driver (every Mac), the first start of each image also prepares a MicroVM disk, about a minute.
+
+On a Mac the run says it works on a copy before it copies anything:
+
+```text
+  copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; the agent works on a copy, and your folder changes only when you bring its work back: at the end of the session, or later with `defenseclaw sandbox pull`
+  Copying ~/code/myapp (secrets are held back)…
+```
+
+</Step>
+
+<Step>
+
+### Read the banner
+
+Before the harness takes over your terminal, DefenseClaw prints what the sandbox can see and use.
+
+<Tabs items={['Linux', 'macOS']}>
+<Tab value="Linux">
+
+```text
+Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + blocklist
+  Project   ~/code/myapp → /work/myapp (live)   undo point taken → `defenseclaw sandbox undo myapp-7f3a` restores it
+  Hidden    .env  certs/dev.pem  (secret files appear empty inside; --unmask PATH to share)
+  Protected .git/hooks .git/config .git/config.worktree (read-only)
+            Not visible: everything else on this machine
+  Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
+  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-7f3a (or `defenseclaw tui`: 7, then t); each one also rings the bell here
+```
+
+</Tab>
+<Tab value="macOS">
+
+```text
+Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + blocklist
+  Project   ~/code/myapp → /sandbox/work/myapp (copy)   changes come back with `defenseclaw sandbox pull myapp-1c2d`
+            Not visible: everything else on this machine
+  Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
+  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t); each one also rings the bell here
+```
+
+</Tab>
+</Tabs>
+
+| Line | What it tells you |
+| --- | --- |
+| `Sandbox …` | The name (the folder name cut to fit OpenShell's 19 characters), the harness and the permission mode. `skip-permissions ON` means the harness's own prompts are off. With `--safe` it reads `skip-permissions OFF (harness prompts kept)`. |
+| `network: …` | `open + blocklist` (the default), `allowlist (balanced)` or `provider hosts only (strict)`. |
+| `Project` | Your folder and where it appears inside. `(live)` means the agent edits your folder. `(copy)` means it edits a copy without what git ignores, such as `node_modules/`, so install dependencies inside. |
+| `Hidden` | Secret files that appear empty inside a live mount. On a copy they are held back. `--unmask PATH` shares one. |
+| `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook that runs on your machine. |
+| `Model` | The model credential and the only hosts it works at. The sandbox holds a placeholder. The second line says OpenShell reaches those hosts around the egress proxy, so the proxy's blocklist and upload checks do not see that traffic. |
+| `Asks` | Where to answer the rare asks. Claude Code and Codex keep the terminal title, so keep the command shown open in a second terminal. |
+
+The banner also shows `Context`, `Secret`, `Host`, `Uploads`, `Policy`, `Keys`, `MCP` and `Hooks` lines when they apply. [Sandbox CLI reference](/docs/reference/sandbox-cli#sandbox-run) lists them.
+
+</Step>
+
+<Step>
+
+### Watch the activity feed
+
+Open a second terminal:
+
+```bash
+defenseclaw sandbox activity -f
+```
+
+```text
+14:02:11 myapp-7f3a ✓ registry.npmjs.org
+14:02:13 myapp-7f3a ✓ docs.python.org
+14:02:20 myapp-7f3a ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))
+14:02:20 myapp-7f3a ✗ webhook.site (webhook catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
+14:06:02 myapp-7f3a ✗ tool Bash blocked: <the rule's reason>
+```
+
+| Mark | Meaning |
+| --- | --- |
+| `✓ host` | The sandbox reached a site through the egress proxy. |
+| `✗ host (why)` | The proxy blocked a site. The line ends with the unblock command when the block can be lifted. |
+| `⚠` | DefenseClaw allowed a tool call and recorded a finding for your review. |
+| `✗ tool … blocked` | DefenseClaw's hooks blocked a tool call. The harness shows the reason too. |
+| `? ask …` | The sandbox asks to reach something only you can open, such as a port on your machine. |
+
+Model calls do not appear in the feed, because OpenShell opens the model provider's hosts to the harness directly. `--sandbox NAME` limits the feed to one sandbox, and `-o json` prints JSON. The TUI Sandboxes panel (key `7`, then `t`) and the macOS app show the same feed: [watch from the TUI or app](/docs/how-to/sandboxes/watch-from-the-tui-or-app).
+
+</Step>
+
+<Step>
+
+### Handle a block
+
+When the proxy refuses a site, the agent gets an HTTP 403 for plain HTTP, or a failed connection for HTTPS. After the tool call, DefenseClaw's hooks tell Claude Code, Codex and GitHub Copilot CLI which site was blocked, why, and how you can unblock it. If the block is a false positive, [unblock the site](/docs/how-to/sandboxes/unblock-a-site).
+
+</Step>
+
+<Step>
+
+### End the session
+
+Exit the harness as you normally would. DefenseClaw summarizes the session and flags changed files that can run code on your machine.
+
+<Tabs items={['Linux', 'macOS']}>
+<Tab value="Linux">
+
+```text
+Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 new sites contacted · 1 site blocked · 8 files changed (+212 −37)
+  ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))
+  ✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked since
+⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
+Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
+  Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-7f3a   delete: defenseclaw sandbox delete myapp-7f3a
+```
+
+</Tab>
+<Tab value="macOS">
+
+```text
+  Pulling myapp-1c2d's work…
+Session ended · 14 tool calls · 2 new sites contacted · 3 files changed (+41 −6)
+Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip  [d] show diff (then Enter)
+  ✓ applied 3 changes to ~/code/myapp
+  your previous working tree is kept at refs/defenseclaw/copy/myapp-1c2d/pre-apply; `defenseclaw sandbox undo myapp-1c2d` reverts the apply
+  Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-1c2d   delete: defenseclaw sandbox delete myapp-1c2d
+```
+
+</Tab>
+</Tabs>
+
+[Review, undo or pull](/docs/how-to/sandboxes/review-undo-or-pull) explains each answer. A session that changed no files ends without the question.
+
+</Step>
+
+<Step>
+
+### Resume or clean up
+
+The sandbox is stopped and kept, with the agent's state inside it.
+
+```bash
+defenseclaw sandbox connect myapp-7f3a -- --continue
+defenseclaw sandbox list
+defenseclaw sandbox delete myapp-7f3a
+```
+
+`--rm` on `sandbox run` deletes the sandbox at the end instead. It keeps a copy whose work you did not bring back.
+
+</Step>
+
+</Steps>
+
+## Run without a terminal
+
+`--prompt` runs the harness headless with one prompt and streams its output:
+
+```bash
+defenseclaw sandbox run codex --prompt "fix the failing tests"
+```
+
+A headless run deletes its sandbox when nothing is left in it to bring back or undo:
+
+```text
+  ✓ sandbox myapp-1c2d deleted: nothing is left in it to bring back or undo (a one-prompt run's sandbox; --keep or openshell.keep_headless keeps it)
+```
+
+`--detach` starts a run in the background and needs a prompt:
+
+```bash
+defenseclaw sandbox run claude --detach --prompt "fix the failing tests"
+```
+
+```text
+  ✓ Claude Code is running in the background in myapp-7f3a
+  follow:  defenseclaw sandbox logs myapp-7f3a -f
+  watch:   defenseclaw sandbox activity -f --sandbox myapp-7f3a
+  review:  defenseclaw sandbox review myapp-7f3a   undo: defenseclaw sandbox undo myapp-7f3a
+  stop:    defenseclaw sandbox stop myapp-7f3a
+```
+
+## Check it worked
+
+```bash
+defenseclaw sandbox status myapp-7f3a
+```
+
+The `Hook traffic` and `Hook events` rows show that the hooks reach DefenseClaw, and the `Egress` row counts the sites contacted and blocked. If every tool call is blocked, see [hooks cannot reach DefenseClaw](/docs/troubleshooting/sandboxes#every-tool-call-is-blocked).
+
+## Next
+
+- [Unblock a site](/docs/how-to/sandboxes/unblock-a-site)
+- [Review, undo or pull](/docs/how-to/sandboxes/review-undo-or-pull)
+- [More ways to run](/docs/how-to/sandboxes/more-ways-to-run)
