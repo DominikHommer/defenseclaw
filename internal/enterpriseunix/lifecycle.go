@@ -259,6 +259,10 @@ type lifecycle struct {
 	confirmedLate map[string]bool
 	// inboxProcessed are the bundle inbox files this run removes at its end.
 	inboxProcessed []string
+	// inboxSuperseded are the lower inbox versions this run did not apply,
+	// and inboxTopVersion the version it applied instead.
+	inboxSuperseded []supersededInbox
+	inboxTopVersion uint64
 }
 
 // noteChange records one change a repair or ensure made to an installed

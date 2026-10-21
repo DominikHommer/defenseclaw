@@ -957,7 +957,7 @@ func refuseWindowsBundleRequired(cmd *cobra.Command, action string, opts *window
 		return false, nil
 	}
 	return true, writeWindowsBundleRefusal(cmd, action, opts, string(enterprisebundle.CodeBundleRequired), fmt.Sprintf(
-		"this device takes its policy from signed bundles (the MDM installed %s), so CONFIG= is not applied; deliver a signed bundle with /ensure BUNDLE=<file>",
+		"this device takes its policy from signed bundles (a trust anchor file is installed at %s), so CONFIG= is not applied; deliver a signed bundle with /ensure BUNDLE=<file>",
 		driver.AnchorsPath), "")
 }
 

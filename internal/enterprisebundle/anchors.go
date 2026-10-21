@@ -104,7 +104,9 @@ type TrustCheck func(path string) error
 // LoadAnchors reads the anchor file at path. A missing file is
 // anchor_missing; a file or folder above it that fails trust (owner, mode,
 // ACL, links; nil skips the check) or that is not a regular file is
-// anchor_insecure; a malformed file is anchor_invalid.
+// anchor_insecure; a malformed file is anchor_invalid. An anchor_insecure
+// refusal caused by an operating system error wraps it: errors.Is(err,
+// fs.ErrPermission) tells an account that may not read the file.
 func LoadAnchors(path string, trust TrustCheck) (*Anchors, error) {
 	anchors, _, err := ReadAnchorsFile(path, trust)
 	return anchors, err
@@ -119,19 +121,25 @@ func ReadAnchorsFile(path string, trust TrustCheck) (*Anchors, []byte, error) {
 		return nil, nil, refuse(CodeAnchorMissing, AnchorsName, "no trust anchor file; bundle mode is off")
 	}
 	if err != nil {
-		return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "cannot inspect the trust anchor file: %s", boundedDetail(errors.Unwrap(err).Error()))
+		refusal := refuse(CodeAnchorInsecure, AnchorsName, "cannot inspect the trust anchor file: %s", boundedDetail(errors.Unwrap(err).Error()))
+		refusal.cause = err
+		return nil, nil, refusal
 	}
 	if !info.Mode().IsRegular() {
 		return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "the trust anchor path is not a regular file")
 	}
 	if trust != nil {
 		if err := trust(path); err != nil {
-			return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "%s", boundedDetail(err.Error()))
+			refusal := refuse(CodeAnchorInsecure, AnchorsName, "%s", boundedDetail(err.Error()))
+			refusal.cause = err
+			return nil, nil, refusal
 		}
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, nil, refuse(CodeAnchorInsecure, AnchorsName, "cannot open the trust anchor file")
+		refusal := refuse(CodeAnchorInsecure, AnchorsName, "cannot open the trust anchor file")
+		refusal.cause = err
+		return nil, nil, refusal
 	}
 	defer file.Close()
 	opened, err := file.Stat()
