@@ -42,7 +42,7 @@ The config is the only file you write. The lifecycle keeps these records next to
 | `config.yaml.v8.bak` | The `config_version: 8` file the first migration replaced (root-only), if the host needed that migration. |
 | `migration-v9.json` | What the migration moved, what conflicted and what it left out. `defenseclaw-gateway config migrate --config /etc/defenseclaw/config.yaml --ack` marks it read on Linux; on macOS use `--config /opt/cisco/defenseclaw/etc/config.yaml`. |
 
-On Linux and macOS the lifecycle directory also holds `committed-config.yaml` (a copy of the last applied config), `rejected-config.yaml` (an in-place edit that was reverted) and `policy-state.json` (the last applied effective policy digest). See [What `ensure` does with the config](/docs/enterprise/lifecycle#what-ensure-does-with-the-config) and [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
+On Linux and macOS the lifecycle directory (`/var/lib/defenseclaw-enterprise` on Linux, root-only; `/opt/cisco/defenseclaw/lifecycle` on macOS) is not the config folder. It holds `committed-config.yaml` (a copy of the last applied config), `rejected-config.yaml` (an in-place edit that was reverted) and `policy-state.json` (the last applied effective policy digest). See [What `ensure` does with the config](/docs/enterprise/lifecycle#what-ensure-does-with-the-config) and [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
 
 ## Required keys
 
@@ -152,7 +152,7 @@ The gateway ships three rule packs, `default`, `strict` and `permissive`, under 
 
    The lifecycle refuses a pack inside `data_dir`. Before it changes anything it also refuses a pack whose folder, a folder above it, or any folder or file inside it is a symlink, is writable by group or others, has an ACL entry that grants write, or belongs to an account other than root (a pack copied with `cp -a` keeps its owner). It names the path and the reason. `status` and `verify` report a pack in use that no longer passes these checks. To repair modes, change only the `guardrail` folder and the pack (for example `sudo chmod 0755 <policies>/guardrail` and `sudo chmod -R u=rwX,go=rX <policies>/guardrail/my-pack`), and leave `policies` itself to the lifecycle, which keeps it at `0750`.
 2. **Choose the levels.** The pack's posture (its manifest's posture, else its folder name) sets the default levels: `strict` blocks findings of MEDIUM severity and above and alerts on LOW ones, `permissive` blocks only CRITICAL findings and alerts on HIGH ones, and any other pack blocks CRITICAL findings and alerts on MEDIUM and above. `guardrail.block_at` and `alert_at` (or a connector's own) override them; see [Thresholds](/docs/how-to/policies/change-block-and-alert-levels). The manifest is part of the pack's pin, so validate the pack again after you change it.
-3. **Validate the pack** with the gateway's own loader. On macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`.
+3. **Validate the pack** you just created, `my-pack` here (use your own folder name), with the gateway's own loader. On macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` and the folder is `/opt/cisco/defenseclaw/etc/policies/guardrail/my-pack`.
 
    ```bash
    sudo /opt/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir /etc/defenseclaw/policies/guardrail/my-pack
@@ -170,7 +170,7 @@ The gateway ships three rule packs, `default`, `strict` and `permissive`, under 
 
    The lifecycle refuses a pack that does not exist or whose digest does not match, and applies the new pack in the running gateway without a restart. If the gateway cannot load it, `ensure` fails and the previous config stays in force.
 
-To change a pack that is in use, create the edited copy in a new folder (for example `acme-v2`), validate it, and switch `rule_pack` and `custom_packs` to it, so `ensure` applies it with rollback. A pack edited in place no longer matches its pinned digest, so the gateway refuses it until you pin the new digest.
+To change a pack that is in use, create the edited copy in a new folder (for example `my-pack-v2`), validate it, and switch `rule_pack` and `custom_packs` to it, so `ensure` applies it with rollback. A pack edited in place no longer matches its pinned digest, so the gateway refuses it until you pin the new digest.
 
 On Windows, give the pack its own folder (not `data_dir` or the staging folder), quote its path with single quotes, and pin the digest that Setup prints when it refuses a placeholder, or that `defenseclaw-gateway.exe rulepack validate --dir <pack>` prints once DefenseClaw is installed. See [Write the config](/docs/enterprise/windows#2-write-the-config).
 

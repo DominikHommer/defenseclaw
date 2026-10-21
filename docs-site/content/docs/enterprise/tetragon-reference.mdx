@@ -256,17 +256,18 @@ file. "No copy" kept the host's existing policies loaded.
 | Live roots in the controls copy | `file_open` hooks | µs per open |
 | --- | ---: | ---: |
 | No copy | 0 extra | 5.63 to 5.78 |
-| 4 | 2 | 9.06 to 9.43 |
+| 4 (current limit) | 2 | 9.06 to 9.43 |
 | 5 | 2 | Not measured |
-| 8 (current limit) | 2 | 11.17 to 11.35 |
+| 8 | 2 | 11.17 to 11.35 |
 | 12 | 3 | 14.03 to 14.47 |
 | 16 | 3 | 16.12 to 16.27 |
 | 32 | 6 | Not measured |
 | 64 | 12 | 48.81 to 50.79 |
 
-All tested copies loaded enabled. The 12, 16, 32 and 64-root copies show the
-uncapped renderer's cost; the shipped eight-root limit keeps the largest
-render at about 1.2 times the four-root cost. Every extra `file_open` hook
+All tested copies loaded enabled. The rows above four roots were measured with an
+earlier renderer that had no cap. They show what more roots would cost; the
+shipped limit is four roots per policy, so the largest render is the four-root
+row. Every extra `file_open` hook
 runs for every open on the host, including opens by processes outside the
 agent sessions.
 

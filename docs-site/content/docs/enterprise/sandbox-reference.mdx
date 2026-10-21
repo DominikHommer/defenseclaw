@@ -251,7 +251,7 @@ The sandbox routes answer with an HTTP status and a `sandbox_*` reason. The user
 
 | Reason (status) | Meaning | What to do |
 | --- | --- | --- |
-| `sandbox_registration_unknown` (404), `sandbox_registration_revoked`, `sandbox_registration_expired` (410) | The registration is gone, revoked, or the five-minute pending window passed | Start the sandbox again |
+| `sandbox_registration_unknown` (404), `sandbox_registration_revoked`, `sandbox_registration_expired` (410) | The registration is gone, revoked, or the 30-minute pending window passed (a registration that was never bound to a sandbox) | Start the sandbox again |
 | `sandbox_registration_stopped` (403) | The sandbox is not running: its daemon reported it stopped, or has not reported it running for five minutes | `defenseclaw sandbox start` |
 | `sandbox_subject_changed` (409) | The account behind the uid was renamed or recycled | Start the sandbox again |
 | `sandbox_relay_files_unsupported` (400) | A client sent mount-mode file bytes; managed hosts are copy-only | Use copy mode |
