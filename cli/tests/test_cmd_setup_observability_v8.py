@@ -255,6 +255,44 @@ def test_setup_v8_failed_add_takes_the_new_key_back_out_of_dotenv(
     assert "DEFENSECLAW_SPLUNK_HEC_TOKEN" not in os.environ
 
 
+def test_setup_v8_failed_add_keeps_a_token_another_setup_committed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-1320: while this add waited, another setup saved a destination that
+    # uses the token this add staged; this add then failed on the changed
+    # config. Its rollback must not take that destination's token out of .env.
+    _stub_canonical_v8_gateway(monkeypatch)
+    monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN")
+    app = _setup_app(tmp_path)
+    from defenseclaw.observability import v8_writer
+    from defenseclaw.observability.v8_yaml import V8YAMLMutation
+
+    original = v8_writer.mutate_v8_config
+
+    def concurrent(path, mutations, **kwargs):
+        other = [
+            V8YAMLMutation.set(mutation.path, {**mutation.value, "name": "hec-b"})
+            for mutation in mutations
+            if isinstance(mutation.value, dict) and mutation.value.get("kind")
+        ]
+        original(path, other, **{**kwargs, "expected_before_sha256": None})
+        raise RuntimeError("config.yaml changed while this setup ran")
+
+    monkeypatch.setattr(v8_writer, "mutate_v8_config", concurrent)
+    result = CliRunner().invoke(
+        observability,
+        ["add", "splunk-hec", "--non-interactive", "--name", "hec", "--token", "dummy-hec",
+         "--endpoint", "https://hec.example.com:8088/services/collector"],
+        obj=app,
+    )
+
+    assert result.exit_code != 0
+    assert "hec-b" in (tmp_path / "config.yaml").read_text()
+    assert dotenv_values(tmp_path / ".env").get("DEFENSECLAW_SPLUNK_HEC_TOKEN") == "dummy-hec"
+
+
 def test_setup_v8_failed_add_keeps_its_error_when_the_key_cannot_be_taken_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

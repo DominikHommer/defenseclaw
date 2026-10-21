@@ -599,7 +599,19 @@ def _add_v8_destination(
             expected_before_sha256=expected_sha256,
         )
     except BaseException:
-        if secret_changed:
+        keep_for = (
+            _destinations_now_using_secret(data_dir, preset.token_env, authored) if secret_changed else []
+        )
+        if keep_for:
+            # GAP-1320: another setup committed a destination that uses the
+            # staged value while this one failed; taking it out of .env would
+            # break that destination.
+            click.echo(
+                f"  Note: {preset.token_env} stays in .env: destination "
+                f"{', '.join(repr(name) for name in keep_for)} that another setup saved uses it.",
+                err=True,
+            )
+        elif secret_changed:
             # GAP-0210: a failed add leaves no key behind in .env.
             try:
                 restore_secret(data_dir, preset.token_env, secret_before, environ_before, stored_secret)
@@ -625,6 +637,36 @@ def _add_v8_destination(
         # config.yaml may be unchanged, so the restart has to be asked for.
         mark_setup_secret_changed()
     return result, warnings
+
+
+def _destinations_now_using_secret(
+    data_dir: str, key: str | None, before: list[dict[str, Any]]
+) -> list[str]:
+    """Destinations config.yaml now has that use the secret key and did not before.
+
+    A destination uses it through a ``*_env`` field naming key or a
+    ``${key}`` reference in a value.
+    """
+
+    if not key:
+        return []
+    try:
+        now = _v8_authored_destinations(data_dir)
+    except Exception:  # noqa: BLE001 - an unreadable config commits nothing.
+        return []
+    needle = "${" + key + "}"
+
+    def refers(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(refers(item) for item in value.values())
+        if isinstance(value, list):
+            return any(refers(item) for item in value)
+        return isinstance(value, str) and (value == key or needle in value)
+
+    def using(destinations: list[dict[str, Any]]) -> set[str]:
+        return {str(destination.get("name")) for destination in destinations if refers(destination)}
+
+    return sorted(using(now) - using(before))
 
 
 def _stored_secret(data_dir: str, key: str) -> str | None:
