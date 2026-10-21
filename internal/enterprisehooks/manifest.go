@@ -46,7 +46,6 @@ type ManifestTarget struct {
 
 const enterpriseHookManifestMaxBytes int64 = 4 << 20
 
-
 func LoadManifest(path string) (Manifest, error) {
 	manifest, _, err := LoadManifestWithSHA256(path)
 	return manifest, err
