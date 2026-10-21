@@ -3405,7 +3405,7 @@
     {
       "name": "DEFENSECLAW_MANAGED_HOOK",
       "category": "hook_internal",
-      "purpose": "Immutable sentinel baked into managed-enterprise hook scripts so missing authentication material and unavailable enforcement fail closed even when an inherited environment requests permissive availability behavior.",
+      "purpose": "Immutable sentinel baked into managed-enterprise hook scripts so missing authentication material and unavailable enforcement fail closed even when an inherited environment requests permissive availability behavior. A per-user hook unsets an inherited value, so the agent environment cannot make it act as a managed hook.",
       "default": "unset (set to 1 only by generated managed hooks)",
       "accepted_values": [
         "1",

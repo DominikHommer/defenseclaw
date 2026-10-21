@@ -1185,13 +1185,25 @@ def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
     # the new one was in place left a gap in which an agent's registered hook
     # found no launcher. Install-File swaps an existing file in with
     # File.Replace first and renames only when that fails.
-    install_file = _ps_functions("Install-File")
-    assert install_file.index("Switch-InPlace") < install_file.index("Remove-Aside")
+    assert "Publish-File" in _ps_functions("Install-File")
+    publish = _ps_functions("Publish-File")
+    assert publish.index("Switch-InPlace") < publish.index("Remove-Aside")
+    # The shims and the hook state the native hook reads are swapped the same
+    # way (1.0.4 review): none of them goes missing during an upgrade.
+    text = _text()
+    hook_state = text[text.index("function Write-HookState {") :]
+    hook_state = hook_state[: hook_state.index("\n}\n") + 3]
+    for writer, body in (
+        ("Write-PosixShim", _ps_functions("Write-PosixShim")),
+        ("Write-Shim", _ps_functions("Write-Shim")),
+        ("Write-HookState", hook_state),
+    ):
+        assert 'Publish-File "$path.new" $path' in body and "Remove-Aside" not in body, writer
     assert "[IO.File]::Replace($New, $Destination, $Backup, $true)" in _ps_functions("Invoke-FileReplace")
     # 1.0.4 review: a file ReplaceFile cannot swap is never renamed aside; the
     # install fails and the installed launcher stays where hooks find it.
     switch = _ps_functions("Switch-InPlace")
-    assert "Remove-Aside" not in switch
+    assert "Remove-Aside" not in switch and "Move-Path" not in switch
     assert "it was left as it was" in switch
 
 
@@ -1204,7 +1216,7 @@ def test_install_file_never_leaves_the_destination_missing(tmp_path: Path) -> No
 $ErrorActionPreference = 'Stop'
 function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
 function Move-Path([string]$From, [string]$To) {{ throw "rename used: $From" }}
-{_ps_functions("Get-Sha256", "Install-File", "Invoke-FileReplace", "Switch-InPlace")}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileReplace", "Switch-InPlace")}
 Install-File '{source}' '{dest}'
 """
     completed = _run_powershell(script)
@@ -1229,7 +1241,7 @@ $script:missing = 0
 function Start-Sleep {{ }}
 function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
 function Move-Path([string]$From, [string]$To) {{ throw "rename used: $From" }}
-{_ps_functions("Get-Sha256", "Install-File", "Switch-InPlace")}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace")}
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
     $script:calls++
     if (-not (Test-Path -LiteralPath $Destination)) {{ $script:missing++ }}
@@ -1257,7 +1269,7 @@ def test_a_replace_that_stops_after_the_backup_rename_finishes_the_swap(tmp_path
     script = f"""
 $ErrorActionPreference = 'Stop'
 function Start-Sleep {{ }}
-{_ps_functions("Get-Sha256", "Move-Path", "Install-File", "Switch-InPlace")}
+{_ps_functions("Get-Sha256", "Move-Path", "Install-File", "Publish-File", "Switch-InPlace", "Invoke-FileMove", "Close-SwapGap")}
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
     [IO.File]::Move($Destination, $Backup)
     throw "Unable to move the replacement file to the file to be replaced."
@@ -1268,3 +1280,56 @@ Install-File '{source}' '{dest}'
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert dest.read_text(encoding="ascii") == "new"
     assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("held_moves", [3, 1000])
+def test_a_partial_replace_with_a_held_replacement_puts_the_launcher_back_at_once(tmp_path: Path, held_moves: int) -> None:
+    # 1.0.4 review: ReplaceFile renamed the installed launcher to the backup
+    # (error 1177) while a scanner held the new copy. The old launcher goes
+    # back before any wait, so every hook call during the retries finds it;
+    # the swap then finishes when the hold ends, or the install fails with the
+    # old launcher in place.
+    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    source.write_text("new", encoding="ascii")
+    dest.write_text("old", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:replaces = 0
+$script:heldMoves = 0
+$script:missingAtWait = 0
+$script:waits = 0
+function Start-Sleep {{ $script:waits++; if (-not (Test-Path -LiteralPath '{dest}')) {{ $script:missingAtWait++ }} }}
+function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
+function Move-Path([string]$From, [string]$To) {{ throw "a retried rename was used: $From" }}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace", "Close-SwapGap")}
+function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
+    $script:replaces++
+    if ($script:heldMoves -lt {held_moves}) {{
+        [IO.File]::Move($Destination, $Backup)
+        throw "Unable to move the replacement file to the file to be replaced."
+    }}
+    [IO.File]::Replace($New, $Destination, $Backup, $true)
+}}
+function Invoke-FileMove([string]$From, [string]$To) {{
+    if ($From.EndsWith('.new') -and $script:heldMoves -lt {held_moves}) {{
+        $script:heldMoves++
+        throw "The process cannot access the file because it is being used by another process."
+    }}
+    [IO.File]::Move($From, $To)
+}}
+try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }} catch {{ Write-Output "FAILED: $($_.Exception.Message)" }}
+Write-Output "REPLACES=$script:replaces WAITS=$script:waits MISSING_AT_WAIT=$script:missingAtWait"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "MISSING_AT_WAIT=0" in out and "WAITS=0 " not in out, out
+    if held_moves == 3:
+        assert "INSTALLED" in out, out
+        assert dest.read_text(encoding="ascii") == "new"
+        assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+    else:
+        assert "FAILED: Could not replace" in out and "it was left as it was" in out, out
+        assert dest.read_text(encoding="ascii") == "old"
+        assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]

@@ -777,9 +777,13 @@ else:
 # never fail the hook.
 #
 # Usage:
-#   defenseclaw_log_hook_failure CONNECTOR HOOK_NAME REASON CATEGORY FAIL_MODE [OUTCOME]
-# OUTCOME records the actual delivery decision, not merely configured policy.
-# Legacy diagnostic-only callers default to unknown rather than guessing.
+#   defenseclaw_log_hook_failure CONNECTOR HOOK_NAME REASON CATEGORY FAIL_MODE OUTCOME
+# OUTCOME records the actual delivery decision, not merely configured policy:
+# fail_open (the call ran unchecked), fail_closed (it was blocked) or
+# diagnostic (a record that is no delivery decision: the call still went to
+# the gateway). Every caller passes one; the gateway counts fail_open lines
+# as unchecked calls and keeps the fail_mode rule only for lines older hooks
+# wrote without one (unknown).
 #
 # CATEGORY is one of: "transport" (gateway unreachable / 5xx) or
 # "response" (4xx / parse error). The category lets operators tell the
@@ -793,7 +797,7 @@ defenseclaw_log_hook_failure() {
   local fail_mode="${5:-${FAIL_MODE:-open}}"
   local outcome="${6:-unknown}"
   case "$outcome" in
-    fail_open|fail_closed) : ;;
+    fail_open|fail_closed|diagnostic) : ;;
     *) outcome=unknown ;;
   esac
   if [ "$outcome" = "fail_open" ]; then
@@ -1455,7 +1459,7 @@ defenseclaw_missing_token_next_step() {
 #     the cap was breached.
 #
 # Usage:
-#   PAYLOAD="$(defenseclaw_read_stdin_capped)" || exit $?
+#   PAYLOAD="$(defenseclaw_read_stdin_capped fail_closed)" || exit 2
 #
 # Returns 0 with the body on stdout. Returns 1 (overflow) with an
 # empty stdout. If `head` is missing we read the body with a bounded
@@ -1464,8 +1468,8 @@ defenseclaw_missing_token_next_step() {
 # hook still functions on minimal containers, logging it as a
 # transport-category event so operators can spot it.
 defenseclaw_read_stdin_capped() {
-  # Caller supplies its actual oversized-payload outcome. Legacy callers and
-  # reader/tooling diagnostics remain unknown, not presumed fail-open.
+  # The caller passes the outcome its oversized-payload branch applies
+  # (fail_open or fail_closed); an older caller without one logs unknown.
   local overflow_outcome="${1:-unknown}"
   local connector="${DEFENSECLAW_HOOK_CONNECTOR:-unknown}"
   local hook_name="${DEFENSECLAW_HOOK_NAME:-unknown}"
@@ -1535,7 +1539,7 @@ sys.stdout.buffer.write(data)')"
   # spot the missing-tooling condition.
   defenseclaw_log_hook_failure "$connector" "$hook_name" \
     "head(1)/python3 missing; reading stdin unbounded (set DEFENSECLAW_HOOK_MAX_BODY)" \
-    transport "${FAIL_MODE:-open}"
+    transport "${FAIL_MODE:-open}" diagnostic
   cat
   return 0
 }
@@ -1635,7 +1639,7 @@ defenseclaw_extract_trace_context() {
     else
       defenseclaw_log_hook_failure "$connector" "$hook_name" \
         "rejected malformed traceparent (length=${#tp})" \
-        response "${FAIL_MODE:-open}"
+        response "${FAIL_MODE:-open}" diagnostic
     fi
   fi
 
@@ -1648,7 +1652,7 @@ defenseclaw_extract_trace_context() {
     else
       defenseclaw_log_hook_failure "$connector" "$hook_name" \
         "rejected malformed tracestate (length=${#ts})" \
-        response "${FAIL_MODE:-open}"
+        response "${FAIL_MODE:-open}" diagnostic
     fi
   fi
 }

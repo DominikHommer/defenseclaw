@@ -37,6 +37,11 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would switch off the per-user closed-mode
+# tightening.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
@@ -82,7 +87,7 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
   defenseclaw_handle_missing_token openhands openhands-hook "openhands hook" "${HOOK_DIR}/{{.TokenFile}}"
 fi{{end}}
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: openhands hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     printf '{"decision":"deny","reason":"DefenseClaw hook payload too large"}\n'
@@ -108,7 +113,7 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 fail_unreachable() {
-  defenseclaw_log_hook_failure openhands openhands-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure openhands openhands-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "openhands hook" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     printf '{"decision":"deny","reason":"DefenseClaw hook failed closed"}\n'
@@ -118,7 +123,7 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_log_hook_failure openhands openhands-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure openhands openhands-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: openhands hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0

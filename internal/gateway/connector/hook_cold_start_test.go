@@ -231,7 +231,6 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 			_ = os.Remove(filepath.Join(dataDir, "config.yaml"))
 		}, hint: waited, retried: true},
 		"autostart off": {env: []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}, hint: waited, retried: true},
-		"managed hook":  {env: []string{"DEFENSECLAW_MANAGED_HOOK=1"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -339,10 +338,13 @@ func TestClaudeShellHookFailClosedDenyIsOnePlainSentence(t *testing.T) {
 		t.Fatalf("deny reason = %q\nwant %q", reason, want)
 	}
 
-	managed := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, stopped,
+	// A per-user hook is never a managed one: a DEFENSECLAW_MANAGED_HOOK
+	// inherited from the agent's environment does not switch it to the
+	// managed answer (1.0.4 review, GAP-0315).
+	inherited := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, stopped,
 		"DEFENSECLAW_FAIL_MODE=closed", "DEFENSECLAW_MANAGED_HOOK=1")
-	if code := exitCodeOf(managed.err); code != 2 || strings.TrimSpace(managed.stdout) != "" {
-		t.Fatalf("managed hook: exit %d stdout %q, want its exit-2 contract unchanged", code, managed.stdout)
+	if got := failClosedDenyReason(t, inherited); got != want {
+		t.Fatalf("inherited managed marker: deny reason = %q\nwant %q", got, want)
 	}
 }
 

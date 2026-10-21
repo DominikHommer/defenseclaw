@@ -756,7 +756,7 @@ def _print_agents(
         return
 
     gc = getattr(cfg, "guardrail", None)
-    agent_missing = {c for c in actives if _agent_missing(cfg, c)}
+    agent_missing = {c for c in actives if _agent_missing(cfg, c, health_map.get(c))}
     # ``guardrail.enabled: false`` (``setup guardrail --disable``, or the
     # default ``uninstall``) makes the gateway tear every hook connector
     # down, so none of them enforces (GAP-1312). The OpenClaw row reports the
@@ -1085,7 +1085,7 @@ def _connectors_not_started(health: dict | None) -> set[str]:
     return {name.strip().lower() for name in names if isinstance(name, str) and name.strip()}
 
 
-def _agent_missing(cfg, connector: str) -> bool:
+def _agent_missing(cfg, connector: str, live: dict | None = None) -> bool:
     """Whether the connector's agent is not installed (GAP-0513).
 
     The rule of doctor's Connector compatibility row
@@ -1094,14 +1094,20 @@ def _agent_missing(cfg, connector: str) -> bool:
     active while doctor fails it. Claude Code uses the same proof: a
     ``claude`` missing from the PATH of the shell that runs status is no
     evidence, because Claude Code often runs from an absolute path or an IDE
-    (GAP-1331, GAP-1333). OpenClaw keeps its own install check.
+    (GAP-1331, GAP-1333). ``live`` is the gateway's health row for the
+    connector: a hook call it took after the scan outranks the scan.
+    OpenClaw keeps its own install check.
     """
     if connector == "openclaw":
         return False
     try:
         from defenseclaw.doctor_health import connector_agent_missing
 
-        return connector_agent_missing(str(getattr(cfg, "data_dir", "") or ""), connector)
+        return connector_agent_missing(
+            str(getattr(cfg, "data_dir", "") or ""),
+            connector,
+            last_activity_at=(live or {}).get("last_activity_at") if isinstance(live, dict) else None,
+        )
     except Exception:  # noqa: BLE001 - status must survive incomplete evidence.
         return False
 
@@ -1753,7 +1759,7 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             row["state"] = health_map[name]["state"]
         elif not row.get("enabled"):
             row["state"] = "disabled"
-        if row.get("enabled") and _agent_missing(cfg, name):
+        if row.get("enabled") and _agent_missing(cfg, name, health_map.get(name)):
             # As the text output: not running while doctor fails it (GAP-0513).
             row["state"] = "off"
             row["runtime_detail"] = _agent_missing_detail(name)

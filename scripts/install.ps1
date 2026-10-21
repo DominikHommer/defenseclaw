@@ -1221,13 +1221,39 @@ function Remove-DeveloperFiles {
 function Install-File([string]$Source, [string]$Destination) {
     if ((Test-Path -LiteralPath $Destination) -and (Get-Sha256 $Source) -eq (Get-Sha256 $Destination)) { return }
     Copy-Item -LiteralPath $Source -Destination "$Destination.new" -Force
-    if (Test-Path -LiteralPath $Destination -PathType Leaf) { Switch-InPlace "$Destination.new" $Destination; return }
+    Publish-File "$Destination.new" $Destination
+}
+
+function Publish-File([string]$New, [string]$Destination) {
+    # Put $New at $Destination. An installed file (a binary, a shim, the hook
+    # state the native hook reads) is swapped in place, so the path a hook or
+    # a shim names is never missing; only a first install or a directory in
+    # the way takes the rename.
+    if (Test-Path -LiteralPath $Destination -PathType Leaf) { Switch-InPlace $New $Destination; return }
     if (Test-Path -LiteralPath $Destination) { Remove-Aside $Destination }
-    Move-Path "$Destination.new" $Destination
+    Move-Path $New $Destination
 }
 
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {
     [IO.File]::Replace($New, $Destination, $Backup, $true)
+}
+
+function Invoke-FileMove([string]$From, [string]$To) {
+    [IO.File]::Move($From, $To)
+}
+
+function Close-SwapGap([string]$New, [string]$Backup, [string]$Destination) {
+    # ReplaceFile stopped after it renamed the installed file to the backup
+    # (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2), so nothing is at $Destination.
+    # Put a file back at once: the new one if it moves now, else the old one
+    # (a held new file is never waited on with the path missing). Returns
+    # $true when the new file is in place, $false when the old one is back.
+    for ($tries = 0; ; $tries++) {
+        if (Test-Path -LiteralPath $New) { try { Invoke-FileMove $New $Destination; return $true } catch { } }
+        if (Test-Path -LiteralPath $Backup) { try { Invoke-FileMove $Backup $Destination; return $false } catch { } }
+        if ($tries -ge 200) { throw "Could not put $Destination back after a partial replace; the installed file is $Backup" }
+        Start-Sleep -Milliseconds 50
+    }
 }
 
 function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) {
@@ -1241,6 +1267,8 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
     # next install removes it. While a scanner or another program holds a
     # file, retry; if it never lets go, fail and leave the installed file in
     # place (the install is then undone) rather than fall back to the rename.
+    # A ReplaceFile that stops halfway is closed at once (Close-SwapGap), and
+    # the retries then run with the installed file back in place.
     $aside = "$Destination.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
     for ($waited = 0; ; $waited++) {
         try {
@@ -1250,11 +1278,7 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
         } catch {
             $reason = $_.Exception.Message
         }
-        if (-not (Test-Path -LiteralPath $Destination)) {
-            # ReplaceFile can stop after it renamed the old file to the backup
-            # (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2): finish the swap, or put the
-            # old file back.
-            if (Test-Path -LiteralPath $New) { Move-Path $New $Destination } else { Move-Path $aside $Destination }
+        if (-not (Test-Path -LiteralPath $Destination) -and (Close-SwapGap $New $aside $Destination)) {
             Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
             return
         }
@@ -1272,8 +1296,7 @@ function Write-PosixShim([string]$Target) {
     $text = "#!/bin/sh`n# Git Bash runs this; cmd.exe and PowerShell run defenseclaw.exe.`nexec `"$($Target -replace '\\', '/')`" `"`$@`"`n"
     if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
     [IO.File]::WriteAllText("$path.new", $text, (New-Object Text.UTF8Encoding $false))
-    if (Test-Path -LiteralPath $path) { Remove-Aside $path }
-    Move-Path "$path.new" $path
+    Publish-File "$path.new" $path
 }
 
 function Write-Shim([string]$Name, [string]$Target) {
@@ -1284,8 +1307,7 @@ function Write-Shim([string]$Name, [string]$Target) {
     $encoding = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
     if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path, $encoding) -ceq $text) { return }
     [IO.File]::WriteAllText("$path.new", $text, $encoding)
-    if (Test-Path -LiteralPath $path) { Remove-Aside $path }
-    Move-Path "$path.new" $path
+    Publish-File "$path.new" $path
 }
 
 function Write-HookState {
@@ -1298,8 +1320,7 @@ function Write-HookState {
     $text = ($state | ConvertTo-Json -Compress) + "`n"
     if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
     [IO.File]::WriteAllText("$path.new", $text, (New-Object Text.UTF8Encoding $false))
-    if (Test-Path -LiteralPath $path) { Remove-Aside $path }
-    Move-Path "$path.new" $path
+    Publish-File "$path.new" $path
 }
 
 function Copy-BinDir([string]$To) {

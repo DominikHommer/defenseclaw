@@ -40,6 +40,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import click
+import pytest
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_status
 from defenseclaw.commands.cmd_status import _print_agents
@@ -1188,3 +1189,50 @@ def test_status_marks_claude_code_off_when_discovery_found_no_agent(monkeypatch)
     out = _render_live(cfg, {"connectors": [{"name": "claudecode", "state": "running"}]})
     claude_row = next(line for line in out.splitlines() if "Claude Code (claudecode)" in line)
     assert "is not installed" in claude_row and "RUNNING" not in claude_row
+
+
+def _write_negative_scan(data_dir, connector, scanned_at):
+    import json as _json
+
+    from defenseclaw.inventory.agent_discovery import _cache_path
+
+    path = _cache_path(data_dir=str(data_dir))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps({"scanned_at": scanned_at, "agents": {connector: {"installed": False, "binary_path": ""}}}))
+
+
+@pytest.mark.parametrize(
+    "scanned_at,activity,missing",
+    [
+        # A hook call after the negative scan: the agent runs (absolute path,
+        # IDE), so status keeps the live row and count (1.0.4 review).
+        ("2026-10-20T09:00:00Z", "2026-10-21T08:27:20.123456789Z", False),
+        # A scan time that cannot be read cannot outrank a live call.
+        ("", "2026-10-21T08:27:20Z", False),
+        # The scan came after the last call (the agent was removed since).
+        ("2026-10-21T09:00:00Z", "2026-10-21T08:27:20Z", True),
+        # No call recorded: the scan stands.
+        ("2026-10-20T09:00:00Z", None, True),
+        # An unreadable activity time is no evidence.
+        ("2026-10-20T09:00:00Z", "yesterday", True),
+    ],
+)
+def test_status_hook_activity_after_a_negative_scan_outranks_it(monkeypatch, tmp_path, scanned_at, activity, missing):
+    monkeypatch.setattr(cmd_status.shutil, "which", lambda name: None if name == "claude" else "/bin/true")
+    monkeypatch.setattr("defenseclaw.inventory.agent_discovery.binary_on_path", lambda connector: False)
+    monkeypatch.setattr("defenseclaw.sandbox_images.verified_harness_contract", lambda data_dir, connector: None)
+    cfg = _cfg(["claudecode"])
+    cfg.data_dir = str(tmp_path)
+    _write_negative_scan(tmp_path, "claudecode", scanned_at)
+    row = {"name": "claudecode", "state": "running", "requests": 3}
+    if activity is not None:
+        row["last_activity_at"] = activity
+    out = _render_live(cfg, {"connectors": [row]})
+    claude_row = next(line for line in out.splitlines() if "Claude Code (claudecode)" in line)
+    agents_row = next(line for line in out.splitlines() if "Agents" in line)
+    if missing:
+        assert "is not installed" in claude_row and "RUNNING" not in claude_row, out
+        assert "1 not running" in agents_row, out
+    else:
+        assert "RUNNING" in claude_row and "is not installed" not in claude_row, out
+        assert "1 active" in agents_row and "not running" not in agents_row, out

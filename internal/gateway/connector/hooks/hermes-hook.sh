@@ -40,6 +40,11 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
+# A per-user render is never a managed or Secure Client hook: those markers
+# come only from a managed render (the branch above), never from the
+# agent's environment, where they would switch off the per-user closed-mode
+# tightening.
+unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
@@ -88,7 +93,7 @@ FAIL_MODE="closed"
 readonly FAIL_MODE
 
 hermes_sandbox_block() {
-  defenseclaw_log_hook_failure hermes hermes-hook "$1" "$2" closed
+  defenseclaw_log_hook_failure hermes hermes-hook "$1" "$2" closed fail_closed
   echo "defenseclaw: hermes hook: $1, blocking (sandbox hooks fail closed)" >&2
   printf '{"action":"block","message":"%s"}\n' "$(defenseclaw_json_escape "DefenseClaw blocked this tool call because its policy check failed: $1")"
   exit 2
@@ -115,7 +120,7 @@ case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
   *$'\n'*|*$'\r'*) hermes_sandbox_block "malformed sandbox binding token" transport ;;
 esac
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || hermes_sandbox_block "hook payload too large" response
+PAYLOAD="$(defenseclaw_read_stdin_capped fail_closed)" || hermes_sandbox_block "hook payload too large" response
 API_ADDR="{{.APIAddr}}"
 
 # The per-sandbox binding token is an OpenShell provider placeholder; the
@@ -179,7 +184,7 @@ hermes_block() {
   printf '{"action":"block","message":"%s"}\n' "$(defenseclaw_json_escape "$(hermes_block_message "$1" "$2")")"
 }
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: hermes hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     hermes_block oversized "stdin body exceeded cap"
@@ -206,7 +211,7 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
-  defenseclaw_log_hook_failure hermes hermes-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure hermes hermes-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "hermes tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
 {{if .SecureClient}}    printf '{"action":"block","message":"DefenseClaw hook failed closed"}\n'
@@ -217,7 +222,7 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_log_hook_failure hermes hermes-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure hermes hermes-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: hermes hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
