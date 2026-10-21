@@ -507,6 +507,20 @@ $stream.Dispose()
                     Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4
                 [IO.File]::WriteAllText([IO.Path]::Combine($Directory, $stateLeaf), $document)
                 [IO.File]::WriteAllText([IO.Path]::Combine($Directory, $lockLeaf), '')
+                # Setup writes these as an administrator. A runner account
+                # whose token makes itself the owner of new files (the
+                # built-in Administrator) would make them untrusted.
+                foreach ($tree in @($selectorPF, $selectorPD)) {
+                    if (-not [IO.Directory]::Exists($tree)) {
+                        continue
+                    }
+                    foreach ($item in @(@(Microsoft.PowerShell.Management\Get-Item -LiteralPath $tree -Force) +
+                            @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $tree -Recurse -Force))) {
+                        $security = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $item.FullName
+                        $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+                        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $item.FullName -AclObject $security
+                    }
+                }
             }
             function Invoke-TestSelectorPurge {
                 @(Remove-DefenseClawRuntimeSelectorState -HookPath $ownHook -Directories @($claudeDir, $codexDir, $cursorDir)) +
