@@ -21,7 +21,7 @@ invalid-response failures.
 | Control | Effect | Default and scope |
 | --- | --- | --- |
 | `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `closed` on a fresh install. Migrated legacy configs can retain explicit `open`. Secure Client deployments default to `open` when it is unset (see [Secure Client](#secure-client)). Can be overridden per connector. See [Which value applies](#which-value-applies). |
-| `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force an otherwise closed connector open. | Unset. Per agent process; compatibility/managed-deployment override. |
+| `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed on a hook that can block. It cannot force an otherwise closed connector open. The per-user GitHub Copilot CLI hook and the Amp plugin do not read it (see [Strict availability](#strict-availability)). | Unset. Per agent process; compatibility/managed-deployment override. |
 | `DEFENSECLAW_FAIL_MODE` | Not read by 1.0.4 hooks: the installed mode is the fail mode. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again; Secure Client shell hooks keep it (see [The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)). | Set the mode with `defenseclaw guardrail fail-mode`. |
 
 You choose `open` or `closed`, and the default is `closed`. An explicit value
@@ -351,10 +351,16 @@ event.
 ## Strict availability
 
 `DEFENSECLAW_STRICT_AVAILABILITY=1` is an unconditional closed override for
-transport and missing-token failures. It exists for managed or compatibility
-deployments that must never open during a gateway outage. It does not add a
-missing hook, convert native OTLP into enforcement, or make an unsupported
-connector block-capable.
+transport and missing-token failures on the hooks that can block a call. It
+exists for managed or compatibility deployments that must never open during
+a gateway outage. It does not add a missing hook, convert native OTLP into
+enforcement, or make an unsupported connector block-capable.
+
+Two hooks do not read it. The per-user GitHub Copilot CLI hook lets a call
+run while the gateway is down whatever is set (see
+[GitHub Copilot CLI fails open upstream](#github-copilot-cli-fails-open-upstream)).
+The Amp plugin uses the fail mode setup wrote into it; to make Amp block
+during an outage, run `defenseclaw guardrail fail-mode closed`.
 
 Because a strict outage can make the agent unavailable, use persisted status,
 gateway monitoring, and a tested restart path before applying it broadly. On
@@ -378,11 +384,18 @@ and the installed hooks.
 
 `defenseclaw status` and `defenseclaw doctor` read the same installed state,
 so what they report is what the hooks do. A variable set in the shell that
-runs them changes nothing.
+runs them changes nothing. One exception: on a managed Windows computer the
+native hook takes its mode from the runtime generation the guardian
+publishes, which they cannot check. They show the administrator's mode with
+the drift `windows-managed-runtime-unverified`; the guardian's `verify`
+checks the runtime itself.
 
 `DEFENSECLAW_STRICT_AVAILABILITY=1` is the one process setting the hooks
-read. It can only close: it blocks a call while the gateway is down, even on
-a hook installed open. Status still reports the installed mode.
+read. It can only close: on a hook that can block, it blocks a call while the
+gateway is down, even when the hook is installed open. The per-user GitHub
+Copilot CLI hook and the Amp plugin do not read it (see
+[Strict availability](#strict-availability)). Status still reports the
+installed mode.
 
 Hooks rendered by 1.0.3 or earlier read `DEFENSECLAW_FAIL_MODE` until the
 upgrade's connector refresh renders them again. Under an authenticated Secure
@@ -396,7 +409,8 @@ down, on Linux, macOS and Windows. Copilot gives a hook no way to fail
 closed, so DefenseClaw lets that call run. It records the call in
 `hook-failures.jsonl` and reports it: `guardrail fail-mode` and `status` show
 Copilot as upstream fail-open, and the gateway raises a `guardrail-degraded`
-alert when it starts again. No setting changes this for a per-user install.
+alert when it starts again. No setting changes this for a per-user install,
+`DEFENSECLAW_STRICT_AVAILABILITY=1` included.
 Only an administrator-managed standalone Copilot hook blocks `preToolUse` and
 `permissionRequest` while the gateway service is not running.
 
@@ -405,7 +419,10 @@ directory, and `DEFENSECLAW_CONNECTOR` only picks the connector they report
 as. They run open only when every connector recorded there is open: one
 connector set to `closed` closes them for all, also after an upgrade that
 kept an older global `open`. A malformed or partial record (for example a
-`fail_modes` value in `hooks/.hookcfg` that is not a map) also closes them.
+`fail_modes` value in `hooks/.hookcfg` that is not a map, or a
+`hooks/.hookcfg.<connector>` file that names another connector) also closes
+them, and so does a host with neither `jq` nor `python3`, where they cannot
+read `hooks/.hookcfg` (Secure Client delivery is unchanged).
 
 Environment keys are case-insensitive on Windows. Do not define multiple
 case-variants with different values.

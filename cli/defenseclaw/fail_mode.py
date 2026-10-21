@@ -221,6 +221,8 @@ def resolve_connector_fail_mode(
     runtime = runtime_source[1]
     if runtime_source[0].endswith("-legacy"):
         drift.append("windows-sidecar-legacy")
+    if runtime_source[0] == "windows-managed-runtime":
+        drift.append("windows-managed-runtime-unverified")
     if runtime is None and runtime_source[0].startswith("windows-sidecar"):
         # The native Windows hook reads its mode from this sidecar alone and
         # fails closed when the file is missing or unreadable or names no mode
@@ -278,6 +280,8 @@ def resolve_connector_fail_mode(
         if source == "config":
             continue
         if mode is None:
+            if source == "windows-managed-runtime":
+                continue
             if source not in {"claude-env"} or name == "claudecode":
                 drift.append(f"{source}-missing")
         elif mode != desired:
@@ -345,6 +349,13 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
     if connector == "opencode":
         return "opencode-plugin", _read_opencode_plugin_mode(cfg)
     if _is_windows():
+        if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+            # A managed native hook takes its mode from the authenticated
+            # runtime generation the guardian publishes, never from
+            # hooks/.hookcfg (buildHookOptionsForRuntime). This process cannot
+            # authenticate that generation, so it names no mode: the report
+            # shows the administrator's mode with the unverified drift.
+            return "windows-managed-runtime", None
         mode, legacy = _read_windows_hook_mode(Path(cfg.data_dir) / "hooks" / ".hookcfg", connector)
         if legacy:
             return "windows-sidecar-legacy", mode
@@ -353,33 +364,143 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
     return "hook-script", _read_baked_hook_mode(Path(cfg.data_dir) / "hooks" / script_name)
 
 
+# The white space Go's strings.TrimSpace strips (unicode.IsSpace), which the
+# native hook's sidecar reader applies (readHookSidecar).
+_GO_SPACE = (
+    "\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+# readHookSidecar's bounds: a larger or deeper sidecar is malformed state.
+_WINDOWS_SIDECAR_MAX_BYTES = 64 * 1024
+_WINDOWS_SIDECAR_MAX_DEPTH = 32
+_INT64 = (-(2**63), 2**63 - 1)
+# An integer token too long for Go's int: never a version.
+_NOT_AN_INT64 = object()
+
+
+def _go_fail_mode(value: str) -> str:
+    """nativeHookFailMode: open only for open, any case, after Go's trim."""
+
+    trimmed = value.strip(_GO_SPACE)
+    return "open" if trimmed.isascii() and trimmed.lower() == "open" else "closed"
+
+
+# The only non-ASCII letters Go's strings.ToUpper turns into ASCII ones.
+_GO_UPPER_TO_ASCII = {"\u0131": "I", "\u017f": "S"}
+# The only non-ASCII letters strings.EqualFold matches to ASCII ones.
+_GO_FOLD_TO_ASCII = {"\u017f": "s", "\u212a": "k"}
+_WINDOWS_SIDECAR_FIELDS = ("version", "gateway_addr", "fail_modes", "legacy_fail_mode")
+
+
+def _windows_sidecar_key(connector: str) -> str:
+    """hookSidecarFailModeKey for a key compared with an ASCII connector key:
+    Go's trim, Go's upper-casing (no expansions such as ß to SS), then '-',
+    '_' and ' ' dropped. A non-ASCII letter Go would map to another non-ASCII
+    one is kept as it is: either way the key cannot equal an ASCII one."""
+
+    name = "".join(
+        _GO_UPPER_TO_ASCII.get(char, char.upper() if char.isascii() else char) for char in connector.strip(_GO_SPACE)
+    )
+    for dropped in "-_ ":
+        name = name.replace(dropped, "")
+    return "DEFENSECLAW_FAIL_MODE_" + name
+
+
+def _go_fold_equal(key: str, field: str) -> bool:
+    """strings.EqualFold against an ASCII lower-case field name."""
+
+    return len(key) == len(field) and all(
+        char == want or (char.isascii() and char.lower() == want) or _GO_FOLD_TO_ASCII.get(char) == want
+        for char, want in zip(key, field, strict=True)
+    )
+
+
+def _json_nesting_depth(text: str) -> int:
+    """jsonNestingDepth: the deepest object or array nesting."""
+
+    depth = deepest = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif char in "}]":
+            depth -= 1
+    return deepest
+
+
+def _reject_json_constant(name: str) -> None:
+    raise ValueError(f"{name} is not JSON")
+
+
 def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, bool]:
-    data = _read_small_file(path)
+    """Read hooks/.hookcfg exactly as the native Windows hook does.
+
+    The contract is readHookSidecar's (internal/cli/hook.go), held to by the
+    shared vectors in internal/cli/testdata/windows_hook_sidecar_vectors.json.
+    Returns the mode and whether it came from the legacy (unscoped) value;
+    ``None`` names no mode, which the hook runs closed.
+    """
+
+    data = _read_small_bytes(path)
     if data is None:
-        return None, False
+        # Missing names no mode; a link, a directory or an oversized file is
+        # malformed state, closed.
+        return ("closed" if os.path.lexists(path) else None), False
+    if len(data) > _WINDOWS_SIDECAR_MAX_BYTES:
+        return "closed", False
+    # encoding/json reads invalid UTF-8 in a string as U+FFFD and rejects it
+    # anywhere else, as a replacement decode and json.loads do.
+    text = data.decode("utf-8", errors="replace")
     try:
-        payload = json.loads(data)
+        payload = json.loads(
+            text,
+            parse_constant=_reject_json_constant,
+            parse_int=lambda token: int(token) if len(token) <= 20 else _NOT_AN_INT64,
+        )
         parsed = True
-    except (TypeError, ValueError):
+    except (ValueError, RecursionError):
         payload = None
         parsed = False
-    version = payload.get("version") if isinstance(payload, dict) else None
-    if isinstance(version, int) and not isinstance(version, bool) and version >= 2:
-        # As the native hook reads it (readHookSidecar): a connector map that
-        # is present but not an object, or an entry that is not a mode, is
-        # closed and never falls back to the legacy mode.
-        modes = payload.get("fail_modes", {})
-        if not isinstance(modes, dict):
-            return "closed", False
-        key = normalize(connector)
-        if key in modes:
-            value = modes[key]
-            return (normalize_fail_mode(value) if isinstance(value, str) else "closed"), False
-        legacy_value = str(payload.get("legacy_fail_mode") or "").strip().lower()
-        if legacy_value in _VALID_MODES:
-            return legacy_value, True
-        return None, False
-    if parsed or data.lstrip()[:1] in ("{", "["):
+    if parsed and isinstance(payload, dict):
+        version = payload.get("version", 0)
+        if version is None:
+            version = 0
+        if type(version) is not int or not _INT64[0] <= version <= _INT64[1]:
+            version = 0
+        if version >= 2:
+            addr = payload.get("gateway_addr")
+            legacy = payload.get("legacy_fail_mode")
+            modes = payload.get("fail_modes", {})
+            if (
+                not all(value is None or isinstance(value, str) for value in (addr, legacy))
+                or not isinstance(modes, dict)
+                or not all(value is None or isinstance(value, str) for value in modes.values())
+                or any(
+                    key != field and _go_fold_equal(key, field) for key in payload for field in _WINDOWS_SIDECAR_FIELDS
+                )
+                or _json_nesting_depth(text) > _WINDOWS_SIDECAR_MAX_DEPTH
+            ):
+                return "closed", False
+            key = _windows_sidecar_key(normalize(connector))
+            entries = [value or "" for name, value in modes.items() if _windows_sidecar_key(name) == key]
+            if entries:
+                # A blank entry is closed, and entries that normalize alike
+                # are open only when every one is.
+                return ("open" if all(_go_fail_mode(value) == "open" for value in entries) else "closed"), False
+            if legacy:
+                return _go_fail_mode(legacy), True
+            return None, False
+    if parsed or text.lstrip(_GO_SPACE)[:1] in ("{", "["):
         # As readHookSidecar: JSON that is not a v2 sidecar, or that does not
         # parse, is malformed state and closed, never KEY=value lines.
         return "closed", False
@@ -387,16 +508,17 @@ def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, boo
     # last value of a key wins, and a connector's own key comes before the
     # unscoped one.
     values: dict[str, str] = {}
-    for line in data.splitlines():
-        line = line.strip()
+    for line in text.split("\n"):
+        line = line.strip(_GO_SPACE)
         if not line or line.startswith("#"):
             continue
         key, separator, value = line.removeprefix("export ").partition("=")
-        if separator and key.strip():
-            values[key.strip()] = value.strip().strip("\"'")
-    scoped = "DEFENSECLAW_FAIL_MODE_" + re.sub(r"[-_ ]", "", normalize(connector).upper())
-    value = (values.get(scoped) or values.get("DEFENSECLAW_FAIL_MODE") or "").strip().lower()
-    return (value if value in _VALID_MODES else None), True
+        key = key.strip(_GO_SPACE)
+        if separator and key:
+            values[key] = value.strip(_GO_SPACE).strip("\"'")
+    scoped = _windows_sidecar_key(normalize(connector))
+    value = values.get(scoped) or values.get("DEFENSECLAW_FAIL_MODE") or ""
+    return (_go_fail_mode(value) if value else None), True
 
 
 def _read_baked_hook_mode(path: Path) -> str | None:

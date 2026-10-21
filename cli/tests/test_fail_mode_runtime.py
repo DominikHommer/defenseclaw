@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import stat
@@ -29,6 +30,14 @@ _HOOK_FAIL_MODE_LINES = json.loads(
         Path(__file__).resolve().parents[2] / "internal/gateway/connector/testdata/unix_hook_fail_mode_lines.json"
     ).read_text(encoding="utf-8")
 )
+
+# The hooks/.hookcfg bodies the Go test TestReadHookSidecarSharedVectors runs
+# through the native hook's reader (readHookSidecar).
+_WINDOWS_SIDECAR_VECTORS = json.loads(
+    (Path(__file__).resolve().parents[2] / "internal/cli/testdata/windows_hook_sidecar_vectors.json").read_text(
+        encoding="utf-8"
+    )
+)["vectors"]
 
 _SHARED_HOOK_SCRIPTS = (
     "inspect-tool.sh",
@@ -1092,9 +1101,15 @@ def test_no_environment_changes_the_reported_fail_mode(
     ):
         state = resolve_connector_fail_mode(cfg, "codex")
         report = connector_fail_mode_report(cfg, "codex")
-    assert state.runtime == installed and state.effective == installed
-    assert state.provenance == ("windows-sidecar" if windows else "hook-script")
-    assert state.current, state.drift
+    if windows and standalone is not None:
+        # A managed native hook runs on the authenticated runtime generation,
+        # which status cannot verify: the administrator's mode, unverified.
+        assert state.runtime is None and state.effective == installed
+        assert "windows-managed-runtime-unverified" in state.drift
+    else:
+        assert state.runtime == installed and state.effective == installed
+        assert state.provenance == ("windows-sidecar" if windows else "hook-script")
+        assert state.current, state.drift
     assert report["effective"] == installed and report["note"] == ""
     assert "caller_env" not in report
     assert not hasattr(fail_mode_runtime, "_inherited_fail_mode")
@@ -1180,7 +1195,7 @@ _SCOPED_CODEX_KEY = "DEFENSECLAW_FAIL_MODE" + "_CODEX"
         ("DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE=closed\n", "closed"),
         ("DEFENSECLAW_FAIL_MODE=open\n" + _SCOPED_CODEX_KEY + "=closed\n", "closed"),
         ("export " + _SCOPED_CODEX_KEY + '="open"\nDEFENSECLAW_FAIL_MODE=closed\n', "open"),
-        ("DEFENSECLAW_FAIL_MODE=bogus\n", None),
+        ("DEFENSECLAW_FAIL_MODE=bogus\n", "closed"),
         ("DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970\n", None),
     ],
 )
@@ -1191,6 +1206,70 @@ def test_windows_flat_sidecar_report_matches_the_native_hook(tmp_path: Path, tex
     path = tmp_path / ".hookcfg"
     path.write_text(text, encoding="utf-8")
     assert fail_mode_runtime._read_windows_hook_mode(path, "codex") == (want, True)
+
+
+@pytest.mark.parametrize("vector", _WINDOWS_SIDECAR_VECTORS, ids=lambda vector: vector["name"])
+def test_windows_sidecar_report_matches_the_native_hook_contract(tmp_path: Path, vector: dict) -> None:
+    # 1.0.4 review (loop round 2 of G-hooks-upg): a gateway_addr or peer entry
+    # that is not a string made the native hook run closed while status
+    # reported open, and a connector key in another case the other way round.
+    # Status reads every vector the Go test runs through readHookSidecar to
+    # the same mode.
+    path = tmp_path / ".hookcfg"
+    body = base64.b64decode(vector["body_b64"]) if "body_b64" in vector else vector.get("body", "").encode("utf-8")
+    kind = vector.get("kind", "")
+    if kind == "dir":
+        path.mkdir()
+    elif kind == "link":
+        target = tmp_path / "target"
+        target.write_bytes(body)
+        try:
+            path.symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+    elif kind == "oversize":
+        path.write_bytes(body + b" " * (70 * 1024))
+    elif kind != "missing":
+        path.write_bytes(body)
+    mode, legacy = fail_mode_runtime._read_windows_hook_mode(path, vector["connector"])
+    assert (mode or "closed") == vector["mode"]
+    if "legacy" in vector:
+        assert legacy is vector["legacy"]
+
+
+@pytest.mark.parametrize("sidecar", ["missing", "closed", "malformed", "open"])
+@pytest.mark.parametrize("desired", ["open", "closed"])
+def test_managed_windows_status_does_not_report_the_sidecar_as_the_hook_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, desired: str, sidecar: str
+) -> None:
+    # 1.0.4 review (loop round 2 of G-hooks-upg): a managed native hook takes
+    # its mode from the authenticated runtime generation, never from
+    # hooks/.hookcfg, so a missing or stale sidecar made status and doctor
+    # report closed while the hook ran the administrator's open. Status
+    # cannot authenticate the generation: it reports the administrator's
+    # mode and says the runtime is unverified, whatever the sidecar holds.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": desired})
+    _write_current_runtime(cfg, home, {"codex": desired})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: True
+    path = Path(cfg.data_dir) / "hooks" / ".hookcfg"
+    if sidecar == "missing":
+        path.unlink()
+    elif sidecar == "malformed":
+        path.write_text("{not json", encoding="utf-8")
+    else:
+        path.write_text(json.dumps({"version": 2, "fail_modes": {"codex": sidecar}}), encoding="utf-8")
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        report = connector_fail_mode_report(cfg, "codex")
+    assert report["effective"] == desired and report["runtime"] is None
+    assert report["provenance"] == "config"
+    assert "windows-managed-runtime-unverified" in report["drift"] and not report["current"]
+    assert {"name": "windows-managed-runtime", "mode": None} in report["sources"]
+    assert not [reason for reason in report["drift"] if reason.startswith("windows-sidecar")]
+    assert not [source for source in report["sources"] if source["name"].startswith("windows-sidecar")]
 
 
 @pytest.mark.parametrize(

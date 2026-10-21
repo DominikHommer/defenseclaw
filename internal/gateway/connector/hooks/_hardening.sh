@@ -344,26 +344,39 @@ defenseclaw_shared_hook_token_file() {
 # together. After an upgrade, a kept legacy open therefore never reopens a
 # connector recorded closed. A v2 JSON whose fail_modes is present but not an
 # object (null included) is malformed; a missing fail_modes is the shape every
-# release writes for an install with no connector entry yet. The sidecars are
-# the only input: DEFENSECLAW_FAIL_MODE in the agent's environment is not read
-# (GAP-0315). Malformed, ambiguous or missing state fails closed.
+# release writes for an install with no connector entry yet. A connector
+# record that is not a regular file or does not name its own connector is
+# malformed too. The JSON can name a connector no flat record does (a write
+# cut short between the two, or a peer an older release recorded), so JSON
+# that no parser can read (no jq or python3) is closed: only an install with
+# no JSON state at all opens from the flat records alone. Secure Client
+# delivery keeps its flat-record reading (unchanged in 1.0.4). The sidecars
+# are the only input: DEFENSECLAW_FAIL_MODE in the agent's environment is not
+# read (GAP-0315). Malformed, ambiguous, unverifiable or missing state fails
+# closed.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
   local config="${hook_dir}/.hookcfg"
   local candidate suffix recorded mode selected="" summary=""
   for candidate in "${hook_dir}"/.hookcfg.*; do
-    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
     suffix="${candidate##*.hookcfg.}"
     [ "$suffix" != "legacy" ] && [ "$suffix" != "lock" ] || continue
     case "$suffix" in
       ""|*[!a-z0-9_-]*) continue ;;
     esac
-    # A record names itself; lock files and interrupted-write debris do not.
+    # A file named for a connector is that connector's record. The writers'
+    # lock (.hookcfg.lock) and atomic-write temporaries (.tmp-*) never take a
+    # connector name, so a link, a directory, a record that names another
+    # connector or none, or one that says anything but open, closes the hook.
+    if [ -L "$candidate" ] || [ ! -f "$candidate" ]; then
+      printf closed
+      return 0
+    fi
     recorded="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_CONNECTOR 2>/dev/null || true)"
-    [ "$recorded" = "$suffix" ] || continue
     mode="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
-    if [ "$mode" != "open" ]; then
+    if [ "$recorded" != "$suffix" ] || [ "$mode" != "open" ]; then
       printf closed
       return 0
     fi
@@ -373,9 +386,13 @@ defenseclaw_shared_runtime_fail_mode() {
   done
   # The JSON state, as four words: connector entries, whether all of them
   # are open, the selected connector's entry, and the legacy mode. A parser
-  # that runs and fails means malformed state; no parser leaves only the flat
-  # records.
-  if [ -f "$config" ]; then
+  # that runs and fails means malformed state. JSON no parser can read is
+  # closed: it may record a connector no flat record names.
+  if [ -e "$config" ] || [ -L "$config" ]; then
+    if [ ! -f "$config" ]; then
+      printf closed
+      return 0
+    fi
     if command -v jq >/dev/null 2>&1; then
       summary="$(jq -r --arg connector "$connector" '
         def word: if . == null or . == "" then "none" elif . == "open" then "open" else "closed" end;
@@ -393,6 +410,9 @@ assert isinstance(m,dict)
 w=lambda v:"none" if v in (None,"") else ("open" if v=="open" else "closed")
 c=sys.argv[2]
 print(len(m),"open" if all(v=="open" for v in m.values()) else "closed",w(m.get(c)) if c else "none",w(d.get("legacy_fail_mode")))' "$config" "$connector" 2>/dev/null)" || summary="invalid"
+    elif [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != "1" ] || [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ]; then
+      printf closed
+      return 0
     fi
   fi
   local json_count=0 json_all=open json_selected=none json_legacy=none
@@ -424,8 +444,8 @@ print(len(m),"open" if all(v=="open" for v in m.values()) else "closed",w(m.get(
   # No selected connector: several records (an ambiguous identity) or none.
   # Only the unscoped legacy mode can open such a call, as before connector
   # records existed; a closed record already closed it above. Its flat record
-  # must name no connector and say open, and JSON a parser read must agree.
-  # Without a parser the flat record decides, as for connector records.
+  # must name no connector and say open, and the JSON, when there is one,
+  # must agree.
   local legacy="${hook_dir}/.hookcfg.legacy" legacy_connector
   if ! legacy_connector="$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_CONNECTOR 2>/dev/null)" \
     || [ -n "$legacy_connector" ] \

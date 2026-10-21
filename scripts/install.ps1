@@ -1282,40 +1282,71 @@ function New-VerifiedCopy([string]$From, [string]$To) {
     return $false
 }
 
+function Write-LockedBytes($Stream, [byte[]]$Bytes) {
+    $Stream.Write($Bytes, 0, $Bytes.Length)
+}
+
+function Write-LockedCopy([string]$From, [string]$To) {
+    # Write a copy of $From to $To, a path nothing is at, through one handle
+    # that shares nothing: no other program can open $To, so no hook runs it,
+    # until the copy is whole and checked. A copy that fails is emptied and
+    # removed. A hold on $From against a rename still lets it be read.
+    # Returns $true when $To holds a whole copy.
+    try { $out = [IO.File]::Open($To, 'CreateNew', 'ReadWrite', 'None') } catch { return $false }
+    $whole = $false
+    try {
+        $in = [IO.File]::Open($From, 'Open', 'Read', 'ReadWrite, Delete')
+        try {
+            $bytes = New-Object byte[] $in.Length
+            $read = 0
+            while ($read -lt $bytes.Length) {
+                $n = $in.Read($bytes, $read, $bytes.Length - $read)
+                if ($n -le 0) { throw "$From ended early" }
+                $read += $n
+            }
+        } finally { $in.Dispose() }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $want = [BitConverter]::ToString($sha.ComputeHash([byte[]]$bytes))
+            $length = $bytes.Length
+            Write-LockedBytes $out $bytes
+            $out.Flush($true)
+            $out.Position = 0
+            $whole = ($out.Length -eq $length) -and ([BitConverter]::ToString($sha.ComputeHash([IO.Stream]$out)) -eq $want)
+        } finally { $sha.Dispose() }
+    } catch {
+        $whole = $false
+    } finally {
+        if (-not $whole) { try { $out.SetLength(0) } catch { } }
+        $out.Dispose()
+    }
+    if (-not $whole) { Remove-Item -LiteralPath $To -Force -ErrorAction SilentlyContinue }
+    return $whole
+}
+
 function Close-SwapGap([string]$New, [string]$Backup, [string]$Restore, [string]$Destination) {
     # ReplaceFile stopped after it renamed the installed file to the backup
     # (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2), so nothing is at $Destination.
-    # Put a file back at once: the new one if it moves now, else the old one
-    # from the backup, else the restore copy Switch-InPlace made before the
-    # swap (a scanner can hold both the new file and the backup against a
-    # rename), else a copy of the old file (a hold against a rename still lets
-    # it be read). Only renames reach $Destination: a copy is made to a ready
-    # file beside it, checked, and renamed in, so a hook never runs a partial
-    # launcher and a failed copy never passes for the old one. No step waits
-    # with the path missing. Returns $true when the new file is in place,
+    # Put a whole launcher back at once, with no wait: the new one if it moves
+    # now, else the old one from the backup or the restore copy Switch-InPlace
+    # made before the swap. A scanner can hold all three against a rename, and
+    # a copy beside the path can be held the same way, so the old launcher is
+    # then written into the empty path itself (Write-LockedCopy): a hold
+    # against a rename still lets a file be read, and no hook can open the new
+    # file before it is whole and checked. Only a path that cannot be written
+    # at all (a full disk) is retried, for a second, before the install fails
+    # and names the backup. Returns $true when the new file is in place,
     # $false when the old one is back.
-    $ready = ""
-    $copies = 0
-    try {
-        for ($tries = 0; ; $tries++) {
-            if (Test-Path -LiteralPath $New) { try { Invoke-FileMove $New $Destination; return $true } catch { } }
-            foreach ($old in @($Backup, $Restore)) {
-                if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-FileMove $old $Destination; return $false } catch { } }
-            }
-            if (-not $ready) {
-                foreach ($old in @($Restore, $Backup)) {
-                    if (-not $old -or -not (Test-Path -LiteralPath $old)) { continue }
-                    $copies++
-                    $candidate = "$Backup.ready$copies"
-                    if (New-VerifiedCopy $old $candidate) { $ready = $candidate; break }
-                }
-            }
-            if ($ready) { try { Invoke-FileMove $ready $Destination; $ready = ""; return $false } catch { } }
-            if ($tries -ge 200) { throw "Could not put $Destination back after a partial replace; the installed file is $Backup" }
-            Start-Sleep -Milliseconds 50
+    for ($tries = 0; ; $tries++) {
+        if (Test-Path -LiteralPath $New) { try { Invoke-FileMove $New $Destination; return $true } catch { } }
+        foreach ($old in @($Backup, $Restore)) {
+            if ($old -and (Test-Path -LiteralPath $old)) { try { Invoke-FileMove $old $Destination; return $false } catch { } }
         }
-    } finally {
-        if ($ready) { Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue }
+        foreach ($old in @($Restore, $Backup)) {
+            if ($old -and (Test-Path -LiteralPath $old) -and (Write-LockedCopy $old $Destination)) { return $false }
+        }
+        if ($tries -ge 20) { throw "Could not put $Destination back after a partial replace; the installed file is $Backup" }
+        Start-Sleep -Milliseconds 50
     }
 }
 
@@ -1338,10 +1369,10 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
     # A ReplaceFile that stops halfway is closed at once (Close-SwapGap), and
     # the retries then run with the installed file back in place. The restore
     # copy, an independent copy of the installed file made before each
-    # attempt, is what Close-SwapGap publishes when a scanner holds both the
-    # new file and the backup; only a verified whole copy is used. Its name
-    # starts like the backup's, so the next install removes one this run
-    # could not.
+    # attempt, is what Close-SwapGap moves back or copies in when a scanner
+    # holds the new file and the backup; only a verified whole copy is used.
+    # Its name starts like the backup's, so the next install removes one this
+    # run could not.
     $aside = "$Destination.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
     $restore = "$aside.restore"
     $restoreReady = $false

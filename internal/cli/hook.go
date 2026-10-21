@@ -622,48 +622,88 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	return opts
 }
 
+// hookSidecarMaxBytes bounds the hooks/.hookcfg read. Setup writes a few
+// hundred bytes; a larger file is malformed state.
+const hookSidecarMaxBytes = 64 << 10
+
+// hookSidecarMaxDepth bounds the nesting of a JSON sidecar. Setup writes two
+// levels; a deeper document is malformed state.
+const hookSidecarMaxDepth = 32
+
 // readHookSidecar parses the hooks/.hookcfg file setup writes on Windows.
 // Version 2 is JSON with a connector-keyed fail_modes map. The legacy
 // KEY=value shape remains readable so the first connector refresh can migrate
 // an existing install without changing its runtime behavior beforehand.
-// A connector map that is present but not an object of strings (null
-// included), or a blank entry, is malformed state: it resolves closed and
-// never falls back to the legacy mode. A missing map is what every release
-// writes before the first connector entry, so the legacy mode still applies.
-// A JSON document that does not parse, or is not version 2 or later, is
-// malformed too: it resolves closed and is never read as KEY=value lines.
-// A missing or unreadable file names no mode, which is closed as well.
+//
+// `defenseclaw status` and `doctor` read the same file the same way
+// (fail_mode.py _read_windows_hook_mode); the shared vectors in
+// testdata/windows_hook_sidecar_vectors.json hold both readers to one
+// contract:
+//   - A missing file names no mode (closed). A file that is not a regular
+//     file (a link included) or is larger than hookSidecarMaxBytes is closed.
+//   - Top-level keys match exactly: a key that names a sidecar field in
+//     another case ("Version", "FAIL_MODES", which encoding/json alone would
+//     take) is malformed. Version 2 or later is a sidecar; any other JSON,
+//     JSON that does not parse, or a document that opens with { or [ is
+//     malformed and closed, never read as KEY=value lines.
+//   - In a sidecar, gateway_addr and legacy_fail_mode must be strings (or
+//     null), and fail_modes, when present, an object whose values are
+//     strings (or null). Anything else, a fail_modes of null included, is
+//     closed and never falls back to the legacy mode. A missing fail_modes
+//     is what every release writes before the first connector entry, so the
+//     legacy mode still applies.
+//   - A connector entry is found by hookSidecarFailModeKey. A blank entry is
+//     closed, and entries whose keys normalize alike are open only when every
+//     one of them is open.
 func readHookSidecar(path string) map[string]string {
 	out := map[string]string{}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return out
+	}
+	if !info.Mode().IsRegular() || info.Size() > hookSidecarMaxBytes {
+		out["DEFENSECLAW_FAIL_MODE"] = "closed"
+		return out
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return out
 	}
-	var current struct {
-		Version     int             `json:"version"`
-		GatewayAddr string          `json:"gateway_addr"`
-		FailModes   json.RawMessage `json:"fail_modes"`
-		LegacyMode  string          `json:"legacy_fail_mode"`
+	if len(data) > hookSidecarMaxBytes {
+		out["DEFENSECLAW_FAIL_MODE"] = "closed"
+		return out
 	}
-	if json.Unmarshal(data, &current) == nil && current.Version >= 2 {
-		out["DEFENSECLAW_GATEWAY_ADDR"] = current.GatewayAddr
-		var modes map[string]string
-		if len(current.FailModes) > 0 {
-			if err := json.Unmarshal(current.FailModes, &modes); err != nil || modes == nil {
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(data, &doc) == nil && doc != nil {
+		var version int
+		if raw, ok := doc["version"]; !ok || json.Unmarshal(raw, &version) != nil {
+			version = 0
+		}
+		if version >= 2 {
+			addr, addrOK := hookSidecarString(doc, "gateway_addr")
+			legacy, legacyOK := hookSidecarString(doc, "legacy_fail_mode")
+			modes, modesOK := hookSidecarModes(doc)
+			if !addrOK || !legacyOK || !modesOK || hookSidecarFieldCaseVariant(doc) ||
+				jsonNestingDepth(data) > hookSidecarMaxDepth {
 				out["DEFENSECLAW_FAIL_MODE"] = "closed"
 				return out
 			}
-		}
-		for connector, mode := range modes {
-			if strings.TrimSpace(mode) == "" {
-				mode = "closed"
+			out["DEFENSECLAW_GATEWAY_ADDR"] = addr
+			for connector, mode := range modes {
+				key := hookSidecarFailModeKey(connector)
+				if strings.TrimSpace(mode) == "" {
+					mode = "closed"
+				}
+				if prior, seen := out[key]; seen && (nativeHookFailMode(prior) != "open" || nativeHookFailMode(mode) != "open") {
+					mode = "closed"
+				}
+				out[key] = mode
 			}
-			out[hookSidecarFailModeKey(connector)] = mode
+			if legacy != "" {
+				out["DEFENSECLAW_FAIL_MODE"] = legacy
+			}
+			return out
 		}
-		if current.LegacyMode != "" {
-			out["DEFENSECLAW_FAIL_MODE"] = current.LegacyMode
-		}
-		return out
 	}
 	if trimmed := bytes.TrimSpace(data); json.Valid(trimmed) ||
 		(len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')) {
@@ -684,17 +724,100 @@ func readHookSidecar(path string) map[string]string {
 			continue
 		}
 		key = strings.TrimSpace(key)
-		val = strings.TrimSpace(val)
-		if unq, err := strconv.Unquote(val); err == nil {
-			val = unq
-		} else {
-			val = strings.Trim(val, `"'`)
-		}
+		val = strings.Trim(strings.TrimSpace(val), `"'`)
 		if key != "" {
 			out[key] = val
 		}
 	}
 	return out
+}
+
+// hookSidecarFields are the top-level fields readHookSidecar reads.
+var hookSidecarFields = [...]string{"version", "gateway_addr", "fail_modes", "legacy_fail_mode"}
+
+// hookSidecarFieldCaseVariant reports a top-level key that names a sidecar
+// field in another case, which encoding/json would decode into that field.
+func hookSidecarFieldCaseVariant(doc map[string]json.RawMessage) bool {
+	for key := range doc {
+		for _, field := range hookSidecarFields {
+			if key != field && strings.EqualFold(key, field) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hookSidecarString reads an optional string field of a v2 sidecar: absent
+// and null are "", any other non-string is malformed.
+func hookSidecarString(doc map[string]json.RawMessage, field string) (string, bool) {
+	raw, ok := doc[field]
+	if !ok {
+		return "", true
+	}
+	var value *string
+	if json.Unmarshal(raw, &value) != nil {
+		return "", false
+	}
+	if value == nil {
+		return "", true
+	}
+	return *value, true
+}
+
+// hookSidecarModes reads the optional fail_modes object of a v2 sidecar. A
+// null value is a blank entry (closed); a present map that is not an object
+// of strings is malformed.
+func hookSidecarModes(doc map[string]json.RawMessage) (map[string]string, bool) {
+	raw, ok := doc["fail_modes"]
+	if !ok {
+		return nil, true
+	}
+	var entries map[string]json.RawMessage
+	if json.Unmarshal(raw, &entries) != nil || entries == nil {
+		return nil, false
+	}
+	modes := make(map[string]string, len(entries))
+	for connector, value := range entries {
+		var mode *string
+		if json.Unmarshal(value, &mode) != nil {
+			return nil, false
+		}
+		if mode != nil {
+			modes[connector] = *mode
+		} else {
+			modes[connector] = ""
+		}
+	}
+	return modes, true
+}
+
+// jsonNestingDepth is the deepest object or array nesting of a JSON
+// document that already parsed.
+func jsonNestingDepth(data []byte) int {
+	depth, deepest := 0, 0
+	inString, escaped := false, false
+	for _, c := range data {
+		switch {
+		case inString && escaped:
+			escaped = false
+		case inString && c == '\\':
+			escaped = true
+		case inString && c == '"':
+			inString = false
+		case inString:
+		case c == '"':
+			inString = true
+		case c == '{' || c == '[':
+			depth++
+			if depth > deepest {
+				deepest = depth
+			}
+		case c == '}' || c == ']':
+			depth--
+		}
+	}
+	return deepest
 }
 
 func hookSidecarFailMode(sidecar map[string]string, connector string) string {
@@ -704,6 +827,9 @@ func hookSidecarFailMode(sidecar map[string]string, connector string) string {
 	return sidecar["DEFENSECLAW_FAIL_MODE"]
 }
 
+// hookSidecarFailModeKey is a connector's key in the parsed sidecar: trimmed,
+// upper-cased, and '-', '_' and ' ' dropped, so "claude-code" and
+// "ClaudeCode" name one connector.
 func hookSidecarFailModeKey(connector string) string {
 	name := strings.ToUpper(strings.TrimSpace(connector))
 	name = strings.NewReplacer("-", "", "_", "", " ", "").Replace(name)

@@ -45,11 +45,13 @@ func TestPerUserCopilotHookFailsOpenUpstreamAsDocumented(t *testing.T) {
 	}{
 		{filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "fail-modes.mdx"), []string{
 			"The per-user GitHub Copilot CLI hook cannot block a call while the gateway is down, on Linux, macOS and Windows.",
-			"No setting changes this for a per-user install.",
+			"No setting changes this for a per-user install, `DEFENSECLAW_STRICT_AVAILABILITY=1` included.",
+			"The per-user GitHub Copilot CLI hook and the Amp plugin do not read it",
 			"`DEFENSECLAW_FAIL_MODE` is not read",
 		}},
 		{filepath.Join("..", "..", "envvars", "registry.json"), []string{
 			"Not read by 1.0.4 hooks",
+			"the per-user GitHub Copilot CLI hook and the Amp plugin do not read it",
 		}},
 	} {
 		data, err := os.ReadFile(doc.path)
