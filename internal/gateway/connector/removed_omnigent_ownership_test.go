@@ -22,6 +22,7 @@ package connector
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -232,19 +233,25 @@ func TestRemovedOmnigentConfigOwnershipIsParsed(t *testing.T) {
 			}
 		})
 	}
-	// YAML that does not parse fails verification only when it names
-	// DefenseClaw's module; another tool's broken file is not DefenseClaw's.
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	writeRemovedFixture(t, path, "policy_modules: [corp\n", 0o600)
-	if loads, err := removedOmnigentConfigLoadsPolicy(path); err != nil || loads {
-		t.Fatalf("foreign unparsable config: loads = %v, %v; want clean", loads, err)
-	}
-	if err := removeRemovedOmnigentConfigEntries(path); err != nil {
-		t.Fatalf("cleanup of a foreign unparsable config: %v", err)
-	}
-	writeRemovedFixture(t, path, "policy_modules: ["+removedOmnigentModuleName+"\n", 0o600)
-	if _, err := removedOmnigentConfigLoadsPolicy(path); err == nil {
-		t.Fatal("an unparsable config naming DefenseClaw's module verified clean")
+	// YAML that does not parse cannot be classified, with or without the
+	// literal name (an escape could spell it): it fails verification and
+	// cleanup leaves it byte for byte.
+	for _, body := range []string{
+		"policy_modules: [corp\n",
+		"policy_modules: [" + removedOmnigentModuleName + "\n",
+		`policy_modules: ["defenseclaw_omnigent_\x70olicy"` + "\n",
+	} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		writeRemovedFixture(t, path, body, 0o600)
+		if loads, err := removedOmnigentConfigLoadsPolicy(path); err == nil {
+			t.Fatalf("unparsable config %q verified: loads = %v with no error", body, loads)
+		}
+		if err := removeRemovedOmnigentConfigEntries(path); err == nil {
+			t.Fatalf("cleanup accepted the unparsable config %q", body)
+		}
+		if got, _ := os.ReadFile(path); string(got) != body {
+			t.Fatalf("cleanup rewrote the unparsable config %q: %q", body, got)
+		}
 	}
 }
 
@@ -555,4 +562,306 @@ func TestRemovedOmnigentTeardownKeepsStateForDuplicateHandler(t *testing.T) {
 		t.Fatalf("DefenseClaw's module survived the retry: %v", err)
 	}
 	f.assertTokenRevoked(t)
+}
+
+// OmniGent's YAML loader reads what a scalar decodes to, so a double-quoted
+// escape or a !!binary scalar names DefenseClaw's module (or a key cleanup
+// edits) without the literal bytes. Cleanup and verification classify by the
+// decoded YAML: an escaped entry is removed like a plain one, one cleanup
+// cannot rewrite (!!binary) or decode (a key set twice) is refused and left
+// byte for byte, and a decoded name that is not DefenseClaw's stays.
+func TestRemovedOmnigentConfigOwnershipIsDecoded(t *testing.T) {
+	binaryName := base64.StdEncoding.EncodeToString([]byte(removedOmnigentModuleName))
+	const corp = "  corp:\n    handler: corp_policy.check\n"
+	for _, tc := range []struct {
+		name, body string
+		outcome    string // "clean" (not ours), "cleaned", "refused"
+	}{
+		{"module \\x escape", `policy_modules: [corp_policy, "defenseclaw_omnigent_\x70olicy"]` + "\n", "cleaned"},
+		{"module \\u escape", "policy_modules:\n  - corp_policy\n  - \"defenseclaw_omnigent_\\u0070olicy\"\n", "cleaned"},
+		{"module \\U escape", "policy_modules:\n  - corp_policy\n  - \"defenseclaw_omnigent_\\U00000070olicy\"\n", "cleaned"},
+		{"module escaped line break", "policy_modules:\n  - corp_policy\n  - \"defenseclaw_omnigent_\\\n    policy\"\n", "cleaned"},
+		{"module scalar escape", `policy_modules: "\x64efenseclaw_omnigent_policy"` + "\n", "cleaned"},
+		{"handler escape", "policies:\n  dc:\n    handler: \"defenseclaw_omnigent_\\x70olicy.defenseclaw_policy\"\n" + corp, "cleaned"},
+		{"escaped keys and names", `"policy_\x6dodules": ["defenseclaw_omnigent_\x70olicy", corp_policy]` + "\n" +
+			"\"polic\\x69es\":\n  dc:\n    \"h\\x61ndler\": \"defenseclaw_omnigent_\\x70olicy.defenseclaw_policy\"\n" + corp, "cleaned"},
+		{"module !!binary", "policy_modules: [corp_policy, !!binary " + binaryName + "]\n", "refused"},
+		{"escaped name with a key set twice", "policies:\n  dc:\n    handler: \"defenseclaw_omnigent_\\x70olicy.defenseclaw_policy\"\n    handler: corp_policy.check\n", "refused"},
+		{"escaped merge source", "x-base: &base\n  policy_modules: [\"defenseclaw_omnigent_\\x70olicy\"]\n<<: *base\n", "refused"},
+		{"escaped name in a second document", "server: http://127.0.0.1:7000\n---\n" + `policy_modules: ["defenseclaw_omnigent_\x70olicy"]` + "\n", "refused"},
+		{"name in a second document", "server: http://127.0.0.1:7000\n---\npolicy_modules: [" + removedOmnigentModuleName + "]\n", "refused"},
+		{"escaped foreign prefix", `policy_modules: ["defenseclaw_omnigent_\x70olicy_corp"]` + "\n", "clean"},
+		{"escaped foreign value", `notes: "corp_\x70olicy"` + "\n", "clean"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			writeRemovedFixture(t, path, tc.body, 0o600)
+			var decoded interface{}
+			if err := yaml.Unmarshal([]byte(tc.body), &decoded); tc.outcome == "cleaned" && (err != nil || !removedOmnigentValueLoadsPolicy(decoded)) {
+				t.Fatalf("fixture does not load DefenseClaw's policy when decoded: %q", tc.body)
+			}
+			loads, err := removedOmnigentConfigLoadsPolicy(path)
+			switch tc.outcome {
+			case "clean":
+				if err != nil || loads {
+					t.Fatalf("loads = %v, %v; want clean", loads, err)
+				}
+			default:
+				if err == nil && !loads {
+					t.Fatal("a config whose decoded YAML loads DefenseClaw's policy verified clean")
+				}
+			}
+			err = removeRemovedOmnigentConfigEntries(path)
+			after, _ := os.ReadFile(path)
+			switch tc.outcome {
+			case "clean":
+				if err != nil || string(after) != tc.body {
+					t.Fatalf("cleanup = %v, rewrote %q; want it left alone", err, after)
+				}
+			case "refused":
+				if err == nil || !strings.Contains(err.Error(), "by hand") {
+					t.Fatalf("cleanup = %v; want it refused", err)
+				}
+				if string(after) != tc.body {
+					t.Fatalf("cleanup rewrote a config it refused:\n%s", after)
+				}
+			case "cleaned":
+				if err != nil {
+					t.Fatalf("cleanup: %v", err)
+				}
+				var value interface{}
+				if err := yaml.Unmarshal(after, &value); err != nil || removedOmnigentValueLoadsPolicy(value) {
+					t.Fatalf("cleaned config still loads DefenseClaw's policy (%v):\n%s", err, after)
+				}
+				if loads, err := removedOmnigentConfigLoadsPolicy(path); err != nil || loads {
+					t.Fatalf("after cleanup loads = %v, %v:\n%s", loads, err, after)
+				}
+				if strings.Contains(tc.body, "corp_policy") && !strings.Contains(string(after), "corp_policy") {
+					t.Fatalf("cleanup dropped the operator's entries:\n%s", after)
+				}
+			}
+		})
+	}
+}
+
+// End to end for the reported case: config.yaml names DefenseClaw's module
+// and handler only through escapes. Teardown removes them, and only then the
+// module, the .pth line and the token; a config cleanup cannot rewrite
+// (!!binary) keeps all of that for the retry.
+func TestRemovedOmnigentTeardownCleansEscapedConfig(t *testing.T) {
+	escaped := `policy_modules: [corp_policy, "defenseclaw_omnigent_\x70olicy"]` + "\npolicies:\n  " + removedOmnigentPolicyKey +
+		":\n    handler: \"defenseclaw_omnigent_\\x70olicy.defenseclaw_policy\"\n  corp:\n    handler: corp_policy.check\n"
+	t.Run("escaped names are cleaned", func(t *testing.T) {
+		f := newRemovedOmnigentFixture(t)
+		f.stagePolicy(t, escaped)
+		f.teardownTwice(t)
+		config, _ := os.ReadFile(f.configPath)
+		var value interface{}
+		if err := yaml.Unmarshal(config, &value); err != nil || removedOmnigentValueLoadsPolicy(value) || !strings.Contains(string(config), "corp_policy.check") {
+			t.Fatalf("config.yaml after teardown (%v):\n%s", err, config)
+		}
+		if _, err := os.Lstat(f.modulePath); !os.IsNotExist(err) {
+			t.Fatalf("DefenseClaw's module survived teardown: %v", err)
+		}
+		if _, err := os.Lstat(f.pthPath); !os.IsNotExist(err) {
+			t.Fatalf("the .pth file survived teardown: %v", err)
+		}
+		f.assertTokenRevoked(t)
+	})
+	t.Run("binary name is refused", func(t *testing.T) {
+		f := newRemovedOmnigentFixture(t)
+		body := "policy_modules: [corp_policy, !!binary " + base64.StdEncoding.EncodeToString([]byte(removedOmnigentModuleName)) + "]\n"
+		pthBefore := f.stagePolicy(t, body)
+		f.assertRetryStateKept(t, body, pthBefore)
+	})
+}
+
+// stagePolicy sets up what an older release's OmniGent setup left: backup
+// records for config.yaml, the module and the .pth file, DefenseClaw's
+// rendered module, the .pth line naming its hook directory, the hook token,
+// and then config.yaml as body (edited since setup, so it is not restored).
+// It returns the .pth bytes.
+func (f removedOmnigentFixture) stagePolicy(t *testing.T, body string) string {
+	t.Helper()
+	f.hookToken(t)
+	writeRemovedFixture(t, f.configPath, "policy_modules:\n  - corp_policy\n", 0o600)
+	for _, logical := range []string{"config", "module", "pth"} {
+		if err := captureManagedFileBackup(f.dataDir, removedOmnigentID, logical, f.logicalPath(logical)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRemovedFixture(t, f.configPath, "policy_modules:\n  - corp_policy\n  - "+removedOmnigentModuleName+"\n", 0o600)
+	writeRemovedFixture(t, f.modulePath, removedOmnigentRendered, 0o600)
+	pth := filepath.Dir(f.modulePath) + "\n"
+	writeRemovedFixture(t, f.pthPath, pth, 0o600)
+	for _, logical := range []string{"config", "module", "pth"} {
+		if err := updateManagedFileBackupPostHash(f.dataDir, removedOmnigentID, logical, f.logicalPath(logical)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRemovedFixture(t, f.configPath, body, 0o600)
+	return pth
+}
+
+func (f removedOmnigentFixture) logicalPath(logical string) string {
+	return map[string]string{"config": f.configPath, "module": f.modulePath, "pth": f.pthPath}[logical]
+}
+
+// assertRetryStateKept runs teardown twice against a config.yaml it cannot
+// clean and checks that everything a restarted OmniGent needs to load the
+// policy its config names, and everything the retry needs, is still there:
+// config.yaml byte for byte, the .pth file and its record, the module and
+// its record, the config record and the hook token.
+func (f removedOmnigentFixture) assertRetryStateKept(t *testing.T, config, pth string) {
+	t.Helper()
+	conn, _ := RetiredConnector(removedOmnigentID)
+	for run := 1; run <= 2; run++ {
+		if err := conn.Teardown(context.Background(), f.opts); err == nil {
+			t.Fatalf("Teardown run %d succeeded while config.yaml cannot be cleaned", run)
+		}
+		if got, _ := os.ReadFile(f.configPath); string(got) != config {
+			t.Fatalf("Teardown run %d rewrote config.yaml:\n%s", run, got)
+		}
+		if got, err := os.ReadFile(f.pthPath); err != nil || string(got) != pth {
+			t.Fatalf("Teardown run %d changed the .pth file: %q, %v; want %q", run, got, err, pth)
+		}
+		if _, err := os.Lstat(f.modulePath); err != nil {
+			t.Fatalf("Teardown run %d removed the module config.yaml still names: %v", run, err)
+		}
+		for _, logical := range []string{"config", "module", "pth"} {
+			if _, err := os.Lstat(managedFileBackupPath(f.dataDir, removedOmnigentID, logical)); err != nil {
+				t.Fatalf("Teardown run %d dropped the %s record: %v", run, logical, err)
+			}
+		}
+		if err := conn.VerifyClean(f.opts); err == nil {
+			t.Fatalf("VerifyClean passed after teardown run %d", run)
+		}
+		if token, err := LoadHookAPIToken(f.dataDir, removedOmnigentID); err != nil || token == "" {
+			t.Fatalf("hook token = %q, %v; want it kept for the retry", token, err)
+		}
+	}
+}
+
+// A config.yaml cleanup cannot finish keeps the .pth line that puts the
+// policy module on OmniGent's import path, and its record, as well as the
+// module: config.yaml still loads the policy, and a restarted OmniGent fails
+// when the module cannot be imported. This holds whether the .pth file is
+// unchanged since setup (restorable) or the user added a line to it. Once
+// config.yaml is fixed, the retry removes DefenseClaw's line and the module.
+func TestRemovedOmnigentTeardownKeepsImportPathWhileConfigFails(t *testing.T) {
+	failures := []struct{ name, body, fixed string }{
+		{"key set twice", "policy_modules: [corp_policy, " + removedOmnigentModuleName + "]\npolicies:\n  " + removedOmnigentPolicyKey +
+			":\n    handler: " + removedOmnigentHandler + "\n    handler: corp_policy.check\n",
+			"policy_modules: [corp_policy, " + removedOmnigentModuleName + "]\npolicies:\n  " + removedOmnigentPolicyKey + ":\n    handler: corp_policy.check\n"},
+		{"merge key", "x-base: &base\n  policy_modules: [" + removedOmnigentModuleName + "]\n<<: *base\n", "policy_modules: [" + removedOmnigentModuleName + "]\n"},
+		{"not YAML", "policy_modules: [corp_policy, " + removedOmnigentModuleName + "\n", "policy_modules: [corp_policy, " + removedOmnigentModuleName + "]\n"},
+		{"not YAML, escaped name", `policy_modules: [corp_policy, "defenseclaw_omnigent_\x70olicy"` + "\n", `policy_modules: [corp_policy, "defenseclaw_omnigent_\x70olicy"]` + "\n"},
+		{"read-only directory", "policy_modules: [corp_policy, " + removedOmnigentModuleName + "]\n", ""},
+	}
+	for _, failure := range failures {
+		for _, userLine := range []bool{false, true} {
+			name := failure.name + ", .pth unchanged"
+			if userLine {
+				name = failure.name + ", .pth edited"
+			}
+			t.Run(name, func(t *testing.T) {
+				readOnly := failure.fixed == ""
+				if readOnly && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
+					t.Skip("needs POSIX directory permissions that bind the caller")
+				}
+				f := newRemovedOmnigentFixture(t)
+				pth := f.stagePolicy(t, failure.body)
+				corpLibs := filepath.Join(filepath.Dir(f.pthPath), "corp-libs")
+				if userLine {
+					pth += corpLibs + "\n"
+					writeRemovedFixture(t, f.pthPath, pth, 0o600)
+				}
+				configDir := filepath.Dir(f.configPath)
+				if readOnly {
+					if err := os.Chmod(configDir, 0o500); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.Chmod(configDir, 0o700) })
+				}
+				f.assertRetryStateKept(t, failure.body, pth)
+
+				if readOnly {
+					if err := os.Chmod(configDir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					writeRemovedFixture(t, f.configPath, failure.fixed, 0o600)
+				}
+				f.teardownTwice(t)
+				got, err := os.ReadFile(f.pthPath)
+				switch {
+				case userLine && (err != nil || string(got) != corpLibs+"\n"):
+					t.Fatalf(".pth after the retry = %q, %v; want only the user's line", got, err)
+				case !userLine && !os.IsNotExist(err):
+					t.Fatalf(".pth after the retry = %q, %v; want it removed", got, err)
+				}
+				if _, err := os.Lstat(f.modulePath); !os.IsNotExist(err) {
+					t.Fatalf("DefenseClaw's module survived the retry: %v", err)
+				}
+				f.assertTokenRevoked(t)
+			})
+		}
+	}
+}
+
+// A config.yaml backup that itself loads DefenseClaw's policy (setup ran
+// again after a rollback left its entries, GAP-1926) is not restored. The
+// restore drops the record, the only thing that names a config outside the
+// default paths on a later gateway boot: the restored entries were then
+// never cleaned (or, when cleanup of the restored file failed, never
+// retried) while the module went. Cleanup edits the file in place instead
+// and keeps the record until the file is clean.
+func TestRemovedOmnigentTeardownKeepsConfigRecordForDirtyBackup(t *testing.T) {
+	for _, tc := range []struct{ name, backup, fixed string }{
+		{"backup loads the policy", "policy_modules: [corp_policy, " + removedOmnigentModuleName + "]\n", ""},
+		{"backup has a key set twice", "policy_modules: [corp_policy, " + removedOmnigentModuleName + "]\npolicies:\n  " + removedOmnigentPolicyKey +
+			":\n    handler: " + removedOmnigentHandler + "\n    handler: corp_policy.check\n",
+			"policy_modules: [corp_policy, " + removedOmnigentModuleName + "]\npolicies:\n  " + removedOmnigentPolicyKey + ":\n    handler: corp_policy.check\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRemovedOmnigentFixture(t)
+			// Native maintenance passed this config home to setup; a gateway
+			// boot knows it only from the record.
+			f.configPath = filepath.Join(t.TempDir(), "omnigent-home", "config.yaml")
+			f.hookToken(t)
+			writeRemovedFixture(t, f.configPath, tc.backup, 0o600)
+			if err := captureManagedFileBackup(f.dataDir, removedOmnigentID, "config", f.configPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := updateManagedFileBackupPostHash(f.dataDir, removedOmnigentID, "config", f.configPath); err != nil {
+				t.Fatal(err)
+			}
+			writeRemovedFixture(t, f.modulePath, removedOmnigentRendered, 0o600)
+			conn, _ := RetiredConnector(removedOmnigentID)
+			if tc.fixed != "" {
+				if err := conn.Teardown(context.Background(), f.opts); err == nil {
+					t.Fatal("Teardown succeeded on a recorded config with a key set twice")
+				}
+				if _, err := os.Lstat(managedFileBackupPath(f.dataDir, removedOmnigentID, "config")); err != nil {
+					t.Fatalf("the config record went before config.yaml was clean: %v", err)
+				}
+				if _, err := os.Lstat(f.modulePath); err != nil {
+					t.Fatalf("the module went while config.yaml still names it: %v", err)
+				}
+				if err := conn.VerifyClean(f.opts); err == nil {
+					t.Fatal("VerifyClean passed while the recorded config.yaml cannot be classified")
+				}
+				writeRemovedFixture(t, f.configPath, tc.fixed, 0o600)
+			}
+			f.teardownTwice(t)
+			config, _ := os.ReadFile(f.configPath)
+			if got := string(config); strings.Contains(got, removedOmnigentModuleName) || !strings.Contains(got, "corp_policy") {
+				t.Fatalf("config.yaml after teardown = %q; want only DefenseClaw's module gone", got)
+			}
+			if _, err := os.Lstat(f.modulePath); !os.IsNotExist(err) {
+				t.Fatalf("DefenseClaw's module survived teardown: %v", err)
+			}
+			f.assertTokenRevoked(t)
+		})
+	}
 }

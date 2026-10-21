@@ -24,7 +24,9 @@ package connector
 // leave the agent working without DefenseClaw. Delete this file in 1.1.
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -278,43 +280,48 @@ func (c removedOmnigentConnector) configPaths(opts SetupOpts) []string {
 	return uniqueNonEmptyStrings(append(paths, homePath(".omnigent", "config.yaml")))
 }
 
-// Teardown restores config.yaml and the .pth file an older release backed up
-// when they are unchanged since then. Otherwise it removes only DefenseClaw's
-// policy entries from config.yaml and only the line naming DefenseClaw's hook
-// directory from the .pth file. The policy module goes last, only once every
-// config.yaml is clean, and only when its bytes are provably DefenseClaw's
-// (inspectModule); a module the user changed stays and is reported, because
-// nothing loads it once config.yaml and the .pth file no longer name it.
+// Teardown cleans config.yaml first, then the .pth file, then the policy
+// module, so nothing OmniGent can still load is taken away from under it.
+// A config.yaml unchanged since setup gets the file setup found back (unless
+// those bytes name DefenseClaw's module themselves); otherwise only
+// DefenseClaw's policy entries are removed. Until every config.yaml is clean
+// and verified, the .pth file, the module, every backup and the token stay:
+// a restarted OmniGent can still import a policy its config names, and the
+// next run retries. Then the .pth file is restored, or loses only the line
+// naming DefenseClaw's hook directory, and the module goes only when its
+// bytes are provably DefenseClaw's (inspectModule); a module the user
+// changed stays and is reported, because nothing loads it once config.yaml
+// and the .pth file no longer name it.
 func (c removedOmnigentConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	if strings.TrimSpace(opts.DataDir) == "" {
 		return errors.New("omnigent cleanup: empty data directory")
 	}
-	moduleDir := filepath.Dir(c.modulePath(opts))
+	// The paths come from the backup records, read before a restore
+	// removes them.
+	configs := c.configPaths(opts)
+	pth := managedFileBackupTargetPath(opts.DataDir, c.name, "pth", "")
 	var errs []error
-	for _, logical := range []string{"config", "pth"} {
-		path := managedFileBackupTargetPath(opts.DataDir, c.name, logical, "")
-		if path == "" {
-			continue
-		}
-		if _, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, logical, path); err != nil {
-			errs = append(errs, fmt.Errorf("omnigent cleanup %s: %s", logical, restoreBackupFailure(err)))
-			continue
-		}
-		if logical == "pth" {
-			if err := removeRemovedOmnigentImportPath(path, moduleDir); err != nil {
-				errs = append(errs, fmt.Errorf("omnigent cleanup: %w", err))
-			}
-		}
+	if err := c.restoreConfigBackup(opts); err != nil {
+		errs = append(errs, fmt.Errorf("omnigent cleanup config: %w", err))
 	}
-	for _, path := range c.configPaths(opts) {
+	for _, path := range configs {
 		if err := removeRemovedOmnigentConfigEntries(path); err != nil {
 			errs = append(errs, fmt.Errorf("omnigent cleanup %s: %w", path, err))
 		}
 	}
 	if len(errs) > 0 {
-		// The module stays while a config.yaml may still name it: OmniGent
-		// fails to start when a policy it loads cannot be imported.
 		return errors.Join(errs...)
+	}
+	if err := verifyRemovedOmnigentConfigs(configs); err != nil {
+		return err
+	}
+	if pth != "" {
+		if _, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "pth", pth); err != nil {
+			return fmt.Errorf("omnigent cleanup pth: %s", restoreBackupFailure(err))
+		}
+		if err := removeRemovedOmnigentImportPath(pth, filepath.Dir(c.modulePath(opts))); err != nil {
+			return fmt.Errorf("omnigent cleanup: %w", err)
+		}
 	}
 	if err := c.removeModule(opts); err != nil {
 		return fmt.Errorf("omnigent cleanup: %w", err)
@@ -330,20 +337,38 @@ func (c removedOmnigentConnector) Teardown(_ context.Context, opts SetupOpts) er
 	return c.removeCredentials(opts.DataDir)
 }
 
+// restoreConfigBackup puts back the config.yaml setup found when the file is
+// unchanged since setup wrote it. A backup whose own bytes load DefenseClaw's
+// policy (one taken after an earlier setup, GAP-1926), or cannot be
+// classified, is not restored: the restore drops the record that names a
+// config outside the default paths, so a later failure would lose track of
+// it. Cleanup edits that file in place instead.
+func (c removedOmnigentConnector) restoreConfigBackup(opts SetupOpts) error {
+	path := managedFileBackupTargetPath(opts.DataDir, c.name, "config", "")
+	if path == "" {
+		return nil
+	}
+	if record, err := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config")); err == nil && record.Existed {
+		config, err := classifyRemovedOmnigentConfig(record.PristineBytes)
+		if err != nil || (config != nil && config.loadsPolicy()) {
+			return nil
+		}
+	}
+	if _, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", path); err != nil {
+		return errors.New(restoreBackupFailure(err))
+	}
+	return nil
+}
+
 // VerifyClean fails while an OmniGent config still loads DefenseClaw's
-// policy (by the rule cleanup removes it), DefenseClaw's own policy module
-// remains, or the recorded .pth file still puts DefenseClaw's hook directory
-// on OmniGent's import path. A policy, module or import line that belongs to
-// someone else is not DefenseClaw's state and does not fail it.
+// policy (by the rule cleanup removes it) or cannot be classified,
+// DefenseClaw's own policy module remains, or the recorded .pth file still
+// puts DefenseClaw's hook directory on OmniGent's import path. A policy,
+// module or import line that belongs to someone else is not DefenseClaw's
+// state and does not fail it.
 func (c removedOmnigentConnector) VerifyClean(opts SetupOpts) error {
-	for _, path := range c.configPaths(opts) {
-		loads, err := removedOmnigentConfigLoadsPolicy(path)
-		if err != nil {
-			return fmt.Errorf("omnigent cleanup could not read %s: %w", path, err)
-		}
-		if loads {
-			return fmt.Errorf("omnigent cleanup incomplete: %s still loads DefenseClaw's policy", path)
-		}
+	if err := verifyRemovedOmnigentConfigs(c.configPaths(opts)); err != nil {
+		return err
 	}
 	module, err := c.inspectModule(opts)
 	if err != nil {
@@ -359,6 +384,21 @@ func (c removedOmnigentConnector) VerifyClean(opts SetupOpts) error {
 		}
 		if names {
 			return fmt.Errorf("omnigent cleanup incomplete: %s still names DefenseClaw's hook directory", pth)
+		}
+	}
+	return nil
+}
+
+// verifyRemovedOmnigentConfigs fails while one of paths still loads
+// DefenseClaw's policy or cannot be classified.
+func verifyRemovedOmnigentConfigs(paths []string) error {
+	for _, path := range paths {
+		loads, err := removedOmnigentConfigLoadsPolicy(path)
+		if err != nil {
+			return fmt.Errorf("omnigent cleanup could not read %s: %w", path, err)
+		}
+		if loads {
+			return fmt.Errorf("omnigent cleanup incomplete: %s still loads DefenseClaw's policy", path)
 		}
 	}
 	return nil
@@ -532,8 +572,9 @@ func removedOmnigentImportLine(line, hookDir string) bool {
 // the parsed policy_modules entry, and a policy whose handler is in
 // DefenseClaw's module, followed through YAML aliases and merge keys.
 // Comments, other modules and another tool's policy under DefenseClaw's old
-// key do not count. A config naming the module that does not load as plain
-// YAML (a key set twice) is an error: which entry OmniGent uses is unknown.
+// key do not count. YAML that does not parse, and a config naming the module
+// that does not load as plain YAML (a key set twice), is an error: what
+// OmniGent reads from it is unknown.
 func removedOmnigentConfigLoadsPolicy(path string) (bool, error) {
 	config, err := readRemovedOmnigentConfig(path)
 	if err != nil || config == nil {
@@ -593,12 +634,10 @@ func removeRemovedOmnigentConfigEntries(path string) error {
 	return atomicWriteFile(path, updated, 0o600)
 }
 
-const removedOmnigentUneditable = "still loads DefenseClaw's policy through YAML cleanup cannot edit safely (a merge key); remove DefenseClaw's entries by hand"
+const removedOmnigentUneditable = "still loads DefenseClaw's policy in a way cleanup cannot edit safely (a YAML merge key or a !!binary value); remove DefenseClaw's entries by hand"
 
-// readRemovedOmnigentConfig parses an OmniGent config that mentions
-// DefenseClaw's module. A missing or empty file, or one that never names the
-// module (every entry an older release wrote does), returns nil: there is
-// nothing of DefenseClaw's in it, even if another tool's YAML does not parse.
+// readRemovedOmnigentConfig reads and classifies an OmniGent config file
+// (classifyRemovedOmnigentConfig); a missing file returns nil.
 func readRemovedOmnigentConfig(path string) (*removedOmnigentConfig, error) {
 	data, err := readHookConfigFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -607,29 +646,112 @@ func readRemovedOmnigentConfig(path string) (*removedOmnigentConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !strings.Contains(string(data), removedOmnigentModuleName) {
-		return nil, nil
-	}
-	config, err := parseRemovedOmnigentConfig(data)
+	config, err := classifyRemovedOmnigentConfig(data)
 	if err != nil {
-		return nil, fmt.Errorf("parse YAML %s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return config, nil
 }
 
-// parseRemovedOmnigentConfig parses config.yaml bytes into a document whose
+// classifyRemovedOmnigentConfig parses config.yaml bytes. Empty YAML, and
+// YAML that never names DefenseClaw's module, return nil: nothing in it is
+// DefenseClaw's. The name is looked for in what OmniGent's YAML loader reads
+// (decoded keys, values and tags), not only in the raw bytes: a
+// double-quoted escape ("\x70", "\u0070", an escaped line break) or a
+// !!binary scalar spells it without the literal text, and every document in
+// the file is searched. YAML that does not parse is an error, not "someone
+// else's": cleanup cannot tell what OmniGent would read from it, so the
+// module, the import path and the token stay until the file is fixed
+// (OmniGent cannot load it either).
+func classifyRemovedOmnigentConfig(data []byte) (*removedOmnigentConfig, error) {
+	documents, err := parseRemovedOmnigentYAML(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse YAML: %w; cleanup cannot tell whether it loads DefenseClaw's policy, so fix the file (OmniGent cannot load it either)", err)
+	}
+	names := strings.Contains(string(data), removedOmnigentModuleName)
+	for _, document := range documents {
+		names = names || yamlNodeNames(document, removedOmnigentModuleName)
+	}
+	if !names {
+		return nil, nil
+	}
+	return decodeRemovedOmnigentDocuments(documents)
+}
+
+// parseRemovedOmnigentYAML parses every YAML document in config.yaml bytes.
+func parseRemovedOmnigentYAML(data []byte) ([]*yaml.Node, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var documents []*yaml.Node
+	for {
+		var document yaml.Node
+		err := decoder.Decode(&document)
+		if errors.Is(err, io.EOF) {
+			return documents, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		documents = append(documents, &document)
+	}
+}
+
+// decodeRemovedOmnigentDocuments checks the one document a config holds (no
+// document returns nil). A config with more than one is refused: OmniGent's
+// loader reads a single document, and which one it would use (or whether it
+// refuses the file) is not cleanup's to guess.
+func decodeRemovedOmnigentDocuments(documents []*yaml.Node) (*removedOmnigentConfig, error) {
+	switch len(documents) {
+	case 0:
+		return nil, nil
+	case 1:
+		return decodeRemovedOmnigentDocument(documents[0])
+	}
+	return nil, errors.New("holds more than one YAML document; cleanup cannot tell which one OmniGent reads, so remove DefenseClaw's entries by hand")
+}
+
+// yamlNodeNames reports whether a parsed YAML tree spells name in a decoded
+// scalar (key or value), in a !!binary scalar's decoded bytes, or in a tag.
+// Aliases are not followed: the nodes they name are in the tree.
+func yamlNodeNames(node *yaml.Node, name string) bool {
+	if node == nil {
+		return false
+	}
+	if strings.Contains(node.Value, name) || strings.Contains(node.Tag, name) {
+		return true
+	}
+	if node.Kind == yaml.ScalarNode && node.ShortTag() == "!!binary" {
+		data, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(node.Value), ""))
+		if err == nil && strings.Contains(string(data), name) {
+			return true
+		}
+	}
+	for _, child := range node.Content {
+		if yamlNodeNames(child, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseRemovedOmnigentConfig parses and checks config.yaml bytes
+// (decodeRemovedOmnigentDocuments).
+func parseRemovedOmnigentConfig(data []byte) (*removedOmnigentConfig, error) {
+	documents, err := parseRemovedOmnigentYAML(data)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRemovedOmnigentDocuments(documents)
+}
+
+// decodeRemovedOmnigentDocument checks a parsed config.yaml: a document whose
 // only child is the top-level mapping, plus its decoded value; empty YAML
-// returns nil. The bytes must also decode. A key set twice in one mapping (a
+// returns nil. The document must also decode. A key set twice in one mapping (a
 // policy's handler or merge key, a policy name, policies or policy_modules)
 // does not: which copy OmniGent uses is up to its YAML loader, so cleanup
 // could drop a policy whose effective handler is another tool's, or pass one
 // that still loads DefenseClaw's. Such a config is refused, not guessed at,
 // and teardown keeps its state until the file is fixed.
-func parseRemovedOmnigentConfig(data []byte) (*removedOmnigentConfig, error) {
-	var document yaml.Node
-	if err := yaml.Unmarshal(data, &document); err != nil {
-		return nil, err
-	}
+func decodeRemovedOmnigentDocument(document *yaml.Node) (*removedOmnigentConfig, error) {
 	if len(document.Content) == 0 {
 		return nil, nil
 	}
@@ -640,7 +762,7 @@ func parseRemovedOmnigentConfig(data []byte) (*removedOmnigentConfig, error) {
 	if err := document.Decode(&value); err != nil {
 		return nil, fmt.Errorf("%w; cleanup cannot tell which entry OmniGent uses (a key set twice?), so remove DefenseClaw's entries by hand", err)
 	}
-	return &removedOmnigentConfig{document: &document, value: value}, nil
+	return &removedOmnigentConfig{document: document, value: value}, nil
 }
 
 // pruneRemovedOmnigentConfig removes DefenseClaw's entries from a parsed
