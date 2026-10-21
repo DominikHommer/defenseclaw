@@ -16,8 +16,9 @@ computer applies it only if a key in its trust anchor file signed it. Bundles
 work on the standalone profile. A Secure Client computer refuses every `bundle`
 command.
 
-`sign` and `verify` run offline, on any OS, and change nothing. `status` reads the
-device and must run as root or an elevated administrator. For delivery, see
+`sign` and `verify` run on any OS and change nothing. `verify` runs the device
+checks only on the managed device, elevated. `status` reads the device and must run
+as root or an elevated administrator. For delivery, see
 [Install order with a signed bundle](/docs/enterprise/mdm#install-order-with-a-signed-bundle).
 
 ## Sign a bundle
@@ -31,9 +32,7 @@ defenseclaw-gateway enterprise bundle sign --in ./policy --out v12.dcbundle \
 The key is a PEM Ed25519 or ECDSA P-256 private key. `--key-id` must name a key in
 the devices' trust anchor file, and `--tenant` must equal the anchor's tenant.
 `--platform` (repeatable) limits the targets; the default is Linux, macOS and
-Windows. For a key in an HSM or KMS, run `sign --emit-digest` to write the unsigned
-bundle and print the digest to sign, then `sign --attach-sig` with the signature and
-the public key.
+Windows.
 
 Leave `data_dir` out of a managed bundle so each device uses its own service
 directory.
@@ -41,18 +40,56 @@ directory.
 `sign` prints errors, which refuse the bundle, and warnings, which it records in the
 manifest. Use `--json` for a machine-readable result.
 
-## Verify a bundle
+### Sign with an HSM or KMS
+
+Write the unsigned bundle with `--emit-digest` in place of `--key`:
 
 ```bash
-defenseclaw-gateway enterprise bundle verify --bundle v12.dcbundle --platform linux
+defenseclaw-gateway enterprise bundle sign --in ./policy --out v12.unsigned.dcbundle \
+  --emit-digest --tbs-out v12.tbs --tenant acme --device-group eng-laptops \
+  --version 12 --created-by operator:alice
 ```
 
-`verify` runs every check the device runs: anchor, key, signature, manifest, tenant,
-device group, platform, version floor, minimum product version, file hashes, inline
-secrets, secret references, the config validator and the effective policy digest. On
-a managed device it also checks that each credential the bundle names is stored. Use
-`--anchors FILE` to check against another anchor file and `--platform` to check for
-another OS.
+What the HSM signs depends on the key type:
+
+- **Ed25519:** the exact bytes in the `--tbs-out` file. Do not sign the printed
+  digest: an Ed25519 signature over it does not verify.
+- **ECDSA P-256:** the printed SHA-256 digest (`to_be_signed_sha256` in `--json`).
+
+Then attach the signature (DER, raw `r||s` or base64). `--key-id` and `--public-key`
+(the PEM public key) are required, and the signature must verify with that key:
+
+```bash
+defenseclaw-gateway enterprise bundle sign --attach-sig v12.sig \
+  --in v12.unsigned.dcbundle --out v12.dcbundle \
+  --key-id acme-2026a --public-key signing.pub.pem
+```
+
+## Verify a bundle
+
+On a workstation or in CI, check against the anchor file you deliver:
+
+```bash
+defenseclaw-gateway enterprise bundle verify --bundle v12.dcbundle \
+  --anchors bundle-anchors.json --platform linux
+```
+
+This checks the anchor, key, signature, manifest, tenant, device group, platform,
+the anchor `min_version`, minimum product version, file hashes, inline secrets,
+secret references, the config validator and the effective policy digest. It warns
+`anchor_trust_unchecked`, since only a device needs a root-owned anchor file.
+
+It cannot run the device checks: the installed anchor file, the version the device
+last confirmed, and that each credential the bundle names is stored. A bundle that
+passes on a workstation can still be refused by the device. For those checks, run
+`verify` on the managed device as root or an elevated administrator:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise bundle verify --bundle v12.dcbundle
+```
+
+Without elevation, `verify` skips what it cannot read and warns `floor_unchecked` or
+`secret_presence_unchecked`. On Windows it may not read the installed anchors at all.
 
 ### The version floor
 
@@ -68,9 +105,10 @@ success. A different manifest under the same ID and version is refused. To roll
 back, sign the old content again as a new, higher version with `--rollback-of`.
 
 The confirmed floor is stored in a root-only state file in the lifecycle directory.
-It never goes down while that file exists. Removing the lifecycle state, for example
-with an uninstall that purges, resets it, so keep `min_version` current in the
-anchor file you deliver: that part of the floor survives a reinstall.
+It never goes down while that file exists. On Linux and macOS a plain `uninstall`
+removes that file, as does `--purge`; only `uninstall --keep-state` keeps it. So keep
+`min_version` current in the anchor file you deliver: that part of the floor survives
+a reinstall.
 
 ### Retired and revoked keys
 
@@ -95,7 +133,7 @@ platform, with the product version that computed it. The device recomputes it.
 | `digest_mismatch` (error) | The device runs the signer's product version and computes a different digest. The bundle is refused. | Fix the difference the message names, and sign again. |
 | `digest_unverifiable` (warning) | The signer ran another product version, so the device cannot reproduce the digest. The bundle can still apply; the device reports its own digest. | Sign with the release the devices run. |
 | `digest_layout_unverifiable` (warning) | The device uses a non-standard ProgramData root that changes its digest, and the signed digest matches the standard layout. | Use the standard layout, or accept the warning. |
-| `secret_presence_unchecked` (warning) | The secret store could not be read, so `verify` did not check that the bundle's credentials are stored. | Run `verify` as root on the managed device. |
+| `secret_presence_unchecked` (warning) | The secret store could not be read, so `verify` did not check that the bundle's credentials are stored. | Run `verify` on the managed device as root or an elevated administrator. |
 
 ## Check a device
 
@@ -107,9 +145,14 @@ On macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. On Wind
 run `defenseclaw.exe enterprise bundle status --json` from an elevated prompt.
 
 `status` shows the current (confirmed) bundle, the last good bundle kept for rollback,
-the floor, the last receipt, the last refusal, whether sessions need a restart, and
-whether the running gateway enforces the current bundle digest (`applied`).
+the confirmed floor, the last receipt, the last refusal, whether sessions need a
+restart, and whether the running gateway enforces the current bundle digest
+(`applied`).
 
+- The `floor` in `status` is only the stored confirmed floor. It leaves out the anchor
+  `min_version`, so it can show `0` while an anchor `min_version` of 12 refuses
+  version 12. For the effective floor and what set it, run `verify` on the device
+  (`floor` and `floor_source` in its JSON), or read `min_version` in the anchor file.
 - If the gateway cannot be asked, `status` adds the warning `gateway_unchecked` and
   leaves `applied` false. Run the platform's `enterprise status` for the gateway's
   own answer.
