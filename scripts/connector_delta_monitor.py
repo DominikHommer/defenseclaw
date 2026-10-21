@@ -93,7 +93,10 @@ def request(url, payload=None, *, ai=False, method=None):
         raise ValueError("unapproved upstream destination")
     if method is not None and (method != "PATCH" or parsed.netloc != "api.github.com" or ai):
         raise ValueError("unapproved request method")
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": "DefenseClaw-Connector-Monitor"}
+    headers = {
+        "Accept": "application/json" if ai else "application/vnd.github+json",
+        "User-Agent": "DefenseClaw-Connector-Monitor",
+    }
     if ai and parsed.netloc == "bedrock-runtime.us-east-1.amazonaws.com":
         headers["Authorization"] = "Bearer " + os.environ["CONNECTOR_DELTA_BEDROCK_API_KEY"]
     elif ai:

@@ -52,10 +52,28 @@ jobs:
           from scripts import connector_delta_monitor as m
           config = m.load(m.CONFIG)
           rows = []
+          diagnostics = []
+          original = m.urllib.request.build_opener
+          def diagnostic_opener(*args, **kwargs):
+              opener = original(*args, **kwargs)
+              call = opener.open
+              def opened(request, **options):
+                  try:
+                      return call(request, **options)
+                  except m.urllib.error.HTTPError as error:
+                      if 'bedrock-runtime' in request.full_url:
+                          diagnostics.append({'status':error.code,'error':error.read(3000).decode('utf-8',errors='replace')})
+                      raise
+                  except OSError as error:
+                      diagnostics.append({'error_type':type(error).__name__})
+                      raise
+              opener.open = opened
+              return opener
+          m.urllib.request.build_opener = diagnostic_opener
           for name, number in [('codex', n) for n in (15252,38947,20522,22268,55456,24962,49379,33926,35194)] + [('claudecode', n) for n in (98083,98080)]:
               bundle, report = m.analyze(config, Path('integration'), {'schema_version':1,'cursors':{}}, ai=True, only=(name,number))
               rows.append({'connector':name,'number':number,'gaps':bundle['gaps'],'report':report})
-          m.save(Path(os.environ['RUNNER_TEMP'])/'impact-eval.json', rows)
+          m.save(Path(os.environ['RUNNER_TEMP'])/'impact-eval.json', {'results':rows,'diagnostics':diagnostics})
           print('Evaluation complete; detailed output is encrypted, not logged.')
           PY
       - name: Encrypt findings for local review
