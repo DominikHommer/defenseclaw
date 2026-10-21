@@ -15,8 +15,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest, v: new-trace, ref: "", cap: "", settle: "", ddrive: "" }
-          - { os: windows-latest, v: new-cap300-trace, ref: "", cap: "300", settle: "", ddrive: "" }
+          - { os: windows-latest, v: new-rate5, ref: "", rate: "5", calls: "3000" }
+          - { os: windows-latest, v: new-rate3, ref: "", rate: "3", calls: "1800" }
+          - { os: windows-latest, v: old-rate5, ref: 5bbc0ff3ecb1d51f751ccc18321f69eb0744b6a8, rate: "5", calls: "3000" }
+          - { os: windows-latest, v: old-rate3, ref: 5bbc0ff3ecb1d51f751ccc18321f69eb0744b6a8, rate: "3", calls: "1800" }
     name: probe ${{ matrix.os }} ${{ matrix.v }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
@@ -33,44 +35,11 @@ jobs:
         shell: bash
         env:
           DEFENSECLAW_HOOK_FLOOD_PROBE: "1"
-          DEFENSECLAW_HOOK_FLOOD_CALLS: "6000"
-          GFLOOD_CAP_MS: ${{ matrix.cap }}
-          GFLOOD_SETTLE: ${{ matrix.settle }}
-          GFLOOD_DDRIVE: ${{ matrix.ddrive }}
-          GFW_TRACE: "1"
+          DEFENSECLAW_HOOK_FLOOD_CALLS: ${{ matrix.calls }}
+          DEFENSECLAW_HOOK_FLOOD_RATE: ${{ matrix.rate }}
         run: |
           git log --oneline -1
-          if [ "$GFLOOD_DDRIVE" = 1 ]; then export TMP="$RUNNER_TEMP" TEMP="$RUNNER_TEMP"; echo "TMP=$TMP"; fi
           if [ -z "${{ matrix.ref }}" ]; then cp .github/zz-gfw/knobs.go internal/audit/zz_gfw_bench_knobs.go; fi
           go test -count=1 -timeout 45m -run '^TestHookFloodProbe$' -v ./internal/gateway/ > probe.log 2>&1 || true
           grep -E "minute|WAL|PASS|FAIL|sent|drained|flat|all |ok " probe.log || true
           grep -E -B3 -A12 "^--- FAIL|Error|panic" probe.log | head -60 || true
-          grep -E "^gfw " probe.log | head -3000 || true
-
-  migration:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-    name: audit store tests ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 50
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: audit tests
-        shell: bash
-        env:
-          GFW_SYNC_FLOOR: "1"
-        run: |
-          set -o pipefail
-          cp .github/zz-gfw/knobs.go internal/audit/zz_gfw_bench_knobs.go
-          cp .github/zz-gfw/floor_test.go internal/audit/zz_gfw_floor_test.go
-          go test -count=1 -timeout 20m -run '^TestGFWSyncFloor$' -v ./internal/audit/ 2>&1 | grep -E "sync floor|ok|FAIL"
-          go test -count=1 -timeout 40m -run 'Correlation|Migration|Ordered|Unread|TimeOrdered|Upgrade|V7|Legacy' ./internal/audit/ 2>&1 | tail -40
-          go test -count=1 -timeout 20m -run 'TimeOrdered|OccurrenceID' ./internal/observability/ 2>&1 | tail -10
