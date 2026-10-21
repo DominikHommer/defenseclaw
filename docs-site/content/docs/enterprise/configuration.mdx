@@ -152,16 +152,27 @@ The gateway ships three rule packs, `default`, `strict` and `permissive`, under 
 
    The lifecycle refuses a pack inside `data_dir`. Before it changes anything it also refuses a pack whose folder, a folder above it, or any folder or file inside it is a symlink, is writable by group or others, has an ACL entry that grants write, or belongs to an account other than root (a pack copied with `cp -a` keeps its owner). It names the path and the reason. `status` and `verify` report a pack in use that no longer passes these checks. To repair modes, change only the `guardrail` folder and the pack (for example `sudo chmod 0755 <policies>/guardrail` and `sudo chmod -R u=rwX,go=rX <policies>/guardrail/my-pack`), and leave `policies` itself to the lifecycle, which keeps it at `0750`.
 2. **Choose the levels.** The pack's posture (its manifest's posture, else its folder name) sets the default levels: `strict` blocks findings of MEDIUM severity and above and alerts on LOW ones, `permissive` blocks only CRITICAL findings and alerts on HIGH ones, and any other pack blocks CRITICAL findings and alerts on MEDIUM and above. `guardrail.block_at` and `alert_at` (or a connector's own) override them; see [Thresholds](/docs/how-to/policies/change-block-and-alert-levels). The manifest is part of the pack's pin, so validate the pack again after you change it.
-3. **Validate the pack** you just created, `my-pack` here (use your own folder name), with the gateway's own loader. On macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` and the folder is `/opt/cisco/defenseclaw/etc/policies/guardrail/my-pack`.
+3. **Validate the pack** you just created, `my-pack` here (use your own folder name), with the gateway's own loader.
 
-   ```bash
+   ```bash title="macOS"
+   sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir /opt/cisco/defenseclaw/etc/policies/guardrail/my-pack
+   ```
+
+   ```bash title="Linux"
    sudo /opt/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir /etc/defenseclaw/policies/guardrail/my-pack
    ```
 
    `--json` prints a versioned result. Enterprise packages ship no `defenseclaw` CLI, so `defenseclaw guardrail validate-pack` and `defenseclaw setup guardrail` from the [per-user workflow](/docs/how-to/policies/validate-a-rule-pack) are not available.
 4. **Point the config at it.** Add the pack under `guardrail.custom_packs` with its path and the `custom_packs pin` value `rulepack validate` prints (`sha256:` and the digest of the pack's own files), select it with `guardrail.rule_pack` (or `guardrail.connectors.<name>.rule_pack` for one agent), and apply the config with `ensure --config` or through your MDM.
 
-   ```yaml
+   ```yaml title="macOS"
+   guardrail:
+     rule_pack: my-pack
+     custom_packs:
+       my-pack: {path: /opt/cisco/defenseclaw/etc/policies/guardrail/my-pack, digest: "sha256:<digest>"}
+   ```
+
+   ```yaml title="Linux"
    guardrail:
      rule_pack: my-pack
      custom_packs:
