@@ -1452,6 +1452,19 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 		!strings.Contains(c.Fix.Summary, "for slow, wait a minute for OpenShell's cleanup, then `defenseclaw sandbox start NAME` with no stop") {
 		t.Fatalf("timed out on %s: %+v", openshell.SandboxMin, c)
 	}
+	// On an older gateway, a prerelease of SandboxMin included, both are
+	// upgraded first; after it, the one whose provisioning timed out still
+	// starts with no stop, which the upgraded gateway refuses for it.
+	for _, old := range []string{"0.1.3", "0.1.5-pre.2"} {
+		ta.daemon.status.Gateway.Version = old
+		c := check(ta)
+		if c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "where this OpenShell can neither stop nor start them") || c.Fix == nil ||
+			c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" (see Gateway), then `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME` for hic, "+
+				"which keep the sandbox and its work; for slow wait a minute for OpenShell's cleanup, then `defenseclaw sandbox start NAME` with no stop: OpenShell "+
+				openshell.SandboxMin+" refuses to stop a sandbox whose provisioning timed out" {
+			t.Fatalf("errored and timed out on %s: %+v", old, c)
+		}
+	}
 	ta.daemon.mu.Lock()
 	delete(ta.daemon.sandboxes, "slow")
 	ta.daemon.mu.Unlock()

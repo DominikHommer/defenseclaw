@@ -445,7 +445,7 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 			}
 			upgrading = true
 		}
-		if v.Compare(mustParse(SupportedBelow)) >= 0 {
+		if aboveWindow(v) {
 			return nil, &ErrUnsupportedVersion{Found: v}
 		}
 	}

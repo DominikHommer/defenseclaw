@@ -92,8 +92,14 @@ type Status struct {
 	Profile string      `json:"profile,omitempty"`
 	Admin   AdminStatus `json:"admin"`
 	// Sandboxes counts the DefenseClaw sandboxes; Running those Ready.
-	Sandboxes        int       `json:"sandboxes"`
-	Running          int       `json:"running"`
+	Sandboxes int `json:"sandboxes"`
+	Running   int `json:"running"`
+	// Live counts those that may hold compute a stop of the OpenShell
+	// gateway would end unflushed or half started (manager.MayHoldCompute):
+	// the running ones, those starting or stopping or in an unknown phase,
+	// and a MicroVM in OpenShell's error state. Unset by a daemon before
+	// DefenseClaw 1.0.4 (Busy).
+	Live             *int      `json:"live,omitempty"`
 	PendingApprovals int       `json:"pending_approvals"`
 	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
 	// StartedAt is when the daemon's sandbox subsystem started. Nothing
@@ -116,6 +122,20 @@ type Status struct {
 	// Managed is set by a managed host's per-user sandbox daemon: the
 	// caller's own policy, never another account's.
 	Managed *ManagedStatus `json:"managed,omitempty"`
+}
+
+// Busy is how many sandboxes may hold compute (Live, and never fewer than
+// Running): what a stop of the gateway or of the daemon, which takes the
+// gateway with it, waits for. A daemon that does not report Live does not
+// say which phases its sandboxes are in, so every one of them counts.
+func (s *Status) Busy() int {
+	if s == nil {
+		return 0
+	}
+	if s.Live == nil {
+		return max(s.Sandboxes, s.Running)
+	}
+	return max(*s.Live, s.Running)
 }
 
 // ManagedStatus is the managed part of Status: the caller's own sandbox

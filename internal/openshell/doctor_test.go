@@ -719,8 +719,41 @@ func TestDoctorChecks(t *testing.T) {
 		{name: "cli newer than supported", setup: cliVersion("openshell 0.2.0\n"), want: []checkWant{{"openshell-cli", fail, "not supported"}},
 			fix:  &fixWant{command: install, manual: true, text: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell 0.2.0, then install OpenShell " + openshell.InstallerVersion},
 			then: installNeeded(false)},
-		{name: "cli and gateway differ", setup: func(f *doctorFixture) { f.fake.SetHealth(true, "0.1.2") },
-			want: []checkWant{{"gateway-version", warn, "gateway 0.1.2 but CLI 0.1.1"}}},
+		{name: "cli and gateway differ", setup: func(f *doctorFixture) { f.atRelease(openshell.SandboxMin); f.fake.SetHealth(true, "0.1.6") },
+			want: []checkWant{{"gateway-version", warn, "gateway 0.1.6 but CLI " + openshell.SandboxMin}}},
+		// A CLI that runs sandboxes, and an older gateway that still
+		// answers (the upgrade replaced the binaries, the gateway kept
+		// running): the skew does not hide that the gateway runs no
+		// sandbox, and the fix restarts it on the CLI's release.
+		{name: "cli runs sandboxes, older gateway answers", setup: func(f *doctorFixture) { f.atRelease(openshell.SandboxMin); f.fake.SetHealth(true, "0.1.3") },
+			want: []checkWant{{"gateway-version", fail, "OpenShell 0.1.3 runs no DefenseClaw sandbox"}},
+			then: func(t *testing.T, _ *doctorFixture, r *openshell.DoctorReport) {
+				c := r.Get(openshell.CheckIDGatewayVersion)
+				if !strings.HasSuffix(c.Detail, "; the CLI installed here is OpenShell "+openshell.SandboxMin) || c.Fix == nil || !c.Fix.RestartsGateway ||
+					!strings.Contains(c.Fix.Summary, "restart the openshell-gateway user service so it runs the gateway installed with the CLI") ||
+					r.OK() || r.OpenShellUpgradeNeeded() || r.OpenShellUpgradeAvailable() {
+					t.Fatalf("gateway-version = %+v (fix %+v), upgrade needed %v", c, c.Fix, r.OpenShellUpgradeNeeded())
+				}
+			}},
+		// Neither runs sandboxes, and they differ: the upgrade replaces
+		// both, and setup offers it before it stops on this check.
+		{name: "cli and older gateway differ, neither runs sandboxes", setup: func(f *doctorFixture) { f.fake.SetHealth(true, "0.1.2") },
+			want: []checkWant{{"gateway-version", fail, "OpenShell 0.1.2 runs no DefenseClaw sandbox"}},
+			then: func(t *testing.T, _ *doctorFixture, r *openshell.DoctorReport) {
+				c := r.Get(openshell.CheckIDGatewayVersion)
+				if !strings.HasSuffix(c.Detail, "; the CLI installed here is OpenShell 0.1.1") || c.Fix == nil || c.Fix.RestartsGateway ||
+					c.Fix.Command != "defenseclaw sandbox setup --install-openshell" || !r.OpenShellUpgradeNeeded() || !r.OpenShellUpgradeAvailable() {
+					t.Fatalf("gateway-version = %+v (fix %+v), upgrade needed %v", c, c.Fix, r.OpenShellUpgradeNeeded())
+				}
+			}},
+		// A prerelease of SandboxMin, CLI and gateway: the upgrade.
+		{name: "a prerelease of the release sandboxes need", setup: func(f *doctorFixture) { f.atRelease("0.1.5-pre.3") },
+			want: []checkWant{{"openshell-cli", warn, "0.1.5-pre.3 at /usr/bin/openshell"}, {"gateway-version", fail, "OpenShell 0.1.5-pre.3 is a prerelease, which runs no DefenseClaw sandbox"}},
+			then: func(t *testing.T, _ *doctorFixture, r *openshell.DoctorReport) {
+				if !r.OpenShellUpgradeNeeded() || !r.OpenShellUpgradeAvailable() {
+					t.Fatalf("upgrade needed %v, available %v", r.OpenShellUpgradeNeeded(), r.OpenShellUpgradeAvailable())
+				}
+			}},
 		{name: "gateway outside the window", setup: func(f *doctorFixture) { f.fake.SetHealth(true, "0.2.0") },
 			want: []checkWant{{"gateway-version", fail, "not supported"}}},
 		{name: "gateway unhealthy", setup: func(f *doctorFixture) { f.fake.SetHealth(false, "0.1.1") },
@@ -1279,13 +1312,17 @@ func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
 		{"the unit runs an older OpenShell", "0.0.40", openshell.StatusFail, "OpenShell 0.0.40 is older than 0.1.1"},
 		// Supported: the restart succeeds, and stopped every sandbox on
 		// each --fix --yes.
-		{"the unit runs a newer OpenShell", "0.1.2", openshell.StatusWarn, "gateway 0.1.2 but CLI 0.1.1"},
+		{"the unit runs a newer OpenShell", "0.1.6", openshell.StatusWarn, "gateway 0.1.6 but CLI " + openshell.SandboxMin},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// The CLI runs sandboxes (openshell.SandboxMin): the gateway's
+			// release is the one to bring back to it.
+			unit := strings.Replace(unit, "the OpenShell 0.1.1 installed", "the OpenShell "+openshell.SandboxMin+" installed", 1)
 			other := "the openshell-gateway user service runs another OpenShell's gateway: restarted, it still answers with OpenShell " + tc.gateway +
-				", not the OpenShell 0.1.1 of the CLI at /usr/bin/openshell. Stop that gateway (`systemctl --user stop openshell-gateway`) " +
+				", not the OpenShell " + openshell.SandboxMin + " of the CLI at /usr/bin/openshell. Stop that gateway (`systemctl --user stop openshell-gateway`) " +
 				"and remove that other OpenShell, then install OpenShell " + openshell.InstallerVersion
 			f := newDoctorFixture(t)
+			f.atRelease(openshell.SandboxMin)
 			f.fake.SetHealth(true, tc.gateway)
 			restarts := restartTo(f, restart, tc.gateway)
 			r := f.run()
@@ -1307,9 +1344,11 @@ func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
 				t.Fatalf("the unit was restarted %d times", *restarts)
 			}
 			// Another release is another mismatch, whose restart the doctor
-			// offers again.
+			// offers again: one that runs no sandbox fails the check, with
+			// the same restart (the skew does not hide it).
 			f.fake.SetHealth(true, "0.1.3")
-			c = expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusWarn, "gateway 0.1.3 but CLI 0.1.1")
+			c = expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusFail,
+				"OpenShell 0.1.3 runs no DefenseClaw sandbox: before 0.1.5 its network broker")
 			fixIs(t, c, strings.Replace(unit, "0.0.40", "0.1.3", 1), restart, true)
 			// Once the gateway stopped (the fix's first step), the record
 			// ends: the same mismatch back gets its one restart again,
@@ -1338,10 +1377,31 @@ func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
 	})
 	t.Run("newer gateway, unit running", func(t *testing.T) {
 		f := newDoctorFixture(t)
-		f.fake.SetHealth(true, "0.1.2")
+		f.atRelease(openshell.SandboxMin)
+		f.fake.SetHealth(true, "0.1.6")
 		r := f.run()
-		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusWarn, "gateway 0.1.2 but CLI 0.1.1")
-		fixIs(t, c, strings.Replace(unit, "0.0.40", "0.1.2", 1), restart, true)
+		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusWarn, "gateway 0.1.6 but CLI "+openshell.SandboxMin)
+		fixIs(t, c, strings.Replace(strings.Replace(unit, "0.0.40", "0.1.6", 1), "the OpenShell 0.1.1 installed", "the OpenShell "+openshell.SandboxMin+" installed", 1), restart, true)
+	})
+	// The finding of the 1.0.4 review: CLI 0.1.5, the 0.1.3 gateway still
+	// running. The doctor fails, restarts the unit on the CLI's release,
+	// and the check passes after.
+	t.Run("older gateway that runs no sandbox, CLI that does", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.atRelease(openshell.SandboxMin)
+		f.fake.SetHealth(true, "0.1.3")
+		restarts := restartTo(f, restart, openshell.SandboxMin)
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "OpenShell 0.1.3 runs no DefenseClaw sandbox")
+		fixIs(t, c, strings.Replace(strings.Replace(unit, "0.0.40", "0.1.3", 1), "the OpenShell 0.1.1 installed", "the OpenShell "+openshell.SandboxMin+" installed", 1), restart, true)
+		if r.OK() {
+			t.Fatal("the report is OK on a gateway that runs no sandbox")
+		}
+		applyFixes(t, r, openshell.CheckIDGatewayVersion)
+		if *restarts != 1 {
+			t.Fatalf("the fix restarted the unit %d times", *restarts)
+		}
+		expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusPass, openshell.SandboxMin+" healthy")
 	})
 	t.Run("unrecognized release", func(t *testing.T) {
 		f := newDoctorFixture(t)

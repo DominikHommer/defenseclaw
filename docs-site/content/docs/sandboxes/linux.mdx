@@ -165,7 +165,10 @@ Switch your local OpenShell gateway to the docker compute driver? (its configura
 ```
 
 The same setup on a machine whose OpenShell was already at 0.1.2, replayed from a
-real run (on 0.1.2 setup now also offers the upgrade to 0.1.5):
+real run before 1.0.4. Today setup on 0.1.2 also offers the upgrade to 0.1.5,
+and it stops on the **Gateway** check until you take it, because OpenShell
+before 0.1.5 runs no DefenseClaw sandbox
+([Upgrade OpenShell](/docs/sandboxes/guide#upgrade-openshell)):
 
 <TerminalAnimation
   cwd="~/code/myapp"

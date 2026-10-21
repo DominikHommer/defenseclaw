@@ -313,7 +313,7 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		}
 		switch {
 		case sb.Phase != "error" || otherDriverNames[sb.Name]:
-		case openshell.ProvisioningTimedOut(sb.PhaseReason) && !oldGateway:
+		case openshell.ProvisioningTimedOut(sb.PhaseReason):
 			timedOut = append(timedOut, sb.Name)
 		default:
 			errored = append(errored, sb.Name)
@@ -358,9 +358,20 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Detail = strings.Join(details, "; ")
 		c.Fix = &openshell.Fix{Summary: strings.Join(fixes, "; ")}
 		if oldGateway {
-			c.Detail += ", where this OpenShell can neither stop nor start " + itThem(errored)
-			c.Fix = &openshell.Fix{Summary: "upgrade OpenShell to " + openshell.InstallerVersion + " (see Gateway), then `" + CommandName + " stop NAME` and `" +
-				CommandName + " start NAME`, which keep the sandbox and its work"}
+			// The upgrade first; after it, the way on of the upgraded
+			// gateway, which still refuses to stop a sandbox whose
+			// provisioning timed out.
+			c.Detail += ", where this OpenShell can neither stop nor start " + itThem(append(slices.Clone(errored), timedOut...))
+			var after []string
+			if len(errored) > 0 {
+				after = append(after, "`"+CommandName+" stop NAME` and `"+CommandName+" start NAME` for "+strings.Join(errored, ", ")+
+					", which keep the sandbox and its work")
+			}
+			if len(timedOut) > 0 {
+				after = append(after, "for "+strings.Join(timedOut, ", ")+" wait a minute for OpenShell's cleanup, then `"+CommandName+
+					" start NAME` with no stop: OpenShell "+openshell.SandboxMin+" refuses to stop a sandbox whose provisioning timed out")
+			}
+			c.Fix = &openshell.Fix{Summary: "upgrade OpenShell to " + openshell.InstallerVersion + " (see Gateway), then " + strings.Join(after, "; ")}
 		}
 	case len(stoppedSilent) > 0:
 		c.Status = openshell.StatusWarn

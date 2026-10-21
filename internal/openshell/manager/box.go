@@ -532,6 +532,28 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	m.syncObserve(b, phase)
 }
 
+// MayHoldCompute reports whether a sandbox in phase (sandboxapi's, as
+// audit.SandboxPhase spells it) on the compute driver driver (a record's:
+// "" is docker) may hold compute that stopping its OpenShell gateway would
+// end without the flush a DefenseClaw stop does first, or half started:
+// every phase but stopped, completed, deleting and deleted (an unknown or
+// empty one included), except OpenShell's error state on a driver whose
+// own stop keeps the workload's writes (docker: a container that stopped).
+// A MicroVM in its error state may still run, and DefenseClaw cannot flush
+// it first (endHarness asks only a ready sandbox), so whatever stops the
+// gateway on its own (a managed setup switch, the daemon's idle stop of
+// the gateway) waits for it to be stopped or deleted.
+func MayHoldCompute(phase, driver string) bool {
+	switch audit.SandboxPhase(phase) {
+	case audit.SandboxPhaseStopped, audit.SandboxPhaseCompleted, audit.SandboxPhaseDeleting, audit.SandboxPhaseDeleted:
+		return false
+	case audit.SandboxPhaseError:
+		d, ok := openshell.LookupDriver(driver)
+		return !ok || !d.StopFlushes
+	}
+	return true
+}
+
 // errorPhaseWayOn is what to do about a sandbox in OpenShell's error phase:
 // its container stopped (a Docker restart stops every one), its workload
 // failed, or OpenShell gave up provisioning it. A gateway that runs
@@ -541,11 +563,17 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 // refuses that stop while its own cleanup reclaims what the attempt started,
 // and a start after the cleanup provisions the sandbox again. An older
 // gateway can neither stop nor start it: upgrade (upgradeWayOn, "" on a
-// gateway that runs sandboxes) is how OpenShell is upgraded first.
+// gateway that runs sandboxes) is how OpenShell is upgraded first, and the
+// way on after it is the one of the upgraded gateway, which for a
+// provisioning timeout is still the start with no stop.
 func errorPhaseWayOn(name, reason, upgrade string) string {
 	switch {
 	case reason == overlayDiskFullText:
 		return overlayDiskWayOn(name)
+	case upgrade != "" && openshell.ProvisioningTimedOut(reason):
+		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then wait a minute for OpenShell's cleanup of " +
+			"the provisioning that timed out and `defenseclaw sandbox start " + name + "` (no stop: OpenShell " + openshell.SandboxMin +
+			" refuses to stop a sandbox whose provisioning timed out), which provisions it again"
 	case upgrade != "":
 		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then `defenseclaw sandbox stop " + name +
 			"` and `defenseclaw sandbox start " + name + "`, which keep the sandbox and its work"

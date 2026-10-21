@@ -63,7 +63,9 @@ const (
 	// starts a sandbox on. Before 0.1.5 the supervisor's network broker
 	// fell through to the native connect, bind, listen or send when it
 	// could not inspect a socket descriptor, so a sandbox's traffic could
-	// bypass its policy (NVIDIA/OpenShell#4494). A sandbox keeps the
+	// bypass its policy (NVIDIA/OpenShell#4494). Its prereleases come
+	// before it (Version.Compare): the fix landed in 0.1.5-pre.4, so
+	// 0.1.5-pre.1 to pre.3 still have the hole. A sandbox keeps the
 	// supervisor of the release its session started on, so one that
 	// started earlier must stop and start again (record.SessionRelease).
 	// Every release from it also stops a sandbox in OpenShell's error state,
@@ -163,16 +165,23 @@ var TarballPins = map[string]map[string]string{
 // and the client submits.
 type SandboxPolicy = v1.SandboxPolicy
 
-// Version is a parsed OpenShell release number. Pre-release and build
-// suffixes are kept for display but do not take part in comparisons, so a
-// 0.1.2-pre.3 build is treated as 0.1.2.
+// Version is a parsed OpenShell release number. Pre is its prerelease, ""
+// for a release: the "pre.3" of the tag v0.1.5-pre.3, of the Debian or rpm
+// package version 0.1.5~pre.3-1 and of `openshell --version`, or the
+// "dev.108" of a dev build (0.1.6-dev.108+g152d05940). A prerelease comes
+// before its release, as in semantic versioning (Compare): NVIDIA cuts the
+// prereleases of a release before all of its fixes are in, so 0.1.5-pre.3
+// is not 0.1.5 (SandboxMin). A package revision (the "-1" of 0.1.1-1) and
+// build metadata (the "+g152d05940") take no part in it.
 type Version struct {
 	Major, Minor, Patch int
+	Pre                 string
 	Raw                 string
 }
 
-// ParseVersion accepts "0.1.1", "v0.1.1", "openshell 0.1.1" and
-// "0.1.1-1" (the Debian revision the package reports).
+// ParseVersion accepts "0.1.1", "v0.1.1", "openshell 0.1.1", "0.1.1-1"
+// (the Debian revision the package reports), and the prereleases
+// "0.1.5-pre.3", "0.1.5~pre.3" (rpm) and "0.1.5~pre.3-1" (Debian).
 func ParseVersion(s string) (Version, error) {
 	raw := strings.TrimSpace(s)
 	fields := strings.Fields(raw)
@@ -180,7 +189,28 @@ func ParseVersion(s string) (Version, error) {
 		return Version{}, fmt.Errorf("openshell: empty version")
 	}
 	token := strings.TrimPrefix(fields[len(fields)-1], "v")
-	if i := strings.IndexAny(token, "-+"); i >= 0 {
+	token, _, _ = strings.Cut(token, "+")
+	pre := ""
+	if i := strings.IndexAny(token, "-~"); i >= 0 {
+		rest := token[i+1:]
+		switch {
+		case token[i] == '~':
+			// Debian and rpm spell a prerelease with a tilde, which sorts
+			// it before the release; a Debian revision may follow.
+			if j := strings.LastIndex(rest, "-"); j >= 0 {
+				rest = rest[:j]
+			}
+			if !validPrerelease(rest) {
+				return Version{}, fmt.Errorf("openshell: unrecognized version %q", raw)
+			}
+			pre = rest
+		case rest != "" && (rest[0] < '0' || rest[0] > '9'):
+			// "pre.3", "dev.108": a revision is a number ("0.1.1-1").
+			if !validPrerelease(rest) {
+				return Version{}, fmt.Errorf("openshell: unrecognized version %q", raw)
+			}
+			pre = rest
+		}
 		token = token[:i]
 	}
 	parts := strings.Split(token, ".")
@@ -195,10 +225,35 @@ func ParseVersion(s string) (Version, error) {
 		}
 		nums[i] = n
 	}
-	return Version{Major: nums[0], Minor: nums[1], Patch: nums[2], Raw: raw}, nil
+	return Version{Major: nums[0], Minor: nums[1], Patch: nums[2], Pre: pre, Raw: raw}, nil
 }
 
-// Compare returns -1, 0 or 1.
+// validPrerelease reports dot-separated identifiers of letters, digits and
+// hyphens, none empty.
+func validPrerelease(pre string) bool {
+	if pre == "" {
+		return false
+	}
+	for _, id := range strings.Split(pre, ".") {
+		if id == "" {
+			return false
+		}
+		for _, r := range id {
+			switch {
+			case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '-':
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Compare returns -1, 0 or 1, in semantic-versioning precedence: a
+// prerelease comes before its release (0.1.5-pre.3 < 0.1.5 < 0.1.6-pre.1),
+// so a floor such as SandboxMin is never met by a prerelease of it. The
+// ceiling of the supported window compares the release alone
+// (Version.Release): 0.2.0-pre.1 is outside it, as 0.2.0 is.
 func (v Version) Compare(o Version) int {
 	for _, d := range [3]int{v.Major - o.Major, v.Minor - o.Minor, v.Patch - o.Patch} {
 		if d < 0 {
@@ -208,11 +263,65 @@ func (v Version) Compare(o Version) int {
 			return 1
 		}
 	}
+	switch {
+	case v.Pre == o.Pre:
+		return 0
+	case v.Pre == "":
+		return 1
+	case o.Pre == "":
+		return -1
+	}
+	return comparePrerelease(v.Pre, o.Pre)
+}
+
+// comparePrerelease orders two prereleases as semantic versioning does:
+// identifier by identifier, numbers by value and below words, and a
+// shorter list first when it is a prefix of the other.
+func comparePrerelease(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		x, xerr := strconv.Atoi(as[i])
+		y, yerr := strconv.Atoi(bs[i])
+		switch {
+		case xerr == nil && yerr == nil && x != y:
+			if x < y {
+				return -1
+			}
+			return 1
+		case xerr == nil && yerr != nil:
+			return -1
+		case xerr != nil && yerr == nil:
+			return 1
+		case xerr != nil && as[i] != bs[i]:
+			return strings.Compare(as[i], bs[i])
+		}
+	}
+	switch {
+	case len(as) < len(bs):
+		return -1
+	case len(as) > len(bs):
+		return 1
+	}
 	return 0
 }
 
+// Release is v without its prerelease: the release it is a prerelease of.
+func (v Version) Release() Version {
+	return Version{Major: v.Major, Minor: v.Minor, Patch: v.Patch}
+}
+
+// aboveWindow reports a version at or above SupportedBelow, a prerelease
+// of it included.
+func aboveWindow(v Version) bool {
+	return v.Release().Compare(mustParse(SupportedBelow)) >= 0
+}
+
 func (v Version) String() string {
-	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
+	s := fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
+	if v.Pre != "" {
+		s += "-" + v.Pre
+	}
+	return s
 }
 
 // breakingReleaseFloor is the upstream installer's BREAKING_RELEASE_VERSION:
@@ -248,12 +357,20 @@ type ErrSandboxRelease struct {
 }
 
 func (e *ErrSandboxRelease) Error() string {
+	if e.Found.Pre != "" && e.Found.Release().Compare(mustParse(SandboxMin)) >= 0 {
+		// A prerelease of SandboxMin or a later release: the broker fix
+		// may not be in it.
+		return fmt.Sprintf("OpenShell %s is a prerelease, which runs no DefenseClaw sandbox: a prerelease of %s may lack its fix for the network broker "+
+			"that let a sandbox's connections bypass the sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to %s in place",
+			e.Found, SandboxMin, InstallerVersion)
+	}
 	return fmt.Sprintf("OpenShell %s runs no DefenseClaw sandbox: before %s its network broker let a sandbox's connections bypass the sandbox policy "+
 		"when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to %s in place", e.Found, SandboxMin, InstallerVersion)
 }
 
 // CheckSandboxRelease returns an *ErrSandboxRelease when a gateway of
-// release v must run no sandbox work (SandboxMin).
+// release v must run no sandbox work (SandboxMin), a prerelease of
+// SandboxMin included.
 func CheckSandboxRelease(v Version) error {
 	if v.Compare(mustParse(SandboxMin)) < 0 {
 		return &ErrSandboxRelease{Found: v}
@@ -300,7 +417,7 @@ func ManagedSetupPin(setup bool, pin string) (release string, raised bool) {
 // CheckSupported returns an *ErrUnsupportedVersion when v is outside the
 // supported window.
 func CheckSupported(v Version) error {
-	if v.Compare(mustParse(SupportedMin)) < 0 || v.Compare(mustParse(SupportedBelow)) >= 0 {
+	if v.Compare(mustParse(SupportedMin)) < 0 || aboveWindow(v) {
 		return &ErrUnsupportedVersion{Found: v}
 	}
 	return nil

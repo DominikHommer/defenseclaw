@@ -113,6 +113,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	live := 0
 	for _, b := range m.boxes {
 		if b.deleted || b.retained {
 			continue
@@ -121,7 +122,11 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if b.phase == audit.SandboxPhaseReady {
 			st.Running++
 		}
+		if MayHoldCompute(string(b.phase), b.rec.Driver) {
+			live++
+		}
 	}
+	st.Live = &live
 	for _, a := range m.approvals {
 		if a.status == sandboxapi.ApprovalPending {
 			st.PendingApprovals++

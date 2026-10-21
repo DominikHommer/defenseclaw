@@ -220,12 +220,12 @@ func versionNote(version string) string {
 
 // describePending reports a change that waits for an account's sandboxes.
 func (l *lifecycle) describePending(entry pending) {
-	waiting := fmt.Sprintf("%d sandboxes run", entry.Sandboxes)
+	waiting := fmt.Sprintf("%d sandboxes run (or are starting, stopping, or a MicroVM in OpenShell's error state)", entry.Sandboxes)
 	switch {
 	case entry.Sandboxes < 0:
 		waiting = "the lifecycle could not tell whether sandboxes run"
 	case entry.Sandboxes == 1:
-		waiting = "1 sandbox runs"
+		waiting = "1 sandbox runs (or is starting, stopping, or a MicroVM in OpenShell's error state)"
 	case entry.Sandboxes == 0:
 		waiting = "waiting to be tried again"
 	}
@@ -375,7 +375,9 @@ func versionAllowed(spec string, have openshell.Version) (bool, string) {
 			return false, fmt.Sprintf("%s is older than %s", have, m[1])
 		}
 		if m[2] != "" {
-			if high, _ := openshell.ParseVersion(m[2]); have.Compare(high) >= 0 {
+			// A prerelease of the ceiling is outside the range, as the
+			// ceiling is.
+			if high, _ := openshell.ParseVersion(m[2]); have.Release().Compare(high) >= 0 {
 				return false, fmt.Sprintf("%s is %s or newer", have, m[2])
 			}
 		}

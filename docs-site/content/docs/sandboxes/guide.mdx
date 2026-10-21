@@ -1971,8 +1971,13 @@ nothing where a supported OpenShell CLI is already installed.
 before 0.1.5 its network broker let a sandbox's connections bypass the
 sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494);
 upgrade OpenShell to 0.1.5 in place``, or the same for 0.1.1, 0.1.2 or
-0.1.4. `defenseclaw sandbox run` and `start` refuse with the same words, and
-setup stops on it.
+0.1.4. A prerelease of 0.1.5 (`0.1.5-pre.3`) gets ``OpenShell 0.1.5-pre.3 is
+a prerelease, which runs no DefenseClaw sandbox``: NVIDIA cut the first
+prereleases before the fix. `defenseclaw sandbox run` and `start` refuse with
+the same words, and setup stops on it. When the CLI is already 0.1.5 but the
+old gateway still answers (an upgrade that left it running), the check adds
+``the CLI installed here is OpenShell 0.1.5``, and its fix restarts the
+gateway service so that it runs the 0.1.5 gateway.
 
 **Why:** DefenseClaw installs OpenShell 0.1.5 and creates or starts sandboxes
 only on 0.1.5 or later. Before 0.1.5 the supervisor's network broker fell
@@ -2214,7 +2219,7 @@ which runs NVIDIA's installer and sets up the service.
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |
 | ``sandbox <name> does not run as DefenseClaw prepared it; DefenseClaw deleted it`` (a run or create), or ``…; DefenseClaw stopped it again (its work is kept)`` (a start) | The check after ready found the sandbox other than DefenseClaw prepared it, on any compute driver, and the reason follows the message: the workload runs as another uid or holds capabilities, a hook, launcher or managed-settings file is missing, changed, not root-owned or writable, or (Linux) a per-run settings file is not on a read-only mount. Nothing of the sandbox kept running, unless a start's message ends ``DefenseClaw could not stop the sandbox again, so it is still running: stop it with `defenseclaw sandbox stop <name>` ``: the stop failed too, so the sandbox still runs. Stop it with `defenseclaw sandbox stop <name>` first. Rebuild the harness image (`defenseclaw sandbox image build <harness> --force`) and run again; on a Mac, a uid mismatch is fixed by `defenseclaw sandbox doctor --fix`. If it repeats, keep the reason for a bug report. |
 | ``<name> is in OpenShell's error state`` (start, stop or connect), or the session ended with ``<name>'s container stopped under the session`` (or ``<name> does not answer, though OpenShell still reads it as running``, when Docker is still coming back) | The sandbox's container stopped while it ran (a Docker restart stops every one, or the workload failed), and OpenShell holds it in its error state. `defenseclaw sandbox doctor` names it under **Sandbox hooks**. Fix what stopped it (start Docker again, for one), then `defenseclaw sandbox stop <name>` and `defenseclaw sandbox start <name>`, which keep the sandbox and its work. |
-| ``<name> is in OpenShell's error state: ProvisioningTimedOut`` (or `ImagePreparationTimedOut`), or a stop refused with ``sandbox provisioning timed out; retry start after timeout cleanup completes`` | OpenShell gave up provisioning the sandbox (a large image or a slow pull can pass its deadline) and refuses to stop it while its own cleanup reclaims what it started. Do not stop it: wait a minute, then `defenseclaw sandbox start <name>`, which provisions it again. A start that says ``provisioning timeout cleanup is still pending`` is tried again a little later. |
+| ``<name> is in OpenShell's error state: ProvisioningTimedOut`` (or `ImagePreparationTimedOut`), or a stop refused with ``sandbox provisioning timed out; retry start after timeout cleanup completes`` | OpenShell gave up provisioning the sandbox (a large image or a slow pull can pass its deadline) and refuses to stop it while its own cleanup reclaims what it started. Do not stop it: wait a minute, then `defenseclaw sandbox start <name>`, which provisions it again. A start that says ``provisioning timeout cleanup is still pending`` is tried again a little later. On OpenShell older than 0.1.5, upgrade first (`defenseclaw sandbox setup --install-openshell`), then wait and start the same way, with no stop. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. DefenseClaw also refuses system folders, shared roots such as `/tmp`, credential folders such as `~/.ssh`, and agent homes such as `~/.claude` and `~/.codex`, whose settings and hooks run on your machine. |
 | `undo cannot look inside tools in …: the session took read permission away` | Make the folder readable (`chmod u+rwx tools`), review what is in it, and run undo again. |
 | `… cannot be mounted live: …; run with --copy to work on a copy` | Add `--copy`. |

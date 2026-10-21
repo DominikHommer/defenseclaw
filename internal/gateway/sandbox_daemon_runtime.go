@@ -942,7 +942,10 @@ func (d *SandboxDaemon) checkUpgrade() {
 	}
 }
 
-// runningSandboxes counts the user's sandboxes that may be running.
+// runningSandboxes counts the user's sandboxes that may be running or hold
+// compute (manager.MayHoldCompute): while one does, the daemon neither
+// stops the account's OpenShell gateway nor exits for a pending restart,
+// which would take the gateway with it.
 func (d *SandboxDaemon) runningSandboxes(ctx context.Context) (int, error) {
 	if d.opts.countRunning != nil {
 		return d.opts.countRunning(ctx)
@@ -951,13 +954,20 @@ func (d *SandboxDaemon) runningSandboxes(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	return sandboxesHoldingCompute(list), nil
+}
+
+// sandboxesHoldingCompute counts the sandboxes of list that may run or
+// hold compute (manager.MayHoldCompute), a MicroVM in OpenShell's error
+// state included.
+func sandboxesHoldingCompute(list []sandboxapi.Sandbox) int {
 	n := 0
 	for _, sb := range list {
-		if sandboxMayRun(sb.Phase) {
+		if sandboxMayRun(sb.Phase) || manager.MayHoldCompute(sb.Phase, sb.Driver) {
 			n++
 		}
 	}
-	return n, nil
+	return n
 }
 
 // sandboxMayRun reports a phase in which a sandbox may be running.
