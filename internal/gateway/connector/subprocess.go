@@ -1083,84 +1083,95 @@ func writeHookConfigSidecarUsing(
 	managed bool,
 	writeFile func(string, []byte, os.FileMode) error,
 ) error {
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	return withFileLockMode(path, managed, func() error {
+		return writeHookConfigSidecarLocked(hookDir, apiAddr, connectorName, failMode, source, managed, writeFile)
+	})
+}
+
+// writeHookConfigSidecarLocked is writeHookConfigSidecarUsing for a caller
+// that holds the sidecar lock (refreshHookFailModesLocked).
+func writeHookConfigSidecarLocked(
+	hookDir, apiAddr, connectorName, failMode, source string,
+	managed bool,
+	writeFile func(string, []byte, os.FileMode) error,
+) error {
 	if managed {
 		source = ""
 	}
 	path := filepath.Join(hookDir, hookConfigSidecarName)
-	return withFileLockMode(path, managed, func() error {
-		name := normalizeConnectorName(connectorName)
-		runtimeName := name
-		if runtimeName == "" {
-			runtimeName = "legacy"
-		}
-		flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+runtimeName)
-		jsonSnapshot, err := snapshotHookRuntimeFileForMode(path, managed)
-		if err != nil {
-			return fmt.Errorf("read hook config sidecar: %w", err)
-		}
-		flatSnapshot, err := snapshotHookRuntimeFileForMode(flatPath, managed)
-		if err != nil {
-			return fmt.Errorf("read shell hook runtime sidecar: %w", err)
-		}
-		snapshots := []hookRuntimeFileSnapshot{jsonSnapshot, flatSnapshot}
+	name := normalizeConnectorName(connectorName)
+	runtimeName := name
+	if runtimeName == "" {
+		runtimeName = "legacy"
+	}
+	flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+runtimeName)
+	jsonSnapshot, err := snapshotHookRuntimeFileForMode(path, managed)
+	if err != nil {
+		return fmt.Errorf("read hook config sidecar: %w", err)
+	}
+	flatSnapshot, err := snapshotHookRuntimeFileForMode(flatPath, managed)
+	if err != nil {
+		return fmt.Errorf("read shell hook runtime sidecar: %w", err)
+	}
+	snapshots := []hookRuntimeFileSnapshot{jsonSnapshot, flatSnapshot}
 
-		state := hookConfigSidecar{Version: 2, GatewayAddr: apiAddr, FailModes: map[string]string{}, Managed: managed}
-		if jsonSnapshot.existed {
-			prior, err := carryableHookConfigSidecar(jsonSnapshot.data)
-			// A managed sidecar is guardian-owned and every connector reconciles
-			// on its own schedule, so unreadable content is replaced outright and
-			// at most one peer entry waits for its own pass. An unmanaged sidecar
-			// is the operator's only record of peer fail modes, so it is kept and
-			// the write refused instead.
-			if err != nil && !managed {
-				return err
+	state := hookConfigSidecar{Version: 2, GatewayAddr: apiAddr, FailModes: map[string]string{}, Managed: managed}
+	if jsonSnapshot.existed {
+		prior, err := carryableHookConfigSidecar(jsonSnapshot.data)
+		// A managed sidecar is guardian-owned and every connector reconciles
+		// on its own schedule, so unreadable content is replaced outright and
+		// at most one peer entry waits for its own pass. An unmanaged sidecar
+		// is the operator's only record of peer fail modes, so it is kept and
+		// the write refused instead.
+		if err != nil && !managed {
+			return err
+		}
+		if err == nil {
+			if prior.FailModes != nil {
+				state.FailModes = prior.FailModes
 			}
-			if err == nil {
-				if prior.FailModes != nil {
-					state.FailModes = prior.FailModes
-				}
-				state.LegacyMode = prior.LegacyMode
-				if !managed {
-					state.FailModeSources = prior.FailModeSources
-					state.LegacySource = prior.LegacySource
-				}
+			state.LegacyMode = prior.LegacyMode
+			if !managed {
+				state.FailModeSources = prior.FailModeSources
+				state.LegacySource = prior.LegacySource
 			}
 		}
-		mode := normalizeHookFailMode(failMode)
-		if name != "" {
-			state.FailModes[name] = mode
-			if source == "" {
-				delete(state.FailModeSources, name)
-			} else {
-				if state.FailModeSources == nil {
-					state.FailModeSources = map[string]string{}
-				}
-				state.FailModeSources[name] = source
-			}
+	}
+	mode := normalizeHookFailMode(failMode)
+	if name != "" {
+		state.FailModes[name] = mode
+		if source == "" {
+			delete(state.FailModeSources, name)
 		} else {
-			state.LegacyMode = mode
-			state.LegacySource = source
-		}
-		body, err := json.MarshalIndent(state, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal hook config sidecar: %w", err)
-		}
-		body = append(body, '\n')
-		if err := writeFile(path, body, 0o600); err != nil {
-			return fmt.Errorf("write hook config sidecar: %w", err)
-		}
-		// Shell hooks need a parser-independent connector record because jq and
-		// python3 are not guaranteed on the hardened macOS/Linux PATH.  One flat
-		// file per connector preserves mixed modes; an unscoped legacy record is
-		// a fallback only and never overrides a connector file.
-		if err := writeFile(flatPath, hookRuntimeFlatRecord(name, mode, source), 0o600); err != nil {
-			if restoreErr := restoreHookRuntimeFilesUsing(snapshots, writeFile); restoreErr != nil {
-				return fmt.Errorf("write shell hook runtime sidecar: %v (%v)", err, restoreErr)
+			if state.FailModeSources == nil {
+				state.FailModeSources = map[string]string{}
 			}
-			return fmt.Errorf("write shell hook runtime sidecar: %w", err)
+			state.FailModeSources[name] = source
 		}
-		return nil
-	})
+	} else {
+		state.LegacyMode = mode
+		state.LegacySource = source
+	}
+	body, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal hook config sidecar: %w", err)
+	}
+	body = append(body, '\n')
+	if err := writeFile(path, body, 0o600); err != nil {
+		return fmt.Errorf("write hook config sidecar: %w", err)
+	}
+	// Shell hooks need a parser-independent connector record because jq and
+	// python3 are not guaranteed on the hardened macOS/Linux PATH.  One flat
+	// file per connector preserves mixed modes; an unscoped legacy record is
+	// a fallback only and never overrides a connector file.
+	if err := writeFile(flatPath, hookRuntimeFlatRecord(name, mode, source), 0o600); err != nil {
+		if restoreErr := restoreHookRuntimeFilesUsing(snapshots, writeFile); restoreErr != nil {
+			return fmt.Errorf("write shell hook runtime sidecar: %v (%v)", err, restoreErr)
+		}
+		return fmt.Errorf("write shell hook runtime sidecar: %w", err)
+	}
+	return nil
 }
 
 // hookRuntimeFlatRecord is a connector's flat shell runtime record. Its
@@ -1197,6 +1208,36 @@ type HookFailModeRefresh struct {
 // mode("") is the unscoped legacy entry. A managed sidecar is not touched.
 func RefreshHookFailModes(hookDir string, mode func(connector string) string) (HookFailModeRefresh, error) {
 	var out HookFailModeRefresh
+	err := withHookFailModeLock(hookDir, func() error {
+		var err error
+		out, err = refreshHookFailModesLocked(hookDir, mode)
+		return err
+	})
+	return out, err
+}
+
+// withHookFailModeLock runs fn holding the hook sidecar lock
+// (hooks/.hookcfg.lock), which every release's sidecar writer takes, 0.8.10
+// on, so no gateway records a fail mode between fn's reads and writes. A
+// missing hook directory has nothing to refresh, and fn does not run.
+func withHookFailModeLock(hookDir string, fn func() error) error {
+	info, err := os.Stat(hookDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect hook directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("hook directory %s is not a directory", hookDir)
+	}
+	return withFileLock(filepath.Join(hookDir, hookConfigSidecarName), fn)
+}
+
+// refreshHookFailModesLocked is RefreshHookFailModes for a caller that holds
+// the sidecar lock (withHookFailModeLock).
+func refreshHookFailModesLocked(hookDir string, mode func(connector string) string) (HookFailModeRefresh, error) {
+	var out HookFailModeRefresh
 	path := filepath.Join(hookDir, hookConfigSidecarName)
 	var state hookConfigSidecar
 	data, err := os.ReadFile(path)
@@ -1230,14 +1271,14 @@ func RefreshHookFailModes(hookDir string, mode func(connector string) string) (H
 		if want == "" {
 			continue
 		}
-		if err := writeHookConfigSidecar(hookDir, state.GatewayAddr, name, want, false); err != nil {
+		if err := writeHookConfigSidecarLocked(hookDir, state.GatewayAddr, name, want, HookFailModeSourceConfig, false, hookRuntimeFileWriter(false)); err != nil {
 			return out, fmt.Errorf("refresh %s hook fail mode: %w", name, err)
 		}
 		out.Sidecar = append(out.Sidecar, name)
 	}
 	if state.LegacyMode != "" || hookRuntimeRecordFile(filepath.Join(hookDir, hookConfigSidecarName+".legacy")) {
 		if want := mode(""); want != "" {
-			if err := writeHookConfigSidecar(hookDir, state.GatewayAddr, "", want, false); err != nil {
+			if err := writeHookConfigSidecarLocked(hookDir, state.GatewayAddr, "", want, HookFailModeSourceConfig, false, hookRuntimeFileWriter(false)); err != nil {
 				return out, fmt.Errorf("refresh the legacy hook fail mode: %w", err)
 			}
 			out.Sidecar = append(out.Sidecar, "legacy")
@@ -1247,12 +1288,15 @@ func RefreshHookFailModes(hookDir string, mode func(connector string) string) (H
 	for name := range connectorHookScripts {
 		scriptOwners[name] = true
 	}
+	for name := range connectorHookAdapters {
+		scriptOwners[name] = true
+	}
 	for _, name := range sortedNames(scriptOwners) {
 		if mode(name) != "closed" {
 			continue
 		}
 		for _, script := range connectorHookScripts[name] {
-			closed, err := closeBakedHookFailMode(filepath.Join(hookDir, script))
+			closed, err := closeBakedHookFailMode(filepath.Join(hookDir, script), bakedHookFailModeOpens)
 			if err != nil {
 				return out, err
 			}
@@ -1260,8 +1304,26 @@ func RefreshHookFailModes(hookDir string, mode func(connector string) string) (H
 				out.Scripts = append(out.Scripts, script)
 			}
 		}
+		for _, adapter := range connectorHookAdapters[name] {
+			closed, err := closeBakedHookFailMode(filepath.Join(hookDir, adapter), bakedAdapterFailModeOpens)
+			if err != nil {
+				return out, err
+			}
+			if closed {
+				out.Scripts = append(out.Scripts, adapter)
+			}
+		}
 	}
 	return out, nil
+}
+
+// connectorHookAdapters are the Windows PowerShell adapters a per-user Cursor
+// or Copilot registration runs before the native hook (HookScriptNames). An
+// adapter answers for itself when the hook launcher is missing or times out
+// (the installer swaps it), so its baked open is closed as a script's is.
+var connectorHookAdapters = map[string][]string{
+	"copilot": {"copilot-hook.ps1"},
+	"cursor":  {"cursor-hook.ps1"},
 }
 
 func sortedNames(set map[string]bool) []string {
@@ -1357,9 +1419,40 @@ func copilotClosedFailure(open string) string {
 // hookScriptMaxBytes bounds the hook script closeBakedHookFailMode reads.
 const hookScriptMaxBytes = 1 << 20
 
-// closeBakedHookFailMode rewrites the open a hook script bakes as closed. A
-// missing script, a link or an oversized file is left alone.
-func closeBakedHookFailMode(path string) (bool, error) {
+// bakedAdapterFailModeOpens are the fail-open answers of the per-user Windows
+// adapters of 0.8.10 up to this release, each with its closed form. Cursor's
+// (cursor-hook.ps1) prints {"continue":true} and exits 0 when the hook
+// launcher fails, whatever the mode in 0.8.10 and for a rendered open after
+// it; its closed form is the template's. Copilot's (copilot-hook.ps1, 1.0.0
+// on) printed nothing, so Copilot ran the tool; its closed form prints
+// Copilot's native denial for a tool boundary (copilotAdapterClosedFailure).
+// Each match is one line, so an adapter written with CRLF line ends is
+// closed too.
+var bakedAdapterFailModeOpens = strings.NewReplacer(
+	`[Console]::Out.Write('{"continue":true}')`, `[Console]::Out.Write('`+cursorAdapterClosedResponse+`')`,
+	"$exitCode = 0\r\n", "$exitCode = 2\r\n",
+	"$exitCode = 0\n", "$exitCode = 2\n",
+	copilotAdapterOpenFailure, copilotAdapterClosedFailure,
+)
+
+const (
+	// cursorAdapterClosedResponse is Cursor's denial in cursor-hook.ps1.
+	cursorAdapterClosedResponse = `{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}`
+	// copilotAdapterOpenFailure is the catch block of copilot-hook.ps1 for
+	// an open mode: a diagnostic only, so Copilot runs the tool.
+	copilotAdapterOpenFailure = `[Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)`
+	// copilotAdapterClosedFailure is the catch block for a closed mode:
+	// Copilot ignores a failed hook process but honors its native denial,
+	// so a tool boundary gets one (the native hook's failNativeDecision).
+	copilotAdapterClosedFailure = `[Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); ` +
+		`if (-not $responseWritten) { if ($Event -ceq 'preToolUse') { [Console]::Out.Write('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}') } ` +
+		`elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') } }`
+)
+
+// closeBakedHookFailMode rewrites the open a hook script or adapter bakes as
+// closed with opens. A missing file, a link or an oversized file is left
+// alone.
+func closeBakedHookFailMode(path string, opens *strings.Replacer) (bool, error) {
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
 		return false, nil
@@ -1374,7 +1467,7 @@ func closeBakedHookFailMode(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read hook %s: %w", filepath.Base(path), err)
 	}
-	closed := bakedHookFailModeOpens.Replace(string(body))
+	closed := opens.Replace(string(body))
 	if closed == string(body) {
 		return false, nil
 	}

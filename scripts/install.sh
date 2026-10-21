@@ -492,8 +492,25 @@ stop_gateway() {
     while [[ -n "$(gateway_pid || true)" && ${waited} -lt 30 ]]; do
         sleep 1; waited=$((waited + 1))
         [[ ${waited} -eq 15 ]] && kill "${pid}" 2>/dev/null || true
+        # A gateway still shutting down at 25s is killed, as install.ps1
+        # does: one whose hook writer waits on the fail-mode hold
+        # (hold_hook_fail_modes) cannot finish its own shutdown.
+        [[ ${waited} -eq 25 ]] && kill -KILL "${pid}" 2>/dev/null || true
     done
     [[ -z "$(gateway_pid || true)" ]]
+}
+
+hook_fail_mode_refresh_probe() {
+    # 0: the staged gateway has 'connector refresh-fail-modes'. 1: an older
+    # one (a downgrade), which prints the connector help for an unknown
+    # subcommand and sets its own modes when it starts. 2: any other answer
+    # (an error, no output): the hooks cannot be shown safe.
+    local help="" rc=0
+    help="$("${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --help 2>&1)" || rc=$?
+    [[ ${rc} -eq 0 && "${help}" == *"connector refresh-fail-modes"* ]] && return 0
+    [[ ${rc} -eq 0 && "${help}" == *"defenseclaw-gateway connector [command]"* ]] && return 1
+    warn "The new gateway did not answer 'connector refresh-fail-modes --help' (exit ${rc})"
+    return 2
 }
 
 refresh_hook_fail_modes() {
@@ -502,20 +519,76 @@ refresh_hook_fail_modes() {
     # staged gateway: an earlier release may have recorded or baked open for a
     # mode nobody set, which its hooks follow while the gateway is down for
     # the swap. An open the config sets stays open, from a DEFENSECLAW_CONFIG
-    # outside the data directory too. A release without the command (a
-    # downgrade) sets its own when its gateway starts. Any other answer to
-    # the probe (an error, no output) fails: the hooks cannot be shown safe.
+    # outside the data directory too. Used when no gateway runs; a running
+    # one gets hold_hook_fail_modes.
     [[ -d "${DEFENSECLAW_HOME}/hooks" ]] || return 0
-    local gateway="${STAGING}/bin/defenseclaw-gateway" help="" rc=0
-    help="$("${gateway}" connector refresh-fail-modes --help 2>&1)" || rc=$?
-    if [[ ${rc} -eq 0 && "${help}" == *"connector refresh-fail-modes"* ]]; then
-        "${gateway}" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}"
-        return
+    local probe=0
+    hook_fail_mode_refresh_probe || probe=$?
+    case ${probe} in
+        0) "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}" ;;
+        1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+HOLD_PID=""
+HOLD_LOG=""
+hold_hook_fail_modes() {
+    # hold_hook_fail_modes PID: refresh_hook_fail_modes for the running
+    # gateway PID, which is about to stop. The staged gateway refreshes, holds
+    # the lock every release's hook writer takes until PID has exited, and
+    # refreshes again: the old gateway may render its hooks again while it
+    # runs or shuts down, and they would follow that open while it is down.
+    # Returns once the first refresh is written and the lock held;
+    # finish_hook_fail_mode_hold waits for the rest.
+    [[ -d "${DEFENSECLAW_HOME}/hooks" ]] || return 0
+    local probe=0 waited=0
+    hook_fail_mode_refresh_probe || probe=$?
+    case ${probe} in
+        0) ;;
+        1) return 0 ;;
+        *) return 1 ;;
+    esac
+    HOLD_LOG="${STAGING}/refresh-fail-modes.log"
+    "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}" \
+        --hold-until-exit "$1" >"${HOLD_LOG}" 2>&1 &
+    HOLD_PID=$!
+    while ! grep -q "Holding the hook fail modes" "${HOLD_LOG}" 2>/dev/null; do
+        if ! kill -0 "${HOLD_PID}" 2>/dev/null; then
+            finish_hook_fail_mode_hold || true
+            return 1
+        fi
+        if [[ ${waited} -ge 600 ]]; then
+            warn "The new gateway did not set the hooks' fail modes within a minute"
+            end_hook_fail_mode_hold
+            return 1
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+}
+
+finish_hook_fail_mode_hold() {
+    # Wait for the hold, which ends once the gateway it holds for has exited,
+    # and show what it said.
+    [[ -n "${HOLD_PID}" ]] || return 0
+    local rc=0
+    wait "${HOLD_PID}" || rc=$?
+    HOLD_PID=""
+    if [[ ${rc} -eq 0 ]]; then
+        grep -v "Holding the hook fail modes" "${HOLD_LOG}" || true
+    else
+        cat "${HOLD_LOG}" >&2 || true
     fi
-    # An older gateway prints the connector help for an unknown subcommand.
-    [[ ${rc} -eq 0 && "${help}" == *"defenseclaw-gateway connector [command]"* ]] && return 0
-    warn "The new gateway did not answer 'connector refresh-fail-modes --help' (exit ${rc})"
-    return 1
+    return ${rc}
+}
+
+end_hook_fail_mode_hold() {
+    # Let go of the hold early: the gateway did not stop.
+    [[ -n "${HOLD_PID}" ]] || return 0
+    kill "${HOLD_PID}" 2>/dev/null || true
+    wait "${HOLD_PID}" 2>/dev/null || true
+    HOLD_PID=""
 }
 
 warn_running_sandboxes() {
@@ -898,19 +971,26 @@ fi
 
 WAS_RUNNING=false
 RESTORED_NOTE="Your previous install is back."
-[[ -n "$(gateway_pid || true)" ]] && WAS_RUNNING=true
-refresh_hook_fail_modes \
-    || die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
+OLD_GATEWAY_PID="$(gateway_pid || true)"
+[[ -n "${OLD_GATEWAY_PID}" ]] && WAS_RUNNING=true
 if [[ "${WAS_RUNNING}" == true ]]; then
+    hold_hook_fail_modes "${OLD_GATEWAY_PID}" \
+        || die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
     info "Stopping the gateway"
-    stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The running gateway did not stop; nothing was changed"
-    # Again once it is stopped: it may have rendered them while it ran.
-    if ! refresh_hook_fail_modes; then
+    if ! stop_gateway "${BIN_DIR}/defenseclaw-gateway"; then
+        end_hook_fail_mode_hold
+        die "The running gateway did not stop; nothing was changed"
+    fi
+    # The hold refreshes again once the gateway has exited.
+    if ! finish_hook_fail_mode_hold; then
         restart_old
         rm -rf "${STAGING}"
         drop_new_uv
         die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down. ${RESTORED_NOTE}"
     fi
+else
+    refresh_hook_fail_modes \
+        || die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
 fi
 
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then

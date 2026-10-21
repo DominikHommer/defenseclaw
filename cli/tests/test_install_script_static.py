@@ -1843,7 +1843,7 @@ def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_pat
         script = tmp_path / f"refresh-{gateway.name}.sh"
         script.write_text(
             "set -euo pipefail\nwarn() { echo \"warn: $*\" >&2; }\n"
-            + _install_sh_functions("refresh_hook_fail_modes")
+            + _install_sh_functions("hook_fail_mode_refresh_probe", "refresh_hook_fail_modes")
             + f'DEFENSECLAW_HOME="{home}" STAGING="{staging}"\nrefresh_hook_fail_modes\n',
             encoding="utf-8",
         )
@@ -1877,15 +1877,102 @@ def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_pat
         assert result.returncode != 0, result.stdout + result.stderr
         assert "did not answer 'connector refresh-fail-modes --help'" in result.stderr
 
+
+
+def test_a_running_gateway_cannot_reopen_its_hooks_while_it_stops(tmp_path: Path) -> None:
+    # r104 W3 G3-upg round 3: after the first refresh the old gateway could
+    # render its open again (a 1.0.x Codex registration check does) before it
+    # exited, and its hooks followed that open while it was down. For a
+    # running gateway the staged one now refreshes and holds the lock every
+    # release's hook writer takes until that gateway has exited, then
+    # refreshes again. The installer stops the gateway once the hold says it
+    # is holding and waits for the hold after the stop.
+    calls = tmp_path / "calls"
+    home = tmp_path / "dc"
+    (home / "hooks").mkdir(parents=True)
+    staging = tmp_path / "staging"
+    (staging / "bin").mkdir(parents=True)
+    gateway = staging / "bin" / "defenseclaw-gateway"
+
+    def run(body: str, fake: str) -> subprocess.CompletedProcess[str]:
+        gateway.write_text(fake, encoding="utf-8")
+        gateway.chmod(0o755)
+        if calls.exists():
+            calls.unlink()
+        script = tmp_path / "hold.sh"
+        script.write_text(
+            "set -euo pipefail\nwarn() { echo \"warn: $*\" >&2; }\n"
+            + _install_sh_functions(
+                "hook_fail_mode_refresh_probe", "hold_hook_fail_modes",
+                "finish_hook_fail_mode_hold", "end_hook_fail_mode_hold",
+            )
+            + f'HOLD_PID="" HOLD_LOG="" DEFENSECLAW_HOME="{home}" STAGING="{staging}" CALLS="{calls}"\n'
+            + body,
+            encoding="utf-8",
+        )
+        return _run([str(script)], tmp_path)
+
+    newer = (
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{calls}"\n'
+        'case "$*" in *--help*) echo "  defenseclaw-gateway connector refresh-fail-modes [flags]"; exit 0;; esac\n'
+        'pid="${*##* }"\n'
+        'echo "Hook fail modes set from the config: codex"\n'
+        'echo "Holding the hook fail modes until the gateway (process $pid) exits"\n'
+        'while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done\n'
+        f'echo "second refresh" >> "{calls}"\n'
+    )
+    old_gateway = (
+        'sleep 30 & old=$!\n'
+        'hold_hook_fail_modes "$old"\n'
+        'echo "holding" >> "$CALLS"\n'
+        'kill "$old"; wait "$old" 2>/dev/null || true\n'
+        'echo "stopped" >> "$CALLS"\n'
+        'finish_hook_fail_mode_hold\n'
+        'echo "finished" >> "$CALLS"\n'
+    )
+    result = run(old_gateway, newer)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = calls.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "connector refresh-fail-modes --help", lines
+    assert lines[1].startswith(f"connector refresh-fail-modes --data-dir {home} --hold-until-exit "), lines
+    assert lines[2:] == ["holding", "stopped", "second refresh", "finished"], lines
+    assert "Hook fail modes set from the config: codex" in result.stdout
+    assert "Holding the hook fail modes" not in result.stdout
+
+    # A hold that fails before it holds refuses the swap; so does one the
+    # installer lets go of (the gateway did not stop).
+    failing = newer.replace('pid="${*##* }"', 'echo "cannot read hooks/.hookcfg" >&2; exit 1')
+    result = run('sleep 30 & old=$!\nif hold_hook_fail_modes "$old"; then echo held; else echo refused; fi\nkill "$old"\n', failing)
+    assert result.returncode == 0 and "refused" in result.stdout, result.stdout + result.stderr
+    assert "cannot read hooks/.hookcfg" in result.stderr
+    result = run(
+        'sleep 30 & old=$!\nhold_hook_fail_modes "$old"\nend_hook_fail_mode_hold\n'
+        'echo "let go" >> "$CALLS"\nkill "$old"\n',
+        newer,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert calls.read_text(encoding="utf-8").splitlines()[-1] == "let go"
+    # An older staged gateway (a downgrade) holds nothing.
+    older = _fake_gateway(tmp_path / "older", "defenseclaw-gateway connector [command]", calls)
+    result = run('hold_hook_fail_modes 1\necho "skipped" >> "$CALLS"\n', older.read_text(encoding="utf-8"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == ["connector refresh-fail-modes --help", "skipped"]
+
     text = INSTALL_SH.read_text(encoding="utf-8")
-    swap = text[text.index('[[ -n "$(gateway_pid || true)" ]] && WAS_RUNNING=true') : text.index("if ! snapshot; then")]
-    first = swap.index("refresh_hook_fail_modes \\\n    || die")
-    stop = swap.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die')
-    second = swap.index("if ! refresh_hook_fail_modes; then")
-    assert first < stop < second, swap
-    assert "nothing was changed (see above)" in swap[first:stop]
-    after = swap[second:]
+    swap = text[text.index('OLD_GATEWAY_PID="$(gateway_pid || true)"') : text.index("if ! snapshot; then")]
+    hold = swap.index('hold_hook_fail_modes "${OLD_GATEWAY_PID}"')
+    stop = swap.index('if ! stop_gateway "${BIN_DIR}/defenseclaw-gateway"; then')
+    finish = swap.index("if ! finish_hook_fail_mode_hold; then")
+    plain = swap.index("refresh_hook_fail_modes \\\n        || die")
+    assert hold < stop < finish < plain, swap
+    assert "nothing was changed (see above)" in swap[hold:stop]
+    assert swap[stop:finish].index("end_hook_fail_mode_hold") < swap[stop:finish].index("did not stop; nothing was changed")
+    after = swap[finish:plain]
     assert after.index("restart_old") < after.index("${RESTORED_NOTE}"), after
+    # A gateway whose shutdown waits on the hold is killed, as on Windows.
+    stop_fn = text[text.index("stop_gateway() {") : text.index("\n}\n", text.index("stop_gateway() {"))]
+    assert 'kill -KILL "${pid}"' in stop_fn, stop_fn
 
 
 def test_rollback_says_a_later_upgrade_keeps_the_data_instead_of_bringing_it_back() -> None:

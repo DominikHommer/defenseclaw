@@ -12,9 +12,11 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -31,9 +33,12 @@ is down from config.yaml, without touching agent configuration or restarting
 anything. hooks/.hookcfg and its flat records get the mode the config chooses,
 and a connector hook script that bakes an open the config does not choose is
 closed until the gateway renders it. The installers run it with the new
-release's gateway before the running gateway stops and again once it is
-stopped, so no hook follows an open an earlier release recorded for a mode
-nobody set. An open the config sets stays open. A config this release cannot
+release's gateway. With --hold-until-exit PID (the running gateway) it
+holds the lock every release's hook writer takes after the first refresh,
+prints "Holding the hook fail modes", and refreshes again once that gateway
+has exited, before it lets go: the old gateway cannot render its open again
+while it stops. So no hook follows an open an earlier release recorded for a
+mode nobody set. An open the config sets stays open. A config this release cannot
 load yet (a 0.8.x one before 'defenseclaw migrate') is read for its explicit
 fail modes only. Managed installs are not changed.`,
 	Hidden: true,
@@ -46,9 +51,27 @@ fail modes only. Managed installs are not changed.`,
 	RunE:              runConnectorRefreshFailModes,
 }
 
+// hookFailModeHoldMarker is the line the installers wait for: the lock is
+// held and the first refresh is written.
+const hookFailModeHoldMarker = "Holding the hook fail modes"
+
+var (
+	refreshFailModesHoldPID     int
+	refreshFailModesHoldTimeout time.Duration
+)
+
 func init() {
+	connectorRefreshFailModesCmd.Flags().IntVar(&refreshFailModesHoldPID, "hold-until-exit", 0,
+		"hold the hook fail modes until the gateway with this process ID exits, then refresh them again")
+	connectorRefreshFailModesCmd.Flags().DurationVar(&refreshFailModesHoldTimeout, "hold-timeout", 2*time.Minute,
+		"longest wait for that gateway to exit")
 	connectorCmd.AddCommand(connectorRefreshFailModesCmd)
 }
+
+// refreshFailModesProcessRunning reports whether the gateway being stopped
+// is still running (watchdogChildRunning: signal 0, or an open process
+// handle on Windows).
+var refreshFailModesProcessRunning = watchdogChildRunning
 
 func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 	mode, read, managedInstall := refreshFailModeResolver(cmd)
@@ -56,10 +79,20 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 	if dataDir == "" {
 		dataDir = config.DefaultDataPath()
 	}
+	hookDir := filepath.Join(dataDir, "hooks")
+	if refreshFailModesHoldPID != 0 {
+		if connectorFlagJSON {
+			return errors.New("connector refresh-fail-modes: --hold-until-exit does not take --json")
+		}
+		if refreshFailModesHoldPID < 0 || refreshFailModesHoldTimeout <= 0 {
+			return errors.New("connector refresh-fail-modes: --hold-until-exit takes a process ID and --hold-timeout a positive time")
+		}
+		return holdConnectorFailModes(cmd, hookDir, mode, managedInstall)
+	}
 	var result connector.HookFailModeRefresh
 	if !managedInstall {
 		var err error
-		result, err = connector.RefreshHookFailModes(filepath.Join(dataDir, "hooks"), mode)
+		result, err = connector.RefreshHookFailModes(hookDir, mode)
 		if err != nil {
 			return fmt.Errorf("connector refresh-fail-modes: %w", err)
 		}
@@ -70,13 +103,43 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 			"refreshed": nonNilStrings(result.Sidecar), "scripts": nonNilStrings(result.Scripts),
 		})
 	}
-	if len(result.Sidecar) > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "Hook fail modes set from the config: %s\n", strings.Join(result.Sidecar, ", "))
-	}
+	printHookFailModeRefresh(cmd, result)
 	if len(result.Scripts) > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Hooks closed until the gateway starts: %s\n", strings.Join(result.Scripts, ", "))
 	}
 	return nil
+}
+
+// holdConnectorFailModes is refresh-fail-modes --hold-until-exit: the
+// refresh under the sidecar lock held until the gateway exits
+// (connector.HoldHookFailModes). A managed install is left alone and has
+// nothing to hold.
+func holdConnectorFailModes(cmd *cobra.Command, hookDir string, mode func(string) string, managedInstall bool) error {
+	out := cmd.OutOrStdout()
+	held := func(first connector.HookFailModeRefresh) {
+		printHookFailModeRefresh(cmd, first)
+		fmt.Fprintf(out, "%s until the gateway (process %d) exits\n", hookFailModeHoldMarker, refreshFailModesHoldPID)
+	}
+	if managedInstall {
+		held(connector.HookFailModeRefresh{})
+		return nil
+	}
+	pid := refreshFailModesHoldPID
+	result, err := connector.HoldHookFailModes(hookDir, mode, held,
+		func() bool { return refreshFailModesProcessRunning(pid) }, refreshFailModesHoldTimeout)
+	if err != nil {
+		return fmt.Errorf("connector refresh-fail-modes: %w", err)
+	}
+	if len(result.Scripts) > 0 {
+		fmt.Fprintf(out, "Hooks closed until the gateway starts: %s\n", strings.Join(result.Scripts, ", "))
+	}
+	return nil
+}
+
+func printHookFailModeRefresh(cmd *cobra.Command, result connector.HookFailModeRefresh) {
+	if len(result.Sidecar) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Hook fail modes set from the config: %s\n", strings.Join(result.Sidecar, ", "))
+	}
 }
 
 // refreshFailModeResolver returns the outage fail mode the config chooses for
