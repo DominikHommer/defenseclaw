@@ -1093,3 +1093,105 @@ func TestValidateConnectorReconciliationRejectsUnsafeState(t *testing.T) {
 		t.Fatal("unsupported connector operation was accepted")
 	}
 }
+
+// until 1.1: while the teardown of a removed connector has left files for the
+// user, the agent still uses DefenseClaw's files under DataRoot, so the
+// uninstall keeps it as residue (DELETEUSERDATA then keeps DataRoot), and an
+// uninstall retry clears it only once the cleanup is finished.
+func writeRemovedConnectorCleanupRecord(t *testing.T, dataRoot, body string) string {
+	t.Helper()
+	path := filepath.Join(dataRoot, removedConnectorCleanupDir, "omnigent.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestReconcileRemovedConnectorsKeepsPendingManualCleanupAsResidue(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, body, want string }{
+		{"steps", `{"items":[{"path":"C:\\Users\\u\\.omnigent\\config.yaml","reason":"edited","step":"remove the entry"}]}`, `config.yaml: remove the entry`},
+		{"unreadable record", "not json", "see "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			transaction := setupTransaction{
+				ID:                         strings.Repeat("9", 32),
+				DataRoot:                   filepath.Join(root, "data"),
+				PreviousConnectors:         []string{"omnigent", "codex"},
+				PreviousOmnigentConfigHome: filepath.Join(root, "omnigent"),
+				PreviousCodexHome:          filepath.Join(root, "codex"),
+			}
+			writeRemovedConnectorCleanupRecord(t, transaction.DataRoot, tc.body)
+			recorder := reconcileRemovedConnectors(transaction, filepath.Join(root, "gateway.exe"), nil,
+				func(_, _, _, _ string, _ []string) error { return nil })
+			if len(recorder.failures) != 1 {
+				t.Fatalf("failures = %+v, want the pending OmniGent cleanup only", recorder.failures)
+			}
+			failure := recorder.failures[0]
+			if failure.Connector != "omnigent" || failure.Operation != "verify" ||
+				!strings.Contains(failure.Message, tc.want) || !strings.Contains(failure.Message, "keeps its data") {
+				t.Fatalf("failure = %+v, want the OmniGent steps", failure)
+			}
+		})
+	}
+}
+
+func TestReconcileRemovedConnectorsWithoutManualCleanupHasNoResidue(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	transaction := setupTransaction{
+		ID:                         strings.Repeat("8", 32),
+		DataRoot:                   filepath.Join(root, "data"),
+		PreviousConnectors:         []string{"omnigent"},
+		PreviousOmnigentConfigHome: filepath.Join(root, "omnigent"),
+	}
+	recorder := reconcileRemovedConnectors(transaction, filepath.Join(root, "gateway.exe"), nil,
+		func(_, _, _, _ string, _ []string) error { return nil })
+	if len(recorder.failures) != 0 {
+		t.Fatalf("failures = %+v, want none", recorder.failures)
+	}
+}
+
+func TestRetryPendingRemovedConnectorClearsOnlyFinishedManualCleanup(t *testing.T) {
+	t.Parallel()
+	for _, finished := range []bool{false, true} {
+		root := t.TempDir()
+		home := filepath.Join(root, "omnigent")
+		transaction := setupTransaction{ID: strings.Repeat("6", 32), DataRoot: filepath.Join(root, "data")}
+		record := writeRemovedConnectorCleanupRecord(t, transaction.DataRoot, `{"items":[{"path":"p","step":"s"}]}`)
+		state := &connectorReconciliationState{
+			SchemaVersion: connectorReconciliationSchemaVersion,
+			Failures: []connectorReconciliationFailure{{
+				Connector: "omnigent", Operation: "verify", ConfigHome: home,
+				Message: "manual cleanup pending", TransactionID: transaction.ID,
+			}},
+		}
+		var actions []string
+		recorder := connectorReconciliationRecorder{}
+		err := retryPendingConnectorReconciliation(transaction, filepath.Join(root, "gateway.exe"), &recorder,
+			func() (*connectorReconciliationState, error) { return state, nil },
+			func(_, _, _, action string, _ []string) error {
+				actions = append(actions, action)
+				// The user did the steps: the teardown finishes and clears
+				// the record.
+				if action == "teardown" && finished {
+					return os.Remove(record)
+				}
+				return nil
+			})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(actions, ","); got != "verify,teardown,verify" {
+			t.Fatalf("finished=%v: retry actions = %q", finished, got)
+		}
+		if finished != (len(recorder.failures) == 0) {
+			t.Fatalf("finished=%v: retry failures = %+v", finished, recorder.failures)
+		}
+	}
+}

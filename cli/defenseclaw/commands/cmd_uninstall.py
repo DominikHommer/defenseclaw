@@ -110,14 +110,19 @@ _CREATED_DIRS_RECORD_MAX_BYTES = 1 << 20
 _WIN_SYNCHRONIZE = 0x00100000
 _WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 # until 1.1: removed connectors whose older-release state uninstall still
-# tears down (connector_backups markers and active_connector.json names).
+# tears down (connector_backups markers, the manual cleanup record their
+# teardown left, and active_connector.json names).
 _REMOVED_CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "omnigent": (
         os.path.join("connector_backups", "omnigent", "config.json"),
         os.path.join("connector_backups", "omnigent", "module.json"),
         os.path.join("connector_backups", "omnigent", "pth.json"),
+        os.path.join("removed_connector_cleanup", "omnigent.json"),
     ),
-    "openhands": (os.path.join("connector_backups", "openhands", "config.json"),),
+    "openhands": (
+        os.path.join("connector_backups", "openhands", "config.json"),
+        os.path.join("removed_connector_cleanup", "openhands.json"),
+    ),
 }
 _ACTIVE_CONNECTOR_STATE = "active_connector.json"
 _ACTIVE_CONNECTOR_STATE_MAX_BYTES = 64 * 1024
@@ -1801,6 +1806,35 @@ def _teardown_connectors(
     return tuple(out)
 
 
+def _require_removed_connector_cleanup_done(data_dir: str) -> None:
+    """Refuse to remove data or binaries while a removed connector's manual cleanup is pending.
+
+    until 1.1: when the OpenHands or OmniGent teardown cannot prove a file is
+    DefenseClaw's, it changes nothing and records the steps to finish by hand
+    (``defenseclaw.removed_connectors``). The agent then still runs the hook
+    script or imports the policy module in *data_dir*, and the record and the
+    gateway that finishes the cleanup are the user's way out, so none of them
+    may go first. An unreadable record counts as pending.
+    """
+    from defenseclaw.removed_connectors import pending_cleanup
+
+    pending = pending_cleanup(data_dir)
+    if not pending:
+        return
+    steps: list[str] = []
+    for cleanup in pending:
+        if cleanup.error:
+            steps.append(f"  - {cleanup.label}: {cleanup.error}")
+        steps.extend(f"  - {item.path} ({item.reason}): {item.step}" for item in cleanup.items)
+    labels = " and ".join(cleanup.label for cleanup in pending)
+    raise click.ClickException(
+        f"aborting uninstall: the removed {labels} connector cleanup left files for you to finish, "
+        "and the agent still uses DefenseClaw's files in "
+        f"{data_dir}. No data or binaries were removed. Do these steps, then run the same "
+        "uninstall command again; it finishes the cleanup before it removes anything:\n" + "\n".join(steps)
+    )
+
+
 def _removed_connectors_in_active_state(data_dir: str) -> tuple[str, ...]:
     """Removed connector names the gateway's active roster still lists.
 
@@ -2030,6 +2064,11 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
         if not plan.remove_data_dir:
             _turn_guardrail_off(plan.data_dir)
+    if (plan.remove_data_dir or plan.remove_binaries) and plan.data_dir:
+        run_phase(
+            "removed connector cleanup check",
+            lambda: _require_removed_connector_cleanup_done(plan.data_dir),
+        )
     if plan.stop_gateway and plan.data_dir:
         _remove_probe_created_state(plan.data_dir)
         # The gateway is stopped, so its watcher no longer uses them.

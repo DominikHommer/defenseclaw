@@ -25,12 +25,17 @@ package connector
 //
 // Teardown changes a file only when it can prove the file is DefenseClaw's as
 // it is now: its bytes are exactly what the older setup wrote (the hash in its
-// backup record). Such a file is put back the way setup found it, or removed
-// when setup created it. Any other file that still names DefenseClaw (the
-// user changed it, there is no record, or it cannot be read) is left byte for
-// byte, and then nothing at all is changed: the steps to finish by hand are
-// recorded, which status and doctor show, and printed once. Nothing is parsed
-// and written back.
+// backup record; for the OpenHands hook script, the digest in the hook
+// contract lock). Such a file is put back the way setup found it, removed when
+// setup created it, or (the hook script) replaced by the disabled tombstone.
+// Any other file that still names DefenseClaw (the user changed it, there is
+// no record, it is a link, or it cannot be read) is left byte for byte, and
+// then nothing at all is changed: the steps to finish by hand are recorded,
+// which status and doctor show, and printed once. A file is never parsed and
+// written back; only the saved copy of DefenseClaw's own .pth file is put back
+// without DefenseClaw's line. Writes replace the file itself, never a link's
+// target, and a change that fails, even after its new bytes are in place, is
+// rolled back with the changes before it.
 
 import (
 	"bytes"
@@ -240,7 +245,7 @@ func (c removedConnectorBase) leaveForManualCleanup(dataDir string, items []remo
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("%s cleanup: record the manual steps: %w", c.name, err)
 	}
-	if err := atomicWriteFile(path, append(data, '\n'), 0o600); err != nil {
+	if err := atomicWriteFileNoFollow(path, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("%s cleanup: record the manual steps: %w", c.name, err)
 	}
 	var b strings.Builder
@@ -279,11 +284,12 @@ type removedFileKind struct {
 	// names reports whether bytes still hold DefenseClaw's entry. An error
 	// means teardown cannot tell, which counts as naming it.
 	names func([]byte) (bool, error)
-	// ownedFile: the whole file is DefenseClaw's (the policy module, its
-	// .pth file). When the copy setup found holds DefenseClaw's entry too
-	// (an earlier setup, GAP-1926), such a file is removed; the agent's own
-	// config is left for the user instead.
-	ownedFile bool
+	// withoutEntry is set for a file DefenseClaw owns by name (the policy
+	// module, its .pth file). When the copy setup found names DefenseClaw too
+	// (an earlier setup, GAP-1926), it returns that copy without
+	// DefenseClaw's entry, or nil to remove the file. Without it (the
+	// agent's own config) such a file is left for the user.
+	withoutEntry func(saved []byte) []byte
 	// step says how to remove DefenseClaw's entry by hand.
 	step string
 }
@@ -345,17 +351,21 @@ func (p *removedCleanupPlan) addRecorded(dataDir, connectorName, logical string,
 	}
 	file := removedFile{path: path, data: data, mode: info.Mode().Perm()}
 	if record.Existed {
-		names, err := kind.names(record.PristineBytes)
+		saved := record.PristineBytes
+		if saved == nil {
+			saved = []byte{}
+		}
+		names, err := kind.names(saved)
 		switch {
-		case (err != nil || names) && kind.ownedFile:
-		case err != nil || names:
+		case err == nil && !names:
+			file.restore = saved
+		case err == nil && kind.withoutEntry != nil:
+			file.restore = kind.withoutEntry(saved)
+		default:
 			p.leave(path, "the copy DefenseClaw saved before its setup names DefenseClaw too", kind.step)
 			return path, nil
-		default:
-			file.restore = record.PristineBytes
-			if file.restore == nil {
-				file.restore = []byte{}
-			}
+		}
+		if file.restore != nil {
 			file.restoreMode = os.FileMode(record.Mode)
 			if file.restoreMode == 0 {
 				file.restoreMode = 0o600
@@ -395,10 +405,16 @@ func (p *removedCleanupPlan) addFound(path string, data []byte, kind removedFile
 
 // apply makes every planned change or none: a change that fails, or a file
 // that changed since the plan read it, rolls back the changes already made.
+// A change that failed after its new bytes were in place (the parent
+// directory sync after the rename, say) is rolled back too.
 func (p *removedCleanupPlan) apply() error {
 	for i, file := range p.files {
-		if err := file.apply(); err != nil {
-			if rollbackErr := p.rollback(i); rollbackErr != nil {
+		if changing, err := file.apply(); err != nil {
+			n := i
+			if changing && file.changed() {
+				n = i + 1
+			}
+			if rollbackErr := p.rollback(n); rollbackErr != nil {
 				return errors.Join(err, rollbackErr)
 			}
 			return fmt.Errorf("%w; nothing was changed", err)
@@ -407,24 +423,32 @@ func (p *removedCleanupPlan) apply() error {
 	return nil
 }
 
-func (f removedFile) apply() error {
+// apply makes the change; changing reports that a failure came from the
+// change itself, not from the check before it.
+func (f removedFile) apply() (changing bool, err error) {
 	data, info, err := readRemovedFile(f.path)
 	if err != nil {
-		return fmt.Errorf("read %s: %w", f.path, err)
+		return false, fmt.Errorf("read %s: %w", f.path, err)
 	}
 	if info == nil || !bytes.Equal(data, f.data) {
-		return fmt.Errorf("%s changed during cleanup", f.path)
+		return false, fmt.Errorf("%s changed during cleanup", f.path)
 	}
 	if f.restore == nil {
 		if err := os.Remove(f.path); err != nil {
-			return fmt.Errorf("remove %s: %w", f.path, err)
+			return true, fmt.Errorf("remove %s: %w", f.path, err)
 		}
-		return nil
+		return true, nil
 	}
-	if err := atomicWriteFile(f.path, f.restore, f.restoreMode); err != nil {
-		return newManagedRestoreError(f.path, err)
+	if err := atomicWriteFileNoFollow(f.path, f.restore, f.restoreMode); err != nil {
+		return true, newManagedRestoreError(f.path, err)
 	}
-	return nil
+	return true, nil
+}
+
+// changed reports whether the file no longer holds the bytes the plan read.
+func (f removedFile) changed() bool {
+	data, info, err := readRemovedFile(f.path)
+	return err == nil && (info == nil || !bytes.Equal(data, f.data))
 }
 
 // rollback puts back the first n files as the plan read them.
@@ -432,7 +456,7 @@ func (p *removedCleanupPlan) rollback(n int) error {
 	var errs []error
 	for i := n - 1; i >= 0; i-- {
 		file := p.files[i]
-		if err := atomicWriteFile(file.path, file.data, file.mode); err != nil {
+		if err := atomicWriteFileNoFollow(file.path, file.data, file.mode); err != nil {
 			errs = append(errs, fmt.Errorf("could not put back %s: %w", file.path, err))
 		}
 	}
@@ -476,24 +500,62 @@ func (c removedOpenHandsConnector) plan(opts SetupOpts) (*removedCleanupPlan, er
 			return nil, err
 		}
 	}
+	// Last: the script becomes the tombstone only once no hooks file runs it.
+	if err := c.addHookScript(p, opts); err != nil {
+		return nil, err
+	}
 	return p, nil
 }
 
-// Teardown puts back the hooks.json an older release's setup found when the
-// file is exactly as setup left it (see the file comment). Once no hooks file
-// runs DefenseClaw's hook script, that script becomes the disabled tombstone,
-// so an OpenHands conversation that loaded it before teardown keeps working.
-// While a hooks file still runs it, the script stays as it is.
+// addHookScript plans DefenseClaw's hook script: a script exactly as setup
+// wrote it (its digest in the hook contract lock) becomes the disabled
+// tombstone, so an OpenHands conversation that loaded the hook before
+// teardown keeps working. A script DefenseClaw cannot prove it wrote (it
+// changed, there is no digest, or it is a link or not a regular file) is
+// left for the user, and so is everything else.
+func (c removedOpenHandsConnector) addHookScript(p *removedCleanupPlan, opts SetupOpts) error {
+	script := c.hookScript(opts)
+	const step = "delete it once no OpenHands hooks file runs it"
+	data, info, err := readRemovedFile(script)
+	switch {
+	case errors.Is(err, errRemovedNotRegular):
+		p.leave(script, "it is not a regular file", step)
+		return nil
+	case err != nil:
+		return err
+	case info == nil, removedOpenHandsTombstone(data):
+		return nil
+	}
+	entry, err := LoadHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise)
+	if err != nil {
+		p.leave(script, fmt.Sprintf("DefenseClaw cannot read its record of the script: %v", err), step)
+		return nil
+	}
+	switch want := entry.HookScriptDigests[removedOpenHandsHookScript]; {
+	case want == "":
+		p.leave(script, "DefenseClaw has no record of writing it", step)
+	case !strings.EqualFold(strings.TrimPrefix(want, "sha256:"), sha256Hex(data)):
+		p.leave(script, "it changed after DefenseClaw wrote it", step)
+	default:
+		p.files = append(p.files, removedFile{
+			path: script, data: data, mode: info.Mode().Perm(),
+			restore: []byte(disabledHookTombstone("OpenHands")), restoreMode: 0o700,
+		})
+	}
+	return nil
+}
+
+// removedOpenHandsTombstone reports whether data is the disabled tombstone an
+// OpenHands teardown wrote: "OpenHands" in 1.0.4, "openhands" before.
+func removedOpenHandsTombstone(data []byte) bool {
+	return string(data) == disabledHookTombstone("OpenHands") || string(data) == disabledHookTombstone(removedOpenHandsID)
+}
+
+// Teardown puts back the hooks.json an older release's setup found and turns
+// DefenseClaw's hook script into the disabled tombstone, when each is exactly
+// as setup left it (see the file comment).
 func (c removedOpenHandsConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	return c.teardown(opts, c.plan, []string{"config"}, func() error {
-		script := c.hookScript(opts)
-		if _, err := os.Lstat(script); err == nil {
-			if err := writeDisabledHookTombstone(opts, removedOpenHandsHookScript, "OpenHands"); err != nil {
-				return fmt.Errorf("disabled hook tombstone: %w", err)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect %s: %w", script, err)
-		}
 		record := filepath.Join(opts.DataDir, "hooks", hookConfigSidecarName+"."+c.name)
 		if err := os.Remove(record); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove %s: %w", record, err)
@@ -502,8 +564,9 @@ func (c removedOpenHandsConnector) Teardown(_ context.Context, opts SetupOpts) e
 	})
 }
 
-// VerifyClean fails while a hooks file is still as DefenseClaw wrote it, or
-// still runs DefenseClaw's hook script without a recorded manual step.
+// VerifyClean fails while a hooks file or the hook script is still as
+// DefenseClaw wrote it, or a file it cannot prove it wrote still names
+// DefenseClaw without a recorded manual step.
 func (c removedOpenHandsConnector) VerifyClean(opts SetupOpts) error {
 	return c.verifyClean(opts, c.plan)
 }
@@ -573,26 +636,52 @@ var removedOmnigentConfigKind = removedFileKind{
 		removedOmnigentModuleName + ".",
 }
 
+// removedOmnigentModuleMarker heads every policy module an older release
+// wrote (0.8.3 through 1.0.3).
+const removedOmnigentModuleMarker = "# defenseclaw-managed-policy v"
+
 // The policy module lives in DefenseClaw's hook directory under DefenseClaw's
-// name, so any bytes there are DefenseClaw's module.
+// name, but it is DefenseClaw's only while it carries DefenseClaw's marker: a
+// module the user put there before setup is put back, and one the user wrote
+// since is left alone.
 var removedOmnigentModuleKind = removedFileKind{
-	names:     func([]byte) (bool, error) { return true, nil },
-	ownedFile: true,
-	step:      "delete it once config.yaml no longer names " + removedOmnigentModuleName,
+	names: func(data []byte) (bool, error) {
+		return bytes.Contains(data, []byte(removedOmnigentModuleMarker)), nil
+	},
+	withoutEntry: func([]byte) []byte { return nil },
+	step:         "delete it once config.yaml no longer names " + removedOmnigentModuleName,
 }
 
 func removedOmnigentImportPathKind(hookDir string) removedFileKind {
+	isEntry := func(line string) bool {
+		entry := strings.TrimSpace(line)
+		return entry != "" && sameManagedTargetPath(entry, hookDir)
+	}
 	return removedFileKind{
 		names: func(data []byte) (bool, error) {
 			for _, line := range strings.Split(string(data), "\n") {
-				if entry := strings.TrimSpace(line); entry != "" && sameManagedTargetPath(entry, hookDir) {
+				if isEntry(line) {
 					return true, nil
 				}
 			}
 			return false, nil
 		},
-		ownedFile: true,
-		step:      "delete the line " + hookDir + " once config.yaml no longer names " + removedOmnigentModuleName,
+		// Setup wrote the .pth with DefenseClaw's line alone, so the lines
+		// the user had in the copy it saved are put back without that line
+		// (the file is removed when nothing else is left).
+		withoutEntry: func(saved []byte) []byte {
+			var rest strings.Builder
+			for _, line := range strings.SplitAfter(string(saved), "\n") {
+				if !isEntry(line) {
+					rest.WriteString(line)
+				}
+			}
+			if strings.TrimSpace(rest.String()) == "" {
+				return nil
+			}
+			return []byte(rest.String())
+		},
+		step: "delete the line " + hookDir + " once config.yaml no longer names " + removedOmnigentModuleName,
 	}
 }
 
@@ -629,9 +718,9 @@ func (c removedOmnigentConnector) plan(opts SetupOpts) (*removedCleanupPlan, err
 	return p, nil
 }
 
-// Teardown puts back config.yaml and the .pth file the way an older
-// release's setup found them, and removes its policy module, when each is
-// exactly as setup left it (see the file comment).
+// Teardown puts back config.yaml, the .pth file and the policy module the
+// way an older release's setup found them (removing what it created), when
+// each is exactly as setup left it (see the file comment).
 func (c removedOmnigentConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	return c.teardown(opts, c.plan, []string{"config", "pth", "module"}, nil)
 }

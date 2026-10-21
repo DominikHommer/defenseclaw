@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -131,7 +132,10 @@ func retryPendingConnectorReconciliation(
 			transaction, codexHome, claudeHome, copilotHome, cursorHome, devinHome, devinExecutable, antigravityHome, openCodeHome, omnigentHome, hermesHome,
 		)
 		verify := func() error {
-			return run(gatewayPath, transaction.DataRoot, connectorName, "verify", env)
+			if err := run(gatewayPath, transaction.DataRoot, connectorName, "verify", env); err != nil {
+				return err
+			}
+			return removedConnectorManualCleanupPending(transaction.DataRoot, connectorName)
 		}
 		verifyErr := verify()
 		if verifyErr == nil {
@@ -301,8 +305,54 @@ func reconcileRemovedConnectors(
 			}
 			reconciliation.run(transaction.ID, connectorName, configHome, "verify", verify)
 		}
+		// until 1.1: the agent still uses DefenseClaw's files under DataRoot
+		// while a removed connector's manual cleanup is pending, so it stays
+		// residue and DELETEUSERDATA keeps DataRoot.
+		if err := removedConnectorManualCleanupPending(transaction.DataRoot, connectorName); err != nil {
+			reconciliation.run(transaction.ID, connectorName, primaryHome, "verify", func() error { return err })
+		}
 	}
 	return reconciliation
+}
+
+// removedConnectorCleanupDir is where the gateway's teardown of a removed
+// connector (internal/gateway/connector/removed.go) records the files it left
+// for the user to finish by hand. until 1.1.
+const removedConnectorCleanupDir = "removed_connector_cleanup"
+
+const maxRemovedConnectorCleanupRecord = 1 << 20
+
+// removedConnectorManualCleanupPending fails while the teardown of a removed
+// connector has left files for the user: the agent then still runs
+// DefenseClaw's hook or imports its policy module from DataRoot. The error
+// lists the steps; an unreadable record counts as pending. until 1.1.
+func removedConnectorManualCleanupPending(dataRoot, connectorName string) error {
+	if !isRetiredNativeConnector(connectorName) {
+		return nil
+	}
+	path := filepath.Join(dataRoot, removedConnectorCleanupDir, connectorName+".json")
+	data, exists, err := readBoundedNativeStateFile(path, maxRemovedConnectorCleanupRecord)
+	if err == nil && !exists {
+		return nil
+	}
+	steps := "see " + path
+	var record struct {
+		Items []struct {
+			Path string `json:"path"`
+			Step string `json:"step"`
+		} `json:"items"`
+	}
+	if err == nil && json.Unmarshal(data, &record) == nil && len(record.Items) > 0 {
+		parts := make([]string, 0, len(record.Items))
+		for _, item := range record.Items {
+			parts = append(parts, item.Path+": "+item.Step)
+		}
+		steps = strings.Join(parts, "; ")
+	}
+	return fmt.Errorf(
+		"the removed %s connector left files for you to clean up by hand, so DefenseClaw keeps its data in %s: %s; then run Setup /uninstall again",
+		connectorName, dataRoot, steps,
+	)
 }
 
 func connectorCleanupHomes(transaction setupTransaction, connectorName string) []string {

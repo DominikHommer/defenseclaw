@@ -424,12 +424,14 @@ or OmniGent before 1.0.4:
   before it changes anything until you remove it.
 - **OpenHands and OmniGent were removed in 1.0.4.** The first gateway start
   after the upgrade undoes what an older DefenseClaw setup wrote for them:
-  OpenHands' `~/.openhands/hooks.json`, and OmniGent's `~/.omnigent/config.yaml`,
-  its `defenseclaw_omnigent.pth` file and the policy module. It changes a file
-  only when the file is exactly as that setup left it: the file goes back to
-  what it was before setup, or is removed if setup created it. If you changed
-  one of these files since, or DefenseClaw has no record of writing it, the
-  gateway changes none of them. It prints one warning with the steps to remove
+  OpenHands' `~/.openhands/hooks.json` and its hook script, and OmniGent's
+  `~/.omnigent/config.yaml`, its `defenseclaw_omnigent.pth` file and the policy
+  module. It changes a file only when the file is exactly as that setup left
+  it: the file goes back to what it was before setup, is removed if setup
+  created it, or (the OpenHands hook script) becomes a stub that does nothing.
+  If you changed one of these files since, replaced it with a link, or
+  DefenseClaw has no record of writing it, the gateway changes none of them.
+  It prints one warning with the steps to remove
   DefenseClaw's entries by hand, and `defenseclaw status` and
   `defenseclaw doctor` show the same steps. When you have done them, run
   `defenseclaw-gateway connector teardown --connector omnigent` (or
@@ -438,7 +440,10 @@ or OmniGent before 1.0.4:
   the next start. Their settings are dropped from `config.yaml`, including a
   telemetry destination whose every route selected only these connectors;
   `defenseclaw migrate` saves that. `defenseclaw uninstall` runs the same
-  cleanup.
+  cleanup. While steps are left, the agent still uses DefenseClaw's files, so
+  `defenseclaw uninstall --all` (or `--binaries`) stops before it removes
+  anything, and Windows Setup's uninstall with **Delete user data** keeps
+  `%USERPROFILE%\.defenseclaw`. Do the steps, then run the uninstall again.
 
 <Accordions type="multiple">
 
