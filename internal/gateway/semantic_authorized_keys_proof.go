@@ -160,7 +160,11 @@ func trustedGitBashAuthorizedKeysWrite(input actionfacts.Input) bool {
 	return parsed.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(parsed)
 }
 
-func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
+// trustedInlineAuthorizedKeysWrite proves the write of one inline
+// interpreter program (python -c, perl/ruby/node -e). pythonDir is the
+// directory python -c imports from first when the gateway can look at it
+// (trustedPythonImportDir), or "".
+func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts, pythonDir string) bool {
 	if len(facts.Commands) != 1 {
 		return false
 	}
@@ -177,7 +181,7 @@ func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 			(!command.ArgvComplete && !shellArgvProven) {
 			return false
 		}
-		text, calls := trustedPythonExecutedViews(command.Argv[2], facts.CWD, importPathOverride)
+		text, calls := trustedPythonExecutedViews(command.Argv[2], pythonDir, importPathOverride)
 		return trustedPathlibAuthorizedKeysWrite(text, calls) ||
 			trustedPythonPathExpandWrite(text, calls) ||
 			trustedInterpreterAuthorizedKeysWrite(text, facts.ActiveHome)
@@ -205,12 +209,24 @@ func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 // working directory, ...), both views are the code whole, so such a string
 // still proves its write. An unused import of a preloaded module (os, sys)
 // runs nothing.
-func trustedPythonExecutedViews(code, cwd string, importPathOverride bool) (text, calls string) {
+func trustedPythonExecutedViews(code, dir string, importPathOverride bool) (text, calls string) {
 	calls = guardrail.MaskPythonStrings(code)
-	if importPathOverride || guardrail.PythonStringsMayRun(calls, cwd) {
+	if importPathOverride || guardrail.PythonStringsMayRun(calls, dir) {
 		return code, code
 	}
 	return guardrail.MaskPythonCommentsAndDocstrings(code), calls
+}
+
+// trustedPythonImportDir is the directory python -c imports from first, the
+// command's working directory, when the gateway sees the filesystem the
+// command runs in (as literalStdinFilesOf requires): not a sandbox, and an
+// absolute directory. Otherwise it is "" and every import that may load a
+// module from it keeps the program's strings.
+func trustedPythonImportDir(request trustedActionRequest, facts actionfacts.Facts) string {
+	if request.SkipLocalFilesystemResolution || request.SandboxGuestCWD != "" || !filepath.IsAbs(facts.CWD) {
+		return ""
+	}
+	return facts.CWD
 }
 
 // trustedPythonImportPathOverride checks the shell assignment syntax of the

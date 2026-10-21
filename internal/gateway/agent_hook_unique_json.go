@@ -15,9 +15,11 @@ import (
 )
 
 // hookToolCallJSONUnambiguous checks the raw hook body before a map decoder
-// selects one value of a duplicate key. JSON-string arguments are checked
-// too: Copilot accepts an object encoded in toolArgs as a string. Malformed
-// or over-deep input cannot prove an unambiguous tool call.
+// selects one value of a duplicate key: every object of the body, and of a
+// Copilot toolArgs string that holds a JSON object or array (the Copilot
+// projection reads such a string as the arguments), has unique keys, and
+// the body is one JSON value. Malformed input, trailing data or a value
+// nested deeper than the gateway's decoder reads cannot prove one tool call.
 func hookToolCallJSONUnambiguous(connector string, body []byte) bool {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
@@ -28,8 +30,10 @@ func hookToolCallJSONUnambiguous(connector string, body []byte) bool {
 	return err == io.EOF
 }
 
-const hookMaxJSONDepth = 32
-const hookMaxJSONMembers = 4096
+// hookMaxJSONDepth is encoding/json's own nesting limit, so no body the
+// gateway decoded is refused for its depth alone. The body size bounds the
+// work (apiRequestBodyMaxBytes).
+const hookMaxJSONDepth = 10000
 
 func hookUniqueJSONValue(decoder *json.Decoder, depth int, parentKey string, copilot bool) bool {
 	token, err := decoder.Token()
@@ -69,7 +73,7 @@ func hookUniqueJSONValue(decoder *json.Decoder, depth int, parentKey string, cop
 				return false
 			}
 			key, ok := keyToken.(string)
-			if !ok || len(seen) >= hookMaxJSONMembers {
+			if !ok {
 				return false
 			}
 			if _, duplicate := seen[key]; duplicate {
@@ -102,9 +106,6 @@ func hookUniqueJSONValue(decoder *json.Decoder, depth int, parentKey string, cop
 // never a read-only tool by default.
 func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home string) bool {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return true
-	}
 	if copilotWriteAlias(name) && !copilotKnownWriteSpelling(name) {
 		return true
 	}

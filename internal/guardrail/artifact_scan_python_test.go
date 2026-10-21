@@ -4,9 +4,12 @@
 package guardrail
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -194,7 +197,7 @@ func TestPythonStringsMayRun(t *testing.T) {
 		{`from os import *; system("x")`, true},
 		{`import os as source; source.getcwd()`, true},
 	} {
-		if got := PythonStringsMayRun(MaskPythonStrings(tc.source)); got != tc.want {
+		if got := PythonStringsMayRun(MaskPythonStrings(tc.source), ""); got != tc.want {
 			t.Errorf("PythonStringsMayRun(%q) = %t, want %t", tc.source, got, tc.want)
 		}
 	}
@@ -205,6 +208,11 @@ func TestPythonStringsMayRun(t *testing.T) {
 func TestPythonPathWriteMatchNeedsAWriteCallInCode(t *testing.T) {
 	rule := regexp.MustCompile(`authorized_keys`)
 	sourceDir := t.TempDir()
+	// The script itself sits in its directory; it is not a module beside it.
+	script := filepath.Join(sourceDir, "writer.py")
+	if err := os.WriteFile(script, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PYTHONPATH", "")
 	t.Setenv("PYTHONHOME", "")
 	for _, tc := range []struct {
@@ -227,7 +235,7 @@ func TestPythonPathWriteMatchNeedsAWriteCallInCode(t *testing.T) {
 		{"printed open beside an ordinary variable", "source = 1\nprint(\"open('/home/a/.ssh/authorized_keys', 'a')\")\n", false},
 		{"exec through a local alias", "source = exec\nsource(\"open('/home/a/.ssh/authorized_keys', 'a').write('k')\")\n", true},
 	} {
-		if got := pythonPathWriteMatch(rule, tc.source, sourceDir) != nil; got != tc.want {
+		if got := pythonPathWriteMatch(rule, tc.source, script) != nil; got != tc.want {
 			t.Errorf("%s: pythonPathWriteMatch(%q) = %t, want %t", tc.name, tc.source, got, tc.want)
 		}
 	}
@@ -235,7 +243,7 @@ func TestPythonPathWriteMatchNeedsAWriteCallInCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	shadowed := "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n"
-	if pythonPathWriteMatch(rule, shadowed, sourceDir) == nil {
+	if pythonPathWriteMatch(rule, shadowed, script) == nil {
 		t.Fatal("a local pathlib.py can consume the program's string text")
 	}
 	if err := os.Remove(filepath.Join(sourceDir, "pathlib.py")); err != nil {
@@ -244,18 +252,203 @@ func TestPythonPathWriteMatchNeedsAWriteCallInCode(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sourceDir, "fnmatch.py"), []byte("# pathlib dependency\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if pythonPathWriteMatch(rule, shadowed, sourceDir) == nil {
+	if pythonPathWriteMatch(rule, shadowed, script) == nil {
 		t.Fatal("an import dependency can consume the program's string text")
 	}
 	if err := os.Remove(filepath.Join(sourceDir, "fnmatch.py")); err != nil {
 		t.Fatal(err)
 	}
 	pathChanged := "import sys\nsys.path.insert(0, 'other')\n" + shadowed
-	if pythonPathWriteMatch(rule, pathChanged, sourceDir) == nil {
+	if pythonPathWriteMatch(rule, pathChanged, script) == nil {
 		t.Fatal("a changed sys.path can load another module")
 	}
 	t.Setenv("PYTHONPATH", sourceDir)
-	if pythonPathWriteMatch(rule, shadowed, sourceDir) == nil {
+	if pythonPathWriteMatch(rule, shadowed, script) == nil {
 		t.Fatal("PYTHONPATH can load another module")
+	}
+}
+
+// With the directory Python imports from first known, a standard-library
+// import leaves the strings inert only when that directory holds nothing an
+// import can load and nothing moves the import path. Any other import, a
+// sink, a loadable file or package of any kind, a link, an unreadable or
+// oversized directory, PYTHONPATH or PYTHONHOME, or code that changes
+// sys.path or the directory still counts.
+func TestPythonStringsMayRunInAKnownDirectory(t *testing.T) {
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", "")
+	clean := t.TempDir()
+	if err := os.WriteFile(filepath.Join(clean, "notes.txt"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []string{"docs", "my-dir", ".git"} {
+		if err := os.MkdirAll(filepath.Join(clean, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory no import can name, or a directory that is not a package.
+	for _, file := range []string{"docs/README.md", "my-dir/__init__.py", ".git/__init__.py"} {
+		if err := os.WriteFile(filepath.Join(clean, file), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		source string
+		want   bool
+	}{
+		{`import subprocess; """x"""; print("ok")`, false},
+		{"import subprocess as sp, ctypes\nfrom os import system as run, popen\nprint('ok')", false},
+		{`import json; print(json.loads("1"))`, false},
+		{`from pathlib import Path; print(Path("a"))`, false},
+		{`import os, json`, false},
+		{`import xml.etree.ElementTree as ET`, false},
+		{`from __future__ import annotations`, false},
+		{"from collections import (OrderedDict,\n    deque)", false},
+		// Not the standard library, or not a form the scan reads.
+		{`import helper`, true},
+		{`import json, helper`, true},
+		{`from helper import x`, true},
+		{`from . import helper`, true},
+		{`from .helper import x`, true},
+		{`from json import *`, true},
+		{`import __main__`, true},
+		{`import tomllib`, true},
+		{`import imp`, true},
+		// A sink still counts.
+		{`import subprocess; subprocess.run(["true"])`, true},
+		{`import json; exec("x")`, true},
+		// The import path or the directory moves.
+		{`import sys; sys.path.insert(0, "x"); import json`, true},
+		{`import sys; sys . meta_path.clear(); import json`, true},
+		{`import sys; sys.path_hooks.clear(); import json`, true},
+		{`import os; os.sys.path.insert(0, "x"); import json`, true},
+		{`from sys import path; path.insert(0, "x"); import json`, true},
+		{`import sys as s; s.path.insert(0, "x"); import json`, true},
+		{`import os, sys as s; import json`, true},
+		{`import os; os.chdir("/tmp"); import json`, true},
+		{`from os import chdir as cd; cd("/tmp"); import json`, true},
+		{`import os; os.fchdir(3); import json`, true},
+	} {
+		if got := PythonStringsMayRun(MaskPythonStrings(tc.source), clean); got != tc.want {
+			t.Errorf("PythonStringsMayRun(%q, clean dir) = %t, want %t", tc.source, got, tc.want)
+		}
+	}
+	const program = `import json; """x"""; print("ok")`
+	// Anything an import may load, in the directory.
+	for _, entry := range []string{
+		"helper.py", "JSON.PY", "tool.pyw", "cached.pyc", "old.pyo", "native.so",
+		"native.cpython-312-x86_64-linux-gnu.so", "native.pyd", "bundle.zip", "bundle.egg",
+		"pkg/__init__.py", "pkg/__init__.pyc", "pkg/__init__.cpython-312-x86_64-linux-gnu.so",
+		"Pkg/__INIT__.PY", "caf\u00e9/__init__.py",
+	} {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, entry)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, entry), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !PythonStringsMayRun(MaskPythonStrings(program), dir) {
+			t.Errorf("PythonStringsMayRun beside %s = false: an import may load it", entry)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		linked := t.TempDir()
+		if err := os.Symlink(filepath.Join(clean, "notes.txt"), filepath.Join(linked, "notes")); err != nil {
+			t.Fatal(err)
+		}
+		if !PythonStringsMayRun(MaskPythonStrings(program), linked) {
+			t.Error("PythonStringsMayRun beside a link = false: a link may name a module")
+		}
+	}
+	crowded := t.TempDir()
+	for i := 0; i <= pythonDirMaxEntries; i++ {
+		if err := os.WriteFile(filepath.Join(crowded, fmt.Sprintf("n%03d.txt", i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !PythonStringsMayRun(MaskPythonStrings(program), crowded) {
+		t.Error("PythonStringsMayRun in a directory over the entry bound = false")
+	}
+	bigPackage := t.TempDir()
+	for _, sub := range []string{"a", "b"} {
+		for i := 0; i < pythonPackageMaxEntries/2+1; i++ {
+			name := filepath.Join(bigPackage, sub, fmt.Sprintf("n%04d.txt", i))
+			if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(name, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !PythonStringsMayRun(MaskPythonStrings(program), bigPackage) {
+		t.Error("PythonStringsMayRun past the package entry bound = false")
+	}
+	for _, dir := range []string{"", "relative/dir", filepath.Join(clean, "missing")} {
+		if !PythonStringsMayRun(MaskPythonStrings(program), dir) {
+			t.Errorf("PythonStringsMayRun(%q) = false: the directory is not known", dir)
+		}
+	}
+	if !PythonStringsMayRun(MaskPythonStrings(program), clean+string(filepath.Separator)+"notes.txt") {
+		t.Error("PythonStringsMayRun with a file for a directory = false")
+	}
+	t.Setenv("PYTHONPATH", clean)
+	if !PythonStringsMayRun(MaskPythonStrings(program), clean) {
+		t.Error("PYTHONPATH puts another directory first")
+	}
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", clean)
+	if !PythonStringsMayRun(MaskPythonStrings(program), clean) {
+		t.Error("PYTHONHOME moves the standard library")
+	}
+}
+
+// The artifact scan reads a script's imports from the script's own
+// directory, wherever the scan is started from.
+func TestArtifactPythonPathWriteReadsTheScriptsDirectory(t *testing.T) {
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", "")
+	pack := &RulePack{RuleFiles: []*RulesFileYAML{{
+		Category: "persistence",
+		Rules: []RuleDefYAML{{
+			ID: "SSH-KEYS", Pattern: `authorized_keys`, Title: "authorized keys write",
+			Severity: "HIGH", Confidence: 0.9,
+			Expression: "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE)",
+		}},
+	}}}
+	work := t.TempDir()
+	t.Chdir(work)
+	// work/scripts is clean; the skill's own scripts directory is not.
+	for _, dir := range []string{"scripts", filepath.Join("skill", "scripts")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n"
+	writer := filepath.Join("skill", "scripts", "writer.py")
+	if err := os.WriteFile(writer, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"skill", writer} {
+		findings, err := pack.ScanArtifact(context.Background(), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(findings) != 0 {
+			t.Errorf("ScanArtifact(%s) beside no module = %+v, want none (the text is printed)", path, findings)
+		}
+	}
+	if err := os.WriteFile(filepath.Join("skill", "scripts", "re.py"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"skill", writer} {
+		findings, err := pack.ScanArtifact(context.Background(), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(findings) != 1 {
+			t.Errorf("ScanArtifact(%s) beside re.py = %+v, want the write (pathlib imports re)", path, findings)
+		}
 	}
 }
