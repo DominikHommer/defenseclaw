@@ -62,6 +62,7 @@ func TestEnsureRestoresMigratedCursorFailModeOnce(t *testing.T) {
 	// The record the 1.0.0-1.0.2 migration wrote for its rewrite.
 	writeRecord(config.MigrationRecord{
 		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		MigratedAt:   "2026-09-01T00:00:00Z",
 		SourceSHA256: strings.Repeat("b", 64), ResultSHA256: sha256Bytes([]byte(h.read(h.env.Layout.ConfigPath))),
 		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
 	})
@@ -105,6 +106,7 @@ func TestEnsureNeverRepairsABundleConfig(t *testing.T) {
 	installed := h.read(h.env.Layout.ConfigPath)
 	raw, _ := json.Marshal(config.MigrationRecord{
 		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		MigratedAt:   "2026-09-01T00:00:00Z",
 		SourceSHA256: strings.Repeat("b", 64), ResultSHA256: sha256Bytes([]byte(installed)),
 		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
 	})
@@ -153,6 +155,10 @@ func TestEnsureRefusesAMigrationRecordItCannotRead(t *testing.T) {
 		place func() error
 	}{
 		{"undecodable", func() error { return os.WriteFile(recordPath, []byte(`{"schema_version":`), 0o640) }},
+		// G-small loop round 2: a record that decodes without the fields
+		// every migration writes is not "no record".
+		{"an empty object", func() error { return os.WriteFile(recordPath, []byte(`{}`), 0o640) }},
+		{"null", func() error { return os.WriteFile(recordPath, []byte(`null`), 0o640) }},
 		{"past the input bound", func() error {
 			if err := os.WriteFile(recordPath, []byte(`{"schema_version":1}`), 0o640); err != nil {
 				return err

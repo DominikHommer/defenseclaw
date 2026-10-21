@@ -890,7 +890,8 @@ func windowsStandaloneGatewayPID() uint32 {
 
 // startWindowsStandaloneGatewayIfStopped is the rollback recovery for a
 // bundle restart whose stop succeeded but start failed. It never stops a
-// running gateway.
+// running gateway, and reports a start only once the gateway runs
+// (startWindowsGatewayServiceIfStopped).
 func startWindowsStandaloneGatewayIfStopped() (bool, error) {
 	manager, err := mgr.Connect()
 	if err != nil {
@@ -902,25 +903,5 @@ func startWindowsStandaloneGatewayIfStopped() (bool, error) {
 		return false, err
 	}
 	defer service.Close()
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		status, err := service.Query()
-		if err != nil {
-			return false, err
-		}
-		state := windowsServiceState(status.State)
-		if windowsServiceProcessLive(state) {
-			return false, nil
-		}
-		if state == windowsServiceStopped {
-			if err := service.Start(); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-		if time.Now().After(deadline) {
-			return false, fmt.Errorf("%s did not become restartable within 60s", managed.StandaloneWindowsGatewaySvc)
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
+	return startWindowsGatewayServiceIfStopped(scmGatewayService{service}, managed.StandaloneWindowsGatewaySvc, 60*time.Second, 250*time.Millisecond)
 }

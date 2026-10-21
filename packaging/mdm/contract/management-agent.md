@@ -257,7 +257,8 @@ tell an agent that exited while it sent the value from one that is done. At most
 
 Send a credential **only when it changed**. A Windows `set` of the exact
 stored bytes is not rewritten, but it still restarts a running gateway
-(managed hooks fail closed while it restarts): nothing proves which value the
+(managed hooks apply their fail mode while it restarts: closed by default,
+open only where the administrator set open): nothing proves which value the
 running gateway loaded. With no running gateway nothing restarts
 (`gateway_restarted: false`). The result keeps the contract v1 shape, with no
 `noop` member. Compare first with `enterprise secret status --json` (no lock,
@@ -444,8 +445,9 @@ Exit 0.
   on a device, for `verified` and `already_applied`, whether the apply
   restarts the gateway, from the installed config.yaml and the bundle
   config, with the classifier the apply uses on that OS:
-  - `required`: the apply restarts the gateway and managed hooks fail closed
-    while it restarts. `reason_codes` `restart_settings` (`settings` names the
+  - `required`: the apply restarts the gateway, and managed hooks apply
+    their fail mode while it restarts (closed unless the administrator set
+    open). `reason_codes` `restart_settings` (`settings` names the
     restart-required settings as patterns such as `guardrail.hook_self_heal`
     or `guardrail.connectors.*.enabled`, never a profile, group or connector
     name) or, on Windows, `codex_machine_policy` (Codex protection turns on or
@@ -561,7 +563,8 @@ Exit 0.
   on or off runs the full lifecycle transaction instead (a repair with the
   bundle config), because only that transaction installs and removes
   Codex's machine policy: every DefenseClaw service restarts, managed hooks
-  fail closed meanwhile (usually one to three minutes), and the receipt
+  apply their fail mode meanwhile (closed unless the administrator set open;
+  usually one to three minutes), and the receipt
   records `restart: true`.
 - Idempotency: the same bytes as the confirmed bundle are a success no-op;
   the repeated delivery's receipt is discarded and no new public receipt is
@@ -902,8 +905,9 @@ off the device. The agent does not read `/health` itself (section 7); the
   nothing written; retry.
 - Idempotency: on Linux and macOS an identical value is not rewritten and
   ensure runs anyway (usually a no-op). On Windows an identical value is not
-  rewritten, but every set restarts a running gateway (managed hooks fail
-  closed while it restarts), so send a credential only when `status` shows a
+  rewritten, but every set restarts a running gateway (managed hooks apply
+  their fail mode while it restarts: closed unless the administrator set
+  open), so send a credential only when `status` shows a
   different `sha256_prefix` (section 2.5); with no running gateway it reports
   `gateway_restarted: false`. A gateway that is still starting counts as
   running and is restarted once it runs. A Windows set or remove that changed the

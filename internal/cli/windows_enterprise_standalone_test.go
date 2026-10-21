@@ -1252,6 +1252,7 @@ func TestWindowsCursorRepairPlannerKeepsMigrationGuards(t *testing.T) {
 	}
 	record := config.MigrationRecord{
 		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		MigratedAt:   "2026-09-01T00:00:00Z",
 		SourceSHA256: strings.Repeat("c", 64), ResultSHA256: configwrite.SHA256Hex(raw),
 		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
 	}
@@ -3457,6 +3458,13 @@ func TestWindowsCursorRepairPlannerRefusesARecordItCannotRead(t *testing.T) {
 	}{
 		{name: "no record", place: func(string) error { return nil }},
 		{name: "undecodable", place: func(p string) error { return os.WriteFile(p, []byte(`{"moved":[`), 0o600) }, wantErr: true},
+		// G-small loop round 2: a record that decodes without the fields
+		// every migration writes is not "no correction".
+		{name: "an empty object", place: func(p string) error { return os.WriteFile(p, []byte(`{}`), 0o600) }, wantErr: true},
+		{name: "null", place: func(p string) error { return os.WriteFile(p, []byte(`null`), 0o600) }, wantErr: true},
+		{name: "no result digest", place: func(p string) error {
+			return os.WriteFile(p, []byte(`{"schema_version":1,"from_version":8,"to_version":9,"migrated_at":"2026-09-01T00:00:00Z","actor":"lifecycle","source_sha256":"`+strings.Repeat("c", 64)+`","moved":[{"source":"config","from":"guardrail.connectors.cursor.hook_fail_mode","to":"guardrail.connectors.cursor.hook_fail_mode","value":"open"}]}`), 0o600)
+		}, wantErr: true},
 		{name: "past the bound", place: func(p string) error {
 			if err := os.WriteFile(p, []byte(`{"schema_version":1}`), 0o600); err != nil {
 				return err
@@ -3544,6 +3552,39 @@ func TestWindowsEnsureFailsWhenItCannotReadTheCursorRecord(t *testing.T) {
 		if result.OK || result.Noop || len(result.Errors) != 1 || result.Errors[0].Code != "preflight_failed" ||
 			!strings.Contains(result.Errors[0].Message, "recorded Cursor fail-mode repair") {
 			t.Fatalf("config=%v: ensure result %+v, want preflight_failed", withConfig, result)
+		}
+	}
+}
+
+// G-small: a migration-v9.json that is a link, dangling or live, is an
+// error for the Cursor repair planner, never no record: a dangling link read
+// through its path looked missing, and ensure reported compliance while the
+// recorded Cursor correction stayed unapplied.
+func TestWindowsCursorRepairPlannerRefusesALinkedRecord(t *testing.T) {
+	previousLayout, previousBundle := windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent
+	t.Cleanup(func() {
+		windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent = previousLayout, previousBundle
+	})
+	managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+	for _, live := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "record.json")
+		if live {
+			if err := os.WriteFile(target, []byte(`{"schema_version":1}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		symlinkOrSkip(t, target, config.MigrationRecordPath(path))
+		windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+			return managed.StandaloneLayout{ConfigPath: path}, nil
+		}
+		pending, err := windowsEnterpriseCursorMigrationRepairPending()
+		if pending || err == nil || !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
+			t.Fatalf("live=%v: pending = %v, %v; want an error naming %s", live, pending, err, config.MigrationV9RecordFile)
 		}
 	}
 }

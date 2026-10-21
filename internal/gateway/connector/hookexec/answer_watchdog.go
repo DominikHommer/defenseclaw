@@ -160,11 +160,9 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 }
 
 // adopt renders the watchdog's answer again for the call Run resolved (its
-// event, fail mode and runtime), unless it was already given, and points
-// opts at the watchdog's lookup of the call's diagnostic directory. A call
-// that already logged a closed failure keeps a closed answer.
+// event, fail mode and runtime), unless it was already given. A call that
+// already logged a closed failure keeps a closed answer.
 func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
-	w.cacheFailureLogHome(opts)
 	w.mu.Lock()
 	closed := w.closedKnown
 	w.mu.Unlock()
@@ -243,8 +241,9 @@ func (l *failureLogHomeLookup) wait() string {
 // cacheFailureLogHome points a managed call's FailureLogHome at the
 // watchdog's lookup, and starts that lookup the first time: when the
 // watchdog is armed (ArmAnswerWatchdog with the hook command's resolver, or
-// Run), before its answer is rendered and before it can fire. The call's
-// rows, the watchdog's own included, use that one lookup. A call with no
+// Run), before its answer is rendered and before it can fire, and when Run
+// takes over an armed watchdog (hold), before anything there can log. The
+// call's rows, the watchdog's own included, use that one lookup. A call with no
 // resolver writes no managed row.
 func (w *answerWatchdog) cacheFailureLogHome(opts *Options) {
 	if !opts.ManagedEnterprise || opts.FailureLogHome == nil {
@@ -259,8 +258,15 @@ func (w *answerWatchdog) cacheFailureLogHome(opts *Options) {
 	opts.FailureLogHome = lookup.wait
 }
 
-// hold points opts at the watchdog's held output (Run of an adopted call).
+// hold points opts at the watchdog's held output and at its lookup of the
+// call's diagnostic directory (Run of a call the hook command armed). Run
+// can fail and log before it adopts the watchdog (an invalid runtime, a
+// missing home, a broken binding): that row must use the lookup the
+// watchdog started when it was armed, not start a second one that can
+// stall past the deadline while the watchdog waits on it (G-small loop
+// round 3).
 func (w *answerWatchdog) hold(opts *Options) {
+	w.cacheFailureLogHome(opts)
 	opts.Stdout, opts.Stderr = &w.out, &w.err
 	opts.answerWatch = w
 }
