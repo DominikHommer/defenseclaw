@@ -828,7 +828,6 @@ func TestWindowsEnrollmentAccountLookupIsBounded(t *testing.T) {
 		windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = previous, previousTimeout, previousBudget
 	})
 	release := make(chan struct{})
-	defer close(release)
 	windowsEnrollmentLookupAccountSID = func(string) (string, string, error) {
 		<-release
 		return "alice", "CONTOSO", nil
@@ -844,6 +843,8 @@ func TestWindowsEnrollmentAccountLookupIsBounded(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("ten hung lookups took %s; the cycle budget must bound them", elapsed)
 	}
+	close(release)
+	waitIdentityLookupGateIdle(t, &windowsEnrollmentAccountLookupGate)
 
 	// The lookup budget counts only time spent waiting on lookups. Probing the
 	// profiles before a lookup (package manifests, executables) must not use it

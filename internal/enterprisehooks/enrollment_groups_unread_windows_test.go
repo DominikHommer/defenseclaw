@@ -11,7 +11,9 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -216,5 +218,68 @@ func TestWindowsEnrollmentGroupsInDoubtKeepTheAccountDatabaseAnswer(t *testing.T
 	anyone := newWindowsEnrollmentGroups([]string{`CONTOSO\Developers`}, nil, nil, &windowsSessionGroupsIncomplete{unidentified: true}, cache, nil)
 	if decision, reason := anyone.decide(testDomainUserA); decision != windowsEnrollmentUndecided || !strings.Contains(reason, "could not be identified") {
 		t.Fatalf("directory user while a session is unidentified: %v %q; want pending", decision, reason)
+	}
+}
+
+// The same class in the enrollment's own lookups: the account name and the
+// group name lookups gave up waiting but started a new native call for the
+// same SID or name on every cycle, so an account or group the domain
+// controller never answers for added one stuck call per cycle and used its
+// timeout of the shared cycle budget each time; a few of them left every
+// later profile and group without a lookup on every cycle. A lookup still
+// running now fails at once, and the others get the budget from the next
+// cycle on.
+func TestWindowsEnrollmentLookupsThatNeverReturnHoldOnlyTheirOwnKey(t *testing.T) {
+	release := make(chan struct{})
+	var stuckCalls atomic.Int32
+	stuck := func(key string) bool {
+		return strings.HasPrefix(key, "S-1-5-21-9-9-9-") || strings.HasPrefix(key, "stuck")
+	}
+	previousAccount, previousTimeout, previousBudget := windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget
+	previousResolve, previousNameTimeout, previousNameLimit := windowsResolveGroupName, windowsGroupNameLookupTimeout, windowsGroupNameLookupCycleLimit
+	previousMachine := windowsMachineAccountDomainSID
+	t.Cleanup(func() {
+		close(release)
+		waitIdentityLookupGateIdle(t, &windowsEnrollmentAccountLookupGate)
+		waitIdentityLookupGateIdle(t, &windowsGroupNameLookupGate)
+		windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = previousAccount, previousTimeout, previousBudget
+		windowsResolveGroupName, windowsGroupNameLookupTimeout, windowsGroupNameLookupCycleLimit = previousResolve, previousNameTimeout, previousNameLimit
+		windowsMachineAccountDomainSID = previousMachine
+	})
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = 30*time.Millisecond, 100*time.Millisecond
+	windowsGroupNameLookupTimeout, windowsGroupNameLookupCycleLimit = 30*time.Millisecond, 100*time.Millisecond
+	windowsEnrollmentLookupAccountSID = func(sid string) (string, string, error) {
+		if stuck(sid) {
+			stuckCalls.Add(1)
+			<-release
+		}
+		return "alice", "CONTOSO", nil
+	}
+	windowsResolveGroupName = func(name string) (string, error) {
+		if stuck(name) {
+			stuckCalls.Add(1)
+			<-release
+		}
+		return testDomainDevelopersSID, nil
+	}
+	stuckSIDs := []string{"S-1-5-21-9-9-9-1001", "S-1-5-21-9-9-9-1002", "S-1-5-21-9-9-9-1003", "S-1-5-21-9-9-9-1004"}
+	names := []string{"stuck1", "stuck2", "stuck3", "stuck4", `CONTOSO\Developers`}
+	for cycle := 1; cycle <= 4; cycle++ {
+		lookup := newWindowsEnrollmentAccountLookup()
+		for _, sid := range stuckSIDs {
+			if _, _, err := lookup(sid); err == nil {
+				t.Fatalf("cycle %d: the lookup of %s that never returns must fail", cycle, sid)
+			}
+		}
+		_, _, accountErr := lookup(testDomainUserA)
+		groups := newWindowsEnrollmentGroups(names, nil, nil, nil, NewWindowsEnrollmentGroupCache(), nil)
+		resolved := groups.include[len(groups.include)-1].sid
+		if cycle > 1 && (accountErr != nil || resolved != testDomainDevelopersSID) {
+			t.Fatalf("cycle %d: account lookup err %v, group resolved to %q; want both answered once the stuck lookups are known", cycle, accountErr, resolved)
+		}
+	}
+	if got := stuckCalls.Load(); got != int32(len(stuckSIDs)+len(names)-1) {
+		t.Fatalf("stuck lookups started = %d, want one per stuck SID and name", got)
 	}
 }

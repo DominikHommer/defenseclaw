@@ -933,7 +933,11 @@ var (
 // budget counts only time spent waiting on lookups, not the profile probing
 // between them, so a slow host does not starve later profiles of a lookup a
 // healthy domain controller would answer. Once the budget is spent, further
-// lookups fail at once and their profiles keep their existing rows.
+// lookups fail at once and their profiles keep their existing rows. A SID
+// whose lookup of an earlier cycle has not returned fails at once without a
+// new one (windowsEnrollmentAccountLookupGate), so one account the domain
+// controller never answers for neither uses up every cycle's budget nor piles
+// up native calls.
 func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 	var spent time.Duration
 	return func(sid string) (string, string, error) {
@@ -948,32 +952,34 @@ func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 		defer func() { spent += time.Since(started) }()
 		type result struct {
 			account, domain string
-			err             error
 		}
-		done := make(chan result, 1)
+		ctx, cancel := context.WithTimeout(context.Background(), remaining)
+		defer cancel()
 		lookup := windowsEnrollmentLookupAccountSID
-		go func() {
+		r, err := identityLookupGated(ctx, &windowsEnrollmentAccountLookupGate, strings.ToUpper(strings.TrimSpace(sid)), func(context.Context) (result, error) {
 			account, domain, err := lookup(sid)
 			if err == nil {
 				// The sAMAccountName, also while its user is signed in with a
 				// UPN, as the gateway names the account (GAP-0533).
 				account = useridentity.CanonicalWindowsAccountName(sid, account, domain)
 			}
-			done <- result{account, domain, err}
-		}()
-		timer := time.NewTimer(remaining)
-		defer timer.Stop()
-		select {
-		case r := <-done:
-			if r.err == nil && strings.TrimSpace(r.account) == "" {
-				r.err = errors.New("account name lookup returned no name")
-			}
-			return r.account, r.domain, r.err
-		case <-timer.C:
+			return result{account, domain}, err
+		})
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
 			return "", "", errors.New("account name lookup timed out")
+		case err != nil:
+			return "", "", err
+		case strings.TrimSpace(r.account) == "":
+			return "", "", errors.New("account name lookup returned no name")
 		}
+		return r.account, r.domain, nil
 	}
 }
+
+// windowsEnrollmentAccountLookupGate holds the enrollment account name
+// lookups, by SID.
+var windowsEnrollmentAccountLookupGate identityLookupGate
 
 // windowsDeletedLocalAccount reports a local account SID that no longer
 // names an account. A domain or Entra account lookup also fails while its

@@ -13,6 +13,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -394,6 +395,11 @@ func newWindowsEnrollmentGroups(
 	return groups
 }
 
+// boundedWindowsGroupNameLookup resolves name, waiting at most remaining
+// and windowsGroupNameLookupTimeout. A name whose lookup of an earlier cycle
+// has not returned fails at once without a new one
+// (windowsGroupNameLookupGate), so one name the directory never answers for
+// neither uses up every cycle's budget nor piles up native calls.
 func boundedWindowsGroupNameLookup(name string, remaining time.Duration) (string, error) {
 	if remaining <= 0 {
 		return "", errors.New("group name lookup budget for this cycle is exhausted")
@@ -401,30 +407,27 @@ func boundedWindowsGroupNameLookup(name string, remaining time.Duration) (string
 	if remaining > windowsGroupNameLookupTimeout {
 		remaining = windowsGroupNameLookupTimeout
 	}
-	type result struct {
-		sid string
-		err error
-	}
-	done := make(chan result, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), remaining)
+	defer cancel()
 	lookup := windowsResolveGroupName
-	go func() {
-		sid, err := lookup(name)
-		done <- result{sid, err}
-	}()
-	timer := time.NewTimer(remaining)
-	defer timer.Stop()
-	select {
-	case r := <-done:
-		if r.err == nil {
-			if r.sid = canonicalWindowsGroupSID(r.sid); r.sid == "" {
-				r.err = errors.New("group name lookup returned no SID")
-			}
-		}
-		return r.sid, r.err
-	case <-timer.C:
+	sid, err := identityLookupGated(ctx, &windowsGroupNameLookupGate, strings.ToLower(strings.TrimSpace(name)), func(context.Context) (string, error) {
+		return lookup(name)
+	})
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
 		return "", errors.New("group name lookup timed out")
+	case err != nil:
+		return "", err
 	}
+	if sid = canonicalWindowsGroupSID(sid); sid == "" {
+		return "", errors.New("group name lookup returned no SID")
+	}
+	return sid, nil
 }
+
+// windowsGroupNameLookupGate holds the group name lookups, by lower-case
+// name.
+var windowsGroupNameLookupGate identityLookupGate
 
 // active reports whether groups filter anything.
 func (g *windowsEnrollmentGroups) active() bool {
