@@ -210,10 +210,10 @@ func TestForeignHookSessionGatewayDeniesWithTheGuardiansHeldRemovals(t *testing.
 	}
 	guardian = writeHold
 	server.call(server.aliceToken, allow(late))
-	expect("the guardian writes the hold", []published{{server.alice, late, false}}, 1)
+	expect("the guardian writes the hold", []published{{server.alice, late, false}, {server.alice, late, false}}, 1)
 	guardian = func() { _ = os.Remove(holdPath) }
 	server.call(server.aliceToken, allow(late))
-	expect("the guardian removes the hold", []published{{server.alice, late, false}}, 2)
+	expect("the guardian removes the hold", []published{{server.alice, late, false}, {server.alice, late, false}}, 2)
 	server.call(server.aliceToken, allow(late))
 	expect("no hold", []published{{server.alice, late, false}}, 2)
 }
@@ -225,7 +225,7 @@ type foreignHookPublishTestServer struct {
 	aliceToken, bobToken string
 	guardianDir          string
 	withdrawn            []string
-	call                 func(token string, update map[string]any)
+	call                 func(token string, update map[string]any) enterprisepolicy.GuardDecision
 }
 
 func newForeignHookPublishTestServer(t *testing.T, root string, publish func(string, string, enterprisepolicy.SessionKey, enterprisepolicy.GuardDecision, time.Time) error) *foreignHookPublishTestServer {
@@ -273,7 +273,7 @@ func newForeignHookPublishTestServer(t *testing.T, root string, publish func(str
 	bobToken := userScopedTestToken(t, connector.UserScopedHookCredential, "claudecode", bob)
 	server.aliceToken, server.bobToken = aliceToken, bobToken
 	peerUIDs := map[string]int{aliceToken: 1001, bobToken: 1002}
-	server.call = func(token string, update map[string]any) {
+	server.call = func(token string, update map[string]any) enterprisepolicy.GuardDecision {
 		t.Helper()
 		data, err := json.Marshal(update)
 		if err != nil {
@@ -290,6 +290,140 @@ func newForeignHookPublishTestServer(t *testing.T, root string, publish func(str
 		if response.Code != http.StatusOK {
 			t.Fatalf("exchange: %d %s", response.Code, response.Body.String())
 		}
+		var decision enterprisepolicy.GuardDecision
+		if err := json.Unmarshal(response.Body.Bytes(), &decision); err != nil {
+			t.Fatalf("exchange answer %q: %v", response.Body.String(), err)
+		}
+		return decision
 	}
 	return server
+}
+
+// Review P2 (GAP-0352, loop round 2): the answer the hook gets, not only
+// the protected record, follows a removal the guardian recorded while the
+// exchange ran. An allow read from the earlier ledger, hold or mark is
+// decided again from the new state: a removal of this account's connector
+// after the agent process started denies it, and so does the account's
+// pending mark; a removal for another account leaves the allow. When the
+// removals keep changing, the call is denied.
+func TestForeignHookSessionGatewayAnswerFollowsARemovalRecordedDuringTheExchange(t *testing.T) {
+	var during func()
+	runs := 0
+	var publishes []bool
+	root := t.TempDir()
+	server := newForeignHookPublishTestServer(t, root, func(_, _ string, _ enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, _ time.Time) error {
+		publishes = append(publishes, decision.Deny)
+		if during != nil && runs > 0 {
+			runs--
+			during()
+		}
+		return nil
+	})
+	early := runtime.GOOS + ":b:1:100"
+	ledgerPath := filepath.Join(server.guardianDir, enterprisepolicy.ForeignHookRemovalsFile)
+	holdPath, _ := enterprisepolicy.ForeignHookRemovalHoldPath(root, server.alice)
+	replace := func(path, identity, file string) {
+		t.Helper()
+		now := time.Now().UTC()
+		data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
+			Identity: identity, Connector: "claudecode", Path: file, At: now.Format(time.RFC3339), Mark: runtime.GOOS + ":b:200",
+		}}, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path+".tmp", data, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(path+".tmp", path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	accountDir, _ := enterprisepolicy.PublishedSessionIdentityDir(root, server.alice)
+	allow := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": early}, "decision": map[string]any{"deny": false}}
+	files := 0
+	for _, tc := range []struct {
+		name      string
+		guardian  func()
+		times     int
+		reason    string
+		publishes []bool
+	}{
+		{"a ledger removal for another account", func() { replace(ledgerPath, server.bob, "/home/bob/.claude/settings.json") }, 1, "", []bool{false, false}},
+		{"a ledger removal for this account", func() { replace(ledgerPath, server.alice, "/home/alice/.claude/settings.json") }, 1, "started before DefenseClaw removed", []bool{false, true}},
+		{"a held removal for this account", func() { replace(holdPath, server.alice, "/home/alice/.claude/settings.json") }, 1, "started before DefenseClaw removed", []bool{false, true}},
+		{"the account's pending mark", func() {
+			if err := os.MkdirAll(accountDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := enterprisepolicy.MarkForeignHookRemovalPending(root, server.alice); err != nil {
+				t.Fatal(err)
+			}
+		}, 1, "could not record the removal yet", []bool{false, true}},
+		{"removals that keep changing", func() {
+			files++
+			replace(ledgerPath, server.bob, "/home/bob/.claude/"+strconv.Itoa(files)+".json")
+		}, 10, "cannot verify", []bool{false, false, false, true}},
+	} {
+		for _, path := range []string{ledgerPath, holdPath} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+		}
+		if err := enterprisepolicy.ClearForeignHookRemovalPending(root, server.alice); err != nil {
+			t.Fatal(err)
+		}
+		server.call(server.aliceToken, allow)
+		publishes = nil
+		during, runs = tc.guardian, tc.times
+		got := server.call(server.aliceToken, allow)
+		during = nil
+		if tc.reason == "" && got.Deny || tc.reason != "" && (!got.Deny || !strings.Contains(got.Reason, tc.reason)) {
+			t.Fatalf("%s: answer %+v, want reason %q", tc.name, got, tc.reason)
+		}
+		if len(publishes) != len(tc.publishes) {
+			t.Fatalf("%s: published %v, want %v", tc.name, publishes, tc.publishes)
+		}
+		for i := range publishes {
+			if publishes[i] != tc.publishes[i] {
+				t.Fatalf("%s: published %v, want %v", tc.name, publishes, tc.publishes)
+			}
+		}
+	}
+}
+
+// Review P2 (GAP-0352, loop round 2): while the guardian holds an account
+// closed because it could not record a removal, every guarded call of the
+// account is denied and only blocks are published; another account is not
+// affected, and the account is allowed again once the mark is cleared.
+func TestForeignHookSessionGatewayDeniesAnAccountWhoseRemovalIsPending(t *testing.T) {
+	var publishes []string
+	root := t.TempDir()
+	server := newForeignHookPublishTestServer(t, root, func(_, identity string, _ enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, _ time.Time) error {
+		publishes = append(publishes, identity+" deny="+strconv.FormatBool(decision.Deny))
+		return nil
+	})
+	accountDir, _ := enterprisepolicy.PublishedSessionIdentityDir(root, server.alice)
+	if err := os.MkdirAll(accountDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := enterprisepolicy.MarkForeignHookRemovalPending(root, server.alice); err != nil {
+		t.Fatal(err)
+	}
+	allow := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": runtime.GOOS + ":b:1:500"}, "decision": map[string]any{"deny": false}}
+	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "could not record the removal yet") {
+		t.Fatalf("a held account must be denied: %+v", got)
+	}
+	if got := server.call(server.bobToken, allow); got.Deny {
+		t.Fatalf("another account must be allowed: %+v", got)
+	}
+	if err := enterprisepolicy.ClearForeignHookRemovalPending(root, server.alice); err != nil {
+		t.Fatal(err)
+	}
+	if got := server.call(server.aliceToken, allow); got.Deny {
+		t.Fatalf("the account must be allowed once the mark is cleared: %+v", got)
+	}
+	want := []string{server.alice + " deny=true", server.bob + " deny=false", server.alice + " deny=false"}
+	if strings.Join(publishes, ",") != strings.Join(want, ",") || len(server.withdrawn) != 0 {
+		t.Fatalf("published %v (withdrawn %v), want %v", publishes, server.withdrawn, want)
+	}
 }

@@ -125,6 +125,17 @@ func publishedSessionOwnDir(path string, self uint32, rootOwnerOK bool) error {
 // runtime descriptor, never from the environment), writable by no group or
 // other, with no access-list entry that grants write.
 func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) error {
+	return validatePublishedSessionWalk(path, false, trust)
+}
+
+// validatePublishedSessionFolder checks a folder of the record tree and
+// every folder above it the way ValidatePublishedSessionPath checks a record
+// (PublishedSessionTreeProblem).
+func validatePublishedSessionFolder(path string, trust PublishedSessionTrust, _ int) error {
+	return validatePublishedSessionWalk(path, true, trust)
+}
+
+func validatePublishedSessionWalk(path string, folder bool, trust PublishedSessionTrust) error {
 	clean, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -137,8 +148,8 @@ func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) erro
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("%s is a symbolic link", cur)
 		}
-		if leaf && !info.Mode().IsRegular() || !leaf && !info.IsDir() {
-			return fmt.Errorf("%s is not a regular %s", cur, map[bool]string{true: "file", false: "folder"}[leaf])
+		if file := leaf && !folder; file && !info.Mode().IsRegular() || !file && !info.IsDir() {
+			return fmt.Errorf("%s is not a regular %s", cur, map[bool]string{true: "file", false: "folder"}[file])
 		}
 		if info.Mode().Perm()&0o022 != 0 {
 			return fmt.Errorf("%s is writable by group or other (%04o)", cur, info.Mode().Perm())
@@ -158,3 +169,30 @@ func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) erro
 		}
 	}
 }
+
+// publishedSessionPendingFlag reports the guardian's pending mark on an
+// account folder (MarkForeignHookRemovalPending): its sticky bit, which
+// only root and the folder's owner, the gateway service, can set, and
+// which nothing else in the tree uses.
+func publishedSessionPendingFlag(info os.FileInfo) bool { return info.Mode()&os.ModeSticky != 0 }
+
+// publishedSessionSetPending sets or clears the pending mark of dir. A mode
+// change needs no free space, and it keeps the folder's access-list entry.
+func publishedSessionSetPending(dir string, on bool) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is not a folder", dir)
+	}
+	mode := info.Mode().Perm()
+	if on {
+		mode |= os.ModeSticky
+	}
+	return os.Chmod(dir, mode)
+}
+
+// publishedSessionCreatePendingDir creates the folder the guardian marks for
+// an account that has none: root's, 0700, so no record is read from it.
+func publishedSessionCreatePendingDir(dir string) error { return os.Mkdir(dir, 0o700) }

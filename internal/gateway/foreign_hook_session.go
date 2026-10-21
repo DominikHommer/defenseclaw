@@ -76,12 +76,7 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	}
 	stateDir := foreignHookSessionStateDir(dataDir, identity)
 	removalsDir := managed.HookGuardianAuthorizationDir(dataDir)
-	// The guardian's hold first: it deletes a hold only after its ledger
-	// holds the removals, so this exchange sees them in one or the other.
-	held, holdStamp, holdErr := a.foreignHookRemovalHold(identity)
-	removals, removalsStamp, removalsErr := a.foreignHookRemovals.forIdentity(removalsDir, identity)
-	removals = append(removals, held...)
-	removalsErr = errors.Join(removalsErr, holdErr)
+	view := a.readForeignHookRemovals(removalsDir, identity)
 	// Each identity has its own store, so only that identity's exchanges
 	// are serialized; another account's exchange never waits on this one.
 	unlock := a.foreignHookSessionLocks.lock(stateDir)
@@ -90,13 +85,13 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		Key:          exchange.Key,
 		SessionStart: exchange.SessionStart,
 		Decision:     exchange.Decision,
-		Removals:     removals,
-		RemovalsErr:  removalsErr,
+		Removals:     view.removals,
+		RemovalsErr:  view.err,
 		Now:          time.Now(),
 	})
 	// Under the same lock, so the protected record follows the store's
 	// order: the hook reads it when the gateway is down (GAP-0352).
-	a.publishForeignHookSessionDecision(identity, exchange.Key, decision, removalsStamp, holdStamp)
+	decision = a.settleForeignHookSessionDecision(removalsDir, identity, exchange.Key, decision, view)
 	unlock()
 	if decision.Deny {
 		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
@@ -118,36 +113,126 @@ var (
 	foreignHookSessionWithdraw = enterprisepolicy.WithdrawPublishedForeignHookSession
 )
 
-// publishForeignHookSessionDecision writes the answer of one session
-// exchange into the caller's protected session record, which the hook reads
-// during a gateway outage under fail mode open (GAP-0352). Secure Client
-// and per-user gateways have no such record; a failure is logged and leaves
-// no allow behind, so the hook blocks during an outage.
-//
-// The decision used the guardian's removal ledger and its hold for this
-// account as the stamps name them, read before the per-identity lock. The
-// guardian writes its ledger (or, when that fails, the hold) first and
-// revokes the account's records after it, so an allow is withdrawn when
-// either changed since it was read: either this check sees the change, or
-// the guardian's revocation comes after this publication and removes it. A
-// withdrawn answer reads as missing, which blocks; the next exchange
-// publishes again from the new ledger and hold.
-func (a *APIServer) publishForeignHookSessionDecision(identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, stamps ...foreignHookRemovalStamp) {
+// foreignHookRemovalView is what one exchange read of the guardian's
+// removals for its caller: the removals of the hold and the ledger, an error
+// that denies the call (a file that cannot be read, or the account's
+// pending mark, enterprisepolicy.ErrForeignHookRemovalPending), and the
+// stamps of both files.
+type foreignHookRemovalView struct {
+	removals []enterprisepolicy.ForeignHookRemoval
+	err      error
+	ledger   foreignHookRemovalStamp
+	hold     foreignHookRemovalStamp
+}
+
+// readForeignHookRemovals reads the view for identity. The hold comes first:
+// the guardian deletes a hold only after its ledger holds the removals, so
+// the exchange sees them in one or the other. The pending mark comes last:
+// the guardian clears it only after its ledger or hold names the removal.
+func (a *APIServer) readForeignHookRemovals(dir, identity string) foreignHookRemovalView {
+	held, holdStamp, holdErr := a.foreignHookRemovalHold(identity)
+	removals, ledgerStamp, ledgerErr := a.foreignHookRemovals.forIdentity(dir, identity)
+	pending, pendingErr := a.foreignHookRemovalPending(identity)
+	view := foreignHookRemovalView{
+		removals: append(removals, held...),
+		err:      errors.Join(ledgerErr, holdErr, pendingErr),
+		ledger:   ledgerStamp,
+		hold:     holdStamp,
+	}
+	if pending {
+		view.err = errors.Join(view.err, enterprisepolicy.ErrForeignHookRemovalPending)
+	}
+	return view
+}
+
+// foreignHookRemovalsChanged reports whether the guardian changed what view
+// read: it wrote, replaced or removed the ledger or the hold, or it marked
+// the account pending.
+func (a *APIServer) foreignHookRemovalsChanged(identity string, view foreignHookRemovalView) bool {
+	if view.ledger.changed() || view.hold.changed() {
+		return true
+	}
+	if errors.Is(view.err, enterprisepolicy.ErrForeignHookRemovalPending) {
+		return false
+	}
+	pending, err := a.foreignHookRemovalPending(identity)
+	return pending || err != nil
+}
+
+// foreignHookSessionSettleReads bounds how often one exchange reads the
+// guardian's removals.
+const foreignHookSessionSettleReads = 3
+
+// errForeignHookRemovalsUnsettled denies an exchange whose removals kept
+// changing.
+var errForeignHookRemovalsUnsettled = errors.New("the guardian's foreign-hook removals kept changing during this exchange")
+
+// settleForeignHookSessionDecision publishes the answer of one exchange
+// (publishForeignHookSessionDecision) and returns the answer the hook gets.
+// The answer used the guardian's removals as view read them before the
+// per-identity lock, and the guardian writes its ledger (or the hold, or the
+// pending mark) first and revokes the account's records after it. So an
+// allow is checked after its publication: when the guardian changed what
+// view read, the allow is withdrawn, the removals are read again and the
+// answer is decided again from them, which may deny the call (GAP-0352
+// review). Either this check sees the change, or the guardian's revocation
+// comes after the publication and removes it, and the answer was given
+// before the removal was recorded. A block is never withdrawn. After
+// foreignHookSessionSettleReads reads that all changed, the call is denied.
+func (a *APIServer) settleForeignHookSessionDecision(dir, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, view foreignHookRemovalView) enterprisepolicy.GuardDecision {
+	for read := 1; ; read++ {
+		a.publishForeignHookSessionDecision(identity, key, decision)
+		if decision.Deny || !a.foreignHookRemovalsChanged(identity, view) {
+			return decision
+		}
+		a.withdrawForeignHookSessionDecision(identity, key)
+		if read == foreignHookSessionSettleReads {
+			decision = enterprisepolicy.ApplyForeignHookRemovals(decision, key, nil, errForeignHookRemovalsUnsettled, time.Now())
+			continue
+		}
+		view = a.readForeignHookRemovals(dir, identity)
+		decision = enterprisepolicy.ApplyForeignHookRemovals(decision, key, view.removals, view.err, time.Now())
+	}
+}
+
+// foreignHookSessionRecordRoot is the protected session record folder of a
+// standalone gateway, or "" for Secure Client and per-user gateways, which
+// have none.
+func (a *APIServer) foreignHookSessionRecordRoot() (string, error) {
 	cfg := a.scannerCfg
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
+		return "", nil
+	}
+	return foreignHookSessionPublishRoot()
+}
+
+// publishForeignHookSessionDecision writes the answer of one session
+// exchange into the caller's protected session record, which the hook reads
+// during a gateway outage under fail mode open (GAP-0352). A failure is
+// logged and leaves no allow behind, so the hook blocks during an outage.
+func (a *APIServer) publishForeignHookSessionDecision(identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision) {
+	root, err := a.foreignHookSessionRecordRoot()
+	if err == nil && root == "" {
 		return
 	}
-	root, err := foreignHookSessionPublishRoot()
 	if err == nil {
 		err = foreignHookSessionPublish(root, identity, key, decision, time.Now())
-		if !decision.Deny && foreignHookRemovalStampsChanged(stamps) {
-			if withdrawErr := foreignHookSessionWithdraw(root, identity, key); withdrawErr != nil {
-				err = errors.Join(err, withdrawErr)
-			}
-		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s was not written (the hook blocks during a gateway outage): %v\n",
+			clipForeignHookAuditField(key.Connector, 64), err)
+	}
+}
+
+// withdrawForeignHookSessionDecision revokes the answer it published for
+// key; the record then reads as missing, which blocks during an outage.
+func (a *APIServer) withdrawForeignHookSessionDecision(identity string, key enterprisepolicy.SessionKey) {
+	root, err := a.foreignHookSessionRecordRoot()
+	if err != nil || root == "" {
+		return
+	}
+	if err := foreignHookSessionWithdraw(root, identity, key); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s was not withdrawn: %v\n",
 			clipForeignHookAuditField(key.Connector, 64), err)
 	}
 }
@@ -396,15 +481,6 @@ func (s foreignHookRemovalStamp) changed() bool {
 	return err != nil || !sameForeignHookRemovalsFile(s.info, info)
 }
 
-func foreignHookRemovalStampsChanged(stamps []foreignHookRemovalStamp) bool {
-	for _, stamp := range stamps {
-		if stamp.changed() {
-			return true
-		}
-	}
-	return false
-}
-
 // foreignHookRemovalHold reads the removals the guardian holds for identity
 // next to its protected session records because it could not write them to
 // its ledger (enterprisepolicy.ReadForeignHookRemovalHold): the exchange
@@ -412,11 +488,7 @@ func foreignHookRemovalStampsChanged(stamps []foreignHookRemovalStamp) bool {
 // again for an agent process that started before the removal. Only a
 // standalone gateway has the record folder.
 func (a *APIServer) foreignHookRemovalHold(identity string) ([]enterprisepolicy.ForeignHookRemoval, foreignHookRemovalStamp, error) {
-	cfg := a.scannerCfg
-	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
-		return nil, foreignHookRemovalStamp{}, nil
-	}
-	root, err := foreignHookSessionPublishRoot()
+	root, err := a.foreignHookSessionRecordRoot()
 	if err != nil || strings.TrimSpace(root) == "" {
 		return nil, foreignHookRemovalStamp{}, nil
 	}
@@ -426,6 +498,18 @@ func (a *APIServer) foreignHookRemovalHold(identity string) ([]enterprisepolicy.
 	}
 	removals, info, err := enterprisepolicy.ReadForeignHookRemovalHold(root, identity)
 	return removals, foreignHookRemovalStamp{path: path, info: info}, err
+}
+
+// foreignHookRemovalPending reports the guardian's pending mark of identity
+// (enterprisepolicy.ForeignHookRemovalPending): the guardian removed one of
+// the account's hooks and could not record it, so every guarded call of the
+// account is denied. Only a standalone gateway has the record folder.
+func (a *APIServer) foreignHookRemovalPending(identity string) (bool, error) {
+	root, err := a.foreignHookSessionRecordRoot()
+	if err != nil || strings.TrimSpace(root) == "" {
+		return false, nil
+	}
+	return enterprisepolicy.ForeignHookRemovalPending(root, identity)
 }
 
 // sameForeignHookRemovalsFile reports one ledger file, unchanged: the

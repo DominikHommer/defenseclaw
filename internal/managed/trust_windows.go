@@ -221,7 +221,28 @@ func ValidateStrictServiceRuntimeFilePath(path, label, serviceAccount string, na
 	return validateStrictServiceRuntimeFilePath(path, label, serviceSID, namedDirs)
 }
 
+// ValidateStrictServiceRuntimeDirPath is ValidateStrictServiceRuntimeFilePath
+// for a folder: the folder and the namedDirs folders nearest above it get
+// the strict leaf check, every folder above them the narrow ancestor mask,
+// all fatal. The lifecycle uses it to tell whether another account could
+// have changed the protected foreign-hook session record tree (GAP-0352
+// review).
+func ValidateStrictServiceRuntimeDirPath(path, label, serviceAccount string, namedDirs int) error {
+	if label == "" {
+		label = "managed runtime folder"
+	}
+	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
+	if err != nil {
+		return err
+	}
+	return validateStrictServiceRuntimePath(path, true, label, serviceSID, namedDirs)
+}
+
 func validateStrictServiceRuntimeFilePath(path, label string, serviceSID *windows.SID, namedDirs int) error {
+	return validateStrictServiceRuntimePath(path, false, label, serviceSID, namedDirs)
+}
+
+func validateStrictServiceRuntimePath(path string, isDir bool, label string, serviceSID *windows.SID, namedDirs int) error {
 	if path == "" {
 		return fmt.Errorf("%s path is empty", label)
 	}
@@ -232,7 +253,7 @@ func validateStrictServiceRuntimeFilePath(path, label string, serviceSID *window
 	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
-	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, serviceSID, windowsTrustLeaf); err != nil {
+	if err := validateTrustedWindowsPathElementWithWriter(clean, isDir, label, serviceSID, windowsTrustLeaf); err != nil {
 		return err
 	}
 	for level, dir := 0, filepath.Dir(clean); ; level, dir = level+1, filepath.Dir(dir) {

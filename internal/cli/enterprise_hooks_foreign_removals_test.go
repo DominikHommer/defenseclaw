@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -178,5 +180,130 @@ func TestEnterpriseForeignHookRemovalHoldsWhatTheLedgerCannotTake(t *testing.T) 
 	}
 	if _, err := os.Lstat(holdPath); !os.IsNotExist(err) {
 		t.Fatalf("the hold must go once the ledger holds its removals: %v", err)
+	}
+}
+
+// Review P2 (GAP-0352, loop round 2): when neither the ledger nor the hold
+// takes a removal, the account's pending mark keeps it closed: the gateway
+// denies every guarded call of the account and the hook takes no record as
+// proof. A pass that still cannot write keeps the mark. Once storage is
+// back, the next pass for the account (no new removal needed) records an
+// account-wide removal and clears the mark, so the agent that was running
+// when the hook was removed still gets no allow, and one started after the
+// pass does.
+func TestEnterpriseForeignHookRemovalKeepsTheAccountClosedUntilItIsRecorded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the protected ledger write sets a SYSTEM-owned DACL")
+	}
+	guardianDir := filepath.Join(t.TempDir(), "guardian")
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
+	root := t.TempDir()
+	previousCfg := cfg
+	previousOwner, previousDirTrust, previousFileTrust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck
+	previousRevoke, previousRoot := enterpriseForeignHookRevokeSessionRecords, enterpriseForeignHookSessionRoot
+	cfg = &config.Config{
+		DataDir:        t.TempDir(),
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+	}
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	enterpriseHookAuthorizationFileTrustCheck = func(string) error { return nil }
+	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return errors.New("no space left on device") }
+	enterpriseForeignHookSessionRoot = func() (string, bool) { return root, true }
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck = previousOwner, previousDirTrust, previousFileTrust
+		enterpriseForeignHookRevokeSessionRecords, enterpriseForeignHookSessionRoot = previousRevoke, previousRoot
+	})
+	revocations := 0
+	enterpriseForeignHookRevokeSessionRecords = func(identity string, connectors []string) error {
+		revocations++
+		if pending, err := enterprisepolicy.ForeignHookRemovalPending(root, identity); revocations == 1 && (err != nil || !pending) {
+			t.Errorf("the mark must be set before the records are revoked: %v %v", pending, err)
+		}
+		return nil
+	}
+	pending := func(identity string) bool {
+		t.Helper()
+		got, err := enterprisepolicy.ForeignHookRemovalPending(root, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	// The hold cannot be written either: a folder is in its place.
+	holdPath, _ := enterprisepolicy.ForeignHookRemovalHoldPath(root, "1001")
+	if err := os.MkdirAll(filepath.Join(holdPath, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ledgerPath := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile)
+	home := t.TempDir()
+	hook := filepath.Join(home, ".copilot", "hooks", "x.json")
+	var stderr bytes.Buffer
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", home, "copilot", []string{hook})
+	if !pending("1001") || pending("1002") || revocations != 1 {
+		t.Fatalf("only this account must be held (revocations %d): %s", revocations, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "denied until a later pass records the removal") {
+		t.Fatalf("stderr %q", stderr.String())
+	}
+
+	stderr.Reset()
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", home, "copilot", nil)
+	if !pending("1001") {
+		t.Fatal("a pass that still cannot write must keep the mark")
+	}
+	if _, err := os.Lstat(ledgerPath); !os.IsNotExist(err) {
+		t.Fatalf("no ledger can exist yet: %v", err)
+	}
+
+	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return nil }
+	if err := os.RemoveAll(holdPath); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", home, "copilot", nil)
+	if stderr.Len() != 0 || pending("1001") {
+		t.Fatalf("a pass that records the removal must clear the mark: %q", stderr.String())
+	}
+	removals, err := loadEnterpriseForeignHookRemovals(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded *enterprisepolicy.ForeignHookRemoval
+	for i := range removals {
+		if removals[i].Identity == "1001" && removals[i].Connector == "copilot" && removals[i].Path == enterpriseForeignHookUnrecordedRemoval {
+			recorded = &removals[i]
+		}
+	}
+	if recorded == nil {
+		t.Fatalf("the ledger must record the removal for the account: %+v", removals)
+	}
+	parts := strings.Split(recorded.Mark, ":")
+	if len(parts) != 3 {
+		t.Fatalf("mark %q", recorded.Mark)
+	}
+	clock, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := enterprisepolicy.SessionKey{Connector: "copilot", Session: "s-1", Process: parts[0] + ":" + parts[1] + ":4242:" + strconv.FormatInt(clock-1, 10)}
+	if got := enterprisepolicy.ApplyForeignHookRemovals(enterprisepolicy.GuardDecision{}, running, removals, nil, time.Now()); !got.Deny {
+		t.Fatalf("the agent that was running must stay denied: %+v", got)
+	}
+	started := running
+	started.Process = parts[0] + ":" + parts[1] + ":4243:" + strconv.FormatInt(clock+1, 10)
+	if got := enterprisepolicy.ApplyForeignHookRemovals(enterprisepolicy.GuardDecision{}, started, removals, nil, time.Now()); got.Deny {
+		t.Fatalf("an agent started after the pass must be allowed: %+v", got)
+	}
+
+	// Nothing pending and nothing removed: the pass writes nothing.
+	before, err := os.Stat(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", home, "copilot", nil)
+	if after, err := os.Stat(ledgerPath); err != nil || !os.SameFile(before, after) {
+		t.Fatalf("a pass with nothing to record must not rewrite the ledger: %v", err)
 	}
 }

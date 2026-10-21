@@ -2175,8 +2175,18 @@ func (l *lifecycle) keepRunningDuringChange(p *plan) map[string]bool {
 func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 	env := l.env
 	created := []string{}
+	// Before any folder above it is put back (GAP-0352 review).
+	sessionProblem := env.hookSessionRecordsProblem(p.dirs)
 	for _, dir := range p.dirs {
 		path := env.P(dir.Path)
+		if sessionProblem != nil && dir.Path == env.Layout.HookSessionDir {
+			if err := env.invalidateHookSessionRecords(path, dir.Owner); err != nil {
+				return nil, err
+			}
+			if l.reportChanges {
+				l.noteChange("invalidated the protected foreign-hook session records in %s, which another account could change (%v)", dir.Path, sessionProblem)
+			}
+		}
 		if dir.External {
 			if exists(path) {
 				if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
@@ -2389,6 +2399,40 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 
 // metadataDiffers reports whether path's permission bits or owner differ
 // from the managed ones fixMetadata sets.
+// hookSessionTreeProblem is enterprisepolicy.PublishedSessionTreeProblem
+// (replaceable in tests, whose folders the test account owns).
+var hookSessionTreeProblem = enterprisepolicy.PublishedSessionTreeProblem
+
+// hookSessionRecordsProblem reports what in the existing protected
+// foreign-hook session record tree (Layout.HookSessionDir) the hook would
+// refuse, before the lifecycle puts back the owner and mode of the tree and
+// of the folders above it. Anything the hook refuses, another account could
+// have changed: with write access to the folder, an account can move its own
+// folder away while the guardian revokes its records and bring it back
+// after. Restoring the mode would then restore trust in the old records.
+func (e *Env) hookSessionRecordsProblem(dirs []desiredDir) error {
+	for _, dir := range dirs {
+		if dir.Path != "" && dir.Path == e.Layout.HookSessionDir && !dir.External {
+			return hookSessionTreeProblem(e.P(dir.Path), enterprisepolicy.PublishedSessionTrust{ServiceUID: dir.Owner.UID})
+		}
+	}
+	return nil
+}
+
+// invalidateHookSessionRecords closes the record tree at path (0700: the
+// hook cannot reach a record) and revokes every account's records in it
+// (enterprisepolicy.InvalidatePublishedSessionRecords). The caller then puts
+// the tree's mode back.
+func (e *Env) invalidateHookSessionRecords(path string, owner fileOwner) error {
+	if err := e.ensureDir(path, 0o700, owner); err != nil {
+		return err
+	}
+	if err := enterprisepolicy.InvalidatePublishedSessionRecords(path); err != nil {
+		return fmt.Errorf("invalidate the protected foreign-hook session records in %s: %w", path, err)
+	}
+	return nil
+}
+
 func (e *Env) metadataDiffers(path string, mode os.FileMode, owner fileOwner) bool {
 	_, _, current, err := statOwnerMode(path)
 	if err != nil {

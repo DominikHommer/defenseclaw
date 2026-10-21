@@ -256,11 +256,33 @@ file like the ledger, so it keeps denying the agents that started before the
 removal and does not write a new allow for them. The next ledger write takes
 the removals in and deletes the file.
 
+If the guardian can write neither the ledger nor that file (for example, the
+disk is full), it marks the account's folder instead. The mark changes only
+the folder's metadata, so it needs no free space. While the mark is set, the
+gateway blocks every guarded call of that account. The next guardian pass
+for the account that can write records the removal for every connector and
+clears the mark. Agents that were running then stay blocked until they
+restart.
+
+The gateway also checks the ledger, the hold file and the mark again after
+it writes an allow. If the guardian changed one of them during the check,
+the gateway decides the call again, so its answer, not only the record,
+follows the removal.
+
 On Windows, the hook refuses a record when anyone but SYSTEM,
 Administrators or the gateway service can change the record, its folder,
 `DefenseClaw-HookSessions` or `C:\ProgramData\Cisco`. If other software
 loosens the permissions on `C:\ProgramData\Cisco`, guarded calls block during
 an outage.
+
+Before `ensure`, `repair` or Setup puts the folder's owner and permissions
+back, it checks the folder the way the hook does. If the hook would refuse
+anything in it (for example, standard users could add or delete folders in
+it), it deletes every account's records first. Otherwise a user could move
+their folder aside while the guardian revoked it, bring it back, and have
+the old allow trusted again once the permissions are fixed. If you fix the
+permissions by hand instead, also delete the account folders in it; the
+gateway creates them again.
 
 While the gateway cannot answer (it is stopped or restarting, or it ended
 without removing its hook socket), a guarded tool call runs only when the
@@ -268,7 +290,8 @@ fail mode is `open` and that record shows the gateway did not block the agent
 process. Otherwise the call is blocked. That covers `closed` and an unset
 fail mode, a session the gateway blocked, an agent that started while the
 gateway was down, an agent process DefenseClaw cannot name, and a record
-that is missing, older than 7 days, or that the account could change. A blocked session gets the gateway's own block message. Other calls
+that is missing, older than 7 days, dated more than a minute in the future
+(the clock was ahead when it was written), or that the account could change. A blocked session gets the gateway's own block message. Other calls
 get the outage message, for example:
 
 ```text

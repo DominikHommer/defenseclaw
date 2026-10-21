@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -142,6 +144,15 @@ func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) erro
 	return managed.ValidateStrictServiceRuntimeFilePath(path, "protected foreign-hook session record", trust.ServiceAccount, publishedSessionNamedDirs)
 }
 
+// validatePublishedSessionFolder checks a folder of the record tree and
+// every folder above it the way ValidatePublishedSessionPath checks a record
+// (PublishedSessionTreeProblem): the folder and the named DefenseClaw
+// folders above it (1 for an account folder, 0 for the record root) get the
+// strict rule, the rest the narrow fatal one.
+func validatePublishedSessionFolder(path string, trust PublishedSessionTrust, named int) error {
+	return managed.ValidateStrictServiceRuntimeDirPath(path, "protected foreign-hook session record folder", trust.ServiceAccount, named)
+}
+
 // publishedSessionNamedDirs are the folders above a record that DefenseClaw
 // creates with a protected DACL: the account's folder and the record root.
 const publishedSessionNamedDirs = 2
@@ -167,4 +178,59 @@ func expirePublishedSessionRecord(path string) error {
 	defer func() { _ = windows.CloseHandle(handle) }()
 	revoked := windows.NsecToFiletime(publishedSessionRevokedTime.UnixNano())
 	return windows.SetFileTime(handle, nil, &revoked, &revoked)
+}
+
+// publishedSessionPendingTime is the creation time that is the guardian's
+// pending mark on an account folder (MarkForeignHookRemovalPending). Neither
+// the gateway's writes nor the account change a folder's creation time, and
+// setting it needs no free space.
+var publishedSessionPendingTime = time.Unix(1, 0).UTC()
+
+// publishedSessionPendingFlag reports the pending mark.
+func publishedSessionPendingFlag(info os.FileInfo) bool {
+	data, ok := info.Sys().(*syscall.Win32FileAttributeData)
+	return ok && data.CreationTime.Nanoseconds() == publishedSessionPendingTime.UnixNano()
+}
+
+// publishedSessionSetPending sets the pending mark of dir, or clears it (the
+// creation time becomes now), through an attributes-only handle that does
+// not follow a reparse point.
+func publishedSessionSetPending(dir string, on bool) error {
+	pointer, err := winpath.UTF16Ptr(dir)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(pointer, windows.FILE_WRITE_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	created := time.Now()
+	if on {
+		created = publishedSessionPendingTime
+	}
+	stamp := windows.NsecToFiletime(created.UnixNano())
+	return windows.SetFileTime(handle, &stamp, nil, nil)
+}
+
+// publishedSessionCreatePendingDir creates the folder the guardian marks for
+// an account that has none: owned by Administrators, SYSTEM and
+// Administrators only, so the gateway writes nothing in it and the account
+// reads no record from it.
+func publishedSessionCreatePendingDir(dir string) error {
+	descriptor, err := windows.SecurityDescriptorFromString("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if err != nil {
+		return err
+	}
+	attributes := &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: descriptor,
+	}
+	pointer, err := winpath.UTF16Ptr(dir)
+	if err != nil {
+		return err
+	}
+	return windows.CreateDirectory(pointer, attributes)
 }

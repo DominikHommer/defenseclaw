@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -62,10 +63,33 @@ func windowsHookSessionSDDL(gateway *windows.SID) string {
 	return "O:BAG:SY" + windowsHookSessionDACL(gateway)
 }
 
+// windowsHookSessionClosedSDDL is the folder while the lifecycle invalidates
+// its records: no entry for standard users, so the hook cannot read the
+// folder's access list and refuses every record until the final DACL is
+// back.
+func windowsHookSessionClosedSDDL(gateway *windows.SID) string {
+	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;" + gateway.String() + ")"
+}
+
+// windowsHookSessionTreeProblem reports what in the record tree under root
+// the hook would refuse (enterprisepolicy.PublishedSessionTreeProblem);
+// replaceable in tests.
+var windowsHookSessionTreeProblem = func(root string) error {
+	return enterprisepolicy.PublishedSessionTreeProblem(root, enterprisepolicy.PublishedSessionTrust{ServiceAccount: windowsHookSessionGatewayAccount})
+}
+
 // ensureWindowsHookSessionRoot makes root a folder this lifecycle created
 // with the protected DACL. A folder an unprivileged account created first
 // (ProgramData lets users create folders) is removed and created again: its
 // owner keeps WRITE_DAC over it.
+//
+// Before it puts the DACL back on an existing folder, it checks the record
+// tree the way the hook does. Anything the hook refuses, another account
+// could have changed: with write access to the folder, an account can move
+// its own folder away while the guardian revokes its records and bring it
+// back after. So the records are invalidated first, behind a DACL the hook
+// refuses (GAP-0352 review); restoring the access never restores trust in
+// them.
 func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 	info, err := os.Lstat(root)
 	if err == nil {
@@ -81,6 +105,13 @@ func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 				return fmt.Errorf("replace %s, which an unprivileged account created: %w", root, err)
 			}
 			err = os.ErrNotExist
+		} else if problem := windowsHookSessionTreeProblem(root); problem != nil {
+			if err := applyWindowsSDDL(root, windowsHookSessionClosedSDDL(gateway)); err != nil {
+				return fmt.Errorf("close %s: %w", root, err)
+			}
+			if err := enterprisepolicy.InvalidatePublishedSessionRecords(root); err != nil {
+				return fmt.Errorf("invalidate the records in %s, which another account could change (%v): %w", root, problem, err)
+			}
 		}
 	}
 	if errors.Is(err, os.ErrNotExist) {
