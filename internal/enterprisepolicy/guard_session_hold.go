@@ -71,18 +71,16 @@ func HoldPublishedSessionRecords(root string) error {
 	if _, err := os.Lstat(path); err == nil {
 		return nil
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if errors.Is(err, fs.ErrExist) {
-		return nil
-	}
-	if err != nil {
+	if err := createPublishedSessionHold(path, publishedSessionHoldText); err != nil && !errors.Is(err, fs.ErrExist) {
 		return err
 	}
-	// The text only explains the file: an empty one holds just the same.
-	_, _ = file.WriteString("A DefenseClaw lifecycle run is replacing or closing the protected foreign-hook session records next to this file, " +
-		"or could not finish doing so. While this file exists, guarded connectors block during a gateway outage. Run the DefenseClaw repair.\n")
-	return file.Close()
+	return nil
 }
+
+// publishedSessionHoldText only explains the hold file: an empty one holds
+// just the same.
+const publishedSessionHoldText = "A DefenseClaw lifecycle run is replacing or closing the protected foreign-hook session records next to this file, " +
+	"or could not finish doing so. While this file exists, guarded connectors block during a gateway outage. Run the DefenseClaw repair.\n"
 
 // ReleasePublishedSessionRecords removes the hold of the record folder
 // root, once the folder was replaced or closed and its generation bumped.

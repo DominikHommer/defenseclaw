@@ -185,3 +185,31 @@ func TestPublishedSessionGenerationHeldOpenStillBumps(t *testing.T) {
 		t.Fatalf("the allow from before the bump must prove nothing: %v", err)
 	}
 }
+
+// Review (GAP-0352, 1.0.4 loop round 4): the hold file gives standard users
+// no access, so no account can open it and keep it from being removed; the
+// hook still sees it, and the release removes it.
+func TestPublishedSessionHoldGivesStandardUsersNoAccess(t *testing.T) {
+	root := t.TempDir()
+	if err := HoldPublishedSessionRecords(root); err != nil {
+		t.Fatal(err)
+	}
+	hold, _ := PublishedSessionHoldPath(root)
+	descriptor, err := windows.GetNamedSecurityInfo(hold, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sddl := descriptor.String()
+	if !strings.Contains(sddl, "D:P") || strings.Contains(sddl, ";BU)") || strings.Contains(sddl, ";WD)") || strings.Contains(sddl, ";AU)") {
+		t.Fatalf("the hold must be closed to standard users: %s", sddl)
+	}
+	if !PublishedSessionHeld(root) {
+		t.Fatal("the hold must be seen")
+	}
+	if err := ReleasePublishedSessionRecords(root); err != nil {
+		t.Fatal(err)
+	}
+	if PublishedSessionHeld(root) {
+		t.Fatal("the release must remove the hold")
+	}
+}

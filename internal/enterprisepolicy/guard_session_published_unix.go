@@ -63,6 +63,17 @@ func createPublishedSessionGeneration(path string) error {
 	return errors.Join(file.Chmod(0o644), file.Close())
 }
 
+// createPublishedSessionHold creates the hold file at path with text. The
+// hook only checks that something is there.
+func createPublishedSessionHold(path, text string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	_, _ = file.WriteString(text)
+	return file.Close()
+}
+
 // checkPublishedSessionGenerationOwner checks the owner of the generation file:
 // root for the gateway and the hook, and this process (root in production)
 // for the bump.

@@ -171,6 +171,41 @@ func ValidatePublishedSessionRoot(root string, trust PublishedSessionTrust) erro
 // creates with a protected DACL: the account's folder and the record root.
 const publishedSessionNamedDirs = 2
 
+// publishedSessionHoldSDDL is the protected DACL of the hold file: SYSTEM
+// and Administrators only. No standard user can open it to read or write,
+// so none can hold it open without delete sharing and keep the lifecycle
+// from removing it; the hook only checks that it is there, which listing
+// the folder above allows.
+const publishedSessionHoldSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+
+// createPublishedSessionHold creates the hold file at path with text and
+// publishedSessionHoldSDDL.
+func createPublishedSessionHold(path, text string) error {
+	descriptor, err := windows.SecurityDescriptorFromString(publishedSessionHoldSDDL)
+	if err != nil {
+		return err
+	}
+	attributes := &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: descriptor,
+	}
+	pointer, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE, attributes,
+		windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			return fs.ErrExist
+		}
+		return err
+	}
+	var written uint32
+	_ = windows.WriteFile(handle, []byte(text), &written, nil)
+	return windows.CloseHandle(handle)
+}
+
 // publishedSessionGenerationSDDL is the protected DACL of the generation
 // file: SYSTEM and Administrators full control, standard users and services
 // (the gateway) read. It inherits nothing from the record root, which gives
