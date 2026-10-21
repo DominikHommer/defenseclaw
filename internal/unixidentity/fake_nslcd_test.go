@@ -27,14 +27,18 @@ func init() {
 }
 
 // fakeNSLCD answers the nslcd protocol. passwd maps "name:NAME" and
-// "uid:N" to the account nslcd holds, members maps a member name to the
-// gids of the groups that list it, and incomplete names the requests
-// ("name:NAME", "uid:N", "member:NAME") whose search fails: nslcd then
+// "uid:N" to the account nslcd holds (more to the accounts it returns after
+// that one), members maps a member name to the
+// gids of the groups that list it, groups maps a gid to the name of the
+// group nslcd holds for it, and incomplete names the requests ("name:NAME",
+// "uid:N", "member:NAME", "gid:N") whose search fails: nslcd then
 // closes the connection without NSLCD_RESULT_END, as it does when LDAP
 // cannot be reached for that search. Every other request completes.
 type fakeNSLCD struct {
 	passwd     map[string]Account
+	more       map[string][]Account
 	members    map[string][]int
+	groups     map[int]string
 	incomplete map[string]bool
 }
 
@@ -108,6 +112,12 @@ func (f *fakeNSLCD) serve(conn net.Conn) {
 			return
 		}
 		key = "member:" + name
+	case nslcdActionGroupByGID:
+		gid, ok := read()
+		if !ok {
+			return
+		}
+		key = "gid:" + strconv.Itoa(int(int32(gid)))
 	default:
 		return
 	}
@@ -123,8 +133,21 @@ func (f *fakeNSLCD) serve(conn net.Conn) {
 			out = binary.BigEndian.AppendUint32(out, uint32(gid))
 			out = binary.BigEndian.AppendUint32(out, 0)
 		}
+	case nslcdActionGroupByGID:
+		gid, _ := strconv.Atoi(key[len("gid:"):])
+		if name, ok := f.groups[gid]; ok {
+			out = binary.BigEndian.AppendUint32(out, nslcdResultBegin)
+			putString(name)
+			putString("*")
+			out = binary.BigEndian.AppendUint32(out, uint32(gid))
+			out = binary.BigEndian.AppendUint32(out, 0)
+		}
 	default:
+		var accounts []Account
 		if account, ok := f.passwd[key]; ok {
+			accounts = append(accounts, account)
+		}
+		for _, account := range append(accounts, f.more[key]...) {
 			out = binary.BigEndian.AppendUint32(out, nslcdResultBegin)
 			putString(account.Name)
 			putString("*")

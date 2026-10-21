@@ -45,6 +45,10 @@ func QualifiedUserName(context.Context, Resolver, string) string  { return "" }
 // name to one account.
 func SameNameAccounts(context.Context, Resolver, Account) ([]Account, error) { return nil, nil }
 
+// ConfirmLocalAccount has nothing to order on macOS: Open Directory's
+// local node holds the accounts os/user names.
+func ConfirmLocalAccount(Resolver, int, string) error { return nil }
+
 const (
 	darwinDSCL   = "/usr/bin/dscl"
 	darwinODUtil = "/usr/bin/odutil"

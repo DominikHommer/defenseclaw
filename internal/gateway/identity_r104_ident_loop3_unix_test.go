@@ -229,15 +229,16 @@ func TestAgentIdentityAfterAnUpgradeNeedsContinuityForTheIDsOfBefore(t *testing.
 			Connector: "codex", InstallFP: facts.InstallFP})
 	}
 	const (
-		rfc2307UID = 41501      // an RFC 2307 uidNumber: no SID maps to it
-		mappedUID  = 1234801105 // SSSD's default id mapping of RID 1105
+		rfc2307UID = 41501     // an RFC 2307 uidNumber: no SID maps to it
+		mappedUID  = 297801105 // SSSD's default id mapping of RID 1105 (slice 1488 of S-1-5-21-7-7-7)
+		moduloUID  = 201105    // an RFC 2307 uid that matches RID 1105 modulo the range size only
 		localUID   = 41502
 		laterUID   = 41503
 	)
 	const other = "sid:S-1-5-21-2-2-2-3301"
 	// The homes file a 1.0.3 gateway wrote: no format entry, no tokens.
 	legacy := map[string]map[string]string{}
-	for _, uid := range []int{rfc2307UID, mappedUID, localUID, laterUID} {
+	for _, uid := range []int{rfc2307UID, mappedUID, moduloUID, localUID, laterUID} {
 		legacy[strconv.Itoa(uid)] = map[string]string{"home": home, "name": "alice"}
 	}
 	data, err := json.Marshal(legacy)
@@ -249,8 +250,9 @@ func TestAgentIdentityAfterAnUpgradeNeedsContinuityForTheIDsOfBefore(t *testing.
 	}
 	mu.Lock()
 	tokens[rfc2307UID], tokens[mappedUID], tokens[localUID] = other, "sid:S-1-5-21-7-7-7-1105", "files"
+	tokens[moduloUID] = "sid:S-1-5-21-2-2-2-1105"
 	mu.Unlock()
-	start(rfc2307UID, mappedUID, localUID, laterUID)
+	start(rfc2307UID, mappedUID, moduloUID, localUID, laterUID)
 
 	otherAgent := hook(rfc2307UID)
 	legacyID := before(otherAgent, rfc2307UID)
@@ -259,6 +261,11 @@ func TestAgentIdentityAfterAnUpgradeNeedsContinuityForTheIDsOfBefore(t *testing.
 	}
 	if got := hook(mappedUID); got.ID != before(got, mappedUID) {
 		t.Fatalf("an id-mapped SSSD account derived %s; want the ID it had before", got.ID)
+	}
+	// Review of GAP-0947 (loop 4): 201105 - 200000 is RID 1105, but the
+	// uid is not that of its domain's slice: ldap_id_mapping is off.
+	if got := hook(moduloUID); got.ID == before(got, moduloUID) {
+		t.Fatal("an RFC 2307 uid that matches its RID modulo the range size kept the agent ID of before")
 	}
 	if got := hook(localUID); got.ID != before(got, localUID) {
 		t.Fatalf("a local account derived %s; want the ID it had before", got.ID)
@@ -269,7 +276,7 @@ func TestAgentIdentityAfterAnUpgradeNeedsContinuityForTheIDsOfBefore(t *testing.
 
 	// A restart keeps the distinct ID and the legacy mark of a uid no token
 	// was adopted for yet.
-	start(rfc2307UID, mappedUID, localUID, laterUID)
+	start(rfc2307UID, mappedUID, moduloUID, localUID, laterUID)
 	if got := hook(rfc2307UID).ID; got != otherAgent.ID {
 		t.Fatalf("after a restart OTHER's alice derived %s, want %s", got, otherAgent.ID)
 	}

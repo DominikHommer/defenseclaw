@@ -34,6 +34,7 @@ var nslcdSockets = []string{"/run/nslcd/socket", "/var/run/nslcd/socket"}
 // string its length and its bytes.
 const (
 	nslcdVersion             = 0x00000002
+	nslcdActionGroupByGID    = 0x00040002
 	nslcdActionGroupByMember = 0x00040006
 	nslcdActionPasswdByName  = 0x00080001
 	nslcdActionPasswdByUID   = 0x00080002
@@ -159,8 +160,8 @@ func (r *nslcdReader) passwd() Account {
 }
 
 // group reads a group entry: name, password, gid and members.
-func (r *nslcdReader) group() int {
-	_ = r.string()
+func (r *nslcdReader) group() (string, int) {
+	name := r.string()
 	_ = r.string()
 	gid := int(r.int32())
 	members := r.int32()
@@ -170,28 +171,13 @@ func (r *nslcdReader) group() int {
 	for i := int32(0); i < members && r.err == nil; i++ {
 		_ = r.string()
 	}
-	return gid
+	return name, gid
 }
 
 // nslcdPasswd asks nslcd for the account of a name or, when byUID, of a uid
 // (key); found is false when nslcd completed the search and holds none.
 func nslcdPasswd(ctx context.Context, key string, byUID bool) (Account, bool, error) {
-	action, request := int32(nslcdActionPasswdByName), nslcdString(key)
-	if byUID {
-		uid, err := strconv.Atoi(key)
-		if err != nil || uid < 0 {
-			return Account{}, false, fmt.Errorf("unixidentity: invalid uid %q", key)
-		}
-		action, request = nslcdActionPasswdByUID, binary.BigEndian.AppendUint32(nil, uint32(uid))
-	}
-	var accounts []Account
-	err := nslcdQuery(ctx, action, request, func(r *nslcdReader) error {
-		account := r.passwd()
-		if r.err == nil {
-			accounts = append(accounts, account)
-		}
-		return nil
-	})
+	accounts, err := nslcdPasswdAll(ctx, key, byUID)
 	switch {
 	case err != nil:
 		return Account{}, false, err
@@ -203,12 +189,60 @@ func nslcdPasswd(ctx context.Context, key string, byUID bool) (Account, bool, er
 	return accounts[0], true, nil
 }
 
+// nslcdPasswdAll asks nslcd for every account of a name or, when byUID, of
+// a uid (key), as its completed search returns them.
+func nslcdPasswdAll(ctx context.Context, key string, byUID bool) ([]Account, error) {
+	action, request := int32(nslcdActionPasswdByName), nslcdString(key)
+	if byUID {
+		uid, err := strconv.Atoi(key)
+		if err != nil || uid < 0 {
+			return nil, fmt.Errorf("unixidentity: invalid uid %q", key)
+		}
+		action, request = nslcdActionPasswdByUID, binary.BigEndian.AppendUint32(nil, uint32(uid))
+	}
+	var accounts []Account
+	err := nslcdQuery(ctx, action, request, func(r *nslcdReader) error {
+		account := r.passwd()
+		if r.err == nil {
+			if len(accounts) >= nslcdMaxMembers {
+				return fmt.Errorf("unixidentity: nslcd holds more than %d accounts for %s", nslcdMaxMembers, key)
+			}
+			accounts = append(accounts, account)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return accounts, nil
+}
+
+// nslcdGroupByGID asks nslcd for the group of gid; found is false when
+// nslcd completed the search and holds none.
+func nslcdGroupByGID(ctx context.Context, gid int) (string, bool, error) {
+	if gid < 0 {
+		return "", false, fmt.Errorf("unixidentity: invalid gid %d", gid)
+	}
+	var names []string
+	err := nslcdQuery(ctx, nslcdActionGroupByGID, binary.BigEndian.AppendUint32(nil, uint32(gid)), func(r *nslcdReader) error {
+		name, _ := r.group()
+		if r.err == nil && name != "" && len(names) < 1 {
+			names = append(names, name)
+		}
+		return nil
+	})
+	if err != nil || len(names) == 0 {
+		return "", false, err
+	}
+	return names[0], true, nil
+}
+
 // nslcdGroupsByMember asks nslcd for the gids of the groups that list name
 // as a member, as initgroups does.
 func nslcdGroupsByMember(ctx context.Context, name string) ([]int, error) {
 	var ids []int
 	err := nslcdQuery(ctx, nslcdActionGroupByMember, nslcdString(name), func(r *nslcdReader) error {
-		gid := r.group()
+		_, gid := r.group()
 		if r.err == nil {
 			if len(ids) >= maxDirectoryGroups {
 				return fmt.Errorf("unixidentity: in more than the %d groups DefenseClaw names", maxDirectoryGroups)

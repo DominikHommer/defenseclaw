@@ -14,8 +14,10 @@ package gateway
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"math/bits"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -908,22 +910,90 @@ func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 // build saw. A token that does not tell accounts of one name and home apart
 // (files, sss, nss:<service>) cannot differ from the older account's either,
 // so this build would give both the same IDs: it shows continuity. A SID
-// does when SSSD's default id mapping derives uid from it (uid = 200000 +
-// slice * 200000 + RID): the uid then belongs to that SID, and an account
-// of another SID never held it. Any other SID (an RFC 2307 uid, winbind) or
-// a listed record (macOS) does not.
+// does when uid is the one SSSD's default id mapping gives it
+// (sssdDefaultIDMapping): the uid then belongs to that SID, and an account
+// of another SID never held it. Only the uid of the SID's own domain slice
+// counts: a uid that matched the RID only modulo the range size (an
+// RFC 2307 uid 201105 for RID 1105 with ldap_id_mapping off) was taken for
+// a mapped one, and an account that replaced the former holder kept its
+// agent IDs and match.agents profile (review of GAP-0947, loop 4). Any
+// other SID (an RFC 2307 uid, winbind, custom id-mapping ranges) or a
+// listed record (macOS) does not.
 func legacyContinuity(uid int, token string) bool {
 	sid, isSID := strings.CutPrefix(token, "sid:")
 	if !isSID {
 		return !strings.HasPrefix(token, "record:")
 	}
-	const rangeMin, rangeSize = 200000, 200000
+	mapped, ok := sssdDefaultIDMapping(sid)
+	return ok && int64(uid) == mapped
+}
+
+// SSSD's default id mapping (sssd-ad, ldap_idmap_range_min 200000,
+// ldap_idmap_range_max 2000200000, ldap_idmap_range_size 200000): a domain
+// gets the slice murmurhash3 of its SID (seed 0xdeadbeef) names, modulo the
+// number of slices, and an account the uid range min + slice * size + RID.
+const (
+	sssdIDMapRangeMin  = 200000
+	sssdIDMapRangeMax  = 2000200000
+	sssdIDMapRangeSize = 200000
+	sssdIDMapSeed      = 0xdeadbeef
+)
+
+// sssdDefaultIDMapping is the uid SSSD's default id mapping gives sid, the
+// primary slice of its domain. ok is false for a SID it does not map so
+// (no RID, or a RID past the primary slice).
+func sssdDefaultIDMapping(sid string) (int64, bool) {
 	i := strings.LastIndexByte(sid, '-')
-	if i < 0 {
-		return false
+	if i <= 0 || !strings.HasPrefix(strings.ToUpper(sid), "S-1-5-21-") {
+		return 0, false
 	}
 	rid, err := strconv.ParseInt(sid[i+1:], 10, 64)
-	return err == nil && rid >= 0 && rid < rangeSize && uid >= rangeMin && int64(uid-rangeMin)%rangeSize == rid
+	if err != nil || rid < 0 || rid >= sssdIDMapRangeSize {
+		return 0, false
+	}
+	sliceCount := uint32((sssdIDMapRangeMax - sssdIDMapRangeMin) / sssdIDMapRangeSize)
+	slice := int64(murmurHash3x86_32([]byte(strings.ToUpper(sid[:i])), sssdIDMapSeed) % sliceCount)
+	return sssdIDMapRangeMin + slice*sssdIDMapRangeSize + rid, true
+}
+
+// murmurHash3x86_32 is MurmurHash3 (x86, 32 bits), the hash SSSD's
+// sss_idmap picks a domain's slice with.
+func murmurHash3x86_32(data []byte, seed uint32) uint32 {
+	const c1, c2 = 0xcc9e2d51, 0x1b873593
+	h := seed
+	blocks := len(data) / 4
+	for i := 0; i < blocks; i++ {
+		k := binary.LittleEndian.Uint32(data[i*4:])
+		k *= c1
+		k = bits.RotateLeft32(k, 15)
+		k *= c2
+		h ^= k
+		h = bits.RotateLeft32(h, 13)
+		h = h*5 + 0xe6546b64
+	}
+	var k uint32
+	tail := data[blocks*4:]
+	switch len(tail) {
+	case 3:
+		k ^= uint32(tail[2]) << 16
+		fallthrough
+	case 2:
+		k ^= uint32(tail[1]) << 8
+		fallthrough
+	case 1:
+		k ^= uint32(tail[0])
+		k *= c1
+		k = bits.RotateLeft32(k, 15)
+		k *= c2
+		h ^= k
+	}
+	h ^= uint32(len(data))
+	h ^= h >> 16
+	h *= 0x85ebca6b
+	h ^= h >> 13
+	h *= 0xc2b2ae35
+	h ^= h >> 16
+	return h
 }
 
 // rowToken is the account token an agent identity row of uid is recorded

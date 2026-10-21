@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -103,15 +104,45 @@ func adminViewDomainCouldHold(user, id string) bool {
 	return adminViewKnownDomain(domain, id, extra...)
 }
 
-// profileExplainUnresolved resolves an account the platform resolver cannot
-// name through the OS account database (os/user), with its error.
+// profileExplainQualifiedName is the spelling NSS knows a short name by
+// (unixidentity.QualifiedUserName).
 var profileExplainQualifiedName = func(ctx context.Context, name string) string {
 	return unixidentity.QualifiedUserName(ctx, unixidentity.Default(ctx), name)
 }
 
+// profileExplainLocalAccount reports, with nil, that the platform resolver
+// shows name to be the local account that holds uid, alone
+// (unixidentity.ConfirmLocalAccount).
+var profileExplainLocalAccount = func(uid int, name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
+	defer cancel()
+	return unixidentity.ConfirmLocalAccount(unixidentity.Default(ctx), uid, name)
+}
+
+// profileExplainUnresolved resolves an account the platform resolver cannot
+// name through the OS account database (os/user), with its error.
+//
+// A lookup that refused the account is final: a uid more than one account
+// holds (the hook path gives it no facts), or an NSS answer for another
+// account than the one named (a cross-domain spelling). The OS database
+// then named a local account of the name and explain printed its profile
+// (review of GAP-1087, loop 4). For any other failure the account os/user
+// names is taken only when NSS shows it is the local account that holds its
+// uid, alone (profileExplainLocalAccount).
 func profileExplainUnresolved(name string, lookupErr error) (profileSubject, error) {
+	var shared *unixidentity.SharedUIDError
+	if errors.As(lookupErr, &shared) {
+		return profileSubject{UserName: name}, lookupErr
+	}
+	var mismatch *unixidentity.NameMismatchError
+	if errors.As(lookupErr, &mismatch) {
+		return profileSubject{UserName: name}, unixidentity.AccountLookupError(name, "", lookupErr)
+	}
 	if local, err := lookupLocalProfileSubject(name); err == nil {
-		return local, nil
+		uid, convErr := strconv.Atoi(local.UserID)
+		if convErr == nil && profileExplainLocalAccount(uid, local.UserName) == nil {
+			return local, nil
+		}
 	}
 	if cached, ok := profileExplainCachedSubject(name, time.Now()); ok {
 		return cached, nil

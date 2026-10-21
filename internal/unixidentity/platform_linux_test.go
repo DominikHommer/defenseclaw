@@ -103,6 +103,8 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	}
 	services := map[int]string{70005: "winbind", 70006: "winbind", 70007: "ldap", 70008: "winbind", 70009: "ldap"}
 	startFakeSSSD(t, nil)
+	// nslcd completes its searches: it lists no second account of a uid.
+	startFakeNSLCD(t, &fakeNSLCD{})
 	f := &fakeRun{results: map[string]commandResult{"group 70000": {stdout: []byte("users:*:70000:\n")}}}
 	for uid, name := range accounts {
 		line := commandResult{stdout: []byte(name + ":*:" + strconv.Itoa(uid) + ":70000::/home/" + name + ":/bin/bash\n")}

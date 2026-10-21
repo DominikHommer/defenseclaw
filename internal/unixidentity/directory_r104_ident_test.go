@@ -104,6 +104,7 @@ func TestNSSCompatListsItsServices(t *testing.T) {
 		}
 	}
 	line := []byte("bob:*:80001:80001::/home/bob:/bin/bash\n")
+	startFakeNSLCD(t, &fakeNSLCD{passwd: map[string]Account{"uid:80001": {Name: "bob", UID: 80001, GID: 80001, Home: "/home/bob", Shell: "/bin/bash"}}})
 	r := newFakeNSS(&fakeRun{results: map[string]commandResult{
 		"passwd 80001": {stdout: line}, "-s ldap passwd 80001": {stdout: line},
 	}})

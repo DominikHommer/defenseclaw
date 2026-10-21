@@ -213,7 +213,7 @@ func QualifiedAccountName(name string) bool {
 // discovery row): a qualified filter selects it by the id it resolves to.
 // An empty filter selects every row.
 func (f AccountFilter) Matches(id, name string) bool {
-	return f.matches(id, name, "", func() bool { return true })
+	return f.matches(id, name, "", func() bool { return true }, nil)
 }
 
 // MatchesIn is Matches for an agent identity row, which also keeps the
@@ -227,12 +227,14 @@ func (f AccountFilter) Matches(id, name string) bool {
 // before v8, or while none was known) is selected by its uid only while no
 // other account is known to have held the uid, and then only when its
 // owning domains, if it names any, are the account's (review of GAP-1263,
-// loop 3).
+// loop 3). Its recorded name does not select a row recorded for another
+// account than the one the filter resolves to (recordedForAnother).
 func (f AccountFilter) MatchesIn(id, name, domains, incarnation string) bool {
-	return f.matches(id, name, domains, func() bool { return f.ownRow(id, domains, incarnation) })
+	return f.matches(id, name, domains, func() bool { return f.ownRow(id, domains, incarnation) },
+		func() bool { return f.recordedForAnother(id, incarnation) })
 }
 
-func (f AccountFilter) matches(id, name, domains string, own func() bool) bool {
+func (f AccountFilter) matches(id, name, domains string, own, another func() bool) bool {
 	id, name = strings.TrimSpace(id), strings.TrimSpace(name)
 	switch {
 	case f.raw == "":
@@ -244,6 +246,8 @@ func (f AccountFilter) matches(id, name, domains string, own func() bool) bool {
 	}) && own():
 		return true
 	case name == "":
+		return false
+	case another != nil && another():
 		return false
 	case EqualFold(f.raw, name):
 		return true
@@ -275,6 +279,29 @@ func (f AccountFilter) ownRow(id, domains, incarnation string) bool {
 		return false
 	}
 	return f.recordedIn(domains)
+}
+
+// recordedForAnother reports whether a row was recorded for another account
+// than the one a qualified filter resolves to: the row and the account name
+// account tokens and they differ, or the row names none, is of the resolved
+// uid, and another account is known to have held that uid. A qualified
+// name is handed on with the uid (an account deleted and created again
+// with a new SID, its RFC 2307 uid and CORP\alice), so the recorded name
+// selected the former holder's rows, and their history, for the new account
+// (review of GAP-1263, loop 4). A bare filter names every account of the
+// name.
+func (f AccountFilter) recordedForAnother(id, incarnation string) bool {
+	if f.domain == "" {
+		return false
+	}
+	incarnation = strings.TrimSpace(incarnation)
+	switch {
+	case incarnation != "" && f.incarnation != "":
+		return incarnation != f.incarnation
+	case incarnation == "" && f.holderChanged:
+		return slices.ContainsFunc(f.ids, func(resolved string) bool { return strings.EqualFold(resolved, strings.TrimSpace(id)) })
+	}
+	return false
 }
 
 // WithAccountIncarnation gives the account token of the account a qualified
