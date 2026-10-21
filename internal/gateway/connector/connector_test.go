@@ -4505,19 +4505,18 @@ log_user_prompt = false
 // Asserts the platform-specific artifact plus the canonical TOML argv array:
 // Windows writes ["<hook.exe>", "notify"] with no shell bridge; Unix writes
 // ["bash", "<DataDir>/notify-bridge.sh"] and keeps the operator-only bridge.
-func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
+func TestCodex_Setup_RegistersNoNotifierAndRemovesAnOldOne(t *testing.T) {
+	// Codex hands its notify program the turn record (prompt, reply, working
+	// directory) as a command-line argument, readable by other accounts. Setup
+	// registers no notifier outside Secure Client, removes the one an older
+	// Setup wrote with its bridge, and puts the account's own notifier back.
 	dir := t.TempDir()
 	if runtime.GOOS == "windows" {
 		setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
 	}
 	configPath := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(configPath, []byte(`model = "gpt-5"
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
-
 	c := NewCodexConnector()
 	opts := SetupOpts{
 		DataDir:   dir,
@@ -4525,79 +4524,73 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 		APIAddr:   "127.0.0.1:18970",
 		APIToken:  "test-token-codex-notify",
 	}
+	notifyOf := func() (interface{}, bool) {
+		t.Helper()
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parsed map[string]interface{}
+		if err := toml.Unmarshal(raw, &parsed); err != nil {
+			t.Fatalf("invalid TOML after Setup: %v", err)
+		}
+		v, ok := parsed["notify"]
+		return v, ok
+	}
+
+	// A fresh install keeps the account's own notifier and adds none.
+	if err := os.WriteFile(configPath, []byte("model = \"gpt-5\"\nnotify = [\"/usr/local/bin/my-notifier\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-
-	bridgePath := filepath.Join(dir, "notify-bridge.sh")
-	if runtime.GOOS == "windows" {
-		if _, err := os.Stat(bridgePath); !os.IsNotExist(err) {
-			t.Fatalf("Windows setup left Bash notify bridge behind: %v", err)
-		}
-	} else {
-		info, err := os.Stat(bridgePath)
-		if err != nil {
-			t.Fatalf("notify-bridge.sh missing — agent-turn-complete telemetry won't fire: %v", err)
-		}
-		if info.Mode().Perm() != 0o700 {
-			t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only managed executable)", info.Mode().Perm())
-		}
-		bridge, err := os.ReadFile(bridgePath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(bridge), "test-token-codex-notify") {
-			t.Error("bridge embeds APIToken instead of loading the managed connector-scoped token sidecar")
-		}
-		tokenPath, err := HookAPITokenFilePath(dir, "codex")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(string(bridge), shellSingleQuote(tokenPath)) {
-			t.Errorf("bridge missing connector-scoped token sidecar path %q", tokenPath)
-		}
-		if !strings.Contains(string(bridge), "127.0.0.1:18970/api/v1/codex/notify") {
-			t.Errorf("bridge missing gateway notify endpoint URL; body:\n%s", bridge)
-		}
+	if v, _ := notifyOf(); !codexValueMatches(v, []string{"/usr/local/bin/my-notifier"}) {
+		t.Fatalf("notify after a fresh Setup = %v, want the account's own notifier only", v)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "notify-bridge.sh")); !os.IsNotExist(err) {
+		t.Fatalf("Setup wrote a notify bridge: %v", err)
 	}
 
-	// config.toml notify entry must be the array shape codex parses.
-	raw, _ := os.ReadFile(configPath)
-	var parsed map[string]interface{}
-	if err := toml.Unmarshal(raw, &parsed); err != nil {
-		t.Fatalf("invalid TOML after Setup: %v", err)
-	}
-	notify, ok := parsed["notify"].([]interface{})
-	if !ok {
-		t.Fatalf("notify entry not an array (got %T) — codex would silently disable the bridge", parsed["notify"])
-	}
-	if len(notify) != 2 {
-		t.Fatalf("notify array has %d entries, want 2; got %v", len(notify), notify)
-	}
+	// An older Setup's notifier and bridge are removed on the next Setup, and
+	// the notifier it chained is put back.
+	old := codexShellNotifyCommand(opts)
 	if runtime.GOOS == "windows" {
-		if first, _ := notify[0].(string); first != `C:\Program Files\DefenseClaw\defenseclaw-hook.exe` {
-			t.Errorf("notify[0] = %q, want installed no-console hook path", first)
-		}
-		if second, _ := notify[1].(string); second != "notify" {
-			t.Errorf("notify[1] = %q, want native notify subcommand", second)
-		}
-		if strings.Contains(strings.ToLower(string(raw)), "bash") ||
-			strings.Contains(strings.ToLower(string(raw)), "curl") ||
-			strings.Contains(strings.ToLower(string(raw)), "jq") {
-			t.Errorf("Windows config contains a Unix notify dependency:\n%s", raw)
-		}
-	} else {
-		if first, _ := notify[0].(string); first != "bash" {
-			t.Errorf("notify[0] = %q, want \"bash\"", first)
-		}
-		if second, _ := notify[1].(string); !strings.HasSuffix(second, "/notify-bridge.sh") {
-			t.Errorf("notify[1] = %q, want path ending in /notify-bridge.sh", second)
-		}
+		old = codexNativeNotifyCommand()
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]interface{}{}
+	if err := parseCodexTOML(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["notify"] = old
+	out, err := editCodexOwnedTOML(raw, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notify-bridge.sh"), []byte("#!/usr/bin/env bash\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := c.ownedHookContractPresent(opts); err != nil || present {
+		t.Fatalf("hook contract with an old DefenseClaw notifier = %v, %v; want broken so the guard re-runs Setup", present, err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup: %v", err)
+	}
+	if v, _ := notifyOf(); !codexValueMatches(v, []string{"/usr/local/bin/my-notifier"}) {
+		t.Fatalf("notify after re-running Setup = %v, want the account's own notifier back", v)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "notify-bridge.sh")); !os.IsNotExist(err) {
+		t.Fatalf("Setup left the old notify bridge: %v", err)
 	}
 }
 
-// TestCodex_Setup_RejectsExplicitlyDisabledHooks prevents the installer from
-// reporting success when the user's active Codex configuration disables hooks.
 func TestCodex_Setup_RejectsExplicitlyDisabledHooks(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")

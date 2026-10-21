@@ -1135,6 +1135,32 @@ def test_linux_preinstall_refuses_a_downgrade_without_the_rollback_marker(tmp_pa
     assert not marker.exists()
 
 
+# A device that takes signed policy bundles refuses a package below the
+# release its confirmed bundle requires, even with the rollback marker: the
+# installed gateway's floor check exits 3. Any other answer (an older gateway
+# without the check) leaves the install to the downgrade rules above.
+@pytest.mark.parametrize(("rc", "refused"), [(3, True), (1, False), (0, False)])
+def test_linux_preinstall_refuses_a_package_below_the_bundle_release_floor(tmp_path: Path, rc: int, refused: bool) -> None:
+    host = _Host(tmp_path, gateway_rc=rc)
+    host.state.mkdir()
+    (host.state / "deployment.json").write_text('{\n  "product_version": "1.0.6"\n}\n', encoding="utf-8")
+    (host.state / "allow-downgrade").write_text("", encoding="utf-8")
+    _write_stub(host.bin, "stat", "echo 0")
+    rooting = {
+        "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+        "gateway=/opt/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
+        "/run/systemd/system": str(host.run_systemd),
+        "/run/defenseclaw-enterprise-apply-path.held": str(tmp_path / "held"),
+    }
+    script = _rooted((LINUX / "preinstall.sh").read_text(encoding="utf-8"), rooting)
+    result = host.run(script.replace("@DC_PKG_VERSION@", "1.0.5"), "2")
+    assert "gateway enterprise bundle floor-check --product-version 1.0.5" in host.calls()
+    assert (result.returncode == 1) == refused, (result.stdout, result.stderr)
+    if refused:
+        assert "Nothing was changed" in result.stderr
+        assert len([c for c in host.calls() if not c.startswith("gateway ")]) == 0
+
+
 # Preremove ran uninstall with the 5 s default and exited 0
 # on busy (75), so dpkg/rpm deleted the binaries and units while machine
 # policy, per-user hooks and the running gateway still named them.

@@ -1,0 +1,56 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package cli
+
+import (
+	"runtime"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+)
+
+// bundleFloorRefusedExit is the exit code of floor-check when the package
+// version is below the confirmed bundle's release floor (or the floor cannot
+// be read). The package scripts refuse only on this code, so an older
+// gateway without the command does not block an install.
+const bundleFloorRefusedExit = 3
+
+// newEnterpriseBundleFloorCheckCommand is the release floor check the Linux
+// package scripts run with the installed gateway before any file is
+// replaced: a device that takes signed bundles must not go below the release
+// its confirmed bundle requires (min_product_version).
+func newEnterpriseBundleFloorCheckCommand() *cobra.Command {
+	var version string
+	cmd := &cobra.Command{
+		Use:          "floor-check",
+		Short:        "Check a package version against the confirmed bundle's release floor (package scripts)",
+		Hidden:       true,
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if strings.TrimSpace(version) == "" {
+				return bundleUsage("--product-version is required")
+			}
+			if bundleSecureClient() || !bundleManagedDevice() {
+				return nil
+			}
+			env, err := newUnixLifecycleEnv(runtime.GOOS)
+			if err != nil {
+				return withExitCode(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}, bundleFloorRefusedExit)
+			}
+			return withExitCode(env.BundleProductFloorRefusal(strings.TrimSpace(version)), bundleFloorRefusedExit)
+		},
+	}
+	cmd.Flags().StringVar(&version, "product-version", "", "the DefenseClaw version about to be installed")
+	cmd.SetFlagErrorFunc(lifecycleFlagError)
+	return cmd
+}
