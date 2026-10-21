@@ -220,6 +220,27 @@ def test_group_coverage_conditional_password_allow_for_members_is_not_partial(mo
     rules[2]["priority"] = 3
     assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U1"]}).problems == 1
 
+def test_group_coverage_follows_members_a_group_deny_leaves_out(monkeypatch, capsys):
+    """A deny for the group decides only for the members it does not exclude."""
+    rules = [_rule("deny engineering", 1, {"groups": {"include": ["G1"]}, "users": {"exclude": ["U1", "U2"]}}, "DENY"),
+             _rule("group allow", 2, {"groups": {"include": ["G1"]}})]
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"]}).problems == 0
+    assert "password-only sign-on covers group engineering" in capsys.readouterr().out
+    # Every member left out through another group, or a deny for everyone.
+    rules[0]["conditions"]["people"] = {"groups": {"include": ["G1"], "exclude": ["G2"]}}
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U1", "U2"]}).problems == 0
+    rules[0]["conditions"]["people"] = {"users": {"exclude": ["U1", "U2"]}}
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"]}).problems == 0
+    capsys.readouterr()
+    # A member the deny still matches.
+    rules[0]["conditions"]["people"] = {"groups": {"include": ["G1"], "exclude": ["G2"]}}
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U1"]}).problems == 1
+    assert "rule 'deny engineering' applies another sign-on to some members" in capsys.readouterr().out
+    # A deny that leaves out no member decides for the group.
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U3"]}).problems == 1
+    assert "no active password-only ALLOW rule covers group engineering" in capsys.readouterr().out
+
+
 def test_signon_refuses_policy_assigned_to_another_app(monkeypatch):
     monkeypatch.setattr(okta, "find_ldap_app", lambda client: {"id": "ldap"})
     monkeypatch.setattr(okta, "find_user", lambda client, login: {"id": "bind"})

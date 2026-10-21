@@ -459,6 +459,17 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
                 if unrestricted or not password_allow:
                     settled |= matched
                 continue
+            if not password_allow and (excluded_users or excluded_groups):
+                # A deny or a stronger challenge for the whole group decides
+                # only for the members it does not leave out; the others
+                # reach the rules after it.
+                remaining = members_of(group["id"]) - settled
+                matched = rule_members(group["id"], set(), set(), excluded_users, excluded_groups) & remaining
+                if remaining and matched != remaining:
+                    if matched:
+                        group_partial[name].append(f"rule '{rule.get('name')}' applies another sign-on to some members")
+                        settled |= matched
+                    continue
             if unrestricted or not password_allow:
                 group_covered[name] = password_allow and unrestricted
                 group_decided[name] = True
