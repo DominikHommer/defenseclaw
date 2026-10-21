@@ -1,87 +1,15 @@
 ---
-title: AI Discovery
-description: Find AI agents, installed local models, running model servers, MCP servers, skills, and providers on the host, and see which of them actually ran. DefenseClaw runs a continuous fingerprinting scanner and three runtime detection planes in the gateway, plus defenseclaw agent discover for an instant connector inventory.
+title: AI Discovery reference
+description: Discovery categories, local model inventory, continuous-scan knobs, signature packs, IDE plugin inventory, AIBOM, runtime planes per OS and data destinations.
 keywords:
-  - DefenseClaw AI discovery
-  - defenseclaw agent discover
-  - AI inventory
-  - AIBOM
-  - shadow AI
-  - AI bill of materials
-  - ai_discovery event
-  - defenseclaw aibom
-  - AI discovery runtime planes
-  - shadow AI egress
-  - agent kill chain
+  - AI discovery
+  - agent usage
+  - signature packs
+  - IDE plugin inventory
+  - runtime planes
 ---
 
-Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is installed or running on this machine?"* AI Discovery is the inventory pipeline that answers it.
-
-<DefenseClawDemo scenario="ai-discovery-evidence" />
-
-## What you just saw
-
-Connector configuration, process, MCP, package, provider-domain, and environment-variable-name signals were classified and deduplicated into one sanitized inventory record. Discovery reports evidence and confidence; it does not prove that every detected component is active or safe.
-
-![DefenseClaw TUI AI Discovery panel: a local GGUF model in the Local models table, and Codex, Claude Code and npm and PyPI AI SDK dependencies in the AI products and tools table](/images/tui/ai-discovery.png)
-
-The TUI's **AI Discovery** panel (press `V`, above) shows the same inventory this page documents. Local models get their own table above the agents and tools, so long model IDs do not crowd the main table.
-
-<Cards>
-  <Card title="Continuous discovery" description="Go sidecar scanner. Fingerprints local AI artifacts, emits ai_discovery events on new / changed / gone." />
-  <Card title="On-demand discovery" description="defenseclaw agent discover. Operator-side path scan that lists every connector and its install state." />
-  <Card title="AIBOM" description="defenseclaw aibom scan. Connector inventory of skills, plugins, MCP servers, agents, tools, models, memory." />
-  <Card title="Registry" description="defenseclaw registry. Catalog-based admission for skills and MCP servers from corporate, smithery, git, or Clawhub manifests." />
-  <Card title="Runtime planes" description="defenseclaw agent discovery runtime. Three in-gateway planes that observe what actually ran: inference compute, per-process egress, and agent actions." />
-  <Card title="IDE plugin inventory" href="#ide-plugin-inventory" description="defenseclaw agent ide-plugins. Every extension and plugin in VS Code and its forks, JetBrains, Visual Studio, Zed, Eclipse and Neovim, per user, with enabled state and an AI flag." />
-</Cards>
-
-The six are independent — you can run any subset. Most teams start with `defenseclaw agent discover` to see what's there, then turn on continuous discovery in the gateway, then add AIBOM for compliance evidence, then read the IDE plugin inventory per user, then enable the runtime planes to find out which of the inventory was ever actually used.
-
-## Run it now: 30-second tour
-
-```bash
-defenseclaw agent discover
-```
-
-That's it. The CLI walks the known connector paths (OpenClaw, ZeptoClaw,
-Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI,
-OpenHands, Antigravity, Hermes, OpenCode, Amp, Kiro, OmniGent), checks for config files
-and binaries, probes versions under the configured trusted-prefix policy, and
-prints a table of what's installed.
-
-Add `--json` for machine-readable output. Sanitized telemetry emission is
-best-effort and **enabled by default**; use `--no-emit-otel` for a strictly
-local run, or `--require-otel` when an unreachable gateway must fail the
-command:
-
-```bash
-defenseclaw agent discover --json
-defenseclaw agent discover --json --no-emit-otel
-defenseclaw agent discover --require-otel
-```
-
-## Where discovery data goes
-
-<Flow
-  direction="LR"
-  compact
-  caption="The two CLI commands run when you call them. The continuous scan (every 5 minutes by default) and the runtime planes run inside the gateway. The gateway records everything in the local audit log and exports it to your telemetry. The Registry is not a discovery source: it decides what is allowed."
->
-  <Node id="rt" kind="generic" tag="in the gateway">{`What actually ran\nruntime planes`}</Node>
-  <Node id="cont" kind="generic" tag="in the gateway">{`AI on the host\ncontinuous scan`}</Node>
-  <Node id="bom" kind="operator" tag="CLI, on demand">{`Agent assets\naibom scan`}</Node>
-  <Node id="disc" kind="operator" tag="CLI, on demand">{`Installed agents\nagent discover`}</Node>
-  <Node id="gateway" kind="gateway">{`Gateway\nchecks and records`}</Node>
-  <Node id="sinks" kind="datastore">{`Your telemetry\nOTLP, Splunk`}</Node>
-  <Node id="audit" kind="datastore">{`Audit log\nlocal SQLite`}</Node>
-  <Edge from="rt" to="gateway" label="reports" />
-  <Edge from="cont" to="gateway" label="reports" />
-  <Edge from="bom" to="gateway" label="sends" />
-  <Edge from="disc" to="gateway" label="sends" />
-  <Edge from="gateway" to="sinks" label="exports" />
-  <Edge from="gateway" to="audit" label="records" />
-</Flow>
+What AI Discovery finds, where it looks, and what it sends. For the overview see [AI Discovery](/docs/features/ai-discovery). For a quick tour see [Find AI on this machine](/docs/how-to/scanning/find-ai-on-this-machine).
 
 ## What gets discovered
 
@@ -89,7 +17,7 @@ The continuous scanner in the gateway classifies every signal into one of the wi
 
 | Category | What it surfaces |
 | --- | --- |
-| `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, Kiro, OmniGent |
+| `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, Antigravity, Hermes, OpenCode, Amp, Kiro |
 | `ai_cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
 | `active_process` | Running processes whose name matches a catalog entry — agent CLIs, local model servers such as Ollama or vLLM, and AI desktop apps |
 | `editor_extension` | AI extensions and plugins in VS Code and its forks, JetBrains IDEs, Visual Studio, Zed and Vim/Neovim. The full list of every plugin, AI or not, is the [IDE plugin inventory](#ide-plugin-inventory) |
@@ -697,6 +625,8 @@ The CLI has two distinct discovery paths. `agent discover` runs a connector inve
 defenseclaw agent discover --json --emit-otel
 ```
 
+Sanitized telemetry is best-effort and on by default. `--no-emit-otel` keeps a run strictly local. `--require-otel` fails the command when the gateway is unreachable.
+
 Checks every connector DefenseClaw knows. The local `--json` output has an
 `agents` object with one entry per connector (`{"agents": {"codex": {...}, ...}}`),
 plus `scanned_at` and the telemetry result. Each entry has:
@@ -816,7 +746,7 @@ complete BOM:
     "schema_version": 7,
     "content_hash": "8c3a000000000000000000000000000000000000000000000000000000000000",
     "generation": 0,
-    "binary_version": "1.0.0"
+    "binary_version": "<version>"
   },
   "skills": [
     {
@@ -827,7 +757,7 @@ complete BOM:
         "schema_version": 7,
         "content_hash": "8c3a000000000000000000000000000000000000000000000000000000000000",
         "generation": 0,
-        "binary_version": "1.0.0"
+        "binary_version": "<version>"
       }
     }
   ],
@@ -968,7 +898,7 @@ On macOS, enhanced discovery respects the operating system's Transparency, Conse
 
 The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`; the gateway prunes scans older than `observability.local.retention_days` (seven days by default) and always keeps the latest scan. Records sent to a destination follow that destination's redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired `privacy.disable_redaction` setting no longer turns redaction off.
 
-## Runtime planes: what actually ran
+## Runtime planes
 
 Everything above establishes **presence and identity**. It deliberately does
 not prove that a detected component is active — an inventory that quietly
@@ -981,7 +911,7 @@ a sequence of host actions add up to a chain?
 | Question | Answered by |
 | --- | --- |
 | What AI is **present**? | Discovery / AIBOM |
-| What AI is **allowed**? | [Registry](/docs/scanning/registries) |
+| What AI is **allowed**? | [Registries](/docs/reference/registries) |
 | What AI **actually ran, and where did it send data**? | Runtime planes |
 
 Neither half produces the interesting pair alone. *Present but never running*
@@ -1270,7 +1200,7 @@ to that Tetragon. `observe` records file opens of credential, persistence and
 agent-configuration paths and connects per binary. `enforce` lets two fixed
 controls deny, only after an administrator approves them. Hooks and
 OpenShell keep their roles; see
-[Agent segmentation, visibility and enforcement](/docs/segmentation). The
+[Agent segmentation, visibility and enforcement](/docs/appendix/coverage-by-layer). The
 setup, the readiness check and the pause runbook are on
 [Tetragon on a Linux fleet](/docs/enterprise/tetragon),
 and the settings are under
@@ -1291,7 +1221,7 @@ root-only and grants control of kernel policy. `defenseclaw doctor` and
 Tetragon serves its API on a TCP port.
 
 Only a managed Linux gateway reports a Tetragon backend, and the managed Linux
-packages ship no `defenseclaw` command line or TUI in this release (the
+packages ship no `defenseclaw` command line or TUI (the
 per-user installer refuses to run on a managed computer). So the TUI Runtime
 panel, `agent discovery runtime status` and `defenseclaw doctor` have no
 managed Tetragon lines. The administrator's surfaces are the Go commands
@@ -1503,65 +1433,7 @@ header beside the finding count, because a reader who sees only the count
 cannot tell a quiet host from a blind sensor. `Enter` opens a finding, which
 renders a kill chain as a sequence rather than a set, and always states the
 inventory verdict including `unobserved`. Neither shows Tetragon: only a
-managed Linux gateway reports it, the managed Linux packages ship no TUI in
-this release (see
+managed Linux gateway reports it, the managed Linux packages ship no TUI (see
 [Plane C on managed Linux](#plane-c-on-managed-linux-tetragon)), and the macOS
 app manages only the Mac's own gateway.
 
-## Use it alongside Registry
-
-Discovery tells you *what's there*. The [Registry](/docs/scanning/registries)
-tells you *what's approved*, and the [block and allow lists](/docs/policies/admission)
-say what is never or always allowed. The runtime planes tell you *what actually ran*.
-
-A common production pattern:
-
-<Steps>
-  <Step>
-    Run `agent discover` and `aibom scan` to baseline connector assets. With continuous discovery enabled, run `agent usage --refresh --category local_model` to add installed and loaded local models to that baseline.
-  </Step>
-  <Step>
-    Promote the entries you trust into your registry: `defenseclaw registry sync --all` after curating the manifests.
-  </Step>
-  <Step>
-    Flip on registry-required mode with enforcement: `defenseclaw registry require --type skill --enabled --enforce`. `--enforce` turns on `asset_policy.enabled` and sets `asset_policy.mode` to `action`; without it the requirement is recorded but nothing is blocked. Now a new skill that the registry doesn't list is blocked by the install watcher when it appears.
-  </Step>
-  <Step>
-    Approve specific entries as you go: `defenseclaw registry approve <source-id> <entry-name> --type skill` (or `--type mcp`). Approval is per entry, not per source — the source ID identifies the registry, and the entry name picks one cached skill or MCP server inside it. Discovery + admission are now closed-loop.
-  </Step>
-  <Step>
-    Keep a short list of names you never want, whatever a catalog says: `defenseclaw skill block <name>` or `defenseclaw mcp block <name>`. These write `asset_policy` `denied` rules, which apply even when asset policy is off. See [Admission and the block/allow list](/docs/policies/admission).
-  </Step>
-</Steps>
-
-## Common workflows
-
-<Accordions>
-  <Accordion title="Audit shadow AI on a developer laptop">
-    `defenseclaw agent discover --json | jq '[.agents[] | select(.installed)]'` inventories connectors without a gateway. To include standalone models downloaded by known and unknown macOS applications, enable continuous discovery in `enhanced` mode and run `defenseclaw agent usage --refresh --category local_model --detail`.
-  </Accordion>
-  <Accordion title="Trigger a fresh scan after onboarding a tool">
-    `defenseclaw agent discovery scan`. Faster than waiting for the next scheduled rescan, and fires `ai_discovery` events for the new artifacts so your dashboards reflect the install immediately.
-  </Accordion>
-  <Accordion title="Build an SBOM-shaped artifact for a release">
-    `defenseclaw aibom scan --json > aibom.json`. The provenance
-    `content_hash` is stable while the active DefenseClaw configuration and
-    policy files are unchanged. Hash or sign the complete exported file
-    separately when CI needs BOM-content integrity.
-  </Accordion>
-  <Accordion title="My internal connector is mis-detected as `unknown`">
-    Two options: (1) author a custom signature pack and `defenseclaw agent signatures install ./my-pack` so continuous discovery learns it, or (2) run `defenseclaw agent confidence policy validate ./policy.yaml` and adjust the weights so the existing detectors score it correctly.
-  </Accordion>
-  <Accordion title="Discovery is too noisy on this host">
-    Switch automatic model coverage to `passive`, or reduce broad workspace traversal: `defenseclaw agent discovery enable --mode passive --scan-roots ~/work --no-include-shell-history --no-include-network-domains`. Known model stores remain additive to `scan_roots`; on shared dev hosts you may also want to disable package-manifest discovery with `--no-include-package-manifests`.
-  </Accordion>
-</Accordions>
-
-## See also
-
-- [Observability](/docs/observability) — where the discovery events actually surface
-- [Splunk](/docs/observability/splunk) — the AI Discovery Inventory dashboard
-- [Capability Matrix](/docs/connectors/capability-matrix) — what hooks each discovered connector exposes
-- [Setup → Skill Scanner](/docs/scanning/skill-scanner) and [MCP Scanner](/docs/scanning/mcp-scanner) — what to do *with* discovered skills and MCP servers
-- [Reference → CLI](/docs/reference/cli) — full flag surface for `agent`, `aibom`, `registry`
-- [Reference → Redaction](/docs/observability/redaction) — which field classes govern argv and provider hostnames
