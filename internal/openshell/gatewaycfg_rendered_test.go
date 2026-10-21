@@ -283,6 +283,62 @@ func TestReadRenderedGateway(t *testing.T) {
 	}
 }
 
+// An account's own docker gateway in OpenShell's shared default namespace
+// drifts from the render, which keeps the managed gateways' sandboxes in
+// ManagedDockerNamespace: each start of such a gateway removes the
+// supervisors of other accounts' sandboxes in that namespace.
+func TestGatewayDriftNamesTheSharedDockerNamespace(t *testing.T) {
+	want := RenderedGateway{BindAddress: "127.0.0.1:17670", ComputeDriver: DriverDocker, TelemetryEnabled: true}
+	base := "[openshell]\nversion = 2\n[openshell.gateway]\nbind_address = \"127.0.0.1:17670\"\ncompute_driver = \"docker\"\n"
+	for _, tc := range []struct {
+		name, label string
+		bridge      bool
+		drift       bool
+	}{
+		{"unset label", "", false, true},
+		{"default label", "default", false, true},
+		{"managed label", ManagedDockerNamespace, false, false},
+		{"own label", AccountDockerNamespace(1500), false, false},
+		{"1.0.1 bridge", "", true, false},
+	} {
+		dir := t.TempDir()
+		toml := base
+		if tc.label != "" {
+			toml += "[openshell.drivers.docker]\nsandbox_label = \"" + tc.label + "\"\n"
+		}
+		if err := os.WriteFile(filepath.Join(dir, GatewayTOMLFile), []byte(toml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		st, err := (&GatewayConfigurator{Dir: dir, GOOS: "linux"}).Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := want
+		w.DefaultDockerNamespaceBridge = tc.bridge
+		got := false
+		for _, d := range st.Drift(w) {
+			if d.Field == "Docker sandbox namespace" {
+				got = true
+			}
+		}
+		if got != tc.drift {
+			t.Errorf("%s: namespace drift = %t, want %t (%v)", tc.name, got, tc.drift, st.Drift(w))
+		}
+	}
+	// The render read back says which namespace it keeps.
+	for _, bridge := range []bool{false, true} {
+		r := RenderedGateway{BindAddress: "127.0.0.1:17670", ComputeDriver: DriverDocker, DefaultDockerNamespaceBridge: bridge}
+		data, err := r.TOML()
+		if err != nil {
+			t.Fatal(err)
+		}
+		back, err := ParseRenderedGateway(data, nil)
+		if err != nil || back.DefaultDockerNamespaceBridge != bridge {
+			t.Fatalf("bridge %t read back as %+v, %v", bridge, back, err)
+		}
+	}
+}
+
 func TestGatewayDriftNamesEverySettingThatDiffers(t *testing.T) {
 	want := RenderedGateway{BindAddress: "127.0.0.1:17670", ComputeDriver: DriverVM, VMSandboxUID: 1500, VMSandboxGID: 1500}
 	dir := t.TempDir()
