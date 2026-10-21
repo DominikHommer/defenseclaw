@@ -775,6 +775,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err := lingeringStartRefusal(rec.Name, gw.Driver, sb, rec.PhaseReason, req.EndVM); err != nil {
 		return err
 	}
+	// A sandbox an OpenShell before 0.1.5 created keeps a Docker bootstrap
+	// that 0.1.5 cannot read (GAP-0300): it moves to 0.1.5's format first.
+	if err := m.migrateBootstrap(gw, rec.Name, sb); err != nil {
+		return err
+	}
 	m.endSessionUnblocks(b)
 	eff, violations, err := m.resolveBoxViolations(b)
 	if err != nil {
@@ -920,6 +925,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+		if e := legacyBootstrapRefusal(rec.Name, gw.Version, err); e != nil {
+			return e
+		}
 		if e := m.errorPhaseRefusal(rec.Name, rec.PhaseReason, rec.Driver, err); e != nil {
 			return e
 		}

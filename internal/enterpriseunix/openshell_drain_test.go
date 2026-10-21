@@ -41,9 +41,10 @@ import (
 // (stop-sandboxes skips a completed one) was ended with the gateway, its
 // MicroVM with no flush. Every change that stops the gateway (the pin
 // migration's switch, sandboxes turned off) now runs under the account's
-// drain: the drain checks again under the account's lifecycle lock, and a
-// refusal keeps the change waiting, with nothing stopped. Once the drain
-// holds, the units stop inside it, and it is let go after.
+// drain, after the account's daemon and its socket are stopped: the drain
+// checks again under the account's lifecycle lock, and a refusal keeps the
+// change waiting, with the gateway untouched. Once the drain holds, the
+// units stop inside it, and it is let go after.
 func TestAWaitingSwitchChecksAgainUnderTheAccountsDrain(t *testing.T) {
 	old := map[string]any{"install": "setup", "driver": "vm", "version": "0.1.3"}
 	h := newOSHost(t, "linux")
@@ -65,7 +66,7 @@ func TestAWaitingSwitchChecksAgainUnderTheAccountsDrain(t *testing.T) {
 		return r
 	}
 	r := ensure()
-	if containsLine(r.Changes, "switched the sandbox setup of alice") || len(h.ops.stopped()) != 0 {
+	if containsLine(r.Changes, "switched the sandbox setup of alice") || strings.Join(h.ops.stopped(), ",") != "alice:daemon+socket" {
 		t.Fatalf("switched under a MicroVM started after the status: changes %v, stops %v", r.Changes, h.ops.stopped())
 	}
 	entry, waiting := h.env.loadOpenShellState().Pending[fmt.Sprint(h.alice.UID)]
@@ -75,7 +76,7 @@ func TestAWaitingSwitchChecksAgainUnderTheAccountsDrain(t *testing.T) {
 	if w := messagesOf(r.Warnings, codeSandboxPending); !strings.Contains(w, "the switch change for alice waits") {
 		t.Errorf("warnings = %v", r.Warnings)
 	}
-	if !slices.Equal(h.ops.order, []string{"drain refused alice"}) {
+	if !slices.Equal(h.ops.order, []string{"stop alice:daemon+socket", "drain refused alice"}) {
 		t.Fatalf("order = %v", h.ops.order)
 	}
 
@@ -85,7 +86,7 @@ func TestAWaitingSwitchChecksAgainUnderTheAccountsDrain(t *testing.T) {
 	if !containsLine(r.Changes, `switched the sandbox setup of alice (version "0.1.3" -> "`+openshell.InstallerVersion+`")`) {
 		t.Fatalf("changes = %v", r.Changes)
 	}
-	if !slices.Equal(h.ops.order, []string{"drain alice", "stop alice:daemon+gateway", "release alice"}) {
+	if !slices.Equal(h.ops.order, []string{"stop alice:daemon+socket", "drain alice", "stop alice:daemon+gateway", "release alice"}) {
 		t.Fatalf("order = %v", h.ops.order)
 	}
 
@@ -96,13 +97,124 @@ func TestAWaitingSwitchChecksAgainUnderTheAccountsDrain(t *testing.T) {
 	h2.ops.status[h2.alice.UID] = SandboxStatus{Active: true}
 	h2.ops.onDrain = func(SandboxAccount) error { return errors.New("gateway openshell: a sandbox is starting") }
 	requireOK(t, h2.ensure(sandboxConfig(t, "linux", false, on)))
-	if entry := h2.env.loadOpenShellState().Pending[fmt.Sprint(h2.alice.UID)]; entry.Kind != "stop" || len(h2.ops.stopped()) != 0 {
+	if entry := h2.env.loadOpenShellState().Pending[fmt.Sprint(h2.alice.UID)]; entry.Kind != "stop" || strings.Join(h2.ops.stopped(), ",") != "alice:daemon+socket" {
 		t.Fatalf("pending = %+v, stops %v", entry, h2.ops.stopped())
 	}
 	h2.ops.onDrain, h2.ops.order = nil, nil
 	requireOK(t, h2.ensure(sandboxConfig(t, "linux", false, on)))
-	if !slices.Equal(h2.ops.order, []string{"drain alice", "stop alice:daemon+gateway+socket", "release alice"}) {
+	if !slices.Equal(h2.ops.order, []string{"stop alice:daemon+socket", "drain alice", "stop alice:daemon+gateway+socket", "release alice"}) {
 		t.Fatalf("order = %v", h2.ops.order)
+	}
+}
+
+// oldDaemon models what runs as an account around a managed change: its
+// sandbox daemon, started by DefenseClaw 1.0.3 before the package upgrade
+// and still running it, which takes no lifecycle lock; the socket, which
+// starts a daemon of the installed DefenseClaw (one that takes it); the
+// drain's lock; and the MicroVMs on the gateway that a stop-sandboxes
+// leaves running (one that started and completed: it holds the gateway).
+// At its race-th step (each Stop, the drain before and after its check,
+// the release), something starts a sandbox through the daemon: the old
+// daemon starts it whatever the lock, the installed one only while no
+// drain holds. A stop of the gateway ends the MicroVMs left with no flush.
+type oldDaemon struct {
+	race, step     int
+	legacyUp       bool
+	held           bool
+	lingering      int
+	lost, refused  int
+	startedByOld   bool
+	stoppedGateway bool
+}
+
+func (d *oldDaemon) tick(op string) {
+	d.step++
+	if op == "drained" {
+		d.held = true
+	}
+	if d.step == d.race {
+		switch {
+		case d.legacyUp:
+			d.lingering++
+			d.startedByOld = true
+		case !d.held:
+			d.lingering++
+		default:
+			d.refused++
+		}
+	}
+	if op == "release" {
+		d.held = false
+	}
+	if strings.Contains(op, "daemon") {
+		d.legacyUp = false
+	}
+	if strings.Contains(op, "gateway") {
+		d.lost += d.lingering
+		d.lingering = 0
+		d.stoppedGateway = true
+	}
+}
+
+// TestAManagedChangeStopsTheGatewayOnlyOnceNoOldDaemonCanStartAnything:
+// the drain held the account's lifecycle lock, but a sandbox daemon that
+// DefenseClaw 1.0.3 started before the package upgrade does not take it:
+// right after the drain's check it could start a MicroVM through its live
+// socket, and the gateway's stop then ended that MicroVM with no flush
+// (the units were stopped together, after the check). Now the daemon and
+// its socket stop first, whatever release the daemon runs; the drain
+// checks after that, and the gateway stops while the drain holds the
+// starts back. For every step at which something starts a sandbox, for
+// the pin switch and for sandboxes turned off, no MicroVM is lost: a
+// sandbox started before the check makes the change wait, and none can
+// start after it.
+func TestAManagedChangeStopsTheGatewayOnlyOnceNoOldDaemonCanStartAnything(t *testing.T) {
+	for _, kind := range []string{"switch", "stop"} {
+		for race := 0; race <= 6; race++ {
+			t.Run(fmt.Sprintf("%s/race at step %d", kind, race), func(t *testing.T) {
+				h := newOSHost(t, "linux")
+				var cfg []byte
+				switch kind {
+				case "switch":
+					old := map[string]any{"install": "setup", "driver": "vm", "version": "0.1.3"}
+					requireOK(t, h.ensure(sandboxConfig(t, "linux", true, old)))
+					st := h.env.loadOpenShellState()
+					st.Applied.Version = "0.1.3"
+					if err := h.env.saveOpenShellState(st); err != nil {
+						t.Fatal(err)
+					}
+					h.installTarballFiles(t, h.alice, "0.1.3")
+					cfg = sandboxConfig(t, "linux", true, old)
+				case "stop":
+					on := map[string]any{"install": "setup", "driver": "vm", "version": "0.1.5"}
+					requireOK(t, h.ensure(sandboxConfig(t, "linux", true, on)))
+					cfg = sandboxConfig(t, "linux", false, on)
+				}
+				h.ops.status[h.alice.UID] = SandboxStatus{Active: true}
+				d := &oldDaemon{race: race, legacyUp: true}
+				h.ops.order = nil
+				h.ops.onOp = func(_ SandboxAccount, op string) { d.tick(op) }
+				h.ops.onDrain = func(SandboxAccount) error {
+					if d.lingering > 0 {
+						return fmt.Errorf("%w (%d MicroVM run as this account, which the gateway's stop would end with no flush); stop them, then try again",
+							openshell.ErrUnflushed, d.lingering)
+					}
+					return nil
+				}
+				r := h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.4"), ConfigFile: writeTempConfig(t, cfg)})
+				requireOK(t, r)
+				if d.lost != 0 {
+					t.Fatalf("the gateway's stop ended %d MicroVM(s) with no flush (an old daemon started one: %v); order %v", d.lost, d.startedByOld, h.ops.order)
+				}
+				_, waiting := h.env.loadOpenShellState().Pending[fmt.Sprint(h.alice.UID)]
+				if waiting == d.stoppedGateway {
+					t.Fatalf("waiting %v, gateway stopped %v; order %v", waiting, d.stoppedGateway, h.ops.order)
+				}
+				if !waiting && !slices.Equal(h.ops.order[:2], []string{"stop alice:daemon+socket", "drain alice"}) {
+					t.Fatalf("order = %v", h.ops.order)
+				}
+			})
+		}
 	}
 }
 

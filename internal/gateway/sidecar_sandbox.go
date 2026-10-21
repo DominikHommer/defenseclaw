@@ -304,6 +304,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		GatewayResources:   manager.GatewayConfigResources(""),
 		VMDiskFree:         manager.GatewayVMDiskFree(""),
 		StartLock:          func() (func(), error) { return openshell.LockSandboxStart("") },
+		MigrateBootstrap:   migrateDockerBootstrap,
 		OnGateway:          rt.gatewayState,
 		Listeners:          rt.listenersReady,
 		DiscoveryRemoved:   discoveryRemoved,
@@ -760,4 +761,15 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 		return err
 	}
 	return nil
+}
+
+// migrateDockerBootstrap is the sandbox manager's MigrateBootstrap: the
+// account's OpenShell gateway keeps its Docker sandboxes' bootstrap in the
+// account's state folder (openshell.UserStateHome).
+func migrateDockerBootstrap(sandboxID string) ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	return openshell.MigrateDockerBootstrap(openshell.UserStateHome(os.Getenv, home), sandboxID)
 }

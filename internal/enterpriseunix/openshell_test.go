@@ -59,6 +59,19 @@ type fakeSandboxOps struct {
 	// order they ran.
 	onDrain func(SandboxAccount) error
 	order   []string
+	// onOp sees every Stop (as "stop <units>"), the drain before its check
+	// ("drain") and once it holds ("drained"), and every release, as each
+	// begins.
+	onOp func(a SandboxAccount, op string)
+}
+
+func (f *fakeSandboxOps) op(a SandboxAccount, op string) {
+	f.mu.Lock()
+	hook := f.onOp
+	f.mu.Unlock()
+	if hook != nil {
+		hook(a, op)
+	}
 }
 
 func (f *fakeSandboxOps) Accounts(context.Context) []SandboxAccount { return f.accounts }
@@ -70,8 +83,6 @@ func (f *fakeSandboxOps) Status(_ context.Context, a SandboxAccount) (SandboxSta
 }
 
 func (f *fakeSandboxOps) Stop(_ context.Context, a SandboxAccount, scope StopScope) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	var parts []string
 	for _, item := range []struct {
 		scope StopScope
@@ -81,6 +92,9 @@ func (f *fakeSandboxOps) Stop(_ context.Context, a SandboxAccount, scope StopSco
 			parts = append(parts, item.name)
 		}
 	}
+	f.op(a, "stop "+strings.Join(parts, "+"))
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.stops = append(f.stops, a.Name+":"+strings.Join(parts, "+"))
 	f.events = append(f.events, "stop "+a.Name)
 	f.order = append(f.order, "stop "+a.Name+":"+strings.Join(parts, "+"))
@@ -88,6 +102,7 @@ func (f *fakeSandboxOps) Stop(_ context.Context, a SandboxAccount, scope StopSco
 }
 
 func (f *fakeSandboxOps) Drain(_ context.Context, a SandboxAccount) (func() error, error) {
+	f.op(a, "drain")
 	f.mu.Lock()
 	onDrain := f.onDrain
 	f.mu.Unlock()
@@ -99,10 +114,12 @@ func (f *fakeSandboxOps) Drain(_ context.Context, a SandboxAccount) (func() erro
 			return nil, err
 		}
 	}
+	f.op(a, "drained")
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.order = append(f.order, "drain "+a.Name)
 	return func() error {
+		f.op(a, "release")
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.order = append(f.order, "release "+a.Name)
@@ -349,7 +366,7 @@ func TestSandboxOffInstallsNothingAndOffRemovesEverything(t *testing.T) {
 			t.Errorf("%s stays after sandboxes were turned off", path)
 		}
 	}
-	if got := h.ops.stopped(); len(got) != 1 || got[0] != "alice:daemon+gateway+socket" {
+	if got := strings.Join(h.ops.stopped(), ","); got != "alice:daemon+socket,alice:daemon+gateway+socket" {
 		t.Errorf("accounts were stopped as %v", got)
 	}
 }
@@ -691,7 +708,7 @@ func TestSandboxTransitions(t *testing.T) {
 		h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: 0}
 		r = h.ensure(sandboxConfig(t, "linux", true, vm))
 		requireOK(t, r)
-		if got := h.ops.stopped(); len(got) != 1 || got[0] != "alice:daemon+gateway" {
+		if got := strings.Join(h.ops.stopped(), ","); got != "alice:daemon+socket,alice:daemon+gateway" {
 			t.Fatalf("stops = %v", got)
 		}
 		if len(h.ops.teardowns) != 0 {

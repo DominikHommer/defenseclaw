@@ -135,7 +135,8 @@ type StopScope int
 
 const (
 	// StopDaemon stops the sandbox daemon only; its socket keeps listening
-	// and the launcher starts the daemon again on the next command.
+	// and the launcher starts the daemon again on the next command (it
+	// starts a stopped socket too).
 	StopDaemon StopScope = 1 << iota
 	// StopGateway stops the account's OpenShell gateway unit (setup mode).
 	StopGateway
@@ -492,8 +493,7 @@ func (o *commandUserOps) Stop(ctx context.Context, a SandboxAccount, scope StopS
 				continue
 			}
 			res, err := e.Runner.Run(ctx, "launchctl", "bootout", domain+"/"+item.label)
-			// An agent that is not loaded is stopped already.
-			if err != nil && !launchdNotLoaded(err) && !strings.Contains(string(res.Stderr), "Could not find") && !strings.Contains(string(res.Stderr), "No such process") {
+			if err != nil && !bootoutNotLoaded(res, err) {
 				errs = append(errs, err)
 			}
 		}
@@ -520,6 +520,12 @@ func (o *commandUserOps) Stop(ctx context.Context, a SandboxAccount, scope StopS
 		return err
 	}
 	return nil
+}
+
+// bootoutNotLoaded reports a launchctl bootout that failed because the agent
+// is not loaded: it is stopped already.
+func bootoutNotLoaded(res CommandResult, err error) bool {
+	return launchdNotLoaded(err) || strings.Contains(string(res.Stderr), "Could not find") || strings.Contains(string(res.Stderr), "No such process")
 }
 
 func (o *commandUserOps) Reload(ctx context.Context, a SandboxAccount) error {
@@ -837,9 +843,22 @@ func (e *drainHeld) Unwrap() error { return e.err }
 // drainAccount holds the account's gateway (SandboxUserOps.Drain) for a stop
 // of its units that stops its OpenShell gateway: the status check that let
 // the change go came before it, and a sandbox started since would be
-// stopped with the gateway, its MicroVM with no flush. The returned release
-// lets it go, warning when the drain ended badly.
+// stopped with the gateway, its MicroVM with no flush.
+//
+// It first stops the account's sandbox daemon and its socket, whatever
+// DefenseClaw release the daemon runs. A daemon before 1.0.4 (one an
+// upgrade left running) takes no lifecycle lock: through its socket it
+// could start a sandbox after the drain's check, and the gateway's stop
+// would end that one with no flush. A daemon that starts again (the
+// socket or the launcher starts it on the next command) runs the
+// installed DefenseClaw, which the drain's lock holds back, and the drain
+// checks after the daemon is down, so it sees what the old daemon started
+// before. The returned release lets the drain go, warning when it ended
+// badly.
 func (l *lifecycle) drainAccount(ctx context.Context, ops SandboxUserOps, a SandboxAccount) (release func(), err error) {
+	if err := ops.Stop(ctx, a, StopDaemon|StopSocket); err != nil {
+		return nil, fmt.Errorf("stop the sandbox daemon of %s before its gateway: %w", a.Name, err)
+	}
 	done, err := ops.Drain(ctx, a)
 	if err != nil {
 		return nil, &drainHeld{err: err}
@@ -854,7 +873,9 @@ func (l *lifecycle) drainAccount(ctx context.Context, ops SandboxUserOps, a Sand
 // performAccountChange applies one waiting change to an account that runs no
 // sandbox. A change that stops the account's OpenShell gateway (a LaunchAgent
 // reload, a stop, a switch) does so only under the account's drain
-// (drainAccount).
+// (drainAccount), once its sandbox daemon is down. The stops under it name
+// the daemon again: one the socket or the launcher started since runs the
+// installed DefenseClaw, which the drain held back.
 func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps, a SandboxAccount, entry pending, active bool, cur *openshellApplied) error {
 	switch entry.Kind {
 	case "launchd":
@@ -899,8 +920,8 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 			// (it never used sandboxes): nothing to stop, replace or report.
 			return nil
 		}
-		// Held until the previous setup is gone: the daemon's socket keeps
-		// listening, and a start in between would run on it.
+		// Held until the previous setup is gone: a daemon the socket or the
+		// launcher starts in between would run on it.
 		release, err := l.drainAccount(ctx, ops, a)
 		if err != nil {
 			return err
