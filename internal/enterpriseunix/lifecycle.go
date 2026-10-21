@@ -287,6 +287,23 @@ func (l *lifecycle) interrupted() bool {
 	}
 }
 
+// untilInterrupted is ctx, also cancelled when the command gets a stop
+// signal (Options.Interrupted). Call stop once it is no longer needed.
+func (l *lifecycle) untilInterrupted(ctx context.Context) (_ context.Context, stop func()) {
+	if l.opts.Interrupted == nil {
+		return ctx, func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-l.opts.Interrupted:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
 // interruptedError is the cause of a transaction rolled back for a stop
 // signal before step.
 func interruptedError(step string) error {
@@ -421,7 +438,16 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		l.reportNoSpace(err)
 		return 0
 	}
-	lock, err := env.acquireLock(ctx)
+	// A stop signal ends the wait for the lock: the run that waited could
+	// otherwise take it later and remove or change the deployment after
+	// the command was told to stop.
+	lockCtx, stopLockWait := l.untilInterrupted(ctx)
+	lock, err := env.acquireLock(lockCtx)
+	stopLockWait()
+	if err != nil && l.interrupted() {
+		r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) while it waited for the lifecycle lock; nothing was changed")
+		return 0
+	}
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
 			r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep(env.LockTimeout))
@@ -451,6 +477,10 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		return 0
 	}
 	defer lock.release()
+	if l.interrupted() {
+		r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) before it started; nothing was changed")
+		return 0
+	}
 	if l.opts.FromPackage && l.opts.Reason != "package" {
 		// Recorded before the lock goes, so a package run that waits for it
 		// writes its own result after this one.

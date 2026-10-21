@@ -618,11 +618,15 @@ func publishedDirProblem(opts Options, path string) string {
 // access ACL entry denying list or search. The repair made every one 0755,
 // so a vendor folder an administrator kept at 0700 listed its unrelated
 // files to every account, where users need only search, also on the
-// directory of a file the agent opens by name (GAP-0924). It returns the
+// directory of a file the agent opens by name (GAP-0924). Even search lets
+// any account open a file it can name, so a directory whose other files
+// grant access to the accounts it would let in is left as it is, and the
+// error (errPublishedDirExposes) names those files. It returns the
 // directories it changed.
 func restorePublishedDirs(opts Options, path string) ([]string, error) {
 	var restored []string
-	for index, dir := range publishedDirs(opts, path) {
+	dirs := publishedDirs(opts, path)
+	for index, dir := range dirs {
 		info, err := os.Lstat(dir)
 		if err != nil || !info.IsDir() {
 			continue
@@ -640,6 +644,23 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 		}
 		if stat, ok := info.Sys().(*syscall.Stat_t); !opts.SkipTrustChecks && (!ok || !trustedOwner(stat.Uid)) {
 			continue
+		}
+		next := platformPath(opts, path)
+		if index > 0 {
+			next = dirs[index-1]
+		}
+		keep := map[string]bool{filepath.Base(next): true}
+		if listed {
+			keep[DefenseClawDropInName], keep[ClaudeVersionFloorDropInName] = true, true
+		}
+		// An ACL repair can let in named accounts and other: count both.
+		exposed, err := exposedByBroadening(dir, keep, aclProblem != "" || perm&0o010 == 0, aclProblem != "" || perm&0o001 == 0)
+		if err != nil {
+			return restored, err
+		}
+		if len(exposed) > 0 {
+			return restored, fmt.Errorf("%w: users cannot pass %s, and giving them access would also let them open %s; take the access of other accounts away from those files (chmod go-rwx) or move them out of %s, then run ensure",
+				errPublishedDirExposes, dir, strings.Join(exposed, ", "), dir)
 		}
 		if aclProblem != "" {
 			if err := clearPublishedDirACL(opts, dir, listed); err != nil {
@@ -660,6 +681,37 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 		restored = append(restored, dir)
 	}
 	return restored, nil
+}
+
+// exposedByBroadening lists the entries of dir, other than the names in
+// keep, that an account could open once dir gives search to a class that has
+// none now: an entry with any permission bit for that class. group is the
+// owning group, the named POSIX ACL entries and the mask (the group bits of
+// an entry with an ACL); other is every other account. A symbolic link is
+// not counted: the directories above its target decide who reaches it.
+func exposedByBroadening(dir string, keep map[string]bool, group, other bool) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var exposed []string
+	for _, entry := range entries {
+		if keep[entry.Name()] || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		perm := info.Mode().Perm()
+		if (other && perm&0o007 != 0) || (group && perm&0o070 != 0) {
+			exposed = append(exposed, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return exposed, nil
 }
 
 // adminOwnedLink reports a root-owned symbolic link (a link's own mode

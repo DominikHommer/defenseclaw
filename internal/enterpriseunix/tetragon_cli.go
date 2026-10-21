@@ -62,7 +62,7 @@ const guardrailActionMode = "action"
 type tetragonIntent struct {
 	// Written is false for an absent block, or one that spells out the
 	// defaults: the helper then runs on its own defaults and no drop-in is
-	// rendered.
+	// rendered, unless DefaultPlaneCOff.
 	Written bool
 	// Configured is the mode the administrator wrote (consume when unset);
 	// Mode is the one the helper runs, after the caps.
@@ -93,9 +93,10 @@ type tetragonIntent struct {
 	// PlaneC is whether AI Discovery Plane C runs.
 	PlaneC bool
 	// DefaultPlaneCOff is set when an absent (or default) block is capped
-	// at off because Plane C does not run. Reason stays "", so lifecycle
-	// status does not warn on every host without Plane C; the tetragon
-	// commands name the cap (capReason).
+	// at off because Plane C does not run. A drop-in runs the helper off,
+	// whose own default is consume. Reason stays "", so lifecycle status
+	// does not warn on every host without Plane C; the tetragon commands
+	// name the cap (capReason).
 	DefaultPlaneCOff bool
 }
 
@@ -184,9 +185,8 @@ func machinePolicyAnchors(cfg *config.Config, goos string, connectors []string) 
 
 // helperMode is the mode the helper runs with this intent, after the caps.
 // Without a drop-in the helper runs its own default, consume, which is the
-// default intent's mode; a host without Plane C runs off, also with no
-// drop-in, where status said consume (GAP-0084). Off and consume load no
-// kernel policy either way.
+// default intent's mode; a host without Plane C gets a drop-in that runs it
+// off (GAP-0084).
 func (t tetragonIntent) helperMode() string {
 	return t.Mode
 }
@@ -199,15 +199,19 @@ func (t tetragonIntent) approves(digest string) bool {
 // ack is enforce_ack as the drop-in carries it: the canonical comma list.
 func (t tetragonIntent) ack() string { return strings.Join(t.EnforceAck, ",") }
 
+// rendersDropin reports whether the helper gets a drop-in: a written block,
+// or the default one capped at off on a host without Plane C (the helper's
+// own default is consume, which status would not describe).
+func (t tetragonIntent) rendersDropin() bool { return t.Written || t.DefaultPlaneCOff }
+
 // dropin renders 30-defenseclaw-tetragon.conf, or nil when the helper's own
-// defaults say the same (an absent block, or one that spells out the
-// defaults). The header names the control-set digest this build ships, the
+// defaults say the same (rendersDropin). The header names the control-set digest this build ships, the
 // value enforce_ack approves. ENFORCE_ACK is a comma list (one digest, or
 // several while a ring upgrade runs two builds); CUSTOMER_EVENTS appears only
 // when it is not the default, MACHINE_POLICY_CONNECTORS only when it names
 // one.
 func (t tetragonIntent) dropin() []byte {
-	if !t.Written {
+	if !t.rendersDropin() {
 		return nil
 	}
 	var b strings.Builder
@@ -1018,7 +1022,7 @@ func (rep *TetragonReport) fill(env *Env, intent tetragonIntent, haveIntent bool
 		BurnIn: intent.BurnIn, EnforceAck: intent.ack(), CustomerEvents: defaultStr(intent.CustomerEvents, config.TetragonCustomerEventsAgent),
 		Approval:          approvalOf(intent),
 		EnforceConnectors: nonNil(intent.EnforceConnectors), GuardrailObserve: nonNil(intent.GuardrailObserve),
-		MachinePolicyConnectors: nonNil(intent.MachinePolicy), Dropin: intent.Written,
+		MachinePolicyConnectors: nonNil(intent.MachinePolicy), Dropin: intent.rendersDropin(),
 	}
 	rep.Helper = TetragonHelperView{
 		Unit: unitSensorHelper, Running: running, PID: state.HelperPID, Mode: string(state.Intent.Mode),
