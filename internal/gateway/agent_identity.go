@@ -52,6 +52,10 @@ type agentIdentityFacts struct {
 	// CODEX_HOME style override seen in the payload) that differs from
 	// InstallFP. It is recorded for operators and never moves the ID.
 	InstallHint string
+	// LegacyID is the identity 1.0.0 to 1.0.3 gave this agent
+	// (agentidentity.LegacyAgentID), "" when it is ID. A guardrail profile
+	// assignment may still name it (profileAgentBridge).
+	LegacyID string
 }
 
 // agentIdentityConfig is the config the gateway resolves connector config
@@ -111,7 +115,7 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 	if facts.ID == "" {
 		return agentIdentityFacts{}
 	}
-	noteDerivedLegacyAgentID(inputs)
+	facts.LegacyID = agentidentity.LegacyAgentID(inputs)
 	facts.Verified = machineVerified && user.Verified
 	if hint := claimedInstallHint(req.Payload); hint != "" &&
 		agentidentity.NormalizeInstallFP(hint) != agentidentity.NormalizeInstallFP(facts.InstallFP) {

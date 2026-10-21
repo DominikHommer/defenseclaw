@@ -128,6 +128,9 @@ var (
 	// profileAgentSource returns the request's verified agent identity
 	// (defenseclaw.agent.identity.id, agt-...).
 	profileAgentSource = requestAgentIdentity
+	// profileAgentLegacySource returns the 1.0.3 identity of the request's
+	// agent agent (requestLegacyAgentIdentity).
+	profileAgentLegacySource = requestLegacyAgentIdentity
 	// profileExplainSubjectLookup resolves the subject an administrator
 	// names to `guardrail profile explain --user`.
 	profileExplainSubjectLookup = lookupDirectoryProfileSubject
@@ -533,6 +536,25 @@ func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
 	return facts.ID, facts.Verified
 }
 
+// requestLegacyAgentIdentity is the legacy identity (1.0.0 to 1.0.3,
+// agentidentity.LegacyAgentID) of agent, the agent identity of ctx, and
+// true; "" and true for an account without a domain, whose identity did not
+// change. It derives the identity again for ctx's verified user and
+// connector, as the hook path does, and returns false when that derivation
+// is not agent. Every request derives its own: no state is kept, so none
+// can be dropped.
+func requestLegacyAgentIdentity(ctx context.Context, agent string) (string, bool) {
+	connectorName := profileRequestConnector(ctx)
+	if connectorName == "" || agent == "" {
+		return "", false
+	}
+	facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName})
+	if facts.ID == "" || !strings.EqualFold(facts.ID, agent) {
+		return "", false
+	}
+	return facts.LegacyID, true
+}
+
 // guardrailProfileInspectMiddleware resolves the profile for the inspect
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
@@ -575,12 +597,14 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 	}
 	subject, source := profileRequestSubject(ctx)
 	agent := ""
+	var legacy profileAgentLegacy
 	if source != "" && subject != nil {
 		if id, ok := profileAgentSource(ctx); ok {
 			agent = strings.TrimSpace(id)
+			legacy = func() (string, bool) { return profileAgentLegacySource(ctx, agent) }
 		}
 	}
-	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent)
+	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent, legacy)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
 		if derived, ok := set.profiles[decision.Name]; ok {
@@ -1724,7 +1748,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if source == "" {
 		agent = ""
 	}
-	decision := set.matchAgent(subject, source, connectorName, agent)
+	decision := set.matchAgent(subject, source, connectorName, agent, nil)
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match
