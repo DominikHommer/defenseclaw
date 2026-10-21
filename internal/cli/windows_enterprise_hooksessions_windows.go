@@ -45,8 +45,9 @@ import (
 //
 // They also hold the records from their start until the folder has been
 // replaced and bumped (enterprisepolicy.HoldPublishedSessionRecords: the
-// file DefenseClaw-HookSessions.hold next to the folder, in the Cisco folder
-// no standard user can change). While the hold is there the hook allows
+// file DefenseClaw-HookSessions.hold in the hook runtime folder, to which
+// no standard user can add a file; not the Cisco folder, where a stock
+// ProgramData access list lets them). While the hold is there the hook allows
 // nothing during an outage. An account that kept a handle with WRITE_DAC on
 // the folder can make it look trusted again and put an older generation
 // file and its allows back, and a run that cannot replace the folder (the
@@ -66,7 +67,7 @@ var (
 
 // windowsHookSessionFolderName is the folder's last element, which
 // uninstall checks before it removes anything.
-const windowsHookSessionFolderName = "DefenseClaw-HookSessions"
+const windowsHookSessionFolderName = managed.StandaloneWindowsHookSessionDirName
 
 // windowsHookSessionDACL: LocalSystem and Administrators full control, the
 // gateway service modify (it creates and replaces the per-account folders),
@@ -327,7 +328,7 @@ func removeWindowsHookSessionRoot() error {
 	}
 	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
-		return errors.Join(removeWindowsRetiredHookSessionRoots(root), enterprisepolicy.ReleasePublishedSessionRecords(root))
+		return errors.Join(removeWindowsRetiredHookSessionRoots(root), enterprisepolicy.RemovePublishedSessionHolds(root))
 	}
 	if err != nil {
 		return err
@@ -335,7 +336,7 @@ func removeWindowsHookSessionRoot() error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s is not a real folder", root)
 	}
-	return errors.Join(os.RemoveAll(root), removeWindowsRetiredHookSessionRoots(root), enterprisepolicy.ReleasePublishedSessionRecords(root))
+	return errors.Join(os.RemoveAll(root), removeWindowsRetiredHookSessionRoots(root), enterprisepolicy.RemovePublishedSessionHolds(root))
 }
 
 // windowsHookSessionRootProblem names a missing or untrusted folder, or "".
@@ -349,12 +350,15 @@ func windowsHookSessionRootProblem() string {
 			"(Copilot, OpenCode) blocks during a gateway outage even when the fail mode is open." +
 			" Fix: run " + windowsEnterpriseAdminCommand("repair")
 	}
-	if enterprisepolicy.PublishedSessionHeld(root) {
-		hold, _ := enterprisepolicy.PublishedSessionHoldPath(root)
-		return root + " is held (" + hold + "): a DefenseClaw lifecycle run did not finish replacing it, so a guarded connector's hook" +
-			" blocks during a gateway outage even when the fail mode is open." +
+	if holds, err := enterprisepolicy.PublishedSessionHolds(root); err != nil || len(holds) != 0 {
+		named := strings.Join(holds, ", ")
+		if err != nil {
+			named = "its hold folder cannot be listed: " + err.Error()
+		}
+		return root + " is held (" + named + "): a DefenseClaw lifecycle run did not finish replacing it, or the hook guardian did not finish" +
+			" invalidating it after a hook removal, so a guarded connector's hook blocks during a gateway outage even when the fail mode is open." +
 			" Fix: close any program that keeps a file in the folder open, then run " + windowsEnterpriseAdminCommand("repair") +
-			", which replaces the folder and removes the hold"
+			", which replaces the folder and removes its hold; the hook guardian removes its own hold at its next pass"
 	}
 	trusted, err := windowsPathOwnedByAdministrators(root)
 	if err == nil && !trusted {

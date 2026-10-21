@@ -9,11 +9,16 @@ package enterprisepolicy
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 func withoutPublishedSessionACL(*testing.T) {}
@@ -191,6 +196,7 @@ func TestPublishedSessionGenerationHeldOpenStillBumps(t *testing.T) {
 // hook still sees it, and the release removes it.
 func TestPublishedSessionHoldGivesStandardUsersNoAccess(t *testing.T) {
 	root := t.TempDir()
+	publishedSessionTestHoldDir(t, root)
 	if err := HoldPublishedSessionRecords(root); err != nil {
 		t.Fatal(err)
 	}
@@ -211,5 +217,65 @@ func TestPublishedSessionHoldGivesStandardUsersNoAccess(t *testing.T) {
 	}
 	if PublishedSessionHeld(root) {
 		t.Fatal("the release must remove the hold")
+	}
+}
+
+// Review P2 (GAP-0352, 1.0.4 loop round 5): the holds are in the hook
+// runtime folder, to which only SYSTEM and Administrators can add a file,
+// not in the Cisco folder above the record folder, where a stock
+// ProgramData access list lets a standard user create one first.
+func TestPublishedSessionHoldIsInTheHookRuntimeFolder(t *testing.T) {
+	layout, err := managed.StandaloneWindowsLayoutForRoots(`C:\Program Files`, `C:\ProgramData`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold, ok := PublishedSessionHoldPath(layout.HookSessionDir)
+	if !ok || !strings.EqualFold(filepath.Dir(hold), layout.HookRuntimeDir) {
+		t.Fatalf("the lifecycle's hold must be in %s: %q", layout.HookRuntimeDir, hold)
+	}
+	removal, ok := PublishedSessionRemovalHoldPath(layout.HookSessionDir, "S-1-5-21-1-2-3-1001")
+	if !ok || !strings.EqualFold(filepath.Dir(removal), layout.HookRuntimeDir) {
+		t.Fatalf("the guardian's hold must be in %s: %q", layout.HookRuntimeDir, removal)
+	}
+}
+
+// Review P2 (GAP-0352, 1.0.4 loop round 5): a file at the hold path whose
+// DACL lets another account change or delete it (a standard user's own
+// file) is replaced by a hold closed to them before the run changes
+// anything; the run never keeps it as its hold.
+func TestPublishedSessionHoldReplacesAFileOthersMayDelete(t *testing.T) {
+	root := t.TempDir()
+	publishedSessionTestHoldDir(t, root)
+	hold, _ := PublishedSessionHoldPath(root)
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attributes := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
+	pointer, err := winpath.UTF16Ptr(hold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE, attributes,
+		windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = windows.CloseHandle(handle)
+	if publishedSessionHoldTrusted(hold) {
+		t.Fatal("a file everyone may delete is no hold DefenseClaw made")
+	}
+	if err := HoldPublishedSessionRecords(root); err != nil {
+		t.Fatal(err)
+	}
+	if !publishedSessionHoldTrusted(hold) {
+		t.Fatal("the run must replace it with its own hold")
+	}
+	current, err := windows.GetNamedSecurityInfo(hold, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sddl := current.String(); strings.Contains(sddl, ";WD)") {
+		t.Fatalf("the new hold must be closed to everyone else: %s", sddl)
 	}
 }

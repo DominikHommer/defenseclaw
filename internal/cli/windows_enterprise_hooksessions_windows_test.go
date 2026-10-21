@@ -251,6 +251,10 @@ func windowsHookSessionReplacementTestRoot(t *testing.T, drift bool) (root strin
 	self = user.User.Sid
 	identity := self.String()
 	root = filepath.Join(t.TempDir(), windowsHookSessionFolderName)
+	// The holds are in the hook runtime folder next to the record folder.
+	if holds, ok := enterprisepolicy.PublishedSessionHoldDir(root); !ok || os.MkdirAll(holds, 0o755) != nil {
+		t.Fatalf("no hold folder for %s", root)
+	}
 	previousDir := windowsHookSessionDir
 	windowsHookSessionDir = func() (string, error) { return root, nil }
 	t.Cleanup(func() { windowsHookSessionDir = previousDir })
@@ -573,5 +577,30 @@ func TestWindowsLifecycleHoldsTheRecordsFromItsStart(t *testing.T) {
 	}
 	if enterprisepolicy.PublishedSessionHeld(root) {
 		t.Fatal("uninstall must remove the hold")
+	}
+}
+
+// Review P2 (GAP-0352, 1.0.4 loop round 5): status names a hold the hook
+// guardian left as well as the lifecycle's, and uninstall removes both.
+func TestWindowsHookSessionStatusAndUninstallCoverTheGuardiansHold(t *testing.T) {
+	root, self, _, _ := windowsHookSessionReplacementTestRoot(t, false)
+	if err := enterprisepolicy.HoldPublishedSessionRemoval(root, self.String()); err != nil {
+		t.Fatal(err)
+	}
+	removal, _ := enterprisepolicy.PublishedSessionRemovalHoldPath(root, self.String())
+	if problem := windowsHookSessionRootProblem(); !strings.Contains(problem, "is held") || !strings.Contains(problem, removal) {
+		t.Fatalf("status must name the guardian's hold %s: %q", removal, problem)
+	}
+	if err := ensureWindowsHookSessionRoot(root, self); err != nil {
+		t.Fatal(err)
+	}
+	if !enterprisepolicy.PublishedSessionHeld(root) {
+		t.Fatal("a repair leaves the guardian's hold to the guardian")
+	}
+	if err := removeWindowsHookSessionRoot(); err != nil {
+		t.Fatal(err)
+	}
+	if enterprisepolicy.PublishedSessionHeld(root) {
+		t.Fatal("uninstall must remove every hold")
 	}
 }

@@ -261,12 +261,27 @@ longer count. On Linux the package's tmpfiles.d entries create the folder
 and a new generation file at boot, and only at boot.
 
 While a run works on the record folder, it holds the records: it puts a
-`.hold` file next to the folder (`sessions.hold`, or
-`DefenseClaw-HookSessions.hold` on Windows) and deletes it only after the
-folder is closed or replaced and has a new generation. While that file
-exists, guarded calls block during an outage. A run that fails before then
-leaves the file, so guarded calls keep blocking during an outage until a
-later `repair` succeeds. On Windows the hold starts when the action starts.
+hold file in the hold folder and deletes it only after the folder is closed
+or replaced and has a new generation. On Linux and macOS the hold folder is
+the folder above the record folder (`sessions.hold`). On Windows it is
+`%ProgramData%\Cisco\DefenseClaw-HookRuntime`
+(`DefenseClaw-HookSessions.hold`), because standard users can create files
+in `C:\ProgramData\Cisco`. A file at the hold path that DefenseClaw did not
+make is replaced first. While a hold exists, guarded calls block during an
+outage. A run that fails before then leaves the file, so guarded calls keep
+blocking during an outage until a later `repair` succeeds. On Windows the
+hold starts when the action starts.
+
+The guardian holds the records the same way for each hook removal: before
+it writes the removal to its ledger it puts a hold for the account in the
+hold folder (`<folder>.hold-removal-<account digest>`), and it deletes it
+only after the new generation starts. A guardian that stops, or cannot start
+the generation, in between leaves the hold, so guarded calls block during an
+outage until a later pass starts it. The next pass finishes the work: for
+that account it records the removal for every connector, and for another
+account it first blocks that account in the gateway. When the guardian
+cannot resolve the standalone layout (on Windows, the protected ProgramData
+registration), it finds the record folder from its own data directory.
 
 On macOS, a macOS ACL entry grants access that the folder's mode does not.
 When such an entry lets another account change the record folder, or

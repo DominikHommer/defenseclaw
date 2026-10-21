@@ -171,12 +171,89 @@ func ValidatePublishedSessionRoot(root string, trust PublishedSessionTrust) erro
 // creates with a protected DACL: the account's folder and the record root.
 const publishedSessionNamedDirs = 2
 
-// publishedSessionHoldSDDL is the protected DACL of the hold file: SYSTEM
+// publishedSessionHoldSDDL is the protected DACL of a hold file: SYSTEM
 // and Administrators only. No standard user can open it to read or write,
 // so none can hold it open without delete sharing and keep the lifecycle
 // from removing it; the hook only checks that it is there, which listing
-// the folder above allows.
+// the hold folder allows.
 const publishedSessionHoldSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+
+// publishedSessionHoldDir is the hold folder of the record folder root
+// (PublishedSessionHoldDir): the hook runtime folder next to it
+// (managed.StandaloneLayout.HookRuntimeDir), to which only SYSTEM and
+// Administrators can add a file. Not the Cisco folder above root, where a
+// stock ProgramData access list lets standard users create files.
+func publishedSessionHoldDir(root string) string {
+	return filepath.Join(filepath.Dir(root), managed.StandaloneWindowsHookRuntimeDirName)
+}
+
+// publishedSessionHoldReadAccess is FILE_GENERIC_READ | FILE_GENERIC_EXECUTE:
+// the most a trusted hold grants anyone but SYSTEM, Administrators and this
+// process's account.
+const publishedSessionHoldReadAccess = 0x1200a9
+
+// publishedSessionHoldTrusted reports a hold this lifecycle or guardian made:
+// a file (no folder, no reparse point, one link) owned by SYSTEM,
+// Administrators or this process's account, whose DACL gives no one else
+// more than read access. Read by handle, without following a reparse point.
+func publishedSessionHoldTrusted(path string) bool {
+	pointer, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return false
+	}
+	handle, err := windows.CreateFile(pointer, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil ||
+		info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 || info.NumberOfLinks != 1 {
+		return false
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return false
+	}
+	trusted := func(sid *windows.SID) bool {
+		return sid != nil && (sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) || sid.Equals(user.User.Sid))
+	}
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	if owner, _, err := descriptor.Owner(); err != nil || !trusted(owner) {
+		return false
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return false
+	}
+	for i := uint16(0); i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil || ace == nil {
+			return false
+		}
+		switch ace.Header.AceType {
+		case windows.ACCESS_DENIED_ACE_TYPE:
+			continue
+		case windows.ACCESS_ALLOWED_ACE_TYPE:
+		default:
+			// An object or callback entry may grant what this check
+			// cannot weigh.
+			return false
+		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		if sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)); !trusted(sid) && uint32(ace.Mask)&^publishedSessionHoldReadAccess != 0 {
+			return false
+		}
+	}
+	return true
+}
 
 // createPublishedSessionHold creates the hold file at path with text and
 // publishedSessionHoldSDDL.

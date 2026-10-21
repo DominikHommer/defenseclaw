@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,6 +56,26 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 // ledger that drops another account's removals cannot revive that
 // account's allows.
 //
+// Before it publishes anything it holds the records for the account
+// (enterprisepolicy.HoldPublishedSessionRemoval: a hold the hook sees, in a
+// folder no standard user can change), and it releases that hold only
+// after the bump succeeded (GAP-0352, 1.0.4 review loop round 5). Between
+// the ledger write and the bump the gateway already denies from the new
+// ledger, while an allow it wrote earlier still carries the generation the
+// bump ends; a pass that stops or cannot bump there leaves the hold, so the
+// hook allows nothing during an outage until a later pass bumps. A later
+// pass for the account treats its own hold like a pending mark (the files
+// may not have reached the ledger); a later pass for another account first
+// holds the account the hold names closed in the gateway
+// (MarkForeignHookRemovalPending), then bumps, then releases the hold, so a
+// removed account that gets no more passes does not hold every account.
+//
+// The record folder is located from the standalone layout, or else from
+// the data directory the guardian runs with
+// (managed.StandaloneHookSessionDirForDataDir), so a failed lookup of the
+// layout (on Windows, of the protected ProgramData registration) still
+// holds and bumps the folder the hook reads.
+//
 // The account is held closed (enterprisepolicy.MarkForeignHookRemovalPending:
 // the gateway denies every guarded call of the account) when the ledger
 // does not take the removals (the process clock is unavailable, or the
@@ -85,7 +106,30 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: read the pending removal mark of %s: %v\n",
 			foreignGuardLogField(account, 256), pendingErr)
 	}
-	if len(paths) == 0 && !pending && pendingErr == nil {
+	// The record folder is located once for the pass. A lookup that fails
+	// is a generation the guardian cannot bump (GAP-0352 review loop round
+	// 4), never "no records".
+	root, rootErr := enterpriseForeignHookSessionRoot()
+	// The guardian's holds earlier passes left: this account's, and other
+	// accounts'.
+	ownHeld := false
+	var others []enterprisepolicy.PublishedSessionRemovalHold
+	var warn error
+	if rootErr == nil {
+		holds, holdsErr := enterprisepolicy.PublishedSessionRemovalHolds(root)
+		warn = errors.Join(warn, holdsErr)
+		for _, hold := range holds {
+			switch hold.Identity {
+			case identity:
+				ownHeld = true
+			case "":
+				warn = errors.Join(warn, fmt.Errorf("%s names no account, so it stays until an administrator removes it", hold.Path))
+			default:
+				others = append(others, hold)
+			}
+		}
+	}
+	if len(paths) == 0 && !pending && pendingErr == nil && !ownHeld && len(others) == 0 {
 		return
 	}
 	connectors := enterprisepolicy.StandaloneConnectors(cfg)
@@ -95,16 +139,20 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 			every = append(every, name)
 		}
 	}
-	// The record folder is located once for the pass. A lookup that fails
-	// is a generation the guardian cannot bump (GAP-0352 review loop round
-	// 4), never "no records".
-	root, rootErr := enterpriseForeignHookSessionRoot()
-	// A held account is recorded only in a pass that can bump after it.
+	// The hold comes first: from here until the bump below, the ledger may
+	// deny what an allow of the current generation still proves.
+	if rootErr == nil {
+		if holdErr := enterprisepolicy.HoldPublishedSessionRemoval(root, identity); holdErr != nil {
+			warn = errors.Join(warn, fmt.Errorf("hold the protected session records during a gateway outage: %w", holdErr))
+		}
+	}
+	// A held account, or one an earlier pass left held, is recorded only in
+	// a pass that can bump after it.
 	var unrecorded []string
-	if pending && rootErr == nil {
+	if (pending || ownHeld) && rootErr == nil {
 		unrecorded = every
 	}
-	err := func() error {
+	ledgerErr := func() error {
 		mark := agentprocess.Now()
 		if mark == "" {
 			return errors.New("the process clock is unavailable")
@@ -130,20 +178,32 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		}
 		return writeEnterpriseForeignHookRemovalLedger(stderr, added, now)
 	}()
-	held := pending || pendingErr != nil
+	var err error
+	closed := pending || pendingErr != nil
 	hold := func(why string) {
-		if held {
+		if closed {
 			return
 		}
 		if markErr := enterpriseForeignHookMarkRemovalPending(identity); markErr != nil {
 			err = errors.Join(err, fmt.Errorf("hold the account's guarded calls closed: %w", markErr))
 			return
 		}
-		held = true
+		closed = true
 		err = errors.Join(err, errors.New("the account's guarded calls are denied until a later pass "+why))
 	}
-	if err != nil {
+	if ledgerErr != nil {
+		err = ledgerErr
 		hold("records the removal")
+	}
+	// Every other account a hold names is held closed in the gateway before
+	// the bump that ends its hold.
+	var drained []string
+	for _, other := range others {
+		if markErr := enterpriseForeignHookMarkRemovalPending(other.Identity); markErr != nil {
+			warn = errors.Join(warn, fmt.Errorf("hold %s closed, whose earlier pass did not finish: %w", foreignGuardLogField(other.Identity, 256), markErr))
+			continue
+		}
+		drained = append(drained, other.Identity)
 	}
 	// After every write above, so that an allow decided from the earlier
 	// ledger, or before the mark, carries the generation this bump ends.
@@ -154,13 +214,22 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 	if bumpErr != nil {
 		err = errors.Join(err, fmt.Errorf("invalidate the protected session records: %w", bumpErr))
 		hold("invalidates the protected session records")
+	} else {
+		for _, other := range drained {
+			warn = errors.Join(warn, enterprisepolicy.ReleasePublishedSessionRemoval(root, other))
+		}
+		// The gateway denies the removal from the ledger, or the whole
+		// account from its mark.
+		if ledgerErr == nil || closed {
+			warn = errors.Join(warn, enterprisepolicy.ReleasePublishedSessionRemoval(root, identity))
+		}
 	}
 	if err == nil && pending && pendingErr == nil {
 		if clearErr := enterpriseForeignHookClearRemovalPending(identity); clearErr != nil {
 			err = fmt.Errorf("clear the pending removal mark, which the ledger now covers: %w", clearErr)
 		}
 	}
-	if err != nil {
+	if err = errors.Join(err, warn); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s: %v\n",
 			connectorName, foreignGuardLogField(account, 256), err)
 	}
@@ -214,11 +283,29 @@ func writeEnterpriseForeignHookRemovalLedger(stderr io.Writer, added []enterpris
 }
 
 // enterpriseForeignHookSessionRoot is the folder of the protected session
-// records (managed.StandaloneLayout.HookSessionDir). A layout that cannot be
-// resolved (on Windows, a failed ProgramData lookup) is an error: the
-// guardian then cannot bump the record generation, so it holds the account
-// (replaceable in tests).
+// records (managed.StandaloneLayout.HookSessionDir): from the standalone
+// layout, or else from the guardian's data directory
+// (managed.StandaloneHookSessionDirForDataDir), which names the same folder
+// on a standalone host. Only when neither names it is it an error: the
+// guardian then cannot hold the records or bump their generation, so it
+// holds the account closed in the gateway (replaceable in tests).
 var enterpriseForeignHookSessionRoot = func() (string, error) {
+	root, err := enterpriseForeignHookSessionLayoutRoot()
+	if err == nil {
+		return root, nil
+	}
+	if cfg != nil {
+		if fallback, ok := enterpriseForeignHookSessionRootForDataDir(cfg.DataDir); ok {
+			return fallback, nil
+		}
+	}
+	return "", err
+}
+
+// enterpriseForeignHookSessionLayoutRoot is the record folder of the
+// standalone layout. A layout that cannot be resolved (on Windows, a failed
+// ProgramData lookup) is an error (replaceable in tests).
+var enterpriseForeignHookSessionLayoutRoot = func() (string, error) {
 	layout, _, _, err := standaloneEnterprisePolicyLayout()
 	if err != nil {
 		return "", fmt.Errorf("locate the protected session record folder: %w", err)
@@ -227,6 +314,12 @@ var enterpriseForeignHookSessionRoot = func() (string, error) {
 		return "", errors.New("the standalone layout names no protected session record folder")
 	}
 	return layout.HookSessionDir, nil
+}
+
+// enterpriseForeignHookSessionRootForDataDir is the record folder of the
+// standalone layout whose data directory is dataDir (replaceable in tests).
+var enterpriseForeignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
+	return managed.StandaloneHookSessionDirForDataDir(runtime.GOOS, dataDir)
 }
 
 // enterpriseForeignHookBumpSessionGeneration bumps the generation of the

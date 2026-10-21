@@ -63,15 +63,33 @@ func createPublishedSessionGeneration(path string) error {
 	return errors.Join(file.Chmod(0o644), file.Close())
 }
 
-// createPublishedSessionHold creates the hold file at path with text. The
-// hook only checks that something is there.
+// publishedSessionHoldDir is the hold folder of the record folder root
+// (PublishedSessionHoldDir): the folder above it, which only root and the
+// gateway service can change.
+func publishedSessionHoldDir(root string) string { return filepath.Dir(root) }
+
+// createPublishedSessionHold creates the hold file at path with text: 0644,
+// owned by this process (root). The hook only checks that something is
+// there.
 func createPublishedSessionHold(path, text string) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
 	_, _ = file.WriteString(text)
-	return file.Close()
+	return errors.Join(file.Chmod(0o644), file.Close())
+}
+
+// publishedSessionHoldTrusted reports a hold this process's account made: a
+// regular file with one link, owned by that account (root in production),
+// that no other account can write.
+func publishedSessionHoldTrusted(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
+		return false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == uint32(os.Geteuid()) && st.Nlink == 1
 }
 
 // checkPublishedSessionGenerationOwner checks the owner of the generation file:

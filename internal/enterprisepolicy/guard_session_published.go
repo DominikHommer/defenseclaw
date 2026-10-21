@@ -80,10 +80,13 @@ import (
 //     than publishedSessionClockSkew after now;
 //   - no record and no deny marker blocks the call, and every record read is
 //     still the same file at the end;
-//   - no lifecycle holds the record folder: nothing is at <root>.hold, the
-//     hold a lifecycle puts next to the folder before it replaces or closes
-//     it and removes only once that succeeded (HoldPublishedSessionRecords),
-//     and the generation did not change while the hook checked the hold.
+//   - no lifecycle run or guardian pass holds the record folder: no hold is
+//     in the hold folder (PublishedSessionHoldDir), the one a lifecycle puts
+//     there before it replaces or closes the folder and a guardian before
+//     it publishes a removal, each removed only once the generation bump
+//     after it succeeded (HoldPublishedSessionRecords,
+//     HoldPublishedSessionRemoval), and the generation did not change while
+//     the hook checked the holds.
 //
 // A block the gateway decides on its own (a session start that found an
 // unapproved hook) bumps no generation: it replaces the record. When the
@@ -624,7 +627,7 @@ func CheckPublishedForeignHookSession(root, identity string, key SessionKey, dec
 	// finished while this check ran bumped the generation before it removed
 	// the hold, so an allow read while the folder was held never passes.
 	if PublishedSessionHeld(root) {
-		return decision, fmt.Errorf("%w: a DefenseClaw lifecycle run holds the record folder: it is replacing or closing it, or could not finish", ErrPublishedSessionUnavailable)
+		return decision, fmt.Errorf("%w: a DefenseClaw lifecycle run or hook guardian pass holds the record folder: it is invalidating the records, or could not finish", ErrPublishedSessionUnavailable)
 	}
 	if again, err := readPublishedSessionGeneration(root, trust); err != nil || again != generation {
 		return decision, fmt.Errorf("%w: the record folder's generation changed while the record was checked", ErrPublishedSessionUnavailable)

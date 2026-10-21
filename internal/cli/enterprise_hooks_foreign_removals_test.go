@@ -91,6 +91,17 @@ func foreignHookRemovalTestGeneration(t *testing.T, root string) string {
 // current generation.
 func foreignHookRemovalTestAllow(t *testing.T, root, identity, process string) string {
 	t.Helper()
+	path := foreignHookRemovalTestPublish(t, root, identity, process)
+	if !foreignHookRemovalTestProves(root, identity, process) {
+		t.Fatal("a fresh allow of the current generation must prove the process")
+	}
+	return path
+}
+
+// foreignHookRemovalTestPublish writes the allow of
+// foreignHookRemovalTestAllow without checking that it proves the process.
+func foreignHookRemovalTestPublish(t *testing.T, root, identity, process string) string {
+	t.Helper()
 	path, ok := enterprisepolicy.PublishedSessionRecordPath(root, identity, "copilot", "p", process)
 	if !ok {
 		t.Fatal("no record path")
@@ -105,9 +116,6 @@ func foreignHookRemovalTestAllow(t *testing.T, root, identity, process string) s
 	}
 	if err := os.WriteFile(path, record, 0o644); err != nil {
 		t.Fatal(err)
-	}
-	if !foreignHookRemovalTestProves(root, identity, process) {
-		t.Fatal("a fresh allow of the current generation must prove the process")
 	}
 	return path
 }
@@ -490,5 +498,222 @@ func TestEnterpriseForeignHookRemovalHoldsAccountsTheFullLedgerDrops(t *testing.
 	key := enterprisepolicy.SessionKey{Connector: "copilot", Session: "s-1", Process: process}
 	if got := enterprisepolicy.ApplyForeignHookRemovals(enterprisepolicy.GuardDecision{}, key, nil, enterprisepolicy.ErrForeignHookRemovalPending, time.Now()); !got.Deny {
 		t.Fatalf("the gateway must deny the dropped account online: %+v", got)
+	}
+}
+
+// Review P1 and P2 (GAP-0352, 1.0.4 loop round 5): the guardian holds the
+// records where the hook sees them before it publishes a removal, and
+// releases them only after the bump. Between the ledger write and the bump
+// the gateway denies from the new ledger, so the hook must not accept a
+// fresh allow of the generation the bump is about to end, of this account
+// or any other. A bump that fails keeps the hold: an allow the gateway wrote
+// with the unchanged generation (before it read the mark) proves nothing
+// during an outage, until a later pass bumps.
+func TestEnterpriseForeignHookRemovalHoldsTheRecordsUntilTheBumpSucceeds(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the protected ledger write sets a SYSTEM-owned DACL")
+	}
+	var ledgerErr error
+	ledgerPath, root := foreignHookRemovalTestGuardian(t, &ledgerErr)
+	process := runtime.GOOS + ":b:1:100"
+	foreignHookRemovalTestAllow(t, root, "1001", process)
+	foreignHookRemovalTestAllow(t, root, "1002", process)
+	home := t.TempDir()
+	hook := filepath.Join(home, ".copilot", "hooks", "x.json")
+	bumpErr := errors.New("the volume refused the change")
+	var checked int
+	withForeignHookRemovalBumps(t, func(string) error {
+		checked++
+		removals, err := loadEnterpriseForeignHookRemovals(ledgerPath)
+		if err != nil || len(removals) == 0 {
+			t.Errorf("the ledger names the removal by the bump: %+v %v", removals, err)
+		}
+		if !enterprisepolicy.PublishedSessionHeld(root) {
+			t.Error("the records must be held once the ledger is published, before the bump")
+		}
+		for _, identity := range []string{"1001", "1002"} {
+			if foreignHookRemovalTestProves(root, identity, process) {
+				t.Errorf("between the ledger and the bump the allow of %s must prove nothing", identity)
+			}
+		}
+		return bumpErr
+	})
+	var stderr bytes.Buffer
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", home, "copilot", []string{hook})
+	if checked != 1 || !foreignHookRemovalTestPending(t, "1001") {
+		t.Fatalf("a failed bump holds the account (checks %d): %q", checked, stderr.String())
+	}
+	// The gateway answered before it read the mark: a fresh allow with the
+	// generation the failed bump did not end.
+	foreignHookRemovalTestPublish(t, root, "1001", process)
+	foreignHookRemovalTestPublish(t, root, "1002", process)
+	if !enterprisepolicy.PublishedSessionHeld(root) {
+		t.Fatal("a failed bump must leave the records held")
+	}
+	for _, identity := range []string{"1001", "1002"} {
+		if foreignHookRemovalTestProves(root, identity, process) {
+			t.Fatalf("after a failed bump the allow of %s must prove nothing during an outage", identity)
+		}
+	}
+	bumpErr = nil
+	stderr.Reset()
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", home, "copilot", nil)
+	if stderr.Len() != 0 || enterprisepolicy.PublishedSessionHeld(root) || foreignHookRemovalTestPending(t, "1001") {
+		t.Fatalf("the pass that bumps releases the hold and the mark: %q", stderr.String())
+	}
+	for _, identity := range []string{"1001", "1002"} {
+		if foreignHookRemovalTestProves(root, identity, process) {
+			t.Fatalf("the bump ends the earlier allow of %s", identity)
+		}
+	}
+	foreignHookRemovalTestAllow(t, root, "1002", process)
+}
+
+// Review P2 (GAP-0352, 1.0.4 loop round 5): a pass that stopped after it
+// published the removal and before the bump (the guardian was stopped or
+// crashed) left only its hold: no pending mark, and the next pass has no
+// files to record. That pass still finishes the work: it records an
+// account-wide removal, bumps and releases the hold, so the gap does not
+// last until the record expires.
+func TestEnterpriseForeignHookRemovalFinishesAnInterruptedPass(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the protected ledger write sets a SYSTEM-owned DACL")
+	}
+	var ledgerErr error
+	ledgerPath, root := foreignHookRemovalTestGuardian(t, &ledgerErr)
+	bumps := 0
+	withForeignHookRemovalBumps(t, func(string) error {
+		bumps++
+		return nil
+	})
+	process := runtime.GOOS + ":b:1:100"
+	foreignHookRemovalTestAllow(t, root, "1001", process)
+	if err := enterprisepolicy.HoldPublishedSessionRemoval(root, "1001"); err != nil {
+		t.Fatal(err)
+	}
+	if foreignHookRemovalTestProves(root, "1001", process) {
+		t.Fatal("the hold of the interrupted pass must keep the allow from proving anything")
+	}
+	var stderr bytes.Buffer
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", t.TempDir(), "copilot", nil)
+	if bumps != 1 || stderr.Len() != 0 || enterprisepolicy.PublishedSessionHeld(root) {
+		t.Fatalf("the next pass bumps and releases the hold (bumps %d): %q", bumps, stderr.String())
+	}
+	removals, err := loadEnterpriseForeignHookRemovals(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrecorded := 0
+	for _, removal := range removals {
+		if removal.Identity == "1001" && removal.Path == enterpriseForeignHookUnrecordedRemoval {
+			unrecorded++
+		}
+	}
+	if unrecorded == 0 {
+		t.Fatalf("the files of the interrupted pass are unknown: the account's removal covers every connector: %+v", removals)
+	}
+	if foreignHookRemovalTestProves(root, "1001", process) {
+		t.Fatal("the bump ends the earlier allow")
+	}
+	// No hold, no mark, no files: nothing to do.
+	stderr.Reset()
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", t.TempDir(), "copilot", nil)
+	if bumps != 1 {
+		t.Fatalf("a pass with nothing to record must not bump: %d", bumps)
+	}
+}
+
+// Review P2 (GAP-0352, 1.0.4 loop round 5): a hold another account's pass
+// left (that account may never get another pass: it was removed) does not
+// hold every account for ever. The next pass for any account holds that
+// account closed in the gateway first, so nothing of it can be allowed
+// again, then bumps and releases its hold. A hold that names no account
+// stays and is reported.
+func TestEnterpriseForeignHookRemovalEndsAHoldAnotherAccountLeft(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the protected ledger write sets a SYSTEM-owned DACL")
+	}
+	var ledgerErr error
+	_, root := foreignHookRemovalTestGuardian(t, &ledgerErr)
+	var pendingAtBump []bool
+	withForeignHookRemovalBumps(t, func(string) error {
+		pendingAtBump = append(pendingAtBump, foreignHookRemovalTestPending(t, "1002"))
+		return nil
+	})
+	process := runtime.GOOS + ":b:1:100"
+	foreignHookRemovalTestAllow(t, root, "1002", process)
+	if err := enterprisepolicy.HoldPublishedSessionRemoval(root, "1002"); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", t.TempDir(), "copilot", nil)
+	if stderr.Len() != 0 || enterprisepolicy.PublishedSessionHeld(root) {
+		t.Fatalf("the pass ends the other account's hold: %q", stderr.String())
+	}
+	if len(pendingAtBump) != 1 || !pendingAtBump[0] || !foreignHookRemovalTestPending(t, "1002") {
+		t.Fatalf("the other account is held closed before the bump that ends its hold: %v", pendingAtBump)
+	}
+	if foreignHookRemovalTestProves(root, "1002", process) {
+		t.Fatal("the bump ends the other account's earlier allow")
+	}
+
+	// A hold in the guardian's name that names no account.
+	path, _ := enterprisepolicy.PublishedSessionRemovalHoldPath(root, "1003")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", t.TempDir(), "copilot", []string{filepath.Join(t.TempDir(), "x.json")})
+	if !enterprisepolicy.PublishedSessionHeld(root) || !strings.Contains(stderr.String(), "names no account") {
+		t.Fatalf("a hold that names no account stays and is reported: %q", stderr.String())
+	}
+}
+
+// Review P1 (GAP-0352, 1.0.4 loop round 5): a guardian whose lookup of the
+// standalone layout fails (on Windows, the protected ProgramData
+// registration) finds the record folder from its data directory, so the
+// removal still bumps the generation the hook reads, and the old allow
+// proves nothing when the hook's own lookup works during an outage. Only
+// when neither names the folder is the account held closed in the gateway
+// alone.
+func TestEnterpriseForeignHookRemovalFindsTheRecordFolderFromItsDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the protected ledger write sets a SYSTEM-owned DACL")
+	}
+	locate := enterpriseForeignHookSessionRoot
+	var ledgerErr error
+	_, root := foreignHookRemovalTestGuardian(t, &ledgerErr)
+	previousLayout, previousDataDir := enterpriseForeignHookSessionLayoutRoot, enterpriseForeignHookSessionRootForDataDir
+	t.Cleanup(func() {
+		enterpriseForeignHookSessionLayoutRoot, enterpriseForeignHookSessionRootForDataDir = previousLayout, previousDataDir
+	})
+	enterpriseForeignHookSessionRoot = locate
+	enterpriseForeignHookSessionLayoutRoot = func() (string, error) {
+		return "", errors.New("RegGetValue(ProgramData): the RPC server is unavailable")
+	}
+	enterpriseForeignHookSessionRootForDataDir = func(dataDir string) (string, bool) {
+		return root, dataDir == cfg.DataDir
+	}
+	var bumped []string
+	withForeignHookRemovalBumps(t, func(at string) error {
+		bumped = append(bumped, at)
+		return nil
+	})
+	process := runtime.GOOS + ":b:1:100"
+	foreignHookRemovalTestAllow(t, root, "1001", process)
+	home := t.TempDir()
+	var stderr bytes.Buffer
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", home, "copilot", []string{filepath.Join(home, ".copilot", "hooks", "x.json")})
+	if stderr.Len() != 0 || len(bumped) != 1 || bumped[0] != root || foreignHookRemovalTestPending(t, "1001") || enterprisepolicy.PublishedSessionHeld(root) {
+		t.Fatalf("the data directory names the record folder, which the pass bumps (bumped %v): %q", bumped, stderr.String())
+	}
+	if foreignHookRemovalTestProves(root, "1001", process) {
+		t.Fatal("the old allow must prove nothing")
+	}
+	enterpriseForeignHookSessionRootForDataDir = func(string) (string, bool) { return "", false }
+	stderr.Reset()
+	recordEnterpriseForeignHookRemovals(&stderr, "1001", home, "copilot", []string{filepath.Join(home, ".copilot", "hooks", "y.json")})
+	if len(bumped) != 1 || !foreignHookRemovalTestPending(t, "1001") || !strings.Contains(stderr.String(), "RPC server is unavailable") {
+		t.Fatalf("with no folder named the account is held closed (bumped %v): %q", bumped, stderr.String())
 	}
 }

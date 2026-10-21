@@ -76,6 +76,9 @@ func RemoveWindowsStandaloneHookRuntimeDirectories() ([]string, error) {
 			kept = append(kept, directory)
 		}
 	}
+	if err := removeWindowsHookSessionHolds(root); err != nil {
+		errs = append(errs, err)
+	}
 	if err := os.Remove(root); err != nil && !errors.Is(err, os.ErrNotExist) {
 		if !errors.Is(err, windows.ERROR_DIR_NOT_EMPTY) {
 			errs = append(errs, fmt.Errorf("enterprise hooks: remove hook runtime directory %s: %w", root, err))
@@ -83,6 +86,29 @@ func RemoveWindowsStandaloneHookRuntimeDirectories() ([]string, error) {
 		kept = append(kept, root)
 	}
 	return kept, errors.Join(errs...)
+}
+
+// removeWindowsHookSessionHolds removes the holds of the protected
+// foreign-hook session records from the hook runtime root
+// (managed.HookSessionHoldPrefix, GAP-0352): a lifecycle run or hook
+// guardian pass that did not finish leaves one there, and the teardown that
+// removes the machine policy summary ends what they hold.
+func removeWindowsHookSessionHolds(root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: list %s: %w", root, err)
+	}
+	prefix := strings.ToLower(managed.HookSessionHoldPrefix(managed.StandaloneWindowsHookSessionDirName))
+	var errs []error
+	for _, entry := range entries {
+		if !strings.HasPrefix(strings.ToLower(entry.Name()), prefix) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			errs = append(errs, fmt.Errorf("enterprise hooks: remove %s: %w", filepath.Join(root, entry.Name()), err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // windowsMachinePolicySelectorConnectors are the connectors whose runtime
