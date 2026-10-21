@@ -463,3 +463,96 @@ func TestRemovedOmnigentTeardownKeepsModuleWhileConfigIsReadOnly(t *testing.T) {
 		t.Fatalf("the policy module survived the retry: %v", err)
 	}
 }
+
+// A key set twice in one mapping leaves which copy OmniGent uses up to its
+// YAML loader. Cleanup must not guess: removing a policy whose later handler
+// is another tool's would switch that policy off, and passing a file whose
+// effective entry is DefenseClaw's would remove the module OmniGent still
+// imports. Every such config naming DefenseClaw's module fails verification
+// and is left byte for byte; a file that never names the module is not
+// DefenseClaw's and stays clean.
+func TestRemovedOmnigentConfigCleanupRefusesDuplicateKeys(t *testing.T) {
+	const handler = removedOmnigentHandler
+	for _, tc := range []struct{ name, body string }{
+		{"handler set twice, ours first", "policies:\n  guard:\n    handler: " + handler + "\n    handler: corp_policy.check\n"},
+		{"handler set twice, ours last", "policies:\n  guard:\n    handler: corp_policy.check\n    handler: " + handler + "\n"},
+		{"handler set twice, quoted key", "policies:\n  guard:\n    handler: " + handler + "\n    \"handler\": corp_policy.check\n"},
+		{"policy name set twice, ours first", "policies:\n  guard:\n    handler: " + handler + "\n  guard:\n    handler: corp_policy.check\n"},
+		{"policy name set twice, ours last", "policies:\n  guard:\n    handler: corp_policy.check\n  guard:\n    handler: " + handler + "\n"},
+		{"policies set twice", "policies:\n  dc:\n    handler: " + handler + "\npolicies:\n  corp:\n    handler: corp_policy.check\n"},
+		{"policy_modules set twice", "policy_modules: [" + removedOmnigentModuleName + "]\npolicy_modules: [corp]\n"},
+		{"merge key set twice", "x-dc: &dc {handler: " + handler + "}\nx-corp: &corp {handler: corp_policy.check}\npolicies:\n  guard:\n    <<: *dc\n    <<: *corp\n"},
+		{"handler set twice in a merge source", "x-base: &base\n  handler: " + handler + "\n  handler: corp_policy.check\npolicies:\n  guard:\n    <<: *base\n"},
+		{"root merge plus an unrelated key set twice", "x-base: &base\n  policy_modules: [" + removedOmnigentModuleName + "]\n<<: *base\nlog_level: info\nlog_level: debug\n"},
+		{"unrelated key set twice next to our policy", "policies:\n  dc:\n    handler: " + handler + "\n  corp:\n    handler: corp_policy.check\n    timeout: 1\n    timeout: 2\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			writeRemovedFixture(t, path, tc.body, 0o600)
+			if loads, err := removedOmnigentConfigLoadsPolicy(path); err == nil {
+				t.Fatalf("loads = %v with no error; want a config with a key set twice refused", loads)
+			}
+			if err := removeRemovedOmnigentConfigEntries(path); err == nil || !strings.Contains(err.Error(), "by hand") {
+				t.Fatalf("cleanup = %v; want it refused", err)
+			}
+			if got, _ := os.ReadFile(path); string(got) != tc.body {
+				t.Fatalf("cleanup rewrote a config with a key set twice:\n%s", got)
+			}
+		})
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	foreign := "policies:\n  guard:\n    handler: corp_policy.a\n    handler: corp_policy.b\n"
+	writeRemovedFixture(t, path, foreign, 0o600)
+	if loads, err := removedOmnigentConfigLoadsPolicy(path); err != nil || loads {
+		t.Fatalf("foreign config with a key set twice: loads = %v, %v; want clean", loads, err)
+	}
+	if err := removeRemovedOmnigentConfigEntries(path); err != nil {
+		t.Fatalf("cleanup of a foreign config with a key set twice: %v", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != foreign {
+		t.Fatalf("cleanup rewrote a foreign config:\n%s", got)
+	}
+}
+
+// End to end for the reported case: a user appended their own handler to
+// DefenseClaw's old policy. Teardown fails without touching config.yaml,
+// keeps the module, the backups and the token for the retry, and once the
+// user fixes the file the next run finishes and keeps their policy.
+func TestRemovedOmnigentTeardownKeepsStateForDuplicateHandler(t *testing.T) {
+	f := newRemovedOmnigentFixture(t)
+	f.hookToken(t)
+	body := "policy_modules:\n  - corp_policy\n  - " + removedOmnigentModuleName + "\npolicies:\n  " +
+		removedOmnigentPolicyKey + ":\n    handler: " + removedOmnigentHandler + "\n    handler: corp_policy.check\n"
+	writeRemovedFixture(t, f.configPath, body, 0o600)
+	writeRemovedFixture(t, f.modulePath, removedOmnigentRendered, 0o600)
+	conn, _ := RetiredConnector(removedOmnigentID)
+	for run := 1; run <= 2; run++ {
+		if err := conn.Teardown(context.Background(), f.opts); err == nil || !strings.Contains(err.Error(), "by hand") {
+			t.Fatalf("Teardown run %d = %v; want the config refused", run, err)
+		}
+		if got, _ := os.ReadFile(f.configPath); string(got) != body {
+			t.Fatalf("Teardown run %d rewrote config.yaml:\n%s", run, got)
+		}
+		if _, err := os.Lstat(f.modulePath); err != nil {
+			t.Fatalf("the policy module went while config.yaml still names it: %v", err)
+		}
+		if err := conn.VerifyClean(f.opts); err == nil {
+			t.Fatal("VerifyClean passed on a config with the handler set twice")
+		}
+		if token, err := LoadHookAPIToken(f.dataDir, removedOmnigentID); err != nil || token == "" {
+			t.Fatalf("hook token = %q, %v; want it kept for the retry", token, err)
+		}
+	}
+	// The user drops DefenseClaw's line; the retry finishes.
+	writeRemovedFixture(t, f.configPath, "policy_modules:\n  - corp_policy\n  - "+removedOmnigentModuleName+
+		"\npolicies:\n  "+removedOmnigentPolicyKey+":\n    handler: corp_policy.check\n", 0o600)
+	f.teardownTwice(t)
+	config, _ := os.ReadFile(f.configPath)
+	if got := string(config); strings.Contains(got, removedOmnigentModuleName) || !strings.Contains(got, "corp_policy.check") {
+		t.Fatalf("config.yaml after the retry = %q; want only DefenseClaw's module gone", got)
+	}
+	if _, err := os.Lstat(f.modulePath); !os.IsNotExist(err) {
+		t.Fatalf("DefenseClaw's module survived the retry: %v", err)
+	}
+	f.assertTokenRevoked(t)
+}

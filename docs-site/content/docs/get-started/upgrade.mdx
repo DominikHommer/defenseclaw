@@ -430,9 +430,9 @@ or OmniGent before 1.0.4:
   from other tools stay. A policy module you edited stays too: a warning names
   it, and OmniGent no longer loads it. Both agents keep working without
   DefenseClaw. If the gateway can't clean one of these files (it isn't
-  writable, or YAML merge keys pull the policy in), it leaves the policy
-  module in place, names the file in the gateway log, and tries again on
-  every start; fix the file and restart the gateway. Their
+  writable, a key in it is set twice, or YAML merge keys pull the policy in),
+  it leaves the policy module in place, names the file in the gateway log,
+  and tries again on every start; fix the file and restart the gateway. Their
   settings are dropped from `config.yaml`, including a telemetry destination
   whose every route selected only these connectors; `defenseclaw migrate`
   saves that. `defenseclaw uninstall` removes the same files.
