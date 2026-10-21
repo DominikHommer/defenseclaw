@@ -174,6 +174,11 @@ type lifecycle struct {
 	// reportChanges is set while a repair or ensure re-applies an installed
 	// deployment: the result then lists what the transaction changed.
 	reportChanges bool
+	// helperModeRestart is set when ensure applies because the running
+	// sensor helper reported another Tetragon mode than the config renders
+	// (helperModeDrift); the transaction's restart of the helper is the
+	// change it reports.
+	helperModeRestart bool
 	// perUserStateKept names the accounts whose per-user state the purge
 	// left in place (remove-all's state_failed: a pending cleanup still
 	// needs it, or its home was not available). Their session-facts cache
@@ -3087,6 +3092,10 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 		}
 	}
 	if l.machinePolicyDrift(p) {
+		return false, ""
+	}
+	if l.helperModeDrift(ctx, p) {
+		l.helperModeRestart = true
 		return false, ""
 	}
 	if l.policyAssetsChanged(ctx, record, account) {

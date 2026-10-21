@@ -179,7 +179,8 @@ func TestBuildHookOptionsConnectorScopedSidecarMixedModes(t *testing.T) {
 	writeHookSidecarForTest(t, home, `{
   "version": 2,
   "gateway_addr": "127.0.0.1:12345",
-  "fail_modes": {"claudecode": "closed", "codex": "open"}
+  "fail_modes": {"claudecode": "closed", "codex": "open"},
+  "fail_mode_sources": {"claudecode": "config", "codex": "config"}
 }`)
 
 	claude := buildHookOptions("claudecode", "", "", "")
@@ -217,7 +218,7 @@ func TestBuildHookOptionsFlagAndEnvBeatSidecar(t *testing.T) {
 	}
 
 	// It can tighten an installed open mode.
-	writeHookSidecarForTest(t, home, "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:12345\nDEFENSECLAW_FAIL_MODE=open\n")
+	writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:12345","fail_modes":{"codex":"open"},"fail_mode_sources":{"codex":"config"}}`)
 	t.Setenv("DEFENSECLAW_FAIL_MODE", "")
 	if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "open" {
 		t.Errorf("fail mode = %q, want the sidecar's open", opts.FailMode)
@@ -231,14 +232,22 @@ func TestBuildHookOptionsFlagAndEnvBeatSidecar(t *testing.T) {
 	}
 
 	// Upgrade path: the 0.8.x and 1.0.2 sidecar shapes keep the open mode
-	// the user chose (persisted state, not the environment), and an inherited
-	// open still cannot reopen a connector the v2 sidecar records closed.
+	// the user chose, which the config records (persisted state, not the
+	// environment); without it their open is closed. An inherited open still
+	// cannot reopen a connector the v2 sidecar records closed.
 	t.Setenv("DEFENSECLAW_FAIL_MODE", "")
 	for _, body := range []string{
 		"DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:12345\nDEFENSECLAW_FAIL_MODE=open\n",
 		`{"version":2,"gateway_addr":"127.0.0.1:12345","fail_modes":{"codex":"open","claudecode":"closed"}}`,
 	} {
 		writeHookSidecarForTest(t, home, body)
+		_ = os.Remove(filepath.Join(home, "config.yaml"))
+		if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "closed" {
+			t.Errorf("sidecar %q without a configured open: fail mode = %q, want closed", body, opts.FailMode)
+		}
+		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("guardrail:\n  hook_fail_mode: open\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "open" {
 			t.Errorf("sidecar %q: fail mode = %q, want the persisted open", body, opts.FailMode)
 		}

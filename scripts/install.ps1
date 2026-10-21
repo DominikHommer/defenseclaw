@@ -1422,6 +1422,20 @@ function Save-Snapshot {
     return $true
 }
 
+function Update-HookFailModes([string]$Gateway) {
+    # Render the hooks' fail modes (hooks\.hookcfg) from the config with this
+    # release's gateway before the running gateway stops and before the new
+    # hook goes in: an earlier release may have recorded open for a mode
+    # nobody set (1.0.2 resolved an unset mode from the guardrail mode), and
+    # the old or the new hook would follow it while the gateway is down. An
+    # open the config sets stays open. Best effort: the new hook also treats
+    # such an open as closed, and the gateway renders the modes when it starts.
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) { return }
+    if ((Invoke-Native $Gateway @("connector", "refresh-fail-modes", "--data-dir", $DataDir) -Quiet) -ne 0) {
+        Write-Warn "Could not render the hook fail modes from the config before the swap; the gateway renders them when it starts"
+    }
+}
+
 function Install-HookFirst([string]$Slot) {
     # The previous version's hook keeps answering the agents while the data
     # folder is copied and the new Python environment is built, a minute or
@@ -2623,12 +2637,15 @@ function Invoke-Install {
         if ($Setup.ClaudeConfigDir -and -not $env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR = $Setup.ClaudeConfigDir }
     }
     $WasRunning = [bool](Get-GatewayProcess)
+    Update-HookFailModes $stagedGateway
     if ($WasRunning) {
         Write-Info "Stopping the gateway [$(Get-UtcClock)]"
         if (-not (Stop-Gateway)) {
             if ($Setup) { Restore-SetupInstall }
             Die "The running gateway did not stop; nothing was changed"
         }
+        # Again once it is stopped: it may have rendered them while it ran.
+        Update-HookFailModes $stagedGateway
     }
     Stop-Watchdog
     if ($versionChange) {

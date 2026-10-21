@@ -62,7 +62,7 @@ const guardrailActionMode = "action"
 type tetragonIntent struct {
 	// Written is false for an absent block, or one that spells out the
 	// defaults: the helper then runs on its own defaults and no drop-in is
-	// rendered.
+	// rendered, except on a host without Plane C (DefaultPlaneCOff).
 	Written bool
 	// Configured is the mode the administrator wrote (consume when unset);
 	// Mode is the one the helper runs, after the caps.
@@ -184,9 +184,9 @@ func machinePolicyAnchors(cfg *config.Config, goos string, connectors []string) 
 
 // helperMode is the mode the helper runs with this intent, after the caps.
 // Without a drop-in the helper runs its own default, consume, which is the
-// default intent's mode; a host without Plane C runs off, also with no
-// drop-in, where status said consume (GAP-0084). Off and consume load no
-// kernel policy either way.
+// default intent's mode. A host without Plane C runs off: its drop-in says
+// so, for the default block too (dropin), so the helper runs the mode status
+// and verify report. Off and consume load no kernel policy either way.
 func (t tetragonIntent) helperMode() string {
 	return t.Mode
 }
@@ -201,13 +201,16 @@ func (t tetragonIntent) ack() string { return strings.Join(t.EnforceAck, ",") }
 
 // dropin renders 30-defenseclaw-tetragon.conf, or nil when the helper's own
 // defaults say the same (an absent block, or one that spells out the
-// defaults). The header names the control-set digest this build ships, the
+// defaults, on a host with Plane C). The default block on a host without
+// Plane C is capped at off, which is not the helper's default: it gets a
+// drop-in, or the helper kept running consume while status and verify
+// reported off. The header names the control-set digest this build ships, the
 // value enforce_ack approves. ENFORCE_ACK is a comma list (one digest, or
 // several while a ring upgrade runs two builds); CUSTOMER_EVENTS appears only
 // when it is not the default, MACHINE_POLICY_CONNECTORS only when it names
 // one.
 func (t tetragonIntent) dropin() []byte {
-	if !t.Written {
+	if !t.Written && !t.DefaultPlaneCOff {
 		return nil
 	}
 	var b strings.Builder
@@ -233,15 +236,33 @@ func (t tetragonIntent) dropin() []byte {
 }
 
 // noteTetragonRestart says, when a run rewrote or removed the helper's
-// Tetragon drop-in, that the sensor helper restarted into the new mode: the
+// Tetragon drop-in, or restarted a helper that ran another mode
+// (helperModeDrift), that the sensor helper restarted into the new mode: the
 // one thing an administrator pushing enterprise.tetragon wants to read back.
 func (l *lifecycle) noteTetragonRestart(ctx context.Context, p *plan, changed map[string]bool) {
-	if l.env.GOOS != "linux" || p == nil || p.config == nil || !changed[filepath.Join("/etc/systemd/system", unitSensorHelper+".d", dropinTetragon)] {
+	if l.env.GOOS != "linux" || p == nil || p.config == nil ||
+		(!changed[filepath.Join("/etc/systemd/system", unitSensorHelper+".d", dropinTetragon)] && !l.helperModeRestart) {
 		return
 	}
 	if unit, ok := l.helperUnit(); ok && l.env.Services.Active(ctx, unit) {
 		l.noteChange("the sensor helper restarted into enterprise.tetragon mode %s", p.config.Tetragon.helperMode())
 	}
+}
+
+// helperModeDrift reports whether the running sensor helper published a
+// Tetragon mode other than the one p renders: it started before its drop-in
+// changed, or an earlier release left it on its built-in default. ensure is
+// then not a no-op and its transaction restarts the helper, which is what
+// kernel_policy_not_applied tells the administrator to run.
+func (l *lifecycle) helperModeDrift(ctx context.Context, p *plan) bool {
+	if l.env.GOOS != "linux" || p == nil || p.config == nil || !l.helperRunning(ctx) {
+		return false
+	}
+	state, err := kernelpolicy.ReadState(l.env.sensorDirs())
+	if err != nil || state.UpdatedAt.IsZero() || state.Intent.Mode == "" {
+		return false
+	}
+	return string(state.Intent.Mode) != p.config.Tetragon.helperMode()
 }
 
 // sensorDirs are the helper's state and runtime directories on this host.
@@ -1018,7 +1039,7 @@ func (rep *TetragonReport) fill(env *Env, intent tetragonIntent, haveIntent bool
 		BurnIn: intent.BurnIn, EnforceAck: intent.ack(), CustomerEvents: defaultStr(intent.CustomerEvents, config.TetragonCustomerEventsAgent),
 		Approval:          approvalOf(intent),
 		EnforceConnectors: nonNil(intent.EnforceConnectors), GuardrailObserve: nonNil(intent.GuardrailObserve),
-		MachinePolicyConnectors: nonNil(intent.MachinePolicy), Dropin: intent.Written,
+		MachinePolicyConnectors: nonNil(intent.MachinePolicy), Dropin: intent.dropin() != nil,
 	}
 	rep.Helper = TetragonHelperView{
 		Unit: unitSensorHelper, Running: running, PID: state.HelperPID, Mode: string(state.Intent.Mode),

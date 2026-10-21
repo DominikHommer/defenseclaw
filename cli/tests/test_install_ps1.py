@@ -1148,6 +1148,22 @@ def test_the_new_hook_goes_in_before_the_data_copy() -> None:
     assert 'Restore-BinDir (Join-Path $Slot "bin")' in _ps1_function("Restore-Slot")
 
 
+def test_hook_fail_modes_are_rendered_before_the_gateway_stops_and_the_hook_swaps() -> None:
+    # An earlier release's sidecar can hold an open nobody chose; the new
+    # gateway renders the modes from the config before the old gateway stops
+    # (the old hook then fails closed) and, once it is stopped, again before
+    # the new hook goes in.
+    install = _ps1_function("Invoke-Install")
+    first = install.index("Update-HookFailModes $stagedGateway")
+    second = install.index("Update-HookFailModes $stagedGateway", first + 1)
+    stop = install.index("if (-not (Stop-Gateway))")
+    assert first < stop < second < install.index("$saved = Save-Snapshot"), install
+    assert install.index("$stagedGateway = Join-Path $Staging") < first
+    update = _ps1_function("Update-HookFailModes")
+    assert '@("connector", "refresh-fail-modes", "--data-dir", $DataDir)' in update, update
+    assert 'Join-Path $DataDir "hooks\\.hookcfg"' in update, update
+
+
 @pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
 @pytest.mark.parametrize("shell", _POWERSHELLS)
 @pytest.mark.parametrize("case", ["upgrade", "first-install", "interrupted-before-marker"])

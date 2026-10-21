@@ -7271,8 +7271,8 @@ func TestWriteShimScripts_ContentHasAPIAddr(t *testing.T) {
 
 func TestWriteHookScript(t *testing.T) {
 	dir := t.TempDir()
-	if err := WriteHookScript(dir, "127.0.0.1:18970"); err != nil {
-		t.Fatalf("WriteHookScript failed: %v", err)
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", ""); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken failed: %v", err)
 	}
 
 	path := filepath.Join(dir, "inspect-tool.sh")
@@ -7288,8 +7288,8 @@ func TestWriteHookScript(t *testing.T) {
 func TestWriteHookScript_ContentHasAPIAddr(t *testing.T) {
 	dir := t.TempDir()
 	addr := "127.0.0.1:18970"
-	if err := WriteHookScript(dir, addr); err != nil {
-		t.Fatalf("WriteHookScript: %v", err)
+	if err := WriteHookScriptsWithToken(dir, addr, ""); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
 	data, err := os.ReadFile(filepath.Join(dir, "inspect-tool.sh"))
@@ -7304,8 +7304,8 @@ func TestWriteHookScript_ContentHasAPIAddr(t *testing.T) {
 func TestWriteAllHookScripts_CreatesAllFour(t *testing.T) {
 	dir := t.TempDir()
 	addr := "127.0.0.1:18970"
-	if err := WriteAllHookScripts(dir, addr); err != nil {
-		t.Fatalf("WriteAllHookScripts: %v", err)
+	if err := WriteHookScriptsWithToken(dir, addr, ""); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
 	expected := []string{
@@ -12091,8 +12091,8 @@ func TestWriteHookHelpers_RewritesOlder(t *testing.T) {
 
 // TestWriteHookScriptsWithToken_PreservesNewerHelper exercises the
 // full setup-time path operators actually hit. Even when the entry
-// is `WriteHookScriptsWithToken` (used by the OpenClaw connector
-// via the back-compat `WriteHookScript` shim), a newer-on-disk
+// is `WriteHookScriptsWithToken` (used by the OpenClaw connector),
+// a newer-on-disk
 // `_hardening.sh` survives the call. Catches a regression where a
 // future caller bypasses writeHookHelpers and reaches for the embed
 // directly.
