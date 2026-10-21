@@ -48,6 +48,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -1845,6 +1846,12 @@ func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "shutdown is restricted to loopback clients"})
 		return
 	}
+	// A managed standalone gateway is a system service: its service manager
+	// starts and stops it, and the gateway token does not.
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil && cfg.StandaloneEnterprise() {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": managedShutdownRefusal})
+		return
+	}
 	if a.shutdownRequester == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "graceful shutdown is unavailable"})
 		return
@@ -1881,6 +1888,33 @@ func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		// ensuring the caller receives the acknowledgement before teardown.
 		go a.shutdownRequester()
 	}
+}
+
+// managedShutdownRefusal answers a shutdown request on a managed standalone
+// computer.
+const managedShutdownRefusal = "this gateway is managed by the computer's administrator and runs as a system service; it is not stopped over the API"
+
+// managedBundlePolicyReloadRefusal answers /policy/reload on a managed
+// standalone computer that takes its policy from signed bundles.
+const managedBundlePolicyReloadRefusal = "this computer takes its policy from signed policy bundles; deliver a new signed bundle instead of reloading the policy over the API"
+
+// bundleAnchorsPath is where a standalone managed computer keeps the bundle
+// trust anchors (tests replace it).
+var bundleAnchorsPath = func() (string, error) { return enterprisebundle.AnchorsPath(runtime.GOOS) }
+
+// signedBundleMode reports whether a managed standalone computer takes its
+// policy from signed bundles: its trust anchors are installed. An anchors
+// path the gateway cannot check counts as installed.
+func signedBundleMode(cfg *config.Config) bool {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return false
+	}
+	path, err := bundleAnchorsPath()
+	if err != nil {
+		return true
+	}
+	_, err = os.Lstat(path)
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
 }
 
 func sameRuntimeDataDir(left, right string) bool {
@@ -4478,6 +4512,16 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	recordFailure := func(reason string) {
 		_ = a.recordAPIPolicyReloadMetricV8(r.Context(), "failed")
 		_ = a.emitAPIPolicyReloadRejectedV8(r.Context(), reason)
+	}
+	// With signed bundles, a policy becomes active only through a verified
+	// bundle apply, which the lifecycle confirms against the running gateway.
+	if signedBundleMode(a.runtimeConfigSnapshot()) {
+		recordFailure(managedBundlePolicyReloadRefusal)
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error":  managedBundlePolicyReloadRefusal,
+			"status": "refused",
+		})
+		return
 	}
 
 	// Secure Client keeps the reload check of main (issue #1092): it fails
