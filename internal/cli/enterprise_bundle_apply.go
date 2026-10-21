@@ -24,6 +24,7 @@ type bundleApplyOptions struct {
 	deliveryID           string
 	inbox, json          bool
 	refuseCapabilityLoss bool
+	deferRestart         bool
 	lockWait             time.Duration
 }
 
@@ -50,7 +51,9 @@ reports the new policy; a failed or interrupted apply keeps or puts back the
 last good bundle. Every apply ends in a receipt (bundle status). A repeated
 apply of the current bundle is a no-op (already_applied). --inbox applies the
 highest version in <etc>/bundles/inbox and removes the processed files.
---delivery-id records an opaque caller id (1 to 128 of A-Z a-z 0-9 . _ : -)
+--defer-restart refuses a bundle whose config change restarts the gateway
+before anything changes (restart_deferred, exit 75, Windows 1618): the
+restart_prediction of bundle verify. --delivery-id records an opaque caller id (1 to 128 of A-Z a-z 0-9 . _ : -)
 on the receipt, receipt.json and the result bundle block.
 Exit codes: 0, 1 (errors[].code names the refusal), 75 busy, 2 usage. With
 --json, an argument error prints one refusal document (invalid_arguments).`,
@@ -76,6 +79,7 @@ Exit codes: 0, 1 (errors[].code names the refusal), 75 busy, 2 usage. With
 	f.StringVar(&opts.bundle, "bundle", "", "the .dcbundle file or bundle directory")
 	f.BoolVar(&opts.inbox, "inbox", false, "apply the highest version in the bundle inbox")
 	f.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
+	f.BoolVar(&opts.deferRestart, "defer-restart", false, "refuse, before anything changes, a bundle whose config change restarts the gateway (restart_deferred, retry exit code)")
 	f.StringVar(&opts.reason, "reason", "bundle", "annotate the run (recorded in the lifecycle result)")
 	f.StringVar(&opts.deliveryID, "delivery-id", "", "opaque id of this delivery, recorded on its receipt (1 to 128 of A-Z a-z 0-9 . _ : -)")
 	addLockWaitFlag(f, &opts.lockWait)

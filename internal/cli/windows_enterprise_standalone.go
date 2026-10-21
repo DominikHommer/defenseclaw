@@ -2253,7 +2253,7 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 	}
 	for _, message := range result.Errors {
 		switch message.Code {
-		case "lifecycle_busy":
+		case "lifecycle_busy", string(enterprisebundle.CodeRestartDeferred):
 			return enterprisestatus.WindowsExitBusy
 		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
 			return enterprisestatus.WindowsExitBusy

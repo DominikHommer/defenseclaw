@@ -771,6 +771,9 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	run.previousGeneration, _ = configwrite.ReadGenerationState(layout.ConfigPath)
 	driver.EnforcedConfig = installed
 	driver.RefuseCapabilityLoss = opts.refuseCapabilityLoss
+	if opts.deferRestart {
+		driver.RefuseRestart = windowsBundleRestartDeferral
+	}
 	driver.DeliveryID = opts.bundleDeliveryID
 	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(ctx))
 	if err != nil {

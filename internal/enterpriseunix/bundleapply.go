@@ -535,6 +535,14 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 			return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeCapabilityLoss, Detail: "the bundle disables: " + strings.Join(loss, ", ")})
 		}
 	}
+	if env.DeferRestart {
+		// The classifier bundle verify reports as restart_prediction.
+		restart, err := configwrite.ManagedConfigRestartRequired(current, rendered, configwrite.ManagedDefaultsFor(env.Layout))
+		if reason := enterprisebundle.RestartDeferralReason(restart, err != nil || len(current) == 0); reason != "" {
+			refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeRestartDeferred, Detail: reason})
+			return enterprisestatus.BusyExitCode(env.GOOS)
+		}
+	}
 	if _, err := store.Promote(receipt); err != nil {
 		return refuse(err)
 	}

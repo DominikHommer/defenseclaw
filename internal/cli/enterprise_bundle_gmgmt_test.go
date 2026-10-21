@@ -81,3 +81,24 @@ func TestEnterpriseBundleApplyArgumentErrorPrintsOneDocument(t *testing.T) {
 		t.Fatalf("exit %d, stdout %q (%v)", code, out, err)
 	}
 }
+
+// The Windows --defer-restart refusal follows the verify restart
+// prediction: required and unknown refuse, not_required applies.
+func TestBundleRestartDeferralFollowsThePrediction(t *testing.T) {
+	if got := bundleRestartDeferral(&bundleRestartPrediction{GatewayRestart: bundleRestartNotRequired}); got != "" {
+		t.Fatalf("not_required: %q", got)
+	}
+	if got := bundleRestartDeferral(&bundleRestartPrediction{GatewayRestart: bundleRestartRequired, Settings: []string{"gateway.port"}}); !strings.Contains(got, "gateway.port") {
+		t.Fatalf("required: %q", got)
+	}
+	if got := bundleRestartDeferral(&bundleRestartPrediction{GatewayRestart: bundleRestartUnknown}); !strings.Contains(got, "cannot tell") {
+		t.Fatalf("unknown: %q", got)
+	}
+	if got := windowsBundleRestartDeferral(nil, []byte("config_version: 9\n")); !strings.Contains(got, "cannot tell") {
+		t.Fatalf("no enforced config: %q", got)
+	}
+	cmd := newEnterpriseBundleApplyCommand()
+	if cmd.Flags().Lookup("defer-restart") == nil {
+		t.Fatal("bundle apply has no --defer-restart")
+	}
+}

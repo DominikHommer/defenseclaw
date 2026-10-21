@@ -47,6 +47,11 @@ type Driver struct {
 	// value means this is the first bundle on a device with no config.
 	EnforcedConfig       []byte
 	RefuseCapabilityLoss bool
+	// RefuseRestart, when set (apply --defer-restart), names why the change
+	// from the enforced config to the rendered bundle config restarts the
+	// gateway ("" when it does not); a reason refuses the bundle
+	// (restart_deferred) before it is promoted.
+	RefuseRestart func(enforced, rendered []byte) string
 	// DeliveryID is the --delivery-id Prepare records on the receipt it
 	// starts ("" for none).
 	DeliveryID string
@@ -206,6 +211,11 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 		p.Warnings = append(p.Warnings, Warning{Code: "capability_disabled", Message: "the bundle disables: " + strings.Join(loss, ", ")})
 		if d.RefuseCapabilityLoss {
 			return refuse(&Error{Code: CodeCapabilityLoss, Detail: "the bundle disables: " + strings.Join(loss, ", ")})
+		}
+	}
+	if d.RefuseRestart != nil {
+		if reason := d.RefuseRestart(d.EnforcedConfig, rendered); reason != "" {
+			return refuse(&Error{Code: CodeRestartDeferred, Detail: reason})
 		}
 	}
 	dir, err := d.Store.Promote(receipt)
@@ -424,6 +434,20 @@ func (d *Driver) fail(rc *Receipt, code Code, message string) error {
 		return fmt.Errorf("record the failed bundle receipt: %w", err)
 	}
 	return &Error{Code: code, Detail: message}
+}
+
+// RestartDeferralReason is the restart_deferred detail for the settings of
+// a config change that restart the gateway (restart), or for a change whose
+// effect cannot be told (unknown: no installed config to compare); "" when
+// the change applies without a restart.
+func RestartDeferralReason(restart []string, unknown bool) string {
+	switch {
+	case unknown:
+		return "--defer-restart: cannot tell whether this bundle restarts the gateway (no installed config to compare), so it is not applied; apply it without --defer-restart in a maintenance window"
+	case len(restart) > 0:
+		return "--defer-restart: this bundle changes settings that restart the gateway (" + boundedDetail(strings.Join(restart, ", ")) + "), so it is not applied; apply it without --defer-restart in a maintenance window"
+	}
+	return ""
 }
 
 func joinCodes(codes []string) string {
