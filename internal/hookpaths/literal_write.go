@@ -429,9 +429,20 @@ func literalCodePosition(code string, position int) bool {
 			}
 		} else if c == '\'' || c == '"' {
 			quote = c
-		} else if c == '#' {
+		} else if c == '#' && literalCommentStart(code, i) {
 			comment = true
 		}
 	}
 	return quote == 0 && !comment
+}
+
+// A '#' starts a comment only as its own token: at the start of the code or
+// after whitespace or ';', and followed by whitespace or the end. Other
+// spellings ($#name, .#field, s#a#b#) are code in some interpreter, so they
+// never hide a later write.
+func literalCommentStart(code string, i int) bool {
+	if i > 0 && !strings.ContainsRune(" \t\n;", rune(code[i-1])) {
+		return false
+	}
+	return i+1 == len(code) || strings.ContainsRune(" \t\r\n", rune(code[i+1]))
 }
