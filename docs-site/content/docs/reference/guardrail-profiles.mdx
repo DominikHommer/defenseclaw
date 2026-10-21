@@ -462,14 +462,15 @@ defenseclaw audit export --since 1h \
 
 Edit the config and the running gateway applies it on its next reload, with no
 restart in the default `hot` mode. Each profile whose effective policy changed
-writes one `config-update` audit event with the reason
-`guardrail_profile_reload` and the path `guardrail.profiles.<name>.digest`,
-holding the old and the new digest. Compare the digest in a decision with the
+writes one audit event with the reason `guardrail_profile_reload` and the
+path `guardrail.profiles.<name>.digest`, holding the old and the new digest.
+The stored action is `config-update`; `audit export` writes it as
+`config.change.applied`, so filter on the reason, not the action. Compare the digest in a decision with the
 one `explain` reports to prove which version of the policy decided it.
 
 ```bash
 defenseclaw audit export --since 1h \
-  | jq -c 'select(.action=="config-update") | select(tostring | contains("guardrail_profile_reload"))'
+  | jq -c 'select(tostring | contains("guardrail_profile_reload"))'
 ```
 
 The Grafana [Identity & Users](/docs/reference/dashboards) board

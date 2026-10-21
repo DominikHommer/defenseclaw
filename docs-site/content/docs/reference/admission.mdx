@@ -491,8 +491,8 @@ asset_policy:
       description: "A note shown in listings and audit events.",
     },
     "url, command, args_prefix, transport": {
-      type: "string",
-      description: "MCP servers only. Match a server by where it points or how it starts, with or without a name. Every field you give must match. command compares the program's base name; args_prefix compares the first arguments exactly. At an agent hook these fields are compared with the server as the calling user's agent configures it (on a managed device the standalone hook reads that configuration as the user), so two users' servers with the same name are told apart. On a managed device that includes a definition the agent was started with on its command line (claude --mcp-config, which --strict-mcp-config makes the only source, or codex -c mcp_servers.<name>.url=...); when the hook cannot read such a source, a tool call to the server is refused while one of these rules applies, because where it points cannot be checked.",
+      type: "string (args_prefix is a list)",
+      description: "MCP servers only. Match a server by where it points or how it starts, with or without a name. Every field you give must match. command compares the program's base name; args_prefix is a list of strings (for example `[-y, acme-server]`) and compares the first arguments exactly; a single string is refused. At an agent hook these fields are compared with the server as the calling user's agent configures it (on a managed device the standalone hook reads that configuration as the user), so two users' servers with the same name are told apart. On a managed device that includes a definition the agent was started with on its command line (claude --mcp-config, which --strict-mcp-config makes the only source, or codex -c mcp_servers.<name>.url=...); when the hook cannot read such a source, a tool call to the server is refused while one of these rules applies, because where it points cannot be checked.",
     },
     "source_path_contains": {
       type: "list",
@@ -820,8 +820,14 @@ rejected in a version 9 file.
 | `data.json` itself | Renamed `data.json.migrated-v9` |
 
 An operator row is an `actions` row whose `install` field is `block` or
-`allow`, unless its reason is a scan verdict (it starts with `auto-block`,
-`post-scan:`, `post-install scan:`, `scan:` or `scan clean or within policy`).
+`allow`, unless its reason is an automatic one. The migration matches the exact forms
+the scanners write: `post-scan: N findings, max=SEVERITY` (also with
+`post-install scan:` or `scan:` in front), `scan clean or within policy`,
+`auto-block: watch detected SEVERITY findings` with an optional scanner
+suffix, and the prefixes `scanner failure (fail-closed): `,
+`quarantine failed: ` and `link removed: `. A reason that only starts with the
+same words, such as free text after `auto-block`, is read as an operator
+reason and moved.
 Each moved row becomes a rule with its name, connector and reason. An allow
 also keeps its `source_path` as a `source_path_contains` pin; a block does not.
 A tool row named `@connector/tool` becomes a rule for `tool` on that connector,

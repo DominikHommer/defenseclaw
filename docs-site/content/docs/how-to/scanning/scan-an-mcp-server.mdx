@@ -39,6 +39,16 @@ Scan an MCP server before an agent calls it.
    defenseclaw mcp set context7 --command npx --args '["-y", "@upstash/context7-mcp"]'
    ```
 
+## Use it in CI
+
+A scan of one named server with `--json` prints one result object. `--all --json` prints one JSON array with a result object per server, and a failed scan is an error object in the same array. Count findings across every server:
+
+```bash
+defenseclaw mcp scan --all --json | jq '[.[] | (.findings // [])[]] | length'
+```
+
+For one named server, `defenseclaw mcp scan filesystem --json | jq '.findings | length'` works because the output is a single object.
+
 ## Local servers: npx and uvx only
 
 A local (stdio) scan starts the server as you. DefenseClaw starts only `npx` or `uvx` with a package argument (`npx.cmd` and `uvx.exe` on Windows). A server started with `node`, `python3`, `docker` or a binary is refused:

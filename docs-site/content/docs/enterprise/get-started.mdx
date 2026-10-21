@@ -43,8 +43,9 @@ one of two ways:
 | [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Claude Code, Codex, Cursor, GitHub Copilot, and OpenCode with DefenseClaw's managed OpenCode plugin | Its hooks in the vendor's administrator-owned policy files, which apply to every user of the computer |
 | [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp and Kiro, and OpenCode while the managed plugin is not in force | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
 
-OpenClaw, ZeptoClaw and ACP (Agent Client Protocol) editors are not supported
-in enterprise managed mode. The verified agent and OS combinations are in the
+OpenClaw and ZeptoClaw are not supported in enterprise managed mode. ACP
+(Agent Client Protocol) editors are enrolled with `defenseclaw-gateway
+enterprise acp enroll`, as a preview. The verified agent and OS combinations are in the
 [enterprise route table](/docs/support-matrix#enterprise). How to list agents,
 users and per-agent modes is in
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)

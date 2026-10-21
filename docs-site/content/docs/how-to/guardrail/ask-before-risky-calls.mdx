@@ -1,6 +1,6 @@
 ---
 title: Ask before risky calls
-description: Turn on human approval (HITL) so a HIGH-severity tool call pauses in the agent and waits for your yes or no.
+description: Turn on human approval (HITL) so a confirmable HIGH-severity tool call pauses in the agent and waits for your yes or no.
 keywords:
   - DefenseClaw HITL
   - human approval AI agent
@@ -8,7 +8,7 @@ keywords:
   - confirm verdict
 ---
 
-Human approval (HITL) pauses a risky call and asks you instead of silently allowing or hard-blocking it. It works in action mode, on agents that can ask: Claude Code, GitHub Copilot CLI, Antigravity, Amp and OpenClaw ([the list](/docs/features/guardrail#which-agents-can-ask)). CRITICAL findings still block without asking.
+Human approval (HITL) pauses a risky call and asks you instead of silently allowing or hard-blocking it. It works in action mode, on agents that can ask: Claude Code, GitHub Copilot CLI, Antigravity, Amp and OpenClaw ([the list](/docs/features/guardrail#which-agents-can-ask)). CRITICAL findings still block without asking, and alert-only rules never ask.
 
 <DefenseClawDemo scenario="hitl-native-approval" variant="approve" />
 
@@ -43,7 +43,7 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
    DefenseClaw policy needs your confirmation for this action (rule C2-WEBHOOK-SITE: webhook.site (known exfil)).
    ```
 
-   Not every HIGH finding asks. Only a finding that can block can pause, and some HIGH path rules (such as `PATH-AWS-CONFIG`) are recorded without a prompt.
+   Not every HIGH finding asks. Only a finding that can block can pause. Alert-only HIGH rules (such as `PATH-AWS-CONFIG`) never ask: the agent shows a notice and the audit log records `alert`. `defenseclaw guardrail validate-pack` reports the count as `alert_only_rule_count`.
 
 ## Check it worked
 
