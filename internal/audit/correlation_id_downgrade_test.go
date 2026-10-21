@@ -4,6 +4,7 @@
 package audit
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"strings"
@@ -15,37 +16,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
-func TestOrderedCorrelationIDs(t *testing.T) {
-	first, err := NewSemanticEventID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(2 * time.Millisecond)
-	second, err := NewSemanticEventID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := orderedCorrelationID("rel_", string(first), "semantic_event", string(first), "session", "s")
-	if a != orderedCorrelationID("rel_", string(first), "semantic_event", string(first), "session", "s") {
-		t.Fatal("the same fields got two IDs")
-	}
-	if a == orderedCorrelationID("rel_", string(first), "semantic_event", string(first), "session", "t") {
-		t.Fatal("different fields got the same ID")
-	}
-	parsed := uuid.MustParse(string(first))
-	if len(a) != 68 || !strings.HasPrefix(a, "rel_"+hex.EncodeToString(parsed[:8])) {
-		t.Fatalf("ordered ID %q does not start with the anchor's time and counter", a)
-	}
-	b := orderedCorrelationID("rel_", string(second), "semantic_event", string(second), "session", "s")
-	if !(a < b) {
-		t.Fatalf("a later event's ID %q sorts before %q", b, a)
-	}
-	for _, anchor := range []string{"", "not-a-uuid", uuid.NewString(), strings.ToUpper(string(first))} {
-		got := orderedCorrelationID("ev_", anchor, "x", anchor)
-		if got != deterministicCorrelationID("ev_", "x", anchor) {
-			t.Fatalf("anchor %q: got %q, want the unordered ID", anchor, got)
-		}
-	}
+func TestTimeOrderedRecordIDs(t *testing.T) {
 	if id := observability.NewTimeOrderedID(); uuid.MustParse(id).Version() != 7 || uuid.MustParse(id).String() != id {
 		t.Fatalf("NewTimeOrderedID = %q, want a canonical UUIDv7", id)
 	}
@@ -62,17 +33,36 @@ func TestOrderedCorrelationIDs(t *testing.T) {
 	}
 }
 
-// TestCorrelationUpsertsKeepUnorderedIDsOfOlderStores pins the upgrade path:
-// an identifier, relationship or evidence row written before 1.0.4 has the
-// unordered deterministicCorrelationID of its fields. Writing the same fields
-// again must update that row, not add a second one or fail on the table's
-// unique fields, and must return the stored ID.
-func TestCorrelationUpsertsKeepUnorderedIDsOfOlderStores(t *testing.T) {
+// release103CorrelationID is the correlation identifier, relationship and
+// evidence ID of DefenseClaw 1.0.3 and every earlier writer (fc6794381d,
+// internal/audit/correlation_v8.go), written out here so that a change of
+// deterministicCorrelationID fails this test instead of a rollback.
+func release103CorrelationID(prefix string, fields ...string) string {
+	digest := sha256.New()
+	for _, field := range fields {
+		_, _ = digest.Write([]byte{0})
+		_, _ = digest.Write([]byte(field))
+	}
+	return prefix + hex.EncodeToString(digest.Sum(nil))
+}
+
+// TestCorrelationIDsSurviveARollbackTo103 pins the rollback path (review of
+// G-flood-wal: time-ordered correlation IDs broke it). The identifier,
+// relationship and evidence rows this build writes for an event with a UUIDv7
+// semantic ID carry the IDs that 1.0.3 computes from the same fields. A late
+// cross-rail attachment after `defenseclaw rollback` (1.0.3's upserts are this
+// file's PutIdentifier, PutRelationship and PutRelationshipEvidence, keyed by
+// those IDs) then updates the stored rows: it does not fail on the tables'
+// UNIQUE fields and does not add the evidence a second time.
+func TestCorrelationIDsSurviveARollbackTo103(t *testing.T) {
 	store, repo := newCorrelationTestStore(t)
 	instance := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyExternal)
 	semantic, err := NewSemanticEventID()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if uuid.MustParse(string(semantic)).Version() != 7 {
+		t.Fatalf("semantic event ID %s is not a UUIDv7", semantic)
 	}
 	logical, err := NewSemanticEventID()
 	if err != nil {
@@ -100,51 +90,18 @@ func TestCorrelationUpsertsKeepUnorderedIDsOfOlderStores(t *testing.T) {
 		Type: CorrelationBelongsTo, Method: CorrelationMethodReported,
 		RuleID: "hook-tool", RuleVersion: "v1", Status: CorrelationRelationshipActive, ObservedAt: now,
 	}
-	identifierID, err := createTx.PutIdentifier(t.Context(), identifier)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stored, err := createTx.PutRelationship(t.Context(), relationship)
-	if err != nil {
-		t.Fatal(err)
-	}
-	anchor := uuid.MustParse(string(semantic))
-	prefix := hex.EncodeToString(anchor[:8])
-	if !strings.HasPrefix(identifierID, "id_"+prefix) || !strings.HasPrefix(stored.RelationshipID, "rel_"+prefix) {
-		t.Fatalf("new rows are not time ordered: %s %s", identifierID, stored.RelationshipID)
-	}
-	if err := createTx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Rewrite the identifier and relationship as an older binary stored them.
-	legacyIdentifier := deterministicCorrelationID("id_", string(identifier.ConnectorInstanceID),
+	wantIdentifier := release103CorrelationID("id_", string(identifier.ConnectorInstanceID),
 		identifier.Namespace, string(identifier.Kind), identifier.ValueDigest, string(identifier.SemanticEventID))
-	legacyRelationship := deterministicCorrelationID("rel_", string(relationship.FromKind), relationship.FromID,
+	wantRelationship := release103CorrelationID("rel_", string(relationship.FromKind), relationship.FromID,
 		string(relationship.ToKind), relationship.ToID, string(relationship.Type), string(relationship.Method),
 		relationship.RuleID, relationship.RuleVersion)
-	for _, statement := range []struct {
-		query string
-		args  []any
-	}{
-		{`UPDATE correlation_identifiers SET identifier_id=? WHERE identifier_id=?`, []any{legacyIdentifier, identifierID}},
-		{`UPDATE correlation_relationships SET relationship_id=? WHERE relationship_id=?`, []any{legacyRelationship, stored.RelationshipID}},
-	} {
-		if _, err := store.db.Exec(statement.query, statement.args...); err != nil {
-			t.Fatal(err)
-		}
-	}
-
+	wantEvidence := release103CorrelationID("ev_", wantRelationship, string(semantic), string(CorrelationEvidenceSource))
 	evidence := CorrelationRelationshipEvidence{
-		RelationshipID: legacyRelationship, SemanticEventID: semantic,
+		RelationshipID: wantRelationship, SemanticEventID: semantic,
 		Role: CorrelationEvidenceSource, Integrity: CorrelationIntegrityVerified, CreatedAt: now,
 	}
-	attach := func() (string, CorrelationRelationship, string) {
+	put := func(tx *CorrelationTx) (string, CorrelationRelationship, string) {
 		t.Helper()
-		tx, _, err := repo.BeginExistingOccurrence(t.Context(), semantic)
-		if err != nil {
-			t.Fatal(err)
-		}
 		gotIdentifier, err := tx.PutIdentifier(t.Context(), identifier)
 		if err != nil {
 			t.Fatal(err)
@@ -162,21 +119,24 @@ func TestCorrelationUpsertsKeepUnorderedIDsOfOlderStores(t *testing.T) {
 		}
 		return gotIdentifier, gotRelationship, gotEvidence
 	}
-	gotIdentifier, gotRelationship, evidenceID := attach()
-	if gotIdentifier != legacyIdentifier || gotRelationship.RelationshipID != legacyRelationship || !gotRelationship.Unchanged {
-		t.Fatalf("upserts over an older row returned %s %+v, want %s %s", gotIdentifier, gotRelationship,
-			legacyIdentifier, legacyRelationship)
+	gotIdentifier, gotRelationship, gotEvidence := put(createTx)
+	if gotIdentifier != wantIdentifier || gotRelationship.RelationshipID != wantRelationship || gotEvidence != wantEvidence {
+		t.Fatalf("IDs %s %s %s, want the 1.0.3 IDs %s %s %s", gotIdentifier, gotRelationship.RelationshipID,
+			gotEvidence, wantIdentifier, wantRelationship, wantEvidence)
 	}
-	if !strings.HasPrefix(evidenceID, "ev_"+prefix) {
-		t.Fatalf("new evidence %s is not time ordered", evidenceID)
-	}
-	legacyEvidence := deterministicCorrelationID("ev_", legacyRelationship, string(semantic), string(CorrelationEvidenceSource))
-	if _, err := store.db.Exec(`UPDATE correlation_relationship_evidence SET evidence_id=? WHERE evidence_id=?`,
-		legacyEvidence, evidenceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, again := attach(); again != legacyEvidence {
-		t.Fatalf("evidence upsert over an older row returned %s, want %s", again, legacyEvidence)
+
+	// The rolled-back writer attaches the same fields again, as a late
+	// delivery on another rail does.
+	for range 2 {
+		tx, _, err := repo.BeginExistingOccurrence(t.Context(), semantic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		againIdentifier, againRelationship, againEvidence := put(tx)
+		if againIdentifier != wantIdentifier || againRelationship.RelationshipID != wantRelationship ||
+			!againRelationship.Unchanged || againEvidence != wantEvidence {
+			t.Fatalf("late attachment returned %s %+v %s", againIdentifier, againRelationship, againEvidence)
+		}
 	}
 	for table, want := range map[string]int{
 		"correlation_identifiers": 1, "correlation_relationships": 1, "correlation_relationship_evidence": 1,

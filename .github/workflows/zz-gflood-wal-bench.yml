@@ -15,10 +15,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest, v: new-rate5, ref: "", rate: "5", calls: "3000" }
-          - { os: windows-latest, v: new-rate3, ref: "", rate: "3", calls: "1800" }
-          - { os: windows-latest, v: old-rate5, ref: 5bbc0ff3ecb1d51f751ccc18321f69eb0744b6a8, rate: "5", calls: "3000" }
-          - { os: windows-latest, v: old-rate3, ref: 5bbc0ff3ecb1d51f751ccc18321f69eb0744b6a8, rate: "3", calls: "1800" }
+          - { os: windows-latest, v: r1-rate10a, ref: "", rate: "10", calls: "6000", trace: "1" }
+          - { os: windows-latest, v: r1-rate10b, ref: "", rate: "10", calls: "6000", trace: "" }
+          - { os: windows-latest, v: r1-rate5, ref: "", rate: "5", calls: "3000", trace: "" }
+          - { os: ubuntu-latest, v: r1-rate10, ref: "", rate: "10", calls: "6000", trace: "" }
+          - { os: macos-latest, v: r1-rate10, ref: "", rate: "10", calls: "6000", trace: "" }
     name: probe ${{ matrix.os }} ${{ matrix.v }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
@@ -37,9 +38,13 @@ jobs:
           DEFENSECLAW_HOOK_FLOOD_PROBE: "1"
           DEFENSECLAW_HOOK_FLOOD_CALLS: ${{ matrix.calls }}
           DEFENSECLAW_HOOK_FLOOD_RATE: ${{ matrix.rate }}
+          GFW_TRACE: ${{ matrix.trace }}
         run: |
           git log --oneline -1
           if [ -z "${{ matrix.ref }}" ]; then cp .github/zz-gfw/knobs.go internal/audit/zz_gfw_bench_knobs.go; fi
           go test -count=1 -timeout 45m -run '^TestHookFloodProbe$' -v ./internal/gateway/ > probe.log 2>&1 || true
           grep -E "minute|WAL|PASS|FAIL|sent|drained|flat|all |ok " probe.log || true
           grep -E -B3 -A12 "^--- FAIL|Error|panic" probe.log | head -60 || true
+          echo "bounded writer phases: $(grep -c 'writer phase bounded=true' probe.log)"
+          grep -E "writer phase bounded=true" probe.log | head -40 || true
+          grep -E "audit persistence failed" probe.log | head -10 || true

@@ -21,6 +21,7 @@ func init() {
 	ms("GFLOOD_SETTLED_MS", &walSettledSync)
 	ms("GFLOOD_IDLE_MS", &walIdleWindow)
 	ms("GFLOOD_IDLEWAIT_MS", &walIdleWait)
+	ms("GFLOOD_BCAP_MS", &walBoundedCatchUpCap)
 	if n, err := strconv.Atoi(os.Getenv("GFLOOD_SETTLE")); err == nil {
 		walSettleRounds = n
 	}
