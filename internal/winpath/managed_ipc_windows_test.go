@@ -18,3 +18,12 @@ func TestManagedSecureClientLayoutMatchesInstaller(t *testing.T) {
 		t.Fatalf("ManagedIPCRelativeDir = %q, want %q", got, want)
 	}
 }
+
+func TestManagedStandaloneLayoutMatchesInstaller(t *testing.T) {
+	if got, want := StandaloneManagedInstallRelativeDir, `Cisco\DefenseClaw`; got != want {
+		t.Fatalf("StandaloneManagedInstallRelativeDir = %q, want %q", got, want)
+	}
+	if got, want := StandaloneManagedIPCRelativeDir, `Cisco\DefenseClaw\ipc`; got != want {
+		t.Fatalf("StandaloneManagedIPCRelativeDir = %q, want %q", got, want)
+	}
+}
