@@ -24,6 +24,7 @@ for current behavior.
 
 ### Fixed
 
+- **Webhook tests and scoped setup report the right result.** Generic synthetic events include the sending host in the signed body. Connector-scoped adds no longer inherit global names or overwrite warnings, and a PagerDuty test with an unset routing key exits with a short error, including in a dry run.
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 
 ### Removed
