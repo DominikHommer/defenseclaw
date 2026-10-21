@@ -336,8 +336,12 @@ generation in force.
 The same digest is available without the lifecycle, as root on the host. This output
 is from a per-user test home; a managed host prints its own digests:
 
-```bash
+```bash title="Linux"
 sudo /opt/defenseclaw/bin/defenseclaw-gateway policy digest
+```
+
+```bash title="macOS"
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway policy digest
 ```
 
 ```text

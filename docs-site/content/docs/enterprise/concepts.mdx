@@ -72,9 +72,12 @@ refuses to replace a newer version with an older one. See
 ### Transaction and rollback
 
 Every action that changes the computer runs as one locked transaction with a
-snapshot. If a step fails, it restores the snapshot (exit `1` on Linux and macOS,
-`1603` on Windows). A run that finds the lock held exits `75` (Linux, macOS) or
-`1618` (Windows).
+snapshot. If a step fails before the change is committed, it restores the snapshot
+(exit `1` on Linux and macOS, `1603` on Windows). If a step fails after the change
+committed, for example when cleanup of the journal fails, nothing is rolled back:
+the computer is installed (or removed) as asked and the run still exits `1` or
+`1603`. Run Setup or `ensure` again to finish the cleanup. A run that finds the
+lock held exits `75` (Linux, macOS) or `1618` (Windows).
 
 ### Payload
 
@@ -171,9 +174,10 @@ from, never who must have signed them. See
 ### Gateway
 
 The service that checks each agent event against policy and answers allow or
-block. It runs as a restricted service account, never as root: LocalSystem
-write-restricted by `NT SERVICE\DefenseClawGateway` on Windows, `defenseclaw` on
-Linux, `_defenseclaw` on macOS. It listens on `127.0.0.1:18970`, and on Linux and
+block. On Linux and macOS it runs as a dedicated account, never as root:
+`defenseclaw` on Linux, `_defenseclaw` on macOS. On Windows it runs as LocalSystem
+with a write-restricted service SID (`NT SERVICE\DefenseClawGateway`), so it can
+write only its own runtime and log folders. It listens on `127.0.0.1:18970`, and on Linux and
 macOS also on the hook socket. It reads the config and policies but cannot
 change them.
 

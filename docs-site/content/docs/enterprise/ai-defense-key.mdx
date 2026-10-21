@@ -201,6 +201,17 @@ the old key in AI Defense after `secret status` shows the new digest.
 
 ## Remove the key
 
+Remove the reference first. The removal refuses a credential the installed config
+still names (`enterprise.inspection.ai_defense.credential`), so the key stays
+stored until you do this:
+
+1. In the config you deploy, set `enabled: false` under
+   `enterprise.inspection.ai_defense` and delete its `credential` line. Otherwise
+   the gateway keeps logging that the credential is missing, while the local
+   engine decides alone.
+2. Apply the config with `ensure`.
+3. Remove the key:
+
 ```bash
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret remove --name ai-defense-api-key
 ```
@@ -210,16 +221,14 @@ On macOS use `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise sec
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret remove --name ai-defense-api-key
 ```
 
-On Linux and macOS the output names the credential:
+If the config still names the key, the command exits `1` (`1603` on Windows)
+with `the installed config still references credential ai-defense-api-key`, and
+nothing is removed. On Linux and macOS a successful removal prints
 `- removed credential ai-defense-api-key`, or
 `- credential ai-defense-api-key was not stored; nothing to remove`.
-On Windows, removal first reads the installed config to check for references.
+On Windows, removal reads the installed config to check for references.
 If it cannot read that config, it refuses and leaves the credential in place;
 restore config access, then run the command again.
-
-Set `enabled: false` in the config as well. Otherwise the gateway keeps
-logging that the credential is missing, while the local engine decides
-alone.
 
 ## Deliver the key with an MDM
 
@@ -244,9 +253,8 @@ for recipes.
 | Result | Linux and macOS | Windows |
 | --- | --- | --- |
 | Stored, listed or removed | `0` | `0` |
-| Invalid input: both or neither of `--from-stdin` and `--from-file`, or an empty, multi-line or oversized value | `2` | `1639` |
-| Invalid credential name | `1` | `1639` |
-| Not elevated or not root, not installed (Windows only), or the write failed | `1` | `1603` |
+| Invalid input: an invalid credential name, both or neither of `--from-stdin` and `--from-file`, or an empty, multi-line or oversized value | `2` | `1639` |
+| Not elevated or not root, not installed (Windows only), the config still references the credential on removal, or the write failed | `1` | `1603` |
 | The follow-up `ensure` failed and rolled back | `1` | Not applicable |
 | Another lifecycle run holds the lock | `75` | Not applicable |
 | The gateway restart failed after the key was stored | Not applicable | `1603` |
