@@ -904,12 +904,38 @@ func (m *Manager) config() *config.Config {
 
 // configForSandbox keeps fallback policy checks under the same floor as
 // normal resolution. A managed sandbox without a confirmed policy has no
-// configuration to borrow from another sandbox.
+// configuration to borrow from another sandbox. A sandbox a managed create
+// made resolves under the configuration that create pinned until the
+// daemon keeps its registration (box.createCfg). Callers must not hold
+// Manager.mu.
 func (m *Manager) configForSandbox(name string) *config.Config {
+	m.mu.Lock()
+	var pinned *config.Config
+	if b := m.boxes[name]; b != nil {
+		pinned = b.createCfg
+	}
+	m.mu.Unlock()
+	if pinned != nil {
+		return pinned
+	}
 	if m.opts.ConfigForSandbox != nil {
 		return m.opts.ConfigForSandbox(name)
 	}
 	return m.config()
+}
+
+// EndCreate tells the manager the daemon is done with the managed create
+// of the sandbox name (OpenShell id), whether it kept the registration or
+// not: the sandbox's policy follows its registration from now on
+// (ConfigForSandbox; the closed floor without one), and every sandbox's
+// policy is resolved again (RefreshPolicies).
+func (m *Manager) EndCreate(name, id string) {
+	m.mu.Lock()
+	if b := m.boxes[name]; b != nil && b.rec.ID == id {
+		b.createCfg = nil
+	}
+	m.mu.Unlock()
+	m.RefreshPolicies()
 }
 
 // keepIgnored is what a mounted project's undo point keeps a copy of

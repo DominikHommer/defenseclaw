@@ -94,6 +94,8 @@ var (
 	windowsBundleEnsurePrivateDirectory = ensureWindowsBundlePrivateDirectory
 	windowsBundlePublishPrivateFile     = publishWindowsBundlePrivateFile
 	windowsBundleSyncMarker             = syncWindowsBundleMarker
+	// windowsBundleReadAnchors reads and checks an anchor file once.
+	windowsBundleReadAnchors = enterprisebundle.ReadAnchorsFile
 )
 
 func init() {
@@ -327,6 +329,7 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 	store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory
 	store.EnsurePrivateDirectory = windowsBundleEnsurePrivateDirectory
 	store.PublishPrivateFile = windowsBundlePublishPrivateFile
+	store.ReceiptEventReported = func(id string) bool { return enterprisestatus.ReceiptEventReported(layout.DataDir, id) }
 	return &enterprisebundle.Driver{
 		Store: store,
 		DeviceLayout: func() *enterprisebundle.DeviceLayout {
@@ -771,6 +774,9 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	run.previousGeneration, _ = configwrite.ReadGenerationState(layout.ConfigPath)
 	driver.EnforcedConfig = installed
 	driver.RefuseCapabilityLoss = opts.refuseCapabilityLoss
+	if opts.deferRestart {
+		driver.RefuseRestart = windowsBundleRestartDeferral
+	}
 	driver.DeliveryID = opts.bundleDeliveryID
 	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(ctx))
 	if err != nil {
@@ -957,7 +963,7 @@ func refuseWindowsBundleRequired(cmd *cobra.Command, action string, opts *window
 		return false, nil
 	}
 	return true, writeWindowsBundleRefusal(cmd, action, opts, string(enterprisebundle.CodeBundleRequired), fmt.Sprintf(
-		"this device takes its policy from signed bundles (the MDM installed %s), so CONFIG= is not applied; deliver a signed bundle with /ensure BUNDLE=<file>",
+		"this device takes its policy from signed bundles (a trust anchor file is installed at %s), so CONFIG= is not applied; deliver a signed bundle with /ensure BUNDLE=<file>",
 		driver.AnchorsPath), "")
 }
 
@@ -1457,14 +1463,12 @@ func writeWindowsBundleAdminFile(path string, data []byte) error {
 // installWindowsBundleAnchors installs the administrator anchor file src
 // as <state root>\etc\trust\bundle-anchors.json once it decodes and passes
 // the trust check, then checks the installed copy the same way. It returns
-// the bytes it wrote.
+// the bytes it wrote, which are the bytes it read and checked once.
 func installWindowsBundleAnchors(src, dst string) ([]byte, error) {
-	if _, err := enterprisebundle.LoadAnchors(src, bundleAnchorTrust); err != nil {
-		return nil, err
-	}
-	raw, err := safefile.ReadRegularFileBounded(src, windowsBundleMaxAnchors)
+	// One read: the bytes written are the ones decoded and trust-checked.
+	_, raw, err := windowsBundleReadAnchors(src, bundleAnchorTrust)
 	if err != nil {
-		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeAnchorInvalid, Detail: err.Error()}
+		return nil, err
 	}
 	if err := windowsBundleEnsurePrivateDirectory(filepath.Dir(dst)); err != nil {
 		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}

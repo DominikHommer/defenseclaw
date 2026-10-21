@@ -28,10 +28,24 @@ STANDALONE_ENV = {
 }
 
 
+# The per-user archives install.sh and install.ps1 extract. Their Fleet-on
+# install copies bin/edge-connector/tools/policy_compiler.py and fails
+# without it, so these two must carry it (the 1.0.3 Release install gate
+# failed when they did not).
+PER_USER_ARCHIVES = {"default", "windows-amd64"}
+FLEET_COMPILER = "edge-connector/tools/policy_compiler.py"
+
+
 def test_managed_package_recipes_exclude_fleet_compiler():
     release = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    archive_ids = {archive["id"] for archive in release["archives"]}
+    assert PER_USER_ARCHIVES <= archive_ids
     for archive in release["archives"]:
-        assert not any("policy_compiler.py" in entry for entry in archive.get("files", [])), archive["id"]
+        files = archive.get("files", [])
+        if archive["id"] in PER_USER_ARCHIVES:
+            assert FLEET_COMPILER in files, archive["id"]
+            continue
+        assert not any("policy_compiler.py" in entry for entry in files), archive["id"]
     for package in release["nfpms"]:
         assert not any("policy_compiler.py" in entry.get("src", "") or
                        "policy_compiler.py" in entry.get("dst", "")
@@ -830,7 +844,7 @@ def test_launchd_enterprise_installer_matches_cisco_plist_layout():
     assert "system/com.defenseclaw." not in text
 
     deployment_docs = (
-        ROOT / "docs-site" / "content" / "docs" / "enterprise" / "secure-client.mdx"
+        ROOT / "docs-site" / "content" / "docs" / "enterprise" / "install" / "secure-client.mdx"
     ).read_text(encoding="utf-8")
     documented_contract = {
         "There is no dedicated `defenseclaw` service user on macOS.",
@@ -850,6 +864,12 @@ def test_launchd_enterprise_installer_matches_cisco_plist_layout():
 # ---- scriptlets and the MDM wrapper under concurrent lifecycle runs
 
 LINUX = ROOT / "packaging" / "linux"
+# The package scripts look for this text in the installed gateway to know it
+# has the release floor check (internal/cli/enterprise_bundle_floor.go).
+_FLOOR_SOURCE = (ROOT / "internal" / "cli" / "enterprise_bundle_floor.go").read_text(encoding="utf-8")
+_FLOOR_MATCH = re.search(r'^const floorCheckMarker = "([^"]+)"$', _FLOOR_SOURCE, re.MULTILINE)
+assert _FLOOR_MATCH, "floorCheckMarker not found"
+FLOOR_CHECK_MARKER = _FLOOR_MATCH.group(1)
 APPLY_PATH = "defenseclaw-enterprise-apply.path"
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
@@ -877,6 +897,7 @@ class _Host:
         gateway_rc: int = 0,
         apply_path_active: bool = False,
         gateway_out: str = '{"schema_version":2,"ok":true}',
+        floor_check: bool = False,
     ):
         self.tmp = tmp_path
         self.bin = tmp_path / "bin"
@@ -898,7 +919,10 @@ esac""")
         _write_stub(self.bin, "systemd-run", f"""echo "systemd-run $*" >>'{self.log}'""")
         for tool in ("systemd-sysusers", "systemd-tmpfiles", "sync"):
             _write_stub(self.bin, tool, f"""echo "{tool} $*" >>'{self.log}'""")
-        _write_stub(self.tmp, "defenseclaw-gateway", f"""echo "gateway $*" >>'{self.log}'
+        # A gateway from 1.0.4 on carries the floor check marker; the default
+        # stub is an older gateway, which the package scripts do not ask.
+        carries = f"# {FLOOR_CHECK_MARKER}\n" if floor_check else ""
+        _write_stub(self.tmp, "defenseclaw-gateway", f"""{carries}echo "gateway $*" >>'{self.log}'
 cat <<'JSON'
 {gateway_out}
 JSON
@@ -1135,6 +1159,38 @@ def test_linux_preinstall_refuses_a_downgrade_without_the_rollback_marker(tmp_pa
     assert not marker.exists()
 
 
+# A device that takes signed policy bundles refuses a package below the
+# release its confirmed bundle requires, even with the rollback marker: the
+# installed gateway's floor check exits 3. Only exit 0 leaves the install to
+# the downgrade rules above; any other result leaves the floor unchecked and
+# refuses too. An older gateway (no floor check marker) is not asked.
+@pytest.mark.parametrize(
+    ("rc", "floor_check", "refused"),
+    [(3, True, True), (1, True, True), (2, True, True), (0, True, False), (3, False, False), (1, False, False)],
+)
+def test_linux_preinstall_refuses_a_package_below_the_bundle_release_floor(
+    tmp_path: Path, rc: int, floor_check: bool, refused: bool
+) -> None:
+    host = _Host(tmp_path, gateway_rc=rc, floor_check=floor_check)
+    host.state.mkdir()
+    (host.state / "deployment.json").write_text('{\n  "product_version": "1.0.6"\n}\n', encoding="utf-8")
+    (host.state / "allow-downgrade").write_text("", encoding="utf-8")
+    _write_stub(host.bin, "stat", "echo 0")
+    rooting = {
+        "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+        "gateway=/opt/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
+        "/run/systemd/system": str(host.run_systemd),
+        "/run/defenseclaw-enterprise-apply-path.held": str(tmp_path / "held"),
+    }
+    script = _rooted((LINUX / "preinstall.sh").read_text(encoding="utf-8"), rooting)
+    result = host.run(script.replace("@DC_PKG_VERSION@", "1.0.5"), "2")
+    assert ("gateway enterprise bundle floor-check --product-version 1.0.5" in host.calls()) == floor_check
+    assert (result.returncode == 1) == refused, (result.stdout, result.stderr)
+    if refused:
+        assert "Nothing was changed" in result.stderr
+        assert len([c for c in host.calls() if not c.startswith("gateway ")]) == 0
+
+
 # Preremove ran uninstall with the 5 s default and exited 0
 # on busy (75), so dpkg/rpm deleted the binaries and units while machine
 # policy, per-user hooks and the running gateway still named them.
@@ -1219,12 +1275,25 @@ def test_linux_postinstall_does_nothing_after_a_refused_removal(tmp_path: Path, 
     ("line", "marker", "backup", "exit_code"),
     [
         ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb < 1.0.47~SNAPSHOT-aaa f.deb", False, False, 0),
-        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.46~SNAPSHOT-aaa f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb = 1.0.46~SNAPSHOT-bbb f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46~rc.1 < 1.0.46 f.deb", False, False, 0),
+        # A prerelease is older than its release, as the lifecycle orders them.
+        ("defenseclaw-enterprise 1.0.46 > 1.0.46~SNAPSHOT-aaa f.deb", False, False, 1),
+        ("defenseclaw-enterprise 1.0.46~rc.2 > 1.0.46~rc.1 f.deb", False, False, 1),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.46~SNAPSHOT-aaa f.deb", False, False, 1),
         ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > - **REMOVE**", False, False, 0),
         ("other-package 1.0.46 > 1.0.45 f.deb", False, False, 0),
         ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, False, 1),
         ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, True, 1),
         ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", True, False, 0),
+        # The product versions decide, not apt's direction: a higher epoch
+        # makes an older release an apt upgrade, and a lower one the reverse.
+        ("defenseclaw-enterprise 1.0.46 < 1:1.0.45 f.deb", False, False, 1),
+        ("defenseclaw-enterprise 1.0.46 < 1:1.0.45 f.deb", True, False, 0),
+        ("defenseclaw-enterprise 1:1.0.46 < 2:1.0.45~rc.1 f.deb", False, False, 1),
+        ("defenseclaw-enterprise 1:1.0.45 > 1.0.46 f.deb", False, False, 0),
+        ("defenseclaw-enterprise 1.0.46 = 1.0.46 **CONFIGURE**", False, False, 0),
+        ("defenseclaw-enterprise - < 1.0.45 f.deb", False, False, 0),
     ],
 )
 def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
@@ -1232,12 +1301,6 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
 ) -> None:
     host = _Host(tmp_path)
     host.state.mkdir()
-    _write_stub(
-        host.bin,
-        "dpkg",
-        '[ "$1" = --compare-versions ] && [ "$3" = lt ] && [ "$2" != "$4" ] && '
-        '[ "$(printf \'%s\\n%s\\n\' "$2" "$4" | sort -V | head -n 1)" = "$2" ]',
-    )
     allow = host.state / "allow-downgrade"
     if marker:
         allow.write_text("", encoding="utf-8")
@@ -1268,10 +1331,63 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
     assert result.returncode == exit_code, (result.stdout, result.stderr)
     assert allow.exists() == marker  # left for the older package's preinstall and postinstall (GAP-1115)
     if exit_code:
-        assert "refusing to downgrade to 1.0.45~SNAPSHOT-aaa" in result.stderr
+        assert f"refusing to downgrade to {line.split()[3]}" in result.stderr
         assert f"sudo touch {allow}" in result.stderr
         assert "postinstall applies it" in result.stderr
         assert f"--config {previous_config if backup else config}" in result.stderr
+
+
+# The rollback marker does not lift the release floor of the confirmed signed
+# bundle: the hook asks the installed gateway with the full product version
+# (a prerelease of the floor release is below it) and refuses on its exit 3.
+@pytest.mark.parametrize(
+    ("line", "version", "rc", "exit_code"),
+    [
+        ("defenseclaw-enterprise 1.0.4 > 1.0.4~SNAPSHOT-aaa f.deb", "1.0.4-SNAPSHOT-aaa", 3, 1),
+        ("defenseclaw-enterprise 1.0.6 > 1.0.4~SNAPSHOT-aaa f.deb", "1.0.4-SNAPSHOT-aaa", 3, 1),
+        ("defenseclaw-enterprise 1.0.6 > 1:1.0.5 f.deb", "1.0.5", 3, 1),
+        # Only exit 0 passes: any other result leaves the floor unchecked.
+        ("defenseclaw-enterprise 1.0.6 > 1.0.5 f.deb", "1.0.5", 1, 1),
+        ("defenseclaw-enterprise 1.0.6 > 1.0.5 f.deb", "1.0.5", 2, 1),
+        ("defenseclaw-enterprise 1.0.6 > 1.0.5 f.deb", "1.0.5", 0, 0),
+        # Whatever apt's direction (a higher epoch makes 1.0.5 an apt
+        # upgrade), and for every install action, as the preinstall checks.
+        ("defenseclaw-enterprise 1.0.6 < 1:1.0.5 f.deb", "1.0.5", 3, 1),
+        ("defenseclaw-enterprise 1.0.6 < 1:1.0.5 f.deb", "1.0.5", 0, 0),
+        ("defenseclaw-enterprise 1.0.4 < 1.0.6 f.deb", "1.0.6", 3, 1),
+        ("defenseclaw-enterprise 1.0.4 < 1.0.6 f.deb", "1.0.6", 0, 0),
+        ("defenseclaw-enterprise 1.0.6 = 1.0.6 f.deb", "1.0.6", 3, 1),
+        ("defenseclaw-enterprise - < 1.0.5 f.deb", "1.0.5", 3, 1),
+    ],
+)
+def test_linux_apt_hook_refuses_a_downgrade_below_the_bundle_release_floor(
+    tmp_path: Path, line: str, version: str, rc: int, exit_code: int
+) -> None:
+    host = _Host(tmp_path, gateway_rc=rc, floor_check=True)
+    host.state.mkdir()
+    (host.state / "allow-downgrade").write_text("", encoding="utf-8")
+    _write_stub(host.bin, "stat", "echo 0")  # the gateway is root-owned
+    script = _rooted(
+        (LINUX / "apt-downgrade-guard.sh").read_text(encoding="utf-8"),
+        {
+            "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+            "gateway=/opt/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
+        },
+    )
+    path = tmp_path / "guard.sh"
+    path.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        ["sh", str(path)],
+        input=f"VERSION 2\nAPT::Architecture=amd64\n\n{line}\n",
+        env={"PATH": f"{host.bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == exit_code, (result.stdout, result.stderr)
+    assert host.calls() == [f"gateway enterprise bundle floor-check --product-version {version}"]
+    if exit_code:
+        assert "Nothing was changed" in result.stderr
 
 
 def test_enterprise_deb_ships_the_apt_downgrade_hook_and_rpm_does_not() -> None:
@@ -1405,6 +1521,203 @@ cat '{tmp_path / "status.json"}'""")
     assert document["inspection"]["local"] == "active"
     assert [e["code"] for e in document["errors"]] == ["downgrade_refused"] + [e["code"] for e in standing_errors]
     _validate_lifecycle_result(document)
+
+
+# The pkg preinstall checks the confirmed signed bundle's release floor
+# before the Installer replaces any file: with the rollback marker, and on a
+# reinstall after uninstall --keep-state (no deployment record). Only the
+# installed gateway's exit 0 passes: exit 3 refuses, and so does any other
+# result, which leaves the floor unchecked.
+@pytest.mark.parametrize(
+    ("rc", "record", "marker", "refused"),
+    [(3, True, True, True), (3, False, False, True), (1, True, True, True), (2, False, False, True), (0, False, False, False)],
+)
+def test_macos_pkg_preinstall_refuses_below_the_bundle_release_floor(
+    tmp_path: Path, rc: int, record: bool, marker: bool, refused: bool
+) -> None:
+    host = _Host(tmp_path, gateway_rc=rc, floor_check=True)
+    host.state.mkdir()
+    if record:
+        (host.state / "deployment.json").write_text('{"product_version": "1.0.6"}', encoding="utf-8")
+    if marker:
+        (host.state / "allow-downgrade").write_text("", encoding="utf-8")
+    result = host.run(_macos_pkg_preinstall(host, "1.0.5"))
+    assert host.calls()[0] == "gateway enterprise bundle floor-check --product-version 1.0.5"
+    result_path = host.state / "last-package-result.json"
+    assert (result.returncode == 1) == refused, (result.stdout, result.stderr)
+    if not refused:
+        assert not result_path.exists()
+        return
+    assert "Nothing was changed" in result.stderr
+    document = json.loads(result_path.read_text(encoding="utf-8"))
+    assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
+    assert document["installed"] is record and document["installed_version"] == ("1.0.6" if record else "")
+    _validate_lifecycle_result(document)
+
+
+# After uninstall --keep-state (or an uninstall that failed after removing the
+# binaries) the installed gateway is gone, but the trust anchors and the
+# confirmed bundle stay. Each package script then asks the root-only copy of
+# the gateway that uninstall kept in the lifecycle folder (floor-check/), before
+# any file is replaced; a copy that is not root-owned, or a floor-check folder
+# that is a symlink, is not asked.
+def _floor_checker_case(tmp_path: Path, kind: str, rc: int, checker: str) -> tuple[_Host, subprocess.CompletedProcess[str]]:
+    host = _Host(tmp_path)
+    host.gateway.unlink()  # removed with the deployment's binaries
+    host.state.mkdir()
+    kept = host.state / "floor-check"
+    target = kept
+    if checker == "symlink":
+        target = tmp_path / "elsewhere"
+        kept.symlink_to(target)
+    target.mkdir()
+    _write_stub(target, "defenseclaw-gateway", f"""echo "checker $*" >>'{host.log}'
+exit {rc}""")
+    owner = "case \"$3\" in *floor-check*) echo 501 ;; *) echo 0 ;; esac" if checker == "not-root" else "echo 0"
+    return host, _run_floor_script(host, kind, owner)
+
+
+def _run_floor_script(host: _Host, kind: str, owner: str = "echo 0") -> subprocess.CompletedProcess[str]:
+    """Run the macOS pkg preinstall, the Linux preinstall or the apt hook for 1.0.5."""
+    tmp_path = host.tmp
+    if kind == "macos":
+        script = _macos_pkg_preinstall(host, "1.0.5")  # writes its own stat stub
+        _write_stub(host.bin, "stat", owner)
+        return host.run(script)
+    _write_stub(host.bin, "stat", owner)
+    if kind == "linux":
+        rooting = {
+            "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+            "gateway=/opt/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
+            "/run/systemd/system": str(host.run_systemd),
+            "/run/defenseclaw-enterprise-apply-path.held": str(tmp_path / "held"),
+        }
+        script = _rooted((LINUX / "preinstall.sh").read_text(encoding="utf-8"), rooting)
+        return host.run(script.replace("@DC_PKG_VERSION@", "1.0.5"), "1")
+    # The apt hook of a package whose binaries are gone; the rollback marker
+    # leaves only the floor to decide.
+    (host.state / "allow-downgrade").write_text("", encoding="utf-8")
+    script = _rooted(
+        (LINUX / "apt-downgrade-guard.sh").read_text(encoding="utf-8"),
+        {
+            "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+            "gateway=/opt/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
+        },
+    )
+    path = tmp_path / "guard.sh"
+    path.write_text(script, encoding="utf-8")
+    return subprocess.run(
+        ["sh", str(path)],
+        input="VERSION 2\nAPT::Architecture=amd64\n\ndefenseclaw-enterprise 1.0.6 > 1.0.5 f.deb\n",
+        env={"PATH": f"{host.bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+@pytest.mark.parametrize("kind", ["macos", "linux", "apt"])
+@pytest.mark.parametrize(
+    ("rc", "checker", "asked", "refused"),
+    [(3, "root", True, True), (0, "root", True, False), (1, "root", True, True), (3, "not-root", False, False), (3, "symlink", False, False)],
+)
+def test_package_scripts_ask_the_kept_floor_checker_when_the_gateway_is_gone(
+    tmp_path: Path, kind: str, rc: int, checker: str, asked: bool, refused: bool
+) -> None:
+    host, result = _floor_checker_case(tmp_path, kind, rc, checker)
+    floor_calls = [c for c in host.calls() if "floor-check" in c]
+    assert floor_calls == (["checker enterprise bundle floor-check --product-version 1.0.5"] if asked else []), host.calls()
+    assert (result.returncode == 1) == refused, (result.stdout, result.stderr)
+    if not refused:
+        return
+    assert "Nothing was changed" in result.stderr
+    # Refused before any file changed: no other tool ran.
+    assert [c for c in host.calls() if not c.startswith("checker ")] == []
+    if kind == "macos":
+        document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
+        assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
+        assert document["installed"] is False
+        _validate_lifecycle_result(document)
+
+
+def _floor_checker_stub(path: Path, log: Path, failure: str, marker: bool) -> None:
+    """A floor checker that cannot complete its check, the way it fails on a host."""
+    shebang = "#!/nonexistent/loader\n" if failure == "loader-missing" else "#!/bin/sh\n"
+    body = f"# {FLOOR_CHECK_MARKER}\n" if marker else ""
+    body += f"""echo "run $*" >>'{log}'\n"""
+    body += {"killed": "kill -KILL $$\n", "crashed": "exit 2\n", "usage": "exit 1\n"}.get(failure, "exit 0\n")
+    path.write_text(shebang + body, encoding="utf-8")
+    # Application control, or a lost mode bit, refuses the execution: 126.
+    path.chmod(0o644 if failure == "denied" else 0o755)
+
+
+# The whole class of a floor checker that is there but cannot complete its
+# check (fapolicyd denies the execution, the checker is killed, crashes, has
+# no loader, or answers with another error): before, only exit 3 refused, so
+# the package replaced the files below the floor. Each package script now
+# refuses before any file changes, for the installed 1.0.4+ gateway (it
+# carries the floor check marker) and for the copy uninstall kept (always a
+# 1.0.4+ gateway).
+@pytest.mark.parametrize("kind", ["macos", "linux", "apt"])
+@pytest.mark.parametrize("where", ["installed", "kept"])
+@pytest.mark.parametrize("failure", ["denied", "killed", "crashed", "usage", "loader-missing"])
+def test_package_scripts_refuse_when_the_floor_checker_cannot_complete(
+    tmp_path: Path, kind: str, where: str, failure: str
+) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    if where == "installed":
+        _floor_checker_stub(host.gateway, host.log, failure, marker=True)
+    else:
+        host.gateway.unlink()
+        (host.state / "floor-check").mkdir()
+        _floor_checker_stub(host.state / "floor-check" / "defenseclaw-gateway", host.log, failure, marker=False)
+    result = _run_floor_script(host, kind)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "could not be checked" in result.stderr and "exited " in result.stderr, result.stderr
+    assert "Nothing was changed" in result.stderr
+    # Refused before any file changed: no tool other than the checker ran.
+    assert [c for c in host.calls() if not c.startswith("run ")] == [], host.calls()
+    if kind == "macos":
+        document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
+        assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
+        assert "could not be checked" in document["errors"][0]["message"]
+        _validate_lifecycle_result(document)
+
+
+# An upgrade from 0.8.10 or 1.0.0-1.0.3 goes on: that gateway has no floor
+# check (no marker in its binary), so it is not run even when it cannot run
+# or fails; the copy a 1.0.4+ uninstall kept still answers when present.
+@pytest.mark.parametrize("kind", ["macos", "linux", "apt"])
+@pytest.mark.parametrize("failure", ["denied", "usage"])
+@pytest.mark.parametrize("kept_rc", [None, 0, 3])
+def test_package_scripts_do_not_ask_a_gateway_without_the_floor_check(
+    tmp_path: Path, kind: str, failure: str, kept_rc: int | None
+) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    _floor_checker_stub(host.gateway, host.log, failure, marker=False)
+    if kept_rc is not None:
+        (host.state / "floor-check").mkdir()
+        _write_stub(host.state / "floor-check", "defenseclaw-gateway", f"""echo "checker $*" >>'{host.log}'
+exit {kept_rc}""")
+    result = _run_floor_script(host, kind)
+    assert not [c for c in host.calls() if c.startswith("run enterprise bundle floor-check")], host.calls()
+    asked = [c for c in host.calls() if c.startswith("checker ")]
+    assert asked == ([] if kept_rc is None else ["checker enterprise bundle floor-check --product-version 1.0.5"])
+    assert (result.returncode == 1) == (kept_rc == 3), (result.stdout, result.stderr)
+
+
+def test_package_scripts_look_for_the_gateway_floor_check_marker() -> None:
+    builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
+    for text in (
+        (LINUX / "preinstall.sh").read_text(encoding="utf-8"),
+        (LINUX / "apt-downgrade-guard.sh").read_text(encoding="utf-8"),
+        builder,
+    ):
+        assert f"floor_check_marker={FLOOR_CHECK_MARKER}\n" in text
+        assert 'grep -qaF "$floor_check_marker" "$gateway"' in text
+    assert "floorCheckMarkerAnnotation: floorCheckMarker" in _FLOOR_SOURCE
 
 
 def _shell_function(text: str, name: str) -> str:

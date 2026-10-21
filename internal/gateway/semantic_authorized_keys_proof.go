@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -26,7 +27,11 @@ import (
 // action and its fallback handling unchanged.
 
 var (
-	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`(?s)\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];.*\bp\.write_text\(`)
+	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"]`)
+	trustedPathlibWriteText              = regexp.MustCompile(`\bp\.write_text\s*\(`)
+	trustedPathlibSafeReassignment       = regexp.MustCompile(`^\s*;\s*p\s*=\s*(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*;\s*$`)
+	trustedPathlibReassign               = regexp.MustCompile(`\bp\s*:?=[^=]|\bfor\s+p\s+in\b|\bas\s+p\b`)
+	trustedPythonDynamicCode             = regexp.MustCompile(`\b(?:exec\w*|eval|compile|getattr|globals|locals|vars|__dict__|__import__|__builtins__|builtins|importlib|runpy|subprocess|system|popen|spawn\w*|pty|marshal|pickle|ctypes|interact|InteractiveInterpreter|InteractiveConsole)\b`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
@@ -168,10 +173,13 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	}
 	switch command.Program {
 	case "python", "python3":
-		return command.Argv[1] == "-c" && facts.ActiveHome != "" &&
-			(trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedPythonPathAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
+		if command.Argv[1] != "-c" || facts.ActiveHome == "" {
+			return false
+		}
+		code := trustedPythonExecutedText(command.Argv[2])
+		return trustedPathlibAuthorizedKeysWriteProof(code, facts.ActiveHome, facts.CWD) ||
+			trustedPythonPathAuthorizedKeysWrite.MatchString(code) ||
+			trustedInterpreterAuthorizedKeysWrite(code, facts.ActiveHome)
 	case "perl":
 		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			(trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
@@ -182,6 +190,80 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	default:
 		return false
 	}
+}
+
+// trustedPythonExecutedText is Python -c code with its comments and inert
+// triple-quoted strings blanked: a docstring that spells a write executes
+// nothing (GAP-1199); an f-string field runs and is kept. Code whose executed
+// text may run a string (exec, eval, compile, getattr, subprocess, ...) is
+// kept whole, so such a string still proves its write; the same words in a
+// comment or a docstring run nothing.
+func trustedPythonExecutedText(code string) string {
+	masked := guardrail.MaskPythonCommentsAndDocstrings(code)
+	if trustedPythonDynamicCode.MatchString(masked) {
+		return code
+	}
+	return masked
+}
+
+// trustedPathlibAuthorizedKeysWriteProof proves p = Path.home() / ".ssh" /
+// "authorized_keys"; ... p.write_text(...) in the executed text. A binding of
+// p between the two disproves it only when it is a literal Path("...") that
+// names an ordinary file, not the keys file or a link to it (G-hooks-wp), or
+// a binding of another form (GAP-1299: p = ..., for p in, as p).
+func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string) bool {
+	for _, assignment := range trustedPathlibAuthorizedKeysWrite.FindAllStringIndex(code, -1) {
+		rest := code[assignment[1]:]
+		write := trustedPathlibWriteText.FindStringIndex(rest)
+		if write == nil {
+			continue
+		}
+		between := rest[:write[0]]
+		if safe := trustedPathlibSafeReassignment.FindStringSubmatch(between); len(safe) == 2 {
+			if trustedOrdinaryPathReassignment(safe[1], home, cwd) {
+				continue
+			}
+			return true
+		}
+		if trustedPathlibReassign.MatchString(between) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func trustedOrdinaryPathReassignment(name, home, cwd string) bool {
+	if name == "" || strings.ContainsAny(name, "\x00\r\n$`*?[") {
+		return false
+	}
+	if !filepath.IsAbs(name) {
+		if !filepath.IsAbs(cwd) {
+			return false
+		}
+		name = filepath.Join(cwd, name)
+	}
+	resolved, ok := hookpaths.ResolveWriteTarget(name)
+	if !ok {
+		return false
+	}
+	entry, entryErr := os.Stat(resolved)
+	if entryErr != nil && !os.IsNotExist(entryErr) {
+		return false
+	}
+	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
+		if canonicalSemanticPath(resolved) == canonicalSemanticPath(protected) {
+			return false
+		}
+		guarded, err := os.Stat(protected)
+		if err != nil && !os.IsNotExist(err) {
+			return false
+		}
+		if entryErr == nil && err == nil && os.SameFile(entry, guarded) {
+			return false
+		}
+	}
+	return true
 }
 
 // A static shell redirect writes its target independently of the program's
@@ -463,8 +545,15 @@ func interpreterCallArgs(call string) []string {
 
 func interpreterCodePosition(code string, position int) bool {
 	var quote byte
+	comment := false
 	for i := 0; i < position; i++ {
 		c := code[i]
+		if comment {
+			if c == '\n' {
+				comment = false
+			}
+			continue
+		}
 		if quote != 0 {
 			switch c {
 			case '\\':
@@ -474,9 +563,11 @@ func interpreterCodePosition(code string, position int) bool {
 			}
 		} else if c == '\'' || c == '"' {
 			quote = c
+		} else if c == '#' && interpreterCommentStart(code, i) {
+			comment = true
 		}
 	}
-	return quote == 0
+	return quote == 0 && !comment
 }
 
 func trustedAuthorizedKeysPathInText(text, activeHome string) bool {
@@ -604,7 +695,39 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	if err != nil {
 		return false
 	}
+	var boundWord *syntax.Word
+	boundValue := ""
+	if len(file.Stmts) == 2 {
+		assignment, assignmentOK := file.Stmts[0].Cmd.(*syntax.CallExpr)
+		second := file.Stmts[1]
+		if binary, ok := second.Cmd.(*syntax.BinaryCmd); ok && binary.Op == syntax.AndStmt {
+			second = binary.X
+		}
+		child, childOK := second.Cmd.(*syntax.CallExpr)
+		if assignmentOK && childOK && len(assignment.Args) == 0 && len(assignment.Assigns) == 1 &&
+			len(file.Stmts[0].Redirs) == 0 && len(child.Args) > 0 {
+			item := assignment.Assigns[0]
+			if item.Name != nil && item.Value != nil {
+				if value, static := hookpaths.StaticWord(item.Value, input.ActiveHome); static && value == "ln" {
+					candidate := child.Args[0]
+					start, end := int(candidate.Pos().Offset()), int(candidate.End().Offset())
+					if start >= 0 && end <= len(input.Command) && end > start {
+						for _, spelling := range []string{"$" + item.Name.Value, "${" + item.Name.Value + "}",
+							`"$` + item.Name.Value + `"`, `"${` + item.Name.Value + `}"`} {
+							if input.Command[start:end] == spelling {
+								boundWord, boundValue = candidate, value
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	word := func(value *syntax.Word) string {
+		if value == boundWord {
+			return boundValue
+		}
 		text, ok := hookpaths.StaticWord(value, input.ActiveHome)
 		if !ok {
 			return ""
@@ -626,6 +749,9 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
+			return false
+		}
+		if _, declaration := node.(*syntax.FuncDecl); declaration {
 			return false
 		}
 		stmt, ok := node.(*syntax.Stmt)
@@ -984,6 +1110,18 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
+		boundedOperands, boundedPattern := hookpaths.BoundedShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		if boundedPattern {
+			// Bash expands the bound redirect as a pathname pattern at run
+			// time, which may select a link to the protected file. The opened
+			// file is unknown, so fail closed.
+			return true
+		}
+		for _, operand := range boundedOperands {
+			if writeTarget(operand, false, false) {
+				return true
+			}
+		}
 		for _, operand := range hookpaths.QuotedDynamicCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
 			if writeTarget(operand, false, true) {
 				return true
@@ -1027,7 +1165,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
 			target = raw
 		}
-		ownCopy := (command.Program == "cp" || command.Program == "gcp") &&
+		ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
 			target == hookpaths.CopyDestination(command.Argv, clientCWD)
 		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
 			continue
@@ -1475,4 +1613,15 @@ func trustedNestedAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 		}
 	}
 	return false
+}
+
+// A '#' starts a comment only as its own token: at the start of the code or
+// after whitespace or ';', and followed by whitespace or the end. Other
+// spellings ($#name, .#field, s#a#b#) are code in some interpreter, so they
+// never hide a later write.
+func interpreterCommentStart(code string, i int) bool {
+	if i > 0 && !strings.ContainsRune(" \t\n;", rune(code[i-1])) {
+		return false
+	}
+	return i+1 == len(code) || strings.ContainsRune(" \t\r\n", rune(code[i+1]))
 }

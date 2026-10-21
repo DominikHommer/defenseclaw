@@ -327,7 +327,7 @@
     "path": "sandbox kernel-feed install",
     "use": "install",
     "short": "Install or update the sandbox kernel feed service (as root; needs a unix-socket Tetragon)",
-    "long": "Copies the defenseclaw-sensor-helper of this install to /usr/local/libexec/defenseclaw/defenseclaw-sensor-helper,\nchecks that this host's Tetragon serves a root-owned unix socket (never a TCP address) and that Docker\nanswers, then writes and starts defenseclaw-sandbox-feed.service. Run it again after an upgrade to update\nthe feed. Refused on a managed host, where sandboxes are not supported."
+    "long": "Copies the defenseclaw-sensor-helper of this install to /usr/local/libexec/defenseclaw/defenseclaw-sensor-helper,\nchecks that this host's Tetragon serves a root-owned unix socket (never a TCP address) and that Docker\nanswers, then writes and starts defenseclaw-sandbox-feed.service. Run it again after an upgrade to update\nthe feed. Refused on a managed host: its sandboxes are the managed deployment's, and this\nper-user feed installer is not part of it."
   },
   {
     "path": "sandbox kernel-feed status",

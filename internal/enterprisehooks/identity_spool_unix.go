@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -66,10 +67,12 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // and status and verify warned identity_records_stale about it 30 minutes
 // later (GAP-1113, GAP-1103). A directory account's record stays until it is
 // older than IdentitySpoolMaxAge, when the gateway ignores it anyway, unless
-// the pass resolved an account in that same directory. An outage can remove
-// accounts from one directory's enumeration while another still answers;
-// removing those records would lose their UPN facts (GAP-0145, GAP-1228).
-// A failed pass removes nothing young.
+// two successive passes resolved an account in that same directory and
+// listed it in neither. An outage can remove accounts from one directory's
+// enumeration while another still answers, and one lookup can miss an
+// account its directory still holds; removing those records would lose
+// their UPN facts (GAP-0145, GAP-1228, GAP-1236). A failed pass removes
+// nothing young.
 func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoolAccount, setOwnership func(string) error,
 	logf func(string, ...any)) error {
 	if dir == "" {
@@ -106,7 +109,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		}
 		keep[name] = true
 		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
-		record, err := collectIdentitySpoolRecord(lookupCtx, account, time.Now().UTC())
+		record, err := identitySpoolCollect(lookupCtx, account, time.Now().UTC())
 		cancel()
 		if err == nil {
 			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil {
@@ -150,33 +153,73 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	if err != nil {
 		return errors.Join(passErr, fmt.Errorf("read identity spool: %w", err))
 	}
+	identitySpoolOmitted.Lock()
+	defer identitySpoolOmitted.Unlock()
+	omittedBefore, omitted := identitySpoolOmitted.byDir[dir], map[string]bool{}
 	for _, entry := range entries {
 		if keep[entry.Name()] {
 			continue
 		}
-		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge &&
-			(passErr != nil || !identitySpoolRecordLeft(dir, entry, answeredDirectories)) {
-			continue
+		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge {
+			if passErr != nil {
+				omitted[entry.Name()] = omittedBefore[entry.Name()]
+				continue
+			}
+			left, directory := identitySpoolRecordLeft(dir, entry, answeredDirectories)
+			if !left {
+				continue
+			}
+			if directory && !omittedBefore[entry.Name()] {
+				// The first pass that omits the account: it goes at the next
+				// one that still does not list it.
+				omitted[entry.Name()] = true
+				continue
+			}
 		}
 		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
+	}
+	for name, marked := range omitted {
+		if !marked {
+			delete(omitted, name)
+		}
+	}
+	if len(omitted) == 0 {
+		delete(identitySpoolOmitted.byDir, dir)
+	} else {
+		identitySpoolOmitted.byDir[dir] = omitted
 	}
 	return passErr
 }
 
+// identitySpoolCollect is collectIdentitySpoolRecord; tests replace it.
+var identitySpoolCollect = collectIdentitySpoolRecord
+
+// identitySpoolOmitted holds, per spool directory, the young directory
+// records the last successful pass did not list although their directory
+// answered. One answer for another account of the directory does not show
+// that this account left: a lookup can miss it once (GAP-1236). The guardian
+// is one long-running process; after a restart the first pass only marks.
+var identitySpoolOmitted = struct {
+	sync.Mutex
+	byDir map[string]map[string]bool
+}{byDir: map[string]map[string]bool{}}
+
 // identitySpoolRecordLeft reports whether a young unlisted record can be
-// removed. Directory records leave only after their own directory answered;
-// a record without a usable directory key stays until it ages out.
-func identitySpoolRecordLeft(dir string, entry os.DirEntry, answeredDirectories map[string]bool) bool {
+// removed, and whether it is a directory record, which goes only when a
+// second pass confirms its account's departure. Directory records leave
+// only after their own directory answered; a record without a usable
+// directory key stays until it ages out.
+func identitySpoolRecordLeft(dir string, entry os.DirEntry, answeredDirectories map[string]bool) (left, directory bool) {
 	key, ok := strings.CutSuffix(entry.Name(), ".json")
 	if !ok || !entry.Type().IsRegular() || !validIdentitySpoolKey(key) {
-		return false
+		return false, false
 	}
 	record, err := ReadIdentitySpoolRecord(dir, key, nil)
 	if err != nil || !identitySpoolDirectoryRecord(record) {
-		return true
+		return true, false
 	}
-	directory := identitySpoolDirectoryKey(record)
-	return directory != "" && answeredDirectories[directory]
+	name := identitySpoolDirectoryKey(record)
+	return name != "" && answeredDirectories[name], true
 }
 
 // identitySpoolDirectoryKey uses the SSSD domain that actually held the uid

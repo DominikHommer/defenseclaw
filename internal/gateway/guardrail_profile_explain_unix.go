@@ -40,22 +40,27 @@ var profileExplainAccount = func(name string) (id, userName string, err error) {
 		if account, err = resolver.LookupUID(uid); err != nil {
 			return "", "", err
 		}
-	} else if twins := sameNameProfileAccounts(ctx, resolver, name, account); len(twins) > 0 {
+	} else if twins, err := sameNameProfileAccounts(ctx, resolver, name, account); len(twins) > 0 {
 		// A bare name a local and a directory account share names both:
 		// explaining the one NSS answers first hid the other (GAP-1087).
 		return "", "", ambiguousAccount(name, append([]unixidentity.Account{account}, twins...))
+	} else if err != nil {
+		// Whether a directory account shares the name is unknown: the bare
+		// name is refused, not taken for the local account (GAP-1131).
+		return "", "", err
 	}
 	return strconv.Itoa(account.UID), sanitizeLLMEventUser(account.Name), nil
 }
 
 // sameNameProfileAccounts lists the other accounts a bare name typed for an
 // administrator view also names (unixidentity.SameNameAccounts); none for a
-// qualified name or a uid.
-var sameNameProfileAccounts = func(ctx context.Context, r unixidentity.Resolver, name string, account unixidentity.Account) []unixidentity.Account {
+// qualified name or a uid. Its error is that of SameNameAccounts, when no
+// twin is known and the joined domains are not.
+var sameNameProfileAccounts = func(ctx context.Context, r unixidentity.Resolver, name string, account unixidentity.Account) ([]unixidentity.Account, error) {
 	if strings.ContainsAny(name, `@\`) || strings.Trim(name, "0123456789") == "" {
-		return nil
+		return nil, nil
 	}
-	twins := unixidentity.SameNameAccounts(ctx, r, account)
+	twins, err := unixidentity.SameNameAccounts(ctx, r, account)
 	for _, cached := range managedHookPeerHomes.cachedNamesakes(name, account.UID) {
 		found := false
 		for _, twin := range twins {
@@ -68,7 +73,10 @@ var sameNameProfileAccounts = func(ctx context.Context, r unixidentity.Resolver,
 			twins = append(twins, cached)
 		}
 	}
-	return twins
+	if len(twins) > 0 {
+		return twins, nil
+	}
+	return nil, err
 }
 
 // ambiguousAccount is the refusal of a bare name that names accounts.
@@ -81,9 +89,19 @@ func ambiguousAccount(name string, accounts []unixidentity.Account) error {
 }
 
 // adminViewDomainCouldHold reports whether the domain of a qualified --user
-// filter could hold a uid: always, as a uid does not tell a local account
-// from a directory one (GAP-1221).
-func adminViewDomainCouldHold(string, string) bool { return true }
+// filter held a uid no account holds now: a uid does not tell a local account
+// from a directory one (GAP-1221), nor one domain from another, so the domain
+// must be one the gateway knew the uid's account by (adminViewKnownDomain):
+// the name it last resolved to, or the facts its hooks cached (GAP-1263).
+func adminViewDomainCouldHold(user, id string) bool {
+	_, domain := useridentity.SplitQualifiedName(user)
+	var extra []string
+	if uid, err := strconv.Atoi(strings.TrimSpace(id)); err == nil && uid >= 0 {
+		_, lastDomain := useridentity.SplitQualifiedName(managedHookPeerLastName(uid))
+		extra = append(extra, lastDomain)
+	}
+	return adminViewKnownDomain(domain, id, extra...)
+}
 
 // profileExplainUnresolved resolves an account the platform resolver cannot
 // name through the OS account database (os/user), with its error.

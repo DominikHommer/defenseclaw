@@ -12,7 +12,7 @@ def page(path):
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
     def test_fg05_managed_agent_destination_notes(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         self.assertIn("destinations refused, awaiting approval or declined", text)
         self.assertIn("only while the\norganization allows unblocks", text)
 
@@ -22,45 +22,45 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
 
     def test_fg05_activity_omits_deleted_by_default(self):
         guide = page("sandboxes/guide.mdx")
-        reference = page("reference/sandbox-cli.mdx")
+        reference = page("reference/sandboxes/cli.mdx")
         self.assertIn("listing leaves out sandboxes deleted since the daemon", guide)
         self.assertIn("listing leaves out events\nof sandboxes deleted since the daemon started", reference)
 
     def test_fg05_policy_explain_default_new_run(self):
-        enterprise = page("enterprise/sandboxes.mdx")
-        reference = page("reference/sandbox-cli.mdx")
+        enterprise = page("enterprise/runtime/sandboxes.mdx")
+        reference = page("reference/sandboxes/cli.mdx")
         self.assertIn("it explains a new\nrun of the default agent", enterprise)
         self.assertIn("describes a\nnew run of the default agent", reference)
 
     def test_fg05_approval_always_refused_under_floor(self):
-        enterprise = page("enterprise/sandboxes.mdx")
-        reference = page("reference/sandbox-cli.mdx")
+        enterprise = page("enterprise/runtime/sandboxes.mdx")
+        reference = page("reference/sandboxes/cli.mdx")
         self.assertIn("With `allow_unblock: false`, the person can approve", enterprise)
         self.assertIn("`approve --always` is refused, even when `user_approvals` is\nunset", reference)
 
     def test_fg05_driver_switch_notice(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         self.assertIn("your organization changed how sandboxes run on this computer", text)
         self.assertIn("This notice carries no exception\ncontact", text)
 
     def test_fg05_active_gauge_refresh(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         self.assertIn("`defenseclaw.sandbox.active` is exported again every minute", text)
         self.assertIn("exports `0` for a connector whose sandboxes stopped", text)
 
     def test_fg05_session_unblock_expires_on_stop(self):
         guide = page("sandboxes/guide.mdx")
-        reference = page("reference/sandbox-cli.mdx")
+        reference = page("reference/sandboxes/cli.mdx")
         self.assertIn("After a stop and start, or a connect of\na stopped sandbox", guide)
         self.assertIn("at the hook and egress proxy", reference)
 
     def test_fg05_upstream_telemetry_profile_floor(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         self.assertIn("`allow_upstream_telemetry: false` has OpenShell's\nown telemetry off", text)
         self.assertIn("host's rendered `gateway.env`", text)
 
     def test_fg05_managed_policy_next_hook_call(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         # DELTA-21 (GAP-0172) replaced "takes the changed policy on its next
         # relayed hook call": a running sandbox takes the change before its
         # next connection (test_r102_delta15_docs checks the full paragraph).
@@ -89,7 +89,7 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
         self.assertNotIn("Docker Desktop shares your temp directory", text)
 
     def test_fg06_image_build_reference_names_probe_directory(self):
-        section = page("reference/sandbox-cli.mdx").split("### `sandbox image build`", 1)[1]
+        section = page("reference/sandboxes/cli.mdx").split("### `sandbox image build`", 1)[1]
         self.assertIn("`~/Library/Caches/defenseclaw/hookfire`", section)
         self.assertIn("`sandbox image build <harness> --force` recheck command", section)
 
@@ -100,7 +100,7 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
 
     def test_fg07_full_disk_stop_keeps_copy(self):
         guide = page("sandboxes/guide.mdx")
-        reference = page("reference/sandbox-cli.mdx")
+        reference = page("reference/sandboxes/cli.mdx")
         self.assertIn("even with `--yes` (exit `5`)", guide)
         self.assertIn("full disk keeps running if its copy holds work not\nyet pulled", reference)
         self.assertIn("If its disk does not answer\nwithin 15 seconds", reference)
@@ -143,7 +143,7 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
 
     def test_macos_protected_folder_skip_is_partial(self):
         discovery = " ".join(page("ai-discovery.mdx").split())
-        macos = " ".join(page("enterprise/macos.mdx").split())
+        macos = " ".join(page("enterprise/install/macos.mdx").split())
         self.assertNotIn("a root reached through a link into a protected folder is skipped", discovery)
         self.assertNotIn("a package scan root reached through a link into one of them is skipped too", discovery)
         self.assertNotIn("A package scan root reached through a link into one of these folders is skipped too", macos)
@@ -153,7 +153,7 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
         self.assertNotIn("the scan stays complete", macos)
 
     def test_fg04a_windows_plugin_refusal_is_structured(self):
-        section = page("enterprise/windows.mdx").split("- Claude Code runs a plugin", 1)[1].split("- MCP servers", 1)[0]
+        section = page("enterprise/install/windows.mdx").split("- Claude Code runs a plugin", 1)[1].split("- MCP servers", 1)[0]
         self.assertIn("ASSET-POLICY reason_code=admin-deny", section)
         self.assertNotIn("reason_code=install-block", section)
         self.assertNotIn("the refusal\n  says `plugin", section)
@@ -164,82 +164,82 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
         self.assertIn("[connector compatibility guide](/docs/connectors/compatibility)", text)
 
     def test_lfwin_guardian_first_reconcile_wait(self):
-        text = page("enterprise/troubleshooting.mdx")
+        text = page("troubleshooting/enterprise.mdx")
         self.assertIn("Setup waits up to 10 minutes for the guardian's first reconcile", text)
         self.assertIn("hook_guardian_startup.json", text)
         self.assertIn("no longer running during its first reconcile", text)
 
     def test_fg12_uninstall_incomplete_code(self):
-        text = page("enterprise/troubleshooting.mdx")
+        text = page("troubleshooting/enterprise.mdx")
         self.assertIn("| `uninstall_incomplete` |", text)
         self.assertIn("started the services again", text)
 
     def test_fg12_linux_package_removal_keeps_files(self):
-        text = page("enterprise/linux.mdx")
+        text = page("enterprise/install/linux.mdx")
         self.assertIn("apt or dnf fails and keeps the package files", text)
         self.assertIn("`uninstall_incomplete`", text)
 
     def test_fg12_doctor_prints_pinned_driver_digest(self):
-        section = page("enterprise/sandboxes.mdx").split("### Recipe: prerequisite mode", 1)[1]
+        section = page("enterprise/runtime/sandboxes.mdx").split("### Recipe: prerequisite mode", 1)[1]
         self.assertIn("install command with the SHA-256 digest this DefenseClaw build pins", section)
         self.assertNotIn("and its `.sha256` file", section)
 
     def test_fg11_machine_policy_summary_missing(self):
-        self.assertIn("| `machine_policy_summary_missing` | Windows |", page("enterprise/troubleshooting.mdx"))
+        self.assertIn("| `machine_policy_summary_missing` | Windows |", page("troubleshooting/enterprise.mdx"))
 
     def test_fg11_stopped_service_verify_is_not_ready(self):
-        row = next(line for line in page("enterprise/troubleshooting.mdx").splitlines()
+        row = next(line for line in page("troubleshooting/enterprise.mdx").splitlines()
                    if line.startswith("| `not_ready` | Windows |"))
         self.assertIn("`verify` also reports it", row)
 
     def test_fg11_rule_pack_preflight_grant(self):
-        row = next(line for line in page("enterprise/troubleshooting.mdx").splitlines()
+        row = next(line for line in page("troubleshooting/enterprise.mdx").splitlines()
                    if line.startswith("| `rule_pack_unreadable` | Windows |"))
         self.assertIn("Setup's config preflight", row)
         self.assertIn("service's derived SID", row)
 
     def test_fg11_scanner_trust_and_judge(self):
-        text = page("enterprise/troubleshooting.mdx")
+        text = page("troubleshooting/enterprise.mdx")
         self.assertIn("folder or executable is writable by a non-administrator", text)
         self.assertIn("| `scanner_judge_missing` | Windows |", text)
         self.assertIn("`Scanners:` shows `judge none`", text)
 
     def test_fg11_secret_remove_requires_readable_config(self):
-        text = page("enterprise/configuration.mdx")
+        text = page("enterprise/configure/configuration.mdx")
         self.assertIn("refuses when it cannot read the installed config", text)
 
     def test_fg11_setup_upgrade_file_held(self):
-        text = page("enterprise/troubleshooting.mdx")
+        text = page("troubleshooting/enterprise.mdx")
         self.assertIn("Setup upgrade says another program holds a file open", text)
 
     def test_fg08_update_keeps_running_sessions_enforced(self):
-        section = page("enterprise/tetragon.mdx").split(
+        section = page("enterprise/runtime/tetragon.mdx").split(
             "5. **Restart agent sessions after enforce starts.**", 1
         )[1].split("The controls compile", 1)[0]
         self.assertIn("old controls policy\n   stays loaded and enforcing", section)
         self.assertNotIn("A planned follow-up", section)
 
     def test_fg08_predate_troubleshooting_excludes_self_update(self):
-        tetragon = page("enterprise/tetragon.mdx")
-        table = page("enterprise/troubleshooting.mdx")
+        tetragon = page("enterprise/runtime/tetragon.mdx")
+        table = page("troubleshooting/enterprise.mdx")
         self.assertIn("enforce turned on or Tetragon restarted", tetragon)
         row = next(line for line in table.splitlines() if line.startswith("| `kernel_sessions_predate_controls`"))
         self.assertIn("old controls policy enforcing", row)
         self.assertNotIn("after an agent's own update", row)
 
     def test_fg08_limit_keeps_old_controls(self):
-        section = page("enterprise/tetragon.mdx").split("## Reference", 1)[1]
+        section = page("enterprise/runtime/tetragon.mdx").split("## Reference", 1)[1]
         self.assertIn("old controls policy enforcing", section)
         self.assertNotIn("A planned follow-up", section)
 
     def test_fg08_lifecycle_retains_old_policy(self):
-        row = next(line for line in page("enterprise/tetragon.mdx").splitlines()
+        row = next(line for line in page("enterprise/runtime/tetragon.mdx").splitlines()
                    if line.startswith("| An agent updates itself |"))
         self.assertIn("removed when the last one exits", row)
         self.assertNotIn("A planned follow-up", row)
 
     def test_fg13_entra_planning_and_local_group_guards(self):
-        text = page("enterprise/identity-entra-id.mdx")
+        text = page("enterprise/identity/entra-id.mdx")
         self.assertIn("A Microsoft Graph read failure stops the plan", text)
         self.assertIn("planned groups without regard to letter case", text)
         self.assertIn("refuses existing\ndynamic or mail-enabled groups", text)

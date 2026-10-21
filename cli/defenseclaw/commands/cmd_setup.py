@@ -753,7 +753,7 @@ from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E40
 # notifiers). Distinct from `setup observability add webhook` (generic
 # HTTP JSONL audit-log forwarder) — see the published webhook guide for the
 # disambiguation:
-# https://cisco-ai-defense.github.io/defenseclaw/docs/setup/webhooks/
+# https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/set-up-webhook-alerts/
 from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
 
 setup.add_command(webhook)
@@ -3082,7 +3082,6 @@ def _interactive_mcp_setup(mc, cfg) -> None:
 
     click.echo()
     ux.section("MCP Scanner Configuration")
-    click.echo(f"  {ux.dim('Binary:')} {mc.binary}")
     click.echo()
 
     while True:

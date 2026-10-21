@@ -19,6 +19,7 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1400,6 +1401,97 @@ func TestLinkedOrUnmovableSkillReportsWhatHappened(t *testing.T) {
 			t.Fatalf("journal %+v reason %q, want blocked, disabled, quarantine failed", entry.Actions, entry.Reason)
 		}
 	})
+}
+
+// GAP-0133: a skill on asset_policy.skill.denied whose quarantine folder the
+// gateway cannot enter stays in place and blocked. skill info said
+// quarantined: a pending quarantine record stayed and the journal did not
+// say the quarantine failed.
+func TestDeniedSkillWhoseQuarantineFailsSaysSo(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions as a non-root user")
+	}
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.AssetPolicy = config.DefaultAssetPolicy()
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "denied-skill"}}
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	path := filepath.Join(skillDir, "denied-skill")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("---\nname: denied-skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cfg.QuarantineDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg.QuarantineDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cfg.QuarantineDir, 0o700) })
+
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "denied-skill", Path: path, Timestamp: time.Now()})
+	if res.Verdict != VerdictBlocked {
+		t.Fatalf("verdict = %q, want blocked", res.Verdict)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("expected the skill to stay in place: %v", err)
+	}
+	records, err := store.ListQuarantineRecordsForConnector(context.Background(), "skill", "denied-skill", "")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("quarantine records = %+v (err %v), want none for files that never moved", records, err)
+	}
+	entry, err := store.GetAction("skill", "denied-skill")
+	if err != nil || entry == nil || entry.Actions.Install != "block" || !strings.HasPrefix(entry.Reason, "quarantine failed: ") {
+		t.Fatalf("journal = %+v (err %v), want install block with quarantine failed", entry, err)
+	}
+}
+
+// A quarantine that published its copy and then failed to remove the
+// source keeps its pending record when the destination cannot be inspected
+// afterwards: the copy may still be there and the record restores it. Only
+// the record this attempt opened, for a move that failed before publishing,
+// is rolled back on an uncertain destination.
+func TestUncertainQuarantineCopyKeepsItsRecord(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions as a non-root user")
+	}
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "skills")
+	quarantineRoot := filepath.Join(root, "quarantine")
+	source := filepath.Join(skillsRoot, "risky")
+	if err := os.MkdirAll(skillsRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("marker\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := enforce.NewAssetQuarantinePlan(quarantineRoot, []string{skillsRoot}, "skill", "risky", "claudecode", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(skillsRoot, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsRoot, 0o755) })
+	moveErr := enforce.ExecuteAssetQuarantine(plan, "rec-published")
+	if !errors.Is(moveErr, enforce.ErrQuarantinePublished) {
+		t.Fatalf("source removal failure = %v, want it marked published", moveErr)
+	}
+	if err := os.Chmod(quarantineRoot, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(quarantineRoot, 0o700) })
+	if quarantineUnmaterialized(plan, moveErr, true) {
+		t.Fatal("rolled back the record of a published copy whose destination cannot be inspected")
+	}
+	early := errors.New("enforce: copy quarantine stage: denied")
+	if quarantineUnmaterialized(plan, early, false) {
+		t.Fatal("rolled back the record of an earlier attempt whose copy may remain")
+	}
+	if !quarantineUnmaterialized(plan, early, true) {
+		t.Fatal("kept the record this attempt opened for a move that published nothing")
+	}
 }
 
 // blockingScanner waits until its scan context ends and reports that.

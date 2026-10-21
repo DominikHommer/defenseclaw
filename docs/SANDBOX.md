@@ -8,8 +8,8 @@ behaviours the code is built around. The code is the authority; each section
 names the package to read.
 
 The operator guide for the sandbox commands is the
-[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
-(`docs-site/content/docs/sandboxes/guide.mdx`): setup, running a harness, the
+[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/sandboxes/run-an-agent/)
+(`docs-site/content/docs/how-to/sandboxes/run-an-agent.mdx`): setup, running a harness, the
 session, the end-of-session review and undo, the run variations, MCP
 servers, the shell wrapper, troubleshooting, and removing what a retired 0.0.x standalone install left.
 Telemetry details are in
@@ -2855,8 +2855,8 @@ OpenClaw gateway (18789 by default).
 A standalone enterprise install (rpm, deb, pkg; Linux and macOS) runs sandboxes
 for standard users, with the policy chosen by the same identity rules as the
 guardrail profile. The user documentation is
-[Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/)
-(`docs-site/content/docs/enterprise/sandboxes.mdx`). This section is the
+[Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/runtime/sandboxes/)
+(`docs-site/content/docs/enterprise/runtime/sandboxes.mdx`). This section is the
 contributor view.
 
 ### Processes and trust
@@ -3234,12 +3234,14 @@ nothing of the vm driver, but the names of its caches carry the release
 
 - OpenShell `>=0.1.1 <0.2.0`, checked against the CLI and the gateway. The
   installer code (`openshell.Installer`) runs the upstream installer from the
-  v0.1.3 tag (`InstallerVersion`) only after checking it against a pinned
+  v0.1.5 tag (`InstallerVersion`) only after checking it against a pinned
   SHA-256 for that tag; the release comes from `OPENSHELL_VERSION`.
   Releases before 0.0.37 must be cleaned up
   with the old CLI first; later ones upgrade in place. A supported release
-  older than `InstallerVersion` (0.1.3) still works: the doctor's
-  `openshell-cli` check warns, and setup upgrades it in place only with
+  older than `InstallerVersion` (0.1.5) is still driven (list, stop, delete,
+  pull), but runs no sandbox before `SandboxMin` (0.1.5, its prereleases
+  included): the doctor's `openshell-cli` check warns, its **Gateway** check
+  fails, and setup upgrades it in place only with
   consent (`Installer.Upgrade`: `--install-openshell`, or yes to its
   question, whose default is no). NVIDIA's script restarts the gateway only
   after its downloads and the package's (formula's) install, so
@@ -3380,5 +3382,5 @@ watchdog, status, the Python CLI's `api_bind_host`) dials it there; the
 migration record lists the removed keys. Running it again changes nothing.
 The root systemd units, launchers, network namespace, NAT rules and `sandbox`
 user are removed by hand, as the
-[published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/#remove-a-retired-standalone-sandbox)
+[published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/troubleshooting/sandboxes/#remove-a-retired-standalone-sandbox)
 lists.

@@ -228,12 +228,13 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		// and group identity facts, but the enumerator never rewrites them.
 		if authored, loadErr := enterprisehooks.LoadManifest(manifestPath); loadErr == nil {
 			if cfg.StandaloneEnterprise() {
-				publishEnterpriseWindowsManifestIdentity(stderr, cfg, manifestPath, authored)
+				publishEnterpriseWindowsManifestIdentity(cycleCtx, stderr, cfg, manifestPath, authored)
 			}
 			if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(authored, "", !cfg.SecureClientIntegration(), enumerationLoggerForStderr(stderr)); grantErr != nil {
 				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 			}
 			_ = publishEnterpriseWindowsMCPServers(cfg, authored, stderr) // logged; the next cycle publishes again
+			publishEnterpriseWindowsIDEAppData(cfg, authored, stderr)
 		} else if cfg.StandaloneEnterprise() {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not load administrator targets for identity facts: %v\n", loadErr)
 		}
@@ -291,12 +292,20 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		// The gateway's service account cannot read that cache: publish each
 		// user's verified directory facts and named groups where it can.
 		identityDir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-		if spoolErr := enterpriseWindowsIdentitySpoolWriter(identityDir, enumerateOpts.GroupCache, enterpriseWindowsConnectorEmails(stderr, cfg, manifest), enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
+		// An excluded account's groups are not published as trusted
+		// identity facts (GAP-1264), and the pass ends with the cycle
+		// (GAP-1049).
+		excludedSIDs := make([]string, 0, len(excluded))
+		for _, target := range excluded {
+			excludedSIDs = append(excludedSIDs, target.SID)
+		}
+		if spoolErr := enterpriseWindowsIdentitySpoolWriter(cycleCtx, identityDir, enumerateOpts.GroupCache, excludedSIDs, enterpriseWindowsConnectorEmails(stderr, cfg, manifest), enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
 			fmt.Fprintf(stderr, format+"\n", args...)
 		}); spoolErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", spoolErr)
 		}
 		_ = publishEnterpriseWindowsMCPServers(cfg, manifest, stderr) // logged; the next cycle publishes again
+		publishEnterpriseWindowsIDEAppData(cfg, manifest, stderr)
 		unprotected = append(unprotected, ownerUnknown...)
 		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
@@ -326,18 +335,18 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(manifest, "", !cfg.SecureClientIntegration(), logf); grantErr != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 	}
-	if previousErr == nil {
-		// A profile this cycle no longer enrolls (its account was added to
-		// exclude_users, or no enrolled agent is left) loses the gateway's
-		// read access now, so its inventory rows go at the next scan
-		// (GAP-0717).
-		if dropped := enterprisehooks.ManifestHomesDropped(previous, manifest); len(dropped.Targets) > 0 {
-			if revokeErr := enterpriseWindowsInventoryReadRevoker(dropped); revokeErr != nil {
-				fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway keeps read access on %d profile(s) no longer enrolled; the revoke failed\n", countDistinctSIDs(dropped.Targets))
-			} else {
-				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d profile(s) no longer enrolled\n", countDistinctSIDs(dropped.Targets))
-			}
+	if standalone {
+		// A profile this cycle no longer grants (its account was added to
+		// exclude_users, no enrolled agent is left, or its rows are all
+		// disabled) loses the gateway's read access now, so its inventory
+		// rows go at the next scan (GAP-0717, GAP-1193). A revoke that
+		// fails stays in the grant ledger beside the manifest and is
+		// retried, also after a restart (GAP-1269).
+		var last *enterprisehooks.Manifest
+		if previousErr == nil {
+			last = &previous
 		}
+		reconcileEnterpriseWindowsInventoryGrants(stderr, manifestPath, last, manifest)
 	}
 	if standalone {
 		revokeEnterpriseWindowsExcludedInventoryRead(stderr, excluded)
@@ -353,6 +362,43 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN cycle exceeded 10 s target: %s\n", elapsed)
 	}
 	return nil
+}
+
+// reconcileEnterpriseWindowsInventoryGrants revokes the gateway's inventory
+// read access on the profiles the grant ledger holds that current gives no
+// grant to, and records current's grants (enterprisehooks.
+// ReconcileInventoryGrants).
+func reconcileEnterpriseWindowsInventoryGrants(stderr io.Writer, manifestPath string, previous *enterprisehooks.Manifest, current enterprisehooks.Manifest) {
+	result := enterprisehooks.ReconcileInventoryGrants(enterprisehooks.InventoryGrantLedger{
+		Load: func() ([]enterprisehooks.ManifestTarget, error) {
+			return enterpriseWindowsInventoryGrantLedgerLoader(manifestPath)
+		},
+		Save: func(targets []enterprisehooks.ManifestTarget) error {
+			return enterpriseWindowsInventoryGrantLedgerSaver(manifestPath, targets)
+		},
+	}, previous, current, enterpriseWindowsInventoryReadRevoker)
+	if result.LoadErr != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN the inventory grant ledger is unreadable; revoking from the last manifest: %s\n", enumeratorErrorText(result.LoadErr))
+	}
+	if result.RevokeErr != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway keeps read access on %d profile(s) no longer enrolled; the revoke failed and is retried at the next cycle: %s\n",
+			countDistinctSIDs(result.Pending), enumeratorErrorText(result.RevokeErr))
+	}
+	if len(result.Revoked) > 0 {
+		fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d profile(s) no longer enrolled\n", countDistinctSIDs(result.Revoked))
+	}
+	if result.SaveErr != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not save the inventory grant ledger: %s\n", enumeratorErrorText(result.SaveErr))
+	}
+}
+
+// enumeratorErrorText is err's message, at most 512 bytes of it.
+func enumeratorErrorText(err error) string {
+	message := err.Error()
+	if len(message) > 512 {
+		message = message[:512] + "..."
+	}
+	return message
 }
 
 // enterpriseWindowsExcludedRevoked holds the excluded profiles whose
@@ -392,12 +438,8 @@ func revokeEnterpriseWindowsExcludedInventoryRead(stderr io.Writer, excluded []e
 		return
 	}
 	if err := enterpriseWindowsInventoryReadRevoker(pending); err != nil {
-		message := err.Error()
-		if len(message) > 512 {
-			message = message[:512] + "..."
-		}
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway may keep read access on %d excluded profile(s); the revoke failed: %s\n",
-			len(pending.Targets), message)
+			len(pending.Targets), enumeratorErrorText(err))
 		return
 	}
 	for _, target := range pending.Targets {
@@ -408,7 +450,7 @@ func revokeEnterpriseWindowsExcludedInventoryRead(stderr io.Writer, excluded []e
 
 // publishEnterpriseWindowsManifestIdentity refreshes signed-in token groups
 // for administrator selected targets while keeping their manifest untouched.
-func publishEnterpriseWindowsManifestIdentity(stderr io.Writer, cfg *config.Config, manifestPath string, manifest enterprisehooks.Manifest) {
+func publishEnterpriseWindowsManifestIdentity(ctx context.Context, stderr io.Writer, cfg *config.Config, manifestPath string, manifest enterprisehooks.Manifest) {
 	cachePath := enterprisehooks.WindowsEnrollmentGroupsCachePath(manifestPath)
 	cache, err := enterpriseWindowsEnumerateGroupCacheLoader(cachePath)
 	if err != nil {
@@ -426,7 +468,7 @@ func publishEnterpriseWindowsManifestIdentity(stderr io.Writer, cfg *config.Conf
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not save the enrollment group cache: %v\n", err)
 	}
 	identityDir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-	if err := enterpriseWindowsIdentitySpoolWriter(identityDir, refreshed, enterpriseWindowsConnectorEmails(stderr, cfg, manifest), enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
+	if err := enterpriseWindowsIdentitySpoolWriter(ctx, identityDir, refreshed, nil, enterpriseWindowsConnectorEmails(stderr, cfg, manifest), enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
 		fmt.Fprintf(stderr, format+"\n", args...)
 	}); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", err)
@@ -636,6 +678,22 @@ func publishEnterpriseWindowsMCPServers(cfg *config.Config, manifest enterpriseh
 	return errors.Join(errs...)
 }
 
+// publishEnterpriseWindowsIDEAppData publishes the IDE inventory of each
+// enrolled profile whose AppData folder redirection moved, which the gateway
+// service cannot read (enterprisehooks.WriteWindowsIDEAppDataSpool,
+// GAP-1249). Standalone with AI discovery on only: the Secure Client profile
+// gateway has no IDE inventory.
+func publishEnterpriseWindowsIDEAppData(cfg *config.Config, manifest enterprisehooks.Manifest, stderr io.Writer) {
+	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() || !cfg.AIDiscovery.Enabled {
+		return
+	}
+	logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
+	dir := enterprisehooks.IDEAppDataSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+	if err := enterpriseWindowsIDEAppDataSpoolWriter(dir, manifest, enterpriseHookAuthorizationOwnershipSetter, logf); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the IDE inventory of redirected AppData: %v\n", err)
+	}
+}
+
 // refreshEnterpriseWindowsMCPServers republishes them from the last
 // published manifest. The error says why nothing was published; a
 // deployment that publishes no MCP servers has nothing to refresh.
@@ -694,11 +752,15 @@ var (
 	enterpriseWindowsIdentitySpoolWriter         = enterprisehooks.WriteWindowsIdentitySpool
 	enterpriseWindowsClaudeMCPSpoolWriter        = enterprisehooks.WriteWindowsClaudeMCPSpool
 	enterpriseWindowsKiroMCPSpoolWriter          = enterprisehooks.WriteWindowsKiroMCPSpool
+	enterpriseWindowsIDEAppDataSpoolWriter       = enterprisehooks.WriteWindowsIDEAppDataSpool
 	enterpriseWindowsManifestGroupCacheRefresher = enterprisehooks.RefreshWindowsManifestIdentityGroups
 	enterpriseWindowsEnumerateUnprotectedWriter  = enterprisehooks.WriteWindowsUnprotectedAgents
 	// enterpriseWindowsInventoryReadRevoker takes the gateway's inventory
 	// ACEs from the profiles a cycle stopped enrolling.
 	enterpriseWindowsInventoryReadRevoker = enterprisehooks.RevokeGatewayInventoryReadForManifest
+	// The grant ledger beside the manifest.
+	enterpriseWindowsInventoryGrantLedgerLoader = enterprisehooks.LoadWindowsInventoryGrantLedger
+	enterpriseWindowsInventoryGrantLedgerSaver  = enterprisehooks.SaveWindowsInventoryGrantLedger
 )
 
 // isEnterpriseWindowsEnumerateConfigMissing recognises the specific

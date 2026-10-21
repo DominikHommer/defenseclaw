@@ -153,8 +153,9 @@ done
 
 # preinstall refuses before any file lands on a Secure Client host: the two
 # deployments share the gateway port and the lifecycle would refuse anyway.
-# It also refuses a downgrade before the older binaries replace the installed
-# ones, unless the administrator created the root-owned rollback marker
+# It also refuses a release below the confirmed signed bundle's floor, and a
+# downgrade before the older binaries replace the installed ones unless the
+# administrator created the root-owned rollback marker
 # /opt/cisco/defenseclaw/lifecycle/allow-downgrade (postinstall consumes it).
 cat >"$SCRIPTS/preinstall" <<'EOF'
 #!/bin/sh
@@ -166,59 +167,96 @@ fi
 state=/opt/cisco/defenseclaw/lifecycle
 package_version="@DC_PKG_VERSION@"
 record="$state/deployment.json"
-if [ -f "$record" ] && [ ! -L "$record" ] && [ "$(stat -f %u "$record")" = 0 ]; then
+marker="$state/allow-downgrade"
+gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
+root_owned() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -f %u "$1")" = 0 ]
+}
+installed=
+if root_owned "$record"; then
     installed=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" | head -n 1)
-    marker="$state/allow-downgrade"
-    if [ -n "$installed" ] && ! [ -f "$marker" ] && ! awk -v a="$package_version" -v b="$installed" '
-        function norm(v) { sub(/^v/, "", v); sub(/\+.*/, "", v); return v }
-        BEGIN {
-            a = norm(a); b = norm(b); pa = ""; pb = ""
-            if (index(a, "-")) { pa = substr(a, index(a, "-") + 1); a = substr(a, 1, index(a, "-") - 1) }
-            if (index(b, "-")) { pb = substr(b, index(b, "-") + 1); b = substr(b, 1, index(b, "-") - 1) }
-            na = split(a, x, "."); nb = split(b, y, "."); n = na > nb ? na : nb
-            for (i = 1; i <= n; i++) {
-                xi = (i <= na) ? x[i] + 0 : 0; yi = (i <= nb) ? y[i] + 0 : 0
-                if (xi > yi) exit 0
-                if (xi < yi) exit 1
-            }
-            if (pa == pb || pa == "") exit 0
-            if (pb == "") exit 1
-            np = split(pa, u, "."); nq = split(pb, w, "."); m = np > nq ? np : nq
-            for (i = 1; i <= m; i++) {
-                if (u[i] == w[i]) continue
-                if (u[i] ~ /^[0-9]+$/ && w[i] ~ /^[0-9]+$/) exit (u[i] + 0 > w[i] + 0) ? 0 : 1
-                exit (u[i] > w[i]) ? 0 : 1
-            }
-            exit 0
-        }'; then
-        message="DefenseClaw $installed is installed; refusing to downgrade to $package_version, so nothing was changed. For a deliberate rollback, create $marker as root first."
-        echo "$message" >&2
-        # The Installer shows only a generic error, so leave the reason in
-        # the package result an MDM detection or an administrator reads.
-        # The refusal changed nothing, so the result reports the running
-        # deployment as its own status sees it (GAP-1428: a fixed document
-        # said every service was down). The fixed document stays the
-        # fallback for an installed gateway that cannot answer.
-        umask 077
-        result="$state/last-package-result.json"
-        error="{\"code\":\"downgrade_refused\",\"message\":\"$message\"}"
-        gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
-        if ! { [ -x "$gateway" ] && "$gateway" enterprise macos status --json 2>/dev/null | sed \
-            -e 's/^  "ok": [a-z]*,$/  "ok": false,/' \
-            -e 's/^  "action": "[a-z-]*",$/  "action": "ensure",/' \
-            -e 's/^  "noop": [a-z]*,$/  "noop": false,/' \
-            -e '/^  "noop_reason": /d' \
-            -e "s|^  \"product_version\": \"[^\"]*\",\$|  \"product_version\": \"$package_version\",|" \
-            -e "s|^  \"errors\": \[\],\$|  \"errors\": [$error],|" \
-            -e "s|^  \"errors\": \[\$|  \"errors\": [$error,|" \
-            -e 's/^  "exit_code": [0-9]*$/  "exit_code": 1/' >"$result.tmp" &&
-            grep -q '"downgrade_refused"' "$result.tmp" && grep -q '^  "exit_code": 1$' "$result.tmp"; }; then
-            printf '{"schema_version":2,"ok":false,"action":"ensure","noop":false,"profile":"standalone","platform":"darwin","product_version":"%s","installed_version":"%s","installed":true,"transaction_pending":false,"services":[],"readiness":{"gateway":false,"guardian":false,"enumerator":false,"sensor_helper":false},"inspection":{"local":"unknown","ai_defense":"unknown"},"machine_policy":{},"enrollment":{"targets":0,"pending":0,"failed":0,"exempt":0},"coverage_complete":false,"security_complete":false,"errors":[%s],"exit_code":1}\n' \
-                "$package_version" "$installed" "$error" >"$result.tmp"
-        fi
-        mv -f "$result.tmp" "$result" && echo "See $result." >&2
-        exit 1
+fi
+# refuse CODE MESSAGE: nothing was changed. The Installer shows only a
+# generic error, so leave the reason in the package result an MDM detection
+# or an administrator reads. The result reports the running deployment as
+# its own status sees it (GAP-1428: a fixed document said every service was
+# down). The fixed document stays the fallback for an installed gateway that
+# cannot answer.
+refuse() {
+    code=$1 message=$2
+    echo "$message" >&2
+    umask 077
+    result="$state/last-package-result.json"
+    error="{\"code\":\"$code\",\"message\":\"$message\"}"
+    present=true
+    [ -n "$installed" ] || present=false
+    if ! { [ -x "$gateway" ] && "$gateway" enterprise macos status --json 2>/dev/null | sed \
+        -e 's/^  "ok": [a-z]*,$/  "ok": false,/' \
+        -e 's/^  "action": "[a-z-]*",$/  "action": "ensure",/' \
+        -e 's/^  "noop": [a-z]*,$/  "noop": false,/' \
+        -e '/^  "noop_reason": /d' \
+        -e "s|^  \"product_version\": \"[^\"]*\",\$|  \"product_version\": \"$package_version\",|" \
+        -e "s|^  \"errors\": \[\],\$|  \"errors\": [$error],|" \
+        -e "s|^  \"errors\": \[\$|  \"errors\": [$error,|" \
+        -e 's/^  "exit_code": [0-9]*$/  "exit_code": 1/' >"$result.tmp" &&
+        grep -q "\"$code\"" "$result.tmp" && grep -q '^  "exit_code": 1$' "$result.tmp"; }; then
+        printf '{"schema_version":2,"ok":false,"action":"ensure","noop":false,"profile":"standalone","platform":"darwin","product_version":"%s","installed_version":"%s","installed":%s,"transaction_pending":false,"services":[],"readiness":{"gateway":false,"guardian":false,"enumerator":false,"sensor_helper":false},"inspection":{"local":"unknown","ai_defense":"unknown"},"machine_policy":{},"enrollment":{"targets":0,"pending":0,"failed":0,"exempt":0},"coverage_complete":false,"security_complete":false,"errors":[%s],"exit_code":1}\n' \
+            "$package_version" "$installed" "$present" "$error" >"$result.tmp"
     fi
+    mv -f "$result.tmp" "$result" && echo "See $result." >&2
+    exit 1
+}
+# A Mac that takes signed policy bundles must not run a release below the one
+# its confirmed bundle requires (min_product_version), even for a deliberate
+# rollback or a reinstall after uninstall --keep-state: a bundle signed with
+# a lower floor lifts it. A gateway from 1.0.4 on reads the floor before any
+# file is replaced, and its binary carries floor_check_marker: looking for
+# it, without running the gateway, tells a gateway that cannot run from one
+# before 1.0.4, which has no check and is not asked. When the installed
+# gateway is gone or older (uninstall --keep-state, or an uninstall that
+# failed after removing the binaries), the root-only copy that uninstall kept
+# in the lifecycle folder answers. Only exit 0 lets the install go on: exit 3
+# is the refusal, and any other result (execution denied, killed, crashed)
+# leaves the floor unchecked, so the install is refused too.
+floor_check_marker=defenseclaw-package-floor-check/1
+checker=
+if root_owned "$gateway" && grep -qaF "$floor_check_marker" "$gateway" 2>/dev/null; then
+    checker=$gateway
+elif [ ! -L "$state/floor-check" ] && root_owned "$state/floor-check/defenseclaw-gateway"; then
+    checker="$state/floor-check/defenseclaw-gateway"
+fi
+if [ -n "$checker" ]; then
+    floor_msg=$("$checker" enterprise bundle floor-check --product-version "$package_version" 2>&1 >/dev/null)
+    floor_rc=$?
+    if [ "$floor_rc" -ne 0 ]; then
+        [ "$floor_rc" -eq 3 ] || floor_msg="The release floor of the confirmed signed policy bundle could not be checked: $checker exited $floor_rc${floor_msg:+ ($floor_msg)}. Let it run (for example, trust it in the application control policy) and install again."
+        floor_msg=$(printf '%s' "${floor_msg#Error: }" | tr '\n' ' ' | tr -d '"\\|&')
+        refuse product_floor_refused "Refusing to install DefenseClaw $package_version: $floor_msg Nothing was changed."
+    fi
+fi
+if [ -n "$installed" ] && ! [ -f "$marker" ] && ! awk -v a="$package_version" -v b="$installed" '
+    function norm(v) { sub(/^v/, "", v); sub(/\+.*/, "", v); return v }
+    BEGIN {
+        a = norm(a); b = norm(b); pa = ""; pb = ""
+        if (index(a, "-")) { pa = substr(a, index(a, "-") + 1); a = substr(a, 1, index(a, "-") - 1) }
+        if (index(b, "-")) { pb = substr(b, index(b, "-") + 1); b = substr(b, 1, index(b, "-") - 1) }
+        na = split(a, x, "."); nb = split(b, y, "."); n = na > nb ? na : nb
+        for (i = 1; i <= n; i++) {
+            xi = (i <= na) ? x[i] + 0 : 0; yi = (i <= nb) ? y[i] + 0 : 0
+            if (xi > yi) exit 0
+            if (xi < yi) exit 1
+        }
+        if (pa == pb || pa == "") exit 0
+        if (pb == "") exit 1
+        np = split(pa, u, "."); nq = split(pb, w, "."); m = np > nq ? np : nq
+        for (i = 1; i <= m; i++) {
+            if (u[i] == w[i]) continue
+            if (u[i] ~ /^[0-9]+$/ && w[i] ~ /^[0-9]+$/) exit (u[i] + 0 > w[i] + 0) ? 0 : 1
+            exit (u[i] > w[i]) ? 0 : 1
+        }
+        exit 0
+    }'; then
+    refuse downgrade_refused "DefenseClaw $installed is installed; refusing to downgrade to $package_version, so nothing was changed. For a deliberate rollback, create $marker as root first."
 fi
 exit 0
 EOF

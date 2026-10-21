@@ -160,6 +160,7 @@ func promotedArtifactFindings(
 		matched := dispatchTrustedAction(ctx, trustedActionRequest{
 			Input:              input,
 			LegacyText:         string(body),
+			ArtifactBody:       true,
 			Connector:          req.ConnectorName,
 			EnforcementCapable: enforcementCapable,
 			recordTelemetry:    recordTelemetry,

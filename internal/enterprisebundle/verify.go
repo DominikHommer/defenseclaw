@@ -125,6 +125,10 @@ type VerifyInput struct {
 	// SecretPresent reports whether the device holds an enterprise
 	// credential; nil does not check presence (off a device).
 	SecretPresent func(name string) (bool, error)
+	// RequireSecretPresence is set by the apply: a required reference whose
+	// presence could not be checked refuses (secret_ref_missing) instead of
+	// only warning secret_presence_unchecked, as read-only verify does.
+	RequireSecretPresence bool
 	// Stage writes the bundle files to a private directory and returns it;
 	// the config loader and the digest read the policy files from there.
 	Stage func(*Bundle) (string, error)
@@ -239,12 +243,15 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 		// Every reference is looked up, so a refusal names the first
 		// required credential missing and the result lists all of them: the
 		// caller stores them in one pass.
-		unchecked, missing, required := false, []string{}, ""
+		unchecked, missing, required, requiredUnchecked := false, []string{}, "", false
 		for _, ref := range m.SecretRefs {
 			present, err := in.SecretPresent(ref.Name())
 			switch {
 			case err != nil:
 				unchecked = true
+				if in.RequireSecretPresence && ref.Required && required == "" {
+					required, requiredUnchecked = ref.Name(), true
+				}
 			case !present:
 				missing = append(missing, ref.Name())
 				if ref.Required && required == "" {
@@ -252,14 +259,19 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 				}
 			}
 		}
-		if !unchecked {
+		// The warning comes before a refusal for another missing required
+		// credential, so the refusal still says the store was partly
+		// unreadable and the list is incomplete.
+		if unchecked {
+			res.Warnings = append(res.Warnings, Warning{Code: WarnSecretPresenceUnchecked, Message: "the enterprise secret store could not be read; credential presence was not checked"})
+		} else {
 			res.SecretRefsMissing = missing
+		}
+		if requiredUnchecked {
+			return res, refuse(CodeSecretRefMissing, "secret_refs", "credential %s could not be checked, so the apply does not rely on it; store it again with enterprise secret set", safePath(required))
 		}
 		if required != "" {
 			return res, refuse(CodeSecretRefMissing, "secret_refs", "this device has no credential %s", safePath(required))
-		}
-		if unchecked {
-			res.Warnings = append(res.Warnings, Warning{Code: WarnSecretPresenceUnchecked, Message: "the enterprise secret store could not be read; credential presence was not checked"})
 		}
 	}
 	root, err := in.Stage(b)

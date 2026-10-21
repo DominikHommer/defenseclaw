@@ -1008,14 +1008,51 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 		t.Fatalf("healthy: %+v", c)
 	}
 	// GAP-0278: a sandbox a Docker restart left in OpenShell's error state,
-	// which can be neither stopped nor started, is named with the way on.
+	// is named with the way on.
 	lost := sampleSandbox("hic")
 	lost.Phase = "error"
 	ta.daemon.add(lost)
-	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "hic is in OpenShell's error state") || c.Fix == nil ||
-		!strings.Contains(c.Fix.Summary, "--keep-snapshot") {
+	// Before openshell.SandboxMin the gateway can neither stop nor start it:
+	// OpenShell is upgraded first.
+	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "hic is in OpenShell's error state") ||
+		!strings.Contains(c.Detail, "neither stop nor start") || c.Fix == nil || !strings.Contains(c.Fix.Summary, "upgrade OpenShell to "+openshell.InstallerVersion) {
 		t.Fatalf("errored: %+v", c)
 	}
+	// From it the gateway stops a sandbox in its error state, and starts it
+	// again after (NVIDIA/OpenShell#4231): the way on keeps it.
+	ta.daemon.status.Gateway.Version = openshell.SandboxMin
+	if c := check(ta); c.Status != openshell.StatusWarn || strings.Contains(c.Detail, "neither stop nor start") || c.Fix == nil ||
+		!strings.Contains(c.Fix.Summary, "`defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`") ||
+		strings.Contains(c.Fix.Summary, "delete") {
+		t.Fatalf("errored on %s: %+v", openshell.SandboxMin, c)
+	}
+	// One whose provisioning timed out starts again with no stop, which
+	// OpenShell refuses for it.
+	slow := sampleSandbox("slow")
+	slow.Phase, slow.PhaseReason = "error", "ProvisioningTimedOut: Provisioning repair window expired after 300 seconds"
+	ta.daemon.add(slow)
+	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "hic is in OpenShell's error state (the container stopped") ||
+		!strings.Contains(c.Detail, "slow is in OpenShell's error state because its provisioning timed out") || c.Fix == nil ||
+		!strings.Contains(c.Fix.Summary, "for slow, wait a minute for OpenShell's cleanup, then `defenseclaw sandbox start NAME` with no stop") {
+		t.Fatalf("timed out on %s: %+v", openshell.SandboxMin, c)
+	}
+	// On an older gateway, a prerelease of SandboxMin included, both are
+	// upgraded first; after it, the one whose provisioning timed out still
+	// starts with no stop, which the upgraded gateway refuses for it.
+	for _, old := range []string{"0.1.3", "0.1.5-pre.2"} {
+		ta.daemon.status.Gateway.Version = old
+		c := check(ta)
+		if c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "where this OpenShell can neither stop nor start them") || c.Fix == nil ||
+			c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" (see Gateway), then `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME` for hic, "+
+				"which keep the sandbox and its work; for slow wait a minute for OpenShell's cleanup, then `defenseclaw sandbox start NAME` with no stop: OpenShell "+
+				openshell.SandboxMin+" refuses to stop a sandbox whose provisioning timed out" {
+			t.Fatalf("errored and timed out on %s: %+v", old, c)
+		}
+	}
+	ta.daemon.mu.Lock()
+	delete(ta.daemon.sandboxes, "slow")
+	ta.daemon.mu.Unlock()
+	ta.daemon.status.Gateway.Version = "0.1.1"
 	bad := sampleSandbox("bad")
 	bad.Hooks.Unreachable, bad.Hooks.UnreachableReason = true, "OpenShell refused the hooks' connections"
 	ta.daemon.add(bad)
@@ -2246,7 +2283,8 @@ func TestSessionSummary(t *testing.T) {
 				return nil
 			}
 		}, want: []string{sbName + "'s container stopped under the session (Docker restarted, or its workload failed), which ended Claude Code",
-			"is in OpenShell's error state → `defenseclaw sandbox delete " + sbName + " --keep-snapshot`"},
+			"is in OpenShell's error state → fix what stopped it, then `defenseclaw sandbox stop " + sbName +
+				"` and `defenseclaw sandbox start " + sbName + "`, which keep the sandbox and its work"},
 			not: []string{"keeps running", "was stopped from outside this session"}},
 		// GAP-0333, GAP-0337: Docker restarted under a session that connected
 		// to a running sandbox, and OpenShell read it ready for longer than

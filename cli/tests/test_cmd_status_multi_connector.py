@@ -1061,10 +1061,28 @@ def test_status_names_a_connector_whose_setup_failed_at_gateway_start():
     assert "1 active, 1 not running" in agents_row
 
 
-def test_status_marks_missing_claude_binary_as_not_detected(monkeypatch):
+def test_status_keeps_live_claude_code_health_without_claude_on_path(monkeypatch):
+    # GAP-1331/GAP-1333: Claude Code runs from an absolute path or an IDE and
+    # reports running; the status shell has no claude on PATH. Status keeps
+    # the gateway's live state and count instead of the caller's PATH.
     monkeypatch.setattr(cmd_status.shutil, "which", lambda name: None if name == "claude" else "/bin/true")
+    monkeypatch.setattr("defenseclaw.doctor_health._last_scan_found_no_agent", lambda data_dir, connector: False)
     cfg = _cfg(["claudecode"])
     out = _render_live(cfg, {"connectors": [{"name": "claudecode", "state": "running"}]})
     claude_row = next(line for line in out.splitlines() if "Claude Code (claudecode)" in line)
-    assert "not detected" in claude_row.lower()
-    assert "RUNNING" not in claude_row
+    assert "RUNNING" in claude_row and "not detected" not in claude_row.lower()
+    agents_row = next(line for line in out.splitlines() if "Agents" in line)
+    assert "1 active" in agents_row and "not running" not in agents_row
+
+
+def test_status_marks_claude_code_off_when_discovery_found_no_agent(monkeypatch):
+    # The gateway's discovery scan found no Claude Code installation and none
+    # is on PATH: the staged connector is shown off, as for other connectors.
+    monkeypatch.setattr(cmd_status.shutil, "which", lambda name: None if name == "claude" else "/bin/true")
+    monkeypatch.setattr("defenseclaw.doctor_health._last_scan_found_no_agent", lambda data_dir, connector: True)
+    monkeypatch.setattr("defenseclaw.inventory.agent_discovery.binary_on_path", lambda connector: False)
+    monkeypatch.setattr("defenseclaw.sandbox_images.verified_harness_contract", lambda data_dir, connector: None)
+    cfg = _cfg(["claudecode"])
+    out = _render_live(cfg, {"connectors": [{"name": "claudecode", "state": "running"}]})
+    claude_row = next(line for line in out.splitlines() if "Claude Code (claudecode)" in line)
+    assert "is not installed" in claude_row and "RUNNING" not in claude_row

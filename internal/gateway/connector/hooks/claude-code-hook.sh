@@ -59,7 +59,12 @@ fi
 {{end}}
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
-  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+  # DEFENSECLAW_FAIL_MODE=closed and strict availability tighten this exit
+  # as they tighten every later failure (GAP-0315).
+  _DC_HOME_FAIL_MODE="{{.FailMode}}"
+  case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) _DC_HOME_FAIL_MODE="closed" ;; esac
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
+  if [ "$_DC_HOME_FAIL_MODE" = "closed" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     exit 2
   fi
@@ -93,7 +98,10 @@ defenseclaw_harden_env
 FAIL_MODE="closed"
 readonly FAIL_MODE{{else if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
 # DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
-FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="{{.FailMode}}"
+# An inherited DEFENSECLAW_FAIL_MODE can only tighten the installed mode:
+# a project or parent process cannot reopen a closed hook (GAP-0315).
+case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) FAIL_MODE="closed" ;; esac{{end}}
 
 # Bail early on missing token: see codex-hook.sh +
 # defenseclaw_handle_missing_token in _hardening.sh for rationale.
@@ -127,7 +135,13 @@ PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome re
 # native bridge that will handle the matching invocation. The script-marker
 # check matters because teardown intentionally leaves a v0 no-op tombstone (and
 # may leave the scoped token) for already-running host processes.
-CURSOR_ORIGIN_VERSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.cursor_version // empty' 2>/dev/null || true)"
+# Only a payload that names the field can carry it, so a Claude Code call
+# runs no jq for this check (issue #1130).
+CURSOR_ORIGIN_VERSION=""
+case "$PAYLOAD" in
+  *cursor_version*)
+    CURSOR_ORIGIN_VERSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.cursor_version // empty' 2>/dev/null || true)" ;;
+esac
 if [ -n "$CURSOR_ORIGIN_VERSION" ] && [ -f "${HOOK_DIR}/.hook-cursor.token" ]; then
   CURSOR_HOOK_MARKER=""
   if [ -r "${HOOK_DIR}/cursor-hook.sh" ]; then
@@ -302,10 +316,14 @@ fi
 # restarting or not running (after a reboot, for example): send the call
 # again for up to 3 seconds, starting the gateway after a refusal. See
 # defenseclaw_await_gateway in _hardening.sh.
-# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
+# A tool call's request is bounded like the native hook's answer budget, by
+# the payload's top-level event (defenseclaw_payload_tool_gate_max_time).
+HOOK_MAX_TIME=10
+{{if not .SecureClient}}defenseclaw_payload_tool_gate_max_time "$PAYLOAD" 10
+{{end}}# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
 # payload on descriptors, never on its command line.
 defenseclaw_hook_post() {
-  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 10 "$PAYLOAD" \
+  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" "$HOOK_MAX_TIME" "$PAYLOAD" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
 {{if and .Managed (not .SecureClient)}}    "${RESOLVED_HEADER_ARGS[@]+"${RESOLVED_HEADER_ARGS[@]}"}" \
@@ -319,8 +337,7 @@ RESPONSE=$(defenseclaw_hook_post) || {
 }
 defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-RESULT=$(echo "$RESPONSE" | sed '$d')
+defenseclaw_split_response
 
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"

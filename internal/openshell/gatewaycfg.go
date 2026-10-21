@@ -1785,13 +1785,30 @@ var ErrUnflushed = errors.New("openshell: the gateway was not restarted, because
 // sandboxFlushWait bounds sync(1) in one sandbox.
 const sandboxFlushWait = 20 * time.Second
 
-// FlushSandboxes runs sync(1) in every ready sandbox of the gateway c
-// talks to when its compute driver's stop does not keep what a workload
-// has not synced (Driver.StopFlushes). A gateway restart stops all of its
+// syncSandbox runs sync(1) in the sandbox name, within sandboxFlushWait.
+func syncSandbox(ctx context.Context, c Client, name string) error {
+	res, err := c.Exec(ctx, name, []string{"/bin/sync"}, ExecOptions{Timeout: sandboxFlushWait, Attempts: 1, MaxOutputBytes: 256})
+	if err == nil && res.ExitCode != 0 {
+		err = fmt.Errorf("sync(1) exited with status %d", res.ExitCode)
+	}
+	return err
+}
+
+// FlushSandboxes readies the sandboxes of the gateway c talks to for a
+// restart when its compute driver's stop does not keep what a workload has
+// not synced (Driver.StopFlushes). A gateway restart stops all of its
 // sandboxes, and a MicroVM stopped without a flush brings what it wrote
-// since its last one back empty (OpenShell 0.1.1). A gateway that does
-// not answer runs nothing a flush could reach; one that answers but whose
-// sandboxes could not be listed or flushed fails with ErrUnflushed,
+// since its last one back empty (OpenShell 0.1.1). So, with restartRiskOf:
+//   - a ready sandbox has sync(1) run in it;
+//   - a MicroVM whose workload ended, which no OpenShell call can flush
+//     (EndedSettle), is waited for until its guest wrote its disk back
+//     (settleEnded, at most EndedSettle);
+//   - one that may run work no flush reaches (starting, provisioning,
+//     stopping, a phase OpenShell does not name) refuses the restart.
+//
+// A gateway that does not answer runs nothing a flush could reach; one
+// that answers but whose sandboxes could not be listed, waited for or
+// flushed, or that runs one of the last kind, fails with ErrUnflushed,
 // naming them.
 //
 // A gateway whose driver is not known, because GetGatewayInfo failed, is
@@ -1815,16 +1832,22 @@ func FlushSandboxes(ctx context.Context, c Client) error {
 		}
 		return fmt.Errorf("%w (they could not be listed: %v)", ErrUnflushed, err)
 	}
+	if err := activeRefusal(list); err != nil {
+		return err
+	}
+	if list, err = settleEnded(ctx, c, list); err != nil {
+		return fmt.Errorf("%w (the wait for the MicroVMs whose workload ended to write their disks back ended: %v)", ErrUnflushed, err)
+	}
+	// One started again during the wait is judged again.
+	if err := activeRefusal(list); err != nil {
+		return err
+	}
 	var failed []string
 	for _, sb := range list {
-		if sb == nil || sb.Status.Phase != PhaseReady {
+		if restartRiskOf(sb) != riskReady {
 			continue
 		}
-		res, err := c.Exec(ctx, sb.Name, []string{"/bin/sync"}, ExecOptions{Timeout: sandboxFlushWait, Attempts: 1, MaxOutputBytes: 256})
-		if err == nil && res.ExitCode != 0 {
-			err = fmt.Errorf("sync(1) exited with status %d", res.ExitCode)
-		}
-		if err != nil {
+		if err := syncSandbox(ctx, c, sb.Name); err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", sb.Name, err))
 		}
 	}
@@ -1833,6 +1856,23 @@ func FlushSandboxes(ctx context.Context, c Client) error {
 			"stop them first, then try again", ErrUnflushed, strings.Join(failed, "; "))
 	}
 	return nil
+}
+
+// activeRefusal is ErrUnflushed for the sandboxes of list that may run work
+// no flush reaches (riskActive), nil when there are none.
+func activeRefusal(list []*Sandbox) error {
+	var active []*Sandbox
+	for _, sb := range list {
+		if restartRiskOf(sb) == riskActive {
+			active = append(active, sb)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w (%s): a MicroVM that is starting, stopping or in a phase OpenShell does not name may run work that no flush reaches; "+
+		"wait until it is ready or stopped (`defenseclaw sandbox stop NAME` flushes and stops one), then try again",
+		ErrUnflushed, strings.Join(phaseNames(active), "; "))
 }
 
 // flushGatewaySandboxes is FlushSandboxes on the gateway of opts. A

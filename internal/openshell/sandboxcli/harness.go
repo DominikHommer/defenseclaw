@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -253,6 +254,13 @@ func (a *App) detectLLM(spec *harness.Spec, choice, from, region string, reserve
 		v := c.value()
 		if v == "" {
 			continue
+		}
+		now := time.Now()
+		if a.Now != nil {
+			now = a.Now()
+		}
+		if err := expiredBedrockKey(c.source, v, now); err != nil {
+			return llmChoice{}, err
 		}
 		cred := &sandboxapi.LLMCredential{Profile: c.profile, Credentials: map[string]string{c.envName: v}}
 		if c.llm == LLMBedrock {

@@ -85,9 +85,9 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
         self.assert_public(install_block, guide_block)
 
     def test_gap_0556_to_0591_windows_restart_discovery_and_owner_reporting(self):
-        windows = page("enterprise/windows.mdx")
-        enrollment = page("enterprise/enrollment.mdx")
-        troubleshooting = page("enterprise/troubleshooting.mdx")
+        windows = page("enterprise/install/windows.mdx")
+        enrollment = page("enterprise/configure/enrollment.mdx")
+        troubleshooting = page("troubleshooting/enterprise.mdx")
         restart = section(
             windows, "If the hook guardian's restore record cannot be read", "Windows `status`, `verify`, `ensure`"
         )
@@ -163,8 +163,8 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
         self.assert_public(restart, reports, enrolled, unprotected, sessions)
 
     def test_gap_0564_0579_0588_settings_warning_and_docker_namespace(self):
-        windows = page("enterprise/windows.mdx")
-        troubleshooting = page("enterprise/troubleshooting.mdx")
+        windows = page("enterprise/install/windows.mdx")
+        troubleshooting = page("troubleshooting/enterprise.mdx")
         guide = page("sandboxes/guide.mdx")
         lifecycle = section(windows, "Windows `status`, `verify`, `ensure` and `repair` also report", "With `JSON=1`")
         warning = section(troubleshooting, "| `agent_settings_not_restored` |", "| `guardian_target_failed` |")
@@ -206,10 +206,10 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
         mac = ("`/opt/cisco/defenseclaw/runtime/sandbox`", "`/opt/cisco/defenseclaw/runtime/redaction-correlation.key`")
         pages = {
             "enterprise/mdm/linux-config-management.mdx": linux,
-            "enterprise/mdm/intune-linux.mdx": linux,
+            "enterprise/mdm/intune/linux.mdx": linux,
             "enterprise/mdm/kandji.mdx": mac,
             "enterprise/mdm/jamf.mdx": mac,
-            "enterprise/mdm/intune-macos.mdx": mac,
+            "enterprise/mdm/intune/macos.mdx": mac,
         }
         for name, paths in pages.items():
             text = page(name)
@@ -225,7 +225,7 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
             page("enterprise/mdm/linux-config-management.mdx"),
         )
         self.assertNotIn(
-            "removes the machine state (config, policies, key, state and logs)", page("enterprise/mdm/intune-linux.mdx")
+            "removes the machine state (config, policies, key, state and logs)", page("enterprise/mdm/intune/linux.mdx")
         )
         self.assertNotIn(
             ("The uninstall always removes the config, credentials, state and logs"), page("enterprise/mdm/jamf.mdx")

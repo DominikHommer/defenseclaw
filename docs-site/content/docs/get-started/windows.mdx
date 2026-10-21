@@ -1,0 +1,117 @@
+---
+title: Windows
+description: Install and run DefenseClaw on native Windows x64 for your own account, and what differs from macOS and Linux.
+keywords:
+  - DefenseClaw Windows
+  - DefenseClaw install.ps1
+  - DefenseClaw Windows x64
+  - DefenseClaw WSL
+---
+
+DefenseClaw has a native, per-user Windows x64 (`amd64`) distribution. It installs a local gateway, a hook runner, the CLI, the TUI, the scanners and a managed Python runtime for the signed-in user. The agent keeps talking to its own model service; DefenseClaw adds a hook or plugin and does not proxy model traffic on Windows.
+
+<Callout type="warning" title="WSL is not supported">
+Run DefenseClaw and the agent in the same native Windows user session. Do not install DefenseClaw in WSL, point a native agent at a WSL installation, or mix native and WSL connector homes.
+</Callout>
+
+## Requirements
+
+| Requirement | Detail |
+| --- | --- |
+| Windows | Windows 10 or newer, including Windows Server 2019 and later. |
+| Architecture | x64 (`amd64`) only. Windows ARM64 is not certified, even with x64 emulation: ARM64 is not certified and the installer stops. x86 is unsupported. |
+| Shell | Windows PowerShell 5.1 (built in) or PowerShell 7. |
+| Scope | Current user only. Running elevated works but is not needed. |
+| Agent | A [supported agent](/docs/get-started/support-matrix) installed natively for the same Windows user. |
+| Network | The installer downloads from GitHub. At runtime DefenseClaw listens on authenticated loopback, normally `127.0.0.1:18970`. |
+
+The optional local observability and Local Splunk bundles need Windows x64 Pro, Enterprise or Education, Hyper-V, machine-installed Docker Desktop with Linux containers on the Hyper-V backend, Compose v2 and a native `docker.exe`. Windows Home, per-user Docker Desktop and WSL2 engines are outside that path. Core DefenseClaw does not need Docker.
+
+## Install
+
+In PowerShell, as the user who runs your agents:
+
+```powershell
+irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
+```
+
+To guard one agent and run first-time setup in the same step, download the script first and pass parameters:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector codex -Quickstart
+```
+
+The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`. Open a new terminal, then check:
+
+```powershell
+defenseclaw --version
+defenseclaw-gateway --version
+```
+
+Parameters and exit codes are in the [installer reference](/docs/reference/commands/installer). A saved `install.ps1` exits `0` when installed, `1` when not (a previous install is restored), `3` when a connector needs attention and `4` when the first-run quickstart failed.
+
+## Set up agents
+
+```powershell
+defenseclaw init
+```
+
+`init` asks which agents to guard. For one agent without prompts, or to add agents later:
+
+```powershell
+defenseclaw quickstart --connector codex
+defenseclaw setup codex --mode observe
+defenseclaw setup -c codex -c claudecode -c cursor --mode observe --yes
+```
+
+The `-c` list becomes the full set of guarded agents, so include the ones you already have. `--detected` picks the agents installed on this computer, and `defenseclaw setup --add-detected --yes` adds newly installed ones without touching the others. The Windows connector names are `claudecode`, `codex`, `amp`, `cursor`, `devin`, `hermes`, `opencode`, `copilot`, `antigravity` and `kiro`.
+
+Setup honors the agents' own home-folder variables and remembers the folder it set up ([Paths](/docs/reference/configuration/paths#overrides)). Restart OpenCode after setup. Fully exit and relaunch Amp; for `amp -x`, add `--plugin-ready-timeout 30`.
+
+## How it runs
+
+- The gateway is a background process of your account. It starts with `defenseclaw quickstart`, `defenseclaw setup` or `defenseclaw-gateway start`, and a hook starts it when an agent calls it while it is stopped. There is no Windows service, Scheduled Task or sign-in entry.
+- A hook sends each event to the gateway on loopback with a credential scoped to that connector. In action mode the answer can block the step, where the event supports a block.
+- Agents that export OpenTelemetry send it to the same gateway. That adds detail to the audit log and never blocks anything.
+- Every decision is written to `%USERPROFILE%\.defenseclaw\audit.db`. Sending data elsewhere is a separate choice.
+
+Security details are in the [Windows security model](/docs/appendix/windows-security-model).
+
+## Upgrade and roll back
+
+```powershell
+defenseclaw upgrade
+defenseclaw rollback
+```
+
+The installer continues in a new PowerShell window. Close the TUI and other DefenseClaw commands first; it waits up to a minute for them. In an SSH session there is no desktop for that window, so both commands change nothing, exit 1 and print the `powershell -File ... install.ps1` command that runs the installer in your terminal. When an administrator sets `DisableSelfUpdate`, the installer, `upgrade` and `rollback` refuse. See [Upgrade](/docs/get-started/upgrade) and, for a 0.8.x Setup install, [Upgrade from 0.8.x](/docs/appendix/upgrade-from-0-8#windows-moving-from-the-setup-package).
+
+To repair an install, run the install command again; it keeps your configuration, data and the rollback copy.
+
+## Uninstall
+
+```powershell
+defenseclaw uninstall --all --binaries --yes
+```
+
+Without `--all` and `--binaries`, uninstall keeps your data and programs. Close agent sessions first. See [Uninstall](/docs/get-started/uninstall).
+
+## What Windows does not support
+
+- WSL, or a mix of native and WSL connectors.
+- Windows ARM64 and x86.
+- A machine-wide install, MSI or Windows service from the per-user package. For that, use [Enterprise](/docs/enterprise/install/windows). On a computer with a standalone enterprise deployment, `install.ps1`, `defenseclaw upgrade`, `defenseclaw rollback` and the per-user gateway refuse.
+- The proxy connectors (OpenClaw, ZeptoClaw): native Windows has no guardrail proxy.
+- OpenShell sandboxes. `defenseclaw sandbox` commands stop with "OpenShell sandboxes run on Linux and macOS only". Use [sandboxes](/docs/features/sandboxes) on Linux or an Apple-silicon Mac.
+- An agent on another computer sending hooks to this gateway: only the same computer, same user, over loopback is tested.
+
+Coming from WSL, do a fresh native install. Do not copy a WSL data directory, hook scripts, tokens, virtual environment or connector configuration into the Windows profile.
+
+## If something fails
+
+Run these before changing anything, then see [Windows troubleshooting](/docs/troubleshooting/windows):
+
+```powershell
+defenseclaw status
+defenseclaw doctor
+```

@@ -118,6 +118,9 @@ class FirstRunOptions:
     # ``None`` preserves single-connector callers by using ``connector``.
     connector_settings: list[dict] | None = None
     profile: str = "observe"  # observe | action
+    # A quickstart re-run without --mode: profile is the connector's current
+    # mode, so leave guardrail.mode and the connector's override as they are.
+    keep_modes: bool = False
     scanner_mode: str = "local"  # local | remote | both
     with_judge: bool = False
     judge_hook_connectors: list[str] | None = None
@@ -867,7 +870,15 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 profile = "observe"
 
         if connector != "none":
-            _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
+            _apply_first_run_choices(
+                cfg,
+                options,
+                connector,
+                profile,
+                scanner_mode,
+                # A downgraded profile (unverified version) still applies.
+                keep_modes=options.keep_modes and profile == _normalize_profile(options.profile, connector),
+            )
         else:
             if new_config:
                 # A fresh config defaults to OpenClaw. Persist the explicit
@@ -1399,6 +1410,8 @@ def _apply_first_run_choices(
     connector: str,
     profile: str,
     scanner_mode: str,
+    *,
+    keep_modes: bool = False,
 ) -> None:
     # Keep a pinned workspace only when every connector in the new first-run
     # roster was already pinned. Adding a peer starts at global scope as before.
@@ -1429,7 +1442,10 @@ def _apply_first_run_choices(
         cfg.guardrail.connectors = {}
     cfg.guardrail.scanner_mode = scanner_mode
     profile_mode = "action" if profile == "action" else "observe"
-    cfg.guardrail.mode = profile_mode
+    if not keep_modes:
+        # A scoped action used to become the global mode on a quickstart
+        # re-run, and clearing the scope then left it in action (GAP-0115).
+        cfg.guardrail.mode = profile_mode
     cfg.guardrail.enabled = True
     if options.with_judge:
         cfg.guardrail.judge.enabled = True
@@ -1444,7 +1460,7 @@ def _apply_first_run_choices(
     else:
         cfg.guardrail.judge.enabled = False
     cfg.guardrail.detection_strategy = cfg.guardrail.detection_strategy or "regex_judge"
-    _apply_first_run_connector_override(cfg, connector, profile_mode)
+    _apply_first_run_connector_override(cfg, connector, None if keep_modes else profile_mode)
 
     # Honor an explicit operator choice supplied via flag/prompt.
     # Empty string means "leave whatever was loaded alone": "closed"
@@ -1549,8 +1565,11 @@ def pin_cursor_posture(gc, primary: str = "") -> None:
         gc.hilt.enabled = False
 
 
-def _apply_first_run_connector_override(cfg: Config, connector: str, mode: str) -> None:
-    """Keep an existing multi-connector map aligned with first-run choices."""
+def _apply_first_run_connector_override(cfg: Config, connector: str, mode: str | None) -> None:
+    """Keep an existing multi-connector map aligned with first-run choices.
+
+    ``mode`` None keeps the connector's own mode setting as it is.
+    """
     gc = cfg.guardrail
     if not getattr(gc, "connectors", None):
         return
@@ -1568,7 +1587,8 @@ def _apply_first_run_connector_override(cfg: Config, connector: str, mode: str) 
                 break
     if pc is None:
         pc = PerConnectorGuardrailConfig()
-    pc.mode = "action" if mode == "action" else "observe"
+    if mode is not None:
+        pc.mode = "action" if mode == "action" else "observe"
     if pc.enabled is False:
         pc.enabled = True
     gc.connectors[key] = pc

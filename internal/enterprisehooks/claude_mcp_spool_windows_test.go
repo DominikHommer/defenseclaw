@@ -19,6 +19,78 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// GAP-1405: a record that cannot be updated is withdrawn, so the gateway
+// never admits the old servers as the user's current ones, and the next
+// successful update publishes the new ones.
+func TestWriteWindowsMCPSpoolWithdrawsARecordItCannotUpdate(t *testing.T) {
+	home := t.TempDir()
+	settings := filepath.Join(home, ".kiro", "settings")
+	if err := os.MkdirAll(settings, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeServers := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(settings, "mcp.json"), []byte(`{"mcpServers":{"`+name+`":{"command":"x"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := filepath.Join(t.TempDir(), KiroMCPSpoolDirName)
+	const sid = "S-1-5-21-1-1001"
+	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "kiro"}}}
+	names := func() ([]string, error) {
+		servers, _, err := ReadKiroMCPSpool(dir, sid, nil)
+		var out []string
+		for _, server := range servers {
+			out = append(out, server.Name)
+		}
+		return out, err
+	}
+	writeServers("first")
+	if err := WriteWindowsKiroMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := names(); err != nil || strings.Join(got, ",") != "first" {
+		t.Fatalf("published %v (%v), want first", got, err)
+	}
+	writeServers("second")
+	previous := windowsMCPSpoolWrite
+	t.Cleanup(func() { windowsMCPSpoolWrite = previous })
+	windowsMCPSpoolWrite = func(string, string, string, []byte, func(string) error) error {
+		return errors.New("there is not enough space on the disk")
+	}
+	if err := WriteWindowsKiroMCPSpool(dir, manifest, nil, t.Logf); err == nil || !strings.Contains(err.Error(), "not enough space") {
+		t.Fatalf("a failed update reported %v, want the failure", err)
+	}
+	if got, err := names(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("after a failed update the gateway reads %v (%v), want no record", got, err)
+	}
+	windowsMCPSpoolWrite = previous
+	if err := WriteWindowsKiroMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := names(); err != nil || strings.Join(got, ",") != "second" {
+		t.Fatalf("published %v (%v), want second", got, err)
+	}
+
+	// A record the gateway holds open while the update fails is not left
+	// naming the old servers either.
+	held, err := os.Open(filepath.Join(dir, strings.ToUpper(sid)+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	writeServers("third")
+	windowsMCPSpoolWrite = func(string, string, string, []byte, func(string) error) error {
+		return errors.New("the process cannot access the file")
+	}
+	if err := WriteWindowsKiroMCPSpool(dir, manifest, nil, t.Logf); err == nil {
+		t.Fatal("a failed update was reported as published")
+	}
+	if got, err := names(); err == nil && len(got) != 0 {
+		t.Fatalf("after a failed update of a held record the gateway reads %v, want no servers", got)
+	}
+}
+
 // Project names in .claude.json are controlled by the enrolled user. A UNC
 // path must be rejected before LocalSystem touches the remote filesystem.
 func TestWindowsClaudeProjectMCPRejectsUNC(t *testing.T) {

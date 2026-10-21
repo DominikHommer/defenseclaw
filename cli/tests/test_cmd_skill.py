@@ -1656,6 +1656,30 @@ class TestSkillInstall(SkillCommandTestBase):
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
     @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
+    def test_install_audit_names_the_config_generation_of_its_decision(self, mock_install, mock_scan, mock_eval):
+        # r103 GAP-0021: the install-allowed row said generation 0 while a
+        # reload applied a newer generation during the install.
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        mock_install.side_effect = self._fake_clawhub_install
+        skill_dir = os.path.join(self.tmp_dir, "skills", "gen-stamp")
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner", target=skill_dir, timestamp=datetime.now(timezone.utc),
+            findings=[], duration=timedelta(seconds=0.1),
+        )
+        mock_eval.side_effect = [AdmissionDecision("allowed", "on the allow list", source="manual-allow")]
+        self.app.cfg._loaded_generation = 6
+
+        result = self.invoke(["install", "gen-stamp"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        events = [e for e in self.app.store.list_events(20) if e.action == "install-allowed"]
+        self.assertEqual(len(events), 1)
+        self.assertIn("config_generation=6", events[0].details)
+
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
     def test_install_findings_the_admission_action_allows_are_not_an_allow_list_hit(
         self, mock_install, mock_scan, mock_eval
     ):
@@ -2254,6 +2278,28 @@ class TestSkillList(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("quarantined", result.output)
         self.assertNotIn("removed", result.output)
+
+    def test_failed_quarantine_with_a_kept_record_is_not_quarantined(self):
+        # A quarantine that published its copy but could not remove the
+        # source keeps its pending record; the skill is still in place, so
+        # the journal's "quarantine failed" wins over the record.
+        from defenseclaw.commands.cmd_skill import _build_actions_map
+        from defenseclaw.models import ActionState
+
+        self.app.store.set_action(
+            "skill", "stuck-skill", "/h/.claude/skills/stuck-skill",
+            ActionState(install="block"), "quarantine failed: remove quarantined source: permission denied",
+        )
+        self.app.store.create_quarantine_record(
+            "skill", "stuck-skill", "/h/.claude/skills/stuck-skill",
+            "/h/.defenseclaw/quarantine/skills/stuck-skill", "sha256:x",
+            "watcher enforcement", "",
+        )
+
+        entry = _build_actions_map(self.app.store)["stuck-skill"]
+        self.assertEqual(entry.actions.install, "block")
+        self.assertNotEqual(entry.actions.file, "quarantine")
+        self.assertTrue(entry.reason.startswith("quarantine failed: "), entry.reason)
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_no_duplicate_entries(self, mock_list):

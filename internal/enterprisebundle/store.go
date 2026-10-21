@@ -55,12 +55,35 @@ const (
 	// MaxReceipts is how many receipts the store keeps; older finished
 	// ones are removed.
 	MaxReceipts = 20
+	// MaxReceiptEvents is how many public receipt events receipt-events/
+	// keeps. Older ones are removed when a receipt finishes, except the
+	// event of a receipt the store still keeps, of the current or last good
+	// bundle, and one the gateway has not reported yet (up to
+	// maxUnreportedReceiptEvents).
+	MaxReceiptEvents = 100
 	// MaxErrorMessage bounds a receipt error message (bytes).
 	MaxErrorMessage = 512
 
 	stagingPrefix     = ".staging-"
 	maxStoreFileBytes = 64 << 10
+
+	// retiredReceiptIDsName is the root-only list, in the lifecycle
+	// directory, of bundle ids that were a receipt id and whose receipt or
+	// receipt event was removed. A receipt id is never issued twice: the
+	// gateway reporter and management agents deduplicate receipt events by
+	// it, so a reused id would hide the new delivery.
+	retiredReceiptIDsName = "retired-receipt-ids"
+	// maxRetiredReceiptIDsBytes bounds that list (about 140,000 ids). When
+	// it is full or cannot be read, no bundle id is a receipt id again:
+	// every later delivery gets an r- id.
+	maxRetiredReceiptIDsBytes = 4 << 20
 )
+
+// maxUnreportedReceiptEvents bounds receipt-events/ while the gateway has
+// not reported its events (it is stopped, or cannot write its audit log).
+// Past it the oldest unreported events are removed, and the receipt that
+// removed them carries receipt_events_dropped. A variable for tests.
+var maxUnreportedReceiptEvents = 1000
 
 // Receipt states; see enterprisestatus for their meaning.
 const (
@@ -176,6 +199,20 @@ type Transition struct {
 	At    string `json:"at"`
 }
 
+// WarnReceiptPublishFailed is the receipt warning code of a finished
+// receipt whose public copy (receipt-events/ and receipt.json) could not be
+// written. The root-only receipt, the apply result and bundle status still
+// record the outcome; a management agent that forwards receipt events reads
+// this one from bundle status instead.
+const WarnReceiptPublishFailed = "receipt_publish_failed"
+
+// WarnReceiptEventsDropped is the receipt warning code of a finished
+// receipt that had to remove older receipt events the gateway had not
+// reported (receipt-events/ held maxUnreportedReceiptEvents of them). Those
+// deliveries are missing from the audit log; bundle status still lists the
+// newest MaxReceipts receipts.
+const WarnReceiptEventsDropped = "receipt_events_dropped"
+
 // WarnConfirmedAfterInterrupt is the receipt warning code of a bundle that
 // a later lifecycle run confirmed: the run that applied it ended before the
 // gateway confirmed it (not_confirmed, or the run stopped after the commit).
@@ -188,12 +225,18 @@ const WarnConfirmedAfterInterrupt = "bundle_confirmed_after_interrupt"
 type Receipt struct {
 	SchemaVersion int    `json:"schema_version"`
 	ReceiptID     string `json:"receipt_id"`
-	BundleID      string `json:"bundle_id,omitempty"`
-	Version       uint64 `json:"version,omitempty"`
-	TenantID      string `json:"tenant_id,omitempty"`
-	DeviceGroup   string `json:"device_group,omitempty"`
-	SignerKeyID   string `json:"signer_key_id,omitempty"`
-	Principal     string `json:"principal,omitempty"`
+	// Sequence orders deliveries on this device: Receive gives each new
+	// receipt one more than the highest it keeps. Receipts sort by it, not
+	// by the wall clock, so a clock change never makes an older delivery
+	// look newer. Stored in the root-only receipt file only (diskReceipt);
+	// 0 for a receipt written before it existed.
+	Sequence    uint64 `json:"-"`
+	BundleID    string `json:"bundle_id,omitempty"`
+	Version     uint64 `json:"version,omitempty"`
+	TenantID    string `json:"tenant_id,omitempty"`
+	DeviceGroup string `json:"device_group,omitempty"`
+	SignerKeyID string `json:"signer_key_id,omitempty"`
+	Principal   string `json:"principal,omitempty"`
 	// Actor is the local OS account that received this bundle.
 	Actor string `json:"actor,omitempty"`
 	// DeliveryID is the opaque id the caller of `enterprise bundle apply
@@ -387,6 +430,11 @@ type Store struct {
 	EnsurePrivateDirectory func(path string) error
 	// PublishPrivateFile seals an atomically replaced state or receipt file.
 	PublishPrivateFile func(path string) error
+	// ReceiptEventReported reports whether the gateway reported the receipt
+	// event id (wrote its audit event). receipt-events/ keeps an event it
+	// has not reported past MaxReceiptEvents; nil treats every event as
+	// reported.
+	ReceiptEventReported func(id string) bool
 }
 
 func (s *Store) ensurePrivateDirectory(path string) error {
@@ -488,8 +536,45 @@ func (s *Store) saveState(st State) error {
 	return s.publishPrivateFile(s.StatePath())
 }
 
+// diskReceipt is the root-only receipt file: the receipt and its delivery
+// sequence, which status output leaves out.
+type diskReceipt struct {
+	*Receipt
+	Sequence uint64 `json:"sequence,omitempty"`
+}
+
 func (s *Store) writeReceipt(r *Receipt) error {
-	data, err := json.MarshalIndent(r, "", "  ")
+	if Finished(r.State) {
+		// Make room for the event of r before it is written, so that a drop
+		// of events the gateway never reported is recorded on r. Retention
+		// is housekeeping: an event that cannot be removed now is removed
+		// when a later receipt finishes.
+		if dropped, _ := s.pruneReceiptEvents(r.ReceiptID); dropped > 0 && !slices.Contains(r.WarningCodes, WarnReceiptEventsDropped) {
+			r.WarningCodes = append(r.WarningCodes, WarnReceiptEventsDropped)
+		}
+	}
+	if err := s.writePrivateReceipt(r); err != nil {
+		return err
+	}
+	if !Finished(r.State) {
+		return nil
+	}
+	// Reporting only: the gateway reads receipt-events/ for the audit event
+	// and the metrics. A failed write must not fail the apply, whose outcome
+	// the root-only receipt and status already record; the receipt carries
+	// receipt_publish_failed so the apply result and bundle status say so.
+	if err := s.writePublicReceipt(r); err != nil {
+		if slices.Contains(r.WarningCodes, WarnReceiptPublishFailed) {
+			return nil
+		}
+		r.WarningCodes = append(r.WarningCodes, WarnReceiptPublishFailed)
+		return s.writePrivateReceipt(r)
+	}
+	return nil
+}
+
+func (s *Store) writePrivateReceipt(r *Receipt) error {
+	data, err := json.MarshalIndent(diskReceipt{Receipt: r, Sequence: r.Sequence}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -499,16 +584,7 @@ func (s *Store) writeReceipt(r *Receipt) error {
 	if err := configwrite.WriteFileDurable(s.receiptPath(r.ReceiptID), append(data, '\n'), 0o600); err != nil {
 		return err
 	}
-	if err := s.publishPrivateFile(s.receiptPath(r.ReceiptID)); err != nil {
-		return err
-	}
-	if Finished(r.State) {
-		// Reporting only: the gateway reads receipt-events/ for the audit
-		// event and the metrics. A failed write must not fail the apply,
-		// whose outcome the root-only receipt and status already record.
-		_ = s.writePublicReceipt(r)
-	}
-	return nil
+	return s.publishPrivateFile(s.receiptPath(r.ReceiptID))
 }
 
 // PublicReceiptPath is <etc>/bundles/receipt.json.
@@ -549,6 +625,11 @@ func (s *Store) writePublicReceipt(r *Receipt) error {
 	}
 	if refusal := r.Refusal(); refusal != nil {
 		if previous, err := enterprisestatus.ReadPublicReceipt(s.PublicReceiptPath()); err == nil {
+			if r.ErrorCode == CodeSuperseded && previous.LastRefusal != nil {
+				// As in Latest: a superseded inbox receipt does not replace
+				// another refusal; its event above records it.
+				return nil
+			}
 			previous.LastRefusal = refusal
 			return s.publishReceipt(previous)
 		}
@@ -600,6 +681,139 @@ func (s *Store) publishReceiptEvent(out enterprisestatus.PublicReceipt) error {
 	return nil
 }
 
+// pruneReceiptEvents makes room in receipt-events/ for the event of the
+// receipt incoming: it keeps the MaxReceiptEvents-1 newest other events,
+// every event of a receipt the store keeps or of the current or last good
+// bundle, and an event the gateway has not reported while fewer than
+// maxUnreportedReceiptEvents events are kept. dropped counts the removed
+// events the gateway had not reported. Events are ordered newest first by
+// modification time. The id of a removed event is retired first, so a
+// later delivery of that bundle never takes it again.
+func (s *Store) pruneReceiptEvents(incoming string) (dropped int, err error) {
+	dir := s.PublicReceiptEventsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	type event struct {
+		id  string
+		mod time.Time
+	}
+	var events []event
+	for _, entry := range entries {
+		id, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || id == incoming || !enterprisestatus.ValidReceiptID(id) || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		events = append(events, event{id: id, mod: info.ModTime()})
+	}
+	room := MaxReceiptEvents - 1
+	if len(events) <= room {
+		return 0, nil
+	}
+	receipts, err := s.Receipts()
+	if err != nil {
+		return 0, err
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		return 0, err
+	}
+	keep := map[string]bool{}
+	for _, r := range receipts {
+		keep[r.ReceiptID] = true
+	}
+	for _, ref := range []*Ref{st.Current, st.LastGood} {
+		if ref != nil {
+			keep[ref.BundleID] = true
+			if id := receiptIDOfVersionDir(ref.Dir, ref.Version, ref.BundleID); id != "" {
+				keep[id] = true
+			}
+		}
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		if !events[i].mod.Equal(events[j].mod) {
+			return events[i].mod.After(events[j].mod)
+		}
+		return events[i].id > events[j].id
+	})
+	var errs []error
+	kept := room
+	for _, ev := range events[room:] {
+		if keep[ev.id] {
+			continue
+		}
+		reported := s.ReceiptEventReported == nil || s.ReceiptEventReported(ev.id)
+		if !reported && kept < maxUnreportedReceiptEvents-1 {
+			kept++
+			continue
+		}
+		if err := s.retireReceiptID(ev.id); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, ev.id+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+			continue
+		}
+		if !reported {
+			dropped++
+		}
+	}
+	return dropped, errors.Join(errs...)
+}
+
+func (s *Store) retiredReceiptIDsPath() string {
+	return filepath.Join(s.LifecycleDir, retiredReceiptIDsName)
+}
+
+// retiredReceiptIDs reads the retired receipt id list; usable is false when
+// it is over its bound or cannot be read, and then no bundle id may become
+// a receipt id again.
+func (s *Store) retiredReceiptIDs() (ids []string, usable bool) {
+	path := s.retiredReceiptIDsPath()
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, true
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxRetiredReceiptIDsBytes {
+		return nil, false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	return strings.Fields(string(raw)), true
+}
+
+// retireReceiptID records that the receipt or receipt event of id is about
+// to be removed, when id is a bundle id (an r- id is never issued again
+// anyway). An error keeps the file that was to be removed.
+func (s *Store) retireReceiptID(id string) error {
+	if !ValidBundleID(id) {
+		return nil
+	}
+	ids, usable := s.retiredReceiptIDs()
+	if !usable || slices.Contains(ids, id) {
+		return nil
+	}
+	if err := s.ensurePrivateDirectory(s.LifecycleDir); err != nil {
+		return err
+	}
+	path := s.retiredReceiptIDsPath()
+	if err := configwrite.WriteFileDurable(path, []byte(strings.Join(append(ids, id), "\n")+"\n"), 0o600); err != nil {
+		return err
+	}
+	return s.publishPrivateFile(path)
+}
+
 func (s *Store) publishReceipt(out enterprisestatus.PublicReceipt) error {
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
@@ -618,15 +832,28 @@ func (s *Store) publishReceipt(out enterprisestatus.PublicReceipt) error {
 }
 
 // Latest separates a pre-staging refusal from the latest receipt that
-// reached staging and may have affected the enforcing policy.
+// reached staging and may have affected the enforcing policy. A superseded
+// inbox receipt is the refusal only when no other refusal is kept: the run
+// that superseded it records it after the bundle it chose, and that
+// bundle's own refusal is the one to act on.
 func (s *Store) Latest() (last *Receipt, refusal *enterprisestatus.BundleRefusal, err error) {
 	receipts, err := s.Receipts()
 	if err != nil {
 		return nil, nil, err
 	}
+	var superseded *enterprisestatus.BundleRefusal
+	defer func() {
+		if refusal == nil {
+			refusal = superseded
+		}
+	}()
 	for _, r := range receipts {
 		if r.IsRefusal() {
-			if refusal == nil {
+			if r.ErrorCode == CodeSuperseded {
+				if superseded == nil {
+					superseded = r.Refusal()
+				}
+			} else if refusal == nil {
 				refusal = r.Refusal()
 			}
 		} else if last == nil {
@@ -667,7 +894,11 @@ func (s *Store) Receive(bundleID string, version uint64, deliveryID string) (*Re
 		}
 	}
 	at := s.now()
-	r := &Receipt{SchemaVersion: ReceiptSchemaVersion, State: StateReceived, Actor: configwrite.CurrentOSActor(),
+	sequence, err := s.nextSequence()
+	if err != nil {
+		return nil, err
+	}
+	r := &Receipt{SchemaVersion: ReceiptSchemaVersion, Sequence: sequence, State: StateReceived, Actor: configwrite.CurrentOSActor(),
 		DeliveryID: deliveryID, Transitions: []Transition{{State: StateReceived, At: stamp(at)}}}
 	if ValidBundleID(bundleID) && s.receiptReusable(bundleID) {
 		r.ReceiptID, r.BundleID, r.Version = bundleID, bundleID, version
@@ -691,17 +922,36 @@ func (s *Store) Receive(bundleID string, version uint64, deliveryID string) (*Re
 	return r, s.prune()
 }
 
-// receiptReusable reports whether a new receipt may take the id bundleID.
-// Every delivery keeps its own history, including repeated refusals.
+// nextSequence is the delivery sequence of a new receipt: one more than the
+// highest a kept receipt carries. Pruning keeps the newest receipts, so the
+// sequence never goes back while the receipts directory exists.
+func (s *Store) nextSequence() (uint64, error) {
+	receipts, err := s.Receipts()
+	if err != nil {
+		return 0, err
+	}
+	var highest uint64
+	for _, r := range receipts {
+		highest = max(highest, r.Sequence)
+	}
+	return highest + 1, nil
+}
+
+// receiptReusable reports whether a new receipt may take the id bundleID:
+// only when no receipt ever had it. Every delivery keeps its own history,
+// including repeated refusals.
 func (s *Store) receiptReusable(bundleID string) bool {
 	_, err := readStoreFile(s.receiptPath(bundleID))
 	if !errors.Is(err, fs.ErrNotExist) {
 		return false
 	}
-	// A finished private receipt may have been pruned. The public audit
-	// spool retains its ID, so a later delivery must still get a new one.
 	_, err = os.Lstat(filepath.Join(s.PublicReceiptEventsDir(), bundleID+".json"))
-	return errors.Is(err, fs.ErrNotExist)
+	if !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	// Both were removed: the retired list still has the id.
+	ids, usable := s.retiredReceiptIDs()
+	return usable && !slices.Contains(ids, bundleID)
 }
 
 // Advance moves r one state forward (CheckTransition), applies update to
@@ -1076,18 +1326,30 @@ func (s *Store) Receipts() ([]*Receipt, error) {
 			continue
 		}
 		var r Receipt
-		if json.Unmarshal(raw, &r) != nil || r.ReceiptID != id {
+		disk := diskReceipt{Receipt: &r}
+		if json.Unmarshal(raw, &disk) != nil || r.ReceiptID != id {
 			continue
 		}
+		r.Sequence = disk.Sequence
 		out = append(out, &r)
 	}
+	sortReceipts(out)
+	return out, nil
+}
+
+// sortReceipts orders receipts newest first by delivery sequence. A receipt
+// without one was written by an earlier release, before every receipt with
+// one; those keep the order of their received time.
+func sortReceipts(out []*Receipt) {
 	sort.SliceStable(out, func(i, j int) bool {
+		if a, b := out[i].Sequence, out[j].Sequence; a != b {
+			return a > b
+		}
 		if a, b := out[i].ReceivedAt(), out[j].ReceivedAt(); a != b {
 			return a > b
 		}
 		return out[i].ReceiptID > out[j].ReceiptID
 	})
-	return out, nil
 }
 
 // Summary is the result v2 bundle block: the latest receipt that reached
@@ -1156,6 +1418,9 @@ func (s *Store) prune() error {
 		if !Finished(r.State) {
 			continue
 		}
+		if err := s.retireReceiptID(r.ReceiptID); err != nil {
+			return err
+		}
 		if err := os.Remove(s.receiptPath(r.ReceiptID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
@@ -1189,10 +1454,21 @@ func (s *Store) gc(st State, keep map[string]bool) error {
 				(IsVersionDirName(name) && !st.held(name) && !keep[name])
 			if stale {
 				errs = append(errs, removeTree(filepath.Join(s.BundlesDir, name)))
+			} else if entry.Type().IsRegular() && isTempOf(name, enterprisestatus.PublicReceiptName) {
+				// A crash during the atomic replace of receipt.json.
+				errs = append(errs, os.Remove(filepath.Join(s.BundlesDir, name)))
 			}
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		errs = append(errs, err)
+	}
+	if entries, err := os.ReadDir(s.PublicReceiptEventsDir()); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.Type().IsRegular() && strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp") {
+				errs = append(errs, os.Remove(filepath.Join(s.PublicReceiptEventsDir(), name)))
+			}
+		}
 	}
 	for _, dir := range []string{s.LifecycleDir, s.receiptsDir()} {
 		entries, err := os.ReadDir(dir)
@@ -1202,12 +1478,18 @@ func (s *Store) gc(st State, keep map[string]bool) error {
 		for _, entry := range entries {
 			name := entry.Name()
 			if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp") &&
-				(strings.HasPrefix(name, "."+StateFileName+".") || dir == s.receiptsDir()) {
+				(strings.HasPrefix(name, "."+StateFileName+".") || isTempOf(name, retiredReceiptIDsName) || dir == s.receiptsDir()) {
 				errs = append(errs, os.Remove(filepath.Join(dir, name)))
 			}
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// isTempOf reports the temp file name of an atomic replace of base
+// (.<base>.<random>.tmp).
+func isTempOf(name, base string) bool {
+	return strings.HasPrefix(name, "."+base+".") && strings.HasSuffix(name, ".tmp")
 }
 
 func validSHA256Hex(value string) bool {

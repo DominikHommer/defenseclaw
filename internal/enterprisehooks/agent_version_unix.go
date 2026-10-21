@@ -292,15 +292,17 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 			return version, ""
 		}
 	}
+	stampVersion := ""
 	if probe.stamp != "" {
 		stamp := filepath.Join(home, filepath.FromSlash(probe.stamp))
 		if unixDiscoveryCandidateTrusted(home, stamp) {
-			if version := readUnixInstallStampVersion(stamp); version != "" {
-				return version, ""
-			}
+			stampVersion = readUnixInstallStampVersion(stamp)
 		}
 	}
 	if !allowExec {
+		if stampVersion != "" {
+			return stampVersion, ""
+		}
 		return "", fmt.Sprintf("no %s package metadata under this home", connector)
 	}
 	installedAt, installedNote := "", ""
@@ -324,6 +326,12 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 				}
 			}
 		}
+	}
+	// The install stamp names the release only when the CLI does not answer
+	// itself: only the installer rewrites the stamp, so a CLI upgraded
+	// another way leaves it naming the older release (GAP-1274).
+	if stampVersion != "" {
+		return stampVersion, ""
 	}
 	if installedAt != "" {
 		return "", UnixAgentUnversionedReasonPrefix + installedAt + installedNote

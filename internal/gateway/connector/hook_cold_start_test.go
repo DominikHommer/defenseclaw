@@ -68,7 +68,7 @@ type coldStartHookRun struct {
 func runHookForColdStart(t *testing.T, c Connector, script string, args []string, prepare func(dataDir string), extraEnv ...string) coldStartHookRun {
 	t.Helper()
 	hooksDir := t.TempDir()
-	if err := WriteHookScriptsForConnectorObject(hooksDir, freeAPIAddr(t), "cold-start-scoped-token", c); err != nil {
+	if err := writePerUserHooksForTestFailMode(hooksDir, freeAPIAddr(t), "cold-start-scoped-token", c, extraEnv); err != nil {
 		t.Fatalf("write hooks: %v", err)
 	}
 	stubDir := t.TempDir()
@@ -256,6 +256,15 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 			if tc.hint != "" && !strings.Contains(run.stderr, tc.hint) {
 				t.Errorf("stderr = %q, want the next step %q", run.stderr, tc.hint)
 			}
+			// GAP-0090, GAP-0093: the next step names the status command
+			// and no Windows one.
+			if tc.hint != "" && (!strings.Contains(run.stderr, "`defenseclaw-gateway status`") ||
+				strings.Contains(run.stderr, ".exe") || strings.Contains(run.stderr, "PowerShell")) {
+				t.Errorf("stderr = %q, want `defenseclaw-gateway status` named and no Windows command", run.stderr)
+			}
+			if tc.notice != "" && !strings.Contains(run.stdout, "`defenseclaw-gateway status`") {
+				t.Errorf("stdout = %q, want `defenseclaw-gateway status` named", run.stdout)
+			}
 			if tc.hint == "" && strings.Contains(run.stderr, "defenseclaw-gateway start") {
 				t.Errorf("stderr = %q, want no start advice", run.stderr)
 			}
@@ -415,8 +424,9 @@ func assertGatewayDownNotice(t *testing.T, stdout string, want bool) {
 		t.Fatalf("stdout = %q, want one JSON hook result: %v", stdout, err)
 	}
 	if !strings.HasPrefix(out.SystemMessage, "DefenseClaw is not checking this session") ||
-		!strings.Contains(out.SystemMessage, "Run `defenseclaw-gateway start` to resume protection.") {
-		t.Errorf("systemMessage = %q, want the gateway-down notice with the start step", out.SystemMessage)
+		!strings.Contains(out.SystemMessage, "Run `defenseclaw-gateway start` to resume protection.") ||
+		!strings.Contains(out.SystemMessage, "`defenseclaw-gateway status`") || strings.Contains(out.SystemMessage, ".exe") {
+		t.Errorf("systemMessage = %q, want the gateway-down notice with the start and status steps", out.SystemMessage)
 	}
 }
 

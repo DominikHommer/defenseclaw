@@ -284,6 +284,14 @@ type Options struct {
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
 	// or contains a .disabled file the hook is a no-op (exit 0).
 	Home string
+	// FailureLogHome resolves the invoking user's diagnostic directory for
+	// the failure rows of a managed hook. It is never on the answer path:
+	// a tool call's answer watchdog runs it once in the background from the
+	// moment it is armed (cacheFailureLogHome), so the watchdog's own row
+	// does not wait on it; any other call runs it only when it writes a row.
+	// Enforcement still uses the administrator-owned Home, and a managed row
+	// never goes there: with no resolver, or an empty answer, there is no row.
+	FailureLogHome func() string
 	// HookDir holds connector-scoped and legacy token sidecars (default Home/hooks).
 	HookDir string
 	// Token, when set, is the resolved gateway token (e.g. from the
@@ -497,6 +505,9 @@ func runHook(ctx context.Context, opts Options) int {
 		)
 		opts.Event = strings.TrimSpace(opts.Event)
 		if bindingErr != nil {
+			if managedNativeDecision(opts) {
+				return failManagedCodexBinding(opts, sp, bindingErr.Error())
+			}
 			return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), bindingErr.Error())
 		}
 		opts.Event = event
@@ -540,7 +551,7 @@ func runHook(ctx context.Context, opts Options) int {
 		// tool call after all: it stands down.
 		opts.answerWatch.answered()
 	case opts.answerWatch != nil:
-		opts.answerWatch.adopt(opts, sp, failMode)
+		opts.answerWatch.adopt(&opts, sp, failMode)
 	case !deadline.IsZero():
 		// A tool call is answered by its answer deadline even when this
 		// process runs late (GAP-0155, GAP-0167).
@@ -1573,6 +1584,11 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 		if action == "confirm" {
 			return rawStringOr(fields, "decision", "") == "ask"
 		}
+		if event == "PreCompact" && sp.style == styleClaudeCode {
+			// Claude Code stops a compaction on decision block, the shape
+			// the gateway renders for it (GAP-0326).
+			return rawStringOr(fields, "decision", "") == "block"
+		}
 		if event == "SessionStart" || event == "PreCompact" || event == "PostCompact" {
 			var continued bool
 			return sp.style == styleCodex && json.Unmarshal(fields["continue"], &continued) == nil && !continued
@@ -1891,10 +1907,10 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	switch {
 	case reason == "gateway unreachable":
 		text = "DefenseClaw is not checking this session: this account's gateway is not running. " +
-			"Run `defenseclaw-gateway start` to resume protection."
+			"Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint
 	case reason == perUserGatewayRestartingReason:
 		text = "DefenseClaw is not checking this session: this account's gateway is restarting or not running " +
-			"(no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection."
+			"(no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint
 	case reason == perUserGatewayNoAnswerReason:
 		text = "DefenseClaw is not checking this session: this account's gateway did not answer in time " +
 			"(it may be restarting or busy). Check it with `defenseclaw-gateway status`."
@@ -1907,6 +1923,10 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	}
 	return `{"systemMessage":` + mustJSONString(text) + `}`
 }
+
+// perUserGatewayStatusHint ends a per-user gateway-down notice: the command
+// that shows the gateway's state (GAP-0093), as the Unix hooks say it.
+const perUserGatewayStatusHint = " `defenseclaw-gateway status` shows its state."
 
 // unreachableLead starts the unreachable line. Another account's process on
 // the gateway port answers, so the gateway is not "unreachable" there; the
@@ -1977,7 +1997,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 		// The hook does not start a gateway the user stopped (GAP-0486:
 		// the agent showed only the cold-start error).
 		return lead + "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop` (fail mode closed). " +
-			"Start it with `defenseclaw-gateway start`, then try again."
+			"Start it with `defenseclaw-gateway start`, then try again." + perUserGatewayStatusHint
 	case strings.HasPrefix(reason, coldStartFailedReason):
 		return lead + "the DefenseClaw gateway is not running and could not be started (fail mode closed). " +
 			"Run `defenseclaw-gateway start` to see why, then try again."
@@ -2208,6 +2228,22 @@ func responseFailureReason(reason string) string {
 		return reason + " (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)"
 	}
 	return reason
+}
+
+// failManagedCodexBinding keeps the shell hook's binding-error wording in
+// Codex's native denial body. A mismatched registered event is an integrity
+// refusal, including when the administrator allows outages to fail open.
+// A registered Stop event still gets the neutral Stop rule, as in
+// failResponse: blocking Stop keeps Codex running and repeats the failing
+// hook (#1140).
+func failManagedCodexBinding(opts Options, sp spec, reason string) int {
+	reason = "codex hook binding error: " + reason
+	if failClosedStopEvent(opts, sp) {
+		return allowFailClosedStop(opts, sp, reason, "response")
+	}
+	logHookFailure(opts, sp, reason, "response", "closed", true)
+	fmt.Fprintln(opts.Stderr, "defenseclaw: "+reason)
+	return emitCodexBlock(opts, "DefenseClaw blocked this "+hookEventSubject(opts.Event)+": "+reason)
 }
 
 // invalidManagedCopilotBindingReason is the hook-failure reason of a managed

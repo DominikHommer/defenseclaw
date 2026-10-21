@@ -487,6 +487,10 @@ type resolver struct {
 	repoMount bool
 	// floorProfile is Flags.FloorProfile.
 	floorProfile string
+	// baseLocked is openshell.admin.locked, the organization's own lock
+	// list: a key the floor locks that it does not list is locked by the
+	// floor profile's sandbox section (lockConstraint).
+	baseLocked []string
 }
 
 // ConstraintManagedCopyOnly is the constraint of a managed computer's
@@ -540,6 +544,7 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 		explicit:     flags.Subject != nil,
 		firewallFile: cfg.Firewall.ConfigFile,
 		floorProfile: strings.TrimSpace(flags.FloorProfile),
+		baseLocked:   cfg.OpenShell.Admin.Locked,
 		eff: &Effective{
 			Admin:         adminStatusFor(cfg, floor),
 			admin:         floor,

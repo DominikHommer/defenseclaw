@@ -40,7 +40,7 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
 
     def test_operations_image_needs_purge(self):
         self.assert_pins(
-            "enterprise/operations.mdx",
+            "enterprise/operate/operations.mdx",
             "Prefer an image without that state:",
             "For clones that already run it,",
             (
@@ -60,7 +60,7 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
 
     def test_lifecycle_kept_store_and_package_channel(self):
         self.assert_pins(
-            "enterprise/lifecycle.mdx",
+            "enterprise/operate/lifecycle.mdx",
             "## Uninstall",
             "## Decommission checklist",
             (
@@ -86,7 +86,7 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
 
     def test_lifecycle_registration_warning_and_error(self):
         self.assert_pins(
-            "enterprise/lifecycle.mdx",
+            "enterprise/operate/lifecycle.mdx",
             "- **Registrations left",
             "- **Manifest rows",
             (
@@ -95,7 +95,7 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
                 "the directory gives a removed account no home while its recorded home remains",
                 "re-homed account's current home was cleaned but its old home cannot be trusted",
                 "uninstall warns with `per_user_hooks_remaining` and goes on",
-                "current-home and old-home clearing paths in [Warnings](/docs/enterprise/troubleshooting#warnings)",
+                "current-home and old-home clearing paths in [Warnings](/docs/troubleshooting/enterprise#warnings)",
                 "error (Linux and macOS)",
                 "Other registration removal failures report `per_user_hooks_remaining`",
                 "stop uninstall before removing the binaries those registrations run",
@@ -107,7 +107,7 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
 
     def test_linux_removal_and_package_scripts(self):
         self.assert_pins(
-            "enterprise/linux.mdx",
+            "enterprise/install/linux.mdx",
             "## Remove",
             "## Upgrades and changes",
             (
@@ -134,7 +134,7 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
 
     def test_macos_removal(self):
         self.assert_pins(
-            "enterprise/macos.mdx",
+            "enterprise/install/macos.mdx",
             "## Remove",
             "## Upgrades and changes",
             (
@@ -182,7 +182,7 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
 
     def test_cli_uninstall_flags(self):
         self.assert_pins(
-            "reference/cli.mdx",
+            "reference/commands/cli.mdx",
             "| `uninstall` | Stop and remove the deployment",
             "| `--keep-service-account` | uninstall",
             (
@@ -237,18 +237,18 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
                 ),
                 "does not make `security_complete` false or `verify` fail, change the exit code, or fail MDM detection",
                 "review their settings and restore missing values from a backup",
-                "[Warnings](/docs/enterprise/troubleshooting#warnings)",
+                "[Warnings](/docs/troubleshooting/enterprise#warnings)",
             ),
         )
 
     def test_linux_agent_settings_warning(self):
         self.assert_agent_settings_notice(
-            "enterprise/linux.mdx", "guardian reconciles.", "The guardian is always running"
+            "enterprise/install/linux.mdx", "guardian reconciles.", "The guardian is always running"
         )
 
     def test_macos_agent_settings_warning(self):
         self.assert_agent_settings_notice(
-            "enterprise/macos.mdx", "enterprise macos reconcile --json`.", "A `guardrail.profile_assignments`"
+            "enterprise/install/macos.mdx", "enterprise macos reconcile --json`.", "A `guardrail.profile_assignments`"
         )
 
 

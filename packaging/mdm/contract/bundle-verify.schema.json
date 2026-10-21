@@ -32,7 +32,7 @@
         "already_applied",
         "refused"
       ],
-      "description": "already_applied: the bytes are the current confirmed bundle, and apply would be a success no-op."
+      "description": "already_applied: the bytes are the current confirmed bundle: apply writes no new receipt and re-installs the bundle config only when the installed config.yaml drifted from it (config_drift true; restart_prediction says whether that restarts the gateway)."
     },
     "platform": {
       "enum": [
@@ -99,6 +99,10 @@
     "restart_prediction": {
       "$ref": "#/$defs/restartPrediction"
     },
+    "config_drift": {
+      "type": "boolean",
+      "description": "For result already_applied on a managed device (root or SYSTEM): true when the installed config.yaml is not the confirmed bundle's config (changed or deleted outside the lifecycle). Apply the same bundle again to repair it, scheduled by restart_prediction; with false nothing is to do. Absent for other results, off a device, when the installed config or the bundle store could not be read, and on builds before 1.0.4."
+    },
     "warnings": {
       "type": "array",
       "items": {
@@ -145,7 +149,8 @@
           "errors": {
             "minItems": 1
           },
-          "restart_prediction": false
+          "restart_prediction": false,
+          "config_drift": false
         }
       }
     }
@@ -265,7 +270,7 @@
               "installed_config_unreadable"
             ]
           },
-          "description": "restart_settings: settings lists the restart-required settings; codex_machine_policy (Windows): Codex protection turns on or off, which runs the full lifecycle transaction; fleet_setup_required (Windows): the bundle changes fleet.enabled, which the apply refuses (deliver it through signed Setup); already_applied: the bundle is the confirmed one, apply changes nothing; installed_config_unreadable: the installed config.yaml could not be read (run as root or SYSTEM) or, on Windows, parsed."
+          "description": "restart_settings: settings lists the restart-required settings; codex_machine_policy (Windows): Codex protection turns on or off, which runs the full lifecycle transaction; fleet_setup_required (Windows): the bundle changes fleet.enabled, which the apply refuses (deliver it through signed Setup); already_applied: the bundle is the confirmed one and the installed config.yaml is its config (config_drift false; a drifted installed config is classified like any other change, and config_drift is true); installed_config_unreadable: the installed config.yaml could not be read (run as root or SYSTEM) or, on Windows, parsed."
         },
         "settings": {
           "type": "array",

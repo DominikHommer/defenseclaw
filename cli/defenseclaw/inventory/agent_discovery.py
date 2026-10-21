@@ -808,6 +808,11 @@ class AgentSignal:
     configured: bool = False
     active: bool = False
     mode: str = ""
+    # Candidates ahead of binary_path that the version probe passed over. A
+    # later scan that does not probe carries the version only while exactly
+    # these are still ahead of it, so a newly preferred binary is not
+    # reported at the old one's version.
+    skipped_binaries: tuple[str, ...] = ()
 
 
 @dataclass
@@ -1231,6 +1236,17 @@ def _keep_versions_of_slow_unchanged_agents(
     requires it) is under a trusted prefix; an agent that was removed has
     no file there and is reported as not installed. Windows keeps its
     protected selection rules.
+
+    An agent that is not probed is reported at its first binary candidate;
+    the last scan may have probed a later one (``cursor`` before ``agent``,
+    GAP-0002). That still counts as the same selection only while the
+    candidates ahead of it are exactly the ones that probe passed over and
+    are unchanged since; a new or changed one ahead could answer, so the
+    agent stays unversioned until probed. A binary outside the trusted
+    prefixes (when discovery requires them) never keeps a version. An
+    installed agent that was never probed has no version to keep; it keeps
+    its binary path, so an upgrade run without the agents on PATH does not
+    report it as not installed (rel-1-0-3 GAP-0277).
     """
     not_found = not _is_windows_host()
     slow = [
@@ -1264,12 +1280,28 @@ def _keep_versions_of_slow_unchanged_agents(
             continue
         version = str(previous.get("version") or "")
         previous_binary = str(previous.get("binary_path") or "")
-        if not version or not previous_binary or (signal.binary_path and previous_binary != signal.binary_path):
+        if not previous_binary:
             continue
-        if not signal.binary_path and (
-            not os.path.isfile(previous_binary)
-            or (require_trusted_binary_paths and not _is_trusted_binary_path(previous_binary, data_dir=data_dir))
-        ):
+        if require_trusted_binary_paths and not _is_trusted_binary_path(previous_binary, data_dir=data_dir):
+            continue
+        skipped = signal.skipped_binaries
+        if not signal.binary_path:
+            if not os.path.isfile(previous_binary):
+                continue
+            skipped = _recorded_skipped_binaries(previous)
+        elif previous_binary != signal.binary_path:
+            if signal.error != VERSION_NOT_PROBED:
+                continue
+            ahead = _unchanged_candidates_ahead(signal.name, previous_binary, previous, previous_scan.timestamp())
+            if ahead is None:
+                continue
+            skipped = ahead
+        if not version:
+            never_probed = previous.get("installed") is True and previous.get("error") == VERSION_NOT_PROBED
+            if not signal.binary_path and never_probed:
+                signal.binary_path = previous_binary
+                signal.error = VERSION_NOT_PROBED
+                signal.installed = True
             continue
         try:
             changed_at = os.stat(os.path.realpath(previous_binary)).st_mtime
@@ -1281,6 +1313,37 @@ def _keep_versions_of_slow_unchanged_agents(
         signal.version = version
         signal.error = ""
         signal.installed = True
+        signal.skipped_binaries = skipped
+
+
+def _recorded_skipped_binaries(previous: dict[str, Any]) -> tuple[str, ...]:
+    recorded = previous.get("skipped_binaries")
+    if not isinstance(recorded, list):
+        return ()
+    return tuple(str(path) for path in recorded if isinstance(path, str))
+
+
+def _unchanged_candidates_ahead(
+    name: str,
+    previous_binary: str,
+    previous: dict[str, Any],
+    previous_scan: float,
+) -> tuple[str, ...] | None:
+    """Return the candidates ahead of *previous_binary* when they are exactly
+    the ones the last probe passed over and none changed since, else None."""
+    candidates = _binary_candidates_for_agent(name, _SPECS.get(name, _AgentSpec((), "", ("--version",))))
+    if previous_binary not in candidates:
+        return None
+    ahead = tuple(candidates[: candidates.index(previous_binary)])
+    if ahead != _recorded_skipped_binaries(previous):
+        return None
+    for candidate in ahead:
+        try:
+            if os.stat(os.path.realpath(candidate)).st_mtime >= previous_scan:
+                return None
+        except OSError:
+            return None
+    return ahead
 
 
 def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
@@ -1473,6 +1536,7 @@ def _scan_agent(
         require_trusted_binary_paths = True
     probe_errors: list[str] = []
     timed_out = ""
+    skipped: tuple[str, ...] = ()
     missing_state = _missing_probe_state(name) if binary_candidates else ([], [])
     for candidate in binary_candidates:
         candidate_version, candidate_error = _version_for_agent_binary(
@@ -1487,6 +1551,7 @@ def _scan_agent(
             version = candidate_version
             error = ""
             version_ok = True
+            skipped = binary_candidates[: binary_candidates.index(candidate)]
             break
         if candidate_error:
             probe_errors.append(f"{candidate}: {candidate_error}")
@@ -1505,6 +1570,7 @@ def _scan_agent(
         )
         if candidate_version and not candidate_error:
             binary_path, version, version_ok = timed_out, candidate_version, True
+            skipped = binary_candidates[: binary_candidates.index(timed_out)]
     if missing_state[0]:
         _record_probe_state(missing_state, data_dir=data_dir)
     if not version_ok and probe_errors:
@@ -1513,6 +1579,7 @@ def _scan_agent(
         # A trusted binary that is only slow is installed; its version stays
         # unknown, so action mode still refuses it until a probe answers.
         binary_path = timed_out
+        skipped = binary_candidates[: binary_candidates.index(timed_out)]
 
     installed = bool(binary_path) and (version_ok or bool(timed_out))
     return AgentSignal(
@@ -1523,6 +1590,7 @@ def _scan_agent(
         version=version,
         error=error,
         configured=bool(config_path),
+        skipped_binaries=tuple(skipped),
     )
 
 
@@ -2734,6 +2802,7 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 version=str(raw.get("version") or ""),
                 error=str(raw.get("error") or ""),
                 configured=bool(raw.get("configured")),
+                skipped_binaries=_recorded_skipped_binaries(raw),
             )
     except Exception:
         return None

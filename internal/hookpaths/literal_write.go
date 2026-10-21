@@ -14,15 +14,25 @@ import (
 var (
 	literalOpenCall    = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync|os\.open)\s*\(`)
 	literalWriteCall   = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
+	literalNodeStream  = regexp.MustCompile(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
 	literalPathWrite   = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
-	literalPerlOpen    = regexp.MustCompile(`\bopen\s+\w+\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
+	literalPathOpen    = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
+	literalPerlOpen    = regexp.MustCompile(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
 	literalAwkRedirect = regexp.MustCompile(`(?:>>|>)\s*['"]([^'"]+)['"]`)
+	literalCopyCall    = regexp.MustCompile(`\bshutil\.copyfile\s*\(`)
 )
 
 // LiteralWriteOperands lists fixed write paths inside a directly invoked
 // interpreter, awk program, or sed in-place command. The shell and gateway
 // call this same extractor before resolving each operand through links.
 func LiteralWriteOperands(command, cwd, home string) (operands []string) {
+	return literalWriteOperandsDepth(command, cwd, home, 0)
+}
+
+func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands []string) {
+	if depth > 4 {
+		return nil
+	}
 	file, ok := parseShell(command)
 	if !ok {
 		return nil
@@ -36,8 +46,19 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 		}
 		operands = append(operands, OperandPath(name, cwd))
 	}
+	boundName, boundValue := boundedProgramAssignment(file, home)
+	// A definition runs nothing. A body is read once, where it is defined,
+	// when the command may call it, so an uncalled body stays inert.
+	called := calledFunctions(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
-		call, ok := node.(*syntax.CallExpr)
+		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
+			return declaration.Name != nil && called[declaration.Name.Value]
+		}
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
@@ -45,47 +66,20 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 		for i, arg := range call.Args {
 			var static bool
 			words[i], static = StaticWord(arg, home)
+			if i == 0 && !static && simpleShellParameter(arg) == boundName {
+				words[i], static = boundValue, true
+			}
 			if !static {
 				return true
 			}
 		}
-		programWords := words
-		if programBase(words[0]) == "env" {
-			for i := 1; i < len(words); i++ {
-				if !strings.HasPrefix(words[i], "-") && !strings.Contains(words[i], "=") {
-					programWords = words[i:]
-					break
-				}
-			}
-		}
-		program := programBase(programWords[0])
-		switch {
-		case program == "python" || strings.HasPrefix(program, "python3") || program == "perl" || program == "ruby" || program == "node":
-			for i := 1; i+1 < len(programWords); i++ {
-				if programWords[i] == "-c" || programWords[i] == "-e" {
-					for _, name := range literalInterpreterWrites(programWords[i+1]) {
-						add(name)
-					}
-					break
-				}
-			}
-		case program == "awk" || program == "gawk" || program == "mawk" || program == "nawk":
-			for _, arg := range words[1:] {
-				if strings.Contains(arg, "{") {
-					for _, match := range literalAwkRedirect.FindAllStringSubmatch(arg, -1) {
-						add(match[1])
-					}
-				}
-			}
-		case program == "sed" || program == "gsed":
-			for _, name := range sedInPlaceFiles(words) {
-				if sedFollowsInPlaceLinks(words) || sedParentProtected(name, cwd, home) {
-					add(name)
-				}
-			}
+		for _, name := range literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1) {
+			add(name)
 		}
 		return true
 	})
+	operands = append(operands, literalPipelineOperands(file, called, cwd, home, depth)...)
+	operands = append(operands, literalGeneratedScriptOperands(file, cwd, home, depth)...)
 	return operands
 }
 
@@ -259,8 +253,42 @@ func literalInterpreterWrites(code string) []string {
 			}
 		}
 	}
+	for _, loc := range literalNodeStream.FindAllStringIndex(code, -1) {
+		if !literalCodePosition(code, loc[0]) {
+			continue
+		}
+		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
+			args := literalCallArgs(call)
+			if len(args) > 0 {
+				if path, ok := literalString(args[0]); ok {
+					paths = append(paths, path)
+				}
+			}
+		}
+	}
+	for _, loc := range literalCopyCall.FindAllStringIndex(code, -1) {
+		if !literalCodePosition(code, loc[0]) {
+			continue
+		}
+		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
+			args := literalCallArgs(call)
+			if len(args) == 2 {
+				if path, ok := literalString(args[1]); ok {
+					paths = append(paths, path)
+				}
+			}
+		}
+	}
 	for _, match := range literalPathWrite.FindAllStringSubmatchIndex(code, -1) {
 		if literalCodePosition(code, match[0]) {
+			paths = append(paths, code[match[2]:match[3]])
+		}
+	}
+	for _, match := range literalPathOpen.FindAllStringSubmatchIndex(code, -1) {
+		if literalCodePosition(code, match[0]) &&
+			(strings.HasPrefix(code[match[0]:match[1]], "pathlib.") ||
+				strings.Contains(code[:match[0]], "from pathlib import Path")) &&
+			validPythonWriteMode(code[match[4]:match[5]]) {
 			paths = append(paths, code[match[2]:match[3]])
 		}
 	}
@@ -279,6 +307,26 @@ func perlRedirectMode(arg string) bool {
 
 func literalWriteMode(mode string) bool {
 	return strings.ContainsAny(mode, "wax+") || mode == ">" || mode == ">>"
+}
+
+func validPythonWriteMode(mode string) bool {
+	if mode == "" || !strings.ContainsRune("waxr", rune(mode[0])) {
+		return false
+	}
+	plus, binary, text := 0, 0, 0
+	for _, flag := range mode[1:] {
+		switch flag {
+		case '+':
+			plus++
+		case 'b':
+			binary++
+		case 't':
+			text++
+		default:
+			return false
+		}
+	}
+	return plus <= 1 && binary+text <= 1 && (mode[0] != 'r' || plus == 1)
 }
 
 func literalOSWriteFlags(flags string) bool {
@@ -367,8 +415,15 @@ func literalCallArgs(call string) []string {
 
 func literalCodePosition(code string, position int) bool {
 	var quote byte
+	comment := false
 	for i := 0; i < position; i++ {
 		c := code[i]
+		if comment {
+			if c == '\n' {
+				comment = false
+			}
+			continue
+		}
 		if quote != 0 {
 			if c == '\\' {
 				i++
@@ -377,7 +432,20 @@ func literalCodePosition(code string, position int) bool {
 			}
 		} else if c == '\'' || c == '"' {
 			quote = c
+		} else if c == '#' && literalCommentStart(code, i) {
+			comment = true
 		}
 	}
-	return quote == 0
+	return quote == 0 && !comment
+}
+
+// A '#' starts a comment only as its own token: at the start of the code or
+// after whitespace or ';', and followed by whitespace or the end. Other
+// spellings ($#name, .#field, s#a#b#) are code in some interpreter, so they
+// never hide a later write.
+func literalCommentStart(code string, i int) bool {
+	if i > 0 && !strings.ContainsRune(" \t\n;", rune(code[i-1])) {
+		return false
+	}
+	return i+1 == len(code) || strings.ContainsRune(" \t\r\n", rune(code[i+1]))
 }

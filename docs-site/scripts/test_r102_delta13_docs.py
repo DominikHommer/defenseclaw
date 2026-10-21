@@ -12,7 +12,7 @@ def page(name):
 
 class R102Delta13DocsTest(unittest.TestCase):
     def test_gap_0498_prerequisites_say_docker_reads_the_admin_policy(self):
-        text = page("sandboxes.mdx")
+        text = page("runtime/sandboxes.mdx")
         self.assertIn(
             "A member of `docker` can read and change what root can on the host, including "
             "the administrator policy in `/etc/defenseclaw/config.yaml`, the protected credentials, "
@@ -33,7 +33,7 @@ class R102Delta13DocsTest(unittest.TestCase):
         self.assertNotIn("On the Docker driver a member of the `docker` group", text)
 
     def test_gap_0498_names_refused_credentials_and_supported_literals(self):
-        text = page("sandboxes.mdx")
+        text = page("runtime/sandboxes.mdx")
         self.assertNotIn("a managed config already refuses inline keys and tokens", text)
         self.assertIn(
             "A managed config refuses inline values for `llm.api_key`, `inspect_llm.api_key`, "
@@ -50,7 +50,7 @@ class R102Delta13DocsTest(unittest.TestCase):
         self.assertIn("An installed 1.0.2 config with literals still loads", text)
 
     def test_gap_0498_privacy_names_the_docker_group_residual(self):
-        text = page("sandboxes.mdx")
+        text = page("runtime/sandboxes.mdx")
         self.assertIn("**Residual: Docker group members.**", text)
         self.assertIn("the privacy rules above hold only for accounts outside the group", text)
         self.assertIn(
@@ -65,14 +65,14 @@ class R102Delta13DocsTest(unittest.TestCase):
         self.assertIn("a **Docker access** warning", text)
 
     def test_gap_0498_verify_code_counts_without_names(self):
-        text = page("sandboxes.mdx")
+        text = page("runtime/sandboxes.mdx")
         self.assertIn("| `docker_group_members` | How many enrolled accounts are in the `docker` group (Linux)", text)
         self.assertIn("A number, never names", text)
         self.assertIn("the protected credentials and the services' environment. A number, never names", text)
         self.assertIn("references do not protect secrets from its members", text)
 
     def test_gap_0498_linux_page_warns_and_links(self):
-        text = page("linux.mdx")
+        text = page("install/linux.mdx")
         self.assertIn(
             "Membership in `docker` is root-equivalent: a member can read and change what root can on the "
             "host, including the administrator policy in `/etc/defenseclaw/config.yaml`, the protected "
@@ -86,7 +86,7 @@ class R102Delta13DocsTest(unittest.TestCase):
         )
         self.assertNotIn("keep secrets in the config as references", text)
         self.assertIn("its agent images are built in Docker, so it needs the `docker` group too", text)
-        self.assertIn("(/docs/enterprise/sandboxes#what-users-see)", text)
+        self.assertIn("(/docs/enterprise/runtime/sandboxes#what-users-see)", text)
 
 
 if __name__ == "__main__":

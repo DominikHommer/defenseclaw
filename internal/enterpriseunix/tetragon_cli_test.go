@@ -617,6 +617,46 @@ func tetragonCLIHost(t *testing.T) *testHost {
 	return h
 }
 
+// GAP-0084: with Plane C off, the absent block runs the helper off like a
+// written one: a drop-in sets mode off (the helper's own default is
+// consume), tetragon status reports mode off and names the cap, and
+// lifecycle status does not warn on every host without Plane C.
+func TestTetragonStatusOfTheDefaultBlockWithPlaneCOff(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: tetragonTestConfig(t, h, "", false)}))
+	dropin := h.read(tetragonDropinPath)
+	if want := expectedTetragonDropin("off", "168h", "", ""); dropin != want {
+		t.Fatalf("drop-in:\n%s\nwant:\n%s", dropin, want)
+	}
+	env := map[string]string{}
+	for _, line := range strings.Split(dropin, "\n") {
+		if name, value, ok := strings.Cut(strings.TrimPrefix(line, "Environment="), "="); ok && strings.HasPrefix(line, "Environment=") {
+			env[name] = value
+		}
+	}
+	if helper := kernelpolicy.IntentFromLookup(func(name string) (string, bool) { value, ok := env[name]; return value, ok }); helper.Mode != kernelpolicy.ModeOff {
+		t.Fatalf("the helper reads mode %s from the drop-in, want off", helper.Mode)
+	}
+	old := tetragonLoginUID
+	tetragonLoginUID = func() int { return 1234 }
+	t.Cleanup(func() { tetragonLoginUID = old })
+	stubTetragonAccounts(t)
+	rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus})
+	if rep.Intent.Mode != config.TetragonModeOff || rep.Intent.CapReason != config.TetragonReasonPlaneCOff || !rep.Intent.Dropin {
+		t.Fatalf("intent %+v", rep.Intent)
+	}
+	found := false
+	for _, warning := range rep.Warnings {
+		found = found || warning.Code == config.TetragonReasonPlaneCOff
+	}
+	if !found {
+		t.Fatalf("tetragon status does not name the Plane C cap: %+v", rep.Warnings)
+	}
+	if status := h.run(Options{Action: ActionStatus}); hasWarning(status, config.TetragonReasonPlaneCOff) {
+		t.Fatalf("lifecycle status warns about the default block: %+v", status.Warnings)
+	}
+}
+
 // GAP-0046: a pause or resume that wrote its file succeeds whatever else
 // the host reports (here a recorded policy with no helper running, which
 // status fails on), and prints the change, not the whole status: the fleet

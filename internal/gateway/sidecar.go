@@ -2474,6 +2474,9 @@ func (s *Sidecar) watchGenerationAssets() {
 		}
 		return nil
 	}
+	s.configMgr.candidateAssets = func(cfg *config.Config) ([]string, []string) {
+		return generationAssetDirs(cfg, &Generation{}), generationAssetFiles(cfg)
+	}
 }
 
 // guardrailNeedsRestart reports a guardrail change that only a new gateway
@@ -3778,6 +3781,9 @@ func warnUnenforcedAssetPolicy(cfg *config.Config, skillDirs, pluginDirs []strin
 		}
 	}
 	for _, message := range cfg.UnenforcedAssetPolicyRules(watched) {
+		fmt.Fprintf(os.Stderr, "[sidecar] warning: %s\n", message)
+	}
+	for _, message := range cfg.EmptyRequiredAssetRegistries(watched) {
 		fmt.Fprintf(os.Stderr, "[sidecar] warning: %s\n", message)
 	}
 }

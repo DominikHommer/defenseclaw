@@ -28,5 +28,9 @@ func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) {
 
 func runTree(cmd *exec.Cmd, _ bool) error {
 	exitWithParent(cmd)
-	return cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	killDescendantsAtExit(cmd)
+	return cmd.Wait()
 }

@@ -1,0 +1,9 @@
+{
+  "title": "Intune",
+  "pages": [
+    "tenant",
+    "windows",
+    "macos",
+    "linux"
+  ]
+}

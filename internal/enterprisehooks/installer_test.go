@@ -688,6 +688,30 @@ func TestVerifyFailsWhenHooksPredateTheConfiguredHookSocket(t *testing.T) {
 	if _, err := Verify(context.Background(), tcpOpts); err != nil {
 		t.Fatalf("Verify (TCP install, TCP configured): %v", err)
 	}
+	// The TCP install has the Secure Client shape (no hook socket), so it
+	// registered DefenseClaw's Codex notifier. With the socket configured
+	// Setup registers none, so Verify refuses that notifier as a left-over
+	// first (svis.GAP-0045).
+	if _, err := Verify(context.Background(), socketOpts); err == nil || !strings.Contains(err.Error(), "owned hook command not present") {
+		t.Fatalf("Verify (TCP install with its notifier, socket configured) = %v, want the left-over notifier refused", err)
+	}
+	// Without the notifier, the hooks themselves still name the TCP transport.
+	cfgData, err := os.ReadFile(codexConfig)
+	if err != nil {
+		t.Fatalf("read codex config: %v", err)
+	}
+	var kept []string
+	for _, line := range strings.Split(string(cfgData), "\n") {
+		if !strings.HasPrefix(line, "notify = ") {
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == len(strings.Split(string(cfgData), "\n")) {
+		t.Fatal("TCP install wrote no Codex notifier")
+	}
+	if err := os.WriteFile(codexConfig, []byte(strings.Join(kept, "\n")), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
 	if _, err := Verify(context.Background(), socketOpts); err == nil || !strings.Contains(err.Error(), transportDrift) {
 		t.Fatalf("Verify (TCP install, socket configured) = %v, want transport drift", err)
 	}
@@ -707,13 +731,19 @@ func TestVerifyFailsWhenHooksPredateTheConfiguredHookSocket(t *testing.T) {
 	otherUID.ManagedServiceUID = 462
 	otherPath := socketOpts
 	otherPath.ManagedHookSocket = "/run/defenseclaw/hook.sock"
-	for name, opts := range map[string]InstallOptions{
-		"TCP configured":         tcpOpts,
-		"other service uid":      otherUID,
-		"other hook socket path": otherPath,
+	// TCP with no hook socket is the Secure Client shape, whose Codex
+	// notifier a socket install does not write, so Verify fails on the
+	// missing notifier before it compares the transport (svis.GAP-0045).
+	for name, c := range map[string]struct {
+		opts InstallOptions
+		want string
+	}{
+		"TCP configured":         {tcpOpts, "owned hook command not present"},
+		"other service uid":      {otherUID, transportDrift},
+		"other hook socket path": {otherPath, transportDrift},
 	} {
-		if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), transportDrift) {
-			t.Fatalf("Verify (socket install, %s) = %v, want transport drift", name, err)
+		if _, err := Verify(context.Background(), c.opts); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("Verify (socket install, %s) = %v, want %q", name, err, c.want)
 		}
 	}
 }

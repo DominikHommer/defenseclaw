@@ -165,7 +165,8 @@ def test_version_before_1_0_is_refused_without_network(tmp_path: Path) -> None:
 def test_malformed_version_is_refused(tmp_path: Path) -> None:
     result = _run([str(_stamped(tmp_path)), "--version", "1.2"], tmp_path)
 
-    assert result.returncode == 1
+    # A usage error, as the install page says (GAP-0062).
+    assert result.returncode == 2
     assert "--version must look like 1.2.3" in result.stderr
 
 
@@ -317,6 +318,39 @@ def test_running_sandboxes_are_named_before_the_gateway_restarts(tmp_path: Path,
         assert completed.stdout.strip().startswith(expected), completed.stdout
     else:
         assert completed.stdout == "", completed.stdout
+
+
+@pytest.mark.parametrize("operator_stopped", [False, True])
+def test_the_install_stop_leaves_no_operator_stop_marker(tmp_path: Path, operator_stopped: bool) -> None:
+    # GAP-0140: hooks that run during an upgrade read gateway.stopped as an
+    # operator stop and fail at once with that text; the hooks of 1.0.2 do
+    # not read .install.lock. The install's own stop leaves no marker, and an
+    # operator's marker from before the install stays.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("stop_gateway() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    data = tmp_path / "data"
+    data.mkdir()
+    marker = data / "gateway.stopped"
+    if operator_stopped:
+        marker.write_text("stopped\n", encoding="utf-8")
+    gateway = tmp_path / "defenseclaw-gateway"
+    gone = tmp_path / "gone"
+    gateway.write_text(f'#!/bin/sh\n[ "$1" = stop ] && echo stopped > "{marker}" && : > "{gone}"\n', encoding="utf-8")
+    gateway.chmod(0o755)
+    script = tmp_path / "stop.sh"
+    script.write_text(
+        f'set -euo pipefail\nDEFENSECLAW_HOME="{data}"\n'
+        f'gateway_pid() {{ [ -e "{gone}" ] || printf 42; return 0; }}\n'
+        + func
+        + f'stop_gateway "{gateway}"\n',
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert marker.exists() == operator_stopped
 
 
 def test_install_makes_the_owned_bin_folders_private(tmp_path: Path) -> None:
@@ -1372,92 +1406,16 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
-def _legacy_0_8_home(
-    home: Path, receipt_age: int, cache_age: int, cache_wheel: str, sigstore_age: int = 5
-) -> tuple[Path, Path]:
-    """Lay out a 0.8.10 install that ran uv's installer and a temporary Cosign, without a marker."""
-    bin_dir, dc_home = home / ".local" / "bin", home / ".defenseclaw"
-    bin_dir.mkdir(parents=True)
-    (bin_dir / "uv").write_text("#!/bin/sh\necho 'uv 0.12.24 (x86_64-unknown-linux-gnu)'\n", encoding="utf-8")
-    (bin_dir / "uv").chmod(0o755)
-    (bin_dir / "uvx").write_text("uvx", encoding="utf-8")
-    receipt = home / ".config" / "uv" / "uv-receipt.json"
-    receipt.parent.mkdir(parents=True)
-    receipt.write_text(
-        f'{{"binaries":["uv","uvx"],"install_prefix":"{bin_dir}","version":"0.12.24"}}', encoding="utf-8"
-    )
-    site = dc_home / ".venv" / "lib" / "python3.12" / "site-packages"
-    for wheel in ("defenseclaw-0.8.10", "litellm-1.91.5"):
-        (site / f"{wheel}.dist-info").mkdir(parents=True)
-    cfg = dc_home / ".venv" / "pyvenv.cfg"
-    cfg.write_text("home = /usr/bin\nuv = 0.12.24\nversion_info = 3.12.14\n", encoding="utf-8")
-    cache = home / ".cache" / "uv"
-    for archive, wheel in (("a1", "defenseclaw-0.8.10"), ("a2", cache_wheel)):
-        (cache / "archive-v0" / archive / f"{wheel}.dist-info").mkdir(parents=True)
-    (cache / "CACHEDIR.TAG").write_text("Signature: 8a477f597d28d172789f06886806bc55\n", encoding="utf-8")
-    tuf = home / ".sigstore" / "root" / "tuf-repo-cdn.sigstore.dev"
-    tuf.mkdir(parents=True)
-    (tuf / "root.json").write_text("{}", encoding="utf-8")
-    venv_t = 1_700_000_000
-    for path in (tuf / "root.json", tuf, tuf.parent, home / ".sigstore"):
-        os.utime(path, (venv_t - sigstore_age, venv_t - sigstore_age))
-    (cache / "CACHEDIR.TAG").touch()
-    os.utime(cache / "CACHEDIR.TAG", (venv_t - 1, venv_t - 1))
-    for path in (*cache.glob("archive-v0/*/*"), *cache.glob("archive-v0/*"), cache / "archive-v0", cache):
-        os.utime(path, (venv_t - cache_age, venv_t - cache_age))
-    os.utime(receipt, (venv_t - receipt_age, venv_t - receipt_age))
-    os.utime(cfg, (venv_t, venv_t))
-    return bin_dir, dc_home
-
-
-@pytest.mark.parametrize(
-    ("cache_age", "cache_wheel", "claimed"),
-    [
-        (-5, "litellm-1.91.5", True),  # the 0.8.10 installer's uv: wheels unpacked for its venv
-        (3600, "litellm-1.91.5", False),  # the user's uv: its cache predates the receipt
-        (30, "litellm-1.91.5", False),  # the user's uv, used just before the 0.8.10 install
-        (-5, "ruff-0.15.7", False),  # the user's uv, used for something DefenseClaw never installed
-    ],
-)
-def test_upgrade_from_0_8_records_uv_only_when_the_0_8_installer_placed_it(
-    tmp_path: Path, cache_age: int, cache_wheel: str, claimed: bool
-) -> None:
-    # GAP-0908: the 0.8.10 installer ran uv's installer and kept no marker,
-    # and it also reused a uv the user already had. The upgrade records the
-    # uv (the digests install_uv writes) and its cache only on evidence that
-    # user's own uv cannot meet, and ~/.sigstore only with that uv (GAP-1262).
-    home = tmp_path / "home"
-    bin_dir, dc_home = _legacy_0_8_home(home, receipt_age=60, cache_age=cache_age, cache_wheel=cache_wheel)
-
-    proc = _run([str(_legacy_leftovers_script(tmp_path, home, bin_dir, dc_home))], tmp_path)
-
-    assert proc.returncode == 0, proc.stderr
-    assert (bin_dir / "uv").exists() and (bin_dir / "uvx").exists()
-    record = bin_dir / "defenseclaw-uv.sha256"
-    leftovers = dc_home / "legacy-install-leftovers"
-    if not claimed:
-        assert not record.exists()
-        assert not leftovers.exists()
-        return
-    uv_digest = hashlib.sha256((bin_dir / "uv").read_bytes()).hexdigest()
-    uvx_digest = hashlib.sha256(b"uvx").hexdigest()
-    assert record.read_text(encoding="utf-8") == f"{uv_digest}  uv\n{uvx_digest}  uvx\n"
-    assert leftovers.read_text(encoding="utf-8") == "uv-cache\nsigstore\n"
-
-
-def _legacy_leftovers_script(tmp_path: Path, home: Path, bin_dir: Path, dc_home: Path) -> Path:
+def test_upgrade_from_0_8_never_claims_a_uv_as_the_installers() -> None:
+    # p0 GAP-1456: the 0.8.x installer ran uv's own installer and kept no
+    # record, and a uv the user installed the same way just before is
+    # indistinguishable from it. The upgrade recorded such a uv (and its
+    # cache and ~/.sigstore) for `uninstall --all --binaries` to delete.
+    # Only install_uv, which downloaded the uv itself, writes the record.
     text = INSTALL_SH.read_text(encoding="utf-8")
-    script = tmp_path / "legacy.sh"
-    script.write_text(
-        'set -euo pipefail\nhas() { [[ "$1" != cosign ]] && command -v "$1" >/dev/null 2>&1; }\n'
-        + text[text.index("readonly LEGACY_WINDOW") : text.index("find_legacy_leftovers() {")].replace("readonly ", "")
-        + _install_sh_functions("sha256_of", "find_legacy_leftovers", "record_legacy_leftovers")
-        + f'HOME="{home}" BIN_DIR="{bin_dir}" DEFENSECLAW_HOME="{dc_home}"\n'
-        + "unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME UV_CACHE_DIR\n"
-        + "find_legacy_leftovers\nrecord_legacy_leftovers\n",
-        encoding="utf-8",
-    )
-    return script
+    assert "legacy-install-leftovers" not in text
+    assert "LEGACY_UV_RECORD" not in text
+    assert "uv-receipt.json" not in text
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read-only bin folder")
@@ -1909,22 +1867,35 @@ def test_rollback_says_a_later_upgrade_keeps_the_data_instead_of_bringing_it_bac
     assert "keep_rolled_back_data" in text[text.index("finish_swap() {") :][:600]
 
 
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--version="], "--version needs a value such as 1.2.3; nothing was changed"),
+        (["--version", ""], "--version needs a value such as 1.2.3; nothing was changed"),
+        (["--version", "w0-invalid"], "--version must look like 1.2.3, got 'w0-invalid'; nothing was changed"),
+        (["--version=1.0"], "--version must look like 1.2.3, got '1.0'; nothing was changed"),
+    ],
+)
+def test_an_empty_or_malformed_version_is_a_usage_error(tmp_path: Path, args: list[str], message: str) -> None:
+    # GAP-0012: an empty --version installed the latest release; GAP-0062:
+    # a malformed one exited 1. Both are usage errors before any download.
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    curl_log = tmp_path / "curl.log"
+    (tools / "curl").write_text(f'#!/bin/sh\necho "$@" >> "{curl_log}"\nexit 1\n', encoding="utf-8")
+    (tools / "curl").chmod(0o755)
+    proc = _run([str(_stamped(tmp_path)), *args], tmp_path, PATH=f"{tools}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert message in proc.stderr
+    assert not curl_log.exists()
+    assert not (tmp_path / "home" / ".defenseclaw").exists()
+
+
 def test_an_empty_local_value_is_a_usage_error(tmp_path: Path) -> None:
     # #1096/GAP-1336: an empty --local= ran with the current folder as the assets.
     proc = _run([str(_stamped(tmp_path)), "--local="], tmp_path)
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "--local needs a directory; nothing was changed" in proc.stderr
-
-
-def test_a_sigstore_cache_older_than_the_0_8_uv_is_the_users(tmp_path: Path) -> None:
-    # #1096/GAP-1262: a ~/.sigstore the user made five minutes before the
-    # 0.8.x venv fell inside the ten-minute window and was recorded for
-    # deletion. The 0.8.x installer ran its temporary Cosign after uv.
-    home = tmp_path / "home"
-    bin_dir, dc_home = _legacy_0_8_home(home, receipt_age=60, cache_age=-5, cache_wheel="litellm-1.91.5", sigstore_age=300)
-    proc = _run([str(_legacy_leftovers_script(tmp_path, home, bin_dir, dc_home))], tmp_path)
-    assert proc.returncode == 0, proc.stderr
-    assert (dc_home / "legacy-install-leftovers").read_text(encoding="utf-8") == "uv-cache\n"
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read-only bin folder")

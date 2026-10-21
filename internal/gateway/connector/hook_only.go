@@ -505,6 +505,21 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	return ApplyHookContract(profile, opts)
 }
 
+// copilotPatchText is the patch an apply_patch toolArgs string carries:
+// the text itself or a JSON string of it, starting with "*** Begin Patch".
+func copilotPatchText(toolName string, raw []byte) (string, bool) {
+	if !strings.EqualFold(strings.TrimSpace(toolName), "apply_patch") {
+		return "", false
+	}
+	text := string(raw)
+	if len(raw) >= 2 && raw[0] == '"' {
+		if json.Unmarshal(raw, &text) != nil {
+			return "", false
+		}
+	}
+	return text, strings.HasPrefix(text, "*** Begin Patch")
+}
+
 func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 	req := HookProfileRequest{
 		ConnectorName: "copilot",
@@ -530,6 +545,12 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 		raw := bytes.TrimSpace([]byte(value))
 		if len(raw) >= 2 && raw[0] == '{' && raw[len(raw)-1] == '}' && json.Valid(raw) {
 			req.ToolArgs = append(json.RawMessage(nil), raw...)
+		} else if patch, ok := copilotPatchText(req.ToolName, raw); ok {
+			// apply_patch is a freeform tool: its arguments are the patch
+			// text itself, sent raw or as a JSON string. Judge it as the
+			// patch it is; an unread one blocked every benign patch
+			// (GAP-0668).
+			req.ToolArgs, _ = json.Marshal(map[string]string{"patch": patch})
 		}
 	}
 	if CopilotVSCodeLocalTool(req.ToolName) && len(req.ToolArgs) != 0 {
@@ -1688,6 +1709,8 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 			c.hookCommand(opts),
 		); err != nil {
 			errs = append(errs, fmt.Sprintf("remove hook entries: %v", err))
+		} else if err := c.keepOperatorEmptyHooks(opts, logicalName, path); err != nil {
+			errs = append(errs, fmt.Sprintf("keep the empty hooks object: %v", err))
 		} else {
 			discardManagedFileBackup(opts.DataDir, c.name, logicalName)
 		}
@@ -2384,6 +2407,17 @@ func (c *hookOnlyConnector) removeConfigEntriesWithManagedBackup(
 		return fmt.Errorf("load Hermes pristine custody: %w", err)
 	}
 	return removeHermesHooks(path, hookScript, backup)
+}
+
+// keepOperatorEmptyHooks puts back the operator's empty hooks object after
+// the surgical removal of DefenseClaw's entries from a JSON hooks file.
+func (c *hookOnlyConnector) keepOperatorEmptyHooks(opts SetupOpts, logicalName, path string) error {
+	switch c.name {
+	case "cursor", "antigravity":
+		return keepPristineEmptyHooks(opts.DataDir, c.name, logicalName, path)
+	default:
+		return nil
+	}
 }
 
 func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts SetupOpts) error {

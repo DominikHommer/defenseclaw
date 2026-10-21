@@ -92,8 +92,15 @@ type Status struct {
 	Profile string      `json:"profile,omitempty"`
 	Admin   AdminStatus `json:"admin"`
 	// Sandboxes counts the DefenseClaw sandboxes; Running those Ready.
-	Sandboxes        int       `json:"sandboxes"`
-	Running          int       `json:"running"`
+	Sandboxes int `json:"sandboxes"`
+	Running   int `json:"running"`
+	// Live counts those that may hold compute a stop of the OpenShell
+	// gateway would end unflushed or half started (manager.HoldsCompute):
+	// the running ones, those starting or stopping or in an unknown phase,
+	// and a MicroVM that completed or is in OpenShell's error state, until
+	// its guest has written its disk back (openshell.EndedSettle). Unset by
+	// a daemon before DefenseClaw 1.0.4 (Busy).
+	Live             *int      `json:"live,omitempty"`
 	PendingApprovals int       `json:"pending_approvals"`
 	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
 	// StartedAt is when the daemon's sandbox subsystem started. Nothing
@@ -116,6 +123,20 @@ type Status struct {
 	// Managed is set by a managed host's per-user sandbox daemon: the
 	// caller's own policy, never another account's.
 	Managed *ManagedStatus `json:"managed,omitempty"`
+}
+
+// Busy is how many sandboxes may hold compute (Live, and never fewer than
+// Running): what a stop of the gateway or of the daemon, which takes the
+// gateway with it, waits for. A daemon that does not report Live does not
+// say which phases its sandboxes are in, so every one of them counts.
+func (s *Status) Busy() int {
+	if s == nil {
+		return 0
+	}
+	if s.Live == nil {
+		return max(s.Sandboxes, s.Running)
+	}
+	return max(*s.Live, s.Running)
 }
 
 // ManagedStatus is the managed part of Status: the caller's own sandbox
@@ -149,6 +170,12 @@ type ManagedStatus struct {
 	// MicroVM driver can't run (docker, none or "").
 	DriverReason   string `json:"driver_reason,omitempty"`
 	DriverFallback string `json:"driver_fallback,omitempty"`
+	// NextDriver is the compute driver the managed gateway gives the
+	// caller's next sandbox start (the daemon's own probe at the start
+	// decides), whatever Driver says of the last sandbox: a stopped one may
+	// be of a driver the organization replaced since. "" when the managed
+	// gateway does not say, or from a daemon before DefenseClaw 1.0.4.
+	NextDriver string `json:"next_driver,omitempty"`
 	// PendingRestart says an upgrade or setting change waits for the
 	// caller's sandboxes to stop.
 	PendingRestart bool `json:"pending_restart,omitempty"`
@@ -309,6 +336,12 @@ type Sandbox struct {
 	// without a flush: what it wrote in its last seconds may be missing,
 	// empty or cut short (UnflushedText).
 	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
+	// EndedAt is when DefenseClaw saw its workload end (completed, or
+	// OpenShell's error state), or its harness at work after that; zero in
+	// any other phase. Once its MicroVM's guest has had
+	// openshell.EndedSettle to write its disk back, a stop of the OpenShell
+	// gateway loses none of its work (manager.HoldsCompute).
+	EndedAt time.Time `json:"ended_at,omitzero"`
 	// RepoPolicy is the repository policy (.defenseclaw/sandbox.yaml) the
 	// posture includes, without its content, as the launch banner names it.
 	RepoPolicy *RepoPolicy `json:"repo_policy,omitempty"`
@@ -1155,6 +1188,12 @@ type ManagedExplain struct {
 	// MCPBlocked those it leaves out, with the reason.
 	MCPIncluded []string     `json:"mcp_included,omitempty"`
 	MCPBlocked  []ManagedMCP `json:"mcp_blocked,omitempty"`
+	// MCPProjectCount is how many MCP servers the project of a new run
+	// defines (.mcp.json, .codex/config.toml), and MCPProjectBlocked says
+	// the pack's mcp.project_servers keeps them from starting. The sandbox
+	// daemon reads the project as the caller; the gateway never sets them.
+	MCPProjectCount   int  `json:"mcp_project_count,omitempty"`
+	MCPProjectBlocked bool `json:"mcp_project_blocked,omitempty"`
 	// WorkdirMode is copy on managed hosts; AllowMount, AllowHostPorts and
 	// AllowYolo are the floor's.
 	WorkdirMode    string `json:"workdir_mode,omitempty"`
@@ -1441,6 +1480,11 @@ const ReasonToolHostRefused = "tool_host_refused"
 // when it goes down without DefenseClaw stopping it: its last writes may
 // be lost (no flush).
 const ReasonUnflushedStop = "unflushed_stop"
+
+// ReasonOldSupervisor is the Reason of the (HIGH) finding event a running
+// sandbox gets when its session started on an OpenShell release older than
+// openshell.SandboxMin, whose supervisor it keeps until it stops.
+const ReasonOldSupervisor = "old_supervisor"
 
 // ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed
 // gets the first time the egress proxy could not complete an allowed

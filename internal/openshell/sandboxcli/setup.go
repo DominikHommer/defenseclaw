@@ -337,7 +337,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		// installs works, and setup offers the upgrade once its gateway is
 		// usable (settleGateway, which may start it first).
 		var err error
-		if rep, err = a.settleGateway(ctx, rep, assume); err != nil {
+		if rep, err = a.settleGateway(ctx, rep, assume, true); err != nil {
 			return err
 		}
 		if c := rep.Get(openshell.CheckIDCLI); c != nil && c.Status == openshell.StatusWarn {
@@ -347,7 +347,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		}
 	}
 	var err error
-	if rep, err = a.settleGateway(ctx, rep, assume); err != nil {
+	if rep, err = a.settleGateway(ctx, rep, assume, false); err != nil {
 		return err
 	}
 	if unmanaged = rep.GatewayUnmanaged(); unmanaged {
@@ -766,13 +766,18 @@ var gatewayStops = []string{openshell.CheckIDCLI, openshell.CheckIDRegistration,
 // does. A gateway service that is installed but stopped comes before the
 // registration and the gateway: its gateway does not answer, and one that
 // never started has not written the client certificates a registration
-// takes.
-func gatewayStop(rep *openshell.DoctorReport) *openshell.Check {
+// takes. Before the in-place upgrade (beforeUpgrade), a Gateway check that
+// fails only because its release runs no sandbox
+// (DoctorReport.OpenShellUpgradeNeeded) is the upgrade's to fix.
+func gatewayStop(rep *openshell.DoctorReport, beforeUpgrade bool) *openshell.Check {
 	order := gatewayStops
 	if svc := rep.Service; svc != nil && svc.Installed && !svc.Active {
 		order = []string{openshell.CheckIDCLI, openshell.CheckIDGatewayService, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion}
 	}
 	for _, id := range order {
+		if id == openshell.CheckIDGatewayVersion && beforeUpgrade && rep.OpenShellUpgradeNeeded() && rep.OpenShellUpgradeAvailable() {
+			continue
+		}
 		if failed(rep, id) {
 			return rep.Get(id)
 		}
@@ -786,10 +791,10 @@ func gatewayStop(rep *openshell.DoctorReport) *openshell.Check {
 // service, and registers a gateway that never was): setup offers it, as
 // `doctor --fix` does, and checks again. It returns the doctor report of
 // the machine as it is then.
-func (a *App) settleGateway(ctx context.Context, rep *openshell.DoctorReport, assume bool) (*openshell.DoctorReport, error) {
+func (a *App) settleGateway(ctx context.Context, rep *openshell.DoctorReport, assume, beforeUpgrade bool) (*openshell.DoctorReport, error) {
 	tried := map[string]bool{}
 	for {
-		c := gatewayStop(rep)
+		c := gatewayStop(rep, beforeUpgrade)
 		if c == nil {
 			return rep, nil
 		}
@@ -830,15 +835,19 @@ func (a *App) installerHow() string {
 // offerOpenShellUpgrade offers a supported OpenShell older than the
 // release DefenseClaw installs, whose CLI check (cli) warns, the in-place
 // upgrade (DoctorReport.OpenShellUpgradeAvailable). The question's default
-// is no, so --yes and --non-interactive keep the installed release, which
-// goes on working; --install-openshell upgrades it. NVIDIA's installer
+// is no, as the install's, so --yes and --non-interactive keep the
+// installed release; --install-openshell upgrades it. A kept release older
+// than openshell.SandboxMin runs no sandbox, so setup then stops on the
+// Gateway check, with the upgrade as its fix (the hosts DefenseClaw 1.0.0
+// to 1.0.3 set up on 0.1.1 to 0.1.3). NVIDIA's installer
 // restarts the gateway once it has installed the release, of every owner:
 // on the docker driver that drops the connections of the running
 // sandboxes, after Docker pulls the release's supervisor images; on the
 // MicroVM driver it would stop them without a flush, so while one runs
 // the upgrade is not offered, and openshell.PrepareUpgrade checks again
 // before the script. A refused upgrade ran nothing: setup warns and goes
-// on with the release installed. An OpenShell installed another way is
+// on with the release installed (to that Gateway check). An OpenShell
+// installed another way is
 // its user's to upgrade: the check's fix says how. It returns the doctor
 // report of the machine as it is then.
 func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *openshell.DoctorReport, cli openshell.Check) (*openshell.DoctorReport, error) {
@@ -853,7 +862,7 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 		return keep()
 	}
 	microVM := rep.Driver == openshell.DriverVM
-	running, known := a.runningSandboxes(ctx)
+	running, ended, known := a.restartSandboxes(ctx)
 	if microVM && known && len(running) > 0 {
 		a.warn("OpenShell " + rep.CLIVersion + " is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the " +
 			plural(int64(len(running)), "MicroVM sandbox", "MicroVM sandboxes") + " running on it (" + shortList(running) + ") without a flush")
@@ -874,6 +883,9 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 		stops = "it drops the connections of the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it (" + shortList(running) + ")"
 	case known:
 		stops = "no sandbox runs on it now"
+	}
+	if wait := endedWait(ended); microVM && wait != "" {
+		stops += "; " + wait
 	}
 	upgrade := o.InstallOpenShell
 	if !upgrade && !o.NonInteractive {
@@ -1013,9 +1025,24 @@ func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume,
 	if o.RestartGateway {
 		return true, nil
 	}
-	sandboxes, known := a.gatewaySandboxes(ctx, !switching)
+	var sandboxes, ended []string
+	var known bool
+	if switching {
+		sandboxes, known = a.gatewaySandboxes(ctx)
+	} else {
+		sandboxes, ended, known = a.restartSandboxes(ctx)
+	}
+	wait := endedWait(ended)
 	if known && len(sandboxes) == 0 {
+		// A MicroVM whose workload ended loses nothing once the restart
+		// has waited for it.
+		if wait != "" {
+			a.note("applying this restarts the OpenShell gateway: " + wait)
+		}
 		return true, nil
+	}
+	if wait != "" {
+		wait = "; " + wait
 	}
 	what := "the sandboxes on it could not be listed, so some may be running"
 	if known {
@@ -1029,27 +1056,32 @@ func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume,
 	case switching:
 		a.warn("applying this restarts the OpenShell gateway on the MicroVM driver, and " + what + "; sandboxes made on the docker driver cannot start again after it, and OpenShell drops them a few minutes later with any work not brought back")
 	case microVM:
-		a.warn("applying this restarts the OpenShell gateway: its running MicroVM sandboxes have their disks flushed and stop, and " + what)
+		a.warn("applying this restarts the OpenShell gateway: its running MicroVM sandboxes have their disks flushed and stop, and " + what + wait)
 	default:
-		a.warn("applying this restarts the OpenShell gateway, which drops the connections of every sandbox on it, and " + what)
+		a.warn("applying this restarts the OpenShell gateway, which drops the connections of every sandbox on it, and " + what + wait)
 	}
 	return a.ask("Restart the OpenShell gateway now?", false, assume)
 }
 
 // restartStops says what a restart of a MicroVM gateway does to the
-// sandboxes running on it, of every owner, for a doctor fix that restarts
-// it: "" when none runs. Their disks are flushed before they stop
-// (openshell.FlushSandboxes).
-func (a *App) restartStops(ctx context.Context) string {
-	running, known := a.runningSandboxes(ctx)
+// sandboxes on it, of every owner, for a doctor fix that restarts it, as
+// the restart's own gate (openshell.FlushSandboxes) judges them: stops,
+// the ones running on it ("" when none runs), whose disks are flushed
+// before they stop; wait, the MicroVMs whose workload ended, which the
+// restart waits for first (endedWait).
+func (a *App) restartStops(ctx context.Context) (stops, wait string) {
+	running, ended, known := a.restartSandboxes(ctx)
+	if wait = endedWait(ended); wait != "" {
+		wait = "this restarts the OpenShell gateway: " + wait
+	}
 	if known && len(running) == 0 {
-		return ""
+		return "", wait
 	}
 	what := "every sandbox running on it (they could not be listed)"
 	if known {
 		what = "the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it (" + shortList(running) + ")"
 	}
-	return "this restarts the OpenShell gateway, which stops " + what + ", once their disks are flushed"
+	return "this restarts the OpenShell gateway, which stops " + what + ", once their disks are flushed", wait
 }
 
 // manualRestartStops ends a line that leaves the restart of the OpenShell
@@ -1062,11 +1094,19 @@ func (a *App) restartStops(ctx context.Context) string {
 // the gateway lists them, but for those in gone (ones the caller removes
 // before then).
 func (a *App) manualRestartStops(ctx context.Context, microVM bool, gone []string) string {
-	running, known := a.runningSandboxes(ctx)
-	running = slices.DeleteFunc(running, func(name string) bool { return slices.Contains(gone, name) })
+	running, ended, known := a.restartSandboxes(ctx)
+	unlisted := func(name string) bool { return slices.Contains(gone, name) }
+	running, ended = slices.DeleteFunc(running, unlisted), slices.DeleteFunc(ended, unlisted)
 	names := ""
 	if known && len(running) > 0 {
 		names = " (" + shortList(running) + ")"
+	}
+	// Nothing flushes a MicroVM whose workload ended: its guest writes its
+	// disk back on its own (openshell.EndedSettle).
+	wait := ""
+	if microVM && len(ended) > 0 {
+		wait = "; nothing flushes the " + plural(int64(len(ended)), "MicroVM", "MicroVMs") + " whose workload ended (" + shortList(ended) + "): wait " +
+			openshell.EndedSettleWords() + " after " + itsTheir(ended) + " workload ended before the restart, or what " + itThem(ended) + " wrote last may be lost"
 	}
 	stop := "`" + CommandName + " stop NAME`"
 	switch {
@@ -1076,10 +1116,10 @@ func (a *App) manualRestartStops(ctx context.Context, microVM bool, gone []strin
 		return "restarting it stops every sandbox on it"
 	case known && len(running) == 0:
 		return "restarting it stops every sandbox on it (none runs now): stop a MicroVM sandbox you start before then first (" + stop +
-			", which flushes its disk), or what it wrote since its last sync is lost"
+			", which flushes its disk), or what it wrote since its last sync is lost" + wait
 	}
 	return "restarting it stops every sandbox on it: first stop the MicroVM sandboxes running on it" + names + " with " + stop +
-		", which flushes their disks, or what they wrote since their last sync is lost"
+		", which flushes their disks, or what they wrote since their last sync is lost" + wait
 }
 
 // shortList names at most five of names.
@@ -1092,16 +1132,68 @@ func shortList(names []string) string {
 }
 
 // runningSandboxes names the sandboxes on the OpenShell gateway that a
-// restart would disrupt, of every owner. known is false when the gateway
-// could not list them.
+// restart would stop with work in them, of every owner (restartSandboxes'
+// running). known is false when the gateway could not list them.
 func (a *App) runningSandboxes(ctx context.Context) (names []string, known bool) {
-	return a.gatewaySandboxes(ctx, true)
+	names, _, known = a.restartSandboxes(ctx)
+	return names, known
 }
 
-// gatewaySandboxes names the sandboxes on the OpenShell gateway, of every
-// owner: with running, only those a restart would disrupt. known is false
-// when the gateway could not list them.
-func (a *App) gatewaySandboxes(ctx context.Context, running bool) (names []string, known bool) {
+// restartSandboxes names the sandboxes on the OpenShell gateway, of every
+// owner, that a restart of it disrupts, as the restart's own gate judges
+// them (openshell.RestartHolds, on the compute driver the gateway names;
+// a MicroVM one when it names none): running, those that run or may (ready,
+// provisioning, starting, stopping, a phase OpenShell does not name), and
+// ended, the MicroVMs whose workload ended, which nothing flushes and a
+// restart DefenseClaw makes waits for (openshell.EndedSettle). known is
+// false when the gateway could not list them.
+func (a *App) restartSandboxes(ctx context.Context) (running, ended []string, known bool) {
+	c, _, err := a.OpenShell(ctx)
+	if err != nil {
+		return nil, nil, false
+	}
+	defer c.Close()
+	list, err := c.ListSandboxes(ctx, nil)
+	if err != nil {
+		return nil, nil, false
+	}
+	stopFlushes := false
+	if info, err := c.GatewayInfo(ctx); err == nil {
+		if d, err := openshell.GatewayDriver(info); err == nil {
+			stopFlushes = d.StopFlushes
+		}
+	}
+	for _, sb := range list {
+		switch holds, isEnded := openshell.RestartHolds(sb, stopFlushes); {
+		case isEnded:
+			ended = append(ended, sb.Name)
+		case holds:
+			running = append(running, sb.Name)
+		}
+	}
+	sort.Strings(running)
+	sort.Strings(ended)
+	return running, ended, true
+}
+
+// endedWait says that a restart DefenseClaw makes of the gateway first
+// waits for the MicroVMs ended (restartSandboxes), "" for none.
+func endedWait(ended []string) string {
+	if len(ended) == 0 {
+		return ""
+	}
+	disk := "its disk"
+	if len(ended) > 1 {
+		disk = "their disks"
+	}
+	return "it first waits up to " + openshell.EndedSettleWords() + " for the " + plural(int64(len(ended)), "MicroVM", "MicroVMs") + " whose workload ended (" +
+		shortList(ended) + ") to write " + disk + " back, since nothing in OpenShell flushes one, then stops " + itThem(ended) + " with " +
+		itsTheir(ended) + " work kept"
+}
+
+// gatewaySandboxes names every sandbox on the OpenShell gateway, of every
+// owner. known is false when the gateway could not list them.
+func (a *App) gatewaySandboxes(ctx context.Context) (names []string, known bool) {
 	c, _, err := a.OpenShell(ctx)
 	if err != nil {
 		return nil, false
@@ -1112,10 +1204,7 @@ func (a *App) gatewaySandboxes(ctx context.Context, running bool) (names []strin
 		return nil, false
 	}
 	for _, sb := range list {
-		if sb == nil {
-			continue
-		}
-		if !running || sb.Status.Phase == openshell.PhaseReady || sb.Status.Phase == openshell.PhaseProvisioning {
+		if sb != nil {
 			names = append(names, sb.Name)
 		}
 	}

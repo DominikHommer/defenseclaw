@@ -705,7 +705,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper, checks that this host's Tetragon serves "
             "a root-owned unix socket (never a TCP address) and that Docker answers, then writes and starts "
             "defenseclaw-sandbox-feed.service. Run it again after an upgrade to update the feed. Refused on a "
-            "managed host, where sandboxes are not supported."
+            "managed host: its sandboxes are the managed deployment's, and this per-user feed installer is not "
+            "part of it."
         ),
     ),
     _Cmd(("kernel-feed", "uninstall"), "Stop and remove the sandbox kernel feed service (as root)"),

@@ -3458,7 +3458,7 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read hook script: %v", err)
 			}
-			want := `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-` + tc.wantFailMode + `}"`
+			want := "\nFAIL_MODE=\"" + tc.wantFailMode + "\"\n" + perUserEnvTightenComment
 			if tc.connector.Name() == "copilot" {
 				want = `FAIL_MODE="open"`
 				if strings.Contains(string(body), "DEFENSECLAW_FAIL_MODE:-") {

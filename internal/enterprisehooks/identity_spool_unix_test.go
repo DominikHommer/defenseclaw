@@ -16,6 +16,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -121,10 +122,52 @@ func TestIdentitySpoolCleanupRequiresTheRecordsDomainToAnswer(t *testing.T) {
 	}
 	answered := map[string]bool{"sssd:reachable.test": true}
 	for _, entry := range entries {
-		got := identitySpoolRecordLeft(dir, entry, answered)
+		got, directory := identitySpoolRecordLeft(dir, entry, answered)
 		want := entry.Name() == "94401104.json"
-		if got != want {
-			t.Errorf("cleanup %s = %v, want %v", entry.Name(), got, want)
+		if got != want || !directory {
+			t.Errorf("cleanup %s = %v (directory %v), want %v (directory true)", entry.Name(), got, directory, want)
+		}
+	}
+}
+
+// GAP-1236: one account of a directory resolving does not show that another
+// account of it, which the pass did not list, left: its lookup may have
+// missed once. The record stays until a second successive pass that also
+// does not list it, and a pass that lists it again starts over.
+func TestIdentitySpoolKeepsAnOmittedAccountOfAnAnsweringDirectoryUntilASecondPass(t *testing.T) {
+	dir := t.TempDir()
+	directoryRecord := func(uid int, user string) IdentitySpoolRecord {
+		return IdentitySpoolRecord{Key: strconv.Itoa(uid), User: user, UpdatedAt: time.Now().UTC(), SSSDDomain: "dclab.test",
+			Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Realm: "DCLAB.TEST"}}
+	}
+	previous := identitySpoolCollect
+	t.Cleanup(func() { identitySpoolCollect = previous })
+	identitySpoolCollect = func(_ context.Context, account IdentitySpoolAccount, _ time.Time) (IdentitySpoolRecord, error) {
+		return directoryRecord(account.UID, account.User), nil
+	}
+	alice := IdentitySpoolAccount{UID: 94401201, User: "dcad-alice"}
+	bob := IdentitySpoolAccount{UID: 94401202, User: "dcad-bob"}
+	data, err := MarshalIdentitySpoolRecord(directoryRecord(bob.UID, bob.User))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "94401202.json"), data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	for pass, step := range []struct {
+		accounts []IdentitySpoolAccount
+		wantBob  bool
+	}{
+		{[]IdentitySpoolAccount{alice}, true},      // bob's lookup missed once
+		{[]IdentitySpoolAccount{alice, bob}, true}, // and recovered
+		{[]IdentitySpoolAccount{alice}, true},      // a new first omission
+		{[]IdentitySpoolAccount{alice}, false},     // confirmed: bob left
+	} {
+		if err := WriteIdentitySpool(context.Background(), dir, step.accounts, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "94401202.json")); (err == nil) != step.wantBob {
+			t.Fatalf("pass %d: bob's record present = %v, want %v", pass+1, err == nil, step.wantBob)
 		}
 	}
 }
@@ -268,6 +311,35 @@ func TestIdentitySpoolStaleWhenOneAccountStopsRefreshing(t *testing.T) {
 	oldest, key, stale := IdentitySpoolStale(dir, now, 30*time.Minute)
 	if !stale || now.Sub(oldest) < time.Hour || key != "1001" {
 		t.Fatalf("oldest record = %s (%q), stale = %v; want the stale account reported", oldest, key, stale)
+	}
+}
+
+// GAP-1116: a record dated in the future is the account named when it alone
+// makes the spool stale; an over-age record is still named first.
+func TestIdentitySpoolStaleNamesTheFutureDatedRecord(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		ages    map[string]time.Duration
+		wantKey string
+	}{
+		{map[string]time.Duration{"1001": -10 * time.Minute, "1002": 0}, "1001"},
+		{map[string]time.Duration{"1001": -10 * time.Minute, "1002": 0, "1003": 2 * time.Hour}, "1003"},
+	} {
+		dir := t.TempDir()
+		for key, age := range tc.ages {
+			path := filepath.Join(dir, key+".json")
+			if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			written := now.Add(-age)
+			if err := os.Chtimes(path, written, written); err != nil {
+				t.Fatal(err)
+			}
+		}
+		when, key, stale := IdentitySpoolStale(dir, now, 5*time.Minute)
+		if !stale || key != tc.wantKey || !when.Equal(now.Add(-tc.ages[tc.wantKey])) {
+			t.Fatalf("records %v: stale = %v, key %q at %s; want %q", tc.ages, stale, key, when, tc.wantKey)
+		}
 	}
 }
 

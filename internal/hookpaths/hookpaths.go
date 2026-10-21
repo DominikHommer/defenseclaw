@@ -88,7 +88,14 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		return nil, false, false
 	}
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
+	// A definition runs nothing. A body is read once, where it is defined,
+	// when the command may call it (GAP-1430). Expanding each call instead
+	// costs time exponential in the call nesting.
+	called := calledFunctions(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
+			return declaration.Name != nil && called[declaration.Name.Value]
+		}
 		redirect, isRedirect := node.(*syntax.Redirect)
 		if !isRedirect || redirect.Word == nil {
 			return true
@@ -110,6 +117,46 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		return true
 	})
 	return operands, true, dynamic
+}
+
+// calledFunctions marks each function the command may call: its name appears
+// as a word, or as a token inside a word, anywhere except its own definition
+// header. This over-approximates the shell's calls (a nested shell, trap or
+// redefinition may run the name), and it is linear in the command.
+func calledFunctions(file *syntax.File) map[string]bool {
+	names := map[string]bool{}
+	headers := map[*syntax.Lit]bool{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction && declaration.Name != nil {
+			names[declaration.Name.Value] = false
+			headers[declaration.Name] = true
+		}
+		return true
+	})
+	if len(names) == 0 {
+		return names
+	}
+	mark := func(text string) {
+		for _, token := range strings.FieldsFunc(text, func(r rune) bool {
+			return unicode.IsSpace(r) || strings.ContainsRune(";&|()<>'\"`{}=$\\", r)
+		}) {
+			if _, defined := names[token]; defined {
+				names[token] = true
+			}
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Lit:
+			if !headers[node] {
+				mark(node.Value)
+			}
+		case *syntax.SglQuoted:
+			mark(node.Value)
+		}
+		return true
+	})
+	return names
 }
 
 // OperandPath preserves dot-dot in the command operand until link resolution.
@@ -450,6 +497,18 @@ func Resolve(payload []byte) string {
 	if len(args) == 0 {
 		return ""
 	}
+	// Copilot CLI sends a freeform apply_patch's arguments as the patch text
+	// in a JSON string, raw or JSON-encoded once more; read it as the patch
+	// the gateway judges (GAP-0668).
+	var patch string
+	if isApplyPatchToolName(tool) && json.Unmarshal(args, &patch) == nil {
+		if strings.HasPrefix(patch, `"`) && json.Unmarshal([]byte(patch), &patch) != nil {
+			patch = ""
+		}
+		if strings.HasPrefix(patch, "*** Begin Patch") {
+			args, _ = json.Marshal(map[string]string{"patch": patch})
+		}
+	}
 	// The gateway names relative operands from the event cwd; use the same
 	// directory so both sides build the same keys.
 	var cwd string
@@ -497,6 +556,10 @@ func Resolve(payload []byte) string {
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				literalOperands = LiteralWriteOperands(command, cwd, home)
+				// A bound pathname pattern has no fixed operand to list; the
+				// gateway reads the same result and fails closed on it.
+				boundedOperands, _ := BoundedShellWriteOperands(command, cwd, home)
+				literalOperands = append(literalOperands, boundedOperands...)
 				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
 				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
 				truncated = truncated || directoryUnknown
@@ -861,6 +924,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		links.unknown(true)
 		return links
 	}
+	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds := false, false
 	var copyScopes []string
@@ -896,7 +960,11 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			// A program named by a parameter or a substitution may be ln.
 			links.unknown(false)
 		case slices.Contains(linkPrograms, program):
-			if slices.Contains(static, false) || !links.add(program, words[1:], cwd) {
+			workingDirectory := cwd
+			if call == linkCall {
+				workingDirectory = linkCWD
+			}
+			if slices.Contains(static, false) || !links.add(program, words[1:], workingDirectory) {
 				links.unknown(true)
 			}
 		case slices.Contains(copyPrograms, program):
@@ -939,7 +1007,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			if archiveCopiesLinks(program, words[1:], static[1:]) {
 				destination := archiveDestination(program, words[1:], static[1:], cwd)
 				copyScopes = append(copyScopes, destination)
-				if copiesDiskSymlink(words[1:], static[1:], cwd, home, facts, record) {
+				if archiveCopiesDiskSymlink(words[1:], static[1:], cwd, home, facts, record) {
 					links.unknownIn(destination)
 				}
 			}
@@ -972,7 +1040,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			links.unknownCopyIn(scope)
 		}
 	}
-	if len(links.aliases) > 0 && (renames || cds && links.relative) {
+	if len(links.aliases) > 0 && (renames || cds && links.relative && linkCall == nil) {
 		links.unknown(true)
 	}
 	// Scopes are read against the starting directory; after a directory
@@ -981,6 +1049,90 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		links.globalOpaque = true
 	}
 	return links
+}
+
+// staticChangedDirectoryLink handles one ordered cd/link/write chain. The
+// physical cd target fixes the link's name without guessing about other shell
+// control flow. The hook cannot see the CDPATH of the agent's shell, which
+// startup files may set without exporting it, so only an absolute or ./
+// operand without dot-dot names a proven directory. After any other cd the
+// link may sit in another directory, where its relative target may name the
+// protected file: the chain is accepted only when the write cannot open the
+// new link.
+func staticChangedDirectoryLink(file *syntax.File, cwd, home string) (*syntax.CallExpr, string) {
+	if len(file.Stmts) != 1 {
+		return nil, ""
+	}
+	var statements []*syntax.Stmt
+	var flatten func(*syntax.Stmt) bool
+	flatten = func(stmt *syntax.Stmt) bool {
+		if stmt == nil || stmt.Background || stmt.Negated {
+			return false
+		}
+		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+			return len(stmt.Redirs) == 0 && pair.Op == syntax.AndStmt && flatten(pair.X) && flatten(pair.Y)
+		}
+		statements = append(statements, stmt)
+		return len(statements) <= 3
+	}
+	if !flatten(file.Stmts[0]) || len(statements) != 3 {
+		return nil, ""
+	}
+	first, firstOK := statements[0].Cmd.(*syntax.CallExpr)
+	second, secondOK := statements[1].Cmd.(*syntax.CallExpr)
+	third, thirdOK := statements[2].Cmd.(*syntax.CallExpr)
+	if !firstOK || !secondOK || !thirdOK || len(statements[0].Redirs) != 0 || len(statements[1].Redirs) != 0 ||
+		len(first.Assigns) != 0 || len(first.Args) != 2 ||
+		len(second.Assigns) != 0 || len(second.Args) != 4 || len(third.Assigns) != 0 || len(third.Args) == 0 {
+		return nil, ""
+	}
+	cd, cdOK := StaticWord(first.Args[0], home)
+	path, pathOK := StaticWord(first.Args[1], home)
+	link, linkOK := StaticWord(second.Args[0], home)
+	option, optionOK := StaticWord(second.Args[1], home)
+	writer, writerOK := StaticWord(third.Args[0], home)
+	if !cdOK || cd != "cd" || !pathOK || path == "" || strings.HasPrefix(path, "-") ||
+		!linkOK || !slices.Contains(linkPrograms, programBase(link)) || !optionOK || option != "-s" ||
+		!writerOK || writer != "echo" || len(statements[2].Redirs) != 1 {
+		return nil, ""
+	}
+	for _, word := range second.Args[2:] {
+		if _, static := StaticWord(word, home); !static {
+			return nil, ""
+		}
+	}
+	if !cdBypassesSearchPath(path) {
+		target, _ := StaticWord(second.Args[2], home)
+		name, _ := StaticWord(second.Args[3], home)
+		written, static := StaticWord(statements[2].Redirs[0].Word, home)
+		if !static || written == "" || strings.ContainsAny(written, `/\`) || shellAuthorizedKeysBase(written) ||
+			written == filepath.Clean(name) || written == filepath.Base(target) {
+			return nil, ""
+		}
+	}
+	changed, ok := ResolveWriteTarget(OperandPath(path, cwd))
+	if !ok {
+		return nil, ""
+	}
+	info, err := os.Stat(changed)
+	if err != nil || !info.IsDir() {
+		return nil, ""
+	}
+	return second, changed
+}
+
+// cdBypassesSearchPath reports a cd operand that Bash resolves without CDPATH
+// and without logical dot-dot processing against the event cwd.
+func cdBypassesSearchPath(path string) bool {
+	if !filepath.IsAbs(path) && path != "." && !strings.HasPrefix(path, "./") {
+		return false
+	}
+	for _, component := range strings.Split(filepath.ToSlash(path), "/") {
+		if component == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // dataPrograms only print, search or count text, so link API text in their
@@ -1392,7 +1544,9 @@ func ProcCWDWriteOperand(path string) bool {
 	return true
 }
 
-func copyDestination(args []string, static []bool, cwd string) string {
+// archiveCopyDestination reads the final destination of an rsync, pax, or
+// cpio copy. Their operand grammar differs from cp's option grammar.
+func archiveCopyDestination(args []string, static []bool, cwd string) string {
 	for i := len(args) - 1; i >= 0; i-- {
 		if !static[i] {
 			return ""
@@ -1413,13 +1567,25 @@ func copyDestination(args []string, static []bool, cwd string) string {
 
 // cpOperands reads the options that can change source and destination
 // positions. Unknown or dynamic options make the destination unbounded.
-func cpOperands(args []string, static []bool) (sources []string, destination string, preserves bool, ok bool) {
+type cpOperandsResult struct {
+	sources     []string
+	destination string
+	preserves   bool
+	hard        bool
+	symbolic    bool
+	noTargetDir bool
+	targetDir   bool
+	ok          bool
+}
+
+func cpOperands(args []string, static []bool) cpOperandsResult {
+	var result cpOperandsResult
 	var operands []string
 	targetDir := ""
 	options := true
 	for i := 0; i < len(args); i++ {
 		if !static[i] {
-			return nil, "", true, false
+			return cpOperandsResult{preserves: true}
 		}
 		arg := args[i]
 		if options && arg == "--" {
@@ -1434,25 +1600,40 @@ func cpOperands(args []string, static []bool) (sources []string, destination str
 			name, value, joined := strings.Cut(arg[2:], "=")
 			option, unique := longOption(name, cpLongOptions)
 			if !unique || option == "" {
-				return nil, "", true, false
+				return cpOperandsResult{preserves: true}
 			}
 			switch option {
 			case "archive", "recursive", "no-dereference":
-				preserves = true
+				result.preserves = true
+			case "link":
+				if joined {
+					return cpOperandsResult{preserves: true}
+				}
+				result.hard = true
+			case "symbolic-link":
+				if joined {
+					return cpOperandsResult{preserves: true}
+				}
+				result.symbolic = true
+			case "no-target-directory":
+				if joined {
+					return cpOperandsResult{preserves: true}
+				}
+				result.noTargetDir = true
 			case "preserve":
 				if joined && (value == "links" || strings.Contains(","+value+",", ",links,")) {
-					preserves = true
+					result.preserves = true
 				}
 			case "target-directory", "suffix":
 				if !joined {
 					i++
 					if i >= len(args) || !static[i] {
-						return nil, "", true, false
+						return cpOperandsResult{preserves: true}
 					}
 					value = args[i]
 				}
 				if value == "" {
-					return nil, "", true, false
+					return cpOperandsResult{preserves: true}
 				}
 				if option == "target-directory" {
 					targetDir = value
@@ -1461,7 +1642,7 @@ func cpOperands(args []string, static []bool) (sources []string, destination str
 				// These take only an optional joined value.
 			default:
 				if joined {
-					return nil, "", true, false
+					return cpOperandsResult{preserves: true}
 				}
 			}
 			continue
@@ -1469,46 +1650,55 @@ func cpOperands(args []string, static []bool) (sources []string, destination str
 		for j := 1; j < len(arg); j++ {
 			switch arg[j] {
 			case 'a', 'P', 'd', 'r', 'R':
-				preserves = true
+				result.preserves = true
+			case 'l':
+				result.hard = true
+			case 's':
+				result.symbolic = true
+			case 'T':
+				result.noTargetDir = true
 			case 't', 'S':
 				value := arg[j+1:]
 				if value == "" {
 					i++
 					if i >= len(args) || !static[i] {
-						return nil, "", true, false
+						return cpOperandsResult{preserves: true}
 					}
 					value = args[i]
 				}
 				if value == "" {
-					return nil, "", true, false
+					return cpOperandsResult{preserves: true}
 				}
 				if arg[j] == 't' {
 					targetDir = value
 				}
 				j = len(arg)
-			case 'b', 'c', 'f', 'H', 'i', 'L', 'l', 'n', 'N', 'p', 's', 'T', 'u', 'v', 'x', 'X', 'Z':
+			case 'b', 'c', 'f', 'H', 'i', 'L', 'n', 'N', 'p', 'u', 'v', 'x', 'X', 'Z':
 			default:
-				return nil, "", true, false
+				return cpOperandsResult{preserves: true}
 			}
 		}
 	}
 	if targetDir != "" {
-		if len(operands) == 0 {
-			return nil, "", preserves, false
+		if len(operands) == 0 || result.noTargetDir {
+			return cpOperandsResult{preserves: result.preserves}
 		}
-		return operands, targetDir, preserves, true
+		result.sources, result.destination, result.targetDir, result.ok = operands, targetDir, true, true
+		return result
 	}
-	if len(operands) < 2 {
-		return nil, "", preserves, false
+	if len(operands) < 2 || result.noTargetDir && len(operands) > 2 {
+		return cpOperandsResult{preserves: result.preserves}
 	}
-	return operands[:len(operands)-1], operands[len(operands)-1], preserves, true
+	result.sources, result.destination, result.ok = operands[:len(operands)-1], operands[len(operands)-1], true
+	return result
 }
 
 func cpDestination(args []string, static []bool, cwd string) string {
-	_, destination, _, ok := cpOperands(args, static)
-	if !ok {
+	parsed := cpOperands(args, static)
+	if !parsed.ok {
 		return ""
 	}
+	destination := parsed.destination
 	if !filepath.IsAbs(destination) {
 		destination = filepath.Join(cwd, destination)
 	}
@@ -1517,18 +1707,40 @@ func cpDestination(args []string, static []bool, cwd string) string {
 
 // CopyDestination returns a statically understood cp destination.
 func CopyDestination(argv []string, cwd string) string {
-	if len(argv) < 2 || !slices.Contains(copyPrograms, programBase(argv[0])) {
+	args, ok := copyProgramArgs(argv)
+	if !ok || len(args) == 0 {
 		return ""
 	}
-	return cpDestination(argv[1:], makeStatic(len(argv)-1), cwd)
+	return cpDestination(args, makeStatic(len(args)), cwd)
+}
+
+// IsCopyProgram identifies a copy call, including a multicall applet.
+func IsCopyProgram(argv []string) bool {
+	_, ok := copyProgramArgs(argv)
+	return ok
+}
+
+func copyProgramArgs(argv []string) ([]string, bool) {
+	if len(argv) == 0 {
+		return nil, false
+	}
+	program := programBase(argv[0])
+	for depth := 0; slices.Contains(multicallPrograms, program); depth++ {
+		if depth >= 4 || len(argv) < 2 {
+			return nil, false
+		}
+		argv = argv[1:]
+		program = programBase(argv[0])
+	}
+	return argv[1:], slices.Contains(copyPrograms, program)
 }
 
 func cpDiskSymlink(args []string, static []bool, cwd, home string, facts map[string]string, record bool) bool {
-	sources, _, _, ok := cpOperands(args, static)
-	if !ok {
+	parsed := cpOperands(args, static)
+	if !parsed.ok {
 		return true
 	}
-	for _, source := range sources {
+	for _, source := range parsed.sources {
 		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
 			return true
 		}
@@ -1536,7 +1748,7 @@ func cpDiskSymlink(args []string, static []bool, cwd, home string, facts map[str
 	return false
 }
 
-func copiesDiskSymlink(args []string, static []bool, cwd, home string, facts map[string]string, record bool) bool {
+func archiveCopiesDiskSymlink(args []string, static []bool, cwd, home string, facts map[string]string, record bool) bool {
 	operands := make([]string, 0, len(args))
 	for i, arg := range args {
 		if !static[i] || strings.HasPrefix(arg, "-") {
@@ -1623,7 +1835,7 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 			return ""
 		}
 	} else if program == "rsync" || (program == "pax" || program == "cpio" || program == "bsdcpio") && archiveCopiesLinks(program, args, static) {
-		return copyDestination(args, static, cwd)
+		return archiveCopyDestination(args, static, cwd)
 	} else if program == "unzip" || program == "cpio" || program == "bsdcpio" || strings.HasPrefix(program, "7z") {
 		for i, arg := range args {
 			option := ""
@@ -1804,8 +2016,7 @@ func archiveNamesEscape(program string, args []string, static []bool) bool {
 }
 
 func copyPreservesLinks(args []string, static []bool) bool {
-	_, _, preserves, _ := cpOperands(args, static)
-	return preserves
+	return cpOperands(args, static).preserves
 }
 
 func archiveCopiesLinks(program string, args []string, static []bool) bool {
@@ -1951,7 +2162,7 @@ var (
 		"dereference", "force", "interactive", "keep-directory-symlink", "no-clobber", "no-dereference",
 		"preserve", "parents", "recursive", "reflink", "remove-destination", "strip-trailing-slashes",
 		"update", "verbose", "one-file-system", "context", "help", "version"}
-	optionsWithValue = []string{"target-directory", "suffix", "sparse", "no-preserve"}
+	optionsWithValue = []string{"target-directory", "suffix"}
 )
 
 // longOption expands an abbreviated long option. ok is false when it is
@@ -1982,12 +2193,31 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 		l.record(args[0], args[1], false, cwd)
 		return true
 	}
-	copyCall := slices.Contains(copyPrograms, program)
-	options := lnLongOptions
-	if copyCall {
-		options = cpLongOptions
+	if slices.Contains(copyPrograms, program) {
+		parsed := cpOperands(args, makeStatic(len(args)))
+		if !parsed.ok || parsed.hard && parsed.symbolic {
+			return false
+		}
+		if !parsed.hard && !parsed.symbolic {
+			return true
+		}
+		dir := ""
+		dest := parsed.destination
+		if parsed.targetDir || len(parsed.sources) > 1 || !parsed.noTargetDir {
+			dir = dest
+		}
+		literal := parsed.symbolic
+		for _, source := range parsed.sources {
+			if len(parsed.sources) == 1 && !parsed.targetDir {
+				l.record(source, dest, literal, cwd)
+			}
+			if dir != "" {
+				l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, cwd)
+			}
+		}
+		return true
 	}
-	hard, symbolic, relative, noTargetDir := false, false, false, false
+	symbolic, relative, noTargetDir := false, false, false
 	var targetDir string
 	var operands []string
 	optionsEnd := false
@@ -2003,7 +2233,7 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, value, hasValue := strings.Cut(arg[2:], "=")
-			option, ok := longOption(name, options)
+			option, ok := longOption(name, lnLongOptions)
 			if !ok {
 				return false
 			}
@@ -2014,10 +2244,8 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 				value = args[i]
 			}
 			switch option {
-			case "symbolic", "symbolic-link":
+			case "symbolic":
 				symbolic = true
-			case "link":
-				hard = true
 			case "relative":
 				relative = true
 			case "no-target-directory":
@@ -2031,9 +2259,7 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 			switch c := arg[j]; {
 			case c == 's':
 				symbolic = true
-			case c == 'l' && copyCall:
-				hard = true
-			case c == 'r' && !copyCall:
+			case c == 'r':
 				relative = true
 			case c == 'T':
 				noTargetDir = true
@@ -2052,13 +2278,10 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 			}
 		}
 	}
-	if copyCall && !hard && !symbolic {
-		return true
-	}
 	sources, dest, dir := operands, "", targetDir
 	switch {
 	case targetDir != "":
-	case len(operands) == 1 && !copyCall:
+	case len(operands) == 1:
 		dir = cwd
 		l.relative = true
 	case len(operands) == 2:
@@ -2071,7 +2294,7 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 		sources, dir = operands[:len(operands)-1], operands[len(operands)-1]
 	}
 	// A symbolic link stores its target as written, relative to the link's
-	// directory; ln -r, a hard link and cp --link name the source file.
+	// directory; ln -r and a hard link name the source file.
 	literal := symbolic && !relative
 	for _, source := range sources {
 		if dest != "" {

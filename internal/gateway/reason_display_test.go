@@ -26,6 +26,17 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
+// GAP-1555: the archive-extraction block reaches the user with its guidance,
+// not as two redacted spans.
+func TestArchiveBeforeWriteBlockKeepsItsGuidance(t *testing.T) {
+	reason := "matched: persistence.ssh_authorized_keys_command:" + archiveBeforeWriteTitle
+	got := agentVerdictReason("block", reason, defaultSinkDisplayReason(reason, redaction.SinkPolicyDefault), redaction.SinkPolicyDefault)
+	if strings.Contains(got, "<redacted") || !strings.Contains(got, "Run the extraction and the write as separate commands") ||
+		!strings.Contains(got, agentBlockNoRetry) {
+		t.Fatalf("archive block reason = %q", got)
+	}
+}
+
 func TestTrustedBuiltInMatchReason(t *testing.T) {
 	tests := []struct {
 		name   string

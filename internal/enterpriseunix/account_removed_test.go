@@ -172,7 +172,9 @@ func TestAccountRemovedWarningNeedsAConfirmedMiss(t *testing.T) {
 		{"a user's file text for an existing account", "alice", quoted, false, true},
 		{"the exact error for an account that still exists", "alice", `enterprise hooks: target account "alice" does not exist: no such account`, false, true},
 		{"a missing local account", "gone1", `enterprise hooks: target account "gone1" does not exist: no such account`, true, false},
-		{"a missing directory account not confirmed", "gone2", `enterprise hooks: target account "gone2" does not exist: no such account`, false, false},
+		// GAP-1133: an unconfirmed miss is not reported as removed, and with
+		// no directory outage to explain it, its target is a failure.
+		{"a missing directory account not confirmed", "gone2", `enterprise hooks: target account "gone2" does not exist: no such account`, false, true},
 		{"a confirmed directory account whose home is gone", "gone3", "user home /home/gone3 is not available yet: no such file or directory", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

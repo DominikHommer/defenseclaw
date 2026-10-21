@@ -197,17 +197,80 @@ class TestWindowedSearch(unittest.TestCase):
                 self.assertEqual(want and want.span(), got and got.span(), rule.rule_id)
 
 
+    def test_multiline_rule_matches_words_far_apart(self):
+        """GAP-1316: a match across many lines is not lost to the windows.
+
+        Whatever lets a match cross lines gives the plain search's result: a
+        global or scoped DOTALL flag, a class or negated literal that holds a
+        newline, a repeated group with a newline, a lookaround, a run of
+        whitespace over blank lines, bounded newlines between long lines.
+        """
+        filler = "".join(f"line {i} of filler text\n" for i in range(800))
+        long_line = "x" * 700 + "\n"
+        far = "start\n" + filler + "finish\n"
+        cases = [
+            (r"(?s)start.*finish", far),
+            (r"(?s:start.*finish)", far),
+            (r"(?is:START.*FINISH)", far),
+            (r"start(?s:.)*finish", far),
+            (r"start(?s:.*)finish", far),
+            (r"start[\s\S]*finish", far),
+            (r"start[^#]*finish", far),
+            (r"start[^\t]*?finish", far),
+            (r"start(?:.*\n)*finish", far),
+            (r"start(?:.|\n)*finish", far),
+            (r"start(?=[\s\S]*finish)", far),
+            (r"start\s+finish", filler + "start" + "\n" * 900 + "finish\n"),
+            (r"start\n.*\n.*\nfinish", filler + "start\n" + long_line * 2 + "finish\n" + filler),
+            (r"start\n(?:.*\n){0,5}finish", filler + "start\n" + long_line * 5 + "finish\n" + filler),
+        ]
+        for source, text in cases:
+            self.assertGreater(len(text), rulepack._WINDOW_MIN_TEXT)
+            rule = _span_rule(source)
+            want = rule.pattern.search(text)
+            self.assertIsNotNone(want, source)
+            got = rulepack._search(rule, text, rulepack._fold(text))
+            self.assertEqual(want.span(), got and got.span(), source)
+            pack = rulepack.RulePack(source_dir="test", rules=[rule])
+            self.assertEqual([f.rule_id for f in pack.scan_text(text, location="notes.txt")], ["T-SPAN"], source)
+        # A lookahead that must not see the far word is not satisfied by a
+        # window's end either.
+        rule = _span_rule(r"start(?![\s\S]*finish)")
+        self.assertIsNone(rulepack._search(rule, far, rulepack._fold(far)))
+
+    def test_reach_keeps_line_bounded_rules_windowed(self):
+        for source, reach in [
+            (r"ignore\s+previous\s+instructions", 2),
+            (r"(?i)api[_-]?key\s*[:=]\s*\S{16,}", 2),
+            (r"rm\s+-rf\s+/[^\n]*", 2),
+            (r"start\n.*\n.*\nfinish", 3),
+        ]:
+            rule = _span_rule(source)
+            self.assertIsNotNone(rule.anchors, source)
+            self.assertEqual(rule.reach, reach, source)
+        for source in (r"(?s:a.*b)", r"abc[^#]*def", r"(abc)\1", r"abc(?=[\s\S]*def)"):
+            self.assertIsNone(_span_rule(source).anchors, source)
+
+
+def _span_rule(source):
+    pattern = rulepack.re.compile(source)
+    required, anchors, reach = rulepack._prefilter(pattern)
+    return rulepack._CompiledRule(
+        rule_id="T-SPAN", pattern=pattern, title="Span", severity="HIGH", confidence=1,
+        tags=[], category="test", required=required, anchors=anchors, reach=reach,
+    )
+
+
 class TestRequiredLiterals(unittest.TestCase):
     def test_sequence_branch_and_repeat(self):
         self.assertEqual(
-            rulepack._required_literals(r"(?i)ab(?:cd|ef)\s+g+"),
+            rulepack._prefilter(rulepack.re.compile(r"(?i)ab(?:cd|ef)\s+g+"))[0],
             ("and", ["ab", ("or", ["cd", "ef"]), "g"]),
         )
 
     def test_optional_or_unknown_parts_give_no_requirement(self):
-        self.assertIsNone(rulepack._required_literals(r"(?:abc)?\d+"))
-        self.assertIsNone(rulepack._required_literals(r"abc|\d+"))
-        self.assertIsNone(rulepack._required_literals("([unclosed"))
+        self.assertIsNone(rulepack._prefilter(rulepack.re.compile(r"(?:abc)?\d+"))[0])
+        self.assertIsNone(rulepack._prefilter(rulepack.re.compile(r"abc|\d+"))[0])
 
     def test_default_pack_rules_get_a_prefilter(self):
         root = os.path.join(os.path.dirname(__file__), "..", "..", "policies", "guardrail", "default")

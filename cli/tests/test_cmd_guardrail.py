@@ -223,6 +223,47 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("action mode with fail mode open", result.output)
         self.assertIn("defenseclaw guardrail fail-mode closed", result.output)
 
+    def test_status_flags_fail_open_connector_an_action_profile_enforces(self):
+        # GAP-1282: base mode observe, a guardrail profile puts the connector
+        # in action mode for its accounts, fail mode open.
+        from defenseclaw.config import GuardrailProfile, PerConnectorGuardrailConfig
+
+        for profile in (
+            GuardrailProfile(mode="action"),
+            GuardrailProfile(connectors={"kiro": PerConnectorGuardrailConfig(mode="action")}),
+        ):
+            app = make_ctx(enabled=True, connector="kiro", hook_fail_mode="open")
+            app.cfg.guardrail.mode = "observe"
+            app.cfg.guardrail.profiles = {"engineering": profile}
+            with patch("defenseclaw.gateway.current_user_guardrail_profile", return_value=None):
+                result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("action mode for guardrail profile(s) engineering with fail mode open", result.output)
+            self.assertIn("defenseclaw guardrail fail-mode closed", result.output)
+        # A profile that keeps observe (or sets action for another connector)
+        # adds no warning.
+        app = make_ctx(enabled=True, connector="kiro", hook_fail_mode="open")
+        app.cfg.guardrail.profiles = {
+            "ops": GuardrailProfile(mode="action", connectors={"kiro": PerConnectorGuardrailConfig(mode="observe")}),
+            "dev": GuardrailProfile(connectors={"codex": PerConnectorGuardrailConfig(mode="action")}),
+        }
+        with patch("defenseclaw.gateway.current_user_guardrail_profile", return_value=None):
+            result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertNotIn("with fail mode open", result.output)
+
+    def test_fail_mode_view_reports_antigravity_and_copilot_upstream_fail_open(self):
+        # GAP-0336: the fail-mode view listed them closed while status, doctor
+        # and guardrail status said upstream fail-open.
+        for connector, label in (("antigravity", "Antigravity"), ("copilot", "Copilot")):
+            app = make_ctx(enabled=True, connector=connector, hook_fail_mode="closed")
+            result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            row = next(line for line in result.output.splitlines() if f"({connector}):" in line)
+            self.assertIn("open (", row)
+            self.assertIn("upstream; configured provenance: closed", row)
+            self.assertIn("remains fail-open", result.output)
+            self.assertNotIn("Still fail-open", result.output)
+
     def test_status_single_connector_uses_uniform_per_connector_block(self):
         # A single-connector install renders the SAME per-connector block
         # layout as a fan-out install: one connector roster table, no

@@ -50,6 +50,9 @@ type agentIdentityRecorder struct {
 	subSessionOrder []string
 	// exclusions are late child links awaiting the next inventory write.
 	// They must survive a failed write and are removed only after commit.
+	// Each one is a sub-session still in subSessions: one dropped past that
+	// bound loses its exclusion too, so a write that keeps failing cannot
+	// grow them past agentIdentityRecorderMaxPending (GAP-1128).
 	exclusions map[string]inventory.AgentIdentitySession
 
 	// persistErr is why the last write to inventory.db failed, "" after
@@ -136,6 +139,7 @@ func (r *agentIdentityRecorder) markSubagentSession(agentID, sessionID string) {
 		}
 		for len(r.subSessionOrder) >= agentIdentityRecorderMaxPending {
 			delete(r.subSessions, r.subSessionOrder[0])
+			delete(r.exclusions, r.subSessionOrder[0])
 			r.subSessionOrder = r.subSessionOrder[1:]
 		}
 		r.subSessions[key] = struct{}{}
@@ -176,7 +180,12 @@ func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord, e
 		r.exclusions = make(map[string]inventory.AgentIdentitySession)
 	}
 	for _, child := range excluded {
-		r.exclusions[subSessionKey(child.AgentID, child.SessionID)] = child
+		// A child dropped from subSessions while the write was in flight
+		// counts as a session again, as one past the bound does.
+		key := subSessionKey(child.AgentID, child.SessionID)
+		if _, sub := r.subSessions[key]; sub {
+			r.exclusions[key] = child
+		}
 	}
 	for i := range batch {
 		old := batch[i]
@@ -747,6 +756,47 @@ func adminViewRemovedAccount(user string) func(id string) bool {
 	return func(id string) bool {
 		return useridentity.KindForID(id) != "" && name(id) == "" && adminViewDomainCouldHold(user, id)
 	}
+}
+
+// adminViewKnownDomain reports whether the gateway knows id, an account no
+// account holds now, as an account of domain, the domain of a qualified
+// --user filter: the facts its hooks cached for it name that domain (its
+// DNS domain, NetBIOS domain, realm, or the suffix of its UPN or principal),
+// or a domain it was otherwise seen in does (extra: the domain of the name a
+// uid last resolved to, the domain the LSA names for a SID). Two deleted accounts of one bare name
+// in two domains are then told apart by their own domain; one the gateway
+// knows no domain for is not listed by a qualified name, only by its bare
+// name or its id (GAP-1183, GAP-1263).
+func adminViewKnownDomain(domain, id string, extra ...string) bool {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return false
+	}
+	matches := func(candidate string) bool {
+		candidate = strings.TrimSpace(candidate)
+		return candidate != "" && useridentity.EqualFold(candidate, domain)
+	}
+	for _, candidate := range extra {
+		if matches(candidate) {
+			return true
+		}
+	}
+	key := strings.TrimSpace(id)
+	if useridentity.KindForID(key) == useridentity.KindWindowsSID {
+		key = strings.ToUpper(key)
+	}
+	facts, _, ok := peerDirectoryCache().peek(key)
+	if !ok {
+		return false
+	}
+	_, upnDomain := useridentity.SplitQualifiedName(facts.UPN)
+	_, principalDomain := useridentity.SplitQualifiedName(facts.Principal)
+	for _, candidate := range []string{facts.Domain, facts.AccountDomain, facts.Realm, upnDomain, principalDomain} {
+		if matches(candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func agentIdentityMatches(rec inventory.AgentIdentityRecord, filter inventory.AgentIdentityFilter) bool {

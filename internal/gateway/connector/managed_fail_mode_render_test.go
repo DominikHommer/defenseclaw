@@ -147,15 +147,16 @@ func TestManagedShellHooksIgnoreTheEnvironmentFailMode(t *testing.T) {
 					continue
 				}
 				body := string(script.body)
-				// A managed hook bakes only the rendered value; a per-user
-				// hook keeps the environment override.
-				override := strings.Contains(body, `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`)
+				// Neither hook lets the environment replace the rendered value;
+				// a per-user hook lets it only tighten to closed.
+				override := strings.Contains(body, `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-`)
 				pinned := strings.Contains(body, "\nFAIL_MODE=\"closed\"")
-				if managed && (override || !pinned) {
-					t.Errorf("%s managed: environment override = %v, rendered fail mode pinned = %v", name, override, pinned)
+				tighten := strings.Contains(body, perUserEnvTightenLine)
+				if override || !pinned {
+					t.Errorf("%s managed=%v: environment override = %v, rendered fail mode pinned = %v", name, managed, override, pinned)
 				}
-				if !managed && !override {
-					t.Errorf("%s per-user: environment override missing", name)
+				if tighten == managed {
+					t.Errorf("%s managed=%v: tighten-only environment line present = %v", name, managed, tighten)
 				}
 			}
 		}

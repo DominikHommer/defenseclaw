@@ -34,7 +34,11 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if note := entraShortNameNote(set, subject, runtime.GOOS); note != "" {
 		warnings = append(warnings, note)
 	}
-	if note := unnamedGroupsNote(subject); note != "" {
+	var sids *profileGroupSIDs
+	if set != nil {
+		sids = set.groupSIDs
+	}
+	if note := unnamedGroupsNote(subject, sids); note != "" {
 		warnings = append(warnings, note)
 	}
 	if subject != nil && subject.cachedFactsAge > 0 {
@@ -78,6 +82,17 @@ func (set *guardrailProfileSet) assignmentWarningsWithWait(checkGroups bool, wai
 func (set *guardrailProfileSet) healthProfileWarnings() []string {
 	warnings := set.assignmentWarningsWithWait(true, profileGroupCheckWait)
 	return append(warnings, set.inertHILTWarnings()...)
+}
+
+// standaloneProfileWarnings is what status and verify list on a standalone
+// deployment: the profile set's warnings, or, with no profiles, the inert
+// human-approval warnings of the config itself, which config validate and
+// profile-explain already gave (id.GAP-1264).
+func standaloneProfileWarnings(set *guardrailProfileSet, cfg *config.Config) []string {
+	if set != nil {
+		return set.healthProfileWarnings()
+	}
+	return ConfigHILTWarnings(cfg)
 }
 
 // inertHILTWarning uses the same resolved threshold as enforcement. Keep
@@ -286,8 +301,11 @@ func validSIDString(s string) bool {
 // only numbers. The Unix resolver keeps a group id as its number when no
 // group answers for it, which is what a directory that does not answer
 // leaves behind: the account then has too few groups for its assignments to
-// match, and nothing else in the answer shows it (GAP-0212).
-func unnamedGroupsNote(subject *profileSubject) string {
+// match, and nothing else in the answer shows it (GAP-0212). On standalone
+// Windows (sids, the SIDs of the assignment group names) an assignment
+// matches the SID of the group it names, so a group shown only by its SID
+// still matches it, and the note does not say otherwise (GAP-1141).
+func unnamedGroupsNote(subject *profileSubject, sids *profileGroupSIDs) string {
 	if subject == nil || subject.LookupFailed {
 		return ""
 	}
@@ -319,6 +337,10 @@ func unnamedGroupsNote(subject *profileSubject) string {
 	}
 	if unnamed == 0 {
 		return ""
+	}
+	if sidForm && sids != nil {
+		return fmt.Sprintf("%d of this account's %d group(s) have no name, only a SID (the guardian names at most 128 groups per account within 2 s, "+
+			"or the SID does not resolve); assignments match groups by SID, so this changes only how they are shown", unnamed, total)
 	}
 	if sidForm {
 		return fmt.Sprintf("%d of this account's %d group(s) have no name, only a SID (the guardian names at most 128 groups per account within 2 s, "+

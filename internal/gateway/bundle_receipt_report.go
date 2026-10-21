@@ -159,7 +159,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 	if refusal := receipt.LastRefusal; refusal != nil && refusal.ReceiptID != receipt.ReceiptID {
 		refusalKey := refusal.ReceiptID + "|" + refusal.Time
 		if refusalKey != r.reportedRefusal && !r.hasSeen(refusal.ReceiptID) {
-			if err := r.report(enterprisestatus.PublicReceipt{ReceiptID: refusal.ReceiptID,
+			if err := r.report(enterprisestatus.PublicReceipt{ReceiptID: refusal.ReceiptID, DeliveryID: refusal.DeliveryID,
 				BundleID: refusal.BundleID, Version: refusal.Version, State: enterprisestatus.BundleFailed,
 				ErrorCode: refusal.ErrorCode, FinishedAt: refusal.Time,
 				WarningCodes: refusal.WarningCodes, DisabledByBundle: refusal.DisabledByBundle,
@@ -183,7 +183,11 @@ func (r *bundleReceiptReporter) spoolDir() string {
 	return filepath.Join(filepath.Dir(r.receiptPath), enterprisestatus.PublicReceiptEventsDirName)
 }
 
-func (r *bundleReceiptReporter) seenDir() string { return r.markerPath + ".d" }
+// seenDir is <data_dir>/bundle-receipt.reported.d; the lifecycle reads it
+// before it removes a receipt event.
+func (r *bundleReceiptReporter) seenDir() string {
+	return filepath.Join(filepath.Dir(r.markerPath), enterprisestatus.ReportedReceiptsDirName)
+}
 
 func (r *bundleReceiptReporter) hasSeen(id string) bool {
 	if !enterprisestatus.ValidReceiptID(id) {
@@ -249,7 +253,7 @@ func (r *bundleReceiptReporter) reportSpool() {
 func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {
 	bundle := audit.PolicyBundle{ID: p.BundleID, Version: p.Version, SignerKeyID: p.SignerKeyID, ChangeSummary: p.ChangeSummary}
 	err := r.sink.LogPolicyBundleReceipt(p.Principal, bundle, audit.PolicyBundleReceipt{
-		ReceiptID: p.ReceiptID, Actor: p.Actor, State: p.State, ErrorCode: p.ErrorCode,
+		ReceiptID: p.ReceiptID, DeliveryID: p.DeliveryID, Actor: p.Actor, State: p.State, ErrorCode: p.ErrorCode,
 		EffectivePolicyDigest: p.EffectivePolicyDigest, EnforcingDigest: p.EnforcingDigest,
 		ConfigGeneration: p.ConfigGeneration, RolledBack: p.RolledBack, Restart: p.Restart,
 		RestartRequired:  p.RestartRequired,

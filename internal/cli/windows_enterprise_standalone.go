@@ -671,12 +671,25 @@ var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
 // machine registration. An elevated lifecycle can inherit ProgramFiles from
 // a caller, so the path used for a subprocess must not use that environment.
 func windowsEnterpriseInstalledAdminCLI() (string, error) {
-	programFiles, err := trustedWindowsEnterpriseProgramFiles()
+	programFiles, err := windowsEnterpriseProgramFilesResolver()
 	if err != nil {
 		return "", fmt.Errorf("resolve trusted Program Files for installed CLI: %w", err)
 	}
-	return filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe"), nil
+	installedCLI := filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe")
+	// An elevated lifecycle runs this image with the service pins. Check
+	// that only SYSTEM, Administrators and TrustedInstaller can replace it
+	// or any folder above it (Program Files\Cisco included), and that its
+	// folders are not links, before any process is created (GAP-1493).
+	if err := windowsEnterpriseInstalledCLICustody(installedCLI, "installed DefenseClaw CLI"); err != nil {
+		return "", fmt.Errorf("refuse to run the installed CLI: %w", err)
+	}
+	return installedCLI, nil
 }
+
+// windowsEnterpriseInstalledCLICustody validates the installed CLI file and
+// every folder above it, with no advisory verdict for the installer-owned
+// Cisco folders. A seam for tests.
+var windowsEnterpriseInstalledCLICustody = managed.ValidateTrustedFilePathStrictAncestors
 
 func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error) {
 	layout, err := windowsEnterpriseHotConfigLayout()
@@ -744,15 +757,27 @@ func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) erro
 
 // writeFileKeepingDACL replaces path with data, giving the new file the
 // DACL of sibling before it is renamed into place, so it is never readable
-// by more than sibling is.
+// by more than sibling is. Each write stages in its own exclusively created
+// file beside path: two lifecycle runs that finish at the same time shared
+// path+".tmp" before, so one could publish the other's bytes or fail on a
+// staging file the other had already renamed (GAP-1404).
 func writeFileKeepingDACL(path string, data []byte, sibling string) error {
 	restore, err := keepConfigDACL(sibling)
 	if err != nil {
 		return err
 	}
-	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+	staging, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
+	}
+	temporary := staging.Name()
+	_, writeErr := staging.Write(data)
+	if closeErr := staging.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		_ = os.Remove(temporary)
+		return writeErr
 	}
 	if err := restore(temporary); err != nil {
 		_ = os.Remove(temporary)
@@ -929,17 +954,70 @@ func runWindowsEnterpriseStandaloneInstaller(
 }
 
 // readWindowsEnterpriseMigrationRecord reads the migration-v9.json beside the
-// installed config, or nil when there is none.
+// installed config for the result's migration note, or nil when there is
+// none or it cannot be read.
 func readWindowsEnterpriseMigrationRecord() []byte {
 	layout, err := windowsEnterpriseHotConfigLayout()
-	if err != nil || strings.TrimSpace(layout.ConfigPath) == "" {
-		return nil
-	}
-	raw, err := readWindowsEnterpriseBoundedFile(config.MigrationRecordPath(layout.ConfigPath), windowsEnterpriseHotConfigMaxBytes)
 	if err != nil {
 		return nil
 	}
+	raw, _ := readWindowsEnterpriseMigrationRecordAt(layout.ConfigPath)
 	return raw
+}
+
+// readWindowsEnterpriseMigrationRecordAt reads the migration-v9.json beside
+// configPath: nil and no error only when there is none. A record that is
+// there but cannot be read (access denied, not a file, more than
+// windowsEnterpriseHotConfigMaxBytes) is an error, never no record.
+func readWindowsEnterpriseMigrationRecordAt(configPath string) ([]byte, error) {
+	if strings.TrimSpace(configPath) == "" {
+		return nil, errors.New("the standalone layout names no installed config")
+	}
+	path := config.MigrationRecordPath(configPath)
+	raw, err := readWindowsEnterpriseBoundedFile(path, windowsEnterpriseHotConfigMaxBytes)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return raw, nil
+}
+
+// A compliant ensure still needs the one-time Cursor correction recorded by
+// the old v9 migration. The actual write stays inside the installer's repair
+// transaction; this read only selects that transaction when every proof and
+// signed-bundle guard already accepts it. Only a missing record, or a config
+// a signed bundle owns, means no correction: a record that cannot be read or
+// decoded made ensure report a compliant deployment while the Cursor fail
+// mode it proves rewritten stayed open (G-small loop 4). Ensure reports that
+// error as preflight_failed.
+var windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) {
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return false, err
+	}
+	recordRaw, recordErr := readWindowsEnterpriseMigrationRecordAt(layout.ConfigPath)
+	if recordErr == nil && recordRaw == nil {
+		return false, nil
+	}
+	fromBundle, err := managedStandaloneConfigFromBundle(layout.ConfigPath)
+	if err != nil || fromBundle {
+		return false, err
+	}
+	if recordErr != nil {
+		return false, recordErr
+	}
+	raw, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return false, err
+	}
+	var record config.MigrationRecord
+	if err := json.Unmarshal(trimWindowsJSONBOM(recordRaw), &record); err != nil {
+		return false, fmt.Errorf("decode %s: %w", config.MigrationRecordPath(layout.ConfigPath), err)
+	}
+	_, _, pending := config.RepairMigratedCursorFailMode(raw, record)
+	return pending, nil
 }
 
 // noteWindowsEnterpriseMigration keeps the audit.db block/allow entries a
@@ -1375,11 +1453,7 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 		))
 	}
 	if len(remaining) > 0 {
-		result.AddError("per_user_state_remaining", fmt.Sprintf(
-			"--purge could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), which keep per-user hook tokens that nothing accepts any more; remove what stays as LocalSystem: %s",
-			len(remaining),
-			windowsEnterpriseBoundedLabels(remaining),
-		))
+		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(len(remaining), windowsEnterpriseBoundedLabels(remaining)))
 	}
 }
 
@@ -2253,7 +2327,7 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 	}
 	for _, message := range result.Errors {
 		switch message.Code {
-		case "lifecycle_busy":
+		case "lifecycle_busy", string(enterprisebundle.CodeRestartDeferred):
 			return enterprisestatus.WindowsExitBusy
 		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
 			return enterprisestatus.WindowsExitBusy
@@ -2284,6 +2358,7 @@ func finishWindowsEnterpriseStandalone(
 		result.Noop, result.NoopReason = false, ""
 	}
 	applyWindowsStandaloneScannerRuntime(result, opts)
+	applyWindowsStandaloneHookSessionRecords(result, opts)
 	addWindowsEnterpriseMigrationChange(result, opts)
 	addWindowsEnterpriseMissingCredentialWarnings(result)
 	applyWindowsEnterpriseAgentSessions(result, opts)
@@ -2531,6 +2606,11 @@ func writeWindowsEnterpriseStandaloneRefusal(
 			message = fmt.Sprintf("invalid --profile %q: use %s or %s",
 				strings.TrimSpace(opts.profile), managed.ProfileStandalone, managed.ProfileSecureClient)
 		}
+		describeHost(result)
+	default:
+		// Every refusal changed nothing, so it reports the host as it is.
+		// An ensure whose --config did not exist reported a healthy
+		// deployment as installed=false with no services (GAP-0036).
 		describeHost(result)
 	}
 	result.AddError(code, message)
@@ -3132,16 +3212,27 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			}
 		}
 		if verified && !compilerDrift {
-			// The module can set ok:false for security_incomplete with no
-			// failed check. Keep its warning, without turning that into a
-			// synthetic not_ready error during result translation.
-			accepted := *verifyReport
-			accepted.OK = true
-			applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
-			result.Noop = true
-			result.NoopReason = "already_applied"
-			applyWindowsEnterprisePolicy(ctx, result)
-			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+			pending := false
+			if windowsEnterpriseIsElevated() {
+				pending, err = windowsEnterpriseCursorMigrationRepairPending()
+				if err != nil {
+					result.AddError("preflight_failed", "check the recorded Cursor fail-mode repair: "+err.Error())
+					return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+				}
+			}
+			if !pending {
+				// The module can set ok:false for security_incomplete with no
+				// failed check. Keep its warning, without turning that into a
+				// synthetic not_ready error during result translation.
+				accepted := *verifyReport
+				accepted.OK = true
+				applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
+				result.Noop = true
+				result.NoopReason = "already_applied"
+				applyWindowsEnterprisePolicy(ctx, result)
+				return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+			}
+			verifyFailure = "recorded Cursor fail-mode repair"
 		}
 		if !compilerDrift {
 			alreadyAppliedNeedsRepair = true
@@ -3162,8 +3253,22 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 	}
 	if plan.Action == "" {
-		verifyCtx := ctx
+		// A compliant deployment can still owe the one-time Cursor fail-mode
+		// correction the old v9 migration recorded. Its repair is selected
+		// only after Verify accepts the deployment, and it meets the rule-pack
+		// preflight below like any repair, before anything stops.
+		cursorRepairPending := false
 		if windowsEnterpriseIsElevated() {
+			pending, repairErr := windowsEnterpriseCursorMigrationRepairPending()
+			if repairErr != nil {
+				applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+				result.AddError("preflight_failed", "check the recorded Cursor fail-mode repair: "+repairErr.Error())
+				return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+			}
+			cursorRepairPending = pending
+		}
+		verifyCtx := ctx
+		if windowsEnterpriseIsElevated() && !cursorRepairPending {
 			// A compliant deployment runs no retire, so this Verify collects
 			// the old runtime copies a retire left and names each per-user
 			// folder still untrusted (#1105, GAP-0211).
@@ -3175,7 +3280,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
 		_, drifted := windowsEnterpriseHookRuntimeDrift()
-		if windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == "" {
+		verified := windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == ""
+		switch {
+		case verified && cursorRepairPending:
+			plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "recorded_cursor_fail_mode"}
+		case verified:
 			accepted := *verifyReport
 			accepted.OK = true
 			applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
@@ -3194,11 +3303,12 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			result.NoopReason = plan.Reason
 			applyWindowsEnterprisePolicy(ctx, result)
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+		default:
+			// Name the failed check: a compliant-looking host that ensure
+			// repaired said only "ensure_repair: verify_failed" (#1282).
+			plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed",
+				Detail: windowsEnterpriseVerifyFailureDetail(verifyReport, drifted)}
 		}
-		// Name the failed check: a compliant-looking host that ensure
-		// repaired said only "ensure_repair: verify_failed" (#1282).
-		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed",
-			Detail: windowsEnterpriseVerifyFailureDetail(verifyReport, drifted)}
 	}
 
 	// An upgrade that keeps the installed config: this release's gateway must
@@ -3215,8 +3325,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 
 	// A repair restarts the gateway on the installed config: refuse one whose
 	// rule packs the gateway would not load, before anything stops (GAP-0672).
-	if plan.Action == "repair" && plan.Reason == "verify_failed" {
-		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+	// Every repair ensure selects here restarts it (verify_failed and the
+	// recorded Cursor correction alike); a pending transaction is left to its
+	// recovery, which restores the packs the deployment had.
+	if plan.Action == "repair" && plan.Reason != "transaction_pending" {
+		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(opts.configPath); err != nil {
 			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 			result.Errors = []enterprisestatus.Message{}
 			result.AddError("preflight_failed", err.Error())
@@ -3228,7 +3341,10 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	var startOnlyKeys []string
 	if plan.Action == "upgrade" && (plan.Reason == "drift:config" || plan.Reason == "drift:bundle") {
 		applied, keys := windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result)
-		if applied {
+		if applied || opts.hotConfigRestoreFailed {
+			// A failed apply whose restore could not be proven stops here:
+			// the transaction would snapshot the config it left behind
+			// (GAP-1178).
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
 		// A signed bundle has no transaction fallback after a hot apply that

@@ -1210,7 +1210,7 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 		s.errored = true
 		runtime, why := s.runtimeStopCause(after)
 		text := name + "'s " + runtime + " stopped under the session (" + why + "), which ended " + s.harnessName() +
-			"; OpenShell now holds it in its error state, where it can be neither stopped nor started"
+			"; OpenShell now holds it in its error state"
 		if runtime == "MicroVM" && len(s.otherGateways) > 0 {
 			text += ". " + otherGatewaysText(s.otherGateways) + ". Stop that process (`kill PID` with the number above) once your sandboxes are saved"
 		}
@@ -1508,7 +1508,7 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			return nil
 		case s.unanswered:
 			a.note("Sandbox " + name + " does not answer → `" + CommandName + " status " + name + "` shows its state; in OpenShell's error state `" +
-				CommandName + " delete " + name + " --keep-snapshot` keeps the undo point, then run again")
+				CommandName + " stop " + name + "` and `" + CommandName + " start " + name + "` bring it back with its work")
 			return nil
 		case !s.started:
 			if now, err := s.api.Get(ctx, name); err == nil && now.Phase != "ready" {
@@ -1536,13 +1536,10 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		s.markStopped()
 	}
 	if s.errored {
-		if s.sb.WorkdirMode == config.OpenShellWorkdirCopy {
-			a.note("Sandbox " + name + " is in OpenShell's error state, and its copy's work that was not pulled cannot be read any more → `" +
-				CommandName + " delete " + name + "`, then run again")
-			return nil
-		}
-		a.note("Sandbox " + name + " is in OpenShell's error state → `" + CommandName + " delete " + name +
-			" --keep-snapshot` keeps the undo point and the folder's changes, then run again")
+		// Every gateway DefenseClaw starts a session on stops a sandbox in
+		// that state and starts it again (openshell.SandboxMin).
+		a.note("Sandbox " + name + " is in OpenShell's error state → fix what stopped it, then `" + CommandName + " stop " + name +
+			"` and `" + CommandName + " start " + name + "`, which keep the sandbox and its work")
 		return nil
 	}
 	if s.policyStop != "" {

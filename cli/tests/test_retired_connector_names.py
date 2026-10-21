@@ -84,7 +84,7 @@ DESKTOP_ONLY_FILES = frozenset(
         "internal/legacyconnector/legacyconnector_test.go",
         # IDE inventory: legacy Desktop folders are reported as Devin Desktop,
         # and the page names the old product so admins can find it (GAP-0418).
-        "docs-site/content/docs/ai-discovery.mdx",
+        "docs-site/content/docs/reference/scanning/ai-discovery.mdx",
     }
 )
 # Third-party VS Code extension ids the IDE inventory flags as AI extensions

@@ -759,6 +759,32 @@ func TestEnsureRefusesAnUntrustedRulePackUpFront(t *testing.T) {
 	}
 }
 
+// A configured custom pack deleted after ensure applied it fails the next
+// gateway restart; status and verify say so now (p0 GAP-1207).
+func TestVerifyReportsADeletedCustomRulePack(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	const pack = "/etc/defenseclaw/policies/guardrail/custom"
+	if err := os.MkdirAll(h.env.P(pack), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := writeChangedConfig(t, h, "rule_pack: default",
+		"rule_pack: acme\n  custom_packs:\n    acme: {path: "+pack+", digest: \"sha256:"+strings.Repeat("a", 64)+"\"}")
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: cfg}))
+	if r := h.run(Options{Action: ActionVerify}); strings.Contains(messagesOf(r.Errors, codeVerify), pack) {
+		t.Fatalf("verify reported the pack before it was deleted: %+v", r.Errors)
+	}
+	if err := os.RemoveAll(h.env.P(pack)); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if r.OK || !strings.Contains(messagesOf(r.Errors, codeVerify), pack+`" is missing`) {
+			t.Fatalf("%s did not report the deleted pack: %+v", action, r.Errors)
+		}
+	}
+}
+
 // `rulepack validate` runs as an administrator, so it asks whether the
 // service account could read the pack.
 func TestRulePackServiceReadProblemNamesAnUnreadablePack(t *testing.T) {
@@ -1359,8 +1385,26 @@ func TestStatusAndVerify(t *testing.T) {
 	if !strings.Contains(changes, "rewrote /etc/systemd/system/"+unitGateway) || !strings.Contains(changes, "started "+unitEnumerator+", which was not running") {
 		t.Fatalf("repair does not list what it changed: %q", repair.Changes)
 	}
-	if again := h.run(Options{Action: ActionRepair}); len(again.Changes) != 0 {
-		t.Fatalf("a repair of a healthy deployment lists changes: %q", again.Changes)
+	if !strings.HasSuffix(changes, RepairRestartedServices) || strings.Contains(changes, RepairNothingChanged) {
+		t.Fatalf("repair does not end with the service restart: %q", repair.Changes)
+	}
+	// A healthy deployment: --json says there was nothing to repair and
+	// that repair restarted the services (GAP-0020, GAP-0061).
+	again := h.run(Options{Action: ActionRepair})
+	requireOK(t, again)
+	if strings.Join(again.Changes, "\n") != RepairNothingChanged+"\n"+RepairRestartedServices {
+		t.Fatalf("a repair of a healthy deployment lists %q", again.Changes)
+	}
+	raw, err := json.Marshal(again)
+	if err != nil || !strings.Contains(string(raw), `"changes":["nothing to repair"`) {
+		t.Fatalf("the repair JSON has no changes list: %s %v", raw, err)
+	}
+	// With --no-start (not_started) it does not claim a restart.
+	stopped := &lifecycle{env: h.env, result: enterprisestatus.New(ActionRepair, "standalone", "linux", "1.0.0")}
+	stopped.result.AddWarning(codeNotStarted, "installed without starting the services (--no-start)")
+	stopped.summarizeRepair()
+	if strings.Join(stopped.result.Changes, "\n") != RepairNothingChanged {
+		t.Fatalf("a --no-start repair lists %q", stopped.result.Changes)
 	}
 }
 

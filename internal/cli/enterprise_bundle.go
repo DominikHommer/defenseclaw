@@ -71,7 +71,8 @@ names, a manifest with their hashes and the effective policy digest per
 platform, and a detached signature. Devices trust the keys in their
 MDM-installed anchor file (<etc>/trust/bundle-anchors.json). sign and verify
 run offline and change nothing; status reports the bundle state of a managed
-device; apply installs a bundle on a Linux or macOS managed device as root.
+device; apply installs a bundle on a managed device (as root on Linux and
+macOS, as an elevated administrator or SYSTEM on Windows).
 Secure Client computers do not have them.`
 
 func init() {
@@ -274,6 +275,7 @@ type bundleVerifyResult struct {
 	DigestVerified        bool                       `json:"digest_verified"`
 	SecretRefsMissing     *[]string                  `json:"secret_refs_missing,omitempty"`
 	RestartPrediction     *bundleRestartPrediction   `json:"restart_prediction,omitempty"`
+	ConfigDrift           *bool                      `json:"config_drift,omitempty"`
 	Warnings              []enterprisebundle.Warning `json:"warnings"`
 	Errors                []bundleError              `json:"errors"`
 }
@@ -505,6 +507,13 @@ func runEnterpriseBundleVerify(cmd *cobra.Command, opts *bundleVerifyOptions) er
 	return printBundleResult(cmd, opts.json, res, err, func(w io.Writer) { printVerifyText(w, res) })
 }
 
+// bundleAnchorsNotAdmin is the refusal of verify for an account that cannot
+// read the installed trust anchors.
+func bundleAnchorsNotAdmin() error {
+	return &enterprisebundle.Error{Code: enterprisebundle.CodeNotAdmin, Path: enterprisebundle.AnchorsName,
+		Detail: "this account cannot read the installed trust anchors; run verify as root or as an elevated administrator or SYSTEM, or pass --anchors with a copy of the anchor file that this account can read"}
+}
+
 func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVerifyResult) error {
 	if bundleSecureClient() {
 		return secureClientBundleRefusal()
@@ -525,8 +534,7 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 		// of calling the anchor file insecure.
 		if _, err := bundleAnchorsLstat(path); errors.Is(err, fs.ErrPermission) {
 			res.Anchors = path
-			return &enterprisebundle.Error{Code: enterprisebundle.CodeNotAdmin, Path: enterprisebundle.AnchorsName,
-				Detail: "this account cannot read the installed trust anchors; run verify as root or as an elevated administrator or SYSTEM, or pass --anchors with a copy of the anchor file that this account can read"}
+			return bundleAnchorsNotAdmin()
 		}
 	} else if !device {
 		// An administrator checking a bundle on a workstation names an
@@ -545,6 +553,11 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 	}
 	anchors, err := enterprisebundle.LoadAnchors(path, trust)
 	if err != nil {
+		// The file can be listed but not inspected or read by this account
+		// (an ACL that denies it the file only).
+		if opts.anchors == "" && errors.Is(err, fs.ErrPermission) {
+			return bundleAnchorsNotAdmin()
+		}
 		return err
 	}
 	in := enterprisebundle.VerifyInput{
@@ -609,7 +622,7 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 	}
 	// An apply on this device runs for its own platform only.
 	if device && opts.platform == runtime.GOOS {
-		res.RestartPrediction = bundleVerifyRestartPrediction(opts.platform, out)
+		res.RestartPrediction, res.ConfigDrift = bundleVerifyRestartPrediction(opts.platform, out)
 	}
 	return nil
 }
@@ -667,6 +680,9 @@ func printVerifyText(w io.Writer, res *bundleVerifyResult) {
 	switch res.Result {
 	case "already_applied":
 		fmt.Fprintf(w, "Bundle %s version %d is the bundle already applied.\n", res.Bundle.BundleID, res.Bundle.Version)
+		if res.ConfigDrift != nil && *res.ConfigDrift {
+			fmt.Fprintln(w, "The installed config.yaml is not this bundle's config: apply the bundle again to repair it.")
+		}
 	default:
 		fmt.Fprintf(w, "Bundle %s version %d verified for %s (key %s, floor %d).\n", res.Bundle.BundleID, res.Bundle.Version, res.Platform, res.SignerKeyID, res.Floor)
 	}

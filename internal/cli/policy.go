@@ -55,6 +55,11 @@ func init() {
 	policyEvaluateCmd.Flags().String("target-name", "", "Target name to evaluate")
 	policyEvaluateCmd.Flags().String("severity", "", "Max severity of scan result (empty = pre-scan)")
 	policyEvaluateCmd.Flags().Int("findings", 0, "Number of findings")
+	policyEvaluateCmd.Flags().String("connector", "", "Connector the asset is installed for")
+	policyEvaluateCmd.Flags().String("url", "", "MCP server URL, as the registry pins it")
+	policyEvaluateCmd.Flags().String("command", "", "MCP server command, as the registry pins it")
+	policyEvaluateCmd.Flags().StringArray("arg", nil, "MCP server argument, repeatable, in order")
+	policyEvaluateCmd.Flags().String("transport", "", "MCP server transport (stdio, http, sse)")
 }
 
 var policyCmd = &cobra.Command{
@@ -84,6 +89,18 @@ func policyConfigOnlyPreRunE(cmd *cobra.Command, _ []string) error {
 }
 
 func policyConfigOnlyPostRun(*cobra.Command, []string) {}
+
+// managedStandaloneHost reports a standalone managed host (Windows, Linux or
+// macOS). There an administrator command reads the deployment's config and
+// leaves the audit store, which the gateway service account owns, to the
+// gateway.
+func managedStandaloneHost() bool {
+	if _, windows := managedHostWindowsStandalone(); windows {
+		return true
+	}
+	_, unix := managedHostUnixRecord(nil)
+	return unix
+}
 
 // ---------------------------------------------------------------------------
 // policy validate
@@ -159,6 +176,11 @@ func validateSecureClientPolicy(regoDir string) error {
 var policyTestCmd = &cobra.Command{
 	Use:   "test",
 	Short: "Run the Rego unit tests (*_test.rego) without an external opa binary",
+	// The tests write no audit event. On a managed host the audit store is
+	// the gateway service account's, which an administrator command does
+	// not open (GAP-0052).
+	PersistentPreRunE: policyConfigOnlyPreRunE,
+	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		regoDir, err := policyCommandRegoDir(cmd)
 		if err != nil {
@@ -293,10 +315,7 @@ var policyEvaluateCmd = &cobra.Command{
 	Use:   "evaluate",
 	Short: "Dry-run the admission policy for a given input",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if _, windows := managedHostWindowsStandalone(); windows {
-			return policyConfigOnlyPreRunE(cmd, args)
-		}
-		if _, unix := managedHostUnixRecord(nil); unix {
+		if managedStandaloneHost() {
 			return policyConfigOnlyPreRunE(cmd, args)
 		}
 		return rootPersistentPreRunE(cmd, args)
@@ -322,10 +341,14 @@ var policyEvaluateCmd = &cobra.Command{
 			TargetName: targetName,
 			Path:       "/dry-run",
 		}
+		asset := config.AssetPolicyInput{TargetType: targetType, Name: targetName, SourcePath: "/dry-run"}
+		asset.Connector, _ = cmd.Flags().GetString("connector")
+		asset.URL, _ = cmd.Flags().GetString("url")
+		asset.Command, _ = cmd.Flags().GetString("command")
+		asset.Args, _ = cmd.Flags().GetStringArray("arg")
+		asset.Transport, _ = cmd.Flags().GetString("transport")
 		if !secureClient {
-			input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
-				TargetType: targetType, Name: targetName, SourcePath: "/dry-run",
-			})
+			input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, asset)
 			input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), targetType)
 		}
 
@@ -366,10 +389,53 @@ var policyEvaluateCmd = &cobra.Command{
 			}
 		}
 
+		if !secureClient {
+			out = withAssetPolicyDryRun(cfg, asset, out)
+		}
 		result, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(result))
 		return nil
 	},
+}
+
+// withAssetPolicyDryRun applies the asset_policy decision the gateway takes
+// before admission, in the watcher and the hooks: a registry_required,
+// registry or default-deny verdict that the admission lists do not carry.
+// Without it the dry run said scan / awaiting scan for an approved and an
+// unregistered MCP server alike while the runtime refused the unregistered
+// one (p0 GAP-0945). A registry entry of that name pinned to a URL, command,
+// arguments, transport or connector the input does not give leaves the
+// result undetermined, not blocked: the runtime matches the server's own
+// definition and may admit it.
+func withAssetPolicyDryRun(cfg *config.Config, asset config.AssetPolicyInput, out *policy.AdmissionOutput) *policy.AdmissionOutput {
+	if cfg == nil || out == nil || out.Verdict == "blocked" {
+		return out
+	}
+	asset.RuntimeSurface = "watcher"
+	decision := cfg.EvaluateAssetPolicy(asset)
+	if decision.Source == "registry-required" {
+		if unknown := cfg.AssetRegistryPinsUnknown(asset); len(unknown) > 0 {
+			flags := make([]string, len(unknown))
+			for i, field := range unknown {
+				flags[i] = "--" + strings.TrimSuffix(field, "s")
+			}
+			out.Reason += fmt.Sprintf("; asset policy undetermined: the registry entry for %q pins its %s; pass %s to check it",
+				asset.Name, strings.Join(unknown, ", "), strings.Join(flags, " "))
+			return out
+		}
+	}
+	switch {
+	case decision.Enabled && decision.RawAction == "block" && decision.Action == "block":
+		return &policy.AdmissionOutput{
+			Verdict: "blocked", Reason: decision.Reason,
+			FileAction: "none", InstallAction: "block", RuntimeAction: "block",
+		}
+	case decision.WouldBlock:
+		out.Reason += "; asset policy would block (" + decision.Source + "): " + decision.Reason
+	case decision.Source == "registry":
+		out.Reason = decision.Reason + "; " + out.Reason
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

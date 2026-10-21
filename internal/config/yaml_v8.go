@@ -23,13 +23,17 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const (
@@ -63,6 +67,7 @@ const (
 	V8YAMLErrorVersionUpgrade      V8YAMLErrorCode = "config_version_upgrade_required"
 	V8YAMLErrorVersionUnsupported  V8YAMLErrorCode = "config_version_unsupported"
 	V8YAMLErrorLegacyKeyForbidden  V8YAMLErrorCode = "legacy_config_key_forbidden"
+	V8YAMLErrorProfileInvalid      V8YAMLErrorCode = "enterprise_profile_invalid"
 )
 
 // V8YAMLError never renders a mapping value or scalar payload. Paths retain
@@ -400,6 +405,12 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
 			"config_version must be an integer", "run `defenseclaw migrate` to create a current source")
 	}
+	if version >= ConfigVersionV9 && version <= MaxSupportedConfigVersion {
+		// Secure Client stays on config_version 8, with its own diagnostics.
+		if err := validateV8YAMLEnterpriseProfile(source, root); err != nil {
+			return err
+		}
+	}
 	switch {
 	case version > v8YAMLConfigVersion && v9SecureClientDocument(root):
 		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
@@ -418,6 +429,57 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	default:
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
 			"config_version must be a non-negative integer", "run `defenseclaw migrate` to create a current source")
+	}
+}
+
+// validateV8YAMLEnterpriseProfile refuses, at enterprise.profile, a managed
+// document whose profile does not resolve: a name that is no profile, one
+// that differs from the profile the installation is fixed to, or
+// secure_client on Linux. The version check would otherwise read such a
+// document as a Secure Client source and blame a supported config_version
+// (GAP-0023). The runtime loader refuses the same documents.
+func validateV8YAMLEnterpriseProfile(source string, root *yaml.Node) error {
+	if !v9ManagedDocument(root) {
+		return nil
+	}
+	enterprise := v8YAMLMapValue(root, "enterprise")
+	node := v8YAMLMapValue(enterprise, "profile")
+	declared := managed.NormalizeEnterpriseProfile(yamlScalarValue(node))
+	pinned := managed.NormalizeEnterpriseProfile(os.Getenv(managed.EnterpriseProfileEnv))
+	if _, err := managed.ResolveEnterpriseProfile(runtime.GOOS, v9DocumentDeploymentMode(root), pinned, declared); err == nil {
+		return nil
+	}
+	at := node
+	if at == nil {
+		at = enterprise
+	}
+	if at == nil {
+		at = root
+	}
+	known := func(profile string) bool {
+		return profile == managed.ProfileStandalone || profile == managed.ProfileSecureClient
+	}
+	const path = "$.enterprise.profile"
+	switch {
+	case declared != "" && !known(declared):
+		allowed := "standalone or secure_client"
+		if runtime.GOOS == "linux" {
+			allowed = "standalone"
+		}
+		return v8Error(source, V8YAMLErrorProfileInvalid, path, at,
+			"enterprise.profile is not a supported profile", "set it to "+allowed)
+	case pinned != "" && !known(pinned):
+		return v8Error(source, V8YAMLErrorProfileInvalid, path, at,
+			"this installation is fixed to an enterprise profile this release does not support",
+			"reinstall the DefenseClaw enterprise package")
+	case pinned != "" && declared != "" && pinned != declared:
+		return v8Error(source, V8YAMLErrorProfileInvalid, path, at,
+			"enterprise.profile is fixed to "+pinned+" on this host",
+			"set it to "+pinned+" or remove it; changing the profile needs a reinstall of the deployment")
+	default:
+		return v8Error(source, V8YAMLErrorProfileInvalid, path, at,
+			"enterprise.profile is fixed to standalone on Linux (secure_client is not available here)",
+			"set it to standalone or remove it")
 	}
 }
 

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -120,6 +122,29 @@ func identitySpoolConnectorEmail(sid, connector string) string {
 		return ""
 	}
 	return record.ConnectorEmails[connector]
+}
+
+// identitySpoolIDEMaxAge bounds how old a published IDE inventory may be: an
+// enumerator that stopped publishing leaves the profile to the gateway's own
+// scan.
+const identitySpoolIDEMaxAge = 24 * time.Hour
+
+// identitySpoolIDEInstalls is the IDE inventory the enumerator published for
+// sid, whose profile is home, when its redirected AppData is out of the
+// gateway service's reach: a trusted record of that profile, at most
+// identitySpoolIDEMaxAge old.
+func identitySpoolIDEInstalls(sid, home string) ([]ideplugins.Install, bool) {
+	dir := currentIdentitySpoolDir()
+	if dir == "" {
+		return nil, false
+	}
+	record, err := enterprisehooks.ReadIDEAppDataSpool(enterprisehooks.IDEAppDataSpoolDir(filepath.Dir(dir)), sid, validateManagedGuardianAuthorization)
+	now := time.Now()
+	if err != nil || !strings.EqualFold(filepath.Clean(record.Home), filepath.Clean(home)) ||
+		record.UpdatedAt.After(now.Add(time.Minute)) || now.Sub(record.UpdatedAt) > identitySpoolIDEMaxAge {
+		return nil, false
+	}
+	return record.Installs, true
 }
 
 // identitySpoolAccountName is the DOMAIN\name the SYSTEM enumerator recorded

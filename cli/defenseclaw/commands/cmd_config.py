@@ -106,7 +106,15 @@ def config_cmd(ctx: click.Context) -> None:
         and path.exists()
         and not _looks_like_v8_config(str(path))
     ):
-        raise click.ClickException(_not_current_message(str(path)))
+        message = _not_current_message(str(path))
+        if subcommand in _WRITER_SUBCOMMANDS:
+            # Nothing was written; say so, as for a malformed file (GAP-0056).
+            message += " config.yaml was not changed."
+        raise click.ClickException(message)
+
+
+#: The config subcommands that write config.yaml.
+_WRITER_SUBCOMMANDS = frozenset({"set", "unset", "migrate"})
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +298,12 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     else:
         view = _key_view(app, parts)
     found, value = _lookup(view, parts)
+    if not found and written is not None:
+        # The resolved admission view writes an action as its shorthand; the
+        # source may set one lifecycle field of it (GAP-0103).
+        found, value = _lookup(written, parts)
+    if not found:
+        found, value = _admission_lifecycle_field(view, parts)
     if not found:
         if _is_destination_key(parts):
             raise click.ClickException(_destination_not_set(key, parts, view))
@@ -308,7 +322,9 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     if parts[0] != "observability":
         if written is None:
             written = _show_data(app, source=True, effective=False, provenance=False)
-        if not _lookup(written, parts)[0]:
+        if not _lookup(written, parts)[0] and not (
+            _admission_lifecycle_field(written, parts)[0]
+        ):
             click.echo(f"(default: config.yaml does not set {key})", err=True)
         elif effective:
             click.echo(f"(source: {config_module.config_path()})", err=True)
@@ -490,6 +506,11 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
             )
         data, sources = _admission_view(cfg, parts[1])
         found, value = _lookup(data, parts[2:]) if len(parts) > 2 else (True, data)
+        if not found:
+            # One lifecycle field of an action the compiled view writes as a
+            # shorthand, from that action, never from config.yaml: Secure
+            # Client enforces data.json, not the written source.
+            found, value = _admission_lifecycle_field({"admission": {parts[1]: data}}, parts)
         if not found:
             return None
         return value, sources.get(parts[2], _whole_source(sources)) if len(parts) > 2 else _whole_source(sources)
@@ -1046,6 +1067,25 @@ def config_migrate(dry_run: bool, ack: bool, as_json: bool) -> None:
         click.echo(f"  note: {note}")
     for lost in record.get("unenforced_rego_data") or []:
         click.echo(f"  WARNING: {lost}")
+
+
+_LIFECYCLE_FIELDS = ("install", "file", "runtime")
+
+
+def _admission_lifecycle_field(data: object, parts: list) -> tuple[bool, object]:
+    """One lifecycle field (install, file, runtime) of an admission action
+    *data* writes as a shorthand such as ``quarantine`` (GAP-0103)."""
+    if len(parts) < 4 or parts[0] != "admission" or parts[-1] not in _LIFECYCLE_FIELDS:
+        return False, None
+    found, label = _lookup(data, parts[:-1])
+    if not found or not isinstance(label, str):
+        return False, None
+    from defenseclaw.enforce.admission import _SHORTHANDS
+
+    action = _SHORTHANDS.get(label.strip().lower())
+    if action is None:
+        return False, None
+    return True, getattr(action[0], parts[-1])
 
 
 def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:

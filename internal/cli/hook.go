@@ -218,7 +218,7 @@ func newHookSessionFactsCmd() *cobra.Command {
 func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
 	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, hookexec.DefaultMaxBody+1))
 	stdin := io.MultiReader(bytes.NewReader(payload), os.Stdin)
-	return stdin, hookexec.ArmAnswerWatchdog(hookexec.Options{
+	opts := hookexec.Options{
 		Connector:         connectorName,
 		Event:             event,
 		FailMode:          failMode,
@@ -227,7 +227,16 @@ func armHookAnswerWatchdog(connectorName, event, failMode, surface string, manag
 		SecureClient:      managed && secureClientHost(),
 		StartedAt:         startedAt,
 		Exit:              exit,
-	}, payload)
+	}
+	if managed {
+		// The watchdog starts this account lookup in the background before
+		// it can fire, and Run's rows reuse it: a deadline that passed
+		// before Run, or a lookup slower than the watchdog's log wait, left
+		// the call it answered with no hook-failures row.
+		profileDir := hookUserProfileDir
+		opts.FailureLogHome = func() string { return failureLogHomeIn(profileDir) }
+	}
+	return stdin, hookexec.ArmAnswerWatchdog(opts, payload)
 }
 
 // endHookBeforeRun ends a hook call that needs no answer (a retired launcher,
@@ -314,7 +323,7 @@ func hookFailureExitCode(failure hookFailureContext) int {
 // hookPreRunFailsClosed reports whether the failed invocation's policy is to
 // fail closed, with buildHookOptionsForRuntime's precedence: a managed hook
 // always does; otherwise --fail-mode, else the sidecar, then an inherited
-// DEFENSECLAW_FAIL_MODE (for a packaged hook only when it tightens).
+// DEFENSECLAW_FAIL_MODE only when it tightens.
 func hookPreRunFailsClosed(failure hookFailureContext) bool {
 	if failure.managed || implicitEnterpriseManagedHook() {
 		return true
@@ -327,10 +336,19 @@ func hookPreRunFailsClosed(failure hookFailureContext) bool {
 	if mode == "" {
 		mode = hookSidecarFailMode(readHookSidecar(filepath.Join(home, "hooks", ".hookcfg")), failure.connector)
 	}
-	if v := os.Getenv("DEFENSECLAW_FAIL_MODE"); v != "" && (!trusted || strings.EqualFold(strings.TrimSpace(v), "closed")) {
-		mode = v
+	if hookEnvTightensFailMode() {
+		mode = "closed"
 	}
 	return nativeHookFailMode(mode) == "closed"
+}
+
+// hookEnvTightensFailMode reports whether an inherited DEFENSECLAW_FAIL_MODE
+// asks for closed. The environment can only tighten the installed mode, for
+// packaged and source hooks alike: a project's agent settings or a parent
+// process cannot reopen a closed hook (GAP-0315). An explicit per-user open is
+// chosen with guardrail fail-mode, which persists it in config and the hooks.
+func hookEnvTightensFailMode() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEFENSECLAW_FAIL_MODE")), "closed")
 }
 
 // nativeHookFailMode resolves the fail mode a hook command ends with (flag,
@@ -449,6 +467,29 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 	return buildHookOptionsForRuntime(connector, event, apiAddr, failMode, false)
 }
 
+// hookUserProfileDir resolves the invoking user's profile
+// (managedHookUserProfileDir); a variable so tests can stall it.
+var hookUserProfileDir = managedHookUserProfileDir
+
+// managedHookFailureLogHome is the invoking user's diagnostic directory for
+// managed hook failure rows (hookUserProfileDir). It is never on the answer
+// path: a tool call looks it up in the background once its watchdog is armed
+// (armHookAnswerWatchdog), any other call only when it writes a row. The
+// account lookup (NSS, Open Directory, a token Known Folder) can be slow.
+func managedHookFailureLogHome() string {
+	return failureLogHomeIn(hookUserProfileDir)
+}
+
+// failureLogHomeIn is the diagnostic directory in the profile that
+// profileDir resolves; empty when it resolves none.
+func failureLogHomeIn(profileDir func() (string, error)) string {
+	home, err := profileDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, config.DefaultDataDirName)
+}
+
 func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, enterpriseManaged bool) hookexec.Options {
 	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
 		// The administrator-owned runtime failed trust validation. Do not read its
@@ -463,6 +504,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			SecureClient:          secureClientHost(),
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
+		opts.FailureLogHome = managedHookFailureLogHome
 		// Marks a failed Unix standalone runtime as the standalone profile's
 		// (no transport is selected); a no-op elsewhere.
 		applyStandaloneManagedHookTransport(&opts, connector)
@@ -542,12 +584,8 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	if failMode == "" {
 		failMode = hookSidecarFailMode(sidecar, connector)
 	}
-	if v := os.Getenv("DEFENSECLAW_FAIL_MODE"); v != "" {
-		if !trustedNativeState || strings.EqualFold(strings.TrimSpace(v), "closed") {
-			// A packaged native hook accepts inherited environment only when it
-			// tightens policy. Project settings cannot turn a baked closed mode open.
-			failMode = v
-		}
+	if hookEnvTightensFailMode() {
+		failMode = "closed"
 	}
 	failMode = nativeHookFailMode(failMode)
 	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")
@@ -580,6 +618,9 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			os.Getenv("TRACESTATE"),
 			os.Getenv("OTEL_TRACESTATE"),
 		),
+	}
+	if enterpriseManaged {
+		opts.FailureLogHome = managedHookFailureLogHome
 	}
 	if trustedNativeState {
 		opts.GatewayRecovery = trustedNativeGatewayRecovery()

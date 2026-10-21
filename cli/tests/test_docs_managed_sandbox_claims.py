@@ -33,22 +33,22 @@ def test_docs_never_prescribe_sandbox_run_mount_or_yolo_flags() -> None:
 
 
 def test_no_sandbox_variable_is_not_an_unconditional_bypass() -> None:
-    guide = " ".join(_read("sandboxes/guide.mdx").split())
+    guide = " ".join(_read("how-to/sandboxes/more-ways-to-run.mdx").split())
     bullet = guide.split("DEFENSECLAW_NO_SANDBOX=1 claude` runs the harness", 1)[1][:400]
     assert "where your organization allows it" in bullet  # GAP-0047
     assert "required_for" in bullet
-    env = " ".join(_read("reference/env-vars.mdx").split())
+    env = " ".join(_read("reference/configuration/env-vars.mdx").split())
     assert "still refused" in env.split("`DEFENSECLAW_NO_SANDBOX`", 1)[1][:900]
 
 
 def test_admin_docs_use_the_packaged_gateway_path() -> None:
-    concepts = _read("enterprise/concepts.mdx")  # GAP-0203
+    concepts = _read("enterprise/plan/concepts.mdx")  # GAP-0203
     assert "/opt/defenseclaw/bin/defenseclaw-gateway" in concepts
     assert "command not found" in concepts
 
 
 def test_managed_sandbox_page_states_the_verified_residuals_and_limits() -> None:
-    page = _read("enterprise/sandboxes.mdx")
+    page = _read("enterprise/runtime/sandboxes.mdx")
     assert "hidepid" in page  # GAP-0302
     assert "openshell.admin.when_unavailable" in page  # GAP-0408
     assert "user_approvals: null" not in page  # GAP-0394
@@ -57,11 +57,11 @@ def test_managed_sandbox_page_states_the_verified_residuals_and_limits() -> None
 
 
 def test_windows_rule_pack_folder_is_not_left_readable_by_users() -> None:
-    windows = _read("enterprise/windows.mdx")
+    windows = _read("enterprise/install/windows.mdx")
     assert "leave the inherited `Users`" not in " ".join(windows.split())  # GAP-0386
     assert "sc.exe showsid DefenseClawGateway" in windows
 
 
 def test_lifecycle_explains_a_hand_edit_is_applied_not_drift() -> None:
-    lifecycle = _read("enterprise/lifecycle.mdx")
+    lifecycle = _read("enterprise/operate/lifecycle.mdx")
     assert "A hand edit of the config is applied, not reported as drift" in lifecycle  # GAP-0398

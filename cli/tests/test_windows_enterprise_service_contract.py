@@ -79,7 +79,7 @@ INSTALL_ACL_SELF_HEAL_SMOKE = (
     / "tests"
     / "enterprise-install-acl-self-heal-smoke.ps1"
 )
-DEPLOYMENT_DOC = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "secure-client.mdx"
+DEPLOYMENT_DOC = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "install" / "secure-client.mdx"
 CERTIFICATION_DOC = ROOT / "docs" / "WINDOWS-ENTERPRISE-CERTIFICATION.md"
 MATRIX_TEST = ROOT / "internal" / "gateway" / "enterprise_mode_matrix_test.go"
 WINDOWS_LIFECYCLE_CLI = ROOT / "internal" / "cli" / "windows_enterprise_service.go"
@@ -5780,7 +5780,7 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
         "    $machineStateRemaining = [string[]]@()\n"
         "    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {\n"
         "        $machineStateRemaining = [string[]]@(\n"
-        "            @(Remove-DefenseClawRuntimeSelectorState -Directories @("
+        "            @(Remove-DefenseClawRuntimeSelectorState -HookPath ([string]$Layout.HookPath) -Directories @("
     ) in module
     assert "@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)" in module
     # GAP-2057: stale installer staging and bootstrap folders go too.

@@ -39,7 +39,12 @@ export DEFENSECLAW_HOME
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
-  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+  # DEFENSECLAW_FAIL_MODE=closed and strict availability tighten this exit
+  # as they tighten every later failure (GAP-0315).
+  _DC_HOME_FAIL_MODE="{{.FailMode}}"
+  case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) _DC_HOME_FAIL_MODE="closed" ;; esac
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
+  if [ "$_DC_HOME_FAIL_MODE" = "closed" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     exit 2
   fi
@@ -86,7 +91,10 @@ defenseclaw_harden_env
 # installer-owned delivery policy; an inherited DEFENSECLAW_FAIL_MODE cannot
 # weaken an explicitly closed managed hook. Secure Client hooks keep the
 # environment override (#1163).
-FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+FAIL_MODE="{{.FailMode}}"{{else if .SecureClientDelivery}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{else}}FAIL_MODE="{{.FailMode}}"
+# An inherited DEFENSECLAW_FAIL_MODE can only tighten the installed mode:
+# a project or parent process cannot reopen a closed hook (GAP-0315).
+case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) FAIL_MODE="closed" ;; esac{{end}}
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="kiro"
 DEFENSECLAW_HOOK_NAME="kiro-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME

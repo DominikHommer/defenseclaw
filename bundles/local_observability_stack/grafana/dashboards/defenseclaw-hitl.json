@@ -57,7 +57,7 @@
         "name": "connector",
         "label": "Connector",
         "type": "custom",
-        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,devin,copilot,antigravity,opencode,amp",
+        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,devin,copilot,antigravity,opencode,amp,kiro",
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
@@ -119,6 +119,10 @@
           {
             "text": "amp",
             "value": "amp"
+          },
+          {
+            "text": "kiro",
+            "value": "kiro"
           }
         ],
         "skipUrlSync": false,

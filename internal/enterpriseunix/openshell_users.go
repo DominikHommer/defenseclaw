@@ -67,10 +67,23 @@ type SandboxStatus struct {
 	Active bool
 	// Running is the number of sandboxes that run.
 	Running int
+	// Live is the number that may hold compute a stop of the account's
+	// OpenShell gateway would end unflushed or half started: the running
+	// ones, those starting or stopping, and a MicroVM that completed or is
+	// in OpenShell's error state whose guest has not had
+	// openshell.EndedSettle to write its disk back (sandboxapi.Status.Busy).
+	// What stops that gateway on its own (busy) waits for them.
+	Live int
 	// PendingRestart is the daemon's own report that it waits for a restart.
 	PendingRestart bool
 	// StartedAt is when the daemon started (zero when it does not say).
 	StartedAt time.Time
+}
+
+// busy is how many of the account's sandboxes a stop of its gateway or
+// daemon waits for: Live, never fewer than Running.
+func (s SandboxStatus) busy() int {
+	return max(s.Running, s.Live)
 }
 
 // SandboxUserOps is how the lifecycle acts in accounts. Env.SandboxUsers
@@ -304,7 +317,9 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 		return st, fmt.Errorf("ask the sandbox daemon of %s: %w", a.Name, err)
 	}
 	var reply struct {
+		Sandboxes int       `json:"sandboxes"`
 		Running   int       `json:"running"`
+		Live      *int      `json:"live"`
 		StartedAt time.Time `json:"started_at"`
 		Managed   *struct {
 			PendingRestart bool `json:"pending_restart"`
@@ -317,6 +332,12 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 	// one.
 	st.Active = true
 	st.Running = reply.Running
+	// A daemon before 1.0.4 does not say which sandboxes may hold compute:
+	// every one it counts does (sandboxapi.Status.Busy).
+	st.Live = max(reply.Sandboxes, reply.Running)
+	if reply.Live != nil {
+		st.Live = *reply.Live
+	}
 	st.StartedAt = reply.StartedAt
 	st.PendingRestart = reply.Managed != nil && reply.Managed.PendingRestart
 	return st, nil
@@ -644,8 +665,13 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 			entry.Reason = entry.reasonBase() + " (the lifecycle could not tell whether a sandbox of this account runs: " + err.Error() + ")"
 			state.Pending[key] = entry
 			continue
-		case status.Active && status.Running > 0:
-			entry.Sandboxes = status.Running
+		case status.Active && status.busy() > 0:
+			// Not only the running ones: a switch or stop takes the
+			// account's OpenShell gateway down, under a MicroVM that
+			// completed or is in OpenShell's error state (until its guest
+			// has written its disk back, openshell.EndedSettle) or a
+			// sandbox still starting too.
+			entry.Sandboxes = status.busy()
 			state.Pending[key] = entry
 			continue
 		}
@@ -1266,7 +1292,7 @@ func (l *lifecycle) keepAccountSandboxes(ctx context.Context, a SandboxAccount) 
 	ops := l.env.sandboxOps()
 	// A daemon that cannot say leaves it unknown whether a sandbox runs:
 	// the sandboxes are stopped as if one did.
-	if st, err := ops.Status(ctx, a); err != nil || st.Running > 0 {
+	if st, err := ops.Status(ctx, a); err != nil || st.busy() > 0 {
 		stopped, err := ops.StopSandboxes(ctx, a)
 		if len(stopped) > 0 {
 			r.Changes = append(r.Changes, fmt.Sprintf("stopped the running sandboxes of user %s (%s); they are kept, with their work", a.Name, strings.Join(stopped, ", ")))

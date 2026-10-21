@@ -127,7 +127,8 @@ func TestVerifyCountsUnusableCredentialAsMissing(t *testing.T) {
 
 // The list is absent unless every reference was checked: off a device (no
 // presence reader) and with a store that cannot be read for one name, which
-// keeps today's warning, or today's refusal when a required one is missing.
+// warns secret_presence_unchecked, also on the refusal for another required
+// credential that is missing.
 func TestVerifyOmitsSecretRefsMissingWhenPresenceWasNotChecked(t *testing.T) {
 	f, b, a := secretRefsFixture(t)
 	res, err := enterprisebundle.Verify(context.Background(), f.input(t, b, a))
@@ -154,6 +155,9 @@ func TestVerifyOmitsSecretRefsMissingWhenPresenceWasNotChecked(t *testing.T) {
 	res, err = enterprisebundle.Verify(context.Background(), in)
 	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefMissing || !strings.Contains(err.Error(), "splunk-token") || res.SecretRefsMissing != nil {
 		t.Fatalf("unreadable credential and a missing required one: missing %#v, err %v", res.SecretRefsMissing, err)
+	}
+	if !hasWarning(res.Warnings, enterprisebundle.WarnSecretPresenceUnchecked) {
+		t.Fatalf("unreadable credential and a missing required one: the refusal dropped the unchecked warning: %+v", res.Warnings)
 	}
 	var be *enterprisebundle.Error
 	if !errors.As(err, &be) || be.Path != "secret_refs" {
@@ -227,4 +231,38 @@ func hasWarning(warnings []enterprisebundle.Warning, code string) bool {
 		}
 	}
 	return false
+}
+
+// The apply sets RequireSecretPresence: a required credential whose lookup
+// failed refuses secret_ref_missing (with the secret_presence_unchecked
+// warning) instead of letting the apply pass the credential gate. An
+// optional one only warns; read-only verify keeps the warning alone.
+func TestVerifyRequireSecretPresenceRefusesARequiredCredentialItCannotCheck(t *testing.T) {
+	f, b, a := secretRefsFixture(t)
+	unreadable := func(fail string) func(string) (bool, error) {
+		return func(name string) (bool, error) {
+			if name == fail {
+				return false, os.ErrPermission
+			}
+			return true, nil
+		}
+	}
+	in := f.input(t, b, a)
+	in.SecretPresent = unreadable("splunk-token")
+	if _, err := enterprisebundle.Verify(context.Background(), in); err != nil {
+		t.Fatalf("read-only verify with an unchecked required credential: %v, want the warning only", err)
+	}
+	in.RequireSecretPresence = true
+	res, err := enterprisebundle.Verify(context.Background(), in)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefMissing || !strings.Contains(err.Error(), "splunk-token could not be checked") {
+		t.Fatalf("apply with an unchecked required credential: got %v, want secret_ref_missing", err)
+	}
+	if res.SecretRefsMissing != nil || !hasWarning(res.Warnings, enterprisebundle.WarnSecretPresenceUnchecked) {
+		t.Fatalf("apply refusal: missing %#v, warnings %+v", res.SecretRefsMissing, res.Warnings)
+	}
+	in.SecretPresent = unreadable("zz-optional")
+	res, err = enterprisebundle.Verify(context.Background(), in)
+	if err != nil || !hasWarning(res.Warnings, enterprisebundle.WarnSecretPresenceUnchecked) {
+		t.Fatalf("apply with an unchecked optional credential: warnings %+v, err %v; want the warning only", res.Warnings, err)
+	}
 }

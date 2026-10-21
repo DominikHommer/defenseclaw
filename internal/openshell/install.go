@@ -445,7 +445,7 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 			}
 			upgrading = true
 		}
-		if v.Compare(mustParse(SupportedBelow)) >= 0 {
+		if aboveWindow(v) {
 			return nil, &ErrUnsupportedVersion{Found: v}
 		}
 	}
@@ -688,9 +688,17 @@ func (i *Installer) prepareUpgrade(ctx context.Context, release Version) error {
 //     GetGatewayInfo did not name) the restart stops every sandbox, and a
 //     MicroVM stopped without a flush loses what it wrote since its last
 //     sync: a flush before the script would leave minutes of writes
-//     unsynced. A sandbox running or starting refuses the upgrade
-//     (ErrSandboxesRunning, naming them), and so does a list that fails.
-//     One that answers neither call is taken to be down, and runs nothing.
+//     unsynced. A sandbox that may hold compute (MayHoldCompute: running,
+//     starting, stopping, or in a phase OpenShell does not name) refuses
+//     the upgrade (ErrSandboxesRunning, naming them), and so does a list
+//     that fails. A MicroVM whose workload ended (WorkloadEnded: completed,
+//     or in the error state, which an OpenShell before SandboxMin cannot
+//     stop) writes nothing more, but nothing in OpenShell flushes it: the
+//     upgrade waits until its guest wrote its disk back (settleEnded, at
+//     most EndedSettle), and refuses when that wait ends early. One whose
+//     provisioning timed out ran nothing since its last stop, and the
+//     upgraded gateway's start provisions it again. A gateway that answers
+//     neither call is taken to be down, and runs nothing.
 //
 // A sandbox started after this, while the script runs, is not covered.
 func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) error) error {
@@ -710,9 +718,24 @@ func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) er
 		}
 		return fmt.Errorf("%w, and the sandboxes on it could not be listed: %v", ErrSandboxesRunning, err)
 	}
+	if err := runningRefusal(list); err != nil {
+		return err
+	}
+	if list, err = settleEnded(ctx, c, list); err != nil {
+		return fmt.Errorf("%w: the wait for the MicroVMs whose workload ended to write their disks back ended (%v); "+
+			"DefenseClaw cannot flush such a MicroVM, whose guest writes its disk back within %s, so upgrade again then", ErrSandboxesRunning, err, EndedSettleWords())
+	}
+	// One started again during the wait is judged again.
+	return runningRefusal(list)
+}
+
+// runningRefusal is ErrSandboxesRunning for the sandboxes of list that an
+// upgrade's gateway restart would stop with work in them (riskReady,
+// riskActive), nil when there are none.
+func runningRefusal(list []*Sandbox) error {
 	var running []string
 	for _, sb := range list {
-		if sb != nil && (sb.Status.Phase == PhaseReady || sb.Status.Phase == PhaseProvisioning) {
+		if r := restartRiskOf(sb); r == riskReady || r == riskActive {
 			running = append(running, sb.Name)
 		}
 	}

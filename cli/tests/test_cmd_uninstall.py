@@ -128,6 +128,32 @@ class BuildPlanTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(bin_dir / "defenseclaw"))
         self.assertTrue((bin_dir / "defenseclaw-gateway").is_file())
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX launcher links")
+    def test_reset_keeps_the_launcher_of_the_venv_it_keeps(self):
+        # GAP-0029/GAP-0114: reset removed ~/.local/bin/defenseclaw and then
+        # said to run 'defenseclaw quickstart', which was no longer found.
+        bin_dir = Path(self._tmp.name) / "bin"
+        venv_bin = Path(self._tmp.name) / ".venv" / "bin"
+        bin_dir.mkdir()
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "defenseclaw").write_text("cli", encoding="utf-8")
+        (bin_dir / "defenseclaw").symlink_to(venv_bin / "defenseclaw")
+        owned = (str(bin_dir), (str(bin_dir / "defenseclaw"),))
+        with patch.object(cmd_uninstall, "_owned_binary_targets", return_value=owned):
+            plan = cmd_uninstall._build_plan(
+                wipe_data=True,
+                binaries=False,
+                revert_openclaw=True,
+                remove_plugin=False,
+                preserve_data_entries=cmd_uninstall._RESET_PRESERVED_ENTRIES,
+                platform_name="linux",
+            )
+
+        self.assertEqual(plan.data_bound_launchers, ())
+        with capture_click_output() as out:
+            cmd_uninstall._render_kept_and_next_steps(plan)
+        self.assertNotIn("launcher", out.getvalue().lower())
+
     def test_windows_git_bash_launcher_is_bound_to_the_data_dir(self):
         data_dir = Path(self._tmp.name) / "data"
         launcher = Path(self._tmp.name) / "defenseclaw"

@@ -721,6 +721,8 @@ def profile_status_text(cfg, result: dict) -> str:
         scoped.append(f"{item.get('profile')} for {subject} (by {item.get('match')})")
     if scoped:
         text += "; except " + ", ".join(scoped)
+    if result.get("agent_assignments_unchecked"):
+        text += "; agent-scoped assignments not checked: the gateway did not list this account's agents"
     return text
 
 
@@ -906,12 +908,22 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                     f"{_connector_label(name)} ({name}) is not guarded: {unrunnable}. Fail mode does not apply "
                     f"to a hook the agent does not run; repair: {repair_command(name, unrunnable)}"
                 )
-            elif (cmode or "") == "action" and cfm == "open" and not upstream_fail_open(app.cfg, name):
+            elif cfm == "open" and not upstream_fail_open(app.cfg, name) and (
+                (cmode or "") == "action" or _action_profiles_for(gc, name)
+            ):
                 # An upgrade keeps the fail mode an older setup chose, while a
-                # new setup gives an action connector closed (GAP-0415).
+                # new setup gives an action connector closed (GAP-0415). A
+                # guardrail profile that puts the connector in action mode
+                # for some accounts counts too (GAP-1282): fail mode is baked
+                # into the hooks, so a profile cannot close it.
                 scope = f" --connector {name}" if getattr(gc, "connectors", None) else ""
+                where = (
+                    "is in action mode"
+                    if (cmode or "") == "action"
+                    else "is in action mode for guardrail profile(s) " + ", ".join(_action_profiles_for(gc, name))
+                )
                 posture_rows.append(
-                    f"{_connector_label(name)} ({name}) is in action mode with fail mode open: while the gateway "
+                    f"{_connector_label(name)} ({name}) {where} with fail mode open: while the gateway "
                     f"is down its hooks allow calls that policy blocks; set closed with "
                     f"defenseclaw guardrail fail-mode closed{scope}"
                 )
@@ -1796,15 +1808,15 @@ def fail_mode_cmd(
                 _eff = _state.runtime or "unknown"
                 if _state.drift:
                     _eff += f" (desired {_state.desired}; drift: {', '.join(_state.drift)})"
-            elif normalize_connector(_name) == "hermes" and upstream_fail_open(app.cfg, _name):
-                _eff = f"open (Hermes upstream; configured provenance: {_eff})"
+            elif upstream_fail_open(app.cfg, _name):
+                # Copilot CLI, Antigravity and Hermes fail open upstream, as
+                # status, doctor and guardrail status say (GAP-0336).
+                _eff = f"open ({_connector_label(_name)} upstream; configured provenance: {_eff})"
             elif _is_proxy_connector(_name):
                 _eff = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
             elif _cursor_stays_fail_closed(gc, _name):
                 _eff = "closed (Cursor hooks always fail closed in action mode)"
-            if _eff.startswith("open") and not (
-                normalize_connector(_name) == "hermes" and upstream_fail_open(app.cfg, _name)
-            ):
+            if _eff.startswith("open") and not upstream_fail_open(app.cfg, _name):
                 _open_names.append(_name)
             _eff_disp = ux._style(_eff, fg="yellow") if _eff == "closed" else _eff
             click.echo(f"      - {_connector_label(_name)} ({_name}): {_eff_disp}")
@@ -1819,10 +1831,12 @@ def fail_mode_cmd(
             )
             click.echo(f"  {ux.dim('Switch to closed:')} defenseclaw guardrail fail-mode closed")
         else:
-            # Name Hermes only when it is configured (GAP-2116).
+            # Name only the configured upstream fail-open connectors (GAP-2116,
+            # GAP-0336).
+            _upstream_open = [_connector_label(n) for n in _actives if upstream_fail_open(app.cfg, n)]
             _hermes_note = (
-                "; Hermes remains fail-open"
-                if any(normalize_connector(n) == "hermes" for n in _actives) and upstream_fail_open(app.cfg, "hermes")
+                f"; {', '.join(_upstream_open)} {'remains' if len(_upstream_open) == 1 else 'remain'} fail-open"
+                if _upstream_open
                 else ""
             )
             ux.subhead(
@@ -2078,6 +2092,24 @@ _HERMES_UPSTREAM_TIMEOUT_NOTE = (
     "A gateway that is down or gives an unusable answer blocks the Hermes tool call; Hermes itself "
     "still lets a call run when the hook times out or cannot start."
 )
+
+
+def _action_profiles_for(gc, connector: str) -> list[str]:
+    """Names of the guardrail profiles that put *connector* in action mode.
+
+    A profile's own per-connector mode wins over its profile-wide mode, as
+    the gateway resolves it; an unset value inherits and is not counted.
+    """
+    names: list[str] = []
+    target = normalize_connector(connector)
+    for pname, profile in sorted((getattr(gc, "profiles", None) or {}).items()):
+        mode = str(getattr(profile, "mode", "") or "").strip().lower()
+        for cname, override in (getattr(profile, "connectors", None) or {}).items():
+            if normalize_connector(cname) == target and str(getattr(override, "mode", "") or "").strip():
+                mode = str(override.mode).strip().lower()
+        if mode == "action":
+            names.append(str(pname))
+    return names
 
 
 def _warn_still_fail_open(gc, open_names: list[str]) -> None:
@@ -2990,7 +3022,20 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
             path = named
         else:
             names = ", ".join(sorted(p.name for p in packs))
-            raise click.ClickException(f"no pack with the name {path!r} was found; available packs: {names}")
+            message = f"no pack with the name {path!r} was found; available packs: {names}"
+            if json_out:
+                # --json promises the versioned result on stdout (GAP-1053).
+                missing = rulepack_validation.RulePackValidationBridgeError(message, code="pack_not_found")
+                click.echo(
+                    json.dumps(
+                        rulepack_validation.bridge_error_wire(missing),
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                raise SystemExit(1)
+            raise click.ClickException(message)
     try:
         result = rulepack_validation.validate_rule_pack(path)
     except rulepack_validation.RulePackValidationBridgeError as exc:
@@ -3039,6 +3084,8 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
         )
         click.echo(f"  digest: {summary['digest']}")
         click.echo(f"  files digest: {summary['files_digest']} (the guardrail.custom_packs pin)")
+        for warning in result.warnings:
+            click.echo("warning: " + warning, err=True)
     else:
         issue = result.error
         assert issue is not None
@@ -5298,8 +5345,8 @@ def _age_text(seconds) -> str:
 
 
 # How long explain waits for the gateway. The gateway looks the user up in the
-# directory before it answers, and that lookup is bounded at 20 s (and the
-# account lookup before it at 10 s), so the client waits longer than both.
+# directory before it answers, waiting at most 12 s for that lookup (and 10 s
+# for the account lookup before it), so the client waits longer than both.
 PROFILE_EXPLAIN_TIMEOUT_SECONDS = 35
 
 
@@ -5358,8 +5405,14 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
         notice = gateway_reload_notice(app.cfg)
         ux.subhead(notice or "Start it with: defenseclaw-gateway start", indent="  ")
         raise SystemExit(1) from None
+    # The gateway answers 200 with lookup_error for an account it could not
+    # name (a typo, or a bare name two accounts share); the answer is still
+    # printed, and the command fails (GAP-1239).
+    unresolved = bool(result.get("lookup_error")) and not (result.get("subject") or {}).get("user_id")
     if json_out:
         click.echo(json.dumps(result, indent=2, sort_keys=True))
+        if unresolved:
+            raise SystemExit(1)
         return
     ux.section("Guardrail profile resolution", indent="  ")
     # The answer is the gateway's, which may still run an earlier generation
@@ -5419,6 +5472,8 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
             f"rule_pack={effective.get('rule_pack_dir') or 'default'}"
         )
     click.echo()
+    if unresolved:
+        raise SystemExit(1)
 
 
 # Register `defenseclaw guardrail judge` (hook-lane judge gate). The

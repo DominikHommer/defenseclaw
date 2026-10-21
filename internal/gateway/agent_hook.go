@@ -121,8 +121,11 @@ type agentHookRequest struct {
 	ToolName                    string
 	ToolArgs                    json.RawMessage
 	ToolArgsProjectionUncertain bool
-	Content                     string
-	Direction                   string
+	// ToolCallUnparsed: the connector's decoder found no tool call it can
+	// read (connector.HookProfileRequest.ToolCallUnparsed).
+	ToolCallUnparsed bool
+	Content          string
+	Direction        string
 	// HookSurface names the connector-owned hook config that invoked this
 	// request, for connectors that install more than one with differing veto
 	// contracts. Setup marks each config's command and the bridge forwards
@@ -2106,6 +2109,7 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 	if decoded.ToolName != "" {
 		req.ToolName = decoded.ToolName
 	}
+	req.ToolCallUnparsed = decoded.ToolCallUnparsed
 	if decoded.ToolArgsAuthoritative {
 		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
 		req.ToolArgsProjectionUncertain = len(req.ToolArgs) == 0
@@ -2121,6 +2125,10 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 		toolArgs := profile.DecodeToolArgs(rawPayload)
 		req.ToolArgsProjectionUncertain = len(toolArgs) == 0
 		if len(toolArgs) == 0 {
+			// A body the raw decoder rejects (a duplicate key, an alias
+			// collision) is an unread tool call even when the map decode
+			// found one: refuse it, never judge it as an empty call.
+			req.ToolCallUnparsed = true
 			toolArgs = json.RawMessage(`{}`)
 		}
 		req.ToolArgs = append(json.RawMessage(nil), toolArgs...)
@@ -2290,6 +2298,16 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// handles the "non-enforceable event" case by downgrading to
 		// would-block automatically.
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
+	case structuredToolEvent && req.ToolCallUnparsed:
+		// A tool call the connector's decoder cannot read is refused, not
+		// judged as an empty call (fail closed, GAP-0337).
+		a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
+		verdict = &ToolInspectVerdict{
+			Action: "block", Severity: "HIGH", Confidence: 1.0,
+			Reason: fmt.Sprintf("DefenseClaw could not read the tool call in this %s hook payload, "+
+				"so it cannot show the call is safe and blocks it. Update DefenseClaw and the agent if this repeats.", req.ConnectorName),
+			Findings: []string{"HOOK-TOOL-CALL-UNPARSED"},
+		}
 	case structuredToolEvent:
 		if req.ToolArgsProjectionUncertain {
 			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)

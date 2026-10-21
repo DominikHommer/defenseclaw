@@ -130,3 +130,28 @@ func TestReportHookFailOpenCallsWithoutAFile(t *testing.T) {
 		t.Fatalf("got %d alerts without a hook-failures file", got)
 	}
 }
+
+// rel-1-0-4 GAP-0127: with Codex set open, two calls ran fail-open and two
+// that DEFENSECLAW_STRICT_AVAILABILITY blocked were logged with fail mode open
+// and outcome fail_closed. The recovery alert counts the two that ran.
+func TestReportHookFailOpenCallsSkipsStrictClosedCalls(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	logDir := filepath.Join(t.TempDir(), "logs")
+	now := time.Date(2026, 10, 21, 8, 30, 0, 0, time.UTC)
+	appendHookFailures(t, logDir,
+		`{"ts":"2026-10-21T08:27:22Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open"}`+"\n",
+		`{"ts":"2026-10-21T08:27:23Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_open"}`+"\n",
+		`{"ts":"2026-10-21T08:27:47Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_closed"}`+"\n",
+		`{"ts":"2026-10-21T08:27:48Z","connector":"codex","hook":"codex-hook","reason":"gateway unreachable","category":"transport","fail_mode":"open","outcome":"fail_closed"}`+"\n",
+	)
+	if err := reportHookFailOpenCallsIn(logDir, logger, now); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	alerts := degradedAlerts(t, store)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d fail-open alerts, want 1: %+v", len(alerts), alerts)
+	}
+	if d := alerts[0].Details; !strings.Contains(d, "2 codex hook calls") || !strings.Contains(d, "last 2026-10-21T08:27:23Z") {
+		t.Fatalf("alert counts the strict-closed calls: %s", d)
+	}
+}

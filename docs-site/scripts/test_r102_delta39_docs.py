@@ -9,7 +9,7 @@ DOCS = ROOT / "docs-site/content/docs"
 
 class Delta39DocsTest(unittest.TestCase):
     def test_enrollment_explains_reported_paths(self):
-        text = " ".join((DOCS / "enterprise/enrollment.mdx").read_text().split())
+        text = " ".join((DOCS / "enterprise/configure/enrollment.mdx").read_text().split())
         self.assertIn("Each user's cleanup worker reports the agent config paths it found or edited", text)
         self.assertIn("when removal succeeds, the guardian retries that home's cleanup once", text)
         self.assertIn("every reported path lies in the home its worker cleaned", text)
@@ -33,7 +33,7 @@ class Delta39DocsTest(unittest.TestCase):
         self.assertNotIn("An edited plugin that still contains DefenseClaw code keeps the record", text)
 
     def test_troubleshooting_explains_copied_receipt_and_remedy(self):
-        text = " ".join((DOCS / "enterprise/troubleshooting.mdx").read_text().split())
+        text = " ".join((DOCS / "troubleshooting/enterprise.mdx").read_text().split())
         self.assertIn("A copied backup receipt can name a config path in another home", text)
         self.assertIn(
             ("An unreadable or invalid backup receipt does not stop teardown, but keeps a re-homed row unverified"),

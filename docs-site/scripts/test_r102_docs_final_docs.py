@@ -14,7 +14,7 @@ def page(name):
 
 class R102DocsFinalDocsTest(unittest.TestCase):
     def test_gap_0012_windows_profile_scan_limit(self):
-        text = page("enterprise/windows.mdx")
+        text = page("enterprise/install/windows.mdx")
         self.assertIn("health.watcher.details.profile_roots_skipped: true", text)
         self.assertIn("enterprise `status` and `verify` results do not report that field separately", text)
         self.assertIn(
@@ -54,7 +54,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("MCP runtime detection defaults to true", text)
         self.assertIn("Windows `status` and `verify` do not emit `asset_policy_not_enforced`", text)
         self.assertIn("gateway log is the only warning on Windows", text)
-        windows = page("enterprise/windows.mdx")
+        windows = page("enterprise/install/windows.mdx")
         self.assertIn(
             "Windows `status` and `verify` do not warn when a default or registry rule goes "
             "unenforced; the gateway log is the only signal",
@@ -62,7 +62,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         )
 
     def test_gap_0012_windows_scan_examples_exclude_profiles(self):
-        text = page("enterprise/windows.mdx")
+        text = page("enterprise/install/windows.mdx")
         self.assertIn("no per-user attribution", text)
         self.assertIn("A profile asset is never admission-blocked in 1.0.2", text)
         self.assertIn("C:\\\\ApprovedSkills\\\\<account>\\\\reviewed-skill", text)
@@ -108,7 +108,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertNotIn("those servers receive no install-watcher scan", text)
         self.assertIn("receive the install-watcher scan: the scanner runs in the gateway service and the hook "
                       "enumerator starts each server as its user", text)
-        windows = page("enterprise/windows.mdx")
+        windows = page("enterprise/install/windows.mdx")
         for phrase in ("### MCP servers in user profiles", "Secondary Logon service (`seclogon`)",
                        "only `npx` or `uvx` with a package argument",
                        "in no other user's profile, with no link or junction on the way",
@@ -122,13 +122,13 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertNotIn("and Kiro have a prompt hook that can block", text)
 
     def test_gap_0440_windows_guardian_restore_restart(self):
-        text = page("enterprise/windows.mdx")
+        text = page("enterprise/install/windows.mdx")
         self.assertIn("the hook guardian restored hooks that the user changed or removed", text)
         self.assertIn("`security_complete` stays `false` until that session restarts", text)
         self.assertIn("Claude Code, Codex and Cursor use machine policy hooks", text)
 
     def test_gap_0499_unix_guardian_restore_restart(self):
-        text = page("enterprise/troubleshooting.mdx")
+        text = page("troubleshooting/enterprise.mdx")
         row = text.split("| `agent_sessions_restart_required` |", 1)[1].split("| Ask the user named", 1)[0]
         self.assertIn("hook guardian put back hooks the user changed or removed", row)
         self.assertIn("On Linux and macOS this restore case excludes Codex", row)
@@ -150,20 +150,20 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertNotIn("tool calls are refused until you run `defenseclaw rollback` again", text)
 
     def test_gap_0554_enterprise_sandbox_docker_limit(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         bullet = text.split("**Docker is root-equivalent.**", 1)[1].split("- **A registration", 1)[0]
         self.assertIn("container outside DefenseClaw, bypassing `sandbox.required_for` too", bullet)
         self.assertIn("must not give them Docker access", bullet)
         self.assertIn("A root-owned image and lifecycle service", bullet)
 
     def test_gap_0554_enterprise_linux_docker_limit(self):
-        text = page("enterprise/linux.mdx")
+        text = page("enterprise/install/linux.mdx")
         self.assertIn("outside DefenseClaw, bypassing `sandbox.required_for`", text)
         self.assertIn("must not give them Docker access", text)
         self.assertIn("root-owned image and lifecycle service", text)
 
     def test_gap_0445_cli_unreadable_sandbox_list(self):
-        text = page("reference/cli.mdx")
+        text = page("reference/commands/cli.mdx")
         self.assertIn(
             ("`uninstall` and `reset` also stop before any change if DefenseClaw cannot read the sandbox list"), text
         )
@@ -188,7 +188,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("`error`, `stopping`, `creating` and `deleting` phases count as running", text)
 
     def test_gap_0226_windows_install_discovery(self):
-        text = page("enterprise/enrollment.mdx")
+        text = page("enterprise/configure/enrollment.mdx")
         self.assertIn("official Codex `install.ps1` layout", text)
         self.assertIn("per-user WinGet packages for signed-in users", text)
         self.assertIn("A signed-out user's per-user WinGet package is read at the next sign-in", text)
@@ -208,7 +208,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("use each uid or SID with `guardrail profile explain --user`", text)
 
     def test_gap_0438_guardian_hook_binary_reread(self):
-        text = page("enterprise/troubleshooting.mdx")
+        text = page("troubleshooting/enterprise.mdx")
         self.assertIn("The guardian re-reads the hook binary when it changes and at least every 10 minutes", text)
 
     def test_gap_0085_grafana_history_and_current_state(self):
@@ -249,7 +249,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         )
 
     def test_enterprise_non_exempt_host_refusal_names_unavailable_alert_exception(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         self.assertIn(
             "For a non-exempt account, a host run is refused even when it claims to be "
             "nested in a sandbox, unless sandboxes are unavailable to the account and "
@@ -268,7 +268,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn(
             "An effective `alert` setting when sandboxes are unavailable to the account lifts that refusal", text
         )
-        self.assertIn("[the registration limit](/docs/enterprise/sandboxes#require-sandboxes)", text)
+        self.assertIn("[the registration limit](/docs/enterprise/runtime/sandboxes#require-sandboxes)", text)
         self.assertNotIn("that host refusal applies when the effective `when_unavailable` setting is `refuse`", text)
 
     def test_no_sandbox_registry_names_both_host_run_exceptions(self):
@@ -282,7 +282,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         )
 
     def test_no_sandbox_generated_env_vars_row_names_both_exceptions(self):
-        text = page("reference/env-vars.mdx")
+        text = page("reference/configuration/env-vars.mdx")
         row = text.split("`DEFENSECLAW_NO_SANDBOX`", 1)[1].split(" | ", 1)[1]
         self.assertIn(
             "host run is still refused unless the account is in "
@@ -316,7 +316,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("rebuilt from a live registration skips the host-run gate", gate)
 
     def test_enterprise_uninstall_keeps_sandboxes_until_purge(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
         self.assertIn(
             "Without `--purge`, uninstall stops running sandboxes through the sandbox daemon, "
@@ -337,7 +337,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertNotIn("Root runs each user's teardown as that user", bullet)
 
     def test_enterprise_lifecycle_row_does_not_say_every_uninstall_tears_down(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         row = text.split("| Lifecycle (`ensure`, `verify`, `repair`, `uninstall`) | root |", 1)[1].split("\n", 1)[0]
         self.assertIn(
             "`uninstall --purge` tears down per user; `uninstall` alone stops running sandboxes and keeps them", row
@@ -347,7 +347,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
     def test_enterprise_uninstall_names_the_kept_sandbox_store(self):
         # rel-1-0-2:GAP-0598 (lead decision option a): a non-purge uninstall
         # that keeps sandboxes keeps the registrations, decisions and key.
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
         self.assertIn(
             "also keeps the gateway's sandbox registrations and decisions "
@@ -377,7 +377,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         )
 
     def test_gap_1356_windows_project_skill_roots_skipped(self):
-        text = page("enterprise/windows.mdx")
+        text = page("enterprise/install/windows.mdx")
         self.assertIn("project skill folders inside profiles are skipped before verification or registration", text)
         self.assertIn(
             'no install scan, no "is not scanned yet" refusal and no `project_skill_root_unverified` warning', text

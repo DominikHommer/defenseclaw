@@ -2321,6 +2321,9 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
     def test_codex_hook_check_warns_when_notify_is_not_defenseclaw(self):
         # GAP-1248: a renamed notify program left Codex launching a missing
         # program on every turn while doctor said the hooks were healthy.
+        # Secure Client is the one profile that registers the notifier.
+        from unittest import mock
+
         from defenseclaw.commands import cmd_doctor
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2345,12 +2348,51 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
                 cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix", config_path=config_toml)
                 return [c for c in result.checks if c["label"] == "Codex notify"]
 
-            renamed = notify_rows(f'notify = ["bash", "{bridge[:-3]}-TAMPERED.sh"]\n')
-            healthy = notify_rows(f'notify = ["bash", "{bridge}"]\n')
+            with mock.patch.object(cmd_doctor, "_doctor_secure_client", return_value=True):
+                renamed = notify_rows(f'notify = ["bash", "{bridge[:-3]}-TAMPERED.sh"]\n')
+                healthy = notify_rows(f'notify = ["bash", "{bridge}"]\n')
 
         self.assertEqual([c["status"] for c in renamed], ["warn"], renamed)
         self.assertIn("-TAMPERED.sh", renamed[0]["detail"])
         self.assertEqual(healthy, [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX hook paths in a TOML basic string")
+    def test_codex_hook_check_warns_when_an_old_defenseclaw_notifier_is_left(self):
+        # Outside Secure Client setup registers no Codex notifier: Codex puts
+        # the turn record on the notifier's command line. One left by an older
+        # setup is reported; the account's own notifier, or none, is fine.
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, ".defenseclaw")
+            cfg = self._make_cfg(home)
+            self._write_hook(home, "codex-hook.sh", "#!/bin/sh\n# defenseclaw-managed-hook v6\n")
+            bridge = os.path.join(home, "notify-bridge.sh")
+            own = os.path.join(home, "hooks", "codex-hook.sh")
+            config_toml = os.path.join(tmp, "codex", "config.toml")
+            os.makedirs(os.path.dirname(config_toml))
+            hooks = (
+                "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\n"
+                f'type = "command"\ncommand = "{own} --event PreToolUse"\n'
+            )
+
+            def notify_rows(notify: str) -> list[dict]:
+                with open(config_toml, "w", encoding="utf-8") as fh:
+                    fh.write(notify + hooks)
+                result = _DoctorResult()
+                cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix", config_path=config_toml)
+                return [c for c in result.checks if c["label"] == "Codex notify"]
+
+            stale = notify_rows(f'notify = ["bash", "{bridge}"]\n')
+            native = notify_rows('notify = ["/opt/defenseclaw/bin/defenseclaw-hook", "notify"]\n')
+            users = notify_rows('notify = ["/usr/local/bin/my-notifier"]\n')
+            none = notify_rows("")
+
+        self.assertEqual([c["status"] for c in stale], ["warn"], stale)
+        self.assertIn("still runs the DefenseClaw notifier", stale[0]["detail"])
+        self.assertEqual([c["status"] for c in native], ["warn"], native)
+        self.assertEqual(users, [])
+        self.assertEqual(none, [])
 
     def test_unreadable_foreign_codex_hook_script_counts_as_broken(self):
         # GAP-1854: another account's unreadable home raised PermissionError
@@ -3571,3 +3613,60 @@ def test_policy_digest_probe_unavailable_does_not_pass():
     row = result.checks[-1]
     assert row["status"] == "warn"
     assert "comparison" in row["detail"]
+
+
+def _hilt_profile_cfg(profile):
+    from defenseclaw.config import GuardrailProfile
+
+    cfg = Config(
+        data_dir="/tmp/defenseclaw",
+        audit_db="/tmp/defenseclaw/audit.db",
+        quarantine_dir="/tmp/defenseclaw/quarantine",
+        plugin_dir="/tmp/defenseclaw/plugins",
+        policy_dir="/tmp/defenseclaw/policies",
+        guardrail=GuardrailConfig(enabled=True, mode="action", connector="codex"),
+        gateway=GatewayConfig(),
+        openshell=OpenShellConfig(),
+    )
+    cfg.guardrail.hilt.enabled = True
+    cfg.guardrail.profiles = {"read_only": profile or GuardrailProfile()}
+    cfg.guardrail.default_profile = "read_only"
+    return cfg
+
+
+def test_hilt_observe_under_a_profile_names_the_profile_setting():
+    # GAP-1269: 'guardrail mode' does not change the mode a profile sets.
+    from defenseclaw.commands.cmd_doctor import _check_hilt_support, _emit_hilt_observe_summary
+    from defenseclaw.config import GuardrailProfile
+
+    resolved = {
+        "profile": "read_only",
+        "effective": {"mode": "observe", "hilt": {"enabled": True, "min_severity": "HIGH"}},
+    }
+    for profile, pinned in ((GuardrailProfile(mode="observe"), True), (GuardrailProfile(), False)):
+        cfg = _hilt_profile_cfg(profile)
+        result = _DoctorResult()
+        observe_only: list = []
+        with patch("defenseclaw.gateway.current_user_guardrail_profile", return_value=resolved):
+            for connector in ("codex", "claudecode"):
+                _check_hilt_support(cfg, connector, result, observe_only=observe_only)
+        _emit_hilt_observe_summary(observe_only, result, tagged=True)
+        remediation = result.checks[-1]["remediation"]
+        if pinned:
+            assert "guardrail.profiles.read_only.mode" in remediation
+            assert "guardrail mode action" not in remediation
+        else:
+            # A profile that inherits the mode: the base command does change it.
+            assert "guardrail mode action --connector <name>" in remediation
+
+
+def test_scanner_settings_names_the_skill_scanner_judge():
+    # GAP-0981: the guardrail judge can be on while the skill scanner's is off.
+    from defenseclaw.config import default_config
+    from defenseclaw.scanner import settings as scanner_settings
+
+    cfg = default_config()
+    cfg.guardrail.judge.enabled = True
+    cfg.scanners.skill_scanner.use_llm = False
+    issue = scanner_settings.recommended_settings_issue(cfg)
+    assert issue.startswith("the skill-scanner LLM judge is off")

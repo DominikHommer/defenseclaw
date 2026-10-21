@@ -57,6 +57,13 @@ type EnforcementQuarantineAppliedInput struct {
 	AssetType       string
 	SourcePath      string
 	DestinationPath string
+	// PolicyStamped pins the asset.quarantined policy stamp to the
+	// generation of the decision that ordered the quarantine; the live
+	// generation can be a newer one a reload applied meanwhile (p0
+	// GAP-1000). Unset, the record carries the live stamp.
+	PolicyStamped    bool
+	PolicyDigest     observability.Optional[string]
+	PolicyGeneration observability.Optional[int64]
 }
 
 // LogJudgeCompletion routes one validated judge occurrence exclusively through
@@ -269,6 +276,9 @@ func (l *Logger) emitEnforcementQuarantineV8(
 					return observability.Record{}, buildErr
 				}
 				policyDigest, policyGeneration := livePolicyStamp()
+				if input.PolicyStamped {
+					policyDigest, policyGeneration = input.PolicyDigest, input.PolicyGeneration
+				}
 				record, buildErr := builder.BuildLogAssetQuarantined(observability.LogAssetQuarantinedInput{
 					Envelope: envelope, Severity: severity, LogLevel: logLevel,
 					Outcome:                             observability.OutcomeQuarantined,

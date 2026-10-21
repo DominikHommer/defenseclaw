@@ -1,0 +1,11 @@
+{
+  "title": "Configure",
+  "pages": [
+    "configuration",
+    "settings",
+    "enrollment",
+    "machine-policy",
+    "foreign-hook-guard",
+    "ai-defense-key"
+  ]
+}

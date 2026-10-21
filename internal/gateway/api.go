@@ -48,6 +48,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -298,7 +299,6 @@ type APIServer struct {
 	hookChildThreads                  map[string]hookChildThread
 	hookChildThreadOrder              []string
 	copilotSubagents                  []copilotPendingSubagent
-	codexPendingThreads               []codexPendingThread
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
 	// hookLifecycleHistoryRead holds the session keys whose signed lifecycle
@@ -1358,10 +1358,21 @@ func (a *APIServer) Run(ctx context.Context) error {
 
 	// The Windows standalone hook reports the calls it refuses for an
 	// unenrolled account here (GAP-1242); a no-op on every other profile.
-	// It stops with this run of the API server.
+	// It stops with this run of the API server, which waits, bounded, for
+	// its last rows (GAP-1253).
 	refusalCtx, stopRefusals := context.WithCancel(ctx)
-	defer stopRefusals()
-	go a.serveUnenrolledRefusals(refusalCtx)
+	refusalsDone := make(chan struct{})
+	defer func() {
+		stopRefusals()
+		select {
+		case <-refusalsDone:
+		case <-time.After(unenrolledRefusalStopTimeout):
+		}
+	}()
+	go func() {
+		defer close(refusalsDone)
+		a.serveUnenrolledRefusals(refusalCtx)
+	}()
 
 	errCh := make(chan error, 2)
 	if hookSrv != nil {
@@ -1615,7 +1626,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			// nobody, and the whole team falls to the default profile:
 			// status and verify report it (GAP-0704). The last check is
 			// served; a stale one is refreshed in the background.
-			if warnings := liveGuardrailProfiles.Load().healthProfileWarnings(); len(warnings) > 0 {
+			if warnings := standaloneProfileWarnings(liveGuardrailProfiles.Load(), cfg); len(warnings) > 0 {
 				setHealthProfileWarnings(body, "profile_warnings", "profile_warning_count", warnings, rootPeer)
 			}
 			// Non-secret fingerprints of the per-user credential keys that
@@ -1800,15 +1811,16 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"connector_modes": a.connectorModesSummary(r.Context()),
 	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
-		if set := a.guardrailProfileSet(); set != nil {
+		set := a.guardrailProfileSet()
+		if set != nil {
 			status["profile_assignment_warnings"] = set.assignmentWarnings(true)
-			// What /health lists only to root on the hook socket: Windows
-			// status and verify read it here with the gateway credential
-			// (GAP-1268).
-			if cfg.StandaloneEnterprise() {
-				if warnings := set.healthProfileWarnings(); len(warnings) > 0 {
-					status["profile_warnings"] = warnings
-				}
+		}
+		// What /health lists only to root on the hook socket: Windows
+		// status and verify read it here with the gateway credential
+		// (GAP-1268).
+		if cfg.StandaloneEnterprise() {
+			if warnings := standaloneProfileWarnings(set, cfg); len(warnings) > 0 {
+				status["profile_warnings"] = warnings
 			}
 		}
 	}
@@ -1843,6 +1855,12 @@ func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 	if !connector.IsLoopback(r) {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "shutdown is restricted to loopback clients"})
+		return
+	}
+	// A managed standalone gateway is a system service: its service manager
+	// starts and stops it, and the gateway token does not.
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil && cfg.StandaloneEnterprise() {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": managedShutdownRefusal})
 		return
 	}
 	if a.shutdownRequester == nil {
@@ -1881,6 +1899,33 @@ func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		// ensuring the caller receives the acknowledgement before teardown.
 		go a.shutdownRequester()
 	}
+}
+
+// managedShutdownRefusal answers a shutdown request on a managed standalone
+// computer.
+const managedShutdownRefusal = "this gateway is managed by the computer's administrator and runs as a system service; it is not stopped over the API"
+
+// managedBundlePolicyReloadRefusal answers /policy/reload on a managed
+// standalone computer that takes its policy from signed bundles.
+const managedBundlePolicyReloadRefusal = "this computer takes its policy from signed policy bundles; deliver a new signed bundle instead of reloading the policy over the API"
+
+// bundleAnchorsPath is where a standalone managed computer keeps the bundle
+// trust anchors (tests replace it).
+var bundleAnchorsPath = func() (string, error) { return enterprisebundle.AnchorsPath(runtime.GOOS) }
+
+// signedBundleMode reports whether a managed standalone computer takes its
+// policy from signed bundles: its trust anchors are installed. An anchors
+// path the gateway cannot check counts as installed.
+func signedBundleMode(cfg *config.Config) bool {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return false
+	}
+	path, err := bundleAnchorsPath()
+	if err != nil {
+		return true
+	}
+	_, err = os.Lstat(path)
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
 }
 
 func sameRuntimeDataDir(left, right string) bool {
@@ -4002,16 +4047,6 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
-			if authenticated, ok := a.authenticateACPToken(r, token); ok {
-				r = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
-				next.ServeHTTP(w, r)
-				return
-			}
-			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_scoped_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
 			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
 			registered := false
@@ -4473,6 +4508,16 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	recordFailure := func(reason string) {
 		_ = a.recordAPIPolicyReloadMetricV8(r.Context(), "failed")
 		_ = a.emitAPIPolicyReloadRejectedV8(r.Context(), reason)
+	}
+	// With signed bundles, a policy becomes active only through a verified
+	// bundle apply, which the lifecycle confirms against the running gateway.
+	if signedBundleMode(a.runtimeConfigSnapshot()) {
+		recordFailure(managedBundlePolicyReloadRefusal)
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error":  managedBundlePolicyReloadRefusal,
+			"status": "refused",
+		})
+		return
 	}
 
 	// Secure Client keeps the reload check of main (issue #1092): it fails

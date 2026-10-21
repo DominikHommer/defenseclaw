@@ -1,0 +1,193 @@
+---
+title: Set up sandboxes on Linux
+description: Run sandbox setup on Linux, read sandbox doctor, and optionally switch to KVM MicroVMs.
+keywords:
+  - sandbox setup Linux
+  - sandbox doctor
+  - openshell-gateway
+  - Landlock
+  - KVM MicroVM
+---
+
+Install and configure OpenShell sandboxes on a Linux machine with `defenseclaw sandbox setup`, then check the machine with `defenseclaw sandbox doctor`. By default each sandbox is a container that OpenShell's Docker driver runs, and your project folder is mounted into it live.
+
+## Before you start
+
+| You need | Details |
+| --- | --- |
+| DefenseClaw | Installed and initialized ([quickstart](/docs/get-started/quickstart)), with the daemon running (`defenseclaw-gateway start`). Run everything as your own user, not root. |
+| Linux | amd64 or arm64. WSL2 is not supported. |
+| Kernel | Landlock ABI 3 or newer, enabled in the kernel's `lsm=` list. Upstream kernels have it from 6.2. A distribution kernel with a backport can have it too (RHEL 9 lists `landlock` on its 5.14 kernel), so `sandbox doctor` reading the running kernel is the check to trust. |
+| Docker | A rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group), with the buildx plugin (`docker-buildx-plugin` from Docker's repository). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. |
+| systemd | A user session with a systemd user manager. OpenShell's gateway runs as the `openshell-gateway` user service. |
+| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. |
+
+You do not need OpenShell installed first: setup offers to install it. Check the kernel yourself with `cat /sys/kernel/security/lsm`, which should list `landlock`. Turn on linger so the gateway keeps running after you log out:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+## Steps
+
+<Steps>
+
+<Step>
+
+### Run setup
+
+```bash
+defenseclaw sandbox setup
+```
+
+Setup checks the machine, then asks before each change. A first run looks like this (shortened):
+
+```text
+DefenseClaw sandbox setup
+  Checking this machine…  ✓ linux/arm64  ✓ Landlock  ✓ Docker 29.4.0  ✗ OpenShell not installed
+Install OpenShell … with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
+OpenShell install plan
+  Privileges  the script uses sudo to install the openshell package, then enables and
+              starts the openshell-gateway user service (systemd --user)
+Run this plan? [y/N] y
+Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw mounts only the launch folder and the read-only settings Claude Code and Codex sandboxes need) [Y/n]
+Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n]
+  ✓ gateway configured and restarted
+  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
+    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓
+    Codex (codex)         model credential ~/.codex/auth.json ✓
+  …
+  ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml
+Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N]
+Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]
+  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972)
+
+  ✓ Done →  cd <project> && defenseclaw sandbox run claude
+```
+
+What setup does, in order:
+
+| Step | What happens |
+| --- | --- |
+| Check the machine | Platform, your user, Landlock, Docker and the OpenShell CLI. It stops at the first problem it cannot fix and names the fix. |
+| Install OpenShell | When it is missing or too old and you agree. NVIDIA's installer script is checked against a pinned SHA-256, uses `sudo` for the package, then enables the `openshell-gateway` user service. |
+| Configure the gateway | The gateway listens on `localhost:17670` with mTLS. Setup turns on project-folder mounts in `~/.config/openshell/gateway.toml` and turns OpenShell's anonymous usage telemetry off in `gateway.env`, each with a timestamped backup, then restarts the gateway once. Say no to mounts, or pass `--no-mounts`, and no Claude Code or Codex sandbox can start. |
+| Pick the compute driver | DefenseClaw drives OpenShell's `docker` driver. A gateway configured for another driver, such as `podman`, is switched to `docker` when you agree. Sandboxes made on the old driver cannot start after the switch, and OpenShell can drop a stopped one a few minutes later. Pull the work of copy-mode sandboxes you want to keep first: `defenseclaw sandbox pull NAME` shows the changes, then `defenseclaw sandbox pull NAME --apply` merges them into your host project (on a conflict, keep the patch and branch it reports). |
+| Record the harnesses | Writes `openshell.harnesses` and turns `openshell.enabled` on. |
+| Offer shell wrappers | So typing `claude` or `codex` starts a sandbox ([more ways to run](/docs/how-to/sandboxes/more-ways-to-run#make-claude-run-sandboxed)). |
+| Build the images | Each harness image is built in Docker and checked to prove that its hooks fire and block. |
+| Wait for the daemon | Reports the hook ingress and egress proxy addresses. |
+
+On Linux, setup gives each per-user Docker gateway its own sandbox namespace, `defenseclaw-u<uid>`, when that account has no sandbox in OpenShell's `default` namespace. If the gateway still has sandboxes there, setup leaves its namespace in place and `defenseclaw sandbox doctor` warns `docker-namespace` until those sandboxes are gone.
+
+Setup is safe to run again. When sandboxes are running, it asks before it restarts the shared gateway. Flags and the harness list are in the [sandbox CLI reference](/docs/reference/sandboxes/cli#sandbox-setup). You can run the same setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenShell)**), which runs `defenseclaw sandbox setup --non-interactive` with your answers.
+
+</Step>
+
+<Step>
+
+### Check the machine
+
+```bash
+defenseclaw sandbox doctor
+```
+
+```text
+  ✓ Platform                   linux/arm64
+  ✓ User                       alice (uid 1000)
+  ✓ Landlock                   ABI 6
+  ✓ Docker                     Docker 29.4.0 (Ubuntu 24.04 LTS)
+  ✓ Docker BuildKit            docker build uses BuildKit (buildx v0.30.1)
+  ✓ Docker host networking     Docker Engine shares the host network
+  ✓ systemd linger             enabled for alice
+  ✓ Gateway service            openshell-gateway active (running)
+  …
+  ✓ Gateway compute driver     docker
+  ✓ Project bind mounts        enabled for the docker driver
+  ✓ OpenShell telemetry        OpenShell usage telemetry is off
+  ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
+  ✓ Sandbox egress port        127.0.0.1:18972 is served by the DefenseClaw daemon
+  ✓ Sandbox hooks              no sandbox is running
+  ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
+  ✓ Organization policy        no openshell.admin constraints
+
+  ✓ ready for sandboxes
+```
+
+`✓` passed, `⚠` warning, `✗` failed and `-` skipped, with the reason. Every warning and failure names its fix on the next line (`→ …`). `defenseclaw sandbox doctor --fix` applies the fixes that need only your user, such as starting the gateway or turning bind mounts on, after asking. The command exits 1 when a check fails. `defenseclaw doctor` shows the same checks in its **Sandbox** section.
+
+The same check on a Red Hat Enterprise Linux 9 host:
+
+![defenseclaw sandbox doctor on Linux: Landlock, Docker with BuildKit and host networking, disk space, systemd linger, the openshell-gateway service, its registration and health, the sandbox ingress and egress ports served by the DefenseClaw daemon, the hook-verified harness images, the organization policy, and the closing line ready for sandboxes](/images/sandboxes/screens/linux-doctor.png)
+
+</Step>
+
+<Step>
+
+### Run your first agent
+
+```bash
+cd ~/code/myapp
+defenseclaw sandbox run claude
+```
+
+Continue with [run an agent](/docs/how-to/sandboxes/run-an-agent).
+
+</Step>
+
+</Steps>
+
+## Run sandboxes in MicroVMs with KVM
+
+On a Linux host with KVM, OpenShell's MicroVM driver (`vm`) runs each sandbox as a small virtual machine with a Linux kernel of its own, as it does on a Mac. The Docker driver stays the default. MicroVMs are the way on where the host kernel has no usable Landlock, because the MicroVM's own kernel enforces it. `sandbox setup` offers the switch on a host where `/dev/kvm` exists, and the answer defaults to yes only when Landlock is missing.
+
+| Needs | Details |
+| --- | --- |
+| KVM | `/dev/kvm` that your user can open for reading and writing. Where it belongs to the `kvm` group, run `sudo usermod -aG kvm $USER` and log in again. On a cloud VM, use an instance type with nested virtualization or a `.metal` size. |
+| `e2fsprogs` | Version 1.43 or newer, whose `mke2fs` and `debugfs` format each MicroVM's disks. |
+| The driver | `openshell-driver-vm`, which NVIDIA's package does not install. Download it from the OpenShell release with its `.sha256` file, check the digest and put it in `~/.local/libexec/openshell`. The doctor prints the commands for your architecture. |
+| The service umask | The `openshell-gateway` service must run with a umask no stricter than `0022`. Setup writes a systemd drop-in (`zz-defenseclaw-umask.conf`) with `UMask=0022` as part of the gateway change. |
+
+Setup installs none of this. KVM access and `e2fsprogs` need an administrator and the driver is a download you verify, so setup stops with the way on and asks you to run it again.
+
+With the MicroVM driver, every run works on a copy, `--context` is refused, `--cpu` and `--memory` have no effect, and the first start of an image prepares a disk of about 5 GB, which takes about a minute. [Sandboxes](/docs/features/sandboxes#linux-and-macos) compares the drivers. On a managed computer the organization chooses the driver, and a sandbox that starts where KVM does not work falls back to Docker under the same policy unless the organization requires MicroVMs: [the docker fallback](/docs/enterprise/runtime/sandboxes#the-docker-fallback).
+
+## One OpenShell gateway per machine
+
+OpenShell's packaged gateway listens on the fixed port `127.0.0.1:17670` and runs as the `openshell-gateway` user service of the account that started it. A machine runs one gateway, so only that account can run sandboxes. In a second account, `sandbox setup` and `sandbox doctor` say that the port is held by another account's process, and setup installs and starts nothing.
+
+To hand sandboxes to another account, stop the gateway in the account that runs it, then run `defenseclaw sandbox setup` in the other one. `disable --now` also keeps the gateway from starting again at the next login:
+
+```bash
+systemctl --user disable --now openshell-gateway
+```
+
+<Callout type="warn" title="Handing the gateway over stops the sandboxes it runs">
+Every sandbox the gateway runs stops with it. A live-mounted sandbox's edits are already in your folder and its undo point is kept, and a copy keeps its work in the sandbox. Neither account can connect to those sandboxes until the account that made them runs the gateway again.
+</Callout>
+
+Membership in the `docker` group is root-equivalent on the machine. Every account in the group can list every sandbox container (`docker ps`) and run commands in it (`docker exec`). Give the group only to accounts that trust each other. Several users on one host are tracked upstream in [NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
+
+## Optional kernel feed
+
+When your administrator runs [Tetragon](https://tetragon.io) on this computer, the opt-in kernel feed adds every process the kernel starts in your Docker sandboxes to their process trees, including those that live for milliseconds. Without it nothing changes.
+
+```bash
+defenseclaw sandbox kernel-feed status
+defenseclaw sandbox kernel-feed install
+```
+
+Run as yourself, `install` prints the exact `sudo` command. It needs Docker sandboxes, Tetragon serving its API on `unix:///var/run/tetragon/tetragon.sock`, systemd, and you in the `docker` group. It reads only the exec and exit of container processes, and enforces nothing. macOS MicroVM sandboxes and the Linux `vm` driver are not covered. Turn the process tree on per sandbox with `sandbox run --process-tree`. The commands, reason codes and files are in the [sandbox CLI reference](/docs/reference/sandboxes/cli#sandbox-kernel-feed).
+
+## Check it worked
+
+`defenseclaw sandbox doctor` ends with `ready for sandboxes`, and `defenseclaw sandbox status` lists the gateway and the sandbox listeners.
+
+## Undo
+
+`defenseclaw sandbox teardown --dry-run` prints every step, and `defenseclaw sandbox teardown` removes this install's sandboxes, images and gateway changes, and turns `openshell.enabled` off. OpenShell itself stays installed. See [`sandbox teardown`](/docs/reference/sandboxes/cli#sandbox-teardown).
+
+## Next
+
+- [Run an agent in a sandbox](/docs/how-to/sandboxes/run-an-agent)
+- [Troubleshooting](/docs/troubleshooting/sandboxes)

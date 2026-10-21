@@ -49,11 +49,13 @@ type Inputs struct {
 	InstallFP string
 	// Account is the name the host's account database gives UserID now.
 	// Linux and macOS hand a removed account's uid to the next account, so
-	// a uid's ID is also keyed on its account (AccountKey): the new account
-	// never gets the removed one's agent identities, their history or the
-	// guardrail profile assigned to them (GAP-0947). A SID is never reused,
-	// so a SID's account is ignored and a renamed Windows account keeps its
-	// IDs.
+	// a uid's ID is also keyed on its account (AccountKey) and, for a
+	// directory account the host names with its domain or realm, on that
+	// domain (AccountDomain): the new account never gets the removed one's
+	// agent identities, their history or the guardrail profile assigned to
+	// them, a namesake from another domain included (GAP-0947, GAP-1055). A
+	// SID is never reused, so a SID's account is ignored and a renamed
+	// Windows account keeps its IDs.
 	Account string
 }
 
@@ -61,6 +63,22 @@ type Inputs struct {
 // sha256 of the normalized inputs, or "" when the machine, user or connector
 // is unknown.
 func AgentID(in Inputs) string {
+	return agentID(in, true)
+}
+
+// LegacyAgentID is the ID 1.0.0 to 1.0.3 gave in, whose account key left
+// out the domain, or "" when it is AgentID's: in names a uid's qualified
+// account. A guardrail profile assignment written for the legacy ID keeps
+// selecting the account it was recorded for (the gateway's agent ledger).
+// Remove once upgrades from 1.0.3 are no longer supported.
+func LegacyAgentID(in Inputs) string {
+	if legacy := agentID(in, false); legacy != agentID(in, true) {
+		return legacy
+	}
+	return ""
+}
+
+func agentID(in Inputs, withDomain bool) string {
 	machine := clean(in.MachineHash)
 	user := NormalizeUserID(in.UserID)
 	connector := strings.ToLower(clean(in.Connector))
@@ -70,6 +88,9 @@ func AgentID(in Inputs) string {
 	parts := []string{machine, user, connector, NormalizeInstallFP(in.InstallFP)}
 	if !IsSID(user) {
 		parts = append(parts, AccountKey(in.Account))
+		if domain := AccountDomain(in.Account); withDomain && domain != "" {
+			parts = append(parts, domain)
+		}
 	}
 	return AgentIDPrefix + digest16(agentNamespace, parts...)
 }
@@ -88,15 +109,33 @@ func AccountKey(name string) string {
 	return strings.ToLower(name)
 }
 
+// AccountDomain is the DOMAIN of a DOMAIN\name account or the realm of a
+// name@realm one, lower-cased, or "" for a bare name.
+func AccountDomain(name string) string {
+	name = clean(name)
+	if i := strings.IndexByte(name, '\\'); i > 0 && i < len(name)-1 {
+		return strings.ToLower(name[:i])
+	}
+	if i := strings.LastIndexByte(name, '@'); i > 0 && i < len(name)-1 {
+		return strings.ToLower(name[i+1:])
+	}
+	return ""
+}
+
 // UIDReassigned reports whether holder, the account that holds the uid
 // userID now, is another account than recorded, the one a record of that
 // uid was made for: recorded was removed and its uid handed to holder, or
-// renamed. A SID is never handed on, and an unknown side proves nothing.
+// renamed. Two names of one account in two domains are two accounts. A SID
+// is never handed on, and an unknown side proves nothing.
 func UIDReassigned(userID, recorded, holder string) bool {
 	if IsSID(NormalizeUserID(userID)) || clean(recorded) == "" || clean(holder) == "" {
 		return false
 	}
-	return AccountKey(recorded) != AccountKey(holder)
+	if AccountKey(recorded) != AccountKey(holder) {
+		return true
+	}
+	recordedDomain, holderDomain := AccountDomain(recorded), AccountDomain(holder)
+	return recordedDomain != "" && holderDomain != "" && recordedDomain != holderDomain
 }
 
 // IsSID reports whether a normalized user id is a Windows SID.

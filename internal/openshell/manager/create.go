@@ -126,6 +126,9 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err != nil {
 		return nil, err
 	}
+	if err := m.sandboxReleaseRefusal(gw); err != nil {
+		return nil, err
+	}
 	// On a managed host the daemon chose the driver at sandbox start (its
 	// KVM probe and the organization's driver_fallback): the gateway must
 	// run that one. It is never switched under running sandboxes.
@@ -190,6 +193,14 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	b, err := m.reserve(name, project, mode)
 	if err != nil {
 		return nil, err
+	}
+	if pinned, ok := ctx.Value(createConfigKey{}).(*config.Config); ok && pinned != nil {
+		// The refreshes during the create, and until the daemon keeps the
+		// registration, judge this sandbox under the floor its create
+		// resolved with, not the closed one (GAP-0016).
+		m.mu.Lock()
+		b.createCfg = pinned
+		m.mu.Unlock()
 	}
 	b.op.Lock()
 	defer b.op.Unlock()
