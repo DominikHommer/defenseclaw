@@ -372,7 +372,6 @@ func apiAuthenticationFailureLogReason(reason string) string {
 		"invalid_scoped_path_token",
 		"invalid_acp_signed_request",
 		"missing_acp_authenticated_transport",
-		"invalid_acp_scoped_token",
 		acpCallerAccountMismatchReason,
 		acpCallerAccountUnverifiedReason:
 		return reason

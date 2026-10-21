@@ -647,16 +647,6 @@ func acpBindingAllowed(allow []string, value string) bool {
 	return len(allow) == 0 || slices.Contains(allow, value)
 }
 
-// isACPAPIPath reports whether the path belongs to the ACP guard's own
-// signed-request routes. The operator read-only routes (/v1/acp/catalog,
-// /v1/acp/profiles) deliberately stay on the gateway token: routing them
-// here would let an ACP scoped credential read the ACP policy inventory and
-// would refuse the management token the documented API contract assigns to
-// those routes (docs/reference/gateway-api.mdx, Auth).
-func isACPAPIPath(path string) bool {
-	return path == "/api/v1/acp/challenge" || path == "/api/v1/acp/evaluate"
-}
-
 type acpEnterpriseCredentialContextKey struct{}
 
 func withACPEnterpriseCredential(ctx context.Context, credential acp.EnterpriseCredential) context.Context {
@@ -717,24 +707,6 @@ func acpPrincipalIdentity(principal string) string {
 		return ""
 	}
 	return identity
-}
-
-// authenticateACPToken applies different custody models without widening the
-// bearer onto any non-ACP route. Unmanaged mode uses the single local sidecar;
-// managed enterprise mode requires one administrator-owned, per-principal and
-// per-binding credential record and carries its scope into evaluation.
-func (a *APIServer) authenticateACPToken(r *http.Request, candidate string) (*http.Request, bool) {
-	if a == nil || a.scannerCfg == nil || r == nil {
-		return r, false
-	}
-	if !managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) {
-		return r, a.acpAPITokenMatches(candidate)
-	}
-	credential, ok := acp.MatchEnterpriseCredential(a.scannerCfg.DataDir, candidate)
-	if !ok {
-		return r, false
-	}
-	return r.WithContext(withACPEnterpriseCredential(r.Context(), credential)), true
 }
 
 func (a *APIServer) authenticateACPSignedRequest(r *http.Request) (*http.Request, string, string, bool) {
@@ -851,17 +823,9 @@ func serveACPSignedResponse(w http.ResponseWriter, r *http.Request, next http.Ha
 	_, _ = w.Write(capture.body.Bytes())
 }
 
-// acpAPITokenMatches authenticates the guard with a credential that has no
-// authority outside ACP routes. The token stays in a mode-0600 sidecar rather
-// than IDE JSON or config.yaml.
-func (a *APIServer) acpAPITokenMatches(candidate string) bool {
-	if a == nil || a.scannerCfg == nil || candidate == "" {
-		return false
-	}
-	expected, ok := a.loadACPAPIToken()
-	return ok && constantTimeStringMatch(expected, candidate)
-}
-
+// loadACPAPIToken reads the per-user guard key. It signs the two guard
+// routes only and has no authority on any other route. It stays in a
+// mode-0600 sidecar rather than IDE JSON or config.yaml.
 func (a *APIServer) loadACPAPIToken() (string, bool) {
 	if a == nil || a.scannerCfg == nil {
 		return "", false
