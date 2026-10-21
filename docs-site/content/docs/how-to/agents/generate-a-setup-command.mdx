@@ -25,7 +25,12 @@ Nothing here runs on your machine. Choose **Bash / zsh** for macOS and Linux or 
 
 The two choices with no flag are the hook fail mode (use `defenseclaw guardrail fail-mode`) and judge fallback models (`guardrail.judge.fallbacks` in `config.yaml`). Every flag is in the [`setup guardrail` reference](/docs/reference/commands/guardrail-setup).
 
+## Check it worked
+
+Run the copied command on the host, then `defenseclaw guardrail status`. The agent shows `enabled` with the mode, rule pack and judge you picked. A mismatch means a flag was left out of the command.
+
 ## Next
 
+- [Set up an LLM key](/docs/how-to/agents/set-up-an-llm-key)
 - [Turn on blocking](/docs/how-to/guardrail/turn-on-blocking)
 - [Capability matrix](/docs/reference/apis/capability-matrix)

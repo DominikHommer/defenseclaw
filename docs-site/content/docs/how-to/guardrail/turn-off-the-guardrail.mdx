@@ -29,24 +29,24 @@ keywords:
 
    The command always restarts the gateway, even with `--no-restart`, because the restart runs the teardown. It is global. To turn off one agent and keep the rest, use `defenseclaw guardrail disable --connector codex`.
 
-2. Check the agent files.
+## Check it worked
 
-   ```bash
-   defenseclaw guardrail status
-   ```
+```bash
+defenseclaw guardrail status
+```
 
-   ```text
-     * enabled:    no
-         - Claude Code
-             key:         claudecode
-             state:       disabled (guardrail off)
-     …
-     Enable with:   defenseclaw guardrail enable
-   ```
+```text
+  * enabled:    no
+      - Claude Code
+          key:         claudecode
+          state:       disabled (guardrail off)
+  …
+  Enable with:   defenseclaw guardrail enable
+```
 
-   Open the agent's config (for example `~/.claude/settings.json`). No DefenseClaw hook entries remain. A file DefenseClaw created is deleted; a file you had before is restored.
+Open the agent's config (for example `~/.claude/settings.json`). No DefenseClaw hook entries remain. A file DefenseClaw created is deleted; a file you had before is restored.
 
-   `defenseclaw doctor` shows the guardrail as disabled. It still checks the agents' hooks and reports them missing; after a disable that is expected.
+`defenseclaw doctor` shows the guardrail as disabled. It still checks the agents' hooks and reports them missing; after a disable that is expected.
 
 ## Turn it back on
 
@@ -71,5 +71,5 @@ Add `--connector codex` to bring back one agent, or `--yes` to skip the question
 
 ## Next
 
-- [Turn on blocking](/docs/how-to/guardrail/turn-on-blocking)
 - [Add or remove an agent](/docs/how-to/agents/add-or-remove-an-agent)
+- [Turn on blocking](/docs/how-to/guardrail/turn-on-blocking)
