@@ -39,12 +39,15 @@ func ManagedHookGroupsForOS(connectorName, agentVersion, goos string) ([]Managed
 	if name == "codex" && strings.TrimSpace(agentVersion) == "" && goos == "windows" {
 		// A machine-wide requirements file serves every client version on
 		// the host. Without a pinned version, Windows publishes the exact
-		// ten-group matrix its machine-requirements installer certifies and
-		// verifies. Linux and macOS publish the matrix of the default
-		// contract their commands bind (codex-hooks-v4: SessionStart with
-		// compact and SessionEnd), as per-user setup does (GAP-0008).
-		out := make([]ManagedHookGroup, 0, len(codexHookGroups))
-		for _, group := range codexHookGroups {
+		// ten-group matrix its machine-requirements installer writes and
+		// verifies for the contract its commands bind, SessionStart with
+		// compact included (windowsCodexMachineGroups). Linux and macOS
+		// publish the matrix of that default contract (codex-hooks-v4:
+		// SessionStart with compact and SessionEnd), as per-user setup does
+		// (GAP-0008).
+		groups := windowsCodexMachineGroups(resolveHookContractForOS(name, "", goos).Contract.ContractID)
+		out := make([]ManagedHookGroup, 0, len(groups))
+		for _, group := range groups {
 			out = append(out, ManagedHookGroup{Event: group.eventType, Matcher: group.matcher, Timeout: group.timeout})
 		}
 		return out, nil
@@ -67,11 +70,8 @@ func ManagedHookGroupsForOS(connectorName, agentVersion, goos string) ([]Managed
 			if !ok {
 				return nil, fmt.Errorf("codex hook contract %s contains unregistered event %s", contract.ContractID, event)
 			}
-			if event == "SessionStart" &&
-				(contract.ContractID == "codex-hooks-v3" ||
-					contract.ContractID == "codex-hooks-v3-generic" ||
-					contract.ContractID == "codex-hooks-v4") {
-				group.matcher = "startup|resume|clear|compact"
+			if event == "SessionStart" && codexContractCertifiesCompactSessionStart(contract.ContractID) {
+				group.matcher = codexCompactSessionStartMatcher
 			}
 			out = append(out, ManagedHookGroup{Event: group.eventType, Matcher: group.matcher, Timeout: group.timeout})
 		}
