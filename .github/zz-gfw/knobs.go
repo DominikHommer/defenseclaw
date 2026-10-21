@@ -27,6 +27,13 @@ func init() {
 	}
 }
 
+var gfwBoundFactor = func() int64 {
+	if n, err := strconv.Atoi(os.Getenv("GFLOOD_BFACTOR")); err == nil && n > 0 {
+		return int64(n)
+	}
+	return 1
+}()
+
 var gfwTraceOn = os.Getenv("GFW_TRACE") == "1"
 
 func gfwTrace(format string, args ...any) {

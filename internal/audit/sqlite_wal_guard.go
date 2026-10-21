@@ -271,7 +271,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 		}
 	}
 	policy := walCatchUpPolicy{window: walIdleWindow, acquire: walWriterAcquireWait, hold: walCatchUpCap}
-	if logBytes > limitBytes {
+	if logBytes > gfwBoundFactor*limitBytes {
 		policy = walCatchUpPolicy{acquire: walBoundedAcquireWait, hold: walBoundedCatchUpCap, bounded: true}
 		result.Bounded = true
 	}
