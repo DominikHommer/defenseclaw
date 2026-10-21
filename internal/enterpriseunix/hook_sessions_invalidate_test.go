@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,5 +216,182 @@ func TestTheLifecycleBumpsTheHookSessionGenerationFirstAndWhileClosed(t *testing
 	}
 	if info, err := os.Lstat(root); err != nil || info.Mode().Perm() != 0o700 && info.Mode().Perm()&0o022 == 0 {
 		t.Fatalf("a failed bump must not open the record folder: %v %v", info, err)
+	}
+}
+
+// hookSessionTestReachable reports whether the hook, as an agent account,
+// could read account 1001's allow under root and would trust the folders on
+// the way (below top: none writable by group or other or carrying a macOS
+// access-list entry, every one traversable), and the allow proves the
+// process.
+func hookSessionTestReachable(h *testHost, root string) bool {
+	h.runner.mu.Lock()
+	defer h.runner.mu.Unlock()
+	for dir := root; dir != h.env.Root && strings.HasPrefix(dir, h.env.Root+"/"); dir = filepath.Dir(dir) {
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 || info.Mode().Perm()&0o001 == 0 || len(h.runner.acls[dir]) > 0 {
+			return false
+		}
+	}
+	return hookSessionTestProves(root)
+}
+
+// Review P2 (GAP-0352, 1.0.4 loop round 3): with a folder above the record
+// folder loosened (its mode, or on macOS an access-list entry), an account
+// moves the record folder, or the folder on the way to it, away before a
+// repair, so the repair's first bump finds nothing, and brings it back with
+// its own generation file and allow while it can still change the loosened
+// folder: as soon as it can, or only once the repair has bumped the record
+// folder. A repair that put the folder's mode back before it closed and
+// bumped the record folder let the hook trust the old allow in between, and
+// one that removed the access-list entry only after the bump let the
+// account bring the old folder back after it. The repair now puts the
+// folder back closed, without access-list entries, and opens it only after
+// the bump: the hook reaches the old allow at no point of the run or after
+// it, on Linux and macOS, for every managed folder above the record folder.
+// A healthy host never has those folders closed.
+func TestRepairNeverOpensAFolderAboveTheRecordsBeforeTheirBump(t *testing.T) {
+	type loosening struct{ dir, how, when string }
+	for _, goos := range []string{"linux", "darwin"} {
+		h := newTestHost(t, goos)
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+		root := h.env.P(h.env.Layout.HookSessionDir)
+		above := []string{h.env.Layout.HookSocketDir}
+		if goos == "darwin" {
+			above = append([]string{h.env.Layout.InstallRoot}, above...)
+		}
+		cases := []loosening{{}}
+		for _, dir := range above {
+			hows := []string{"mode"}
+			if goos == "darwin" {
+				hows = append(hows, "acl")
+			}
+			for _, how := range hows {
+				for _, when := range []string{"first", "after the bump"} {
+					cases = append(cases, loosening{dir, how, when})
+				}
+			}
+		}
+		for _, c := range cases {
+			name := goos + " healthy"
+			if c.dir != "" {
+				name = goos + " " + c.dir + " " + c.how + " " + c.when
+			}
+			t.Run(name, func(t *testing.T) {
+				publishHookSessionTestAllow(t, root)
+				var folder, child, away string
+				if c.dir != "" {
+					folder = h.env.P(c.dir)
+					child = root
+					for filepath.Dir(child) != folder {
+						child = filepath.Dir(child)
+					}
+					if c.how == "mode" {
+						if err := os.Chmod(folder, 0o777); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						h.runner.mu.Lock()
+						h.runner.acls = map[string][]string{folder: {"user:developer allow add_subdirectory,delete_child"}}
+						h.runner.mu.Unlock()
+					}
+					away = filepath.Join(t.TempDir(), "away")
+					if err := os.Rename(child, away); err != nil {
+						t.Fatal(err)
+					}
+				}
+				writable := func() bool {
+					if folder == "" {
+						return false
+					}
+					h.runner.mu.Lock()
+					acl := len(h.runner.acls[folder]) > 0
+					h.runner.mu.Unlock()
+					info, err := os.Lstat(folder)
+					return acl || err == nil && info.Mode().Perm()&0o002 != 0
+				}
+				returned, bumped, reached, closedHealthy := false, false, "", ""
+				probe := func(when string) {
+					// On a healthy host the allow is the untouched one the
+					// run's first bump ends.
+					if returned && reached == "" && hookSessionTestReachable(h, root) {
+						reached = when
+					}
+					if c.dir == "" && closedHealthy == "" {
+						for _, dir := range above {
+							if info, err := os.Lstat(h.env.P(dir)); err == nil && info.Mode().Perm()&0o001 == 0 {
+								closedHealthy = dir + " " + when
+							}
+						}
+					}
+				}
+				bringBack := func() error {
+					if returned || !writable() || c.when != "first" && !bumped {
+						return nil
+					}
+					// The account brings its old folder back while it
+					// still can.
+					if err := os.RemoveAll(child); err != nil {
+						return err
+					}
+					if err := os.Rename(away, child); err != nil {
+						return err
+					}
+					if !hookSessionTestProves(root) {
+						return errors.New("the brought-back folder must still hold its own allow")
+					}
+					returned = true
+					return nil
+				}
+				previousLchown := h.env.Lchown
+				h.env.Lchown = func(path string, uid, gid int) error {
+					if err := bringBack(); err != nil {
+						return err
+					}
+					probe("before the chown of " + path)
+					err := previousLchown(path, uid, gid)
+					probe("after the chown of " + path)
+					return err
+				}
+				t.Cleanup(func() { h.env.Lchown = previousLchown })
+				previousBump := hookSessionBump
+				hookSessionBump = func(path string) error {
+					probe("at the bump of " + path)
+					err := previousBump(path)
+					bumped = bumped || path == root
+					return err
+				}
+				t.Cleanup(func() { hookSessionBump = previousBump })
+				requireOK(t, h.run(Options{Action: ActionRepair}))
+				probe("after the repair")
+				if c.when == "first" && !returned {
+					t.Fatal("the account must bring its folder back while it can change the folder above")
+				}
+				if reached != "" {
+					t.Fatalf("the hook could trust the old allow %s", reached)
+				}
+				if closedHealthy != "" {
+					t.Fatalf("a healthy host must keep the folders above the records open: %s", closedHealthy)
+				}
+				if hookSessionTestProves(root) && returned {
+					t.Fatal("the old allow must prove nothing after the repair")
+				}
+				h.runner.mu.Lock()
+				left := len(h.runner.acls[folder])
+				h.runner.mu.Unlock()
+				if left > 0 {
+					t.Fatalf("the repair must remove the access-list entry of %s", folder)
+				}
+				modes := map[string]os.FileMode{root: 0o711}
+				for _, dir := range above {
+					modes[h.env.P(dir)] = 0o755
+				}
+				for path, mode := range modes {
+					if info, err := os.Lstat(path); err != nil || info.Mode().Perm() != mode {
+						t.Fatalf("%s: the mode must be put back: %v %v", path, info, err)
+					}
+				}
+			})
+		}
 	}
 }

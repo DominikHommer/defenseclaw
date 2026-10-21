@@ -1887,7 +1887,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	pending.Phase = "apply"
 	_ = env.savePending(pending)
 
-	createdDirs, err := l.applyDirs(p)
+	createdDirs, err := l.applyDirs(ctx, p)
 	if err != nil {
 		return failAndRollback(codeApply, err)
 	}
@@ -2176,9 +2176,24 @@ func (l *lifecycle) keepRunningDuringChange(p *plan) map[string]bool {
 	return keep
 }
 
-func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
+func (l *lifecycle) applyDirs(ctx context.Context, p *plan) ([]string, error) {
 	env := l.env
 	created := []string{}
+	// A folder above the record folder that another account could change
+	// is put back closed, and opened only once the record folder below it
+	// is closed and bumped (sealHookSessionRecords; GAP-0352, 1.0.4 review
+	// loop round 3): an account that moved the record folder, or a folder
+	// holding it, away before the run's first bump and brought it back while
+	// the folder above was writable finds the hook unable to reach its old
+	// allow from the moment that folder is no longer writable until the
+	// bump has ended it. That covers a macOS access-list entry too, which
+	// lets an account change a folder whatever its mode, and which the run
+	// would otherwise remove only after the seal (removeACLs): the account
+	// could put its old folder back after the bump. A folder that is
+	// already right is left open: no other account can rename anything in
+	// it, and its hook socket stays reachable.
+	sealPending := env.Layout.HookSessionDir != "" && planHasDir(p.dirs, env.Layout.HookSessionDir)
+	var closedAbove []desiredDir
 	for _, dir := range p.dirs {
 		path := env.P(dir.Path)
 		if dir.External {
@@ -2195,16 +2210,34 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 		if l.reportChanges && env.metadataDiffers(path, dir.Mode, dir.Owner) {
 			l.noteChange("restored the mode and owner of %s", dir.Path)
 		}
+		if sealPending && hookSessionAncestor(dir.Path, env.Layout.HookSessionDir) && exists(path) &&
+			(env.metadataDiffers(path, dir.Mode, dir.Owner) || l.hookSessionAncestorACL(ctx, path)) {
+			if err := l.closeHookSessionAncestor(ctx, path, dir.Owner); err != nil {
+				return nil, err
+			}
+			closedAbove = append(closedAbove, dir)
+			continue
+		}
 		if dir.Path == env.Layout.HookSessionDir {
-			// Every folder above it is back by now: this closed bump ends
-			// whatever another account could change while the tree was
-			// loosened.
+			// Every folder above it is back by now, closed when another
+			// account could change it: this closed bump ends whatever
+			// another account could change while the tree was loosened.
 			if err := env.sealHookSessionRecords(path, dir.Owner); err != nil {
 				return nil, err
 			}
 		}
 		if err := env.ensureDir(path, dir.Mode, dir.Owner); err != nil {
 			return nil, err
+		}
+		if dir.Path == env.Layout.HookSessionDir {
+			sealPending = false
+			for i := len(closedAbove) - 1; i >= 0; i-- {
+				above := closedAbove[i]
+				if err := env.ensureDir(env.P(above.Path), above.Mode, above.Owner); err != nil {
+					return nil, err
+				}
+			}
+			closedAbove = nil
 		}
 	}
 	for _, file := range p.files {
@@ -2457,6 +2490,64 @@ func (e *Env) sealHookSessionRecords(path string, owner fileOwner) error {
 	}
 	if err := hookSessionBump(path); err != nil {
 		return fmt.Errorf("invalidate the protected foreign-hook session records in %s: %w", path, err)
+	}
+	return nil
+}
+
+// planHasDir reports whether dirs plans the directory at canonical.
+func planHasDir(dirs []desiredDir, canonical string) bool {
+	for _, dir := range dirs {
+		if dir.Path == canonical {
+			return true
+		}
+	}
+	return false
+}
+
+// hookSessionAncestor reports whether the canonical directory dir is a
+// folder above the record folder at session.
+func hookSessionAncestor(dir, session string) bool {
+	dir, session = filepath.Clean(dir), filepath.Clean(session)
+	return dir != session && strings.HasPrefix(session, strings.TrimSuffix(dir, "/")+"/")
+}
+
+// hookSessionAncestorACL reports whether the folder at path, above the
+// record folder, has a macOS access-list entry that gives another account
+// any access, or an access list that cannot be read.
+func (l *lifecycle) hookSessionAncestorACL(ctx context.Context, path string) bool {
+	if l.env.GOOS != "darwin" {
+		return false
+	}
+	findings, err := l.env.aclFindings(ctx, []aclTarget{{path: path, private: true}})
+	return err != nil || len(findings) > 0
+}
+
+// closeHookSessionAncestor puts back the owner of the folder at path, above
+// the record folder, closes it to every other account (0700) and removes
+// its macOS access-list entries, so no other account can reach or rename
+// anything below it, until applyDirs gives it its mode after the record
+// folder was sealed. The owner goes back first: an account that owned the
+// folder could otherwise open it again.
+func (l *lifecycle) closeHookSessionAncestor(ctx context.Context, path string, owner fileOwner) error {
+	e := l.env
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	if err := e.Lchown(path, owner.UID, owner.GID); err != nil {
+		return fmt.Errorf("chown %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("chmod %s: %w", path, err)
+	}
+	if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode()&(os.ModePerm|os.ModeSticky)&^0o700 != 0 {
+		return fmt.Errorf("%s could not be closed to other accounts before the records below it are invalidated", path)
+	}
+	if e.GOOS == "darwin" {
+		return l.removeACLTargets(ctx, []aclTarget{{path: path, private: true}})
 	}
 	return nil
 }
