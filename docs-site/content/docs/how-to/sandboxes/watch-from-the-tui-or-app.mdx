@@ -8,138 +8,55 @@ keywords:
   - sandbox notifications
 ---
 
-Watch the live feed, answer asks, unblock sites, and stop, pull or undo a sandbox from the TUI or the macOS app. Both read the DefenseClaw daemon, so a sandbox started from the command line shows up in both.
+Watch the live feed, answer asks, unblock sites, and stop, pull or undo a sandbox from the TUI or the macOS app. Both read the DefenseClaw daemon, so a sandbox started from the command line shows up in both. Sandboxes must be set up and the daemon running. On Windows the panel only says that OpenShell sandboxes run on Linux and macOS.
 
-## Before you start
-
-- Sandboxes are set up and the daemon runs. See [Linux](/docs/how-to/sandboxes/set-up-on-linux) or [macOS](/docs/how-to/sandboxes/set-up-on-macos).
-- On Windows the Sandboxes panel only says that OpenShell sandboxes run on Linux and macOS.
-
-| Task | Command line | TUI | macOS app |
+| Task | Command line | TUI (`7`) | macOS app |
 | --- | --- | --- | --- |
-| Set up | `defenseclaw sandbox setup` | Setup (`0`), **Sandboxes (OpenShell)** | Setup, **Sandbox** (never installs OpenShell) |
-| Start a run | `defenseclaw sandbox run claude` | `n` in the Sandboxes panel | **Copy run command**, paste in Terminal |
-| Watch the feed | `defenseclaw sandbox activity -f` | `7`, then `t` for **Activity** | **Activity** in the Sandboxes view, plus notifications |
-| Unblock a site | `defenseclaw sandbox unblock HOST --sandbox NAME` | `u` | **Unblock** in a notification, the menu bar or the view |
-| Answer an ask | `defenseclaw sandbox approve NAME ID` | `a`, `A` or `x` in **Asks** | **Approve**, **Always…** or **Reject** |
-| Resume | `defenseclaw sandbox connect NAME` | `c` | **Copy connect command** |
-| Bring back a copy | `defenseclaw sandbox pull NAME --apply` | `P` | **Copy pull command** or **Pull to branch** |
-| Undo | `defenseclaw sandbox undo NAME` | `U` | **Undo…** |
+| Start a run | `sandbox run claude` | `n` | **Copy run command** |
+| Watch the feed | `sandbox activity -f` | `t` for **Activity** | **Activity**, plus notifications |
+| Unblock a site | `sandbox unblock HOST` | `u` | **Unblock** |
+| Answer an ask | `sandbox approve NAME ID` | `a`, `A`, `x` in **Asks** | **Approve**, **Always…**, **Reject** |
+| Bring back a copy | `sandbox pull NAME --apply` | `P` | **Pull to branch** |
+| Undo | `sandbox undo NAME` | `U` | **Undo…** |
 
 ## Use the TUI
-
-<Steps>
-
-<Step>
-
-### Open the Sandboxes panel
 
 ```bash
 defenseclaw tui
 ```
 
-Press `7`.
+Press `7` for the Sandboxes panel. The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or `UNREACHABLE`), how many sandboxes run, how many asks wait, and the gateway with its driver. `OFF` points to the setup wizard. `UNAVAILABLE` gives the daemon's reason.
 
-![DefenseClaw TUI Sandboxes panel on a Mac: READY header with the OpenShell gateway and its MicroVM driver, a blocked-destination line, the action bar and one running sandbox with its pack, mode, sites, blocked sites and tool calls](/images/sandboxes/screens/tui-sandboxes.png)
-
-The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or `UNREACHABLE`), how many sandboxes run, how many asks wait, and the gateway with its compute driver (`docker` or `MicroVM`). `OFF` points to the setup wizard. `UNAVAILABLE` gives the daemon's reason and suggests `defenseclaw sandbox doctor`.
-
-</Step>
-
-<Step>
-
-### Switch views with `t`
-
-| View | What it shows |
-| --- | --- |
-| **Sandboxes** | Every sandbox, running ones first: name, phase, harness, pack and profile, mode, uptime, sites, blocked sites, tool calls and alerts. |
-| **Activity** | The live feed, newest first. `✓` allowed site, `✗` blocked site, `⊘` blocked tool call, `↺` lifted block, `⚠` large upload or finding, `?` ask, `·` lifecycle step. A block you can lift ends in `(u unblocks)`. |
-| **Asks** | Asks waiting for you: sandbox, destination, program, risk and reason. |
+Press `t` to switch views: **Sandboxes** (one row per sandbox), **Activity** (the live feed, newest first) and **Asks** (waiting for you). `Enter` opens details, `Esc` closes them.
 
 ![DefenseClaw TUI Activity view on Linux: the feed of one sandbox, newest first, with allowed sites, two shadow AI warnings, a paste site refused with the key that unblocks it, a blocked tool call and the sandbox's lifecycle lines](/images/sandboxes/screens/tui-sandboxes-activity.png)
 
-`Enter` opens the selected row's details and `Esc` closes them. The details list the harness, phase, pack, the repository policy, the project, site and tool-call counts, how the last detached run ended, hook events, the last blocked tool call, the image, the process tree when it is on, and a Destination row for each site.
-
-</Step>
-
-<Step>
-
-### Act with a key
-
 | Key | Action |
 | --- | --- |
-| `t` | Switch between Sandboxes, Activity and Asks |
 | `n` | Start a new sandboxed run |
 | `c` | Connect: start a stopped sandbox and attach its harness |
-| `s` | Stop the sandbox (asks first). It is kept. |
-| `d` | Delete the sandbox (asks first). Undo is no longer possible. |
-| `R` | Review the changed files that can run code on your machine (a live mount) |
-| `P` | Pull a copy-mode sandbox's work: show it, apply it, or put it on a branch (`dc/NAME`, or a name you type) |
+| `s` / `d` | Stop (kept) or delete the sandbox, after asking |
+| `R` / `P` | Review changed files (live mount), or pull a copy's work |
 | `U` | Undo the pre-session snapshot, or the last pull on a copy |
-| `u` | Unblock a blocked site: **Only in** this sandbox, or **In every sandbox (always)** |
-| `a` / `A` / `x` | Approve an ask once, approve it always, or reject it |
+| `u` | Unblock a blocked site, for this sandbox or all |
+| `a` / `A` / `x` | Approve an ask once, always, or reject it |
 | `w` | Turn the shell wrapper on or off per harness |
-| `r` | Refresh now |
 
-The KEYS line at the bottom lists the keys that apply to the selected row. Confirmations for delete, undo and the "always" choices start on **Cancel**. Blocks of private networks, metadata addresses and your organization's block lists cannot be lifted here.
+The KEYS line at the bottom lists the keys that apply to the selected row. Blocks of private networks, metadata addresses and your organization's block lists cannot be lifted here.
 
-</Step>
+`n` opens the launch dialog: harness, project folder, optional name, network profile, work on a copy (ticked and locked on a Mac), and keep the harness's prompts (`--safe`). `Ctrl+S` starts it and the TUI hands over your terminal until the harness exits.
 
-<Step>
-
-### Start a run with `n`
-
-![DefenseClaw TUI New sandboxed run dialog on a Mac: harness, project folder, name, network profile, work on a copy (ticked and locked), keep the harness's own permission prompts](/images/sandboxes/screens/tui-sandbox-launch.png)
-
-| Field | Meaning |
-| --- | --- |
-| Harness | Claude Code, Codex or another harness DefenseClaw runs. The ones you set up come first. |
-| Project folder | The only folder the agent sees. Your home folder and system folders are refused. |
-| Name | Optional. The default is the folder name plus a short random suffix. |
-| Network profile | The pack default, `open`, `balanced` or `strict`. |
-| Work on a copy | Same as `--copy`. On a Mac it is ticked and locked. |
-| Keep the harness's own permission prompts | Same as `--safe`. |
-
-`Ctrl+S` starts and `Esc` cancels. The TUI hands your terminal to `defenseclaw sandbox run`. After the end-of-session summary, `Enter` brings the TUI back.
-
-</Step>
-
-</Steps>
+![DefenseClaw TUI New sandboxed run dialog on a Mac: harness, project folder, name, network profile, work on a copy, keep the harness's own permission prompts](/images/sandboxes/screens/tui-sandbox-launch.png)
 
 ## Use the macOS app
 
-The [macOS app](/docs/features/macos-app) shows sandboxes in the Sandboxes view (sidebar, under **Govern**, or `⌘⇧B`), the menu bar, notifications and an Overview card. It refreshes every few seconds while open.
+The [macOS app](/docs/features/macos-app) shows sandboxes in the Sandboxes view (under **Govern**, or `⌘⇧B`), the menu bar and notifications. It refreshes every few seconds. The view has a table of sandboxes, a list of waiting asks and the 60 newest events, and each selected sandbox offers **Stop…**, **Copy pull command**, **Pull to branch**, **Review changes**, **Undo…** and **Copy connect command**. The app has no launch dialog: start runs in Terminal.
 
-- **Header:** the status line and two buttons. **Copy run command** copies `cd <project> && defenseclaw sandbox run claude`. **Refresh** reads the daemon again.
-- **Sandboxes:** a table with Name, Phase, Harness, Pack/Profile, Mode, Up, Sites and Alerts.
-- **Asks:** each waiting ask, with **Approve**, **Always…** and **Reject**.
-- **Activity:** the 60 newest events. A blocked site you can lift has an **Unblock** menu.
-
-The app has no launch dialog. Start runs in Terminal.
-
-| Action on the selected sandbox | What it does |
-| --- | --- |
-| **Stop…** | Asks first, then stops the sandbox. It is kept. |
-| **Copy pull command** | Copies `defenseclaw sandbox pull NAME`. |
-| **Pull to branch** | Puts the work on branch `dc/NAME` and leaves your working tree alone. A change that can run code on your Mac is not brought back this way: pull it in Terminal, where it asks. |
-| **Review changes** | For a live mount (Linux): lists the changed files that can run code. |
-| **Undo…** | Asks first. On a copy it reverts the last `pull --apply`. On a live mount it restores the pre-session snapshot. |
-| **Copy connect command** | Copies the command that resumes the sandbox. |
-
-With **Notify on sandbox blocked destinations and asks (with Unblock)** on in the app's settings, you get a notification for each of these. The app sends at most one per sandbox and site per minute.
-
-| Event | Actions |
-| --- | --- |
-| A blocked site you can unblock | **Unblock for this sandbox**, **Review** |
-| An ask | **Review** |
-| A new git repository in a mounted project | **Review** |
-| Hooks that cannot reach DefenseClaw | **Review** |
-
-**Unblock for this sandbox** needs an unlocked Mac and lifts the block for that sandbox only. Unblocking a site everywhere is a confirmed choice in the Sandboxes view.
+With **Notify on sandbox blocked destinations and asks** on in the app's settings, you get a notification for a blocked site (**Unblock for this sandbox**), an ask, a new git repository in a mounted project, and hooks that cannot reach DefenseClaw. At most one arrives per sandbox and site per minute. Unblocking a site everywhere is a confirmed choice in the Sandboxes view.
 
 ## Check it worked
 
-Run `defenseclaw sandbox run claude` in a terminal. The sandbox appears in the Sandboxes view of the TUI (`7`) or the app within a few seconds, and its sites appear in **Activity**.
+Run `defenseclaw sandbox run claude` in a terminal. The sandbox appears in the TUI Sandboxes panel or the app within a few seconds, and its sites appear in **Activity**.
 
 ## Next
 

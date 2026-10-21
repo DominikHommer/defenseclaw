@@ -9,12 +9,7 @@ keywords:
   - openshell.pack
 ---
 
-Pick the sandbox pack that fits your project, add your own hosts to it, and lock a project to the sites its sandbox reached. A pack is one YAML file that sets the sandbox posture: web access, how connection requests are approved, live mount or copy, hidden secret files, skip-permissions mode and MCP servers.
-
-## Before you start
-
-- Sandboxes are set up ([Linux](/docs/how-to/sandboxes/set-up-on-linux) or [macOS](/docs/how-to/sandboxes/set-up-on-macos)).
-- You know which posture you need. The three built-in packs:
+Pick the sandbox pack that fits your project, add your own hosts, and lock a project to the sites its sandbox reached. A pack is one YAML file that sets web access, how connection requests are approved, live mount or copy, hidden secret files and skip-permissions mode.
 
 | Pack | Web access | Your project | Skip-permissions |
 | --- | --- | --- | --- |
@@ -22,56 +17,21 @@ Pick the sandbox pack that fits your project, add your own hosts to it, and lock
 | `balanced` | A curated developer allowlist | Mounted live | On |
 | `strict` | None, only the model provider | Copied | Off |
 
-[Sandbox policy](/docs/reference/sandboxes/policy#built-in-packs) lists every setting of each pack.
+Every setting of each pack is in [Sandbox policy](/docs/reference/sandboxes/policy#built-in-packs). Sandboxes must be set up first.
 
 ## Pick a built-in pack
 
-<Steps>
-
-<Step>
-
-### For one run
+For one run:
 
 ```bash
 defenseclaw sandbox run claude --pack balanced
 ```
 
-`--pack` applies every setting of the pack. `--profile` changes only the network settings and keeps the rest of the pack the run uses ([sandbox network](/docs/reference/sandboxes/network#profiles)).
-
-</Step>
-
-<Step>
-
-### For every run
-
-Set `openshell.pack` in `~/.defenseclaw/config.yaml`:
-
-```yaml
-openshell:
-  pack: balanced
-```
-
-```bash
-defenseclaw sandbox pack list
-```
-
-The command lists the packs with their digests. `defenseclaw sandbox pack show balanced` prints one.
-
-</Step>
-
-</Steps>
+For every run, set `openshell.pack: balanced` in `~/.defenseclaw/config.yaml`. `defenseclaw sandbox pack list` lists the packs with their digests.
 
 ## Extend a pack
 
-A custom pack starts from nothing unless it names a parent. Name a built-in pack and list only what you add.
-
-<Steps>
-
-<Step>
-
-### Write the file
-
-Create `~/.defenseclaw/policies/sandbox/team-web/pack.yaml`. The directory name must match `name`. DefenseClaw does not create the `policies/sandbox` directory.
+A custom pack starts from nothing unless it names a parent. Create `~/.defenseclaw/policies/sandbox/team-web/pack.yaml`. The directory name must match `name`.
 
 ```yaml
 version: 1
@@ -82,55 +42,27 @@ egress:
     - artifacts.example.com
     - docs.example.com
   ports: [443]
-harness:
-  yolo: false
 ```
 
-Lists such as `egress.allow` add to the parent's. Every other key replaces the parent's value. [Sandbox policy](/docs/reference/sandboxes/policy#extend-a-pack) has the rules.
-
-</Step>
-
-<Step>
-
-### Validate it
+Lists such as `egress.allow` add to the parent's. Every other key replaces the parent's value ([rules](/docs/reference/sandboxes/policy#extend-a-pack)). Validate it, then use it:
 
 ```bash
 defenseclaw sandbox pack validate ~/.defenseclaw/policies/sandbox/team-web/pack.yaml
+defenseclaw sandbox run claude --pack team-web
 ```
 
-The command applies the same rules as a run and prints the pack's name, profile and digest. A bad key stops it with the file, the key and the reason:
+A bad key stops validation with the file, the key and the reason:
 
 ```text
 sandbox pack /home/dev/.defenseclaw/policies/sandbox/team-web/pack.yaml: egress.ports[1]: port 70000 must be between 1 and 65535
 ```
 
-</Step>
-
-<Step>
-
-### Use it
-
-```bash
-defenseclaw sandbox run claude --pack team-web
-```
-
-Or set `openshell.pack: team-web`. `defenseclaw sandbox policy explain` shows the chain and where each setting comes from.
-
-</Step>
-
-</Steps>
-
-Keep custom packs out of the folders you run sandboxes on. A folder that holds a pack the policy reads is never shared with a sandbox.
-
 ## Add one host at a time
 
 ```bash
 defenseclaw sandbox policy allow artifacts.example.com
-defenseclaw sandbox policy block files.example.net
 defenseclaw sandbox policy test --host artifacts.example.com
 ```
-
-`policy allow` and `policy block` add a host to `openshell.egress.allow` and `openshell.egress.block`. `policy test` says what the policy decides for a destination, which rule decides and why. Add `--pack` or `--sandbox NAME` to test another policy.
 
 ```text
   pack balanced · profile balanced · network allowlist
@@ -138,48 +70,14 @@ DESTINATION             DECISION  RULE                      SOURCE
 registry.npmjs.org:443  allowed   allow registry.npmjs.org  DefenseClaw's curated allowlist (pack balanced)
 ```
 
+`policy block HOST` does the opposite. `policy test` says which rule decides and why.
+
 ## Record, then lock
 
-Start a project on a pack that lets the work happen, then lock it to what it reached.
-
-<Steps>
-
-<Step>
-
-### Run a few sessions
-
-Use the default `open` pack. DefenseClaw keeps every destination a sandbox reaches or tries to reach, across restarts, until you delete the sandbox. `defenseclaw sandbox destinations NAME` lists them.
-
-</Step>
-
-<Step>
-
-### See what a recorded pack would change
+Run a few sessions on the default `open` pack. DefenseClaw keeps every destination a sandbox reached or tried to reach (`defenseclaw sandbox destinations NAME`). Then preview and write a pack from them:
 
 ```bash
 defenseclaw sandbox policy suggest --sandbox myapp-claude --diff
-```
-
-```text
-  pack myapp-claude-recorded against the policy of sandbox myapp-claude (pack open):
-    profile                    open → balanced
-    network.mode               open → allowlist
-    approvals.mode             auto → triage
-    egress.allow               +example.net, registry.npmjs.org, registry.yarnpkg.com (+47 more; -o json lists all)
-    egress.large_upload_mb     25 → 10
-    hooks.on_tamper            alert → stop
-    hooks.on_silence           alert → stop
-  ⚠ reached now, blocked with the pack:
-    api.openai.com:443 — network_allowlist  (network.mode allowlist (profile balanced))
-```
-
-</Step>
-
-<Step>
-
-### Write the pack
-
-```bash
 defenseclaw sandbox policy suggest --sandbox myapp-claude \
   --pack-out ~/.defenseclaw/policies/sandbox/myapp/pack.yaml
 ```
@@ -188,39 +86,13 @@ defenseclaw sandbox policy suggest --sandbox myapp-claude \
   ✓ wrote /home/user/.defenseclaw/policies/sandbox/myapp/pack.yaml: pack myapp, extends balanced, 1 host to allow
 ```
 
-The pack extends `balanced` and allows every host the sandbox reached that balanced does not cover, each with a comment naming the programs that reached it. Hosts only ever refused, shadow AI hosts, blocklist hosts and the sandbox's model provider are listed as comments, not allowed. Nothing is applied until you run with the pack. The file is never written over. Review every host.
-
-![defenseclaw sandbox policy suggest --pack-out: the pack it wrote, extending balanced and allowing one host with the program that reached it, then comments listing the hosts balanced already covers, the host that was only ever refused, the shadow AI host and the sandbox's model provider](/images/sandboxes/screens/terminal-policy-recorded-pack.png)
-
-</Step>
-
-<Step>
-
-### Lock the project to it
+The pack extends `balanced` and allows each host the sandbox reached that balanced does not cover, with a comment naming the programs that reached it. Hosts only ever refused, shadow AI hosts and the model provider are listed as comments, not allowed. Review every host, then lock the project:
 
 ```bash
 defenseclaw sandbox run claude --pack myapp
 ```
 
-Or set `openshell.pack: myapp`. To keep it locked in CI, list expected decisions in a fixture and run `policy test`:
-
-```yaml
-- {host: registry.npmjs.org, port: 443, expect: allow}
-- {host: pastebin.com, port: 443, expect: block, rule: feed}
-```
-
-```bash
-defenseclaw sandbox policy test --pack ~/.defenseclaw/policies/sandbox/myapp/pack.yaml \
-  --fixture egress-expectations.yaml --output json
-```
-
-The command exits 1 when a decision does not match. It needs no `config.yaml` and no running daemon, but it runs `defenseclaw-gateway`, which must be on `PATH` or next to `defenseclaw`.
-
-</Step>
-
-</Steps>
-
-A project can also ask for a stricter sandbox itself with a [`.defenseclaw/sandbox.yaml` repository policy](/docs/reference/sandboxes/policy#repository-policy).
+To keep it locked in CI, run `defenseclaw sandbox policy test --pack FILE --fixture egress-expectations.yaml`. It exits 1 when a decision does not match. A project can also ask for a stricter sandbox with a [`.defenseclaw/sandbox.yaml`](/docs/reference/sandboxes/policy#repository-policy).
 
 ## Check it worked
 
