@@ -322,8 +322,9 @@ system drive if you expect such floods. The file shrinks back once the flood
 stops. A fix is planned for 1.0.4.
 
 A tool call that DefenseClaw allowed while the gateway was running still runs
-if you approve it in the agent after the gateway stops. Every call checked
-while the gateway is down is blocked.
+if you approve it in the agent after the gateway stops. In fail mode `closed`
+(the default), every call checked while the gateway is down is blocked; with
+the administrator's `hook_fail_mode: open`, an outage lets it run.
 
 ## Symptoms
 

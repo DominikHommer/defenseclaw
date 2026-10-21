@@ -330,7 +330,7 @@ events below:
 | Claude Code | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` | Yes |
 | Codex | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | None | Yes |
 | Cursor | `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt` | None | Yes |
-| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down) |
+| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down in the effective mode `closed`, the default, or with strict availability) |
 | Devin | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop` | None | Yes |
 | Antigravity | `PreToolUse` | `PreToolUse` | No |
 | Hermes | `pre_tool_call` | None | No (managed standalone: blocks `pre_tool_call` when DefenseClaw cannot check it) |
@@ -411,8 +411,12 @@ closed, so DefenseClaw lets that call run. It records the call in
 Copilot as upstream fail-open, and the gateway raises a `guardrail-degraded`
 alert when it starts again. No setting changes this for a per-user install,
 `DEFENSECLAW_STRICT_AVAILABILITY=1` included.
-Only an administrator-managed standalone Copilot hook blocks `preToolUse` and
-`permissionRequest` while the gateway service is not running.
+An administrator-managed standalone Copilot hook can block `preToolUse` and
+`permissionRequest` while the gateway service is not running, but only in the
+effective mode `closed` (the default) or with
+[strict availability](#strict-availability). With the administrator's
+`hook_fail_mode: open` it lets the call run, as every connector does in fail
+mode `open`.
 
 The shared `inspect-*.sh` scripts serve every connector of one data
 directory, and `DEFENSECLAW_CONNECTOR` only picks the connector they report

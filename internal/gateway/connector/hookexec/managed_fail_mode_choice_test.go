@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -132,6 +134,81 @@ func TestStandaloneManagedCopilotFollowsTheAdministratorsFailMode(t *testing.T) 
 			}
 			if !tc.blocked && !strings.Contains(result.stderr, "allowing") {
 				t.Fatalf("%s: an open outage must say the call is allowed: stderr=%q", event, result.stderr)
+			}
+		}
+	}
+}
+
+// 1.0.4 review (loop round 3 of G-hooks-upg): the docs promised that a
+// managed standalone Copilot hook blocks during a gateway outage, but one
+// whose administrator chose open lets the call run (managedCopilotOpen).
+// The outage blocks only in the effective mode closed or with strict
+// availability; this pins the behavior and that the docs say so.
+func TestManagedCopilotOutageBlockingDocsFollowTheFailMode(t *testing.T) {
+	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+	for _, tc := range []struct {
+		mode    string
+		strict  bool
+		blocked bool
+	}{
+		{mode: "closed", blocked: true},
+		{mode: "open", strict: true, blocked: true},
+		{mode: "open"},
+	} {
+		result := run(t, "copilot", &stubRT{err: notRunning}, func(o *Options) {
+			managedCodex(o)
+			o.ExplainUnenrolledAccount = true
+			o.Event = "preToolUse"
+			o.FailMode = tc.mode
+			o.StrictAvailability = tc.strict
+			o.Stdin = strings.NewReader(`{"toolName":"bash","toolArgs":"{\"command\":\"echo ok\"}"}`)
+		})
+		if got := blocked(result); got != tc.blocked {
+			t.Fatalf("fail mode %q, strict %v: blocked = %v, want %v: stdout=%q", tc.mode, tc.strict, got, tc.blocked, result.stdout)
+		}
+	}
+	docs := filepath.Join("..", "..", "..", "..", "docs-site", "content", "docs")
+	for _, doc := range []struct {
+		path      string
+		want      []string
+		forbidden []string
+	}{
+		{filepath.Join(docs, "reference", "fail-modes.mdx"), []string{
+			"No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down in the effective mode `closed`, the default, or with strict availability)",
+			"but only in the effective mode `closed` (the default) or with [strict availability](#strict-availability). With the administrator's `hook_fail_mode: open` it lets the call run",
+		}, []string{
+			"No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down) |",
+			"Only an administrator-managed standalone Copilot hook blocks",
+		}},
+		{filepath.Join(docs, "connectors", "copilot.mdx"), []string{
+			"With the administrator's `hook_fail_mode: open` it lets them run.",
+		}, []string{
+			"the administrator-owned hook is stricter: it denies",
+		}},
+		{filepath.Join(docs, "connectors", "capability-matrix.mdx"), []string{
+			"A managed hook lets a call run during a gateway outage only when the administrator set `hook_fail_mode: open`, and never with strict availability.",
+		}, []string{
+			"a managed hook never fails open on a gateway outage",
+		}},
+		{filepath.Join(docs, "enterprise", "troubleshooting.mdx"), []string{
+			"with the administrator's `hook_fail_mode: open`, an outage lets it run.",
+		}, []string{
+			"stops. Every call checked while the gateway is down is blocked.",
+		}},
+	} {
+		data, err := os.ReadFile(doc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Join(strings.Fields(string(data)), " ")
+		for _, want := range doc.want {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s: missing %q", doc.path, want)
+			}
+		}
+		for _, forbidden := range doc.forbidden {
+			if strings.Contains(text, forbidden) {
+				t.Errorf("%s still promises outage blocking whatever the fail mode: %q", doc.path, forbidden)
 			}
 		}
 	}

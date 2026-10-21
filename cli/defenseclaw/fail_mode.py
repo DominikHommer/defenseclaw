@@ -442,6 +442,22 @@ def _reject_json_constant(name: str) -> None:
     raise ValueError(f"{name} is not JSON")
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    # A key given twice reads differently to each reader (they take the
+    # last), so the native hook closes on it (HookSidecarJSONAmbiguous).
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"key {key!r} is given twice")
+        obj[key] = value
+    return obj
+
+
+# A shell variable name: the keys of the KEY=value sidecar of 0.8.x
+# (connector.ParseLegacyHookSidecar).
+_LEGACY_SIDECAR_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, bool]:
     """Read hooks/.hookcfg exactly as the native Windows hook does.
 
@@ -464,6 +480,7 @@ def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, boo
     try:
         payload = json.loads(
             text,
+            object_pairs_hook=_unique_json_object,
             parse_constant=_reject_json_constant,
             parse_int=lambda token: int(token) if len(token) <= 20 else _NOT_AN_INT64,
         )
@@ -500,13 +517,13 @@ def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, boo
             if legacy:
                 return _go_fail_mode(legacy), True
             return None, False
-    if parsed or text.lstrip(_GO_SPACE)[:1] in ("{", "["):
-        # As readHookSidecar: JSON that is not a v2 sidecar, or that does not
-        # parse, is malformed state and closed, never KEY=value lines.
-        return "closed", False
-    # The KEY=value sidecar of 0.8.x, read as readHookSidecar reads it: the
-    # last value of a key wins, and a connector's own key comes before the
-    # unscoped one.
+    # The KEY=value sidecar of 0.8.x, read as readHookSidecar reads it
+    # (connector.ParseLegacyHookSidecar): only a document of blank lines, #
+    # comments and [export ]KEY=value lines with each key once is one, and a
+    # connector's own key comes before the unscoped one. Anything else (JSON
+    # that is not a v2 sidecar or does not parse, a byte-order mark or a
+    # comment in front of it, a line that is not KEY=value, a key given
+    # twice) is malformed state and closed.
     values: dict[str, str] = {}
     for line in text.split("\n"):
         line = line.strip(_GO_SPACE)
@@ -514,8 +531,9 @@ def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, boo
             continue
         key, separator, value = line.removeprefix("export ").partition("=")
         key = key.strip(_GO_SPACE)
-        if separator and key:
-            values[key] = value.strip(_GO_SPACE).strip("\"'")
+        if not separator or not _LEGACY_SIDECAR_KEY.fullmatch(key) or key in values:
+            return "closed", False
+        values[key] = value.strip(_GO_SPACE).strip("\"'")
     scoped = _windows_sidecar_key(normalize(connector))
     value = values.get(scoped) or values.get("DEFENSECLAW_FAIL_MODE") or ""
     return (_go_fail_mode(value) if value else None), True

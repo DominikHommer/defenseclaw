@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -643,9 +644,16 @@ const hookSidecarMaxDepth = 32
 //     file (a link included) or is larger than hookSidecarMaxBytes is closed.
 //   - Top-level keys match exactly: a key that names a sidecar field in
 //     another case ("Version", "FAIL_MODES", which encoding/json alone would
-//     take) is malformed. Version 2 or later is a sidecar; any other JSON,
-//     JSON that does not parse, or a document that opens with { or [ is
-//     malformed and closed, never read as KEY=value lines.
+//     take) is malformed, and so is a key given twice in any object
+//     (connector.HookSidecarJSONAmbiguous). Version 2 or later is a sidecar;
+//     any other JSON is malformed and closed.
+//   - Anything that is not JSON is read as the KEY=value file of releases
+//     before 0.8.10 only when it has that shape throughout
+//     (connector.ParseLegacyHookSidecar): blank lines, # comments and
+//     [export ]KEY=value lines, each key once. Any other document (JSON that
+//     does not parse, a byte-order mark or a comment in front of it, a line
+//     that is not KEY=value, a key given twice) is malformed and closed, so a
+//     KEY=value line in a broken document never selects a mode.
 //   - In a sidecar, gateway_addr and legacy_fail_mode must be strings (or
 //     null), and fail_modes, when present, an object whose values are
 //     strings (or null). Anything else, a fail_modes of null included, is
@@ -683,8 +691,8 @@ func readHookSidecar(path string) map[string]string {
 			addr, addrOK := hookSidecarString(doc, "gateway_addr")
 			legacy, legacyOK := hookSidecarString(doc, "legacy_fail_mode")
 			modes, modesOK := hookSidecarModes(doc)
-			if !addrOK || !legacyOK || !modesOK || hookSidecarFieldCaseVariant(doc) ||
-				jsonNestingDepth(data) > hookSidecarMaxDepth {
+			if !addrOK || !legacyOK || !modesOK || jsonNestingDepth(data) > hookSidecarMaxDepth ||
+				connector.HookSidecarJSONAmbiguous(data) {
 				out["DEFENSECLAW_FAIL_MODE"] = "closed"
 				return out
 			}
@@ -705,47 +713,14 @@ func readHookSidecar(path string) map[string]string {
 			return out
 		}
 	}
-	if trimmed := bytes.TrimSpace(data); json.Valid(trimmed) ||
-		(len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')) {
-		// JSON that is not a v2 sidecar (an older or unknown version, an
-		// array, a scalar) or that does not parse is no sidecar this hook
-		// understands: closed, never KEY=value lines.
+	// JSON that is not a v2 sidecar (an older or unknown version, an array,
+	// a scalar) never has the KEY=value shape, so it is closed here too.
+	legacy, ok := connector.ParseLegacyHookSidecar(data)
+	if !ok {
 		out["DEFENSECLAW_FAIL_MODE"] = "closed"
 		return out
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-		key, val, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		val = strings.Trim(strings.TrimSpace(val), `"'`)
-		if key != "" {
-			out[key] = val
-		}
-	}
-	return out
-}
-
-// hookSidecarFields are the top-level fields readHookSidecar reads.
-var hookSidecarFields = [...]string{"version", "gateway_addr", "fail_modes", "legacy_fail_mode"}
-
-// hookSidecarFieldCaseVariant reports a top-level key that names a sidecar
-// field in another case, which encoding/json would decode into that field.
-func hookSidecarFieldCaseVariant(doc map[string]json.RawMessage) bool {
-	for key := range doc {
-		for _, field := range hookSidecarFields {
-			if key != field && strings.EqualFold(key, field) {
-				return true
-			}
-		}
-	}
-	return false
+	return legacy
 }
 
 // hookSidecarString reads an optional string field of a v2 sidecar: absent

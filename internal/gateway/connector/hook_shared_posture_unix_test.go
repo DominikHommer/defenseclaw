@@ -158,6 +158,68 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 			"claudecode", [3]string{"closed", "closed", "closed"}},
 		{"json-state-dangling-link", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": "@dangling"},
 			"claudecode", [3]string{"closed", "closed", "closed"}},
+		// 1.0.4 review (loop round 3 of G-hooks-upg): JSON state that is not
+		// the one document the writers make is malformed on every parser
+		// path, and so is a flat record that is not their KEY=value lines.
+		// Before, jq read empty or blank text, a fractional version, a field
+		// of another type, a key given twice, two documents and a byte-order
+		// mark as open, both parsers followed a link to open JSON, and a
+		// flat record giving its mode twice took the first.
+		{"json-empty", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": ""},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-blank", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": " \n\t\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-fractional-version", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2.5,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-string", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":"2","fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-bool", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":true,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-legacy-mode-not-a-string", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"legacy_fail_mode":5}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-gateway-not-a-string", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"gateway_addr":["x"],"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-entry-not-a-string", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open","codex":1}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-field-in-another-case", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"FAIL_MODES":{"codex":"closed"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-key-twice", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"closed"},"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-entry-twice", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"closed","claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-two-documents", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"}} {"version":2,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-byte-order-mark", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": "\ufeff" + `{"version":2,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-link-to-open-state", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": "@link:" + `{"version":2,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-mode-twice", state{".hookcfg.claudecode": flat("claudecode", "open") + "DEFENSECLAW_FAIL_MODE=closed\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-connector-twice", state{".hookcfg.claudecode": flat("claudecode", "open") + "DEFENSECLAW_CONNECTOR=claudecode\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-extra-line", state{".hookcfg.claudecode": flat("claudecode", "open") + "{\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-blank-line", state{".hookcfg.claudecode": "\n" + flat("claudecode", "open")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-lower-case-key", state{".hookcfg.claudecode": "x=1\n" + flat("claudecode", "open")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-cut-short", state{".hookcfg.claudecode": strings.TrimSuffix(flat("claudecode", "open"), "\n")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-nul", state{".hookcfg.claudecode": "DEFENSECLAW_CONNECTOR=claudecode\nDEFENSECLAW_FAIL_MODE=op\x00en\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"legacy-flat-mode-twice", state{".hookcfg.legacy": flat("", "closed") + "DEFENSECLAW_FAIL_MODE=open\n"},
+			"", [3]string{"closed", "closed", "closed"}},
+		// Controls: the writers' JSON, null fields and nested objects with
+		// unique keys stay readable.
+		{"json-writer-shape", state{".hookcfg.claudecode": flat("claudecode", "open"),
+			".hookcfg": "{\n  \"version\": 2,\n  \"gateway_addr\": \"127.0.0.1:1\",\n  \"fail_modes\": {\n    \"claudecode\": \"open\"\n  },\n  \"managed_enterprise\": true\n}\n"},
+			"claudecode", [3]string{"open", "open", "closed"}},
+		{"json-null-fields", state{".hookcfg.claudecode": flat("claudecode", "open"),
+			".hookcfg": `{"version":3,"gateway_addr":null,"legacy_fail_mode":null,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"open", "open", "closed"}},
+		{"json-nested-unique-keys", state{".hookcfg.claudecode": flat("claudecode", "open"),
+			".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"extra":{"a":{"a":1},"b":[{"a":1},{"a":2}]}}`},
+			"claudecode", [3]string{"open", "open", "closed"}},
 		// Controls: names the writers use for other files never count as
 		// records, and an install with no JSON state opens from its flat
 		// records on every parser path.

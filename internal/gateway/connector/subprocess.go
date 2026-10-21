@@ -966,10 +966,10 @@ func ValidateManagedNativeHookRuntime(
 	if err != nil {
 		return fmt.Errorf("read managed connector runtime sidecar: %w", err)
 	}
-	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
+	if got, ok := flatHookRecordValue(flat, "DEFENSECLAW_CONNECTOR"); !ok || got != name {
 		return fmt.Errorf("managed shell runtime connector %q, want %q", got, name)
 	}
-	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != mode {
+	if got, ok := flatHookRecordValue(flat, "DEFENSECLAW_FAIL_MODE"); !ok || got != mode {
 		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, mode)
 	}
 	tokenPath, err := HookTokenFilePath(hookDir, name)
@@ -1051,15 +1051,22 @@ func restoreHookRuntimeFilesUsing(
 }
 
 // carryableHookConfigSidecar returns the peer state a rewrite should preserve,
-// accepting the v2 map form and the legacy scalar form.
+// accepting the v2 map form and the legacy scalar form. State the readers
+// close on (a malformed legacy file, JSON with a key given twice or a field
+// named in another case) is refused, never settled into a mode a reader
+// would open on.
 func carryableHookConfigSidecar(data []byte) (hookConfigSidecar, error) {
 	var prior hookConfigSidecar
 	if err := json.Unmarshal(data, &prior); err != nil {
-		legacyMode := legacyHookConfigValue(data, "DEFENSECLAW_FAIL_MODE")
-		if legacyMode != "open" && legacyMode != "closed" {
+		values, ok := ParseLegacyHookSidecar(data)
+		legacyMode := values["DEFENSECLAW_FAIL_MODE"]
+		if !ok || (legacyMode != "open" && legacyMode != "closed") {
 			return hookConfigSidecar{}, fmt.Errorf("parse hook config sidecar: %w", err)
 		}
 		return hookConfigSidecar{LegacyMode: legacyMode}, nil
+	}
+	if HookSidecarJSONAmbiguous(data) {
+		return hookConfigSidecar{}, errAmbiguousHookConfigSidecar
 	}
 	if prior.Version != 2 {
 		return hookConfigSidecar{}, fmt.Errorf("unsupported hook config sidecar version %d", prior.Version)
@@ -1183,10 +1190,15 @@ func clearHookConfigSidecarEntryLocked(
 			// A legacy scalar sidecar has no connector entry to remove and
 			// remains available for unmigrated callers. Unknown malformed JSON
 			// is not overwritten because that could destroy peer state.
-			legacyMode := legacyHookConfigValue(jsonSnapshot.data, "DEFENSECLAW_FAIL_MODE")
-			if legacyMode != "open" && legacyMode != "closed" {
+			values, ok := ParseLegacyHookSidecar(jsonSnapshot.data)
+			legacyMode := values["DEFENSECLAW_FAIL_MODE"]
+			if !ok || (legacyMode != "open" && legacyMode != "closed") {
 				return nil, fmt.Errorf("parse hook config sidecar: %w", err)
 			}
+		} else if HookSidecarJSONAmbiguous(jsonSnapshot.data) {
+			// Rewriting it would settle the ambiguity, maybe into an open
+			// mode the readers close on now.
+			return nil, errAmbiguousHookConfigSidecar
 		} else {
 			if state.Version != 2 {
 				return nil, fmt.Errorf("unsupported hook config sidecar version %d", state.Version)
@@ -1267,6 +1279,8 @@ func validateHookRuntimeStateForContract(
 		}
 	} else if err := json.Unmarshal(body, &state); err != nil {
 		return fmt.Errorf("parse hook config sidecar: %w", err)
+	} else if HookSidecarJSONAmbiguous(body) {
+		return errAmbiguousHookConfigSidecar
 	}
 	if state.Version != 2 {
 		return fmt.Errorf("unsupported hook config sidecar version %d", state.Version)
@@ -1289,10 +1303,10 @@ func validateHookRuntimeStateForContract(
 	if err != nil {
 		return fmt.Errorf("read connector shell runtime sidecar: %w", err)
 	}
-	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
+	if got, ok := flatHookRecordValue(flat, "DEFENSECLAW_CONNECTOR"); !ok || got != name {
 		return fmt.Errorf("shell runtime connector %q, want %q", got, name)
 	}
-	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != want {
+	if got, ok := flatHookRecordValue(flat, "DEFENSECLAW_FAIL_MODE"); !ok || got != want {
 		return fmt.Errorf("connector %s shell fail mode %q, want %q", name, got, want)
 	}
 	return nil
@@ -1314,8 +1328,15 @@ func decodeManagedHookConfigSidecar(data []byte, state *hookConfigSidecar) error
 		}
 		return err
 	}
+	if HookSidecarJSONAmbiguous(data) {
+		return errAmbiguousHookConfigSidecar
+	}
 	return nil
 }
+
+// errAmbiguousHookConfigSidecar is a JSON sidecar that names a key twice or
+// a field in another case (HookSidecarJSONAmbiguous).
+var errAmbiguousHookConfigSidecar = errors.New("parse hook config sidecar: a key is given twice or a field is named in another case")
 
 // readStableHookRuntimeSidecar bounds allocation from file metadata, rejects
 // links and non-regular objects, pins the opened file identity, and performs
@@ -1463,16 +1484,6 @@ func ValidateHookRuntimeState(dataDir, connectorName, failMode string) error {
 // exact-schema parsing for enterprise guardian status and verification.
 func ValidateManagedHookRuntimeState(dataDir, connectorName, failMode string) error {
 	return validateHookRuntimeStateForContract(dataDir, connectorName, failMode, true)
-}
-
-func legacyHookConfigValue(data []byte, wanted string) string {
-	for _, line := range strings.Split(string(data), "\n") {
-		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if ok && strings.TrimSpace(strings.TrimPrefix(key, "export ")) == wanted {
-			return strings.Trim(strings.TrimSpace(value), `"'`)
-		}
-	}
-	return ""
 }
 
 func hookScriptNamesForConnector(opts SetupOpts, c Connector) []string {

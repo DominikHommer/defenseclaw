@@ -78,10 +78,10 @@
    "legacy": false
   },
   {
-   "name": "v2/duplicate-key-last-wins",
+   "name": "malformed/v2-entry-twice",
    "connector": "codex",
    "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"closed\",\"codex\":\"open\"}}",
-   "mode": "open",
+   "mode": "closed",
    "legacy": false
   },
   {
@@ -538,11 +538,88 @@
    "legacy": true
   },
   {
-   "name": "flat/last-wins",
+   "name": "flat/key-twice-open-first",
    "connector": "codex",
    "body": "DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE=closed\n",
    "mode": "closed",
-   "legacy": true
+   "legacy": false
+  },
+  {
+   "name": "flat/key-twice-open-last",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "flat/scoped-key-twice",
+   "connector": "codex",
+   "body": "DEFENSECLAW_FAIL_MODE_CODEX=closed\nDEFENSECLAW_FAIL_MODE_CODEX=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/bom-broken-json-then-flat-open",
+   "connector": "codex",
+   "body_b64": "77u/eyJ2ZXJzaW9uIjoyLCJmYWlsX21vZGVzIjoKREVGRU5TRUNMQVdfRkFJTF9NT0RFPW9wZW4K",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/comment-broken-json-then-flat-open",
+   "connector": "codex",
+   "body": "# written by hand\n{\"version\":2,\"fail_modes\":{\"codex\":\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/bom-flat-open",
+   "connector": "codex",
+   "body_b64": "77u/REVGRU5TRUNMQVdfRkFJTF9NT0RFPW9wZW4K",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/text-line-then-flat-open",
+   "connector": "codex",
+   "body": "not a setting\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/bad-key-then-flat-open",
+   "connector": "codex",
+   "body": "DEFENSECLAW FAIL MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/json-array-line-then-flat-open",
+   "connector": "codex",
+   "body": "[\"x\",\nDEFENSECLAW_FAIL_MODE=open\n",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/v2-key-twice",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"closed\"},\"fail_modes\":{\"codex\":\"open\"}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "malformed/v2-nested-key-twice",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"extra\":{\"a\":1,\"a\":2}}",
+   "mode": "closed",
+   "legacy": false
+  },
+  {
+   "name": "v2/nested-unique-keys",
+   "connector": "codex",
+   "body": "{\"version\":2,\"fail_modes\":{\"codex\":\"open\"},\"extra\":{\"a\":{\"a\":1},\"b\":[{\"a\":1},{\"a\":2}]}}",
+   "mode": "open",
+   "legacy": false
   },
   {
    "name": "flat/scoped-first",

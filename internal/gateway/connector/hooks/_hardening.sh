@@ -302,18 +302,45 @@ defenseclaw_shared_runtime_connector() {
   fi
 }
 
+# Print the value of one key of a flat KEY=value record (the
+# hooks/.hookcfg.<connector> files the setup writers make: two lines,
+# DEFENSECLAW_CONNECTOR and DEFENSECLAW_FAIL_MODE). A record that is not a
+# regular file, holds a NUL byte, has a line that is not KEY=value with an
+# upper-case key, gives a key twice or ends without a newline (a write cut
+# short) is malformed: nothing is printed and the call fails, so no caller
+# reads an open mode out of it.
 defenseclaw_flat_hookcfg_value() {
   local config="$1"
   local wanted="$2"
-  local key value
+  local line="" key value="" found=0 seen=" "
   [ -f "$config" ] && [ ! -L "$config" ] || return 1
-  while IFS='=' read -r key value; do
+  # read with a NUL delimiter succeeds only when the file holds a NUL, which
+  # the line reads below would drop without a trace.
+  if IFS= read -r -d '' line < "$config"; then
+    return 1
+  fi
+  line=""
+  while IFS= read -r line; do
+    case "$line" in
+      *=*) ;;
+      *) return 1 ;;
+    esac
+    key="${line%%=*}"
+    case "$key" in
+      ""|[0123456789]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) return 1 ;;
+    esac
+    case "$seen" in
+      *" $key "*) return 1 ;;
+    esac
+    seen="${seen}${key} "
     if [ "$key" = "$wanted" ]; then
-      printf '%s' "$value"
-      return 0
+      found=1
+      value="${line#*=}"
     fi
   done < "$config"
-  return 1
+  # read leaves an unterminated last line in $line.
+  [ -z "$line" ] && [ "$found" = 1 ] || return 1
+  printf '%s' "$value"
 }
 
 # Return the shared legacy token path or the connector-scoped token path named
@@ -342,14 +369,22 @@ defenseclaw_shared_hook_token_file() {
 # record (.hookcfg.legacy, which names no connector) and the JSON
 # legacy_fail_mode both say open: every writer since 0.8.10 writes the two
 # together. After an upgrade, a kept legacy open therefore never reopens a
-# connector recorded closed. A v2 JSON whose fail_modes is present but not an
-# object (null included) is malformed; a missing fail_modes is the shape every
-# release writes for an install with no connector entry yet. A connector
-# record that is not a regular file or does not name its own connector is
-# malformed too. The JSON can name a connector no flat record does (a write
-# cut short between the two, or a peer an older release recorded), so JSON
-# that no parser can read (no jq or python3) is closed: only an install with
-# no JSON state at all opens from the flat records alone. Secure Client
+# connector recorded closed. The JSON is the one document the writers make:
+# a regular file (not a link) holding exactly one JSON object, no key given
+# twice in any object (readers take the last, so it reads differently to
+# each), no top-level key naming a field in another case, an integer version
+# of 2 or more, gateway_addr and legacy_fail_mode strings or null, and
+# fail_modes, when present, an object of strings or null. Anything else
+# (empty or blank text, a byte-order mark, two documents, a fractional
+# version, a field of another type, fail_modes null) is malformed; a missing
+# fail_modes is the shape every release writes for an install with no
+# connector entry yet. A connector record that is not a regular file, does
+# not name its own connector, or is not the writers' KEY=value lines (see
+# defenseclaw_flat_hookcfg_value) is malformed too. The JSON can name a
+# connector no flat record does (a write cut short between the two, or a peer
+# an older release recorded), so JSON that no parser can read (no jq or
+# python3) is closed: only an install with no JSON state at all opens from the
+# flat records alone. Secure Client
 # delivery keeps its flat-record reading (unchanged in 1.0.4). The sidecars
 # are the only input: DEFENSECLAW_FAIL_MODE in the agent's environment is not
 # read (GAP-0315). Malformed, ambiguous, unverifiable or missing state fails
@@ -389,30 +424,76 @@ defenseclaw_shared_runtime_fail_mode() {
   # that runs and fails means malformed state. JSON no parser can read is
   # closed: it may record a connector no flat record names.
   if [ -e "$config" ] || [ -L "$config" ]; then
-    if [ ! -f "$config" ]; then
+    local first=""
+    if [ -L "$config" ] || [ ! -f "$config" ]; then
       printf closed
       return 0
     fi
+    # jq skips a leading byte-order mark that no writer emits and the other
+    # readers reject.
+    IFS= read -r first < "$config" || true
+    case "$first" in
+      $'\xef\xbb\xbf'*) printf closed; return 0 ;;
+    esac
     if command -v jq >/dev/null 2>&1; then
-      summary="$(jq -r --arg connector "$connector" '
+      # --stream sees every key as written: a path met again after its value
+      # ended is a key given twice, or a second document.
+      summary="$(jq -n -r --stream --arg connector "$connector" '
         def word: if . == null or . == "" then "none" elif . == "open" then "open" else "closed" end;
-        if type == "object" and (.version | type) == "number" and .version >= 2
-          and ((has("fail_modes") | not) or (.fail_modes | type) == "object") then
-          (if has("fail_modes") then .fail_modes else {} end) as $modes
-          | "\($modes | length) \(if [$modes[]] | all(. == "open") then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word) end) \(.legacy_fail_mode | word)"
-        else "invalid" end' "$config" 2>/dev/null)" || summary="invalid"
+        def text: . == null or type == "string";
+        def fold: explode | map(if . == 383 then 115 elif . == 8490 then 107 else . end) | implode | ascii_downcase;
+        [inputs] as $events
+        | if (reduce $events[] as $event ({seen: {}, duplicate: false};
+              if ($event | length) == 2 then
+                . as $state
+                | .duplicate = (.duplicate or any(range(0; ($event[0] | length) + 1) as $n | $event[0][:$n] | tojson; in($state.seen)))
+                | .seen[$event[0] | tojson] = true
+              else .seen[$event[0][:-1] | tojson] = true end) | .duplicate)
+          then "invalid"
+          else [fromstream($events[])] as $docs
+          | if ($docs | length) != 1 then "invalid" else $docs[0]
+          | if type == "object"
+              and (.version | type) == "number" and .version >= 2
+              and (.version | tojson | explode | all(. >= 48 and . <= 57))
+              and (.gateway_addr | text) and (.legacy_fail_mode | text)
+              and ((has("fail_modes") | not) or ((.fail_modes | type) == "object" and all(.fail_modes[]; text)))
+              and all(keys[]; . as $key | all("version", "gateway_addr", "fail_modes", "legacy_fail_mode"; . == $key or ($key | fold) != .))
+            then
+              (if has("fail_modes") then .fail_modes else {} end) as $modes
+              | "\($modes | length) \(if [$modes[]] | all(. == "open") then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word) end) \(.legacy_fail_mode | word)"
+            else "invalid" end end end' "$config" 2>/dev/null)" || summary="invalid"
     elif _dc_python3_usable; then
-      summary="$(python3 -c 'import json,sys
-d=json.load(open(sys.argv[1],encoding="utf-8"))
-assert isinstance(d,dict) and type(d.get("version")) is int and d["version"]>=2
+      # -I: no PYTHON* variable (PYTHONOPTIMIZE, PYTHONPATH) of the agent's
+      # environment changes this check.
+      summary="$(python3 -I -c 'import json,sys
+def need(ok):
+  if not ok: sys.exit(1)
+def unique(pairs):
+  d={}
+  for k,v in pairs:
+    need(k not in d)
+    d[k]=v
+  return d
+def constant(name):
+  raise ValueError(name)
+d=json.loads(open(sys.argv[1],encoding="utf-8",errors="replace").read(),object_pairs_hook=unique,parse_constant=constant)
+t=lambda v:v is None or isinstance(v,str)
+fold=lambda k:k.replace("\u017f","s").replace("\u212a","k").encode("utf-8","surrogatepass").lower().decode("utf-8","surrogatepass")
+need(isinstance(d,dict) and type(d.get("version")) is int and d["version"]>=2)
+need(t(d.get("gateway_addr")) and t(d.get("legacy_fail_mode")))
+need(all(k==f or fold(k)!=f for k in d for f in ("version","gateway_addr","fail_modes","legacy_fail_mode")))
 m=d.get("fail_modes",{})
-assert isinstance(m,dict)
+need(isinstance(m,dict) and all(t(v) for v in m.values()))
 w=lambda v:"none" if v in (None,"") else ("open" if v=="open" else "closed")
 c=sys.argv[2]
 print(len(m),"open" if all(v=="open" for v in m.values()) else "closed",w(m.get(c)) if c else "none",w(d.get("legacy_fail_mode")))' "$config" "$connector" 2>/dev/null)" || summary="invalid"
     elif [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != "1" ] || [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ]; then
       printf closed
       return 0
+    fi
+    if [ -z "$summary" ] && { command -v jq >/dev/null 2>&1 || _dc_python3_usable; }; then
+      # A parser that ran and printed nothing read no state: malformed.
+      summary="invalid"
     fi
   fi
   local json_count=0 json_all=open json_selected=none json_legacy=none
@@ -426,6 +507,11 @@ print(len(m),"open" if all(v=="open" for v in m.values()) else "closed",w(m.get(
     case "$json_count" in
       ""|*[!0-9]*) printf closed; return 0 ;;
     esac
+    # Exactly the four words the parsers print, nothing more.
+    if [ "$#" -ne 4 ]; then
+      printf closed
+      return 0
+    fi
   fi
   if [ "$json_all" != "open" ]; then
     printf closed

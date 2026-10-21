@@ -1192,7 +1192,6 @@ _SCOPED_CODEX_KEY = "DEFENSECLAW_FAIL_MODE" + "_CODEX"
     "text,want",
     [
         ("DEFENSECLAW_FAIL_MODE=open\n", "open"),
-        ("DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE=closed\n", "closed"),
         ("DEFENSECLAW_FAIL_MODE=open\n" + _SCOPED_CODEX_KEY + "=closed\n", "closed"),
         ("export " + _SCOPED_CODEX_KEY + '="open"\nDEFENSECLAW_FAIL_MODE=closed\n', "open"),
         ("DEFENSECLAW_FAIL_MODE=bogus\n", "closed"),
@@ -1200,12 +1199,33 @@ _SCOPED_CODEX_KEY = "DEFENSECLAW_FAIL_MODE" + "_CODEX"
     ],
 )
 def test_windows_flat_sidecar_report_matches_the_native_hook(tmp_path: Path, text: str, want: str | None) -> None:
-    # The 0.8.x KEY=value sidecar: the last value of a key wins and the
-    # connector's own key comes first, as readHookSidecar reads it. None (no
-    # mode) is reported closed by resolve_connector_fail_mode.
+    # The 0.8.x KEY=value sidecar: the connector's own key comes first, as
+    # readHookSidecar reads it. None (no mode) is reported closed by
+    # resolve_connector_fail_mode.
     path = tmp_path / ".hookcfg"
     path.write_text(text, encoding="utf-8")
     assert fail_mode_runtime._read_windows_hook_mode(path, "codex") == (want, True)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE=closed\n",
+        "DEFENSECLAW_FAIL_MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n",
+        "\ufeff{broken\nDEFENSECLAW_FAIL_MODE=open\n",
+        "# note\n{broken\nDEFENSECLAW_FAIL_MODE=open\n",
+        "not a setting\nDEFENSECLAW_FAIL_MODE=open\n",
+    ],
+)
+def test_windows_sidecar_that_is_not_the_legacy_shape_is_closed(tmp_path: Path, text: str) -> None:
+    # 1.0.4 review (loop round 3 of G-hooks-upg): a byte-order mark or a
+    # comment hid the opening brace of broken JSON, and a following
+    # DEFENSECLAW_FAIL_MODE=open line then read open; a key given twice took
+    # its last value. Only a document with the KEY=value shape throughout,
+    # each key once, reads as one (connector.ParseLegacyHookSidecar).
+    path = tmp_path / ".hookcfg"
+    path.write_text(text, encoding="utf-8")
+    assert fail_mode_runtime._read_windows_hook_mode(path, "codex") == ("closed", False)
 
 
 @pytest.mark.parametrize("vector", _WINDOWS_SIDECAR_VECTORS, ids=lambda vector: vector["name"])
