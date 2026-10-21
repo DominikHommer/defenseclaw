@@ -1060,4 +1060,3 @@ A block by your own Tetragon policy is told too, while `customer_events` is `age
 ### Tetragon upgrades
 
 **Tetragon.** A restart drops every policy added with `tetra`, yours included (see [Harden Tetragon](#harden-tetragon)), and DefenseClaw's policies load again within about a minute, honoring any pause. A new Tetragon minor outside the supported window (1.8, for example) makes the helper fall back to `cn_proc` and `fanotify` and warn `tetragon_unsupported_version`. Alert on it: `DefenseClawTetragonFallback` fires when a computer that has Tetragon installed runs on the fallback.
-
