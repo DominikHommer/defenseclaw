@@ -3041,6 +3041,8 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
         )
         click.echo(f"  digest: {summary['digest']}")
         click.echo(f"  files digest: {summary['files_digest']} (the guardrail.custom_packs pin)")
+        for warning in result.warnings:
+            click.echo("warning: " + warning, err=True)
     else:
         issue = result.error
         assert issue is not None

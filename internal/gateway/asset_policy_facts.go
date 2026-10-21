@@ -172,7 +172,9 @@ const maxDeclaredNameScan = 4096
 // whose SKILL.md declares name. Codex selects a skill ($name, or by plain
 // words) by the name its SKILL.md declares, while admission blocks and
 // disables it under its folder name, so a skill whose quarantine failed in
-// a folder of another name still ran (GAP-1101).
+// a folder of another name still ran (GAP-1101). Past maxDeclaredNameScan
+// folders it reads no more SKILL.md files and lists every other folder: one
+// of them may declare name, so each answers for it (fail closed).
 func foldersDeclaringSkill(root, name string) []string {
 	if gatewaySkillPathCheck(root) != nil {
 		return nil
@@ -187,11 +189,12 @@ func foldersDeclaringSkill(root, name string) []string {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || config.SameAssetName(entry.Name(), name) {
 			continue
 		}
-		if scanned++; scanned > maxDeclaredNameScan {
-			break
-		}
 		dir := filepath.Join(root, entry.Name())
 		if gatewaySkillPathCheck(dir) != nil {
+			continue
+		}
+		if scanned++; scanned > maxDeclaredNameScan {
+			folders = append(folders, dir)
 			continue
 		}
 		if config.SameAssetName(assetfacts.DeclaredSkillName(dir), name) {

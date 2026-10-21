@@ -985,6 +985,37 @@ func (rp *RulePack) validate(allowEmptyCategories bool) error {
 	return rp.validateSensitiveTools()
 }
 
+// countSemanticRules counts the rules with an expression, as
+// validateRuleFiles does.
+func countSemanticRules(files []*RulesFileYAML) int {
+	count := 0
+	for _, ruleFile := range files {
+		if ruleFile == nil {
+			continue
+		}
+		for _, rule := range ruleFile.Rules {
+			if rule.Expression != "" || (rule.decoded && rule.expressionSet) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// CandidateRemedy is the action a config writer names when a candidate
+// config selects a pack that fails with e (config.CheckCandidateAssets):
+// a catalog over a limit needs fewer rules, not another reference.
+func (e *RulePackError) CandidateRemedy() string {
+	if e == nil {
+		return ""
+	}
+	switch e.Code {
+	case "semantic_rule_count_limit", "semantic_catalog_cost_limit", "rule_count_limit":
+		return "select fewer rules (disable rules, or remove guardrail.rules protections), then retry"
+	}
+	return ""
+}
+
 func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 	seenCategories := make(map[string]string, len(rp.RuleFiles))
 	seenIDs := make(map[string]struct{})
@@ -1042,7 +1073,13 @@ func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 			if hasExpression {
 				semanticRules++
 				if semanticRules > maxSemanticRules {
-					return rulePackErr(rel, "semantic_rule_count_limit", "rule pack contains too many semantic rules")
+					// The limit is on the whole catalog, protections composed
+					// in included, so name no file of it (GAP-0965).
+					return rulePackErr(".", "semantic_rule_count_limit", fmt.Sprintf(
+						"the rule catalog has %d rules with an expression, more than the limit of %d "+
+							"(rules that guardrail.rules protections add count too); disable or remove rules or "+
+							"protections, or split the rules across packs",
+						countSemanticRules(rp.RuleFiles), maxSemanticRules))
 				}
 				if compiler == nil {
 					var err error

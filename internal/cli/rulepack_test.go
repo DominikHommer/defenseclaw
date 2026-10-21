@@ -101,6 +101,22 @@ func TestRulePackValidateNamesCustomerToolCallRegexRule(t *testing.T) {
 		strings.Contains(warnings.String(), "12 enabled") {
 		t.Fatalf("customer rule warning = %q", warnings.String())
 	}
+
+	// GAP-0942: the JSON result carries the same warning, so the
+	// defenseclaw guardrail validate-pack wrapper prints it too.
+	rulePackValidateJSON = true
+	output.Reset()
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	var response rulePackWireResponse
+	if err := json.Unmarshal([]byte(output.String()), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Warnings) != 1 || !strings.Contains(response.Warnings[0], "CUSTOMER-MARKER") ||
+		!strings.Contains(response.Warnings[0], "detection-only and cannot block") {
+		t.Fatalf("JSON warnings = %q", response.Warnings)
+	}
 }
 
 func TestRulePackValidateFailureIsStructuredAndValueSafe(t *testing.T) {
