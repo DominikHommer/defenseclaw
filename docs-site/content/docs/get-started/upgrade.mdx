@@ -426,8 +426,10 @@ or OmniGent before 1.0.4:
   after the upgrade removes DefenseClaw's hooks from OpenHands
   (`~/.openhands/hooks.json`) and its policy from OmniGent (the
   `defenseclaw_omnigent_policy` entries in `~/.omnigent/config.yaml`, the
-  policy module and its `.pth` file). Hooks and policies from other tools stay,
-  and both agents keep working without DefenseClaw. Their settings are dropped
+  policy module and DefenseClaw's line in its `.pth` file). Hooks and policies
+  from other tools stay. A policy module you edited stays too: a warning names
+  it, and OmniGent no longer loads it. Both agents keep working without
+  DefenseClaw. Their settings are dropped
   from `config.yaml`; `defenseclaw migrate` saves that. `defenseclaw uninstall`
   removes the same files. You don't need to do anything.
 

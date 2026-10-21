@@ -2542,10 +2542,6 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 		strings.EqualFold(strings.TrimSpace(toolName), "execute_bash") {
 		return "shell"
 	}
-	// sys_os_shell, {"command": "..."}; the DefenseClaw OpenShell sandbox
-	// agent uses it) is the same shell shape under another name. Unmapped,
-	// its commands parse to no command facts and a CRITICAL command finding
-	// stays an unproven candidate that allows.
 	// Text sent to a running process is judged as shell input (see
 	// agentHookTrustedActionArgs): agy's send_command_input as run_command
 	// input, Hermes' process tool (write, submit) as a shell command.

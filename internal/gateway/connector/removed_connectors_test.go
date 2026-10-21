@@ -50,6 +50,15 @@ func TestRemovedConnectorsAreTeardownOnly(t *testing.T) {
 	}
 }
 
+// What older releases wrote into OmniGent's config.yaml.
+const (
+	removedOmnigentHandler   = removedOmnigentModuleName + ".defenseclaw_policy"
+	removedOmnigentPolicyKey = "defenseclaw_guardrail"
+	// removedOmnigentRendered stands for a policy module an older release
+	// rendered: it starts with the template's marker line.
+	removedOmnigentRendered = removedOmnigentPolicyMarker + "\n\"\"\"OmniGent custom policy bridge installed by DefenseClaw.\"\"\"\n\ndef defenseclaw_policy(event):\n    pass\n"
+)
+
 func writeRemovedFixture(t *testing.T, path, body string, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -250,7 +259,7 @@ func TestRemovedOmnigentTeardownRemovesPolicy(t *testing.T) {
 				}
 			}
 			writeRemovedFixture(t, configPath, patchedConfig, 0o600)
-			writeRemovedFixture(t, modulePath, "def defenseclaw_policy(event):\n    pass\n", 0o600)
+			writeRemovedFixture(t, modulePath, removedOmnigentRendered, 0o600)
 			writeRemovedFixture(t, pthPath, filepath.Dir(modulePath)+"\n", 0o600)
 			if backup {
 				for logical, path := range map[string]string{"config": configPath, "module": modulePath, "pth": pthPath} {
