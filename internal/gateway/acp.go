@@ -27,7 +27,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
-	"github.com/google/uuid"
 )
 
 func (a *APIServer) handleACPCatalog(w http.ResponseWriter, r *http.Request) {
@@ -581,7 +580,7 @@ func (a *APIServer) recordACPEvaluationV8(
 		severity = "NONE"
 	}
 	facts, err := newAPIGuardrailEventV8Facts(ctx, connector, guardrailEventRequest{
-		EvaluationID: uuid.NewString(), Direction: direction, Action: action,
+		EvaluationID: observability.NewTimeOrderedID(), Direction: direction, Action: action,
 		RawAction: verdict.RawAction, WouldBlock: verdict.WouldBlock, Severity: severity,
 		Reason: verdict.Reason, Findings: findings,
 		ElapsedMs: float64(elapsed) / float64(time.Millisecond),

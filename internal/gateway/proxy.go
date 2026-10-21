@@ -55,7 +55,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/google/uuid"
 )
 
 // guardrailListenAddr returns the TCP listen address for the guardrail HTTP server.
@@ -4936,7 +4935,7 @@ func (p *GuardrailProxy) recordTelemetry(
 		// a join key. Finding emission receives this same key when detections
 		// exist; telemetry failures never force the decision log to invent a
 		// second identity.
-		verdict.EvaluationID = uuid.NewString()
+		verdict.EvaluationID = observability.NewTimeOrderedID()
 	}
 	if len(verdict.Findings) > 0 && !verdict.FindingsEmitted {
 		eval := p.emitGuardrailScanVerdictFindings(
@@ -4980,7 +4979,7 @@ func (p *GuardrailProxy) recordTelemetry(
 
 	if p.webhooks != nil && verdict.Action == "block" {
 		event := audit.Event{
-			ID:               uuid.New().String(),
+			ID:               observability.NewTimeOrderedID(),
 			Timestamp:        time.Now().UTC(),
 			Action:           string(audit.ActionGuardrailBlock),
 			Target:           model,

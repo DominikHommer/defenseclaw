@@ -27,8 +27,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/google/uuid"
 )
 
 // inspectMode returns the authenticated connector's guardrail mode for the
@@ -459,7 +459,7 @@ func (a *APIServer) raiseToolResultAlert(ctx context.Context, event audit.Event,
 	// event its id first: the webhook payload then carries the id of the audit
 	// row, and the delivery can be matched to the alert (GAP-0218).
 	if event.ID == "" {
-		event.ID = uuid.New().String()
+		event.ID = observability.NewTimeOrderedID()
 	}
 	_ = a.logger.LogEventCtx(ctx, event)
 	if a.webhookSource == nil {

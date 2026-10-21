@@ -1434,9 +1434,19 @@ func (tx *CorrelationTx) PutIdentifier(ctx context.Context, identifier Correlati
 	if err := validateIdentifier(identifier); err != nil {
 		return "", err
 	}
-	id := deterministicCorrelationID("id_", string(identifier.ConnectorInstanceID),
+	id := orderedCorrelationID("id_", string(identifier.SemanticEventID), string(identifier.ConnectorInstanceID),
 		identifier.Namespace, string(identifier.Kind), identifier.ValueDigest,
 		string(identifier.SemanticEventID))
+	// The same identifier may already be stored under its unordered ID from
+	// before 1.0.4 (orderedCorrelationID); keep that row's ID.
+	switch err := tx.tx.QueryRowContext(ctx, `SELECT identifier_id FROM correlation_identifiers
+		WHERE connector_instance_id=? AND namespace=? AND identifier_kind=? AND value_digest=?
+		  AND semantic_event_id=?`, string(identifier.ConnectorInstanceID), identifier.Namespace,
+		string(identifier.Kind), identifier.ValueDigest, string(identifier.SemanticEventID)).Scan(&id); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return "", fmt.Errorf("audit: read correlation identifier: %w", err)
+	}
 	result, err := txExecContextObserved(ctx, tx.tx, "correlation_identifier_upsert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_identifiers (
 			identifier_id, semantic_event_id, connector_instance_id, namespace, identifier_kind,
@@ -1480,12 +1490,17 @@ func (tx *CorrelationTx) PutRelationship(
 		return CorrelationRelationship{}, err
 	}
 	confidence := relationshipConfidence(input.Method)
-	id := deterministicCorrelationID("rel_", string(input.FromKind), input.FromID,
+	id := orderedCorrelationID("rel_", relationshipAnchor(input), string(input.FromKind), input.FromID,
 		string(input.ToKind), input.ToID, string(input.Type), string(input.Method), input.RuleID,
 		input.RuleVersion)
+	// Look the relationship up by its fields, not its ID: one stored before
+	// 1.0.4 has the unordered ID of the same fields (orderedCorrelationID), and
+	// keeps it.
 	var previous string
-	switch err := tx.tx.QueryRowContext(ctx, `SELECT status FROM correlation_relationships
-		WHERE relationship_id = ?`, id).Scan(&previous); {
+	switch err := tx.tx.QueryRowContext(ctx, `SELECT relationship_id, status FROM correlation_relationships
+		WHERE from_kind=? AND from_id=? AND to_kind=? AND to_id=? AND relationship_type=? AND method=?
+		  AND rule_id=? AND rule_version=?`, string(input.FromKind), input.FromID, string(input.ToKind),
+		input.ToID, string(input.Type), string(input.Method), input.RuleID, input.RuleVersion).Scan(&id, &previous); {
 	case errors.Is(err, sql.ErrNoRows):
 		previous = ""
 	case err != nil:
@@ -1537,7 +1552,17 @@ func (tx *CorrelationTx) PutRelationshipEvidence(
 	if evidenceValue == "" {
 		evidenceValue = string(evidence.SemanticEventID)
 	}
-	id := deterministicCorrelationID("ev_", evidence.RelationshipID, evidenceValue, string(evidence.Role))
+	id := orderedCorrelationID("ev_", evidenceValue, evidence.RelationshipID, evidenceValue, string(evidence.Role))
+	// Evidence stored before 1.0.4 has the unordered ID of the same fields
+	// (orderedCorrelationID); keep that row's ID.
+	switch err := tx.tx.QueryRowContext(ctx, `SELECT evidence_id FROM correlation_relationship_evidence
+		WHERE relationship_id=? AND evidence_role=? AND (evidence_record_id=? OR
+		  (evidence_record_id IS NULL AND semantic_event_id=?)) LIMIT 1`, evidence.RelationshipID,
+		string(evidence.Role), evidence.RecordID, string(evidence.SemanticEventID)).Scan(&id); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return "", fmt.Errorf("audit: read correlation relationship evidence: %w", err)
+	}
 	_, err := txExecContextObserved(ctx, tx.tx, "correlation_evidence_upsert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_relationship_evidence (
 			evidence_id, relationship_id, evidence_record_id, semantic_event_id, evidence_role,
@@ -1824,12 +1849,47 @@ func (tx *CorrelationTx) usable(ctx context.Context) error {
 }
 
 func deterministicCorrelationID(prefix string, fields ...string) string {
+	return prefix + hex.EncodeToString(correlationFieldsDigest(fields))
+}
+
+func correlationFieldsDigest(fields []string) []byte {
 	digest := sha256.New()
 	for _, field := range fields {
 		_, _ = digest.Write([]byte{0})
 		_, _ = digest.Write([]byte(field))
 	}
-	return prefix + hex.EncodeToString(digest.Sum(nil))
+	return digest.Sum(nil)
+}
+
+// orderedCorrelationID is the ID of a correlation identifier, relationship or
+// evidence row, a function of its fields like deterministicCorrelationID, so
+// the same fields always get the same ID and the row's upsert dedupes them.
+// When anchor (one of the fields) is a canonical UUIDv7, the ID starts with
+// the anchor's first 8 bytes (its millisecond time and counter) and ends with
+// the first 24 bytes of the fields' SHA-256, so the rows of a new event are
+// appended at the end of the table's unique ID index. The unordered
+// deterministicCorrelationID put each hook call's rows on random leaves of
+// those indexes, which made a checkpoint's sync on Windows write them one at
+// a time (rel-1-0-3 GAP-0320, GAP-0325). Rows stored before 1.0.4 keep their
+// unordered IDs: the upserts look a row up by its fields first.
+func orderedCorrelationID(prefix, anchor string, fields ...string) string {
+	parsed, err := uuid.Parse(anchor)
+	if err != nil || parsed.Version() != 7 || parsed.String() != anchor {
+		return deterministicCorrelationID(prefix, fields...)
+	}
+	return prefix + hex.EncodeToString(parsed[:8]) + hex.EncodeToString(correlationFieldsDigest(fields)[:24])
+}
+
+// relationshipAnchor is the time-ordered field of a relationship's ID: the
+// semantic event it starts from, else the one it points to.
+func relationshipAnchor(input CorrelationRelationshipInput) string {
+	if input.FromKind == CorrelationNodeSemanticEvent {
+		return input.FromID
+	}
+	if input.ToKind == CorrelationNodeSemanticEvent {
+		return input.ToID
+	}
+	return ""
 }
 
 func relationshipConfidence(method CorrelationRelationshipMethod) int {

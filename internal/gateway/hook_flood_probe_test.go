@@ -438,6 +438,11 @@ func TestHookFloodProbe(t *testing.T) {
 				guard.held.Round(time.Millisecond), guard.heldMax.Round(time.Millisecond), guard.passMax.Round(time.Millisecond),
 				guard.walMax, guard.syncs, guard.syncMax.Round(time.Millisecond))
 		}
+		all := slices.Clone(latencies)
+		slices.Sort(all)
+		t.Logf("flood %d all %d calls p50=%v p99=%v p999=%v max=%v", flood, calls,
+			all[calls/2].Round(time.Microsecond), all[calls*99/100].Round(time.Microsecond),
+			all[calls*999/1000].Round(time.Microsecond), all[calls-1].Round(time.Microsecond))
 		for _, violation := range hookFloodFlatnessViolations(minutes) {
 			t.Errorf("flood %d is not flat: %s", flood, violation)
 		}

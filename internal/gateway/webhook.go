@@ -40,8 +40,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/google/uuid"
 )
 
 // WebhookDispatcher sends structured JSON payloads to configured webhook
@@ -382,7 +382,7 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 	// historical idempotent ForSinkReason behavior.
 	event.Details = redaction.ReasonForSink(event.Details, redaction.SinkPolicyForDirective(event.RedactionEnabled))
 	if event.ID == "" {
-		event.ID = uuid.New().String()
+		event.ID = observability.NewTimeOrderedID()
 	}
 	rank := audit.SeverityRank(event.Severity)
 	action := strings.ToLower(event.Action)

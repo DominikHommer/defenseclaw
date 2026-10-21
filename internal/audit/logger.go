@@ -27,8 +27,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -61,7 +59,7 @@ func stampAuditEventEnvelope(e *Event) {
 		return
 	}
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -942,7 +940,7 @@ func (l *Logger) logActionWithEnvelopeContextAndAssetActor(
 		actor = "defenseclaw"
 	}
 	event := Event{
-		ID:        uuid.New().String(),
+		ID:        observability.NewTimeOrderedID(),
 		Timestamp: time.Now().UTC(),
 		Action:    action,
 		Target:    target,
@@ -1039,7 +1037,7 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		structured[key] = value
 	}
 	event := Event{
-		ID:                uuid.New().String(),
+		ID:                observability.NewTimeOrderedID(),
 		Timestamp:         time.Now().UTC(),
 		Action:            action,
 		Target:            target,

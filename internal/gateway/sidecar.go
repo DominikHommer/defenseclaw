@@ -4272,7 +4272,7 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 
 	if webhooks := s.webhooksSnapshot(); webhooks != nil {
 		event := audit.Event{
-			ID:        uuid.New().String(),
+			ID:        observability.NewTimeOrderedID(),
 			Timestamp: time.Now().UTC(),
 			Action:    string(audit.ActionBlock),
 			Target:    subjectName,

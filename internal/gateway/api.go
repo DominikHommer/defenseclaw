@@ -41,8 +41,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -56,6 +54,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -2903,7 +2902,7 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 		bySev[string(f.Severity)]++
 	}
 	return map[string]interface{}{
-		"scan_id":                    uuid.New().String(),
+		"scan_id":                    observability.NewTimeOrderedID(),
 		"verdict":                    string(result.MaxSeverity()),
 		"provenance":                 version.Current(),
 		"findings_count_by_severity": bySev,

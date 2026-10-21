@@ -27,7 +27,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
-	"github.com/google/uuid"
 )
 
 // JudgeCompletionInput contains only facts present on the completed judge call.
@@ -178,7 +177,7 @@ func (l *Logger) emitEnforcementQuarantineV8(
 		return auditV8Persisted, fmt.Errorf("audit: v8 quarantine log batch runtime is unavailable")
 	}
 	assetEvent := event
-	assetEvent.ID = uuid.NewString()
+	assetEvent.ID = observability.NewTimeOrderedID()
 	assetEvent.Target = input.SourcePath
 	assetEvent.Details = fmt.Sprintf("dest=%s", input.DestinationPath)
 
@@ -324,7 +323,7 @@ func newQuarantineRuntimeV8GeneratedMetric(
 			}
 			builder, err := observability.NewFamilyBuilder(
 				observability.ClockFunc(func() time.Time { return event.Timestamp.UTC() }),
-				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+				observability.TimeOrderedOccurrenceIDs,
 			)
 			if err != nil {
 				return observability.Record{}, err
