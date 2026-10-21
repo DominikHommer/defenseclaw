@@ -5,7 +5,6 @@
     "prompt-injection-codex",
     "cursor-secret-exfil",
     "hitl-approvals",
-    "local-observability",
     "switch-connectors"
   ]
 }

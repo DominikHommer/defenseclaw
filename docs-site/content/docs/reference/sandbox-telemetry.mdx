@@ -1,25 +1,14 @@
 ---
 title: Sandbox telemetry
-description: The v8 records DefenseClaw writes for OpenShell sandboxes — phase changes, egress decisions with bytes and duration, asks, policy changes, shadow AI and other findings, processes, integration health — and the attributes that tie them to one sandbox.
+description: The records, attributes, health codes and metrics DefenseClaw writes for OpenShell sandboxes, and how to reconstruct a session from them.
 keywords:
   - OpenShell sandbox telemetry
   - sandbox egress records
-  - log.egress.completed
   - shadow AI finding
-  - openshell_egress_auth_failed
   - defenseclaw.sandbox.name
-  - sandbox process tree records
 ---
 
-Every [OpenShell sandbox](/docs/sandboxes) writes canonical v8 records, the same
-kind as the rest of DefenseClaw's [observability](/docs/observability). They
-go to the local SQLite history and to each destination whose routes select
-them, redacted by that destination's profile. This page lists what is recorded,
-how a record names its sandbox, and which records tell you something is wrong.
-The [Sandboxes board](/docs/observability/grafana-dashboards#sandboxes-board)
-and the [Splunk Observability dashboard](/docs/observability/splunk) are built
-from these records; the full attribute registry is
-[`docs/OPENSHELL_SANDBOX_EVENTS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OPENSHELL_SANDBOX_EVENTS.md).
+Every [OpenShell sandbox](/docs/sandboxes) writes records into the standard [observability buckets](/docs/reference/observability#buckets). They go to local SQLite and to each destination whose routes select them, redacted by that destination's profile. The [Sandboxes board](/docs/reference/dashboards#sandboxes-board) and the Splunk Observability sandbox dashboard are built from them. The full attribute registry is [`docs/OPENSHELL_SANDBOX_EVENTS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OPENSHELL_SANDBOX_EVENTS.md).
 
 ## What is recorded
 
@@ -105,14 +94,12 @@ The records the managed computer adds:
 | The managed policy refused a destination | `log.sandbox.access_refused` | Names the rule and `server.address`; the rule is the caller's own match only. Always written. |
 | A sandbox or an agent container DefenseClaw did not create | `log.sandbox.foreign_sandbox`, `log.sandbox.foreign_container` | A sandbox is stopped, deleted when it cannot stop, or reported; a container is only reported, with its image in `defenseclaw.sandbox.container.image`. Both carry the account's own profile match and the detected agent connector, including when the account has no registered sandbox. |
 | An OpenShell setting differs from `enterprise.openshell` | `log.sandbox.settings_drift` | `defenseclaw.openshell.settings.field` names the key, never the value. Pauses the user's sandboxes. Always written. |
-| A watched registration is used or reported running without an accepted guest record since bind after five minutes | `log.sandbox.registration_without_guest` | The reason is `relay_without_guest` or `running_without_guest`; action `alert`, severity `MEDIUM`, bucket `compliance.activity`, and no outcome. It names the account, connector, registration, sandbox id and name, and the gateway's running state (`ready` or `stopped` phase). The Sandboxes dashboard stat **Sandbox registrations without a guest** counts these records. It changes no decision and is a tripwire for the simple case: the same account can post lifecycle records, and a dropped first record can cause one alert. Only registrations bound by a build with this signal are watched. The first accepted record ends the watch, so a guest that disappears later is not reported by this signal. Registrations bound before the upgrade to 1.0.2 (for example by 1.0.1) are not watched; re-create those sandboxes after the upgrade to bring them under the signal. Root-owned attestation in a later release replaces this signal. See [the managed limit](/docs/enterprise/sandboxes#require-sandboxes). |
+| A watched registration is used or reported running without an accepted guest record since bind after five minutes | `log.sandbox.registration_without_guest` | The reason is `relay_without_guest` or `running_without_guest`; action `alert`, severity `MEDIUM`, bucket `compliance.activity`, and no outcome. It names the account, connector, registration, sandbox id and name, and the gateway's running state (`ready` or `stopped` phase). The Sandboxes dashboard stat **Sandbox registrations without a guest** counts these records. It changes no decision and is a tripwire for the simple case: the same account can post lifecycle records, and a dropped first record can cause one alert. See [the managed limit](/docs/enterprise/sandboxes#require-sandboxes). |
 
 A refusal, a removal or stop, a re-match and an ask decision are mandatory:
 they reach the audit floor whatever a route's collection settings say. The
 Grafana Sandboxes board has a managed fleet section built from these records,
-including the registration alert stat. Splunk saved searches, Splunk
-Observability charts and a sandbox errors detector cover the earlier managed
-families.
+including the registration alert stat. 
 
 ## Egress records
 
@@ -178,7 +165,7 @@ To work out what an agent did in a sandbox, from the records alone:
    `ps` says when the tree was last sampled. Deleting the sandbox removes them.
 2. `defenseclaw audit export --since 1h` writes the audit records, hook
    decisions included, for the same window.
-3. In Grafana, set **Sandbox** on the [Sandboxes board](/docs/observability/grafana-dashboards#sandboxes-board).
+3. In Grafana, set **Sandbox** on the [Sandboxes board](/docs/reference/dashboards#sandboxes-board).
    To read the records in order, open Explore on Loki and filter on the sandbox
    name, then on one family:
 
@@ -215,7 +202,7 @@ The labels below are the ones the local Prometheus shows. In OTLP they are
 ## What leaves the host
 
 - The command line of a process is content class: each destination's
-  [redaction profile](/docs/observability/redaction) decides whether it leaves
+  [redaction profile](/docs/reference/redaction) decides whether it leaves
   the host. Before that, DefenseClaw replaces the values of arguments that name
   secrets and keeps at most 1,024 bytes.
 - Destinations, file names, finding targets and the program names in a record
@@ -230,6 +217,6 @@ The labels below are the ones the local Prometheus shows. In OTLP they are
 
 - [Sandbox guide: see where the sandbox connected](/docs/sandboxes/guide#see-where-the-sandbox-connected)
 - [Network and egress: destinations and shadow AI](/docs/sandboxes/network#destinations-and-shadow-ai)
-- [Grafana Sandboxes board](/docs/observability/grafana-dashboards#sandboxes-board)
-- [Splunk Observability dashboards and detector](/docs/observability/splunk)
+- [Grafana Sandboxes board](/docs/reference/dashboards#sandboxes-board)
+- [Splunk Observability dashboards and detector](/docs/reference/dashboards#splunk)
 - [Gateway API: sandbox status and destinations](/docs/reference/gateway-api)

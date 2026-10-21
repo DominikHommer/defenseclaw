@@ -20,7 +20,7 @@ export const legacyRedirects: Record<string, string> = {
   'setup/skill-scanner': '/docs/scanning/skill-scanner/',
   'setup/mcp-scanner': '/docs/scanning/mcp-scanner/',
   'setup/registries': '/docs/scanning/registries/',
-  'setup/webhooks': '/docs/observability/webhooks/',
+  'setup/webhooks': '/docs/how-to/observability/set-up-webhook-alerts/',
   'setup/enterprise-deployment': '/docs/enterprise/secure-client/',
   defaults: '/docs/policies/defaults/',
   benchmarks: '/docs/guardrail/benchmarks/',
@@ -30,7 +30,6 @@ export const legacyRedirects: Record<string, string> = {
   'get-started/windows/connectors-enforcement': '/docs/connectors/',
   'get-started/windows/managed-enterprise': '/docs/enterprise/windows/',
   openclaw: '/docs/connectors/openclaw-integration/',
-  'reference/redaction': '/docs/observability/redaction/',
   'connectors/tool-call-state': '/docs/policies/cel/tool-call-state/',
 };
 
