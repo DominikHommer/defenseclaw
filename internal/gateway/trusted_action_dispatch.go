@@ -54,6 +54,11 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// ArtifactBody is set when LegacyText and Input.Command are the whole
+	// body of a script the call runs (the artifact lane): its comments and
+	// data are not tool-call text, so a migrated literal rule must match a
+	// word the parse took from an executed command (GAP-1513).
+	ArtifactBody bool
 	// conflictSource is the tool call's argument object before a connector
 	// projection took arguments out of Input.Args, for the conflicting-keys
 	// check (conflictingToolArgumentKeys); nil when Input.Args is the object
@@ -575,9 +580,12 @@ func withMigratedLiteralRuleFindings(
 // the parse of its commands took from it, with its path values and network
 // hosts.
 func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) []string {
-	texts := []string{request.LegacyText, request.Input.Command, string(request.Input.Args)}
-	texts = append(texts, request.Input.Argv...)
-	texts = appendJSONStrings(texts, request.Input.Args)
+	var texts []string
+	if !request.ArtifactBody {
+		texts = append(texts, request.LegacyText, request.Input.Command, string(request.Input.Args))
+		texts = append(texts, request.Input.Argv...)
+		texts = appendJSONStrings(texts, request.Input.Args)
+	}
 	for _, command := range facts.Commands {
 		texts = append(texts, command.Argv...)
 		for _, argument := range command.Arguments {

@@ -526,6 +526,45 @@ func TestHandleAgentHook_AntigravityRequiresRegisteredEvent(t *testing.T) {
 	}
 }
 
+// GAP-0337: a PreToolUse payload with no readable toolCall (a flat Claude
+// Code shaped decoy, a camelCase toolName/toolInput form, a toolCall without
+// args) is refused, not judged as an empty call; the real nested shape is
+// judged, and a PostToolUse, which has no toolCall, is not refused.
+func TestHandleAgentHook_AntigravityRefusesAnUnreadableToolCall(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "antigravity"
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	for _, tc := range []struct {
+		name, event, body, want string
+	}{
+		{"flat claude shape", "PreToolUse", `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"echo ok"},"cwd":"/tmp"}`, "block"},
+		{"camel case flat", "PreToolUse", `{"toolName":"run_command","toolInput":{"CommandLine":"echo ok"}}`, "block"},
+		{"tool call without args", "PreToolUse", `{"conversationId":"c1","toolCall":{"name":"run_command"}}`, "block"},
+		{"payload claims another event", "PreToolUse", `{"conversationId":"c1","hookEventName":"Stop","terminationReason":"done"}`, "block"},
+		{"nested benign", "PreToolUse", `{"conversationId":"c1","workspacePaths":["/tmp"],"toolCall":{"name":"run_command","args":{"CommandLine":"echo ok","Cwd":"/tmp"}}}`, "allow"},
+		{"post tool use", "PostToolUse", `{"conversationId":"c1","stepIdx":1}`, "allow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/antigravity/hook", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-DefenseClaw-Antigravity-Event", tc.event)
+			recorder := httptest.NewRecorder()
+			api.handleAgentHook("antigravity").ServeHTTP(recorder, req)
+			var parsed struct {
+				Action   string   `json:"action"`
+				Findings []string `json:"findings"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &parsed); err != nil {
+				t.Fatalf("status=%d body=%s: %v", recorder.Code, recorder.Body.String(), err)
+			}
+			if parsed.Action != tc.want {
+				t.Fatalf("action=%q, want %q: %s", parsed.Action, tc.want, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandleAgentHook_AntigravityAllowsForcedSingleFileDeletionWithoutFinding(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"

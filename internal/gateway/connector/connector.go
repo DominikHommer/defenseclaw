@@ -714,10 +714,15 @@ type HookProfileRequest struct {
 	// ToolArgsAuthoritative distinguishes a deliberately empty/fail-closed
 	// connector projection from a decoder that does not own tool arguments.
 	ToolArgsAuthoritative bool
-	Content               string
-	Direction             string
-	Model                 string
-	Payload               map[string]interface{}
+	// ToolCallUnparsed is set by a decoder that owns the tool call when the
+	// payload holds no tool call it can read (no name or no argument
+	// object). A tool-call event with it set is refused: an unread call
+	// cannot be shown safe (fail closed, GAP-0337).
+	ToolCallUnparsed bool
+	Content          string
+	Direction        string
+	Model            string
+	Payload          map[string]interface{}
 }
 
 // HookVerdictInput is the mode-mapping context fed to a profile's

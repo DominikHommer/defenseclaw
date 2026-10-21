@@ -303,6 +303,12 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"python open append", `python3 -c "import os; open(os.path.expanduser('~/.ssh/authorized_keys'), 'a').write('dccert-block-marker\n')"`, "", "", true},
 		{"python Path home", `python3 -c "from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p.write_text(p.read_text() + 'dccert-block-marker\n')"`, "", "", true},
 		{"python Path expanduser", `python3 -c "from pathlib import Path; Path('~/.ssh/authorized_keys').expanduser().write_text('dccert-block-marker\n')"`, "", "", true},
+		// A docstring or comment that spells the write runs nothing (GAP-1199);
+		// exec of such a string still writes.
+		{"python docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", false},
+		{"python exec docstring write", `python3 -c 'from pathlib import Path; exec("""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""")'`, "", "", true},
+		// A path bound again before the write is not the keys file (GAP-1299).
+		{"python reassigned path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p = Path("notes.txt"); p.write_text("example")'`, "", "", false},
 		{"python append absolute", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "a").write("dccert-block-marker")'`, "", "", true},
 		{"python home append", `python -c 'open("$HOME/.ssh/authorized_keys", "a").write("dccert-block-marker")'`, "", "", true},
 		{"perl write", `perl -e 'open(F, ">>", "$ENV{HOME}/.ssh/authorized_keys"); print F "dccert-block-marker\n"; close(F)'`, "", "", true},

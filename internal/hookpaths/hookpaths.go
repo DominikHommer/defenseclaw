@@ -450,6 +450,18 @@ func Resolve(payload []byte) string {
 	if len(args) == 0 {
 		return ""
 	}
+	// Copilot CLI sends a freeform apply_patch's arguments as the patch text
+	// in a JSON string, raw or JSON-encoded once more; read it as the patch
+	// the gateway judges (GAP-0668).
+	var patch string
+	if isApplyPatchToolName(tool) && json.Unmarshal(args, &patch) == nil {
+		if strings.HasPrefix(patch, `"`) && json.Unmarshal([]byte(patch), &patch) != nil {
+			patch = ""
+		}
+		if strings.HasPrefix(patch, "*** Begin Patch") {
+			args, _ = json.Marshal(map[string]string{"patch": patch})
+		}
+	}
 	// The gateway names relative operands from the event cwd; use the same
 	// directory so both sides build the same keys.
 	var cwd string

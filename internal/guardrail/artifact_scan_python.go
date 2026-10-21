@@ -16,7 +16,7 @@ var pythonModuleWrite = regexp.MustCompile(`\b(?:os\.(?:remove|unlink|rename|rep
 var pythonWriteOpen = regexp.MustCompile(`\bopen\s*\([^\n)]*,\s*["'][rbtU]*[wax+]`)
 
 func pythonPathWriteMatch(rule *regexp.Regexp, source string) []int {
-	code := maskPythonCommentsAndDocstrings(source)
+	code := MaskPythonCommentsAndDocstrings(source)
 	lines := strings.Split(code, "\n")
 	for _, hit := range rule.FindAllStringIndex(code, -1) {
 		lineNo := strings.Count(code[:hit[0]], "\n")
@@ -135,9 +135,10 @@ func pythonCallEnd(line string, open int) int {
 	return -1
 }
 
-// Comments and triple-quoted strings can mention paths without executing a
-// write. Blank them in place so matches retain their source offsets.
-func maskPythonCommentsAndDocstrings(source string) string {
+// MaskPythonCommentsAndDocstrings blanks the comments and triple-quoted
+// strings of Python source in place, so matches keep their offsets: they can
+// mention paths without executing a write.
+func MaskPythonCommentsAndDocstrings(source string) string {
 	out := []byte(source)
 	quote := byte(0)
 	triple := false
