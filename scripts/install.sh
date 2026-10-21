@@ -550,6 +550,7 @@ hold_hook_fail_modes() {
         *) return 1 ;;
     esac
     HOLD_LOG="${STAGING}/refresh-fail-modes.log"
+    : >"${HOLD_LOG}"
     "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}" \
         --hold-until-exit "$1" >"${HOLD_LOG}" 2>&1 &
     HOLD_PID=$!
