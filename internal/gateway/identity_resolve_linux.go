@@ -47,7 +47,7 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
-	record, ok := readIdentitySpoolFactsForAccount(key, account.Name, now)
+	record, ok := readIdentitySpoolFactsForAccount(key, account.Name, facts.AccountSID, now)
 	var spool *enterprisehooks.IdentitySpoolRecord
 	if ok {
 		spool = &record

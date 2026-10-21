@@ -77,8 +77,9 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // account, since its verified identity (UPN, domain) is then another
 // account's. Otherwise it stays until it is older than IdentitySpoolMaxAge,
 // when the gateway ignores it anyway, unless two successive passes resolved
-// an account in that same directory and listed it in neither, and its uid
-// then no longer resolves. An outage can remove accounts from one
+// an account in that same directory, listed it in neither, and each found
+// its uid unresolved; a check that finds the uid still naming the account
+// clears the first answer. An outage can remove accounts from one
 // directory's enumeration while another still answers, a listing can be
 // partial, and one lookup can miss an account its directory still holds;
 // removing those records would lose their UPN facts, and a profile assigned
@@ -179,10 +180,10 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	}
 	// The marks are read and stored under the lock; the departure lookups
 	// run without it. A stored mark map is never changed afterwards.
-	identitySpoolOmitted.Lock()
-	omittedBefore := identitySpoolOmitted.byDir[dir]
-	identitySpoolOmitted.Unlock()
-	omitted := map[string]bool{}
+	identitySpoolUnresolved.Lock()
+	unresolvedBefore := identitySpoolUnresolved.byDir[dir]
+	identitySpoolUnresolved.Unlock()
+	unresolved := map[string]bool{}
 	for _, entry := range entries {
 		if keep[entry.Name()] {
 			continue
@@ -197,17 +198,28 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 					// another domain or directory: the record's verified
 					// identity is no longer this uid's, whatever the pass or
 					// the record's own directory says. It goes now.
+				case departure == identitySpoolDepartureStays:
+					// The uid still names the record's account: the listing
+					// merely omitted it, and an earlier not-found answer was a
+					// miss. Its mark goes, also on a failed pass.
+					continue
 				case passErr != nil:
-					omitted[entry.Name()] = omittedBefore[entry.Name()]
+					unresolved[entry.Name()] = unresolvedBefore[entry.Name()]
 					continue
 				case !gone:
 					continue
-				case !omittedBefore[entry.Name()] || departure != identitySpoolDepartureNotFound:
-					// The first pass that omits the account marks it; a later
-					// one removes it only when its uid no longer resolves. A
-					// check that did not finish keeps the mark. Until then the
-					// record ages out (GAP-1236).
-					omitted[entry.Name()] = true
+				case departure != identitySpoolDepartureNotFound:
+					// A check that did not finish shows nothing either way:
+					// the mark stays as it was.
+					unresolved[entry.Name()] = unresolvedBefore[entry.Name()]
+					continue
+				case !unresolvedBefore[entry.Name()]:
+					// The first not-found answer marks the record; it goes at
+					// the next pass that omits it only when that one's check
+					// finds the uid unresolved too. One lookup can miss an
+					// account its directory still holds. Until then the record
+					// ages out (GAP-1236).
+					unresolved[entry.Name()] = true
 					continue
 				}
 			} else if passErr != nil || !gone {
@@ -216,17 +228,17 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		}
 		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
 	}
-	identitySpoolOmitted.Lock()
-	defer identitySpoolOmitted.Unlock()
-	for name, marked := range omitted {
+	identitySpoolUnresolved.Lock()
+	defer identitySpoolUnresolved.Unlock()
+	for name, marked := range unresolved {
 		if !marked {
-			delete(omitted, name)
+			delete(unresolved, name)
 		}
 	}
-	if len(omitted) == 0 {
-		delete(identitySpoolOmitted.byDir, dir)
+	if len(unresolved) == 0 {
+		delete(identitySpoolUnresolved.byDir, dir)
 	} else {
-		identitySpoolOmitted.byDir[dir] = omitted
+		identitySpoolUnresolved.byDir[dir] = unresolved
 	}
 	return passErr
 }
@@ -295,7 +307,9 @@ func identitySpoolDirectoryDeparture(ctx context.Context, dir, name string) iden
 
 // identitySpoolSameIdentity compares a record's directory identity with
 // fresh, what the directory answers for its uid now; complete says every
-// lookup of fresh succeeded. Each fact both name must agree. A complete
+// lookup of fresh succeeded. Each fact both name must agree, the account's
+// SID first: an account recreated under the same uid, name and domain has
+// another SID. A complete
 // answer that is no directory account's (the uid is a local account now)
 // is another identity; an incomplete one that names nothing to compare
 // shows nothing.
@@ -311,6 +325,7 @@ func identitySpoolSameIdentity(record, fresh IdentitySpoolRecord, complete bool)
 	}
 	compared := false
 	for _, pair := range [][2]string{
+		{record.AccountSID, fresh.AccountSID},
 		{record.SSSDDomain, fresh.SSSDDomain},
 		{record.AccountDomain, fresh.AccountDomain},
 		{record.Facts.Domain, fresh.Facts.Domain},
@@ -345,12 +360,16 @@ var identitySpoolLookupUID = func(ctx context.Context, uid int) (unixidentity.Ac
 // account's check is skipped (identityLookupGated).
 var identitySpoolDepartureGate identityLookupGate
 
-// identitySpoolOmitted holds, per spool directory, the young directory
-// records the last successful pass did not list although their directory
-// answered. One answer for another account of the directory does not show
-// that this account left: a lookup can miss it once (GAP-1236). The guardian
-// is one long-running process; after a restart the first pass only marks.
-var identitySpoolOmitted = struct {
+// identitySpoolUnresolved holds, per spool directory, the young directory
+// records whose uid the departure check of the last pass that omitted them
+// found unresolved (identitySpoolDepartureNotFound) while their directory
+// answered. A listing's omission alone shows nothing, since partial listings
+// omit accounts that still exist, and one not-found answer does not show
+// that the account left: a lookup can miss it once (GAP-1236). The record
+// goes at a second not-found answer in a row; a check that finds the uid
+// naming the account again clears the mark. The guardian is one
+// long-running process; after a restart the first pass only marks.
+var identitySpoolUnresolved = struct {
 	sync.Mutex
 	byDir map[string]map[string]bool
 }{byDir: map[string]map[string]bool{}}

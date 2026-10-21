@@ -177,6 +177,7 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 					if sid, err = sssdAccountSID(sssd, uid); err != nil {
 						return useridentity.DirectoryFacts{}, err
 					}
+					facts.AccountSID = sid
 					if inDomain, err = r.applySSSDDomain(&facts, sssd, account.Name, sid); err != nil {
 						return useridentity.DirectoryFacts{}, err
 					}

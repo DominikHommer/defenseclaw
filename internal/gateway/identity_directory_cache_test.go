@@ -390,11 +390,50 @@ func TestIdentitySpoolRecordRequiresCurrentAccountName(t *testing.T) {
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate; setIdentitySpoolDir("") })
 	setIdentitySpoolDir(dir)
-	if _, ok := readIdentitySpoolFactsForAccount(key, "bob@corp.example.com", time.Now()); ok {
+	if _, ok := readIdentitySpoolFactsForAccount(key, "bob@corp.example.com", "", time.Now()); ok {
 		t.Fatal("spool facts crossed uid reuse")
 	}
-	if _, ok := readIdentitySpoolFactsForAccount(key, "ALICE@CORP.EXAMPLE.COM", time.Now()); !ok {
+	if _, ok := readIdentitySpoolFactsForAccount(key, "ALICE@CORP.EXAMPLE.COM", "", time.Now()); !ok {
 		t.Fatal("case-only account variation was rejected")
+	}
+}
+
+// W2B-G-enum review loop 4: an account recreated in AD under the same uid
+// and name has another SID. Until the guardian's next pass rewrote its
+// record, the gateway merged the old account's UPN into the new account's
+// facts. A record that names another SID than the one the gateway resolved
+// now is ignored; one without a SID (an older guardian, an account without
+// one) is still read by name.
+func TestIdentitySpoolRecordRequiresCurrentAccountSID(t *testing.T) {
+	const oldSID, newSID = "S-1-5-21-1-2-3-1601", "S-1-5-21-1-2-3-1777"
+	dir := t.TempDir()
+	oldValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate; setIdentitySpoolDir("") })
+	setIdentitySpoolDir(dir)
+	for _, tc := range []struct {
+		name, recordSID, ownSID string
+		want                    bool
+	}{
+		{"the same SID", oldSID, oldSID, true},
+		{"the same SID in another case", oldSID, strings.ToLower(oldSID), true},
+		{"a recreated account", oldSID, newSID, false},
+		{"a record without a SID", "", newSID, true},
+		{"no SID resolved now", oldSID, "", true},
+	} {
+		data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+			Key: "15002", User: "alice", UpdatedAt: time.Now().UTC(), AccountSID: tc.recordSID,
+			Facts: useridentity.DirectoryFacts{UPN: "alice@corp.example.com"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "15002.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := readIdentitySpoolFactsForAccount("15002", "alice", tc.ownSID, time.Now()); ok != tc.want {
+			t.Errorf("%s: record read %v, want %v", tc.name, ok, tc.want)
+		}
 	}
 }
 

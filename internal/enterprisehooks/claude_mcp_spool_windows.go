@@ -71,7 +71,8 @@ var windowsKiroMCPSpoolSource = windowsMCPSpoolSource{
 // presented as the current state, and the gateway fails closed for that
 // user's Claude Code MCP servers (GAP-0829). A record that cannot be
 // updated is withdrawn for the same reason, and the error names it
-// (GAP-1405).
+// (GAP-1405): each such record is an *MCPSpoolRecordError
+// (MCPSpoolRecordFailures), any other error is the folder's.
 func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func(string) error, logf func(string, ...any)) error {
 	return writeWindowsMCPSpool(dir, manifest, windowsClaudeMCPSpoolSource, setOwnership, logf)
 }
@@ -135,7 +136,9 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 			}
 		}
 		if err != nil {
-			failed = errors.Join(failed, withdrawMCPSpoolRecord(dir, name, err))
+			failed = errors.Join(failed, &MCPSpoolRecordError{
+				Connector: source.connector, SID: key, Home: home, Err: withdrawMCPSpoolRecord(dir, name, err),
+			})
 			continue
 		}
 		if current, readErr := os.ReadFile(filepath.Join(dir, name)); readErr == nil && bytes.Equal(current, data) {
@@ -145,7 +148,9 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 			if logf != nil {
 				logf("[hook-enumerator] WARN publish %s MCP servers for %s: %v", source.label, key, err)
 			}
-			failed = errors.Join(failed, withdrawMCPSpoolRecord(dir, name, err))
+			failed = errors.Join(failed, &MCPSpoolRecordError{
+				Connector: source.connector, SID: key, Home: home, Err: withdrawMCPSpoolRecord(dir, name, err),
+			})
 		} else if logf != nil {
 			// What the gateway admits for the user, so a server that never
 			// reached admission can be traced to the record (GAP-0219).

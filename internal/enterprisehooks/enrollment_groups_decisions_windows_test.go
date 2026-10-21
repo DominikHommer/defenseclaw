@@ -215,12 +215,16 @@ func TestWindowsEnrollmentGroupsDecideWellKnownGroupsFromTokens(t *testing.T) {
 			t.Fatalf("resolved names must be cached: %v", cache.Names)
 		}
 
-		// Off the network the names no longer resolve; the cached SIDs keep
-		// deciding.
+		// Off the network the names no longer resolve. Their cached SIDs
+		// decide no one, since the groups may have been recreated under
+		// those names (W2B-G-enum review loop 4): a holder of a cached SID is
+		// pending, neither excluded nor admitted.
 		stubGroupDirectory(t, map[string]string{}, map[string][]string{testLocalDevelopers: {testLocalUserSID}})
 		offline := newWindowsEnrollmentGroups([]string{"Developers"}, []string{`CONTOSO\Contractors`}, nil, nil, cache, nil)
-		if got, reason := offline.decide(testDomainUserA); got != windowsEnrollmentExcluded {
-			t.Fatalf("cached membership off the network: %d (%s)", got, reason)
+		for _, sid := range []string{testDomainUserA, testDomainUserB, testLocalUserSID} {
+			if got, reason := offline.decide(sid); got != windowsEnrollmentUndecided || !strings.Contains(reason, "did not resolve this cycle") {
+				t.Fatalf("%s: cached membership off the network: %d (%s), want pending", sid, got, reason)
+			}
 		}
 		// An exclude_groups name that never resolved excludes no one; an
 		// include_groups one leaves the users no other entry admits pending,

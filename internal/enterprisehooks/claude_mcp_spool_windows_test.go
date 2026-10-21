@@ -475,3 +475,37 @@ func TestWindowsClaudeProjectMCPChecksDirectoryAndFileACL(t *testing.T) {
 		})
 	}
 }
+
+// W2B-G-enum review loop 3: a record that cannot be updated is named in the
+// error with its account, and the other users' records are still published.
+func TestWriteWindowsMCPSpoolNamesTheRecordItCouldNotPublish(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), KiroMCPSpoolDirName)
+	var targets []ManifestTarget
+	for _, sid := range []string{"S-1-5-21-1-1001", "S-1-5-21-1-1002"} {
+		home := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, ".kiro", "settings"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".kiro", "settings", "mcp.json"), []byte(`{"mcpServers":{"notes":{"command":"x"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		targets = append(targets, ManifestTarget{SID: sid, UserHome: home, Connector: "kiro"})
+	}
+	previous := windowsMCPSpoolWrite
+	t.Cleanup(func() { windowsMCPSpoolWrite = previous })
+	windowsMCPSpoolWrite = func(dir, name, pattern string, data []byte, setOwnership func(string) error) error {
+		if strings.HasPrefix(name, "S-1-5-21-1-1001") {
+			return errors.New("there is not enough space on the disk")
+		}
+		return previous(dir, name, pattern, data, setOwnership)
+	}
+	err := WriteWindowsKiroMCPSpool(dir, Manifest{Targets: targets}, nil, t.Logf)
+	records, whole := MCPSpoolRecordFailures(err)
+	if whole || len(records) != 1 || records[0].SID != "S-1-5-21-1-1001" || records[0].Connector != "kiro" ||
+		!strings.EqualFold(records[0].Home, filepath.Clean(targets[0].UserHome)) {
+		t.Fatalf("error %v: records %+v whole %v; want the first user's record only", err, records, whole)
+	}
+	if servers, _, readErr := ReadKiroMCPSpool(dir, "S-1-5-21-1-1002", nil); readErr != nil || len(servers) != 1 {
+		t.Fatalf("the other user's record: %v (%v), want published", servers, readErr)
+	}
+}

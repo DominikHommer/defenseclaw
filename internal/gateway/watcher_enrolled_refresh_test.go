@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 )
 
 // GAP-0216: a managed Windows gateway knew an enrolled user's MCP servers
@@ -257,5 +258,80 @@ func TestKiroMCPToolCallIsDecidedOnTheRefreshedDefinition(t *testing.T) {
 	api.agentHookMCPAssetDecision(ctx, call)
 	if refreshed != before {
 		t.Fatal("a gateway without enrolled-user records refreshed them")
+	}
+}
+
+// W2B-G-enum review loop 3: one user's Claude Code record that the
+// enumerator could not publish failed the whole refresh, so the gateway
+// refused every MCP tool call: other users' current Claude Code calls and
+// every Kiro call, whose records were published. A partial refresh now has
+// the published records read, and refuses only the calls whose own record
+// it did not confirm.
+func TestPartialRefreshRefusesOnlyTheCallsOfTheRecordsItDidNotPublish(t *testing.T) {
+	const alice, bob = `C:\Users\alice`, `C:\Users\bob`
+	ctx := context.Background()
+	asAlice := withManagedHookPeer(ctx, managedHookPeer{Name: "alice", Home: alice})
+	asBob := withManagedHookPeer(ctx, managedHookPeer{Name: "bob", Home: bob})
+	var s Sidecar
+	var steps []string
+	var answer error
+	s.enrolledMCPRefresh.Store(&enrolledMCPRefresher{
+		refresh: func(context.Context) error { steps = append(steps, "publish"); return answer },
+		reload:  func() { steps = append(steps, "read") },
+	})
+	aliceClaude := &mcpasuser.RefreshIncomplete{Records: []mcpasuser.RefreshRecord{{Connector: "claudecode", SID: "S-1-5-21-1-1001", Home: alice}}}
+	claudeFolder := &mcpasuser.RefreshIncomplete{Connectors: []string{"claudecode"}}
+	for _, tc := range []struct {
+		name      string
+		answer    error
+		ctx       context.Context
+		connector string
+		refused   bool
+		read      bool
+	}{
+		{"another user's current Claude Code call", aliceClaude, asBob, "claudecode", false, true},
+		{"the same user's current Kiro call", aliceClaude, asAlice, "kiro", false, true},
+		{"the call of the record not published", aliceClaude, asAlice, "claudecode", true, true},
+		{"a caller whose home is not known", aliceClaude, ctx, "claudecode", true, true},
+		{"a caller whose home is not known, other connector", aliceClaude, ctx, "kiro", false, true},
+		{"a connector whose folder failed", claudeFolder, asBob, "claudecode", true, true},
+		{"another connector than the folder that failed", claudeFolder, asBob, "kiro", false, true},
+		{"a refresh that failed", errors.New("load the enrollment manifest: access denied"), asBob, "kiro", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			steps, answer = nil, tc.answer
+			err := s.refreshEnrolledMCPBeforeCall(tc.ctx, tc.connector)
+			if (err != nil) != tc.refused {
+				t.Fatalf("refresh = %v, want refused %v", err, tc.refused)
+			}
+			want := []string{"publish"}
+			if tc.read {
+				want = append(want, "read")
+			}
+			if !reflect.DeepEqual(steps, want) {
+				t.Fatalf("steps %v, want %v: the published records are read, a failed refresh reads none", steps, want)
+			}
+		})
+	}
+
+	// The hook end to end: Kiro and the other user are decided, the user
+	// whose record was not published is refused.
+	saved := agentHookMCPFromEnrolledSpool
+	agentHookMCPFromEnrolledSpool = func(*config.Config) bool { return true }
+	t.Cleanup(func() { agentHookMCPFromEnrolledSpool = saved })
+	api := &APIServer{scannerCfg: &config.Config{}}
+	api.SetMCPRefreshBeforeCall(s.refreshEnrolledMCPBeforeCall)
+	api.SetMCPAdmissionPending(func(_, server, _, _ string) (string, bool) { return server, false })
+	answer = aliceClaude
+	kiro := agentHookRequest{ConnectorName: "kiro", HookEventName: "preToolUse", ToolName: "mcp__notes__read"}
+	claude := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse", ToolName: "mcp__notes__read"}
+	if decision, _ := api.agentHookMCPAssetDecision(asAlice, kiro); decision.Action == "block" {
+		t.Fatalf("Kiro call of a user whose Kiro record was published: %q (%s), want it decided, not refused", decision.Action, decision.Reason)
+	}
+	if decision, _ := api.agentHookMCPAssetDecision(asBob, claude); decision.Action == "block" {
+		t.Fatalf("Claude Code call of another user: %q (%s), want it decided, not refused", decision.Action, decision.Reason)
+	}
+	if decision, refused := api.agentHookMCPAssetDecision(asAlice, claude); !refused || decision.Action != "block" {
+		t.Fatalf("Claude Code call of the user whose record was not published: refused=%v %q, want it refused", refused, decision.Action)
 	}
 }

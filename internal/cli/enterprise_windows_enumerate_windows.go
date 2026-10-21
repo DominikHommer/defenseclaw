@@ -654,8 +654,13 @@ var enterpriseWindowsMCPRefresh mcpasuser.Coalescer
 // servers of the users manifest enrolls for the gateway, whose service
 // account cannot read ~/.claude.json (GAP-0424) nor a protected
 // ~/.kiro/settings/mcp.json (GAP-1468). Standalone only: the Secure Client
-// profile gateway has no enrolled-user watcher. It returns why a record
-// folder could not be written (also logged).
+// profile gateway has no enrolled-user watcher. When something was not
+// published (also logged) it returns a *mcpasuser.RefreshIncomplete that
+// names, per connector, the records it could not publish, or the connector
+// whose record folder could not be written: the gateway reads the records
+// that were published and refuses only the calls of what it names, so one
+// user's failed record does not refuse other users' or other connectors'
+// calls.
 func publishEnterpriseWindowsMCPServers(cfg *config.Config, manifest enterprisehooks.Manifest, stderr io.Writer) error {
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
 		return nil
@@ -665,17 +670,34 @@ func publishEnterpriseWindowsMCPServers(cfg *config.Config, manifest enterpriseh
 	logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
 	authorizationDir := managed.HookGuardianAuthorizationDir(cfg.DataDir)
 	var errs []error
-	if err := enterpriseWindowsClaudeMCPSpoolWriter(enterprisehooks.ClaudeMCPSpoolDir(authorizationDir), manifest,
-		enterpriseHookAuthorizationOwnershipSetter, logf); err != nil {
-		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish Claude Code MCP servers: %v\n", err)
-		errs = append(errs, fmt.Errorf("publish Claude Code MCP servers: %w", err))
+	incomplete := &mcpasuser.RefreshIncomplete{}
+	for _, spool := range []struct {
+		connector, label, dir string
+		write                 func(string, enterprisehooks.Manifest, func(string) error, func(string, ...any)) error
+	}{
+		{"claudecode", "Claude Code", enterprisehooks.ClaudeMCPSpoolDir(authorizationDir), enterpriseWindowsClaudeMCPSpoolWriter},
+		{"kiro", "Kiro", enterprisehooks.KiroMCPSpoolDir(authorizationDir), enterpriseWindowsKiroMCPSpoolWriter},
+	} {
+		err := spool.write(spool.dir, manifest, enterpriseHookAuthorizationOwnershipSetter, logf)
+		if err == nil {
+			continue
+		}
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish %s MCP servers: %v\n", spool.label, err)
+		errs = append(errs, fmt.Errorf("publish %s MCP servers: %w", spool.label, err))
+		records, whole := enterprisehooks.MCPSpoolRecordFailures(err)
+		if whole {
+			incomplete.Connectors = append(incomplete.Connectors, spool.connector)
+			continue
+		}
+		for _, record := range records {
+			incomplete.Records = append(incomplete.Records, mcpasuser.RefreshRecord{Connector: spool.connector, SID: record.SID, Home: record.Home})
+		}
 	}
-	if err := enterpriseWindowsKiroMCPSpoolWriter(enterprisehooks.KiroMCPSpoolDir(authorizationDir), manifest,
-		enterpriseHookAuthorizationOwnershipSetter, logf); err != nil {
-		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish Kiro MCP servers: %v\n", err)
-		errs = append(errs, fmt.Errorf("publish Kiro MCP servers: %w", err))
+	if len(errs) == 0 {
+		return nil
 	}
-	return errors.Join(errs...)
+	incomplete.Detail = errors.Join(errs...).Error()
+	return incomplete
 }
 
 // publishEnterpriseWindowsIDEAppData publishes the IDE inventory of each
