@@ -446,6 +446,16 @@ func readPublishedSessionGeneration(root string, trust func(string) error) (stri
 // own old generation file, which only a bump after its return can end. The
 // error reports a bump that neither moved the generation nor removed it.
 func BumpPublishedSessionGeneration(root string) error {
+	return BumpPublishedSessionGenerationPast(root, time.Time{})
+}
+
+// BumpPublishedSessionGenerationPast is BumpPublishedSessionGeneration with
+// a floor: the new generation is also later than floor. A lifecycle that
+// replaces the record folder with a new one passes the generation of the
+// folder it retired, so the new folder's first generation never repeats or
+// precedes one a record was ever stamped with, even after the clock was set
+// back.
+func BumpPublishedSessionGenerationPast(root string, floor time.Time) error {
 	path, ok := PublishedSessionGenerationPath(root)
 	if !ok {
 		return fmt.Errorf("no protected session record folder %q", root)
@@ -460,6 +470,9 @@ func BumpPublishedSessionGeneration(root string) error {
 	old, err := ownPublishedSessionGeneration(path)
 	if err != nil {
 		return err
+	}
+	if floor.After(old) {
+		old = floor
 	}
 	next := time.Now()
 	if !next.After(old) {

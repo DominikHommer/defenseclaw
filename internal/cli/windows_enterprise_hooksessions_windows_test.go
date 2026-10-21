@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -114,9 +115,10 @@ func TestWindowsHookSessionRepairEndsRecordsMovedAsideAndBack(t *testing.T) {
 	if err := check(); err != nil {
 		t.Fatalf("the next allow after the repair proves the process: %v", err)
 	}
-	// A repair of a root the hook trusts keeps the folder and still ends
-	// every earlier allow. (The test account stands in for the gateway
-	// service, which the real check does not accept, so it is replaced.)
+	// A repair of a root the hook trusts replaces it too and ends every
+	// earlier allow the same way. (The test account stands in for the
+	// gateway service, which the real check does not accept, so it is
+	// replaced.)
 	previousTrust := windowsHookSessionRootTrustProblem
 	windowsHookSessionRootTrustProblem = func(string) error { return nil }
 	t.Cleanup(func() { windowsHookSessionRootTrustProblem = previousTrust })
@@ -173,12 +175,13 @@ func TestWindowsHookSessionStatusUsesTheHooksStrictRule(t *testing.T) {
 	}
 }
 
-// openWindowsHookSessionRootHandle opens root the way an account that had
+// openWindowsHookSessionHandle opens path (the record root, a record
+// folder, a record or the generation file) the way an account that had
 // WRITE_DAC on it could, and keeps the handle: access is checked at open,
-// so the handle keeps WRITE_DAC whatever DACL the folder gets later.
-func openWindowsHookSessionRootHandle(t *testing.T, root string, share uint32) windows.Handle {
+// so the handle keeps WRITE_DAC whatever DACL the object gets later.
+func openWindowsHookSessionHandle(t *testing.T, path string, share uint32) windows.Handle {
 	t.Helper()
-	pointer, err := winpath.UTF16Ptr(root)
+	pointer, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,10 +218,31 @@ func windowsFileIndex(t *testing.T, handle windows.Handle) uint64 {
 	return uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow)
 }
 
+// windowsHookSessionTestKey is the agent process the replacement tests
+// publish for.
+var windowsHookSessionTestKey = enterprisepolicy.SessionKey{Connector: "copilot", Session: "s-1", Process: "windows:b:1:100"}
+
+// windowsHookSessionTestGeneration is the record root's current generation.
+func windowsHookSessionTestGeneration(t *testing.T, root string) int64 {
+	t.Helper()
+	generation, err := enterprisepolicy.PublishedSessionGeneration(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := strconv.ParseInt(generation, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
 // windowsHookSessionReplacementTestRoot is a record root as the lifecycle
-// makes it, with an allow published for the test account, and its drifted
-// SDDL: standard users may add folders, delete them and change the DACL.
-func windowsHookSessionReplacementTestRoot(t *testing.T) (root string, self *windows.SID, check func() error, drifted string) {
+// makes it, with an allow published for the test account. With drift it
+// gets the drifted SDDL (standard users may add folders, delete them and
+// change the DACL); without, the root keeps the trusted SDDL and the hook's
+// root check accepts it (the test account stands in for the gateway
+// service, which the real check does not accept).
+func windowsHookSessionReplacementTestRoot(t *testing.T, drift bool) (root string, self *windows.SID, check func() error, drifted string) {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -233,7 +257,7 @@ func windowsHookSessionReplacementTestRoot(t *testing.T) (root string, self *win
 	if err := ensureWindowsHookSessionRoot(root, self); err != nil {
 		t.Skipf("the record folder cannot get its owner here (an elevated test): %v", err)
 	}
-	key := enterprisepolicy.SessionKey{Connector: "copilot", Session: "s-1", Process: "windows:b:1:100"}
+	key := windowsHookSessionTestKey
 	if err := windowsHookSessionTestPublish(root, identity, key); err != nil {
 		t.Fatal(err)
 	}
@@ -243,6 +267,12 @@ func windowsHookSessionReplacementTestRoot(t *testing.T) (root string, self *win
 	}
 	if err := check(); err != nil {
 		t.Fatalf("the published allow must prove the process: %v", err)
+	}
+	if !drift {
+		previousTrust := windowsHookSessionRootTrustProblem
+		windowsHookSessionRootTrustProblem = func(string) error { return nil }
+		t.Cleanup(func() { windowsHookSessionRootTrustProblem = previousTrust })
+		return root, self, check, ""
 	}
 	drifted = "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;BU)(A;;0x40044;;;BU)(A;OICI;0x1301bf;;;" + self.String() + ")"
 	if err := applyWindowsSDDL(root, drifted); err != nil {
@@ -263,8 +293,8 @@ func windowsHookSessionReplacementTestRoot(t *testing.T) (root string, self *win
 // root path is a new one, the handle's DACL changes never reach it, and the
 // old allow proves nothing.
 func TestWindowsHookSessionRepairReplacesARootARetainedHandleCanChange(t *testing.T) {
-	root, self, check, drifted := windowsHookSessionReplacementTestRoot(t)
-	handle := openWindowsHookSessionRootHandle(t, root, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	root, self, check, drifted := windowsHookSessionReplacementTestRoot(t, true)
+	handle := openWindowsHookSessionHandle(t, root, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 	before := windowsFileIndex(t, handle)
 	if err := ensureWindowsHookSessionRoot(root, self); err != nil {
 		t.Fatal(err)
@@ -275,7 +305,7 @@ func TestWindowsHookSessionRepairReplacesARootARetainedHandleCanChange(t *testin
 	if err := setWindowsDACLThroughHandle(t, handle, drifted); err != nil {
 		t.Logf("the retained handle cannot change the retired folder any more: %v", err)
 	}
-	current := openWindowsHookSessionRootHandle(t, root, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	current := openWindowsHookSessionHandle(t, root, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 	if windowsFileIndex(t, current) == before {
 		t.Fatal("the repair must replace the folder object a retained handle can change")
 	}
@@ -293,9 +323,16 @@ func TestWindowsHookSessionRepairReplacesARootARetainedHandleCanChange(t *testin
 // The same with a handle that does not share delete access, which refuses
 // the move: the repair fails and the folder keeps an owner the hook refuses
 // whatever the handle writes into its DACL, so nothing it holds is trusted
-// again. Once the handle is closed, the next repair replaces it.
+// again, whether the root was drifted or looked trusted. Once the handle is
+// closed, the next repair replaces it.
 func TestWindowsHookSessionRepairKeepsARootItCannotReplaceRefused(t *testing.T) {
-	root, self, check, _ := windowsHookSessionReplacementTestRoot(t)
+	for name, drift := range map[string]bool{"drifted": true, "looks trusted": false} {
+		t.Run(name, func(t *testing.T) { testWindowsHookSessionRepairKeepsARootItCannotReplaceRefused(t, drift) })
+	}
+}
+
+func testWindowsHookSessionRepairKeepsARootItCannotReplaceRefused(t *testing.T, drift bool) {
+	root, self, check, _ := windowsHookSessionReplacementTestRoot(t, drift)
 	pointer, err := winpath.UTF16Ptr(root)
 	if err != nil {
 		t.Fatal(err)
@@ -344,5 +381,89 @@ func TestWindowsHookSessionRepairKeepsARootItCannotReplaceRefused(t *testing.T) 
 		if strings.Contains(entry.Name(), windowsHookSessionRetiredInfix) {
 			t.Fatalf("a retired root must not be left behind: %s", entry.Name())
 		}
+	}
+}
+
+// Review P1 (GAP-0352, 1.0.4 loop round 2): an administrator briefly gave
+// an account WRITE_DAC on its own record folder, its record or the
+// generation file; the account kept a handle and put the trusted DACL back,
+// so the root looked right to the hook and to the repair. A repair that kept
+// a root it trusted kept those objects, and after a guardian removal the
+// handle let the account grant itself write access and put a fresh allow of
+// the current generation in its record. Every repair and ensure now
+// replaces the root with everything in it, even when it looks trusted: no
+// object a retained handle reaches is at a record path afterwards, the old
+// allow proves nothing, and the new generation is later than the old one.
+// When a handle inside the root refuses the move, the step fails and the
+// root keeps an owner the hook refuses instead.
+func TestWindowsHookSessionRepairReplacesEveryObjectARetainedHandleReaches(t *testing.T) {
+	root, self, check, _ := windowsHookSessionReplacementTestRoot(t, false)
+	identity := self.String()
+	key := windowsHookSessionTestKey
+	account, _ := enterprisepolicy.PublishedSessionIdentityDir(root, identity)
+	record, _ := enterprisepolicy.PublishedSessionRecordPath(root, identity, key.Connector, "p", key.Process)
+	generation, _ := enterprisepolicy.PublishedSessionGenerationPath(root)
+	before := windowsHookSessionTestGeneration(t, root)
+	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
+	retained := map[string]uint64{}
+	for _, path := range []string{root, account, record, generation} {
+		retained[path] = windowsFileIndex(t, openWindowsHookSessionHandle(t, path, share))
+	}
+	if err := ensureWindowsHookSessionRoot(root, self); err != nil {
+		if trusted, ownerErr := windowsPathOwnedByAdministrators(root); ownerErr != nil || trusted {
+			t.Fatalf("a root the repair could not replace (%v) must keep an owner the hook refuses: %v %v", err, trusted, ownerErr)
+		}
+		t.Logf("the open handles refused the move; the root keeps an owner the hook refuses: %v", err)
+		return
+	}
+	if err := check(); !errors.Is(err, enterprisepolicy.ErrPublishedSessionUnavailable) {
+		t.Fatalf("after the repair the old allow must prove nothing: %v", err)
+	}
+	if after := windowsHookSessionTestGeneration(t, root); after <= before {
+		t.Fatalf("the new root's generation must be later than the replaced one: %d after %d", after, before)
+	}
+	// The gateway writes the account's folder and record again.
+	if err := windowsHookSessionTestPublish(root, identity, key); err != nil {
+		t.Fatal(err)
+	}
+	for path, index := range retained {
+		if windowsFileIndex(t, openWindowsHookSessionHandle(t, path, share)) == index {
+			t.Fatalf("%s is still the object a retained handle reaches", path)
+		}
+	}
+	if trusted, err := windowsPathOwnedByAdministrators(root); err != nil || !trusted {
+		t.Fatalf("the new root is owned by Administrators: %v %v", trusted, err)
+	}
+}
+
+// The same with the record held open without delete sharing, which may
+// refuse moving the root: either the root is replaced, or the step fails
+// and the root keeps an owner the hook refuses. The old allow is never
+// trusted again.
+func TestWindowsHookSessionRepairWithARecordHeldOpen(t *testing.T) {
+	root, self, check, _ := windowsHookSessionReplacementTestRoot(t, false)
+	record, _ := enterprisepolicy.PublishedSessionRecordPath(root, self.String(), windowsHookSessionTestKey.Connector, "p", windowsHookSessionTestKey.Process)
+	before := windowsFileIndex(t, openWindowsHookSessionHandle(t, root, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE))
+	pointer, err := winpath.UTF16Ptr(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = windows.CloseHandle(handle) })
+	if err := ensureWindowsHookSessionRoot(root, self); err != nil {
+		if trusted, ownerErr := windowsPathOwnedByAdministrators(root); ownerErr != nil || trusted {
+			t.Fatalf("a root the repair could not replace (%v) must keep an owner the hook refuses: %v %v", err, trusted, ownerErr)
+		}
+		return
+	}
+	if windowsFileIndex(t, openWindowsHookSessionHandle(t, root, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)) == before {
+		t.Fatal("a repair that succeeded must have replaced the root")
+	}
+	if err := check(); !errors.Is(err, enterprisepolicy.ErrPublishedSessionUnavailable) {
+		t.Fatalf("after the repair the old allow must prove nothing: %v", err)
 	}
 }

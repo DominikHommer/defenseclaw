@@ -320,3 +320,40 @@ func TestBumpPublishedSessionGenerationOnlyMovesForwardAndFailsClosed(t *testing
 		t.Fatalf("the link's target must not be touched: %v %v", info, err)
 	}
 }
+
+// Review P1 (GAP-0352, loop round 2): a lifecycle that replaces the record
+// folder starts the new folder's generation past the one of the folder it
+// retired (BumpPublishedSessionGenerationPast), even when the retired one was
+// dated ahead of the clock: no generation a record was ever stamped with
+// comes back, not even for a moment.
+func TestBumpPublishedSessionGenerationPastAFloor(t *testing.T) {
+	root := publishedSessionTestRoot(t)
+	floor := time.Now().Add(time.Hour)
+	previousSet := publishedSessionSetTime
+	t.Cleanup(func() { publishedSessionSetTime = previousSet })
+	var set []time.Time
+	publishedSessionSetTime = func(name string, at time.Time) error {
+		set = append(set, at)
+		return previousSet(name, at)
+	}
+	if err := BumpPublishedSessionGenerationPast(root, floor); err != nil {
+		t.Fatal(err)
+	}
+	if after := publishedSessionTestGeneration(t, root); after <= floor.UnixNano() {
+		t.Fatalf("the generation must move past the floor: %d, floor %d", after, floor.UnixNano())
+	}
+	for _, at := range set {
+		if !at.After(floor) {
+			t.Fatalf("a bump must never set the generation to the floor or before it: %v (floor %v)", at, floor)
+		}
+	}
+	// A floor behind the current generation changes nothing: the bump moves
+	// forward from the file's own time.
+	before := publishedSessionTestGeneration(t, root)
+	if err := BumpPublishedSessionGenerationPast(root, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if after := publishedSessionTestGeneration(t, root); after <= before {
+		t.Fatalf("an old floor must not hold the generation back: %d after %d", after, before)
+	}
+}
