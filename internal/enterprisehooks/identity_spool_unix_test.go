@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -130,11 +131,26 @@ func TestIdentitySpoolCleanupRequiresTheRecordsDomainToAnswer(t *testing.T) {
 	}
 }
 
+// stubIdentitySpoolLookupUID answers the departure lookup: the uids in
+// present resolve to their names, any other uid is not found.
+func stubIdentitySpoolLookupUID(t *testing.T, present map[int]string) {
+	t.Helper()
+	previous := identitySpoolLookupUID
+	t.Cleanup(func() { identitySpoolLookupUID = previous })
+	identitySpoolLookupUID = func(uid int) (unixidentity.Account, error) {
+		if name, ok := present[uid]; ok {
+			return unixidentity.Account{Name: name, UID: uid}, nil
+		}
+		return unixidentity.Account{}, unixidentity.ErrNotFound
+	}
+}
+
 // GAP-1236: one account of a directory resolving does not show that another
 // account of it, which the pass did not list, left: its lookup may have
 // missed once. The record stays until a second successive pass that also
 // does not list it, and a pass that lists it again starts over.
 func TestIdentitySpoolKeepsAnOmittedAccountOfAnAnsweringDirectoryUntilASecondPass(t *testing.T) {
+	stubIdentitySpoolLookupUID(t, nil) // bob's uid no longer resolves
 	dir := t.TempDir()
 	directoryRecord := func(uid int, user string) IdentitySpoolRecord {
 		return IdentitySpoolRecord{Key: strconv.Itoa(uid), User: user, UpdatedAt: time.Now().UTC(), SSSDDomain: "dclab.test",
@@ -161,7 +177,7 @@ func TestIdentitySpoolKeepsAnOmittedAccountOfAnAnsweringDirectoryUntilASecondPas
 		{[]IdentitySpoolAccount{alice}, true},      // bob's lookup missed once
 		{[]IdentitySpoolAccount{alice, bob}, true}, // and recovered
 		{[]IdentitySpoolAccount{alice}, true},      // a new first omission
-		{[]IdentitySpoolAccount{alice}, false},     // confirmed: bob left
+		{[]IdentitySpoolAccount{alice}, false},     // confirmed: bob is gone
 	} {
 		if err := WriteIdentitySpool(context.Background(), dir, step.accounts, nil, nil); err != nil {
 			t.Fatal(err)
@@ -356,5 +372,80 @@ func TestMacOSRecordOfAnotherAccountIsRefused(t *testing.T) {
 	}
 	if err := checkMacOSRecordUID("AuthenticationAuthority: ;ShadowHash;\n", 501); err == nil {
 		t.Fatal("a record without a UniqueID was accepted")
+	}
+}
+
+// W2B-G-enum review: a directory listing can omit an account on every pass
+// while another account of the directory resolves (SSSD enumerate=false, a
+// partial answer). Two such passes removed the omitted account's fresh
+// record, and a profile assigned by its UPN fell to the default. The record
+// now stays while the account's own uid still resolves to it, until it ages
+// out; it goes once the uid stops resolving or names another account, and at
+// once for an account the enrollment settings leave out.
+func TestIdentitySpoolKeepsAnAccountPartialListingsOmitWhileItResolves(t *testing.T) {
+	dir := t.TempDir()
+	directoryRecord := func(uid int, user string) IdentitySpoolRecord {
+		return IdentitySpoolRecord{Key: strconv.Itoa(uid), User: user, UpdatedAt: time.Now().UTC(), SSSDDomain: "dclab.test",
+			Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Realm: "DCLAB.TEST", UPN: user + "@dclab.test"}}
+	}
+	previous := identitySpoolCollect
+	t.Cleanup(func() { identitySpoolCollect = previous })
+	identitySpoolCollect = func(_ context.Context, account IdentitySpoolAccount, _ time.Time) (IdentitySpoolRecord, error) {
+		return directoryRecord(account.UID, account.User), nil
+	}
+	present := map[int]string{94401302: "dcad-bob", 94401303: "dcad-carol"}
+	stubIdentitySpoolLookupUID(t, present)
+	alice := IdentitySpoolAccount{UID: 94401301, User: "dcad-alice"}
+	for _, record := range []IdentitySpoolRecord{directoryRecord(94401302, "dcad-bob"), directoryRecord(94401303, "dcad-carol")} {
+		data, err := MarshalIdentitySpoolRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, record.Key+".json"), data, 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	has := func(key string) bool {
+		_, err := os.Stat(filepath.Join(dir, key+".json"))
+		return err == nil
+	}
+	pass := func(accounts ...IdentitySpoolAccount) {
+		t.Helper()
+		if err := WriteIdentitySpool(context.Background(), dir, accounts, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 4 {
+		pass(alice)
+		if !has("94401302") || !has("94401303") {
+			t.Fatalf("partial listing %d removed a record of an account that still resolves: bob %v, carol %v", i+1, has("94401302"), has("94401303"))
+		}
+	}
+	// carol's uid now names another account; bob's still resolves.
+	present[94401303] = "dcad-dave"
+	pass(alice)
+	if has("94401303") || !has("94401302") {
+		t.Fatalf("after carol's uid was reassigned: carol %v, bob %v; want carol's record gone and bob's kept", has("94401303"), has("94401302"))
+	}
+	// bob's record ages out while every listing still omits him.
+	old := time.Now().Add(-IdentitySpoolMaxAge - time.Minute)
+	if err := os.Chtimes(filepath.Join(dir, "94401302.json"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	pass(alice)
+	if has("94401302") {
+		t.Fatal("the record of an account the listings omit outlived its maximum age")
+	}
+	// An account the enrollment settings leave out goes at once, also while
+	// it resolves.
+	erin := IdentitySpoolAccount{UID: 94401305, User: "dcad-erin"}
+	present[erin.UID] = erin.User
+	pass(alice, erin)
+	if !has("94401305") {
+		t.Fatal("erin's record was not published")
+	}
+	pass(alice, IdentitySpoolAccount{UID: erin.UID, Left: true})
+	if has("94401305") {
+		t.Fatal("the record of an account the enrollment leaves out was kept")
 	}
 }

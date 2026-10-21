@@ -165,7 +165,7 @@ func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorNam
 func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	cfg := a.liveConfig()
 	if a.mcpRefreshBeforeCall == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
-		probe.Surface != "hook" || (hookEvent != "PreToolUse" && hookEvent != "PermissionRequest") {
+		probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return config.AssetPolicyDecision{}, false
 	}
 	if err := a.mcpRefreshBeforeCall(ctx, connectorName); err == nil {
@@ -179,6 +179,16 @@ func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorN
 	return decision, true
 }
 
+// mcpCallAboutToRun reports a hook event sent before a tool runs, however
+// the connector spells it (Kiro CLI 2.x sends preToolUse).
+func mcpCallAboutToRun(hookEvent string) bool {
+	switch canonicalEvent(hookEvent) {
+	case "pretooluse", "permissionrequest":
+		return true
+	}
+	return false
+}
+
 // mcpAdmissionPendingDecision refuses the tool call of an MCP server the
 // install watcher admits but has not admitted yet (GAP-0112). Claude Code
 // starts a project's servers when it opens the project, before the
@@ -190,7 +200,7 @@ func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorN
 func (a *APIServer) mcpAdmissionPendingDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	cfg := a.liveConfig()
 	if a.mcpAdmissionPending == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
-		probe.Surface != "hook" || (hookEvent != "PreToolUse" && hookEvent != "PermissionRequest") {
+		probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return config.AssetPolicyDecision{}, false
 	}
 	home, _ := callerHomeForAssets(ctx)

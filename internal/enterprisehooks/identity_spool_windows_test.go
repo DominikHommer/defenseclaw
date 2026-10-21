@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -81,8 +82,8 @@ func writeTestIdentityRecord(t *testing.T, dir, sid string, updated time.Time) {
 }
 
 // The identity pass obeys the enumerator cycle (GAP-1049): it stops at the
-// cycle's end, keeps the records of the accounts it did not reach, and the
-// next pass starts with the oldest records.
+// cycle's end, keeps the records of the accounts it did not reach or was
+// still resolving, and the next pass starts with the oldest records.
 func TestWindowsIdentitySpoolStopsAtTheCycleDeadline(t *testing.T) {
 	dir := t.TempDir()
 	stale := time.Now().UTC().Add(-50 * time.Minute)
@@ -97,15 +98,15 @@ func TestWindowsIdentitySpoolStopsAtTheCycleDeadline(t *testing.T) {
 	var order []string
 	stubWindowsIdentityLookups(t, func(sid string) {
 		order = append(order, sid)
-		if len(order) == 2 {
-			cancel() // the cycle ends while the second account is resolved
+		if len(order) == 3 {
+			cancel() // the cycle ends while the third account is resolved
 		}
 	}, nil)
 	err := WriteWindowsIdentitySpool(ctx, dir, cache, nil, nil, nil, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want the pass stopped by the cycle", err)
 	}
-	if strings.Join(order, ",") != testSpoolUserB+","+testSpoolUserC {
+	if strings.Join(order, ",") != testSpoolUserB+","+testSpoolUserC+","+testSpoolUserA {
 		t.Fatalf("resolved %v, want the account without a record, then the oldest, and none after the cycle ended", order)
 	}
 	record, readErr := ReadIdentitySpoolRecord(dir, testSpoolUserA, nil)
@@ -159,5 +160,74 @@ func TestWindowsIdentitySpoolPublishesNoRecordForAnExcludedAccount(t *testing.T)
 	}
 	if _, err := os.Stat(filepath.Join(dir, testSpoolUserB+".json")); !os.IsNotExist(err) {
 		t.Fatalf("the excluded account's record is still published: %v", err)
+	}
+}
+
+// W2B-G-enum review: the pass checked the cycle only between accounts, and
+// an account's directory lookup ran synchronously, so a lookup that stalled
+// held the pass past the cycle's deadline and the other records went
+// unrefreshed. The pass stops waiting at the deadline and keeps the records;
+// a lookup that keeps running counts against a small limit, and at that
+// limit a pass starts no new lookup.
+func TestWindowsIdentitySpoolStopsWaitingForABlockedLookupAtTheDeadline(t *testing.T) {
+	dir := t.TempDir()
+	oldA, oldB := time.Now().UTC().Add(-50*time.Minute), time.Now().UTC().Add(-time.Minute)
+	writeTestIdentityRecord(t, dir, testSpoolUserA, oldA)
+	writeTestIdentityRecord(t, dir, testSpoolUserB, oldB)
+	cache := NewWindowsEnrollmentGroupCache()
+	cache.Users[testSpoolUserA] = []string{}
+	cache.Users[testSpoolUserB] = []string{}
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var reached []string
+	stubWindowsIdentityLookups(t, func(sid string) {
+		mu.Lock()
+		reached = append(reached, sid)
+		mu.Unlock()
+		if sid == testSpoolUserA {
+			<-release // the directory never answers for the oldest account
+		}
+	}, nil)
+	t.Cleanup(func() {
+		close(release)
+		for deadline := time.Now().Add(5 * time.Second); windowsIdentityAbandoned.Load() != 0 && time.Now().Before(deadline); {
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := WriteWindowsIdentitySpool(ctx, dir, cache, nil, nil, nil, nil)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("the pass returned after %s, past its 200ms cycle", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the pass stopped by the cycle deadline", err)
+	}
+	mu.Lock()
+	got := strings.Join(reached, ",")
+	mu.Unlock()
+	if got != testSpoolUserA {
+		t.Fatalf("lookups started for %s, want only the oldest account's", got)
+	}
+	for sid, want := range map[string]time.Time{testSpoolUserA: oldA, testSpoolUserB: oldB} {
+		if record, err := ReadIdentitySpoolRecord(dir, sid, nil); err != nil || !record.UpdatedAt.Equal(want) {
+			t.Fatalf("record of %s = %+v (%v), want it kept as it was", sid, record, err)
+		}
+	}
+	if windowsIdentityAbandoned.Load() != 1 {
+		t.Fatalf("lookups still running = %d, want the blocked one", windowsIdentityAbandoned.Load())
+	}
+	windowsIdentityAbandoned.Add(windowsIdentityAbandonedLimit - 1)
+	err = WriteWindowsIdentitySpool(context.Background(), dir, cache, nil, nil, nil, nil)
+	windowsIdentityAbandoned.Add(-(windowsIdentityAbandonedLimit - 1))
+	if !errors.Is(err, errWindowsIdentityLookupsStalled) {
+		t.Fatalf("err = %v at the limit of stalled lookups, want the pass stopped", err)
+	}
+	mu.Lock()
+	got = strings.Join(reached, ",")
+	mu.Unlock()
+	if got != testSpoolUserA {
+		t.Fatalf("lookups started for %s at the limit, want none", got)
 	}
 }

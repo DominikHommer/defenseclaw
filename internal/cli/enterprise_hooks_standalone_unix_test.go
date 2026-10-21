@@ -1565,8 +1565,9 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 		Targets:  []enterprisehooks.ManifestTarget{{User: "alice", UID: &alice, Connector: "opencode"}, {User: "carol", Connector: "opencode"}},
 		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
 	})
-	if len(accounts) != 2 || accounts[0].UID != 1001 || accounts[1].UID != 1003 {
-		t.Fatalf("manifest mode published identity records for %+v, want alice and carol only", accounts)
+	if len(accounts) != 3 || accounts[0].UID != 1001 || accounts[1].UID != 1003 || accounts[0].Left || accounts[1].Left ||
+		accounts[2].UID != 94401104 || !accounts[2].Left {
+		t.Fatalf("manifest mode identity accounts %+v, want alice and carol published and bob's record withdrawn", accounts)
 	}
 }
 
