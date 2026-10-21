@@ -19,9 +19,11 @@ package openshell_test
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -35,8 +37,10 @@ import (
 // deleting, an unknown one and one this build does not name included; a
 // sandbox whose workload ended (completed, error) holds nothing only where
 // the driver's stop flushes (docker), since a MicroVM keeps running after
-// its workload ends (GAP-0012). The workload of one in the error state
-// ended, but where OpenShell could not poll its VM's process.
+// its workload ends (GAP-0012), with whatever the workload left running.
+// Such a MicroVM may linger for any error reason but a VM that is gone and
+// a provisioning that timed out: the round before let most error reasons
+// go after two minutes, as if nothing ran in them.
 func TestMayHoldCompute(t *testing.T) {
 	for _, tc := range []struct {
 		phase       openshell.SandboxPhase
@@ -62,67 +66,53 @@ func TestMayHoldCompute(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct {
-		phase openshell.SandboxPhase
-		said  string
-		ended bool
+		phase   openshell.SandboxPhase
+		said    string
+		lingers bool
+		gone    bool
 	}{
-		{openshell.PhaseCompleted, "", true},
-		{openshell.PhaseError, "", true},
-		{openshell.PhaseError, "MainProcessFailed: Canonical main process exited with status 1", true},
-		{openshell.PhaseError, "ProcessExited: VM process exited with status 1", true},
-		{openshell.PhaseError, "ProcessPollFailed: Bad file descriptor", false},
-		{openshell.PhaseReady, "", false},
-		{openshell.PhaseStopped, "", false},
-		{openshell.PhaseUnknown, "", false},
+		{openshell.PhaseCompleted, "", true, false},
+		{openshell.PhaseCompleted, "MainProcessCompleted: Canonical main process exited", true, false},
+		{openshell.PhaseError, "", true, false},
+		{openshell.PhaseError, "MainProcessFailed: Canonical main process exited with status 1", true, false},
+		{openshell.PhaseError, "ProcessPollFailed: Bad file descriptor", true, false},
+		{openshell.PhaseError, "ImagePreparationFailed: no space left on device", true, false},
+		{openshell.PhaseError, "MainProcessFailed: the VM process exited with status 1", true, false},
+		{openshell.PhaseError, "ProcessExited: VM process exited with status 1", false, true},
+		{openshell.PhaseError, "ProcessExited: Canonical main process exited before VM driver restart", false, true},
+		{openshell.PhaseError, "MainProcessFailed: exited 1; ProcessExited: host supervisor process exited", false, true},
+		{openshell.PhaseError, "ProcessExited", false, true},
+		{openshell.PhaseError, "ProvisioningTimedOut: Provisioning repair window expired after 300 seconds", false, false},
+		{openshell.PhaseReady, "", false, false},
+		{openshell.PhaseStopped, "", false, false},
+		{openshell.PhaseUnknown, "", false, false},
 	} {
-		if openshell.WorkloadEnded(tc.phase, tc.said) != tc.ended {
-			t.Errorf("WorkloadEnded(%q, %q) = %v", tc.phase, tc.said, !tc.ended)
+		if got := openshell.MayLinger(tc.phase, tc.said); got != tc.lingers {
+			t.Errorf("MayLinger(%q, %q) = %v", tc.phase, tc.said, got)
+		}
+		if got := openshell.VMGone(tc.said); got != tc.gone {
+			t.Errorf("VMGone(%q) = %v", tc.said, got)
 		}
 	}
-	at := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
-	if openshell.EndedSettled(time.Time{}, at) || openshell.EndedSettled(at, at.Add(openshell.EndedSettle-time.Second)) ||
-		!openshell.EndedSettled(at, at.Add(openshell.EndedSettle)) {
-		t.Error("EndedSettled: a MicroVM settles EndedSettle after its workload ended, and one not known since when never")
+	sb := &openshell.Sandbox{Name: "dc-done"}
+	sb.Status.Phase = openshell.PhaseCompleted
+	for _, tc := range []struct {
+		asked map[string]string
+		want  bool
+	}{
+		{nil, false},
+		{map[string]string{"dc-done": "completed"}, true},
+		{map[string]string{"dc-done": "error"}, false},
+		{map[string]string{"dc-done": ""}, false},
+		{map[string]string{"dc-other": "completed"}, false},
+	} {
+		if got := openshell.LetGo(tc.asked, sb); got != tc.want {
+			t.Errorf("LetGo(%v, completed dc-done) = %v", tc.asked, got)
+		}
 	}
-}
-
-// settleTime is a fake clock for the wait for MicroVMs whose workload
-// ended: every sleep moves it on, and onSleep (when set) runs after each.
-type settleTime struct {
-	mu      sync.Mutex
-	now     time.Time
-	slept   time.Duration
-	onSleep func(slept time.Duration)
-}
-
-func fakeSettleClock(t *testing.T) *settleTime {
-	t.Helper()
-	c := &settleTime{now: time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)}
-	openshell.SetSettleClock(t, func() time.Time {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		return c.now
-	}, func(ctx context.Context, d time.Duration) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		c.mu.Lock()
-		c.now = c.now.Add(d)
-		c.slept += d
-		slept, f := c.slept, c.onSleep
-		c.mu.Unlock()
-		if f != nil {
-			f(slept)
-		}
-		return nil
-	})
-	return c
-}
-
-func (c *settleTime) waited() time.Duration {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.slept
+	if openshell.LetGo(map[string]string{"": ""}, nil) {
+		t.Error("LetGo(nil sandbox) = true")
+	}
 }
 
 // computeGateway is a gateway on driver d with a sandbox in each phase,
@@ -130,6 +120,7 @@ func (c *settleTime) waited() time.Duration {
 func computeGateway(t *testing.T, d openshell.ComputeDriver, phases map[string]openshell.SandboxPhase, conds map[string]v1.SandboxCondition) (openshell.Client, *openshelltest.Fake) {
 	t.Helper()
 	f := openshelltest.New(openshelltest.WithDriver(d))
+	f.SetRelease(openshell.SandboxMin)
 	c := f.Client(openshell.ClientOptions{})
 	for name, phase := range phases {
 		if _, err := c.CreateSandbox(context.Background(), name, &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
@@ -169,6 +160,7 @@ func execsIn(f *openshelltest.Fake) []string {
 var (
 	failedMain = v1.SandboxCondition{Type: "Ready", Status: "False", Reason: "MainProcessFailed", Message: "Canonical main process exited with status 1"}
 	unpolled   = v1.SandboxCondition{Type: "Ready", Status: "False", Reason: "ProcessPollFailed", Message: "Bad file descriptor"}
+	vmGone     = v1.SandboxCondition{Type: "Ready", Status: "False", Reason: "ProcessExited", Message: "VM process exited with status 1"}
 	timedOut   = v1.SandboxCondition{Type: "Ready", Status: "False", Reason: "ProvisioningTimedOut", Message: "Provisioning repair window expired after 300 seconds"}
 )
 
@@ -204,171 +196,148 @@ func TestFakeLeavesAnEndedSandboxAsOpenShellDoes(t *testing.T) {
 	}
 }
 
-// TestPrepareUpgradeWaitsForEveryMicroVMThatMayHoldCompute: on the MicroVM
+// lingerVariants are MicroVMs that may linger, whatever time has passed:
+// completed, and in the error state with its main process failed, its VM
+// not polled, a reason OpenShell gives for something else, or none.
+var lingerVariants = []struct {
+	name string
+	cond *v1.SandboxCondition
+}{
+	{"completed", nil}, {"failed", &failedMain}, {"unpolled", &unpolled},
+	{"imagefail", &v1.SandboxCondition{Type: "Ready", Status: "False", Reason: "ImagePreparationFailed", Message: "no space left on device"}},
+	{"noreason", nil},
+}
+
+// lingerGateway is a MicroVM gateway with the sandbox dc-x as v, plus a
+// stopped one.
+func lingerGateway(t *testing.T, v struct {
+	name string
+	cond *v1.SandboxCondition
+}) (openshell.Client, *openshelltest.Fake, openshell.SandboxPhase) {
+	t.Helper()
+	phase := openshell.PhaseError
+	if v.name == "completed" {
+		phase = openshell.PhaseCompleted
+	}
+	conds := map[string]v1.SandboxCondition{}
+	if v.cond != nil {
+		conds["dc-x"] = *v.cond
+	}
+	c, f := computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-x": phase, "dc-off": openshell.PhaseStopped}, conds)
+	return c, f, phase
+}
+
+// TestPrepareUpgradeRefusesEveryMicroVMThatMayHoldCompute: on the MicroVM
 // driver the upgrade's gateway restart stops every sandbox, so a MicroVM
-// starting, stopping, in a phase OpenShell does not name, or in the error
-// state with its VM not polled refuses it at once, as a ready one does.
-// One whose workload ended (completed, or the error state that an
-// OpenShell before 0.1.5 cannot stop) still runs its VM, and nothing in
-// OpenShell can flush it: the upgrade waits EndedSettle for its guest to
-// write its disk back and execs nothing in it. One started again during
-// the wait refuses; a phase change starts the wait over; a wait cut short
-// refuses. One whose provisioning timed out ran nothing, and is not waited
-// for. On docker none of this applies.
-func TestPrepareUpgradeWaitsForEveryMicroVMThatMayHoldCompute(t *testing.T) {
+// that runs, starts, stops or is in a phase OpenShell does not name
+// refuses it. So does one that may linger (completed, or in the error
+// state), however long ago its workload ended: the round before let it go
+// after two minutes, but what its workload left running may still write,
+// and nothing in OpenShell flushes or stops it. Its user lets it go
+// (`defenseclaw sandbox stop`, LetGo) for the phase it is in; one that is
+// in another phase since is held again. One whose VM is gone, or whose
+// provisioning timed out, runs nothing. Nothing is run in any of them. On
+// docker none of this applies.
+func TestPrepareUpgradeRefusesEveryMicroVMThatMayHoldCompute(t *testing.T) {
 	pull := func(context.Context) error { return nil }
-	clock := fakeSettleClock(t)
-
-	for _, tc := range []struct {
-		phase openshell.SandboxPhase
-		cond  *v1.SandboxCondition
-	}{
-		{openshell.PhaseStarting, nil}, {openshell.PhaseStopping, nil}, {openshell.PhaseUnknown, nil}, {"Hibernating", nil},
-		{openshell.PhaseProvisioning, nil}, {openshell.PhaseReady, nil}, {openshell.PhaseError, &unpolled},
+	for _, phase := range []openshell.SandboxPhase{
+		openshell.PhaseStarting, openshell.PhaseStopping, openshell.PhaseUnknown, "Hibernating", openshell.PhaseProvisioning, openshell.PhaseReady,
 	} {
-		conds := map[string]v1.SandboxCondition{}
-		if tc.cond != nil {
-			conds["dc-x"] = *tc.cond
-		}
-		c, _ := computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-x": tc.phase, "dc-off": openshell.PhaseStopped, "dc-done": openshell.PhaseCompleted}, conds)
-		before := clock.waited()
-		err := openshell.PrepareUpgrade(context.Background(), c, pull)
-		if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "(dc-x): stop them first with `defenseclaw sandbox stop NAME`") {
-			t.Errorf("a MicroVM in phase %q: %v", tc.phase, err)
-		}
-		if clock.waited() != before {
-			t.Errorf("a MicroVM in phase %q: the refusal waited %s first", tc.phase, clock.waited()-before)
+		c, _ := computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-x": phase, "dc-off": openshell.PhaseStopped}, nil)
+		err := openshell.PrepareUpgrade(context.Background(), c, pull, map[string]string{"dc-x": strings.ToLower(string(phase))})
+		if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "(dc-x: stop them first with `defenseclaw sandbox stop NAME`") {
+			t.Errorf("a MicroVM in phase %q: %v", phase, err)
 		}
 	}
-
-	ended := map[string]openshell.SandboxPhase{"dc-done": openshell.PhaseCompleted, "dc-failed": openshell.PhaseError, "dc-off": openshell.PhaseStopped}
-	c, f := computeGateway(t, openshell.DriverVM, ended, map[string]v1.SandboxCondition{"dc-failed": failedMain})
-	before := clock.waited()
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil {
-		t.Fatalf("ended MicroVMs: %v", err)
-	}
-	if w := clock.waited() - before; w < openshell.EndedSettle || w > openshell.EndedSettle+10*time.Second {
-		t.Fatalf("the upgrade waited %s for the ended MicroVMs, want %s", w, openshell.EndedSettle)
-	}
-	if got := execsIn(f); len(got) != 0 {
-		t.Fatalf("the upgrade ran commands in %v, which OpenShell refuses", got)
-	}
-
-	// Started again during the wait: it runs, and refuses.
-	c, f = computeGateway(t, openshell.DriverVM, ended, nil)
-	clock.onSleep = func(time.Duration) { _ = f.SetPhase(openshell.DefaultWorkspace, "dc-done", openshell.PhaseReady) }
-	err := openshell.PrepareUpgrade(context.Background(), c, pull)
-	clock.onSleep = nil
-	if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "(dc-done): stop them first") {
-		t.Fatalf("a MicroVM started during the wait: %v", err)
-	}
-
-	// Completed, then in the error state: the wait starts over.
-	c, f = computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-done": openshell.PhaseCompleted}, nil)
-	clock.onSleep = func(slept time.Duration) {
-		if sb, _ := f.Sandboxes().Get(context.Background(), openshell.DefaultWorkspace, "dc-done"); sb.Status.Phase == openshell.PhaseCompleted && slept-before >= time.Minute {
-			_ = f.SetPhase(openshell.DefaultWorkspace, "dc-done", openshell.PhaseError)
+	for _, v := range lingerVariants {
+		c, f, phase := lingerGateway(t, v)
+		err := openshell.PrepareUpgrade(context.Background(), c, pull, nil)
+		if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "(dc-x, "+strings.ToLower(string(phase))+": nothing in OpenShell flushes or stops a MicroVM") ||
+			!strings.Contains(err.Error(), "`defenseclaw sandbox stop NAME` lets DefenseClaw stop it with the gateway") {
+			t.Errorf("a lingering MicroVM (%s): %v", v.name, err)
+		}
+		if got := execsIn(f); len(got) != 0 {
+			t.Errorf("a lingering MicroVM (%s): ran commands in %v", v.name, got)
+		}
+		// Let go in its phase: the upgrade goes ahead; in another phase, not.
+		if err := openshell.PrepareUpgrade(context.Background(), c, pull, map[string]string{"dc-x": strings.ToLower(string(phase))}); err != nil {
+			t.Errorf("a lingering MicroVM (%s) its user let go: %v", v.name, err)
+		}
+		other := "completed"
+		if phase == openshell.PhaseCompleted {
+			other = "error"
+		}
+		if err := openshell.PrepareUpgrade(context.Background(), c, pull, map[string]string{"dc-x": other}); !errors.Is(err, openshell.ErrSandboxesRunning) {
+			t.Errorf("a lingering MicroVM (%s) let go in another phase: %v", v.name, err)
 		}
 	}
-	before = clock.waited()
-	err = openshell.PrepareUpgrade(context.Background(), c, pull)
-	clock.onSleep = nil
-	if w := clock.waited() - before; err != nil || w < time.Minute+openshell.EndedSettle {
-		t.Fatalf("a MicroVM whose phase changed during the wait: %v after %s", err, w)
-	}
 
-	// A wait cut short refuses.
-	c, _ = computeGateway(t, openshell.DriverVM, ended, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	clock.onSleep = func(time.Duration) { cancel() }
-	err = openshell.PrepareUpgrade(ctx, c, pull)
-	clock.onSleep = nil
-	if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "the wait for the MicroVMs whose workload ended to write their disks back ended") {
-		t.Fatalf("a wait cut short: %v", err)
-	}
-
-	// Provisioning that timed out: nothing ran in it since its last stop.
-	c, f = computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-timeout": openshell.PhaseError}, map[string]v1.SandboxCondition{"dc-timeout": timedOut})
-	before = clock.waited()
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || len(execsIn(f)) != 0 || clock.waited() != before {
-		t.Fatalf("a MicroVM whose provisioning timed out: %v, ran in %v, waited %s", err, execsIn(f), clock.waited()-before)
+	// Its VM gone, or its provisioning timed out: nothing ran in it.
+	for _, cond := range []v1.SandboxCondition{vmGone, timedOut} {
+		c, f := computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-x": openshell.PhaseError}, map[string]v1.SandboxCondition{"dc-x": cond})
+		if err := openshell.PrepareUpgrade(context.Background(), c, pull, nil); err != nil || len(execsIn(f)) != 0 {
+			t.Errorf("a MicroVM in the error state (%s): %v, ran in %v", cond.Reason, err, execsIn(f))
+		}
 	}
 
 	// Docker keeps its sandboxes through the restart.
 	pulls := 0
-	c, f = computeGateway(t, openshell.DriverDocker, map[string]openshell.SandboxPhase{"dc-done": openshell.PhaseCompleted, "dc-x": openshell.PhaseStarting}, nil)
-	before = clock.waited()
-	if err := openshell.PrepareUpgrade(context.Background(), c, func(context.Context) error { pulls++; return nil }); err != nil || pulls != 1 || len(execsIn(f)) != 0 || clock.waited() != before {
-		t.Fatalf("docker: %v, pulled %d, ran in %v, waited %s", err, pulls, execsIn(f), clock.waited()-before)
+	c, f := computeGateway(t, openshell.DriverDocker, map[string]openshell.SandboxPhase{"dc-done": openshell.PhaseCompleted, "dc-x": openshell.PhaseStarting}, nil)
+	if err := openshell.PrepareUpgrade(context.Background(), c, func(context.Context) error { pulls++; return nil }, nil); err != nil || pulls != 1 || len(execsIn(f)) != 0 {
+		t.Fatalf("docker: %v, pulled %d, ran in %v", err, pulls, execsIn(f))
 	}
 }
 
-// TestFlushSandboxesWaitsForEndedMicroVMs: a gateway restart that
-// DefenseClaw makes (doctor --fix, setup) on the MicroVM driver applies the
-// gate the upgrade does. Before, it flushed only the ready sandboxes: a
-// MicroVM whose workload ended was restarted under at once (with no ready
-// sandbox, nothing at all came first), and one starting or stopping too.
-// Now it waits EndedSettle for an ended MicroVM's guest to write its disk
-// back, execs nothing in it, syncs the ready ones after the wait, right
-// before the restart, and refuses at once for one that may run work no
-// flush reaches. A list that fails during the wait refuses. Docker
-// restarts at once.
-func TestFlushSandboxesWaitsForEndedMicroVMs(t *testing.T) {
-	clock := fakeSettleClock(t)
-	var syncedAt []time.Duration
-	c, f := computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{
-		"dc-up": openshell.PhaseReady, "dc-done": openshell.PhaseCompleted, "dc-failed": openshell.PhaseError, "dc-off": openshell.PhaseStopped,
-	}, map[string]v1.SandboxCondition{"dc-failed": failedMain})
-	f.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
-		syncedAt = append(syncedAt, clock.waited())
-		return openshelltest.ExecResponse{}
-	})
-	if err := openshell.FlushSandboxes(context.Background(), c); err != nil {
-		t.Fatalf("ended MicroVMs and a ready one: %v", err)
-	}
-	if got := execsIn(f); !slices.Equal(got, []string{"dc-up"}) {
-		t.Fatalf("ran commands in %v, want only the ready one", got)
-	}
-	if len(syncedAt) != 1 || syncedAt[0] < openshell.EndedSettle {
-		t.Fatalf("the ready sandbox was synced at %v, want once, after the %s wait", syncedAt, openshell.EndedSettle)
-	}
-
-	// Only ended ones, no ready one: the restart still waits.
-	c, f = computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-done": openshell.PhaseCompleted}, nil)
-	before := clock.waited()
-	if err := openshell.FlushSandboxes(context.Background(), c); err != nil || clock.waited()-before < openshell.EndedSettle || len(execsIn(f)) != 0 {
-		t.Fatalf("only a completed MicroVM: %v, waited %s, ran in %v", err, clock.waited()-before, execsIn(f))
+// TestQuiesceSandboxesHoldsForLingeringMicroVMs: a gateway restart that
+// DefenseClaw makes (doctor --fix, setup) on the MicroVM driver applies
+// the gate the upgrade does. The round before waited two minutes for a
+// MicroVM whose workload ended and then restarted under it. Now one that
+// may linger refuses the restart, however long it has been so, before
+// anything is stopped, unless its user let it go; one let go stays as it
+// is (OpenShell cannot stop it) and the ready ones are stopped. One that
+// may run work no flush reaches refuses at once. Docker restarts at once.
+func TestQuiesceSandboxesHoldsForLingeringMicroVMs(t *testing.T) {
+	for _, v := range lingerVariants {
+		c, f, phase := lingerGateway(t, v)
+		if err := f.SetPhase(openshell.DefaultWorkspace, "dc-off", openshell.PhaseReady); err != nil {
+			t.Fatal(err)
+		}
+		err := openshell.QuiesceSandboxes(context.Background(), c, nil)
+		if !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "(dc-x, "+strings.ToLower(string(phase))+": nothing in OpenShell flushes or stops a MicroVM") {
+			t.Errorf("a lingering MicroVM (%s): %v", v.name, err)
+		}
+		if n := f.Calls(openshelltest.MethodStopSandbox); n != 0 || len(execsIn(f)) != 0 {
+			t.Errorf("a lingering MicroVM (%s): %d stops and commands in %v before the refusal", v.name, n, execsIn(f))
+		}
+		if err := openshell.QuiesceSandboxes(context.Background(), c, map[string]string{"dc-x": strings.ToLower(string(phase))}); err != nil {
+			t.Errorf("a lingering MicroVM (%s) its user let go: %v", v.name, err)
+		}
+		if n := f.Calls(openshelltest.MethodStopSandbox); n != 1 {
+			t.Errorf("a lingering MicroVM (%s) let go: %d stops, want the ready one's", v.name, n)
+		}
 	}
 
 	for _, phase := range []openshell.SandboxPhase{openshell.PhaseStarting, openshell.PhaseStopping, openshell.PhaseProvisioning, openshell.PhaseUnknown} {
-		c, f := computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-x": phase, "dc-up": openshell.PhaseReady, "dc-done": openshell.PhaseCompleted}, nil)
-		before := clock.waited()
-		err := openshell.FlushSandboxes(context.Background(), c)
-		if !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "(dc-x, "+strings.ToLower(string(phase))+"): a MicroVM that is starting, stopping") {
+		c, f := computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-x": phase, "dc-up": openshell.PhaseReady}, nil)
+		err := openshell.QuiesceSandboxes(context.Background(), c, nil)
+		if !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "(dc-x, "+strings.ToLower(string(phase))+": a MicroVM that is starting, stopping") {
 			t.Errorf("a MicroVM in phase %q: %v", phase, err)
 		}
-		if clock.waited() != before || len(execsIn(f)) != 0 {
-			t.Errorf("a MicroVM in phase %q: waited %s, ran in %v before the refusal", phase, clock.waited()-before, execsIn(f))
+		if f.Calls(openshelltest.MethodStopSandbox) != 0 || len(execsIn(f)) != 0 {
+			t.Errorf("a MicroVM in phase %q: stopped or ran in sandboxes before the refusal", phase)
 		}
 	}
-	c, _ = computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-x": openshell.PhaseError}, map[string]v1.SandboxCondition{"dc-x": unpolled})
-	if err := openshell.FlushSandboxes(context.Background(), c); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "(dc-x, error)") {
-		t.Errorf("a MicroVM whose VM was not polled: %v", err)
+
+	for _, cond := range []v1.SandboxCondition{vmGone, timedOut} {
+		c, f := computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-x": openshell.PhaseError}, map[string]v1.SandboxCondition{"dc-x": cond})
+		if err := openshell.QuiesceSandboxes(context.Background(), c, nil); err != nil || f.Calls(openshelltest.MethodStopSandbox) != 0 {
+			t.Errorf("a MicroVM in the error state (%s): %v", cond.Reason, err)
+		}
 	}
 
-	// The list fails during the wait.
-	c, f = computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-done": openshell.PhaseCompleted}, nil)
-	clock.onSleep = func(time.Duration) { f.FailNext(openshelltest.MethodListSandboxes, errors.New("gateway busy")) }
-	err := openshell.FlushSandboxes(context.Background(), c)
-	clock.onSleep = nil
-	if !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "gateway busy") {
-		t.Fatalf("a list that fails during the wait: %v", err)
-	}
-
-	c, f = computeGateway(t, openshell.DriverDocker, map[string]openshell.SandboxPhase{"dc-done": openshell.PhaseCompleted, "dc-x": openshell.PhaseStarting}, nil)
-	before = clock.waited()
-	if err := openshell.FlushSandboxes(context.Background(), c); err != nil || clock.waited() != before || len(execsIn(f)) != 0 {
-		t.Fatalf("docker: %v, waited %s, ran in %v", err, clock.waited()-before, execsIn(f))
+	c, f := computeGateway(t, openshell.DriverDocker, map[string]openshell.SandboxPhase{"dc-done": openshell.PhaseCompleted, "dc-x": openshell.PhaseStarting}, nil)
+	if err := openshell.QuiesceSandboxes(context.Background(), c, nil); err != nil || f.Calls(openshelltest.MethodStopSandbox) != 0 || len(execsIn(f)) != 0 {
+		t.Fatalf("docker: %v", err)
 	}
 }
 
@@ -376,25 +345,87 @@ func TestFlushSandboxesWaitsForEndedMicroVMs(t *testing.T) {
 func TestRestartHolds(t *testing.T) {
 	c, _ := computeGateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{
 		"ready": openshell.PhaseReady, "starting": openshell.PhaseStarting, "done": openshell.PhaseCompleted, "failed": openshell.PhaseError,
-		"unpolled": openshell.PhaseError, "timedout": openshell.PhaseError, "off": openshell.PhaseStopped,
-	}, map[string]v1.SandboxCondition{"failed": failedMain, "unpolled": unpolled, "timedout": timedOut})
+		"unpolled": openshell.PhaseError, "timedout": openshell.PhaseError, "gone": openshell.PhaseError, "off": openshell.PhaseStopped,
+	}, map[string]v1.SandboxCondition{"failed": failedMain, "unpolled": unpolled, "timedout": timedOut, "gone": vmGone})
 	list, err := c.ListSandboxes(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string][2][2]bool{
-		// {MicroVM driver: holds, ended}, {docker: holds, ended}
+		// {MicroVM driver: holds, lingers}, {docker: holds, lingers}
 		"ready": {{true, false}, {true, false}}, "starting": {{true, false}, {true, false}},
 		"done": {{true, true}, {false, false}}, "failed": {{true, true}, {false, false}},
-		"unpolled": {{true, false}, {false, false}}, "timedout": {{false, false}, {false, false}},
-		"off": {{false, false}, {false, false}},
+		"unpolled": {{true, true}, {false, false}}, "timedout": {{false, false}, {false, false}},
+		"gone": {{false, false}, {false, false}}, "off": {{false, false}, {false, false}},
 	}
 	for _, sb := range list {
 		for i, stopFlushes := range []bool{false, true} {
-			holds, isEnded := openshell.RestartHolds(sb, stopFlushes)
-			if w := want[sb.Name][i]; holds != w[0] || isEnded != w[1] {
-				t.Errorf("RestartHolds(%s, stopFlushes %v) = %v, %v; want %v", sb.Name, stopFlushes, holds, isEnded, w)
+			holds, lingers := openshell.RestartHolds(sb, stopFlushes)
+			if w := want[sb.Name][i]; holds != w[0] || lingers != w[1] {
+				t.Errorf("RestartHolds(%s, stopFlushes %v) = %v, %v; want %v", sb.Name, stopFlushes, holds, lingers, w)
 			}
 		}
 	}
+}
+
+// TestLifecycleLock: a restart or an upgrade holds the lock exclusively,
+// and a create or a start shares it: one is refused at once while the
+// other holds it, the exclusive one waits for the shared ones up to its
+// bound or its context, and either goes once the other let go. The lock
+// file is the owner's only, in a configuration directory the exclusive
+// one makes; a start where none exists holds nothing.
+func TestLifecycleLock(t *testing.T) {
+	skipOnWindows(t)
+	openshell.SetLifecycleLockWait(t, 300*time.Millisecond)
+	dir := filepath.Join(t.TempDir(), "openshell")
+	none, err := openshell.LockSandboxStart(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	none()
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a start made the configuration directory: %v", err)
+	}
+
+	restart, err := openshell.LockGatewayLifecycle(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, ".defenseclaw-lifecycle.lock")); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("lock file: %v, %v", info, err)
+	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("configuration directory: %v, %v", info, err)
+	}
+	if _, err := openshell.LockSandboxStart(dir); !errors.Is(err, openshell.ErrGatewayBusy) {
+		t.Fatalf("a start during a restart: %v", err)
+	}
+	if _, err := openshell.LockGatewayLifecycle(context.Background(), dir); !errors.Is(err, openshell.ErrGatewayBusy) {
+		t.Fatalf("a second restart: %v", err)
+	}
+	restart()
+
+	a, err := openshell.LockSandboxStart(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := openshell.LockSandboxStart(dir)
+	if err != nil {
+		t.Fatalf("two starts at once: %v", err)
+	}
+	if _, err := openshell.LockGatewayLifecycle(context.Background(), dir); !errors.Is(err, openshell.ErrGatewayBusy) {
+		t.Fatalf("a restart under starts held past the wait: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := openshell.LockGatewayLifecycle(ctx, dir); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a restart whose context ended: %v", err)
+	}
+	a()
+	go func() { time.Sleep(50 * time.Millisecond); b() }()
+	restart, err = openshell.LockGatewayLifecycle(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("a restart once the starts ended: %v", err)
+	}
+	restart()
 }

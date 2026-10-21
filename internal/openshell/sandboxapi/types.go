@@ -97,9 +97,10 @@ type Status struct {
 	// Live counts those that may hold compute a stop of the OpenShell
 	// gateway would end unflushed or half started (manager.HoldsCompute):
 	// the running ones, those starting or stopping or in an unknown phase,
-	// and a MicroVM that completed or is in OpenShell's error state, until
-	// its guest has written its disk back (openshell.EndedSettle). Unset by
-	// a daemon before DefenseClaw 1.0.4 (Busy).
+	// and a MicroVM that completed or is in OpenShell's error state, which
+	// nothing in OpenShell flushes or stops, until its user lets it go
+	// (StopAskedIn) or deletes it. Unset by a daemon before DefenseClaw
+	// 1.0.4 (Busy).
 	Live             *int      `json:"live,omitempty"`
 	PendingApprovals int       `json:"pending_approvals"`
 	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
@@ -330,12 +331,13 @@ type Sandbox struct {
 	// without a flush: what it wrote in its last seconds may be missing,
 	// empty or cut short (UnflushedText).
 	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
-	// EndedAt is when DefenseClaw saw its workload end (completed, or
-	// OpenShell's error state), or its harness at work after that; zero in
-	// any other phase. Once its MicroVM's guest has had
-	// openshell.EndedSettle to write its disk back, a stop of the OpenShell
-	// gateway loses none of its work (manager.HoldsCompute).
-	EndedAt time.Time `json:"ended_at,omitzero"`
+	// StopAskedIn is the phase (as Phase spells it) the sandbox was in when
+	// its user's own stop (QueryLetGo) found a MicroVM that OpenShell did
+	// not stop: its workload completed, or it is in OpenShell's error state.
+	// While it stays in that phase, what stops the OpenShell gateway no
+	// longer waits for it (manager.HoldsCompute, openshell.LetGo), and that
+	// stop loses what it has not written to disk by then. Empty otherwise.
+	StopAskedIn string `json:"stop_asked_in,omitempty"`
 	// RepoPolicy is the repository policy (.defenseclaw/sandbox.yaml) the
 	// posture includes, without its content, as the launch banner names it.
 	RepoPolicy *RepoPolicy `json:"repo_policy,omitempty"`

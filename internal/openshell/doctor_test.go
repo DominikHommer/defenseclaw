@@ -163,8 +163,8 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 				d, _ := openshell.LookupDriver(string(f.restartedOn))
 				return d, nil
 			},
-			FlushSandboxes: func(ctx context.Context) error {
-				return openshell.FlushSandboxes(ctx, f.fake.Client(openshell.ClientOptions{}))
+			QuiesceSandboxes: func(ctx context.Context) error {
+				return openshell.QuiesceSandboxes(ctx, f.fake.Client(openshell.ClientOptions{}), nil)
 			},
 			ServiceDockerGroupMissing: func() bool { return f.staleManager }},
 		Ports:                     []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},

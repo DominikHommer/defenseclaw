@@ -398,6 +398,16 @@ func (c *Client) Stop(ctx context.Context, name string) (*Sandbox, error) {
 	return &out, nil
 }
 
+// StopLetGo is Stop as the user's own stop (QueryLetGo): a MicroVM that
+// OpenShell does not stop is let go (Sandbox.StopAskedIn).
+func (c *Client) StopLetGo(ctx context.Context, name string) (*Sandbox, error) {
+	var out Sandbox
+	if err := c.do(ctx, http.MethodPost, sandboxPath(name, "stop"), url.Values{QueryLetGo: {"1"}}, struct{}{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Start starts a stopped sandbox with a freshly rotated binding.
 func (c *Client) Start(ctx context.Context, name string, req StartRequest) (*Sandbox, error) {
 	var out Sandbox

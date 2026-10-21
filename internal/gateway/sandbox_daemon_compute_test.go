@@ -18,21 +18,19 @@ package gateway
 
 import (
 	"testing"
-	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // TestSandboxDaemonKeepsTheGatewayForComputeThatMayStillRun: the daemon
 // stops the account's OpenShell gateway, or exits for a pending restart
 // (the managed pin migration's, for one), only once no sandbox may hold
-// compute: a MicroVM that completed or is in OpenShell's error state
-// counts until its guest has had openshell.EndedSettle to write its disk
-// back, which nothing in OpenShell does sooner; a docker sandbox in those
-// phases is an exited container.
+// compute: a MicroVM that completed or is in OpenShell's error state, which
+// nothing in OpenShell flushes or stops, counts until its user lets it go
+// (the round before let it go two minutes after its workload ended); a
+// docker sandbox in those phases is an exited container, and a MicroVM
+// whose VM is gone runs nothing.
 func TestSandboxDaemonKeepsTheGatewayForComputeThatMayStillRun(t *testing.T) {
-	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		list []sandboxapi.Sandbox
 		want int
@@ -42,17 +40,19 @@ func TestSandboxDaemonKeepsTheGatewayForComputeThatMayStillRun(t *testing.T) {
 		{[]sandboxapi.Sandbox{{Phase: "error", Driver: "docker"}, {Phase: "error"}}, 0},
 		{[]sandboxapi.Sandbox{{Phase: "stopping", Driver: "vm"}, {Phase: "creating", Driver: "docker"}}, 2},
 		{[]sandboxapi.Sandbox{{Phase: "stopped"}, {Phase: "completed"}, {Phase: "deleting", Driver: "vm"}}, 0},
-		// A MicroVM whose workload ended still runs (GAP-0012) until its
-		// guest has written its disk back; one not polled may still run.
+		// A MicroVM whose workload ended still runs (GAP-0012), with what
+		// its workload left running, until its user lets it go.
 		{[]sandboxapi.Sandbox{{Phase: "completed", Driver: "vm"}}, 1},
-		{[]sandboxapi.Sandbox{{Phase: "completed", Driver: "vm", EndedAt: now.Add(-time.Minute)}}, 1},
-		{[]sandboxapi.Sandbox{{Phase: "completed", Driver: "vm", EndedAt: now.Add(-openshell.EndedSettle)}, {Phase: "error", Driver: "vm", EndedAt: now.Add(-time.Hour)}}, 0},
-		{[]sandboxapi.Sandbox{{Phase: "error", Driver: "vm", PhaseReason: "ProcessPollFailed: Bad file descriptor", EndedAt: now.Add(-time.Hour)}}, 1},
+		{[]sandboxapi.Sandbox{{Phase: "completed", Driver: "vm", StopAskedIn: "error"}}, 1},
+		{[]sandboxapi.Sandbox{{Phase: "completed", Driver: "vm", StopAskedIn: "completed"}, {Phase: "error", Driver: "vm", StopAskedIn: "error"}}, 0},
+		{[]sandboxapi.Sandbox{{Phase: "error", Driver: "vm", PhaseReason: "ProcessPollFailed: Bad file descriptor"}}, 1},
+		{[]sandboxapi.Sandbox{{Phase: "error", Driver: "vm", PhaseReason: "MainProcessFailed: Canonical main process exited with status 1"}}, 1},
+		{[]sandboxapi.Sandbox{{Phase: "error", Driver: "vm", PhaseReason: "ProcessExited: VM process exited with status 1"}}, 0},
 		// Nothing ran in one whose provisioning timed out; a missing one is gone.
 		{[]sandboxapi.Sandbox{{Phase: "error", Driver: "vm", PhaseReason: "ProvisioningTimedOut: Provisioning repair window expired after 300 seconds"}, {Phase: "missing", Driver: "vm"}}, 0},
 		{[]sandboxapi.Sandbox{{Phase: "unknown", Driver: "docker"}, {Phase: "provisioning"}}, 2},
 	} {
-		if got := sandboxesHoldingCompute(tc.list, now); got != tc.want {
+		if got := sandboxesHoldingCompute(tc.list); got != tc.want {
 			t.Errorf("%+v: %d, want %d", tc.list, got, tc.want)
 		}
 	}

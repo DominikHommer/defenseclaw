@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -833,7 +834,8 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 			}
 		}
 	}
-	stopped, err := api.Stop(ctx, o.Name)
+	// The user's own stop: a MicroVM that OpenShell does not stop is let go.
+	stopped, err := api.StopLetGo(ctx, o.Name)
 	if err != nil {
 		return apiError(err)
 	}
@@ -841,8 +843,33 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	if copyAt != nil && !stopped.Hooks.LastHookAt.After(sb.Hooks.LastHookAt) {
 		a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
 	}
+	if stopped.StopAskedIn != "" && stopped.StopAskedIn == stopped.Phase {
+		a.warn(stopped.Name + " is " + stopped.Phase + ": " + manager.LetGoNote(stopped.Name))
+		return nil
+	}
 	a.ok(stopped.Name + " is " + stopped.Phase)
 	return nil
+}
+
+// stopsAsked lists the sandboxes whose users let them go, by name, with
+// the phase they were let go in (openshell.StopsAsked), from the daemon:
+// none when it does not answer.
+func (a *App) stopsAsked(ctx context.Context) map[string]string {
+	api, err := a.api()
+	if err != nil {
+		return nil
+	}
+	list, err := api.List(ctx)
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, sb := range list {
+		if sb.StopAskedIn != "" && sb.StopAskedIn == sb.Phase {
+			out[sb.Name] = sb.StopAskedIn
+		}
+	}
+	return out
 }
 
 // copyAtStop looks at the copy of sb, which is about to stop, within a

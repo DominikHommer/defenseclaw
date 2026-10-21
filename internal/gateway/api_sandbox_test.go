@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -85,8 +86,12 @@ func (f *fakeSandboxController) Delete(_ context.Context, name string, _ sandbox
 	return answer(f, "delete "+name, &sandboxapi.DeleteResponse{Name: name, Deleted: true})
 }
 
-func (f *fakeSandboxController) Stop(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
-	return answer(f, "stop "+name, &sandboxapi.Sandbox{Name: name, Phase: "stopped"})
+func (f *fakeSandboxController) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
+	call := "stop " + name
+	if sandboxapi.LetGoFrom(ctx) {
+		call += " let-go"
+	}
+	return answer(f, call, &sandboxapi.Sandbox{Name: name, Phase: "stopped"})
 }
 
 func (f *fakeSandboxController) Start(_ context.Context, name string, _ sandboxapi.StartRequest) (*sandboxapi.Sandbox, error) {
@@ -445,6 +450,32 @@ func TestSandboxAPIActivity(t *testing.T) {
 		t.Fatalf("stream = %v, %v", seen, err)
 	}
 	eventuallyTrue(t, func() bool { ctl.mu.Lock(); defer ctl.mu.Unlock(); return ctl.cancelled })
+}
+
+// TestSandboxAPIStopLetsGoOnlyOnTheUsersOwnStop: only `defenseclaw sandbox
+// stop` (Client.StopLetGo, ?let_go=1) reaches the controller as the user's
+// own stop, which lets a MicroVM OpenShell does not stop go; a stop of a
+// session's end, a pull or the daemon, and any other query value, does not.
+func TestSandboxAPIStopLetsGoOnlyOnTheUsersOwnStop(t *testing.T) {
+	ctl := &fakeSandboxController{}
+	_, h := sandboxTestAPI(t, ctl, true)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	c := sandboxapi.NewClient(srv.URL, "test-token")
+	if _, err := c.Stop(context.Background(), "box"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.StopLetGo(context.Background(), "box"); err != nil {
+		t.Fatal(err)
+	}
+	if w := serve(h, sandboxRequest(http.MethodPost, sandboxapi.PathSandboxes+"/box/stop?let_go=true", "")); w.Code != 200 {
+		t.Fatalf("stop with another let_go value = %d", w.Code)
+	}
+	ctl.mu.Lock()
+	defer ctl.mu.Unlock()
+	if want := []string{"stop box", "stop box let-go", "stop box"}; !slices.Equal(ctl.calls, want) {
+		t.Fatalf("calls = %v, want %v", ctl.calls, want)
+	}
 }
 
 func TestSandboxAPIClientRoundTrip(t *testing.T) {

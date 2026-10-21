@@ -57,8 +57,9 @@ func TestSandboxSwitchWaitsForComputeThatMayStillRun(t *testing.T) {
 		if !waiting || entry.Kind != "switch" || entry.Sandboxes != 1 || !strings.Contains(entry.Reason, `version "0.1.3" -> "`+openshell.InstallerVersion+`"`) {
 			t.Fatalf("pending = %+v, %v", entry, waiting)
 		}
-		if w := messagesOf(r.Warnings, codeSandboxPending); !strings.Contains(w, "1 sandbox runs (or is starting, stopping, or a MicroVM whose workload ended, its disk not written back yet)") ||
-			!strings.Contains(w, "Nothing in OpenShell flushes a MicroVM whose workload ended: it stops counting once its guest has had 2 minutes to write its disk back") {
+		if w := messagesOf(r.Warnings, codeSandboxPending); !strings.Contains(w, "1 sandbox runs (or is starting, stopping, or a MicroVM whose workload ended that the user has not let go)") ||
+			!strings.Contains(w, "lets the change stop a MicroVM whose workload completed or that is in OpenShell's error state, which nothing in OpenShell flushes or stops") ||
+			strings.Contains(w, "disk back") {
 			t.Errorf("warnings = %v", r.Warnings)
 		}
 		// Stopped or deleted: the next run switches.

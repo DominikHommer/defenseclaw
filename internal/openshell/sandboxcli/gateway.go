@@ -61,7 +61,7 @@ func (g *gatewayService) configurator() *openshell.GatewayConfigurator {
 			d.Gateway = g.app.Cfg.OpenShell.Gateway.Name
 			cli = g.app.Cfg.OpenShell.EffectiveBinary()
 		}
-		g.cfg = &openshell.GatewayConfigurator{Discover: d, CLI: cli}
+		g.cfg = &openshell.GatewayConfigurator{Discover: d, CLI: cli, StopsAsked: g.app.stopsAsked}
 	}
 	return g.cfg
 }

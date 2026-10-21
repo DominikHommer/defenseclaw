@@ -389,8 +389,12 @@ type Doctor struct {
 	// Dial connects to the discovered gateway.
 	Dial func(*Registration) (Client, error)
 	// Gateway reads the gateway configuration and service; it defaults to
-	// a configurator over Discover.ConfigDir, Runner and GOOS.
+	// a configurator over Discover.ConfigDir, Runner, GOOS and StopsAsked.
 	Gateway *GatewayConfigurator
+	// StopsAsked lists the sandboxes whose user let them go, which a
+	// restart of the default Gateway stops under it (GatewayConfigurator.
+	// StopsAsked).
+	StopsAsked StopsAsked
 	// Rendered, on a managed computer, is the administrator's rendered
 	// gateway configuration, which the account's managed gateway runs on:
 	// the default Gateway reads it in place of the account's own files, with
@@ -509,7 +513,7 @@ func (d *Doctor) defaults() {
 	}
 	if d.Gateway == nil {
 		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover, CLI: d.CLI, LookPath: d.LookPath,
-			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing, Rendered: d.Rendered}
+			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing, Rendered: d.Rendered, StopsAsked: d.StopsAsked}
 		if d.Rendered != nil {
 			euid, egid := os.Geteuid(), os.Getegid()
 			if d.Geteuid != nil {
@@ -1712,7 +1716,8 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 // one installed another way (no gateway service: GatewayUnmanaged) is the
 // user's to upgrade. What the restart does depends on the configured
 // driver (PrepareUpgrade): on the MicroVM driver it would stop the running
-// sandboxes without a flush, so the upgrade waits until none runs.
+// sandboxes without a flush, so the upgrade waits until none runs or may
+// linger (MayLinger) that its user has not let go.
 func (r *doctorRun) upgradeFix() *Fix {
 	if r.serviceMissing() {
 		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " the way you installed it: DefenseClaw upgrades only the OpenShell NVIDIA's installer installs"}

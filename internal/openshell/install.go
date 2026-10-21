@@ -246,6 +246,15 @@ type Installer struct {
 	// discover the Discover registration, dial it and PrepareUpgrade, with
 	// the images gateway.toml leaves to the release: RuntimeImages).
 	PrepareUpgrade func(ctx context.Context, release Version) error
+	// StopsAsked lists the sandboxes whose user let them go (LetGo): the
+	// default PrepareUpgrade refuses the upgrade under any other MicroVM
+	// that may linger (MayLinger). Nil lets none go.
+	StopsAsked StopsAsked
+	// LockLifecycle takes the lifecycle lock that keeps DefenseClaw from
+	// creating or starting a sandbox from PrepareUpgrade's check to the
+	// healthy upgraded gateway, minutes later (default:
+	// LockGatewayLifecycle on Discover.ConfigDir).
+	LockLifecycle func(context.Context) (unlock func(), err error)
 	// Geteuid is the caller's uid (default os.Geteuid): root needs no sudo.
 	Geteuid func() int
 	// HomebrewPrefixProblem says, on a Mac, why Homebrew cannot install a
@@ -358,6 +367,9 @@ func (i *Installer) defaults() {
 	}
 	if i.PrepareUpgrade == nil {
 		i.PrepareUpgrade = i.prepareUpgrade
+	}
+	if i.LockLifecycle == nil {
+		i.LockLifecycle = func(ctx context.Context) (func(), error) { return LockGatewayLifecycle(ctx, i.Discover.ConfigDir) }
 	}
 	if i.Geteuid == nil {
 		i.Geteuid = os.Geteuid
@@ -554,6 +566,14 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 		return nil, err
 	}
 	if upgrading {
+		// Held until the upgraded gateway is healthy: NVIDIA's script
+		// restarts it minutes after the check, and a sandbox DefenseClaw
+		// started meanwhile would be stopped by that restart unflushed.
+		unlock, lerr := i.LockLifecycle(ctx)
+		if lerr != nil {
+			return nil, lerr
+		}
+		defer unlock()
 		if err := i.PrepareUpgrade(ctx, target); err != nil {
 			return nil, err
 		}
@@ -673,7 +693,7 @@ func (i *Installer) prepareUpgrade(ctx context.Context, release Version) error {
 	return PrepareUpgrade(ctx, c, func(ctx context.Context) error {
 		st, _ := (&GatewayConfigurator{Dir: i.Discover.ConfigDir, GOOS: i.GOOS, Runner: i.Runner}).Read()
 		return PullRuntimeImages(ctx, i.Runner, st.RuntimeImages(release))
-	})
+	}, stopsAsked(ctx, i.StopsAsked))
 }
 
 // PrepareUpgrade readies the gateway c talks to for the restart of an
@@ -691,17 +711,20 @@ func (i *Installer) prepareUpgrade(ctx context.Context, release Version) error {
 //     unsynced. A sandbox that may hold compute (MayHoldCompute: running,
 //     starting, stopping, or in a phase OpenShell does not name) refuses
 //     the upgrade (ErrSandboxesRunning, naming them), and so does a list
-//     that fails. A MicroVM whose workload ended (WorkloadEnded: completed,
-//     or in the error state, which an OpenShell before SandboxMin cannot
-//     stop) writes nothing more, but nothing in OpenShell flushes it: the
-//     upgrade waits until its guest wrote its disk back (settleEnded, at
-//     most EndedSettle), and refuses when that wait ends early. One whose
-//     provisioning timed out ran nothing since its last stop, and the
-//     upgraded gateway's start provisions it again. A gateway that answers
-//     neither call is taken to be down, and runs nothing.
+//     that fails. So does a MicroVM that may linger (MayLinger: its
+//     workload completed, or it is in the error state), which may still
+//     run what its workload left running and which nothing in OpenShell
+//     flushes or stops, unless its user let it go (asked, LetGo). One
+//     whose VM is gone (VMGone) runs nothing, and one whose provisioning
+//     timed out ran nothing since its last stop: the upgraded gateway's
+//     start provisions it again. A gateway that answers neither call is
+//     taken to be down, and runs nothing.
 //
-// A sandbox started after this, while the script runs, is not covered.
-func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) error) error {
+// The caller holds the lifecycle lock (LockGatewayLifecycle) from this
+// check until the upgraded gateway is healthy, so DefenseClaw starts no
+// sandbox while the script runs; another OpenShell client is not held
+// back.
+func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) error, asked map[string]string) error {
 	info, infoErr := c.GatewayInfo(ctx)
 	if infoErr == nil {
 		if d, err := GatewayDriver(info); err == nil && d.StopFlushes {
@@ -718,33 +741,33 @@ func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) er
 		}
 		return fmt.Errorf("%w, and the sandboxes on it could not be listed: %v", ErrSandboxesRunning, err)
 	}
-	if err := runningRefusal(list); err != nil {
-		return err
-	}
-	if list, err = settleEnded(ctx, c, list); err != nil {
-		return fmt.Errorf("%w: the wait for the MicroVMs whose workload ended to write their disks back ended (%v); "+
-			"DefenseClaw cannot flush such a MicroVM, whose guest writes its disk back within %s, so upgrade again then", ErrSandboxesRunning, err, EndedSettleWords())
-	}
-	// One started again during the wait is judged again.
-	return runningRefusal(list)
+	return runningRefusal(list, asked)
 }
 
 // runningRefusal is ErrSandboxesRunning for the sandboxes of list that an
 // upgrade's gateway restart would stop with work in them (riskReady,
-// riskActive), nil when there are none.
-func runningRefusal(list []*Sandbox) error {
+// riskActive, and riskLingering where asked does not let them go), nil
+// when there are none.
+func runningRefusal(list []*Sandbox, asked map[string]string) error {
 	var running []string
 	for _, sb := range list {
 		if r := restartRiskOf(sb); r == riskReady || r == riskActive {
 			running = append(running, sb.Name)
 		}
 	}
-	if len(running) == 0 {
+	held := lingering(list, asked)
+	if len(running) == 0 && len(held) == 0 {
 		return nil
 	}
 	slices.Sort(running)
-	return fmt.Errorf("%w (%s): stop them first with `defenseclaw sandbox stop NAME`, which flushes their disks, then upgrade",
-		ErrSandboxesRunning, strings.Join(running, ", "))
+	var parts []string
+	if len(running) > 0 {
+		parts = append(parts, strings.Join(running, ", ")+": stop them first with `defenseclaw sandbox stop NAME`, which flushes their disks")
+	}
+	if len(held) > 0 {
+		parts = append(parts, strings.Join(phaseNames(held), "; ")+": "+lingerWayOn)
+	}
+	return fmt.Errorf("%w (%s), then upgrade", ErrSandboxesRunning, strings.Join(parts, "; and "))
 }
 
 // runtimeImageRepository holds the images OpenShell's docker driver runs

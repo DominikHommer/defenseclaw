@@ -545,7 +545,7 @@ func (m *Manager) stopForAlarm(name, bindingID string, kind audit.SandboxFinding
 	if !current {
 		return
 	}
-	if err := m.stop(ctx, b); err != nil {
+	if err := m.stop(ctx, b, false); err != nil {
 		m.logf("%s: stop %s: %v", what, name, err)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
 			Reason: string(kind), Message: "⚠ DefenseClaw could not stop the sandbox for " + what + ": stop it yourself"})
@@ -647,12 +647,6 @@ func (b *box) noteActiveLocked(at time.Time) {
 		b.activeSince = at
 	}
 	b.activeAt = at
-	// Work seen in a sandbox whose workload ended (a process that outlived
-	// its main one) starts the wait for its MicroVM's disk over
-	// (HoldsCompute).
-	if workloadEnded(b.phase, b.rec.PhaseReason) && at.After(b.rec.EndedAt) {
-		b.rec.EndedAt = at.UTC()
-	}
 }
 
 // checkHookSilence raises a hook_silence finding for a ready sandbox whose

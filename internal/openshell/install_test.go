@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 
@@ -51,6 +52,9 @@ type installFixture struct {
 	out      bytes.Buffer
 	verified int
 	inst     *openshell.Installer
+	// lockDir is the configuration directory of the lifecycle lock the
+	// installer takes for an upgrade (Installer.LockLifecycle).
+	lockDir string
 	// scriptSeen is the script content and mode observed while the
 	// installer ran.
 	scriptSeen []byte
@@ -80,6 +84,7 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 	t.Cleanup(f.srv.Close)
 	f.cliPath = filepath.Join(t.TempDir(), "openshell")
 	f.tempDir = t.TempDir()
+	f.lockDir = t.TempDir()
 	version := existing
 	if existing != "" {
 		writeExecutable(t, f.cliPath)
@@ -126,6 +131,7 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 		VerifyGateway:         func(context.Context) error { f.verified++; return nil },
 		Geteuid:               func() int { return 1000 },
 		HomebrewPrefixProblem: func() error { return nil },
+		LockLifecycle:         func(ctx context.Context) (func(), error) { return openshell.LockGatewayLifecycle(ctx, f.lockDir) },
 	}
 	return f
 }
@@ -405,6 +411,47 @@ func TestInstallUpgradesInPlace(t *testing.T) {
 	})
 }
 
+// TestUpgradeHoldsTheLifecycleLock: NVIDIA's script restarts the gateway
+// minutes after PrepareUpgrade's check, and a sandbox DefenseClaw started
+// meanwhile was stopped by that restart without a flush. The upgrade now
+// holds the lifecycle lock from the check to the healthy gateway, so
+// DefenseClaw's create and start are refused throughout and allowed
+// again after it; one in flight when the upgrade begins makes it wait,
+// and one held past the wait refuses the upgrade with nothing run.
+func TestUpgradeHoldsTheLifecycleLock(t *testing.T) {
+	f := newInstallFixture(t, fakeScript, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+	f.inst.Release = openshell.InstallerTag
+	var during []error
+	starts := func() { _, err := openshell.LockSandboxStart(f.lockDir); during = append(during, err) }
+	f.inst.PrepareUpgrade = func(context.Context, openshell.Version) error { starts(); return nil }
+	f.inst.VerifyGateway = func(context.Context) error { f.verified++; starts(); return nil }
+	if _, err := f.inst.Upgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(during) != 2 || !errors.Is(during[0], openshell.ErrGatewayBusy) || !errors.Is(during[1], openshell.ErrGatewayBusy) || !f.ran() {
+		t.Fatalf("a start during the check and after the script: %v (script ran %v)", during, f.ran())
+	}
+	unlock, err := openshell.LockSandboxStart(f.lockDir)
+	if err != nil {
+		t.Fatalf("a start after the upgrade: %v", err)
+	}
+
+	// A start in flight: the upgrade waits for it, and refuses once the
+	// wait is over, with nothing run.
+	openshell.SetLifecycleLockWait(t, 300*time.Millisecond)
+	g := newInstallFixture(t, fakeScript, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+	g.inst.Release, g.lockDir = openshell.InstallerTag, f.lockDir
+	prepared := false
+	g.inst.PrepareUpgrade = func(context.Context, openshell.Version) error { prepared = true; return nil }
+	if _, err := g.inst.Upgrade(context.Background()); !errors.Is(err, openshell.ErrGatewayBusy) || prepared || g.ran() {
+		t.Fatalf("an upgrade under a start in flight: %v (prepared %v, script ran %v)", err, prepared, g.ran())
+	}
+	unlock()
+	if _, err := g.inst.Upgrade(context.Background()); err != nil || !prepared {
+		t.Fatalf("the upgrade once the start ended: %v (prepared %v)", err, prepared)
+	}
+}
+
 // TestPrepareUpgrade: NVIDIA's script restarts the gateway only once it
 // has downloaded and installed the release. On the docker driver, whose
 // sandboxes keep running, the release's supervisor images are pulled
@@ -434,40 +481,40 @@ func TestPrepareUpgrade(t *testing.T) {
 	unavailable := &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"}
 
 	c, _ := gateway(t, openshell.DriverDocker, running)
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 1 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull, nil); err != nil || pulls != 1 {
 		t.Fatalf("docker: %v, pulled %d times", err, pulls)
 	}
 	pullErr := fmt.Errorf("%w (docker pull: offline)", openshell.ErrRuntimeImages)
-	if err := openshell.PrepareUpgrade(context.Background(), c, func(context.Context) error { return pullErr }); !errors.Is(err, openshell.ErrRuntimeImages) {
+	if err := openshell.PrepareUpgrade(context.Background(), c, func(context.Context) error { return pullErr }, nil); !errors.Is(err, openshell.ErrRuntimeImages) {
 		t.Fatalf("docker, pull failed: %v", err)
 	}
 
 	pulls = 0
 	c, _ = gateway(t, openshell.DriverVM, running)
-	err := openshell.PrepareUpgrade(context.Background(), c, pull)
-	if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "(dc-a, dc-b): stop them first with `defenseclaw sandbox stop NAME`") || pulls != 0 {
+	err := openshell.PrepareUpgrade(context.Background(), c, pull, nil)
+	if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "(dc-a, dc-b: stop them first with `defenseclaw sandbox stop NAME`") || pulls != 0 {
 		t.Fatalf("vm, sandboxes running: %v (pulled %d times)", err, pulls)
 	}
 	c, _ = gateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-c": openshell.PhaseStopped})
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 0 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull, nil); err != nil || pulls != 0 {
 		t.Fatalf("vm, none running: %v (pulled %d times)", err, pulls)
 	}
 
 	c, f := gateway(t, openshell.DriverVM, running)
 	f.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); !errors.Is(err, openshell.ErrSandboxesRunning) || pulls != 0 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull, nil); !errors.Is(err, openshell.ErrSandboxesRunning) || pulls != 0 {
 		t.Fatalf("driver unknown, sandboxes running: %v (pulled %d times)", err, pulls)
 	}
 	c, f = gateway(t, openshell.DriverVM, running)
 	f.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
 	f.FailNext(openshelltest.MethodListSandboxes, &v1.StatusError{Code: v1.ErrorInternal, Message: "store locked"})
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "could not be listed: ") {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull, nil); !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "could not be listed: ") {
 		t.Fatalf("driver unknown, list failed: %v", err)
 	}
 	c, f = gateway(t, openshell.DriverVM, running)
 	f.FailNext(openshelltest.MethodGatewayInfo, unavailable)
 	f.FailNext(openshelltest.MethodListSandboxes, unavailable)
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 0 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull, nil); err != nil || pulls != 0 {
 		t.Fatalf("gateway down: %v (pulled %d times)", err, pulls)
 	}
 }

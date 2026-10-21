@@ -1864,8 +1864,9 @@ func TestDoctorJudgesMicroVMsAgainstTheAdminMaximum(t *testing.T) {
 }
 
 // TestDoctorFixAsksBeforeARestartStopsSandboxes: a fix that restarts a
-// MicroVM gateway stops every sandbox running on it, once its disk is
-// flushed. With none running it is a yes by default, as every fix; with
+// MicroVM gateway stops every sandbox running on it, with OpenShell's
+// flushing stop, which this gateway (0.1.1) lacks, so it names them as what
+// refuses the restart. With none running it is a yes by default, as every fix; with
 // some running it names them and is a no by default, which --yes takes.
 // On docker, whose stop keeps what a container wrote, nothing changes.
 func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
@@ -1880,7 +1881,8 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	}
 	report := on(openshell.DriverVM)
 	const question = `Fix "MicroVM resources": raise them and restart the gateway?`
-	const stops = "MicroVM resources: this restarts the OpenShell gateway, which stops the 1 sandbox running on it (dc-claude-theirs-a), once their disks are flushed"
+	const stops = "MicroVM resources: this restarts the OpenShell gateway, which this OpenShell refuses while sandboxes run on it (dc-claude-theirs-a): " +
+		"it stops a MicroVM without flushing its disk (OpenShell " + openshell.SandboxMin + " flushes it), so stop them first with `defenseclaw sandbox stop NAME`"
 
 	ta := newTestApp(t, "\n")
 	ta.IO.TTY = true

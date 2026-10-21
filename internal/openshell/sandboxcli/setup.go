@@ -49,7 +49,7 @@ func (a *App) defaultInstaller(consent func(*openshell.InstallPlan) (bool, error
 		d.Gateway = a.Cfg.OpenShell.Gateway.Name
 	}
 	return &openshell.Installer{
-		Out: a.IO.Out, Consent: consent, Discover: d,
+		Out: a.IO.Out, Consent: consent, Discover: d, StopsAsked: a.stopsAsked,
 		ConfirmBreakingUpgrade: func(*openshell.InstallPlan) (bool, error) {
 			// Only a person can say the old runtime is backed up: --yes
 			// does not answer this.
@@ -862,11 +862,16 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 		return keep()
 	}
 	microVM := rep.Driver == openshell.DriverVM
-	running, ended, known := a.restartSandboxes(ctx)
+	running, held, known := a.restartSandboxes(ctx)
 	if microVM && known && len(running) > 0 {
 		a.warn("OpenShell " + rep.CLIVersion + " is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the " +
 			plural(int64(len(running)), "MicroVM sandbox", "MicroVM sandboxes") + " running on it (" + shortList(running) + ") without a flush")
 		a.note("→ stop them first (`" + CommandName + " stop NAME` flushes their disks), then upgrade: `" + CommandName + " setup --install-openshell`")
+		return rep, nil
+	}
+	if microVM && len(held) > 0 {
+		a.warn("OpenShell " + rep.CLIVersion + " is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, and " + heldBack(held))
+		a.note("→ then upgrade: `" + CommandName + " setup --install-openshell`")
 		return rep, nil
 	}
 	// What the restart does to the sandboxes on the gateway, of every
@@ -883,9 +888,6 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 		stops = "it drops the connections of the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it (" + shortList(running) + ")"
 	case known:
 		stops = "no sandbox runs on it now"
-	}
-	if wait := endedWait(ended); microVM && wait != "" {
-		stops += "; " + wait
 	}
 	upgrade := o.InstallOpenShell
 	if !upgrade && !o.NonInteractive {
@@ -1025,27 +1027,26 @@ func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume,
 	if o.RestartGateway {
 		return true, nil
 	}
-	var sandboxes, ended []string
+	var sandboxes, held []string
 	var known bool
 	if switching {
 		sandboxes, known = a.gatewaySandboxes(ctx)
 	} else {
-		sandboxes, ended, known = a.restartSandboxes(ctx)
+		sandboxes, held, known = a.restartSandboxes(ctx)
 	}
-	wait := endedWait(ended)
-	if known && len(sandboxes) == 0 {
-		// A MicroVM whose workload ended loses nothing once the restart
-		// has waited for it.
-		if wait != "" {
-			a.note("applying this restarts the OpenShell gateway: " + wait)
-		}
+	wait := ""
+	if microVM && len(held) > 0 {
+		// The restart's own gate refuses it under them: no by default.
+		wait = "; " + heldBack(held)
+	}
+	if known && len(sandboxes) == 0 && wait == "" {
 		return true, nil
 	}
-	if wait != "" {
-		wait = "; " + wait
-	}
 	what := "the sandboxes on it could not be listed, so some may be running"
-	if known {
+	switch {
+	case known && len(sandboxes) == 0:
+		what = "no sandbox runs on it"
+	case known:
 		what = plural(int64(len(sandboxes)), "sandbox runs", "sandboxes run") + " on it (" + shortList(sandboxes) + ")"
 	}
 	switch {
@@ -1056,7 +1057,7 @@ func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume,
 	case switching:
 		a.warn("applying this restarts the OpenShell gateway on the MicroVM driver, and " + what + "; sandboxes made on the docker driver cannot start again after it, and OpenShell drops them a few minutes later with any work not brought back")
 	case microVM:
-		a.warn("applying this restarts the OpenShell gateway: its running MicroVM sandboxes have their disks flushed and stop, and " + what + wait)
+		a.warn("applying this restarts the OpenShell gateway: its running MicroVM sandboxes stop first, with OpenShell's own stop, which flushes their disks, and " + what + wait)
 	default:
 		a.warn("applying this restarts the OpenShell gateway, which drops the connections of every sandbox on it, and " + what + wait)
 	}
@@ -1065,23 +1066,44 @@ func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume,
 
 // restartStops says what a restart of a MicroVM gateway does to the
 // sandboxes on it, of every owner, for a doctor fix that restarts it, as
-// the restart's own gate (openshell.FlushSandboxes) judges them: stops,
-// the ones running on it ("" when none runs), whose disks are flushed
-// before they stop; wait, the MicroVMs whose workload ended, which the
-// restart waits for first (endedWait).
-func (a *App) restartStops(ctx context.Context) (stops, wait string) {
-	running, ended, known := a.restartSandboxes(ctx)
-	if wait = endedWait(ended); wait != "" {
-		wait = "this restarts the OpenShell gateway: " + wait
-	}
+// the restart's own gate (openshell.QuiesceSandboxes) judges them: stops,
+// the ones running on it ("" when none runs), which it stops first with
+// OpenShell's own stop, which flushes their disks (or, on a gateway whose
+// stop does not flush, under which it is refused); held, the MicroVMs
+// that may linger and that their users have not let go, under which it is
+// refused too (heldBack).
+func (a *App) restartStops(ctx context.Context) (stops, held string) {
+	running, lingering, known := a.restartSandboxes(ctx)
+	held = heldBack(lingering)
 	if known && len(running) == 0 {
-		return "", wait
+		return "", held
 	}
 	what := "every sandbox running on it (they could not be listed)"
 	if known {
 		what = "the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it (" + shortList(running) + ")"
 	}
-	return "this restarts the OpenShell gateway, which stops " + what + ", once their disks are flushed", wait
+	if !a.gatewayStopFlushes(ctx) {
+		names := "they could not be listed"
+		if known {
+			names = shortList(running)
+		}
+		return "this restarts the OpenShell gateway, which this OpenShell refuses while sandboxes run on it (" + names + "): it stops a MicroVM without " +
+			"flushing its disk (OpenShell " + openshell.SandboxMin + " flushes it), so stop them first with `" + CommandName + " stop NAME`", held
+	}
+	return "this restarts the OpenShell gateway, which stops " + what + ", each first with OpenShell's own stop, which flushes its disk", held
+}
+
+// gatewayStopFlushes reports whether the OpenShell gateway's own stop of a
+// MicroVM flushes its disk first (openshell.SandboxMin and later): false
+// when its release cannot be read.
+func (a *App) gatewayStopFlushes(ctx context.Context) bool {
+	c, _, err := a.OpenShell(ctx)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	h, err := c.Health(ctx)
+	return err == nil && openshell.RunsSandboxes(h.RawVersion)
 }
 
 // manualRestartStops ends a line that leaves the restart of the OpenShell
@@ -1094,19 +1116,20 @@ func (a *App) restartStops(ctx context.Context) (stops, wait string) {
 // the gateway lists them, but for those in gone (ones the caller removes
 // before then).
 func (a *App) manualRestartStops(ctx context.Context, microVM bool, gone []string) string {
-	running, ended, known := a.restartSandboxes(ctx)
+	running, held, known := a.restartSandboxes(ctx)
 	unlisted := func(name string) bool { return slices.Contains(gone, name) }
-	running, ended = slices.DeleteFunc(running, unlisted), slices.DeleteFunc(ended, unlisted)
+	running, held = slices.DeleteFunc(running, unlisted), slices.DeleteFunc(held, unlisted)
 	names := ""
 	if known && len(running) > 0 {
 		names = " (" + shortList(running) + ")"
 	}
-	// Nothing flushes a MicroVM whose workload ended: its guest writes its
-	// disk back on its own (openshell.EndedSettle).
+	// Nothing in OpenShell flushes or stops a MicroVM that may linger
+	// (openshell.MayLinger).
 	wait := ""
-	if microVM && len(ended) > 0 {
-		wait = "; nothing flushes the " + plural(int64(len(ended)), "MicroVM", "MicroVMs") + " whose workload ended (" + shortList(ended) + "): wait " +
-			openshell.EndedSettleWords() + " after " + itsTheir(ended) + " workload ended before the restart, or what " + itThem(ended) + " wrote last may be lost"
+	if microVM && len(held) > 0 {
+		wait = "; the " + plural(int64(len(held)), "MicroVM", "MicroVMs") + " whose workload ended (" + shortList(held) + ") may still run what " +
+			itsTheir(held) + " workload left running, which nothing in OpenShell flushes or stops: the restart stops " + itThem(held) +
+			", and what is not on " + itsTheir(held) + " disk by then is lost (`" + CommandName + " delete NAME` deletes one first)"
 	}
 	stop := "`" + CommandName + " stop NAME`"
 	switch {
@@ -1144,10 +1167,11 @@ func (a *App) runningSandboxes(ctx context.Context) (names []string, known bool)
 // them (openshell.RestartHolds, on the compute driver the gateway names;
 // a MicroVM one when it names none): running, those that run or may (ready,
 // provisioning, starting, stopping, a phase OpenShell does not name), and
-// ended, the MicroVMs whose workload ended, which nothing flushes and a
-// restart DefenseClaw makes waits for (openshell.EndedSettle). known is
-// false when the gateway could not list them.
-func (a *App) restartSandboxes(ctx context.Context) (running, ended []string, known bool) {
+// held, the MicroVMs that may linger (openshell.MayLinger), which nothing
+// in OpenShell flushes or stops and under which a restart DefenseClaw
+// makes is refused, but those their users let go (openshell.LetGo).
+// known is false when the gateway could not list them.
+func (a *App) restartSandboxes(ctx context.Context) (running, held []string, known bool) {
 	c, _, err := a.OpenShell(ctx)
 	if err != nil {
 		return nil, nil, false
@@ -1163,32 +1187,34 @@ func (a *App) restartSandboxes(ctx context.Context) (running, ended []string, kn
 			stopFlushes = d.StopFlushes
 		}
 	}
+	var asked map[string]string
 	for _, sb := range list {
-		switch holds, isEnded := openshell.RestartHolds(sb, stopFlushes); {
-		case isEnded:
-			ended = append(ended, sb.Name)
+		switch holds, lingers := openshell.RestartHolds(sb, stopFlushes); {
+		case lingers:
+			if asked == nil {
+				asked = a.stopsAsked(ctx)
+			}
+			if !openshell.LetGo(asked, sb) {
+				held = append(held, sb.Name)
+			}
 		case holds:
 			running = append(running, sb.Name)
 		}
 	}
 	sort.Strings(running)
-	sort.Strings(ended)
-	return running, ended, true
+	sort.Strings(held)
+	return running, held, true
 }
 
-// endedWait says that a restart DefenseClaw makes of the gateway first
-// waits for the MicroVMs ended (restartSandboxes), "" for none.
-func endedWait(ended []string) string {
-	if len(ended) == 0 {
+// heldBack says that a restart DefenseClaw makes of the gateway is refused
+// under the MicroVMs held (restartSandboxes), "" for none.
+func heldBack(held []string) string {
+	if len(held) == 0 {
 		return ""
 	}
-	disk := "its disk"
-	if len(ended) > 1 {
-		disk = "their disks"
-	}
-	return "it first waits up to " + openshell.EndedSettleWords() + " for the " + plural(int64(len(ended)), "MicroVM", "MicroVMs") + " whose workload ended (" +
-		shortList(ended) + ") to write " + disk + " back, since nothing in OpenShell flushes one, then stops " + itThem(ended) + " with " +
-		itsTheir(ended) + " work kept"
+	return "it is refused while the " + plural(int64(len(held)), "MicroVM", "MicroVMs") + " whose workload ended (" + shortList(held) + ") may still run what " +
+		itsTheir(held) + " workload left running, which nothing in OpenShell flushes or stops: `" + CommandName + " stop NAME` lets the restart stop " +
+		itThem(held) + " (what is not on " + itsTheir(held) + " disk by then is lost), and `" + CommandName + " delete NAME` deletes " + itThem(held)
 }
 
 // gatewaySandboxes names every sandbox on the OpenShell gateway, of every

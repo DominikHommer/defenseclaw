@@ -93,7 +93,7 @@ const (
 // build does not name included, but for the completed and error phases
 // where the stop flushes: a MicroVM keeps running after its workload
 // completes or fails, until it is deleted or its gateway stops (GAP-0012),
-// with what it wrote not written back yet (EndedSettle).
+// with whatever its workload left running (MayLinger).
 func MayHoldCompute(p SandboxPhase, stopFlushes bool) bool {
 	switch p {
 	case PhaseStopped, PhaseDeleting:
