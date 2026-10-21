@@ -3228,7 +3228,10 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	var startOnlyKeys []string
 	if plan.Action == "upgrade" && (plan.Reason == "drift:config" || plan.Reason == "drift:bundle") {
 		applied, keys := windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result)
-		if applied {
+		if applied || opts.hotConfigRestoreFailed {
+			// A failed apply whose restore could not be proven stops here:
+			// the transaction would snapshot the config it left behind
+			// (GAP-1178).
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
 		// A signed bundle has no transaction fallback after a hot apply that

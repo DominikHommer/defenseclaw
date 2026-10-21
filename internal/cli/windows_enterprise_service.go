@@ -156,6 +156,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// transaction owns Codex's machine policy, so the change, a signed
 	// bundle's included, goes to that transaction (GAP-0033).
 	codexTargetTransaction bool
+	// hotConfigRestoreFailed is set when a failed hot config apply could not
+	// put the previous config or its enrolled targets back; ensure stops
+	// instead of starting the upgrade transaction.
+	hotConfigRestoreFailed bool
 	// ignoredDeploymentRecords lists deployment records profile resolution
 	// found but ignored because an administrator did not write them. Only
 	// the standalone result reports them.

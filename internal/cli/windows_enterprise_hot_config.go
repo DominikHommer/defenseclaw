@@ -198,6 +198,7 @@ func windowsEnterpriseHotConfigApply(
 	bundleChange := opts.bundle != nil && opts.bundle.prepared != nil && opts.bundle.prepared.Receipt != nil
 	payloadlessRollback := windowsBundleRollbackWithoutPayload(opts)
 	opts.codexTargetTransaction = false
+	opts.hotConfigRestoreFailed = false
 	failBundle := func(code, message string) {
 		switch {
 		case bundleChange:
@@ -326,19 +327,50 @@ func windowsEnterpriseHotConfigApply(
 	// again as a new generation: the counter never goes back, because the
 	// gateway may already have reported the number the attempt took. A hand
 	// edit stays unrecorded, and a record the attempt created goes away.
+	// Targets this attempt published for the new config are published again
+	// for the restored one, so a user the new config dropped is enrolled
+	// again (GAP-1494). A restore that cannot be proven is reported and
+	// stops the run: the upgrade transaction would otherwise snapshot the
+	// config this attempt left behind as its preimage (GAP-1178).
+	targetsRefreshed := false
 	undo := func() {
+		restoreCtx := context.WithoutCancel(ctx)
+		var restoreErr error
 		if recordedBefore {
 			// The record named previous: a bundle config goes back as that
 			// bundle, so /health names the bundle that enforces again.
-			_ = windowsEnterpriseHotConfigWrite(context.WithoutCancel(ctx), layout.ConfigPath, previous, configwrite.RestoreOptions(state, configwrite.SHA256Hex(previous), configwrite.Options{
+			restoreErr = windowsEnterpriseHotConfigWrite(restoreCtx, layout.ConfigPath, previous, configwrite.RestoreOptions(state, configwrite.SHA256Hex(previous), configwrite.Options{
 				Actor: configwrite.ActorLifecycle, LocalActor: configwrite.CurrentOSActor(),
 				Reason: "enterprise windows ensure (config change not applied)", ExpectSHA256: configwrite.SHA256Hex(next),
 			}))
 		} else {
-			_ = writeFileKeepingDACL(layout.ConfigPath, previous, layout.ConfigPath)
+			restoreErr = writeFileKeepingDACL(layout.ConfigPath, previous, layout.ConfigPath)
+		}
+		if restoreErr == nil {
+			restored, readErr := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+			switch {
+			case readErr != nil:
+				restoreErr = readErr
+			case !bytes.Equal(restored, previous):
+				restoreErr = errors.New("the installed config does not hold the previous bytes after the restore")
+			}
+		}
+		if restoreErr != nil {
+			opts.hotConfigRestoreFailed = true
+			result.AddError("config_restore_failed", "the config change was not applied and the previous config could not be put back at "+
+				layout.ConfigPath+": "+windowsEnterpriseBoundedDiagnostic(restoreErr.Error())+
+				"; nothing else was changed. Run the same ensure again, or repair with the last good config")
+			return
 		}
 		if generationErr != nil {
 			_ = os.Remove(generationPath)
+		}
+		if targetsRefreshed {
+			if err := windowsEnterpriseHotConfigRefreshTargets(restoreCtx, layout); err != nil {
+				opts.hotConfigRestoreFailed = true
+				result.AddError("targets_restore_failed", "the previous config is back, but the enrolled targets could not be published for it again: "+
+					windowsEnterpriseBoundedDiagnostic(err.Error())+"; run the same ensure again, or repair")
+			}
 		}
 	}
 	if _, err := windowsEnterpriseHotConfigValidate(layout.ConfigPath, layout.DataDir, layout.ServiceUser, false); err != nil {
@@ -404,6 +436,7 @@ func windowsEnterpriseHotConfigApply(
 	// upgrade transaction does; the guardian reconciles them with the config
 	// it reloads (enterpriseHookStandaloneConfigRefresh).
 	if refreshTargets {
+		targetsRefreshed = true
 		if err := windowsEnterpriseHotConfigRefreshTargets(ctx, layout); err != nil {
 			undo()
 			failBundle("bundle_targets_refresh_failed", "the bundle's enrolled targets could not be refreshed")
@@ -623,6 +656,15 @@ func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (s
 		return "", nil
 	}
 	defer release()
+	// Another lifecycle run may have committed a config while the preflight
+	// ran or this call waited for the lock. Read the installed file again
+	// under the lock: one that parses now is that run's commit and stays,
+	// and the bytes kept are the ones being replaced, not the ones read
+	// before (GAP-1177).
+	current, err = readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil || windowsEnterpriseConfigParses(current) || windowsBundleInstallTransactionPending(layout) {
+		return "", nil
+	}
 	kept := keepWindowsEnterpriseRejectedConfig(layout, current)
 	if kept == "" {
 		return "", fmt.Errorf("the installed %s does not parse and could not be kept as rejected-config.yaml", layout.ConfigPath)
