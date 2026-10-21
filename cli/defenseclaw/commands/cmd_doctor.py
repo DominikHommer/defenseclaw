@@ -3177,13 +3177,33 @@ def _check_component_connector_compatibility(
     from defenseclaw.doctor_health import (
         HealthStatus,
         build_health_report,
+        hook_call_after_scan,
         read_cached_discovery,
         supported_range_text,
     )
 
     enabled = tuple(connector for connector in connectors if _connector_enabled(cfg, connector))
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    live_activity: dict[str, object] | None = None
+
+    def last_hook_call(connector: str) -> object:
+        # Read once, and only for a connector the scan found missing.
+        nonlocal live_activity
+        if live_activity is None:
+            live_activity = {}
+            try:
+                health, _reason, _checked = _authenticated_gateway_health(cfg)
+                if health is not None:
+                    from defenseclaw.commands.cmd_status import _fetch_health_connectors
+
+                    rows = _fetch_health_connectors(health=health)
+                    live_activity = {name: row.get("last_activity_at") for name, row in rows.items()}
+            except Exception:  # noqa: BLE001 - live evidence is optional here.
+                live_activity = {}
+        return live_activity.get(connector)
+
     try:
-        discovery = read_cached_discovery(str(getattr(cfg, "data_dir", "") or ""))
+        discovery = read_cached_discovery(data_dir)
         report = build_health_report(
             enabled,
             discovery,
@@ -3255,12 +3275,38 @@ def _check_component_connector_compatibility(
             from defenseclaw.inventory import agent_discovery
 
             on_path = agent_discovery.binary_on_path(finding.connector)
+            seen = "" if on_path else hook_call_after_scan(data_dir, last_hook_call(finding.connector))
+            harness = None
+            if not on_path and not seen:
+                from defenseclaw.sandbox_images import verified_harness_contract
+
+                harness = verified_harness_contract(data_dir, finding.connector)
             if on_path:
                 # Installed after the last agent discovery: refresh the
                 # evidence rather than install it again (GAP-0052).
                 tag = "warn"
                 detail += f"; {on_path} is installed now, after the last agent discovery"
                 remediation = _health_remediation_text(finding.remediations[1:])
+            elif seen:
+                # The agent runs from a path or an IDE the scan did not see:
+                # status counts it live on the same evidence (1.0.4 review).
+                tag = "warn"
+                detail += (
+                    f"; the gateway took an authenticated hook call from it at {seen}, "
+                    "after the last agent discovery (started by absolute path or from an IDE)"
+                )
+                remediation = _health_remediation_text(finding.remediations[1:])
+            elif harness is not None:
+                # The sandbox-only layout: the agent runs inside a verified
+                # harness image, which setup, the gateway and status admit.
+                tag = "pass"
+                image = str(getattr(harness, "tag", "") or "").strip()
+                detail = (
+                    f"{finding.connector} runs inside the verified sandbox harness image"
+                    + (f" {image}" if image else "")
+                    + "; the host has no installation to check"
+                )
+                remediation = ""
         if finding.reason_code in {"connector-version-not-observed", "connector-version-unparseable"}:
             # A slow or failed version probe leaves the connector in observe.
             # Refreshing discovery and rerunning setup restores the mode.
@@ -7131,15 +7177,14 @@ def _check_opencode_later_plugins(cfg, path: str, r: _DoctorResult) -> None:
     )
 
 
-def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
-    """Report whether the managed OpenCode bridge actually loaded.
+def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
+    """The gateway's health from its authenticated ``/status`` document.
 
-    A current file digest cannot distinguish a normal OpenCode process from
-    ``--pure`` or another external-plugin-disabled launch. The bridge emits a
-    scoped, secret-free heartbeat from its v1.18.10-v1.18.19 config hook.
-    Consume it only through the authenticated, process/profile-bound status
-    document; missing or old evidence stays unverified and never guesses why
-    the client did not load the plugin.
+    The document counts only when the listener is this profile's gateway
+    process and the runtime it reports binds back to it, the same trust as
+    ``cmd_status._fetch_runtime_bound_health``. Returns
+    ``(health, "", True)``, or ``(None, reason, checked)``: ``checked`` is
+    False when no gateway runs.
     """
     gateway = getattr(cfg, "gateway", None)
     try:
@@ -7147,16 +7192,16 @@ def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
     except (TypeError, ValueError):
         api_port = 0
     if not 1 <= api_port <= 65_535:
-        return "warn", "runtime load unverified: sidecar API port is unavailable"
+        return None, "sidecar API port is unavailable", True
 
     token, _token_env, _token_source = _daemon_effective_gateway_token(cfg)
     if not token:
-        return "warn", "runtime load unverified: authenticated gateway token is unavailable"
+        return None, "authenticated gateway token is unavailable", True
     trust = _trusted_gateway_listener(cfg)
     if not trust.trusted and trust.code == "missing":
-        return "warn", "runtime load not checked: the gateway is not running"
+        return None, "the gateway is not running", False
     if not trust.trusted:
-        return "warn", f"runtime load unverified: {trust.detail}"
+        return None, trust.detail, True
 
     code, body = _http_probe(
         _gateway_api_url(cfg, "/status"),
@@ -7168,18 +7213,33 @@ def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
         bound_peer=trust,
     )
     if code != 200:
-        detail = "gateway is unreachable" if code == 0 else f"authenticated status returned HTTP {code}"
-        return "warn", f"runtime load unverified: {detail}"
+        return None, ("gateway is unreachable" if code == 0 else f"authenticated status returned HTTP {code}"), True
     runtime_ok, runtime_detail = _authenticated_runtime_matches(cfg, trust.pid, body)
     if not runtime_ok:
-        return "warn", f"runtime load unverified: {runtime_detail}"
+        return None, runtime_detail, True
     try:
         document = json.loads(body)
         health = document.get("health") if isinstance(document, dict) else None
     except (json.JSONDecodeError, TypeError):
         health = None
     if not isinstance(health, dict):
-        return "warn", "runtime load unverified: authenticated status health is malformed"
+        return None, "authenticated status health is malformed", True
+    return health, "", True
+
+
+def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
+    """Report whether the managed OpenCode bridge actually loaded.
+
+    A current file digest cannot distinguish a normal OpenCode process from
+    ``--pure`` or another external-plugin-disabled launch. The bridge emits a
+    scoped, secret-free heartbeat from its v1.18.10-v1.18.19 config hook.
+    Consume it only through the authenticated, process/profile-bound status
+    document; missing or old evidence stays unverified and never guesses why
+    the client did not load the plugin.
+    """
+    health, problem, checked = _authenticated_gateway_health(cfg)
+    if health is None:
+        return "warn", f"runtime load {'unverified' if checked else 'not checked'}: {problem}"
 
     from defenseclaw.commands.cmd_status import (
         _RUNTIME_HEALTHY_STATES,

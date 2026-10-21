@@ -339,15 +339,19 @@ defenseclaw_shared_hook_token_file() {
 # connector is selected: a selector can only tighten. With every record open,
 # a selected connector (the single record, or the environment's choice) needs
 # an open record of its own; with none selected (several records, or none),
-# only the unscoped legacy mode (.hookcfg.legacy, legacy_fail_mode) can open
-# the call. After an upgrade, a kept legacy open therefore never reopens a
-# connector recorded closed. A record counts as open only with its config
-# source (FAIL_MODE_SOURCE=config, fail_mode_sources, legacy_fail_mode_source):
-# an earlier release's open may be an unset mode it resolved open, and an
-# open lowered for a vendor that cannot fail closed is not an operator's
-# choice. An inherited DEFENSECLAW_FAIL_MODE can only tighten (GAP-0315);
-# guardian-managed hooks trust only installer-owned state. Malformed,
-# ambiguous or missing state fails closed.
+# only the unscoped legacy mode can open the call, and only when its flat
+# record (.hookcfg.legacy, which names no connector) and the JSON
+# legacy_fail_mode both say open: every writer since 0.8.10 writes the two
+# together. After an upgrade, a kept legacy open therefore never reopens a
+# connector recorded closed. A v2 JSON whose fail_modes is present but not an
+# object (null included) is malformed; a missing fail_modes is the shape every
+# release writes for an install with no connector entry yet. An inherited
+# DEFENSECLAW_FAIL_MODE can only tighten (GAP-0315); guardian-managed hooks
+# trust only installer-owned state. Malformed, ambiguous or missing state
+# fails closed. A record counts as open only with its config source
+# (FAIL_MODE_SOURCE=config, fail_mode_sources, legacy_fail_mode_source): an
+# earlier release's open may be an unset mode it resolved open, and an open
+# lowered for a vendor that cannot fail closed is not an operator's choice.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
@@ -387,10 +391,10 @@ defenseclaw_shared_runtime_fail_mode() {
       summary="$(jq -r --arg connector "$connector" '
         def word($source): if . == null or . == "" then "none" elif . == "open" and $source == "config" then "open" else "closed" end;
         if type == "object" and (.version | type) == "number" and .version >= 2
-          and ((.fail_modes // {}) | type) == "object"
-          and ((.fail_mode_sources // {}) | type) == "object" then
-          (.fail_modes // {}) as $modes
-          | (.fail_mode_sources // {}) as $sources
+          and ((has("fail_modes") | not) or (.fail_modes | type) == "object")
+          and ((has("fail_mode_sources") | not) or (.fail_mode_sources | type) == "object") then
+          (if has("fail_modes") then .fail_modes else {} end) as $modes
+          | (if has("fail_mode_sources") then .fail_mode_sources else {} end) as $sources
           | .legacy_fail_mode_source as $legacy_source
           | "\($modes | length) \(if [$modes | to_entries[] | .value == "open" and $sources[.key] == "config"] | all then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word($sources[$connector])) end) \(.legacy_fail_mode | word($legacy_source))"
         else "invalid" end' "$config" 2>/dev/null)" || summary="invalid"
@@ -398,8 +402,8 @@ defenseclaw_shared_runtime_fail_mode() {
       summary="$(python3 -c 'import json,sys
 d=json.load(open(sys.argv[1],encoding="utf-8"))
 assert isinstance(d,dict) and type(d.get("version")) is int and d["version"]>=2
-m=d.get("fail_modes") or {}
-s=d.get("fail_mode_sources") or {}
+m=d.get("fail_modes",{})
+s=d.get("fail_mode_sources",{})
 assert isinstance(m,dict) and isinstance(s,dict)
 w=lambda v,src:"none" if v in (None,"") else ("open" if v=="open" and src=="config" else "closed")
 c=sys.argv[2]
@@ -434,17 +438,22 @@ print(len(m),"open" if all(v=="open" and s.get(k)=="config" for k,v in m.items()
   fi
   # No selected connector: several records (an ambiguous identity) or none.
   # Only the unscoped legacy mode can open such a call, as before connector
-  # records existed; a closed record already closed it above.
-  local legacy_flat=none
-  if [ -f "${hook_dir}/.hookcfg.legacy" ]; then
-    legacy_flat="$(defenseclaw_flat_hookcfg_value "${hook_dir}/.hookcfg.legacy" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
-    source="$(defenseclaw_flat_hookcfg_value "${hook_dir}/.hookcfg.legacy" FAIL_MODE_SOURCE 2>/dev/null || true)"
-    [ "$legacy_flat" = "open" ] && [ "$source" = "config" ] || legacy_flat=closed
+  # records existed; a closed record already closed it above. Its flat record
+  # must name no connector and say open, and JSON a parser read must agree.
+  # Without a parser the flat record decides, as for connector records.
+  local legacy="${hook_dir}/.hookcfg.legacy" legacy_connector
+  if ! legacy_connector="$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_CONNECTOR 2>/dev/null)" \
+    || [ -n "$legacy_connector" ] \
+    || [ "$(defenseclaw_flat_hookcfg_value "$legacy" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)" != "open" ] \
+    || [ "$(defenseclaw_flat_hookcfg_value "$legacy" FAIL_MODE_SOURCE 2>/dev/null || true)" != "config" ]; then
+    printf closed
+    return 0
   fi
-  case "$legacy_flat/$json_legacy" in
-    open/open|open/none|none/open) printf open ;;
-    *) printf closed ;;
-  esac
+  if [ -n "$summary" ] && [ "$json_legacy" != "open" ]; then
+    printf closed
+    return 0
+  fi
+  printf open
 }
 
 # _defenseclaw_sweep_stale_hook_dirs removes orphaned hook-tmp.*

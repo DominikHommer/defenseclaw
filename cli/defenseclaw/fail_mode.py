@@ -133,6 +133,10 @@ class ConnectorFailModeState:
     # The vendor limit a closed hook of this connector keeps
     # (upstream_hook_limit), or "".
     limit: str = ""
+    # The mode an inherited DEFENSECLAW_FAIL_MODE in the shell that runs this
+    # command would give the hooks. It is not the agent's environment: the
+    # agent process may not have it, so it never sets the runtime mode.
+    caller_env: str | None = None
 
     @property
     def current(self) -> bool:
@@ -182,14 +186,20 @@ class ConnectorFailModeState:
         limit it keeps instead.
         """
 
+        notes = []
         if self.limit and self.effective == "closed":
-            return self.limit
-        if self.configured == self.desired or self.effective != self.desired:
-            return ""
-        return (
-            f"observe mode keeps hooks fail-{self.desired}; "
-            f"guardrail.hook_fail_mode={self.configured} applies in action mode"
-        )
+            notes.append(self.limit)
+        elif self.configured != self.desired and self.effective == self.desired:
+            notes.append(
+                f"observe mode keeps hooks fail-{self.desired}; "
+                f"guardrail.hook_fail_mode={self.configured} applies in action mode"
+            )
+        if self.caller_env is not None and self.caller_env != self.effective:
+            notes.append(
+                f"this shell sets DEFENSECLAW_FAIL_MODE={self.caller_env}, unverified: "
+                "it applies only to an agent started with it"
+            )
+        return "; ".join(notes)
 
     def to_report(self) -> dict[str, Any]:
         """Return the canonical JSON-friendly reporting projection."""
@@ -204,6 +214,7 @@ class ConnectorFailModeState:
             "current": self.current,
             "drift": list(self.drift),
             "sources": [{"name": source, "mode": mode} for source, mode in self.sources],
+            "caller_env": self.caller_env,
         }
 
 
@@ -236,10 +247,10 @@ def resolve_connector_fail_mode(
     runtime = runtime_source[1]
     if runtime_source[0].endswith("-legacy"):
         drift.append("windows-sidecar-legacy")
-    process_env = _inherited_fail_mode(cfg, name, os.environ.get("DEFENSECLAW_FAIL_MODE"))
-    if process_env is not None:
-        sources.append(("process-env", process_env))
-        runtime = process_env
+    # The shell running status or doctor is not the agent: its
+    # DEFENSECLAW_FAIL_MODE is reported apart, unverified, and never replaces
+    # the installed mode (1.0.4 review, loop round 3).
+    caller_env = _inherited_fail_mode(cfg, name, os.environ.get("DEFENSECLAW_FAIL_MODE"))
 
     workspace = _connector_workspace(cfg)
     if name == "claudecode":
@@ -303,6 +314,7 @@ def resolve_connector_fail_mode(
         runtime=runtime,
         sources=tuple(sources),
         drift=tuple(dict.fromkeys(drift)),
+        caller_env=caller_env,
     )
 
 
@@ -439,11 +451,16 @@ def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, boo
     except (TypeError, ValueError):
         payload = None
     if isinstance(payload, dict) and int(payload.get("version", 0) or 0) >= 2:
-        modes = payload.get("fail_modes")
-        if isinstance(modes, dict):
-            value = modes.get(normalize(connector))
-            if str(value or "").strip() in _VALID_MODES:
-                return normalize_fail_mode(value), False
+        # As the native hook reads it (readHookSidecar): a connector map that
+        # is present but not an object, or an entry that is not a mode, is
+        # closed and never falls back to the legacy mode.
+        modes = payload.get("fail_modes", {})
+        if not isinstance(modes, dict):
+            return "closed", False
+        key = normalize(connector)
+        if key in modes:
+            value = modes[key]
+            return (normalize_fail_mode(value) if isinstance(value, str) else "closed"), False
         legacy_value = str(payload.get("legacy_fail_mode") or "").strip().lower()
         if legacy_value in _VALID_MODES:
             return legacy_value, True

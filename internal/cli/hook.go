@@ -675,6 +675,10 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 // Version 2 is JSON with a connector-keyed fail_modes map. The legacy
 // KEY=value shape remains readable so the first connector refresh can migrate
 // an existing install without changing its runtime behavior beforehand.
+// A connector map that is present but not an object of strings (null
+// included), or a blank entry, is malformed state: it resolves closed and
+// never falls back to the legacy mode. A missing map is what every release
+// writes before the first connector entry, so the legacy mode still applies.
 func readHookSidecar(path string) map[string]string {
 	out := map[string]string{}
 	data, err := os.ReadFile(path)
@@ -684,14 +688,24 @@ func readHookSidecar(path string) map[string]string {
 	var current struct {
 		Version     int               `json:"version"`
 		GatewayAddr string            `json:"gateway_addr"`
-		FailModes   map[string]string `json:"fail_modes"`
+		FailModes   json.RawMessage   `json:"fail_modes"`
 		Sources     map[string]string `json:"fail_mode_sources"`
 		LegacyMode  string            `json:"legacy_fail_mode"`
 		LegacySrc   string            `json:"legacy_fail_mode_source"`
 	}
 	if json.Unmarshal(data, &current) == nil && current.Version >= 2 {
 		out["DEFENSECLAW_GATEWAY_ADDR"] = current.GatewayAddr
-		for connector, mode := range current.FailModes {
+		var modes map[string]string
+		if len(current.FailModes) > 0 {
+			if err := json.Unmarshal(current.FailModes, &modes); err != nil || modes == nil {
+				out["DEFENSECLAW_FAIL_MODE"] = "closed"
+				return out
+			}
+		}
+		for connector, mode := range modes {
+			if strings.TrimSpace(mode) == "" {
+				mode = "closed"
+			}
 			out[hookSidecarFailModeKey(connector)] = mode
 		}
 		for connector, source := range current.Sources {

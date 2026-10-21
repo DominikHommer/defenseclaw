@@ -21,7 +21,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from defenseclaw import doctor_health, sandbox_images
-from defenseclaw.commands import cmd_status
+from defenseclaw.commands import cmd_doctor, cmd_status
+from defenseclaw.commands.cmd_doctor import _DoctorResult
 from defenseclaw.config import AIDiscoveryConfig, ApplicationProtectionConfig
 from defenseclaw.inventory import agent_discovery
 
@@ -167,3 +168,80 @@ def test_status_json_agrees(copilot_not_installed):
     assert rows["copilot"]["state"] == "off"
     assert "is not installed" in rows["copilot"]["runtime_detail"]
     assert "state" not in rows["codex"]
+
+
+def _doctor_row(cfg, connector: str, health, monkeypatch) -> dict:
+    monkeypatch.setattr(cmd_doctor, "_doctor_component_evidence", lambda cfg: ())
+    monkeypatch.setattr(cmd_doctor, "_connector_enabled", lambda cfg, connector: True)
+    monkeypatch.setattr(cmd_doctor, "_unverified_executable_note", lambda cfg, connector: ("", ""))
+    probes: list[object] = []
+
+    def gateway_health(cfg_arg):
+        probes.append(cfg_arg)
+        return (health, "", True) if health is not None else (None, "the gateway is not running", False)
+
+    monkeypatch.setattr(cmd_doctor, "_authenticated_gateway_health", gateway_health)
+    r = _DoctorResult(passive=True, quiet=True)
+    cmd_doctor._check_component_connector_compatibility(cfg, [connector], r)
+    row = next(c for c in r.checks if c["label"] == f"Connector compatibility: {connector}")
+    row["probes"] = len(probes)
+    return row
+
+
+@pytest.mark.parametrize(
+    "case,activity,missing",
+    [
+        # Claude Code started by absolute path or from an IDE after a scan that
+        # missed it: the gateway took an authenticated hook call after the scan.
+        ("call-after-scan", (_SCANNED_AT + timedelta(minutes=30)).isoformat().replace("+00:00", "Z"), False),
+        ("call-after-scan-go-nanoseconds", "2026-10-13T09:30:00.123456789Z", False),
+        # The scan came after the last call: the agent was removed since.
+        ("call-before-scan", (_SCANNED_AT - timedelta(minutes=30)).isoformat().replace("+00:00", "Z"), True),
+        ("no-call", None, True),
+        ("unreadable-call-time", "yesterday", True),
+    ],
+)
+def test_status_and_doctor_agree_on_an_agent_the_scan_missed(copilot_not_installed, monkeypatch, case, activity, missing):
+    """1.0.4 review (loop round 3): status accepted a hook call after a
+    negative discovery scan as proof that Claude Code runs; doctor still
+    failed it as connector-agent-unavailable from the scan and its own PATH."""
+    data_dir = copilot_not_installed.data_dir
+    cfg = _cfg(["claudecode"], data_dir)
+    row = {"name": "claudecode", "state": "running"}
+    if activity is not None:
+        row["last_activity_at"] = activity
+    health = {"connectors": [row]}
+    claude = _row(_render(cfg, health), "Claude Code (claudecode)")
+    doctor = _doctor_row(cfg, "claudecode", health, monkeypatch)
+    assert doctor["probes"] == 1
+    if missing:
+        assert "RUNNING" not in claude and "OFF" in claude
+        assert doctor["status"] == "fail", doctor
+    else:
+        assert "RUNNING" in claude and "is not installed" not in claude
+        assert doctor["status"] == "warn", doctor
+        assert "authenticated hook call from it at 2026-10-13T09:30:00" in doctor["detail"], doctor
+        assert "after the last agent discovery" in doctor["detail"], doctor
+        assert doctor["remediation"].startswith("defenseclaw agent discover --refresh"), doctor
+        assert "Install" not in doctor["remediation"], doctor
+
+
+def test_doctor_without_the_gateway_keeps_the_scan(copilot_not_installed, monkeypatch):
+    cfg = _cfg(["claudecode"], copilot_not_installed.data_dir)
+    assert _doctor_row(cfg, "claudecode", None, monkeypatch)["status"] == "fail"
+
+
+def test_doctor_admits_a_sandbox_only_connector_as_status_does(copilot_not_installed, monkeypatch):
+    copilot_not_installed.harness["copilot"] = SimpleNamespace(tag="defenseclaw/sandbox:copilot-u1000")
+    cfg = _cfg(["copilot"], copilot_not_installed.data_dir)
+    assert "RUNNING" in _row(_render(cfg, {"connectors": [{"name": "copilot", "state": "running"}]}), "(copilot)")
+    doctor = _doctor_row(cfg, "copilot", {"connectors": [{"name": "copilot", "state": "running"}]}, monkeypatch)
+    assert doctor["status"] == "pass", doctor
+    assert "defenseclaw/sandbox:copilot-u1000" in doctor["detail"], doctor
+
+
+def test_doctor_reads_the_gateway_only_for_an_agent_the_scan_missed(copilot_not_installed, monkeypatch):
+    copilot_not_installed.on_path["copilot"] = "/usr/local/bin/copilot"
+    cfg = _cfg(["codex", "copilot"], copilot_not_installed.data_dir)
+    for connector in ("codex", "copilot"):
+        assert _doctor_row(cfg, connector, {"connectors": []}, monkeypatch)["probes"] == 0

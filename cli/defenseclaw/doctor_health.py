@@ -590,11 +590,8 @@ def connector_agent_missing(data_dir: str, connector: str, *, last_activity_at: 
 
     if not _last_scan_found_no_agent(data_dir, connector):
         return False
-    activity = _parse_timestamp(last_activity_at)
-    if activity is not None:
-        scanned = _last_scan_time(data_dir)
-        if scanned is None or activity > scanned:
-            return False
+    if hook_call_after_scan(data_dir, last_activity_at):
+        return False
     from defenseclaw.inventory import agent_discovery
 
     if agent_discovery.binary_on_path(connector):
@@ -602,6 +599,21 @@ def connector_agent_missing(data_dir: str, connector: str, *, last_activity_at: 
     from defenseclaw.sandbox_images import verified_harness_contract
 
     return verified_harness_contract(data_dir, connector) is None
+
+
+def hook_call_after_scan(data_dir: str, last_activity_at: Any) -> str:
+    """The gateway's last authenticated hook call for a connector, as RFC
+    3339 UTC, when it came after the last agent discovery scan (or the scan
+    time cannot be read); "" otherwise. Status and doctor both take it as
+    proof that the agent runs (connector_agent_missing)."""
+
+    activity = _parse_timestamp(last_activity_at)
+    if activity is None:
+        return ""
+    scanned = _last_scan_time(data_dir)
+    if scanned is not None and activity <= scanned:
+        return ""
+    return activity.isoformat().replace("+00:00", "Z")
 
 
 def _parse_timestamp(value: Any):
