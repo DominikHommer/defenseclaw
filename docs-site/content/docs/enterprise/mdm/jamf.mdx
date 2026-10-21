@@ -255,6 +255,8 @@ It always exits `0` and prints one of these values:
 | `not-installed` | No managed deployment, or its gateway is not root-owned |
 | `outdated` | Older than `DC_MIN_VERSION` |
 | `unhealthy` | `verify` reported problems |
+| `busy` | A lifecycle run holds its lock. Transient; the next inventory shows the real state |
+| `unknown` | The script did not run as root |
 
 Build [Smart Groups](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Smart_Groups)
 on the attribute:
@@ -262,7 +264,7 @@ on the attribute:
 | Smart Group | Criteria on the extension attribute |
 | --- | --- |
 | `DefenseClaw needs install` | `not-installed` or `outdated` |
-| `DefenseClaw installed` | a version, `outdated` or `unhealthy`, for example **matches regex** `^([0-9]\|outdated\|unhealthy)`. A blank value means the Mac has not reported the attribute yet, so do not treat it as installed. |
+| `DefenseClaw installed` | a version, `outdated`, `unhealthy` or `busy`, for example **matches regex** `^([0-9]\|outdated\|unhealthy\|busy)`. A blank value means the Mac has not reported the attribute yet, so do not treat it as installed. |
 | `DefenseClaw unhealthy` | `unhealthy` |
 
 The value changes only when the Mac submits inventory. See

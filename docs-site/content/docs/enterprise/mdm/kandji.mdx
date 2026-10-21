@@ -99,7 +99,9 @@ DC_FORMAT="exit"
 ```
 
 It exits `0` when the Mac has the deployment at that version or newer, so Iru
-reinstalls the package only when the deployment is missing or older.
+reinstalls the package only when the deployment is missing or older. While a lifecycle
+run holds its lock it exits `75` (`busy`), so that audit fails once; the next check-in
+passes.
 
 The pre-install script puts your config at the layout path
 `/opt/cisco/defenseclaw/etc/config.yaml` before the package installs, so the

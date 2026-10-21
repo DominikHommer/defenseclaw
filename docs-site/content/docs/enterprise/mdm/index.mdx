@@ -27,12 +27,15 @@ to enterprise deployment? Start with
 | [Ansible, Puppet, Chef, Salt, apt, dnf](/docs/enterprise/mdm/linux-config-management) | Linux | The `.deb` or `.rpm` and your config |
 | Anything else: start at [What you deliver](#what-you-deliver) | Windows, Linux, macOS | The release file and the kit wrapper, run as SYSTEM or root |
 
-**Validation status.** The three Intune recipes delivered DefenseClaw end to
-end on a test tenant in the PR #1304 pass; see
+**Validation status.** The three Intune recipes (Windows, macOS script route and
+Linux) delivered DefenseClaw end to end on a test tenant in the PR #1304 pass,
+including a cached Intune install script that reinstalled the macOS package after an
+uninstall. See
 [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant). Jamf Pro, Iru,
 Workspace ONE, Configuration Manager and the Linux tools are templates built from
 the vendor's documentation and checked with [Simulate your MDM](#simulate-your-mdm).
-Pilot each on a small device group first.
+The tenant helper's create, update and assign commands ran against the same
+tenant with throwaway objects. Pilot each recipe on a small device group first.
 
 ## The contract every recipe follows
 
@@ -401,23 +404,27 @@ The document's `exit_code` field matches the process exit code. Its format is
 | Invalid arguments, for example a first Windows install without a config. Retrying does not help. | `1639` | `2` | Failure; fix the assignment |
 | Reboot required (reserved; nothing returns it) | `3010` | — | Soft reboot |
 
-An invalid config is a plain failure: `config_invalid` and exit `1` on Linux and
-macOS, exit `1603` on Windows. The installed config stays as it was.
+An invalid config is `config_invalid` and exit `1` on Linux and macOS. On
+standalone Windows, Setup reports a config that is malformed, not UTF-8 or does not
+validate as `invalid_arguments` and exit `1639`, because the administrator has to fix
+the file. The installed config stays as it was.
 
 The Windows codes are Windows Installer codes, so MDMs classify them with their
 default tables. Intune's default Win32 return codes (`0`, `1707`, `3010`, `1641`,
 `1618`) already treat `1603` and `1639` as failures and retry `1618`.
 
-The standalone Setup can also refuse before the lifecycle starts. A malformed
-command line exits `1639`: an unknown property, a `CONFIG=` or `MANIFEST=` path
-that is missing, relative or environment-expanded, `/install` without `CONFIG=`
-and `MANIFEST=`, or `TIMEOUTSECONDS` out of range. A token that is not elevated,
-and a `CONFIG=` or `MANIFEST=` file that a non-administrator can change, exit
-`1603`. The Secure Client Setup returns only `0` and `1603`. With `JSON=1`, Setup
-prints a short document with `schema_version: 1` and an `error` field; put
-`JSON=1` right after the action, because Setup stops reading arguments at the
-first unknown one. The wrappers turn that document into a schema-version-2
-document with the code `mdm_lifecycle_no_result`.
+The standalone Setup can also refuse before the lifecycle starts. It exits `1639`
+(`invalid_arguments`) for a malformed command line: an unknown property, a `CONFIG=`
+or `MANIFEST=` path that is missing, relative or environment-expanded, `/install`
+without `CONFIG=` and `MANIFEST=`, or `TIMEOUTSECONDS` out of range. It also exits
+`1639` for a `CONFIG=` or `MANIFEST=` file that a non-administrator owns or can
+change, and names the account and the `icacls` fix. A token that is not elevated
+exits `1603`. The wrappers' own `mdm_untrusted_input` stays `1603`. With `JSON=1`,
+Setup prints the same schema-version-2 document as the lifecycle, with `errors[]`
+and `exit_code`, and the wrappers keep it. Setup scans every argument for `JSON=1`,
+so `/ensure BOGUS=1 JSON=1` still returns the JSON refusal, whatever the order.
+The Secure Client Setup returns only `0` and `1603`, with a schema-version-1
+document (an `error` field) under `JSON=1`.
 
 Codes that start with `mdm_` come from the kit's scripts. Most mean the wrapper
 stopped before the lifecycle ran; `mdm_not_installed` after an apply, and
@@ -560,14 +567,16 @@ so run it as root. A standard user gets `unknown` in `value` and `jamf` format.
 | Format | Exit code | Output |
 | --- | --- | --- |
 | `exit` (default) | `0` when detected, `1` otherwise | `DefenseClaw Enterprise <version>` on standard output, or the reason on standard error |
-| `value` | Always `0` (except for a failed session check) | The installed version, or `not-installed`, `outdated` (with `--min-version`) or `unhealthy` (with `--require-healthy`). For inventory attributes. |
+| `value` | Always `0` (except for a failed session check) | The installed version, or `not-installed`, `outdated` (with `--min-version`), `unhealthy` (with `--require-healthy`), `unknown` (not run as root) or `busy` (a lifecycle run holds its lock; transient). For inventory attributes. |
 | `jamf` | Always `0` (same exception) | The same values inside `<result>...</result>`, for Jamf Pro extension attributes |
 
 - `--min-version` takes a dotted release such as `X.Y.Z`; a bad value exits `2`.
   A leading `v` and build metadata (`+...`) are ignored, and a prerelease sorts
   before its release.
-- `--require-healthy` reports lock contention as `busy` (exit `75` in exit
-  format); retry after the apply finishes. On Linux it also reports `unhealthy`
+- Lock contention is `busy` (exit `75` in exit format) with or without
+  `--require-healthy`, and in `exit` format the `verify` call can report it too. It is
+  transient: retry after the apply finishes, and keep a device that reports it in the
+  group it was in. On Linux it also reports `unhealthy`
   while dpkg lists the package half-configured or rpm lists two versions of it
   (an install cut short by a power loss), so the MDM runs the deployment again.
 - `--require-tetragon consume|observe|enforce` (Linux only) also runs
@@ -677,7 +686,7 @@ no-op result and exit `0`.
 
 | OS | Command | Removes |
 | --- | --- | --- |
-| Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), config, credentials, most state and logs, and the `defenseclaw` service account, then the deb or rpm unless `--keep-package`. `--purge` also removes each enrolled account's `~/.defenseclaw` and per-user binaries (an account's own earlier install is moved to `~/.defenseclaw-backup-<UTC time>` first), the kept sandbox store and key, and the wrapper's staging folder `/var/lib/defenseclaw-mdm` once it is empty. |
+| Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), config, credentials, most state and logs, and the `defenseclaw` service account, then the deb or rpm unless `--keep-package`. Your policies in `/etc/defenseclaw/policies` stay; `--purge` removes them. `--purge` also removes each enrolled account's `~/.defenseclaw` and per-user binaries (an account's own earlier install is moved to `~/.defenseclaw-backup-<UTC time>` first), the kept sandbox store and key, and the wrapper's staging folder `/var/lib/defenseclaw-mdm` once it is empty. |
 | macOS | `uninstall.sh [--purge] [--log FILE]`, or `DC_PURGE=1` in its settings block | The same, with the `_defenseclaw` account; the lifecycle forgets the pkg receipt. |
 | Windows | `uninstall.ps1 [-Purge]`, or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks and machine-policy entries, the machine state (config, key and state), the Add/Remove Programs entry and the marker. Purge also removes each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries. |
 
