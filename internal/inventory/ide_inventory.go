@@ -268,12 +268,11 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() ([]AISignal, *IDEI
 		owner := s.ideOwnerForHome(home, serviceContext)
 		homeSignals := s.ideSignals(installs, index, serviceContext)
 		if published {
-			// A redirected AppData folder is outside the profile, so the
-			// path does not name the owner of what it holds.
+			// The enumerator read a redirected AppData folder the profile's
+			// owner owns. Its path is outside the profile, or inside
+			// another one, so it does not name the owner of what it holds.
 			for i := range homeSignals {
-				if homeSignals[i].UserID == "" {
-					homeSignals[i].UserID, homeSignals[i].UserName = owner.id, owner.name
-				}
+				homeSignals[i].UserID, homeSignals[i].UserName = owner.id, owner.name
 			}
 		}
 		signals = append(signals, homeSignals...)

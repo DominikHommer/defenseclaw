@@ -580,7 +580,7 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 			agent = strings.TrimSpace(id)
 		}
 	}
-	decision := set.match(subject, source, profileRequestConnector(ctx), set.profileAgent(agent))
+	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
 		if derived, ok := set.profiles[decision.Name]; ok {
@@ -1724,7 +1724,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if source == "" {
 		agent = ""
 	}
-	decision := set.match(subject, source, connectorName, set.profileAgent(agent))
+	decision := set.matchAgent(subject, source, connectorName, agent)
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match

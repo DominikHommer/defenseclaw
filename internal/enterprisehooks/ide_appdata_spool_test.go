@@ -4,6 +4,7 @@
 package enterprisehooks
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -67,5 +68,54 @@ func TestRedirectedAppDataFolderOddValues(t *testing.T) {
 	}
 	if folder, refused := RedirectedAppDataFolder(`D:\..\..\Windows`, home, `CORP\alice`, `AppData\Roaming`); folder != "" || refused == "" {
 		t.Errorf(`D:\..\..\Windows = %q, %q; want refused`, folder, refused)
+	}
+}
+
+// Under a budget that reads only some profiles a cycle, every enrolled
+// profile gets a record within the cycles the budget needs for all of
+// them, and none waits much longer than that for a new one.
+func TestIDEAppDataScansReachEveryProfileUnderBudget(t *testing.T) {
+	const (
+		profiles = 30
+		scan     = 10 * time.Second
+		budget   = 20 * time.Second
+		cycle    = time.Minute
+		rescan   = 5 * time.Minute
+	)
+	clock := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	published := map[string]time.Time{}
+	for n := 1; n <= 60; n++ {
+		start := clock
+		var due []ideAppDataDue
+		for i := 0; i < profiles; i++ {
+			name := fmt.Sprintf("S-1-5-21-1-2-3-%d.json", 1000+i)
+			at, ok := published[name]
+			if ok && clock.Sub(at) < rescan {
+				continue
+			}
+			due = append(due, ideAppDataDue{name: name, published: at})
+		}
+		keep := scanIDEAppDataDue(due, func() bool { return clock.After(start.Add(budget)) }, func(item ideAppDataDue) bool {
+			clock = clock.Add(scan)
+			published[item.name] = clock
+			return true
+		})
+		for _, item := range due {
+			if !keep[item.name] {
+				delete(published, item.name)
+			}
+		}
+		// The budget reads three profiles a cycle: ten cycles reach all.
+		if n == 10 && len(published) != profiles {
+			t.Fatalf("after %d cycles %d of %d profiles have a record", n, len(published), profiles)
+		}
+		if n > 10 {
+			for name, at := range published {
+				if age := start.Add(cycle).Sub(at); age > 12*time.Minute {
+					t.Fatalf("cycle %d: the record of %s is %s old", n, name, age)
+				}
+			}
+		}
+		clock = start.Add(cycle)
 	}
 }
