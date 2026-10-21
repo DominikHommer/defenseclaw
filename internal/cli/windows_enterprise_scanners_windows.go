@@ -48,7 +48,10 @@ var (
 	windowsScannerRuntimeDir     = managed.StandaloneWindowsScannerRuntimeDir
 	windowsScannerGatewayAccount = `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc
 	windowsScannerPrepareTimeout = 15 * time.Minute
-	windowsScannerSourceCheck    = managed.ValidateTrustedFilePath
+	// The staged scanner is hashed, signature-checked and copied by path:
+	// a folder above it that a standard user can replace children of would
+	// let one swap it between those steps (review loop round 4).
+	windowsScannerSourceCheck = managed.ValidateTrustedFilePathStrictAncestors
 )
 
 // windowsScannerRuntimeSDDL: Administrators own the root; LocalSystem and
@@ -271,13 +274,13 @@ func windowsScannerRuntimeCertificationRun(opts *windowsEnterpriseLifecycleOptio
 }
 
 // windowsScannerRuntimeACLCheck checks that only administrators and
-// LocalSystem can change the installed runtime root and executable; a seam
-// for tests, whose temporary folders are not.
+// LocalSystem can change the installed runtime root and executable, or
+// replace either through a folder above them: every verdict is fatal,
+// ProgramData\Cisco included, since an elevated lifecycle runs the
+// executable by its path (review loop round 4). A seam for tests, whose
+// temporary folders are not trusted.
 var windowsScannerRuntimeACLCheck = func(root, target string) error {
-	if err := managed.ValidateTrustedRuntimeDir(root, "scanner runtime"); err != nil {
-		return err
-	}
-	return managed.ValidateTrustedFilePath(target, "scanner runtime executable")
+	return managed.ValidateTrustedRuntimeImage(root, target, "scanner runtime")
 }
 
 // windowsInstalledScannerRuntimeCheck is every check made before the
@@ -299,7 +302,7 @@ var windowsScannerRuntimeServiceCheck = func() error {
 	if err != nil {
 		return err
 	}
-	if err := managed.ValidateTrustedFilePath(filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName), "scanner runtime"); err != nil {
+	if err := managed.ValidateTrustedRuntimeImage(root, filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName), "scanner runtime"); err != nil {
 		return err
 	}
 	if err := managed.ValidateServiceCanReadTree(root, "scanner runtime", windowsScannerGatewayAccount); err != nil && !managed.IsServiceAccountUnresolved(err) {
@@ -616,10 +619,7 @@ func installWindowsScannerRuntime(source, action string, opts *windowsEnterprise
 			return fmt.Errorf("record the admitted scanner runtime: %w", err)
 		}
 	}
-	if err := managed.ValidateTrustedFilePath(target, "scanner runtime"); err != nil {
-		return err
-	}
-	if err := managed.CheckScannerRuntimeAdmitted(root, target); err != nil {
+	if err := windowsInstalledScannerRuntimeCheck(root, target); err != nil {
 		return err
 	}
 	// prepare checks every file of an unpacked runtime against the archive
@@ -714,7 +714,8 @@ func windowsScannerRuntimeUnavailable(scanners *enterprisestatus.ScannerRuntime)
 	if state == "untrusted" && scanners.Problem != "" {
 		return "the skill, MCP and plugin scanner runtime can be changed by an account other than SYSTEM and Administrators (" +
 			scanners.Problem + "), so DefenseClaw does not run it, " + blocked +
-			"; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, which puts back the folder's protected permissions and the payload copy"
+			"; remove any access it names on a folder above the runtime (Setup does not change those), then run " +
+			"DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, which puts back the runtime folder's protected permissions and the payload copy"
 	}
 	if state == "untrusted" {
 		return "the skill, MCP and plugin scanner runtime executable is not the one the payload trust policy admitted " +
@@ -961,6 +962,12 @@ func copyWindowsScannerRuntime(source, target, root, want string) error {
 		if got, err := windowsEnterpriseFileSHA256(tmp); err != nil || got != want {
 			_ = os.Remove(tmp)
 			return errors.New("the copied scanner runtime does not match the payload")
+		}
+		// The copy runs elevated by its path: checked as the installed
+		// runtime is, before it runs.
+		if err := windowsScannerRuntimeACLCheck(root, tmp); err != nil {
+			_ = os.Remove(tmp)
+			return err
 		}
 		if err := runWindowsScannerRuntime(tmp, "prepare"); err != nil {
 			_ = os.Remove(tmp)
