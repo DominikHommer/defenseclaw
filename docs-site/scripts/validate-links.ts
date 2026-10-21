@@ -23,6 +23,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import GithubSlugger from 'github-slugger';
+import { legacyRedirects } from '../lib/redirects';
 
 const CONTENT_ROOT = resolve(process.cwd(), 'content/docs');
 
@@ -130,8 +131,35 @@ async function buildPages(): Promise<MdxFile[]> {
   return out;
 }
 
+// Redirect hygiene (lib/redirects.ts). A key that is also a real page would
+// never be served as a redirect; a value that is itself a key would chain;
+// an anchor in a value is overwritten by the old URL's #hash.
+function checkRedirects(pages: MdxFile[]): string[] {
+  const real = new Set(pages.map((page) => page.slugs.join('/')));
+  const keys = new Set(Object.keys(legacyRedirects));
+  const errors: string[] = [];
+  for (const [key, value] of Object.entries(legacyRedirects)) {
+    if (real.has(key)) {
+      errors.push(`redirect key "${key}" is also a real page; remove one of them`);
+    }
+    if (value.includes('#')) {
+      errors.push(`redirect "${key}" target "${value}" must not carry an anchor`);
+    }
+    const target = value.replace(/^\/docs\/?/, '').replace(/\/$/, '');
+    if (keys.has(target)) {
+      errors.push(`redirect "${key}" points at "${value}", which is itself a redirect`);
+    }
+  }
+  return errors;
+}
+
 async function checkLinks() {
   const pages = await buildPages();
+  const redirectErrors = checkRedirects(pages);
+  if (redirectErrors.length > 0) {
+    for (const message of redirectErrors) console.error(`[validate-links] ${message}`);
+    process.exit(1);
+  }
   const scanned = await scanURLs({
     preset: 'next',
     // Pass the public catch-all route explicitly. tinyglobby returns
@@ -142,10 +170,18 @@ async function checkLinks() {
     // platform.
     pages: [join('docs', '[[...slug]]', 'page.tsx')],
     populate: {
-      'docs/[[...slug]]': pages.map((page) => ({
-        value: { slug: page.slugs },
-        hashes: page.headings,
-      })),
+      // Redirect slugs are valid link targets: the site pre-renders a
+      // "moved" page for each one.
+      'docs/[[...slug]]': [
+        ...pages.map((page) => ({
+          value: { slug: page.slugs },
+          hashes: page.headings,
+        })),
+        ...Object.keys(legacyRedirects).map((key) => ({
+          value: { slug: key.split('/') },
+          hashes: [] as string[],
+        })),
+      ],
     },
   });
 
