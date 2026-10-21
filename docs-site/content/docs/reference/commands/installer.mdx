@@ -44,7 +44,7 @@ Options that take a value also accept `--name=value`. `defenseclaw quickstart --
 curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | DEFENSECLAW_REPO=https://mirror.example.com/defenseclaw bash
 ```
 
-A first install has no `config.yaml`, so the variable is the only way to name a mirror. Afterwards, `update.source` does the same for `defenseclaw upgrade` ([Upgrade](/docs/get-started/upgrade#install-from-a-mirror)). A mirror changes only where files come from. The installer still checks the release signature against the official identity, so a mirror needs `cosign` 2.0 or later.
+A first install has no `config.yaml`, so the variable is the only way to name a mirror. Afterwards, `update.source` does the same for `defenseclaw upgrade` ([Upgrade](/docs/appendix/upgrade-from-0-8#install-from-a-mirror)). A mirror changes only where files come from. The installer still checks the release signature against the official identity, so a mirror needs `cosign` 2.0 or later.
 
 ## Exit codes
 
