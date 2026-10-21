@@ -168,6 +168,13 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 					}
 					return true, nil
 				}
+				var replies []map[string]any
+				if tc.verifyFails {
+					replies = append(replies, failedVerify)
+				}
+				stub := &ensureStub{t: t, replies: replies}
+				// The installer stub replaces the policy digest seam too: install it first.
+				stub.install(t)
 				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) {
 					installed, err := os.ReadFile(host.configPath)
 					if err != nil {
@@ -199,12 +206,6 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 						`,"gateway_reported_bundle_id":"` + reportedBundle +
 						`","gateway_reported_bundle_version":2,"gateway_last_reload_error":"` + reloadError + `"}`), nil
 				}
-				var replies []map[string]any
-				if tc.verifyFails {
-					replies = append(replies, failedVerify)
-				}
-				stub := &ensureStub{t: t, replies: replies}
-				stub.install(t)
 				result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 				applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
 					&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
