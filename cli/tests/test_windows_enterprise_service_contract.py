@@ -5780,7 +5780,7 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
         "    $machineStateRemaining = [string[]]@()\n"
         "    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {\n"
         "        $machineStateRemaining = [string[]]@(\n"
-        "            @(Remove-DefenseClawRuntimeSelectorState -Directories @("
+        "            @(Remove-DefenseClawRuntimeSelectorState -HookPath ([string]$Layout.HookPath) -Directories @("
     ) in module
     assert "@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)" in module
     # GAP-2057: stale installer staging and bootstrap folders go too.
