@@ -33,6 +33,20 @@ type unprovenFactsEntry struct {
 	at     time.Time
 }
 
+// unprovenAccounts counts the accounts whose last lookup failed for want of
+// a proof less than identityDirectoryTTL ago (status and explain).
+func unprovenAccounts(now time.Time) int {
+	unprovenFacts.Lock()
+	defer unprovenFacts.Unlock()
+	n := 0
+	for _, entry := range unprovenFacts.entries {
+		if now.Sub(entry.at) < identityDirectoryTTL {
+			n++
+		}
+	}
+	return n
+}
+
 // unprovenFactsFor returns the candidate facts of key's last lookup and why
 // it failed, when it failed for want of a proof less than
 // identityDirectoryTTL ago.

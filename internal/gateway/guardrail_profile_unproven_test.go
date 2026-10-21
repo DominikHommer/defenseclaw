@@ -239,3 +239,22 @@ func TestUnprovenLookupRefusesTheLLMProxy(t *testing.T) {
 		}
 	}
 }
+
+// Status and explain say how many accounts are refused for a missing proof.
+func TestDirectoryHealthSaysUnprovenAccountsAreRefused(t *testing.T) {
+	now := time.Now()
+	setUnprovenFacts(t, map[string]unprovenFactsEntry{
+		"1001": localCandidate(now, "opsadmin", "strict-devs"),
+		"1004": localCandidate(now.Add(-identityDirectoryTTL-time.Second), "olddev"),
+	})
+	view, message := directoryHealthView(identityCacheHealth{Failing: 2, Since: now, LastError: unprovenTestReason}, now)
+	if view["unproven"] != 1 || !strings.Contains(message, "for 1 account(s) only a proof is missing") ||
+		!strings.Contains(message, "requests are refused") {
+		t.Fatalf("health = %v, %q; want one unproven account whose requests are refused", view, message)
+	}
+	setUnprovenFacts(t, nil)
+	if view, message := directoryHealthView(identityCacheHealth{Failing: 1, Since: now, LastError: "timeout"}, now); view["unproven"] != 0 ||
+		strings.Contains(message, "refused") {
+		t.Fatalf("health without unproven accounts = %v, %q", view, message)
+	}
+}

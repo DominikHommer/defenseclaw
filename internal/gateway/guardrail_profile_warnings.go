@@ -1047,7 +1047,13 @@ func directoryHealthView(h identityCacheHealth, now time.Time) (view map[string]
 		message += fmt.Sprintf(", and %d account(s) are served facts up to %s old, which are dropped at %s",
 			h.Stale, h.OldestAge.Round(time.Minute), identityDirectoryMaxAge)
 	}
+	unproven := unprovenAccounts(now)
+	if unproven > 0 {
+		message += fmt.Sprintf("; for %d account(s) only a proof is missing (a directory service did not show that it holds nothing more "+
+			"of the account), and their requests are refused while that decides their profile", unproven)
+	}
 	view = map[string]any{
+		"unproven":           unproven,
 		"failing":            h.Failing,
 		"since":              h.Since.UTC().Format(time.RFC3339),
 		"last_error":         h.LastError,
