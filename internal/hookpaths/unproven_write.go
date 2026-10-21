@@ -209,7 +209,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 				if len(call.Args) >= 2 {
 					if script, static := StaticWord(call.Args[1], home); static {
 						if content, ok := readIndirectSource(script, cwd); ok {
-							if class, dynamic := unprovenInterpreterCode(content, language, cwd, home); class != "" {
+							if class, dynamic := unprovenInterpreterCode(content, language, cwd, home, !pythonCallSetsImportPath(call)); class != "" {
 								set(class, dynamic)
 							}
 							if protectedReachFromText(content, cwd, home) &&
@@ -223,7 +223,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 				return true
 			}
 			if fixed && unprovenWriter.MatchString(code) {
-				if class, dynamic := unprovenInterpreterCode(code, language, cwd, home); class != "" {
+				if class, dynamic := unprovenInterpreterCode(code, language, cwd, home, !pythonCallSetsImportPath(call)); class != "" {
 					set(class, dynamic)
 				}
 				for _, argument := range call.Args[codeIndex+1:] {
@@ -472,7 +472,7 @@ func functionBodyMayWrite(body *syntax.Stmt, cwd, home string) bool {
 				code, _, fixed := interpreterCodeOperand(call, program, home)
 				if !fixed || len(literalInterpreterWrites(code, program)) > 0 {
 					mayWrite = true
-				} else if class, _ := unprovenInterpreterCode(code, program, cwd, home); class != "" {
+				} else if class, _ := unprovenInterpreterCode(code, program, cwd, home, !pythonCallSetsImportPath(call)); class != "" {
 					mayWrite = true
 				}
 			} else if !static || !slicesContainsString(dataPrograms, program) &&
@@ -504,12 +504,45 @@ func interpreterCodeOperand(call *syntax.CallExpr, program, home string) (string
 	return "", 0, false
 }
 
-func unprovenInterpreterCode(code, language, cwd, home string) (string, bool) {
+// PythonInertTextMasked is set by internal/guardrail, which imports this
+// package: it returns Python source with the string text that provably runs
+// nothing blanked at the same offsets (guardrail.MaskPythonStrings when
+// guardrail.PythonStringsMayRun says the strings cannot run from cwd), or the
+// source unchanged. Unset, every byte counts (fail closed). T5 integration of
+// g-hooks-wp's class rule with g-hooks-parse's inert Python text: a write
+// call spelled only inside an inert string is not interpreter code.
+var PythonInertTextMasked func(code, cwd string) string
+
+// pythonCallSetsImportPath reports whether the shell call assigns PYTHONPATH
+// or PYTHONHOME (or anything the check cannot name): a module from another
+// directory can then run string text, so none of it is inert.
+func pythonCallSetsImportPath(call *syntax.CallExpr) bool {
+	for _, assignment := range call.Assigns {
+		if assignment.Name == nil {
+			return true
+		}
+		switch assignment.Name.Value {
+		case "PYTHONPATH", "PYTHONHOME":
+			return true
+		}
+	}
+	return false
+}
+
+func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (string, bool) {
 	if len(code) > 16<<10 {
 		return "interpreter-path", true
 	}
+	// scan finds the write calls; code still supplies their arguments, at
+	// the same offsets.
+	scan := code
+	if maskInert && PythonInertTextMasked != nil && (language == "python" || strings.HasPrefix(language, "python3")) {
+		if masked := PythonInertTextMasked(code, cwd); len(masked) == len(code) {
+			scan = masked
+		}
+	}
 	if language == "python" || strings.HasPrefix(language, "python3") {
-		for _, location := range literalCopyCall.FindAllStringIndex(code, -1) {
+		for _, location := range literalCopyCall.FindAllStringIndex(scan, -1) {
 			api := strings.TrimSuffix(code[location[0]:location[1]], "(")
 			if api != "shutil.copy" && api != "shutil.copy2" {
 				continue
@@ -558,7 +591,7 @@ func unprovenInterpreterCode(code, language, cwd, home string) (string, bool) {
 			}
 		}
 	}
-	for _, location := range unprovenWriter.FindAllStringIndex(code, -1) {
+	for _, location := range unprovenWriter.FindAllStringIndex(scan, -1) {
 		call, ok := literalBoundedCall(code, location[1]-1)
 		if !ok {
 			return "interpreter-path", true
