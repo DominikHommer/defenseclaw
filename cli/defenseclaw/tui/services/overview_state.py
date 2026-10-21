@@ -650,11 +650,14 @@ class OverviewPanelModel:
             self.guardrail_profile = result
             # The unscoped gateway response also names connector assignments.
             # Keep only connector-wide entries: an agent assignment must not
-            # change the posture shown for every call on that connector.
+            # change the posture shown for every call on that connector. A
+            # failed account lookup holds for those entries too.
+            lookup_error = (result or {}).get("lookup_error")
             self.connector_guardrail_profiles = {
                 str(item["connector"]).strip().lower(): {
                     "profile": item["profile"],
                     "effective": {"mode": item.get("mode", "")},
+                    **({"lookup_error": lookup_error} if lookup_error else {}),
                 }
                 for item in (result or {}).get("overrides", [])
                 if isinstance(item, dict)
@@ -780,7 +783,9 @@ class OverviewPanelModel:
                 return OverviewCommandIntent(label=label, args=args)
         return None
 
-    def build_notices(self, *, now: datetime | None = None) -> tuple[OverviewNotice, ...]:
+    def build_notices(self, *, now: datetime | None = None, connector: str = "") -> tuple[OverviewNotice, ...]:
+        """Overview notices; ``connector`` is the connector filter in effect ("" = All)."""
+
         now = now or datetime.now(timezone.utc)
         notices: list[OverviewNotice] = []
         gateway_availability = self.gateway_availability()
@@ -853,7 +858,7 @@ class OverviewPanelModel:
                 )
             else:
                 notices.append(OverviewNotice("warn", "LLM guardrail not configured - press [g] to set up"))
-        if lookup_error := self.profile_lookup_error():
+        if lookup_error := self.profile_lookup_error(connector):
             if len(lookup_error) > 80:
                 lookup_error = lookup_error[:79].rstrip() + "…"
             notices.append(

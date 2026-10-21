@@ -666,8 +666,11 @@ class PolicyPanelMixin:
         if not chosen or chosen == (current if current == "off" else current.upper()):
             self._set_status("Approval unchanged.")  # type: ignore[attr-defined]
             return
+        from defenseclaw.enforce import asset_lists
+
+        secure_client = asset_lists.is_secure_client(getattr(self, "config", None))
         confirmed = await self.push_screen_wait(  # type: ignore[attr-defined]
-            PolicyConsequenceScreen(hilt_change_modal(model, row, chosen))
+            PolicyConsequenceScreen(hilt_change_modal(model, row, chosen, secure_client=secure_client))
         )
         if confirmed is None:
             self._set_status("Approval unchanged.")  # type: ignore[attr-defined]
@@ -1006,7 +1009,9 @@ def level_change_modal(model: PoliciesPanelModel, row: Any, kind: str, choice: s
     return _modal(title, f"{what} level: {old} → {new}", details, consequence, _confirm("level", "s", label, weaker))
 
 
-def hilt_change_modal(model: PoliciesPanelModel, row: Any, level: str) -> ConsequenceModalModel:
+def hilt_change_modal(
+    model: PoliciesPanelModel, row: Any, level: str, *, secure_client: bool = False
+) -> ConsequenceModalModel:
     """Human approval for one scope; red when it asks for fewer severities."""
     old = str(getattr(row, "hilt", "") or "off")
     weaker = hilt_weakens(old, level)
@@ -1024,9 +1029,13 @@ def hilt_change_modal(model: PoliciesPanelModel, row: Any, level: str) -> Conseq
         others = [str(getattr(r, "scope", "")) for r in model.postures if model.connector_of(r)]
         if others:
             details.append("Sets approval on every active connector: " + ", ".join(others) + ".")
-    # The gateway applies approval from the new config generation, with no
-    # restart (what `guardrail hilt` reports when it finishes).
-    details.append(_run_line(intent, "; a running gateway applies it now."))
+    # What `guardrail hilt` does: a Secure Client gateway reads approval at
+    # start, so the command restarts it; elsewhere the running gateway
+    # applies the new config generation with no restart.
+    if secure_client:
+        details.append(_run_line(intent, "; on Secure Client the gateway restarts to apply it."))
+    else:
+        details.append(_run_line(intent, "; a running gateway applies it now."))
     consequence = ""
     if weaker:
         lost = actions_weaken(severity_actions(block, alert, old), severity_actions(block, alert, level))

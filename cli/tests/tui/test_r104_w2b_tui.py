@@ -12,8 +12,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
@@ -27,6 +29,7 @@ from defenseclaw.tui.panels.setup import SetupWizard
 from defenseclaw.tui.panels.setup_catalog import PickerRow, TaskStatus
 from defenseclaw.tui.policy_panel import hilt_change_modal
 from defenseclaw.tui.screens.setup_picker import SetupPickerScreen
+from defenseclaw.tui.services.config_watch import probe_config_generation
 from defenseclaw.tui.services.overview_state import OverviewConfig, OverviewPanelModel
 from defenseclaw.tui.services.policy_state import compact_matrix_lines
 from defenseclaw.tui.services.sandbox_state import NO_ASKS_TEXT
@@ -118,6 +121,13 @@ def test_approval_preview_says_the_running_gateway_applies_it_now() -> None:
     assert "applies it now" in details and "restarts" not in details, details
 
 
+def test_approval_preview_on_secure_client_says_the_gateway_restarts() -> None:
+    # Review of GAP-0030: on Secure Client `guardrail hilt` restarts the gateway.
+    model = protection_model()
+    details = " ".join(hilt_change_modal(model, model.scope_row(""), "HIGH+", secure_client=True).details)
+    assert "restarts to apply it" in details and "applies it now" not in details, details
+
+
 def test_alert_target_drops_the_connector_its_column_shows() -> None:
     # GAP-0112: "claudecode:PreToolUse" next to a Connector cell was cut to "claudecode:PreTo".
     assert _target_without_connector("claudecode:PreToolUse", "claudecode") == "PreToolUse"
@@ -163,9 +173,7 @@ async def test_inventory_detail_is_readable_at_80x24(tmp_path) -> None:
     assert "SKILL: alpha" in text and "Eligible: true" in text and "Enabled: true" in text, text
 
 
-async def test_config_save_shows_a_key_another_writer_changed(monkeypatch, tmp_path) -> None:
-    # GAP-1049: the save merged the other writer's guardrail.mode on disk, but
-    # the TUI kept its stale copy and marked that generation seen.
+def _save_app(monkeypatch, tmp_path) -> tuple[DefenseClawTUI, Path]:
     from defenseclaw.tui.services import config_audit
 
     payload = {
@@ -186,7 +194,13 @@ async def test_config_save_shows_a_key_another_writer_changed(monkeypatch, tmp_p
     monkeypatch.setattr(app, "_write_activity", lambda message: app.activity_lines.append(message))
     monkeypatch.setattr(app, "_schedule_active_panel_refresh", lambda _reason="": 0)
     monkeypatch.setattr(config_audit, "record_config_save", lambda _cfg, _entries: True)
+    return app, path
 
+
+async def test_config_save_shows_a_key_another_writer_changed(monkeypatch, tmp_path) -> None:
+    # GAP-1049: the save merged the other writer's guardrail.mode on disk, but
+    # the TUI kept its stale copy and marked that generation seen.
+    app, path = _save_app(monkeypatch, tmp_path)
     other = config_module.load()
     other.guardrail.mode = "action"
     other.save()
@@ -200,12 +214,94 @@ async def test_config_save_shows_a_key_another_writer_changed(monkeypatch, tmp_p
         if field.key == "asset_policy.mode"
     )
     assert model.set_current_field_value("action")
-    action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
+    workers: list[object] = []
+    monkeypatch.setattr(app, "run_worker", lambda work, **_kw: workers.append(work))
+    with patch.object(DefenseClawTUI, "is_running", new_callable=PropertyMock, return_value=True):
+        action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
     assert "failed" not in action.hint, action.hint
+    assert app.config.asset_policy.mode == "action"
+    # The read-back runs as a worker, off the event loop.
+    read_back = [w for w in workers if getattr(getattr(w, "cr_code", None), "co_name", "") == "_read_back_saved_config"]
+    assert len(read_back) == 1, workers
+    for work in workers:
+        if work not in read_back and hasattr(work, "close"):
+            work.close()  # other refreshes the save scheduled
+    await read_back[0]
 
     assert config_module.load().guardrail.mode == "action"
     assert app.config.guardrail.mode == "action"
     assert app.config.asset_policy.mode == "action"
+    assert app._config_watcher.applied == probe_config_generation(path)
+
+
+async def test_config_read_back_does_not_wait_forever_for_a_stalled_writer(monkeypatch, tmp_path) -> None:
+    # Review of GAP-1049: the read-back waited on config.yaml.lock with no
+    # bound on Textual's event loop, so a stalled writer froze the TUI.
+    from defenseclaw import config_writer
+    from defenseclaw.tui import app as app_module
+
+    app, path = _save_app(monkeypatch, tmp_path)
+    monkeypatch.setattr(app_module, "_SAVE_READ_BACK_LOCK_TIMEOUT_S", 0.2)
+    seen = app._config_watcher.applied
+    other = config_module.load()
+    other.guardrail.mode = "action"
+    other.save()
+    held, release = threading.Event(), threading.Event()
+
+    def stalled_writer() -> None:
+        with config_writer.hold_lock(str(path), timeout_s=None):
+            held.set()
+            release.wait(10)
+
+    writer = threading.Thread(target=stalled_writer)
+    writer.start()
+    try:
+        assert held.wait(5)
+        app._config_read_back_running = True
+        await asyncio.wait_for(app._read_back_saved_config(), timeout=5)
+    finally:
+        release.set()
+        writer.join(10)
+    assert not app._config_read_back_running
+    assert any("read-back after save deferred" in line for line in app.activity_lines), app.activity_lines
+    # The generation stays unseen, so the config poll loads it.
+    assert app._config_watcher.applied == seen and app.config.guardrail.mode == "observe"
+    for step in range(3):
+        await app._poll_config_once(now=1000.0 + 10 * step)
+    assert app.config.guardrail.mode == "action"
+
+
+def _two_connector_overview() -> OverviewPanelModel:
+    return OverviewPanelModel(
+        OverviewConfig(guardrail_mode="observe", connector_modes=(("codex", "observe"), ("claudecode", "observe"))),
+        version="test",
+    )
+
+
+def test_failed_identity_lookup_holds_for_a_connector_assignment() -> None:
+    # Review of GAP-1271: the copied connector entry dropped lookup_error,
+    # so codex read "profile strict" after a failed lookup.
+    model = _two_connector_overview()
+    model.set_guardrail_profile(
+        {
+            "profile": "lenient",
+            "lookup_error": "directory unavailable",
+            "effective": {"mode": "observe"},
+            "overrides": [{"connector": "codex", "profile": "strict", "mode": "action"}],
+        }
+    )
+    label = model.guardrail_mode_label("codex")
+    assert "profile strict" not in label and "user lookup failed" in label, label
+
+
+def test_failed_identity_lookup_for_the_filtered_connector_shows_a_notice() -> None:
+    # Review of GAP-1271: the notice checked only the unscoped reply.
+    model = _two_connector_overview()
+    model.set_guardrail_profile({"profile": "strict", "effective": {"mode": "action"}})
+    model.set_guardrail_profile({"profile": "lenient", "lookup_error": "directory unavailable"}, "codex")
+    assert not any("Couldn't look up" in n.message for n in model.build_notices())
+    messages = [n.message for n in model.build_notices(connector="codex")]
+    assert any("Couldn't look up" in m and "directory unavailable" in m for m in messages), messages
 
 
 def test_failed_identity_lookup_shows_a_notice_not_a_profile_label() -> None:

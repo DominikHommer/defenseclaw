@@ -347,6 +347,27 @@ def _load_config_generation(path: Path, expected: ConfigGeneration) -> object:
     return loaded
 
 
+# How long the read-back after an editor save waits for config.yaml.lock.
+_SAVE_READ_BACK_LOCK_TIMEOUT_S = 5.0
+
+
+def _read_back_config_generation(path: Path, timeout_s: float) -> tuple[ConfigGeneration, object]:
+    """Load config.yaml and its generation while writers are excluded.
+
+    Waits at most ``timeout_s`` for the writer lock (ConfigLockBusyError
+    after that), so a stalled writer cannot hold the caller forever.
+    """
+
+    from defenseclaw import config_writer
+
+    with config_writer.hold_lock(str(path), timeout_s=timeout_s):
+        generation = probe_config_generation(path)
+        if generation is None:
+            raise _ConfigGenerationChangedError("config.yaml could not be read")
+        loaded = config_module.load()
+    return generation, loaded
+
+
 # Wizard rows whose value changes must re-derive the conditional field groups
 # (e.g. picking ``bedrock`` reveals the Bedrock region/auth rows). Keyed by the
 # CLI flag for flagged rows, and by the visible label for flag-less rows such as
@@ -1321,6 +1342,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # from accidentally watching the operator's real home config.
         self._config_watcher = ConfigChangeWatcher(config_path) if config_path is not None else None
         self._config_poll_running = False
+        # True while the read-back after an editor save runs (GAP-1049).
+        self._config_read_back_running = False
         self._config_reload_count = 0
         self._config_error = ""
         # Set on each config-editor save: saved sections the CLI already applies.
@@ -9085,7 +9108,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         service_cards = self.overview_model.service_cards()
         self.body_text = self._overview_body_text(service_cards)
 
-        notices = self.overview_model.build_notices()
+        notices = self.overview_model.build_notices(connector=self._connector_filter())
         doctor = self.overview_model.doctor_box()
         ai_box = self.overview_model.ai_discovery_box()
         cfg = self.overview_model.cfg
@@ -10267,7 +10290,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return f"{count} critical/high {noun} review - press 2 for Alerts."
 
     def _overview_body_text(self, service_cards: tuple[Any, ...]) -> str:
-        notices = self.overview_model.build_notices()
+        notices = self.overview_model.build_notices(connector=self._connector_filter())
         doctor = self.overview_model.doctor_box()
         ai_box = self.overview_model.ai_discovery_box()
         cfg = self.overview_model.cfg
@@ -13259,13 +13282,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # A Secure Client gateway reads its policy at start, so every
                 # save keeps the restart of main (issue #1092).
                 restart_keys = None
-            saved_config, synced = self._saved_config_snapshot(staged_config)
             roster_changed, storage_changed = self._apply_config_snapshot(
-                saved_config,
+                staged_config,
                 external=False,
                 refresh_disk=False,
             )
-            if self._config_watcher is not None and not synced:
+            if self._config_watcher is not None and not self._schedule_saved_config_read_back(staged_config):
                 self._config_watcher.sync_to_disk()
             if roster_changed:
                 self._schedule_roster_catalog_refresh()
@@ -13632,6 +13654,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if (
             self._config_watcher is None
             or self._config_poll_running
+            # The save read-back applies that generation itself.
+            or self._config_read_back_running
             or getattr(self, "_app_shutting_down", False)
         ):
             return
@@ -13775,31 +13799,57 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if roster_changed or storage_changed:
             self._schedule_roster_catalog_refresh()
 
-    def _saved_config_snapshot(self, staged: object) -> tuple[object, bool]:
-        """The config as saved, and whether the watcher already saw its generation.
+    def _schedule_saved_config_read_back(self, staged: object) -> bool:
+        """Read config.yaml back after an editor save, off the event loop.
 
         A save merges only this editor's changes into config.yaml, so a key
-        another writer changed since the TUI loaded is kept on disk but was
-        still old in ``staged``; with that generation marked seen the TUI
-        showed the old value until restarted (GAP-1049). Read the file back
-        under the writer lock and mark exactly that generation seen. Falls
-        back to ``staged`` when it cannot be read back.
+        another writer changed since the TUI loaded is kept on disk but is
+        still old in ``staged``; marking that generation seen showed the old
+        value until restart (GAP-1049). The worker loads the file under the
+        writer lock and marks exactly that generation seen. Returns False
+        when nothing was scheduled (no running app, or not a real Config);
+        the caller then marks the current generation seen as before.
         """
 
-        if not isinstance(staged, config_module.Config):
-            return staged, False
-        data_dir = getattr(staged, "data_dir", None) or None
-        path = str(config_module.config_path_for_data_dir(data_dir))
+        if self._config_watcher is None or not isinstance(staged, config_module.Config) or not self.is_running:
+            return False
+        self._config_read_back_running = True
+        self.run_worker(self._read_back_saved_config(), exclusive=False, thread=False, group="config-read-back")
+        return True
+
+    async def _read_back_saved_config(self) -> None:
+        """Load the saved config.yaml and apply it (see _schedule_saved_config_read_back).
+
+        The lock wait is bounded: a writer that holds config.yaml.lock longer
+        leaves the generation unseen, and the next config poll loads it.
+        """
+
+        watcher = self._config_watcher
         try:
-            with config_module.locked_config_yaml(path):
-                saved = config_module.load(data_dir=data_dir)
-                synced = self._config_watcher is not None and self._config_watcher.sync_to_disk()
-        except Exception as exc:  # noqa: BLE001 - the save itself succeeded; show what was written.
-            self._write_activity(
-                f"[#FBBF24]config read-back after save failed:[/] {rich_escape(str(exc))}; showing the saved edits."
+            if watcher is None:
+                return
+            try:
+                generation, saved = await asyncio.to_thread(
+                    _read_back_config_generation, watcher.path, _SAVE_READ_BACK_LOCK_TIMEOUT_S
+                )
+            except Exception as exc:  # noqa: BLE001 - the save succeeded; the next poll loads the file.
+                self._write_activity(
+                    f"[#FBBF24]config read-back after save deferred:[/] {rich_escape(str(exc))}; "
+                    "the next config check loads the saved file."
+                )
+                return
+            # A draft started since the save is kept and rebased (external).
+            roster_changed, storage_changed = self._apply_config_snapshot(
+                saved, external=self.setup_model.has_changes(), refresh_disk=False
             )
-            return staged, False
-        return saved, synced
+            watcher.accept(generation)
+            self._schedule_active_panel_refresh("config-save-read-back")
+            if storage_changed:
+                self._schedule_signal_data_refresh()
+            if roster_changed or storage_changed:
+                self._schedule_roster_catalog_refresh()
+        finally:
+            self._config_read_back_running = False
 
     def _apply_config_snapshot(
         self,
