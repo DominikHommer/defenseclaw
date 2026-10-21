@@ -454,7 +454,6 @@ defenseclaw setup openclaw --mode action --human-approval --rule-pack default --
 <Files>
   <Folder name="~/.defenseclaw" defaultOpen>
     <File name="config.yaml" />
-    <File name="picked_connector" />
     <Folder name="hooks">
       <File name="claude-code-hook.sh" />
       <File name="inspect-*.sh" />
@@ -465,7 +464,7 @@ defenseclaw setup openclaw --mode action --human-approval --rule-pack default --
   </Folder>
 </Files>
 
-`setup guardrail` saves `config.yaml`. The gateway writes the connector files when it starts: for Claude Code, the hook scripts under `~/.defenseclaw/hooks/` and the hook entries in `~/.claude/settings.json`. A hash-checked backup is stored before edits; teardown restores the file or removes only the DefenseClaw-owned entries. The [connector pages](/docs/connectors) list the files each agent uses.
+`setup guardrail` saves `config.yaml`. The `picked_connector` hint in `~/.defenseclaw` is written by the connector aliases (`defenseclaw setup <connector>`) and by `install.sh --connector`, not by `setup guardrail`. The gateway writes the connector files when it starts: for Claude Code, the hook scripts under `~/.defenseclaw/hooks/` and the hook entries in `~/.claude/settings.json`. A hash-checked backup is stored before edits; teardown restores the file or removes only the DefenseClaw-owned entries. The [connector pages](/docs/connectors) list the files each agent uses.
 
 ## Verify
 

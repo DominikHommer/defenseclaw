@@ -143,7 +143,7 @@ The fleet management and verdict cache run as Go services alongside the main Def
 
 ## OTA policy updates
 
-Policy updates are distributed over MQTT with:
+Policy updates are distributed over MQTT. Production builds reject HMAC-signed updates unless they are built with `DCLAW_ALLOW_HMAC_OTA=ON` and the device is provisioned with a separate HMAC key (`DCLAW_OTA_HMAC_KEY`). Updates carry:
 - **HMAC-SHA256 signatures** — every update is cryptographically signed
 - **Anti-rollback** — monotonic version counter prevents downgrade attacks
 - **Local canary window** — each receiving device monitors its block rate for ten minutes and can restore its previous policy partition after a sustained spike
