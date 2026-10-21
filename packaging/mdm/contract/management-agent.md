@@ -770,7 +770,8 @@ off the device. The agent does not read `/health` itself (section 7); the
   Windows settles first, as in 4.4.
 - stdout: `bundle-status.schema.json`: `current`, `last_good`, `floor`,
   `last_receipt` (the root-only receipt, with `transitions` and
-  `error_message`), `last_refusal`, `bundle`, `gateway_digest`, `applied`.
+  `error_message`, and `rollback_of` for a rollback bundle, 4.9),
+  `last_refusal`, `bundle`, `gateway_digest`, `applied`.
   `current` and `last_good` carry the `delivery_id` of the apply that
   confirmed them, when it had one (2.6). `anchors_summary` (from 1.0.4,
   optional) describes the installed anchor file: `sha256` of its bytes,
@@ -1082,6 +1083,11 @@ enforcing.
   1.0.4 the `config.bundle.receipt` audit event and its OTel log record carry
   it too (`defenseclaw.policy.bundle.delivery_id`); older builds have it only
   in these files, the command results and `bundle status`.
+- `rollback_of` is optional and present only on the receipt of a rollback
+  bundle: the id of the earlier bundle whose content that bundle publishes
+  again, copied from its signed manifest (`enterprise bundle sign
+  --rollback-of`). As with every member, the agent ignores it when it does
+  not know it and treats its absence as normal (section 0).
 - Receipt ids are not ordered in time. Keep the set of `receipt_id`s already
   forwarded (prune ids whose file is gone) and order receipts by
   `finished_at` when the order matters; do not keep only the last id.

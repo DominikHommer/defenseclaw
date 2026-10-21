@@ -4580,6 +4580,12 @@ func TestCodex_Setup_RegistersNoNotifierAndRemovesAnOldOne(t *testing.T) {
 	if present, err := c.ownedHookContractPresent(opts); err != nil || present {
 		t.Fatalf("hook contract with an old DefenseClaw notifier = %v, %v; want broken so the guard re-runs Setup", present, err)
 	}
+	// The guardian's message names the cause: a notifier this profile does not
+	// register (train T2: main's absent reasons combined with w2b-g-sec's
+	// Secure Client-only notifier).
+	if reason := c.ownedHookContractAbsentReason(opts); !strings.Contains(reason, "does not register") {
+		t.Fatalf("absent reason with an old DefenseClaw notifier = %q, want the left-over notifier named", reason)
+	}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("second Setup: %v", err)
 	}
