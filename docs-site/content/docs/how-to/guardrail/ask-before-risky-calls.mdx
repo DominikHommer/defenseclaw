@@ -19,19 +19,21 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
 
 ## Steps
 
-1. Turn on approval at HIGH.
+1. Turn on approval at HIGH. The command shows the change and asks `Proceed?`; press Enter or type `y`.
 
    ```bash
    defenseclaw guardrail hilt on --min-severity HIGH
    ```
 
    ```text
-     Updating HILT: enabled=false -> true, min_severity=HIGH -> HIGH
+     Updating HILT: enabled=false → true, min_severity=HIGH → HIGH
 
-     OK Config saved (guardrail.hilt: enabled=true min_severity=HIGH)
+     Proceed? [Y/n]: y
+     ✓ Config saved (guardrail.hilt: enabled=true min_severity=HIGH)
+     ✓ The running gateway applies it now.
    ```
 
-   `--min-severity` takes `low`, `medium`, `high` or `critical`. Add `--connector claudecode` to change one agent only. The running gateway applies the change now; there is no confirmation prompt and no restart.
+   `--min-severity` takes `low`, `medium`, `high` or `critical`. Add `--connector claudecode` to change one agent only. Add `--yes` to skip the prompt in a script. The running gateway applies the change without a restart.
 
 2. Ask Claude Code to run a command that matches a HIGH rule and sends no data:
 
