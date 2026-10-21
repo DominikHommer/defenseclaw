@@ -180,11 +180,8 @@ package, verify it as above, and run the lane script with
 header of `scripts/test-enterprise-unix-install.sh`). Run it as root only on a
 machine you can throw away: it installs and removes system services.
 
-Run by hand from a 0.x package, the lane script applies a `config_version: 8`
-config instead. The upgrade then migrates it: the lane also checks
-`migration-v9.json` and that `config.yaml.v8.bak` equals the previous config,
-and the config check reads the migration record. The release gate never takes
-this path, because it upgrades only from a 1.x release.
+The previous release must be 1.x. No 0.x release ships a standalone
+enterprise package, so the lane scripts refuse a 0.x `--previous-version`.
 
 ## Dry run
 
