@@ -24,7 +24,14 @@ defenseclaw setup zeptoclaw --mode action --rule-pack default --restart
 
 The proxy is in the data path in both modes. Observe records and never blocks. Action enforces. Run `defenseclaw doctor` to check the result.
 
-{/* needs-live-capture: output of defenseclaw setup zeptoclaw */}
+## Check it
+
+```bash
+defenseclaw status
+```
+
+The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
+
 
 ## What it can block or ask
 

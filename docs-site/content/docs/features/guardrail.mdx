@@ -59,8 +59,6 @@ With the `default` pack in action mode:
 | MEDIUM | Alert | Alert |
 | LOW | Allow | Allow |
 
-The Block column applies in action mode. In observe mode a CRITICAL finding raises an alert and the call still runs.
-
 Human approval is off by default. Its default minimum severity is HIGH. Change the levels with `defenseclaw guardrail block-at` and `alert-at`, or per rule pack, connector or profile ([Thresholds](/docs/reference/policy/thresholds) shows which scope wins).
 
 ## Fail mode
@@ -96,4 +94,4 @@ Codex, Cursor, Hermes, OpenCode, Devin, Kiro and ZeptoClaw cannot ask. The [capa
   <Card title="Add or remove an agent" href="/docs/how-to/agents/add-or-remove-an-agent" description="Guard a second agent." />
 </Cards>
 
-Reference: [`setup guardrail` flags](/docs/reference/commands/guardrail-setup), [guardrail profiles](/docs/reference/policy/guardrail-profiles), [LLM providers](/docs/reference/configuration/llm-providers), [fail modes](/docs/reference/configuration/fail-modes).
+All guides: [How-to > Guardrail](/docs/how-to/guardrail). Reference: [`setup guardrail` flags](/docs/reference/commands/guardrail-setup), [guardrail profiles](/docs/reference/policy/guardrail-profiles), [LLM providers](/docs/reference/configuration/llm-providers), [fail modes](/docs/reference/configuration/fail-modes).

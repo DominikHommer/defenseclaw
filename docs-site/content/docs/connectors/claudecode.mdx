@@ -24,7 +24,14 @@ defenseclaw setup claude-code --mode action  # block on policy hits
 
 On Windows, run the same commands in PowerShell. Quit and reopen Claude Code afterwards so it loads the hooks.
 
-{/* needs-live-capture: output of defenseclaw setup claude-code */}
+## Check it
+
+```bash
+defenseclaw status
+```
+
+The agent appears under **Agents** with its mode. `defenseclaw doctor` passes the **Claude Code hooks** row.
+
 
 ## What it can block or ask
 

@@ -11,11 +11,9 @@ keywords:
 
 <Callout title="Template">Checked by simulating the MDM execution context; not run in a live Iru tenant. Pilot it on a small group first.</Callout>
 
-Kandji is now Iru, and Kandji Device Management is now Iru Endpoint Management
-([Iru and Kandji](https://www.iru.com/kandji-mdm/)). This recipe deploys the
-standalone profile to Macs with Iru Library Items and the MDM kit
-(`packaging/mdm/macos`). The contract every recipe follows is in
-[Install with an MDM](/docs/enterprise/mdm).
+Kandji is now Iru ([Iru and Kandji](https://www.iru.com/kandji-mdm/)). This recipe
+deploys the standalone profile to Macs with Iru Library Items and the MDM kit
+(`packaging/mdm/macos`). The contract is in [Install with an MDM](/docs/enterprise/mdm).
 
 | Route | Library Items | Package source |
 | --- | --- | --- |
@@ -24,24 +22,14 @@ standalone profile to Macs with Iru Library Items and the MDM kit
 
 ## Prerequisites
 
-- Macs with Apple silicon on macOS 13 or later. The package refuses other hardware
-  and older releases.
-- No Cisco Secure Client DefenseClaw deployment on the Mac.
-- DefenseClaw ships no privacy (PPPC) profile; see
-  [macOS requirements](/docs/enterprise/install/macos#requirements) for when you need one.
-- For the script-only route, an HTTPS server of your own that serves the package
-  file directly. The wrapper does not follow HTTP redirects, and GitHub release
-  links redirect, so they do not work as the source.
-- Your administrator config; see
-  [Where the config lives](/docs/enterprise/configure/configuration#where-the-config-lives)
-  and [Choose the agents to protect](/docs/enterprise/configure/configuration#choose-the-agents-to-protect).
+- Macs with Apple silicon on macOS 13 or later, and no Cisco Secure Client DefenseClaw
+  deployment.
+- For the script-only route, an HTTPS server that serves the package file directly.
+  The wrapper does not follow HTTP redirects, and GitHub release links redirect.
+- Your administrator config ([choose the agents](/docs/enterprise/configure/configuration#choose-the-agents-to-protect)).
   The default config protects no agent.
 
 ## Get and verify the release
-
-On an administrator workstation, download the package and the signed checksum list,
-then check the signature and the package's SHA-256. For the script-only route, that
-SHA-256 is the pin you paste into the script.
 
 ```bash
 VERSION=X.Y.Z   # the release you deploy
@@ -55,60 +43,33 @@ grep "  $PKG\$" checksums.txt | shasum -a 256 -c -
 grep "  $PKG\$" checksums.txt   # the first field is the pin
 ```
 
-The kit scripts are in `packaging/mdm/macos` and in the
-`defenseclaw-enterprise-<version>-darwin-arm64.tar.gz` release archive. You paste
-them into Iru, so each script's settings block holds its values.
-
-## How Iru runs Library Items
-
-| Behavior | Iru Endpoint |
-| --- | --- |
-| Identity | The Iru Agent runs custom scripts as root. Without a shebang it uses `/bin/sh`. |
-| Audit result | Audit exit `0` is **Pass**. Any other code is **Error** and raises an alert. |
-| Remediation | Runs when the audit fails. Exit `0` is **Remediated**; any other code is **Error**. |
-| Frequency | Install once per device, every check-in (about 15 minutes), daily, or on demand from Self Service. |
-| Order | The Iru Agent processes Library Items by **Name** during check-in. |
-| Custom Apps | A PKG up to 5 GB. **Audit and enforce** runs the audit script at each check-in and reinstalls when it fails. A failed pre-install script skips the install and retries at the next check-in. |
-
-Source: [Custom Scripts Overview](https://docs.iru.com/en/endpoint/library/library-items-profiles/custom-scripts-overview)
-and [Custom Apps Overview](https://docs.iru.com/en/endpoint/library/library-items-profiles/custom-apps-overview).
-
-`defenseclaw-enterprise.sh`, `uninstall.sh` and `detect.sh` accept only their own
-flags and exit `2` on any other argument (`mdm_invalid_arguments`; `detect.sh`
-prints nothing). Put every value in the script's settings block.
+The kit scripts are in `packaging/mdm/macos` and in the release archive. You paste
+them into Iru, so each script's settings block holds its values. The Iru Agent runs
+custom scripts as root. An audit exit `0` is **Pass**; any other code is **Error** and
+raises an alert. The kit scripts accept only their own flags and exit `2` on any other
+argument, so put every value in the settings block.
 
 ## Iru-hosted package route
 
 ### The package
 
-Add a **Mac Custom App** Library Item named `DefenseClaw 1 package` and assign it to
-your Blueprints:
+Add a **Mac Custom App** Library Item named `DefenseClaw 1 package`, assigned to your
+Blueprints:
 
 | Setting | Value |
 | --- | --- |
 | Package Type | **Installer Package**, the package you verified |
 | Execution Frequency | **Audit and enforce** |
-| Audit script | `detect.sh`, with the settings below |
+| Audit script | `detect.sh`, with `DC_MIN_VERSION="X.Y.Z"` and `DC_FORMAT="exit"` |
 | Pre-install script | The stage script below |
 
-Paste `detect.sh` as the audit script and set its settings block:
+The audit exits `0` when the Mac has the deployment at that version or newer, so Iru
+reinstalls the package only when it is missing or older. While a lifecycle run holds
+its lock it exits `75` (`busy`), so that audit fails once; the next check-in passes.
 
-```bash
-DC_MIN_VERSION="X.Y.Z"
-DC_FORMAT="exit"
-```
-
-It exits `0` when the Mac has the deployment at that version or newer, so Iru
-reinstalls the package only when the deployment is missing or older. While a lifecycle
-run holds its lock it exits `75` (`busy`), so that audit fails once; the next check-in
-passes.
-
-The pre-install script puts your config at the layout path
-`/opt/cisco/defenseclaw/etc/config.yaml` before the package installs, so the
-package's own `ensure --from-package` applies it on the first install. Once the
-package is installed (its pkg receipt exists) it never overwrites the config; until
-then it replaces it, so a redeploy after a first install that failed on the config
-installs the fixed one.
+The pre-install script puts your config at `/opt/cisco/defenseclaw/etc/config.yaml`
+before the package installs, so the package's own `ensure --from-package` applies it.
+Once the package is installed (its pkg receipt exists) it never overwrites the config.
 
 ```bash
 #!/bin/sh
@@ -144,63 +105,39 @@ chmod 0640 "$tmp"
 mv -f "$tmp" "$layout/config.yaml"
 ```
 
-Replace the YAML between the markers with your config. Never put the AI Defense key
-in it: the standalone profile rejects an inline API key, and Library Items are not
-secret storage.
-
-The package's postinstall step runs `enterprise macos ensure --from-package`. If the
-lifecycle fails, it has already rolled back and the postinstall step fails the
-install, so the Custom App shows **Error**. The result is kept in
-`/opt/cisco/defenseclaw/lifecycle/last-package-result.json`.
+Replace the YAML with your config. Never put the AI Defense key in it. If the
+lifecycle fails, the postinstall step fails the install and the Custom App shows
+**Error**; the result is in `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`.
 
 ### The ensure script
 
-Add a **Mac Custom Script** Library Item named `DefenseClaw 2 ensure`, so it sorts
-after the package, assign it to the same Blueprints, and set **Execution Frequency**
-to **Run daily**. For the **Audit Script**, paste `defenseclaw-enterprise.sh`, leave
-the source settings empty so the wrapper re-applies the installed deployment, and
-put your config between the markers of its inline config (the same YAML as the
-pre-install script):
+Add a **Mac Custom Script** named `DefenseClaw 2 ensure` (it sorts after the package),
+assigned to the same Blueprints, **Run daily**. Paste `defenseclaw-enterprise.sh` as
+the **Audit Script**, leave the source settings empty so the wrapper re-applies the
+installed deployment, and put the same YAML between the markers of its inline config:
 
 ```bash
 DC_ACTION=ensure
 
 dc_inline_config() {
     cat <<'DEFENSECLAW_CONFIG'
-config_version: 9
-deployment_mode: managed_enterprise
-data_dir: /opt/cisco/defenseclaw/runtime
-policy_dir: /opt/cisco/defenseclaw/etc/policies
-enterprise:
-  profile: standalone
-gateway:
-  api_bind: 127.0.0.1
-  api_port: 18970
-guardrail:
-  enabled: true
-  mode: observe
-  connectors:
-    claudecode: {}
-    codex: {}
+# the same config YAML as the pre-install script
 DEFENSECLAW_CONFIG
 }
 ```
 
-Leave the **Remediation Script** empty. Each run, the wrapper copies the inline
-config into a root-only staging folder and runs `enterprise macos ensure` with it.
-`ensure` applies a changed config, repairs drift, or does nothing, and the wrapper
-exits with its code, so the audit passes when the Mac matches and a failure raises
-an alert. A cancelled run stops its lifecycle child and reports `mdm_cancelled`;
-inspect the deployment before retrying. The script is its own audit because
-`detect.sh` does not compare configs: an audit built on it would keep passing after
-you change the config, and the change would never be applied.
+Leave the **Remediation Script** empty. Each run, the wrapper stages the inline config
+in a root-only folder and runs `enterprise macos ensure` with it: it applies a changed
+config, repairs drift, or does nothing, and exits with the lifecycle's code. A
+cancelled run stops its lifecycle child and reports `mdm_cancelled`; inspect the
+deployment before retrying. The script is its own audit because `detect.sh` does not
+compare configs.
 
 ## Script-only route
 
-Use one **Mac Custom Script** that also installs the package. Name it
-`DefenseClaw ensure`, set **Execution Frequency** to **Run daily**, paste
-`defenseclaw-enterprise.sh` as the **Audit Script**, and set the source in its
-settings block together with the inline config shown above:
+Use one **Mac Custom Script** named `DefenseClaw ensure`, **Run daily**, with
+`defenseclaw-enterprise.sh` as the **Audit Script** and the source in its settings
+block, together with the inline config above:
 
 ```bash
 DC_ACTION=ensure
@@ -210,100 +147,72 @@ DC_TRUST_MODE=hash_pinned
 DC_PRODUCT_VERSION="X.Y.Z"
 ```
 
-Each run, the wrapper downloads the package into a root-only staging folder and
-checks it against the pin (`mdm_hash_mismatch` otherwise), installs it when its
-version differs from the installed one, runs `enterprise macos ensure` with your
-config, prints one lifecycle result document and exits with the lifecycle's code.
-The download happens on every run, so use a direct HTTPS file URL. A GitHub release
-link may answer HTTP 302; the wrapper refuses redirects and reports that status
+Each run downloads the package, checks it against the pin (`mdm_hash_mismatch`
+otherwise), installs it when its version differs, and runs `ensure`. Use a
+direct HTTPS file URL: a GitHub release link may answer HTTP 302, which the wrapper reports
 instead of treating the empty response as a hash mismatch.
 
 ## Optional health report
 
-To report health between runs, add a Mac Custom Script named `DefenseClaw health`,
-**Run daily**, with `detect.sh` as its **Audit Script** and no remediation:
-
-```bash
-DC_MIN_VERSION="X.Y.Z"
-DC_REQUIRE_HEALTHY=1
-DC_FORMAT="exit"
-```
-
-It exits `0` and prints `DefenseClaw Enterprise <version>` when the Mac is installed,
-current and passes `verify`. Otherwise it exits `1` and explains on standard error,
-which Iru reports as **Error**.
-
-| Signal | Meaning |
-| --- | --- |
-| The Custom App status | Whether the package is installed at the version you set |
-| The ensure script status | **Pass** when the Mac matches your settings; **Error** with an alert when the lifecycle or the wrapper fails. The result document is in the audit information. |
-| The health script status | **Pass** when installed, current and healthy |
-
-See [Detection](/docs/enterprise/mdm#detection).
+Add a Mac Custom Script `DefenseClaw health`, **Run daily**, with `detect.sh` as its
+**Audit Script** and `DC_MIN_VERSION="X.Y.Z"`, `DC_REQUIRE_HEALTHY=1`,
+`DC_FORMAT="exit"`. It exits `0` and prints `DefenseClaw Enterprise <version>` when
+the Mac is installed, current and passes `verify`; otherwise it exits `1` and explains
+on standard error (Iru: **Error**). See [Detection](/docs/enterprise/mdm#detection).
 
 ## Deliver the AI Defense key
 
-The key is optional. Without it the local policy engine decides alone. Iru's script
-variables carry device and user details, not secrets, so do not paste the key into
-a Library Item. Store it after the first install, on standard input, from your
-secrets tooling or an administrator session:
+The key is optional. Iru's script variables carry device and user details, not
+secrets, so do not paste the key into a Library Item. Store it after the first
+install, on standard input:
 
 ```bash
 read -rs KEY && printf '%s' "$KEY" | sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-stdin --json; unset KEY
 ```
 
 Then set `enterprise.inspection.ai_defense.enabled: true` and
-`credential: ai-defense-api-key` in the config. See
-[Deliver the AI Defense key](/docs/enterprise/mdm#deliver-the-ai-defense-key) and
-[AI Defense key](/docs/enterprise/configure/ai-defense-key).
+`credential: ai-defense-api-key` in the config
+([AI Defense key](/docs/enterprise/configure/ai-defense-key)).
 
 ## Upgrade, roll back and change the config
 
 | Task | Iru-hosted package route | Script-only route |
 | --- | --- | --- |
 | Upgrade | Upload the new package to the Custom App and raise `DC_MIN_VERSION` in its audit script | Change the URL, the pin and `DC_PRODUCT_VERSION` |
-| Roll back | Follow [Roll back](/docs/enterprise/operate/lifecycle#roll-back) | Follow [Roll back](/docs/enterprise/operate/lifecycle#roll-back) |
+| Roll back | [Roll back](/docs/enterprise/operate/lifecycle#roll-back) | [Roll back](/docs/enterprise/operate/lifecycle#roll-back) |
 | Change the config | Edit the inline config in the ensure script | Edit the inline config in the ensure script |
-
-The lifecycle validates a new config before it replaces the running one, and rolls
-back if applying it fails.
 
 ## Deliver a custom macOS rule pack
 
 Before the first pkg install, add a root **stage-pack** script that copies the pack
 into `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` with `root:wheel`
-ownership, `0755` directories and `0644` files. Use the
-[stage-pack script and pin example](/docs/enterprise/mdm#stage-a-custom-macos-rule-pack),
-and run it before the config and pkg steps. In `config.yaml`, set
-`guardrail.rule_pack` to the pack name and `guardrail.custom_packs.<name>` to that
-absolute path and its `sha256:<digest>` pin. Stage the pack again before reinstalling
-after a purge.
+ownership. Use the [stage-pack script and pin example](/docs/enterprise/mdm/reference#stage-a-custom-macos-rule-pack),
+run it before the config and pkg steps, and set `guardrail.custom_packs.<name>` to
+that absolute path and its `sha256:<digest>` pin. Stage the pack again before
+reinstalling after a purge.
 
 ## Uninstall
 
 Remove the DefenseClaw Library Items from the Blueprints first. Then run
 `uninstall.sh` once as a Mac Custom Script (**Install once per device**, or on demand
-from Self Service). It runs `enterprise macos uninstall`; set `DC_PURGE=1` in its
-settings block for a purge. What it removes is in
-[Uninstall](/docs/enterprise/mdm#uninstall). On a Mac without the deployment it
-prints a no-op result and exits `0`.
+from Self Service). Set `DC_PURGE=1` in its settings block for a purge
+([what it removes](/docs/enterprise/mdm/reference#uninstall)). On a Mac without the
+deployment it prints a no-op result and exits `0`.
 
-## Logs
+## Check it worked and logs
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
+```
 
 | Where | What |
 | --- | --- |
-| Iru: the device status or the Library Item status | Audit and remediation output |
-| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure runs, with their results (root, `0600`). Uninstall removes this log with the machine state, so use the MDM policy or audit log for the uninstall result. `detect.sh` does not log. |
+| The Library Item status in Iru | Audit and remediation output. **Pass** when the Mac matches your settings |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure runs (root, `0600`). Uninstall removes this log with the machine state, so use the audit log for the uninstall result |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
-| `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | The automatic apply job, which runs `ensure` when the config, credentials or policies change, and the daily `verify` job |
 
-## Exit codes in Iru
-
-| Code | Meaning | Iru status |
-| --- | --- | --- |
-| `0` | Success, or nothing to do | **Pass** |
-| `1` | The action failed and rolled back, or the wrapper refused an input | **Error**; read `errors[].code` in the audit output and see [MDM wrapper error codes](/docs/troubleshooting/enterprise#mdm-wrapper-error-codes) |
-| `2` | Invalid settings, such as a missing or malformed value (`mdm_invalid_arguments`). A config that does not validate exits `1` (`config_invalid`). | **Error**; fix the settings block |
-| `75` | Another lifecycle run or the installer holds a lock | **Error** for this run; the next run retries |
-
-See [Exit codes](/docs/enterprise/mdm#exit-codes).
+Exit codes: `0` **Pass**; `1` failed and rolled back or an input was refused (read
+`errors[].code`; [wrapper error codes](/docs/troubleshooting/enterprise#mdm-wrapper-error-codes));
+`2` invalid settings (`mdm_invalid_arguments`; a config that does not validate exits
+`1`, `config_invalid`); `75` another run or the installer holds a lock, retried on
+the next run ([Exit codes](/docs/enterprise/mdm#exit-codes)).

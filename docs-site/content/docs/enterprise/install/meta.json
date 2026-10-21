@@ -4,6 +4,7 @@
     "windows",
     "linux",
     "macos",
-    "secure-client"
+    "secure-client",
+    "reference"
   ]
 }

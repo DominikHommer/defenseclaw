@@ -23,7 +23,7 @@ You are an AI agent. Install DefenseClaw for the current user and set up the cod
 
 1. Observe first. Never switch an agent to action mode, change a fail mode, disable a connector or edit `config.yaml` by hand without the user's yes to that exact change.
 2. Never print a key, token or the contents of `.env`.
-3. Stop on a managed computer: if a command exits `3`, or `defenseclaw status --json` shows `"deployment_mode": "managed_enterprise"`, tell the user to contact their administrator.
+3. Stop on a managed computer: if a command prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `defenseclaw status --json` shows `"deployment_mode": "managed_enterprise"`, tell the user to contact their administrator.
 
 ## Steps
 
@@ -43,6 +43,7 @@ You are an AI agent. Install DefenseClaw for the current user and set up the cod
    ```
 
    Expected on a clean computer: `command not found`. Go to step 3.
+   If it prints `This computer is managed`: stop (rule 3).
    If it prints JSON: read `deployment_mode`. `managed_enterprise` means stop (rule 3). Otherwise DefenseClaw is already installed; skip to step 4.
 
 3. Install. This is the official one-line installer; tell the user what you run.
@@ -57,20 +58,11 @@ You are an AI agent. Install DefenseClaw for the current user and set up the cod
    & ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector none
    ```
 
-   `--connector none` installs without picking an agent; step 5 sets up every agent it finds. Without it, a shell with no terminal gets the installer's default agent (`codex`) without being asked.
-   Expected: the installer ends with `Next: defenseclaw init`. Open a new shell if it says `~/.local/bin` is not on `PATH`.
-   If it fails, read the exit code: `1` not installed (an upgrade puts the previous install back), `2` unknown option, nothing changed. Report the last lines of the output; do not retry in a loop.
+   `--connector none` installs without picking an agent; step 4 sets up every agent it finds.
+   Expected: the installer ends with `Next: defenseclaw init`. Open a new shell if it says `~/.local/bin` is not on `PATH`, then run `defenseclaw --version` (expect `defenseclaw, version X.Y.Z`).
+   If it fails, exit `1` means not installed (an upgrade puts the previous install back) and `2` an unknown option. Report the last lines of the output; do not retry in a loop.
 
-4. Check the version.
-
-   ```bash
-   defenseclaw --version
-   ```
-
-   Expected: `defenseclaw, version X.Y.Z`.
-   If the command is not found, run the install command again and open a new shell.
-
-5. Set up the agents in observe mode.
+4. Set up the agents in observe mode.
 
    ```bash
    defenseclaw init --non-interactive --yes --observe-all
@@ -88,9 +80,9 @@ You are an AI agent. Install DefenseClaw for the current user and set up the cod
      OK Sidecar  …
    ```
 
-   If `status=partial` or `needs_attention`: the report names the cause (for example an agent that is not installed). Continue to step 6 and include it in your report. For one agent only, use `defenseclaw quickstart --connector <name>`.
+   If `status=partial` or `needs_attention`: the report names the cause (for example an agent that is not installed). Continue to step 5 and include it in your report. For one agent only, use `defenseclaw quickstart --connector <name>`.
 
-6. Check health.
+5. Check health.
 
    ```bash
    defenseclaw doctor --json
@@ -99,7 +91,7 @@ You are an AI agent. Install DefenseClaw for the current user and set up the cod
    Expected: `"outcome": "healthy"` (or `"warning"`) and `"exit_code": 0`. `"outcome": "failed"` comes with `"exit_code": 1`.
    If it differs: list each check with `"status": "fail"` and its `"remediation"`. Do not apply `--fix` without the user's yes; you may show `defenseclaw doctor --fix --dry-run`.
 
-7. Check the gateway and the agents.
+6. Check the gateway and the agents.
 
    ```bash
    defenseclaw status --json
@@ -108,7 +100,7 @@ You are an AI agent. Install DefenseClaw for the current user and set up the cod
    Expected: `sidecar.running` is `true`, and each entry in `connectors` has `"mode": "observe"`.
    If the sidecar is not running, ask the user before running `defenseclaw-gateway start`.
 
-8. Tell the user to restart each agent so it loads the hooks.
+7. Tell the user to restart each agent so it loads the hooks.
 
 ## Report
 

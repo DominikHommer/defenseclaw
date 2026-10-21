@@ -1,0 +1,92 @@
+---
+title: Sandbox setup and gateway problems
+description: Fix sandboxes that are off, a missing or unusable OpenShell, and a gateway that answers wrong, holds the wrong port or is down.
+keywords:
+  - sandbox setup
+  - OpenShell gateway
+  - sandbox doctor
+---
+
+Run `defenseclaw sandbox doctor` first; each failed check names its fix. These are the setup and gateway failures it reports.
+
+## Sandboxes are off
+
+**You see:** ``OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on``.
+
+**Cause:** `openshell.enabled` is false.
+
+**Fix:** run `defenseclaw sandbox setup`.
+
+**Check:** `defenseclaw sandbox doctor` ends with `ready for sandboxes`.
+
+## No gateway service installed
+
+**You see:** the **Gateway** check's fix is `defenseclaw sandbox setup --install-openshell`.
+
+**Cause:** there is no gateway service to start: no `nvidia/openshell` formula on a Mac, no `openshell-gateway` user unit on Linux. `--fix` does not install one.
+
+**Fix:** run `defenseclaw sandbox setup --install-openshell`.
+
+**Check:** the **Gateway service** check passes.
+
+## OpenShell installed another way
+
+**You see:** the **Gateway** and **Gateway service** checks say the OpenShell at a path ``was installed another way``.
+
+**Cause:** OpenShell came from somewhere other than the formula or NVIDIA's installer, such as release binaries. `--install-openshell` installs nothing where a supported CLI already exists.
+
+**Fix:** while its gateway answers, setup uses it, but DefenseClaw cannot start or restart it, so restart it yourself after a gateway change (on a Mac, after `defenseclaw sandbox stop NAME` for each running sandbox, which saves its disk). With no gateway answering, start it yourself. For a gateway DefenseClaw manages, stop that gateway, remove that OpenShell, then run `defenseclaw sandbox setup --install-openshell`. On Linux the doctor compares `gateway.toml` and `gateway.env` with the start of your `openshell-gateway` process and warns until you restart it.
+
+**Check:** the **Gateway service** check passes or only warns, and `sandbox status` lists the gateway.
+
+## OpenShell too old, too new or not usable yet
+
+**You see:** an **OpenShell CLI** warning or failure, a **Gateway** failure such as ``OpenShell 0.1.3 runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's connections bypass the sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to 0.1.5 in place``, or ``the OpenShell gateway is not usable yet (Gateway service)``. `defenseclaw sandbox run` and `start` refuse with the same words.
+
+**Cause:** DefenseClaw drives a range of OpenShell releases ([requirements](/docs/features/sandbox-details#requirements)). Older than the range or missing: setup offers the install. Inside the range but older than 0.1.5 (a 0.1.5 prerelease counts as older): DefenseClaw creates and starts no sandbox, the **Gateway** check fails and setup offers the upgrade in place. When the CLI is already 0.1.5 but the old gateway still answers (an upgrade that left it running), the check adds ``the CLI installed here is OpenShell 0.1.5``, and its fix restarts the gateway service. Newer than the range: setup does not downgrade it. Installed, but a gateway, registration or mTLS check fails: that is not the install's fault.
+
+**Fix:** answer yes to the upgrade question in `defenseclaw sandbox setup` (the default is no, so `--yes` and `--non-interactive` keep the release you have, and setup then stops on the **Gateway** check), or run `defenseclaw sandbox setup --install-openshell`. For a newer release, remove it first. For a failing gateway check, run the fix the check prints. The TUI shows the fix as the hint of **Install OpenShell**.
+
+**Check:** the **Gateway** and **OpenShell CLI** rows pass.
+
+The upgrade restarts the gateway, which affects every sandbox on it, of every owner. Setup names the running ones first. On the Docker driver, running sandboxes keep running and lose their connections, and Docker pulls the new supervisor images from `ghcr.io` first (when it cannot reach `ghcr.io`, setup keeps the release you have and changes nothing). On the MicroVM driver, the restart stops every running sandbox and loses what it wrote since its last sync, so setup does not upgrade while a sandbox runs, starts or stops: stop them with `defenseclaw sandbox stop NAME` and start them again afterwards. A MicroVM that completed or is in OpenShell's error state still runs its VM, and nothing in OpenShell can flush it: the upgrade waits up to two minutes for its guest to write its disk back, which keeps its work. On a Mac the first start of each image prepares its MicroVM disk again, and `defenseclaw sandbox image prune` removes the old ones. After the upgrade, stop and start each sandbox that kept running through it: until it stops it runs the old release's supervisor, and DefenseClaw says so (``⚠ <name>'s session started on OpenShell 0.1.3``) in the activity feed and in `defenseclaw sandbox status <name>`. 0.1.5 names the supervisor's OCSF log files `openshell-ocsf.*.jsonl` instead of `openshell-ocsf.*.log`; update a collector of your own that reads them. DefenseClaw does not upgrade an OpenShell installed another way. Before it enables bind mounts (Linux), DefenseClaw checks that the gateway lets a client without a certificate finish the TLS handshake but refuses that client's API calls, and that the gateway has no OIDC issuer.
+
+## The gateway answers with another release
+
+**You see:** ``the gateway that answers runs OpenShell 0.0.40, not the OpenShell … installed here``.
+
+**Cause:** the gateway that answers is not the one the CLI's install runs.
+
+**Fix:** run `defenseclaw sandbox doctor --fix`, which restarts the `openshell-gateway` unit (Linux) or Homebrew's `nvidia/openshell/openshell` service (Mac). If it still answers with another release, the service runs another OpenShell's gateway. Stop that gateway (`systemctl --user stop openshell-gateway`, or `brew services stop nvidia/openshell/openshell`), remove that OpenShell, then run `defenseclaw sandbox setup --install-openshell`.
+
+**Check:** the **Gateway** check shows the CLI's release.
+
+## Something else holds the gateway's port
+
+**You see:** the gateway service is stopped, yet a gateway answers. Or the **Gateway service** check says ``127.0.0.1:17670, the gateway's port, is held by a process of another account``.
+
+**Cause:** another gateway, or another account's, owns the port. A machine runs one OpenShell gateway.
+
+**Fix:** stop that gateway, then start the service. For another account's gateway, hand it over ([Linux](/docs/how-to/sandboxes/set-up-on-linux#one-openshell-gateway-per-machine), [macOS](/docs/how-to/sandboxes/set-up-on-macos#one-openshell-gateway-per-mac)). `--fix` leaves this to you.
+
+**Check:** `defenseclaw sandbox doctor` shows the gateway service active.
+
+## The daemon is not running
+
+**You see:** ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)``, or ``the DefenseClaw gateway has not started on this account yet``.
+
+**Cause:** the daemon is stopped. With it down, sandbox hooks block every tool call. A session that ends while it is down skips its review and keep/undo question and says how to run them later. The sandbox and its undo point are kept.
+
+**Fix:** run `defenseclaw-gateway start`.
+
+**Check:** the **DefenseClaw daemon** check passes.
+
+## Sandboxes are unavailable
+
+**You see:** ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)``, or ``the OpenShell gateway is not running: nothing listens on 127.0.0.1:17670``.
+
+**Cause:** the OpenShell gateway service is stopped, or on Linux stopped with your login session.
+
+**Fix:** run `defenseclaw sandbox doctor --fix`. On Linux turn on linger: `sudo loginctl enable-linger $USER`.
+
+**Check:** the **Gateway service** and **systemd linger** checks pass.

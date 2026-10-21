@@ -92,7 +92,10 @@ DESKTOP_ONLY_FILES = frozenset(
 THIRD_PARTY_EXTENSION_IDS = ("google." + _GEMINI + "-" + _CLI + "-vscode-ide-companion",)
 # Files that may name either retired connector.
 UNRESTRICTED_FILES = frozenset({"CHANGELOG.md"})
-UPGRADE_GUIDE = "docs-site/content/docs/get-started/upgrade.mdx"
+# The full notes live in the appendix; the upgrade page keeps a short pointer
+# section of the same name.
+UPGRADE_GUIDE = "docs-site/content/docs/appendix/upgrade-from-0-8.mdx"
+UPGRADE_GUIDES = frozenset({UPGRADE_GUIDE, "docs-site/content/docs/get-started/upgrade.mdx"})
 UPGRADE_SECTION = "## Renamed and removed connectors"
 EXCLUDED_PREFIXES = ("openwiki/",)
 MAX_SCAN_BYTES = 8 * 1024 * 1024
@@ -150,7 +153,7 @@ def _violations(relative: str, text: str) -> list[str]:
     if relative in DESKTOP_ONLY_FILES:
         hits = _hits(text, GEMINI_RE) + _hits(text, GEMINI_LIST_RE)
     else:
-        if relative == UPGRADE_GUIDE:
+        if relative in UPGRADE_GUIDES:
             text = _outside_upgrade_section(text)
         hits = _hits(text, ANY_RE) + _hits(text, GEMINI_LIST_RE)
     return [f"{relative}:{hit}" for hit in hits]
@@ -210,7 +213,7 @@ def test_gemini_list_pattern_matches_connector_lists_only() -> None:
 
 def test_allowlisted_files_still_exist() -> None:
     tracked = set(_tracked_files())
-    for relative in DESKTOP_ONLY_FILES | UNRESTRICTED_FILES | {UPGRADE_GUIDE}:
+    for relative in DESKTOP_ONLY_FILES | UNRESTRICTED_FILES | UPGRADE_GUIDES:
         assert relative in tracked, f"allowlisted file is missing: {relative}"
 
 

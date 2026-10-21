@@ -23,8 +23,6 @@ Evaluation runs in your browser with compiled copies of the bundled Rego (admiss
 2. On Review, run the canned scenarios in Live Test. They use the selected policy mode; observe mode reports `alert` for the bundled CRITICAL guardrail cases.
 3. Open in Playground to fine-tune, then download the install script. A share link holds the whole policy in its URL fragment; treat it like the YAML.
 
-Balanced/default exposes 243 declared rules (239 enabled); Permissive 243 (235 enabled); Strict 255 (all enabled).
-
 ## What the creator cannot do
 
 - Live Test evaluates only the admission and guardrail Rego. It does not run ActionFacts parsing, CEL, regex, YARA or bounded chains.
@@ -44,11 +42,11 @@ defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/my-policy
 defenseclaw guardrail use-pack my-policy
 ```
 
-## Verify locally
+## Check it worked
 
-Test the script in a throwaway home before you run it on a shared install.
+Test the script in a throwaway home before you run it on a shared install. Read the script first; it inlines every pack file.
 
-1. Save the script path and isolate the home. Read the script first; it inlines every pack file, so list its write targets.
+1. Isolate the home and list the script's write targets.
 
    ```bash
    INSTALL_SCRIPT="$HOME/Downloads/install-my-policy.sh"
@@ -59,48 +57,38 @@ Test the script in a throwaway home before you run it on a shared install.
    grep -nE '^(cat >|defenseclaw )' "$INSTALL_SCRIPT"
    ```
 
-2. Create a minimal installation in the throwaway home.
+2. Create a minimal install, run the script and read the policy back. Use the name the creator showed in place of `my-policy`.
 
    ```bash
    defenseclaw init --non-interactive --yes --connector codex \
      --skip-install --no-start-gateway --no-verify
-   ```
-
-3. Check the syntax, run the script, then read back the policy. Use the name the creator showed in place of `my-policy`.
-
-   ```bash
-   bash -n "$INSTALL_SCRIPT"
-   bash "$INSTALL_SCRIPT"
-   defenseclaw policy list
+   bash -n "$INSTALL_SCRIPT" && bash "$INSTALL_SCRIPT"
    defenseclaw policy show my-policy
    ```
 
-4. Compile the Rego and read the effective values. `policy test` runs any `*_test.rego` files in the directory. Both use `opa` when it is on `PATH`, otherwise the engine inside `defenseclaw-gateway`.
+3. Compile and test the Rego, read the effective values, and dry-run an admission decision. `opa` is used when it is on `PATH`, otherwise the engine inside `defenseclaw-gateway`.
 
    ```bash
    defenseclaw policy validate --rego-dir "$DEFENSECLAW_HOME/policies/rego"
    defenseclaw policy test --rego-dir "$DEFENSECLAW_HOME/policies/rego" --verbose
-   defenseclaw config get admission.skill --effective
    defenseclaw config get guardrail.block_at --effective
-   ```
-
-5. Dry-run an admission decision. It reads the isolated config and needs no running gateway.
-
-   ```bash
    defenseclaw-gateway policy evaluate --target-type skill \
      --target-name test-skill --severity HIGH --findings 3
    ```
 
-   Compare the JSON decision with the HIGH action you set in the creator.
+   The JSON decision should match the HIGH action you set in the creator.
 
-6. Validate and switch to the rule pack, then clean up. The throwaway gateway is not running, so `policy activate` and `use-pack` warn that the audit event was not recorded. That is expected.
+4. Validate and switch to the rule pack, then clean up. The throwaway gateway is not running, so `use-pack` warns that the audit event was not recorded. That is expected.
 
    ```bash
    defenseclaw guardrail validate-pack "$DEFENSECLAW_HOME/policies/guardrail/my-policy"
    defenseclaw guardrail use-pack my-policy
-   rm -rf -- "$VERIFY_HOME"
+   rm -rf -- "${VERIFY_HOME:?}"
    ```
 
-To promote, run the reviewed script and `use-pack` again with `HOME="$REAL_HOME" DEFENSECLAW_HOME="$REAL_DEFENSECLAW_HOME"`. Never point `VERIFY_HOME` at `/`, a shared home or an existing data directory.
+To promote, run the reviewed script and `use-pack` again with `HOME="$REAL_HOME" DEFENSECLAW_HOME="$REAL_DEFENSECLAW_HOME"`.
 
-Next: [tune the judge](/docs/how-to/policies/tune-the-llm-judge), [custom rules](/docs/how-to/policies/write-a-custom-rule).
+## Next
+
+- [Guardrail profiles reference](/docs/reference/policy/guardrail-profiles)
+- [Tune the LLM judge](/docs/how-to/policies/tune-the-llm-judge)

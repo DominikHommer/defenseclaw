@@ -23,6 +23,31 @@ The flag tables are generated from the `defenseclaw-gateway sandbox` command
 tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 --help` prints the same flags.
 
+## Commands at a glance
+
+| Command | What it does |
+| --- | --- |
+| [`sandbox setup`](#sandbox-setup) | One-time setup: OpenShell, bind mounts, telemetry, harnesses, wrappers and images. |
+| [`sandbox doctor`](#sandbox-doctor) | Check that this machine can run sandboxes. |
+| [`sandbox image`](#sandbox-image) | Build, list, prune and remove the harness images. |
+| [`sandbox enable`](#sandbox-enable), [`disable`](#sandbox-disable) | Add or remove the shell wrapper that runs a harness command in a sandbox. |
+| [`sandbox teardown`](#sandbox-teardown) | Remove everything DefenseClaw set up for sandboxes. |
+| [`sandbox kernel-feed`](#sandbox-kernel-feed) | Linux only: add Tetragon's kernel-level process events to the process tree. |
+| [`sandbox run`](#sandbox-run) | Run a harness in a new sandbox on the current folder. |
+| [`sandbox connect`](#sandbox-connect), [`exec`](#sandbox-exec), [`logs`](#sandbox-logs) | Resume a sandbox, run one command in it, or read a detached run's output. |
+| [`sandbox list`](#sandbox-list), [`status`](#sandbox-status) | List sandboxes, or show one in detail. |
+| [`sandbox stop`](#sandbox-stop), [`start`](#sandbox-start), [`delete`](#sandbox-delete) | Stop, start or delete sandboxes. |
+| [`sandbox activity`](#sandbox-activity), [`destinations`](#sandbox-destinations) | The live feed, and every site a sandbox reached or tried to reach. |
+| [`sandbox approvals`](#sandbox-approvals), [`approve`](#sandbox-approve), [`reject`](#sandbox-reject) | The asks waiting for you, and your answers. |
+| [`sandbox unblock`](#sandbox-unblock) | Lift an egress block. |
+| [`sandbox review`](#sandbox-review), [`undo`](#sandbox-undo) | Review a mounted project's changes, or restore its undo point. |
+| [`sandbox pull`](#sandbox-pull) | Bring a copy-mode sandbox's work back. |
+| [`sandbox discover`](#sandbox-discover), [`ps`](#sandbox-ps) | What runs inside a sandbox: AI components and the process tree. |
+| [`sandbox policy`](#sandbox-policy) | Show, explain, suggest, test and edit the sandbox policy. |
+| [`sandbox pack`](#sandbox-pack) | List, show and validate policy packs. |
+
+Platform and software requirements are at the end of the page ([Requirements and platform facts](#requirements-and-platform-facts)).
+
 ## How the commands run
 
 - **One entry point.** Type `defenseclaw sandbox …`. The Python CLI checks the
@@ -70,28 +95,6 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   changes went to a patch file and, in a git project, to a `dc/<name>` branch.
   `stop` exits `5` when a MicroVM with a full disk keeps running. An interrupted
   command returns `130`, and an unsupported platform or setup returns `3`.
-
-| Command | What it does |
-| --- | --- |
-| [`sandbox setup`](#sandbox-setup) | One-time setup: OpenShell, bind mounts, telemetry, harnesses, wrappers, and images. |
-| [`sandbox doctor`](#sandbox-doctor) | Check that this machine can run sandboxes. |
-| [`sandbox image`](#sandbox-image) | Build, list, prune, and remove the harness images. |
-| [`sandbox enable`](#sandbox-enable), [`disable`](#sandbox-disable) | Add or remove the shell wrapper that runs a harness command in a sandbox. |
-| [`sandbox teardown`](#sandbox-teardown) | Remove everything DefenseClaw set up for sandboxes. |
-| [`sandbox run`](#sandbox-run) | Run a harness in a new sandbox on the current folder. |
-| [`sandbox connect`](#sandbox-connect) | Resume a sandbox and attach the harness, or a shell. |
-| [`sandbox exec`](#sandbox-exec) | Run one command in a sandbox. |
-| [`sandbox logs`](#sandbox-logs) | Show the output of a detached run. |
-| [`sandbox list`](#sandbox-list), [`status`](#sandbox-status) | List sandboxes, or show one in detail. |
-| [`sandbox stop`](#sandbox-stop), [`start`](#sandbox-start), [`delete`](#sandbox-delete) | Stop, start, or delete sandboxes. |
-| [`sandbox activity`](#sandbox-activity) | The live activity feed. |
-| [`sandbox destinations`](#sandbox-destinations) | What a sandbox reached or tried to reach, and which of it is shadow AI. |
-| [`sandbox approvals`](#sandbox-approvals), [`approve`](#sandbox-approve), [`reject`](#sandbox-reject) | The asks waiting for you, and your answers. |
-| [`sandbox unblock`](#sandbox-unblock) | Lift an egress block. |
-| [`sandbox review`](#sandbox-review), [`undo`](#sandbox-undo) | Review a mounted project's changes, or restore its undo point. |
-| [`sandbox pull`](#sandbox-pull) | Bring a copy-mode sandbox's work back. |
-| [`sandbox policy`](#sandbox-policy) | Show, explain, suggest, test, and edit the sandbox policy. |
-| [`sandbox pack`](#sandbox-pack) | List, show, and validate policy packs. |
 
 ## On a managed computer
 
@@ -631,6 +634,32 @@ go to the harness. The step-by-step version is
 | End of session | The sandbox the session started is stopped first. The summary counts tool calls and blocks, new sites contacted, sites blocked and files changed, then names notices and changes that can run code. A mounted folder asks to keep, undo or show the diff. A copy asks to apply, branch, patch or skip. Without a terminal, or with `--yes`, a mount keeps the changes and a copy skips ([review, undo or pull](/docs/how-to/sandboxes/review-undo-or-pull)). |
 | `--rm` | On a mounted folder it keeps the undo point when the review failed or nobody accepted the changes. In copy mode it is not honored while changes are left in the sandbox. |
 | Full disk | A pull that fails because a MicroVM's own disk is full leaves the MicroVM running: free space (`sandbox connect NAME --shell`), `sandbox pull NAME`, then `sandbox stop NAME`. |
+
+#### The run banner
+
+Before the harness takes over the terminal, `run` prints what the sandbox can see and use. The example is from Linux with a live mount; on a Mac the `Project` line says `(copy)` and the `Hidden` and `Protected` lines are absent.
+
+```text
+Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + blocklist
+  Project   ~/code/myapp → /work/myapp (live)   undo point taken → `defenseclaw sandbox undo myapp-7f3a` restores it
+  Hidden    .env  certs/dev.pem  (secret files appear empty inside; --unmask PATH to share)
+  Protected .git/hooks .git/config .git/config.worktree (read-only)
+            Not visible: everything else on this machine
+  Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+  Asks      watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-7f3a
+```
+
+| Line | What it tells you |
+| --- | --- |
+| `Sandbox …` | The name (the folder name cut to fit OpenShell's 19 characters), the harness and the permission mode. `skip-permissions ON` means the harness's own prompts are off. With `--safe` it reads `skip-permissions OFF (harness prompts kept)`. |
+| `network: …` | `open + blocklist` (the default), `allowlist (balanced)` or `provider hosts only (strict)`. |
+| `Project` | Your folder and where it appears inside. `(live)` means the agent edits your folder. `(copy)` means it edits a copy without what git ignores, such as `node_modules/`, so install dependencies inside. |
+| `Hidden` | Secret files that appear empty inside a live mount. On a copy they are held back. `--unmask PATH` shares one. |
+| `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook that runs on your machine. |
+| `Model` | The model credential and the only hosts it works at. The sandbox holds a placeholder. OpenShell reaches those hosts around the egress proxy, so the proxy's blocklist and upload checks do not see that traffic. |
+| `Asks` | Where to answer the rare asks. Claude Code and Codex keep the terminal title, so keep the command shown open in a second terminal. |
+
+The banner also shows `Context`, `Secret`, `Host`, `Uploads`, `Policy`, `Keys`, `MCP`, `Hooks` and `Driver` lines when they apply.
 
 #### Continue a conversation
 
@@ -1793,3 +1822,115 @@ defenseclaw sandbox pack validate ~/.defenseclaw/policies/sandbox/team-web/pack.
 {/* AUTOGEN-BEGIN: sandbox-flags pack validate */}
 This command has no flags.
 {/* AUTOGEN-END: sandbox-flags */}
+
+## Requirements and platform facts
+
+What a machine needs before `defenseclaw sandbox setup` can finish, and the facts that differ between the Docker driver on Linux and the MicroVM driver on a Mac. `sandbox doctor` checks all of it.
+
+### Linux
+
+| You need | Details |
+| --- | --- |
+| DefenseClaw | Installed and initialized ([quickstart](/docs/get-started/quickstart)), with the daemon running (`defenseclaw-gateway start`). Run everything as your own user, not root. |
+| Linux | amd64 or arm64. WSL2 is not supported. |
+| Kernel | Landlock ABI 3 or newer, enabled in the kernel's `lsm=` list. Upstream kernels have it from 6.2. A distribution kernel with a backport can have it too (RHEL 9 lists `landlock` on its 5.14 kernel), so `sandbox doctor` reading the running kernel is the check to trust. |
+| Docker | A rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group), with the buildx plugin (`docker-buildx-plugin` from Docker's repository). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. |
+| systemd | A user session with a systemd user manager. OpenShell's gateway runs as the `openshell-gateway` user service. |
+| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. |
+
+You do not need OpenShell installed first: setup offers to install it. Check the kernel yourself with `cat /sys/kernel/security/lsm`, which should list `landlock`. Turn on linger so the gateway keeps running after you log out:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+### MicroVMs with KVM on Linux
+
+On a Linux host with KVM, OpenShell's MicroVM driver (`vm`) runs each sandbox as a small virtual machine with a Linux kernel of its own, as it does on a Mac. The Docker driver stays the default. MicroVMs are the way on where the host kernel has no usable Landlock, because the MicroVM's own kernel enforces it. `sandbox setup` offers the switch on a host where `/dev/kvm` exists, and the answer defaults to yes only when Landlock is missing.
+
+| Needs | Details |
+| --- | --- |
+| KVM | `/dev/kvm` that your user can open for reading and writing. Where it belongs to the `kvm` group, run `sudo usermod -aG kvm $USER` and log in again. On a cloud VM, use an instance type with nested virtualization or a `.metal` size. |
+| `e2fsprogs` | Version 1.43 or newer, whose `mke2fs` and `debugfs` format each MicroVM's disks. |
+| The driver | `openshell-driver-vm`, which NVIDIA's package does not install. Download it from the OpenShell release with its `.sha256` file, check the digest and put it in `~/.local/libexec/openshell`. The doctor prints the commands for your architecture. |
+| The service umask | The `openshell-gateway` service must run with a umask no stricter than `0022`. Setup writes a systemd drop-in (`zz-defenseclaw-umask.conf`) with `UMask=0022` as part of the gateway change. |
+
+Setup installs none of this. KVM access and `e2fsprogs` need an administrator and the driver is a download you verify, so setup stops with the way on and asks you to run it again.
+
+With the MicroVM driver, every run works on a copy, `--context` is refused, `--cpu` and `--memory` have no effect, and the first start of an image prepares a disk of about 5 GB, which takes about a minute. [Sandboxes](/docs/features/sandbox-details#linux-and-macos) compares the drivers. On a managed computer the organization chooses the driver, and a sandbox that starts where KVM does not work falls back to Docker under the same policy unless the organization requires MicroVMs: [the docker fallback](/docs/enterprise/runtime/sandboxes#the-docker-fallback).
+
+### One OpenShell gateway per machine (Linux)
+
+OpenShell's packaged gateway listens on the fixed port `127.0.0.1:17670` and runs as the `openshell-gateway` user service of the account that started it. A machine runs one gateway, so only that account can run sandboxes. In a second account, `sandbox setup` and `sandbox doctor` say that the port is held by another account's process, and setup installs and starts nothing.
+
+To hand sandboxes to another account, stop the gateway in the account that runs it, then run `defenseclaw sandbox setup` in the other one. `disable --now` also keeps the gateway from starting again at the next login:
+
+```bash
+systemctl --user disable --now openshell-gateway
+```
+
+<Callout type="warn" title="Handing the gateway over stops the sandboxes it runs">
+Every sandbox the gateway runs stops with it. A live-mounted sandbox's edits are already in your folder and its undo point is kept, and a copy keeps its work in the sandbox. Neither account can connect to those sandboxes until the account that made them runs the gateway again.
+</Callout>
+
+Membership in the `docker` group is root-equivalent on the machine. Every account in the group can list every sandbox container (`docker ps`) and run commands in it (`docker exec`). Give the group only to accounts that trust each other. Several users on one host are tracked upstream in [NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
+
+### macOS
+
+| You need | Details |
+| --- | --- |
+| A Mac with Apple silicon | The MicroVM driver runs on Apple silicon only. On an Intel Mac sandboxes are refused. If you run the Intel build of DefenseClaw under Rosetta, install the arm64 build. |
+| DefenseClaw | Installed and initialized ([quickstart](/docs/get-started/quickstart)), with the daemon running. The [macOS app](/docs/features/macos-app) starts it for you. Run everything as your own user. |
+| [Homebrew](https://brew.sh) | OpenShell installs from NVIDIA's `nvidia/openshell` formula and its gateway runs as a Homebrew service. NVIDIA's installer runs Homebrew as you, without `sudo`, so your account must be able to write to Homebrew's folders ([another account's Homebrew](#a-homebrew-that-belongs-to-another-account)). |
+| Xcode or the Command Line Tools | Current for your macOS release. Homebrew may build the formula from source and checks them first ([developer tools](#developer-tools)). |
+| `e2fsprogs` | The MicroVM driver formats each MicroVM's disks with its `mke2fs` and `debugfs`. Setup offers to install it with Homebrew. The driver looks only in the Homebrew kegs under `/opt/homebrew` and `/usr/local`. |
+| Docker Desktop, running | DefenseClaw builds the harness images in Docker, and the MicroVM driver reads them from it. Start it once on your own account first ([first start](#docker-desktops-first-start)). |
+| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. A MicroVM image's first start uses about 11 GiB of free host space while it prepares its disk (the VM volume needs at least 12 GiB free, 22 GiB recommended). The driver then keeps a disk of about 5 GB per image it has started. |
+
+On a Mac your organization manages with a standalone enterprise install, an administrator provides OpenShell and `e2fsprogs`, and the managed setup mode needs no Homebrew on your account: [Sandboxes on managed computers](/docs/enterprise/runtime/sandboxes).
+
+#### Developer tools
+
+When NVIDIA's tap has no prebuilt package for your macOS release, Homebrew builds the formula and stops if Xcode or the Command Line Tools are too old (`Your Xcode (26.2) … is too outdated`). Update them as Homebrew says, then run setup again.
+
+<Callout type="warn" title="Homebrew checks Xcode.app even when you use the Command Line Tools">
+Homebrew looks at `/Applications/Xcode.app` even when `xcode-select` selects the Command Line Tools. If the tools are current but that Xcode is old, setup says `Homebrew checks Xcode 26.2 at /Applications/Xcode.app even so`. Update that Xcode or delete it.
+</Callout>
+
+#### Docker Desktop's first start
+
+The first time Docker Desktop starts on your account it asks you to install Rosetta (when missing), allow local-network access, accept its licence, and type an administrator's name and password for its privileged helper. On a standard account, have an administrator type the password. Setup does not answer these prompts. Its Docker check fails until Docker Desktop has started once.
+
+#### A Homebrew that belongs to another account
+
+Setup checks `Library/Taps` and `Cellar` under the Homebrew prefix before it runs NVIDIA's installer, and stops with the owner and folder:
+
+```text
+  ✗ install OpenShell: Homebrew at /opt/homebrew belongs to admin, and you (alice) cannot write to /opt/homebrew/Library/Taps, where Homebrew adds NVIDIA's tap and installs the formula
+  → ask admin (or an administrator) to make /opt/homebrew writable for you, or use a Homebrew of your own (…)
+```
+
+Either have the owner give you write access, or install a Homebrew of your own in your home directory, put it first on `PATH` with `eval "$(~/homebrew/bin/brew shellenv)"`, and run setup again. A Homebrew of your own works with three differences. The install plan passes `OPENSHELL_LOCAL_TLS_DIR=<prefix>/var/openshell/tls` to NVIDIA's installer. Homebrew has no prebuilt packages for such a prefix, so it may build for many minutes. And the driver never finds an `e2fsprogs` installed there, so setup stops and asks an administrator to run `brew install e2fsprogs` with a Homebrew under `/opt/homebrew` or `/usr/local`. When the OpenShell CLI is outside `/usr/bin`, `/usr/local/bin` and `/opt/homebrew/bin`, setup records its path as `openshell.binary` in `~/.defenseclaw/config.yaml`.
+
+### MicroVM facts on a Mac
+
+| Topic | What to know |
+| --- | --- |
+| Resources | Every MicroVM on the gateway gets the same vCPUs, memory and disk, set under `[openshell.drivers.vm]` in the gateway's `gateway.toml` (`/opt/homebrew/var/openshell/gateway.toml` for the Homebrew service, unless `~/.config/openshell/gateway.toml` exists). `--cpu` and `--memory` have no effect. The doctor warns when the disk for changes is under 8 GiB. |
+| The sandbox user | Set for the whole gateway: every MicroVM runs as your uid and gid. |
+| Disk use | About 5 GB per image the driver has started, in `~/.local/state/openshell/vm-driver`. `defenseclaw sandbox image prune` and `image rm` remove unused images and their disks. |
+| Per-run settings | Claude Code and Codex settings are baked, root-owned and read-only, into a small run image for each sandbox. A run with other `--env`, credentials or model provider prepares another disk. |
+| Stopping | `defenseclaw sandbox stop NAME` saves the MicroVM's disk. A gateway restart stops every MicroVM on it, so setup asks before it restarts a gateway with sandboxes running. |
+| Disk full | DefenseClaw warns once when a MicroVM's overlay disk reaches 90% use. `defenseclaw sandbox status NAME` shows the warning while it runs. |
+
+Limits on a Mac: there is no live mount and no pre-session snapshot, `sandbox undo` reverts the last `pull --apply`, `--context` is refused, the copy has no Git LFS, and OpenShell calls the driver experimental. A harness runs only after its image proves its hooks fire in a MicroVM ([which agents run](/docs/features/sandbox-details#which-agents-run)).
+
+### One OpenShell gateway per Mac
+
+OpenShell's gateway listens on the fixed port `127.0.0.1:17670` and runs as the Homebrew service of the account that started it. A Mac runs one gateway, so only that account can run sandboxes. In a second account, `defenseclaw sandbox doctor` says that the port is held by another account's process, skips the checks that follow from it, and setup installs and starts nothing.
+
+To hand sandboxes to another account, stop the gateway in the account that runs it, then run `defenseclaw sandbox setup` in the other one (add `--install-openshell` if OpenShell is not installed there). Several users on one machine are tracked upstream in [NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
+
+```bash
+brew services stop nvidia/openshell/openshell
+```

@@ -26,6 +26,24 @@ DefenseClaw ships three binaries. Each row below is on the Python CLI unless it 
 | `defenseclaw-gateway` | The Go sidecar: daemon control (`start`, `stop`, `restart`), policy reload, code scanning, audit export, enterprise lifecycle. |
 | `defenseclaw-acp` | The stdio guard that ACP clients spawn. It checks its runtime contract, then evaluates ACP traffic. |
 
+## Summary
+
+| Task | Commands | Section |
+| --- | --- | --- |
+| Install and first run | `init`, `quickstart` | [First run](#first-run) |
+| Check health | `doctor`, `status` | [Doctor](#doctor) |
+| Set up agents, providers, scanners | `setup ...` | [Setup](#setup) |
+| Guardrail and policy | `guardrail`, `policy` | [Guardrail](#guardrail), [Policies](#policies) |
+| Keys and credentials | `keys` | [Credentials](#credentials) |
+| Alerts and audit | `alerts`, `audit` | [Audit & alerts](#audit--alerts) |
+| Discovery and scanning | `agent`, `skill`, `mcp`, `plugin` | [AI discovery](#ai-discovery), [Scanning](#scanning) |
+| Block and allow lists | `skill|mcp|plugin|tool block|allow` | [Asset Policy Commands](#asset-policy-commands) |
+| Gateway daemon | `defenseclaw-gateway start|stop|restart` | [Gateway daemon](#gateway-daemon) |
+| Configuration | `config get|set|unset` | [Configuration](#configuration) |
+| Upgrade and uninstall | `upgrade`, `uninstall` | [Upgrade](#upgrade), [Uninstall](#uninstall--disable) |
+| Sandboxes | `sandbox ...` | [Sandbox](#sandbox) |
+| Enterprise lifecycle | `defenseclaw-gateway enterprise ...` | [Enterprise](#enterprise) |
+
 `config.yaml` holds every setting you choose. Every command that changes one (`config set`, `guardrail ...`, `skill|mcp|plugin|tool block|allow`, `policy activate`, the `setup` commands, the TUI) goes through the same config writer, which checks the change before it writes. A running gateway applies a valid change itself and shows a new policy generation in `defenseclaw status`; only the [restart-required keys](#restart-required-keys) need `defenseclaw-gateway restart`. Files derived from `config.yaml`, such as `custom-providers.json` and the generated hook scripts, are rewritten for you. See [Source of truth](/docs/reference/configuration/source-of-truth).
 
 ## First run

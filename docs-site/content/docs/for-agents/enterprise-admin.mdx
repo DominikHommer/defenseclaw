@@ -21,7 +21,7 @@ You are an AI agent working for an administrator, on an admin workstation or a t
 
 ## Hard rules
 
-1. Never run this on a user's managed computer, or on any computer the administrator did not name. Per-user commands exit `3` on a managed computer; that is the product telling you to stop.
+1. Never run this on a user's managed computer, or on any computer the administrator did not name. Per-user commands print `This computer is managed` (exit `2`) or `This device is managed` (exit `3`) on a managed computer; that is the product telling you to stop.
 2. Observe first. Write `guardrail.mode: observe`. Switching to `action` or changing a fail mode needs the administrator's yes to that exact change.
 3. Never print a key or token. The Cisco AI Defense key never goes in the config, a script body or a command line; use `enterprise secret set --from-stdin`.
 4. The config file must be owned by root (Windows: SYSTEM or Administrators) and writable by nobody else, or the wrapper refuses it.

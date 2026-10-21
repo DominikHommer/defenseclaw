@@ -13,7 +13,7 @@ This page puts Kiro behind the [ACP guard](/docs/features/acp-guard) in Zed, the
 ## Before you start
 
 - DefenseClaw is [installed](/docs/get-started/install) and the gateway runs.
-- You use Zed or JetBrains, and the agent runs from a terminal once already (for Kiro, run `kiro-cli login`). An editor starts the agent with no terminal, so a first-run question would leave the thread on a spinner.
+- You use Zed or JetBrains, and the agent has run from a terminal once (for Kiro, `kiro-cli login`). An editor starts it with no terminal, so a first-run question would hang the thread.
 
 ## Guard Kiro in Zed
 
@@ -26,7 +26,7 @@ This page puts Kiro behind the [ACP guard](/docs/features/acp-guard) in Zed, the
 
    {/* needs-live-capture: output of acp setup */}
 
-   Setup writes one `DefenseClaw · Kiro` entry, a private token file and a contract lock. It keeps your other Zed settings and agent servers, but it rewrites the file as plain JSON: the comment block before the opening `{` stays, and other comments and trailing commas are dropped. A failed write rolls all three changes back. For JetBrains use `--client jetbrains`.
+   Setup writes one `DefenseClaw · Kiro` entry, a private token file and a contract lock; a failed write rolls all three back. Your other settings stay, but Zed's file is rewritten as plain JSON, so comments after the opening block and trailing commas are dropped. For JetBrains use `--client jetbrains`.
 
 2. Check the binding.
 
@@ -59,12 +59,7 @@ defenseclaw acp detect
   foreign    Something Else (left untouched)
 ```
 
-| Label | Meaning |
-| --- | --- |
-| `guarded` | The entry starts `defenseclaw-acp`. |
-| `UNGUARDED` (direct launch) | A native agent the guard can wrap. |
-| `UNGUARDED` (client registry) | The editor resolves and starts the agent itself, so there is nothing to wrap. |
-| `foreign` | Not an agent DefenseClaw knows. It is never changed. |
+`guarded` entries start `defenseclaw-acp`. `UNGUARDED` is a native agent the guard can wrap (direct launch), or an agent the editor starts from its own registry, which cannot be wrapped. `foreign` entries are not agents DefenseClaw knows and are never changed.
 
 Wrap the direct launches:
 
@@ -72,7 +67,7 @@ Wrap the direct launches:
 defenseclaw setup acp
 ```
 
-This runs the same setup for each pair and points your existing entry at the guard, keeping its key and `env`. It starts in observe mode; add `--activate` for action mode. A client-registry entry cannot be wrapped: remove it in the editor after the guarded entry exists, or the agent can still start without the guard.
+This runs setup for each pair and points your entry at the guard, keeping its key and `env`. It starts in observe mode; add `--activate` for action mode. Remove a client-registry entry in the editor once the guarded entry exists, or the agent can still start without the guard.
 
 ## Guard several agents in one editor
 
@@ -99,7 +94,7 @@ ACP guard: off (1 binding)
   Fix with: defenseclaw acp verify, then re-run defenseclaw acp setup for that pair
 ```
 
-The sample shows a binding whose contract lock is missing, so it needs attention. After a good setup the binding is not flagged. `defenseclaw doctor` lists the same bindings and fails on a broken one.
+The sample shows a binding with a missing contract lock. After a good setup the binding is not flagged. `defenseclaw doctor` lists the same bindings and fails on a broken one.
 
 ## Undo
 
@@ -113,3 +108,4 @@ This removes the entry and the contract lock for that pair.
 
 - [ACP guard reference](/docs/reference/apis/acp-guard)
 - [Kiro connector](/docs/connectors/kiro), the separate hook path
+- [Change block and alert levels](/docs/how-to/policies/change-block-and-alert-levels)

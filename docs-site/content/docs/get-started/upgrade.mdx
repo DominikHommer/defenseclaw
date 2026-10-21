@@ -1,11 +1,10 @@
 ---
 title: Upgrade
-description: Upgrade DefenseClaw with one command, roll back, control update notices, install from a mirror, and see which connectors were renamed or removed.
+description: Upgrade DefenseClaw with one command, roll back, and turn off update notices.
 keywords:
   - defenseclaw upgrade
   - defenseclaw rollback
-  - DefenseClaw update.source
-  - renamed and removed connectors
+  - DefenseClaw update.check
 ---
 
 `defenseclaw upgrade` installs the latest release and keeps your configuration, audit data, device key and agent setup. 1.0.4 supports upgrades from 1.0.3, 1.0.2 and 0.8.10. For 0.8.x, see [Upgrade from 0.8.x](/docs/appendix/upgrade-from-0-8).
@@ -49,6 +48,7 @@ defenseclaw rollback
 
 Rollback swaps the live install with the one the last upgrade replaced: programs, Python environment, configuration and data as they were at upgrade time. Anything written since moves into `~/.defenseclaw/previous` and returns when you roll forward. One previous install is kept, and rollback needs no network.
 
+- Between releases from 1.0.1 on, rollback also carries your sandbox setup: sandbox records, hook bindings and harness images. A release before 1.0.1 cannot take over that setup.
 - Each install shows only its own audit events. Read the other install's with `~/.defenseclaw/previous/bin/defenseclaw-gateway audit export --db ~/.defenseclaw/previous/data/audit.db`.
 - Rollback starts the restored gateway and waits up to 3 minutes. If it does not come up, rollback exits `1` and agent hooks are not guarded until `defenseclaw-gateway start` succeeds.
 - If an upgrade or rollback is interrupted, run the same command again. The installer first restores the install it was replacing.
@@ -56,83 +56,8 @@ Rollback swaps the live install with the one the last upgrade replaced: programs
 
 ## Update notices
 
-When a newer release exists, interactive commands and the TUI show one line: `DefenseClaw X.Y.Z is available (you have A.B.C) — run 'defenseclaw upgrade'`. The check runs at most once a day and never in scripts, JSON output or CI. Nothing is installed unless you run `defenseclaw upgrade`.
-
-## Update settings
-
-| Key | Default | What it does |
-| --- | --- | --- |
-| `update.check` | `true` | Show the update notice. Also off with `DEFENSECLAW_NO_UPDATE_CHECK=1`. |
-| `update.channel` | `stable` | The release channel. `stable` is the only one. |
-| `update.source` | `https://github.com/cisco-ai-defense/defenseclaw` | Where release files come from. Set an `https://` base URL for a mirror. |
-
-```bash
-defenseclaw config set update.check false
-```
-
-On Windows the `DisableSelfUpdate` enterprise policy also turns the notice off. A managed device does not self-update; the [lifecycle](/docs/enterprise/operate/lifecycle) applies updates.
-
-### Install from a mirror
-
-```bash
-defenseclaw config set update.source https://mirror.example.com/defenseclaw
-```
-
-The mirror must serve the paths GitHub serves: `releases/latest` (a redirect to the newest tag) and `releases/download/<tag>/` with the installer, the release files, `checksums.txt` and `checksums.txt.bundle`.
-
-`update.source` changes only where files come from. The certificate identity that signed the official releases is built into DefenseClaw, so a mirror must serve the official signed `checksums.txt` and its bundle, and the machine needs `cosign` 2.0 or later. Without it, the upgrade stops before it runs anything. `DEFENSECLAW_REPO` is the deprecated alias; `update.source` wins when both are set. A first install has no `config.yaml`, so use `DEFENSECLAW_REPO` for the installer there ([Installer](/docs/reference/commands/installer#mirror)).
+When a newer release exists, interactive commands and the TUI show one line: `DefenseClaw X.Y.Z is available (you have A.B.C) — run 'defenseclaw upgrade'`. The check runs at most once a day and never in scripts, JSON output or CI. Nothing is installed unless you run `defenseclaw upgrade`. Turn the notice off with `defenseclaw config set update.check false`. To install from a mirror, see [Update settings and mirrors](/docs/appendix/upgrade-from-0-8#update-settings-and-mirrors).
 
 ## Renamed and removed connectors
 
-This applies if you used Windsurf, Gemini CLI, OpenHands or OmniGent before 1.0.4.
-
-- **Windsurf is now Devin.** The upgrade moves your `windsurf` settings to the [`devin` connector](/docs/connectors/devin) and replaces the old hooks. You do nothing.
-- **Gemini CLI was removed.** Use [Antigravity](/docs/connectors/antigravity). Remove DefenseClaw's hooks from Gemini CLI's settings once.
-- **OpenHands and OmniGent were removed.** The `config_version` 9 migration drops their entries from `config.yaml`, including a telemetry destination whose every route selected only these connectors (`defenseclaw migrate` saves that), and records them in `migration-v9.json`. The first gateway start after the upgrade undoes what an older DefenseClaw setup wrote for them: OpenHands' `~/.openhands/hooks.json`, and OmniGent's `~/.omnigent/config.yaml`, its `defenseclaw_omnigent.pth` file and the policy module. It changes a file only when the file is exactly as that setup left it: the file goes back to what it was before setup, or is removed if setup created it. If you changed one of these files since, or DefenseClaw has no record of writing it, the gateway changes none of them: it prints one warning with the steps to remove DefenseClaw's entries by hand, and `defenseclaw status` and `defenseclaw doctor` show the same steps. When you have done them, run `defenseclaw-gateway connector teardown --connector omnigent` (or `openhands`) to remove the rest. Your other connectors start either way. If a file can't be written, nothing is changed and the gateway tries again on the next start. `defenseclaw uninstall` runs the same cleanup. Set up another agent with `defenseclaw setup <connector>` if one of them was your only connector.
-
-<Accordions type="multiple">
-
-<Accordion title="Windsurf is now Devin: what the upgrade changes" id="windsurf-is-now-devin">
-
-Windsurf was renamed Devin Desktop (Cognition). The [`devin` connector](/docs/connectors/devin) covers Devin CLI and Devin Desktop's default Devin Local agent; both read the same hook config. The move runs during `defenseclaw upgrade`, on the next `defenseclaw-gateway restart`, or when you run `defenseclaw setup devin`:
-
-- In `~/.defenseclaw/config.yaml`, `guardrail.connector`, `claw.mode` and every per-connector `windsurf` block become `devin`, keeping their settings. If a `devin` block already exists, it wins and the `windsurf` block is dropped; the upgrade output names the dropped key. Connector name lists, `asset_policy` rule connectors and observability route selectors are renamed the same way.
-- The gateway removes only the hook entries DefenseClaw wrote into `~/.codeium/windsurf/hooks.json`. Hooks from other tools stay.
-- It deletes `~/.defenseclaw/hooks/windsurf-hook.sh` (and `windsurf-hook.ps1`) and `~/.defenseclaw/connector_backups/windsurf/`.
-- It installs the Devin hooks in `~/.config/devin/config.json` (Windows: `%APPDATA%\devin\config.json`).
-
-Devin Desktop builds before 3.9.19 still run the legacy Cascade agent without DefenseClaw hooks. To confirm, run `defenseclaw doctor`, check that the Devin hook row passes, then open a new Devin tab or session.
-
-</Accordion>
-
-<Accordion title="Gemini CLI was removed: cleanup steps" id="gemini-cli-was-removed">
-
-If another connector is configured, the upgrade removes `geminicli` from `guardrail.connectors` and moves `guardrail.connector` and `claw.mode` to the first remaining connector. If Gemini CLI was your only connector, the upgrade stops before it changes anything; `defenseclaw migrate --check` names the connector. On its next start, the gateway deletes `~/.defenseclaw/hooks/geminicli-hook.sh` (and `.ps1`) and the connector's OTLP token. It never edits `~/.gemini`.
-
-Do this once, before you set up Antigravity:
-
-1. If Gemini CLI was your only connector, remove it on the release you still have. This refuses to remove the last connector without `--force`; DefenseClaw then enforces nothing until step 5.
-
-   ```bash
-   defenseclaw setup remove geminicli --yes --force
-   ```
-
-2. Open `~/.gemini/settings.json` (or `$GEMINI_CLI_HOME/.gemini/settings.json`; on Windows `%USERPROFILE%\.gemini\settings.json`). Under `hooks`, delete every group whose `hooks` list contains `"name": "defenseclaw"`, then delete any event key left empty.
-3. If `telemetry.otlpEndpoint` in the same file contains `/otlp/geminicli/`, delete the `telemetry` object or restore your own values.
-4. Do not touch `~/.gemini/config/`. That directory belongs to Antigravity.
-5. Restart the gateway and set up Antigravity:
-
-   ```bash
-   defenseclaw-gateway restart
-   defenseclaw setup antigravity
-   ```
-
-<Callout type="warn" title="Gemini CLI can be blocked until the gateway restarts">
-Until the gateway restarts after `geminicli` leaves `config.yaml`, the old hook script still calls a gateway endpoint that no longer exists. With `guardrail.hook_fail_mode: closed`, the default for new installs, that blocks every Gemini CLI action.
-</Callout>
-
-If `config.yaml` still names `geminicli`, the gateway refuses to start and its error points here; step 1 fixes it.
-
-</Accordion>
-
-</Accordions>
+Windsurf became [Devin](/docs/connectors/devin), and Gemini CLI, OpenHands and OmniGent were removed in 1.0.4. The upgrade handles Windsurf for you. For the rest, see [Renamed and removed connectors](/docs/appendix/upgrade-from-0-8#renamed-and-removed-connectors).

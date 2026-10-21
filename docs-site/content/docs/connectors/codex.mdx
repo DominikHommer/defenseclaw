@@ -24,7 +24,14 @@ defenseclaw setup codex --mode action  # block on policy hits
 
 On Windows, run the same commands in PowerShell. Quit and reopen Codex afterwards.
 
-{/* needs-live-capture: output of defenseclaw setup codex */}
+## Check it
+
+```bash
+defenseclaw status
+```
+
+The agent appears under **Agents** with its mode. `defenseclaw doctor` passes the **Codex hooks** row.
+
 
 ## What it can block or ask
 
@@ -44,21 +51,20 @@ On Windows, run the same commands in PowerShell. Quit and reopen Codex afterward
 | Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 | Proxy bypass for telemetry | `$CODEX_HOME/.env` (marked block, only when a proxy is set) | not written |
 
-Everything outside DefenseClaw's marked fields is kept. Teardown restores the backup, or removes only DefenseClaw's entries.
+Teardown restores the backup, or removes only DefenseClaw's entries.
 
 ## Limits
 
 - `codex features disable hooks` keeps the entries but runs none of them. DefenseClaw raises a guardrail-degraded alert, `defenseclaw status` shows DEGRADED and `defenseclaw doctor` fails the **Codex hooks** row. Run `codex features enable hooks`.
 - Delete only DefenseClaw's `command` lines from `config.toml` and Codex will not start. Use `defenseclaw setup codex --yes` or `defenseclaw doctor --fix` to repair it.
-- Hosted tools, file reads and `write_stdin` have no complete hook coverage.
+- Hosted tools, file reads and `write_stdin` have no complete hook coverage. On Windows each gateway start runs Codex's app-server once, which contacts OpenAI.
 - After you rotate a model key, or after an upgrade, run `codex app-server daemon restart`. The daemon keeps the environment and telemetry credential it started with.
-- Each gateway start on Windows runs Codex's app-server once to read its requirements. That process contacts OpenAI.
 
 ## On a managed computer
 
 The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup codex` and `setup remove`, and has no `guardrail` group. Protected requirements pin `[features] hooks = true`, so `codex features disable hooks` writes the user's config but hooks stay on.
 
-The administrator manages Codex in the managed `config.yaml`. `guardrail.connectors.codex: {}` adds it, the connector's `mode` and `hook_fail_mode` tune it, and `guardrail.connectors.codex.enabled: false` removes it. Apply the change as in [Change the config](/docs/enterprise/operate/lifecycle#change-the-config), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/configure/machine-policy#inspect-export-and-verify)).
+The administrator manages Codex in the managed `config.yaml` under `guardrail.connectors.codex` (`{}` adds it, `enabled: false` removes it). Apply the change as in [Change the config](/docs/enterprise/operate/lifecycle#change-the-config), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/configure/machine-policy#inspect-export-and-verify)).
 
 ## Turn it off
 

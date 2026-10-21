@@ -26,7 +26,7 @@ yaml = pytest.importorskip("yaml")
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "packaging" / "mdm" / "linux" / "examples" / "tetragon"
-GUIDE = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "runtime" / "tetragon.mdx"
+GUIDE = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "runtime" / "tetragon-reference.mdx"
 CLI_REFERENCE = ROOT / "docs-site" / "content" / "docs" / "reference" / "commands" / "cli.mdx"
 SCHEMA = ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json"
 

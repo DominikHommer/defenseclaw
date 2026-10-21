@@ -27,6 +27,19 @@ defenseclaw config reference observability
 defenseclaw observability plan
 ```
 
+## At a glance
+
+| Section | What it covers |
+| --- | --- |
+| [Buckets](#buckets) | The record groups you route, and what each holds |
+| [Destinations and capabilities](#destinations-and-capabilities) | OTLP, Splunk HEC and the other sinks, and what each can carry |
+| [Routes and selectors](#routes-and-selectors) | Which buckets go to which destination |
+| [Delivery tuning](#delivery-tuning), [Failure circuits](#failure-circuits) | Batching, queues, retries and what happens when a destination fails |
+| [Local history](#local-history) | What local SQLite keeps and for how long |
+| [Edit safely](#edit-safely) | How to change the block without breaking `config.yaml` |
+| [Local stack](#local-stack), [Galileo traces](#galileo-traces) | The bundled Grafana stack and the Galileo preset |
+| [Alert runbooks](#alert-runbooks) | What to do when a bundled alert fires |
+
 ## Buckets
 
 Every record belongs to one bucket. The catalog is closed at 14 names; you can change collection and delivery for a bucket but cannot add one.

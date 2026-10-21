@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_enrollment_docs_use_windows_status_for_managed_accounts() -> None:
     enrollment = (ROOT / "docs-site/content/docs/enterprise/configure/enrollment.mdx").read_text()
     operations = (ROOT / "docs-site/content/docs/enterprise/operate/operations.mdx").read_text()
-    sections = (enrollment.split("## Supported agent versions", 1)[1],
+    sections = (enrollment.split("## Check it worked", 1)[1],
                 operations.split("## Review activity from the CLI", 1)[1])
     for section in sections:
         assert "enterprise windows status --profile standalone --json" in section
@@ -931,7 +931,8 @@ def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> Non
 
 
 def test_enterprise_example_uses_secure_managed_redaction_default() -> None:
-    text = (ROOT / "docs-site/content/docs/enterprise/install/secure-client.mdx").read_text(encoding="utf-8")
+    # The Secure Client config example moved to the install reference page.
+    text = (ROOT / "docs-site/content/docs/enterprise/install/reference/secure-client.mdx").read_text(encoding="utf-8")
     assert "  defaults:\n    redaction_profile: sensitive" in text
 
 
@@ -964,8 +965,10 @@ def test_enterprise_docs_say_how_to_turn_on_ai_discovery() -> None:
     for page in ("install/linux.mdx", "install/macos.mdx"):
         text = (ROOT / "docs-site/content/docs/enterprise" / page).read_text(encoding="utf-8")
         assert "ai_discovery:\n  enabled: true" in text, page
-    configuration = (ROOT / "docs-site/content/docs/enterprise/configure/configuration.mdx").read_text(encoding="utf-8")
-    samples = configuration[configuration.index("## Sample configs"):]
+        assert "`ai_discovery.enabled: true`" in text, page
+    # The three sample configs (Linux, macOS, Windows) now live in the configure reference.
+    configuration = (ROOT / "docs-site/content/docs/enterprise/configure/reference.mdx").read_text(encoding="utf-8")
+    samples = configuration[configuration.index("### Sample configs"):]
     assert samples.count("ai_discovery:\n  enabled: true") == 3
 
 

@@ -23,7 +23,7 @@ You are an AI agent. Find out why DefenseClaw is not working, map each failure t
 
 1. Observe first. Do not switch to action mode, change a fail mode, disable a connector, unblock a site or edit `config.yaml` by hand without the user's yes to that exact change.
 2. Never print a key, token, `.env`, `hooks/` or `device.key`. Redact them from anything you quote.
-3. Stop on a managed computer: a command that exits `3`, or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`, means the administrator owns DefenseClaw. Tell the user to contact them.
+3. Stop on a managed computer: a command that prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`, means the administrator owns DefenseClaw. Tell the user to contact them.
 4. Do not open `audit.db` or attach it to a report.
 
 ## Steps

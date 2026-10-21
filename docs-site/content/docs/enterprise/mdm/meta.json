@@ -6,6 +6,8 @@
     "kandji",
     "workspace-one",
     "configmgr",
-    "linux-config-management"
+    "linux-config-management",
+    "linux-config-recipes",
+    "reference"
   ]
 }

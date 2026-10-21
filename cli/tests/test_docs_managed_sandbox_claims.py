@@ -48,7 +48,8 @@ def test_admin_docs_use_the_packaged_gateway_path() -> None:
 
 
 def test_managed_sandbox_page_states_the_verified_residuals_and_limits() -> None:
-    page = _read("enterprise/runtime/sandboxes.mdx")
+    # The residuals and flag limits moved to the sandbox reference page.
+    page = _read("enterprise/runtime/sandbox-reference.mdx")
     assert "hidepid" in page  # GAP-0302
     assert "openshell.admin.when_unavailable" in page  # GAP-0408
     assert "user_approvals: null" not in page  # GAP-0394
@@ -63,5 +64,5 @@ def test_windows_rule_pack_folder_is_not_left_readable_by_users() -> None:
 
 
 def test_lifecycle_explains_a_hand_edit_is_applied_not_drift() -> None:
-    lifecycle = _read("enterprise/operate/lifecycle.mdx")
+    lifecycle = _read("enterprise/operate/reference.mdx")
     assert "A hand edit of the config is applied, not reported as drift" in lifecycle  # GAP-0398

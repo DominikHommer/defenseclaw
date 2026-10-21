@@ -50,14 +50,19 @@ Take a 30-second inventory of the AI on a machine.
    defenseclaw agent ide-plugins --user alice --ai-only
    ```
 
+   The `ide-plugins` table looks like this (sample data; your plugins differ):
+
    ```text
-   User   IDE              Plugin                                            Version   Enabled      AI
-   alice  cursor           anthropic.claude-code (Claude Code for VS Code)   2.1.0     yes          yes
-   alice  vscode           github.copilot (GitHub Copilot)                   1.250.0   yes          yes
-   …
+   ┏━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━┓
+   ┃ User  ┃ IDE    ┃ Plugin                                          ┃ Version ┃ Enabled ┃ AI  ┃
+   ┡━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━┩
+   │ alice │ cursor │ anthropic.claude-code (Claude Code for VS Code) │ 2.1.0   │ yes     │ yes │
+   │ alice │ vscode │ github.copilot (GitHub Copilot)                 │ 1.250.0 │ yes     │ yes │
+   └───────┴────────┴─────────────────────────────────────────────────┴─────────┴─────────┴─────┘
+   2 plugin(s) shown; 7 in total, 4 AI, 0 disabled, 1 user(s)
    ```
 
-   {/* needs-live-capture: agent usage table and ide-plugins on a running gateway (the ide-plugins sample above is from the previous docs, 7 plugins, 4 AI) */}
+   {/* needs-live-capture: agent usage table and ide-plugins on a running gateway (the ide-plugins sample above is rendered by the CLI table code from sample rows) */}
 
 4. Open the TUI panel. Run `defenseclaw tui` and press `V`. Local models get their own table above agents and tools. Press `a` to show all models, `t` to switch tables.
 

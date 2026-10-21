@@ -2,6 +2,7 @@
   "title": "Operate",
   "pages": [
     "operations",
-    "lifecycle"
+    "lifecycle",
+    "reference"
   ]
 }

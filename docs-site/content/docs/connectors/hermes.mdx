@@ -26,7 +26,14 @@ On Windows, run the same commands in PowerShell. Interactive setup asks for the 
 
 Then reload or restart every Hermes host. Hermes registers hooks in each running process, so restarting the DefenseClaw gateway does not reload them. Until you reload, setup and doctor report `pending_reload`.
 
-{/* needs-live-capture: output of defenseclaw setup hermes */}
+## Check it
+
+```bash
+defenseclaw status
+```
+
+The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
+
 
 ## What it can block or ask
 

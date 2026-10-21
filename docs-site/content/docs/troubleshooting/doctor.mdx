@@ -21,8 +21,6 @@ DefenseClaw Doctor
 ==================
 
   [PASS] Audit database  -  ~/.defenseclaw/audit.db; SQLite quick_check=ok; required schema present
-  [PASS] Device identity  -  Ed25519 key custody and HMAC-bound provenance are valid
-  [PASS] Private files  -  only this account can read .env, device.key, audit.db and the data directory
 
   -- Connectors --
   [PASS] Connector compatibility: claudecode  -  claudecode matches a supported connector contract; installed=2.1.270; contract=claudecode-hooks-v2; supported=>=2.1.154
@@ -65,7 +63,7 @@ Rows are grouped by the section headers: the first group (configuration, audit d
 | `defenseclaw doctor --fix --yes` | Apply every safe and disruptive repair that applies. A repair runs before the checks, so the summary shows the repaired state. |
 | `defenseclaw doctor --fix --fix-id ID` | Apply one repair and its declared dependencies. Repeatable. |
 
-`doctor` is the command that reaches out: the `LLM reachable` check sends one request to your provider. `defenseclaw status` reads only local state and the local gateway.
+The `LLM reachable` check sends one request to your provider. `defenseclaw status` reads only local state and the local gateway.
 
 `--yes` never selects policy-changing or experimental repairs. Recreating the device key always asks first; do not add `--yes`:
 
@@ -82,7 +80,6 @@ defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize
 | Policy | WARN | `config.yaml` was edited outside the DefenseClaw writer. On a per-user install the gateway records the hand edit itself and the row clears. Make later changes with `defenseclaw config set`. |
 | Config validation | FAIL | `config.yaml` is invalid; the line names the field. A running gateway keeps the config it started with. |
 | Config migration | PASS or WARN | Shows until you run `defenseclaw config migrate --ack`. WARN when the migration recorded conflicts. |
-| Custom-provider overlay | FAIL | `custom-providers.json` was edited by hand. `defenseclaw doctor --fix` rewrites it. |
 | Hook runtime files | FAIL | A generated hook script was edited or replaced. `defenseclaw doctor --fix` re-renders it. |
 | Claude Code hooks freshness, Codex hooks freshness | WARN | A hook script is from an older build, or bakes a different fail mode. The line names the command that regenerates it. |
 | Orphaned hook entries | FAIL or WARN | Entries remain for a connector that is no longer configured. Run `defenseclaw setup remove CONNECTOR`. |
@@ -111,7 +108,6 @@ Doctor never edits `config.yaml` unless a repair says so.
 - **An exposed `.env`.** If another local user could read it, doctor rotates the gateway token instead of only tightening permissions. Rotate the other credentials in the file yourself.
 - **The gateway binary.** Doctor checks that only an administrator or your account can change `defenseclaw-gateway` and its directory. It refuses a file that fails the check, for example with `chmod go-w <file>` as the fix.
 - **A missing audit database.** `defenseclaw doctor --fix --dry-run --fix-id doctor.state.audit-db.initialize` previews it. Doctor creates a database only when none exists and the gateway is not running, and never erases an existing one.
-- **Versions.** An unsupported connector or component version is a finding, never an automatic change.
 - **Observability.** Repeated export failures pause one destination (a circuit breaker); local history and other destinations keep working. Fix and reload the destination, or run `defenseclaw setup observability disable NAME`.
 
-Not sure what a row means? [Troubleshooting](/docs/troubleshooting) lists the common failures. Agents can follow [Troubleshoot DefenseClaw](/docs/for-agents/troubleshoot).
+Common failures: [Troubleshooting](/docs/troubleshooting). Agents: [Troubleshoot DefenseClaw](/docs/for-agents/troubleshoot).

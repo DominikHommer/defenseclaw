@@ -52,7 +52,9 @@ async function listMdxFiles(dir: string): Promise<string[]> {
 function pathToSlugs(absPath: string): string[] {
   const relPath = relative(CONTENT_ROOT, absPath).replace(/\\/g, '/');
   const noExt = relPath.replace(/\.mdx$/, '');
-  const segs = noExt.split('/');
+  // A "(group)" folder groups pages in the sidebar without adding a URL
+  // segment, as in Fumadocs's own slug builder.
+  const segs = noExt.split('/').filter((seg) => !/^\(.+\)$/.test(seg));
   if (segs[segs.length - 1] === 'index') segs.pop();
   return segs;
 }
@@ -160,6 +162,18 @@ async function checkLinks() {
     for (const message of redirectErrors) console.error(`[validate-links] ${message}`);
     process.exit(1);
   }
+  // Every docs page and every redirect slug (the site pre-renders a "moved"
+  // page for each one) is a valid link target.
+  const docsRoutes = [
+    ...pages.map((page) => ({
+      value: { slug: page.slugs },
+      hashes: page.headings,
+    })),
+    ...Object.keys(legacyRedirects).map((key) => ({
+      value: { slug: key.split('/') },
+      hashes: [] as string[],
+    })),
+  ];
   const scanned = await scanURLs({
     preset: 'next',
     // Pass the public catch-all route explicitly. tinyglobby returns
@@ -170,20 +184,32 @@ async function checkLinks() {
     // platform.
     pages: [join('docs', '[[...slug]]', 'page.tsx')],
     populate: {
-      // Redirect slugs are valid link targets: the site pre-renders a
-      // "moved" page for each one.
-      'docs/[[...slug]]': [
-        ...pages.map((page) => ({
-          value: { slug: page.slugs },
-          hashes: page.headings,
-        })),
-        ...Object.keys(legacyRedirects).map((key) => ({
-          value: { slug: key.split('/') },
-          hashes: [] as string[],
-        })),
-      ],
+      'docs/[[...slug]]': docsRoutes,
+      // The same route as app-directory discovery finds it. Without this
+      // key the discovered route gets the default population, a /docs/(.+)
+      // fallback that accepts every docs link, real or not.
+      '(docs)/docs/[[...slug]]': docsRoutes,
     },
   });
+
+  // The site is exported with trailing slashes, so /docs/a and /docs/a/ are
+  // the same page. The scan registers the bare form only.
+  for (const [url, meta] of [...scanned.urls]) {
+    if (!url.endsWith('/')) scanned.urls.set(`${url}/`, meta);
+  }
+
+  // Negative check: a docs URL with no page must not resolve. This fails the
+  // run if a catch-all fallback ever accepts every docs link again.
+  const probes = ['/docs/validate-links-negative-probe', '/docs/validate-links-negative-probe/'];
+  const probe = probes.find(
+    (url) => scanned.urls.has(url) || scanned.fallbackUrls.some((fallback) => fallback.url.test(url)),
+  );
+  if (probe) {
+    console.error(
+      `[validate-links] the route scan accepts ${probe}, which has no page: a catch-all fallback would hide broken links`,
+    );
+    process.exit(1);
+  }
 
   const files: FileObject[] = pages.map((page) => ({
     path: page.absolutePath,

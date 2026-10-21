@@ -3,6 +3,7 @@
   "pages": [
     "rollout",
     "concepts",
-    "threat-model"
+    "threat-model",
+    "managed-policy"
   ]
 }
