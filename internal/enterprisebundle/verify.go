@@ -104,6 +104,11 @@ func CheckProductVersion(min, running string) error {
 	return nil
 }
 
+// IsReleaseVersion reports whether v is a release version
+// (MAJOR.MINOR.PATCH, an optional prerelease and build), the only kind
+// CheckProductVersion places against a min_product_version.
+func IsReleaseVersion(v string) bool { return productVersionRegex.MatchString(v) }
+
 // VerifyInput is what Verify checks a bundle against.
 type VerifyInput struct {
 	Bundle *Bundle
