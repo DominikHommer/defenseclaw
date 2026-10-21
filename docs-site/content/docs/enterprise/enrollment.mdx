@@ -495,6 +495,14 @@ enumerator logs the entry every cycle, and a signed-in user left pending has
 their installed agents reported as `agent_unprotected`. Name groups by SID to
 avoid lookups.
 
+A group name that resolved before but does not resolve now (the directory
+is unreachable, or its lookup does not answer) keeps the SID it last
+resolved to. The group may have been deleted and recreated under the same
+name with a new SID, so that SID decides only the users it lists: they are
+still excluded (or included). Every user the filter would decide because they
+are not in that SID is pending until the name resolves again, so an exclusion
+is never lost and no one is revoked.
+
 ## New, changed and removed users
 
 - **New user.** Enrolled on the next enumerator cycle, within five

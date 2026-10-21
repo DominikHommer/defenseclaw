@@ -52,9 +52,16 @@ import (
 //
 // Entries name a group by SID (S-1-5-32-544, S-1-12-1-...) or by name
 // (Administrators, BUILTIN\Administrators, CONTOSO\Developers). A name is
-// resolved to a SID while the directory answers and the resolution is
-// cached; Entra ID group names cannot be resolved on the device, so Entra ID
-// groups are listed by SID. A name that does not resolve and was never
+// resolved to a SID every cycle and the resolution is cached; Entra ID group
+// names cannot be resolved on the device, so Entra ID groups are listed by
+// SID. A name that resolved before but does not resolve this cycle (the
+// directory is unreachable, or its lookup has not answered) keeps its cached
+// SID, but that SID is unverified: the group may have been deleted and
+// recreated under the same name with a new SID, which a user's token then
+// holds instead. A user the cached SID lists is decided as before; a decision
+// that rests on a user not being in it is in doubt, so the user is pending
+// (no new rows, existing rows kept) until the name resolves again, and an
+// exclusion is never lost to an obsolete SID. A name that does not resolve and was never
 // cached (a misspelling, a group of another platform such as wheel, or a
 // directory group while the directory is unreachable) cannot be evaluated:
 // as an exclude_groups entry it excludes no one, as on Linux and macOS, so
@@ -266,6 +273,11 @@ const windowsEveryoneSID = "S-1-1-0"
 type windowsEnrollmentGroupEntry struct {
 	raw string
 	sid string // "" when the name did not resolve and is not cached
+	// unverified: the name did not resolve this cycle and sid is the SID
+	// cached when it last did. The group may since have been recreated
+	// under the same name with another SID, so a user's not being in sid
+	// is in doubt (membership).
+	unverified bool
 	// members lists the direct members of a local group from the local
 	// account database; nil for a directory group or when unreadable.
 	members map[string]bool
@@ -364,8 +376,8 @@ func newWindowsEnrollmentGroups(
 				entry.sid = sid
 				cache.Names[key] = sid
 			case cache.Names[key] != "":
-				entry.sid = cache.Names[key]
-				logfSafely(logf, "enrollment", fmt.Sprintf("group %q did not resolve (%v); using its cached SID %s", entry.raw, err, entry.sid))
+				entry.sid, entry.unverified = cache.Names[key], true
+				logfSafely(logf, "enrollment", fmt.Sprintf("enterprise.enrollment.%s %q did not resolve (%v); its cached SID %s still decides its members, and users it does not list are pending this cycle, since the group may have been recreated under a new SID (name the group by SID)", list, entry.raw, err, entry.sid))
 			case list == "exclude_groups":
 				logfSafely(logf, "enrollment", fmt.Sprintf("enterprise.enrollment.exclude_groups %q does not resolve to a group on this computer (%v); it excludes no one this cycle (name the group by SID)", entry.raw, err))
 			default:
@@ -466,8 +478,21 @@ func (g *windowsEnrollmentGroups) groupKind(sid string) windowsGroupKind {
 
 // membership is userSID's membership of entry. inDoubt says the answer
 // comes only from the groups cached at an earlier sign-in while the user may
-// be signed in now with a token this cycle could not read.
+// be signed in now with a token this cycle could not read, or that the user
+// is not in the group's cached SID while that SID is unverified: the group
+// may have been recreated under the same name with a SID the user holds, so
+// a non-member answer of an exclude_groups entry could lose the exclusion,
+// and one of an include_groups entry could revoke a member.
 func (g *windowsEnrollmentGroups) membership(userSID string, entry windowsEnrollmentGroupEntry) (membership windowsGroupMembership, inDoubt bool) {
+	membership, inDoubt = g.membershipOfSID(userSID, entry)
+	if entry.unverified && membership == windowsGroupNotMember {
+		return membership, true
+	}
+	return membership, inDoubt
+}
+
+// membershipOfSID is membership for entry.sid as it stands.
+func (g *windowsEnrollmentGroups) membershipOfSID(userSID string, entry windowsEnrollmentGroupEntry) (windowsGroupMembership, bool) {
 	if entry.sid == "" {
 		return windowsGroupUnresolved, false
 	}
@@ -617,10 +642,37 @@ func (g *windowsEnrollmentGroups) evaluate(userSID string) (decision windowsEnro
 
 // inDoubtReason is the pending reason of a decision evaluate put in doubt.
 func (g *windowsEnrollmentGroups) inDoubtReason(userSID string) string {
-	if g.unread[strings.ToUpper(strings.TrimSpace(userSID))] {
-		return "the groups of this user's active session could not be read this cycle, so the membership cached at an earlier sign-in may be out of date; pending: existing rows kept, no new rows"
+	userSID = strings.ToUpper(strings.TrimSpace(userSID))
+	var causes []string
+	_, fresh := g.sessions[userSID]
+	_, cached := g.cache.Users[userSID]
+	switch {
+	case g.unread[userSID]:
+		causes = append(causes, "the groups of this user's active session could not be read this cycle, so the membership cached at an earlier sign-in may be out of date")
+	case g.unreadAnyone && !fresh && cached:
+		causes = append(causes, "an active session's user could not be identified this cycle and may be this user, so the membership cached at an earlier sign-in may be out of date")
 	}
-	return "an active session's user could not be identified this cycle and may be this user, so the membership cached at an earlier sign-in may be out of date; pending: existing rows kept, no new rows"
+	if names := g.unverifiedNames(); len(names) > 0 {
+		causes = append(causes, fmt.Sprintf(
+			"enterprise.enrollment group %q did not resolve this cycle, so its cached SID may name a group since deleted or recreated under that name (name the group by SID)",
+			strings.Join(names, ", ")))
+	}
+	if len(causes) == 0 {
+		causes = append(causes, "the group membership this decision rests on may be out of date")
+	}
+	return strings.Join(causes, "; ") + "; pending: existing rows kept, no new rows"
+}
+
+// unverifiedNames lists the entries whose cached SID this cycle could not
+// confirm.
+func (g *windowsEnrollmentGroups) unverifiedNames() []string {
+	var names []string
+	for _, entry := range append(append([]windowsEnrollmentGroupEntry(nil), g.exclude...), g.include...) {
+		if entry.unverified {
+			names = append(names, entry.raw)
+		}
+	}
+	return names
 }
 
 func windowsGroupsPendingReason(list string, groups []string) string {
