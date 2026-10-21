@@ -28,7 +28,14 @@ var agentIdentitiesDDL = []string{
 	`CREATE TABLE IF NOT EXISTS agent_identity_sessions (agent_id TEXT NOT NULL, session_id TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY (agent_id, session_id)) WITHOUT ROWID`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identity_sessions_first_seen ON agent_identity_sessions(first_seen)`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identity_sessions_last_seen ON agent_identity_sessions(last_seen)`,
+	// The records a prune keeps aside for the gateway's 1.0.3 assignment
+	// bridge (retireLegacyAgentIdentities); never listed.
+	`CREATE TABLE IF NOT EXISTS agent_identities_retired (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0)`,
 }
+
+// agentIdentityColumns are the stored columns of agent_identities and
+// agent_identities_retired, in their order.
+const agentIdentityColumns = `agent_id, user_id, user_name, connector, install_fp, machine_hash, first_seen, last_seen, last_session_id, sessions_seen`
 
 // agentIdentityTimeLayout is fixed-width UTC so the stored strings order the
 // same way the times do, which the upsert's min/max rely on.
@@ -111,6 +118,10 @@ type AgentIdentityFilter struct {
 	Connector      string
 	// AgentIDs, when set, selects only these agents.
 	AgentIDs []string
+	// Retired also lists the records a prune kept aside for the gateway's
+	// 1.0.3 assignment bridge (retireLegacyAgentIdentities). Only the bridge
+	// sets it.
+	Retired bool
 	// Offset skips that many matching rows; Limit caps the rows returned
 	// after them (0 or less: no cap). The total counts every match.
 	Offset int
@@ -321,8 +332,13 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 			args = append(args, id)
 		}
 	}
+	from := ` FROM agent_identities`
+	if filter.Retired {
+		from = ` FROM (SELECT ` + agentIdentityColumns + ` FROM agent_identities UNION ALL SELECT ` +
+			agentIdentityColumns + ` FROM agent_identities_retired)`
+	}
 	query := `SELECT agent_id, user_id, COALESCE(user_name, ''), connector, COALESCE(install_fp, ''), machine_hash,
-		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen FROM agent_identities` + where +
+		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen` + from + where +
 		` ORDER BY last_seen DESC, agent_id`
 	// The user filter runs in Go (useridentity.AccountFilter), so a
 	// bare name selects a row stored as user@realm or DOMAIN\user, and the
@@ -332,7 +348,7 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 	account := filter.Account()
 	total := -1
 	if user == "" && (filter.Limit > 0 || filter.Offset > 0) {
-		counted, err := s.queryDB(ctx, "agent_identities.count", `SELECT COUNT(*) FROM agent_identities`+where, args...)
+		counted, err := s.queryDB(ctx, "agent_identities.count", `SELECT COUNT(*)`+from+where, args...)
 		if err != nil {
 			return nil, 0, err
 		}
