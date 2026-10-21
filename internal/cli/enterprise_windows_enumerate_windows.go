@@ -228,7 +228,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		// and group identity facts, but the enumerator never rewrites them.
 		if authored, loadErr := enterprisehooks.LoadManifest(manifestPath); loadErr == nil {
 			if cfg.StandaloneEnterprise() {
-				publishEnterpriseWindowsManifestIdentity(stderr, cfg, manifestPath, authored)
+				publishEnterpriseWindowsManifestIdentity(cycleCtx, stderr, cfg, manifestPath, authored)
 			}
 			if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(authored, "", !cfg.SecureClientIntegration(), enumerationLoggerForStderr(stderr)); grantErr != nil {
 				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
@@ -291,7 +291,14 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		// The gateway's service account cannot read that cache: publish each
 		// user's verified directory facts and named groups where it can.
 		identityDir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-		if spoolErr := enterpriseWindowsIdentitySpoolWriter(identityDir, enumerateOpts.GroupCache, enterpriseWindowsConnectorEmails(stderr, cfg, manifest), enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
+		// An excluded account's groups are not published as trusted
+		// identity facts (GAP-1264), and the pass ends with the cycle
+		// (GAP-1049).
+		excludedSIDs := make([]string, 0, len(excluded))
+		for _, target := range excluded {
+			excludedSIDs = append(excludedSIDs, target.SID)
+		}
+		if spoolErr := enterpriseWindowsIdentitySpoolWriter(cycleCtx, identityDir, enumerateOpts.GroupCache, excludedSIDs, enterpriseWindowsConnectorEmails(stderr, cfg, manifest), enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
 			fmt.Fprintf(stderr, format+"\n", args...)
 		}); spoolErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", spoolErr)
@@ -408,7 +415,7 @@ func revokeEnterpriseWindowsExcludedInventoryRead(stderr io.Writer, excluded []e
 
 // publishEnterpriseWindowsManifestIdentity refreshes signed-in token groups
 // for administrator selected targets while keeping their manifest untouched.
-func publishEnterpriseWindowsManifestIdentity(stderr io.Writer, cfg *config.Config, manifestPath string, manifest enterprisehooks.Manifest) {
+func publishEnterpriseWindowsManifestIdentity(ctx context.Context, stderr io.Writer, cfg *config.Config, manifestPath string, manifest enterprisehooks.Manifest) {
 	cachePath := enterprisehooks.WindowsEnrollmentGroupsCachePath(manifestPath)
 	cache, err := enterpriseWindowsEnumerateGroupCacheLoader(cachePath)
 	if err != nil {
@@ -426,7 +433,7 @@ func publishEnterpriseWindowsManifestIdentity(stderr io.Writer, cfg *config.Conf
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not save the enrollment group cache: %v\n", err)
 	}
 	identityDir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-	if err := enterpriseWindowsIdentitySpoolWriter(identityDir, refreshed, enterpriseWindowsConnectorEmails(stderr, cfg, manifest), enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
+	if err := enterpriseWindowsIdentitySpoolWriter(ctx, identityDir, refreshed, nil, enterpriseWindowsConnectorEmails(stderr, cfg, manifest), enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
 		fmt.Fprintf(stderr, format+"\n", args...)
 	}); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", err)

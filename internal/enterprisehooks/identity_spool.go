@@ -117,7 +117,9 @@ const identitySpoolClockSlack = time.Minute
 // written under a slow clock did once it was corrected, and the accounts
 // assigned by UPN fell to the default profile until the guardian's next
 // interval (GAP-0921). oldest is the time of the oldest record, zero for
-// none, and key its uid or SID.
+// none, and key its uid or SID; when only a record dated in the future makes
+// the spool stale, they are that record's time and key instead, so the
+// account named is the one at fault (GAP-1116).
 func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest time.Time, key string, stale bool) {
 	if dir == "" {
 		return time.Time{}, "", false
@@ -126,7 +128,8 @@ func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest 
 	if err != nil {
 		return time.Time{}, "", false
 	}
-	future := false
+	var futureAt time.Time
+	futureKey := ""
 	for _, entry := range entries {
 		name, ok := strings.CutSuffix(entry.Name(), ".json")
 		// Only the accounts' records count: the guardian's other files
@@ -142,11 +145,19 @@ func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest 
 		if oldest.IsZero() || written.Before(oldest) {
 			oldest, key = written, name
 		}
-		if written.Sub(now) > identitySpoolClockSlack {
-			future = true
+		if written.Sub(now) > identitySpoolClockSlack && (futureKey == "" || written.After(futureAt)) {
+			futureAt, futureKey = written, name
 		}
 	}
-	return oldest, key, !oldest.IsZero() && (future || now.Sub(oldest) > fresh)
+	switch {
+	case oldest.IsZero():
+		return time.Time{}, "", false
+	case now.Sub(oldest) > fresh:
+		return oldest, key, true
+	case futureKey != "":
+		return futureAt, futureKey, true
+	}
+	return oldest, key, false
 }
 
 // IdentitySpoolDir is the spool directory for a guardian authorization

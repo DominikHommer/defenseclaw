@@ -1152,11 +1152,19 @@ func TestEnumerateWindowsDisabledLocalAccountIsNotReportedUnprotected(t *testing
 	for _, tc := range []struct {
 		disabled      bool
 		sessionActive bool
-		wantReported  int
+		// disconnected: the account keeps a disconnected session, which
+		// can still start its agents (GAP-1463).
+		disconnected bool
+		// running is an agent of a connector that is not enabled: it does
+		// not keep the warning (GAP-0673).
+		running      map[string]map[string]string
+		wantReported int
 	}{
 		{disabled: true, sessionActive: false, wantReported: 0},
 		{disabled: false, sessionActive: false, wantReported: 1},
 		{disabled: true, sessionActive: true, wantReported: 1},
+		{disabled: true, disconnected: true, wantReported: 1},
+		{disabled: true, running: map[string]map[string]string{testLocalUserSID: {"cursor": "cursor (pid 9)"}}, wantReported: 0},
 	} {
 		windowsLocalAccountDisabled = func(string) (bool, error) { return tc.disabled, nil }
 		sessions := map[string][]string{}
@@ -1164,15 +1172,49 @@ func TestEnumerateWindowsDisabledLocalAccountIsNotReportedUnprotected(t *testing
 			sessions[testLocalUserSID] = []string{}
 		}
 		stubActiveSessions(t, sessions)
+		if tc.disconnected {
+			stubSignedInSessions(t, testLocalUserSID)
+		}
 		var reported []UnprotectedAgent
 		if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+			RunningAgents:     tc.running,
 			ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if len(reported) != tc.wantReported {
-			t.Fatalf("disabled=%v sessionActive=%v: reported %+v, want %d", tc.disabled, tc.sessionActive, reported, tc.wantReported)
+			t.Fatalf("disabled=%v sessionActive=%v disconnected=%v running=%v: reported %+v, want %d",
+				tc.disabled, tc.sessionActive, tc.disconnected, tc.running, reported, tc.wantReported)
 		}
+	}
+}
+
+// A session list that cannot be read keeps a disabled account's warning: it
+// may still have a session (GAP-1463).
+func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenSessionsAreUnreadable(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	previousDomain, previousDisabled := windowsMachineAccountDomainSID, windowsLocalAccountDisabled
+	t.Cleanup(func() { windowsMachineAccountDomainSID, windowsLocalAccountDisabled = previousDomain, previousDisabled })
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	windowsLocalAccountDisabled = func(string) (bool, error) { return true, nil }
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".local", "bin", "claude.exe"), []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	stubActiveSessions(t, map[string][]string{})
+	windowsSignedInSessionUsers = func() (map[string]bool, error) { return nil, errors.New("access denied") }
+	var reported []UnprotectedAgent
+	if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("reported %+v, want the disabled account's Claude Code kept", reported)
 	}
 }
 
