@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -54,9 +55,22 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 	defer enterpriseForeignHookRemovalsMu.Unlock()
 	err := func() error {
 		dataDir := cfg.DataDir
-		if !filepath.IsAbs(managed.HookGuardianAuthorizationDir(dataDir)) {
+		guardianDir := managed.HookGuardianAuthorizationDir(dataDir)
+		if !filepath.IsAbs(guardianDir) {
 			return errors.New("the data directory is not an absolute path")
 		}
+		if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
+			return err
+		}
+		fence := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFenceFile)
+		if err := enterpriseHookAuthorizationFileTrustCheck(fence); err != nil {
+			return err
+		}
+		unlock, err := enterprisepolicy.LockForeignHookRemovals(context.Background(), fence)
+		if err != nil {
+			return err
+		}
+		defer unlock()
 		mark := agentprocess.Now()
 		if mark == "" {
 			return errors.New("the process clock is unavailable")
@@ -72,7 +86,7 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 				})
 			}
 		}
-		path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
+		path := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile)
 		existing, loadErr := loadEnterpriseForeignHookRemovals(path)
 		if loadErr != nil {
 			// The gateway cannot use this ledger either; replacing it keeps
@@ -81,9 +95,6 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		}
 		data, err := enterprisepolicy.EncodeForeignHookRemovals(existing, added, now)
 		if err != nil {
-			return err
-		}
-		if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
 			return err
 		}
 		if err := writeEnterpriseHookProtectedFile(path, data); err != nil {

@@ -75,10 +75,30 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	stateDir := foreignHookSessionStateDir(dataDir, identity)
-	removals, removalsErr := a.foreignHookRemovals.forIdentity(managed.HookGuardianAuthorizationDir(dataDir), identity)
 	// Each identity has its own store, so only that identity's exchanges
 	// are serialized; another account's exchange never waits on this one.
 	unlock := a.foreignHookSessionLocks.lock(stateDir)
+	guardianDir := managed.HookGuardianAuthorizationDir(dataDir)
+	fence := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFenceFile)
+	if err := validateManagedGuardianAuthorization(fence, "hook guardian foreign-hook removal fence"); err != nil {
+		unlock()
+		writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_removal_fence_unavailable")
+		return
+	}
+	lockCtx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	fenceUnlock, err := enterprisepolicy.LockForeignHookRemovals(lockCtx, fence)
+	cancel()
+	if err != nil {
+		unlock()
+		writeManagedHookRefusal(w, http.StatusServiceUnavailable, "foreign_hook_removal_fence_unavailable")
+		return
+	}
+	defer func() {
+		if fenceUnlock != nil {
+			fenceUnlock()
+		}
+	}()
+	removals, removalsErr := a.foreignHookRemovals.forIdentity(guardianDir, identity)
 	decision := enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
 		StateDir:     stateDir,
 		Key:          exchange.Key,
@@ -90,6 +110,10 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	})
 	unlock()
 	if decision.Deny {
+		// A denial cannot become an allow when the guardian commits a
+		// removal, so do not hold the fence through audit export.
+		fenceUnlock()
+		fenceUnlock = nil
 		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
 	}
 	w.Header().Set("Content-Type", "application/json")

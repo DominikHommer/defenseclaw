@@ -44,6 +44,9 @@ func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 	}
 	guardianDir := t.TempDir()
 	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
+	if err := os.WriteFile(filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFenceFile), nil, 0o640); err != nil {
+		t.Fatal(err)
+	}
 	restoreValidate := validateManagedGuardianAuthorization
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = restoreValidate })
@@ -146,5 +149,124 @@ func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 	restartedHandler := restarted.tokenAuth(restarted.managedHookSocketMux())
 	if status, result := call(restartedHandler, aliceToken, clean, ""); status != http.StatusOK || !result.Deny || !strings.Contains(result.Reason, "restart the agent") {
 		t.Fatalf("gateway restart lost the block: %d %+v", status, result)
+	}
+}
+
+type pausedForeignHookResponse struct {
+	http.ResponseWriter
+	entered chan struct{}
+	resume  chan struct{}
+}
+
+func (w pausedForeignHookResponse) Write(data []byte) (int, error) {
+	close(w.entered)
+	<-w.resume
+	return w.ResponseWriter.Write(data)
+}
+
+// GAP-0348: an allow's response write and a guardian removal commit must
+// have one order across processes. The permanent fence cannot be replaced
+// when the ledger is atomically replaced.
+func TestForeignHookSessionAllowResponseFencesRemovalCommit(t *testing.T) {
+	guardianDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
+	previous := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
+	fence := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFenceFile)
+	if err := os.WriteFile(fence, nil, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
+	identity := "1001"
+	if runtime.GOOS == "windows" {
+		identity = "S-1-5-21-1111-2222-3333-1001"
+	}
+	body := []byte(`{"key":{"connector":"claudecode","session":"s-1","process":"` + runtime.GOOS + `:b:4242:100"},"session_start":true,"decision":{"deny":false}}`)
+	request := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", bytes.NewReader(body))
+		ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")
+		ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
+		return req.WithContext(ctx)
+	}
+	ledger := filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile)
+	commit := func() {
+		t.Helper()
+		data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
+			Identity: identity, Connector: "claudecode", Path: "/home/alice/.claude/settings.json",
+			At: time.Now().UTC().Format(time.RFC3339), Mark: runtime.GOOS + ":b:200",
+		}}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(ledger, data, 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A commit that owns the fence first must be visible to the exchange.
+	unlock, err := enterprisepolicy.LockForeignHookRemovals(context.Background(), fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		api.handleForeignHookSession(recorder, request())
+		done <- recorder
+	}()
+	select {
+	case response := <-done:
+		unlock()
+		t.Fatalf("exchange answered before the removal commit: %s", response.Body.String())
+	case <-time.After(100 * time.Millisecond):
+	}
+	commit()
+	unlock()
+	select {
+	case response := <-done:
+		if !strings.Contains(response.Body.String(), `"deny":true`) {
+			t.Fatalf("removal before exchange: %s", response.Body.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("exchange did not answer after the commit")
+	}
+
+	// Reset the ledger, then pause an allow during Encode. The guardian's
+	// exclusive commit must wait until that response has been written.
+	if err := os.Remove(ledger); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	paused := pausedForeignHookResponse{ResponseWriter: recorder, entered: make(chan struct{}), resume: make(chan struct{})}
+	answered := make(chan struct{})
+	go func() { api.handleForeignHookSession(paused, request()); close(answered) }()
+	select {
+	case <-paused.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("allow did not reach its response write")
+	}
+	writerDone := make(chan func(), 1)
+	go func() {
+		unlock, err := enterprisepolicy.LockForeignHookRemovals(context.Background(), fence)
+		if err == nil {
+			writerDone <- unlock
+		}
+	}()
+	select {
+	case unlock := <-writerDone:
+		unlock()
+		close(paused.resume)
+		t.Fatal("guardian commit overtook an allow response write")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(paused.resume)
+	<-answered
+	select {
+	case unlock := <-writerDone:
+		commit()
+		unlock()
+	case <-time.After(3 * time.Second):
+		t.Fatal("guardian did not acquire the fence after the response")
 	}
 }

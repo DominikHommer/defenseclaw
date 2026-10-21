@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestHookCallerLimiterBoundsEachCallerSeparately(t *testing.T) {
@@ -314,6 +317,14 @@ func TestForeignHookSessionExchangesDoNotWaitOnOtherIdentities(t *testing.T) {
 	if !filepath.IsAbs(dataDir) {
 		t.Fatalf("test data dir %q is not absolute", dataDir)
 	}
+	guardianDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
+	if err := os.WriteFile(filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFenceFile), nil, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	previous := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = previous })
 	exchange := func(identity string) <-chan int {
 		done := make(chan int, 1)
 		go func() {
