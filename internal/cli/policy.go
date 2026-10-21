@@ -321,18 +321,29 @@ var policyEvaluateCmd = &cobra.Command{
 		return rootPersistentPreRunE(cmd, args)
 	},
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		paths, err := resolvePolicyPaths()
-		if err != nil {
-			return fmt.Errorf("policy: resolve paths: %w", err)
-		}
-
 		targetType, _ := cmd.Flags().GetString("target-type")
 		targetName, _ := cmd.Flags().GetString("target-name")
 		severity, _ := cmd.Flags().GetString("severity")
 		findings, _ := cmd.Flags().GetInt("findings")
+		if targetType != "skill" && targetType != "mcp" && targetType != "plugin" {
+			return usageError(cmd, fmt.Errorf("--target-type must be skill, mcp or plugin"))
+		}
+		severity = strings.ToUpper(severity)
+		switch severity {
+		case "", "INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL":
+		default:
+			return usageError(cmd, fmt.Errorf("--severity must be INFO, LOW, MEDIUM, HIGH or CRITICAL (or empty for pre-scan)"))
+		}
+		if findings < 0 {
+			return usageError(cmd, fmt.Errorf("--findings must be zero or greater"))
+		}
 
 		if targetName == "" {
-			return fmt.Errorf("--target-name is required")
+			return usageError(cmd, fmt.Errorf("--target-name is required"))
+		}
+		paths, err := resolvePolicyPaths()
+		if err != nil {
+			return fmt.Errorf("policy: resolve paths: %w", err)
 		}
 
 		secureClient := cfg != nil && cfg.SecureClientIntegration()
