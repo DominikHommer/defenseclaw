@@ -223,11 +223,23 @@ func TestBumpPublishedSessionGenerationOnlyMovesForwardAndFailsClosed(t *testing
 		t.Fatal(err)
 	}
 	before := publishedSessionTestGeneration(t, root)
+	previousSet := publishedSessionSetTime
+	t.Cleanup(func() { publishedSessionSetTime = previousSet })
+	var set []time.Time
+	publishedSessionSetTime = func(name string, at time.Time) error {
+		set = append(set, at)
+		return previousSet(name, at)
+	}
 	if err := BumpPublishedSessionGeneration(root); err != nil {
 		t.Fatal(err)
 	}
 	if after := publishedSessionTestGeneration(t, root); after <= before {
 		t.Fatalf("a generation dated ahead must still move forward: %d after %d", after, before)
+	}
+	for _, at := range set {
+		if at.UnixNano() <= before {
+			t.Fatalf("a bump must never set the generation back, not even for a moment: %v (was %d)", at, before)
+		}
 	}
 
 	// Whole seconds: the first time does not take.
@@ -235,8 +247,6 @@ func TestBumpPublishedSessionGenerationOnlyMovesForwardAndFailsClosed(t *testing
 	if err := os.Chtimes(path, whole, whole); err != nil {
 		t.Fatal(err)
 	}
-	previousSet := publishedSessionSetTime
-	t.Cleanup(func() { publishedSessionSetTime = previousSet })
 	publishedSessionSetTime = func(name string, at time.Time) error { return previousSet(name, at.Truncate(time.Second)) }
 	if err := BumpPublishedSessionGeneration(root); err != nil {
 		t.Fatal(err)
