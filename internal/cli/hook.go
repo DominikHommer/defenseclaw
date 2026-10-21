@@ -220,7 +220,7 @@ func armHookAnswerWatchdog(connectorName, event, failMode, surface string, manag
 	stdin := io.MultiReader(bytes.NewReader(payload), os.Stdin)
 	// No FailureLogHome here: armed alone the watchdog writes no row. Run's
 	// options carry the resolver when Run adopts the watchdog.
-	return stdin, hookexec.ArmAnswerWatchdog(hookexec.Options{
+	watchdog := hookexec.ArmAnswerWatchdog(hookexec.Options{
 		Connector:         connectorName,
 		Event:             event,
 		FailMode:          failMode,
@@ -230,6 +230,14 @@ func armHookAnswerWatchdog(connectorName, event, failMode, surface string, manag
 		StartedAt:         startedAt,
 		Exit:              exit,
 	}, payload)
+	if managed {
+		// Once the watchdog is armed, look the account up in the
+		// background: a lookup slower than the watchdog's log wait left
+		// the call it answered with no hook-failures row.
+		profileDir := hookUserProfileDir
+		watchdog.PrefetchFailureLogHome(func() string { return failureLogHomeIn(profileDir) })
+	}
+	return stdin, watchdog
 }
 
 // endHookBeforeRun ends a hook call that needs no answer (a retired launcher,
@@ -456,12 +464,18 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 var hookUserProfileDir = managedHookUserProfileDir
 
 // managedHookFailureLogHome is the invoking user's diagnostic directory for
-// managed hook failure rows (hookUserProfileDir). hookexec calls it only when
-// it writes a row, after the call was answered or its watchdog armed: the
-// account lookup (NSS, Open Directory, a token Known Folder) can be slow, and
-// a call that succeeds never pays for it.
+// managed hook failure rows (hookUserProfileDir). It is never on the answer
+// path: a tool call looks it up in the background once its watchdog is armed
+// (armHookAnswerWatchdog), any other call only when it writes a row. The
+// account lookup (NSS, Open Directory, a token Known Folder) can be slow.
 func managedHookFailureLogHome() string {
-	home, err := hookUserProfileDir()
+	return failureLogHomeIn(hookUserProfileDir)
+}
+
+// failureLogHomeIn is the diagnostic directory in the profile that
+// profileDir resolves; empty when it resolves none.
+func failureLogHomeIn(profileDir func() (string, error)) string {
+	home, err := profileDir()
 	if err != nil || home == "" {
 		return ""
 	}

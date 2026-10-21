@@ -285,8 +285,10 @@ type Options struct {
 	// or contains a .disabled file the hook is a no-op (exit 0).
 	Home string
 	// FailureLogHome resolves the invoking user's diagnostic directory for
-	// the failure rows of a managed hook. It runs only when a row is written,
-	// so the account lookup is not on the path of a call that succeeds.
+	// the failure rows of a managed hook. It is never on the answer path:
+	// a tool call's answer watchdog runs it once in the background from the
+	// moment it is armed (PrefetchFailureLogHome), so the watchdog's own row
+	// does not wait on it; any other call runs it only when it writes a row.
 	// Enforcement still uses the administrator-owned Home, and a managed row
 	// never goes there: with no resolver, or an empty answer, there is no row.
 	FailureLogHome func() string
@@ -549,7 +551,7 @@ func runHook(ctx context.Context, opts Options) int {
 		// tool call after all: it stands down.
 		opts.answerWatch.answered()
 	case opts.answerWatch != nil:
-		opts.answerWatch.adopt(opts, sp, failMode)
+		opts.answerWatch.adopt(&opts, sp, failMode)
 	case !deadline.IsZero():
 		// A tool call is answered by its answer deadline even when this
 		// process runs late (GAP-0155, GAP-0167).

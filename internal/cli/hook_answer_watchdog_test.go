@@ -55,8 +55,10 @@ func TestHookArmsTheAnswerWatchdogBeforeTheRuntimeResolution(t *testing.T) {
 // A managed hook arms its answer watchdog before anything resolves the
 // user's diagnostic directory: on Windows that is a token-bound Known Folder
 // lookup that can stall, and a stall before the watchdog runs left the call
-// with no fail-closed answer at its deadline.
-func TestManagedHookArmsTheWatchdogBeforeTheProfileLookup(t *testing.T) {
+// with no fail-closed answer at its deadline. Once armed, the hook starts
+// that lookup in the background (G-small loop 2): a lookup slower than the
+// watchdog's log wait left the call it answered with no failure row.
+func TestManagedHookArmsTheWatchdogThenPrefetchesTheProfileLookup(t *testing.T) {
 	savedSecureClient, savedProfile := secureClientHost, hookUserProfileDir
 	secureClientHost = func() bool { return false }
 	looked := make(chan struct{}, 1)
@@ -86,15 +88,19 @@ func TestManagedHookArmsTheWatchdogBeforeTheProfileLookup(t *testing.T) {
 		_, watchdog := armHookAnswerWatchdog("claudecode", "", "", "", true, time.Now(), func(int) {})
 		armed <- watchdog
 	}()
+	var watchdog *hookexec.AnswerWatchdog
 	select {
-	case watchdog := <-armed:
+	case watchdog = <-armed:
 		if watchdog == nil {
 			t.Fatal("the managed tool call armed no watchdog")
 		}
-		watchdog.Finish(0)
-	case <-looked:
-		t.Fatal("the hook resolved the user profile before it armed the watchdog")
 	case <-time.After(10 * time.Second):
 		t.Fatal("arming the watchdog waited on the stalled profile lookup")
+	}
+	defer watchdog.Finish(0)
+	select {
+	case <-looked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the armed hook did not start the profile lookup of its failure rows")
 	}
 }

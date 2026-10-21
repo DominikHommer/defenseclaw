@@ -110,25 +110,17 @@ func isTracestateChar(c byte) bool {
 // without a fail-closed contract records what the call got instead
 // (loggedFailMode), so the fail-open report finds the calls that ran.
 func logHookFailure(opts Options, sp spec, reason, category, failMode string, blocked bool) {
-	if w := opts.answerWatch; w != nil {
-		w.mu.Lock()
-		answeredByWatchdog := w.fired
-		if !answeredByWatchdog {
-			if w.failureLogged {
-				w.mu.Unlock()
-				return
-			}
-			w.failureLogged = true
-			w.failureLogDone = make(chan struct{})
-		}
-		w.mu.Unlock()
-		if answeredByWatchdog {
-			return
-		}
-		defer close(w.failureLogDone)
-	}
 	if sp.failOpenOnly {
 		blocked = loggedFailMode(opts, sp, failMode) == "closed"
+	}
+	if w := opts.answerWatch; w != nil {
+		// Before anything below can block: a closed failure keeps the
+		// watchdog's answer closed (claimFailureLog).
+		done, claimed := w.claimFailureLog(opts, sp, blocked)
+		if !claimed {
+			return
+		}
+		defer close(done)
 	}
 	outcome := "fail_closed"
 	if !blocked {
