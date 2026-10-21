@@ -1995,7 +1995,12 @@ OpenShell 0.1.3 to 0.1.5 in place with NVIDIA's installer?``, or run
 no, as for the install, so `--yes` and `--non-interactive` do not upgrade, and
 setup then stops on the **Gateway** check. In the TUI, turn **Install
 OpenShell** on: it stays off for an upgrade. On the MicroVM driver, first stop
-the running sandboxes with `defenseclaw sandbox stop <name>`. After the
+the sandboxes that run, start or stop with `defenseclaw sandbox stop <name>`.
+The upgrade flushes the disk of a MicroVM that completed or is in OpenShell's
+error state, whose VM still runs. When it cannot, it names the MicroVM:
+`defenseclaw sandbox stop <name>` flushes it. OpenShell before 0.1.5 refuses
+to stop a MicroVM in its error state, but the stop flushes its disk all the
+same and says so, and the upgrade then keeps its work. After the
 upgrade, stop and start each sandbox that kept running through it: until it
 stops, it runs the old release's supervisor, and DefenseClaw says so
 (``⚠ <name>'s session started on OpenShell 0.1.3``) in the activity feed and

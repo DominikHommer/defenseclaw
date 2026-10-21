@@ -688,9 +688,16 @@ func (i *Installer) prepareUpgrade(ctx context.Context, release Version) error {
 //     GetGatewayInfo did not name) the restart stops every sandbox, and a
 //     MicroVM stopped without a flush loses what it wrote since its last
 //     sync: a flush before the script would leave minutes of writes
-//     unsynced. A sandbox running or starting refuses the upgrade
-//     (ErrSandboxesRunning, naming them), and so does a list that fails.
-//     One that answers neither call is taken to be down, and runs nothing.
+//     unsynced. A sandbox that may hold compute (MayHoldCompute: running,
+//     starting, stopping, or in a phase OpenShell does not name) refuses
+//     the upgrade (ErrSandboxesRunning, naming them), and so does a list
+//     that fails. A MicroVM whose workload ended (WorkloadEnded: completed,
+//     or in the error state, which an OpenShell before SandboxMin cannot
+//     stop) writes nothing more: its disk is flushed now, and it refuses
+//     the upgrade only when that fails. One whose provisioning timed out
+//     ran nothing since its last stop, and the upgraded gateway's start
+//     provisions it again. A gateway that answers neither call is taken to
+//     be down, and runs nothing.
 //
 // A sandbox started after this, while the script runs, is not covered.
 func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) error) error {
@@ -710,18 +717,37 @@ func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) er
 		}
 		return fmt.Errorf("%w, and the sandboxes on it could not be listed: %v", ErrSandboxesRunning, err)
 	}
-	var running []string
+	var running, unflushed []string
 	for _, sb := range list {
-		if sb != nil && (sb.Status.Phase == PhaseReady || sb.Status.Phase == PhaseProvisioning) {
+		switch {
+		case sb == nil || !MayHoldCompute(sb.Status.Phase, false):
+		case sb.Status.Phase == PhaseError && ProvisioningTimedOut(failureReason(sb)):
+		case WorkloadEnded(sb.Status.Phase):
+			if err := syncSandbox(ctx, c, sb.Name); err != nil {
+				unflushed = append(unflushed, fmt.Sprintf("%s, %s: %v", sb.Name, strings.ToLower(string(sb.Status.Phase)), err))
+			}
+		default:
 			running = append(running, sb.Name)
 		}
 	}
-	if len(running) == 0 {
+	if len(running) == 0 && len(unflushed) == 0 {
 		return nil
 	}
 	slices.Sort(running)
-	return fmt.Errorf("%w (%s): stop them first with `defenseclaw sandbox stop NAME`, which flushes their disks, then upgrade",
-		ErrSandboxesRunning, strings.Join(running, ", "))
+	slices.Sort(unflushed)
+	var why strings.Builder
+	if len(running) > 0 {
+		fmt.Fprintf(&why, " (%s): stop them first with `defenseclaw sandbox stop NAME`, which flushes their disks", strings.Join(running, ", "))
+	}
+	if len(unflushed) > 0 {
+		sep := ":"
+		if why.Len() > 0 {
+			sep = ";"
+		}
+		fmt.Fprintf(&why, "%s DefenseClaw could not flush the disks of the MicroVMs whose workload ended (%s): `defenseclaw sandbox stop NAME` "+
+			"flushes and stops one, and flushes one in OpenShell's error state that this OpenShell cannot stop", sep, strings.Join(unflushed, "; "))
+	}
+	return fmt.Errorf("%w%s, then upgrade", ErrSandboxesRunning, why.String())
 }
 
 // runtimeImageRepository holds the images OpenShell's docker driver runs

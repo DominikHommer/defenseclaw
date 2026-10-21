@@ -19,6 +19,7 @@ package manager
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -251,15 +252,95 @@ func (b *headBuffer) Bytes() []byte { return b.buf.Bytes() }
 // flushSandbox runs sync(1) in a ready sandbox before a stop its driver
 // does not flush, and reports a failure.
 func (m *Manager) flushSandbox(ctx context.Context, gw *Gateway, name string) {
+	if err := m.syncDisk(ctx, gw, name); err != nil {
+		m.flushFailed(name, err)
+	}
+}
+
+// syncDisk runs sync(1) in the sandbox name, within flushWait.
+func (m *Manager) syncDisk(ctx context.Context, gw *Gateway, name string) error {
 	ctx, cancel := context.WithTimeout(ctx, flushWait+5*time.Second)
 	defer cancel()
 	res, err := m.ownExec(ctx, gw, name, []string{"/bin/sync"}, openshell.ExecOptions{Timeout: flushWait, Attempts: 1, MaxOutputBytes: 256})
 	if err == nil && res.ExitCode != 0 {
 		err = fmt.Errorf("sync(1) exited with status %d", res.ExitCode)
 	}
+	return err
+}
+
+// flushEnded flushes, before a stop, the disk of b when it is a MicroVM
+// whose workload ended (completed, or in OpenShell's error state) on a
+// gateway whose stop does not flush it: such a MicroVM still runs until it
+// stops (GAP-0012), and endHarness flushes only a ready sandbox. It returns
+// that phase and how the flush went ("" and nil when there was nothing to
+// flush). One whose provisioning timed out ran nothing since its last stop.
+// A failed flush is reported (flushFailed), and the stop goes ahead.
+func (m *Manager) flushEnded(ctx context.Context, gw *Gateway, b *box) (audit.SandboxPhase, error) {
+	m.mu.Lock()
+	name, phase, reason := b.rec.Name, b.phase, b.rec.PhaseReason
+	if phase == "" {
+		phase = audit.SandboxPhase(b.rec.Phase)
+	}
+	skip := b.creating || b.deleted || b.retained || b.missing
+	m.mu.Unlock()
+	if skip || gw.Driver.StopFlushes || (phase != audit.SandboxPhaseCompleted && phase != audit.SandboxPhaseError) ||
+		(phase == audit.SandboxPhaseError && openshell.ProvisioningTimedOut(reason)) {
+		return "", nil
+	}
+	err := m.syncDisk(ctx, gw, name)
 	if err != nil {
 		m.flushFailed(name, err)
 	}
+	return phase, err
+}
+
+// keptFlushedReason is the feed's reason for a MicroVM in OpenShell's error
+// state whose disk DefenseClaw flushed where OpenShell refused its stop.
+const keptFlushedReason = "flushed_in_error"
+
+// keptFlushed is refusal, OpenShell's refusal to stop b in its error state
+// (one before openshell.SandboxMin refuses every such stop), told with what
+// became of the flush flushEnded made first (ended: the phase it flushed b
+// in, "" when it made none). A MicroVM still in that phase keeps the flush
+// in its record (FlushedIn), so what stops the gateway on its own (the
+// upgrade, a managed switch to another release, the daemon's idle stop) no
+// longer waits for it: that is how its work is kept across the upgrade
+// that lets OpenShell stop and start it.
+func (m *Manager) keptFlushed(b *box, ended audit.SandboxPhase, flushErr, refusal error) error {
+	var apiErr *sandboxapi.Error
+	if ended == "" || !errors.As(refusal, &apiErr) {
+		return refusal
+	}
+	out := *apiErr
+	m.mu.Lock()
+	name, reason := b.rec.Name, b.rec.PhaseReason
+	flushed := flushErr == nil && b.phase == ended
+	if flushed {
+		b.rec.FlushedIn = string(ended)
+	}
+	m.mu.Unlock()
+	upgrade := m.upgradeWayOn(m.gatewayRelease())
+	switch {
+	case flushErr != nil:
+		out.Message += "; DefenseClaw could not flush its MicroVM's disk either (" + truncate(flushErr.Error(), 200) +
+			"), so what stops the OpenShell gateway on its own (an upgrade, a switch to another OpenShell release) goes on waiting for it"
+		if upgrade != "" {
+			out.Detail = "its MicroVM does not answer, so nothing can flush it: `defenseclaw sandbox stop " + name + "` again once it answers flushes it, " +
+				"and `defenseclaw sandbox delete " + name + "` ends the wait if its work is not needed; " + errorPhaseWayOn(name, reason, upgrade, false)
+		}
+		return &out
+	case !flushed:
+		return &out
+	}
+	if err := m.saveRecord(b); err != nil {
+		m.logf("save the record of %s: %v", name, err)
+	}
+	out.Message += "; DefenseClaw flushed its MicroVM's disk instead, so a restart of the OpenShell gateway (an upgrade, a switch to another " +
+		"OpenShell release) keeps what it wrote, and no longer waits for it"
+	out.Detail = errorPhaseWayOn(name, reason, upgrade, false)
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: keptFlushedReason,
+		Message: "sandbox " + name + "'s MicroVM disk is flushed: OpenShell could not stop it in its error state, and a restart of the OpenShell gateway keeps its work"})
+	return &out
 }
 
 // flushFailed says a stop went ahead without the flush: what the workload

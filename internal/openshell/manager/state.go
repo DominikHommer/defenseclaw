@@ -198,6 +198,11 @@ type record struct {
 	// stopping it, so without a flush: what it wrote in its last seconds
 	// may be missing, empty or cut short (GAP-0367).
 	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
+	// FlushedIn is the phase (completed, error) the MicroVM was in when
+	// DefenseClaw last flushed its disk with its workload ended, for a stop
+	// OpenShell refused (keptFlushed); a phase change clears it
+	// (HoldsCompute).
+	FlushedIn string `json:"flushed_in,omitempty"`
 	// StoppedAt is when the sandbox stopped running, by a stop or because
 	// its main process ended (completed); zero while it is in another
 	// phase. delete_stopped_after counts from it (deleteExpired).

@@ -25,8 +25,9 @@ import (
 // TestSandboxDaemonKeepsTheGatewayForComputeThatMayStillRun: the daemon
 // stops the account's OpenShell gateway, or exits for a pending restart
 // (the managed pin migration's, for one), only once no sandbox may hold
-// compute: a MicroVM in OpenShell's error state counts, since nothing can
-// flush it first; a docker sandbox in that state is a stopped container.
+// compute: a MicroVM that completed or is in OpenShell's error state
+// counts until it stops or DefenseClaw flushed its disk; a docker sandbox
+// in those phases is an exited container.
 func TestSandboxDaemonKeepsTheGatewayForComputeThatMayStillRun(t *testing.T) {
 	for _, tc := range []struct {
 		list []sandboxapi.Sandbox
@@ -37,6 +38,14 @@ func TestSandboxDaemonKeepsTheGatewayForComputeThatMayStillRun(t *testing.T) {
 		{[]sandboxapi.Sandbox{{Phase: "error", Driver: "docker"}, {Phase: "error"}}, 0},
 		{[]sandboxapi.Sandbox{{Phase: "stopping", Driver: "vm"}, {Phase: "creating", Driver: "docker"}}, 2},
 		{[]sandboxapi.Sandbox{{Phase: "stopped"}, {Phase: "completed"}, {Phase: "deleting", Driver: "vm"}}, 0},
+		// A MicroVM whose workload ended still runs (GAP-0012) until it is
+		// stopped, or until DefenseClaw flushed its disk in that phase.
+		{[]sandboxapi.Sandbox{{Phase: "completed", Driver: "vm"}}, 1},
+		{[]sandboxapi.Sandbox{{Phase: "completed", Driver: "vm", FlushedIn: "completed"}, {Phase: "error", Driver: "vm", FlushedIn: "error"}}, 0},
+		{[]sandboxapi.Sandbox{{Phase: "error", Driver: "vm", FlushedIn: "completed"}}, 1},
+		// Nothing ran in one whose provisioning timed out; a missing one is gone.
+		{[]sandboxapi.Sandbox{{Phase: "error", Driver: "vm", PhaseReason: "ProvisioningTimedOut: Provisioning repair window expired after 300 seconds"}, {Phase: "missing", Driver: "vm"}}, 0},
+		{[]sandboxapi.Sandbox{{Phase: "unknown", Driver: "docker"}, {Phase: "provisioning"}}, 2},
 	} {
 		if got := sandboxesHoldingCompute(tc.list); got != tc.want {
 			t.Errorf("%+v: %d, want %d", tc.list, got, tc.want)

@@ -95,9 +95,10 @@ type Status struct {
 	Sandboxes int `json:"sandboxes"`
 	Running   int `json:"running"`
 	// Live counts those that may hold compute a stop of the OpenShell
-	// gateway would end unflushed or half started (manager.MayHoldCompute):
+	// gateway would end unflushed or half started (manager.HoldsCompute):
 	// the running ones, those starting or stopping or in an unknown phase,
-	// and a MicroVM in OpenShell's error state. Unset by a daemon before
+	// and a MicroVM that completed or is in OpenShell's error state, until
+	// it stops or DefenseClaw flushed its disk. Unset by a daemon before
 	// DefenseClaw 1.0.4 (Busy).
 	Live             *int      `json:"live,omitempty"`
 	PendingApprovals int       `json:"pending_approvals"`
@@ -329,6 +330,12 @@ type Sandbox struct {
 	// without a flush: what it wrote in its last seconds may be missing,
 	// empty or cut short (UnflushedText).
 	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
+	// FlushedIn is the phase its MicroVM was in when DefenseClaw last
+	// flushed its disk with its workload ended (completed, or OpenShell's
+	// error state, which an OpenShell before 0.1.5 refuses to stop): while
+	// it stays in that phase, a stop of the OpenShell gateway loses none of
+	// its work (manager.HoldsCompute).
+	FlushedIn string `json:"flushed_in,omitempty"`
 	// RepoPolicy is the repository policy (.defenseclaw/sandbox.yaml) the
 	// posture includes, without its content, as the launch banner names it.
 	RepoPolicy *RepoPolicy `json:"repo_policy,omitempty"`

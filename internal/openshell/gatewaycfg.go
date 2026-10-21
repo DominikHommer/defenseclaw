@@ -1785,6 +1785,15 @@ var ErrUnflushed = errors.New("openshell: the gateway was not restarted, because
 // sandboxFlushWait bounds sync(1) in one sandbox.
 const sandboxFlushWait = 20 * time.Second
 
+// syncSandbox runs sync(1) in the sandbox name, within sandboxFlushWait.
+func syncSandbox(ctx context.Context, c Client, name string) error {
+	res, err := c.Exec(ctx, name, []string{"/bin/sync"}, ExecOptions{Timeout: sandboxFlushWait, Attempts: 1, MaxOutputBytes: 256})
+	if err == nil && res.ExitCode != 0 {
+		err = fmt.Errorf("sync(1) exited with status %d", res.ExitCode)
+	}
+	return err
+}
+
 // FlushSandboxes runs sync(1) in every ready sandbox of the gateway c
 // talks to when its compute driver's stop does not keep what a workload
 // has not synced (Driver.StopFlushes). A gateway restart stops all of its
@@ -1820,11 +1829,7 @@ func FlushSandboxes(ctx context.Context, c Client) error {
 		if sb == nil || sb.Status.Phase != PhaseReady {
 			continue
 		}
-		res, err := c.Exec(ctx, sb.Name, []string{"/bin/sync"}, ExecOptions{Timeout: sandboxFlushWait, Attempts: 1, MaxOutputBytes: 256})
-		if err == nil && res.ExitCode != 0 {
-			err = fmt.Errorf("sync(1) exited with status %d", res.ExitCode)
-		}
-		if err != nil {
+		if err := syncSandbox(ctx, c, sb.Name); err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", sb.Name, err))
 		}
 	}

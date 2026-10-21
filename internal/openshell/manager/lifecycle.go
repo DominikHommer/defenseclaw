@@ -122,7 +122,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if b.phase == audit.SandboxPhaseReady {
 			st.Running++
 		}
-		if MayHoldCompute(string(b.phase), b.rec.Driver) {
+		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason, b.rec.FlushedIn) {
 			live++
 		}
 	}
@@ -340,11 +340,14 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 	m.mu.Lock()
-	name, reason := b.rec.Name, b.rec.PhaseReason
+	name, reason, driver := b.rec.Name, b.rec.PhaseReason, b.rec.Driver
 	m.mu.Unlock()
 	if err := m.checkSandbox(ctx, gw, b); err != nil {
 		return err
 	}
+	// A MicroVM whose workload ended has its disk flushed first: endHarness
+	// flushes only a ready one.
+	ended, flushErr := m.flushEnded(ctx, gw, b)
 	// The harness exits on its own first, so its end-of-session hook runs
 	// and its terminal ends as after /exit (graceful.go); a detached run
 	// the stop ends is marked interrupted, and once the stop is published
@@ -369,11 +372,11 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	if err != nil {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
-		if e := m.errorPhaseRefusal(name, reason, err); e != nil {
-			return e
+		if e := m.errorPhaseRefusal(name, reason, driver, err); e != nil {
+			return m.keptFlushed(b, ended, flushErr, e)
 		}
 		if e := m.errorPhaseNow(b); e != nil {
-			return e
+			return m.keptFlushed(b, ended, flushErr, e)
 		}
 		if connectionClosed(err) {
 			// gRPC's own words reached the user's session end (GAP-0337).
@@ -847,7 +850,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
-		if e := m.errorPhaseRefusal(rec.Name, rec.PhaseReason, err); e != nil {
+		if e := m.errorPhaseRefusal(rec.Name, rec.PhaseReason, rec.Driver, err); e != nil {
 			return e
 		}
 		return upstream("start sandbox "+rec.Name, err)

@@ -69,9 +69,10 @@ type SandboxStatus struct {
 	Running int
 	// Live is the number that may hold compute a stop of the account's
 	// OpenShell gateway would end unflushed or half started: the running
-	// ones, those starting or stopping, and a MicroVM in OpenShell's error
-	// state (sandboxapi.Status.Busy). What stops that gateway on its own
-	// (busy) waits for them.
+	// ones, those starting or stopping, and a MicroVM that completed or is
+	// in OpenShell's error state whose disk DefenseClaw did not flush
+	// (sandboxapi.Status.Busy). What stops that gateway on its own (busy)
+	// waits for them.
 	Live int
 	// PendingRestart is the daemon's own report that it waits for a restart.
 	PendingRestart bool
@@ -666,8 +667,9 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 			continue
 		case status.Active && status.busy() > 0:
 			// Not only the running ones: a switch or stop takes the
-			// account's OpenShell gateway down, under a MicroVM in
-			// OpenShell's error state or a sandbox still starting too.
+			// account's OpenShell gateway down, under a MicroVM that
+			// completed or is in OpenShell's error state (until the user's
+			// stop flushes it) or a sandbox still starting too.
 			entry.Sandboxes = status.busy()
 			state.Pending[key] = entry
 			continue
