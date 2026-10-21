@@ -8,6 +8,40 @@ import (
 	"testing"
 )
 
+// Two directory principals of one short name in two domains that hold one
+// uid in turn get two agent identities, and the second is a reassignment
+// of the first's uid. An unqualified account keeps the ID 1.0.3 gave it,
+// and a qualified one names that ID as its legacy ID (GAP-1055).
+func TestQualifiedAccountsOfTwoDomainsGetTwoIdentities(t *testing.T) {
+	machine := MachineHash("0123456789abcdef0123456789abcdef")
+	in := func(account string) Inputs {
+		return Inputs{MachineHash: machine, UserID: "70001", Connector: "codex", InstallFP: "/home/alice/.codex", Account: account}
+	}
+	corp, lab := AgentID(in("alice@corp.example")), AgentID(in("alice@lab.example"))
+	if corp == "" || corp == lab {
+		t.Fatalf("AgentID corp %q, lab %q; want two identities", corp, lab)
+	}
+	if AgentID(in("ALICE@Corp.Example")) != corp {
+		t.Errorf("the case of a qualified name changed its ID")
+	}
+	if !UIDReassigned("70001", "alice@corp.example", "alice@lab.example") {
+		t.Errorf("a namesake from another domain is not a reassignment of the uid")
+	}
+	if UIDReassigned("70001", "alice@corp.example", "alice") || UIDReassigned("70001", "alice", "CORP\\alice") {
+		t.Errorf("a bare name proves no other domain")
+	}
+	bare := AgentID(in("alice"))
+	if legacy := LegacyAgentID(in("alice@corp.example")); legacy != bare || LegacyAgentID(in("alice@lab.example")) != bare {
+		t.Errorf("LegacyAgentID = %q, want the domain-free ID %q", legacy, bare)
+	}
+	if LegacyAgentID(in("alice")) != "" {
+		t.Errorf("a bare account has no legacy ID")
+	}
+	if got := AgentID(in("alice")); got != "agt-"+digest16(agentNamespace, machine, "70001", "codex", "/home/alice/.codex", "alice") {
+		t.Errorf("a bare account's ID changed: %q", got)
+	}
+}
+
 func TestDerivationTable(t *testing.T) {
 	machine := MachineHash("0123456789abcdef0123456789abcdef")
 	base := Inputs{MachineHash: machine, UserID: "1001", Connector: "claudecode", InstallFP: "/home/alice/.claude"}
