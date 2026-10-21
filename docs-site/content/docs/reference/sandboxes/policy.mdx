@@ -148,6 +148,58 @@ The allow list is built from the entries of a built-in or required pack (always 
 
 Each sandbox has its own threshold: `openshell.egress.large_upload_mb` when above 0, else the resolved pack's `egress.large_upload_mb`, including a run's `--pack` (`--profile` changes no pack setting). A change reaches running sandboxes on the next config reload. The report is an activity event and a HIGH finding (`SANDBOX_EGRESS_LARGE_UPLOAD` in the egress audit record when cut). With the block on, DefenseClaw stops the upload before the chunk that crosses the threshold and refuses later connections to that host, and to other new hosts under the same domain or at the same address. Exempt: hosts you unblocked, hosts on an allow list you or your administrator wrote (`openshell.egress.allow`, a custom pack's `egress.allow`, `admin.egress_allow_only`). The balanced curated list does not exempt a host. The count starts again when the daemon restarts. Under `strict` nothing passes the proxy, so there is nothing to report. How the user sees a cut: [sandbox network](/docs/reference/sandboxes/network#large-uploads).
 
+## Record, then lock
+
+Run the project on the default `open` pack, then write a pack from what its sandboxes reached. DefenseClaw keeps every destination a sandbox reaches or tries to reach until you delete the sandbox (`defenseclaw sandbox destinations NAME`).
+
+```bash
+defenseclaw sandbox policy suggest --sandbox myapp-claude --diff
+```
+
+```text
+  pack myapp-claude-recorded against the policy of sandbox myapp-claude (pack open):
+    profile                    open → balanced
+    network.mode               open → allowlist
+    approvals.mode             auto → triage
+    egress.allow               +example.net, registry.npmjs.org, registry.yarnpkg.com (+47 more; -o json lists all)
+    egress.large_upload_mb     25 → 10
+    hooks.on_tamper            alert → stop
+    hooks.on_silence           alert → stop
+  ⚠ reached now, blocked with the pack:
+    api.openai.com:443 — network_allowlist  (network.mode allowlist (profile balanced))
+```
+
+`--pack-out PATH` writes the pack and never overwrites a file:
+
+```bash
+defenseclaw sandbox policy suggest --sandbox myapp-claude \
+  --pack-out ~/.defenseclaw/policies/sandbox/myapp/pack.yaml
+```
+
+```text
+  ✓ wrote /home/user/.defenseclaw/policies/sandbox/myapp/pack.yaml: pack myapp, extends balanced, 1 host to allow
+```
+
+| In the written pack | Why |
+| --- | --- |
+| `extends: balanced` | The pack starts from the balanced pack. |
+| Hosts to allow | Every host the sandbox reached that balanced does not cover, each with a comment naming the programs that reached it. |
+| Comments only | Hosts only ever refused, shadow AI hosts, blocklist hosts and the sandbox's model provider are listed, not allowed. |
+
+Nothing applies until you run with the pack (`defenseclaw sandbox run claude --pack myapp`, or `openshell.pack: myapp`). Review every host first. To keep a pack from drifting, list expected decisions in a fixture and run `policy test`:
+
+```yaml
+- {host: registry.npmjs.org, port: 443, expect: allow}
+- {host: pastebin.com, port: 443, expect: block, rule: feed}
+```
+
+```bash
+defenseclaw sandbox policy test --pack ~/.defenseclaw/policies/sandbox/myapp/pack.yaml \
+  --fixture egress-expectations.yaml --output json
+```
+
+The command exits `1` when a decision does not match. It needs no `config.yaml` and no running daemon, but it runs `defenseclaw-gateway`, which must be on `PATH` or next to `defenseclaw`.
+
 ## Repository policy
 
 A `.defenseclaw/sandbox.yaml` file in the project folder asks for a stricter sandbox. DefenseClaw reads it on your machine when the sandbox is created. It applies to runs started in the folder that holds `.defenseclaw/`.

@@ -21,7 +21,7 @@ The sandbox holds only a placeholder for the model credential. OpenShell forward
 
 ## Decision order
 
-The proxy checks each request in a fixed order and the first match decides. Every sandbox is decided by its own policy: another sandbox's pack, block list or unblocks never apply to it.
+The proxy checks each request in a fixed order and the first match decides. The table has every step; the diagram shows the layers. Every sandbox is decided by its own policy: another sandbox's pack, block list or unblocks never apply to it.
 
 {/* Checked against internal/openshell/egress/decider.go, func (d *Decider) decide */}
 
@@ -31,20 +31,12 @@ The proxy checks each request in a fixed order and the first match decides. Ever
   <Node id="block" kind="policy">{`Your block list\nblocked; remove the entry to open it`}</Node>
   <Node id="allow" kind="generic">{`Your unblocks and allow list\nallowed`}</Node>
   <Node id="feed" kind="policy">{`The blocklist feed\nblocked; you can unblock it`}</Node>
-  <Node id="dflt" kind="decision">{`The network profile\ndecides the rest (next diagram)`}</Node>
+  <Node id="dflt" kind="decision">{`The network profile\nopen, balanced or strict\ndecides the rest (step 9)`}</Node>
   <Edge from="guard" to="org" />
   <Edge from="org" to="block" />
   <Edge from="block" to="allow" />
   <Edge from="allow" to="feed" />
   <Edge from="feed" to="dflt" />
-</Flow>
-
-<Flow direction="TB" caption="What the profile does with a site no check matched. A site on your organization's allow-only list is allowed immediately before this. The strict profile has no egress proxy, so its sandboxes never get here.">
-  <Node id="p" kind="decision">{`Network profile?\nnothing else matched`}</Node>
-  <Node id="b" kind="policy">{`Only the curated allowlist\nthe rest blocked; you can unblock`}</Node>
-  <Node id="o" kind="generic">{`Any site name allowed\nIP addresses blocked, can unblock`}</Node>
-  <Edge from="p" to="b" label="balanced" />
-  <Edge from="p" to="o" label="open" />
 </Flow>
 
 | Step | Check | Result |
@@ -57,7 +49,7 @@ The proxy checks each request in a fixed order and the first match decides. Ever
 | 6 | Your unblocks | Allowed. |
 | 7 | The allow list (`openshell.egress.allow`) | Allowed, and exempt from the blocklist feed. |
 | 8 | The blocklist feed: paste sites, anonymous file drops, webhook catchers, tunnels, anonymizers | Blocked. You can unblock these. |
-| 9 | The profile's default | `open` allows any host name but blocks a bare IP address until you unblock it. `balanced` blocks anything outside its curated allowlist. |
+| 9 | The profile's default | `open` allows any host name but blocks a bare IP address until you unblock it. `balanced` blocks anything outside its curated allowlist (you can unblock). `strict` has no egress proxy, so a strict sandbox never reaches this step. |
 
 Under `openshell.admin.allow_unblock: false`, unblocks and your allow entries do not count, and the feed is checked before your allow list. [Sandbox policy](/docs/reference/sandboxes/policy) lists the organization keys.
 
