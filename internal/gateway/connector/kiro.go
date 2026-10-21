@@ -281,6 +281,9 @@ func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string
 		if err := removeKiroV3Hooks(path, command); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove hook %s: %w", path, err)
 		}
+		if err := keepPristineEmptyHooks(opts.DataDir, c.Name(), logical, path); err != nil {
+			return fmt.Errorf("kiro keep the empty hooks of %s: %w", path, err)
+		}
 	} else if present, err := kiroV3FileReferencesHook(path, command); err != nil {
 		return fmt.Errorf("kiro inspect restored hook %s: %w", path, err)
 	} else if present {
@@ -305,6 +308,9 @@ func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command strin
 	if !restored {
 		if err := removeKiroV2AgentHooks(path, command); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove agent hooks %s: %w", path, err)
+		}
+		if err := keepPristineEmptyHooks(opts.DataDir, c.Name(), logical, path); err != nil {
+			return fmt.Errorf("kiro keep the empty hooks of %s: %w", path, err)
 		}
 	} else if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil {
 		return fmt.Errorf("kiro inspect restored agent %s: %w", path, err)
