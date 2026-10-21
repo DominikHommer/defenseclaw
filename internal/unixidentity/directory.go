@@ -13,11 +13,15 @@
 package unixidentity
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
+	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -720,6 +724,18 @@ func (r *NSSResolver) otherNSSGroupMemberships(account Account) (map[int]bool, e
 		if service == "sss" || service == "files" || !validServiceName(service) {
 			continue
 		}
+		if memberListServices[service] {
+			listed, skip, err := r.memberListGroupsOf(service, account)
+			if err != nil {
+				return nil, err
+			}
+			if !skip {
+				for _, id := range listed {
+					groups[id] = true
+				}
+			}
+			continue
+		}
 		byName, err := r.LookupUserInService(service, account.Name)
 		if err != nil && !IsNotFound(err) {
 			return nil, err
@@ -742,8 +758,9 @@ func (r *NSSResolver) otherNSSGroupMemberships(account Account) (map[int]bool, e
 }
 
 // nssInitgroupsServices is the service list glibc uses for initgroups: the
-// initgroups line of nsswitch.conf, else its group line; nil without either
-// line or without the file, which glibc reads as files.
+// initgroups line of nsswitch.conf, else its group line (nssServicesInUse:
+// compat asks its included services only for the + lines of /etc/group); nil
+// without either line or without the file, which glibc reads as files.
 func nssInitgroupsServices() ([]string, error) {
 	data, err := readSmallFile(nsswitchPath, 1<<20)
 	if errors.Is(err, os.ErrNotExist) {
@@ -754,7 +771,7 @@ func nssInitgroupsServices() ([]string, error) {
 	}
 	services := ParseNSSwitchServices(string(data), "initgroups")
 	if len(services) == 0 {
-		services = ParseNSSwitchServices(string(data), "group")
+		services = nssServicesInUse(string(data), "group", localGroupPath)
 	}
 	return services, nil
 }
@@ -828,7 +845,9 @@ var memberListServices = map[string]bool{"ldap": true, "nis": true, "nisplus": t
 // that account's. A directory that does not answer fails the lookup, as it
 // does for a directory account: the groups it would list are unknown, and
 // facts without them could select a less strict profile than the account's
-// (fail closed).
+// (fail closed). So does one that holds no account of the name, lists the
+// name in no group and cannot show that it answers at all, which is how
+// getent reports an nslcd that cannot reach LDAP (memberListGroupsOf).
 func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, []string, error) {
 	ids, names, err := localAccountGroups(account)
 	if err != nil {
@@ -849,19 +868,12 @@ func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, [
 		if !memberListServices[service] || !validServiceName(service) {
 			continue
 		}
-		holder, lookupErr := r.LookupUserInService(service, account.Name)
-		if lookupErr != nil && !IsNotFound(lookupErr) {
-			return nil, nil, fmt.Errorf("%s account %s: %w", service, account.Name, lookupErr)
-		}
-		if lookupErr == nil && holder.UID != account.UID {
-			continue
-		}
-		listed, listErr := r.groupIDsInService(service, account.Name)
-		if IsNotFound(listErr) {
-			continue
-		}
+		listed, skip, listErr := r.memberListGroupsOf(service, account)
 		if listErr != nil {
 			return nil, nil, listErr
+		}
+		if skip {
+			continue
 		}
 		for _, id := range listed {
 			if !slices.Contains(ids, id) {
@@ -902,6 +914,124 @@ func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, [
 		}
 	}
 	return ids, names, nil
+}
+
+// errDirectoryUnconfirmed marks a directory answer DefenseClaw cannot tell
+// from an outage: getent exits 2 for a name both when a directory holds no
+// such account and when its module cannot answer (nslcd that cannot reach
+// LDAP, ypbind or winbindd down, SSSD stopped), and initgroups succeeds with
+// no group in both cases.
+var errDirectoryUnconfirmed = errors.New("the directory did not show that it answers")
+
+// memberListGroupsOf returns the gids the member-list service (ldap, nis,
+// nisplus) lists account's name in; skip is set when the service holds
+// another account of that name, whose groups those are. An answer that names
+// neither the account nor a group counts only once the service shows it is
+// answering (serviceAnswers): otherwise a strict profile's LDAP group was
+// dropped while nslcd could not reach LDAP, and the account got a weaker
+// profile (review of GAP-0550).
+func (r *NSSResolver) memberListGroupsOf(service string, account Account) ([]int, bool, error) {
+	holder, err := r.LookupUserInService(service, account.Name)
+	if err != nil && !IsNotFound(err) {
+		return nil, false, fmt.Errorf("%s account %s: %w", service, account.Name, err)
+	}
+	if err == nil && holder.UID != account.UID {
+		return nil, true, nil
+	}
+	answered := err == nil
+	listed, err := r.groupIDsInService(service, account.Name)
+	if err != nil && !IsNotFound(err) {
+		return nil, false, err
+	}
+	if !answered && len(listed) == 0 {
+		if err := r.serviceAnswers(service); err != nil {
+			return nil, false, fmt.Errorf("unixidentity: %s groups of %s: %w", service, account.Name, err)
+		}
+	}
+	return listed, false, nil
+}
+
+// confirmMemberListGroups returns ids, the groups all initgroups services
+// list together, once each member-list service among them shows that it
+// answers for account (memberListGroupsOf): the combined answer silently
+// lacks the groups an unreachable nslcd or ypbind lists.
+func (r *NSSResolver) confirmMemberListGroups(account Account, services []string, ids []int) ([]int, error) {
+	asked := map[string]bool{}
+	for _, service := range services {
+		if !memberListServices[service] || !validServiceName(service) || asked[service] {
+			continue
+		}
+		asked[service] = true
+		if _, _, err := r.memberListGroupsOf(service, account); err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
+}
+
+// serviceAnswers reports, with nil, that NSS service lists at least one
+// group or account when asked to enumerate them, which shows that it
+// answers. Only the first entry is read (firstEntry). A directory that does
+// not enumerate (nslcd with nss_disable_enumeration) cannot show it, and its
+// empty answers stay unconfirmed (fail closed).
+func (r *NSSResolver) serviceAnswers(service string) error {
+	if !validServiceName(service) {
+		return fmt.Errorf("unixidentity: invalid NSS service %q", service)
+	}
+	for _, database := range []string{"group", "passwd"} {
+		sample := &firstEntry{}
+		filters := []outputFilter{sample.wrap}
+		if database == "group" {
+			filters = append(filters, withoutGroupMembers)
+		}
+		result, err := r.runner(r.context(), r.path, []string{"-s", service, database}, filters...)
+		line := sample.line
+		if line == "" && err == nil && result.exitCode == getentExitOK {
+			if lines := nonEmptyLines(string(result.stdout)); len(lines) > 0 {
+				line = lines[0]
+			}
+		}
+		if database == "group" {
+			if _, _, ok := parseGroupName(line); ok {
+				return nil
+			}
+		} else if _, parseErr := ParsePasswdLine(line); line != "" && parseErr == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("unixidentity: NSS service %s lists no group or account: %w", service, errDirectoryUnconfirmed)
+}
+
+// errEnumerationSampled ends an enumeration once its first entry is read.
+var errEnumerationSampled = errors.New("unixidentity: enumeration sampled")
+
+// firstEntry keeps the first line a command writes and fails every write
+// after it, which closes the pipe and ends the command: one entry shows that
+// a directory answers, and listing the rest of a large one would take its
+// time and pass the output limit.
+type firstEntry struct {
+	partial []byte
+	line    string
+	done    bool
+}
+
+func (f *firstEntry) wrap(io.Writer) io.Writer { return f }
+
+func (f *firstEntry) Write(p []byte) (int, error) {
+	if f.done {
+		return 0, errEnumerationSampled
+	}
+	end := bytes.IndexByte(p, '\n')
+	if end < 0 {
+		if len(f.partial)+len(p) > defaultOutputLimit {
+			return 0, errOutputLimit
+		}
+		f.partial = append(f.partial, p...)
+		return len(p), nil
+	}
+	f.line = strings.TrimRight(string(append(f.partial, p[:end]...)), "\r")
+	f.done = true
+	return 0, errEnumerationSampled
 }
 
 // localGroupsListing returns the gids of the /etc/group entries whose member
@@ -1137,20 +1267,25 @@ func QualifiedUserName(ctx context.Context, r Resolver, name string) string {
 }
 
 // SameNameAccounts lists the other accounts the host holds under the bare
-// name of account: the account NSS answers that bare name with, and the
-// directory account of each joined realm that it answers name@domain or
-// NETBIOS\name with. A local and a directory account of one name are two
-// accounts (twins); an answer counts only when its own bare name is that
-// name and its uid is not account's (GAP-1087).
+// name of account: the account NSS answers that bare name with, the account
+// each passwd service of nsswitch.conf answers it with when asked on its
+// own, and the directory account of each joined domain NSS answers
+// name@domain or NETBIOS\name with. A local and a directory account of one
+// name are two accounts (twins); an answer counts only when its own bare name
+// is that name and its uid is not account's (GAP-1087).
 //
-// The joined domains come from realmd, or, where realmd fails or lists none
-// (an SSSD joined without it), from the realms it last listed, the default
-// realm of krb5.conf and the domains of sssd.conf (sameNameRealms). With no
-// twin found and none of those, while NSS asks a directory for accounts,
-// the answer is a *useridentity.NamesakesUnknownError: a directory twin may
-// exist and cannot be looked up, and taking the local account alone hid it
-// (GAP-1131, GAP-1132). So is a candidate lookup that failed rather than
-// found nothing: the twin it would have found is unknown.
+// NSS answers a bare name with the first service that holds it, so with
+// passwd: files ldap the LDAP alice behind the local one, and the local
+// account behind an SSSD one, showed only when that service was asked on its
+// own. A service's "no such account" counts only when it shows that it
+// answers (passwdServiceAnswers): getent says the same while nslcd, ypbind,
+// winbindd or SSSD cannot answer. The joined domains are the ones realmd
+// lists together with every other source DefenseClaw can read
+// (sameNameRealms). While a twin may exist that DefenseClaw cannot look up (a
+// service that does not show it answers, a domain list that may be
+// incomplete, a lookup that failed rather than found nothing) and none was
+// found, the answer is a *useridentity.NamesakesUnknownError: taking the
+// local account alone hid the twin (GAP-1131, GAP-1132).
 func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Account, error) {
 	bare, _ := useridentity.SplitQualifiedName(account.Name)
 	if r == nil || bare == "" {
@@ -1169,6 +1304,19 @@ func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Accou
 	seen := map[int]bool{account.UID: true}
 	var twins []Account
 	lookupErr := realmErr
+	note := func(err error) {
+		if lookupErr == nil {
+			lookupErr = err
+		}
+	}
+	add := func(found Account) {
+		foundBare, _ := useridentity.SplitQualifiedName(found.Name)
+		if seen[found.UID] || !useridentity.EqualFold(foundBare, bare) {
+			return
+		}
+		seen[found.UID] = true
+		twins = append(twins, found)
+	}
 	for _, candidate := range candidates {
 		found, err := r.LookupUser(candidate)
 		var mismatch *NameMismatchError
@@ -1176,17 +1324,40 @@ func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Accou
 			found, err = mismatch.Answered, nil
 		}
 		if err != nil {
-			if !IsNotFound(err) && lookupErr == nil {
-				lookupErr = fmt.Errorf("look up %s: %w", candidate, err)
+			if !IsNotFound(err) {
+				note(fmt.Errorf("look up %s: %w", candidate, err))
 			}
 			continue
 		}
-		foundBare, _ := useridentity.SplitQualifiedName(found.Name)
-		if seen[found.UID] || !useridentity.EqualFold(foundBare, bare) {
+		add(found)
+	}
+	services, err := passwdProviders()
+	if err != nil {
+		note(err)
+	}
+	per, _ := r.(serviceResolver)
+	for _, service := range services {
+		if !validServiceName(service) {
 			continue
 		}
-		seen[found.UID] = true
-		twins = append(twins, found)
+		found, lookup := Account{}, errNoServiceLookup
+		if per != nil {
+			found, lookup = per.LookupUserInService(service, bare)
+		}
+		switch {
+		case lookup == nil:
+			add(found)
+		case errors.Is(lookup, errNoServiceLookup):
+			if !nssLocalPasswdSources[service] {
+				note(fmt.Errorf("look up %s in %s: %w", bare, service, lookup))
+			}
+		case IsNotFound(lookup):
+			if answerErr := per.passwdServiceAnswers(service); answerErr != nil {
+				note(fmt.Errorf("look up %s in %s: %w", bare, service, answerErr))
+			}
+		default:
+			note(fmt.Errorf("look up %s in %s: %w", bare, service, lookup))
+		}
 	}
 	if len(twins) == 0 && lookupErr != nil {
 		return nil, &useridentity.NamesakesUnknownError{Name: bare, Err: lookupErr}
@@ -1194,33 +1365,48 @@ func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Accou
 	return twins, nil
 }
 
-// errNoJoinedDomain is the reason a bare name is refused when realmd lists no
-// joined domain while a directory configuration may still serve one.
+// errNoJoinedDomain is the reason a bare name is refused when no source names
+// every joined domain while a directory configuration may serve one.
 var errNoJoinedDomain = errors.New("realmd lists no joined domain")
 
-// sameNameRealms returns the joined realms SameNameAccounts qualifies a
-// bare name with, and an error only when they are unknown: realmd failed or
-// listed none, nothing stands in for it, and NSS consults a directory that
-// may serve a domain (directoryDomainsPossible). realmd lists no realm for
-// an SSSD set up without it, and a bare name was then taken for the local
-// account although SSSD could name a directory twin (GAP-1131). A host with
-// the sss module but no SSSD configuration, the RHEL default, has no domain
-// for realmd to miss.
+// sameNameRealms returns the joined realms SameNameAccounts qualifies a bare
+// name with: the realms realmd lists now together with those of
+// fallbackRealms (the realms realmd last listed, the default realm of
+// krb5.conf, the domains of the SSSD configuration), so a second SSSD domain
+// one source does not name is still asked (review of GAP-1131). Its error
+// says the list may miss a domain: realmd neither lists a realm now nor
+// listed one before, NSS asks a directory, and that directory is winbind or
+// an Entra ID module, whose domains only realmd names here, or SSSD with a
+// configuration DefenseClaw cannot read in full (sssd.conf is readable by
+// root only), where the default realm of krb5.conf may be one of several
+// domains. A host with the sss module but no SSSD configuration, the RHEL
+// default, has no domain to miss.
 func sameNameRealms(ctx context.Context) ([]Realm, error) {
-	realms, err := hostRealms(ctx)
-	if err == nil && len(realms) > 0 {
+	listed, err := hostRealms(ctx)
+	realms := append([]Realm(nil), listed...)
+	for _, realm := range fallbackRealms() {
+		if !slices.ContainsFunc(realms, func(known Realm) bool { return strings.EqualFold(known.Domain, realm.Domain) }) {
+			realms = append(realms, realm)
+		}
+	}
+	if err == nil && len(listed) > 0 || len(lastListedRealms()) > 0 || !nssConsultsDirectory() {
 		return realms, nil
 	}
-	if fallback := fallbackRealms(); len(fallback) > 0 {
-		return fallback, nil
+	services, servicesErr := passwdProviders()
+	if servicesErr != nil {
+		return realms, servicesErr
 	}
-	if !nssConsultsDirectory() || !directoryDomainsPossible() {
-		return nil, nil
+	_, sssdComplete := sssdDomains()
+	switch {
+	case slices.ContainsFunc(services, func(service string) bool { return qualifiedNameServices[service] }):
+	case slices.Contains(services, "sss") && sssdConfigured() && !sssdComplete:
+	default:
+		return realms, nil
 	}
 	if err != nil {
-		return nil, err
+		return realms, err
 	}
-	return nil, errNoJoinedDomain
+	return realms, errNoJoinedDomain
 }
 
 var (
@@ -1233,13 +1419,9 @@ var (
 // domain-qualified name without an sssd.conf.
 var qualifiedNameServices = map[string]bool{"winbind": true, "himmelblau": true, "aad": true}
 
-// directoryDomainsPossible reports whether a directory may serve a joined
-// domain that fallbackRealms cannot name: sssd.conf or a conf.d snippet
-// exists but names no domain DefenseClaw can read (sssd.conf is readable
-// by root only), or NSS asks winbind or an Entra ID module, whose domains
-// only realmd names here. A plain host with the sss module configured but no
-// SSSD configuration (the RHEL default) has none.
-func directoryDomainsPossible() bool {
+// sssdConfigured reports whether an SSSD configuration exists, readable or
+// not: sssd.conf or a conf.d snippet. Without one SSSD serves no domain.
+func sssdConfigured() bool {
 	if _, err := os.Stat(sssdConfPath); !errors.Is(err, os.ErrNotExist) {
 		return true
 	}
@@ -1252,25 +1434,18 @@ func directoryDomainsPossible() bool {
 			return true
 		}
 	}
-	data, err := readSmallFile(nsswitchPath, 1<<20)
-	if err != nil {
-		return !errors.Is(err, os.ErrNotExist)
-	}
-	return slices.ContainsFunc(ParseNSSwitchServices(string(data), "passwd"), func(service string) bool {
-		return qualifiedNameServices[service]
-	})
+	return false
 }
 
 // fallbackRealms names the joined domains without realmd: the realms
 // realmd last listed (lastListedRealms), the default realm of krb5.conf and
-// the domains sssd.conf serves (readable by root only, as a managed gateway
-// runs). Each gives a DNS domain only, so a bare name is qualified as
-// name@domain.
+// the domains of the SSSD configuration (sssdDomains). The last two give a
+// domain name only, so a bare name is qualified as name@domain.
 func fallbackRealms() []Realm {
 	out := lastListedRealms()
-	add := func(domain string) {
+	add := func(domain string, dns bool) {
 		domain = strings.ToLower(strings.TrimSpace(domain))
-		if domain == "" || !strings.Contains(domain, ".") || strings.ContainsAny(domain, " \t@\\/") {
+		if domain == "" || dns && !strings.Contains(domain, ".") || strings.ContainsAny(domain, " \t@\\/") {
 			return
 		}
 		for _, realm := range out {
@@ -1278,14 +1453,71 @@ func fallbackRealms() []Realm {
 				return
 			}
 		}
-		out = append(out, Realm{Domain: domain, Name: strings.ToUpper(domain)})
+		realm := Realm{Domain: domain}
+		if strings.Contains(domain, ".") {
+			realm.Name = strings.ToUpper(domain)
+		}
+		out = append(out, realm)
 	}
 	if data, err := readSmallFile(krb5ConfPath, 1<<20); err == nil {
-		add(iniValue(string(data), "libdefaults", "default_realm"))
+		add(iniValue(string(data), "libdefaults", "default_realm"), true)
 	}
-	if data, err := readSmallFile(sssdConfPath, 1<<20); err == nil {
+	domains, _ := sssdDomains()
+	for _, domain := range domains {
+		add(domain, false)
+	}
+	return out
+}
+
+// sssdDomains lists the domains the SSSD configuration names: the domains
+// option of [sssd] and each [domain/NAME] section, in sssd.conf and in the
+// conf.d snippets SSSD merges into it. With qualified names SSSD names an
+// account of domain NAME name@NAME, whether or not NAME is a DNS name
+// ([domain/LDAP]). complete reports that every configuration file was read
+// and they name a domain; sssd.conf is readable by root only.
+func sssdDomains() (domains []string, complete bool) {
+	paths := []string{sssdConfPath}
+	entries, err := os.ReadDir(sssdConfDir)
+	readable := err == nil || errors.Is(err, os.ErrNotExist)
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".conf") {
+			paths = append(paths, filepath.Join(sssdConfDir, entry.Name()))
+		}
+	}
+	add := func(domain string) {
+		domain = strings.TrimSpace(domain)
+		if domain != "" && !slices.ContainsFunc(domains, func(known string) bool { return strings.EqualFold(known, domain) }) {
+			domains = append(domains, domain)
+		}
+	}
+	for _, path := range paths {
+		data, err := readSmallFile(path, 1<<20)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			readable = false
+			continue
+		}
 		for _, domain := range strings.Split(iniValue(string(data), "sssd", "domains"), ",") {
 			add(domain)
+		}
+		for _, section := range iniSections(string(data)) {
+			if len(section) > len("domain/") && strings.EqualFold(section[:len("domain/")], "domain/") {
+				add(section[len("domain/"):])
+			}
+		}
+	}
+	return domains, readable && len(domains) > 0
+}
+
+// iniSections lists the section names of an INI-style file, as written.
+func iniSections(content string) []string {
+	var out []string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			out = append(out, strings.TrimSpace(line[1:len(line)-1]))
 		}
 	}
 	return out
@@ -1350,4 +1582,175 @@ func parseGroupName(line string) (int, string, bool) {
 		return 0, "", false
 	}
 	return gid, fields[0], true
+}
+
+// passwdProviders lists the services NSS asks for an account by name: the
+// passwd line of nsswitch.conf as nssServicesInUse reads it, or glibc's
+// default, files, without the file.
+func passwdProviders() ([]string, error) {
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return []string{"files"}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("unixidentity: read NSS configuration: %w", err)
+	}
+	return nssServicesInUse(string(data), "passwd", localPasswdPath), nil
+}
+
+// nssServicesInUse is ParseNSSwitchServices for database without the
+// services compat includes while the local file of the database (localPath)
+// has no + line: compat asks them only for such lines, so a Debian host with
+// the default "group: compat" and no NIS does not wait on a NIS that is
+// never asked.
+func nssServicesInUse(content, database, localPath string) []string {
+	services := ParseNSSwitchServices(content, database)
+	if !slices.Contains(nssSwitchLine(content, database), "compat") || compatIncludes(localPath) {
+		return services
+	}
+	var out []string
+	for _, service := range nssSwitchLine(content, database) {
+		if service == "compat" {
+			service = "files"
+		}
+		if !slices.Contains(out, service) {
+			out = append(out, service)
+		}
+	}
+	return out
+}
+
+// compatIncludes reports whether a passwd(5) or group(5) file has a + line,
+// one that includes accounts or groups of another service through compat. A
+// file that cannot be read may have one.
+func compatIncludes(path string) bool {
+	data, err := readSmallFile(path, 16<<20)
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "+") {
+			return true
+		}
+	}
+	return false
+}
+
+// errNoServiceLookup is a resolver that cannot ask one NSS service.
+var errNoServiceLookup = errors.New("unixidentity: the account resolver cannot ask one NSS service")
+
+// serviceResolver asks one NSS service for an account by name, and tells
+// whether that service's "no such account" is definitive (NSSResolver, and
+// a CachingResolver around one).
+type serviceResolver interface {
+	LookupUserInService(service, name string) (Account, error)
+	passwdServiceAnswers(service string) error
+}
+
+// LookupUserInService asks the wrapped resolver's one NSS service; it is not
+// cached, as only an administrator view asks.
+func (c *CachingResolver) LookupUserInService(service, name string) (Account, error) {
+	if inner, ok := c.inner.(serviceResolver); ok {
+		return inner.LookupUserInService(service, name)
+	}
+	return Account{}, errNoServiceLookup
+}
+
+func (c *CachingResolver) passwdServiceAnswers(service string) error {
+	if inner, ok := c.inner.(serviceResolver); ok {
+		return inner.passwdServiceAnswers(service)
+	}
+	return errNoServiceLookup
+}
+
+// passwdServiceAnswers reports, with nil, that a "no such account" answer of
+// service to a lookup by name is definitive: the service reads local files,
+// the directory it reaches is not configured on this host (no SSSD
+// configuration, no smb.conf), or it shows that it answers: SSSD's NSS
+// responder and winbindd accept a connection, a member-list directory lists
+// an entry (serviceAnswers). Any other service cannot show it.
+func (r *NSSResolver) passwdServiceAnswers(service string) error {
+	switch {
+	case nssLocalPasswdSources[service]:
+		return nil
+	case service == "sss":
+		if !sssdConfigured() {
+			return nil
+		}
+		sssd, err := dialSSSDNSS(r.context())
+		if err != nil {
+			return fmt.Errorf("%w: %w", err, errDirectoryUnconfirmed)
+		}
+		sssd.Close()
+		return nil
+	case service == "winbind":
+		if _, err := os.Stat(sambaConfPath); errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return winbindAnswers(r.context())
+	case memberListServices[service]:
+		return r.serviceAnswers(service)
+	}
+	return fmt.Errorf("unixidentity: cannot tell whether NSS service %s answers: %w", service, errDirectoryUnconfirmed)
+}
+
+// winbindPipes are the sockets winbindd serves the NSS module on, the
+// current location first. Tests replace them.
+var winbindPipes = []string{"/run/samba/winbindd/pipe", "/var/run/samba/winbindd/pipe"}
+
+// winbindAnswers reports, with nil, that winbindd accepts a connection.
+func winbindAnswers(ctx context.Context) error {
+	errs := []error{errDirectoryUnconfirmed}
+	for _, path := range winbindPipes {
+		dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		conn, err := (&net.Dialer{}).DialContext(dialCtx, "unix", path)
+		cancel()
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		errs = append(errs, err)
+	}
+	return fmt.Errorf("unixidentity: winbindd does not answer: %w", errors.Join(errs...))
+}
+
+// AccountIncarnation names the directory account that holds uid, where its
+// name, uid and home cannot: the SID SSSD holds for it ("sid:S-1-5-..."),
+// "sss" for an SSSD account without one, "files" for an account of
+// /etc/passwd, "nss" for an account of another service while SSSD answers.
+// Two accounts of one name, uid and home in two domains, or one deleted and
+// created again with another SID, differ in it, so the gateway does not
+// serve the facts it cached for one to the other. known is false when it
+// cannot tell: the passwd line does not name sss, or SSSD does not answer.
+func (r *NSSResolver) AccountIncarnation(uid int, name string) (string, bool) {
+	local, err := LocalAccounts(r.context())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", false
+	}
+	if localUID, ok := local[name]; ok && localUID == uid {
+		return "files", true
+	}
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if err != nil || !slices.Contains(ParseNSSwitchServices(string(data), "passwd"), "sss") {
+		return "", false
+	}
+	sssd, err := dialSSSDNSS(r.context())
+	if err != nil {
+		return "", false
+	}
+	defer sssd.Close()
+	sid, err := sssdAccountSID(sssd, uid)
+	if err != nil {
+		return "", false
+	}
+	if sid != "" {
+		return "sid:" + strings.ToUpper(sid), true
+	}
+	switch _, err := r.LookupUIDInService("sss", uid); {
+	case err == nil:
+		return "sss", true
+	case IsNotFound(err):
+		return "nss", true
+	}
+	return "", false
 }

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -103,6 +104,9 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	rec.LastSeen = now
 	if facts.UserName != "" {
 		rec.UserName = facts.UserName
+	}
+	if facts.UserDomain != "" {
+		rec.UserDomain = facts.UserDomain
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if _, sub := r.subSessions[subSessionKey(facts.ID, sessionID)]; sub {
@@ -495,9 +499,11 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 		offset = min(n, 1<<30)
 	}
 	user := strings.TrimSpace(q.Get("user"))
+	ids := adminViewAccountIDs(user)
 	filter := inventory.AgentIdentityFilter{
 		User:           user,
-		UserIDs:        adminViewAccountIDs(user),
+		UserIDs:        ids,
+		UserDomains:    adminViewAccountDomains(ids),
 		RemovedAccount: adminViewRemovedAccount(user),
 		Connector:      strings.ToLower(strings.TrimSpace(q.Get("connector"))),
 	}
@@ -639,6 +645,9 @@ func mergeAgentIdentityRows(
 		if buffered.UserName != "" {
 			rec.UserName = buffered.UserName
 		}
+		if buffered.UserDomain != "" {
+			rec.UserDomain = buffered.UserDomain
+		}
 	}
 	rows := make([]agentIdentityRow, 0, len(order))
 	for _, id := range order {
@@ -659,7 +668,8 @@ func mergeAgentIdentityRows(
 // like the rest (GAP-0103). A row whose account no longer resolves keeps its
 // name, and is retired when the account was removed (GAP-1222); so does a row
 // of an account whose uid another account holds now, which is retired instead
-// of being listed under that account (GAP-0947).
+// of being listed under that account (GAP-0947), also when that account has
+// the same bare name in another domain (agentIdentityRecordedInAnotherDomain).
 func nameAgentIdentityRows(rows []agentIdentityRow) {
 	name := hostAccountNamer()
 	for i := range rows {
@@ -667,7 +677,8 @@ func nameAgentIdentityRows(rows []agentIdentityRow) {
 		switch {
 		case holder == "":
 			rows[i].Retired = agentIdentityAccountRemoved(rows[i].UserID)
-		case agentIdentityHeldByAnother(rows[i].AgentIdentityRecord, holder):
+		case agentIdentityHeldByAnother(rows[i].AgentIdentityRecord, holder),
+			agentIdentityRecordedInAnotherDomain(rows[i].AgentIdentityRecord):
 			rows[i].Retired = true
 		default:
 			rows[i].UserName = holder
@@ -705,6 +716,20 @@ func agentIdentityHeldByAnother(rec inventory.AgentIdentityRecord, holder string
 	return rec.UserName == "" || agentidentity.UIDReassigned(rec.UserID, rec.UserName, holder)
 }
 
+// agentIdentityRecordedInAnotherDomain reports whether rec was recorded for
+// an account of other domains than the account whose facts the gateway holds
+// for its uid now: one bare name in two domains derives one agent ID, so the
+// row CORP\alice's agent left read as OTHER\alice's once OTHER\alice held the
+// uid (review of GAP-1263). A side that names no domain proves nothing.
+func agentIdentityRecordedInAnotherDomain(rec inventory.AgentIdentityRecord) bool {
+	recorded := strings.Fields(rec.UserDomain)
+	current := strings.Fields(agentIdentityAccountDomains(rec.UserID))
+	if len(recorded) == 0 || len(current) == 0 {
+		return false
+	}
+	return !slices.ContainsFunc(recorded, func(domain string) bool { return slices.Contains(current, domain) })
+}
+
 // hostAccountNamer names accounts by uid or SID as the host's account
 // database does (an SSSD account keeps its qualified name), looking each id
 // up once. The admin views that list accounts (agent identities, IDE
@@ -740,6 +765,19 @@ var adminViewAccountIDs = func(user string) []string {
 		return nil
 	}
 	return []string{id}
+}
+
+// adminViewAccountDomains is the useridentity.AccountDomains of the
+// accounts ids name (adminViewAccountIDs), from the facts the gateway
+// cached for them.
+func adminViewAccountDomains(ids []string) string {
+	var domains []string
+	for _, id := range ids {
+		if own := agentIdentityAccountDomains(id); own != "" {
+			domains = append(domains, own)
+		}
+	}
+	return strings.Join(domains, " ")
 }
 
 // adminViewRemovedAccount is the RemovedAccount of an agent identity
@@ -800,7 +838,7 @@ func adminViewKnownDomain(domain, id string, extra ...string) bool {
 }
 
 func agentIdentityMatches(rec inventory.AgentIdentityRecord, filter inventory.AgentIdentityFilter) bool {
-	if filter.User != "" && !filter.Account().Matches(rec.UserID, rec.UserName) {
+	if filter.User != "" && !filter.Account().MatchesIn(rec.UserID, rec.UserName, rec.UserDomain) {
 		return false
 	}
 	return filter.Connector == "" || rec.Connector == filter.Connector

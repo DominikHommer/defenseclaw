@@ -41,7 +41,11 @@ func (r *NSSResolver) platformGroupIDs(account Account) ([]int, error) {
 	if globalMismatch {
 		return r.groupIDsInOwnerService(account)
 	}
-	return r.rawGroupIDs(account)
+	ids, err := r.rawGroupIDs(account)
+	if err != nil {
+		return nil, err
+	}
+	return r.confirmMemberListGroups(account, initgroupsServices, ids)
 }
 
 // servicesWithDifferentUID checks the configured passwd and initgroups
@@ -111,6 +115,16 @@ func (r *NSSResolver) groupIDsWithoutSharedNames(account Account, shared map[str
 			continue
 		}
 		seen[service] = true
+		if memberListServices[service] {
+			listed, skip, err := r.memberListGroupsOf(service, account)
+			if err != nil {
+				return nil, err
+			}
+			if !skip {
+				ids = append(ids, listed...)
+			}
+			continue
+		}
 		other, err := r.groupIDsInService(service, account.Name)
 		if IsNotFound(err) {
 			continue

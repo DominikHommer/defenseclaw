@@ -575,6 +575,31 @@ var inventoryMigrations = []invMigration{
 			return nil
 		},
 	},
+	{
+		// v7 keeps the domains of the account each agent identity was last
+		// seen for (useridentity.AccountDomains): one bare name in two
+		// domains derives one agent ID from a uid handed from one to the
+		// other, and a qualified --user filter told their rows apart by
+		// nothing (review of GAP-1263). Rows written before, and by a build
+		// rolled back to, keep none and are selected by their uid as before.
+		description: "v7: record the account domains of each agent identity",
+		apply: func(ex invDBExecer) error {
+			if _, err := ex.Exec(`CREATE TABLE IF NOT EXISTS agent_identities (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0)`); err != nil {
+				return fmt.Errorf("ai inventory: v7 migration: %w", err)
+			}
+			var present int
+			if err := ex.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('agent_identities') WHERE name = 'user_domain'`).Scan(&present); err != nil {
+				return fmt.Errorf("ai inventory: v7 migration: %w", err)
+			}
+			if present > 0 {
+				return nil
+			}
+			if _, err := ex.Exec(`ALTER TABLE agent_identities ADD COLUMN user_domain TEXT`); err != nil {
+				return fmt.Errorf("ai inventory: v7 migration: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 type invMigration struct {

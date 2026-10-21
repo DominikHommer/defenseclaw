@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // agentIdentityFromContext returns the agent identity
@@ -46,8 +47,11 @@ type agentIdentityFacts struct {
 	MachineHash string
 	UserID      string
 	UserName    string
-	Connector   string
-	InstallFP   string
+	// UserDomain is the useridentity.AccountDomains of the user's verified
+	// facts when the hook ran (agentIdentityAccountDomains).
+	UserDomain string
+	Connector  string
+	InstallFP  string
 	// InstallHint is a config root the agent claimed (a CLAUDE_CONFIG_DIR or
 	// CODEX_HOME style override seen in the payload) that differs from
 	// InstallFP. It is recorded for operators and never moves the ID.
@@ -99,9 +103,10 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		// to the other admin views. defenseclaw.user.name stays bare. The
 		// account the ID is keyed on comes first: the listing tells a
 		// removed account's identity by it (GAP-0947).
-		UserName:  firstNonEmpty(account, user.Name),
-		Connector: connectorName,
-		InstallFP: agentIdentityInstallFP(connectorName, user),
+		UserName:   firstNonEmpty(account, user.Name),
+		UserDomain: agentIdentityAccountDomains(user.ID),
+		Connector:  connectorName,
+		InstallFP:  agentIdentityInstallFP(connectorName, user),
 	}
 	facts.ID = agentidentity.AgentID(agentidentity.Inputs{
 		MachineHash: facts.MachineHash, UserID: facts.UserID, Account: account,
@@ -116,6 +121,22 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		facts.InstallHint = hint
 	}
 	return facts
+}
+
+// agentIdentityAccountDomains is the provenance an agent identity row keeps
+// of the account a uid's hooks ran as: the useridentity.AccountDomains of
+// the verified facts the gateway cached for the uid. "" for a SID, which no
+// other account is given, and while no facts are cached.
+func agentIdentityAccountDomains(userID string) string {
+	userID = agentidentity.NormalizeUserID(userID)
+	if userID == "" || agentidentity.IsSID(userID) {
+		return ""
+	}
+	facts, _, ok := peerDirectoryCache().peek(userID)
+	if !ok {
+		return ""
+	}
+	return useridentity.AccountDomains(facts)
 }
 
 // hookAgentIdentityUser picks the user an agent identity belongs to, most

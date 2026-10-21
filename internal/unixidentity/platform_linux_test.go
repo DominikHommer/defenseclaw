@@ -574,7 +574,13 @@ func TestSSSDAccountKeepsGroupFromAnotherNSSService(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(facts.Groups, []string{"alice", "ldap-admins"}) {
 		t.Fatalf("SSSD account groups = %q, %v", facts.Groups, err)
 	}
+	// An empty LDAP answer counts once LDAP shows that it answers: nslcd
+	// that cannot reach LDAP answers the same (fail closed).
 	f.results["-s ldap initgroups alice"] = commandResult{stdout: []byte("alice\n")}
+	if facts, err = newFakeNSS(f).DirectoryFactsForUID(1001, time.Now()); err == nil {
+		t.Fatalf("an LDAP that does not show it answers dropped its groups: %q", facts.Groups)
+	}
+	f.results["-s ldap group"] = commandResult{stdout: []byte("ldap-users:*:9000:\n")}
 	facts, err = newFakeNSS(f).DirectoryFactsForUID(1001, time.Now())
 	if err != nil || !reflect.DeepEqual(facts.Groups, []string{"alice"}) {
 		t.Fatalf("without LDAP membership, groups = %q, %v", facts.Groups, err)

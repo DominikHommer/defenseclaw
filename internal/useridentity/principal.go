@@ -163,6 +163,7 @@ func BareAccountName(name string) string {
 type AccountFilter struct {
 	raw, account, domain string
 	ids                  []string
+	accountDomains       []string
 	removed              func(id string) bool
 }
 
@@ -204,14 +205,26 @@ func QualifiedAccountName(name string) bool {
 
 // Matches reports whether the filter selects the row of account id recorded
 // as name. An empty filter selects every row.
-func (f AccountFilter) Matches(id, name string) bool {
+func (f AccountFilter) Matches(id, name string) bool { return f.MatchesIn(id, name, "") }
+
+// MatchesIn is Matches for a row that also keeps the AccountDomains of the
+// account it was recorded for ("" for a row an older build wrote, or one
+// recorded before the account's facts were known). A qualified filter
+// selects a row by the uid it resolves to only when the row was recorded for
+// an account of the filter's domain: a uid handed from CORP\alice to
+// OTHER\alice kept CORP's rows, recorded with the bare name alice, under
+// alice@OTHER (review of GAP-1263). A row that keeps no domain is selected
+// by its uid, as before.
+func (f AccountFilter) MatchesIn(id, name, domains string) bool {
 	id, name = strings.TrimSpace(id), strings.TrimSpace(name)
 	switch {
 	case f.raw == "":
 		return true
-	case id != "" && (strings.EqualFold(f.raw, id) || slices.ContainsFunc(f.ids, func(resolved string) bool {
+	case id != "" && strings.EqualFold(f.raw, id):
+		return true
+	case id != "" && f.recordedIn(domains) && slices.ContainsFunc(f.ids, func(resolved string) bool {
 		return strings.EqualFold(resolved, id)
-	})):
+	}):
 		return true
 	case name == "":
 		return false
@@ -227,7 +240,58 @@ func (f AccountFilter) Matches(id, name string) bool {
 	case rowDomain != "":
 		return EqualFold(f.domain, rowDomain)
 	}
-	return len(f.ids) == 0 && id != "" && f.removed != nil && f.removed(id)
+	return len(f.ids) == 0 && id != "" && f.removed != nil && f.recordedIn(domains) && f.removed(id)
+}
+
+// WithAccountDomains gives the AccountDomains of the account a qualified
+// filter resolves to (its ids), so a row recorded for that account is
+// selected by its uid also when the filter spells the domain another way
+// than its facts do (CORP\alice for an account whose facts name only
+// corp.example.com).
+func (f AccountFilter) WithAccountDomains(domains string) AccountFilter {
+	f.accountDomains = strings.Fields(domains)
+	return f
+}
+
+// recordedIn reports whether a row recorded for an account of domains (its
+// AccountDomains) may be an account of the filter's domain: it names that
+// domain or a domain of the account the filter resolves to, or names none.
+func (f AccountFilter) recordedIn(domains string) bool {
+	recorded := strings.Fields(domains)
+	if f.domain == "" || len(recorded) == 0 {
+		return true
+	}
+	return slices.ContainsFunc(recorded, func(domain string) bool {
+		return strings.EqualFold(domain, f.domain) || slices.ContainsFunc(f.accountDomains, func(own string) bool {
+			return strings.EqualFold(own, domain)
+		})
+	})
+}
+
+// AccountDomains is the provenance an admin-view row keeps of the account
+// it was recorded for: the domains its verified directory facts name (DNS
+// domain, NetBIOS domain, realm, and the domain parts of its UPN and
+// principal), lower case and space separated, after "." for a local
+// account. A removed account's uid is handed to the next account, of the
+// same bare name in another domain too, and the provenance tells their rows
+// apart where the uid and the name cannot. "" when the facts name none.
+func AccountDomains(facts DirectoryFacts) string {
+	var out []string
+	add := func(domain string) {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain != "" && !strings.ContainsAny(domain, " \t\r\n") && !slices.Contains(out, domain) {
+			out = append(out, domain)
+		}
+	}
+	if facts.Directory == DirectoryLocal {
+		add(".")
+	}
+	_, upnDomain := SplitQualifiedName(facts.UPN)
+	_, principalDomain := SplitQualifiedName(facts.Principal)
+	for _, domain := range []string{facts.Domain, facts.AccountDomain, facts.Realm, upnDomain, principalDomain} {
+		add(domain)
+	}
+	return strings.Join(out, " ")
 }
 
 // NamesakesUnknownError refuses a bare account name while the host cannot

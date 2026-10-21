@@ -283,7 +283,10 @@ func TestLocalAccountGroupsFailWhenTheDirectoryDoesNotAnswer(t *testing.T) {
 		})
 	}
 	t.Run("a directory that holds no such member", func(t *testing.T) {
-		quiet := map[string]commandResult{"passwd 1001": {stdout: localLine}, "passwd alice": {stdout: localLine}}
+		quiet := map[string]commandResult{
+			"passwd 1001": {stdout: localLine}, "passwd alice": {stdout: localLine},
+			"-s ldap initgroups alice": {stdout: []byte("alice\n")}, "-s ldap group": {stdout: []byte("ldap-users:*:9000:\n")},
+		}
 		r := newFakeNSS(&fakeRun{results: quiet})
 		facts, err := r.DirectoryFactsForUID(1001, time.Now())
 		if err != nil || !reflect.DeepEqual(facts.Groups, []string{"5100", "local-team"}) {

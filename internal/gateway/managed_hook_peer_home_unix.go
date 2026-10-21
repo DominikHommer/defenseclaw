@@ -144,6 +144,9 @@ type managedHookPeerHolder struct {
 	name, home string
 	stamp      string
 	record     string // managedHookPeerAccountRecord of name, "" when none was listed
+	// incarnation is the managedHookPeerAccountIncarnation of the account,
+	// "" while none was known.
+	incarnation string
 }
 
 // replacedBy reports whether record, the account's listed record now, is
@@ -152,6 +155,18 @@ type managedHookPeerHolder struct {
 // (GAP-0669). A record unknown on either side is no change.
 func (h managedHookPeerHolder) replacedBy(record string) bool {
 	return h.record != "" && record != "" && h.record != record
+}
+
+// reincarnated reports whether incarnation, the account incarnation that
+// holds the uid now (known), is another than the one the holder's facts
+// were cached for. A uid handed from one domain's alice to another domain's
+// alice with the same home keeps its name and home, and its cached facts
+// gave the second account the first one's groups (review of GAP-0551). An
+// incarnation known now and not when the facts were cached cannot be
+// matched to them, so they are looked up again; one unknown now (SSSD does
+// not answer) changes nothing, as the facts are served through an outage.
+func (h managedHookPeerHolder) reincarnated(incarnation string, known bool) bool {
+	return known && h.incarnation != incarnation
 }
 
 // managedHookPeerHomesFileMax bounds the persisted homes file read at start.
@@ -245,6 +260,11 @@ type managedHookPeerAccount struct {
 	ok       bool
 	notFound bool
 	expires  time.Time
+	// incarnation names which directory account holds the uid
+	// (managedHookPeerAccountIncarnation); incarnationKnown is false when
+	// that could not be told.
+	incarnation      string
+	incarnationKnown bool
 }
 
 // account resolves uid through the cached platform resolver; false when the
@@ -303,11 +323,33 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 			forget.ForgetUID(uid)
 		}
 	}
+	incarnation, incarnationKnown := "", false
+	if ok && identityFactsEnabled.Load() && !ManagedEnterpriseActive() {
+		incarnation, incarnationKnown = managedHookPeerAccountIncarnation(account)
+	}
 	c.mu.Lock()
 	entry.account, entry.ok, entry.notFound, entry.expires = account, ok, unixidentity.IsNotFound(err), c.now().Add(retain)
+	entry.incarnation, entry.incarnationKnown = incarnation, incarnationKnown
 	c.mu.Unlock()
 	close(entry.ready)
 	return account, ok
+}
+
+// incarnation returns the account incarnation of uid that the last
+// completed account lookup found; false when it is unknown.
+func (c *managedHookPeerHomeCache) incarnation(uid int) (string, bool) {
+	c.mu.Lock()
+	entry := c.accounts[uid]
+	c.mu.Unlock()
+	if entry == nil {
+		return "", false
+	}
+	select {
+	case <-entry.ready:
+		return entry.incarnation, entry.incarnationKnown
+	default:
+		return "", false
+	}
 }
 
 // directory returns uid's verified directory facts from the cache, waiting
@@ -348,13 +390,18 @@ func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) {
 	if !ok {
 		return
 	}
+	incarnation, incarnationKnown := c.incarnation(uid)
 	holder := managedHookPeerHolder{name: account.Name, home: account.Home, stamp: managedHookPeerStamp(),
-		record: managedHookPeerAccountRecord(account.Name)}
+		record: managedHookPeerAccountRecord(account.Name), incarnation: incarnation}
 	c.mu.Lock()
 	previous, known := c.holders[uid]
-	changed := known && (previous.name != holder.name || previous.home != holder.home || previous.replacedBy(holder.record))
+	changed := known && (previous.name != holder.name || previous.home != holder.home || previous.replacedBy(holder.record) ||
+		previous.reincarnated(incarnation, incarnationKnown))
 	if known && !changed && holder.record == "" {
 		holder.record = previous.record // a failed listing forgets no record
+	}
+	if known && !changed && !incarnationKnown {
+		holder.incarnation = previous.incarnation // nor does a directory that does not answer
 	}
 	if !known && len(c.holders) < managedHookPeerHomesMax || known {
 		if c.holders == nil {
@@ -544,12 +591,14 @@ func (c *managedHookPeerHomeCache) liveHolders() map[int]managedHookPeerHolder {
 		forgetFacts := false
 		if served && stamp != "" && stamp != holder.stamp {
 			account, ok := c.account(uid)
-			record := ""
+			record, incarnation, incarnationKnown := "", "", false
 			if ok {
 				record = managedHookPeerAccountRecord(account.Name)
+				incarnation, incarnationKnown = c.incarnation(uid)
 			}
 			switch {
-			case ok && (account.Name != holder.name || account.Home != holder.home || holder.replacedBy(record)):
+			case ok && (account.Name != holder.name || account.Home != holder.home || holder.replacedBy(record) ||
+				holder.reincarnated(incarnation, incarnationKnown)):
 				served, forgetFacts = false, true
 			case !ok && facts.Directory == useridentity.DirectoryLocal:
 				c.mu.Lock()
@@ -561,6 +610,9 @@ func (c *managedHookPeerHomeCache) liveHolders() map[int]managedHookPeerHolder {
 				holder.stamp = stamp
 				if record != "" {
 					holder.record = record
+				}
+				if incarnationKnown {
+					holder.incarnation = incarnation
 				}
 				c.mu.Lock()
 				if c.holders[uid] == holders[uid] {
