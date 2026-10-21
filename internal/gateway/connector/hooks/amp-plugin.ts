@@ -27,7 +27,8 @@
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
 import { execFile{{if not .Sandbox}}, execFileSync{{end}} } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { lstat } from 'node:fs/promises'
+{{if not .Sandbox}}import { statSync } from 'node:fs'
+{{end}}import { lstat } from 'node:fs/promises'
 import { {{if not .Sandbox}}homedir, {{end}}userInfo } from 'node:os'
 import { dirname{{if not .Sandbox}}, join{{end}} } from 'node:path'
 
@@ -129,9 +130,30 @@ const DC_SESSION_FACTS_TTL_MS = 300000
 const DC_SESSION_FACTS_RETRY_MS = 30000
 let sessionFactsCache = { key: "", value: "", until: 0 }
 
+// The modification time of this login's FILE or DIR Kerberos credential
+// cache is part of the session facts key: a new kinit into the same cache
+// changes the principal while every session variable stays the same
+// (GAP-1139). KCM, KEYRING and API caches have no file; the variables alone
+// key them.
+function credentialCacheStamp(): string {
+	const name = String(process.env.KRB5CCNAME || "")
+	let path = name
+	if (name === "") path = typeof process.getuid === "function" ? "/tmp/krb5cc_" + process.getuid() : ""
+	else if (name.startsWith("FILE:")) path = name.slice(5)
+	else if (name.startsWith("DIR::")) path = name.slice(5)
+	else if (name.startsWith("DIR:")) path = name.slice(4)
+	if (!path.startsWith("/")) return ""
+	try {
+		return String(statSync(path).mtimeMs)
+	} catch (_) {
+		return ""
+	}
+}
+
 function fullSessionFacts(): string {
 	const env = process.env
-	const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY].map((v) => String(v || "")).join("|")
+	const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY, credentialCacheStamp()]
+		.map((v) => String(v || "")).join("|")
 	const now = Date.now()
 	if (sessionFactsCache.key === key && now < sessionFactsCache.until) return sessionFactsCache.value
 	let value = ""

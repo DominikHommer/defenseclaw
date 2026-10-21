@@ -961,8 +961,9 @@ func TestUnreachable(t *testing.T) {
 		// the per-user outage notice from systemMessage, as on Unix.
 		var notice map[string]string
 		if json.Unmarshal([]byte(r.stdout), &notice) != nil ||
-			!strings.Contains(notice["systemMessage"], "defenseclaw-gateway start") {
-			t.Errorf("stdout = %q, want a systemMessage naming defenseclaw-gateway start", r.stdout)
+			!strings.Contains(notice["systemMessage"], "defenseclaw-gateway start") ||
+			!strings.Contains(notice["systemMessage"], "`defenseclaw-gateway status`") {
+			t.Errorf("stdout = %q, want a systemMessage naming defenseclaw-gateway start and status", r.stdout)
 		}
 		managed := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, func(o *Options) {
 			o.ManagedUnixSocket = "/run/defenseclaw/hook.sock"

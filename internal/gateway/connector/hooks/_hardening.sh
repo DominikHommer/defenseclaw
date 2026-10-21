@@ -918,7 +918,11 @@ _dc_hook_post_response() {
 # stop` (gateway.stopped), during an install (.install.lock), for a managed
 # or socket hook, or when DEFENSECLAW_GATEWAY_AUTOSTART is 0. The start
 # command serializes concurrent hooks with a restart and backs off after a
-# failure. This is the one helper that calls out to the gateway's own CLI.
+# failure. Of the account's hooks that find the gateway down together, only
+# the first launches a start: it takes .cold-start.lock, which the others
+# find younger than 15 s, so a restart runs one start, not one per hook
+# (GAP-0143). An older lock is a start that ended or died and is replaced.
+# This is the one helper that calls out to the gateway's own CLI.
 defenseclaw_gateway_cold_start() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
@@ -935,6 +939,7 @@ defenseclaw_gateway_cold_start() {
   [ ! -e "${data}/.install.lock" ] || return 1
   [ ! -e "${data}/.disabled" ] || return 1
   bin="$(defenseclaw_gateway_binary "$data" "$home")" || return 1
+  _dc_cold_start_lock "${data}/.cold-start.lock" || return 0
   # In its own session where setsid exists, so the agent ending the hook's
   # process group does not end a start that is still running.
   detach="$(command -v setsid 2>/dev/null)" || detach=""
@@ -949,6 +954,22 @@ defenseclaw_gateway_cold_start() {
       "$bin" start --hook-cold-start
   ) </dev/null >/dev/null 2>&1 &
   return 0
+}
+
+# _dc_cold_start_lock LOCK returns 0 when this hook may launch the cold
+# start: it created LOCK (holding the time), or replaced one 15 s or more
+# old. It returns 1 while a start another hook launched is on its way.
+_dc_cold_start_lock() {
+  local lock="$1" now="" stamp=""
+  now="$(date +%s 2>/dev/null)" || now=""
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  ( set -C; printf '%s\n' "$now" > "$lock" ) 2>/dev/null && return 0
+  [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+  IFS= read -r -n 32 stamp < "$lock" 2>/dev/null || true
+  case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
+  [ $((now - stamp)) -ge 15 ] || return 1
+  rm -f "${lock:?}"
+  ( set -C; printf '%s\n' "$now" > "$lock" ) 2>/dev/null
 }
 
 # _dc_hook_elapsed_ms sets _DC_ELAPSED_MS to the time since the hook
@@ -1287,31 +1308,33 @@ defenseclaw_emit_unreachable_stderr() {
 # fail-open hook exits 0, and Claude Code and Codex do not show stderr then:
 # the systemMessage is the only text the user sees. It prints nothing when
 # the gateway is not this account's to start (managed or socket hooks).
+# Each per-user notice also names `defenseclaw-gateway status` (GAP-0093).
 defenseclaw_unreachable_notice_json() {
   local next="" text=""
   next="$(defenseclaw_unreachable_next_step)"
   [ -n "$next" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
   if [ -e "${data}/.install.lock" ]; then
-    text='DefenseClaw is not checking this session: DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done. If it does not come back, run `defenseclaw-gateway start`.'
+    text='DefenseClaw is not checking this session: DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done. If it does not come back, run `defenseclaw-gateway start`. `defenseclaw-gateway status` shows its state.'
   elif [ -e "${data}/gateway.stopped" ]; then
-    text='DefenseClaw is not checking this session: the gateway was stopped with `defenseclaw-gateway stop`. Run `defenseclaw-gateway start` to resume protection.'
+    text='DefenseClaw is not checking this session: the gateway was stopped with `defenseclaw-gateway stop`. Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state.'
   elif [ -n "${_DC_GATEWAY_RESTART_WAITED:-}" ] && ! defenseclaw_own_config_invalid; then
-    text='DefenseClaw is not checking this session: this account'"'"'s gateway is restarting or not running (no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection.'
+    text='DefenseClaw is not checking this session: this account'"'"'s gateway is restarting or not running (no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state.'
   elif defenseclaw_own_gateway_alive; then
     text='DefenseClaw is not checking this session: the gateway is running but did not answer. Run `defenseclaw-gateway restart` to resume protection.'
   elif defenseclaw_own_config_invalid; then
     text='DefenseClaw is not checking this session: the gateway could not start because config.yaml does not load. Run `defenseclaw config validate`, fix the file, then run `defenseclaw-gateway start`.'
   else
-    text='DefenseClaw is not checking this session: this account'"'"'s gateway is not running. Run `defenseclaw-gateway start` to resume protection.'
+    text='DefenseClaw is not checking this session: this account'"'"'s gateway is not running. Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state.'
   fi
   printf '{"systemMessage":"%s"}\n' "$(defenseclaw_json_escape "$text")"
 }
 
 # defenseclaw_unreachable_next_step prints the next step for a per-user
 # account whose own gateway is down: after `defenseclaw-gateway stop` the
-# hooks deliberately do not start it again, so say how to resume. Managed
-# hooks print nothing (their service is not the user's to start).
+# hooks deliberately do not start it again, so say how to resume, and name
+# `defenseclaw-gateway status` (GAP-0090, GAP-0093). Managed hooks print
+# nothing (their service is not the user's to start).
 defenseclaw_unreachable_next_step() {
   # A standalone managed hook reaches only the administrator's gateway
   # service through its socket: a refused connection there means the service
@@ -1326,15 +1349,15 @@ defenseclaw_unreachable_next_step() {
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
   if [ -e "${data}/.install.lock" ]; then
-    printf '%s' 'DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run `defenseclaw-gateway start` if it does not come back'
+    printf '%s' 'DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run `defenseclaw-gateway start` if it does not come back (`defenseclaw-gateway status` shows its state)'
   elif [ -e "${data}/gateway.stopped" ]; then
-    printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection'
+    printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection (`defenseclaw-gateway status` shows its state)'
   elif defenseclaw_own_gateway_stopped && defenseclaw_own_config_invalid; then
     printf '%s' 'the gateway could not start because config.yaml does not load; run `defenseclaw config validate`, fix the file, then run `defenseclaw-gateway start`'
   elif [ -n "${_DC_GATEWAY_RESTART_WAITED:-}" ]; then
-    printf '%s' 'this account'"'"'s gateway is restarting or not running (no answer within 3 seconds); try again in a moment, or run `defenseclaw-gateway start`'
+    printf '%s' 'this account'"'"'s gateway is restarting or not running (no answer within 3 seconds); try again in a moment, or run `defenseclaw-gateway start` (`defenseclaw-gateway status` shows its state)'
   elif defenseclaw_own_gateway_stopped; then
-    printf '%s' 'this account'"'"'s gateway is not running; run `defenseclaw-gateway start`'
+    printf '%s' 'this account'"'"'s gateway is not running; run `defenseclaw-gateway start` (`defenseclaw-gateway status` shows its state)'
   elif defenseclaw_own_gateway_alive; then
     # A frozen or hung gateway keeps its listener: the request timed out.
     printf '%s' 'the gateway is running but did not answer; check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`'
@@ -1770,7 +1793,10 @@ defenseclaw_session_facts_value() {
 # principal included, or nothing. The binary caches its answer in
 # ~/.defenseclaw/session-facts.json for five minutes with the session
 # variables it saw (env_key); a fresh record for the same variables is used
-# as it is, so the binary runs at most once per five minutes per session. It
+# as it is, so the binary runs at most once per five minutes per session,
+# unless the session's FILE or DIR credential cache changed after the record
+# was written: a new kinit into the same cache changes the principal while
+# the variables stay the same (GAP-1139). It
 # runs only when a credential cache can exist (KRB5CCNAME or /etc/krb5.conf;
 # always on macOS, whose default API: cache needs neither), and its answer is
 # used only when it matches the header charset. A standalone managed hook
@@ -1779,7 +1805,7 @@ defenseclaw_session_facts_value() {
 # per-user gateway binary; a managed hook that names none (Secure Client)
 # sends the SSH and logind variables alone.
 defenseclaw_session_facts_full() {
-  local home="${DEFENSECLAW_AGENT_HOME:-${HOME:-}}" env_key cache record="" re out="" bin="${DEFENSECLAW_SESSION_FACTS_BIN:-}"
+  local home="${DEFENSECLAW_AGENT_HOME:-${HOME:-}}" env_key cache record="" re out="" bin="${DEFENSECLAW_SESSION_FACTS_BIN:-}" ccache=""
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) [ -n "$bin" ] || return 0 ;;
   esac
@@ -1797,7 +1823,15 @@ defenseclaw_session_facts_full() {
     *[!A-Za-z0-9._@/:%\ \|-]*) return 0 ;;
   esac
   cache="${home}/.defenseclaw/session-facts.json"
-  if [ -f "$cache" ] && [ ! -L "$cache" ] && [ -n "$(find "$cache" -mmin -5 2>/dev/null)" ]; then
+  case "${KRB5CCNAME:-}" in
+    '') ccache="/tmp/krb5cc_${EUID:-}" ;;
+    FILE:/*) ccache="${KRB5CCNAME#FILE:}" ;;
+    DIR::/*) ccache="${KRB5CCNAME#DIR::}" ;;
+    DIR:/*) ccache="${KRB5CCNAME#DIR:}" ;;
+    /*) ccache="$KRB5CCNAME" ;;
+  esac
+  if [ -f "$cache" ] && [ ! -L "$cache" ] && { [ -z "$ccache" ] || [ ! "$ccache" -nt "$cache" ]; } &&
+    [ -n "$(find "$cache" -mmin -5 2>/dev/null)" ]; then
     IFS= read -r -d '' -n 4096 record < "$cache" 2>/dev/null || true
     re='"env_key":"([^"]*)"'
     if [[ "$record" =~ $re ]] && [ "${BASH_REMATCH[1]}" = "$env_key" ]; then
@@ -1835,6 +1869,20 @@ defenseclaw_session_facts_checked() {
   esac
   [ "${#1}" -le 1024 ] || return 0
   printf '%s' "$1"
+}
+
+# defenseclaw_tool_gate_max_time EVENT DEFAULT sets HOOK_MAX_TIME, the
+# bound of the whole gateway request (curl --max-time): 4 s for an event that
+# holds a tool call (PreToolUse, PermissionRequest), the native hook's answer
+# budget with its scanner-progress ceiling (hookexec answer_deadline.go), and
+# DEFAULT for every other event. A gateway that accepted the call and stalls
+# in the middle of its answer then fails the call within the agent's 5 s, as
+# the native hook does, instead of after 10 s (GAP-0323).
+defenseclaw_tool_gate_max_time() {
+  case "$1" in
+    PreToolUse|PermissionRequest) HOOK_MAX_TIME=4 ;;
+    *) HOOK_MAX_TIME="$2" ;;
+  esac
 }
 
 # defenseclaw_gateway_post URL MAX_TIME BODY [CURL_ARGS...]

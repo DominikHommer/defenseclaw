@@ -34,7 +34,8 @@ import { lstat } from "node:fs/promises";
 {{else}}import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, open } from "node:fs/promises";
 {{end}}import { {{if not .Sandbox}}homedir, {{end}}userInfo } from "node:os";
-{{if not .Sandbox}}import { dirname, join } from "node:path";
+{{if not .Sandbox}}import { statSync } from "node:fs";
+import { dirname, join } from "node:path";
 {{end}}
 // DC_-prefixed constants are non-secret values baked in at setup time, not
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
@@ -141,9 +142,30 @@ const DC_SESSION_FACTS_TTL_MS = 300000;
 const DC_SESSION_FACTS_RETRY_MS = 30000;
 let DC_SESSION_FACTS = { key: "", value: "", until: 0 };
 
+// The modification time of this login's FILE or DIR Kerberos credential
+// cache is part of the session facts key: a new kinit into the same cache
+// changes the principal while every session variable stays the same
+// (GAP-1139). KCM, KEYRING and API caches have no file; the variables alone
+// key them.
+function defenseclawCredentialCacheStamp() {
+  const name = String(process.env.KRB5CCNAME || "");
+  let path = name;
+  if (name === "") path = typeof process.getuid === "function" ? "/tmp/krb5cc_" + process.getuid() : "";
+  else if (name.startsWith("FILE:")) path = name.slice(5);
+  else if (name.startsWith("DIR::")) path = name.slice(5);
+  else if (name.startsWith("DIR:")) path = name.slice(4);
+  if (!path.startsWith("/")) return "";
+  try {
+    return String(statSync(path).mtimeMs);
+  } catch (_) {
+    return "";
+  }
+}
+
 function defenseclawFullSessionFacts() {
   const env = process.env;
-  const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY].map((v) => String(v || "")).join("|");
+  const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY, defenseclawCredentialCacheStamp()]
+    .map((v) => String(v || "")).join("|");
   const now = Date.now();
   if (DC_SESSION_FACTS.key === key && now < DC_SESSION_FACTS.until) return DC_SESSION_FACTS.value;
   let value = "";

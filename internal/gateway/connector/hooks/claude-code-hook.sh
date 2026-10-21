@@ -302,10 +302,18 @@ fi
 # restarting or not running (after a reboot, for example): send the call
 # again for up to 3 seconds, starting the gateway after a refusal. See
 # defenseclaw_await_gateway in _hardening.sh.
-# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
+# A tool call's request is bounded like the native hook's answer budget
+# (defenseclaw_tool_gate_max_time); the event is read from the payload
+# without running jq.
+HOOK_MAX_TIME=10
+{{if not .SecureClient}}case "$PAYLOAD" in
+  *'"hook_event_name":"PreToolUse"'*|*'"hook_event_name": "PreToolUse"'*) defenseclaw_tool_gate_max_time PreToolUse 10 ;;
+  *'"hook_event_name":"PermissionRequest"'*|*'"hook_event_name": "PermissionRequest"'*) defenseclaw_tool_gate_max_time PermissionRequest 10 ;;
+esac
+{{end}}# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
 # payload on descriptors, never on its command line.
 defenseclaw_hook_post() {
-  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 10 "$PAYLOAD" \
+  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" "$HOOK_MAX_TIME" "$PAYLOAD" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
 {{if and .Managed (not .SecureClient)}}    "${RESOLVED_HEADER_ARGS[@]+"${RESOLVED_HEADER_ARGS[@]}"}" \

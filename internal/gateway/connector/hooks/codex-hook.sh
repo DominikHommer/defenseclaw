@@ -294,7 +294,8 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/codex/hook" "$PAYLOAD" \
 API_TOKEN=
 PAYLOAD=
 unset API_TOKEN PAYLOAD{{else}}HOOK_MAX_TIME=10
-if [ "$BOUND_EVENT" = "SessionEnd" ]; then
+{{if not .SecureClient}}defenseclaw_tool_gate_max_time "$BOUND_EVENT" 10
+{{end}}if [ "$BOUND_EVENT" = "SessionEnd" ]; then
   # Codex's host maximum is three seconds. Leave one second for response
   # parsing and process teardown, matching the native launcher budget.
   HOOK_MAX_TIME=2
