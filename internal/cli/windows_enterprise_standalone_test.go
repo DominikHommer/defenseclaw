@@ -3130,12 +3130,17 @@ func TestWindowsEnterpriseStandaloneRepairRulePackPreflight(t *testing.T) {
 		return errors.New("digest sha256:9760 does not match guardrail.custom_packs.acme.digest")
 	}
 	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
-	err := windowsEnterpriseStandaloneRepairRulePackPreflight()
+	err := windowsEnterpriseStandaloneRepairRulePackPreflight("")
 	if err == nil || !strings.Contains(err.Error(), "keeps its last good policy") || !strings.Contains(err.Error(), "nothing was changed") {
 		t.Fatalf("repair preflight = %v, want a refusal that keeps the running gateway", err)
 	}
+	// GAP-1194: a repair that supplies a valid replacement config installs
+	// that config; the pack only the old config selects does not block it.
+	if err := windowsEnterpriseStandaloneRepairRulePackPreflight(`C:\stage\config.yaml`); err != nil {
+		t.Fatalf("repair preflight with a supplied config = %v, want the old config's packs ignored", err)
+	}
 	windowsEnterpriseStandaloneTransactionPending = func() bool { return true }
-	if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+	if err := windowsEnterpriseStandaloneRepairRulePackPreflight(""); err != nil {
 		t.Fatalf("repair preflight with a pending transaction = %v, want it left to the recovery", err)
 	}
 }

@@ -580,7 +580,7 @@ func runWindowsEnterpriseLifecycle(
 		}
 	}
 	if windowsEnterpriseStandalone(opts) && action == "repair" {
-		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(opts.configPath); err != nil {
 			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
 		}
 	}
@@ -1290,10 +1290,7 @@ func runWindowsEnterprisePowerShellEngineWithRunner(
 						exit.ExitCode(),
 					))
 				} else {
-					failures = append(failures, fmt.Errorf(
-						"Windows enterprise installer exited with code %d",
-						exit.ExitCode(),
-					))
+					failures = append(failures, windowsEnterpriseInstallerExitFailure(exit.ExitCode()))
 				}
 			} else {
 				failures = append(failures, fmt.Errorf("Windows enterprise installer: %w", runErr))
