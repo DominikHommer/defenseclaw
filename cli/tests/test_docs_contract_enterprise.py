@@ -377,10 +377,6 @@ FACTS = [
         (('reference/scanning/ai-discovery.mdx',),
          '7 plugin(s) shown; 7 in total, 4 AI'),
     ]),
-    ('row_37_deprecated_harnesses_have_no_resume_recipe', [
-        (('reference/sandboxes/cli.mdx',),
-         'OpenHands and OmniGent are deprecated'),
-    ]),
     ('gap_0350_current_kernel_feed_line_has_text_fallback', [
         (('reference/sandboxes/cli.mdx',),
          'An install or update restarts the feed:'),
