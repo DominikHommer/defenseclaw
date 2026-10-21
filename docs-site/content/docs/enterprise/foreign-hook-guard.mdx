@@ -250,24 +250,27 @@ modification time to 1970, which the hook reads as expired, and writes a
 `.deny` file does not keep the old answer. The next allow that replaces the
 record clears both.
 
-When the guardian cannot write its removal ledger, it keeps the removals in
-`<account digest>.hold` next to the account's folder. The gateway reads that
-file like the ledger, so it keeps denying the agents that started before the
-removal and does not write a new allow for them. The next ledger write takes
-the removals in and deletes the file.
+The record folder holds no removal state: users can list it, and if an
+administrator makes it writable, a user could delete or move what is in it.
+When the guardian cannot write its removal ledger (for example, the disk is
+full), it marks the account in the gateway's own session store instead, in
+the gateway's data directory, which no user can reach. The mark changes only
+a folder's metadata, so it needs no free space. The guardian also sets the
+mark when it removes a hook while the hook would refuse the account's part
+of the record folder: a user could have moved their folder aside before the
+removal and could bring it back once the permissions are fixed. While the
+mark is set, the gateway blocks every guarded call of that account. The next
+guardian pass for the account that can write the ledger, with a record
+folder the hook trusts, records the removal for every connector, deletes the
+account's records again and clears the mark. Agents that were running then
+stay blocked until they restart.
 
-If the guardian can write neither the ledger nor that file (for example, the
-disk is full), it marks the account's folder instead. The mark changes only
-the folder's metadata, so it needs no free space. While the mark is set, the
-gateway blocks every guarded call of that account. The next guardian pass
-for the account that can write records the removal for every connector and
-clears the mark. Agents that were running then stay blocked until they
-restart.
-
-The gateway also checks the ledger, the hold file and the mark again after
-it writes an allow. If the guardian changed one of them during the check,
-the gateway decides the call again, so its answer, not only the record,
-follows the removal.
+The gateway also checks the ledger and the mark again after it writes an
+allow. If the guardian changed one of them during the check, the gateway
+decides the call again, so its answer, not only the record, follows the
+removal. A Windows gateway that cannot find the record folder's protected
+registration blocks every guarded call, because it can neither write its
+answer nor withdraw an earlier one.
 
 On Windows, the hook refuses a record when anyone but SYSTEM,
 Administrators or the gateway service can change the record, its folder,
@@ -276,13 +279,16 @@ loosens the permissions on `C:\ProgramData\Cisco`, guarded calls block during
 an outage.
 
 Before `ensure`, `repair` or Setup puts the folder's owner and permissions
-back, it checks the folder the way the hook does. If the hook would refuse
-anything in it (for example, standard users could add or delete folders in
-it), it deletes every account's records first. Otherwise a user could move
-their folder aside while the guardian revoked it, bring it back, and have
-the old allow trusted again once the permissions are fixed. If you fix the
-permissions by hand instead, also delete the account folders in it; the
-gateway creates them again.
+back, it checks the folder the way the hook does, also when the folder is
+empty. If the hook would refuse anything (for example, standard users could
+add or delete folders in it), it first closes the folder to every user and
+then deletes every account's records. Otherwise a user could move their
+folder aside while the guardian revoked it, bring it back, and have the old
+allow trusted again once the permissions are fixed. Windows `status` and
+`verify` use the hook's rule too, so they warn
+`hook_session_records_untrusted` when, for example, `C:\ProgramData\Cisco`
+lets users delete folders in it. If you fix the permissions by hand instead,
+also delete the account folders in it; the gateway creates them again.
 
 While the gateway cannot answer (it is stopped or restarting, or it ended
 without removing its hook socket), a guarded tool call runs only when the

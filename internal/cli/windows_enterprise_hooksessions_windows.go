@@ -84,12 +84,14 @@ var windowsHookSessionTreeProblem = func(root string) error {
 // owner keeps WRITE_DAC over it.
 //
 // Before it puts the DACL back on an existing folder, it checks the record
-// tree the way the hook does. Anything the hook refuses, another account
-// could have changed: with write access to the folder, an account can move
-// its own folder away while the guardian revokes its records and bring it
-// back after. So the records are invalidated first, behind a DACL the hook
-// refuses (GAP-0352 review); restoring the access never restores trust in
-// them.
+// tree the way the hook does: the folder and every folder above it even
+// when it holds no account folder, then what is in it. Anything the hook
+// refuses, another account could have changed: with write access to the
+// folder, an account can move its own folder away while the guardian
+// revokes its records and bring it back after, until the access is put
+// back. So the folder is closed first (a DACL without standard users, which
+// the hook refuses), then every record in it is invalidated (GAP-0352
+// review); restoring the access never restores trust in them.
 func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 	info, err := os.Lstat(root)
 	if err == nil {
@@ -176,11 +178,17 @@ func windowsHookSessionRootProblem() string {
 		err = errors.New("it is not owned by Administrators or SYSTEM")
 	}
 	if err == nil {
-		err = managed.ValidateTrustedServiceRuntimeDir(root, "protected foreign-hook session records", windowsHookSessionGatewayAccount)
+		// The hook's own rule (GAP-0352 review): the folder, the account
+		// folders and records in it strict, and every folder above it with
+		// fatal verdicts, the shared Cisco folder included. The advisory
+		// ancestor verdicts of ValidateTrustedServiceRuntimeDir would hide a
+		// drifted Cisco folder that makes every hook refuse its record.
+		err = windowsHookSessionTreeProblem(root)
 	}
 	if err != nil {
-		return root + ": " + err.Error() + ". Every guarded connector's hook refuses its session record and blocks during a gateway outage." +
-			" Fix: run " + windowsEnterpriseAdminCommand("repair") + ", which writes the folder's owner and permissions back"
+		return root + ": " + err.Error() + ". A guarded connector's hook refuses the session records there and blocks during a gateway outage," +
+			" and another account may have changed them. Fix: if a folder above it lets other accounts change it, put that folder's permissions back," +
+			" then run " + windowsEnterpriseAdminCommand("repair") + ", which invalidates the records and writes the folder's owner and permissions back"
 	}
 	return ""
 }

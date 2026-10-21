@@ -181,9 +181,10 @@ func expirePublishedSessionRecord(path string) error {
 }
 
 // publishedSessionPendingTime is the creation time that is the guardian's
-// pending mark on an account folder (MarkForeignHookRemovalPending). Neither
-// the gateway's writes nor the account change a folder's creation time, and
-// setting it needs no free space.
+// pending mark on an account's private session store
+// (MarkForeignHookRemovalPending). The gateway's writes do not change a
+// folder's creation time, no standard user can reach the store, and setting
+// it needs no free space.
 var publishedSessionPendingTime = time.Unix(1, 0).UTC()
 
 // publishedSessionPendingFlag reports the pending mark.
@@ -215,22 +216,10 @@ func publishedSessionSetPending(dir string, on bool) error {
 	return windows.SetFileTime(handle, &stamp, nil, nil)
 }
 
-// publishedSessionCreatePendingDir creates the folder the guardian marks for
-// an account that has none: owned by Administrators, SYSTEM and
-// Administrators only, so the gateway writes nothing in it and the account
-// reads no record from it.
-func publishedSessionCreatePendingDir(dir string) error {
-	descriptor, err := windows.SecurityDescriptorFromString("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
-	if err != nil {
-		return err
-	}
-	attributes := &windows.SecurityAttributes{
-		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-		SecurityDescriptor: descriptor,
-	}
-	pointer, err := winpath.UTF16Ptr(dir)
-	if err != nil {
-		return err
-	}
-	return windows.CreateDirectory(pointer, attributes)
+// publishedSessionCreatePendingDir creates the private session store the
+// guardian marks for an account that has none, and the store folder above
+// it. Both inherit the data directory's access list, so the gateway can use
+// the store once the mark is cleared.
+func publishedSessionCreatePendingDir(_, dir string) error {
+	return os.MkdirAll(dir, 0o700)
 }

@@ -424,7 +424,8 @@ func sessionUnavailableDecision(decision GuardDecision) GuardDecision {
 
 // ErrForeignHookRemovalPending is the guardian's pending mark of an account
 // (ForeignHookRemovalPending): it removed one of the account's hooks and
-// could record the removal neither in its ledger nor in the account's hold.
+// could not record the removal in its ledger yet, or could not trust its
+// revocation of the account's protected session records.
 var ErrForeignHookRemovalPending = errors.New("a foreign-hook removal of this account is not recorded yet")
 
 // ApplyForeignHookRemovals is the removal step of ApplyForeignHookSession.

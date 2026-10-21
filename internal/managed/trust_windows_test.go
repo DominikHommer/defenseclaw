@@ -888,3 +888,45 @@ func TestValidateStrictServiceRuntimeFilePathRefusesADriftedFolderAboveTheRecord
 		})
 	}
 }
+
+// Review P2 (GAP-0352, loop round 3), on real folders: the folder form of
+// the strict walk, which status and verify use for the record root,
+// refuses a root whose installer-owned Cisco folder lets another account
+// delete its children, where the trusted runtime folder check only warns.
+func TestValidateStrictServiceRuntimeDirPathRefusesADriftedCiscoFolder(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := user.User.Sid
+	base := t.TempDir()
+	t.Setenv("ProgramData", base)
+	cisco := filepath.Join(base, "Cisco")
+	root := filepath.Join(cisco, "DefenseClaw-HookSessions")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !PlatformInstallerOwnedPath(cisco) {
+		t.Fatalf("%s must be installer-owned for this test", cisco)
+	}
+	if err := validateStrictServiceRuntimePath(root, true, "folder", self, 0); err != nil {
+		t.Skipf("the temp folder chain is not trusted on this host: %v", err)
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + self.String() + ")(A;;0x40;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(cisco, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	err = validateStrictServiceRuntimePath(root, true, "folder", self, 0)
+	var untrusted *UntrustedPrincipalError
+	if !errors.As(err, &untrusted) || !strings.EqualFold(untrusted.Path, cisco) {
+		t.Fatalf("the drifted Cisco folder must refuse the record root: %v", err)
+	}
+}

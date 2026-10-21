@@ -2194,10 +2194,11 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 			l.noteChange("restored the mode and owner of %s", dir.Path)
 		}
 		if sessionProblem != nil && dir.Path == env.Layout.HookSessionDir {
-			if err := env.invalidateHookSessionRecords(path, dir.Owner); err != nil {
+			invalidated, err := env.invalidateHookSessionRecords(path, dir.Owner)
+			if err != nil {
 				return nil, err
 			}
-			if l.reportChanges {
+			if l.reportChanges && invalidated {
 				l.noteChange("invalidated the protected foreign-hook session records in %s, which another account could change (%v)", dir.Path, sessionProblem)
 			}
 		}
@@ -2397,11 +2398,13 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 	return changed, nil
 }
 
-// metadataDiffers reports whether path's permission bits or owner differ
-// from the managed ones fixMetadata sets.
-// hookSessionTreeProblem is enterprisepolicy.PublishedSessionTreeProblem
+// hookSessionTreeProblem is enterprisepolicy.PublishedSessionTreeProblem and
+// hookSessionInvalidate is enterprisepolicy.InvalidatePublishedSessionRecords
 // (replaceable in tests, whose folders the test account owns).
-var hookSessionTreeProblem = enterprisepolicy.PublishedSessionTreeProblem
+var (
+	hookSessionTreeProblem = enterprisepolicy.PublishedSessionTreeProblem
+	hookSessionInvalidate  = enterprisepolicy.InvalidatePublishedSessionRecords
+)
 
 // hookSessionRecordsProblem reports what in the existing protected
 // foreign-hook session record tree (Layout.HookSessionDir) the hook would
@@ -2419,20 +2422,48 @@ func (e *Env) hookSessionRecordsProblem(dirs []desiredDir) error {
 	return nil
 }
 
-// invalidateHookSessionRecords closes the record tree at path (0700: the
-// hook cannot reach a record) and revokes every account's records in it
-// (enterprisepolicy.InvalidatePublishedSessionRecords). The caller then puts
-// the tree's mode back.
-func (e *Env) invalidateHookSessionRecords(path string, owner fileOwner) error {
-	if err := e.ensureDir(path, 0o700, owner); err != nil {
-		return err
+// invalidateHookSessionRecords closes the record tree at path to every
+// account, then revokes every account's records in it
+// (enterprisepolicy.InvalidatePublishedSessionRecords). The owner goes back
+// first, so an account that owned the folder cannot open it again after the
+// mode change, and then the mode becomes 0700: the hook cannot reach a
+// record, and the mask of an access list gives its named entries nothing.
+// The closed state is checked before anything is revoked, so nothing comes
+// back into the tree while the records are invalidated (GAP-0352 review).
+// The caller then puts the tree's mode back. It reports whether the closed
+// tree held anything to invalidate.
+func (e *Env) invalidateHookSessionRecords(path string, owner fileOwner) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
-	if err := enterprisepolicy.InvalidatePublishedSessionRecords(path); err != nil {
-		return fmt.Errorf("invalidate the protected foreign-hook session records in %s: %w", path, err)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", path, err)
 	}
-	return nil
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false, fmt.Errorf("%s is not a directory", path)
+	}
+	if err := e.Lchown(path, owner.UID, owner.GID); err != nil {
+		return false, fmt.Errorf("chown %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return false, fmt.Errorf("chmod %s: %w", path, err)
+	}
+	if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode()&(os.ModePerm|os.ModeSticky)&^0o700 != 0 {
+		return false, fmt.Errorf("%s could not be closed to other accounts before its records are invalidated", path)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if err := hookSessionInvalidate(path); err != nil {
+		return false, fmt.Errorf("invalidate the protected foreign-hook session records in %s: %w", path, err)
+	}
+	return len(entries) > 0, nil
 }
 
+// metadataDiffers reports whether path's permission bits or owner differ
+// from the managed ones fixMetadata sets.
 func (e *Env) metadataDiffers(path string, mode os.FileMode, owner fileOwner) bool {
 	_, _, current, err := statOwnerMode(path)
 	if err != nil {

@@ -171,9 +171,9 @@ func validatePublishedSessionWalk(path string, folder bool, trust PublishedSessi
 }
 
 // publishedSessionPendingFlag reports the guardian's pending mark on an
-// account folder (MarkForeignHookRemovalPending): its sticky bit, which
-// only root and the folder's owner, the gateway service, can set, and
-// which nothing else in the tree uses.
+// account's private session store (MarkForeignHookRemovalPending): its
+// sticky bit, which only root and the folder's owner, the gateway service,
+// can set, and which nothing else in the store uses.
 func publishedSessionPendingFlag(info os.FileInfo) bool { return info.Mode()&os.ModeSticky != 0 }
 
 // publishedSessionSetPending sets or clears the pending mark of dir. A mode
@@ -193,6 +193,29 @@ func publishedSessionSetPending(dir string, on bool) error {
 	return os.Chmod(dir, mode)
 }
 
-// publishedSessionCreatePendingDir creates the folder the guardian marks for
-// an account that has none: root's, 0700, so no record is read from it.
-func publishedSessionCreatePendingDir(dir string) error { return os.Mkdir(dir, 0o700) }
+// publishedSessionCreatePendingDir creates the private session store the
+// guardian marks for an account that has none, and the store folder above
+// it: 0700 and owned like the data directory dataDir (the gateway service),
+// so the gateway can use the store once the mark is cleared.
+func publishedSessionCreatePendingDir(dataDir, dir string) error {
+	info, err := os.Lstat(dataDir)
+	if err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !ok {
+		return fmt.Errorf("%s is not a folder", dataDir)
+	}
+	for _, path := range []string{filepath.Dir(dir), dir} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				continue
+			}
+			return err
+		}
+		if err := os.Lchown(path, int(st.Uid), int(st.Gid)); err != nil {
+			return err
+		}
+	}
+	return nil
+}

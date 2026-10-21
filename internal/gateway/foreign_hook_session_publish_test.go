@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -130,100 +131,13 @@ func TestForeignHookSessionGatewayWithdrawsAnAllowWhoseRemovalLedgerChanged(t *t
 	step("still no ledger", server.aliceToken, allow, nil, 3)
 }
 
-// Review P2 (GAP-0352): a removal the guardian could not write to its
-// ledger is held next to the account's protected records. The gateway
-// denies with it as with the ledger, so the next exchange of an agent
-// process that started before the removal publishes a block, not the allow
-// the guardian revoked. A process that started after it is allowed, another
-// account is not affected, a hold that does not parse denies, and an allow
-// answered while the guardian wrote or removed the hold is withdrawn.
-func TestForeignHookSessionGatewayDeniesWithTheGuardiansHeldRemovals(t *testing.T) {
-	type published struct {
-		identity, process string
-		deny              bool
-	}
-	var writes []published
-	var guardian func()
-	root := t.TempDir()
-	server := newForeignHookPublishTestServer(t, root, func(_, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, _ time.Time) error {
-		writes = append(writes, published{identity, key.Process, decision.Deny})
-		if guardian != nil {
-			guardian()
-			guardian = nil
-		}
-		return nil
-	})
-	early, late := runtime.GOOS+":b:1:100", runtime.GOOS+":b:1:300"
-	holdPath, ok := enterprisepolicy.ForeignHookRemovalHoldPath(root, server.alice)
-	if !ok {
-		t.Fatal("no hold path")
-	}
-	writeHold := func() {
-		t.Helper()
-		now := time.Now().UTC()
-		data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
-			Identity: server.alice, Connector: "claudecode", Path: "/home/alice/.claude/settings.json",
-			At: now.Format(time.RFC3339), Mark: runtime.GOOS + ":b:200",
-		}}, now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(holdPath+".tmp", data, 0o640); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Rename(holdPath+".tmp", holdPath); err != nil {
-			t.Fatal(err)
-		}
-	}
-	allow := func(process string) map[string]any {
-		return map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": process}, "decision": map[string]any{"deny": false}}
-	}
-	expect := func(name string, want []published, withdrawn int) {
-		t.Helper()
-		if len(writes) != len(want) {
-			t.Fatalf("%s: published %+v, want %+v", name, writes, want)
-		}
-		for i := range want {
-			if writes[i] != want[i] {
-				t.Fatalf("%s: publish %d = %+v, want %+v", name, i, writes[i], want[i])
-			}
-		}
-		if len(server.withdrawn) != withdrawn {
-			t.Fatalf("%s: withdrawn %v, want %d", name, server.withdrawn, withdrawn)
-		}
-		writes = nil
-	}
-	writeHold()
-	server.call(server.aliceToken, allow(early))
-	server.call(server.aliceToken, allow(late))
-	server.call(server.bobToken, allow(early))
-	expect("held removal", []published{{server.alice, early, true}, {server.alice, late, false}, {server.bob, early, false}}, 0)
-
-	if err := os.WriteFile(holdPath, []byte(`{"version":1`), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	server.call(server.aliceToken, allow(late))
-	expect("a hold that does not parse", []published{{server.alice, late, true}}, 0)
-
-	if err := os.Remove(holdPath); err != nil {
-		t.Fatal(err)
-	}
-	guardian = writeHold
-	server.call(server.aliceToken, allow(late))
-	expect("the guardian writes the hold", []published{{server.alice, late, false}, {server.alice, late, false}}, 1)
-	guardian = func() { _ = os.Remove(holdPath) }
-	server.call(server.aliceToken, allow(late))
-	expect("the guardian removes the hold", []published{{server.alice, late, false}, {server.alice, late, false}}, 2)
-	server.call(server.aliceToken, allow(late))
-	expect("no hold", []published{{server.alice, late, false}}, 2)
-}
-
 // foreignHookPublishTestServer is a standalone user-scoped gateway with two
 // enrolled accounts whose protected-record writes go to publish.
 type foreignHookPublishTestServer struct {
 	alice, bob           string
 	aliceToken, bobToken string
 	guardianDir          string
+	dataDir              string
 	withdrawn            []string
 	call                 func(token string, update map[string]any) enterprisepolicy.GuardDecision
 }
@@ -268,6 +182,7 @@ func newForeignHookPublishTestServer(t *testing.T, root string, publish func(str
 	if api.scannerCfg == nil || !api.scannerCfg.StandaloneEnterprise() {
 		t.Skip("the user-scoped test server is not a standalone deployment")
 	}
+	server.dataDir = api.configDataDir()
 	handler := api.tokenAuth(api.managedHookSocketMux())
 	aliceToken := userScopedTestToken(t, connector.UserScopedHookCredential, "claudecode", alice)
 	bobToken := userScopedTestToken(t, connector.UserScopedHookCredential, "claudecode", bob)
@@ -301,7 +216,7 @@ func newForeignHookPublishTestServer(t *testing.T, root string, publish func(str
 
 // Review P2 (GAP-0352, loop round 2): the answer the hook gets, not only
 // the protected record, follows a removal the guardian recorded while the
-// exchange ran. An allow read from the earlier ledger, hold or mark is
+// exchange ran. An allow read from the earlier ledger or mark is
 // decided again from the new state: a removal of this account's connector
 // after the agent process started denies it, and so does the account's
 // pending mark; a removal for another account leaves the allow. When the
@@ -321,7 +236,6 @@ func TestForeignHookSessionGatewayAnswerFollowsARemovalRecordedDuringTheExchange
 	})
 	early := runtime.GOOS + ":b:1:100"
 	ledgerPath := filepath.Join(server.guardianDir, enterprisepolicy.ForeignHookRemovalsFile)
-	holdPath, _ := enterprisepolicy.ForeignHookRemovalHoldPath(root, server.alice)
 	replace := func(path, identity, file string) {
 		t.Helper()
 		now := time.Now().UTC()
@@ -338,7 +252,6 @@ func TestForeignHookSessionGatewayAnswerFollowsARemovalRecordedDuringTheExchange
 			t.Fatal(err)
 		}
 	}
-	accountDir, _ := enterprisepolicy.PublishedSessionIdentityDir(root, server.alice)
 	allow := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": early}, "decision": map[string]any{"deny": false}}
 	files := 0
 	for _, tc := range []struct {
@@ -350,12 +263,8 @@ func TestForeignHookSessionGatewayAnswerFollowsARemovalRecordedDuringTheExchange
 	}{
 		{"a ledger removal for another account", func() { replace(ledgerPath, server.bob, "/home/bob/.claude/settings.json") }, 1, "", []bool{false, false}},
 		{"a ledger removal for this account", func() { replace(ledgerPath, server.alice, "/home/alice/.claude/settings.json") }, 1, "started before DefenseClaw removed", []bool{false, true}},
-		{"a held removal for this account", func() { replace(holdPath, server.alice, "/home/alice/.claude/settings.json") }, 1, "started before DefenseClaw removed", []bool{false, true}},
 		{"the account's pending mark", func() {
-			if err := os.MkdirAll(accountDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := enterprisepolicy.MarkForeignHookRemovalPending(root, server.alice); err != nil {
+			if err := enterprisepolicy.MarkForeignHookRemovalPending(server.dataDir, server.alice); err != nil {
 				t.Fatal(err)
 			}
 		}, 1, "could not record the removal yet", []bool{false, true}},
@@ -364,12 +273,10 @@ func TestForeignHookSessionGatewayAnswerFollowsARemovalRecordedDuringTheExchange
 			replace(ledgerPath, server.bob, "/home/bob/.claude/"+strconv.Itoa(files)+".json")
 		}, 10, "cannot verify", []bool{false, false, false, true}},
 	} {
-		for _, path := range []string{ledgerPath, holdPath} {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				t.Fatal(err)
-			}
+		if err := os.Remove(ledgerPath); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
 		}
-		if err := enterprisepolicy.ClearForeignHookRemovalPending(root, server.alice); err != nil {
+		if err := enterprisepolicy.ClearForeignHookRemovalPending(server.dataDir, root, server.alice); err != nil {
 			t.Fatal(err)
 		}
 		server.call(server.aliceToken, allow)
@@ -391,10 +298,13 @@ func TestForeignHookSessionGatewayAnswerFollowsARemovalRecordedDuringTheExchange
 	}
 }
 
-// Review P2 (GAP-0352, loop round 2): while the guardian holds an account
-// closed because it could not record a removal, every guarded call of the
-// account is denied and only blocks are published; another account is not
-// affected, and the account is allowed again once the mark is cleared.
+// Review P2 (GAP-0352, loop round 2; loop round 3): while the guardian holds
+// an account closed because it could not record a removal, every guarded
+// call of the account is denied and only blocks are published; another
+// account is not affected, and the account is allowed again once the mark
+// is cleared. The mark is on the account's private session store, so an
+// account that deletes or moves its folder of protected records, or empties
+// the record root, does not clear it.
 func TestForeignHookSessionGatewayDeniesAnAccountWhoseRemovalIsPending(t *testing.T) {
 	var publishes []string
 	root := t.TempDir()
@@ -406,24 +316,72 @@ func TestForeignHookSessionGatewayDeniesAnAccountWhoseRemovalIsPending(t *testin
 	if err := os.MkdirAll(accountDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := enterprisepolicy.MarkForeignHookRemovalPending(root, server.alice); err != nil {
+	if err := enterprisepolicy.MarkForeignHookRemovalPending(server.dataDir, server.alice); err != nil {
 		t.Fatal(err)
 	}
 	allow := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": runtime.GOOS + ":b:1:500"}, "decision": map[string]any{"deny": false}}
 	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "could not record the removal yet") {
 		t.Fatalf("a held account must be denied: %+v", got)
 	}
+	if err := os.RemoveAll(accountDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "could not record the removal yet") {
+		t.Fatalf("a held account whose record folder is gone must still be denied: %+v", got)
+	}
 	if got := server.call(server.bobToken, allow); got.Deny {
 		t.Fatalf("another account must be allowed: %+v", got)
 	}
-	if err := enterprisepolicy.ClearForeignHookRemovalPending(root, server.alice); err != nil {
+	if err := enterprisepolicy.ClearForeignHookRemovalPending(server.dataDir, root, server.alice); err != nil {
 		t.Fatal(err)
 	}
 	if got := server.call(server.aliceToken, allow); got.Deny {
 		t.Fatalf("the account must be allowed once the mark is cleared: %+v", got)
 	}
-	want := []string{server.alice + " deny=true", server.bob + " deny=false", server.alice + " deny=false"}
+	want := []string{server.alice + " deny=true", server.alice + " deny=true", server.bob + " deny=false", server.alice + " deny=false"}
 	if strings.Join(publishes, ",") != strings.Join(want, ",") || len(server.withdrawn) != 0 {
 		t.Fatalf("published %v (withdrawn %v), want %v", publishes, server.withdrawn, want)
+	}
+}
+
+// Review P2 (GAP-0352, loop round 3): a standalone gateway that cannot
+// locate its protected session record folder (on Windows, the protected
+// ProgramData registration) denies the exchange: it could neither publish
+// its answer nor withdraw an earlier one. Nothing is published, the
+// account's pending mark keeps its own reason, and the exchange is allowed
+// again once the folder is found.
+func TestForeignHookSessionGatewayDeniesWhenTheRecordFolderCannotBeLocated(t *testing.T) {
+	var publishes int
+	root := t.TempDir()
+	server := newForeignHookPublishTestServer(t, root, func(string, string, enterprisepolicy.SessionKey, enterprisepolicy.GuardDecision, time.Time) error {
+		publishes++
+		return nil
+	})
+	lookupErr := errors.New("the protected ProgramData registration cannot be read")
+	foreignHookSessionPublishRoot = func() (string, error) {
+		if lookupErr != nil {
+			return "", lookupErr
+		}
+		return root, nil
+	}
+	allow := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": runtime.GOOS + ":b:1:500"}, "decision": map[string]any{"deny": false}}
+	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "cannot verify") {
+		t.Fatalf("an exchange without its record folder must be denied: %+v", got)
+	}
+	if err := enterprisepolicy.MarkForeignHookRemovalPending(server.dataDir, server.alice); err != nil {
+		t.Fatal(err)
+	}
+	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "could not record the removal yet") {
+		t.Fatalf("the pending mark must deny with its own reason: %+v", got)
+	}
+	if publishes != 0 || len(server.withdrawn) != 0 {
+		t.Fatalf("nothing can be published or withdrawn without the folder: %d %v", publishes, server.withdrawn)
+	}
+	if err := enterprisepolicy.ClearForeignHookRemovalPending(server.dataDir, root, server.alice); err != nil {
+		t.Fatal(err)
+	}
+	lookupErr = nil
+	if got := server.call(server.aliceToken, allow); got.Deny || publishes != 1 {
+		t.Fatalf("once the folder is found the exchange is allowed and published: %+v %d", got, publishes)
 	}
 }

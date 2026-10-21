@@ -278,53 +278,6 @@ func TestPublishedForeignHookSessionRevocationSurvivesAMarkerThatCannotBeCreated
 	}
 }
 
-// Review P2 (GAP-0352): the removals the guardian could not write to its
-// ledger are held next to the account's records; the gateway reads only
-// that account's entries, and a hold that is not a regular file or does
-// not parse is an error, which denies.
-func TestForeignHookRemovalHoldRoundTrip(t *testing.T) {
-	root := t.TempDir()
-	identity := publishedSessionTestIdentity(t)
-	if removals, info, err := ReadForeignHookRemovalHold(root, identity); err != nil || removals != nil || info != nil {
-		t.Fatalf("no hold must hold nothing: %v %v %v", removals, info, err)
-	}
-	path, ok := ForeignHookRemovalHoldPath(root, identity)
-	dir, _ := PublishedSessionIdentityDir(root, identity)
-	if !ok || path != dir+".hold" {
-		t.Fatalf("hold path %q, want next to %q", path, dir)
-	}
-	now := time.Now().UTC()
-	data, err := EncodeForeignHookRemovals(nil, []ForeignHookRemoval{
-		{Identity: identity, Connector: "copilot", Path: "/home/a/.copilot/hooks/x.json", At: now.Format(time.RFC3339), Mark: "linux:b:200"},
-		{Identity: publishedSessionOtherIdentity(identity), Connector: "copilot", Path: "/home/b/x.json", At: now.Format(time.RFC3339), Mark: "linux:b:200"},
-	}, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o640); err != nil {
-		t.Fatal(err)
-	}
-	removals, info, err := ReadForeignHookRemovalHold(root, identity)
-	if err != nil || info == nil || len(removals) != 1 || removals[0].Path != "/home/a/.copilot/hooks/x.json" {
-		t.Fatalf("the hold must give this account's removal only: %+v %v %v", removals, info, err)
-	}
-	if err := os.WriteFile(path, []byte(`{"version":1,"removals":[`), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := ReadForeignHookRemovalHold(root, identity); err == nil {
-		t.Fatal("a hold that does not parse must be an error")
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(path, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := ReadForeignHookRemovalHold(root, identity); err == nil {
-		t.Fatal("a hold that is not a regular file must be an error")
-	}
-}
-
 // A missing record root (no lifecycle folder, Secure Client, per-user)
 // writes nothing and is not an error; the hook then blocks.
 func TestPublishedForeignHookSessionWithoutARootWritesNothing(t *testing.T) {

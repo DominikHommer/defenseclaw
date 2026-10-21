@@ -106,3 +106,38 @@ func TestWindowsHookSessionRepairInvalidatesRecordsMovedAsideAndBack(t *testing.
 		t.Fatalf("the next allow after the repair proves the process: %v", err)
 	}
 }
+
+// Review P2 (GAP-0352, loop round 3): status and verify check the record
+// folder with the hook's own rule (windowsHookSessionTreeProblem), so a
+// drift the hook refuses, such as a Cisco folder above it that standard
+// users can delete children of, is reported as
+// hook_session_records_untrusted. The advisory ancestor verdicts of
+// ValidateTrustedServiceRuntimeDir hid it.
+func TestWindowsHookSessionStatusUsesTheHooksStrictRule(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), windowsHookSessionFolderName)
+	var drift error
+	var checked []string
+	previousDir, previousTree := windowsHookSessionDir, windowsHookSessionTreeProblem
+	windowsHookSessionDir = func() (string, error) { return root, nil }
+	windowsHookSessionTreeProblem = func(path string) error {
+		checked = append(checked, path)
+		return drift
+	}
+	t.Cleanup(func() { windowsHookSessionDir, windowsHookSessionTreeProblem = previousDir, previousTree })
+	if err := ensureWindowsHookSessionRoot(root, user.User.Sid); err != nil {
+		t.Skipf("the record folder cannot get its owner here (an elevated test): %v", err)
+	}
+	if problem := windowsHookSessionRootProblem(); problem != "" {
+		t.Fatalf("a folder the hook trusts must be no problem: %s", problem)
+	}
+	drift = errors.New(`C:\ProgramData\Cisco lets BUILTIN\Users delete its children`)
+	checked = nil
+	problem := windowsHookSessionRootProblem()
+	if !strings.Contains(problem, "delete its children") || len(checked) != 1 || checked[0] != root {
+		t.Fatalf("a drift the hook refuses must be reported (checked %v): %q", checked, problem)
+	}
+}
