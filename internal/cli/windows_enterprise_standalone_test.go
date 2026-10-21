@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -1114,6 +1115,90 @@ func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
 	}
 	if !result.OK || !result.Noop || result.NoopReason != "compliant" {
 		t.Fatalf("result %+v", result)
+	}
+}
+
+func TestWindowsCompliantEnsureRunsRecordedCursorRepairOnce(t *testing.T) {
+	originalPending, originalElevated := windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated
+	t.Cleanup(func() {
+		windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated = originalPending, originalElevated
+	})
+	windowsEnterpriseIsElevated = func() bool { return true }
+	pending := true
+	windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) { return pending, nil }
+	for _, tc := range []struct {
+		calls []string
+		noop  bool
+	}{
+		{calls: []string{"Status", "Repair"}},
+		{calls: []string{"Status", "Verify"}, noop: true},
+	} {
+		replies := make([]map[string]any, 0, len(tc.calls))
+		for _, action := range tc.calls {
+			replies = append(replies, installedStatus(strings.ToLower(action)))
+		}
+		stub := &ensureStub{t: t, replies: replies}
+		stub.install(t)
+		var stdout bytes.Buffer
+		command := &cobra.Command{}
+		command.SetOut(&stdout)
+		opts := ensureTestOptions()
+		opts.configPath, opts.manifestPath = "", ""
+		if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+			t.Fatal(err)
+		}
+		var calls []string
+		for _, call := range stub.calls {
+			calls = append(calls, call[1])
+		}
+		if !reflect.DeepEqual(calls, tc.calls) {
+			t.Fatalf("installer calls %v, want %v", calls, tc.calls)
+		}
+		var result enterprisestatus.Result
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || !result.OK || result.Noop != tc.noop {
+			t.Fatalf("ensure result %+v (%v)", result, err)
+		}
+		pending = false
+	}
+}
+
+func TestWindowsCursorRepairPlannerKeepsMigrationGuards(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	const key = "guardrail.connectors.cursor.hook_fail_mode"
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := config.MigrationRecord{
+		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		SourceSHA256: strings.Repeat("c", 64), ResultSHA256: configwrite.SHA256Hex(raw),
+		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
+	}
+	if err := config.WriteMigrationRecord(path, record); err != nil {
+		t.Fatal(err)
+	}
+	previousLayout, previousBundle := windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent
+	t.Cleanup(func() {
+		windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent = previousLayout, previousBundle
+	})
+	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{ConfigPath: path}, nil
+	}
+	managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
+	if pending, err := windowsEnterpriseCursorMigrationRepairPending(); err != nil || !pending {
+		t.Fatalf("proven migration not planned: %v, %v", pending, err)
+	}
+	managedStandaloneBundleCurrent = func() (bool, error) { return true, nil }
+	if pending, err := windowsEnterpriseCursorMigrationRepairPending(); err != nil || pending {
+		t.Fatalf("bundle config planned for repair: %v, %v", pending, err)
+	}
+	managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
+	if err := os.WriteFile(path, append(raw, '#'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := windowsEnterpriseCursorMigrationRepairPending(); err != nil || pending {
+		t.Fatalf("changed config planned for repair: %v, %v", pending, err)
 	}
 }
 

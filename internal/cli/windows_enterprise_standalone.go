@@ -942,6 +942,35 @@ func readWindowsEnterpriseMigrationRecord() []byte {
 	return raw
 }
 
+// A compliant ensure still needs the one-time Cursor correction recorded by
+// the old v9 migration. The actual write stays inside the installer's repair
+// transaction; this read only selects that transaction when every proof and
+// signed-bundle guard already accepts it.
+var windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) {
+	recordRaw := readWindowsEnterpriseMigrationRecord()
+	if len(recordRaw) == 0 {
+		return false, nil
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return false, err
+	}
+	fromBundle, err := managedStandaloneConfigFromBundle(layout.ConfigPath)
+	if err != nil || fromBundle {
+		return false, err
+	}
+	raw, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return false, err
+	}
+	var record config.MigrationRecord
+	if json.Unmarshal(trimWindowsJSONBOM(recordRaw), &record) != nil {
+		return false, nil
+	}
+	_, _, pending := config.RepairMigratedCursorFailMode(raw, record)
+	return pending, nil
+}
+
 // noteWindowsEnterpriseMigration keeps the audit.db block/allow entries a
 // config_version 9 migration left in place, when the installer run wrote a
 // new migration-v9.json. The installer migrates in its config step
@@ -3132,16 +3161,27 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			}
 		}
 		if verified && !compilerDrift {
-			// The module can set ok:false for security_incomplete with no
-			// failed check. Keep its warning, without turning that into a
-			// synthetic not_ready error during result translation.
-			accepted := *verifyReport
-			accepted.OK = true
-			applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
-			result.Noop = true
-			result.NoopReason = "already_applied"
-			applyWindowsEnterprisePolicy(ctx, result)
-			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+			pending := false
+			if windowsEnterpriseIsElevated() {
+				pending, err = windowsEnterpriseCursorMigrationRepairPending()
+				if err != nil {
+					result.AddError("preflight_failed", "check the recorded Cursor fail-mode repair: "+err.Error())
+					return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+				}
+			}
+			if !pending {
+				// The module can set ok:false for security_incomplete with no
+				// failed check. Keep its warning, without turning that into a
+				// synthetic not_ready error during result translation.
+				accepted := *verifyReport
+				accepted.OK = true
+				applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
+				result.Noop = true
+				result.NoopReason = "already_applied"
+				applyWindowsEnterprisePolicy(ctx, result)
+				return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+			}
+			verifyFailure = "recorded Cursor fail-mode repair"
 		}
 		if !compilerDrift {
 			alreadyAppliedNeedsRepair = true
@@ -3160,6 +3200,17 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		result.Errors = []enterprisestatus.Message{}
 		result.AddError(windowsEnterpriseMessageCode(planErr.Error(), "ensure_refused"), planErr.Error())
 		return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+	}
+	if plan.Action == "" && windowsEnterpriseIsElevated() {
+		pending, repairErr := windowsEnterpriseCursorMigrationRepairPending()
+		if repairErr != nil {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.AddError("preflight_failed", "check the recorded Cursor fail-mode repair: "+repairErr.Error())
+			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+		}
+		if pending {
+			plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "recorded_cursor_fail_mode"}
+		}
 	}
 	if plan.Action == "" {
 		verifyCtx := ctx
