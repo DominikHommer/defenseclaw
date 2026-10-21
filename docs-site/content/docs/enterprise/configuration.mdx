@@ -138,7 +138,7 @@ Pattern-only custom rules alert on tool-call matches but can block matching prom
 
 The gateway ships three rule packs, `default`, `strict` and `permissive`, under `/opt/defenseclaw/share/policies/guardrail` on Linux and `/opt/cisco/defenseclaw/share/policies/guardrail` on macOS. To use your own rules on Linux and macOS:
 
-1. **Create the pack in the administrator policy folder**, as root: `/etc/defenseclaw/policies/guardrail/<name>` on Linux, `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` on macOS. Packages do not create the `policies/guardrail` directory. Copy a shipped pack under `umask 022` so the gateway can read it. Replace `my-pack` with your pack name.
+1. **Create the pack in the administrator policy folder**, as root: `/etc/defenseclaw/policies/guardrail/<name>` on Linux, `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` on macOS. Packages do not create the `policies/guardrail` directory. Copy a shipped pack under `umask 022` so the gateway can read it. Replace `my-pack` with your pack name in every command below.
 
    ```bash title="macOS"
    sudo sh -c 'umask 022 && mkdir -p /opt/cisco/defenseclaw/etc/policies/guardrail && cp -R /opt/cisco/defenseclaw/share/policies/guardrail/default /opt/cisco/defenseclaw/etc/policies/guardrail/my-pack'
@@ -155,7 +155,7 @@ The gateway ships three rule packs, `default`, `strict` and `permissive`, under 
 3. **Validate the pack** with the gateway's own loader. On macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`.
 
    ```bash
-   sudo /opt/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir /etc/defenseclaw/policies/guardrail/strict
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir /etc/defenseclaw/policies/guardrail/my-pack
    ```
 
    `--json` prints a versioned result. Enterprise packages ship no `defenseclaw` CLI, so `defenseclaw guardrail validate-pack` and `defenseclaw setup guardrail` from the [per-user workflow](/docs/how-to/policies/validate-a-rule-pack) are not available.
@@ -163,9 +163,9 @@ The gateway ships three rule packs, `default`, `strict` and `permissive`, under 
 
    ```yaml
    guardrail:
-     rule_pack: acme
+     rule_pack: my-pack
      custom_packs:
-       acme: {path: /etc/defenseclaw/policies/guardrail/acme, digest: "sha256:<digest>"}
+       my-pack: {path: /etc/defenseclaw/policies/guardrail/my-pack, digest: "sha256:<digest>"}
    ```
 
    The lifecycle refuses a pack that does not exist or whose digest does not match, and applies the new pack in the running gateway without a restart. If the gateway cannot load it, `ensure` fails and the previous config stays in force.

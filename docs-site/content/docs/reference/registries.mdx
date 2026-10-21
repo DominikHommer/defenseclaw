@@ -115,7 +115,7 @@ A registry source is a fetchable manifest of skills or MCP servers. Synced entri
   <Node id="verdict" kind="decision">Scan result?</Node>
   <Node id="hold" kind="operator">{`Held for review\nwarning or blocked\nerror or pending`}</Node>
   <Node id="promote" kind="policy">{`Added to asset policy\nrule tagged registry:<id>`}</Node>
-  <Node id="never" kind="generic">{`Never promoted\nlisted as blocked`}</Node>
+  <Node id="never" kind="generic">{`Never promoted\nstatus rejected`}</Node>
   <Edge from="add" to="sync" />
   <Edge from="sync" to="scan" />
   <Edge from="scan" to="verdict" />

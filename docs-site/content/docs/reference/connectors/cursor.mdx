@@ -35,7 +35,7 @@ Reference for the [Cursor connector](/docs/connectors/cursor). DefenseClaw wires
 | W3C traceparent | yes |
 | Fail closed | yes |
 
-The hook payload's `cursor_version` is the Cursor application version, not the Agent CLI version, so DefenseClaw does not use it to pick a contract. The contract comes from `agent --version`: Agent `2.4.0` up to `4.0.0`, or the reviewed Agent build `2026.07.23-e383d2b`. A later Agent build runs as an untested newer version ([version policy](/docs/reference/hook-contracts#version-policy)).
+The contract covers Cursor Desktop application versions `>=2.4.0, <4.0.0`, and for the Agent CLI only the reviewed exact build `2026.07.23-e383d2b`. The hook payload's `cursor_version` is the Desktop application version. A later Agent build runs as an untested newer version ([version policy](/docs/reference/hook-contracts#version-policy)).
 
 ## Action and priority
 
