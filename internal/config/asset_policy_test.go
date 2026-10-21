@@ -542,3 +542,29 @@ func TestMCPAllowBindsCompleteCommandLine(t *testing.T) {
 		}
 	}
 }
+
+// TestEffectiveModePerConnector covers inherit-on-empty + override +
+// alias-insensitive resolution for the per-connector mode (OTHER-7).
+func TestEffectiveModePerConnector(t *testing.T) {
+	ap := &AssetPolicyConfig{
+		Mode: AssetPolicyModeObserve,
+		Connectors: map[string]PerConnectorAssetPolicy{
+			"codex":       {Mode: AssetPolicyModeAction},
+			"claude_code": {Mode: AssetPolicyModeAction},
+		},
+	}
+	if got := ap.EffectiveMode("codex"); got != AssetPolicyModeAction {
+		t.Errorf("EffectiveMode(codex) = %q, want action", got)
+	}
+	if got := ap.EffectiveMode("hermes"); got != AssetPolicyModeObserve {
+		t.Errorf("EffectiveMode(hermes) = %q, want observe (inherit)", got)
+	}
+	if got := ap.EffectiveMode(""); got != AssetPolicyModeObserve {
+		t.Errorf("EffectiveMode(\"\") = %q, want observe (global)", got)
+	}
+	// Alias-insensitive: override keyed on "claude_code" applies to canonical
+	// "claudecode" (normalizeConnectorKey parity with Python).
+	if got := ap.EffectiveMode("claudecode"); got != AssetPolicyModeAction {
+		t.Errorf("EffectiveMode(claudecode) = %q, want action via alias", got)
+	}
+}

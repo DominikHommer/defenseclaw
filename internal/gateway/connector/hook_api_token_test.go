@@ -500,3 +500,27 @@ func TestEnsureHookAPITokenReissuesAMalformedCredential(t *testing.T) {
 		t.Fatalf("LoadHookAPIToken after re-issue = %q, %v", loaded, err)
 	}
 }
+
+func TestRemoveHookAPITokenRevokesAndRotatesTheCredential(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	first, err := EnsureHookAPIToken(dataDir, "cursor")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken first: %v", err)
+	}
+	if err := RemoveHookAPIToken(dataDir, "cursor"); err != nil {
+		t.Fatalf("RemoveHookAPIToken: %v", err)
+	}
+	if got, err := LoadHookAPIToken(dataDir, "cursor"); err != nil || got != "" {
+		t.Fatalf("LoadHookAPIToken after removal = %q, %v; want absent", got, err)
+	}
+	if err := RemoveHookAPIToken(dataDir, "cursor"); err != nil {
+		t.Fatalf("idempotent RemoveHookAPIToken: %v", err)
+	}
+	second, err := EnsureHookAPIToken(dataDir, "cursor")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken second: %v", err)
+	}
+	if second == first {
+		t.Fatal("Cursor hook API token was reused after revocation")
+	}
+}

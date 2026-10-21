@@ -269,6 +269,40 @@ func TestWindowsPerUserManagedEnrollmentDecodeIsStrict(t *testing.T) {
 	}
 }
 
+func TestCertifyWindowsEnterpriseConnectorPerUserRequiresStandalone(t *testing.T) {
+	pinWindowsStandaloneProfileForTest(t, false)
+	if err := certifyWindowsEnterpriseConnector("devin", connector.NewDevinConnector()); err == nil ||
+		!strings.Contains(err.Error(), "standalone") {
+		t.Fatalf("Secure Client process certified devin: %v", err)
+	}
+	if err := certifyWindowsEnterpriseConnector("copilot", connector.NewCopilotConnector()); err != nil {
+		t.Fatalf("Secure Client process refused the built-in copilot connector: %v", err)
+	}
+	if err := certifyWindowsEnterpriseConnector("copilot", connector.NewDevinConnector()); err == nil {
+		t.Fatal("Secure Client certified an impostor implementation under the copilot name")
+	}
+	pinWindowsStandaloneProfileForTest(t, true)
+	for _, conn := range []connector.Connector{
+		connector.NewCopilotConnector(), connector.NewAntigravityConnector(), connector.NewDevinConnector(),
+		connector.NewHermesConnector(), connector.NewOpenCodeConnector(), connector.NewAMPConnector(),
+	} {
+		if err := certifyWindowsEnterpriseConnector(conn.Name(), conn); err != nil {
+			t.Fatalf("certify built-in %s: %v", conn.Name(), err)
+		}
+	}
+	if err := certifyWindowsEnterpriseConnector("copilot", connector.NewDevinConnector()); err == nil {
+		t.Fatal("certified an impostor implementation under the copilot name")
+	}
+	if err := certifyWindowsEnterpriseConnector("openclaw", connector.NewCodexConnector()); err == nil ||
+		!strings.Contains(err.Error(), "refused on native Windows") {
+		t.Fatalf("openclaw refusal = %v", err)
+	}
+	// Secure Client connectors keep their exact certification.
+	if err := certifyWindowsEnterpriseConnector("codex", connector.NewCodexConnector()); err != nil {
+		t.Fatalf("certify codex: %v", err)
+	}
+}
+
 // The per-user connectors join the registry, the effective hook connectors
 // and the managed runtime only in the standalone profile, and fail closed.
 func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {

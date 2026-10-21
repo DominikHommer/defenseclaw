@@ -609,3 +609,42 @@ func TestPrintConnectors_OpenCodeMatchesCLIStatus(t *testing.T) {
 		}
 	}
 }
+
+// A connector the config disables is not shown as enforced: status used to
+// list a connector with "Policy mode: action / Hook enforcement: yes" although
+// its guardrail.connectors.<name>.enabled was false.
+func TestPrintConnectorModesMarksADisabledConnectorAsNotEnforced(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"connector_modes":[`+
+			`{"connector":"codex","mode":"observability","policy_mode":"action","enforcement_surface":"agent_lifecycle_hooks",`+
+			`"telemetry":["hooks"],"proxy_intercept":false,"guardrail_mode":"action","hook_enforcement":true,"enabled":true},`+
+			`{"connector":"cursor","mode":"observability","policy_mode":"action","enforcement_surface":"agent_lifecycle_hooks",`+
+			`"telemetry":["hooks"],"proxy_intercept":false,"guardrail_mode":"action","hook_enforcement":true,"enabled":false}]}`)
+	}))
+	defer srv.Close()
+	bind, port := splitHostPort(t, srv.URL)
+	cfg := config.DefaultConfig()
+	cfg.Gateway.APIBind = bind
+	cfg.Gateway.APIPort = port
+	modes := fetchConnectorModes(srv.Client(), cfg)
+	if len(modes) != 2 {
+		t.Fatalf("want 2 modes, got %v", modes)
+	}
+
+	out := captureStdout(t, func() { printConnectorModes(modes) })
+	codex, cursor, found := strings.Cut(out, "Cursor (cursor)")
+	if !found {
+		t.Fatalf("Cursor is missing from the roster:\n%s", out)
+	}
+	if !strings.Contains(cursor, "disabled, not enforced") {
+		t.Errorf("disabled Cursor is not marked as not enforced:\n%s", out)
+	}
+	for _, unwanted := range []string{"Hook enforcement:", "Policy mode:", "Enforcement:"} {
+		if strings.Contains(cursor, unwanted) {
+			t.Errorf("disabled Cursor still shows %q:\n%s", unwanted, out)
+		}
+	}
+	if !strings.Contains(codex, "Hook enforcement: yes") || strings.Contains(codex, "disabled") {
+		t.Errorf("enabled Codex lost its enforcement lines:\n%s", out)
+	}
+}

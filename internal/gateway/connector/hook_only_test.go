@@ -3545,3 +3545,25 @@ func TestAntigravityAcceptsUnicodeHookPath(t *testing.T) {
 		t.Fatalf("Stop hook = %+v, want command %q", stop, want)
 	}
 }
+
+func TestRemoveJSONHookReferencesKeepsOperatorEmptyHook(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	owned := "/defenseclaw/cursor-hook.sh"
+	body := `{"hooks":{"PreToolUse":[{"command":"/defenseclaw/cursor-hook.sh"}],"Custom":[]}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeJSONHookReferences(path, owned); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), `"Custom": []`) {
+		t.Fatalf("operator empty hook lost: %s", got)
+	}
+	if strings.Contains(string(got), "PreToolUse") {
+		t.Fatalf("owned hook remains: %s", got)
+	}
+}

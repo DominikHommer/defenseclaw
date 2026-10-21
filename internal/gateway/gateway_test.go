@@ -6817,3 +6817,208 @@ func TestHookScopedTokenLegacyFallbackUsesBuiltinHookRosterOnly(t *testing.T) {
 		t.Fatalf("unknown wildcard hook scope status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }
+
+// TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected pins
+// the existing Origin gate stays active inside the path-token branch
+// (a browser tab on http://evil.example.com cannot bypass CSRF by
+// crafting an OTLP path-token URL — even if it somehow learned the
+// token).
+func TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/codex/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://evil.example.com")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("non-localhost Origin: status = %d, want %d", rr.Code, http.StatusForbidden)
+	}
+}
+
+// TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType pins the
+// H-2 follow-up: the path-token branch of apiCSRFProtect skips the
+// X-DefenseClaw-Client header (OTLP exporters can't set arbitrary
+// headers) but MUST still enforce an OTLP-compatible Content-Type so a
+// browser-initiated CSRF POST with the default text/plain or
+// application/x-www-form-urlencoded cannot smuggle a malicious payload
+// in even if it somehow learned the path token.
+func TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cases := []struct {
+		name       string
+		ct         string
+		wantStatus int
+	}{
+		{"missing content-type rejected", "", http.StatusUnsupportedMediaType},
+		{"text/plain rejected", "text/plain", http.StatusUnsupportedMediaType},
+		{"form-urlencoded rejected", "application/x-www-form-urlencoded", http.StatusUnsupportedMediaType},
+		{"application/json accepted", "application/json", http.StatusOK},
+		{"application/json with charset accepted", "application/json; charset=utf-8", http.StatusOK},
+		{"application/x-protobuf accepted", "application/x-protobuf", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/otlp/codex/secret-token-123/v1/logs", nil)
+			req.RemoteAddr = "127.0.0.1:54321"
+			if tc.ct != "" {
+				req.Header.Set("Content-Type", tc.ct)
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != tc.wantStatus {
+				t.Errorf("Content-Type=%q: status = %d, want %d", tc.ct, rr.Code, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/codex/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("loopback OTLP path token: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("loopback OTLP path token: next handler was not called")
+	}
+}
+
+func TestTokenAuth_AcceptLoopbackOTLPScopedAuthorizationHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		scope  connector.OTLPPathTokenScope
+		token  string
+		signal string
+	}{
+		{name: "codex logs", scope: connector.OTLPScopeCodex, token: "codex-scoped-token", signal: "logs"},
+		{name: "claudecode traces", scope: connector.OTLPScopeClaude, token: "claude-scoped-token", signal: "traces"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, called := tokenAuthTestServer(t, "master-token")
+			api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{tc.scope: tc.token})
+			handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				*called = true
+				if got := r.Header.Get(otelSourceHeader); got != string(tc.scope) {
+					t.Errorf("authenticated OTLP source = %q, want %q", got, tc.scope)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/"+tc.signal, nil)
+			req.RemoteAddr = "127.0.0.1:54321"
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			req.Header.Set(otelSourceHeader, string(tc.scope))
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK || !*called {
+				t.Fatalf("%s scoped Authorization rejected: status=%d called=%v", tc.scope, rr.Code, *called)
+			}
+		})
+	}
+}
+
+func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeCodex: "scoped-token-abc",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/codex/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("master token on scoped OTLP path: status=%d want 401", rr.Code)
+	}
+	if *called {
+		t.Fatal("next handler called for master token despite scoped token existing")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/codex/scoped-token-abc/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer secret-token-123")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("master bearer on scoped OTLP path: status=%d want 401", rr.Code)
+	}
+	if *called {
+		t.Fatal("next handler called for master bearer despite scoped token existing")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/codex/scoped-token-abc/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped token: status=%d want 200", rr.Code)
+	}
+}
+
+func TestTokenAuthScopedOTLPHeaderIsBoundToItsSource(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source string
+		token  string
+		want   int
+	}{
+		{name: "correct", source: "claudecode", token: "claude-scoped-token", want: http.StatusOK},
+		{name: "missing", source: "claudecode", want: http.StatusUnauthorized},
+		{name: "wrong", source: "claudecode", token: "wrong-token", want: http.StatusUnauthorized},
+		{name: "master rejected", source: "claudecode", token: "master-token", want: http.StatusUnauthorized},
+		{name: "cross connector rejected", source: "codex", token: "claude-scoped-token", want: http.StatusUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.Token = "master-token"
+			api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+			api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+				connector.OTLPScopeClaude: "claude-scoped-token",
+				connector.OTLPScopeCodex:  "codex-scoped-token",
+			})
+			called := false
+			handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodPost, "/v1/traces", nil)
+			req.RemoteAddr = "127.0.0.1:54321"
+			if tc.source != "" {
+				req.Header.Set(otelSourceHeader, tc.source)
+			}
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, tc.want)
+			}
+			if got := called; got != (tc.want == http.StatusOK) {
+				t.Fatalf("next handler called = %v, want %v", got, tc.want == http.StatusOK)
+			}
+		})
+	}
+}

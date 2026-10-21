@@ -1905,6 +1905,7 @@ func sameRuntimeDataDir(left, right string) bool {
 //	  "connector":  "codex" | "claudecode" | "openclaw" | "zeptoclaw",
 //	  "mode":       "guardrail" | "observability", // legacy data-path field
 //	  "policy_mode": "observe" | "action",
+//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks",
 //	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
 //	  "proxy_intercept": true | false,
 //	}
@@ -1980,7 +1981,8 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 	// connector, showed up in `defenseclaw-gateway status` as "Data path:
 	// DefenseClaw proxy" in the same output whose Guardrail subsystem said
 	// "proxy_port: closed" and "the local guardrail proxy is not in the LLM
-	// data path". The list below now contributes only the telemetry channels
+	// data path". The list below now contributes only the telemetry
+	// channels, which are genuinely per-connector.
 	if !connectorProxyBindsByName(name) {
 		mode = "observability"
 		intercept = false

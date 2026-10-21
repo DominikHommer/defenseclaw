@@ -3246,3 +3246,166 @@ func TestBestEffortHookContractExcludesNewerGatedContracts(t *testing.T) {
 		t.Fatalf("unversioned setup groups=%d err=%v, want %d", len(groups), err, len(hookGroups))
 	}
 }
+
+func TestUntestedNewerVersionPolicy(t *testing.T) {
+	got := ResolveHookContract("hermes", "Hermes Agent v0.30.1")
+	if got.Status != HookCompatibilityKnown || !got.UntestedVersion || got.Contract.ContractID != "hermes-hooks-v2" ||
+		got.NewestTestedVersion != "<0.22.0" || !strings.HasPrefix(got.Reason, UntestedNewerVersionReasonPrefix) {
+		t.Fatalf("hermes 0.30.1 = %+v", got)
+	}
+	if strict := ResolveHookContractStrict("hermes", "Hermes Agent v0.30.1"); strict.Status != HookCompatibilityUnknown || strict.Contract.ContractID != "" {
+		t.Fatalf("strict hermes 0.30.1 = %+v", strict)
+	}
+
+	saved := knownBrokenAgentVersions
+	t.Cleanup(func() { knownBrokenAgentVersions = saved })
+	knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{
+		"hermes": {{Min: "0.30.0", Max: "0.31.0", Reason: "pre_tool_call payload renamed", Issue: "https://example.invalid/1"}},
+	}
+	broken := ResolveHookContract("hermes", "Hermes Agent v0.30.1")
+	if broken.Status != HookCompatibilityUnknown || !strings.Contains(broken.Reason, "known broken") {
+		t.Fatalf("known-broken hermes 0.30.1 = %+v", broken)
+	}
+	knownBrokenAgentVersions = saved
+
+	previous := HookContractLockEntry{Connector: "hermes", RawAgentVersion: "Hermes Agent v0.21.0", NormalizedAgentVersion: "0.21.0", ContractID: "hermes-hooks-v2", CompatibilityStatus: HookCompatibilityKnown}
+	current := HookContractLockEntry{Connector: "hermes", RawAgentVersion: "Hermes Agent v0.30.1", NormalizedAgentVersion: "0.30.1", ContractID: "hermes-hooks-v2", CompatibilityStatus: got.Status}
+	if !HookContractCompatibilityDrifted(previous, current) || !HookContractAgentUpdateAdmitted(previous, current) {
+		t.Fatal("a compatible agent update must drift and be admitted")
+	}
+	sameAgent := previous
+	sameAgent.ContractID = "hermes-hooks-retired"
+	if HookContractAgentUpdateAdmitted(sameAgent, HookContractLockEntry{Connector: "hermes", RawAgentVersion: previous.RawAgentVersion, NormalizedAgentVersion: previous.NormalizedAgentVersion, ContractID: "hermes-hooks-v2", CompatibilityStatus: HookCompatibilityKnown}) {
+		t.Fatal("a contract change without an agent update must not be admitted as one")
+	}
+	current.CompatibilityStatus, current.ContractID = HookCompatibilityUnknown, ""
+	if HookContractAgentUpdateAdmitted(previous, current) {
+		t.Fatal("an update to an unknown version must not be admitted")
+	}
+	SetStrictHookContractResolution(true)
+	t.Cleanup(func() { SetStrictHookContractResolution(false) })
+	current.CompatibilityStatus, current.ContractID = HookCompatibilityKnown, "hermes-hooks-v2"
+	if HookContractAgentUpdateAdmitted(previous, current) {
+		t.Fatal("strict mode must refuse agent updates as before")
+	}
+	if strict := ResolveHookContract("hermes", "Hermes Agent v0.30.1"); strict.Status != HookCompatibilityUnknown {
+		t.Fatalf("strict-mode hermes 0.30.1 = %+v", strict)
+	}
+}
+
+// TestHookProfileResolvesForSetupOptsGOOS pins SetupOpts.GOOS: a profile for
+// an agent that runs on another OS (an OpenShell sandbox is always linux)
+// takes that OS's contract adjustments, whatever this host runs. Devin is
+// pinned to its reviewed 3000.4.25 build on Windows and macOS only; strict
+// resolution keeps a version outside that pin unknown there instead of
+// admitting it as an untested newer one.
+func TestHookProfileResolvesForSetupOptsGOOS(t *testing.T) {
+	SetStrictHookContractResolution(true)
+	t.Cleanup(func() { SetStrictHookContractResolution(false) })
+	conn := NewDevinConnector()
+	for _, tc := range []struct {
+		goos       string
+		version    string
+		wantStatus string
+	}{
+		{"linux", "3000.11.3", HookCompatibilityKnown},
+		{"darwin", "3000.11.3", HookCompatibilityUnknown},
+		{"windows", "3000.11.3", HookCompatibilityUnknown},
+		{"windows", "3000.4.25", HookCompatibilityKnown},
+		{"Linux", "3000.11.3", HookCompatibilityKnown},
+	} {
+		opts := SetupOpts{APIAddr: "127.0.0.1:18970", AgentVersion: tc.version, GOOS: tc.goos}
+		profile := conn.HookProfile(opts)
+		if profile.CompatibilityStatus != tc.wantStatus {
+			t.Errorf("%s %s: status = %q, want %q", tc.goos, tc.version, profile.CompatibilityStatus, tc.wantStatus)
+		}
+		if spec := correlationSpecForOptions("devin", opts); tc.wantStatus == HookCompatibilityKnown &&
+			spec.CompatibilityStatus == HookCompatibilityUnknown {
+			t.Errorf("%s %s: correlation spec fell back: %+v", tc.goos, tc.version, spec)
+		}
+	}
+	// A pinned contract is looked up for the target OS too.
+	pinned := conn.HookProfile(SetupOpts{AgentVersion: "3000.11.3", HookContractID: "devin-hooks-v1", GOOS: "windows"})
+	if pinned.ContractID != "devin-hooks-v1" || pinned.CompatibilityStatus != HookCompatibilityUnknown {
+		t.Fatalf("pinned windows profile = %q/%q", pinned.ContractID, pinned.CompatibilityStatus)
+	}
+	// Empty GOOS keeps the host behaviour.
+	host := conn.HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970", AgentVersion: "3000.11.3"})
+	if want := runtime.GOOS != "windows" && runtime.GOOS != "darwin"; (host.CompatibilityStatus == HookCompatibilityKnown) != want {
+		t.Fatalf("host profile status = %q on %s", host.CompatibilityStatus, runtime.GOOS)
+	}
+}
+
+func TestHookContractsCoverHookEndpoints(t *testing.T) {
+	reg := NewDefaultRegistry()
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity", "opencode", "amp"} {
+		conn, ok := reg.Get(name)
+		if !ok {
+			t.Fatalf("registry missing %s", name)
+		}
+		if _, ok := conn.(HookEndpoint); !ok {
+			t.Fatalf("%s must expose HookEndpoint", name)
+		}
+		contracts := KnownHookContracts(name)
+		if len(contracts) == 0 {
+			t.Fatalf("%s has no hook contracts", name)
+		}
+		for _, contract := range contracts {
+			if contract.ContractID == "" {
+				t.Fatalf("%s contract missing id", name)
+			}
+			if len(contract.Events) == 0 {
+				t.Fatalf("%s contract %s missing events", name, contract.ContractID)
+			}
+			if len(contract.AIDSurfaces) == 0 {
+				t.Fatalf("%s contract %s missing AID surfaces", name, contract.ContractID)
+			}
+			directResponse := name == "amp"
+			if contract.ResponseFieldName == "" && !directResponse {
+				t.Fatalf("%s contract %s missing response field", name, contract.ContractID)
+			}
+			if directResponse && contract.ResponseFieldName != "" {
+				t.Fatalf("%s contract %s must return its policy verdict directly, not through %q", name, contract.ContractID, contract.ResponseFieldName)
+			}
+			if err := ValidateToolCallLifecycleContract(contract.ToolCallLifecycle, contract.Events); err != nil {
+				t.Fatalf("%s contract %s has invalid tool-call lifecycle: %v", name, contract.ContractID, err)
+			}
+		}
+	}
+}
+
+// The lock entry records the locations the connector resolved for this
+// setup: its hook config, its hook script and each surface's paths.
+func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	testenv.SetHome(t, home)
+	conn := NewCursorConnector()
+	opts := SetupOpts{
+		DataDir: filepath.Join(dir, "dc"),
+		APIAddr: "127.0.0.1:18970",
+	}
+
+	entry := NewHookContractLockEntry(opts, conn, "test-build")
+	caps := conn.Capabilities(opts)
+	if want := conn.HookCapabilities(opts).ConfigPath; want == "" || !stringInSlice(entry.Locations.HookConfigPaths, want) {
+		t.Fatalf("HookConfigPaths=%v want %q", entry.Locations.HookConfigPaths, want)
+	}
+	if !stringInSlice(entry.Locations.HookScriptPaths, filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh")) {
+		t.Fatalf("HookScriptPaths=%v", entry.Locations.HookScriptPaths)
+	}
+	if got := entry.Locations.Surfaces["mcp"].ConfigPaths; len(got) == 0 || !sameStrings(got, uniqueNonEmptyStrings(caps.MCP.ConfigPaths)) {
+		t.Fatalf("mcp config paths=%v want %v", got, caps.MCP.ConfigPaths)
+	}
+	if got := entry.Locations.Surfaces["skills"].ReadPaths; len(got) == 0 || !sameStrings(got, uniqueNonEmptyStrings(caps.Skills.ReadPaths)) {
+		t.Fatalf("skill read paths=%v want %v", got, caps.Skills.ReadPaths)
+	}
+	for _, path := range entry.Locations.Surfaces["mcp"].ConfigPaths {
+		if !strings.HasPrefix(path, home) {
+			t.Fatalf("mcp path %q is not under the bound home %q", path, home)
+		}
+	}
+	if entry.Locations.Surfaces["plugins"].Supported != caps.Plugins.Supported {
+		t.Fatalf("plugins surface = %+v, capability %+v", entry.Locations.Surfaces["plugins"], caps.Plugins)
+	}
+}

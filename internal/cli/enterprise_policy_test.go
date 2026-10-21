@@ -365,3 +365,32 @@ func TestEnterprisePolicyMarksAPolicyFileThatIsNotPresent(t *testing.T) {
 		t.Fatalf("policy files:\n%s", out.String())
 	}
 }
+
+// verify printed "antigravity per_user n/a lock=- foreign_hooks=remove
+// owned=0 foreign=0" for agents no foreign-hook guard covers, as if their
+// foreign hooks were counted and removed (GAP-1472). A guarded per-user
+// agent keeps its setting and its guard line.
+func TestEnterprisePolicyRowOfAnUnguardedAgentSaysNoGuard(t *testing.T) {
+	resetEnterprisePolicyFlags(t)
+	report := enterprisePolicyReport{goos: "linux",
+		Result: enterprisepolicy.Result{States: []enterprisepolicy.State{
+			{Connector: "antigravity", Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove},
+			{Connector: "amp", Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove, ForeignEntries: 1},
+		}},
+		Guard: map[string]enterprisepolicy.PublicConnectorPolicy{
+			"antigravity": {ForeignHooks: config.ForeignHooksRemove},
+			"amp":         {ForeignHooks: config.ForeignHooksRemove, Guard: true},
+		},
+	}
+	var out bytes.Buffer
+	if err := writeEnterprisePolicyReport(&out, report); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "foreign_hooks=n/a     owned=0 foreign=-") ||
+		!strings.Contains(text, "no foreign-hook guard for antigravity") ||
+		!strings.Contains(text, "foreign_hooks=remove  owned=0 foreign=1") ||
+		!strings.Contains(text, "guard:     foreign hooks remove") || strings.Contains(text, "no foreign-hook guard for amp") {
+		t.Fatalf("policy rows:\n%s", text)
+	}
+}

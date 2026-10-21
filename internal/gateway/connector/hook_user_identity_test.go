@@ -343,6 +343,7 @@ func TestManagedShellHookTakesSessionFactsFromTheAdministratorBinary(t *testing.
 
 // Every connector shell hook of a standalone install names the
 // administrator-owned hook binary for the session facts, not only the Hermes
+// and Devin hooks that run the foreign-hook guard: Kiro,
 // Antigravity and Cursor were rendered without it, so their records lost the
 // Kerberos principal that Claude Code's carried in the same login (GAP-0194).
 // A socketless managed render (Secure Client) and a per-user render name none.
@@ -430,5 +431,37 @@ func TestOpenCodePluginSendsTheKerberosPrincipal(t *testing.T) {
 	defer mu.Unlock()
 	if len(facts) != 1 || facts[0] != "v1;k=ssh;ca=192.0.2.10;krb=alice@EXAMPLE.TEST" {
 		t.Fatalf("session facts sent by the plugin = %q", facts)
+	}
+}
+
+// TestPluginTransportsReportIdentityToo covers the connectors that do not go
+// through a shell hook at all.
+//
+// amp and opencode POST to the gateway from inside the agent's own
+// runtime, so they bypass both _hardening.sh and hookexec. They were the other
+// half of the same gap: connectors whose events reached AI Defense with
+// no user on them, for the same reason and with the same silence.
+func TestPluginTransportsReportIdentityToo(t *testing.T) {
+	for _, asset := range []string{
+		"hooks/amp-plugin.ts",
+		"hooks/opencode-plugin.js",
+	} {
+		t.Run(filepath.Base(asset), func(t *testing.T) {
+			body, err := hookFS.ReadFile(asset)
+			if err != nil {
+				t.Fatalf("read embed: %v", err)
+			}
+			for _, header := range []string{"X-DefenseClaw-User-Id", "X-DefenseClaw-User-Name"} {
+				if !strings.Contains(string(body), header) {
+					t.Errorf("%s never sets %s, so its events carry no user", asset, header)
+				}
+			}
+			// Each of these runs on Windows too, where there is no POSIX uid.
+			// Reporting the -1 that the runtime returns there would place a
+			// value in user.id belonging to neither identifier namespace.
+			if !strings.Contains(string(body), ">= 0") && !strings.Contains(string(body), "uid >= 0") {
+				t.Errorf("%s does not guard against a negative uid on Windows", asset)
+			}
+		})
 	}
 }

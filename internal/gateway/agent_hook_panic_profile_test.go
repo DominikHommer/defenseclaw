@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -264,6 +265,57 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 					})
 				}
 			}
+		}
+	}
+}
+
+func TestRecoveredHookVerdictUsesRegisteredProfiles(t *testing.T) {
+	api := &APIServer{}
+	profiles := panicTestProfiles(t, api)
+	for name, profile := range profiles {
+		if panicTestEvent(profile, false) == "" {
+			t.Logf("%s declares no supported event outside its block surface", name)
+		}
+		for _, tc := range []struct{ kind, event string }{
+			{"blockable", panicTestEvent(profile, true)},
+			{"nonblockable", panicTestEvent(profile, false)},
+			{"lifecycle", panicTestLifecycleEvent(profile)},
+		} {
+			if tc.event == "" {
+				if tc.kind == "nonblockable" {
+					continue
+				}
+				t.Fatalf("%s has no valid %s event", name, tc.kind)
+			}
+			t.Run(name+"/"+tc.kind+"/"+tc.event, func(t *testing.T) {
+				injectPanicForProfile(t, name)
+				store, logger := testStoreAndLogger(t)
+				cfg := &config.Config{}
+				cfg.Guardrail.Mode, cfg.Guardrail.HookFailMode, cfg.Guardrail.Connector = "action", "closed", name
+				server := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+				response, req := postPanicTestHook(t, server, name, tc.event)
+				mappedAction, mappedWouldBlock := mapHookActionForProfile("block", "action", tc.event, profile.Capabilities, profile, req.Payload)
+				if response["action"] != mappedAction || response["raw_action"] != "block" || response["would_block"] != mappedWouldBlock {
+					t.Fatalf("mapped response=%v, want %s/block/%v", response, mappedAction, mappedWouldBlock)
+				}
+				expected := agentHookResponseForProfile(profile, req, mappedAction, "block", "WARN", "comparison reason for recovered hook evaluation error", nil, "action", mappedWouldBlock, profile.Capabilities)
+				if got, want := normalizedPanicOutput(panicTestOutput(name, response)), normalizedPanicOutput(expected.HookOutput); !reflect.DeepEqual(got, want) {
+					t.Fatalf("hook output=%v, normal verdict output=%v", got, want)
+				}
+				if mappedAction == "block" {
+					denies := panicWireDenies(panicTestOutput(name, response))
+					if name == "amp" {
+						denies = response["action"] == "block"
+					}
+					if !denies {
+						t.Fatalf("%s/%s block has no dialect denial: %v", name, tc.event, response)
+					}
+				}
+				row := soleHookDecisionForTest(t, store)
+				if row.Structured["result"] != "panic" {
+					t.Fatalf("audit result=%v, want one panic row", row.Structured["result"])
+				}
+			})
 		}
 	}
 }

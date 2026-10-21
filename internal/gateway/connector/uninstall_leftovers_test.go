@@ -20,6 +20,48 @@ import (
 	"testing"
 )
 
+// GAP-1926: after a rollback the earlier release's gateway registers
+// DefenseClaw's hooks again, and this release's setup then backs up that
+// file as the operator's. Teardown restores it and must still remove
+// DefenseClaw's own hooks from it; Copilot's own hooks file then goes.
+func TestCopilotTeardownRemovesOwnHooksFromRestoredBackup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX hook commands")
+	}
+	conn := NewCopilotConnector()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "copilot", "defenseclaw.json")
+	prev := CopilotHooksPathOverride
+	CopilotHooksPathOverride = cfgPath
+	t.Cleanup(func() { CopilotHooksPathOverride = prev })
+	opts := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test", WorkspaceDir: t.TempDir()}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	registered, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, registered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup over the re-registered file: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
+	}
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Fatalf("DefenseClaw's own Copilot hooks file survived teardown: %v", err)
+	}
+}
+
 // GAP-1917: the four OTLP endpoints DefenseClaw writes, left on a dead
 // loopback gateway port without the capture pins, are DefenseClaw's and go;
 // one operator endpoint stays.

@@ -40,6 +40,7 @@ const (
 	// / hermes)
 	styleHookEcho
 	// styleHookEchoDecision: echo hook_output, then exit 2 if its
+	// `decision` is deny/block. (devin-hook.sh)
 	styleHookEchoDecision
 	// styleActionStderr: no stdout echo; on action=block write reason to
 	// stderr + exit 2. (amp-plugin)

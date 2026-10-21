@@ -39,6 +39,7 @@ import (
 // hookSpecificOutput.additionalContext, Copilot's additionalContext,
 // Cursor's additional_context, Devin's hookSpecificOutput.additionalContext.
 // The other harnesses' post-tool hooks have no such field (Hermes, Kiro,
+// OpenCode, Amp, Antigravity), so their agents are not
 // told. Both the sandbox egress notice and the kernel block notice use it.
 var postToolContextEvents = map[string][]string{
 	"claudecode": {"posttooluse", "posttoolusefailure"},

@@ -678,8 +678,9 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	}
 }
 
-// emitAgentHookLLMEvent is the LLM-event emitter for the six
-// hook-only connectors (hermes, cursor,
+// emitAgentHookLLMEvent is the LLM-event emitter for the generic
+// hook-only connectors (hermes, cursor, copilot, ...). It mirrors
+// emitClaudeCodeHookLLMEvent /
 // emitCodexHookLLMEvent so a "give me every prompt and tool call"
 // query against the gateway log returns the same shape regardless
 // of which framework the operator is running.

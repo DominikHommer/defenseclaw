@@ -388,6 +388,7 @@ type SurfaceCapability struct {
 
 // SurfaceLocations is the resolved, on-this-machine path manifest for a
 // connector surface. It is derived from SurfaceCapability and SetupOpts so
+// diagnostics can distinguish static capability ("Cursor supports skills")
 // from the concrete path being watched in this workspace.
 type SurfaceLocations struct {
 	Supported      bool     `json:"supported"`

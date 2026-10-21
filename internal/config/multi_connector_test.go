@@ -488,3 +488,52 @@ func TestEffectiveHookFailMode_GlobalOpenIgnoresCase(t *testing.T) {
 func hookFailModeFor(g *GuardrailConfig, connector string) string {
 	return (&Config{Guardrail: *g}).EffectiveHookFailModeForConnector(connector)
 }
+
+// TestConnectorOverride_NameInsensitive confirms every Effective*()
+// resolver finds a per-connector override even when the configured key
+// differs from the requested name only by case or a hyphen/underscore
+// alias. The boot loop keys connectors by their canonical registry name
+// (e.g. "claudecode"), while operators may hand-write "Claude-Code" or
+// "claude_code" in config.yaml; the lookup must reconcile the two so the
+// override is honored instead of silently falling through to the global.
+func TestConnectorOverride_NameInsensitive(t *testing.T) {
+	disabled := false
+	g := &GuardrailConfig{
+		Mode:         "observe",
+		BlockMessage: "global-msg",
+		Connectors: map[string]PerConnectorGuardrailConfig{
+			"Codex":       {Mode: "action", BlockMessage: "codex-msg"},
+			"claude_code": {Mode: "action", Enabled: &disabled},
+		},
+	}
+
+	// Case-insensitive: canonical "codex" must resolve the "Codex" entry.
+	if got := g.EffectiveMode("codex"); got != "action" {
+		t.Errorf("EffectiveMode(codex) = %q, want action (case-insensitive key)", got)
+	}
+	if got := g.EffectiveBlockMessage("codex"); got != "codex-msg" {
+		t.Errorf("EffectiveBlockMessage(codex) = %q, want codex-msg", got)
+	}
+	if !g.HasConnector("CODEX") {
+		t.Errorf("HasConnector(CODEX) = false, want true (case-insensitive)")
+	}
+
+	// Alias-insensitive: canonical "claudecode" must resolve "claude_code".
+	if got := g.EffectiveMode("claudecode"); got != "action" {
+		t.Errorf("EffectiveMode(claudecode) = %q, want action (alias key)", got)
+	}
+	if g.EffectiveEnabled("claudecode") {
+		t.Errorf("EffectiveEnabled(claudecode) = true, want false (alias key honored)")
+	}
+	if !g.HasConnector("claudecode") {
+		t.Errorf("HasConnector(claudecode) = false, want true (alias)")
+	}
+
+	// Genuinely-absent connector still falls through to the global.
+	if got := g.EffectiveMode("retired-example"); got != "observe" {
+		t.Errorf("EffectiveMode(retired-example) = %q, want observe (no override)", got)
+	}
+	if g.HasConnector("retired-example") {
+		t.Errorf("HasConnector(retired-example) = true, want false")
+	}
+}

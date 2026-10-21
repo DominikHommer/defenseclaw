@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -471,5 +472,81 @@ func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
 				t.Fatalf("decisions = %+v", decisions)
 			}
 		})
+	}
+}
+
+// TestAgentHookTrustedActionShellShapes pins the mapping of shell shapes
+// that did not parse completely, so command rules could not prove a trusted
+// action and a CRITICAL finding stayed an allowed candidate. The shapes of
+// workdirShellCalls are proven end to end by
+// TestHostShellCallsInTheirOwnWorkdirAreJudged; these are the other control
+// arguments those tools report (connector.TrustedShellArgs) and an empty
+// working directory.
+func TestAgentHookTrustedActionShellShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name, connector, tool, args string
+	}{
+		{"cursor-shell-no-cwd", "cursor", "Shell",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","cwd":""}`},
+		{"hermes-terminal-controls", "hermes", "terminal",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","background":true,"timeout":60,"pty":false,"notify":["done"]}`},
+		{"devin-exec-controls", "devin", "exec",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","timeout":0,"tty":false}`},
+		{"copilot-bash-async", "copilot", "bash",
+			`{"command":"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt","description":"write marker","mode":"async","detach":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const sessionCWD = "/work/app/sub"
+			raw := actionfacts.Analyze(actionfacts.Input{Tool: tc.tool, Args: json.RawMessage(tc.args), CWD: sessionCWD})
+			if raw.Parse.Status == actionfacts.StatusComplete {
+				t.Skip("the raw shape now parses completely upstream; the mapping is redundant")
+			}
+			args, toolCWD := agentHookTrustedActionArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
+			mapped := actionfacts.Analyze(actionfacts.Input{
+				Tool: agentHookTrustedActionTool(tc.connector, tc.tool, "linux"),
+				Args: args,
+				CWD:  agentHookTrustedActionCWD(context.Background(), sessionCWD, toolCWD),
+			})
+			if mapped.Parse.Status != actionfacts.StatusComplete {
+				t.Fatalf("mapped parse = %+v, want complete", mapped.Parse)
+			}
+		})
+	}
+	// Scoped to the one connector each: nobody else's tool or arguments move.
+	if got := agentHookTrustedActionTool("hermes", "sys_os_shell", "linux"); got != "sys_os_shell" {
+		t.Errorf("hermes sys_os_shell = %q, want passthrough", got)
+	}
+	args := json.RawMessage(`{"command":"ls","is_input":false}`)
+	if got, cwd := agentHookTrustedActionArgs("hermes", "terminal", args); string(got) != string(args) || cwd != "" {
+		t.Errorf("hermes terminal args = %s (cwd %q), want passthrough", got, cwd)
+	}
+	// The tool call's directory replaces the session's, mapped the same way
+	// (on the host: an existing absolute directory, symlinks resolved).
+	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", ""); got != "/work/app" {
+		t.Errorf("no tool cwd = %q, want the request's", got)
+	}
+	dir := t.TempDir()
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", dir); got != want {
+		t.Errorf("tool cwd = %q, want %q", got, want)
+	}
+	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", filepath.Join(dir, "missing")); got != "" {
+		t.Errorf("missing tool cwd = %q, want none", got)
+	}
+	// A relative directory is resolved against the session's; one the
+	// gateway cannot place is none.
+	if err := os.Mkdir(filepath.Join(want, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := agentHookTrustedActionCWD(context.Background(), want, "sub"); got != filepath.Join(want, "sub") {
+		t.Errorf("relative tool cwd = %q, want %q", got, filepath.Join(want, "sub"))
+	}
+	for _, tc := range []struct{ request, tool string }{{"", "sub"}, {want, "~/sub"}, {want, "missing"}} {
+		if got := agentHookTrustedActionCWD(context.Background(), tc.request, tc.tool); got != "" {
+			t.Errorf("tool cwd %q in %q = %q, want none", tc.tool, tc.request, got)
+		}
 	}
 }

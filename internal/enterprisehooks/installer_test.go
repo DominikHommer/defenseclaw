@@ -2137,8 +2137,9 @@ func sliceContains(values []string, want string) bool {
 	return false
 }
 
-// user writes hooks; a first install creates it as the user and registers
-// the DefenseClaw hooks there.
+// Antigravity loads a hooks file that it creates only when the user writes
+// hooks; a first install creates it as the user and registers the
+// DefenseClaw hooks there.
 func TestInstallBootstrapsAMissingHooksFile(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
@@ -2167,6 +2168,40 @@ func TestInstallBootstrapsAMissingHooksFile(t *testing.T) {
 		if !strings.Contains(string(data), tc.connector+"-hook") && !strings.Contains(string(data), "defenseclaw") {
 			t.Fatalf("%s: hooks file lacks the DefenseClaw hook:\n%s", tc.connector, data)
 		}
+	}
+}
+
+// The Antigravity hook-config stub is a standalone-profile behavior. The
+// Secure Client macOS guardian never created that file, so outside the
+// standalone profile a first install still stops on the missing file, and
+// nothing is written.
+func TestHookConfigStubForAntigravityIsStandaloneOnly(t *testing.T) {
+	setStandaloneProfileForTest(t, false)
+	home := t.TempDir()
+	if stub := defaultHookConfigStubForConnector(connector.NewAntigravityConnector(), connector.SetupOpts{}, home); stub.ContentPath != "" {
+		t.Fatalf("antigravity stub outside the standalone profile = %q, want none", stub.ContentPath)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	skipIfRoot(t)
+	home = newTestHome(t)
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "antigravity",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		AgentVersion:  "1.2.11",
+		GuardrailMode: "action",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "parent missing") {
+		t.Fatalf("Secure Client install with no Antigravity hooks file = %v, want the missing-config refusal", err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".gemini")); !os.IsNotExist(err) {
+		t.Fatalf("Secure Client install created the Antigravity config tree: %v", err)
 	}
 }
 

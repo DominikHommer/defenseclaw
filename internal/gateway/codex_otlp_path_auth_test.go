@@ -148,3 +148,54 @@ func TestSanitizeRouteForTelemetry_RedactsCodexOTLPPathToken(t *testing.T) {
 		t.Fatal("Codex OTLP route telemetry retained the scoped credential")
 	}
 }
+
+func TestTokenAuth_CodexOTLPTokenHasNoCrossRouteAuthority(t *testing.T) {
+	t.Parallel()
+	const gatewayToken = "gateway-master"
+	codexToken := strings.Repeat("c", 64)
+	claudeToken := strings.Repeat("d", 64)
+
+	tests := []struct {
+		name   string
+		path   string
+		header string
+		wantOK bool
+	}{
+		{name: "codex scope", path: "/otlp/codex/" + codexToken + "/v1/logs", wantOK: true},
+		{name: "cross connector", path: "/otlp/claudecode/" + codexToken + "/v1/logs"},
+		{name: "shared receiver", path: "/v1/logs", header: codexToken},
+		{name: "header rejected on scoped path", path: "/otlp/codex/" + codexToken + "/v1/logs", header: gatewayToken},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			api, called := tokenAuthTestServer(t, gatewayToken)
+			api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+				connector.OTLPScopeCodex:  codexToken,
+				connector.OTLPScopeClaude: claudeToken,
+			})
+			handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				*called = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			request := httptest.NewRequest(http.MethodPost, test.path, nil)
+			request.RemoteAddr = "127.0.0.1:54321"
+			if test.header != "" {
+				request.Header.Set("X-DefenseClaw-Token", test.header)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if test.wantOK {
+				if response.Code != http.StatusOK || !*called {
+					t.Fatal("valid scoped Codex OTLP route was rejected")
+				}
+				return
+			}
+			if response.Code != http.StatusUnauthorized || *called {
+				t.Fatal("Codex OTLP credential escaped its connector-scoped route")
+			}
+		})
+	}
+}

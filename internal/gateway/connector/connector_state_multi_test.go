@@ -241,3 +241,32 @@ func TestSaveActiveConnectorsPreservesUnrelatedInactiveTombstone(t *testing.T) {
 		t.Fatal("authoritative reactivation did not clear cursor tombstone")
 	}
 }
+
+func TestMarkConnectorInactiveRecoversCorruptStateAndRestoresExactBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, activeConnectorFile)
+	original := []byte("{not-json\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+	restore, err := MarkConnectorInactive(dir, "cursor")
+	if err != nil {
+		t.Fatalf("MarkConnectorInactive: %v", err)
+	}
+	if !ConnectorExplicitlyInactive(dir, "cursor") {
+		t.Fatal("corrupt state was not replaced by scoped tombstone")
+	}
+	if ConnectorExplicitlyInactive(dir, "codex") {
+		t.Fatal("corrupt-state recovery suppressed unrelated codex")
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read restored state: %v", err)
+	}
+	if !reflect.DeepEqual(got, original) {
+		t.Fatalf("restored bytes = %q, want %q", got, original)
+	}
+}

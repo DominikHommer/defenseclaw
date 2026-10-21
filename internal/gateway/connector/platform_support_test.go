@@ -159,3 +159,38 @@ func TestRegistryWindowsFilterKeepsSupportedAndPreview(t *testing.T) {
 		t.Fatalf("windows-filtered connectors=%v, want %v", got, want)
 	}
 }
+
+func TestCheckPlatformSupportPreservesOperatorWording(t *testing.T) {
+	warning, err := CheckPlatformSupport("cursor", "windows")
+	if err != nil || warning != "" {
+		t.Fatalf("supported Cursor result warning=%q err=%v", warning, err)
+	}
+
+	for _, name := range []string{"copilot", "antigravity", "hermes"} {
+		warning, err = CheckPlatformSupport(name, "windows")
+		if err != nil || warning != "" {
+			t.Fatalf("supported %s result warning=%q err=%v", name, warning, err)
+		}
+	}
+
+	warning, err = CheckPlatformSupport("openclaw", "windows")
+	if warning != "" {
+		t.Fatalf("unsupported warning = %q, want empty", warning)
+	}
+	wantError := "connector \"openclaw\" is not supported on windows: " + windowsConnectorSupport["openclaw"].Reason
+	if err == nil || err.Error() != wantError {
+		t.Fatalf("unsupported error = %v, want %q", err, wantError)
+	}
+}
+
+func TestValidateConnectorSupportedOnOS(t *testing.T) {
+	for _, name := range []string{"copilot", "antigravity", "hermes"} {
+		if err := validateConnectorSupportedOnOS(name, "windows"); err != nil {
+			t.Fatalf("supported connector %s should remain available: %v", name, err)
+		}
+	}
+	err := validateConnectorSupportedOnOS("openclaw", "windows")
+	if err == nil || !strings.Contains(err.Error(), "requires the guardrail proxy") {
+		t.Fatalf("expected clear OpenClaw Windows rejection, got %v", err)
+	}
+}

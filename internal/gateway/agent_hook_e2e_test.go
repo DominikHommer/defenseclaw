@@ -43,6 +43,7 @@ import (
 //   - claudecode response carries the top-level "claude_code_output"
 //     key (Claude Code reads that exact field).
 //   - codex response carries "codex_output".
+//   - Amp consumes the canonical top-level action directly.
 //   - every other connector returns "hook_output".
 //   - all responses carry the canonical action/mode/severity fields.
 //

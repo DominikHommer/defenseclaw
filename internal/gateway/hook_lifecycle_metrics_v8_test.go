@@ -395,3 +395,43 @@ func TestHookLifecycleAlwaysOffSamplerKeepsGeneratedCorrelation(t *testing.T) {
 		t.Fatalf("always-off sampler exported %d transition spans, want 0", got)
 	}
 }
+
+func TestLifecycleOnlySessionStartAndEndEmitGeneratedTransitions(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"traces"})
+	for _, event := range []string{"session_start", "session_end"} {
+		payload := map[string]interface{}{
+			"hook_event_name": event,
+			"session_id":      "copilot-lifecycle-only",
+			"agent_id":        "copilot-root",
+			"agent_type":      "root",
+		}
+		api.emitAgentHookLLMEvent(
+			t.Context(), normalizeAgentHookRequest("copilot", payload), nil,
+		)
+	}
+
+	var spans []*tracepb.Span
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		requests, _ := capture.snapshot()
+		spans = hookModelV8CapturedSpans(requests)
+		if len(spans) == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(spans) != 2 {
+		t.Fatalf("lifecycle-only generated spans=%d want=2", len(spans))
+	}
+	events := map[string]bool{"session_start": false, "session_end": false}
+	for _, span := range spans {
+		attributes := hookModelV8ProtoAttributes(span)
+		if family := attributes["defenseclaw.span.family"]; family != observability.TelemetryFamilyAgentTransition {
+			t.Fatalf("lifecycle-only family=%q want transition; attributes=%v", family, attributes)
+		}
+		events[attributes["defenseclaw.agent.lifecycle.event"]] = true
+	}
+	if !events["session_start"] || !events["session_end"] {
+		t.Fatalf("lifecycle-only transition events=%v", events)
+	}
+}

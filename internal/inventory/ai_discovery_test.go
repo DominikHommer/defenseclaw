@@ -3220,3 +3220,34 @@ func TestSecureClientPackageManifestFollowsSymlink(t *testing.T) {
 		t.Fatal("standalone scan followed a package manifest symlink")
 	}
 }
+
+func TestExpandCandidatePath_ExpandsConfiguredEnvironment(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CODEX_HOME", root)
+	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
+
+	got := service.expandCandidatePath("$CODEX_HOME/config.toml")
+	want := filepath.Join(root, "config.toml")
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("expanded paths = %v, want [%s]", got, want)
+	}
+}
+
+func TestExpandCandidatePath_SkipsUnsetEnvironment(t *testing.T) {
+	previous, wasSet := os.LookupEnv("CODEX_HOME")
+	if err := os.Unsetenv("CODEX_HOME"); err != nil {
+		t.Fatalf("unset CODEX_HOME: %v", err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("CODEX_HOME", previous)
+		} else {
+			_ = os.Unsetenv("CODEX_HOME")
+		}
+	})
+	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
+
+	if got := service.expandCandidatePath("$CODEX_HOME/config.toml"); got != nil {
+		t.Fatalf("expanded paths = %v, want nil for unset environment", got)
+	}
+}

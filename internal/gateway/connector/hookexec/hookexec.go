@@ -3283,6 +3283,7 @@ func compactField(m map[string]json.RawMessage, field string) string {
 }
 
 // decodeDecision pulls the `decision` string from an already-compact JSON
+// object (the connector's hook_output) for the Devin deny/block path.
 func decodeDecision(output string) string {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(output), &m); err != nil {

@@ -1261,7 +1261,7 @@ func enterpriseHookWorkerCredential(account enterpriseHookWorkerAccount, supplem
 }
 
 // enterpriseHookWorkerPath lets connector setup find an agent where
-// directories so they always win. The worker runs as the user, so the
+// discovery found it, after the system directories so they always win. The worker runs as the user, so the
 // user-owned entries grant nothing the user does not already have; a
 // standalone worker leaves out machine directories another account could
 // change (enterprisehooks.UnixAgentSearchDirsFor).

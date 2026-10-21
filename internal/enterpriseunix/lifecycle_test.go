@@ -1463,6 +1463,76 @@ func TestAgentPrefixesReachDiscovery(t *testing.T) {
 	}
 }
 
+// A guardian target refused for an agent version without a verified hook
+// contract runs with no DefenseClaw hooks. Status names it and reports the
+// deployment security-incomplete; verify keeps it a warning for that account
+// and fails only for the other failed target.
+func TestUnverifiedHookContractIsVisible(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": false, "target_count": 2, "success_count": 1, "failure_count": 1})
+	h.publishLedger(data)
+	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
+		{"user": "alice", "connector": "codex", "ok": true},
+		{"user": "bob", "connector": "devin", "ok": false, "error": `enterprise hooks: connector devin agent version "3999.0.0" is not verified against a known hook contract: no hook contract matches normalized agent version`},
+		{"user": "carol", "connector": "codex", "ok": false, "error": "enterprise hooks: connector codex setup failed: executable is not in a trusted install prefix"},
+	}})
+	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	requireOK(t, status)
+	if status.SecurityComplete {
+		t.Fatal("status reports security_complete with an unprotected agent")
+	}
+	found := false
+	for _, w := range status.Warnings {
+		if w.Code == codeHookContractUnverified && strings.Contains(w.Message, "devin 3999.0.0 for user bob") && strings.Contains(w.Message, "pin a verified agent version") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("status warnings do not name the unverified contract: %+v", status.Warnings)
+	}
+	failedTarget := false
+	for _, w := range status.Warnings {
+		if w.Code == codeGuardianTargetFailed && strings.Contains(w.Message, "codex for user carol is not protected: connector codex setup failed") {
+			failedTarget = true
+		}
+	}
+	if !failedTarget {
+		t.Fatalf("status warnings do not name the failed target: %+v", status.Warnings)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeVerify)
+	if verify.SecurityComplete {
+		t.Fatal("verify reports security_complete with an unprotected agent")
+	}
+	if errs := messagesOf(verify.Errors, codeVerify); strings.Contains(errs, "user bob") || !strings.Contains(errs, "user carol") {
+		t.Fatalf("verify errors = %q, want only carol's failed target", errs)
+	}
+}
+
+// A guardian target reason names the refused path first and the remedy
+// last; status cut it at 240 bytes, which dropped the remedy. An oversized
+// reason keeps its remedy clause and stays bounded.
+func TestGuardianTargetReasonKeepsItsRemedy(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	remedy := "install it under an administrator-owned prefix listed in enterprise.enrollment.agent_prefixes"
+	oversized := "connector codex setup failed: " + strings.Repeat("path/segment/", 300) + "python3.12 is refused; " + remedy
+	state, _ := json.Marshal(map[string]any{"results": []map[string]any{
+		{"user": "alice", "connector": "codex", "ok": false, "error": "enterprise hooks: " + oversized},
+	}})
+	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	message := strings.TrimSpace(messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeGuardianTargetFailed))
+	if !strings.Contains(message, "for user alice") || !strings.HasSuffix(message, remedy) || len(message) > 1200 {
+		t.Fatalf("the oversized reason lost its remedy or is unbounded (%d bytes): %q", len(message), message)
+	}
+}
+
 // A second lifecycle run reports busy (75) within seconds so an MDM retries
 // later, while the config-apply trigger waits for the running transaction
 // so a change made during it is still applied afterwards.

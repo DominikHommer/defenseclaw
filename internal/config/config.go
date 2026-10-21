@@ -78,6 +78,7 @@ const (
 	// Connector.Name() in internal/gateway/connector and with the
 	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
 	// "zeptoclaw", "claudecode", "codex", "hermes", "cursor",
+	// "devin", "copilot", "antigravity". Constants for those modes
 	// are intentionally not introduced here yet — they're used as
 	// raw strings by Config.activeConnector() (see internal/config/
 	// claw.go) which dispatches to per-connector readers. Promoting
@@ -1911,7 +1912,9 @@ func normalizeConnectorKey(name string) string {
 //
 // Lookup is connector-name-insensitive: an exact key hit is the fast
 // path, otherwise keys are compared after normalizeConnectorKey so that
+// a request for the registry-canonical name (e.g. "claudecode") resolves
 // an override written with different case or a hyphen/underscore alias
+// (e.g. "Claude-Code", "claude_code"). This matches HasConnector and keeps
 // every Effective*() resolver consistent with the boot loop, which keys
 // connectors by their canonical registry name.
 func (g *GuardrailConfig) connectorOverride(connector string) (PerConnectorGuardrailConfig, bool) {
@@ -2112,6 +2115,7 @@ func (g *GuardrailConfig) Validate() error {
 	}
 	sort.Strings(names)
 	// Reject two distinct keys that canonicalize to the same connector
+	// (e.g. "claude-code" + "claudecode").
 	// connectorOverride() resolves keys through normalizeConnectorKey, so a
 	// duplicate would make per-connector lookups (mode, fail mode, HILT) and
 	// the active-connector roster depend on Go map iteration order — a

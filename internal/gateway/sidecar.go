@@ -4844,6 +4844,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// Direct-upstream short-circuit. Hook/policy-native connectors never bind
 	// the proxy listener: Setup has already installed their lifecycle bridge
 	// and telemetry, and action-mode enforcement is returned through that
+	// native hook surface.
 	//
 	// We still construct the GuardrailProxy above and call Setup
 	// before this gate so:
@@ -6828,6 +6829,7 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             gateway.host at a real upstream
 //	                             (LAN IP, FQDN, etc.); they want
 //	                             fleet integration alongside hooks.
+//	hermes / cursor / copilot
 //	                           → SKIP. These connectors are local
 //	                             hook/native-telemetry surfaces in
 //	                             this PR and do not use the OpenClaw

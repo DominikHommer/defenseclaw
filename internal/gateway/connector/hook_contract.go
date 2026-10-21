@@ -985,9 +985,6 @@ func hookContractsForOS(connectorName, goos string) []HookContract {
 		contract.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
 		contract.Notes = append([]string(nil), contract.Notes...)
 
-		// the reviewed macOS lane. DefenseClaw supplies scoped header auth only
-		// through its protected connector launch boundary and does not persist
-		// the launch environment.
 		// Windows and macOS stay on the Devin build they were reviewed
 		// against; the extra pin covers Linux only.
 		if (goos == "windows" || goos == "darwin") && contract.ContractID == "devin-hooks-v1" {

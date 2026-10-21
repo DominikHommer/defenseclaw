@@ -83,7 +83,8 @@ var copilotShellArgs = map[string]trustedShellArg{
 // Arguments that change where or how the command runs are left for the
 // parser, which does not prove them: Devin's env, shell_flavor and shell_id,
 // Copilot's shellId, and OpenClaw's env, elevated, host and node. Claude Code's and Codex's shell calls take their
-// terminal, agy's run_command and Hermes' process have their own
+// own hook paths (Codex passes its hooks only the command); agy's
+// run_command and Hermes' process have their own projections.
 var trustedShellTools = map[string]map[string]map[string]trustedShellArg{
 	"opencode": {"bash": {"workdir": trustedShellWorkdir}},
 	"hermes": {"terminal": {
@@ -193,6 +194,8 @@ func trustedShellArgValue(kind trustedShellArg, raw json.RawMessage) bool {
 
 // shellCommandKeys names, per connector and shell tool (as the tool is
 // named to hooks), the argument that holds the command: the tools
+// trustedShellTools lists, agy's run_command, and Claude Code's and Codex's
+// Bash.
 var shellCommandKeys = map[string]map[string]string{
 	"opencode":    {"bash": "command"},
 	"hermes":      {"terminal": "command"},

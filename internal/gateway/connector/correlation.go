@@ -1134,7 +1134,7 @@ func (s CorrelationSpec) NativeOTLPValues(attributes map[string]interface{}) []C
 // ValidateCorrelationValues rejects contradictory claims made through two
 // aliases that the reviewed profile declares to be the same typed identity.
 // Different targets or ID kinds remain independent evidence even when their
-// invocation ID).
+// raw values happen to be equal.
 func ValidateCorrelationValues(values []CorrelationValue) error {
 	seen := make(map[string]string, len(values))
 	for _, value := range values {

@@ -845,3 +845,14 @@ func TestProviderTypedBindingsOverrideCanonicalFallbacks(t *testing.T) {
 		t.Fatalf("Antigravity provider tool kind=(%+v,%v)", tool, ok)
 	}
 }
+
+func TestCorrelationAliasConflictsAreTypedAndFailClosed(t *testing.T) {
+	codex := DefaultCorrelationSpec("codex")
+	conflicting := codex.HookValues(map[string]interface{}{
+		"session_id": "session-a",
+		"sessionId":  "session-b",
+	})
+	if err := ValidateCorrelationValues(conflicting); err == nil {
+		t.Fatal("conflicting aliases of one typed Codex session were accepted")
+	}
+}

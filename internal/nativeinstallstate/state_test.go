@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -60,5 +61,80 @@ func TestLoadAtRejectsRelocatedOrMalformedState(t *testing.T) {
 	}
 	if _, err := loadAt(executable, filepath.Dir(filepath.Dir(executable))); err == nil {
 		t.Fatal("relocated state was accepted")
+	}
+}
+
+func TestLoadAtAndEnvironmentRehydrateDocumentedConnectorHomes(t *testing.T) {
+	want, executable := fixtureState(t)
+	got, err := loadAt(executable, want.InstallRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := got.Environment([]string{
+		"PATH=fixture",
+		"CODEX_HOME=project-codex",
+		"claude_config_dir=project-claude",
+		"copilot_home=project-copilot",
+		"defenseclaw_cursor_config_home=project-cursor",
+		"opencode_config_dir=project-opencode",
+		"hermes_home=project-hermes",
+		"DEFENSECLAW_HOME=project-data",
+		"ANTIGRAVITY_CONFIG_DIR=project-antigravity",
+		"DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME=project-internal",
+	})
+	joined := strings.Join(env, "\n")
+	for _, expected := range []string{
+		"CODEX_HOME=" + want.CodexHome,
+		"CLAUDE_CONFIG_DIR=" + want.ClaudeConfigDir,
+		"COPILOT_HOME=" + want.CopilotHome,
+		"DEFENSECLAW_CURSOR_CONFIG_HOME=" + want.CursorHome,
+		"OPENCODE_CONFIG_DIR=" + want.OpenCodeConfigDir,
+		"HERMES_HOME=" + want.HermesHome,
+		"DEFENSECLAW_HOME=" + want.DataRoot,
+		"DEFENSECLAW_INSTALL_ROOT=" + want.InstallRoot,
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("managed environment missing %q: %v", expected, env)
+		}
+	}
+	if strings.Contains(joined, "project-") {
+		t.Fatalf("ambient profile override survived: %v", env)
+	}
+	for _, forbidden := range []string{
+		"ANTIGRAVITY_CONFIG_DIR=",
+		"DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME=",
+	} {
+		if strings.Contains(strings.ToUpper(joined), forbidden) {
+			t.Fatalf("invented Google connector environment survived: %v", env)
+		}
+	}
+	if got.AntigravityConfigDir != want.AntigravityConfigDir {
+		t.Fatalf("internal Antigravity custody path = %q, want %q", got.AntigravityConfigDir, want.AntigravityConfigDir)
+	}
+}
+
+func TestEnvironmentRemovesAmbientConnectorHomesFromLegacyState(t *testing.T) {
+	state := State{InstallRoot: `C:\Program Files\DefenseClaw`, DataRoot: `C:\Users\fixture\.defenseclaw`}
+	env := state.Environment([]string{
+		"PATH=fixture",
+		"CODEX_HOME=project-codex",
+		"claude_config_dir=project-claude",
+		"copilot_home=project-copilot",
+		"defenseclaw_cursor_config_home=project-cursor",
+		"opencode_config_dir=project-opencode",
+		"hermes_home=project-hermes",
+		"antigravity_config_dir=project-antigravity",
+		"defenseclaw_antigravity_config_home=project-internal",
+	})
+	joined := strings.Join(env, "\n")
+	if strings.Contains(strings.ToUpper(joined), "CODEX_HOME=") ||
+		strings.Contains(strings.ToUpper(joined), "CLAUDE_CONFIG_DIR=") ||
+		strings.Contains(strings.ToUpper(joined), "COPILOT_HOME=") ||
+		strings.Contains(strings.ToUpper(joined), "DEFENSECLAW_CURSOR_CONFIG_HOME=") ||
+		strings.Contains(strings.ToUpper(joined), "OPENCODE_CONFIG_DIR=") ||
+		strings.Contains(strings.ToUpper(joined), "HERMES_HOME=") ||
+		strings.Contains(strings.ToUpper(joined), "ANTIGRAVITY_CONFIG_DIR=") ||
+		strings.Contains(strings.ToUpper(joined), "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME=") {
+		t.Fatalf("ambient connector home survived legacy state: %v", env)
 	}
 }

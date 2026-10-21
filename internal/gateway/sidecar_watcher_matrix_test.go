@@ -308,6 +308,7 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 
 // TestResolveWatcherDirs_HookOnlyConnectorMatrix locks the watcher
 // contract for the hook-only connectors (hermes, cursor,
+// copilot). Two contracts differ from the
 // claudecode/codex matrix above and are pinned here:
 //
 //  1. Hermes exposes documented user/workspace plugins as read-only
@@ -319,6 +320,7 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 //     surface rather than applying one connector's plugin semantics to all
 //     hook-only connectors.
 //
+//  2. Skills support varies: hermes/cursor/copilot
 //     advertise their own skill paths so src.Skill must be
 //     watcherDirsFromConnector and the slice must contain a
 //     framework-owned subpath. This split is what justifies a dedicated

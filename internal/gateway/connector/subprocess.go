@@ -673,6 +673,7 @@ type renderedHookRuntimeFile struct {
 // opts, and returns the first file that is missing or differs, or "" when
 // every file matches. For a shell hook connector these are its own hook
 // scripts, the shared inspect-* scripts and the _hardening.sh helper they
+// source. A connector whose Setup publishes
 // a managed in-agent plugin (Amp, OpenCode) writes none of them:
 // ManagedPluginArtifactDrift covers the plugin. The standalone Unix guardian
 // relies on this rather than on the digests recorded at the last write: after

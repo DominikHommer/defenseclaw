@@ -11322,7 +11322,7 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 // contract: every proxy-bound built-in connector exposes a
 // HasUsableProviders() hook so the sidecar boot path can refuse to
 // start when no LLM upstream is configured. Hook-only connectors
-// (codex, claudecode, hermes, cursor, devin, copilot,
+// (codex, claudecode, hermes, cursor, devin, copilot)
 // do not interpose on chat traffic, so the probe does not apply.
 func TestConnector_ProviderProbe_ProxyBuiltinsImplement(t *testing.T) {
 	connectors := []Connector{
@@ -12116,5 +12116,150 @@ func TestOpenClaw_IsBundledPlugin(t *testing.T) {
 	os.WriteFile(pkg, append(data, ' '), 0o644)
 	if c.IsBundledPlugin(extDir) {
 		t.Fatal("a plugin with a changed file was recognized as DefenseClaw's own")
+	}
+}
+
+func TestAuthenticateHookBridgeRequest_MasterKeyOnlyWarnsOnLoopbackBypass(t *testing.T) {
+	testStderrMu.Lock()
+	origStderr := os.Stderr
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		testStderrMu.Unlock()
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = pipeW
+	t.Cleanup(func() {
+		os.Stderr = origStderr
+		_ = pipeW.Close()
+		_ = pipeR.Close()
+		testStderrMu.Unlock()
+	})
+
+	var warned sync.Once
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/cursor/hook", nil)
+	r.RemoteAddr = "127.0.0.1:54321"
+	if !authenticateHookBridgeRequest(r, "", "master-key", "cursor", "test bridge", &warned) {
+		t.Fatal("loopback bridge request should be accepted")
+	}
+
+	os.Stderr = origStderr
+	if err := pipeW.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	captured, _ := io.ReadAll(pipeR)
+	if got := string(captured); !strings.Contains(got, "[SECURITY] cursor: loopback request accepted") {
+		t.Fatalf("stderr missing configured-credential bypass warning:\n%s", got)
+	}
+}
+
+func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T) {
+	opts := SetupOpts{APIAddr: "127.0.0.1:18970"}
+	legacy := map[string]interface{}{
+		"log_user_prompt": false,
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://127.0.0.1:18970/v1/logs",
+				"protocol": "json",
+				"headers": map[string]interface{}{
+					"x-defenseclaw-client": "codex-otel/1.0",
+					"x-defenseclaw-source": "codex",
+				},
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(legacy, opts) {
+		t.Fatal("legacy DefenseClaw-managed Codex [otel] block was not recognized")
+	}
+	for _, signal := range []string{"logs", "metrics", "traces"} {
+		current := map[string]interface{}{
+			"metrics_exporter": map[string]interface{}{
+				"otlp-http": map[string]interface{}{
+					"endpoint": "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/" + signal,
+					"protocol": "json",
+				},
+			},
+		}
+		if !codexOtelBlockLooksManaged(current, opts) {
+			t.Fatalf("headerless scoped Codex %s endpoint was not recognized", signal)
+		}
+	}
+	loopbackAlias := map[string]interface{}{
+		"trace_exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://localhost:18970/otlp/codex/" + strings.Repeat("b", 64) + "/v1/traces",
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(loopbackAlias, opts) {
+		t.Fatal("equivalent local Codex scoped endpoint was not recognized")
+	}
+	portDrift := map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://127.0.0.1:43189/otlp/codex/" + strings.Repeat("c", 64) + "/v1/logs",
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(portDrift, opts) {
+		t.Fatal("scoped Codex endpoint was not recognized after gateway API port drift")
+	}
+	legacyPortDrift := map[string]interface{}{
+		"metrics_exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://localhost:43189/v1/metrics",
+				"headers": map[string]interface{}{
+					"x-defenseclaw-client": "codex-otel/1.0",
+					"x-defenseclaw-source": "codex",
+				},
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(legacyPortDrift, opts) {
+		t.Fatal("legacy Codex endpoint was not recognized after gateway API port drift")
+	}
+	for marker, headers := range map[string]map[string]interface{}{
+		"source only": {"x-defenseclaw-source": "codex"},
+		"client only": {"x-defenseclaw-client": "codex-otel/1.0"},
+	} {
+		ambiguousLegacyDrift := map[string]interface{}{
+			"exporter": map[string]interface{}{
+				"otlp-http": map[string]interface{}{
+					"endpoint": "http://127.0.0.1:43189/v1/logs",
+					"headers":  headers,
+				},
+			},
+		}
+		if codexOtelBlockLooksManaged(ambiguousLegacyDrift, opts) {
+			t.Errorf("port-drifted legacy endpoint with %s was classified as managed", marker)
+		}
+	}
+
+	user := map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "https://otel.example.com/v1/logs",
+				"protocol": "json",
+				"headers":  map[string]interface{}{"x-defenseclaw-source": "codex"},
+			},
+		},
+	}
+	if codexOtelBlockLooksManaged(user, opts) {
+		t.Fatal("non-DefenseClaw Codex [otel] block was classified as managed")
+	}
+	for name, endpoint := range map[string]string{
+		"short token":       "http://127.0.0.1:18970/otlp/codex/abc/v1/logs",
+		"remote host":       "http://collector.example/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"query":             "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?x=1",
+		"empty query":       "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?",
+		"other scope":       "http://127.0.0.1:18970/otlp/claudecode/" + strings.Repeat("a", 64) + "/v1/logs",
+		"missing port":      "http://localhost/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"zero port":         "http://localhost:0/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"oversized port":    "http://localhost:70000/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"shared no headers": "http://127.0.0.1:18970/v1/logs",
+	} {
+		candidate := map[string]interface{}{"exporter": map[string]interface{}{"otlp-http": map[string]interface{}{"endpoint": endpoint}}}
+		if codexOtelBlockLooksManaged(candidate, opts) {
+			t.Errorf("operator-owned/nonmatching endpoint %q classified as managed", name)
+		}
 	}
 }

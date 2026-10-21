@@ -170,6 +170,7 @@ type SandboxArtifactProvider interface {
 // with sandbox-only contracts resolves against those instead: one whose host
 // hooks are not version-gated (Kiro), as an overlay image always pins a
 // reviewed harness build, and one whose sandbox needs a narrower range than
+// its host. A version the host contract accepts and the sandbox
 // refuses gets the sandbox's reason. Overlay images pin reviewed builds, so
 // sandbox resolution keeps exact-range matching.
 func ResolveSandboxHookContract(connectorName, agentVersion string) HookContractResolution {

@@ -2561,11 +2561,13 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 }
 
 // agentHookTrustedActionArgs selects the arguments the trusted-action parser
-// controls and model labels next to the command;
-// project them onto the plain shell shape when that is exact (as
+// sees. agy's run_command reports execution controls and model labels next
+// to the command; connector.AntigravityTrustedShellArgs projects them onto
+// the plain shell shape when that is exact (as
 // connector.AmpBashTrustedShellArgs does for Amp's Bash "cmd"), and
 // connector.TrustedShellArgs takes the working directory and control
 // arguments out of the other harnesses' shell tools. Text a tool sends to a
+// running process (agy send_command_input, Hermes
 // process write and submit) is projected the same way, so it is judged as
 // shell input rather than not at all. The recorded ToolArgs never change.
 //
@@ -2992,6 +2994,7 @@ func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookC
 
 // confirmWithoutAskAgent names the agent when the standalone enterprise
 // profile blocks a confirmation instead of downgrading it to an alert: a tool
+// call on Hermes, whose hooks can neither ask the user nor show
 // a notice while the call runs, so the call would run unseen although the
 // organization's rule asked for a person's approval. It returns "" otherwise.
 func confirmWithoutAskAgent(connectorName, rawAction, mode, event string) string {

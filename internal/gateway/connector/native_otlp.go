@@ -62,6 +62,7 @@ func AllNativeOTLPSignals() []NativeOTLPSignal {
 // NativeOTLPSpec describes how DefenseClaw should configure a connector's
 // native OTLP exporter. The spec is intentionally generic enough to
 // accommodate the connectors that DefenseClaw currently integrates
+// with native OTLP (codex, claudecode) AND the next wave the survey
 // surfaced (OpenCode, Cline, Goose, HolmesGPT, Kilo Code) without
 // per-connector code in the gateway.
 //
