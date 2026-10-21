@@ -1958,46 +1958,73 @@ func removedTestImage(t *testing.T, goos string) []byte {
 		binary.LittleEndian.PutUint32(dos[0x3c:], 64)
 		b.Write(dos)
 		b.WriteString("PE\x00\x00")
+		// The fixed part of a PE32+ optional header, no data directories.
+		optional := make([]byte, 112)
+		binary.LittleEndian.PutUint16(optional, 0x20b)
 		write(binary.LittleEndian, struct {
 			Machine, Sections          uint16
 			Time, Symbols, SymbolCount uint32
 			OptionalHeaderSize, Flags  uint16
-		}{Machine: 0x8664, Flags: 0x0002})
-		b.Write(make([]byte, 64))
+		}{Machine: 0x8664, OptionalHeaderSize: uint16(len(optional)), Flags: 0x0002})
+		b.Write(optional)
 	case "darwin":
 		var thin bytes.Buffer
-		if err := binary.Write(&thin, binary.LittleEndian, macho.FileHeader{Magic: macho.Magic64, Cpu: macho.CpuArm64, Type: macho.TypeExec}); err != nil {
+		// One LC_UUID load command.
+		uuid := make([]byte, 24)
+		binary.LittleEndian.PutUint32(uuid, 0x1b)
+		binary.LittleEndian.PutUint32(uuid[4:], uint32(len(uuid)))
+		if err := binary.Write(&thin, binary.LittleEndian, macho.FileHeader{Magic: macho.Magic64, Cpu: macho.CpuArm64, Type: macho.TypeExec, Ncmd: 1, Cmdsz: uint32(len(uuid))}); err != nil {
 			t.Fatal(err)
 		}
 		thin.Write(make([]byte, 4))
+		thin.Write(uuid)
 		write(binary.BigEndian, []uint32{macho.MagicFat, 1, uint32(macho.CpuArm64), 0, 64, uint32(thin.Len()), 0})
 		b.Write(make([]byte, 64-b.Len()))
 		b.Write(thin.Bytes())
 	default:
-		header := elf.Header64{Type: uint16(elf.ET_EXEC), Machine: uint16(elf.EM_X86_64), Version: uint32(elf.EV_CURRENT), Ehsize: 64}
+		// An ELF header and one PT_LOAD program header that maps it.
+		header := elf.Header64{Type: uint16(elf.ET_EXEC), Machine: uint16(elf.EM_X86_64), Version: uint32(elf.EV_CURRENT),
+			Phoff: 64, Ehsize: 64, Phentsize: 56, Phnum: 1}
 		copy(header.Ident[:], elf.ELFMAG)
 		header.Ident[elf.EI_CLASS] = byte(elf.ELFCLASS64)
 		header.Ident[elf.EI_DATA] = byte(elf.ELFDATA2LSB)
 		header.Ident[elf.EI_VERSION] = byte(elf.EV_CURRENT)
 		write(binary.LittleEndian, header)
+		write(binary.LittleEndian, elf.Prog64{Type: uint32(elf.PT_LOAD), Flags: uint32(elf.PF_R | elf.PF_X), Filesz: 120, Memsz: 120, Align: 0x1000})
 	}
 	return b.Bytes()
 }
 
 // Only machine code that this system's loader runs is a program the check
 // rules out by its bytes: an image for another system, a header that does
-// not parse and an ELF object file are run, if at all, as shell scripts.
+// not parse, a header the loader refuses (no segment, no load command, no
+// optional header) and an object file are run, if at all, as shell scripts.
 func TestRemovedLoadableImageIsMachineCodeThisSystemRuns(t *testing.T) {
-	elfObject := removedTestImage(t, "linux")
-	binary.LittleEndian.PutUint16(elfObject[16:], uint16(elf.ET_REL))
-	machoObject := removedTestImage(t, "darwin")
-	binary.LittleEndian.PutUint32(machoObject[64+12:], uint32(macho.TypeObj))
+	changed := func(goos string, at int, change func([]byte)) []byte {
+		image := removedTestImage(t, goos)
+		change(image[at:])
+		return image
+	}
 	images := map[string][]byte{
-		"ELF":                   removedTestImage(t, "linux"),
-		"Mach-O":                removedTestImage(t, "darwin"),
-		"PE":                    removedTestImage(t, "windows"),
-		"ELF object":            elfObject,
-		"Mach-O object":         machoObject,
+		"ELF":    removedTestImage(t, "linux"),
+		"Mach-O": removedTestImage(t, "darwin"),
+		"PE":     removedTestImage(t, "windows"),
+		"ELF object": changed("linux", 16, func(b []byte) {
+			binary.LittleEndian.PutUint16(b, uint16(elf.ET_REL))
+		}),
+		"ELF header with no segment": removedTestImage(t, "linux")[:64],
+		"ELF with no loadable segment": changed("linux", 64, func(b []byte) {
+			binary.LittleEndian.PutUint32(b, uint32(elf.PT_NOTE))
+		}),
+		"Mach-O object": changed("darwin", 64+12, func(b []byte) {
+			binary.LittleEndian.PutUint32(b, uint32(macho.TypeObj))
+		}),
+		"Mach-O header with no load command": changed("darwin", 64+16, func(b []byte) {
+			copy(b, make([]byte, 8))
+		}),
+		"PE with no optional header": changed("windows", 64+4+16, func(b []byte) {
+			binary.LittleEndian.PutUint16(b, 0)
+		}),
 		"ELF magic number only": []byte("\x7fELF\x02\x01\x01\x00\x00\nexec /tmp/relay\n"),
 		"MZ only":               []byte("MZ\x00\nexec /tmp/relay\n"),
 		"shell script":          []byte("#!/bin/sh\n: \x00\nexec /tmp/relay\n"),

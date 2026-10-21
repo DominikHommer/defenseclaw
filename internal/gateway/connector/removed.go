@@ -1032,36 +1032,51 @@ func (c *removedScriptCheck) fileMayRun(path string, info os.FileInfo, depth int
 }
 
 // removedLoadableImage reports whether file is machine code that the loader
-// of goos runs itself: an ELF executable or shared object (Linux and the
-// other Unix systems), a Mach-O executable, library or bundle, thin or
-// universal (macOS), or a PE image (Windows). A program may run any path it
-// holds; the check rules one out by the names in its bytes alone.
+// of goos maps itself: an ELF executable or shared object with a loadable
+// segment (Linux and the other Unix systems), a Mach-O executable, library
+// or bundle with load commands, thin or universal (macOS), or a PE image
+// with an optional header (Windows). A header alone (no segment, no load
+// command) is refused by the loader, and the shell then runs the file as a
+// script. A program may run any path it holds; the check rules one out by
+// the names in its bytes alone.
 func removedLoadableImage(file io.ReaderAt, goos string) bool {
 	switch goos {
 	case "windows":
-		_, err := pe.NewFile(file)
-		return err == nil
+		image, err := pe.NewFile(file)
+		return err == nil && image.OptionalHeader != nil
 	case "darwin", "ios":
 		if thin, err := macho.NewFile(file); err == nil {
-			return removedMachOLoadable(thin.Type)
+			return removedMachOLoadable(thin)
 		}
 		fat, err := macho.NewFatFile(file)
 		if err != nil || len(fat.Arches) == 0 {
 			return false
 		}
 		for _, arch := range fat.Arches {
-			if !removedMachOLoadable(arch.Type) {
+			if !removedMachOLoadable(arch.File) {
 				return false
 			}
 		}
 		return true
 	}
 	image, err := elf.NewFile(file)
-	return err == nil && (image.Type == elf.ET_EXEC || image.Type == elf.ET_DYN)
+	if err != nil || image.Type != elf.ET_EXEC && image.Type != elf.ET_DYN {
+		return false
+	}
+	for _, prog := range image.Progs {
+		if prog.Type == elf.PT_LOAD {
+			return true
+		}
+	}
+	return false
 }
 
-func removedMachOLoadable(t macho.Type) bool {
-	return t == macho.TypeExec || t == macho.TypeDylib || t == macho.TypeBundle
+func removedMachOLoadable(image *macho.File) bool {
+	switch image.Type {
+	case macho.TypeExec, macho.TypeDylib, macho.TypeBundle:
+		return len(image.Loads) > 0
+	}
+	return false
 }
 
 // removedShells are the interpreters whose scripts the check reads.
