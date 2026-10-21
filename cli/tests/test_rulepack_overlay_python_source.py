@@ -197,6 +197,21 @@ class TestWindowedSearch(unittest.TestCase):
                 self.assertEqual(want and want.span(), got and got.span(), rule.rule_id)
 
 
+    def test_multiline_rule_matches_words_far_apart(self):
+        """GAP-1316: a match across many lines is not lost to the windows."""
+        text = "start\n" + "".join(f"line {i} of filler text\n" for i in range(400)) + "finish\n"
+        self.assertGreater(len(text), rulepack._WINDOW_MIN_TEXT)
+        for source in (r"(?s)start.*finish", r"start[\s\S]*finish"):
+            pattern = rulepack.re.compile(source)
+            required = rulepack._required_literals(pattern.pattern)
+            rule = rulepack._CompiledRule(
+                rule_id="T-SPAN", pattern=pattern, title="Span", severity="HIGH", confidence=1,
+                tags=[], category="test", required=required, anchors=rulepack._anchors(required, pattern),
+            )
+            pack = rulepack.RulePack(source_dir="test", rules=[rule])
+            self.assertEqual([f.rule_id for f in pack.scan_text(text, location="notes.txt")], ["T-SPAN"], source)
+
+
 class TestRequiredLiterals(unittest.TestCase):
     def test_sequence_branch_and_repeat(self):
         self.assertEqual(
