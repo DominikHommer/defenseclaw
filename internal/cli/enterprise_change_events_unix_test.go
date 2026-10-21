@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -127,5 +128,31 @@ func TestUnixSecretChangeNeedsRoot(t *testing.T) {
 	recordUnixSecretChange("set", "splunk-hec-token", false, ok, nil)
 	if events, _ := spoolEvents(t, root, layout); len(events) != 0 {
 		t.Fatalf("a standard account recorded %+v", events)
+	}
+}
+
+// A set that read its value records the change without the value, whatever
+// the lifecycle run then did.
+func TestUnixSecretSetChangeEventCarriesNoValue(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the lifecycle run after the read is exercised on Linux only")
+	}
+	root, layout := stubSecretChangeEnv(t)
+	previousCaller := secretCallerPID
+	secretCallerPID = func() int { return 4242 }
+	t.Cleanup(func() { secretCallerPID = previousCaller })
+	const value = "known-credential-value-9157"
+	cmd := newEnterpriseSecretCommand("set", "")
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetIn(strings.NewReader(value + "\n"))
+	opts := enterpriseSecretOptions{name: "splunk-hec-token", fromStdin: true}
+	_ = runEnterpriseSecret(cmd, "set", &opts)
+	events, raw := spoolEvents(t, root, layout)
+	if len(events) != 1 || events[0].SecretName != "splunk-hec-token" || events[0].Action != "set" {
+		t.Fatalf("events = %+v", events)
+	}
+	if strings.Contains(raw, value) {
+		t.Fatalf("the change event carries the value:\n%s", raw)
 	}
 }
