@@ -1,6 +1,7 @@
 {
   "title": "Features",
   "pages": [
+    "index",
     "guardrail",
     "policies",
     "scanning",

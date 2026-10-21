@@ -1,6 +1,7 @@
 {
   "title": "Appendix",
   "pages": [
+    "index",
     "upgrade-from-0-8",
     "migrate-v9",
     "benchmarks",
