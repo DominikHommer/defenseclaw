@@ -2338,6 +2338,23 @@ func (c *managedSandboxController) Explain(ctx context.Context, req sandboxapi.E
 	}
 	applyManagedPosture(out, me.Posture)
 	me.Posture = nil
+	if req.Sandbox == "" && req.Project != "" {
+		// The project's own MCP servers, which only this process can read
+		// as the caller: the MCP row counts them (#1200).
+		project := req.Project
+		if real, err := filepath.EvalSymlinks(project); err == nil {
+			project = real
+		}
+		if spec, ok := harness.Get(connectorName); ok {
+			me.MCPProjectCount = manager.ProjectMCPServerCount(spec.Name, project)
+		}
+		me.MCPProjectBlocked = true
+		for _, s := range out.Settings {
+			if s.Key == "mcp.project_servers" {
+				me.MCPProjectBlocked = s.Value != packs.MCPProjectServersAllow
+			}
+		}
+	}
 	if me.Workspace != nil {
 		// A new run's copy policy is the managed gateway's: the explain floor
 		// leaves out the organization's pack, which the gateway resolves
