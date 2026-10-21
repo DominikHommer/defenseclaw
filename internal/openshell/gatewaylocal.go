@@ -92,11 +92,18 @@ func (r *doctorRun) addCommand() serviceCommand {
 	return serviceCommand{r.CLI, []string{"gateway", "add", endpoint, "--local", "--name", DefaultGatewayName}}
 }
 
+// localRegistrationTLSDir is the Homebrew service's TLS directory when
+// OpenShell needs an explicit path to it. The readiness wait and the CLI
+// registration must use the same directory.
+func (r *doctorRun) localRegistrationTLSDir() string {
+	return brewTLSDir(r.brewPrefix())
+}
+
 // registerEnv is the environment a registration of the local gateway
 // takes: under a Homebrew of your own the OpenShell CLI finds the
 // gateway's client certificates only where EnvLocalTLSDir says (GAP-0110).
 func (r *doctorRun) registerEnv() []string {
-	if dir := brewTLSDir(r.brewPrefix()); dir != "" {
+	if dir := r.localRegistrationTLSDir(); dir != "" {
 		return []string{EnvLocalTLSDir + "=" + dir}
 	}
 	return nil
@@ -105,20 +112,25 @@ func (r *doctorRun) registerEnv() []string {
 // addCommandLine is addCommand as a shell line, with registerEnv.
 func (r *doctorRun) addCommandLine() string {
 	line := r.addCommand().String()
-	if dir := brewTLSDir(r.brewPrefix()); dir != "" {
+	if dir := r.localRegistrationTLSDir(); dir != "" {
 		line = EnvLocalTLSDir + "=" + shellQuote(dir) + " " + line
 	}
 	return line
 }
 
 // registerLocal registers the package gateway once it has written its
-// client certificates (canRegisterLocal), after its service started.
+// client certificates (canRegisterLocal), after its service started. A
+// personal Homebrew writes them under its prefix, not the registration's
+// config directory (GAP-0319).
 func (r *doctorRun) registerLocal(ctx context.Context) error {
 	dir, err := r.configDir()
 	if err != nil {
 		return err
 	}
 	mtls := filepath.Join(dir, gatewaysSubdir, DefaultGatewayName, mtlsSubdir)
+	if brewTLS := r.localRegistrationTLSDir(); brewTLS != "" {
+		mtls = brewTLS
+	}
 	wait := r.Gateway.RestartWait
 	waitCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
