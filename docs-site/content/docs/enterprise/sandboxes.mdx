@@ -357,7 +357,7 @@ In `install: prerequisite` mode you install OpenShell yourself, once per host,
 and do nothing per account. The steps, as root:
 
 1. **Install NVIDIA's `openshell` and `openshell-gateway` packages** at the
-   release this build supports (`0.1.3`). On Linux use the rpm or deb; the
+   release this build installs (`0.1.5`). On Linux use the rpm or deb; the
    stock `0.1.1` rpm is too old for the `driver: vm` checks, and the package
    version wins over the CLI's when `ensure` compares them. On macOS copy both
    binaries into `/usr/local/bin` as root. Do not point at a Homebrew prefix:
@@ -367,7 +367,7 @@ and do nothing per account. The steps, as root:
    driver. Download `openshell-driver-vm-<arch>-unknown-linux-gnu.tar.gz` (or
    the macOS build) from the OpenShell release. `sandbox doctor` prints the
    install command with the SHA-256 digest this DefenseClaw build pins for
-   OpenShell `0.1.3`; use its `sha256sum -c -` check before extracting the
+   OpenShell `0.1.5`; use its `sha256sum -c -` check before extracting the
    archive into `/usr/local/libexec/openshell` (on macOS also
    `/opt/homebrew/libexec/openshell` is searched) and make it root-owned, because
    `tar` keeps the builder's owner:
@@ -406,7 +406,8 @@ sandbox daemon installs the pinned OpenShell release at their first sandbox, as
 that person, with no sudo. The steps, as root:
 
 1. **Pin an exact release.** Set `enterprise.openshell.version` to a release this
-   DefenseClaw build can install (`"0.1.3"`). A range, an empty value or an
+   DefenseClaw build can install (`"0.1.5"`, or `"0.1.3"`, which DefenseClaw
+   1.0.3 installed). A range, an empty value or an
    unknown release is a failed row in `ensure` that lists the releases it can
    install. NVIDIA publishes no tarballs for Intel Macs, so `setup` is refused
    there too.
@@ -422,7 +423,7 @@ that person, with no sudo. The steps, as root:
 4. **Run `ensure`** with the config ([Apply the sandbox configuration](#apply-the-sandbox-configuration)).
    `status` reports OpenShell as "user-installed, unmanaged".
 
-A person sees the first-use step once: `Installing OpenShell 0.1.3 for your
+A person sees the first-use step once: `Installing OpenShell 0.1.5 for your
 account and starting it (first run only)…`. Switching between the modes later is
 deferred until no sandbox of that person runs (see
 [Install OpenShell: the two modes](#install-openshell-the-two-modes)).
@@ -474,7 +475,7 @@ enterprise:
     install: setup            # or prerequisite
     driver: auto              # docker, vm or auto; default: vm on macOS, docker on Linux
     driver_fallback: docker   # Linux, vm or auto: docker (default) or none where KVM is not available
-    version: "0.1.3"          # exact pin for setup; a range inside ">=0.1.1 <0.2.0" for prerequisite
+    version: "0.1.5"          # exact pin for setup; a range inside ">=0.1.1 <0.2.0" for prerequisite
     gateway_port: 17670       # OpenShell gateway, loopback only
 ```
 
@@ -492,7 +493,7 @@ changes. See [Change the config](/docs/enterprise/lifecycle#change-the-config).
 | `install` | `prerequisite` (default) or `setup`. |
 | `driver` | `docker`, `vm` or `auto`. The default is `vm` on macOS and `docker` on Linux. On Linux, `auto` chooses the MicroVM driver where the user's KVM probe passes and `docker` where it does not. On macOS, `auto` resolves to `vm`; an explicit `docker` setting uses Docker and does not need MicroVM `e2fsprogs`. `vm` or `auto` with `install: prerequisite` on Linux is judged by `ensure`: it needs the driver binary, and the stock OpenShell rpm has none (see [Recipe: prerequisite mode](#recipe-prerequisite-mode)). |
 | `driver_fallback` | Linux, `driver: vm` or `auto`. What a sandbox gets when KVM is not available for the user: `docker` (the default) or `none`. See [The docker fallback](#the-docker-fallback). |
-| `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.3"`; `prerequisite` also accepts a range inside `>=0.1.1 <0.2.0`. |
+| `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.5"`; `prerequisite` also accepts a range inside `>=0.1.1 <0.2.0`. |
 | `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. |
 | `e2fsprogs_dir` | macOS only. Optional override: an absolute root-owned e2fsprogs install prefix (`mke2fs` and `debugfs` in its `sbin` or `bin`) or the folder that holds both. `ensure` names the folder the gateway uses and refuses a broken explicit value. When unset, an account build or the package tools are used. |
 

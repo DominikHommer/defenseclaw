@@ -51,9 +51,9 @@ func TestParseVersionAcceptsReportedShapes(t *testing.T) {
 // TestInstallerPin: setup installs InstallerVersion with the script of its
 // tag, whose digest is pinned, from inside the supported window; the advice names it.
 func TestInstallerPin(t *testing.T) {
-	if InstallerVersion != "0.1.3" || InstallerTag != "v"+InstallerVersion ||
-		InstallerURL != "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.3/install.sh" ||
-		InstallerSHA256 != "b8daa915e766564f0473b76ed4e012fff9723c1ac98007b3f85ba20f59442d28" {
+	if InstallerVersion != "0.1.5" || InstallerTag != "v"+InstallerVersion ||
+		InstallerURL != "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.5/install.sh" ||
+		InstallerSHA256 != "7bf6706741b8b59c1b61e0c47030f0a34fefba6cee3c74cd52638cbf7cdc3655" {
 		t.Fatalf("installer pin = %s %s %s", InstallerTag, InstallerURL, InstallerSHA256)
 	}
 	if v := mustParse(InstallerVersion); CheckSupported(v) != nil || v.Compare(mustParse(SupportedMin)) < 0 {
@@ -71,8 +71,8 @@ func TestInstallerPin(t *testing.T) {
 // checks it against that digest, without fetching a checksum file.
 func TestVMDriverDigestsArePinnedForTheInstallerRelease(t *testing.T) {
 	want := map[string]string{
-		"amd64": "22593640c6179eb87413ab099832fbd133d3a6a4979904d27679e7da6d80a0cb",
-		"arm64": "4426ee0992989060eb5987ad7072feb3eb6aecf5a628ad0284c3d7ad5f39974b",
+		"amd64": "6465e39666276215a9fa05d27991e67c9c88267284b59aca95cb7dbb9d69cd41",
+		"arm64": "fc49a0bebfda3075a996123c0fd252200e2987856da63fbd8e7f021f327e1e68",
 	}
 	for goarch, digest := range want {
 		archive := vmDriverArchive(goarch)

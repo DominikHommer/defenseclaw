@@ -280,9 +280,12 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 	// A sandbox of the compute driver the gateway ran before a switch is in
 	// OpenShell's error state because the gateway cannot run it, not because a
 	// container stopped or Docker restarted (GAP-0455).
-	liveDriver := ""
+	liveDriver, errorStops := "", false
 	if st, serr := api.Status(ctx); serr == nil && st.Gateway != nil {
 		liveDriver = st.Gateway.Driver
+		v, verr := openshell.ParseVersion(st.Gateway.Version)
+		first, ferr := openshell.ParseVersion(openshell.ErrorStopRelease)
+		errorStops = verr == nil && ferr == nil && v.Compare(first) >= 0
 	}
 	otherDriver := otherDriverSandboxes(list, liveDriver)
 	otherDriverNames := map[string]bool{}
@@ -317,15 +320,21 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Fix = &openshell.Fix{Summary: "fix the cause above, then start the session again"}
 	case len(errored) > 0:
 		// A sandbox OpenShell lost (its container stopped: a Docker
-		// restart) can be neither stopped nor started (GAP-0278).
+		// restart) can be neither stopped nor started before
+		// openshell.ErrorStopRelease (GAP-0278).
 		c.Status = openshell.StatusWarn
 		verb := " is in"
 		if len(errored) > 1 {
 			verb = " are in"
 		}
-		c.Detail = strings.Join(errored, ", ") + verb + " OpenShell's error state (the container stopped: Docker restarted, or the workload failed), " +
-			"where OpenShell can neither stop nor start " + itThem(errored)
-		c.Fix = &openshell.Fix{Summary: "delete " + itThem(errored) + " (`" + CommandName + " delete NAME --keep-snapshot` keeps a mounted project's undo point) and run again"}
+		c.Detail = strings.Join(errored, ", ") + verb + " OpenShell's error state (the container stopped: Docker restarted, or the workload failed)"
+		if errorStops {
+			c.Fix = &openshell.Fix{Summary: "fix what stopped " + itThem(errored) + ", then `" + CommandName + " stop NAME` and `" + CommandName +
+				" start NAME`, which keep the sandbox and its work"}
+		} else {
+			c.Detail += ", where OpenShell can neither stop nor start " + itThem(errored)
+			c.Fix = &openshell.Fix{Summary: "delete " + itThem(errored) + " (`" + CommandName + " delete NAME --keep-snapshot` keeps a mounted project's undo point) and run again"}
+		}
 	case len(stoppedSilent) > 0:
 		c.Status = openshell.StatusWarn
 		c.Detail = strings.Join(stoppedSilent, ", ") + " stopped after its harness worked without hooks reaching DefenseClaw (hooks.on_silence: stop); no sandbox work runs now"

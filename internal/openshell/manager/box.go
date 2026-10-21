@@ -506,7 +506,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 			if rec.PhaseReason != "" {
 				msg += " (" + rec.PhaseReason + ")"
 			}
-			msg += "; " + errorPhaseWayOn(rec.Name, rec.WorkdirMode, rec.PhaseReason)
+			msg += "; " + errorPhaseWayOn(rec.Name, rec.WorkdirMode, rec.PhaseReason, m.errorStops())
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{
 			Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
@@ -521,14 +521,20 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	m.syncObserve(b, phase)
 }
 
-// errorPhaseWayOn is what to do about a sandbox in OpenShell's error phase,
-// which it can neither stop nor start: its container stopped (a Docker
-// restart stops every one) or its workload failed. Deleting it keeps the
-// folder's changes, and with --keep-snapshot the undo point; a copy's work
-// that was never pulled goes with it.
-func errorPhaseWayOn(name, mode, reason string) string {
+// errorPhaseWayOn is what to do about a sandbox in OpenShell's error phase:
+// its container stopped (a Docker restart stops every one) or its workload
+// failed. A gateway that stops a sandbox in that phase (stops: OpenShell
+// ErrorStopRelease and later) starts it again after a stop, which keeps the
+// sandbox and its work. Earlier ones can neither stop nor start it: deleting
+// it keeps the folder's changes, and with --keep-snapshot the undo point; a
+// copy's work that was never pulled goes with it.
+func errorPhaseWayOn(name, mode, reason string, stops bool) string {
 	if reason == overlayDiskFullText {
 		return overlayDiskWayOn(name)
+	}
+	if stops {
+		return "fix what stopped it (start Docker again, for one), then `defenseclaw sandbox stop " + name +
+			"` and `defenseclaw sandbox start " + name + "`, which keep the sandbox and its work"
 	}
 	way := "OpenShell can neither stop nor start a sandbox in its error state (its container stopped: Docker restarted, or the workload failed): " +
 		"`defenseclaw sandbox delete " + name + " --keep-snapshot` keeps the undo point and the folder's changes, then run again"
@@ -597,11 +603,19 @@ func overlayDiskRefusal(name string, err error) error {
 // errorPhaseRefusal is OpenShell's refusal to stop or start the sandbox
 // name in its error phase as people read it ("Conflict: sandbox must be
 // Stopped, Completed, or a failed main-process Error to start"), or nil.
-func errorPhaseRefusal(name, mode, reason string, err error) error {
+func (m *Manager) errorPhaseRefusal(name, mode, reason string, err error) error {
 	if err == nil || !openshell.IsConflict(err) || !strings.Contains(err.Error(), "current phase: Error") {
 		return nil
 	}
-	return errorPhaseError(name, mode, reason)
+	return errorPhaseError(name, mode, reason, m.errorStops())
+}
+
+// errorStops reports whether the connected gateway stops a sandbox in its
+// error phase (openshell.ErrorStopRelease); false when unknown.
+func (m *Manager) errorStops() bool {
+	v, err := openshell.ParseVersion(m.gatewayRelease())
+	first, ferr := openshell.ParseVersion(openshell.ErrorStopRelease)
+	return err == nil && ferr == nil && v.Compare(first) >= 0
 }
 
 // errorPhaseNow is errorPhaseRefusal for an operation whose error does not
@@ -616,7 +630,7 @@ func (m *Manager) errorPhaseNow(b *box) error {
 	if !inError {
 		return nil
 	}
-	return errorPhaseError(name, mode, reason)
+	return errorPhaseError(name, mode, reason, m.errorStops())
 }
 
 // connectionClosed reports a call that failed because the client's
@@ -627,12 +641,12 @@ func connectionClosed(err error) bool {
 }
 
 // errorPhaseError explains name's error phase, with the way on.
-func errorPhaseError(name, mode, reason string) error {
+func errorPhaseError(name, mode, reason string, stops bool) error {
 	msg := name + " is in OpenShell's error state"
 	if reason != "" {
 		msg += ": " + reason
 	}
-	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: msg, Detail: errorPhaseWayOn(name, mode, reason)}
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: msg, Detail: errorPhaseWayOn(name, mode, reason, stops)}
 }
 
 func lifecycleMessage(name string, phase audit.SandboxPhase) string {

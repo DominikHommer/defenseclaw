@@ -1431,6 +1431,15 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 		!strings.Contains(c.Fix.Summary, "--keep-snapshot") {
 		t.Fatalf("errored: %+v", c)
 	}
+	// From OpenShell 0.1.5 the gateway stops a sandbox in its error state,
+	// and starts it again after (NVIDIA/OpenShell#4231): the way on keeps it.
+	ta.daemon.status.Gateway.Version = openshell.ErrorStopRelease
+	if c := check(ta); c.Status != openshell.StatusWarn || strings.Contains(c.Detail, "neither stop nor start") || c.Fix == nil ||
+		!strings.Contains(c.Fix.Summary, "`defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`") ||
+		strings.Contains(c.Fix.Summary, "delete") {
+		t.Fatalf("errored on %s: %+v", openshell.ErrorStopRelease, c)
+	}
+	ta.daemon.status.Gateway.Version = "0.1.1"
 	bad := sampleSandbox("bad")
 	bad.Hooks.Unreachable, bad.Hooks.UnreachableReason = true, "OpenShell refused the hooks' connections"
 	ta.daemon.add(bad)

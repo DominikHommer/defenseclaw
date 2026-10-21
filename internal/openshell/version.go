@@ -28,7 +28,10 @@ import (
 // project promises Stable-interface compatibility only within a minor line,
 // so the window is one minor release wide and bumped deliberately.
 const (
-	// SupportedMin is the oldest OpenShell release DefenseClaw drives.
+	// SupportedMin is the oldest OpenShell release DefenseClaw drives. It
+	// stays at 0.1.1 while hosts that DefenseClaw 1.0.0 to 1.0.3 set up on
+	// 0.1.1 or 0.1.2 can still be running sandboxes: raising it would cut
+	// their daemon off from the gateway until OpenShell is upgraded.
 	SupportedMin = "0.1.1"
 	// SupportedBelow is the first release outside the window.
 	SupportedBelow = "0.2.0"
@@ -36,7 +39,7 @@ const (
 	// InstallerVersion is the release the setup flow installs, and the one
 	// it offers an older supported release an in-place upgrade to
 	// (Installer.Upgrade, DoctorReport.OpenShellUpgradeAvailable).
-	InstallerVersion = "0.1.3"
+	InstallerVersion = "0.1.5"
 	// InstallerTag is InstallerVersion's upstream release tag.
 	InstallerTag = "v" + InstallerVersion
 	// InstallerURL is the tag-pinned upstream installer. Fetching it from a
@@ -44,12 +47,19 @@ const (
 	InstallerURL = "https://raw.githubusercontent.com/NVIDIA/OpenShell/" + InstallerTag + "/install.sh"
 	// InstallerSHA256 is the digest of InstallerURL. Setup refuses to run a
 	// script that does not match it.
-	InstallerSHA256 = "b8daa915e766564f0473b76ed4e012fff9723c1ac98007b3f85ba20f59442d28"
+	InstallerSHA256 = "7bf6706741b8b59c1b61e0c47030f0a34fefba6cee3c74cd52638cbf7cdc3655"
 
 	// installerUpgradeReason says why a host on an older supported release
 	// is offered InstallerVersion (the doctor's CLI check). Review it with
 	// InstallerVersion.
-	installerUpgradeReason = "fixes a supervisor bug that can stall a sandbox's first connection (0.1.2), cuts the CPU an idle sandbox uses (0.1.2) and ships the MicroVM driver already signed for Apple's Hypervisor (0.1.3)"
+	installerUpgradeReason = "fixes a supervisor bug that can stall a sandbox's first connection (0.1.2), cuts the CPU an idle sandbox uses (0.1.2), " +
+		"ships the MicroVM driver already signed for Apple's Hypervisor (0.1.3), flushes a MicroVM's disk before it stops (0.1.5) " +
+		"and lets a sandbox in OpenShell's error state be stopped and started again (0.1.5)"
+
+	// ErrorStopRelease is the first release whose gateway stops a sandbox
+	// in its error state, so that it can be started again without deleting
+	// it (NVIDIA/OpenShell#4231). Earlier ones refuse both.
+	ErrorStopRelease = "0.1.5"
 
 	// DefaultBaseImage is the digest-pinned NVIDIA community sandbox image
 	// the DefenseClaw overlay is built on (multi-arch; ships node, uv, git
@@ -116,8 +126,14 @@ const TarballBaseURL = "https://github.com/NVIDIA/OpenShell/releases/download/"
 // (TarballInstaller). A tarball is installed only when its digest is
 // listed in NVIDIA's own checksum file for the release and equals the
 // digest pinned here, so the digests of a release are compiled in only
-// after they were checked against the published ones. Add a release with
-// InstallerVersion; a release without an entry cannot be installed.
+// after they were checked against the published ones. The macOS
+// openshell-driver-vm of every pinned release ships signed with Apple's
+// com.apple.security.hypervisor entitlement (since 0.1.3), so it is
+// installed as shipped. Add a release with
+// InstallerVersion; a release without an entry cannot be installed. 0.1.3
+// stays listed for the managed hosts DefenseClaw 1.0.3 set up with
+// enterprise.openshell.version: "0.1.3"; drop it once that release leaves
+// the supported window (SupportedMin).
 var TarballPins = map[string]map[string]string{
 	"0.1.3": {
 		"openshell-x86_64-unknown-linux-musl.tar.gz":           "ed08ea7874c47f22d6e5dcc4b27d9ef1ef5d2060f83035b35ff725d5160830a3",
@@ -129,6 +145,17 @@ var TarballPins = map[string]map[string]string{
 		"openshell-driver-vm-x86_64-unknown-linux-gnu.tar.gz":  "22593640c6179eb87413ab099832fbd133d3a6a4979904d27679e7da6d80a0cb",
 		"openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz": "4426ee0992989060eb5987ad7072feb3eb6aecf5a628ad0284c3d7ad5f39974b",
 		"openshell-driver-vm-aarch64-apple-darwin.tar.gz":      "56e321f990741ca5585f5229e37c178f541b0c38029351fe59b72a36c1c750d4",
+	},
+	"0.1.5": {
+		"openshell-x86_64-unknown-linux-musl.tar.gz":           "ca1ad6e6fbb4a6cd407e95763391b8ecff02912e7d9c467e7ca22696fe80af69",
+		"openshell-aarch64-unknown-linux-musl.tar.gz":          "30c949b4ac07a9c8245c1248eb82e4eb241615134fcabf3c9bf30dec7d00addf",
+		"openshell-aarch64-apple-darwin.tar.gz":                "48d6f4b4a222dc0a120ee4d6a677cb931bcc57f9ac54aefb101588f99c9c7642",
+		"openshell-gateway-x86_64-unknown-linux-gnu.tar.gz":    "6ed6a6aff420c65250082cc1db48dc6271a6f5eec0e0068133566ffae4aa788b",
+		"openshell-gateway-aarch64-unknown-linux-gnu.tar.gz":   "125f9f43b8d06da8280c78089904a6da2faa7c4cb03f82db3b31fc980cf6c62d",
+		"openshell-gateway-aarch64-apple-darwin.tar.gz":        "8e6fd1b05999709a9042ec83fcd902e062507af3e817f28bcda181fb93b42e7a",
+		"openshell-driver-vm-x86_64-unknown-linux-gnu.tar.gz":  "6465e39666276215a9fa05d27991e67c9c88267284b59aca95cb7dbb9d69cd41",
+		"openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz": "fc49a0bebfda3075a996123c0fd252200e2987856da63fbd8e7f021f327e1e68",
+		"openshell-driver-vm-aarch64-apple-darwin.tar.gz":      "125692d5e9b0183ceeadbc78b71de6007a3318dcc7ec9823e784b072ece2c4ac",
 	},
 }
 

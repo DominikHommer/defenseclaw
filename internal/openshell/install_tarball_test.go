@@ -155,25 +155,16 @@ func (r *release) count() int {
 	return len(r.requests)
 }
 
-// fakeRunner answers the installed CLI's --version and records codesign.
+// fakeRunner answers the installed CLI's --version and records every call.
 type fakeRunner struct {
-	version     string
-	entitlement bool
-	calls       []string
+	version string
+	calls   []string
 }
 
 func (f *fakeRunner) Output(_ context.Context, cmd Command) ([]byte, error) {
 	line := cmd.Name + " " + strings.Join(cmd.Args, " ")
 	f.calls = append(f.calls, line)
-	switch {
-	case strings.HasSuffix(cmd.Name, "codesign") && len(cmd.Args) > 0 && cmd.Args[0] == "-d":
-		if f.entitlement {
-			return []byte("<key>com.apple.security.hypervisor</key>"), nil
-		}
-		return []byte("<dict/>"), nil
-	case strings.HasSuffix(cmd.Name, "codesign"):
-		return nil, nil
-	case len(cmd.Args) == 1 && cmd.Args[0] == "--version":
+	if len(cmd.Args) == 1 && cmd.Args[0] == "--version" {
 		return []byte("openshell " + f.version + "\n"), nil
 	}
 	return nil, fmt.Errorf("unexpected command %s", line)
@@ -421,37 +412,25 @@ func TestTarballInstallUsesTheAdministratorsProxy(t *testing.T) {
 	}
 }
 
-func TestTarballInstallSignsTheDriverOnlyWithoutTheEntitlement(t *testing.T) {
-	for _, shipped := range []bool{true, false} {
-		t.Run(fmt.Sprintf("signed=%v", shipped), func(t *testing.T) {
-			rel := &release{t: t, version: "0.1.3", archives: map[string][]byte{}, listed: map[string]string{}, pins: map[string]string{}}
-			cli, gnu, _ := tarballTriples("darwin", "arm64")
-			for _, c := range tarballComponents {
-				asset := c.assetName(cli, gnu)
-				data := tarball(t, reg(c.Name, "binary "+c.Name))
-				rel.archives[asset], rel.listed[asset], rel.pins[asset] = data, digestOf(data), digestOf(data)
-			}
-			rel.server = httptest.NewTLSServer(http.HandlerFunc(rel.serve))
-			defer rel.server.Close()
-			runner := &fakeRunner{version: "0.1.3", entitlement: shipped}
-			inst := rel.installer(t.TempDir(), runner)
-			inst.GOOS, inst.GOARCH = "darwin", "arm64"
-			res, err := inst.Install(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			signed := false
-			for _, call := range runner.calls {
-				if strings.Contains(call, "--force") {
-					signed = true
-					if !strings.Contains(call, "openshell-driver-vm") || !strings.Contains(call, " -s - ") {
-						t.Errorf("codesign call = %s", call)
-					}
-				}
-			}
-			if signed == shipped || (len(res.Resigned) == 1) != signed {
-				t.Errorf("shipped entitlement = %v, signed again = %v, resigned = %v", shipped, signed, res.Resigned)
-			}
-		})
+func TestTarballInstallKeepsTheShippedDriverSignature(t *testing.T) {
+	// Every pinned release ships its macOS MicroVM driver signed for Apple's
+	// Hypervisor, so a Mac install runs nothing but the CLI's --version.
+	rel := &release{t: t, version: "0.1.5", archives: map[string][]byte{}, listed: map[string]string{}, pins: map[string]string{}}
+	cli, gnu, _ := tarballTriples("darwin", "arm64")
+	for _, c := range tarballComponents {
+		asset := c.assetName(cli, gnu)
+		data := tarball(t, reg(c.Name, "binary "+c.Name))
+		rel.archives[asset], rel.listed[asset], rel.pins[asset] = data, digestOf(data), digestOf(data)
+	}
+	rel.server = httptest.NewTLSServer(http.HandlerFunc(rel.serve))
+	defer rel.server.Close()
+	runner := &fakeRunner{version: "0.1.5"}
+	inst := rel.installer(t.TempDir(), runner)
+	inst.GOOS, inst.GOARCH = "darwin", "arm64"
+	if _, err := inst.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 || !strings.HasSuffix(runner.calls[0], " --version") {
+		t.Errorf("calls = %q, want only the installed CLI's --version", runner.calls)
 	}
 }

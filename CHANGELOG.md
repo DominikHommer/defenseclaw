@@ -8,6 +8,20 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.4
+
+### Changed
+
+- **OpenShell 0.1.5.** `defenseclaw sandbox setup` and the managed `install: setup` mode now install NVIDIA OpenShell 0.1.5 (installer script and release tarballs pinned by SHA-256). DefenseClaw still drives 0.1.1 to 0.1.x: a host on 0.1.1 to 0.1.4 keeps working, the doctor's OpenShell CLI check warns, and setup offers the in-place upgrade (no by default). Managed configs that pin `enterprise.openshell.version: "0.1.3"` keep installing 0.1.3; set `"0.1.5"` to move. What 0.1.5 brings: a MicroVM flushes its disk before a stop, and a sandbox in OpenShell's error state (after a Docker restart, for one) can be stopped and started again, so `sandbox doctor` and the session messages now say `defenseclaw sandbox stop NAME` and `start NAME` on a 0.1.5 gateway instead of a delete. The supervisor's OCSF log files are named `openshell-ocsf.*.jsonl` from 0.1.5; DefenseClaw does not read them. The first MicroVM start of each image after the upgrade prepares its disk again (about a minute and 5 GB); `sandbox image prune` removes the older release's disks.
+
+### Fixed
+
+- **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
+
+### Removed
+
+- The managed `install: setup` mode no longer re-signs the macOS MicroVM driver ad hoc with Apple's hypervisor entitlement: every release it can install (0.1.3 and 0.1.5) ships the driver signed with it, so the shim never ran.
+
 ## [Unreleased] — 1.0.3
 
 ### Upgrade note for 1.0.3

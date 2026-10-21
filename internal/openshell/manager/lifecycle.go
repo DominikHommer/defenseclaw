@@ -364,7 +364,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	if err != nil {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
-		if e := errorPhaseRefusal(name, mode, reason, err); e != nil {
+		if e := m.errorPhaseRefusal(name, mode, reason, err); e != nil {
 			return e
 		}
 		if e := m.errorPhaseNow(b); e != nil {
@@ -838,7 +838,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
-		if e := errorPhaseRefusal(rec.Name, rec.WorkdirMode, rec.PhaseReason, err); e != nil {
+		if e := m.errorPhaseRefusal(rec.Name, rec.WorkdirMode, rec.PhaseReason, err); e != nil {
 			return e
 		}
 		return upstream("start sandbox "+rec.Name, err)
