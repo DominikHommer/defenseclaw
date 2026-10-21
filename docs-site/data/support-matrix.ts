@@ -86,7 +86,7 @@ export const generated: GeneratedStatus = {
     judge: { oss: 'SSP', enterprise: 'PPP' },
     redaction: { oss: 'SSP', enterprise: 'NNN' },
     sandboxes: { oss: 'PPU', enterprise: 'SSU' },
-    acp: { oss: 'PSP', enterprise: 'PPP' },
+    acp: { oss: 'PSP', enterprise: 'NNN' },
     'ai-discovery': { oss: 'SSS', enterprise: 'SSP' },
     'runtime-discovery': { oss: 'SSS', enterprise: 'SSP' },
     tools: { oss: 'SSS', enterprise: 'NNN' },
@@ -115,6 +115,22 @@ export const generated: GeneratedStatus = {
   },
 };
 // END GENERATED
+
+// Routes the code allows that the ledger above does not list yet. They show as
+// preview where the generated block says N (not offered); a live S or P in the
+// block wins. This sits outside the generated block so a regeneration keeps it.
+// Remove an entry once the ledger carries the route.
+const unlistedPreview: Record<string, Partial<Record<Edition, true>>> = {
+  // Managed ACP through `defenseclaw-gateway enterprise acp enroll`.
+  acp: { enterprise: true },
+};
+
+export function withUnlistedPreview(statuses: Record<OsId, Status>, unlisted: boolean | undefined): Record<OsId, Status> {
+  if (!unlisted) return statuses;
+  const out = { ...statuses };
+  for (const os of OS_IDS) if (out[os] === 'not-offered') out[os] = 'preview';
+  return out;
+}
 
 const CODE: Record<string, Status> = {
   S: 'supported',
@@ -514,8 +530,11 @@ function buildFeature(source: FeatureSource): FeatureRow {
   if (!codes) throw new Error(`support-matrix: missing feature status for ${source.id}`);
   return {
     ...source,
-    oss: perOs(codes.oss, `${source.id} oss`),
-    enterprise: perOs(codes.enterprise, `${source.id} enterprise`),
+    oss: withUnlistedPreview(perOs(codes.oss, `${source.id} oss`), unlistedPreview[source.id]?.oss),
+    enterprise: withUnlistedPreview(
+      perOs(codes.enterprise, `${source.id} enterprise`),
+      unlistedPreview[source.id]?.enterprise,
+    ),
   };
 }
 
