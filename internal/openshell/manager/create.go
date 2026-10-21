@@ -191,6 +191,14 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err != nil {
 		return nil, err
 	}
+	if pinned, ok := ctx.Value(createConfigKey{}).(*config.Config); ok && pinned != nil {
+		// The refreshes during the create, and until the daemon keeps the
+		// registration, judge this sandbox under the floor its create
+		// resolved with, not the closed one (GAP-0016).
+		m.mu.Lock()
+		b.createCfg = pinned
+		m.mu.Unlock()
+	}
 	b.op.Lock()
 	defer b.op.Unlock()
 	created := false

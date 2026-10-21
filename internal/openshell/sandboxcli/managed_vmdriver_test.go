@@ -185,3 +185,36 @@ func TestImageBuildTargetsTheManagedDriverBeforeTheGatewayRuns(t *testing.T) {
 		t.Fatalf("driver = %q, want the managed vm driver", d.Name)
 	}
 }
+
+// The organization moved from the MicroVM driver to docker while a stopped
+// MicroVM sandbox stays the newest registration, whose driver the managed
+// status names. With no gateway running, image build targets the next
+// start's docker driver, and prune keeps the docker images; a MicroVM next
+// start the docker fallback may still change prunes nothing of either kind.
+func TestImageDriverAfterTheOrganizationChangedDrivers(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		managed            sandboxapi.ManagedStatus
+		build              openshell.ComputeDriver
+		pruneMicroVMTarget bool
+	}{
+		{"stopped vm registration, docker next", sandboxapi.ManagedStatus{Driver: "vm", NextDriver: "docker"}, openshell.DriverDocker, false},
+		{"vm next, docker fallback", sandboxapi.ManagedStatus{Driver: "docker", NextDriver: "vm", DriverFallback: "docker"}, openshell.DriverVM, false},
+		{"vm next, no fallback", sandboxapi.ManagedStatus{Driver: "docker", NextDriver: "vm", DriverFallback: "none"}, openshell.DriverVM, true},
+		{"daemon before 1.0.4", sandboxapi.ManagedStatus{Driver: "vm"}, openshell.DriverVM, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Gateway = nil
+			managed := tc.managed
+			ta.daemon.status.Managed = &managed
+			if d := ta.gatewayDriverNow(bg); d.Name != tc.build {
+				t.Fatalf("image build targets %q, want %q", d.Name, tc.build)
+			}
+			ta.ok(t, ta.ImagePrune(bg, true))
+			if opts := ta.images.pruned[0]; opts.MicroVMGateway != tc.pruneMicroVMTarget {
+				t.Fatalf("prune options = %+v, want MicroVMGateway=%t", opts, tc.pruneMicroVMTarget)
+			}
+		})
+	}
+}

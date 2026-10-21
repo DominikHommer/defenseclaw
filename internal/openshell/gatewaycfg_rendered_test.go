@@ -283,10 +283,12 @@ func TestReadRenderedGateway(t *testing.T) {
 	}
 }
 
-// An account's own docker gateway in OpenShell's shared default namespace
+// An account's own docker gateway in any namespace but the rendered one
 // drifts from the render, which keeps the managed gateways' sandboxes in
-// ManagedDockerNamespace: each start of such a gateway removes the
-// supervisors of other accounts' sandboxes in that namespace.
+// ManagedDockerNamespace (OpenShell's default under the 1.0.1 bridge): a
+// gateway in the shared default namespace removes the supervisors of other
+// accounts' sandboxes at each start, and the sandboxes made in another
+// namespace are lost to the rendered gateway.
 func TestGatewayDriftNamesTheSharedDockerNamespace(t *testing.T) {
 	want := RenderedGateway{BindAddress: "127.0.0.1:17670", ComputeDriver: DriverDocker, TelemetryEnabled: true}
 	base := "[openshell]\nversion = 2\n[openshell.gateway]\nbind_address = \"127.0.0.1:17670\"\ncompute_driver = \"docker\"\n"
@@ -298,8 +300,13 @@ func TestGatewayDriftNamesTheSharedDockerNamespace(t *testing.T) {
 		{"unset label", "", false, true},
 		{"default label", "default", false, true},
 		{"managed label", ManagedDockerNamespace, false, false},
-		{"own label", AccountDockerNamespace(1500), false, false},
+		// A per-user label: the daemon's managed sandboxes would be lost
+		// to the rendered gateway after its next start.
+		{"own label", AccountDockerNamespace(1500), false, true},
 		{"1.0.1 bridge", "", true, false},
+		{"1.0.1 bridge, default label", "default", true, false},
+		{"1.0.1 bridge, managed label", ManagedDockerNamespace, true, true},
+		{"1.0.1 bridge, own label", AccountDockerNamespace(1500), true, true},
 	} {
 		dir := t.TempDir()
 		toml := base

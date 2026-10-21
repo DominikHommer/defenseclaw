@@ -58,6 +58,12 @@ type box struct {
 	cred      egress.Credential
 	phase     audit.SandboxPhase
 	creating  bool
+	// createCfg is the configuration a managed daemon's create pinned
+	// (WithCreateConfig), which the sandbox this create reserved resolves
+	// under until the daemon keeps its registration (EndCreate).
+	// It binds this box, never its name: a same-name create that fails on
+	// the name lends nothing to the sandbox that holds it.
+	createCfg *config.Config
 	deleted   bool
 	orphaned  bool
 	missing   bool

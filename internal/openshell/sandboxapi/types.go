@@ -149,6 +149,12 @@ type ManagedStatus struct {
 	// MicroVM driver can't run (docker, none or "").
 	DriverReason   string `json:"driver_reason,omitempty"`
 	DriverFallback string `json:"driver_fallback,omitempty"`
+	// NextDriver is the compute driver the managed gateway gives the
+	// caller's next sandbox start (the daemon's own probe at the start
+	// decides), whatever Driver says of the last sandbox: a stopped one may
+	// be of a driver the organization replaced since. "" when the managed
+	// gateway does not say, or from a daemon before DefenseClaw 1.0.4.
+	NextDriver string `json:"next_driver,omitempty"`
 	// PendingRestart says an upgrade or setting change waits for the
 	// caller's sandboxes to stop.
 	PendingRestart bool `json:"pending_restart,omitempty"`

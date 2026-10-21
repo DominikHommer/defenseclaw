@@ -200,11 +200,6 @@ type SandboxDaemon struct {
 	// sandboxes resolve against their own confirmed registration floors.
 	floorMu sync.Mutex
 	floor   *config.OpenShellAdminConfig
-	// creating is the sandbox a Create makes, under the lifecycle lock, and
-	// the floor the managed gateway resolved it with, until its
-	// registration is kept (configForSandbox).
-	creating      string
-	creatingFloor config.OpenShellAdminConfig
 
 	// Lazy listeners (D3).
 	listenMu     sync.Mutex
@@ -430,29 +425,10 @@ func (d *SandboxDaemon) configWithFloor(floor config.OpenShellAdminConfig) *conf
 // its status still names the deny and it cannot borrow another run's policy.
 func (d *SandboxDaemon) configForSandbox(name string) *config.Config {
 	r, ok := d.regs.get(name)
-	if !ok {
-		// The sandbox a Create is making has no registration until the
-		// manager returns: a policy refresh of it meanwhile judged it
-		// against the closed floor, and the run's banner said the
-		// organization disallowed the run it was starting (GAP-0016).
-		d.floorMu.Lock()
-		creating, floor := d.creating, d.creatingFloor
-		d.floorMu.Unlock()
-		if creating != "" && creating == name {
-			return d.configWithFloor(floor)
-		}
-	}
 	if !ok || !r.Confirmed || r.Revoked {
 		return d.buildConfigWith(nil)
 	}
 	return d.configWithFloor(r.Floor)
-}
-
-// setCreating names the sandbox a Create makes under floor ("" when none).
-func (d *SandboxDaemon) setCreating(name string, floor config.OpenShellAdminConfig) {
-	d.floorMu.Lock()
-	d.creating, d.creatingFloor = name, floor
-	d.floorMu.Unlock()
 }
 
 // buildConfigWith is buildConfig under floor (nil: the closed floor).
@@ -1704,6 +1680,7 @@ func (d *SandboxDaemon) managedStatus(ctx context.Context) *sandboxapi.ManagedSt
 		GatewayPort:      s.Enterprise.GatewayPort,
 		PendingRestart:   d.pendingRestart.Load(),
 		DriverFallback:   s.Enterprise.DriverFallback,
+		NextDriver:       s.SelectedDriver,
 	}
 	if d.openShell != nil {
 		out.OtherGateways = d.openShell.OtherGateways(ctx, s)
@@ -2159,10 +2136,8 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 	// refuses the create otherwise); the record keeps the reason.
 	createCtx := withManagedMCPJudge(manager.WithCreateConfig(manager.WithDriverChoice(ctx, choice), d.configWithFloor(floor)),
 		fixedMCPJudge(resolveMCPDecision(resolveReq.Harness, mcp, resp)))
-	if req.Name != "" {
-		d.setCreating(req.Name, floor)
-		defer d.setCreating("", config.OpenShellAdminConfig{})
-	}
+	// The sandbox this create reserves resolves under createCtx's floor
+	// until its registration is kept (manager.EndCreate, GAP-0016).
 	sb, err := c.Manager.Create(createCtx, req)
 	if err != nil {
 		undo()
@@ -2181,13 +2156,16 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 		})
 	}
 	if err != nil {
+		// A sandbox the delete leaves behind has no registration: the
+		// closed floor, not the create's.
+		c.EndCreate(sb.Name, sb.ID)
 		if _, delErr := c.Manager.Delete(context.WithoutCancel(ctx), sb.Name, sandboxapi.DeleteRequest{}); delErr != nil {
 			d.logf("delete %s after its registration failed: %v", sb.Name, delErr)
 		}
 		undo()
 		return nil, managedRelayError(err)
 	}
-	d.rt.manager.RefreshPolicies()
+	c.EndCreate(sb.Name, sb.ID)
 	if fresh, err := c.Manager.Get(ctx, sb.Name); err == nil && fresh != nil {
 		// The view under the registration just kept, not one a refresh
 		// during the create judged against the closed floor (GAP-0016).
