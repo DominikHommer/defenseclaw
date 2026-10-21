@@ -274,6 +274,7 @@ type bundleVerifyResult struct {
 	DigestVerified        bool                       `json:"digest_verified"`
 	SecretRefsMissing     *[]string                  `json:"secret_refs_missing,omitempty"`
 	RestartPrediction     *bundleRestartPrediction   `json:"restart_prediction,omitempty"`
+	ConfigDrift           *bool                      `json:"config_drift,omitempty"`
 	Warnings              []enterprisebundle.Warning `json:"warnings"`
 	Errors                []bundleError              `json:"errors"`
 }
@@ -609,7 +610,7 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 	}
 	// An apply on this device runs for its own platform only.
 	if device && opts.platform == runtime.GOOS {
-		res.RestartPrediction = bundleVerifyRestartPrediction(opts.platform, out)
+		res.RestartPrediction, res.ConfigDrift = bundleVerifyRestartPrediction(opts.platform, out)
 	}
 	return nil
 }
@@ -667,6 +668,9 @@ func printVerifyText(w io.Writer, res *bundleVerifyResult) {
 	switch res.Result {
 	case "already_applied":
 		fmt.Fprintf(w, "Bundle %s version %d is the bundle already applied.\n", res.Bundle.BundleID, res.Bundle.Version)
+		if res.ConfigDrift != nil && *res.ConfigDrift {
+			fmt.Fprintln(w, "The installed config.yaml is not this bundle's config: apply the bundle again to repair it.")
+		}
 	default:
 		fmt.Fprintf(w, "Bundle %s version %d verified for %s (key %s, floor %d).\n", res.Bundle.BundleID, res.Bundle.Version, res.Platform, res.SignerKeyID, res.Floor)
 	}

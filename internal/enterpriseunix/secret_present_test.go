@@ -9,10 +9,15 @@
 package enterpriseunix
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
 // Bundle verify and apply read credential presence through
@@ -50,5 +55,38 @@ func TestSecretPresentClassifiesUsabilityLikeTheGateway(t *testing.T) {
 		if present, err := h.env.SecretPresent(name); err != nil || present != want {
 			t.Errorf("%s: present %v, err %v; want %v", name, present, err, want)
 		}
+	}
+}
+
+// A required credential whose check fails (here the trust check cannot read
+// the file's metadata) refuses the apply with secret_ref_missing: the apply
+// never passes the credential gate on a lookup it could not finish.
+func TestBundleApplyRefusesARequiredCredentialItCannotCheck(t *testing.T) {
+	b := newBundleHost(t)
+	v1, _, _ := bundleConfigs(b.testHost)
+	cfg := strings.Replace(v1, "  profile: standalone\n",
+		"  profile: standalone\n  inspection:\n    ai_defense:\n      credential: ai-defense-api-key\n", 1)
+	if cfg == v1 {
+		t.Fatal("the default config has no enterprise profile line to extend")
+	}
+	if err := b.env.WriteSecret(context.Background(), "ai-defense-api-key", []byte("key-1")); err != nil {
+		t.Fatal(err)
+	}
+	secret := b.env.P(filepath.Join(b.env.Layout.SecretsDir, "ai-defense-api-key"))
+	trust := b.env.Trust
+	b.env.Trust = func(path string, kind TrustKind) error {
+		if path == secret {
+			return &os.PathError{Op: "stat", Path: path, Err: syscall.EIO}
+		}
+		return trust(path, kind)
+	}
+	if _, err := b.env.SecretPresent("ai-defense-api-key"); err == nil {
+		t.Fatal("presence of a credential whose metadata cannot be read: no error")
+	}
+	b.mapPromotedBundleOwners(1)
+	r := b.apply(b.dir(1, cfg))
+	requireError(t, r, string(enterprisebundle.CodeSecretRefMissing))
+	if st := b.state(); st.Current != nil {
+		t.Fatalf("refused apply confirmed %+v", st.Current)
 	}
 }
