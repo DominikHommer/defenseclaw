@@ -30,6 +30,15 @@ func TestMaskPythonCommentsAndDocstringsKeepsExecutedText(t *testing.T) {
 		{"format spec field", `f"""{x:{p.write_text("k")}}"""`, true},
 		{"code after an escaped quote", `x = """a\""""; p.write_text("k")`, true},
 		{"code after an f-string", `f"""{x!r:>{w}}"""; p.write_text("k")`, true},
+		// The literal text of an f-string is inert; only its fields run.
+		{"f-string literal text", `f"""p.write_text("k")"""`, false},
+		{"raw f-string literal text", `Rf'''p.write_text("k")'''`, false},
+		{"template string literal text", `t"""p.write_text("k") {x}"""`, false},
+		{"f-string text after a field", `f"""{x!r:>{w}} p.write_text("k")"""`, false},
+		{"f-string text beside a field that writes", `f"""p.write_text {p.write_text("k")}"""`, true},
+		{"f-string escaped braces are text", `f"""{{p.write_text("k")}}"""`, false},
+		{"multiline f-string field", "f\"\"\"a\n{\n p.write_text(\"k\")\n}\nb\"\"\"", true},
+		{"single-quoted f-string", `f"p.write_text('k')"`, true},
 		{"unclosed field", `f"""{p.write_text("k")"""`, true},
 		{"unclosed docstring", `"""p.write_text("k")`, true},
 	} {
