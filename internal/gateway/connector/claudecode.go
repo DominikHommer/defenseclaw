@@ -2406,7 +2406,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 	err = withFileLock(settingsPath, func() error {
 		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			var restorePerm os.FileMode
-			var exactData []byte
+			exactRestore := false
 			if exact, ok := managedFileBackupTransform(managedBackup, data, exists); ok {
 				if exact.Remove {
 					return exact, nil
@@ -2415,10 +2415,10 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				// its "pristine" snapshot during an upgrade. Passing restored
 				// bytes through the same ownership-aware cleanup keeps that stale
 				// snapshot from resurrecting every DefenseClaw hook and OTel key.
+				exactRestore = true
 				data = exact.Data
 				exists = true
 				restorePerm = exact.Perm
-				exactData = exact.Data
 			}
 			if !exists {
 				return atomicTransformResult{Remove: true}, nil
@@ -2427,12 +2427,9 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 			if err := json.Unmarshal(data, &settings); err != nil {
 				return atomicTransformResult{}, fmt.Errorf("parse claude settings for restore: %w", err)
 			}
-			var exactCanonical []byte
-			if exactData != nil {
-				exactCanonical, err = json.Marshal(settings)
-				if err != nil {
-					return atomicTransformResult{}, fmt.Errorf("canonicalize exact Claude settings snapshot: %w", err)
-				}
+			originalCanonical, err := json.Marshal(settings)
+			if err != nil {
+				return atomicTransformResult{}, fmt.Errorf("canonicalize Claude settings snapshot: %w", err)
 			}
 
 			if rawHooks, present := settings["hooks"]; present {
@@ -2500,7 +2497,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				// while the env backup keeps the operator's real env. The restored
 				// env then starts as that snapshot's env.
 				var exactSnapshotEnv map[string]interface{}
-				if exactData != nil {
+				if exactRestore {
 					candidate := make(map[string]interface{}, len(envMap))
 					for key, value := range envMap {
 						candidate[key] = value
@@ -2588,8 +2585,11 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 			if err != nil {
 				return atomicTransformResult{}, fmt.Errorf("canonicalize restored settings: %w", err)
 			}
-			if exactData != nil && bytes.Equal(canonical, exactCanonical) {
-				return atomicTransformResult{Data: exactData, Perm: restorePerm}, nil
+			if bytes.Equal(canonical, originalCanonical) {
+				// Reconciliation may tear down an already-clean connector after
+				// uninstall restored and discarded its backup. Keep those bytes
+				// as well as a pristine backup's original formatting.
+				return atomicTransformResult{Data: data, Perm: restorePerm}, nil
 			}
 			out, err := json.MarshalIndent(settings, "", "  ")
 			if err != nil {
