@@ -1442,6 +1442,11 @@ const ReasonToolHostRefused = "tool_host_refused"
 // be lost (no flush).
 const ReasonUnflushedStop = "unflushed_stop"
 
+// ReasonOldSupervisor is the Reason of the (HIGH) finding event a running
+// sandbox gets when its session started on an OpenShell release older than
+// openshell.SandboxMin, whose supervisor it keeps until it stops.
+const ReasonOldSupervisor = "old_supervisor"
+
 // ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed
 // gets the first time the egress proxy could not complete an allowed
 // connection to a host upstream: an outage, not a policy block.

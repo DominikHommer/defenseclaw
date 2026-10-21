@@ -331,8 +331,7 @@ func expectMode(t *testing.T, path string, mode os.FileMode) {
 // check.
 func TestDoctorHealthyHost(t *testing.T) {
 	f := newDoctorFixture(t)
-	f.runner.On("/usr/bin/openshell --version", "openshell "+openshell.InstallerVersion+"\n", nil)
-	f.fake.SetRelease(openshell.InstallerVersion)
+	f.atRelease(openshell.InstallerVersion)
 	r := f.run()
 	var got []string
 	for _, c := range r.Checks {
@@ -374,24 +373,55 @@ func TestDoctorHealthyHost(t *testing.T) {
 	}
 }
 
-// TestDoctorOffersTheUpgrade: OpenShell 0.1.1 is supported and works, so
-// its CLI check only warns (the report stays OK), naming what
-// InstallerVersion fixes, with setup's in-place upgrade as the fix, which
-// says what the gateway restart needs on the configured driver.
+// okButTheRelease reports a report whose only failing check is the Gateway
+// check of a release that runs no sandbox (OpenShellUpgradeNeeded).
+func okButTheRelease(r *openshell.DoctorReport) bool {
+	for _, c := range r.Checks {
+		if c.Status == openshell.StatusFail && (c.ID != openshell.CheckIDGatewayVersion || !r.OpenShellUpgradeNeeded()) {
+			return false
+		}
+	}
+	return true
+}
+
+// atRelease makes the CLI at /usr/bin/openshell and the gateway answer as
+// release version.
+func (f *doctorFixture) atRelease(version string) {
+	f.runner.On("/usr/bin/openshell --version", "openshell "+version+"\n", nil)
+	f.fake.SetRelease(version)
+}
+
+// TestDoctorOffersTheUpgrade: OpenShell 0.1.1 is supported, so its CLI
+// check only warns, naming what InstallerVersion fixes, with setup's
+// in-place upgrade as the fix, which says what the gateway restart needs on
+// the configured driver. Its gateway runs no sandbox (openshell.SandboxMin,
+// NVIDIA/OpenShell#4494): the Gateway check fails, with that upgrade as its
+// fix, so the report is not OK until the host is upgraded.
 func TestDoctorOffersTheUpgrade(t *testing.T) {
 	f := newDoctorFixture(t) // OpenShell 0.1.1, CLI and gateway
 	r := f.run()
 	c := expectCheck(t, r, openshell.CheckIDCLI, openshell.StatusWarn,
-		"0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" fixes a supervisor bug that can stall a sandbox's first connection")
+		"0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" closes a hole in the network broker that let a sandbox's connections bypass its policy")
 	if c.Fix == nil || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" || c.Fix.Automatic || c.Fix.Apply != nil ||
 		c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" in place (this pulls its supervisor images from ghcr.io and restarts the gateway, "+
 			"which drops the connections of every sandbox on it)" {
 		t.Fatalf("openshell-cli fix = %+v", c.Fix)
 	}
-	if !r.OK() || !r.OpenShellUpgradeAvailable() || r.OpenShellInstallNeeded() {
-		t.Fatalf("OK %v, upgrade available %v, install needed %v\n%s", r.OK(), r.OpenShellUpgradeAvailable(), r.OpenShellInstallNeeded(), r)
+	if r.OK() || !r.OpenShellUpgradeAvailable() || !r.OpenShellUpgradeNeeded() || r.OpenShellInstallNeeded() {
+		t.Fatalf("OK %v, upgrade available %v, needed %v, install needed %v\n%s", r.OK(), r.OpenShellUpgradeAvailable(), r.OpenShellUpgradeNeeded(),
+			r.OpenShellInstallNeeded(), r)
 	}
-	expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusPass, "0.1.1 healthy")
+	gw := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail,
+		"OpenShell 0.1.1 runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's connections bypass the sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494)")
+	if gw.Fix == nil || gw.Fix.Summary != c.Fix.Summary || gw.Fix.Command != c.Fix.Command {
+		t.Fatalf("gateway-version fix = %+v, want the CLI's %+v", gw.Fix, c.Fix)
+	}
+	// On the release that runs sandboxes, neither is asked for.
+	f = newDoctorFixture(t)
+	f.atRelease(openshell.SandboxMin)
+	if r := f.run(); !r.OK() || r.OpenShellUpgradeNeeded() || r.OpenShellUpgradeAvailable() {
+		t.Fatalf("on %s:\n%s", openshell.SandboxMin, r)
+	}
 
 	f = newDoctorFixture(t)
 	f.onMicroVMs()
@@ -625,7 +655,7 @@ func TestDoctorChecks(t *testing.T) {
 		// would not get its port, and the start's wait took that gateway
 		// for the unit's and said "fixed".
 		{name: "service stopped, another gateway answers", setup: unit("inactive", "enabled"),
-			want: []checkWant{{"gateway-service", fail, "inactive"}, {"gateway-version", pass, "0.1.1 healthy"}},
+			want: []checkWant{{"gateway-service", fail, "inactive"}, {"gateway-version", fail, "OpenShell 0.1.1 runs no DefenseClaw sandbox"}},
 			fix: &fixWant{command: start, manual: true, text: "the openshell-gateway user service is stopped, but a gateway answers at https://127.0.0.1:17670: " +
 				"something else runs it, and the service's gateway would not get its port. Stop that gateway, then start the service"}},
 		{name: "service not installed", setup: func(f *doctorFixture) {
@@ -773,7 +803,7 @@ func TestDoctorChecks(t *testing.T) {
 		{name: "remote gateway", setup: func(f *doctorFixture) {
 			writeRegistration(f.t, f.dir, "openshell", map[string]any{"gateway_endpoint": "https://gw.example.com:443", "auth_mode": "mtls", "is_remote": true}, nil)
 		}, want: []checkWant{{"gateway-registration", fail, "remote gateways are not supported"}}},
-		{name: "readable key is fixed", setup: mode(key, 0o644),
+		{name: "readable key is fixed", setup: func(f *doctorFixture) { f.atRelease(openshell.InstallerVersion); mode(key, 0o644)(f) },
 			want: []checkWant{{"mtls-permissions", fail, "private key is accessible to other users"}, {"gateway-version", skip, ""}},
 			fix:  &fixWant{text: "chmod 600 ", auto: true},
 			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
@@ -805,7 +835,10 @@ func TestDoctorChecks(t *testing.T) {
 					t.Fatalf("still warning after the fix:\n%s", again)
 				}
 			}},
-		{name: "world-writable registration is fixed", setup: mode(func(f *doctorFixture) string { return f.regDir }, 0o777),
+		{name: "world-writable registration is fixed", setup: func(f *doctorFixture) {
+			f.atRelease(openshell.InstallerVersion)
+			mode(func(f *doctorFixture) string { return f.regDir }, 0o777)(f)
+		},
 			want: []checkWant{{"gateway-registration", fail, "is writable by every user"}, {"mtls-permissions", skip, ""}, {"gateway-version", skip, ""}, {"bind-mounts", pass, ""}},
 			fix:  &fixWant{auto: true},
 			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
@@ -1011,7 +1044,7 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 		f, cli := release(t, "0.1.1")
 		f.writeTOML(disabledTOML, f.started.Add(-time.Minute))
 		r := f.run()
-		expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusPass, "0.1.1 healthy")
+		expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "OpenShell 0.1.1 runs no DefenseClaw sandbox")
 		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusWarn,
 			"openshell-gateway is not installed; the gateway that answers runs another way, so DefenseClaw cannot start or restart it"), outside(restart, cli))
 		c := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "disabled in ")
@@ -1233,7 +1266,7 @@ func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
 		if *restarts != 1 {
 			t.Fatalf("the fix restarted the unit %d times: %v", *restarts, f.runner.Calls())
 		}
-		expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusPass, "0.1.1 healthy")
+		expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusFail, "OpenShell 0.1.1 runs no DefenseClaw sandbox")
 	})
 	// The unit's own gateway is of another release than the CLI: the
 	// restart brings it back, and the fix says what to do, once.
@@ -1652,6 +1685,7 @@ func TestDoctorSSHConnectionSharing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDoctorFixture(t)
+			f.atRelease(openshell.InstallerVersion)
 			tc.setup(f)
 			r := f.run()
 			c := expectCheck(t, r, openshell.CheckIDSSHSharing, tc.status, tc.detail)

@@ -183,9 +183,9 @@ func (r *release) installer(home string, runner Runner) *TarballInstaller {
 }
 
 func TestTarballInstallPlacesVerifiedBinaries(t *testing.T) {
-	rel := newRelease(t, "0.1.3")
+	rel := newRelease(t, "0.1.5")
 	home := t.TempDir()
-	inst := rel.installer(home, &fakeRunner{version: "0.1.3"})
+	inst := rel.installer(home, &fakeRunner{version: "0.1.5"})
 	res, err := inst.Install(context.Background())
 	if err != nil {
 		t.Fatalf("Install: %v", err)
@@ -206,7 +206,7 @@ func TestTarballInstallPlacesVerifiedBinaries(t *testing.T) {
 		t.Errorf("state dir = %v", entries)
 	}
 	release, intact, err := inst.Installed()
-	if err != nil || !intact || release.Version != "0.1.3" || len(release.Files) != 3 {
+	if err != nil || !intact || release.Version != "0.1.5" || len(release.Files) != 3 {
 		t.Fatalf("Installed = %+v %v %v", release, intact, err)
 	}
 
@@ -256,10 +256,10 @@ func TestTarballInstallRefusesAnUnverifiedTarball(t *testing.T) {
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
-			rel := newRelease(t, "0.1.3")
+			rel := newRelease(t, "0.1.5")
 			mutate(rel)
 			home := t.TempDir()
-			_, err := rel.installer(home, &fakeRunner{version: "0.1.3"}).Install(context.Background())
+			_, err := rel.installer(home, &fakeRunner{version: "0.1.5"}).Install(context.Background())
 			if !errors.Is(err, ErrTarballChecksum) {
 				t.Fatalf("err = %v, want ErrTarballChecksum", err)
 			}
@@ -286,12 +286,12 @@ func TestTarballInstallRefusesUnexpectedArchiveContent(t *testing.T) {
 	}
 	for name, entries := range cases {
 		t.Run(name, func(t *testing.T) {
-			rel := newRelease(t, "0.1.3")
+			rel := newRelease(t, "0.1.5")
 			asset := tarballComponents[0].assetName(cli, gnu)
 			bad := tarball(t, entries...)
 			rel.archives[asset], rel.listed[asset], rel.pins[asset] = bad, digestOf(bad), digestOf(bad)
 			home := t.TempDir()
-			_, err := rel.installer(home, &fakeRunner{version: "0.1.3"}).Install(context.Background())
+			_, err := rel.installer(home, &fakeRunner{version: "0.1.5"}).Install(context.Background())
 			if !errors.Is(err, ErrTarballContent) {
 				t.Fatalf("err = %v, want ErrTarballContent", err)
 			}
@@ -303,16 +303,16 @@ func TestTarballInstallRefusesUnexpectedArchiveContent(t *testing.T) {
 }
 
 func TestTarballInstallRefusesAWrongVersionBinary(t *testing.T) {
-	rel := newRelease(t, "0.1.3")
+	rel := newRelease(t, "0.1.5")
 	_, err := rel.installer(t.TempDir(), &fakeRunner{version: "0.1.1"}).Install(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "reports 0.1.1, want 0.1.3") {
+	if err == nil || !strings.Contains(err.Error(), "reports 0.1.1, want 0.1.5") {
 		t.Fatalf("err = %v", err)
 	}
 }
 
 func TestTarballInstallOfflineIsNamed(t *testing.T) {
-	rel := newRelease(t, "0.1.3")
-	inst := rel.installer(t.TempDir(), &fakeRunner{version: "0.1.3"})
+	rel := newRelease(t, "0.1.5")
+	inst := rel.installer(t.TempDir(), &fakeRunner{version: "0.1.5"})
 	rel.server.Close()
 	_, err := inst.Install(context.Background())
 	if !errors.Is(err, ErrTarballOffline) {
@@ -334,14 +334,14 @@ func TestTarballInstallNeedsAPinnedExactVersion(t *testing.T) {
 		}
 	}
 	_, err := (&TarballInstaller{Version: "9.9.9", Home: home}).Install(context.Background())
-	if !errors.Is(err, ErrTarballNotPinned) || !strings.Contains(err.Error(), "0.1.3") {
+	if !errors.Is(err, ErrTarballNotPinned) || !strings.Contains(err.Error(), "0.1.5") {
 		t.Errorf("unpinned release: err = %v", err)
 	}
-	_, err = (&TarballInstaller{Version: "0.1.3", Home: "relative/home"}).Install(context.Background())
+	_, err = (&TarballInstaller{Version: "0.1.5", Home: "relative/home"}).Install(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Errorf("relative home: err = %v", err)
 	}
-	_, err = (&TarballInstaller{Version: "0.1.3", Home: home, GOOS: "darwin", GOARCH: "amd64"}).Install(context.Background())
+	_, err = (&TarballInstaller{Version: "0.1.5", Home: home, GOOS: "darwin", GOARCH: "amd64"}).Install(context.Background())
 	if !errors.Is(err, ErrTarballPlatform) {
 		t.Errorf("Intel macOS: err = %v", err)
 	}
@@ -368,9 +368,9 @@ func TestTarballPinsCoverEveryPlatform(t *testing.T) {
 }
 
 func TestTarballInstallRefusesRedirectsOffGitHub(t *testing.T) {
-	rel := newRelease(t, "0.1.3")
+	rel := newRelease(t, "0.1.5")
 	rel.redirect = "https://evil.example.test/"
-	inst := rel.installer(t.TempDir(), &fakeRunner{version: "0.1.3"})
+	inst := rel.installer(t.TempDir(), &fakeRunner{version: "0.1.5"})
 	inst.HTTPClient = nil
 	// Trust the test server's certificate in the default client.
 	inst.Proxy = netguard.EgressProxy{}
@@ -397,9 +397,9 @@ func TestTarballInstallUsesTheAdministratorsProxy(t *testing.T) {
 	}))
 	defer proxy.Close()
 	inst := &TarballInstaller{
-		Version: "0.1.3", Home: t.TempDir(), GOOS: "linux", GOARCH: "amd64",
+		Version: "0.1.5", Home: t.TempDir(), GOOS: "linux", GOARCH: "amd64",
 		Proxy:  netguard.EgressProxy{HTTPSProxy: proxy.URL},
-		Runner: &fakeRunner{version: "0.1.3"},
+		Runner: &fakeRunner{version: "0.1.5"},
 	}
 	_, err := inst.Install(context.Background())
 	if !errors.Is(err, ErrTarballOffline) {

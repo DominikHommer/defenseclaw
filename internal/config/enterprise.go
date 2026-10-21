@@ -92,8 +92,9 @@ type EnterpriseOpenShellConfig struct {
 	// contact. A profile's sandbox.driver_fallback: none tightens it per
 	// user; nothing loosens none.
 	DriverFallback string `mapstructure:"driver_fallback" yaml:"driver_fallback,omitempty"`
-	// Version is an exact version ("0.1.3") or a range inside
-	// ">=0.1.1 <0.2.0"; setup needs an exact pin.
+	// Version is an exact version ("0.1.5") or a range inside
+	// ">=0.1.1 <0.2.0"; setup needs an exact pin, and raises one older than
+	// the release sandboxes need (openshell.ManagedSetupPin).
 	Version string `mapstructure:"version" yaml:"version,omitempty"`
 	// GatewayPort is the OpenShell gateway's bind port (0 =
 	// DefaultEnterpriseOpenShellGatewayPort).
@@ -941,11 +942,11 @@ func validateEnterpriseOpenShell(cfg *Config, goos string) error {
 		bounds := enterpriseOpenShellVersionRange.FindStringSubmatch(v)
 		switch {
 		case !exact && bounds == nil:
-			return fmt.Errorf("config: enterprise.openshell.version %q must be an exact version such as 0.1.3 or a range such as \">=0.1.1 <0.2.0\"", o.Version)
+			return fmt.Errorf("config: enterprise.openshell.version %q must be an exact version such as 0.1.5 or a range such as \">=0.1.5 <0.2.0\"", o.Version)
 		case bounds != nil && bounds[2] != "" && compareDottedVersions(bounds[1], bounds[2]) >= 0:
 			return fmt.Errorf("config: enterprise.openshell.version %q is an empty range", o.Version)
 		case bounds != nil && o.Install == EnterpriseOpenShellInstallSetup:
-			return fmt.Errorf("config: enterprise.openshell.version %q is a range; install: setup needs an exact version such as 0.1.3", o.Version)
+			return fmt.Errorf("config: enterprise.openshell.version %q is a range; install: setup needs an exact version such as 0.1.5", o.Version)
 		}
 	}
 	if dir := o.E2fsprogsDir; dir != "" {

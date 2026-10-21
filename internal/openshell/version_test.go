@@ -48,6 +48,78 @@ func TestParseVersionAcceptsReportedShapes(t *testing.T) {
 	}
 }
 
+// TestSandboxRelease: DefenseClaw runs sandboxes only from SandboxMin, the
+// release of NVIDIA/OpenShell#4494 (and #4231), and installs no older one;
+// the older supported releases stay driven for everything else.
+func TestSandboxRelease(t *testing.T) {
+	if SandboxMin != "0.1.5" || mustParse(SandboxMin).Compare(mustParse(InstallerVersion)) > 0 || CheckSupported(mustParse(SandboxMin)) != nil {
+		t.Fatalf("SandboxMin %s, InstallerVersion %s", SandboxMin, InstallerVersion)
+	}
+	for _, v := range []string{"0.1.1", "0.1.3", "0.1.4"} {
+		var e *ErrSandboxRelease
+		if err := CheckSandboxRelease(mustParse(v)); !errors.As(err, &e) || CheckSupported(mustParse(v)) != nil || RunsSandboxes(v) ||
+			err.Error() != "OpenShell "+v+" runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's connections bypass the sandbox policy "+
+				"when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to "+InstallerVersion+" in place" {
+			t.Errorf("%s: %v", v, err)
+		}
+	}
+	for _, v := range []string{"0.1.5", "0.1.6", "openshell 0.1.5"} {
+		if !RunsSandboxes(v) {
+			t.Errorf("%s runs no sandbox", v)
+		}
+	}
+	if RunsSandboxes("") || RunsSandboxes("dev") {
+		t.Error("an unreadable release runs sandboxes")
+	}
+	for release := range TarballPins {
+		if CheckSandboxRelease(mustParse(release)) != nil {
+			t.Errorf("TarballPins lists %s, which runs no sandbox", release)
+		}
+	}
+}
+
+// TestManagedSetupPinMigratesTheOldPin: the hosts DefenseClaw 1.0.3 set up
+// with enterprise.openshell.version "0.1.3" in setup mode move to
+// InstallerVersion in place; every other pin is judged as it is.
+func TestManagedSetupPinMigratesTheOldPin(t *testing.T) {
+	for _, tc := range []struct {
+		setup  bool
+		pin    string
+		want   string
+		raised bool
+	}{
+		{true, "0.1.3", InstallerVersion, true},
+		{true, "0.1.1", InstallerVersion, true},
+		{true, "0.1.5", "0.1.5", false},
+		{true, "0.1.6", "0.1.6", false},
+		{true, "", "", false},
+		{true, ">=0.1.1 <0.2.0", ">=0.1.1 <0.2.0", false},
+		{false, "0.1.3", "0.1.3", false},
+	} {
+		if got, raised := ManagedSetupPin(tc.setup, tc.pin); got != tc.want || raised != tc.raised {
+			t.Errorf("ManagedSetupPin(%v, %q) = %q, %v; want %q, %v", tc.setup, tc.pin, got, raised, tc.want, tc.raised)
+		}
+	}
+}
+
+// TestProvisioningTimedOut recognizes what OpenShell 0.1.5 says of a
+// sandbox whose provisioning deadline passed (NVIDIA/OpenShell#4231).
+func TestProvisioningTimedOut(t *testing.T) {
+	for _, said := range []string{
+		"ProvisioningTimedOut: Provisioning repair window expired after 300 seconds",
+		"ImagePreparationTimedOut: Image preparation or initial supervisor startup exceeded its absolute deadline",
+		"FailedPrecondition: sandbox provisioning timed out; retry start after timeout cleanup completes",
+		"FailedPrecondition: provisioning timeout cleanup is still pending; retry start after compute is reclaimed",
+	} {
+		if !ProvisioningTimedOut(said) {
+			t.Errorf("%q", said)
+		}
+	}
+	if ProvisioningTimedOut("Conflict: sandbox must be Stopped, Completed, or a failed main-process Error to start (current phase: Error)") {
+		t.Error("an error-phase refusal is no timeout")
+	}
+}
+
 // TestInstallerPin: setup installs InstallerVersion with the script of its
 // tag, whose digest is pinned, from inside the supported window; the advice names it.
 func TestInstallerPin(t *testing.T) {

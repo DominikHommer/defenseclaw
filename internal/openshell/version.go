@@ -28,10 +28,12 @@ import (
 // project promises Stable-interface compatibility only within a minor line,
 // so the window is one minor release wide and bumped deliberately.
 const (
-	// SupportedMin is the oldest OpenShell release DefenseClaw drives. It
-	// stays at 0.1.1 while hosts that DefenseClaw 1.0.0 to 1.0.3 set up on
-	// 0.1.1 or 0.1.2 can still be running sandboxes: raising it would cut
-	// their daemon off from the gateway until OpenShell is upgraded.
+	// SupportedMin is the oldest OpenShell release DefenseClaw connects to.
+	// On a release older than SandboxMin it runs no sandbox work, but still
+	// lists, stops, deletes and pulls from the sandboxes there and upgrades
+	// OpenShell in place, so a host DefenseClaw 1.0.0 to 1.0.3 left on 0.1.1
+	// to 0.1.4 keeps its sandboxes and their work through the upgrade.
+	// Raise it to SandboxMin once DefenseClaw 1.0.3 is out of support.
 	SupportedMin = "0.1.1"
 	// SupportedBelow is the first release outside the window.
 	SupportedBelow = "0.2.0"
@@ -52,14 +54,22 @@ const (
 	// installerUpgradeReason says why a host on an older supported release
 	// is offered InstallerVersion (the doctor's CLI check). Review it with
 	// InstallerVersion.
-	installerUpgradeReason = "fixes a supervisor bug that can stall a sandbox's first connection (0.1.2), cuts the CPU an idle sandbox uses (0.1.2), " +
+	installerUpgradeReason = "closes a hole in the network broker that let a sandbox's connections bypass its policy (0.1.5), " +
+		"fixes a supervisor bug that can stall a sandbox's first connection (0.1.2), cuts the CPU an idle sandbox uses (0.1.2), " +
 		"ships the MicroVM driver already signed for Apple's Hypervisor (0.1.3), flushes a MicroVM's disk before it stops (0.1.5) " +
 		"and lets a sandbox in OpenShell's error state be stopped and started again (0.1.5)"
 
-	// ErrorStopRelease is the first release whose gateway stops a sandbox
-	// in its error state, so that it can be started again without deleting
-	// it (NVIDIA/OpenShell#4231). Earlier ones refuse both.
-	ErrorStopRelease = "0.1.5"
+	// SandboxMin is the oldest OpenShell release DefenseClaw creates or
+	// starts a sandbox on. Before 0.1.5 the supervisor's network broker
+	// fell through to the native connect, bind, listen or send when it
+	// could not inspect a socket descriptor, so a sandbox's traffic could
+	// bypass its policy (NVIDIA/OpenShell#4494). A sandbox keeps the
+	// supervisor of the release its session started on, so one that
+	// started earlier must stop and start again (record.SessionRelease).
+	// Every release from it also stops a sandbox in OpenShell's error state,
+	// so that it can be started again (NVIDIA/OpenShell#4231). Review it
+	// with InstallerVersion, never above it.
+	SandboxMin = "0.1.5"
 
 	// DefaultBaseImage is the digest-pinned NVIDIA community sandbox image
 	// the DefenseClaw overlay is built on (multi-arch; ships node, uv, git
@@ -130,22 +140,12 @@ const TarballBaseURL = "https://github.com/NVIDIA/OpenShell/releases/download/"
 // openshell-driver-vm of every pinned release ships signed with Apple's
 // com.apple.security.hypervisor entitlement (since 0.1.3), so it is
 // installed as shipped. Add a release with
-// InstallerVersion; a release without an entry cannot be installed. 0.1.3
-// stays listed for the managed hosts DefenseClaw 1.0.3 set up with
-// enterprise.openshell.version: "0.1.3"; drop it once that release leaves
-// the supported window (SupportedMin).
+// InstallerVersion; a release without an entry cannot be installed. The
+// managed hosts DefenseClaw 1.0.3 set up with enterprise.openshell.version
+// "0.1.3" need no entry for it:
+// setup mode raises an older pin to InstallerVersion (ManagedSetupPin), so a
+// release older than SandboxMin is never listed.
 var TarballPins = map[string]map[string]string{
-	"0.1.3": {
-		"openshell-x86_64-unknown-linux-musl.tar.gz":           "ed08ea7874c47f22d6e5dcc4b27d9ef1ef5d2060f83035b35ff725d5160830a3",
-		"openshell-aarch64-unknown-linux-musl.tar.gz":          "07687dacefc52bc73b01943f5b58f7a5082c1ceaa228461b9a2a78023b8057c0",
-		"openshell-aarch64-apple-darwin.tar.gz":                "2eda3676aa85ff60551b403847090942e119c89f37c84d1635ac166c6b879826",
-		"openshell-gateway-x86_64-unknown-linux-gnu.tar.gz":    "da8dce943fe01cce90243b2bf2587c71a243e4d641a4b616528829b681ced198",
-		"openshell-gateway-aarch64-unknown-linux-gnu.tar.gz":   "801214322227f64f2d3faa6989daaa5e6cd9ef1ab768b5860496deeb1158c27b",
-		"openshell-gateway-aarch64-apple-darwin.tar.gz":        "a0cff0699f4a608a644805dbbf898c42caa59856274ff3cc2cdd6b3af4bacabe",
-		"openshell-driver-vm-x86_64-unknown-linux-gnu.tar.gz":  "22593640c6179eb87413ab099832fbd133d3a6a4979904d27679e7da6d80a0cb",
-		"openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz": "4426ee0992989060eb5987ad7072feb3eb6aecf5a628ad0284c3d7ad5f39974b",
-		"openshell-driver-vm-aarch64-apple-darwin.tar.gz":      "56e321f990741ca5585f5229e37c178f541b0c38029351fe59b72a36c1c750d4",
-	},
 	"0.1.5": {
 		"openshell-x86_64-unknown-linux-musl.tar.gz":           "ca1ad6e6fbb4a6cd407e95763391b8ecff02912e7d9c467e7ca22696fe80af69",
 		"openshell-aarch64-unknown-linux-musl.tar.gz":          "30c949b4ac07a9c8245c1248eb82e4eb241615134fcabf3c9bf30dec7d00addf",
@@ -239,6 +239,62 @@ func (e *ErrUnsupportedVersion) Error() string {
 		return fmt.Sprintf("OpenShell %s is older than %s; upgrade it in place to %s", e.Found, SupportedMin, InstallerVersion)
 	}
 	return fmt.Sprintf("OpenShell %s is not supported; DefenseClaw drives >=%s <%s", e.Found, SupportedMin, SupportedBelow)
+}
+
+// ErrSandboxRelease reports a supported OpenShell release older than
+// SandboxMin, which DefenseClaw creates and starts no sandbox on.
+type ErrSandboxRelease struct {
+	Found Version
+}
+
+func (e *ErrSandboxRelease) Error() string {
+	return fmt.Sprintf("OpenShell %s runs no DefenseClaw sandbox: before %s its network broker let a sandbox's connections bypass the sandbox policy "+
+		"when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to %s in place", e.Found, SandboxMin, InstallerVersion)
+}
+
+// CheckSandboxRelease returns an *ErrSandboxRelease when a gateway of
+// release v must run no sandbox work (SandboxMin).
+func CheckSandboxRelease(v Version) error {
+	if v.Compare(mustParse(SandboxMin)) < 0 {
+		return &ErrSandboxRelease{Found: v}
+	}
+	return nil
+}
+
+// RunsSandboxes reports whether the gateway release release (as its
+// health reports it) is SandboxMin or later; false when it cannot be read.
+func RunsSandboxes(release string) bool {
+	v, err := ParseVersion(release)
+	return err == nil && CheckSandboxRelease(v) == nil
+}
+
+// ProvisioningTimedOut reports OpenShell's account of a sandbox whose
+// provisioning deadline passed, which it holds in its error phase: the
+// condition reason it sets then (ProvisioningTimedOut,
+// ImagePreparationTimedOut), or its refusals to stop such a sandbox
+// ("sandbox provisioning timed out; retry start after timeout cleanup
+// completes") and to start it before that cleanup ends ("provisioning
+// timeout cleanup is still pending; ..."). Such a sandbox is started again
+// without a stop (NVIDIA/OpenShell#4231).
+func ProvisioningTimedOut(said string) bool {
+	return strings.Contains(said, "ProvisioningTimedOut") || strings.Contains(said, "ImagePreparationTimedOut") ||
+		strings.Contains(said, "provisioning timed out") || strings.Contains(said, "provisioning timeout cleanup")
+}
+
+// ManagedSetupPin is the release the managed "setup" install mode installs
+// for the exact pin enterprise.openshell.version: the pin, or
+// InstallerVersion for one older than SandboxMin (raised reports it). That
+// is the in-place migration of the hosts DefenseClaw 1.0.3 set up on
+// "0.1.3", whose sandboxes would otherwise never start again: ensure and
+// each user's daemon move them to InstallerVersion. Any other pin (a
+// range, a newer or unreadable release, prerequisite mode) is kept, and
+// judged as it is. Remove it with the 1.0.3 upgrade path.
+func ManagedSetupPin(setup bool, pin string) (release string, raised bool) {
+	v, err := ParseVersion(pin)
+	if !setup || err != nil || strings.TrimSpace(pin) != v.String() || CheckSandboxRelease(v) == nil {
+		return pin, false
+	}
+	return InstallerVersion, true
 }
 
 // CheckSupported returns an *ErrUnsupportedVersion when v is outside the

@@ -230,8 +230,9 @@ real run (on 0.1.2 setup now also offers the upgrade to 0.1.5):
 - **OpenShell 0.1.5** is installed with NVIDIA's installer, whose script is
   checked against a pinned SHA-256 before it runs. It uses `sudo` for the
   package, then enables and starts the `openshell-gateway` user service.
-  DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2. On
-  OpenShell 0.1.1 to 0.1.4 setup offers the upgrade to 0.1.5 in place (see
+  DefenseClaw runs sandboxes on OpenShell 0.1.5 and later 0.1 releases, not
+  0.2. On OpenShell 0.1.1 to 0.1.4 it creates and starts no sandbox, and setup
+  offers the upgrade to 0.1.5 in place (see
   [upgrade OpenShell](/docs/sandboxes/guide#upgrade-openshell)).
 - **The gateway** listens on `localhost:17670` with mTLS, so only you can
   call it. Setup turns on project-folder mounts in

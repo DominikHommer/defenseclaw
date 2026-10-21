@@ -126,6 +126,9 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err != nil {
 		return nil, err
 	}
+	if err := m.sandboxReleaseRefusal(gw); err != nil {
+		return nil, err
+	}
 	// On a managed host the daemon chose the driver at sandbox start (its
 	// KVM probe and the organization's driver_fallback): the gateway must
 	// run that one. It is never switched under running sandboxes.

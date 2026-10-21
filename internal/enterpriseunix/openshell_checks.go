@@ -358,6 +358,10 @@ var versionRange = regexp.MustCompile(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.
 // supports.
 func versionAllowed(spec string, have openshell.Version) (bool, string) {
 	spec = strings.TrimSpace(spec)
+	if err := openshell.CheckSandboxRelease(have); err != nil && openshell.CheckSupported(have) == nil {
+		// Whatever the pin allows: each user's daemon starts no sandbox on it.
+		return false, err.Error()
+	}
 	switch {
 	case spec == "":
 		if err := openshell.CheckSupported(have); err != nil {
@@ -397,6 +401,11 @@ func (e *Env) checkPrerequisiteMode(ctx context.Context, s openshellSettings) []
 	var rows []prereqRow
 	installFix := e.openshellInstallFix()
 	pinFix := "install a release that satisfies enterprise.openshell.version" + versionNote(s.Version) + " (" + installFix + ")"
+	if v, err := openshell.ParseVersion(s.Version); err == nil && openshell.CheckSandboxRelease(v) != nil {
+		// No release satisfies both the pin and openshell.SandboxMin.
+		pinFix = "set enterprise.openshell.version to " + openshell.InstallerVersion + " (or a range from " + openshell.SandboxMin +
+			") and install that release (" + installFix + ")"
+	}
 	var parts []string
 	releases := map[string]openshell.Version{}
 	part := func(row, name, pkg, path string, refused []string, fix string) {
@@ -505,6 +514,10 @@ func (e *Env) checkSetupMode(ctx context.Context, s openshellSettings) []prereqR
 	case versionRange.MatchString(s.Version) || openshell.TarballPins[s.Version] == nil:
 		rows = append(rows, prereqRow{Name: "openshell pin", Detail: fmt.Sprintf("%q is not a release this DefenseClaw build can install", s.Version),
 			Fix: "set enterprise.openshell.version to one of: " + strings.Join(openshell.PinnedTarballReleases(), ", ")})
+	case s.RaisedFrom != "":
+		rows = append(rows, prereqRow{Name: "openshell pin", OK: true, Detail: s.Version + " from NVIDIA's release tarballs, verified against their checksums and the digests this build pins; " +
+			"enterprise.openshell.version pins " + s.RaisedFrom + ", which runs no sandbox (" + openshell.SandboxMin + " closes a network-broker policy bypass, " +
+			"NVIDIA/OpenShell#4494), so each user's OpenShell moves to " + s.Version + " once none of the user's sandboxes runs; set the pin to " + s.Version})
 	default:
 		rows = append(rows, prereqRow{Name: "openshell pin", OK: true, Detail: s.Version + " from NVIDIA's release tarballs, verified against their checksums and the digests this build pins"})
 	}

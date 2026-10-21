@@ -17,27 +17,63 @@
 package manager
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
-// OpenShell 0.1.5 stops a sandbox in its error state, and starts it again
-// after (NVIDIA/OpenShell#4231), so the way on keeps the sandbox; an older
-// gateway refuses both, and the way on deletes it.
+// A gateway that runs sandboxes (openshell.SandboxMin, which includes
+// NVIDIA/OpenShell#4231) stops a sandbox in its error state and starts it
+// again after, so the way on keeps the sandbox; an older one can do
+// neither, and the way on upgrades OpenShell first.
 func TestErrorPhaseWayOnFollowsTheGatewayRelease(t *testing.T) {
-	for _, mode := range []string{config.OpenShellWorkdirCopy, ""} {
-		old := errorPhaseWayOn("box", mode, "", false)
-		if !strings.Contains(old, "neither stop nor start") || !strings.Contains(old, "`defenseclaw sandbox delete box") {
-			t.Errorf("%q before 0.1.5: %q", mode, old)
-		}
-		now := errorPhaseWayOn("box", mode, "", true)
-		if strings.Contains(now, "delete") || !strings.Contains(now, "`defenseclaw sandbox stop box` and `defenseclaw sandbox start box`") {
-			t.Errorf("%q from 0.1.5: %q", mode, now)
+	now := errorPhaseWayOn("box", "", "")
+	if strings.Contains(now, "delete") || !strings.Contains(now, "`defenseclaw sandbox stop box` and `defenseclaw sandbox start box`") {
+		t.Errorf("from %s: %q", openshell.SandboxMin, now)
+	}
+	old := errorPhaseWayOn("box", "", "upgrade OpenShell")
+	if !strings.Contains(old, "neither stop nor start") || !strings.Contains(old, "upgrade OpenShell, then `defenseclaw sandbox stop box`") {
+		t.Errorf("before %s: %q", openshell.SandboxMin, old)
+	}
+	if got := errorPhaseWayOn("box", overlayDiskFullText, ""); got != overlayDiskWayOn("box") {
+		t.Errorf("a full disk: %q", got)
+	}
+}
+
+// NVIDIA/OpenShell#4231 refuses the stop of a sandbox whose provisioning
+// timed out ("sandbox provisioning timed out; retry start after timeout
+// cleanup completes"): the way on waits for OpenShell's cleanup and starts
+// it, with no stop, in the feed's line and in the refusals of a stop and of
+// a start made before the cleanup ended.
+func TestProvisioningTimeoutWayOnStartsWithoutAStop(t *testing.T) {
+	for _, reason := range []string{
+		errorPhaseReason(&audit.SandboxCondition{Type: "Ready", Status: "False", Reason: "ProvisioningTimedOut", Message: "Provisioning repair window expired after 300 seconds"}),
+		errorPhaseReason(&audit.SandboxCondition{Type: "Ready", Status: "False", Reason: "ImagePreparationTimedOut",
+			Message: "Image preparation or initial supervisor startup exceeded its absolute deadline"}),
+	} {
+		got := errorPhaseWayOn("box", reason, "")
+		if !strings.Contains(got, "refuses to stop it") || !strings.Contains(got, "then `defenseclaw sandbox start box` (no stop)") ||
+			strings.Contains(got, "`defenseclaw sandbox stop box`") {
+			t.Errorf("%q: %q", reason, got)
 		}
 	}
-	if got := errorPhaseWayOn("box", "", overlayDiskFullText, true); got != overlayDiskWayOn("box") {
-		t.Errorf("a full disk: %q", got)
+	e := newEnv(t, nil)
+	for _, refusal := range []string{
+		"FailedPrecondition: sandbox provisioning timed out; retry start after timeout cleanup completes",
+		"FailedPrecondition: provisioning timeout cleanup is still pending; retry start after compute is reclaimed",
+	} {
+		err := e.m.errorPhaseRefusal("box", "", errors.New(refusal))
+		var apiErr *sandboxapi.Error
+		if !errors.As(err, &apiErr) || apiErr.Code != sandboxapi.CodeConflict || !strings.Contains(apiErr.Message, "provisioning timed out") ||
+			!strings.Contains(apiErr.Detail, "(no stop)") {
+			t.Errorf("%q: %v", refusal, err)
+		}
+	}
+	if err := e.m.errorPhaseRefusal("box", "", errors.New("Unavailable: connection refused")); err != nil {
+		t.Errorf("another error: %v", err)
 	}
 }

@@ -335,7 +335,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 	m.mu.Lock()
-	name, mode, reason := b.rec.Name, b.rec.WorkdirMode, b.rec.PhaseReason
+	name, reason := b.rec.Name, b.rec.PhaseReason
 	m.mu.Unlock()
 	if err := m.checkSandbox(ctx, gw, b); err != nil {
 		return err
@@ -364,7 +364,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	if err != nil {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
-		if e := m.errorPhaseRefusal(name, mode, reason, err); e != nil {
+		if e := m.errorPhaseRefusal(name, reason, err); e != nil {
 			return e
 		}
 		if e := m.errorPhaseNow(b); e != nil {
@@ -672,6 +672,10 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err != nil {
 		return err
 	}
+	// A new session takes the supervisor of the gateway's release.
+	if err := m.sandboxReleaseRefusal(gw); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 	m.mu.Lock()
@@ -838,7 +842,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
-		if e := m.errorPhaseRefusal(rec.Name, rec.WorkdirMode, rec.PhaseReason, err); e != nil {
+		if e := m.errorPhaseRefusal(rec.Name, rec.PhaseReason, err); e != nil {
 			return e
 		}
 		return upstream("start sandbox "+rec.Name, err)

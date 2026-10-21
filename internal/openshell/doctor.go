@@ -244,9 +244,10 @@ func (r *DoctorReport) OpenShellInstallNeeded() bool {
 // InstallerVersion that DefenseClaw's install step upgrades in place
 // (Installer.Upgrade): the CLI check warns with that fix. Not for an
 // OpenShell installed another way (GatewayUnmanaged), which its user
-// upgrades. Setup offers the upgrade (no by default) only then, and the
-// TUI shows it with the install toggle off (`sandbox doctor --json`
-// reports it as openshell_upgrade).
+// upgrades. Setup offers the upgrade (no by default; setup does not finish
+// without it while the release runs no sandbox: OpenShellUpgradeNeeded)
+// only then, and the TUI shows it with the install toggle off (`sandbox
+// doctor --json` reports it as openshell_upgrade).
 func (r *DoctorReport) OpenShellUpgradeAvailable() bool {
 	cli := r.Get(CheckIDCLI)
 	if cli == nil || cli.Status != StatusWarn || r.GatewayUnmanaged() {
@@ -254,6 +255,20 @@ func (r *DoctorReport) OpenShellUpgradeAvailable() bool {
 	}
 	v, err := ParseVersion(r.CLIVersion)
 	return err == nil && CheckSupported(v) == nil && v.Compare(mustParse(InstallerVersion)) < 0
+}
+
+// OpenShellUpgradeNeeded reports a gateway, and a CLI of its release, that
+// DefenseClaw drives but runs no sandbox work on (SandboxMin): the Gateway
+// check fails, and its fix is the in-place upgrade that setup offers
+// (OpenShellUpgradeAvailable) or, for an OpenShell installed another way,
+// its user's.
+func (r *DoctorReport) OpenShellUpgradeNeeded() bool {
+	gw := r.Get(CheckIDGatewayVersion)
+	if gw == nil || gw.Status != StatusFail {
+		return false
+	}
+	v, err := ParseVersion(r.GatewayVersion)
+	return err == nil && CheckSupported(v) == nil && CheckSandboxRelease(v) != nil && r.CLIVersion == v.String()
 }
 
 // Get returns the check with id, or nil.
@@ -1910,6 +1925,14 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		version.Status = StatusWarn
 		version.Detail = fmt.Sprintf("gateway %s but CLI %s; keep them on the same release", r.gateway.Version, r.cli)
 		version.Fix = r.gatewayVersionFix(&Fix{Summary: "reinstall OpenShell so the CLI and gateway match", Command: installOpenShellCommand})
+	} else if err := CheckSandboxRelease(r.gateway.Version); err != nil {
+		// The CLI's release too: the upgrade replaces both
+		// (OpenShellUpgradeNeeded).
+		version.Status, version.Detail = StatusFail, err.Error()
+		version.Fix = r.upgradeFix()
+		if r.cli != (Version{}) {
+			r.forgetReleaseRestart()
+		}
 	} else {
 		version.Status, version.Detail = StatusPass, fmt.Sprintf("%s healthy at %s", r.gateway.Version, r.reg.Endpoint)
 		if r.cli != (Version{}) {
