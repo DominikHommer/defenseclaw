@@ -488,9 +488,12 @@ def test_profile_overrides_attribute_no_agent_when_its_owner_is_unknown(monkeypa
     )
     answer = gateway.current_user_guardrail_profile(cfg)
     assert answer["overrides"] == []
-    assert answer["unverified_agents"] == ["agt-other"]
+    # Review fix: no agent ID is named until its owner is confirmed.
+    assert answer["agent_assignments_unchecked"] is True
+    assert "agt-other" not in json.dumps(answer)
     text = cmd_guardrail.profile_status_text(cfg, answer)
-    assert "strict for" not in text and "not checked for agt-other" in text
+    assert "strict for" not in text and "agt-other" not in text
+    assert "agent-scoped assignments not checked" in text
 
 
 def test_profile_overrides_name_an_agent_only_under_its_own_connector(monkeypatch):
@@ -520,4 +523,4 @@ def test_profile_overrides_name_an_agent_only_under_its_own_connector(monkeypatc
     cfg = _scoped_agent_cfg(GuardrailProfileMatch(connectors=["claudecode", "codex"], agents=["agt-codex"]))
     answer = gateway.current_user_guardrail_profile(cfg)
     assert [(o["connector"], o["agent"]) for o in answer["overrides"]] == [("codex", "agt-codex")]
-    assert "unverified_agents" not in answer
+    assert "agent_assignments_unchecked" not in answer

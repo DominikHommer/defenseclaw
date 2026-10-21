@@ -723,12 +723,8 @@ def profile_status_text(cfg, result: dict) -> str:
         scoped.append(f"{item.get('profile')} for {subject} (by {item.get('match')})")
     if scoped:
         text += "; except " + ", ".join(scoped)
-    unverified = result.get("unverified_agents") or []
-    if unverified:
-        text += (
-            f"; agent assignment(s) not checked for {', '.join(unverified)}: "
-            "the gateway did not list this account's agents"
-        )
+    if result.get("agent_assignments_unchecked"):
+        text += "; agent-scoped assignments not checked: the gateway did not list this account's agents"
     return text
 
 
