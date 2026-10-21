@@ -307,10 +307,13 @@ func (e *RefreshIncomplete) Error() string {
 // Refuses reports whether a tool call of connector by the user whose home is
 // home has no confirmed record. An empty home (the caller is not known)
 // is refused when any record of the connector is unconfirmed, and so is any
-// call when a record names no home.
+// call when a record names no home, or when e names nothing at all.
 func (e *RefreshIncomplete) Refuses(connector, home string) bool {
 	if e == nil {
 		return false
+	}
+	if len(e.Connectors) == 0 && len(e.Records) == 0 {
+		return true
 	}
 	connector = strings.TrimSpace(connector)
 	for _, name := range e.Connectors {

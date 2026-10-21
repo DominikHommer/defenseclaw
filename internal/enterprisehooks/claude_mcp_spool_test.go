@@ -123,6 +123,12 @@ func TestReadClaudeMCPSpoolIgnoresTheLegacyWorkDir(t *testing.T) {
 	}
 }
 
+// emptyJoinedError is a joined error with no errors in it.
+type emptyJoinedError struct{}
+
+func (emptyJoinedError) Error() string   { return "nothing" }
+func (emptyJoinedError) Unwrap() []error { return nil }
+
 // W2B-G-enum review loop 3: the refresh tells the gateway which records it
 // did not publish, so a publication's error is split into its records; any
 // other failure is the whole folder's.
@@ -138,6 +144,9 @@ func TestMCPSpoolRecordFailuresNamesTheRecordsAndTheFolder(t *testing.T) {
 	}
 	if records, whole := MCPSpoolRecordFailures(errors.Join(alice, errors.New("set claudecode mcp spool protection"))); !whole || len(records) != 1 {
 		t.Fatalf("records %v, whole %v; want the record and the folder failure", records, whole)
+	}
+	if _, whole := MCPSpoolRecordFailures(emptyJoinedError{}); !whole {
+		t.Fatal("an error that names no record must be the whole connector's")
 	}
 	if records, whole := MCPSpoolRecordFailures(nil); whole || len(records) != 0 {
 		t.Fatal("no error named a failure")

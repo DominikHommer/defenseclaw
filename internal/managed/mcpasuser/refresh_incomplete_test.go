@@ -70,6 +70,9 @@ func TestIncompleteRefreshNamesOnlyTheRecordsItDidNotPublish(t *testing.T) {
 	if none.Refuses("claudecode", alice) {
 		t.Fatal("a nil incomplete refresh refused")
 	}
+	if !(&RefreshIncomplete{Detail: "something failed"}).Refuses("kiro", bob) {
+		t.Fatal("an incomplete refresh that names nothing must refuse every call")
+	}
 
 	// Past the record bound the answer names the connectors instead, so it
 	// fits a frame and still refuses every call it cannot confirm.

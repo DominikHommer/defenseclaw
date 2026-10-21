@@ -96,7 +96,8 @@ func (e *MCPSpoolRecordError) Unwrap() error { return e.Err }
 // MCPSpoolRecordFailures splits the error of an MCP spool publication into
 // the records it could not publish. whole reports a failure that is not one
 // record's (the folder itself could not be written): none of the
-// connector's records can then be taken as current.
+// connector's records can then be taken as current, and neither can they
+// when an error names no record.
 func MCPSpoolRecordFailures(err error) (records []*MCPSpoolRecordError, whole bool) {
 	var walk func(error)
 	walk = func(err error) {
@@ -113,6 +114,9 @@ func MCPSpoolRecordFailures(err error) (records []*MCPSpoolRecordError, whole bo
 		}
 	}
 	walk(err)
+	if err != nil && len(records) == 0 {
+		whole = true
+	}
 	return records, whole
 }
 
