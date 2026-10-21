@@ -102,6 +102,13 @@ type Options struct {
 	// DeliveryID is the opaque `bundle apply --delivery-id` the bundle
 	// receipt records ("" for none; enterprisestatus.CheckDeliveryID).
 	DeliveryID string
+	// Interrupted is closed when the command got SIGTERM or an interrupt.
+	// A transaction then finishes the step it is in and rolls back at the
+	// next safe point (before it stops the services, before it writes the
+	// files, before it starts the services), and the run returns its result
+	// for the command to print. The signal used to kill the run mid-step,
+	// with no result, and a later run recovered it (I-1317). nil for none.
+	Interrupted <-chan struct{}
 }
 
 // Error codes in the lifecycle result.
@@ -125,10 +132,12 @@ const (
 	codeApply               = "apply_failed"
 	codeActivate            = "activation_failed"
 	codeRolledBack          = "rolled_back"
-	codeRollbackFailed      = "rollback_failed"
-	codeRecovered           = "recovered_interrupted_transaction"
-	codeUninstall           = "uninstall_failed"
-	codeUninstallPrecheck   = "uninstall_precheck_refused"
+	// codeInterrupted: a stop signal made the transaction roll back.
+	codeInterrupted       = "interrupted"
+	codeRollbackFailed    = "rollback_failed"
+	codeRecovered         = "recovered_interrupted_transaction"
+	codeUninstall         = "uninstall_failed"
+	codeUninstallPrecheck = "uninstall_precheck_refused"
 	// codeUninstallIncomplete: the uninstall stopped before removing the
 	// binaries, because per-user hook registrations or vendor machine policy
 	// still name them, and started the services again. The package removal
@@ -263,6 +272,23 @@ type lifecycle struct {
 
 // noteChange records one change a repair or ensure made to an installed
 // deployment, so its result says what was repaired.
+// interrupted reports whether the command got a stop signal
+// (Options.Interrupted).
+func (l *lifecycle) interrupted() bool {
+	select {
+	case <-l.opts.Interrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+// interruptedError is the cause of a transaction rolled back for a stop
+// signal before step.
+func interruptedError(step string) error {
+	return fmt.Errorf("the run got a stop signal (SIGTERM or an interrupt) and rolled back before it %s; run it again", step)
+}
+
 func (l *lifecycle) noteChange(format string, args ...any) {
 	if l.reportChanges {
 		l.result.Changes = append(l.result.Changes, fmt.Sprintf(format, args...))
@@ -305,6 +331,34 @@ func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 	l.result.Warnings = uniqueMessages(l.result.Warnings)
 	l.result.Finish(env.GOOS, failure)
 	return l.result
+}
+
+// What a repair that succeeded adds to its changes, so --json says what the
+// text output says (GAP-0020, GAP-0061).
+const (
+	// RepairNothingChanged is the change a repair of a healthy deployment
+	// lists.
+	RepairNothingChanged = "nothing to repair"
+	// RepairRestartedServices is listed by every repair that started the
+	// services (GAP-2030).
+	RepairRestartedServices = "restarted the DefenseClaw services to re-apply the deployment; `ensure` leaves a healthy deployment running"
+)
+
+// summarizeRepair ends the changes of a repair that succeeded: a healthy
+// deployment had nothing to repair, and repair re-applies the deployment,
+// so it stops and starts every service even then. With --no-start
+// (not_started) it started none.
+func (l *lifecycle) summarizeRepair() {
+	r := l.result
+	if len(r.Errors) > 0 {
+		return
+	}
+	if len(r.Changes) == 0 {
+		r.Changes = append(r.Changes, RepairNothingChanged)
+	}
+	if !hasMessageCode(r.Warnings, codeNotStarted) {
+		r.Changes = append(r.Changes, RepairRestartedServices)
+	}
 }
 
 // uniqueMessages drops repeats of an identical code and message, keeping
@@ -492,7 +546,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		// The installed binaries are the payload of a repair without one: a
 		// missing hook binary refused it with payload_invalid (GAP-1217).
 		l.restoreTamperedHookBinary(ctx, record)
-		return l.settleInputChanges(ctx, l.apply(ctx, record))
+		code := l.settleInputChanges(ctx, l.apply(ctx, record))
+		l.summarizeRepair()
+		return code
 	case ActionEnsure:
 		if record == nil {
 			return l.settleInputChanges(ctx, l.freshInstall(ctx))
@@ -1831,13 +1887,16 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, revertConfig)
 		if newerConfig != nil {
-			l.restoreNewerConfig(record, newerConfig)
+			l.restoreNewerConfig(record.ServiceGID, newerConfig)
 		}
 		if restored && record != nil && l.machinePolicyPublished {
 			l.restoreMachinePolicy(record)
 		}
-		if restored && record != nil && newerConfig == nil && l.configWrittenDuringRun != nil {
-			l.restoreNewerConfig(record, l.configWrittenDuringRun)
+		// Also after a failed first install: the snapshot removed the
+		// config.yaml it wrote, and a push made during activation is the
+		// administrator's file (p0 GAP-1410).
+		if restored && newerConfig == nil && l.configWrittenDuringRun != nil {
+			l.restoreNewerConfig(account.GID, l.configWrittenDuringRun)
 		} else {
 			l.configWrittenDuringRun = nil
 		}
@@ -1872,6 +1931,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			return failAndRollback(codeUnmanagedLayout, err)
 		}
 	}
+	if l.interrupted() {
+		return failAndRollback(codeInterrupted, interruptedError("stopped the services"))
+	}
 	keep := l.keepRunningDuringChange(p)
 	// The gateway that keeps running reloads config.yaml as soon as it is written.
 	l.generationExposed = hot
@@ -1880,6 +1942,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		keepSensorHelperRunning(keep, units)
 	}
 	l.quiesce(ctx, units, keep)
+	if l.interrupted() {
+		return failAndRollback(codeInterrupted, interruptedError("wrote the new files"))
+	}
 	pending.Phase = "apply"
 	_ = env.savePending(pending)
 
@@ -1947,6 +2012,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(codeApply, err)
 	}
 
+	if l.interrupted() {
+		return failAndRollback(codeInterrupted, interruptedError("started the services"))
+	}
 	pending.Phase = "activate"
 	_ = env.savePending(pending)
 	l.generationExposed = true
@@ -3260,6 +3328,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// byte (enterprisepolicy restores the recorded preimage or edits only
 	// DefenseClaw's own entries).
 	policyLeft := false
+	var policyRemoved []string
 	if policy, err := env.MachinePolicy.RemoveAll(); err != nil {
 		errs = append(errs, fmt.Errorf("remove machine policy: %w", err))
 		policyLeft = true
@@ -3267,6 +3336,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		for _, state := range policy.States {
 			if state.Changed {
 				r.MachinePolicy[state.Connector] = state.ToStatus()
+				policyRemoved = append(policyRemoved, state.Connector)
 			}
 		}
 	}
@@ -3294,6 +3364,18 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		// administrator ran ensure (GAP-1500).
 		if err := errors.Join(errs...); err != nil {
 			r.AddError(codeUninstall, err.Error())
+		}
+		if record != nil {
+			// The deployment stays, so its vendor machine policy goes back
+			// before its services start: the entries of every connector the
+			// removal could withdraw were gone (Codex beside an immutable
+			// Claude Code file), and those agents ran without DefenseClaw
+			// while the kept deployment read as installed (r102 GAP-0473).
+			// What cannot be written back is named in a warning.
+			l.restoreMachinePolicy(record)
+			for _, connector := range policyRemoved {
+				delete(r.MachinePolicy, connector)
+			}
 		}
 		if failed := l.restoreUninstallServices(ctx, units, wasActive, wasEnabled); len(failed) > 0 {
 			r.AddError(codeUninstall, "could not start the services this uninstall stopped again ("+strings.Join(failed, "; ")+"); run `"+env.lifecycleCommand(ActionEnsure)+"` to restore the deployment")

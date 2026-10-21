@@ -99,6 +99,10 @@ func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts 
 	if err := connector.ClearHookContractLockEntry(dataDir, conn.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("enterprise hooks: clear hook contract lock for %s: %w", conn.Name(), err)
 	}
+	// The account's last connector takes the shared hook scripts with it.
+	if err := connector.RemoveUnusedSharedHookRuntime(dataDir); err != nil {
+		return fmt.Errorf("enterprise hooks: remove the unused shared hook runtime: %w", err)
+	}
 	return nil
 }
 

@@ -91,12 +91,21 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 		env.LockTimeout = opts.lockWait
 	}
 	ctx := cmd.Context()
-	if action == enterpriseunix.ActionRotateCredentials {
+	var interrupted <-chan struct{}
+	switch action {
+	case enterpriseunix.ActionRotateCredentials:
 		var stop func()
 		ctx, stop = settleInterruptedRotation(ctx, cmd.ErrOrStderr(), platform)
 		defer stop()
+	case enterpriseunix.ActionStatus, enterpriseunix.ActionVerify:
+		// Read only: a signal stops them at once.
+	default:
+		var stop func()
+		interrupted, stop = settleInterruptedLifecycle(cmd.ErrOrStderr(), "enterprise "+platform+" "+action, platform)
+		defer stop()
 	}
 	result := enterpriseunix.Run(ctx, env, enterpriseunix.Options{
+		Interrupted:        interrupted,
 		Action:             action,
 		PayloadDir:         opts.payload,
 		FromPackage:        opts.fromPackage,
@@ -153,6 +162,43 @@ func settleInterruptedRotation(parent context.Context, w io.Writer, platform str
 		signal.Stop(signals)
 		close(done)
 		cancel()
+	}
+}
+
+// settleInterruptedLifecycle makes the first SIGTERM or interrupt of a
+// changing lifecycle run (systemd stopping the apply trigger, an MDM
+// timeout, Ctrl+C) ask the run to stop at its next safe point: the
+// transaction finishes the step it is in, rolls back or completes, and the
+// command prints its result. It used to die mid-step with no result, and a
+// later run recovered the transaction (I-1317). A second signal exits at
+// once; the next lifecycle run recovers what it left.
+func settleInterruptedLifecycle(w io.Writer, command, platform string) (<-chan struct{}, func()) {
+	interrupted := make(chan struct{})
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-signals:
+			fmt.Fprintf(w, "\n%s was interrupted; finishing the current step and restoring the previous deployment if the change is not committed yet. Interrupt again to stop at once.\n", command)
+			close(interrupted)
+		case <-done:
+			return
+		}
+		select {
+		case sig := <-signals:
+			fmt.Fprintf(w, "\n%s stopped in the middle of a step; run `enterprise %s ensure` as root to restore the previous deployment or finish the change.\n", command, platform)
+			code := 130
+			if sig == syscall.SIGTERM {
+				code = 143
+			}
+			os.Exit(code)
+		case <-done:
+		}
+	}()
+	return interrupted, func() {
+		signal.Stop(signals)
+		close(done)
 	}
 }
 
@@ -225,16 +271,6 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	if result.Action == enterpriseunix.ActionRotateCredentials && result.Noop && result.NoopReason == enterpriseunix.NoopNoCredentials {
 		fmt.Fprintln(w, "  no enrolled user holds a DefenseClaw credential yet: hooks use the hook socket, and the guardian creates the per-user key when it first gives a user one (agent telemetry, an in-agent plugin or ACP)")
 	}
-	if result.Action == enterpriseunix.ActionRepair && result.OK {
-		if len(result.Changes) == 0 {
-			fmt.Fprintln(w, "  nothing to repair")
-		}
-		// repair re-applies the deployment, so it stops and starts every
-		// service even when nothing needed repair; say so (GAP-2030).
-		if !lifecycleResultHasWarning(result, "not_started") {
-			fmt.Fprintln(w, "  restarted the DefenseClaw services to re-apply the deployment; `ensure` leaves a healthy deployment running")
-		}
-	}
 	// A verify that found the lifecycle lock held checked nothing either:
 	// its all-false readiness line read as "not installed" (GAP-1542).
 	if (result.Action == enterpriseunix.ActionStatus || result.Action == enterpriseunix.ActionVerify) &&
@@ -264,16 +300,6 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		fmt.Fprintf(w, "  installed=true version=%s\n", result.InstalledVersion)
 	}
 	return nil
-}
-
-// lifecycleResultHasWarning reports whether result carries a warning with code.
-func lifecycleResultHasWarning(result *enterprisestatus.Result, code string) bool {
-	for _, warning := range result.Warnings {
-		if warning.Code == code {
-			return true
-		}
-	}
-	return false
 }
 
 // repairCannotFixProblems reports whether every error of result is one

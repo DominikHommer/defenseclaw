@@ -377,22 +377,39 @@ func publishedDirs(opts Options, path string) []string {
 	return dirs
 }
 
-// publishedDirAccess is the access every user needs on the n-th directory
-// above a published file: to list the file's own directory (Claude Code
-// reads every file in managed-settings.d) and to pass the ones above it.
-func publishedDirAccess(index int) os.FileMode {
-	if index == 0 {
+// publishedDirAccess is the access every user needs on a directory above a
+// published file: list, on the drop-in directory an agent reads every file
+// of (listed), and search on every other one. A file the agent opens by
+// name (Codex requirements.toml, Cursor hooks.json) needs no list on its
+// own directory, which may hold an administrator's unrelated files
+// (GAP-0924).
+func publishedDirAccess(listed bool) os.FileMode {
+	if listed {
 		return 0o005
 	}
 	return 0o001
+}
+
+// listedPolicyDir reports whether the n-th directory above the published
+// file path is one its agent lists: the file's own directory, when it is a
+// drop-in of Claude Code managed-settings.d or Copilot CLI policy.d.
+func listedPolicyDir(path string, index int) bool {
+	if index != 0 {
+		return false
+	}
+	switch filepath.Base(path) {
+	case DefenseClawDropInName, ClaudeVersionFloorDropInName:
+		return true
+	}
+	return false
 }
 
 // publishedDirModeAccess is publishedDirAccess in the mode bits of both the
 // owning group and other: a member of the directory's group gets the group
 // bits and never the other bits, so root:staff 0705 kept every staff member
 // from loading the hooks while verify reported coverage (GAP-1407).
-func publishedDirModeAccess(index int) os.FileMode {
-	access := publishedDirAccess(index)
+func publishedDirModeAccess(listed bool) os.FileMode {
+	access := publishedDirAccess(listed)
 	return access | access<<3
 }
 
@@ -440,23 +457,20 @@ var writeLinuxAccessACL = func(path string, acl posixacl.View) error {
 // Linux it rewrites the access ACL with the missing access added to each
 // entry without it and to the mask, and no group-class write
 // (grantPublishedDirAccess).
-var clearPublishedDirACL = func(opts Options, dir string, index int) error {
-	want := uint16(publishedDirAccess(index))
+var clearPublishedDirACL = func(opts Options, dir string, listed bool) error {
+	want := uint16(publishedDirAccess(listed))
 	if opts.goos() == "linux" {
 		info, err := os.Lstat(dir)
 		if err != nil {
 			return err
 		}
+		// A directory without an access ACL reads as none (the mode bits
+		// are the whole ACL): the chmod of the repair gives the access.
 		acl, err := publishedACLReader.Read(dir, info.Mode())
 		if err != nil {
 			return err
 		}
 		if acl.Denied(want) == "" {
-			return nil
-		}
-		if len(acl.Users)+len(acl.Groups) == 0 && !hasLinuxAccessACL(dir) {
-			// The mode bits are the whole ACL (getfacl prints them as one):
-			// the chmod of the repair gives the access.
 			return nil
 		}
 		return writeLinuxAccessACL(dir, grantPublishedDirAccess(acl, want))
@@ -467,19 +481,13 @@ var clearPublishedDirACL = func(opts Options, dir string, index int) error {
 	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Index > entries[j].Index })
 	for _, entry := range entries {
-		if entry.DeniesDirectoryAccess(index == 0) || entry.GrantsWrite() {
+		if entry.DeniesDirectoryAccess(listed) || entry.GrantsWrite() {
 			if err := removeDarwinACLEntry(dir, entry.Index); err != nil {
 				return fmt.Errorf("remove ACL entry %d (%s): %w", entry.Index, entry.Text, err)
 			}
 		}
 	}
 	return nil
-}
-
-// hasLinuxAccessACL reports whether path has an extended POSIX access ACL.
-func hasLinuxAccessACL(path string) bool {
-	_, err := unix.Getxattr(path, linuxAccessACLXattr, nil)
-	return err == nil
 }
 
 // grantPublishedDirAccess is acl with want added to the owning group entry,
@@ -547,7 +555,7 @@ func linuxAccessACLData(acl posixacl.View) []byte {
 	return data
 }
 
-func publishedDirACLProblem(opts Options, dir string, index int) (string, error) {
+func publishedDirACLProblem(opts Options, dir string, listed bool) (string, error) {
 	if opts.goos() == "linux" {
 		info, err := os.Lstat(dir)
 		if err != nil {
@@ -557,7 +565,7 @@ func publishedDirACLProblem(opts Options, dir string, index int) (string, error)
 		if err != nil {
 			return "", err
 		}
-		denied := acl.Denied(uint16(publishedDirAccess(index)))
+		denied := acl.Denied(uint16(publishedDirAccess(listed)))
 		if denied == "" {
 			return "", nil
 		}
@@ -571,7 +579,7 @@ func publishedDirACLProblem(opts Options, dir string, index int) (string, error)
 		return "", err
 	}
 	for _, entry := range entries {
-		if entry.DeniesDirectoryAccess(index == 0) {
+		if entry.DeniesDirectoryAccess(listed) {
 			return fmt.Sprintf("%s has macOS ACL entry %q", dir, entry.Text), nil
 		}
 	}
@@ -591,10 +599,11 @@ func publishedDirProblem(opts Options, path string) string {
 		if err != nil || !info.IsDir() {
 			continue
 		}
-		if want := publishedDirModeAccess(index); info.Mode().Perm()&want != want {
+		listed := listedPolicyDir(path, index)
+		if want := publishedDirModeAccess(listed); info.Mode().Perm()&want != want {
 			problems = append(problems, fmt.Sprintf("%s has mode %04o", dir, info.Mode().Perm()))
 		}
-		if problem, err := publishedDirACLProblem(opts, dir, index); err != nil {
+		if problem, err := publishedDirACLProblem(opts, dir, listed); err != nil {
 			problems = append(problems, fmt.Sprintf("cannot inspect the ACL of %s: %v", dir, err))
 		} else if problem != "" {
 			problems = append(problems, problem)
@@ -608,8 +617,9 @@ func publishedDirProblem(opts Options, path string) string {
 // bits publishedDirModeAccess names, and no macOS ACL entry or Linux POSIX
 // access ACL entry denying list or search. The repair made every one 0755,
 // so a vendor folder an administrator kept at 0700 listed its unrelated
-// files to every account, where users need only search (GAP-0924). It
-// returns the directories it changed.
+// files to every account, where users need only search, also on the
+// directory of a file the agent opens by name (GAP-0924). It returns the
+// directories it changed.
 func restorePublishedDirs(opts Options, path string) ([]string, error) {
 	var restored []string
 	for index, dir := range publishedDirs(opts, path) {
@@ -617,9 +627,11 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 		if err != nil || !info.IsDir() {
 			continue
 		}
+		listed := listedPolicyDir(path, index)
+		need := publishedDirModeAccess(listed)
 		perm := info.Mode().Perm()
-		needMode := perm&publishedDirModeAccess(index) != publishedDirModeAccess(index)
-		aclProblem, err := publishedDirACLProblem(opts, dir, index)
+		needMode := perm&need != need
+		aclProblem, err := publishedDirACLProblem(opts, dir, listed)
 		if err != nil {
 			return restored, err
 		}
@@ -630,7 +642,7 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 			continue
 		}
 		if aclProblem != "" {
-			if err := clearPublishedDirACL(opts, dir, index); err != nil {
+			if err := clearPublishedDirACL(opts, dir, listed); err != nil {
 				return restored, fmt.Errorf("remove the ACL entries denying access to %s: %w", dir, err)
 			}
 			// A Linux ACL rewrite changes the group bits (the mask).
@@ -638,10 +650,10 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 				return restored, err
 			}
 			perm = info.Mode().Perm()
-			needMode = perm&publishedDirModeAccess(index) != publishedDirModeAccess(index)
+			needMode = perm&need != need
 		}
 		if needMode {
-			if err := os.Chmod(dir, (perm|publishedDirModeAccess(index))&^0o022); err != nil {
+			if err := os.Chmod(dir, (perm|need)&^0o022); err != nil {
 				return restored, err
 			}
 		}

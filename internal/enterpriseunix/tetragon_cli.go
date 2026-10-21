@@ -92,6 +92,20 @@ type tetragonIntent struct {
 	ActionCLI, ObserveCLI []string
 	// PlaneC is whether AI Discovery Plane C runs.
 	PlaneC bool
+	// DefaultPlaneCOff is set when an absent (or default) block is capped
+	// at off because Plane C does not run. Reason stays "", so lifecycle
+	// status does not warn on every host without Plane C; the tetragon
+	// commands name the cap (capReason).
+	DefaultPlaneCOff bool
+}
+
+// capReason is the cap that overrides Configured, the Plane C cap of the
+// default block included.
+func (t tetragonIntent) capReason() string {
+	if t.DefaultPlaneCOff {
+		return config.TetragonReasonPlaneCOff
+	}
+	return t.Reason
 }
 
 // tetragonIntentOf reads the intent from a validated config. connectors are
@@ -110,6 +124,10 @@ func tetragonIntentOf(cfg *config.Config, goos string, connectors []string) tetr
 		BurnIn: effective.BurnIn, EnforceAck: effective.EnforceAck, CustomerEvents: effective.CustomerEvents,
 		PlaneC: cfg.PlaneCSelected(),
 	}
+	// The default block is capped the same way a written one is, with no
+	// status warning: a host without Plane C is the default (GAP-0084).
+	intent.DefaultPlaneCOff = !intent.Written && reason == "" && mode == config.TetragonModeOff &&
+		effective.Mode != config.TetragonModeOff && goos == "linux" && cfg.StandaloneEnterprise() && !intent.PlaneC
 	var action, observe []string
 	for _, connector := range connectors {
 		if cfg.Guardrail.Enabled && strings.EqualFold(strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(connector)), guardrailActionMode) {
@@ -164,12 +182,12 @@ func machinePolicyAnchors(cfg *config.Config, goos string, connectors []string) 
 	return out
 }
 
-// helperMode is the mode the helper runs with this intent: its own default
-// when no drop-in is rendered.
+// helperMode is the mode the helper runs with this intent, after the caps.
+// Without a drop-in the helper runs its own default, consume, which is the
+// default intent's mode; a host without Plane C runs off, also with no
+// drop-in, where status said consume (GAP-0084). Off and consume load no
+// kernel policy either way.
 func (t tetragonIntent) helperMode() string {
-	if !t.Written {
-		return string(kernelpolicy.ModeConsume)
-	}
 	return t.Mode
 }
 
@@ -977,6 +995,9 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 		}
 		rep.addWarning(finding.Code, finding.Message)
 	}
+	if in.Intent.DefaultPlaneCOff {
+		rep.addWarning(config.TetragonReasonPlaneCOff, tetragonMessage(config.TetragonReasonPlaneCOff, tetragonFacts{Mode: in.Intent.Configured + " (the default)"}))
+	}
 	if !haveIntent {
 		rep.addWarning(codeConfig, "the installed config could not be read or does not validate (this shows the helper's state against the defaults); see "+
 			literal(adminCommand("enterprise", "linux", "status")))
@@ -993,7 +1014,7 @@ func (rep *TetragonReport) fill(env *Env, intent tetragonIntent, haveIntent bool
 		rep.CustomerPolicies = []TetragonCustomerPolicy{}
 	}
 	rep.Intent = TetragonIntentView{
-		Valid: haveIntent, Configured: intent.Configured, Mode: intent.helperMode(), CapReason: intent.Reason,
+		Valid: haveIntent, Configured: intent.Configured, Mode: intent.helperMode(), CapReason: intent.capReason(),
 		BurnIn: intent.BurnIn, EnforceAck: intent.ack(), CustomerEvents: defaultStr(intent.CustomerEvents, config.TetragonCustomerEventsAgent),
 		Approval:          approvalOf(intent),
 		EnforceConnectors: nonNil(intent.EnforceConnectors), GuardrailObserve: nonNil(intent.GuardrailObserve),
@@ -1348,7 +1369,7 @@ func enrolledNames(users []TetragonUser) string {
 // fails for the mode this host runs, or how far it is from the next mode.
 func statusNext(in tetragonInputs, probes tetragonProbes, now time.Time) []string {
 	mode := in.Intent.helperMode()
-	if in.Intent.Reason == config.TetragonReasonPlaneCOff {
+	if in.Intent.capReason() == config.TetragonReasonPlaneCOff {
 		mode = in.Intent.Configured
 	}
 	if modeRank(mode) == 0 {
