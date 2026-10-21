@@ -353,10 +353,15 @@ $GW   = Join-Path $root 'bin\defenseclaw-gateway.exe'
 ```
 
 Every command below refuses on a Secure Client computer
-(`not_supported_secure_client`) and on a computer that is not a standalone
-managed device (`not_managed`; the device test is the descriptor
-`<etc>/managed-runtime.json`, and on Windows the trusted deployment record).
-Every command below also assumes the deployment is already installed (Linux
+(`not_supported_secure_client`). `bundle apply`, `bundle status` and
+`bundle anchors install` also refuse on a computer that is not a standalone
+managed device, as root and as a user (`not_managed`, exit 1; the device test
+is the descriptor `<etc>/managed-runtime.json`, and on Windows the trusted
+deployment record). The read-only commands answer there instead:
+`<os> status` reports `installed: false` (5.1 relies on it), `secret status`
+lists no credential, and `bundle verify` checks the bundle against the anchor
+file without the device checks (4.2). None of them writes, starts or stops
+anything. Every command below also assumes the deployment is already installed (Linux
 and macOS `bundle apply` refuse `not_installed` without a deployment record;
 Windows refuses `not_managed` unless the deployment was installed before the
 run). Section 5.0 sets up a device that has no MDM.
@@ -390,7 +395,7 @@ Exit 0.
   were not checked). The agent always runs verify as root or SYSTEM.
 - Preconditions: none; it is the dry run of apply.
 - Lock: none. Changes nothing (it stages into a private temporary folder
-  and reads the credential store listing and the installed config.yaml).
+  and reads the stored credentials and the installed config.yaml).
 - Idempotency: pure; repeat freely.
 - stdout: `bundle-verify.schema.json`. `result` is `verified`,
   `already_applied` (the bytes are the confirmed bundle: apply would be a
@@ -407,8 +412,12 @@ Exit 0.
 - Missing credentials, `secret_refs_missing` (absent on builds before
   1.0.3): as root or SYSTEM on a device, the names of every `secret_refs`
   credential the device does not hold, required and optional, in manifest
-  order; `[]` when all are stored. A `secret_ref_missing` refusal lists all
-  of them, not only the first. Absent off a device, when the store could
+  order; `[]` when all are stored. A stored credential the gateway cannot
+  read (empty, more than one line, over 16 KiB, readable by other accounts,
+  or in a folder another account controls) counts as missing, on every OS,
+  in verify and in apply. A `secret_ref_missing` refusal lists all of them,
+  not only the first, and keeps the `secret_presence_unchecked` warning when
+  another credential could not be checked. Absent off a device, when the store could
   not be read (`secret_presence_unchecked`) and on a refusal before the
   credential check. Names only, never a value.
 - Restart prediction, `restart_prediction` (absent on builds before 1.0.3):
@@ -422,7 +431,10 @@ Exit 0.
     name) or, on Windows, `codex_machine_policy` (Codex protection turns on or
     off: every DefenseClaw service restarts, 4.3).
   - `not_required`: no changed setting needs a restart, so the gateway keeps
-    running (`already_applied`: the apply changes nothing). The apply still
+    running (`already_applied`: the bundle is the confirmed one and the
+    installed config matches it). A repeat of the confirmed bundle over an
+    installed config that drifted in a restart-required setting is
+    `required`: the apply installs the bundle config again. The apply still
     restarts a gateway that is down or does not report the new policy in
     time. A bundle that omits `data_dir`, `gateway.api_bind` or
     `gateway.api_port` while the installed config spells out the value the
@@ -437,6 +449,17 @@ Exit 0.
   `restart` is what happened. The receipt carries `restart` only when the
   gateway restarted (always `true`); when it is absent the gateway kept
   running, never read an absent `restart` as unknown.
+- Effective-policy digests and product versions: `expected_digest` is the
+  digest the signer computed with its product version. It is compared with
+  this device's digest (`digest_verified`) only when the signer ran the same
+  product version; otherwise verify and the receipt warn
+  `digest_unverifiable` and the bundle file hashes still protect the content.
+  `effective_policy_digest` is the digest this build computes for the bundle
+  on this device. To know the digest a device will enforce, run verify on
+  that device (or on a computer with the same version and layout) and compare
+  its `effective_policy_digest` with `gateway_digest` of `bundle status` after
+  the apply. Do not compare digests computed by different product versions;
+  the digest algorithm is not part of the contract.
 - Preflight before an apply:
   1. Run verify. `already_applied`: done.
   2. `refused` with `secret_ref_missing`: store every name in
@@ -746,7 +769,12 @@ off the device. The agent does not read `/health` itself (section 7); the
   `last_receipt` (the root-only receipt, with `transitions` and
   `error_message`), `last_refusal`, `bundle`, `gateway_digest`, `applied`.
   `current` and `last_good` carry the `delivery_id` of the apply that
-  confirmed them, when it had one (2.6).
+  confirmed them, when it had one (2.6). `anchors_summary` (from 1.0.4,
+  optional) describes the installed anchor file: `sha256` of its bytes,
+  `tenant_id`, `device_groups`, `min_version` and `keys` (`key_id`, `alg`,
+  `status`, validity; never the public key). Compare `sha256` with the file
+  the agent installed instead of reading the device file. It is absent when
+  the file is missing or fails its checks (see the warnings).
   `applied` is true when the running gateway enforces the current bundle's
   digest with no rejected reload. A refused status (`not_managed`,
   `not_root`, `state_invalid`) did not scan sessions and reports
@@ -1045,10 +1073,14 @@ enforcing.
   was stopped is not counted as theirs. On a build without
   `management_contract`, match on `bundle_id` with `finished_at` after the
   apply started.
-- `delivery_id` is present when the apply had `--delivery-id` (2.6). The
-  `config.bundle.receipt` audit event and OTel do not carry it; only these
-  files, the command results and `bundle status` do.
-- Remember the last forwarded id; nothing is acknowledged back.
+- `delivery_id` is present when the apply had `--delivery-id` (2.6). From
+  1.0.4 the `config.bundle.receipt` audit event and its OTel log record carry
+  it too (`defenseclaw.policy.bundle.delivery_id`); older builds have it only
+  in these files, the command results and `bundle status`.
+- Receipt ids are not ordered in time. Keep the set of `receipt_id`s already
+  forwarded (prune ids whose file is gone) and order receipts by
+  `finished_at` when the order matters; do not keep only the last id.
+  Nothing is acknowledged back.
 
 ```sh
 ls -1 /etc/defenseclaw/bundles/receipt-events/        # macOS: /opt/cisco/defenseclaw/etc/bundles/receipt-events/
@@ -1192,7 +1224,8 @@ The gateway HTTP API (TCP and the hook socket), the token in `.env`,
 (2.6); editing any file under `<etc>` or the lifecycle folder, except the
 4.8 fallback recipe and the 5.0 step 6 anchor removal; `--config` in bundle
 mode; `enterprise bundle sign` (a control-plane tool, not a device call).
-Per-user installs and Secure Client computers refuse every command.
+Secure Client computers refuse every command; on a per-user install only
+the read-only commands answer (section 4).
 
 ## 8. Known limits
 
@@ -1208,6 +1241,12 @@ Per-user installs and Secure Client computers refuse every command.
   stays `unknown` (4.7).
 - Receipt files are written best effort (4.9); stdout and `bundle status` are
   authoritative.
+- The `config.bundle.receipt` audit and OTel record carries the bundle
+  principal as `defenseclaw.admin.principal_ref` only when it is a safe token
+  (letters, digits and `. _ : / -`). A principal with an e-mail address or a
+  `DOMAIN\user` account (`control-plane:acme/alice@example.com`,
+  `operator:CORP\admin`) is left out of that field; the receipt files (4.9),
+  the apply result and `bundle status` keep the full `principal`.
 - `delivery_id` is caller-supplied and not authenticated, and no receipt
   records the delivery channel (MDM, agent, administrator): the apply cannot
   tell them apart without trusting the caller (2.6).

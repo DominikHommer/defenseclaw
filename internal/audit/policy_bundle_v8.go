@@ -49,6 +49,9 @@ type PolicyBundleReceipt struct {
 	// ReceiptID is the bundle id, or r-<ULID> for a delivery whose manifest
 	// could not be read.
 	ReceiptID string
+	// DeliveryID is the caller-supplied --delivery-id of the apply, "" for
+	// none. It is opaque and not authenticated.
+	DeliveryID string
 	// State is PolicyBundleConfirmed or PolicyBundleFailed.
 	State string
 	// ErrorCode is the closed receipt code of a failed receipt.
@@ -83,9 +86,12 @@ const (
 var (
 	policyBundleIDPattern        = regexp.MustCompile(`^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
 	policyBundleReceiptIDPattern = regexp.MustCompile(`^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
-	policyBundleKeyIDPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	policyBundleCodePattern      = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
-	policyBundleDigestPattern    = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	// policyBundleDeliveryIDPattern is the --delivery-id of bundle apply
+	// (enterprisestatus.CheckDeliveryID).
+	policyBundleDeliveryIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+	policyBundleKeyIDPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	policyBundleCodePattern       = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	policyBundleDigestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
 // policyBundleV8Fields are the typed bundle attributes of a record.
@@ -120,6 +126,7 @@ func policyBundleV8FieldsFor(b *PolicyBundle) policyBundleV8Fields {
 // policyBundleReceiptV8Fields are the typed receipt attributes.
 type policyBundleReceiptV8Fields struct {
 	receiptID, state                            string
+	deliveryID                                  observability.Optional[string]
 	errorCode, effectiveDigest, enforcingDigest observability.Optional[string]
 	generation                                  observability.Optional[int64]
 	rolledBack, restart                         observability.Optional[bool]
@@ -134,7 +141,7 @@ func policyBundleReceiptV8FieldsFor(r *PolicyBundleReceipt) (policyBundleReceipt
 		return policyBundleReceiptV8Fields{}, fmt.Errorf("audit: bundle receipt id is not b-<ULID> or r-<ULID>")
 	}
 	out := policyBundleReceiptV8Fields{
-		receiptID: r.ReceiptID, state: r.State,
+		receiptID: r.ReceiptID, state: r.State, deliveryID: observability.Absent[string](),
 		errorCode: observability.Absent[string](), effectiveDigest: observability.Absent[string](),
 		enforcingDigest: observability.Absent[string](), generation: observability.Absent[int64](),
 		rolledBack: observability.Present(r.RolledBack), restart: observability.Present(r.Restart),
@@ -149,6 +156,9 @@ func policyBundleReceiptV8FieldsFor(r *PolicyBundleReceipt) (policyBundleReceipt
 		}
 	default:
 		return policyBundleReceiptV8Fields{}, fmt.Errorf("audit: bundle receipt state %q is not terminal", r.State)
+	}
+	if policyBundleDeliveryIDPattern.MatchString(r.DeliveryID) {
+		out.deliveryID = observability.Present(r.DeliveryID)
 	}
 	if policyBundleDigestPattern.MatchString(r.EffectivePolicyDigest) {
 		out.effectiveDigest = observability.Present(r.EffectivePolicyDigest)
@@ -194,6 +204,9 @@ func (l *Logger) LogPolicyBundleReceipt(principal string, bundle PolicyBundle, r
 	}
 	if receipt.ErrorCode != "" {
 		after["error_code"] = receipt.ErrorCode
+	}
+	if policyBundleDeliveryIDPattern.MatchString(receipt.DeliveryID) {
+		after["delivery_id"] = receipt.DeliveryID
 	}
 	if len(receipt.WarningCodes) > 0 {
 		after["warning_codes"] = receipt.WarningCodes

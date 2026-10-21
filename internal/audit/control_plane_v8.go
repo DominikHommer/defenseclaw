@@ -388,6 +388,7 @@ func buildControlPlaneV8Record(
 			DefenseClawAdminReason:                 evidence.reason,
 			DefenseClawPolicyBundleReceiptID:       receipt.receiptID,
 			DefenseClawPolicyBundleState:           receipt.state,
+			DefenseClawPolicyBundleDeliveryID:      receipt.deliveryID,
 			DefenseClawPolicyBundleID:              evidence.bundle.id,
 			DefenseClawPolicyBundleVersion:         evidence.bundle.version,
 			DefenseClawPolicyBundleSignerKeyID:     evidence.bundle.signerKeyID,
