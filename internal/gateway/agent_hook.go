@@ -325,20 +325,18 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required"})
 				return
 			}
-			vscodeLocal := copilotHookDialectFromHeaders(r.Header) == connector.CopilotHookSurfaceVSCodeLocal
-			if local, ok := connector.CopilotVSCodeLocalEventForCLIHook(event); !vscodeLocal && ok &&
-				payloadString(payload, "hook_event_name") == local &&
-				payload["toolName"] == nil && payload["toolArgs"] == nil {
-				// GAP-1903: the VS Code Local harness also runs the per-user
-				// Copilot CLI hook file, under the Local event the bound CLI
-				// event maps to, and sends it the Local payload (snake_case
-				// tool_name/tool_input). Decoded as a CLI body, the call had
-				// no authoritative arguments and its command rules stayed
-				// detection-only. The Copilot CLI's own camelCase bodies carry
-				// no hook_event_name, and the body may only name the event
-				// the hook command is bound to.
-				event, vscodeLocal = local, true
-			}
+			// GAP-1903: the VS Code Local harness also runs the per-user
+			// Copilot CLI hook file, under the Local event the bound CLI
+			// event maps to, and sends it the Local payload (snake_case
+			// tool_name/tool_input). Decoded as a CLI body, the call had no
+			// authoritative arguments and its command rules stayed
+			// detection-only. The Copilot CLI's own camelCase bodies carry no
+			// hook_event_name, and the body may only name the event the hook
+			// command is bound to. The managed hook reads the body for its
+			// write evidence with the same decision.
+			var vscodeLocal bool
+			event, vscodeLocal = copilotargs.LocalDialect(copilotHookDialectFromHeaders(r.Header), event,
+				payloadString(payload, "hook_event_name"), payload["toolName"] != nil || payload["toolArgs"] != nil)
 			if vscodeLocal {
 				// The VS Code Local harness names the event in its body.
 				// It must be the event the hook command is bound to, so a
