@@ -18,6 +18,7 @@ package harness
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 // startLauncher starts launcher in cwd with args and env (PATH and HOME
@@ -667,5 +669,99 @@ func TestOpenCodeLauncherRefusesForeignPlugins(t *testing.T) {
 				t.Fatalf("exit %d, want a refusal naming %s %s:\n%s", r.exit, names, tc.reason, r.output)
 			}
 		})
+	}
+}
+
+// TestLaunchersScrubTheEnvironment starts every launcher with variables an
+// agent could export from a shell start-up file and requires the harness to
+// get none of them: shell start-up variables (SHELLOPTS=noexec would even
+// stop the stub, a bash script, from recording anything), a Node preload,
+// module directory and compile cache the workload owns (Node would run them
+// in place of the root-owned sources), the dynamic loader's variables
+// naming an inert marker object that does not exist (glibc's loader then
+// warns in each program it starts with one, and only the launcher's own bash,
+// loaded before its first line runs, may see it), and for the uv-installed
+// Python harnesses, whose entry points run Python without -I, the interpreter
+// start-up variables. The system directories lead PATH, the DefenseClaw proxy
+// replaces the caller's, and without one (a strict profile), or with a
+// malformed one, the caller's proxy settings stay as they were.
+func TestLaunchersScrubTheEnvironment(t *testing.T) {
+	planted := t.TempDir()
+	startup := filepath.Join(planted, "startup")
+	writeFile(t, startup, []byte("echo sourced-startup-file\n"))
+	marker := filepath.Join(planted, "dc-inert-loader-marker.so")
+	const caller = "http://already:set@h:1"
+	bypass := "api.anthropic.com,host.openshell.internal"
+	unsetAll := func(names ...string) map[string]string {
+		out := map[string]string{}
+		for _, n := range names {
+			out[n] = unset
+		}
+		return out
+	}
+	vectors := []struct {
+		name   string
+		env    []string
+		want   map[string]string
+		python bool
+	}{
+		{"shell start-up", []string{"BASH_ENV=" + startup, "ENV=" + startup, "BASHOPTS=extglob", "SHELLOPTS=noexec", "CDPATH=/tmp", "GLOBIGNORE=*"},
+			unsetAll("BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "CDPATH", "GLOBIGNORE"), false},
+		{"node", []string{"NODE_OPTIONS=--require=" + planted + "/preload.js", "NODE_PATH=" + planted, "NODE_COMPILE_CACHE=" + planted, "NODE_DISABLE_COMPILE_CACHE=0"},
+			map[string]string{"NODE_OPTIONS": unset, "NODE_PATH": unset, "NODE_DISABLE_COMPILE_CACHE": "1"}, false},
+		{"loader", []string{"LD_PRELOAD=" + marker, "LD_AUDIT=" + marker, "LD_LIBRARY_PATH=" + planted, "LD_BIND_NOW=1", "GCONV_PATH=" + planted},
+			unsetAll("LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH", "LD_BIND_NOW", "GCONV_PATH"), false},
+		{"python", []string{"PYTHONPATH=" + planted, "PYTHONHOME=" + planted, "PYTHONSTARTUP=" + startup, "PYTHONUSERBASE=" + planted,
+			"PYTHONPYCACHEPREFIX=" + planted, "PYTHONWARNINGS=ignore::planted.Warning", "PYTHONBREAKPOINT=planted.hook", "PYTHONINSPECT=1", "PYTHONSAFEPATH="},
+			nil, true},
+		// Node's experimental-proxy warning is silenced with the proxy
+		// (#951), unless the caller asks for Node's warnings.
+		{"egress", []string{"HTTPS_PROXY=http://elsewhere:1", "no_proxy=*", openshell.EnvEgressURL + "=" + testEgressProxy, openshell.EnvEgressBypass + "=" + bypass},
+			map[string]string{"HTTPS_PROXY": testEgressProxy, "HTTP_PROXY": testEgressProxy, "https_proxy": testEgressProxy, "http_proxy": testEgressProxy,
+				"NODE_USE_ENV_PROXY": "1", "NODE_NO_WARNINGS": "1", "NO_PROXY": bypass, "no_proxy": bypass}, false},
+		{"egress with node warnings", []string{"NODE_NO_WARNINGS=0", openshell.EnvEgressURL + "=" + testEgressProxy},
+			map[string]string{"NODE_USE_ENV_PROXY": "1", "NODE_NO_WARNINGS": "0"}, false},
+		{"no egress", nil, unsetAll("HTTPS_PROXY", "https_proxy", "NODE_USE_ENV_PROXY", "NODE_NO_WARNINGS", "NO_PROXY"), false},
+		{"malformed egress", []string{"HTTPS_PROXY=" + caller, openshell.EnvEgressURL + "=http://x y@host:1"},
+			map[string]string{"HTTPS_PROXY": caller, "https_proxy": unset, "NODE_USE_ENV_PROXY": unset, "NODE_NO_WARNINGS": unset}, false},
+	}
+	pythonHarness := map[string]bool{"hermes": true}
+	for _, name := range Names() {
+		spec, _ := Get(name)
+		l := newLauncher(t, spec)
+		for _, v := range vectors {
+			if v.python && !pythonHarness[name] {
+				continue
+			}
+			t.Run(name+"/"+v.name, func(t *testing.T) {
+				agentBin := t.TempDir()
+				r := l.run(t, "", append([]string{"PATH=" + agentBin + ":/usr/bin:/bin"}, v.env...))
+				if r.exit != 0 || !r.started() {
+					t.Fatalf("the stub never ran: exit %d\n%s", r.exit, r.output)
+				}
+				want := maps.Clone(v.want)
+				switch {
+				case v.name == "node" && (name == "codex" || name == "copilot"):
+					// Its own fixed NODE_OPTIONS silences the proxy agent's warning.
+					want["NODE_OPTIONS"] = "--disable-warning=UNDICI-EHPA"
+				}
+				c := r.last()
+				checkEnv(t, c, want)
+				for key := range c.env {
+					if v.python && strings.HasPrefix(key, "PYTHON") {
+						t.Errorf("%s reached the harness", key)
+					}
+				}
+				if !strings.HasPrefix(c.env["PATH"], LauncherSystemPATH+":"+agentBin+":") {
+					t.Errorf("PATH %q does not lead with the system directories", c.env["PATH"])
+				}
+				if strings.Contains(r.output, "sourced-startup-file") {
+					t.Errorf("a start-up file ran:\n%s", r.output)
+				}
+				if v.name == "loader" && runtime.GOOS == "linux" && strings.Count(r.output, marker) > 2 {
+					t.Errorf("programs the launcher started saw the loader marker:\n%s", r.output)
+				}
+			})
+		}
 	}
 }

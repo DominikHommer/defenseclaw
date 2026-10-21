@@ -1617,7 +1617,6 @@ var continueArgs = map[string]string{
 	"copilot":    "--continue",
 	"kiro":       "--resume",
 	"hermes":     "--continue",
-	// conversation.
 	// agy's -c (a Go flag) reopens the folder's latest conversation, as
 	// its own "Resume with -c" says.
 	"antigravity": "-c",

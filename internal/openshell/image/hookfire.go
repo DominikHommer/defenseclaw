@@ -108,11 +108,10 @@ var requiredHookEvents = map[string][]string{
 	// The events Cursor's agent-cli-local build of the pinned release fired
 	// for a headless shell call; beforeSubmitPrompt and stop do not fire in
 	// print mode.
-	"cursor": {"sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "postToolUse"},
-	"devin":  {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
-	"hermes": {"on_session_start", "pre_llm_call", "pre_tool_call", "post_tool_call", "on_session_end"},
-	"kiro":   {"userPromptSubmit", "preToolUse", "postToolUse", "stop"},
-	// and response.
+	"cursor":   {"sessionStart", "preToolUse", "beforeShellExecution", "afterShellExecution", "postToolUse"},
+	"devin":    {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"},
+	"hermes":   {"on_session_start", "pre_llm_call", "pre_tool_call", "post_tool_call", "on_session_end"},
+	"kiro":     {"userPromptSubmit", "preToolUse", "postToolUse", "stop"},
 	"opencode": {"defenseclaw.plugin.loaded", "tool.execute.before", "tool.execute.after"},
 }
 
@@ -243,8 +242,6 @@ var builtinMockLaunch = map[string]func(baseURL string) (map[string]string, []st
 	"antigravity": func(baseURL string) (map[string]string, []string) {
 		return map[string]string{"GEMINI_API_KEY": "dcprobe-0123456789abcdefghij", "GOOGLE_GEMINI_BASE_URL": baseURL}, nil
 	},
-	// The image's sandbox agent on the openai-agents harness (Responses);
-	// an unpinned model would route to Databricks.
 }
 
 // scriptedMock drives a harness that replays scripted model responses from a
@@ -360,6 +357,8 @@ func (a hookSinkAdapter) preToolEvent() string {
 // hookEventName reads the event a hook request reports: the out-of-band
 // event header the Codex hook (X-DefenseClaw-Hook-Event), the Copilot hook
 // (whose native payload has no event field) and the Antigravity hook send,
+// else the payload's hook_event_name (Claude Code, Codex, Hermes) or
+// event_type.
 func hookEventName(r *http.Request, payload map[string]json.RawMessage) string {
 	for _, header := range []string{"X-DefenseClaw-Hook-Event", "X-DefenseClaw-Copilot-Event", "X-DefenseClaw-Antigravity-Event"} {
 		if name := r.Header.Get(header); name != "" {

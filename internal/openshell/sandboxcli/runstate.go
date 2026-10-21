@@ -500,9 +500,6 @@ func launchOptionsSplit(spec *harness.Spec, args []string) (kept []string, unkep
 	return out, "", nil
 }
 
-// keepsEveryArg reports whether every word of spec's interactive command
-// file or directory) as its one operand, with options before or after it,
-// and a first message only through -p, a one-prompt run.
 // launchOperand reports whether word, a harness argument that is not an
 // option, is launch configuration a later session needs again rather than
 // a prompt or a one-off subcommand: OpenCode's project directory

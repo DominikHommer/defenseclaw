@@ -179,6 +179,7 @@ var toolCallHooksByConnector = map[string]toolCallHooks{
 	// are keyed by content, like Kiro CLI's. The image's pinned 3000.4.25
 	// declares the same hook payload fields but was not run.
 	"devin": {keying: keyByContent, pre: "PreToolUse", ran: "PostToolUse"},
+	// Hermes and Antigravity: whether their hooks carry
 	// a per-call ID the gateway sees, and whether a post-tool event fires for
 	// a denied call, is not measured, so they are not paired: hook silence
 	// is their backstop.
