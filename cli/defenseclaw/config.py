@@ -7247,8 +7247,13 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
             del mapping[key]
             changed = True
 
-    def drop_names(parent: Any, key: str) -> bool:
-        """Strip removed names from parent[key]; True when only removed names were listed."""
+    def drop_names(parent: Any, key: str, *, omit_empty: bool = False) -> bool:
+        """Strip removed names from parent[key]; True when only removed names were listed.
+
+        omit_empty removes a key left empty, for the sandbox lists that refuse
+        an empty list (an absent key means no constraint, so the caller keeps
+        the section restrictive where that would widen it).
+        """
         nonlocal changed
         names = child(parent, key)
         if not isinstance(names, list) or not names:
@@ -7256,7 +7261,10 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
         kept = [name for name in names if not _is_retired_connector_name(name)]
         if len(kept) == len(names):
             return False
-        parent[key] = kept
+        if kept or not omit_empty:
+            parent[key] = kept
+        else:
+            del parent[key]
         changed = True
         return not kept
 
@@ -7282,8 +7290,8 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
         application["enabled"] = False
     if drop_names(openshell, "harnesses"):
         openshell["enabled"] = False
-    drop_names(admin, "required_for")
-    if drop_names(admin, "allowed_harnesses"):
+    drop_names(admin, "required_for", omit_empty=True)
+    if drop_names(admin, "allowed_harnesses", omit_empty=True):
         admin["allowed"] = False
 
     profiles = child(guardrail, "profiles")
@@ -7291,8 +7299,8 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
         for profile in profiles.values():
             drop_keys(child(profile, "connectors"))
             sandbox = child(profile, "sandbox")
-            drop_names(sandbox, "required_for")
-            if drop_names(sandbox, "allowed_harnesses"):
+            drop_names(sandbox, "required_for", omit_empty=True)
+            if drop_names(sandbox, "allowed_harnesses", omit_empty=True):
                 sandbox["allowed"] = False
 
     assignments = child(guardrail, "profile_assignments")
@@ -7305,12 +7313,20 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
 
     destinations = child(observability, "destinations")
     if isinstance(destinations, list):
+        kept_destinations = []
         for destination in destinations:
             routes = child(destination, "routes")
-            if isinstance(routes, list):
+            if isinstance(routes, list) and routes:
                 # A route for only removed connectors would select every
                 # connector (and fails the v8 schema's minItems) once emptied.
                 routes[:] = [route for route in routes if not drop_names(child(route, "selector"), "connectors")]
+                if not routes:
+                    # Every route was for removed connectors: empty routes are
+                    # refused and no routes would send every signal, so the
+                    # destination goes (as in Go).
+                    continue
+            kept_destinations.append(destination)
+        destinations[:] = kept_destinations
 
     if isinstance(guardrail, dict) and _is_retired_connector_name(guardrail.get("connector")):
         remaining = guardrail.get("connectors")

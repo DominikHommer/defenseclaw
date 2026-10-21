@@ -25,6 +25,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+// teardownRemovedConnectors is teardownRemovedConnectorsReport without the
+// dropped names.
+func teardownRemovedConnectors(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, ctx context.Context) []string {
+	failed, _ := teardownRemovedConnectorsReport(registry, previous, current, opts, ctx)
+	return failed
+}
+
 // recordingConnector embeds stubConnector (which satisfies the full
 // connector.Connector interface) and records teardown invocations, optionally
 // returning injected errors to exercise the continue-on-error path.

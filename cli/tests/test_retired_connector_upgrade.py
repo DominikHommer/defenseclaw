@@ -149,3 +149,87 @@ def test_retired_connector_only_profile_assignment_is_dropped_even_with_other_ma
         {"profile": "strict", "match": {"groups": ["eng"], "connectors": ["codex"]}},
         {"profile": "strict", "match": {"groups": ["ops"]}},
     ]
+
+
+def test_retired_connector_only_destination_is_dropped_and_save_validates(tmp_path):
+    # Every route of "retired-only" was for removed connectors: an emptied
+    # routes list fails minItems and no routes would send every signal.
+    from defenseclaw.observability.v8_config import load_validate_v8
+
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 8\n"
+        "guardrail:\n"
+        "  connector: codex\n"
+        "  connectors:\n"
+        "    codex: {}\n"
+        "observability:\n"
+        "  destinations:\n"
+        "    - name: retired-only\n"
+        "      kind: console\n"
+        "      routes:\n"
+        "        - {name: omnigent, signals: [logs], selector: {connectors: [omnigent]}}\n"
+        "        - {name: openhands, signals: [logs], selector: {connectors: [Open_Hands]}, action: drop}\n"
+        "    - name: mixed\n"
+        "      kind: console\n"
+        "      routes:\n"
+        "        - {name: retired, signals: [logs], selector: {connectors: [openhands]}}\n"
+        "        - {name: codex, signals: [logs], selector: {connectors: [codex]}}\n"
+        "    - name: everything\n"
+        "      kind: console\n",
+        encoding="utf-8",
+    )
+
+    loaded = config.load(data_dir=tmp_path)
+    loaded.save()
+
+    saved = (tmp_path / "config.yaml").read_bytes()
+    load_validate_v8(saved)
+    destinations = yaml.safe_load(saved)["observability"]["destinations"]
+    assert [destination["name"] for destination in destinations] == ["mixed", "everything"]
+    assert [route["name"] for route in destinations[0]["routes"]] == ["codex"]
+    assert "routes" not in destinations[1]
+
+
+_PROFILE_SANDBOXES = (
+    "  profiles:\n"
+    "    workers:\n"
+    "      sandbox:\n"
+    "        allowed_harnesses: [omnigent]\n"
+    "        required_for: [openhands]\n"
+    "    mixed:\n"
+    "      sandbox:\n"
+    "        allowed_harnesses: [omnigent, codex]\n"
+    "        required_for: [openhands, codex]\n"
+)
+_ADMIN_SANDBOX = "openshell:\n  admin:\n    allowed_harnesses: [openhands]\n    required_for: [omnigent]\n"
+
+
+@pytest.mark.parametrize("where", ("admin", "profiles"))
+def test_retired_connector_only_sandbox_lists_are_omitted_and_stay_restrictive(tmp_path, where):
+    # The sandbox lists refuse an empty list; an absent key means no
+    # constraint, so allowed: false keeps the emptied allow-list closed.
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 9\n"
+        "guardrail:\n"
+        "  connector: codex\n"
+        "  connectors:\n"
+        "    codex: {}\n" + (_PROFILE_SANDBOXES if where == "profiles" else _ADMIN_SANDBOX),
+        encoding="utf-8",
+    )
+
+    loaded = config.load(data_dir=tmp_path)
+    loaded.save()
+    config.load(data_dir=tmp_path)
+
+    saved = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    if where == "admin":
+        closed = saved["openshell"]["admin"]
+    else:
+        closed = saved["guardrail"]["profiles"]["workers"]["sandbox"]
+        mixed = saved["guardrail"]["profiles"]["mixed"]["sandbox"]
+        assert mixed["allowed_harnesses"] == ["codex"]
+        assert mixed["required_for"] == ["codex"]
+        assert "allowed" not in mixed
+    assert closed["allowed"] is False
+    assert "allowed_harnesses" not in closed
+    assert "required_for" not in closed

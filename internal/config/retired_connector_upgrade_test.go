@@ -141,3 +141,91 @@ func TestRetiredConnectorUpgradeDropsRetiredOnlyAssignmentWithOtherMatchers(t *t
 		t.Fatalf("profile assignments after cleanup = %+v", got)
 	}
 }
+
+// A destination whose every route selected only removed connectors goes:
+// empty routes do not compile and no routes would send it every signal.
+// Destinations with a surviving route, and ones without routes, stay.
+func TestRetiredConnectorUpgradeDropsDestinationLeftWithoutRoutes(t *testing.T) {
+	body := "config_version: 8\nobservability:\n  destinations:\n" +
+		"    - name: omnigent-only\n      kind: console\n      routes:\n" +
+		"        - {name: omnigent, signals: [logs], selector: {connectors: [omnigent]}}\n" +
+		"        - {name: openhands, signals: [logs], selector: {connectors: [OpenHands]}, action: drop}\n" +
+		"    - name: mixed\n      kind: console\n      routes:\n" +
+		"        - {name: retired, signals: [logs], selector: {connectors: [openhands]}}\n" +
+		"        - {name: codex, signals: [logs], selector: {connectors: [codex]}}\n" +
+		"    - name: everything\n      kind: console\n"
+	for _, version := range []string{"8", "9"} {
+		t.Run(version, func(t *testing.T) {
+			source := strings.Replace(body, "config_version: 8", "config_version: "+version, 1)
+			compiled, err := ParseCompileObservabilityV8("<test>", []byte(source), ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()})
+			if err != nil {
+				t.Fatalf("compile after removed-connector cleanup: %v", err)
+			}
+			var names []string
+			for _, destination := range compiled.Observability.Destinations {
+				names = append(names, destination.Name)
+			}
+			if got := strings.Join(names, ","); got != "mixed,everything" {
+				t.Fatalf("destinations = %q, want mixed,everything", got)
+			}
+			if routes := compiled.Observability.Destinations[0].Routes; len(routes) != 1 || routes[0].Name != "codex" {
+				t.Fatalf("mixed routes = %+v, want only codex", routes)
+			}
+			if compiled.Observability.Destinations[1].Routes != nil {
+				t.Fatalf("a destination without routes gained some: %+v", compiled.Observability.Destinations[1].Routes)
+			}
+			if destination, ok := compiled.Plan.Destination("omnigent-only"); ok {
+				t.Fatalf("the removed connectors destination still compiles: %+v", destination)
+			}
+			if _, ok := compiled.Plan.Destination("mixed"); !ok {
+				t.Fatal("the mixed destination did not compile")
+			}
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadFromFile(path); err != nil {
+				t.Fatalf("load after removed-connector cleanup: %v", err)
+			}
+		})
+	}
+}
+
+// The sandbox lists refuse an empty list, so a list of only removed
+// connectors is left out (no constraint) and allowed: false keeps the
+// emptied allow-list closed; the config still loads.
+func TestRetiredConnectorUpgradeOmitsEmptiedSandboxLists(t *testing.T) {
+	for name, section := range map[string]string{
+		"admin": "openshell:\n  admin:\n    allowed_harnesses: [openhands]\n    required_for: [omnigent]\n",
+		"profile": "  profiles:\n    workers:\n      sandbox:\n        allowed_harnesses: [omnigent]\n        required_for: [openhands]\n" +
+			"    mixed:\n      sandbox:\n        allowed_harnesses: [omnigent, codex]\n        required_for: [openhands, codex]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := "config_version: 9\nguardrail:\n  connector: codex\n  connectors:\n    codex: {}\n"
+			if name == "profile" {
+				body += section
+			} else {
+				body = section + body
+			}
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadFromFile(path)
+			if err != nil {
+				t.Fatalf("load after removed-connector cleanup: %v", err)
+			}
+			closed := cfg.OpenShell.Admin
+			if name == "profile" {
+				closed = *cfg.Guardrail.Profiles["workers"].Sandbox
+				mixed := cfg.Guardrail.Profiles["mixed"].Sandbox
+				if strings.Join(mixed.AllowedHarnesses, ",") != "codex" || strings.Join(mixed.RequiredFor, ",") != "codex" || mixed.Allowed != nil {
+					t.Fatalf("mixed sandbox = %+v", mixed)
+				}
+			}
+			if closed.Allowed == nil || *closed.Allowed || closed.AllowedHarnesses != nil || closed.RequiredFor != nil {
+				t.Fatalf("emptied sandbox lists = %+v; want them left out and allowed: false", closed)
+			}
+		})
+	}
+}

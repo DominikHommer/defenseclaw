@@ -24,8 +24,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 type removedOmnigentFixture struct {
@@ -294,4 +297,169 @@ func TestRemovedOmnigentTeardownCompletesAroundForeignState(t *testing.T) {
 		t.Fatalf("DefenseClaw's module survived teardown: %v", err)
 	}
 	f.assertTokenRevoked(t)
+}
+
+// YAML anchors, aliases and merge keys reach DefenseClaw's entries in an
+// edited config. Cleanup follows them: an entry that loads DefenseClaw's
+// handler through an alias or a merge goes too, an alias left naming a
+// removed anchor becomes a copy of it, and the written file always parses.
+func TestRemovedOmnigentConfigCleanupFollowsYAMLAliases(t *testing.T) {
+	const handler = removedOmnigentHandler
+	for _, tc := range []struct {
+		name, body string
+		keep       []string // must survive cleanup
+		gone       []string // must not
+	}{
+		{
+			name: "policy alias of the anchored policy",
+			body: "policies:\n  " + removedOmnigentPolicyKey + ": &dc\n    handler: " + handler + "\n  copy: *dc\n  corp:\n    handler: corp.check\n",
+			keep: []string{"corp.check"}, gone: []string{"copy", removedOmnigentPolicyKey},
+		},
+		{
+			name: "anchored policy aliased outside policies",
+			body: "policies:\n  " + removedOmnigentPolicyKey + ": &dc\n    handler: " + handler + "\n    timeout: 5\n  corp:\n    handler: corp.check\nx-saved: *dc\n",
+			keep: []string{"corp.check", "x-saved", "timeout: 5"},
+		},
+		{
+			name: "policy merging the anchored policy",
+			body: "policies:\n  " + removedOmnigentPolicyKey + ": &dc\n    handler: " + handler + "\n  inherits:\n    <<: *dc\n    timeout: 3\n  corp:\n    handler: corp.check\n",
+			keep: []string{"corp.check"}, gone: []string{"inherits"},
+		},
+		{
+			name: "policy merging the anchored policy with its own handler",
+			body: "policies:\n  " + removedOmnigentPolicyKey + ": &dc\n    handler: " + handler + "\n    timeout: 9\n  override:\n    <<: *dc\n    handler: corp.other\n",
+			keep: []string{"override", "corp.other", "timeout: 9"},
+		},
+		{
+			name: "module listed through an alias",
+			body: "x-module: &m " + removedOmnigentModuleName + "\npolicy_modules: [corp, *m]\n",
+			keep: []string{"corp", "x-module"},
+		},
+		{
+			name: "anchored module aliased elsewhere",
+			body: "policy_modules:\n  - corp\n  - &m " + removedOmnigentModuleName + "\nx-note: *m\n",
+			keep: []string{"corp", "x-note"},
+		},
+		{
+			name: "module list through an alias",
+			body: "x-modules: &mods [corp, " + removedOmnigentModuleName + "]\npolicy_modules: *mods\n",
+			keep: []string{"corp", "policy_modules"},
+		},
+		{
+			name: "handler through an alias",
+			body: "x-handler: &h " + handler + "\npolicies:\n  renamed:\n    handler: *h\n  corp:\n    handler: corp.check\n",
+			keep: []string{"corp.check", "x-handler"}, gone: []string{"renamed"},
+		},
+		{
+			name: "policies through an alias",
+			body: "x-policies: &p\n  dc:\n    handler: " + handler + "\n  corp:\n    handler: corp.check\npolicies: *p\n",
+			keep: []string{"corp.check", "policies"}, gone: []string{"dc:"},
+		},
+		{
+			name: "nested anchor inside the removed policy",
+			body: "policies:\n  " + removedOmnigentPolicyKey + ":\n    handler: " + handler + "\n    limits: &limits {calls: 3}\n  corp:\n    handler: corp.check\n    limits: *limits\n",
+			keep: []string{"corp.check", "calls: 3"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			writeRemovedFixture(t, path, tc.body, 0o600)
+			if loads, err := removedOmnigentConfigLoadsPolicy(path); err != nil || !loads {
+				t.Fatalf("before cleanup loads = %v, %v; want DefenseClaw's policy found", loads, err)
+			}
+			if err := removeRemovedOmnigentConfigEntries(path); err != nil {
+				t.Fatalf("cleanup: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var parsed interface{}
+			if err := yaml.Unmarshal(after, &parsed); err != nil {
+				t.Fatalf("cleaned config no longer parses: %v\n%s", err, after)
+			}
+			if loads, err := removedOmnigentConfigLoadsPolicy(path); err != nil || loads {
+				t.Fatalf("after cleanup loads = %v, %v; want clean:\n%s", loads, err, after)
+			}
+			if removedOmnigentValueLoadsPolicy(parsed) {
+				t.Fatalf("the loaded value still names DefenseClaw's policy:\n%s", after)
+			}
+			for _, want := range tc.keep {
+				if !strings.Contains(string(after), want) {
+					t.Fatalf("cleanup dropped %q:\n%s", want, after)
+				}
+			}
+			for _, unwanted := range tc.gone {
+				if strings.Contains(string(after), unwanted) {
+					t.Fatalf("cleanup kept %q:\n%s", unwanted, after)
+				}
+			}
+		})
+	}
+}
+
+// A config that would still load DefenseClaw's policy after the edit cleanup
+// can make (here a root merge key brings policy_modules in) is refused and
+// left byte for byte; teardown then keeps the policy module, so OmniGent can
+// still import what its config names, and reports the config.
+func TestRemovedOmnigentTeardownKeepsModuleWhileConfigCannotBeCleaned(t *testing.T) {
+	merged := "x-base: &base\n  policy_modules: [" + removedOmnigentModuleName + "]\n<<: *base\n"
+	for name, body := range map[string]string{
+		"merge only":               merged,
+		"merge and a direct entry": merged + "policies:\n  " + removedOmnigentPolicyKey + ":\n    handler: " + removedOmnigentHandler + "\n",
+	} {
+		t.Run(name, func(t *testing.T) { testRemovedOmnigentKeepsModuleForConfig(t, body) })
+	}
+}
+
+func testRemovedOmnigentKeepsModuleForConfig(t *testing.T, body string) {
+	f := newRemovedOmnigentFixture(t)
+	writeRemovedFixture(t, f.configPath, body, 0o600)
+	writeRemovedFixture(t, f.modulePath, removedOmnigentRendered, 0o600)
+	if loads, err := removedOmnigentConfigLoadsPolicy(f.configPath); err != nil || !loads {
+		t.Fatalf("merged policy_modules not found: %v, %v", loads, err)
+	}
+	conn, _ := RetiredConnector(removedOmnigentID)
+	if err := conn.Teardown(context.Background(), f.opts); err == nil || !strings.Contains(err.Error(), "by hand") {
+		t.Fatalf("Teardown = %v; want the config refused", err)
+	}
+	if got, _ := os.ReadFile(f.configPath); string(got) != body {
+		t.Fatalf("a config cleanup could not finish was rewritten:\n%s", got)
+	}
+	if _, err := os.Lstat(f.modulePath); err != nil {
+		t.Fatalf("the policy module went while config.yaml still names it: %v", err)
+	}
+	if err := conn.VerifyClean(f.opts); err == nil {
+		t.Fatal("VerifyClean passed while config.yaml still loads DefenseClaw's module")
+	}
+}
+
+// A config.yaml teardown cannot write keeps the policy module it names; once
+// the file is writable a later run finishes.
+func TestRemovedOmnigentTeardownKeepsModuleWhileConfigIsReadOnly(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX directory permissions that bind the caller")
+	}
+	f := newRemovedOmnigentFixture(t)
+	writeRemovedFixture(t, f.configPath, "policy_modules:\n  - corp\n  - "+removedOmnigentModuleName+"\n", 0o600)
+	writeRemovedFixture(t, f.modulePath, removedOmnigentRendered, 0o600)
+	configDir := filepath.Dir(f.configPath)
+	if err := os.Chmod(configDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configDir, 0o700) })
+	conn, _ := RetiredConnector(removedOmnigentID)
+	if err := conn.Teardown(context.Background(), f.opts); err == nil {
+		t.Fatal("Teardown succeeded with a read-only OmniGent config directory")
+	}
+	if _, err := os.Lstat(f.modulePath); err != nil {
+		t.Fatalf("the policy module went while config.yaml still names it: %v", err)
+	}
+	if err := os.Chmod(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.teardownTwice(t)
+	if _, err := os.Lstat(f.modulePath); !os.IsNotExist(err) {
+		t.Fatalf("the policy module survived the retry: %v", err)
+	}
 }

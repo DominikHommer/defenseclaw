@@ -7090,8 +7090,8 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 	return nil
 }
 
-// teardownRemovedConnectors tears down connectors that were active on a
-// previous boot but are absent from the current active set — the
+// teardownRemovedConnectorsReport tears down connectors that were active on
+// a previous boot but are absent from the current active set — the
 // set-difference generalization of teardownPreviousConnector for the
 // multi-connector boot path (removed = previous − current). It is intended to
 // run once, before the per-connector setup loop.
@@ -7103,17 +7103,12 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 // mismatch can never tear down a connector that is in fact still active.
 //
 // A previous name the registry cannot resolve is a connector this build no
-// longer ships. It has no teardown owner, so its agent config files are left
-// untouched; only its DefenseClaw lock entry is dropped (see
-// dropUnregisteredConnectorState) and it is not retried.
-func teardownRemovedConnectors(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, ctx context.Context) []string {
-	failed, _ := teardownRemovedConnectorsReport(registry, previous, current, opts, ctx)
-	return failed
-}
-
-// teardownRemovedConnectorsReport is teardownRemovedConnectors that also
-// returns the unregistered names whose state was dropped, so Sidecar callers
-// can audit them.
+// longer ships. A retired connector ID is torn down by its teardown-only
+// owner and, like a registered connector, returned in failed for a retry
+// when that cleanup cannot finish. Any other such name has no teardown owner:
+// its agent config files are left untouched, only its DefenseClaw lock entry
+// is dropped (dropUnregisteredConnectorState), and it is returned in dropped
+// so Sidecar callers can audit it.
 func teardownRemovedConnectorsReport(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, ctx context.Context) (failed, dropped []string) {
 	if registry == nil || len(previous) == 0 {
 		return nil, nil
@@ -7226,7 +7221,9 @@ func connectorDroppable(registry *connector.Registry, name string) bool {
 // retireOrDropUnregisteredConnector handles a name the registry cannot
 // resolve. A retired connector ID has a teardown-only owner
 // (connector.RetiredConnector) that removes exactly what an older release
-// wrote; its cleanup problems are logged and never block boot. Any other name
+// wrote. A cleanup it cannot finish or verify is returned with the lock entry
+// kept, the way a registered connector's failed teardown is: the caller keeps
+// the name (active roster or lock) so a later boot retries it. Any other name
 // only loses DefenseClaw's lock state (dropUnregisteredConnectorState).
 func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.Registry, dataDir, name, surface string, clearLock func(dataDir, connectorName string) error) error {
 	retired, ok := connector.RetiredConnector(name)
@@ -7238,9 +7235,10 @@ func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.
 	}
 	opts := connector.SetupOpts{DataDir: dataDir}
 	if err := retired.Teardown(ctx, opts); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: cleanup of retired connector %s: %v; %s\n", retired.Name(), err, removedConnectorDocHint)
-	} else if err := retired.VerifyClean(opts); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: retired connector %s left state: %v; %s\n", retired.Name(), err, removedConnectorDocHint)
+		return fmt.Errorf("cleanup of retired connector %s: %w; %s", retired.Name(), err, removedConnectorDocHint)
+	}
+	if err := retired.VerifyClean(opts); err != nil {
+		return fmt.Errorf("retired connector %s left state: %w; %s", retired.Name(), err, removedConnectorDocHint)
 	}
 	if err := clearLock(dataDir, retired.Name()); err != nil {
 		return fmt.Errorf("clear hook contract lock for retired connector %s: %w", retired.Name(), err)
