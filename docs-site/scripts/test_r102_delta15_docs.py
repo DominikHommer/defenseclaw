@@ -12,7 +12,7 @@ def page(path):
 
 class R102Delta15DocsTest(unittest.TestCase):
     def test_live_fields_reach_the_next_connection(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         # gateway/sandbox_daemon_policy_fresh.go confirmEgressPolicy, sandboxEgressPolicyChanging.
         self.assertIn(
             ("decides each new connection with the policy the managed gateway confirmed for it within the last second"),
@@ -42,7 +42,7 @@ class R102Delta15DocsTest(unittest.TestCase):
         )
 
     def test_account_outage_refusal_matches_the_cli(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         # openshell/sandboxcli/managed_errors.go accountOutage.
         self.assertIn("Your account can't be looked up on this computer right now. Try again in a moment.", text)
         self.assertIn("This isn't your organization's sandbox policy.", text)
@@ -50,7 +50,7 @@ class R102Delta15DocsTest(unittest.TestCase):
         self.assertNotIn("A slow or failed lookup never refuses a create", text)
 
     def test_locked_pack_must_be_copy(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         # config/openshell_tighten.go validateLockedSandboxPack.
         self.assertIn("`openshell.admin.locked: [pack]` makes the required pack of every sandbox", text)
         self.assertIn("set `workspace.mode: copy` in the pack", text)

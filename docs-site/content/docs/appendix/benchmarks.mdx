@@ -16,9 +16,9 @@ tool-injection, and honest agent-trajectory datasets.
 <Callout type="info" title="How to read these results">
 The **Profile** column is the guardrail rule-pack profile (`default`,
 `permissive` or `strict`, see
-[profile posture](/docs/reference/detection#profile-posture)).
+[profile posture](/docs/reference/policy/detection#profile-posture)).
 These are not the `open`, `balanced` and `strict` network profiles of
-[OpenShell sandboxes](/docs/reference/sandbox-network/#profiles).
+[OpenShell sandboxes](/docs/reference/sandboxes/network/#profiles).
 Balanced is the public name for the `default` rule pack. A false positive
 (FP) is any finding on a benign call, an alert included; **Benign blocks**
 counts only the benign calls that were blocked. Coverage and authored
@@ -69,10 +69,10 @@ but they can still create alert fatigue.
 ## What changed
 
 <Cards>
-  <Card title="34 exact atomic rules" href="/docs/reference/detection#exact-atomic-semantic-rules" description="Execution, persistence, privilege, credential access, impact, and security-control tampering proofs." />
-  <Card title="26 bounded chains" href="/docs/reference/detection#bounded-tool-call-chains" description="Exact identity and result joins over at most the current event plus eight predecessors." />
-  <Card title="Ten YARA signatures" href="/docs/reference/detection#yara-mcp-description-scanning" description="High-precision MCP description-injection signals that remain alert-only." />
-  <Card title="Five opt-in packs + one staged contract" href="/docs/reference/detection#protection-packs-and-policy-provided-context" description="PII, cloud, database, infrastructure, and Kubernetes packs, plus a staged SSH integrity contract." />
+  <Card title="34 exact atomic rules" href="/docs/reference/policy/detection#exact-atomic-semantic-rules" description="Execution, persistence, privilege, credential access, impact, and security-control tampering proofs." />
+  <Card title="26 bounded chains" href="/docs/reference/policy/detection#bounded-tool-call-chains" description="Exact identity and result joins over at most the current event plus eight predecessors." />
+  <Card title="Ten YARA signatures" href="/docs/reference/policy/detection#yara-mcp-description-scanning" description="High-precision MCP description-injection signals that remain alert-only." />
+  <Card title="Five opt-in packs + one staged contract" href="/docs/reference/policy/detection#protection-packs-and-policy-provided-context" description="PII, cloud, database, infrastructure, and Kubernetes packs, plus a staged SSH integrity contract." />
 </Cards>
 
 The detector now uses four layers:
@@ -90,7 +90,7 @@ The detector now uses four layers:
 Failed, denied, cancelled, cross-session, replayed, unresolved,
 identity-mismatched, or mutated sequences cannot complete a proof.
 
-Read the [deterministic detection reference](/docs/reference/detection)
+Read the [deterministic detection reference](/docs/reference/policy/detection)
 for the complete rule-family inventory, all 34 exact rule IDs, every bounded
 chain and enforcement posture, YARA coverage, and protection-pack status.
 

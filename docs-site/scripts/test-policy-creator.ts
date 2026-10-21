@@ -291,7 +291,7 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
   }
 
   const reference = readFileSync(
-    new URL('../content/docs/reference/detection.mdx', import.meta.url),
+    new URL('../content/docs/reference/policy/detection.mdx', import.meta.url),
     'utf8',
   );
   const creator = readFileSync(
@@ -332,8 +332,8 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
   assert.equal(enforcementCapable, 4);
   for (const page of [
     reference,
-    readFileSync(new URL('../content/docs/reference/cel/engine.mdx', import.meta.url), 'utf8'),
-    readFileSync(new URL('../content/docs/reference/cel/tool-call-state.mdx', import.meta.url), 'utf8'),
+    readFileSync(new URL('../content/docs/reference/policy/cel/engine.mdx', import.meta.url), 'utf8'),
+    readFileSync(new URL('../content/docs/reference/policy/cel/tool-call-state.mdx', import.meta.url), 'utf8'),
   ]) {
     assert.ok(page.includes(`${BOUNDED_CHAINS.length} ordered chains`) ||
       page.includes(`${BOUNDED_CHAINS.length} ordered behaviors`));

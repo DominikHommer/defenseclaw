@@ -1,4 +1,9 @@
 {
   "title": "Troubleshooting",
-  "pages": ["index", "doctor", "windows", "sandboxes"]
+  "pages": [
+    "doctor",
+    "windows",
+    "sandboxes",
+    "enterprise"
+  ]
 }

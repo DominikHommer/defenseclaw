@@ -25,13 +25,13 @@ class R102Delta1DocsTest(unittest.TestCase):
         self.assertIn("then start it again", text)
 
     def test_managed_standalone_pack_dir_default(self):
-        text = page("reference/configuration.mdx")
+        text = page("reference/configuration/index.mdx")
         self.assertIn("# default <data_dir>/policies/sandbox; managed standalone: <policy_dir>/sandbox", text)
         self.assertIn("`<policy_dir>/sandbox` on a managed standalone install", text)
         self.assertIn("standalone install the default `pack_dir`, `<policy_dir>/sandbox`, is one", text)
 
     def test_upgraded_host_keeps_the_old_pack_folder(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         self.assertIn("`/var/lib/defenseclaw/policies/sandbox` on Linux", text)
         self.assertIn("`<policy_dir>/sandbox` yet, keeps reading them from the old folder", text)
         self.assertIn("`sandbox_policy_advisory` and names both folders", text)

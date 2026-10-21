@@ -33,13 +33,13 @@ every value in a script's settings block or on its command line as shown.
   and macOS scripts require Intelligent Hub 20.10 and Workflow Engine 20.10 or later
   ([macOS scripts](https://docs.omnissa.com/macOS-Device-Management-VSaaS/AutomateScriptsmacOSDevices)).
 - Scripts and sensors cannot be assigned to employee-owned devices.
-- Windows: see [Windows requirements](/docs/enterprise/windows#requirements). Setup
+- Windows: see [Windows requirements](/docs/enterprise/install/windows#requirements). Setup
   runs on native x64 Windows only.
 - macOS: Apple silicon on macOS 13 or later. DefenseClaw ships no privacy (PPPC)
-  profile; see [macOS requirements](/docs/enterprise/macos#requirements).
+  profile; see [macOS requirements](/docs/enterprise/install/macos#requirements).
 - Your administrator config; see
-  [Where the config lives](/docs/enterprise/configuration#where-the-config-lives)
-  and [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
+  [Where the config lives](/docs/enterprise/configure/configuration#where-the-config-lives)
+  and [Choose the agents to protect](/docs/enterprise/configure/configuration#choose-the-agents-to-protect).
   The default config protects no agent.
 
 Verify every artifact against the release's cosign-signed `checksums.txt` before you
@@ -172,14 +172,14 @@ context, which **System** provides. Each run stores the key and restarts the
 gateway, so run the script once, and again only when you rotate the key. Workspace
 ONE stores the value, so limit who can edit the script. Then set
 `enterprise.inspection.ai_defense.enabled: true` and `credential: ai-defense-api-key`
-in `config.yaml`. See [AI Defense key](/docs/enterprise/ai-defense-key).
+in `config.yaml`. See [AI Defense key](/docs/enterprise/configure/ai-defense-key).
 
 ### Upgrade, roll back and change the config on Windows
 
 | Task | What to do |
 | --- | --- |
 | Upgrade | Build new content for the new release, add it as a new version of the app, and raise `-MinimumVersion` in the install-complete command. `/ensure` upgrades in place, keeps the state, and applies the config in the new content. |
-| Roll back | `ensure` refuses to downgrade on Windows. Follow [Roll back](/docs/enterprise/lifecycle#roll-back). |
+| Roll back | `ensure` refuses to downgrade on Windows. Follow [Roll back](/docs/enterprise/operate/lifecycle#roll-back). |
 | Change the config | Build new content with the new `config.yaml` and add it as a new version. `/ensure` validates and applies it, and rolls back if applying fails. |
 
 ### Uninstall on Windows
@@ -207,7 +207,7 @@ removes is in [Uninstall](/docs/enterprise/mdm#uninstall).
 | `3010` | Reserved; Setup does not return it | Reboot (**Installer Reboot Exit Code**) |
 
 See [Exit codes](/docs/enterprise/mdm#exit-codes) and
-[Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes).
+[Lifecycle error codes](/docs/troubleshooting/enterprise#lifecycle-error-codes).
 
 ## macOS
 
@@ -378,7 +378,7 @@ after a purge.
 | Task | What to do |
 | --- | --- |
 | Upgrade | Upload the new package as a new version of the app, and raise `DC_MIN_VERSION` in the sensor. The package's `ensure --from-package` upgrades in place and keeps the config and state. |
-| Roll back | Follow [Roll back](/docs/enterprise/lifecycle#roll-back). |
+| Roll back | Follow [Roll back](/docs/enterprise/operate/lifecycle#roll-back). |
 | Change the config | Edit the inline config in the ensure script. The next run applies it; the lifecycle validates it first and rolls back if applying fails. |
 
 ### macOS logs and exit codes

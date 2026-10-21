@@ -48,7 +48,7 @@ By default setup writes global hooks to `~/.copilot/hooks/defenseclaw.json`. `--
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`. Run its printed gateway-restart step before expecting exports. |
 | `--workspace / --workspace-dir` | unset | Opt into repo-local `.github/hooks`. |
 
-The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message and add/replace options ([quick-alias reference](/docs/reference/guardrail-setup#aliases)). For scanner, detection-strategy and judge settings use [full guardrail setup](/docs/features/guardrail). Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`). Example with the judge:
+The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message and add/replace options ([quick-alias reference](/docs/reference/commands/guardrail-setup#aliases)). For scanner, detection-strategy and judge settings use [full guardrail setup](/docs/features/guardrail). Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`). Example with the judge:
 
 ```bash
 export DEFENSECLAW_LLM_KEY='replace-with-your-key'

@@ -3,7 +3,7 @@
 import unittest
 from pathlib import Path
 
-PAGE = Path(__file__).resolve().parents[1] / "content/docs/enterprise/sandboxes.mdx"
+PAGE = Path(__file__).resolve().parents[1] / "content/docs/enterprise/runtime/sandboxes.mdx"
 
 
 class Delta35DocsTest(unittest.TestCase):

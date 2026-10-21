@@ -22,7 +22,7 @@ Run DefenseClaw and the agent in the same native Windows user session. Do not in
 | Architecture | x64 (`amd64`) only. Windows ARM64 is not certified, even with x64 emulation: ARM64 is not certified and the installer stops. x86 is unsupported. |
 | Shell | Windows PowerShell 5.1 (built in) or PowerShell 7. |
 | Scope | Current user only. Running elevated works but is not needed. |
-| Agent | A [supported agent](/docs/support-matrix) installed natively for the same Windows user. |
+| Agent | A [supported agent](/docs/get-started/support-matrix) installed natively for the same Windows user. |
 | Network | The installer downloads from GitHub. At runtime DefenseClaw listens on authenticated loopback, normally `127.0.0.1:18970`. |
 
 The optional local observability and Local Splunk bundles need Windows x64 Pro, Enterprise or Education, Hyper-V, machine-installed Docker Desktop with Linux containers on the Hyper-V backend, Compose v2 and a native `docker.exe`. Windows Home, per-user Docker Desktop and WSL2 engines are outside that path. Core DefenseClaw does not need Docker.
@@ -48,7 +48,7 @@ defenseclaw --version
 defenseclaw-gateway --version
 ```
 
-Parameters and exit codes are in the [installer reference](/docs/reference/installer). A saved `install.ps1` exits `0` when installed, `1` when not (a previous install is restored), `3` when a connector needs attention and `4` when the first-run quickstart failed.
+Parameters and exit codes are in the [installer reference](/docs/reference/commands/installer). A saved `install.ps1` exits `0` when installed, `1` when not (a previous install is restored), `3` when a connector needs attention and `4` when the first-run quickstart failed.
 
 ## Set up agents
 
@@ -66,7 +66,7 @@ defenseclaw setup -c codex -c claudecode -c cursor --mode observe --yes
 
 The `-c` list becomes the full set of guarded agents, so include the ones you already have. `--detected` picks the agents installed on this computer, and `defenseclaw setup --add-detected --yes` adds newly installed ones without touching the others. The Windows connector names are `claudecode`, `codex`, `amp`, `cursor`, `devin`, `hermes`, `opencode`, `copilot`, `antigravity` and `kiro`.
 
-Setup honors the agents' own home-folder variables and remembers the folder it set up ([Paths](/docs/reference/paths#overrides)). Restart OpenCode after setup. Fully exit and relaunch Amp; for `amp -x`, add `--plugin-ready-timeout 30`.
+Setup honors the agents' own home-folder variables and remembers the folder it set up ([Paths](/docs/reference/configuration/paths#overrides)). Restart OpenCode after setup. Fully exit and relaunch Amp; for `amp -x`, add `--plugin-ready-timeout 30`.
 
 ## How it runs
 
@@ -100,7 +100,7 @@ Without `--all` and `--binaries`, uninstall keeps your data and programs. Close 
 
 - WSL, or a mix of native and WSL connectors.
 - Windows ARM64 and x86.
-- A machine-wide install, MSI or Windows service from the per-user package. For that, use [Enterprise](/docs/enterprise/windows). On a computer with a standalone enterprise deployment, `install.ps1`, `defenseclaw upgrade`, `defenseclaw rollback` and the per-user gateway refuse.
+- A machine-wide install, MSI or Windows service from the per-user package. For that, use [Enterprise](/docs/enterprise/install/windows). On a computer with a standalone enterprise deployment, `install.ps1`, `defenseclaw upgrade`, `defenseclaw rollback` and the per-user gateway refuse.
 - The proxy connectors (OpenClaw, ZeptoClaw): native Windows has no guardrail proxy.
 - OpenShell sandboxes. `defenseclaw sandbox` commands stop with "OpenShell sandboxes run on Linux and macOS only". Use [sandboxes](/docs/features/sandboxes) on Linux or an Apple-silicon Mac.
 - An agent on another computer sending hooks to this gateway: only the same computer, same user, over loopback is tested.

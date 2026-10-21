@@ -44,7 +44,7 @@ Reference for the [Devin connector](/docs/connectors/devin). It wires into the n
 | W3C traceparent | yes |
 | Fail closed | yes |
 
-The contract was reviewed against Devin CLI `3000.4.25` on Windows, macOS and Linux. On Linux it is also pinned to `3000.11.3`, which a live check showed delivers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` under these names and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse` (`PermissionRequest` and `PostCompaction` are not verified). Any other CLI from `3000.4.25` on, on every OS, runs as an untested newer version unless known broken ([version policy](/docs/reference/hook-contracts#version-policy)). On Windows a CLI older than `3000.4.25` has no contract, so setup keeps it in observe mode and refuses action mode.
+The contract was reviewed against Devin CLI `3000.4.25` on Windows, macOS and Linux. On Linux it is also pinned to `3000.11.3`, which a live check showed delivers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` under these names and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse` (`PermissionRequest` and `PostCompaction` are not verified). Any other CLI from `3000.4.25` on, on every OS, runs as an untested newer version unless known broken ([version policy](/docs/reference/apis/hook-contracts#version-policy)). On Windows a CLI older than `3000.4.25` has no contract, so setup keeps it in observe mode and refuses action mode.
 
 | Event | DefenseClaw role |
 | --- | --- |
@@ -75,7 +75,7 @@ DefenseClaw manages only documented Devin hook locations. CLI and Devin Local re
 
 Foreign hook groups and JSONC content are kept. Devin also loads hooks from `.claude/` settings for compatibility, and DefenseClaw does not claim or modify those. DefenseClaw does not install Devin plugins or register hooks through them. The `devin acp` entry point is cataloged for the shared [ACP guard](/docs/features/acp-guard) but has not completed official-client testing. Cloud execution, proxy transport, native OTLP, sandboxing, egress control and managed higher-layer policy are outside this connector.
 
-In a standalone enterprise deployment on Linux and macOS, each hook runs `defenseclaw-hook hook --connector devin --enterprise-managed`, which runs the foreign-hook guard and follows the administrator's fail mode: `closed` unless `hook_fail_mode` (global or for Devin) is `open`. See [Machine policy](/docs/enterprise/machine-policy).
+In a standalone enterprise deployment on Linux and macOS, each hook runs `defenseclaw-hook hook --connector devin --enterprise-managed`, which runs the foreign-hook guard and follows the administrator's fail mode: `closed` unless `hook_fail_mode` (global or for Devin) is `open`. See [Machine policy](/docs/enterprise/configure/machine-policy).
 
 ### Devin Desktop under the enterprise profile
 
@@ -111,7 +111,7 @@ Devin CLI cannot run in a sandbox yet. The image is **unverified**, so `defensec
 | --- | --- |
 | Tier | User. Devin has no system hook tier, so hooks are in `~/.config/devin/config.json` in the image. The launcher restores them from a root-owned template on every start and refuses a `--config` of your own. The sandbox hook exits 2 on every failure, with a 30-second timeout. |
 | Skip permissions | Would start with `--permission-mode dangerous`. `--safe` drops `--permission-mode dangerous` and `autonomous` from your arguments. |
-| Tamper detection | DefenseClaw pairs each `PostToolUse` with its `PreToolUse` by session, tool name and input. A tool that ran although denied, or whose `PreToolUse` never arrived, raises `hook_tamper` and the pack's `hooks.on_tamper` applies ([policy packs](/docs/reference/sandbox-policy)). On a logged-in CLI 3000.11.3, `PostToolUse` fires only for a tool that ran. |
+| Tamper detection | DefenseClaw pairs each `PostToolUse` with its `PreToolUse` by session, tool name and input. A tool that ran although denied, or whose `PreToolUse` never arrived, raises `hook_tamper` and the pack's `hooks.on_tamper` applies ([policy packs](/docs/reference/sandboxes/policy)). On a logged-in CLI 3000.11.3, `PostToolUse` fires only for a tool that ran. |
 | Workspace trust | The launcher always passes `--respect-workspace-trust false` and refuses that flag from you, because a headless run fails in an untrusted folder. A project's own `.devin/hooks.v1.json` then loads beside DefenseClaw's without a prompt. |
 | Sign-in | A login inside the sandbox (`/usr/local/lib/defenseclaw/bin/devin-launch auth login --force-manual-token-flow`) is the only path. The credential stays in `~/.local/share/devin`, where the agent can read it. Not tested live. |
 | Image | Devin CLI 3000.4.25 from its release archive, checked against the SHA-256 in Devin's manifest. |

@@ -2,23 +2,14 @@
   "title": "Documentation",
   "pages": [
     "index",
-    "---Get started---",
-    "...get-started",
-    "support-matrix",
-    "---Features---",
-    "...features",
+    "get-started",
+    "features",
     "connectors",
-    "---How-to---",
-    "...how-to",
-    "---Troubleshooting---",
-    "...troubleshooting",
-    "---Reference---",
-    "...reference",
-    "---Enterprise---",
+    "how-to",
+    "troubleshooting",
     "enterprise",
-    "---For agents---",
-    "...for-agents",
-    "---Appendix---",
-    "...appendix"
+    "reference",
+    "for-agents",
+    "appendix"
   ]
 }

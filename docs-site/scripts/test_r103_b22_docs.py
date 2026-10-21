@@ -21,7 +21,7 @@ class R103B22DocsTest(unittest.TestCase):
     def test_lifecycle_kept_setup_record_and_first_removal_purge(self):
         # rel-1-0-2:GAP-0622, GAP-0643 (1), GAP-0643 (5)
         self.assert_phrases(
-            "enterprise/lifecycle.mdx",
+            "enterprise/operate/lifecycle.mdx",
             (
                 "The lifecycle directory then also keeps the root-only record "
                 "of the sandbox setup those sandboxes were made under "
@@ -47,7 +47,7 @@ class R103B22DocsTest(unittest.TestCase):
     def test_operations_clone_purges_and_lists_the_key(self):
         # rel-1-0-2:GAP-0643 (2)
         self.assert_phrases(
-            "enterprise/operations.mdx",
+            "enterprise/operate/operations.mdx",
             (
                 "the gateway's per-machine `redaction-correlation.key` and "
                 "sandbox registration store, if an account on the template "
@@ -61,16 +61,16 @@ class R103B22DocsTest(unittest.TestCase):
                 "pulled yet"
             ),
         )
-        self.assertNotIn("if the template ever held sandboxes", page("enterprise/operations.mdx"))
+        self.assertNotIn("if the template ever held sandboxes", page("enterprise/operate/operations.mdx"))
 
     def test_cli_keep_state_and_purge_rows(self):
         # rel-1-0-2:GAP-0643 (3), GAP-0623
-        text = page("reference/cli.mdx")
+        text = page("reference/commands/cli.mdx")
         row = text.split("| `--keep-state` | uninstall |", 1)[1].split("|", 1)[0]
         self.assertNotIn("lifecycle state", row)
         self.assertIn("The deployment record goes either way", row)
         self.assert_phrases(
-            "reference/cli.mdx",
+            "reference/commands/cli.mdx",
             ("with the root-only record of the sandbox setup they were made under"),
             "Run it in the first removal: it needs the deployment's binaries",
         )
@@ -78,14 +78,14 @@ class R103B22DocsTest(unittest.TestCase):
     def test_linux_apt_purge_names_kept_sandboxes(self):
         # rel-1-0-2:GAP-0643 (5)
         self.assert_phrases(
-            "enterprise/linux.mdx",
+            "enterprise/install/linux.mdx",
             ("The sandboxes the accounts kept in their homes are no longer known to a later install"),
         )
 
     def test_enrollment_rehome_shapes(self):
         # rel-1-0-2:GAP-0632, GAP-0633, GAP-0642
         self.assert_phrases(
-            "enterprise/enrollment.mdx",
+            "enterprise/configure/enrollment.mdx",
             "A home moved by copying it and then emptying the old folder counts as moved",
             "An agent config that is a symlink to a file in the same home is checked through the link",
             "Uninstall runs this cleanup also when a `targets.yaml` row still names the re-homed account",
@@ -103,13 +103,13 @@ class R103B22DocsTest(unittest.TestCase):
         )
         self.assertNotIn(
             ("a link out of the home keeps the record until you clean the file it names"),
-            page("enterprise/enrollment.mdx"),
+            page("enterprise/configure/enrollment.mdx"),
         )
 
     def test_sandboxes_bridge_needs_no_managed_sandbox(self):
         # rel-1-0-3:GAP-0164, rel-1-0-2:GAP-0675
         self.assert_phrases(
-            "enterprise/sandboxes.mdx",
+            "enterprise/runtime/sandboxes.mdx",
             "while that user still keeps a sandbox there and none in `defenseclaw-managed`",
             "starts in `defenseclaw-managed`, because one gateway serves one namespace",
             "the gateway's log names the cause, and they start again once no sandbox is left in `defenseclaw-managed`",

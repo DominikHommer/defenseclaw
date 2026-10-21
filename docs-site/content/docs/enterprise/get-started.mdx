@@ -12,7 +12,7 @@ keywords:
 Deploy the standalone profile in six steps. Each step makes one decision and
 links to the page with the details. You need an MDM, configuration-management
 tool or administrator shell that runs commands as SYSTEM on Windows and as root
-on Linux and macOS. [Concepts](/docs/enterprise/concepts) defines *profile*,
+on Linux and macOS. [Concepts](/docs/enterprise/plan/concepts) defines *profile*,
 *lifecycle* and *ensure*. Not sure you need enterprise deployment? Read
 [Is this for you?](/docs/enterprise#is-this-for-you).
 
@@ -26,7 +26,7 @@ one of them.
 | Choose it when | You deploy with Intune or any other MDM, a package, configuration management or an administrator shell | You run Cisco Secure Client and want DefenseClaw as one of its modules |
 | Platforms | Windows, Linux, macOS | Windows, macOS |
 | Who decides on each tool call | The local policy engine. Cisco AI Defense is added when you turn it on and store a key | Cisco AI Defense only |
-| Next | Continue with step 2 on this page | [Secure Client managed deployment](/docs/enterprise/secure-client) |
+| Next | Continue with step 2 on this page | [Secure Client managed deployment](/docs/enterprise/install/secure-client) |
 
 The rest of this page covers the standalone profile. On Windows and macOS the
 profile defaults to Secure Client, so set `enterprise.profile: standalone`
@@ -40,16 +40,16 @@ one of two ways:
 
 | Route | Agents | What DefenseClaw writes |
 | --- | --- | --- |
-| [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Claude Code, Codex, Cursor, GitHub Copilot, and OpenCode with DefenseClaw's managed OpenCode plugin | Its hooks in the vendor's administrator-owned policy files, which apply to every user of the computer |
-| [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp and Kiro, and OpenCode while the managed plugin is not in force | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
+| [Machine policy](/docs/enterprise/plan/concepts#machine-policy-connector) | Claude Code, Codex, Cursor, GitHub Copilot, and OpenCode with DefenseClaw's managed OpenCode plugin | Its hooks in the vendor's administrator-owned policy files, which apply to every user of the computer |
+| [Per-user](/docs/enterprise/plan/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp and Kiro, and OpenCode while the managed plugin is not in force | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
 
 OpenClaw and ZeptoClaw are not supported in enterprise managed mode. ACP
 (Agent Client Protocol) editors are enrolled with `defenseclaw-gateway
 enterprise acp enroll`, as a preview. The verified agent and OS combinations are in the
-[enterprise route table](/docs/support-matrix#enterprise). How to list agents,
+[enterprise route table](/docs/get-started/support-matrix#enterprise). How to list agents,
 users and per-agent modes is in
-[Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
-and [Plan a rollout](/docs/enterprise/rollout#step-1-choose-the-agents).
+[Choose the agents to protect](/docs/enterprise/configure/configuration#choose-the-agents-to-protect)
+and [Plan a rollout](/docs/enterprise/plan/rollout#step-1-choose-the-agents).
 
 ## 3. Pick your MDM
 
@@ -59,9 +59,9 @@ the scripts in
 Each card names what you push.
 
 <Cards>
-  <Card title="Intune on Windows" href="/docs/enterprise/mdm/intune-windows" description="A Win32 app (.intunewin) that wraps the standalone Setup and your config, plus a PowerShell 7 app it depends on." />
-  <Card title="Intune on macOS" href="/docs/enterprise/mdm/intune-macos" description="One root shell script: the kit wrapper, which downloads the .pkg and runs ensure." />
-  <Card title="Intune on Linux" href="/docs/enterprise/mdm/intune-linux" description="One root platform script: the kit wrapper, which downloads the .deb, .rpm or payload archive." />
+  <Card title="Intune on Windows" href="/docs/enterprise/mdm/intune/windows" description="A Win32 app (.intunewin) that wraps the standalone Setup and your config, plus a PowerShell 7 app it depends on." />
+  <Card title="Intune on macOS" href="/docs/enterprise/mdm/intune/macos" description="One root shell script: the kit wrapper, which downloads the .pkg and runs ensure." />
+  <Card title="Intune on Linux" href="/docs/enterprise/mdm/intune/linux" description="One root platform script: the kit wrapper, which downloads the .deb, .rpm or payload archive." />
   <Card title="Jamf Pro" href="/docs/enterprise/mdm/jamf" description="The .pkg from your distribution point, with kit scripts that stage the config and run ensure." />
   <Card title="Iru (formerly Kandji)" href="/docs/enterprise/mdm/kandji" description="A Custom App with the .pkg and a Custom Script that runs ensure, or a script-only route." />
   <Card title="Workspace ONE UEM" href="/docs/enterprise/mdm/workspace-one" description="A Win32 app from a ZIP on Windows, an internal app with the .pkg on macOS, and scripts that run ensure." />
@@ -108,7 +108,7 @@ script or a command line. Store it with `enterprise secret set`, from
 standard input or a file only administrators can change: after the install
 on Windows, and before or after it on Linux and macOS; see
 [Deliver the AI Defense key](/docs/enterprise/mdm#deliver-the-ai-defense-key)
-and [Cisco AI Defense key](/docs/enterprise/ai-defense-key).
+and [Cisco AI Defense key](/docs/enterprise/configure/ai-defense-key).
 
 ## 5. Run ensure and read the result
 
@@ -160,10 +160,10 @@ $Cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
 </Tabs>
 
 Read `coverage_complete` and `security_complete` in the result
-([Health fields](/docs/enterprise/operations#health-fields)). On Linux and
+([Health fields](/docs/enterprise/operate/operations#health-fields)). On Linux and
 macOS, `policy.effective_digest` and `policy.applied` say which config the host
 runs and whether the gateway applied it
-([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)).
+([Effective policy digest](/docs/enterprise/operate/operations#effective-policy-digest-and-config-generation)).
 Every exit code is listed in [Exit codes](/docs/enterprise/mdm#exit-codes).
 
 ## 6. Pilot in observe mode, then expand in rings
@@ -173,14 +173,14 @@ decision, including what DefenseClaw would have blocked, without blocking on
 policy verdicts. When the pilot is healthy and you have reviewed the decisions,
 set `guardrail.mode: action` and deliver the config again. Then grow in rings
 (pilot, early, broad, everyone), moving on only when a ring is healthy.
-[Plan a rollout](/docs/enterprise/rollout#step-5-expand-in-rings) has ring
+[Plan a rollout](/docs/enterprise/plan/rollout#step-5-expand-in-rings) has ring
 sizes and exit criteria.
 
 ## Next steps
 
 <Cards>
-  <Card title="Threat model" href="/docs/enterprise/threat-model" description="Trust zones, how each boundary is protected, and the risks that remain." />
-  <Card title="Operate" href="/docs/enterprise/operations" description="Check status and health, read logs and events, and verify machine policy." />
-  <Card title="Upgrade, repair and remove" href="/docs/enterprise/lifecycle" description="Upgrade, roll back, change the config, repair and uninstall." />
-  <Card title="Troubleshooting" href="/docs/enterprise/troubleshooting" description="Fix a deployment by lifecycle error code, MDM wrapper code, hook refusal code or symptom." />
+  <Card title="Threat model" href="/docs/enterprise/plan/threat-model" description="Trust zones, how each boundary is protected, and the risks that remain." />
+  <Card title="Operate" href="/docs/enterprise/operate/operations" description="Check status and health, read logs and events, and verify machine policy." />
+  <Card title="Upgrade, repair and remove" href="/docs/enterprise/operate/lifecycle" description="Upgrade, roll back, change the config, repair and uninstall." />
+  <Card title="Troubleshooting" href="/docs/troubleshooting/enterprise" description="Fix a deployment by lifecycle error code, MDM wrapper code, hook refusal code or symptom." />
 </Cards>

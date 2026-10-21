@@ -25,8 +25,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 def test_enrollment_docs_use_windows_status_for_managed_accounts() -> None:
-    enrollment = (ROOT / "docs-site/content/docs/enterprise/enrollment.mdx").read_text()
-    operations = (ROOT / "docs-site/content/docs/enterprise/operations.mdx").read_text()
+    enrollment = (ROOT / "docs-site/content/docs/enterprise/configure/enrollment.mdx").read_text()
+    operations = (ROOT / "docs-site/content/docs/enterprise/operate/operations.mdx").read_text()
     sections = (enrollment.split("## Supported agent versions", 1)[1],
                 operations.split("## Review activity from the CLI", 1)[1])
     for section in sections:
@@ -62,23 +62,23 @@ INSTALLER_FILES = (
 
 OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
     "docs-site/components/command-generator.tsx",
-    "docs-site/content/docs/how-to/guardrail/generate-a-setup-command.mdx",
-    "docs-site/content/docs/reference/guardrail-setup.mdx",
+    "docs-site/content/docs/how-to/agents/generate-a-setup-command.mdx",
+    "docs-site/content/docs/reference/commands/guardrail-setup.mdx",
     "docs-site/content/docs/connectors/openclaw.mdx",
     "docs-site/content/docs/connectors/zeptoclaw.mdx",
     "docs-site/content/docs/connectors/claudecode.mdx",
     "docs-site/content/docs/connectors/codex.mdx",
-    "docs-site/content/docs/reference/redaction.mdx",
-    "docs-site/content/docs/reference/cli.mdx",
-    "docs-site/content/docs/reference/observability.mdx",
+    "docs-site/content/docs/reference/observability/redaction.mdx",
+    "docs-site/content/docs/reference/commands/cli.mdx",
+    "docs-site/content/docs/reference/observability/index.mdx",
     "bundles/local_observability_stack/prometheus/rules/alerts.yml",
     "scripts/install-dev.sh",
-    "docs-site/content/docs/reference/configuration.mdx",
+    "docs-site/content/docs/reference/configuration/index.mdx",
 )
 
 OBSERVABILITY_V8_WORKFLOW_GUIDES = (
     "docs-site/components/command-generator.tsx",
-    "docs-site/content/docs/reference/redaction.mdx",
+    "docs-site/content/docs/reference/observability/redaction.mdx",
     "bundles/local_observability_stack/prometheus/rules/alerts.yml",
 )
 
@@ -90,8 +90,8 @@ OBSERVABILITY_V8_CONNECTOR_GUIDES = (
 )
 
 OBSERVABILITY_V8_JSONL_GUIDES = {
-    "docs-site/content/docs/reference/cli.mdx": "kind: jsonl",
-    "docs-site/content/docs/reference/configuration.mdx": "kind: jsonl",
+    "docs-site/content/docs/reference/commands/cli.mdx": "kind: jsonl",
+    "docs-site/content/docs/reference/configuration/index.mdx": "kind: jsonl",
 }
 
 
@@ -628,19 +628,19 @@ def test_public_operator_docs_never_advertise_direct_defenseclaw_package_install
 
     cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
     assert "published CLI reference" in cli
-    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/" in cli
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/commands/cli/" in cli
 
 
 def test_repository_operator_pointers_delegate_to_the_canonical_website() -> None:
     expected = {
-        "docs/API.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/gateway-api/",
-        "docs/CLI.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/",
+        "docs/API.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/gateway-api/",
+        "docs/CLI.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/commands/cli/",
         "docs/CONFIG_FILES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/",
-        "docs/CONNECTOR-MATRIX.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/hook-contracts/",
-        "docs/ENV-VARS.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/env-vars/",
+        "docs/CONNECTOR-MATRIX.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/hook-contracts/",
+        "docs/ENV-VARS.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/env-vars/",
         "docs/INSTALL.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/install/",
         "docs/QUICKSTART.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/quickstart/",
-        "docs/REGISTRIES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/registries/",
+        "docs/REGISTRIES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/scanning/registries/",
         "docs/SPLUNK_APP.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/send-to-splunk/",
     }
     for rel, canonical_url in expected.items():
@@ -653,11 +653,11 @@ def test_repository_operator_pointers_delegate_to_the_canonical_website() -> Non
 
 def test_scanner_recovery_docs_match_dependency_and_registry_contracts() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    mcp_docs = (ROOT / "docs-site/content/docs/reference/scanners.mdx").read_text(
+    mcp_docs = (ROOT / "docs-site/content/docs/reference/scanning/scanners.mdx").read_text(
         encoding="utf-8"
     )
     registry_docs = (
-        ROOT / "docs-site/content/docs/reference/registries.mdx"
+        ROOT / "docs-site/content/docs/reference/scanning/registries.mdx"
     ).read_text(encoding="utf-8")
     llm_source = (ROOT / "cli/defenseclaw/llm.py").read_text(encoding="utf-8")
     mcp_source = (ROOT / "cli/defenseclaw/scanner/mcp.py").read_text(
@@ -804,16 +804,16 @@ def test_dev_installer_only_offers_jsonl_tail_when_the_destination_exists() -> N
 
 def test_cli_setup_section_lists_redaction_and_links_its_reference() -> None:
     # reference/setup-commands was merged into the Setup section of reference/cli (1.0.4 docs IA).
-    text = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
+    text = (ROOT / "docs-site/content/docs/reference/commands/cli.mdx").read_text(encoding="utf-8")
     setup = text[text.index("\n## Setup"):]
     setup = setup[: setup.index("\n## ", 1)]
     assert "defenseclaw setup redaction" in setup
-    assert "/docs/reference/redaction" in setup
+    assert "/docs/reference/observability/redaction" in setup
 
 
 def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> None:
-    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text(encoding="utf-8")
-    cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
+    redaction = (ROOT / "docs-site/content/docs/reference/observability/redaction.mdx").read_text(encoding="utf-8")
+    cli = (ROOT / "docs-site/content/docs/reference/commands/cli.mdx").read_text(encoding="utf-8")
 
     for text in (redaction, cli):
         assert "defenseclaw setup redaction" in text
@@ -833,11 +833,11 @@ def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> No
 
 
 def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> None:
-    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text(encoding="utf-8")
-    cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
+    redaction = (ROOT / "docs-site/content/docs/reference/observability/redaction.mdx").read_text(encoding="utf-8")
+    cli = (ROOT / "docs-site/content/docs/reference/commands/cli.mdx").read_text(encoding="utf-8")
     setup = cli  # reference/setup-commands was merged into reference/cli
     windows_paths = (
-        ROOT / "docs-site/content/docs/reference/paths.mdx"
+        ROOT / "docs-site/content/docs/reference/configuration/paths.mdx"
     ).read_text(encoding="utf-8")
 
     for expected in (
@@ -931,7 +931,7 @@ def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> Non
 
 
 def test_enterprise_example_uses_secure_managed_redaction_default() -> None:
-    text = (ROOT / "docs-site/content/docs/enterprise/secure-client.mdx").read_text(encoding="utf-8")
+    text = (ROOT / "docs-site/content/docs/enterprise/install/secure-client.mdx").read_text(encoding="utf-8")
     assert "  defaults:\n    redaction_profile: sensitive" in text
 
 
@@ -961,10 +961,10 @@ def test_policy_overview_matches_atomic_invalid_regex_rejection() -> None:
 def test_enterprise_docs_say_how_to_turn_on_ai_discovery() -> None:
     # GAP-1191: ai_discovery.enabled defaults to false, so the managed
     # install pages and every sample config must turn it on explicitly.
-    for page in ("linux.mdx", "macos.mdx"):
+    for page in ("install/linux.mdx", "install/macos.mdx"):
         text = (ROOT / "docs-site/content/docs/enterprise" / page).read_text(encoding="utf-8")
         assert "ai_discovery:\n  enabled: true" in text, page
-    configuration = (ROOT / "docs-site/content/docs/enterprise/configuration.mdx").read_text(encoding="utf-8")
+    configuration = (ROOT / "docs-site/content/docs/enterprise/configure/configuration.mdx").read_text(encoding="utf-8")
     samples = configuration[configuration.index("## Sample configs"):]
     assert samples.count("ai_discovery:\n  enabled: true") == 3
 
@@ -1015,11 +1015,11 @@ def test_v9_migration_docs_name_the_released_config_v8_source() -> None:
         "appendix/upgrade-from-0-8.mdx",
         "get-started/upgrade.mdx",
         "get-started/install.mdx",
-        "reference/cli.mdx",
-        "reference/configuration.mdx",
-        "enterprise/lifecycle.mdx",
-        "reference/llm-providers.mdx",
-        "reference/admission.mdx",
+        "reference/commands/cli.mdx",
+        "reference/configuration/index.mdx",
+        "enterprise/operate/lifecycle.mdx",
+        "reference/configuration/llm-providers.mdx",
+        "reference/scanning/admission.mdx",
     ):
         assert not re.search(r"\b1\.0\.x\b|the 1\.0 (?:behavior|admission)", (docs / page).read_text(encoding="utf-8")), page
 
@@ -1034,7 +1034,7 @@ def test_v9_migration_docs_name_the_released_config_v8_source() -> None:
     assert "reads up to 8" not in migrate and "migrate --check` on" not in back  # 0.8.x has `migrations`, not `migrate`
 
 def test_admission_docs_explain_take_action_false_limits() -> None:
-    text = (ROOT / "docs-site/content/docs/reference/admission.mdx").read_text(encoding="utf-8")
+    text = (ROOT / "docs-site/content/docs/reference/scanning/admission.mdx").read_text(encoding="utf-8")
     section = text.split("Where it runs:", 1)[1].split("## The admission block", 1)[0]
     assert "take_action" in section
     assert "denied" in section and "scanner" in section and "quarantin" in section
@@ -1042,7 +1042,7 @@ def test_admission_docs_explain_take_action_false_limits() -> None:
 
 
 def test_profile_docs_apply_levels_to_content_decisions() -> None:
-    text = (ROOT / "docs-site/content/docs/reference/guardrail-profiles.mdx").read_text(encoding="utf-8")
+    text = (ROOT / "docs-site/content/docs/reference/policy/guardrail-profiles.mdx").read_text(encoding="utf-8")
     section = text.split("| `block_at`, `alert_at` |", 1)[1].split("| `hilt` |", 1)[0]
     assert "prompt" in section and "response" in section and "proxy" in section
     assert "Secure Client" in section
@@ -1050,7 +1050,7 @@ def test_profile_docs_apply_levels_to_content_decisions() -> None:
 
 
 def test_provider_docs_explain_legacy_overlay_migration() -> None:
-    text = (ROOT / "docs-site/content/docs/reference/llm-providers.mdx").read_text(encoding="utf-8")
+    text = (ROOT / "docs-site/content/docs/reference/configuration/llm-providers.mdx").read_text(encoding="utf-8")
     section = text.split("Manage the entries with", 1)[1].split("```bash", 1)[0]
     assert "migration" in section and "request_overrides" in section
     assert "live input" in section and "0.8.x" in section

@@ -12,14 +12,14 @@ def page(name: str) -> str:
 
 class R102HandoffDocsTest(unittest.TestCase):
     def test_fg01_absent_connector_cleanup(self):
-        text = page("reference/cli.mdx")
+        text = page("reference/commands/cli.mdx")
         self.assertIn("the command removes DefenseClaw hook entries it left", text)
         self.assertNotIn(
             ("Remove one connector from the active roster; the gateway restart tears down its hooks. Removing"), text
         )
 
     def test_fg01_doctor_orphaned_hooks_and_otlp(self):
-        text = page("reference/cli.mdx")
+        text = page("reference/commands/cli.mdx")
         self.assertIn("| Orphaned hook entries [connector] | FAIL or WARN |", text)
         self.assertIn(
             ("| Native OTLP credentials | WARN | An agent can keep an old credential after an upgrade, rollback"), text
@@ -80,29 +80,29 @@ class R102HandoffDocsTest(unittest.TestCase):
         self.assertNotIn("They show the same things as the Grafana", text)
 
     def test_fg11_windows_secret_remove_checks_config(self):
-        text = page("enterprise/ai-defense-key.mdx")
+        text = page("enterprise/configure/ai-defense-key.mdx")
         self.assertIn("If it cannot read that config, it refuses", text)
         self.assertIn("leaves the credential in place", text)
 
     def test_fg12_package_uninstall_refusal(self):
-        text = page("enterprise/lifecycle.mdx")
+        text = page("enterprise/operate/lifecycle.mdx")
         self.assertIn("`uninstall_incomplete` keeps the package files", text)
 
     def test_fg12_duplicate_rpm_repair(self):
-        text = page("enterprise/lifecycle.mdx")
+        text = page("enterprise/operate/lifecycle.mdx")
         self.assertIn("`sudo dnf remove --duplicates defenseclaw-enterprise`", text)
         self.assertIn("does not\n  repair the package database", text)
 
     def test_fg12_infopipe_upn_expiry(self):
-        text = page("enterprise/identity-sources.mdx")
+        text = page("enterprise/identity/sources.mdx")
         self.assertIn("kept for at most 24 hours (`upn_source: infopipe_kept`)", text)
 
     def test_fg12_local_groups_follow_nsswitch(self):
-        text = page("enterprise/identity-sources.mdx")
+        text = page("enterprise/identity/sources.mdx")
         self.assertIn("only when `nsswitch.conf` lists `files` or `compat`", text)
 
     def test_fg13_intune_rollback_assignment(self):
-        text = page("enterprise/lifecycle.mdx")
+        text = page("enterprise/operate/lifecycle.mdx")
         self.assertIn("remove the superseding **Required** assignment", text)
 
     def test_fg13_mdm_config_and_result_codes(self):
@@ -117,8 +117,8 @@ class R102HandoffDocsTest(unittest.TestCase):
         self.assertIn("The next run sees a failed result", page("enterprise/mdm/workspace-one.mdx"))
 
     def test_fg13_intune_unix_wrapper_failures(self):
-        linux = page("enterprise/mdm/intune-linux.mdx")
-        mac = page("enterprise/mdm/intune-macos.mdx")
+        linux = page("enterprise/mdm/intune/linux.mdx")
+        mac = page("enterprise/mdm/intune/macos.mdx")
         self.assertIn("older `.deb` is refused before `dpkg -i`", linux)
         self.assertIn("`mdm_staging_full`", linux)
         self.assertIn("`mdm_cancelled`", mac)
@@ -129,7 +129,7 @@ class R102HandoffDocsTest(unittest.TestCase):
         self.assertIn("A cancelled run stops its lifecycle child", page("enterprise/mdm/kandji.mdx"))
 
     def test_fg13_okta_range_source_and_repair(self):
-        text = page("enterprise/identity-okta.mdx")
+        text = page("enterprise/identity/okta.mdx")
         self.assertIn("both `assign-posix` and `install-sssd-okta.sh`", text)
         self.assertIn("SSSD NSS source\nexplicitly", text)
         self.assertIn("it retries the reload even when the\ndrop-in is unchanged", text)
@@ -148,7 +148,7 @@ class R102HandoffDocsTest(unittest.TestCase):
             self.assertIn("`--install-openshell` if OpenShell is not installed there", text)
 
     def test_lfuninst_cli_running_sandbox_option(self):
-        text = page("reference/cli.mdx")
+        text = page("reference/commands/cli.mdx")
         self.assertIn("| `defenseclaw uninstall --stop-sandboxes` |", text)
         self.assertIn("`reset` takes this option too", text)
 
@@ -158,7 +158,7 @@ class R102HandoffDocsTest(unittest.TestCase):
         self.assertNotIn("A live-mounted sandbox is stopped\nand deleted", text)
 
     def test_pr886_api_key_rule_list(self):
-        text = page("reference/configuration.mdx")
+        text = page("reference/configuration/index.mdx")
         self.assertIn("an unset, null or\nempty `cisco_ai_defense.enabled_rules` sends no `config`", text)
         self.assertIn("in the configured order", text)
 

@@ -133,7 +133,7 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
         self.assertNotIn("7 plugin(s) shown; 7 in total, 3 AI", text)
 
     def test_row_37_deprecated_harnesses_have_no_resume_recipe(self):
-        reference = page("reference/sandbox-cli.mdx")
+        reference = page("reference/sandboxes/cli.mdx")
         guide = page("sandboxes/guide.mdx")
         self.assertIn("OpenHands and OmniGent are deprecated", reference)
         self.assertNotIn("| OpenHands | `defenseclaw sandbox connect", reference)
@@ -143,7 +143,7 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
 
     def test_gap_0064_guide_marks_both_harnesses_deprecated(self):
         guide = page("sandboxes/guide.mdx")
-        reference = page("reference/sandbox-cli.mdx")
+        reference = page("reference/sandboxes/cli.mdx")
         self.assertRegex(guide, r"\| OpenHands \| `openhands` \| user \| Deprecated\. \|")
         self.assertRegex(guide, r"\| OmniGent \| `omnigent` \| managed \| Deprecated\. \|")
         deprecated_harness_rows(guide)
@@ -161,7 +161,7 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
         self.assertIn("model-launch notice again", text)
 
     def test_gap_0350_current_kernel_feed_line_has_text_fallback(self):
-        text = page("reference/sandbox-cli.mdx")
+        text = page("reference/sandboxes/cli.mdx")
         section = text.split("### `sandbox kernel-feed install`", 1)[1].split("### `sandbox kernel-feed status`", 1)[0]
         section = " ".join(section.split())
         self.assertIn("An install or update restarts the feed:", section)

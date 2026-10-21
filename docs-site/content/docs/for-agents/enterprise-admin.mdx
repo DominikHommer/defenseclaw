@@ -58,7 +58,7 @@ You are an AI agent working for an administrator, on an admin workstation or a t
    ```
 
    Expected: no error, and the previous config stays in force either way. The CLI is not installed on a managed host; run this where the gateway binary is, or from the unpacked release archive.
-   If it prints an error: report the setting it names and the profile; do not guess a value (`config_invalid` in [Enterprise troubleshooting](/docs/enterprise/troubleshooting)).
+   If it prints an error: report the setting it names and the profile; do not guess a value (`config_invalid` in [Enterprise troubleshooting](/docs/troubleshooting/enterprise)).
 
 3. Show the administrator the config and the artifact name and SHA-256 you will use. Ask: "Run ensure on this host?" Continue only on yes.
 
@@ -86,7 +86,7 @@ You are an AI agent working for an administrator, on an admin workstation or a t
 
    macOS: `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --json`. Windows (elevated): `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone --json`.
    Expected: `coverage_complete` and `security_complete` are `true`; on Linux and macOS `policy.applied` is `true`.
-   If it differs: report the fields and the error codes. See [Enterprise troubleshooting](/docs/enterprise/troubleshooting). Do not edit installed files by hand.
+   If it differs: report the fields and the error codes. See [Enterprise troubleshooting](/docs/troubleshooting/enterprise). Do not edit installed files by hand.
 
 ## Report
 

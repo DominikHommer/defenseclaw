@@ -40,7 +40,7 @@ The contract is `opencode-hooks-v1` with bridge `v7`, source-reviewed for `>=1.1
 | Installed version | What setup does |
 | --- | --- |
 | Older than 1.18.10, or known broken | Refuses in both modes before writing any config, plugin or lock, unless the exploratory `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set. |
-| Newer, such as 1.19.x | Uses the v1 contract and reports an untested newer version ([policy](/docs/reference/hook-contracts#version-policy)). |
+| Newer, such as 1.19.x | Uses the v1 contract and reports an untested newer version ([policy](/docs/reference/apis/hook-contracts#version-policy)). |
 | Not readable | Observe mode continues with a warning. Action mode is refused. |
 
 On Windows, the WinGet path is `%LOCALAPPDATA%\Microsoft\WinGet\Packages\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe\opencode.exe` and the npm path is `%APPDATA%\npm\node_modules\opencode-ai\bin\opencode.exe`. When both exist, WinGet wins. OpenCode, DefenseClaw, the gateway, the plugin and their paths must all stay native Windows. Do not substitute WSL, Docker, a VM, Git Bash, Cygwin or MSYS ([OpenCode's Windows guide](https://opencode.ai/docs/windows-wsl/)).
@@ -100,7 +100,7 @@ Project discovery starts from the pinned workspace and walks up to its nearest `
 
 ## Enterprise standalone profile
 
-DefenseClaw installs its plugin through OpenCode's managed config (`/etc/opencode`, `/Library/Application Support/opencode`, `%ProgramData%\opencode`), with the plugin at `<install root>/share/opencode/defenseclaw.js` ([machine policy](/docs/enterprise/machine-policy)). Under application control OpenCode must be allowed to read that file. OpenCode skips a plugin it cannot read and runs without DefenseClaw, which `status` and `verify` cannot see. On Linux the deb and rpm ship the plugin, so fapolicyd's package-database trust covers it. After a tarball install, add it to a trust file ([application control](/docs/enterprise/threat-model#application-control-must-allow-defenseclaw-files)).
+DefenseClaw installs its plugin through OpenCode's managed config (`/etc/opencode`, `/Library/Application Support/opencode`, `%ProgramData%\opencode`), with the plugin at `<install root>/share/opencode/defenseclaw.js` ([machine policy](/docs/enterprise/configure/machine-policy)). Under application control OpenCode must be allowed to read that file. OpenCode skips a plugin it cannot read and runs without DefenseClaw, which `status` and `verify` cannot see. On Linux the deb and rpm ship the plugin, so fapolicyd's package-database trust covers it. After a tarball install, add it to a trust file ([application control](/docs/enterprise/plan/threat-model#application-control-must-allow-defenseclaw-files)).
 
 ## OpenShell sandbox
 

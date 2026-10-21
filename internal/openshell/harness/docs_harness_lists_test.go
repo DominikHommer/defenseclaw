@@ -69,7 +69,7 @@ func TestDocsListEveryHarness(t *testing.T) {
 
 	// The CLI reference: "named by the command you type (`a`, `b`, ...)",
 	// and a sentence naming the unverified harnesses by display name.
-	bullet = docsBullet(t, docsFile(t, "docs-site", "content", "docs", "reference", "sandbox-cli.mdx"), "- **Harness names.**")
+	bullet = docsBullet(t, docsFile(t, "docs-site", "content", "docs", "reference", "sandboxes", "cli.mdx"), "- **Harness names.**")
 	_, afterOpen, ok := strings.Cut(bullet, "the command you type (")
 	typed, _, ok2 := strings.Cut(afterOpen, ")")
 	if !ok || !ok2 {

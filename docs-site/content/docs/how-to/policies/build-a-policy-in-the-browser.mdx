@@ -32,7 +32,7 @@ Balanced/default exposes 243 declared rules (239 enabled); Permissive 243 (235 e
 - The HITL choice stays in the policy file. Turn it on with `defenseclaw guardrail hilt on --min-severity MEDIUM`.
 - Playground's keep host mode choice omits `guardrail.mode`, so activation keeps the host's mode.
 - Browser regex checks use V8; the gateway uses Go RE2. Final validation happens on the host.
-- Admission first-party entries need an exact asset name and at least one `source_path_contains` path pin ([admission](/docs/reference/admission)).
+- Admission first-party entries need an exact asset name and at least one `source_path_contains` path pin ([admission](/docs/reference/scanning/admission)).
 
 ## Install the policy
 

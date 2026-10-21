@@ -20,8 +20,8 @@ keywords:
   that runs commands as SYSTEM on Windows and as root on Linux and macOS, and
   agents that run as standard users.
 
-The [feature table](/docs/support-matrix#features) compares the editions. The
-[enterprise route table](/docs/support-matrix#enterprise) lists which agents are
+The [feature table](/docs/get-started/support-matrix#features) compares the editions. The
+[enterprise route table](/docs/get-started/support-matrix#enterprise) lists which agents are
 protected on which OS.
 
 <Callout title="Ready to deploy?">
@@ -30,7 +30,7 @@ choosing a profile to a ringed rollout.
 </Callout>
 
 In the config, enterprise deployment is `deployment_mode: managed_enterprise`
-([definition](/docs/enterprise/concepts#managed_enterprise)).
+([definition](/docs/enterprise/plan/concepts#managed_enterprise)).
 
 ## Two profiles
 
@@ -40,7 +40,7 @@ In the config, enterprise deployment is `deployment_mode: managed_enterprise`
 | Platforms | Windows, Linux, macOS | Windows, macOS |
 | Who decides on each tool call | The local policy engine (rule packs, policy, CodeGuard). Cisco AI Defense is added when you store an API key | Cisco AI Defense only. The local detectors are off |
 | If Cisco AI Defense is unreachable | The local verdict stands | The Secure Client posture applies |
-| Documented in | This section | [Secure Client managed deployment](/docs/enterprise/secure-client) |
+| Documented in | This section | [Secure Client managed deployment](/docs/enterprise/install/secure-client) |
 
 - **One profile per computer.** Both profiles use the same gateway port, and on
   Windows the same service names. Uninstall one before you install the other.
@@ -58,14 +58,14 @@ The rest of this section covers the standalone profile.
 
 Every endpoint runs four services and one program:
 
-- The [gateway](/docs/enterprise/concepts#gateway) decides on each tool call.
-- The [guardian](/docs/enterprise/concepts#guardian) installs and repairs each
+- The [gateway](/docs/enterprise/plan/concepts#gateway) decides on each tool call.
+- The [guardian](/docs/enterprise/plan/concepts#guardian) installs and repairs each
   user's hooks.
-- The [enumerator](/docs/enterprise/concepts#enumerator) finds the users to
+- The [enumerator](/docs/enterprise/plan/concepts#enumerator) finds the users to
   protect.
-- The [sensor helper](/docs/enterprise/concepts#sensor-helper) answers a fixed
+- The [sensor helper](/docs/enterprise/plan/concepts#sensor-helper) answers a fixed
   set of privileged discovery questions for the gateway.
-- The [hook](/docs/enterprise/concepts#hook) (`defenseclaw-hook`) is not a
+- The [hook](/docs/enterprise/plan/concepts#hook) (`defenseclaw-hook`) is not a
   service. It is an administrator-owned program that the agent runs as the user.
 
 <Flow
@@ -118,9 +118,9 @@ and DefenseClaw's in-agent plugins reach it only through the hook socket,
 each caller's uid, and there is no TCP fallback. On Windows they use loopback
 with credentials bound to the user's SID.
 
-The files in each zone, per OS, are in the [threat model](/docs/enterprise/threat-model#trust-zones)
-and on the install pages: [Windows](/docs/enterprise/windows#layout),
-[Linux](/docs/enterprise/linux#layout), [macOS](/docs/enterprise/macos#layout).
+The files in each zone, per OS, are in the [threat model](/docs/enterprise/plan/threat-model#trust-zones)
+and on the install pages: [Windows](/docs/enterprise/install/windows#layout),
+[Linux](/docs/enterprise/install/linux#layout), [macOS](/docs/enterprise/install/macos#layout).
 
 ## Who can change what
 
@@ -129,14 +129,14 @@ and on the install pages: [Windows](/docs/enterprise/windows#layout),
 | Config and policies, including thresholds and block and allow lists | Writes | The gateway reads them. The lifecycle is the only writer of `config.yaml` | No write. The local config tools refuse |
 | Secrets | Writes | The gateway reads the one it needs | No access |
 | Binaries and services | Installs, upgrades, removes | Run them | Runs the hook. Cannot stop, change or replace a service |
-| Per-user hook config | Not needed | The guardian writes DefenseClaw's entries, as the user | Owns the files. The guardian repairs its entries, and the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) handles hooks the user adds |
-| Vendor machine policy | Writes. DefenseClaw changes only its own entries | The lifecycle or the guardian writes DefenseClaw's entries ([who writes it](/docs/enterprise/machine-policy#who-writes-machine-policy)) | The agent reads it. No write |
+| Per-user hook config | Not needed | The guardian writes DefenseClaw's entries, as the user | Owns the files. The guardian repairs its entries, and the [foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard) handles hooks the user adds |
+| Vendor machine policy | Writes. DefenseClaw changes only its own entries | The lifecycle or the guardian writes DefenseClaw's entries ([who writes it](/docs/enterprise/configure/machine-policy#who-writes-machine-policy)) | The agent reads it. No write |
 | Audit logs | Reads | The gateway writes them | No access |
 
 An AI agent has exactly the rights of the user it runs as. DefenseClaw does not
 defend a computer from its own administrators: an agent that runs with
 unrestricted `sudo` or administrator rights is an administrator. The
-[threat model](/docs/enterprise/threat-model#what-a-standard-user-cannot-do)
+[threat model](/docs/enterprise/plan/threat-model#what-a-standard-user-cannot-do)
 lists what a standard user cannot do and the risks that remain.
 
 ## Policy changes on a managed host
@@ -144,7 +144,7 @@ lists what a standard user cannot do and the risks that remain.
 On a managed standalone host, `config.yaml` and the policy assets it names are
 the only policy. Only the lifecycle (and a migration it runs) writes the config.
 Under the Secure Client profile none of this applies. The model is in
-[Configuration: one source of truth](/docs/reference/source-of-truth).
+[Configuration: one source of truth](/docs/reference/configuration/source-of-truth).
 
 These attempts are refused, also for root, and write nothing:
 
@@ -178,7 +178,7 @@ asset_policy:
 - **Runtime actions stay allowed.** Quarantine and restore, runtime disable and
   enable, approvals (HITL) and discovery are runtime state, not policy.
 - **The environment cannot weaken the host.** Every `DEFENSECLAW_*` variable
-  has a `managed` setting in the [registry](/docs/reference/env-vars). `ignore`
+  has a `managed` setting in the [registry](/docs/reference/configuration/env-vars). `ignore`
   variables read as unset, from the process environment and from `.env` files.
   `tighten_only` variables (`DEFENSECLAW_FAIL_MODE`,
   `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY`) count only
@@ -200,19 +200,19 @@ asset_policy:
 | macOS | macOS 13.0 or later on Apple silicon, for the `defenseclaw-enterprise-<version>-darwin-arm64.pkg` package. Run as root |
 
 Details are under **Requirements** on each install page:
-[Windows](/docs/enterprise/windows#requirements),
-[Linux](/docs/enterprise/linux#requirements),
-[macOS](/docs/enterprise/macos#requirements).
+[Windows](/docs/enterprise/install/windows#requirements),
+[Linux](/docs/enterprise/install/linux#requirements),
+[macOS](/docs/enterprise/install/macos#requirements).
 
 DefenseClaw protects each agent in one of two ways:
 
 | Route | Agents |
 | --- | --- |
-| [Machine policy](/docs/enterprise/concepts#machine-policy-connector): hooks in the vendor's administrator-owned policy files | Claude Code, Codex, Cursor, GitHub Copilot, OpenCode (with DefenseClaw's managed plugin) |
-| [Per-user](/docs/enterprise/concepts#per-user-connector): the guardian writes and repairs the hook in each enrolled user's config | Devin, Antigravity, Hermes, Amp, Kiro, and OpenCode while the managed plugin is not in force |
+| [Machine policy](/docs/enterprise/plan/concepts#machine-policy-connector): hooks in the vendor's administrator-owned policy files | Claude Code, Codex, Cursor, GitHub Copilot, OpenCode (with DefenseClaw's managed plugin) |
+| [Per-user](/docs/enterprise/plan/concepts#per-user-connector): the guardian writes and repairs the hook in each enrolled user's config | Devin, Antigravity, Hermes, Amp, Kiro, and OpenCode while the managed plugin is not in force |
 
 OpenClaw and ZeptoClaw are not supported in enterprise
-deployments. The [support matrix](/docs/support-matrix#enterprise) lists the
+deployments. The [support matrix](/docs/get-started/support-matrix#enterprise) lists the
 verified agent and OS combinations, and each [connector page](/docs/connectors#platform-support)
 lists agent versions.
 
@@ -221,7 +221,7 @@ lists agent versions.
 The administrator config is one YAML file. This one protects Codex and Claude
 Code in observe mode, so policy verdicts do not block yet. With
 `guardrail.rule_pack` unset, the gateway uses the rule packs built into it; for
-your own, see [Custom rule packs](/docs/enterprise/configuration#custom-rule-packs).
+your own, see [Custom rule packs](/docs/enterprise/configure/configuration#custom-rule-packs).
 
 <Tabs items={['Linux', 'macOS', 'Windows']}>
   <Tab value="Linux">
@@ -293,7 +293,7 @@ guardrail:
   lifecycle writes when you supply none lists no agents. On Windows, install and
   `ensure` require a config. To leave a listed agent unprotected, set
   `enabled: false` or `ownership: "off"`. See
-  [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
+  [Choose the agents to protect](/docs/enterprise/configure/configuration#choose-the-agents-to-protect).
 - **Observe mode does not block on policy verdicts.** It records every decision,
   including what it would have blocked. Set `guardrail.mode: action` to enforce.
   The deployment's own checks apply in both modes: a tool call is refused while
@@ -304,17 +304,17 @@ guardrail:
 - **Unusual layouts need enrollment hints (Linux and macOS).** Homes outside
   `/home`, `/var/home` or `/Users` go in `enterprise.enrollment.home_roots`.
   Agents installed under an administrator prefix go in
-  `enterprise.enrollment.agent_prefixes`. See [Enrollment](/docs/enterprise/enrollment#home-roots-and-install-prefixes).
+  `enterprise.enrollment.agent_prefixes`. See [Enrollment](/docs/enterprise/configure/enrollment#home-roots-and-install-prefixes).
 
 Where the file goes on each OS and every `enterprise.*` setting are in
-[Configuration](/docs/enterprise/configuration). The optional Cisco AI Defense
-key never goes in the config; store it as [Cisco AI Defense key](/docs/enterprise/ai-defense-key) shows.
+[Configuration](/docs/enterprise/configure/configuration). The optional Cisco AI Defense
+key never goes in the config; store it as [Cisco AI Defense key](/docs/enterprise/configure/ai-defense-key) shows.
 
 ## Next steps
 
 <Cards>
   <Card title="Deploy to a fleet" href="/docs/enterprise/get-started" description="Six steps from profile and agents to your MDM recipe, ensure and a ringed rollout." />
-  <Card title="Plan a rollout" href="/docs/enterprise/rollout" description="Choose agents and users, pilot in observe mode, expand in rings." />
-  <Card title="Install on one computer" href="/docs/enterprise/windows" description="Windows, Linux and macOS install pages, with layout, verify and remove." />
-  <Card title="Threat model" href="/docs/enterprise/threat-model" description="Trust zones, what a standard user cannot do, and the risks that remain." />
+  <Card title="Plan a rollout" href="/docs/enterprise/plan/rollout" description="Choose agents and users, pilot in observe mode, expand in rings." />
+  <Card title="Install on one computer" href="/docs/enterprise/install/windows" description="Windows, Linux and macOS install pages, with layout, verify and remove." />
+  <Card title="Threat model" href="/docs/enterprise/plan/threat-model" description="Trust zones, what a standard user cannot do, and the risks that remain." />
 </Cards>

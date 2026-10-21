@@ -148,7 +148,7 @@ defenseclaw sandbox pull myapp-1c2d --patch-out fix.patch
 | `--accept-sensitive` | Bring back changes that can run code without asking. |
 | `--force` | Override blocking review gates or an existing branch or patch file. |
 
-Without a mode, `pull` shows the review only. A folder without git has no branches: use `--apply` or `--patch-out`. A branch starts at the commit your checkout was on when the copy was made and holds only what the sandbox changed. Uncommitted edits that were in the copy stay in your working tree. [`sandbox pull`](/docs/reference/sandbox-cli#sandbox-pull) lists the edge cases.
+Without a mode, `pull` shows the review only. A folder without git has no branches: use `--apply` or `--patch-out`. A branch starts at the commit your checkout was on when the copy was made and holds only what the sandbox changed. Uncommitted edits that were in the copy stay in your working tree. [`sandbox pull`](/docs/reference/sandboxes/cli#sandbox-pull) lists the edge cases.
 
 Applying a copy's work and undoing it:
 

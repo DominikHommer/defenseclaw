@@ -37,7 +37,7 @@ DefenseClaw collects each event once and builds one record from it. The record i
 - **Local history.** A SQLite database in the DefenseClaw data directory keeps every collected log, 7 days by default. It cannot be turned off or filtered. A small set of content-free compliance events is always written, even when you turn off collection for their bucket.
 - **Destinations.** With no destination configured, nothing leaves the computer. An enabled destination with no filter receives every bucket and every signal its kind supports. Adding a second destination adds a second copy. It is not a failover.
 - **Independent delivery.** Each destination has its own bounded queue, retry and health. A slow or failing destination does not block agents or other destinations.
-- **Redaction.** DefenseClaw redacts a record once, per destination, before it is sent. Four built-in profiles run from `none` (the default) to `strict`. See [Redaction](/docs/reference/redaction).
+- **Redaction.** DefenseClaw redacts a record once, per destination, before it is sent. Four built-in profiles run from `none` (the default) to `strict`. See [Redaction](/docs/reference/observability/redaction).
 
 <Callout type="warn" title="The default sends full content">
 With no redaction profile, an enabled destination receives prompts, responses, tool arguments, file paths and identifiers as recorded. Choose a profile before you send to anything outside your trust boundary.
@@ -82,5 +82,5 @@ defenseclaw setup observability list
 ## Reference
 
 - [Observability reference](/docs/reference/observability): buckets, routes, delivery limits, failure circuits, alert runbooks.
-- [Redaction](/docs/reference/redaction) and [Dashboards](/docs/reference/dashboards).
-- [Sandbox telemetry](/docs/reference/sandbox-telemetry) and [Telemetry identity](/docs/reference/telemetry-identity).
+- [Redaction](/docs/reference/observability/redaction) and [Dashboards](/docs/reference/observability/dashboards).
+- [Sandbox telemetry](/docs/reference/sandboxes/telemetry) and [Telemetry identity](/docs/reference/observability/telemetry-identity).

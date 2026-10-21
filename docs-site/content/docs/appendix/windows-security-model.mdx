@@ -68,7 +68,7 @@ redaction. A new install's redaction profile is `none`. Therefore:
   stored or sent.
 
 Treat the data directory and any audit export as sensitive user data. Configure
-and verify [redaction profiles](/docs/reference/redaction) before routing
+and verify [redaction profiles](/docs/reference/observability/redaction) before routing
 records to another system. `defenseclaw config show` masks secret values and
 has no option to reveal them.
 
@@ -218,15 +218,15 @@ machine policy. Machine-wide deployment, including Claude Code managed hooks
 published through Claude Code's managed-settings policy, Codex and Cursor
 managed hooks, and GitHub Copilot machine policy (standalone profile only), is
 part of [enterprise deployment](/docs/enterprise): the
-[standalone profile](/docs/enterprise/windows) or the
-[Secure Client profile](/docs/enterprise/secure-client#native-windows-claude-code-managed-hooks).
+[standalone profile](/docs/enterprise/install/windows) or the
+[Secure Client profile](/docs/enterprise/install/secure-client#native-windows-claude-code-managed-hooks).
 
 ## Security operations links
 
 - [Configuration](/docs/reference/configuration)
-- [Environment variables](/docs/reference/env-vars)
-- [Fail modes](/docs/reference/fail-modes)
-- [Redaction](/docs/reference/redaction)
+- [Environment variables](/docs/reference/configuration/env-vars)
+- [Fail modes](/docs/reference/configuration/fail-modes)
+- [Redaction](/docs/reference/observability/redaction)
 - [Observability](/docs/features/observability)
 - [Scan a skill](/docs/how-to/scanning/scan-a-skill)
 - [Scan an MCP server](/docs/how-to/scanning/scan-an-mcp-server)

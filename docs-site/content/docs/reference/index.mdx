@@ -13,68 +13,68 @@ Lookup pages for after you know what you are doing. `defenseclaw <command> --hel
 ## Commands
 
 <Cards>
-  <Card title="CLI commands" href="/docs/reference/cli" description="Every defenseclaw and defenseclaw-gateway command, grouped by task, with exit codes." />
-  <Card title="Sandbox CLI" href="/docs/reference/sandbox-cli" description="Every defenseclaw sandbox command and flag." />
-  <Card title="init and quickstart" href="/docs/reference/first-run" description="Flags and report fields for first-run setup." />
-  <Card title="Installer" href="/docs/reference/installer" description="install.sh and install.ps1 options, environment and exit codes." />
-  <Card title="setup guardrail" href="/docs/reference/guardrail-setup" description="Every flag, the prompt-to-flag mapping and connector aliases." />
+  <Card title="CLI commands" href="/docs/reference/commands/cli" description="Every defenseclaw and defenseclaw-gateway command, grouped by task, with exit codes." />
+  <Card title="Sandbox CLI" href="/docs/reference/sandboxes/cli" description="Every defenseclaw sandbox command and flag." />
+  <Card title="init and quickstart" href="/docs/reference/commands/first-run" description="Flags and report fields for first-run setup." />
+  <Card title="Installer" href="/docs/reference/commands/installer" description="install.sh and install.ps1 options, environment and exit codes." />
+  <Card title="setup guardrail" href="/docs/reference/commands/guardrail-setup" description="Every flag, the prompt-to-flag mapping and connector aliases." />
 </Cards>
 
 ## Configuration
 
 <Cards>
   <Card title="Configuration" href="/docs/reference/configuration" description="config.yaml keys for config_version 9, one table per section." />
-  <Card title="Source of truth" href="/docs/reference/source-of-truth" description="What is configuration, what is derived and what is runtime state." />
-  <Card title="Environment variables" href="/docs/reference/env-vars" description="Every variable DefenseClaw reads, with defaults and accepted values." />
-  <Card title="Keys" href="/docs/reference/keys" description="The credentials registry and how keys are resolved." />
-  <Card title="Paths" href="/docs/reference/paths" description="Where DefenseClaw keeps programs, data and agent files on each OS." />
-  <Card title="Fail modes" href="/docs/reference/fail-modes" description="What a hook does when the gateway is unreachable or answers badly." />
+  <Card title="Source of truth" href="/docs/reference/configuration/source-of-truth" description="What is configuration, what is derived and what is runtime state." />
+  <Card title="Environment variables" href="/docs/reference/configuration/env-vars" description="Every variable DefenseClaw reads, with defaults and accepted values." />
+  <Card title="Keys" href="/docs/reference/configuration/keys" description="The credentials registry and how keys are resolved." />
+  <Card title="Paths" href="/docs/reference/configuration/paths" description="Where DefenseClaw keeps programs, data and agent files on each OS." />
+  <Card title="Fail modes" href="/docs/reference/configuration/fail-modes" description="What a hook does when the gateway is unreachable or answers badly." />
 </Cards>
 
 ## Guardrail and policy
 
 <Cards>
-  <Card title="Policy defaults" href="/docs/reference/policy-defaults" description="Presets, rule packs and levels that ship." />
-  <Card title="Thresholds" href="/docs/reference/thresholds" description="Scopes, precedence and the default posture." />
-  <Card title="Rules" href="/docs/reference/rules" description="Rule packs, custom packs and layering." />
-  <Card title="Detection" href="/docs/reference/detection" description="The deterministic detection rule inventory and selectors." />
-  <Card title="CEL" href="/docs/reference/cel/engine" description="The CEL engine, fields and tool-call state." />
-  <Card title="Rule recipes" href="/docs/reference/rule-recipes" description="The generated recipe catalog." />
-  <Card title="Regex cookbook" href="/docs/reference/regex-cookbook" description="RE2 patterns by category." />
-  <Card title="Guardrail profiles" href="/docs/reference/guardrail-profiles" description="Per-user and per-group profile keys and matching." />
-  <Card title="LLM providers" href="/docs/reference/llm-providers" description="Key resolution, provider catalog and overrides." />
+  <Card title="Policy defaults" href="/docs/reference/policy/defaults" description="Presets, rule packs and levels that ship." />
+  <Card title="Thresholds" href="/docs/reference/policy/thresholds" description="Scopes, precedence and the default posture." />
+  <Card title="Rules" href="/docs/reference/policy/rules" description="Rule packs, custom packs and layering." />
+  <Card title="Detection" href="/docs/reference/policy/detection" description="The deterministic detection rule inventory and selectors." />
+  <Card title="CEL" href="/docs/reference/policy/cel/engine" description="The CEL engine, fields and tool-call state." />
+  <Card title="Rule recipes" href="/docs/reference/policy/rule-recipes" description="The generated recipe catalog." />
+  <Card title="Regex cookbook" href="/docs/reference/policy/regex-cookbook" description="RE2 patterns by category." />
+  <Card title="Guardrail profiles" href="/docs/reference/policy/guardrail-profiles" description="Per-user and per-group profile keys and matching." />
+  <Card title="LLM providers" href="/docs/reference/configuration/llm-providers" description="Key resolution, provider catalog and overrides." />
 </Cards>
 
 ## Skills, MCP and discovery
 
 <Cards>
-  <Card title="Admission" href="/docs/reference/admission" description="admission and asset_policy keys, actions and defaults." />
-  <Card title="Scanners" href="/docs/reference/scanners" description="Skill and MCP scanner configuration." />
-  <Card title="Registries" href="/docs/reference/registries" description="Registry kinds, subcommands and sync." />
-  <Card title="AI Discovery" href="/docs/reference/ai-discovery" description="What is discovered, from where, and where it goes." />
+  <Card title="Admission" href="/docs/reference/scanning/admission" description="admission and asset_policy keys, actions and defaults." />
+  <Card title="Scanners" href="/docs/reference/scanning/scanners" description="Skill and MCP scanner configuration." />
+  <Card title="Registries" href="/docs/reference/scanning/registries" description="Registry kinds, subcommands and sync." />
+  <Card title="AI Discovery" href="/docs/reference/scanning/ai-discovery" description="What is discovered, from where, and where it goes." />
 </Cards>
 
 ## Connectors, sandboxes and observability
 
 <Cards>
-  <Card title="Capability matrix" href="/docs/reference/capability-matrix" description="What each connector can observe and enforce." />
-  <Card title="Hook contracts" href="/docs/reference/hook-contracts" description="Versioned hook contracts and setup-time checks." />
+  <Card title="Capability matrix" href="/docs/reference/apis/capability-matrix" description="What each connector can observe and enforce." />
+  <Card title="Hook contracts" href="/docs/reference/apis/hook-contracts" description="Versioned hook contracts and setup-time checks." />
   <Card title="Connector details" href="/docs/reference/connectors" description="Per-connector hooks, files and limits." />
-  <Card title="Sandbox policy" href="/docs/reference/sandbox-policy" description="Policy pack files, settings and admin constraints." />
-  <Card title="Sandbox network" href="/docs/reference/sandbox-network" description="How a site is decided, profiles and lists." />
+  <Card title="Sandbox policy" href="/docs/reference/sandboxes/policy" description="Policy pack files, settings and admin constraints." />
+  <Card title="Sandbox network" href="/docs/reference/sandboxes/network" description="How a site is decided, profiles and lists." />
   <Card title="Observability" href="/docs/reference/observability" description="Destinations, routes, delivery tuning and runbooks." />
-  <Card title="Redaction" href="/docs/reference/redaction" description="Profiles, field classes and modes." />
-  <Card title="Dashboards" href="/docs/reference/dashboards" description="The Grafana dashboards and Agent360 panels." />
-  <Card title="Sandbox telemetry" href="/docs/reference/sandbox-telemetry" description="Sandbox records, attributes and metrics." />
-  <Card title="Telemetry identity" href="/docs/reference/telemetry-identity" description="End-user identity attributes on telemetry." />
+  <Card title="Redaction" href="/docs/reference/observability/redaction" description="Profiles, field classes and modes." />
+  <Card title="Dashboards" href="/docs/reference/observability/dashboards" description="The Grafana dashboards and Agent360 panels." />
+  <Card title="Sandbox telemetry" href="/docs/reference/sandboxes/telemetry" description="Sandbox records, attributes and metrics." />
+  <Card title="Telemetry identity" href="/docs/reference/observability/telemetry-identity" description="End-user identity attributes on telemetry." />
 </Cards>
 
 ## APIs and apps
 
 <Cards>
-  <Card title="Gateway API" href="/docs/reference/gateway-api" description="The HTTP routes defenseclaw-gateway serves to hooks, the CLI and the TUI." />
-  <Card title="TUI" href="/docs/reference/tui" description="Every panel, view and key." />
+  <Card title="Gateway API" href="/docs/reference/apis/gateway-api" description="The HTTP routes defenseclaw-gateway serves to hooks, the CLI and the TUI." />
+  <Card title="TUI" href="/docs/reference/commands/tui" description="Every panel, view and key." />
   <Card title="Edge Connector" href="/docs/reference/edge-connector/architecture" description="Architecture, policies, configuration and fleet API." />
 </Cards>
 
-To build a non-interactive `defenseclaw setup guardrail` command, use the [command generator](/docs/how-to/guardrail/generate-a-setup-command).
+To build a non-interactive `defenseclaw setup guardrail` command, use the [command generator](/docs/how-to/agents/generate-a-setup-command).

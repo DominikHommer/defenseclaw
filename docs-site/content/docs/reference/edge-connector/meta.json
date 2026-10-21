@@ -1,4 +1,9 @@
 {
   "title": "Edge Connector",
-  "pages": ["architecture", "policies", "configuration", "api"]
+  "pages": [
+    "architecture",
+    "policies",
+    "configuration",
+    "api"
+  ]
 }

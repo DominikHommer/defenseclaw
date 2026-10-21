@@ -408,7 +408,7 @@ def update_file(path: Path, payload: str, sentinel_begin: str, sentinel_end: str
     return render_mdx()
 
 
-_TARGET_MDX = _REPO_ROOT / "docs-site" / "content" / "docs" / "reference" / "env-vars.mdx"
+_TARGET_MDX = _REPO_ROOT / "docs-site" / "content" / "docs" / "reference" / "configuration" / "env-vars.mdx"
 
 
 def write_bundled_registry() -> bool:

@@ -11,7 +11,7 @@ keywords:
   - DefenseClaw rollback
 ---
 
-`config_version: 9` makes `config.yaml` the only place an administrator's decisions live ([Source of truth](/docs/reference/source-of-truth)). DefenseClaw 0.8.x kept some elsewhere: admission actions and thresholds in `policies/rego/data.json`, operator block and allow entries in `audit.db`, scanner switches in loose keys. The migration copies each into `config.yaml`, keeps the old files, and records every value it moved and every disagreement it settled. You rarely run it by hand; this page shows what it does so you can check the result.
+`config_version: 9` makes `config.yaml` the only place an administrator's decisions live ([Source of truth](/docs/reference/configuration/source-of-truth)). DefenseClaw 0.8.x kept some elsewhere: admission actions and thresholds in `policies/rego/data.json`, operator block and allow entries in `audit.db`, scanner switches in loose keys. The migration copies each into `config.yaml`, keeps the old files, and records every value it moved and every disagreement it settled. You rarely run it by hand; this page shows what it does so you can check the result.
 
 ## Who needs it
 
@@ -19,7 +19,7 @@ keywords:
 | --- | --- |
 | Per-user install of 0.8.5 or later (`config_version: 8`) | The upgrade runs the migration: `defenseclaw upgrade`, or the install command on 0.8.7 and older and on Windows ([Upgrading from 0.x to 1.0](/docs/get-started/upgrade/)). Until it has run, the gateway reads your v8 file as if it were migrated, in memory only, so nothing you configured stops applying. CLI reads such as `defenseclaw config get --effective` still show what the v8 file itself says. |
 | Per-user install of 0.8.4 or older (`config_version: 7`) | The same upgrade first converts the file to version 8 (the one-time 0.x import), then runs this migration. |
-| Managed standalone host (`deployment_mode: managed_enterprise`, `enterprise.profile: standalone`) | The lifecycle (`ensure` or `upgrade`) migrates a version 8 admin config in place and keeps `config.yaml.v8.bak`. Operator rows in `audit.db` are not moved: the admin config is the policy. See [Lifecycle](/docs/enterprise/lifecycle). |
+| Managed standalone host (`deployment_mode: managed_enterprise`, `enterprise.profile: standalone`) | The lifecycle (`ensure` or `upgrade`) migrates a version 8 admin config in place and keeps `config.yaml.v8.bak`. Operator rows in `audit.db` are not moved: the admin config is the policy. See [Lifecycle](/docs/enterprise/operate/lifecycle). |
 | Secure Client profile | No change. It keeps its existing path: the gateway does not migrate its config in memory. |
 | A fresh `defenseclaw init` | `init` writes `config_version: 9`. There is nothing to migrate. |
 
@@ -200,7 +200,7 @@ admission:
   and `runtime` triple, as the MCP `low` entry shows. The MCP entries appear
   because 0.8.x shipped stricter MCP overrides in `scanner_overrides`; the
   migration keeps what enforcement did. See
-  [Admission](/docs/reference/admission) for the shorthands.
+  [Admission](/docs/reference/scanning/admission) for the shorthands.
 - When any severity of a type differs from the built-in, all five severities of
   that type are written.
 - `scan_on_install` and `allow_list_bypass_scan` are written to
@@ -238,7 +238,7 @@ name is inferred from those values.
 different paths: `config.yaml` for hook tool calls, the rule pack's posture for
 hook prompts, and `data.json` for the LLM proxy. In v9 `guardrail.block_at` and
 `guardrail.alert_at` are the only source and apply to hook prompts, hook tool
-calls and the proxy alike ([Thresholds](/docs/reference/thresholds)). The
+calls and the proxy alike ([Thresholds](/docs/reference/policy/thresholds)). The
 migration settles the old values like this:
 
 | In v8 | In v9 |
@@ -316,7 +316,7 @@ defenseclaw config set admission.defaults.allow_list_bypass_scan false
 `rule_pack_dir` is removed at every scope (global, `guardrail.connectors`,
 `guardrail.profiles` and a profile's connectors). It becomes `rule_pack` and,
 where needed, `custom_packs` and `rules.protections`
-([Rules](/docs/reference/rules)).
+([Rules](/docs/reference/policy/rules)).
 
 ```yaml title="config.yaml (v8)"
 guardrail:
@@ -423,7 +423,7 @@ now detection-only
 until you mark the record as read with `defenseclaw-gateway config migrate --ack`.
 
 `defenseclaw doctor` warns about them until you give each an expression
-([CEL rules](/docs/reference/cel/authoring)). A pack with nothing to rewrite is
+([CEL rules](/docs/reference/policy/cel/authoring)). A pack with nothing to rewrite is
 pinned as it is, and its rules are still named. The original folder is kept
 for a rollback to 0.8.x. The migration record (`migration-v9.json`) lists what
 moved, under `detection_only_rules` the rules that no longer block a tool
@@ -448,7 +448,7 @@ managed host, which the migration never rewrites. The error names the edit:
 move the rules of one file into the other, delete it, and run the upgrade
 again. Later edits
 to the pack's files change its digest: validate the pack and update the digest
-(see [Rules](/docs/reference/rules)).
+(see [Rules](/docs/reference/policy/rules)).
 
 ```yaml title="config.yaml (v8, a protected-pack folder)"
 guardrail:
@@ -525,7 +525,7 @@ scanners:
 
 The remaining scanner keys are in the
 [configuration reference](/docs/reference/configuration#scanners). The scanner
-pages explain the gate and the judge: [Scanners](/docs/reference/scanners).
+pages explain the gate and the judge: [Scanners](/docs/reference/scanning/scanners).
 
 ### update_check
 
@@ -595,7 +595,7 @@ asset_policy:
   in `actions_rows_ignored` and adds the note
   `local_enforcement_entries_ignored`, because the admin config is the policy.
 
-See [Admission](/docs/reference/admission) for `asset_policy` and how block and
+See [Admission](/docs/reference/scanning/admission) for `asset_policy` and how block and
 allow entries are matched.
 
 ### AI discovery signature packs
@@ -679,7 +679,7 @@ hold, migration records a note and leaves the entire unmarked overlay as a
 `llm_providers`. Preserve and review that file until the overrides are no
 longer needed. Managed hosts do not import local provider overlays into their
 admin config. See
-[Custom providers](/docs/reference/llm-providers).
+[Custom providers](/docs/reference/configuration/llm-providers).
 
 ### Keys that no longer exist
 
@@ -959,4 +959,4 @@ Setup steps above). It restores the previous binary, config and data
 together.
 
 For a managed host, the older release must be given the version 8 admin config
-explicitly; see [Lifecycle](/docs/enterprise/lifecycle).
+explicitly; see [Lifecycle](/docs/enterprise/operate/lifecycle).

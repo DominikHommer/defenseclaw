@@ -70,7 +70,7 @@ When a newer release exists, interactive commands and the TUI show one line: `De
 defenseclaw config set update.check false
 ```
 
-On Windows the `DisableSelfUpdate` enterprise policy also turns the notice off. A managed device does not self-update; the [lifecycle](/docs/enterprise/lifecycle) applies updates.
+On Windows the `DisableSelfUpdate` enterprise policy also turns the notice off. A managed device does not self-update; the [lifecycle](/docs/enterprise/operate/lifecycle) applies updates.
 
 ### Install from a mirror
 
@@ -80,7 +80,7 @@ defenseclaw config set update.source https://mirror.example.com/defenseclaw
 
 The mirror must serve the paths GitHub serves: `releases/latest` (a redirect to the newest tag) and `releases/download/<tag>/` with the installer, the release files, `checksums.txt` and `checksums.txt.bundle`.
 
-`update.source` changes only where files come from. The certificate identity that signed the official releases is built into DefenseClaw, so a mirror must serve the official signed `checksums.txt` and its bundle, and the machine needs `cosign` 2.0 or later. Without it, the upgrade stops before it runs anything. `DEFENSECLAW_REPO` is the deprecated alias; `update.source` wins when both are set. A first install has no `config.yaml`, so use `DEFENSECLAW_REPO` for the installer there ([Installer](/docs/reference/installer#mirror)).
+`update.source` changes only where files come from. The certificate identity that signed the official releases is built into DefenseClaw, so a mirror must serve the official signed `checksums.txt` and its bundle, and the machine needs `cosign` 2.0 or later. Without it, the upgrade stops before it runs anything. `DEFENSECLAW_REPO` is the deprecated alias; `update.source` wins when both are set. A first install has no `config.yaml`, so use `DEFENSECLAW_REPO` for the installer there ([Installer](/docs/reference/commands/installer#mirror)).
 
 ## Renamed and removed connectors
 

@@ -80,7 +80,7 @@ What setup does, in order:
 
 On Linux, setup gives each per-user Docker gateway its own sandbox namespace, `defenseclaw-u<uid>`, when that account has no sandbox in OpenShell's `default` namespace. If the gateway still has sandboxes there, setup leaves its namespace in place and `defenseclaw sandbox doctor` warns `docker-namespace` until those sandboxes are gone.
 
-Setup is safe to run again. When sandboxes are running, it asks before it restarts the shared gateway. Flags and the harness list are in the [sandbox CLI reference](/docs/reference/sandbox-cli#sandbox-setup). You can run the same setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenShell)**), which runs `defenseclaw sandbox setup --non-interactive` with your answers.
+Setup is safe to run again. When sandboxes are running, it asks before it restarts the shared gateway. Flags and the harness list are in the [sandbox CLI reference](/docs/reference/sandboxes/cli#sandbox-setup). You can run the same setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenShell)**), which runs `defenseclaw sandbox setup --non-interactive` with your answers.
 
 </Step>
 
@@ -150,7 +150,7 @@ On a Linux host with KVM, OpenShell's MicroVM driver (`vm`) runs each sandbox as
 
 Setup installs none of this. KVM access and `e2fsprogs` need an administrator and the driver is a download you verify, so setup stops with the way on and asks you to run it again.
 
-With the MicroVM driver, every run works on a copy, `--context` is refused, `--cpu` and `--memory` have no effect, and the first start of an image prepares a disk of about 5 GB, which takes about a minute. [Sandboxes](/docs/features/sandboxes#linux-and-macos) compares the drivers. On a managed computer the organization chooses the driver, and a sandbox that starts where KVM does not work falls back to Docker under the same policy unless the organization requires MicroVMs: [the docker fallback](/docs/enterprise/sandboxes#the-docker-fallback).
+With the MicroVM driver, every run works on a copy, `--context` is refused, `--cpu` and `--memory` have no effect, and the first start of an image prepares a disk of about 5 GB, which takes about a minute. [Sandboxes](/docs/features/sandboxes#linux-and-macos) compares the drivers. On a managed computer the organization chooses the driver, and a sandbox that starts where KVM does not work falls back to Docker under the same policy unless the organization requires MicroVMs: [the docker fallback](/docs/enterprise/runtime/sandboxes#the-docker-fallback).
 
 ## One OpenShell gateway per machine
 
@@ -177,7 +177,7 @@ defenseclaw sandbox kernel-feed status
 defenseclaw sandbox kernel-feed install
 ```
 
-Run as yourself, `install` prints the exact `sudo` command. It needs Docker sandboxes, Tetragon serving its API on `unix:///var/run/tetragon/tetragon.sock`, systemd, and you in the `docker` group. It reads only the exec and exit of container processes, and enforces nothing. macOS MicroVM sandboxes and the Linux `vm` driver are not covered. Turn the process tree on per sandbox with `sandbox run --process-tree`. The commands, reason codes and files are in the [sandbox CLI reference](/docs/reference/sandbox-cli#sandbox-kernel-feed).
+Run as yourself, `install` prints the exact `sudo` command. It needs Docker sandboxes, Tetragon serving its API on `unix:///var/run/tetragon/tetragon.sock`, systemd, and you in the `docker` group. It reads only the exec and exit of container processes, and enforces nothing. macOS MicroVM sandboxes and the Linux `vm` driver are not covered. Turn the process tree on per sandbox with `sandbox run --process-tree`. The commands, reason codes and files are in the [sandbox CLI reference](/docs/reference/sandboxes/cli#sandbox-kernel-feed).
 
 ## Check it worked
 
@@ -185,7 +185,7 @@ Run as yourself, `install` prints the exact `sudo` command. It needs Docker sand
 
 ## Undo
 
-`defenseclaw sandbox teardown --dry-run` prints every step, and `defenseclaw sandbox teardown` removes this install's sandboxes, images and gateway changes, and turns `openshell.enabled` off. OpenShell itself stays installed. See [`sandbox teardown`](/docs/reference/sandbox-cli#sandbox-teardown).
+`defenseclaw sandbox teardown --dry-run` prints every step, and `defenseclaw sandbox teardown` removes this install's sandboxes, images and gateway changes, and turns `openshell.enabled` off. OpenShell itself stays installed. See [`sandbox teardown`](/docs/reference/sandboxes/cli#sandbox-teardown).
 
 ## Next
 

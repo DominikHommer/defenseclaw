@@ -9,7 +9,7 @@ DOCS = ROOT / "docs-site/content/docs"
 
 class Delta19DocsTest(unittest.TestCase):
     def test_enterprise_limit_and_admin_signal(self):
-        text = (DOCS / "enterprise/sandboxes.mdx").read_text()
+        text = (DOCS / "enterprise/runtime/sandboxes.mdx").read_text()
         self.assertIn("**A registration vouches for the account, not for a VM.** The managed", text)
         self.assertNotIn("That never loosens their\n  policy", text)
         self.assertIn("`sandbox.required_for` refuses normal host use", text)
@@ -52,7 +52,7 @@ class Delta19DocsTest(unittest.TestCase):
             self.assertIn("re-create those sandboxes after the upgrade", text)
             self.assertIn("Root-owned attestation in a later release replaces this signal.", text)
             self.assertIn("first accepted record ends the watch", text.lower())
-        self.assertIn("/docs/enterprise/sandboxes#require-sandboxes", guide)
+        self.assertIn("/docs/enterprise/runtime/sandboxes#require-sandboxes", guide)
         self.assertIn("non-exempt account", guide)
         self.assertIn("`when_unavailable` setting is `refuse`", guide)
         self.assertIn("effective `alert` setting when", guide)

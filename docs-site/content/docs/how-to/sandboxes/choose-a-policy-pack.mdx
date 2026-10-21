@@ -22,7 +22,7 @@ Pick the sandbox pack that fits your project, add your own hosts to it, and lock
 | `balanced` | A curated developer allowlist | Mounted live | On |
 | `strict` | None, only the model provider | Copied | Off |
 
-[Sandbox policy](/docs/reference/sandbox-policy#built-in-packs) lists every setting of each pack.
+[Sandbox policy](/docs/reference/sandboxes/policy#built-in-packs) lists every setting of each pack.
 
 ## Pick a built-in pack
 
@@ -36,7 +36,7 @@ Pick the sandbox pack that fits your project, add your own hosts to it, and lock
 defenseclaw sandbox run claude --pack balanced
 ```
 
-`--pack` applies every setting of the pack. `--profile` changes only the network settings and keeps the rest of the pack the run uses ([sandbox network](/docs/reference/sandbox-network#profiles)).
+`--pack` applies every setting of the pack. `--profile` changes only the network settings and keeps the rest of the pack the run uses ([sandbox network](/docs/reference/sandboxes/network#profiles)).
 
 </Step>
 
@@ -86,7 +86,7 @@ harness:
   yolo: false
 ```
 
-Lists such as `egress.allow` add to the parent's. Every other key replaces the parent's value. [Sandbox policy](/docs/reference/sandbox-policy#extend-a-pack) has the rules.
+Lists such as `egress.allow` add to the parent's. Every other key replaces the parent's value. [Sandbox policy](/docs/reference/sandboxes/policy#extend-a-pack) has the rules.
 
 </Step>
 
@@ -220,7 +220,7 @@ The command exits 1 when a decision does not match. It needs no `config.yaml` an
 
 </Steps>
 
-A project can also ask for a stricter sandbox itself with a [`.defenseclaw/sandbox.yaml` repository policy](/docs/reference/sandbox-policy#repository-policy).
+A project can also ask for a stricter sandbox itself with a [`.defenseclaw/sandbox.yaml` repository policy](/docs/reference/sandboxes/policy#repository-policy).
 
 ## Check it worked
 
@@ -236,5 +236,5 @@ Remove `--pack`, or delete `openshell.pack` from `config.yaml`, to return to `op
 
 ## Next
 
-- [Sandbox policy](/docs/reference/sandbox-policy): pack keys, admin limits and examples.
-- [Sandbox network](/docs/reference/sandbox-network): how the proxy decides each site.
+- [Sandbox policy](/docs/reference/sandboxes/policy): pack keys, admin limits and examples.
+- [Sandbox network](/docs/reference/sandboxes/network): how the proxy decides each site.

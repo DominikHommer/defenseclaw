@@ -37,7 +37,7 @@ import (
 // or for a command group its subcommands. Everything else on the page is
 // prose.
 const (
-	sandboxDocsPage       = "sandbox-cli.mdx"
+	sandboxDocsPage       = "sandboxes/cli.mdx"
 	sandboxDocsBeginMark  = "{/* AUTOGEN-BEGIN: sandbox-flags "
 	sandboxDocsMarkSuffix = " */}"
 	sandboxDocsEndMark    = "{/* AUTOGEN-END: sandbox-flags */}"

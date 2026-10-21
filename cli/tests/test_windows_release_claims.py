@@ -93,7 +93,7 @@ def test_windows_release_metadata_is_exact() -> None:
 
 def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples() -> None:
     enterprise_deployment = (
-        ROOT / "docs-site/content/docs/enterprise/secure-client.mdx"
+        ROOT / "docs-site/content/docs/enterprise/install/secure-client.mdx"
     ).read_text(encoding="utf-8")
     raw_text = (ROOT / "docs-site/content/docs/get-started/windows.mdx").read_text(encoding="utf-8")
     text = " ".join(raw_text.split())
@@ -168,7 +168,7 @@ def test_canonical_docs_keep_cli_taxonomy_and_claude_optional_git_boundary() -> 
     lifecycle = (ROOT / "docs-site/content/docs/get-started/windows.mdx").read_text(encoding="utf-8")
     claude_connector = _connector_text("claudecode")
     cli_reference = (
-        ROOT / "docs-site/content/docs/reference/cli.mdx"
+        ROOT / "docs-site/content/docs/reference/commands/cli.mdx"
     ).read_text(encoding="utf-8")
     live_workflow = (
         ROOT / ".github/workflows/connector-live-e2e.yml"
@@ -270,11 +270,11 @@ def test_windows_installer_tracks_supported_connectors() -> None:
 def test_connector_matrix_delegates_current_support_to_the_website() -> None:
     repository_pointer = (ROOT / "docs/CONNECTOR-MATRIX.md").read_text(encoding="utf-8")
     compatibility = (
-        ROOT / "docs-site/content/docs/reference/hook-contracts.mdx"
+        ROOT / "docs-site/content/docs/reference/apis/hook-contracts.mdx"
     ).read_text(encoding="utf-8")
 
-    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/hook-contracts/" in repository_pointer
-    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/capability-matrix/" in repository_pointer
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/hook-contracts/" in repository_pointer
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/capability-matrix/" in repository_pointer
     assert "not current support matrices" in " ".join(repository_pointer.split())
     for connector_id in (
         "codex",
@@ -323,7 +323,7 @@ def test_public_docs_expose_devin_and_no_retired_desktop_setup_surface() -> None
 
 def test_codex_compatibility_docs_list_current_versioned_contracts() -> None:
     compatibility = (
-        ROOT / "docs-site/content/docs/reference/hook-contracts.mdx"
+        ROOT / "docs-site/content/docs/reference/apis/hook-contracts.mdx"
     ).read_text(encoding="utf-8")
     text = " ".join(compatibility.split())
 
@@ -369,7 +369,7 @@ def test_claude_directoryadded_docs_match_packaged_v2_contract() -> None:
 
     for relative_path in (
         "docs-site/content/docs/reference/connectors/claudecode.mdx",
-        "docs-site/content/docs/reference/hook-contracts.mdx",
+        "docs-site/content/docs/reference/apis/hook-contracts.mdx",
         "docs-site/content/docs/how-to/guardrail/block-a-destructive-command.mdx",
     ):
         text = " ".join((ROOT / relative_path).read_text(encoding="utf-8").split())
@@ -421,7 +421,7 @@ def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
 
 
 def test_antigravity_windows_claims_match_official_hook_boundary() -> None:
-    connector_index = (ROOT / "docs-site/content/docs/reference/capability-matrix.mdx").read_text(
+    connector_index = (ROOT / "docs-site/content/docs/reference/apis/capability-matrix.mdx").read_text(
         encoding="utf-8"
     )
     connector_page = _connector_text("antigravity")
@@ -429,13 +429,13 @@ def test_antigravity_windows_claims_match_official_hook_boundary() -> None:
     # contract table lists every registered event, PreInvocation first.
     user_page = (ROOT / "docs-site/content/docs/connectors/antigravity.mdx").read_text(encoding="utf-8")
     config_reference = (
-        ROOT / "docs-site/content/docs/reference/configuration.mdx"
+        ROOT / "docs-site/content/docs/reference/configuration/index.mdx"
     ).read_text(encoding="utf-8")
     setup_source = (
         ROOT / "cli/defenseclaw/commands/cmd_setup.py"
     ).read_text(encoding="utf-8")
     compatibility = (
-        ROOT / "docs-site/content/docs/reference/hook-contracts.mdx"
+        ROOT / "docs-site/content/docs/reference/apis/hook-contracts.mdx"
     ).read_text(encoding="utf-8")
     validated = json.loads(
         (ROOT / "cli/defenseclaw/inventory/validated_versions.json").read_text(

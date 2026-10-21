@@ -258,7 +258,7 @@ describe('feature demo catalog', () => {
   });
 
   it('identifies the enforcement write counter as config generation', () => {
-    const page = readFileSync(new URL('../content/docs/reference/gateway-api.mdx', import.meta.url), 'utf8');
+    const page = readFileSync(new URL('../content/docs/reference/apis/gateway-api.mdx', import.meta.url), 'utf8');
     assert.match(page, /returns the new config writer generation/);
     assert.match(page, /`\/health.policy.generation`/);
     assert.doesNotMatch(page, /returns the new policy generation/);

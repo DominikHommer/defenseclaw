@@ -18,12 +18,12 @@ class R103B34DocsTest(unittest.TestCase):
             self.assertNotIn("required_group", (REPO / rel).read_text(), rel)
 
     def test_issue_1218_ssh_only_mac_users_unsupported(self):
-        text = page("enterprise/sandboxes.mdx")
+        text = page("enterprise/runtime/sandboxes.mdx")
         self.assertIn("Macs where a user only signs in over SSH (unsupported)", text)
         self.assertIn("DefenseClaw does not support sandboxes for an SSH-only macOS account", text)
 
     def test_gap_0360_landlock_is_an_abi_not_a_kernel_version(self):
-        for rel in ("enterprise/sandboxes.mdx", "enterprise/linux.mdx", "sandboxes/index.mdx"):
+        for rel in ("enterprise/runtime/sandboxes.mdx", "enterprise/install/linux.mdx", "sandboxes/index.mdx"):
             self.assertNotIn("Landlock (kernel 6.2 or newer)", page(rel), rel)
         self.assertIn("Landlock ABI 3 or newer", page("sandboxes/linux.mdx"))
 
@@ -46,12 +46,12 @@ class R103B34DocsTest(unittest.TestCase):
         self.assertIn("alert threshold MEDIUM", text)
 
     def test_gap_0046_standalone_uninstall_removes_lock(self):
-        text = page("enterprise/windows.mdx")
+        text = page("enterprise/install/windows.mdx")
         self.assertIn("A standalone Setup uninstall removes the administrator-only", text)
         self.assertIn("The Secure Client profile keeps the lock unless `PURGE=1`", text)
 
     def test_gap_0060_0061_macos_directory_steps(self):
-        text = page("enterprise/enrollment.mdx")
+        text = page("enterprise/configure/enrollment.mdx")
         self.assertIn("sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile", text)
         self.assertIn("For Hermes, create its config file", text)
 
