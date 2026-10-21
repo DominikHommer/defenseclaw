@@ -295,8 +295,6 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
     "COPILOT_HOME",
     "DEFENSECLAW_CURSOR_CONFIG_HOME",
     "OPENCODE_CONFIG_DIR",
-    "OMNIGENT_CONFIG",
-    "OMNIGENT_CONFIG_HOME",
     "HERMES_HOME",
     # Connector setup may require an operator-approved user-owned runtime
     # prefix. Preserve that explicit trust decision across the A/B lifecycle.
@@ -568,7 +566,7 @@ def setup(
     \b
     Multi-connector:
       One gateway enforces several agent-native connectors (codex, claudecode,
-      hermes, antigravity, omnigent and others), listed under
+      hermes, antigravity and others), listed under
       guardrail.connectors.
         Add one:       defenseclaw setup <connector>  (choose Add when asked)
         Remove one:    defenseclaw setup remove <name>
@@ -5030,11 +5028,9 @@ _CONNECTOR_NAMES_FALLBACK = [
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
 ]
 
@@ -5118,12 +5114,6 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
-    "openhands": {
-        "label": "OpenHands",
-        "description": "~/.openhands/hooks.json command hooks by default; optional repo-local override",
-        "tool_mode": "both",
-        "subprocess_policy": "none",
-    },
     "antigravity": {
         "label": "Antigravity",
         "description": (
@@ -5145,12 +5135,6 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     "amp": {
         "label": "Amp",
         "description": "system TypeScript policy plugin with synchronous tool.call allow/confirm/block verdicts",
-        "tool_mode": "both",
-        "subprocess_policy": "none",
-    },
-    "omnigent": {
-        "label": "OmniGent",
-        "description": "custom Python policy bridge with ALLOW/ASK/DENY and optional native OTLP",
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -5245,17 +5229,6 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "Native OTLP env vars are documented for the process env; shell rc files are not mutated",
         "~/.defenseclaw/hooks/copilot-hook.sh",
     ),
-    "openhands": (
-        "~/.openhands/hooks.json hooks by default",
-        "<workspace>/.openhands/hooks.json hooks only when --workspace is provided",
-        "~/.openhands/mcp.json MCP entries when configured explicitly",
-        (
-            "~/.agents/skills install surface and ~/.openhands/cache/skills/"
-            "public-skills/skills discovery by default; workspace .agents/skills "
-            "only when --workspace is provided"
-        ),
-        "~/.defenseclaw/hooks/openhands-hook.sh",
-    ),
     "antigravity": (
         (
             "~/.gemini/config/hooks.json — five DefenseClaw-owned registrations "
@@ -5300,12 +5273,6 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
             "discovered read-only; DefenseClaw does not rewrite them"
         ),
         "Amp MCP registrations are discovered read-only; manage them with `amp mcp add`",
-    ),
-    "omnigent": (
-        "OmniGent's effective config.yaml policy_modules and server-wide policies",
-        "~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py",
-        "OmniGent Python environment defenseclaw_omnigent.pth import-path file",
-        "Optional native OTLP uses documented process environment variables; shell startup files are not modified",
     ),
     "kiro": (
         "~/.kiro/settings/cli.json and ~/.kiro/settings/mcp.json are discovery-only",
@@ -5636,7 +5603,7 @@ def _check_connector_version_supported_for_setup(
             use_cache=False,
             refresh=True,
             data_dir=data_dir,
-            # Native Windows OmniGent/OpenCode/Amp setup immediately records a protected,
+            # Native Windows OpenCode/Amp setup immediately records a protected,
             # connector-scoped executable selection below.  Its admission scan
             # therefore does not need to republish the process-wide discovery
             # cache.  Leaving that cache untouched prevents an unrelated
@@ -5644,7 +5611,7 @@ def _check_connector_version_supported_for_setup(
             # already-sealed version and contract status when the gateway
             # restarts every active connector.
             persist_cache=connector != "codex" and not (
-                connector in {"omnigent", "opencode", "amp"}
+                connector in {"opencode", "amp"}
                 and platform_support.host_os() == "windows"
             ),
         )
@@ -5912,7 +5879,7 @@ def _protected_selection_targets(connectors: list[str] | tuple[str, ...]) -> tup
 
     selected = setup_agent_selection_connectors(connectors)
     if host_os == "darwin":
-        selected = tuple(name for name in selected if name == "openhands")
+        return ()
     return selected
 
 
@@ -5973,8 +5940,7 @@ def _record_windows_setup_agent_selections(
     if selection_errors:
         # A peer's executable custody is not a prerequisite for the connector
         # being configured. This roster is the whole additive set, so on macOS
-        # -- where the protected subset narrows to OpenHands -- a slow or
-        # failing `openhands --version` probe aborted every
+        # a slow or failing version probe aborted every
         # `defenseclaw setup <other connector>` run before a single hook file
         # was written. Fail only for the connector this run is for, and report
         # the peers that were skipped.
@@ -6184,12 +6150,7 @@ def _hilt_support_note(connector: str) -> str:
         )
     if connector == "antigravity":
         return "Antigravity documents native ask only for PreToolUse."
-    if connector == "omnigent":
-        return (
-            "OmniGent parks request, tool_call, and llm_request policy phases for native ASK approval; "
-            "post-phase confirm findings are audited and continue without an approval pause."
-        )
-    if connector in {"hermes", "devin", "openhands", "opencode"}:
+    if connector in {"hermes", "devin",  "opencode"}:
         return (
             "This connector can block supported hook events but has no native human approval surface; "
             "confirm falls back explicitly."
@@ -7472,7 +7433,6 @@ def setup_guardrail(
 #   defenseclaw setup cursor         → observe by default for Cursor
 #   defenseclaw setup devin          → observe by default for Devin
 #   defenseclaw setup copilot        → observe by default for GitHub Copilot CLI
-#   defenseclaw setup openhands      → observe by default for OpenHands
 #   defenseclaw setup antigravity    → observe by default for Antigravity (agy)
 #
 # Both commands also flip ``claw.mode`` so the rest of the CLI/TUI
@@ -8929,7 +8889,6 @@ def _restored_inactive_connector_bindings(
         "devin",
         "hermes",
         "kiro",
-        "omnigent",
         "opencode",
     }
     bindings: list[tuple[str, str, str]] = []
@@ -10328,13 +10287,6 @@ def _apply_hook_connector_setup(
                     "Hermes callbacks are not live-verified: reload or restart every running "
                     "Hermes CLI, TUI, gateway, desktop, and service host before relying on registration changes."
                 )
-        elif connector == "omnigent":
-            ux.echo("  ✓ OmniGent on-disk policy registration staged")
-            ux.warn(
-                "OmniGent does not expose a loaded policy generation/module/config identity. "
-                "Reload or restart every running OmniGent server; action/fail-closed enforcement "
-                "remains unverified until then."
-            )
         else:
             ux.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
     elif _batch_summary is None:
@@ -10390,14 +10342,6 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
             click.echo("  verdicts before the requested tool can execute.")
         else:
             click.echo("  tool activity is recorded but never blocked.")
-    elif connector == "omnigent":
-        click.echo("  This wires OmniGent into DefenseClaw through its custom")
-        click.echo("  Python policy API. No proxy is inserted in the LLM data")
-        if mode == "action":
-            click.echo("  path; supported policy phases return ALLOW, ASK, or DENY")
-            click.echo("  directly through OmniGent's native approval flow.")
-        else:
-            click.echo("  path; policy activity is recorded but never blocked.")
     else:
         click.echo(f"  This wires {label} into DefenseClaw via the agent's")
         click.echo("  native hook bus. No proxy is inserted in the LLM data")
@@ -10427,8 +10371,6 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
             "    • Agent360 / Galileo — correlated session, turn, tool, outcome, "
             "decision, audit, log, metric, and trace views"
         )
-    elif connector == "omnigent":
-        ux.echo("    • Policy API — six request/tool/model phases → /api/v1/omnigent/hook")
     elif connector == "hermes":
         ux.echo("    • Hooks      — 23 classified v0.19 events → /api/v1/hermes/hook")
     elif connector == "antigravity":
@@ -10436,13 +10378,9 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
         click.echo("                   only PreToolUse carries documented ask/deny output")
     else:
         ux.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → {_hook_api_path(connector)}")
-    native_otel_connectors = {"codex", "claudecode", "omnigent"}
+    native_otel_connectors = {"codex", "claudecode"}
     if connector in native_otel_connectors:
-        if connector == "omnigent":
-            ux.echo(
-                "    • Native OTel — optional; inactive until OTEL_* variables are exported for the OmniGent process"
-            )
-        elif connector == "codex":
+        if connector == "codex":
             ux.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
         else:
             ux.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
@@ -10490,11 +10428,6 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
             "    • Reload/restart every running Hermes CLI, TUI, gateway, desktop, and service host; "
             "DefenseClaw does not manage Hermes PortableGit terminal behavior"
         )
-    elif connector == "omnigent":
-        ux.echo(
-            "    • Reload/restart every running OmniGent server; OmniGent does not expose "
-            "loaded policy generation/module/config identity for live verification"
-        )
     if connector == "codex":
         from defenseclaw.commands.cmd_doctor import codex_telemetry_proxy_status
 
@@ -10525,12 +10458,6 @@ def _print_observability_summary(
             "enabled (synchronous policy plugin)"
             if mode == "action"
             else "disabled (observe-only)"
-        )
-    elif connector == "omnigent":
-        enforcement_label = (
-            "configured (custom policy API; live policy generation unverified)"
-            if mode == "action"
-            else "configured (observe-only; live policy generation unverified)"
         )
     elif connector == "hermes":
         enforcement_label = (
@@ -10592,18 +10519,7 @@ def _print_observability_summary(
     ]
     if unguarded:
         rows.insert(2, ("not guarded now", f"{', '.join(unguarded)} (configured; the gateway did not activate it)"))
-    if connector == "omnigent":
-        rows.extend(
-            [
-                ("native OTel", "optional; inactive until OTEL_* is exported for OmniGent"),
-                ("running OmniGent hosts", "unverified; reload/restart required"),
-                (
-                    "validation evidence",
-                    "on-disk registration only; loaded policy identity unavailable from OmniGent",
-                ),
-            ]
-        )
-    elif connector == "hermes":
+    if connector == "hermes":
         rows.extend(
             [
                 (
@@ -12337,7 +12253,7 @@ def _remove_connector(
 
     configured = _configured_connector_set(gc)
     # Match against canonical aliases so operators can type `Codex`,
-    # `claude-code`, or `open-hands` interchangeably.
+    # `claude-code` interchangeably.
     match = next((c for c in configured if normalize_connector(c) == requested_norm), None)
     if match is None:
         if requested_norm in _CONNECTOR_META:
@@ -12572,7 +12488,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
     surface_name = (
         "synchronous policy plugin"
         if connector == "amp"
-        else ("custom policy API" if connector == "omnigent" else "agent lifecycle hooks")
+        else "agent lifecycle hooks"
     )
     platform = platform_support.connector_platform_support(connector)
     platform_note = (
@@ -12733,11 +12649,9 @@ for _observability_connector in (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
 ):
     setup.add_command(_make_observability_setup_command(_observability_connector))
@@ -12772,11 +12686,9 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "cursor",
         "devin",
         "copilot",
-        "openhands",
         "antigravity",
         "opencode",
         "amp",
-        "omnigent",
         "kiro",
     }
 )
@@ -14587,14 +14499,13 @@ def _restart_services(
     if not gateway_restarted:
         failed.append("defenseclaw-gateway")
 
-    connector_registration_verified = False
     connector_runtime_pending_reload = False
     # Peers the restarted gateway refused: setup skipped them, so they are
     # not guarded now and the closing roster line leaves them out (GAP-2013).
     runtime_skipped: frozenset[str] = frozenset()
     registration_checked = bool(wait_for_connector_ready and wait_targets and gateway_restarted)
     if registration_checked:
-        readiness_label = "DefenseClaw gateway registration" if "omnigent" in wait_targets else "connector runtime"
+        readiness_label = "connector runtime"
         click.echo(f"  {readiness_label}: waiting for verified setup...", nl=False)
         readiness_kwargs: dict[str, Any] = {}
         # The connector this run is for must converge or fail; only its
@@ -14647,7 +14558,6 @@ def _restart_services(
             click.echo(f" ! ({_pending_reload_hint(getattr(readiness, 'connector', ''))})")
         elif readiness:
             ux.echo(" ✓")
-            connector_registration_verified = True
         else:
             ux.echo(f" ✗{f' ({diagnostic})' if diagnostic else ''}")
             if "registration-launcher-digest-missing" in diagnostic:
@@ -14677,28 +14587,6 @@ def _restart_services(
                 f"{roster}: guardrail hooks removed; DefenseClaw no longer enforces policy for them."
                 if shown
                 else "No hook connectors were left to tear down."
-            )
-        elif "omnigent" in hook_multi and not registration_checked:
-            # No readiness wait ran (for example `agent discovery enable`):
-            # don't label the whole roster "not verified" after a good
-            # restart; name the one unchecked connector and how to check it
-            # (GAP-2630).
-            ux.subhead(
-                f"{roster}: enforcement via native lifecycle surfaces on the sidecar API port. "
-                "No proxy listener — each talks directly to its native upstream."
-            )
-            ux.subhead("OmniGent: this restart does not check its registration; run 'defenseclaw doctor' to confirm.")
-        elif "omnigent" in hook_multi:
-            registration_state = (
-                "DefenseClaw gateway registration is ready"
-                if connector_registration_verified
-                else "DefenseClaw gateway registration is not verified"
-            )
-            ux.subhead(
-                f"{len(shown)} hook/policy connectors ({names}): {registration_state} "
-                "on the sidecar API port; OmniGent loaded policy generation "
-                "remains unverified pending reload/restart. No proxy listener — each talks directly "
-                "to its native upstream."
             )
         elif connector_runtime_pending_reload == "opencode":
             ux.subhead(
@@ -14740,17 +14628,6 @@ def _restart_services(
         # observes/enforces via the hook bus on the sidecar API port.
         if teardown:
             ux.subhead(f"{connector} connector: guardrail hooks removed; DefenseClaw no longer enforces policy for it.")
-        elif connector == "omnigent":
-            registration_state = (
-                "DefenseClaw gateway registration is ready"
-                if connector_registration_verified
-                else "DefenseClaw gateway registration is not verified"
-            )
-            ux.subhead(
-                f"omnigent connector: {registration_state} on the sidecar API port; loaded policy "
-                "generation remains unverified pending OmniGent reload/restart. "
-                "No proxy listener — omnigent talks directly to its native upstream."
-            )
         elif connector == "opencode" and connector_runtime_pending_reload:
             ux.subhead(
                 "opencode connector: the managed plugin is current on the sidecar API port; OpenCode "
@@ -16515,10 +16392,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
     data_dir = app.cfg.data_dir
     if batch_targets:
         click.echo("")
-        if "omnigent" in batch_targets:
-            ux.echo("  Starting/restarting defenseclaw-gateway and verifying connector registration…")
-        else:
-            ux.echo("  Starting/restarting defenseclaw-gateway and verifying connector readiness…")
+        ux.echo("  Starting/restarting defenseclaw-gateway and verifying connector readiness…")
         required_raw = ctx.meta.get(_SETUP_BATCH_REQUIRED_KEY)
         focus = [
             name
@@ -16556,19 +16430,9 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
             if isinstance(snapshot, _SetupConfigSnapshot):
                 _rollback_failed_connector_application(app, snapshot, exc)
             raise
-        if "omnigent" in batch_targets:
-            ux.echo(
-                f"  ✓ Configured {len(focus)} connector(s); DefenseClaw gateway roster and "
-                "hook-contract evidence are ready"
-            )
-            ux.warn(
-                "OmniGent loaded policy generation remains unverified; reload/restart every running "
-                "OmniGent server before relying on action/fail-closed enforcement."
-            )
-        else:
-            ux.echo(
-                f"  ✓ Configured {len(focus)} connector(s); runtime roster and hook-contract evidence are ready"
-            )
+        ux.echo(
+            f"  ✓ Configured {len(focus)} connector(s); runtime roster and hook-contract evidence are ready"
+        )
         return
 
     pid_file = os.path.join(data_dir, "gateway.pid")

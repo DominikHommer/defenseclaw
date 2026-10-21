@@ -152,11 +152,9 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "cursor",
         "devin",
         "copilot",
-        "openhands",
         "antigravity",
         "opencode",
         "amp",
-        "omnigent",
         "kiro",
     }
 )
@@ -1970,12 +1968,7 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
                 f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
                 "normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
             )
-        case "omnigent":
-            return (
-                f"{name} connector has seen 0 policy events since the gateway started {formatted} ago - "
-                "normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
-            )
-        case "hermes" | "cursor" | "devin" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
+        case "hermes" | "cursor" | "devin" | "copilot" | "antigravity" | "opencode" | "amp":
             return (
                 f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
@@ -2005,16 +1998,12 @@ def friendly_connector_name(connector: str) -> str:
             return "Devin"
         case "copilot":
             return "GitHub Copilot CLI"
-        case "openhands":
-            return "OpenHands"
         case "antigravity":
             return "Antigravity"
         case "opencode":
             return "OpenCode"
         case "amp":
             return "Amp"
-        case "omnigent":
-            return "OmniGent"
         case "kiro":
             return "Kiro"
         case value:
@@ -2070,7 +2059,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.agents/skills",
         ),
         ("copilot", "skills"): ("./.github/skills", "./.agents/skills", "~/.copilot/skills"),
-        ("openhands", "skills"): ("~/.openhands/skills", "~/.openhands/microagents", "~/.agents/skills"),
         ("antigravity", "skills"): (
             "~/.gemini/config/skills/<skill>/SKILL.md",
             "<workspace>/.agents/skills/<skill>/SKILL.md",
@@ -2089,7 +2077,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.agents/skills",
             "~/.claude/plugins/cache/.../skills (unless Claude-compatible skills are disabled)",
         ),
-        ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
         ("codex", "mcps"): (
@@ -2106,7 +2093,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.devin/config*.json (legacy read-only compatibility)",
         ),
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
-        ("openhands", "mcps"): ("~/.openhands/mcp.json",),
         ("antigravity", "mcps"): (
             "~/.gemini/config/mcp_config.json",
             "<workspace>/.agents/mcp_config.json",
@@ -2118,7 +2104,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.amp/settings.json or settings.jsonc (amp.mcpServers; read-only)",
             "<skill>/mcp.json",
         ),
-        ("omnigent", "mcps"): ("unsupported/unverified by the OmniGent connector",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("claudecode", "plugins"): (os.path.join(claude_root, "plugins"),),
         ("codex", "plugins"): (
@@ -2135,7 +2120,6 @@ def connector_source_label(connector: str, category: str) -> str:
         ("cursor", "plugins"): ("unsupported",),
         ("devin", "plugins"): ("unsupported (closed beta; no general plugin claim)",),
         ("copilot", "plugins"): ("copilot plugin list --json",),
-        ("openhands", "plugins"): ("unsupported",),
         ("antigravity", "plugins"): (
             "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
@@ -2163,7 +2147,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "~/.config/amp/plugins/defenseclaw.ts (DefenseClaw policy plugin)",
             "<workspace>/.amp/plugins",
         ),
-        ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("openclaw", "config"): ("~/.openclaw/openclaw.json",),
         ("claudecode", "config"): (claude_config,),
         ("codex", "config"): (codex_config,),
@@ -2175,7 +2158,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.devin/hooks.v1.json",
         ),
         ("copilot", "config"): ("./.github/hooks/*.json",),
-        ("openhands", "config"): ("~/.openhands/hooks.json",),
         ("antigravity", "config"): ("~/.gemini/config/hooks.json",),
         ("opencode", "config"): (
             f"{opencode_plugin} (managed bridge; lifecycle custody only)",
@@ -2186,7 +2168,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "~/.config/amp/settings.json or settings.jsonc",
             "<workspace>/.amp/settings.json or settings.jsonc",
         ),
-        ("omnigent", "config"): ("$OMNIGENT_CONFIG, $OMNIGENT_CONFIG_HOME/config.yaml, or ~/.omnigent/config.yaml; CLI server requires --config",),
     }
     return ", ".join(sources.get((connector, category), ()))
 

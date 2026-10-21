@@ -139,11 +139,6 @@ class R102EnterprisePagesDocsTest(unittest.TestCase):
         self.assertIn("inside the trust boundary of that user's sandbox registration", text)
         self.assertIn("Additional isolation is planned for 1.0.3", text)
 
-    def test_deprecated_enterprise_example_omits_omnigent_image(self):
-        text = page("runtime/sandboxes.mdx")
-        section = text.split("### Hook silence", 1)[1].split("## Require sandboxes", 1)[0]
-        self.assertIn("Claude Code, Codex, Copilot and Cursor images", section)
-        self.assertNotIn("OmniGent images own their hooks", section)
 
     def test_gap_0319_host_refusal_reason_is_required_for(self):
         text = page("runtime/sandboxes.mdx")

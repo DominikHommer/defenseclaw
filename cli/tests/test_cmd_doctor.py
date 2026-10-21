@@ -44,7 +44,6 @@ from defenseclaw.commands.cmd_doctor import (
     _check_hilt_support,
     _check_hook_health,
     _check_llm_api_key,
-    _check_openhands_hooks,
     _check_proxy_interception,
     _check_scanners,
     _check_security_overrides,
@@ -1079,69 +1078,6 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("mode=action via PreToolUse deny", detail)
         self.assertIn("proxy port intentionally closed", detail)
 
-    @patch("defenseclaw.commands.cmd_doctor._http_probe")
-    def test_omnigent_action_reports_configured_unverified_policy_without_proxy_probe(self, mock_probe):
-        from defenseclaw.commands.cmd_doctor import _check_guardrail_proxy
-
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(
-                enabled=True,
-                mode="action",
-                port=4000,
-                connector="omnigent",
-            ),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        cfg.claw.mode = "omnigent"
-        result = _DoctorResult()
-
-        _check_guardrail_proxy(cfg, result)
-
-        mock_probe.assert_not_called()
-        self.assertEqual(len(result.checks), 1, result.checks)
-        self.assertEqual(result.checks[0]["status"], "pass")
-        self.assertEqual(result.failed, 0, result.checks)
-        self.assertEqual(result.warned, 0, result.checks)
-        self.assertEqual(result.passed, 1, result.checks)
-        detail = result.checks[0]["detail"]
-        self.assertIn("policy path configured for omnigent", detail)
-        self.assertIn("mode=action via ALLOW/ASK/DENY", detail)
-        self.assertIn("live policy generation unverified", detail)
-
-    def test_omnigent_without_judge_skips_llm_key_requirement(self):
-        from defenseclaw.commands.cmd_doctor import _check_llm_api_key
-
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(
-                enabled=True,
-                mode="action",
-                connector="omnigent",
-            ),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        cfg.claw.mode = "omnigent"
-        result = _DoctorResult()
-
-        _check_llm_api_key(cfg, result)
-
-        self.assertEqual(len(result.checks), 1, result.checks)
-        self.assertEqual(result.failed, 0, result.checks)
-        self.assertEqual(result.warned, 0, result.checks)
-        self.assertEqual(result.checks[0]["status"], "skip")
-        self.assertIn("not required by hook/policy enforcement", result.checks[0]["detail"])
-
     def test_hilt_uses_resolved_identity_profile_for_connector(self):
         from defenseclaw.config import GuardrailProfile
 
@@ -1260,11 +1196,11 @@ class DoctorGuardrailTests(unittest.TestCase):
             quarantine_dir="/tmp/defenseclaw/quarantine",
             plugin_dir="/tmp/defenseclaw/plugins",
             policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(enabled=True, mode="action", connector="omnigent"),
+            guardrail=GuardrailConfig(enabled=True, mode="action", connector="amp"),
             gateway=GatewayConfig(),
             openshell=OpenShellConfig(),
         )
-        cfg.claw.mode = "omnigent"
+        cfg.claw.mode = "amp"
         cfg.llm.model = "ollama/qwen2.5:0.5b"
         result = _DoctorResult()
         with patch("defenseclaw.llm.ping", side_effect=AssertionError("probed an unused LLM")):
@@ -1299,10 +1235,6 @@ class DoctorGuardrailTests(unittest.TestCase):
             result.checks[0]["detail"],
         )
 
-        result = _DoctorResult()
-        _check_hilt_support(cfg, "openhands", result)
-        self.assertEqual(result.warned, 1)
-        self.assertIn("no native human approval surface", result.checks[0]["detail"])
 
         result = _DoctorResult()
         _check_hilt_support(cfg, "opencode", result)
@@ -1319,26 +1251,6 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("PreToolUse ask", result.checks[0]["detail"])
         self.assertIn("no override", result.checks[0]["detail"])
 
-    def test_hilt_omnigent_preserves_native_degraded_pre_action_ask_scope(self):
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(enabled=True, mode="action", connector="omnigent"),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        cfg.guardrail.hilt.enabled = True
-
-        result = _DoctorResult()
-        _check_hilt_support(cfg, "omnigent", result)
-
-        self.assertEqual(result.passed, 1, result.checks)
-        self.assertEqual(result.warned, 0, result.checks)
-        self.assertIn("native-degraded support", result.checks[0]["detail"])
-        self.assertIn("request, tool_call, and llm_request", result.checks[0]["detail"])
 
 
 class DoctorHookReachabilityTests(unittest.TestCase):
@@ -1354,38 +1266,6 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             openshell=OpenShellConfig(),
         )
 
-    def test_openhands_hooks_accept_sdk_home_fallback(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = os.path.join(tmp, "home")
-            workspace = os.path.join(tmp, "repo")
-            hook_path = os.path.join(home, ".openhands", "hooks.json")
-            os.makedirs(os.path.dirname(hook_path), exist_ok=True)
-            os.makedirs(workspace, exist_ok=True)
-            with open(hook_path, "w", encoding="utf-8") as fh:
-                json.dump(
-                    {
-                        "pre_tool_use": [
-                            {
-                                "matcher": "*",
-                                "hooks": [
-                                    {
-                                        "type": "command",
-                                        "command": os.path.join(tmp, ".defenseclaw", "hooks", "openhands-hook.sh"),
-                                    }
-                                ],
-                            }
-                        ]
-                    },
-                    fh,
-                )
-            cfg = self._cfg(tmp, "openhands")
-            cfg.claw.workspace_dir = workspace
-            with patch.dict(os.environ, isolated_home_env(home), clear=False):
-                result = _DoctorResult()
-                _check_openhands_hooks(cfg, result)
-            self.assertEqual(result.failed, 0, result.checks)
-            self.assertEqual(result.passed, 1)
-            self.assertIn("reachable", result.checks[0]["detail"])
 
     # ------------------------------------------------------------------
     # Antigravity (`agy`) hook reachability
@@ -3391,35 +3271,7 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
         self.assertIn("mode=action via PreToolUse deny", detail)
         self.assertIn("proxy port intentionally closed", detail)
 
-    def test_multi_hook_action_mode_preserves_omnigent_policy_semantics(self):
-        from defenseclaw.commands.cmd_doctor import (
-            _guardrail_proxy_intentionally_closed,
-        )
 
-        detail = _guardrail_proxy_intentionally_closed(self._cfg(["codex", "omnigent"], mode="action"))
-
-        self.assertTrue(detail.startswith("configured for"), detail)
-        self.assertIn("codex (mode=action via PreToolUse deny)", detail)
-        self.assertIn(
-            "omnigent (native-degraded; mode=action via ALLOW/ASK/DENY; live policy generation unverified)",
-            detail,
-        )
-        self.assertIn("proxy port intentionally closed", detail)
-
-    def test_single_omnigent_status_preserves_native_degraded_posture(self):
-        from defenseclaw.commands.cmd_doctor import (
-            _guardrail_proxy_intentionally_closed,
-        )
-
-        detail = _guardrail_proxy_intentionally_closed(
-            self._cfg(["omnigent"], mode="action")
-        )
-
-        self.assertIn("native-degraded", detail)
-        self.assertIn("mode=action via ALLOW/ASK/DENY", detail)
-        self.assertIn("live policy generation unverified", detail)
-        self.assertNotIn("policy-enforced", detail)
-        self.assertIn("proxy port intentionally closed", detail)
 
     def test_proxy_peer_forces_real_probe(self):
         """hermes (hook) + openclaw (proxy): openclaw needs port 4000, so the

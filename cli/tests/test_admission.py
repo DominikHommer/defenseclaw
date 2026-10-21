@@ -270,16 +270,16 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
         self.assertEqual(d.source, "manual-allow")
 
     def test_denied_rule_matches_connector_alias(self):
-        # A denied rule keyed on the documented alias "open-hands" must still
-        # fire against the registry-canonical active connector "openhands". A
+        # A denied rule keyed on the documented alias "claude-code" must still
+        # fire against the registry-canonical active connector "claudecode". A
         # literal lower-case compare silently skipped the rule, letting a
         # server through that policy meant to block.
         policy = self._asset_policy(
-            denied=[SimpleNamespace(name="risky", connector="open-hands")],
+            denied=[SimpleNamespace(name="risky", connector="claude-code")],
         )
         d = evaluate_admission(
             self.pe, target_type="mcp", name="risky",
-            connector="openhands",
+            connector="claudecode",
             asset_policy=policy,
         )
         self.assertEqual(d.verdict, "blocked")
@@ -838,20 +838,6 @@ class TestEvaluateAssetPolicyPerConnector(unittest.TestCase):
         self.assertEqual(d.verdict, "blocked")
         self.assertEqual(d.source, "asset-policy-default-deny")
 
-    def test_alias_keyed_override_resolves(self):
-        # An override keyed on the documented alias "open-hands" applies to the
-        # registry-canonical connector "openhands" (normalize parity with Go).
-        policy = AssetPolicyConfig(
-            enabled=True,
-            mode="observe",
-            connectors={"open-hands": PerConnectorAssetPolicy(mode="action")},
-        )
-        policy.mcp.denied = [SimpleNamespace(name="rogue")]
-        d = evaluate_asset_policy(
-            policy, target_type="mcp", name="rogue", connector="openhands",
-        )
-        self.assertEqual(d.verdict, "blocked")
-        self.assertEqual(d.source, "asset-policy-deny")
 
 
 class TestEvaluateAdmissionFirstPartyNoBypass(_StoreTestBase):

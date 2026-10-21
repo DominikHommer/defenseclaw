@@ -205,21 +205,6 @@ def _opencode_runtime_truth(
     return raw_state, f"managed bridge authenticated load heartbeat is fresh (received at {heartbeat_raw.strip()})"
 
 
-def _omnigent_effective_runtime_state(cfg, state: str) -> tuple[str, str]:
-    """Project adapter liveness through passive OmniGent policy readiness."""
-
-    raw_state = str(state or "")
-    if raw_state.strip().lower() not in {"running", "active", "ready", "up"}:
-        return raw_state, ""
-    try:
-        from defenseclaw.commands.cmd_doctor import _omnigent_runtime_readiness
-
-        readiness, detail = _omnigent_runtime_readiness(cfg)
-    except Exception as exc:  # noqa: BLE001 - presentation must remain available.
-        readiness, detail = "warn", f"policy readiness unavailable: {exc}"
-    if readiness not in {"pass", "bound"}:
-        return "degraded", detail
-    return raw_state, detail
 
 
 # GAP-1149: counting alerts reads every audit row, which took minutes on a
@@ -708,11 +693,9 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "cursor": "Cursor",
     "devin": "Devin",
     "copilot": "GitHub Copilot CLI",
-    "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
     "amp": "Amp",
-    "omnigent": "OmniGent",
     "kiro": "Kiro",
 }
 # Plain words, as on the TUI Overview (GAP-2561).
@@ -923,8 +906,6 @@ def _print_agents(
                     gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
                     gateway_available=isinstance(health, dict),
                 )
-            elif conn == "omnigent":
-                runtime_state, runtime_detail = _omnigent_effective_runtime_state(cfg, runtime_state)
             elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
                 # The gateway does not dial an OpenClaw gateway that is only
                 # the claw.mode default and is not installed (#958).
@@ -1837,18 +1818,6 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
         rows["opencode"]["state"] = runtime_state
         rows["opencode"]["runtime_detail"] = runtime_detail
-    if (
-        "omnigent" in rows
-        and rows["omnigent"].get("enabled")
-        and (omnigent_health := health_map.get("omnigent")) is not None
-    ):
-        runtime_state, readiness_detail = _omnigent_effective_runtime_state(
-            cfg,
-            str(omnigent_health.get("state") or ""),
-        )
-        rows["omnigent"]["state"] = runtime_state
-        if readiness_detail:
-            rows["omnigent"]["readiness_detail"] = readiness_detail
     cursor = rows.get("cursor")
     if cursor is not None:
         if cursor.get("enabled") and cursor.get("state") == "running":

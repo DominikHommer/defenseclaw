@@ -80,7 +80,6 @@ def _install_state(local_app_data: Path, profile: Path) -> dict[str, object]:
         "release_signing_required": True,
         "toolchain": {"go": "go1.25.0"},
         "installed_at_utc": "2026-07-28T12:00:00Z",
-        "omnigent_config_home": str(profile / ".omnigent"),
         "hermes_home": str(local_app_data / "hermes"),
         "devin_config_dir": str(profile / "AppData" / "Roaming" / "devin"),
         "devin_executable": str(local_app_data / "devin" / "cli" / "bin" / "devin.exe"),
@@ -691,18 +690,39 @@ def test_prepare_accepts_explicitly_absent_legacy_transaction_identity(
     assert _prepare_from_tree(local_app_data, profile) is not None
 
 
-@pytest.mark.parametrize("connector", ["hermes", "omnigent"])
-def test_prepare_accepts_current_native_connector_identities(
-    tmp_path: Path,
-    connector: str,
-) -> None:
+def test_prepare_accepts_current_native_connector_identity(tmp_path: Path) -> None:
     local_app_data, profile = _native_tree(tmp_path)
     state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
     state = _install_state(local_app_data, profile)
-    state["connector"] = connector
+    state["connector"] = "hermes"
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
     assert _prepare_from_tree(local_app_data, profile) is not None
+
+
+def test_prepare_accepts_removed_omnigent_native_install_state(tmp_path: Path) -> None:
+    # until 1.1: an install an older release made with CONNECTOR=omnigent must
+    # still reach Setup /uninstall, which tears OmniGent's policy files down.
+    local_app_data, profile = _native_tree(tmp_path)
+    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
+    state = _install_state(local_app_data, profile)
+    state["connector"] = "omnigent"
+    state["omnigent_config_home"] = str(profile / ".omnigent")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert _prepare_from_tree(local_app_data, profile) is not None
+
+
+def test_prepare_still_refuses_removed_openhands_native_install_state(tmp_path: Path) -> None:
+    # Native Windows Setup never offered OpenHands, so no signed state names it.
+    local_app_data, profile = _native_tree(tmp_path)
+    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
+    state = _install_state(local_app_data, profile)
+    state["connector"] = "openhands"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(native.NativeWindowsUninstallRefusal, match="signed user installation"):
+        _prepare_from_tree(local_app_data, profile)
 
 
 @pytest.mark.parametrize(

@@ -85,11 +85,9 @@ EXPECTED_CLAW_MODE_ENUM = {
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
     # Sentinel emitted when one gateway process serves >1 connector at once.
     # Not a connector name: the true connector is carried per-event by the

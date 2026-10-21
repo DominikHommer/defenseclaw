@@ -53,40 +53,6 @@ func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 	}
 }
 
-// A managed shell hook takes only its rendered fail mode: a fail mode in the
-// environment cannot reopen it. A per-user hook bakes its mode too and lets
-// the environment only tighten it to closed (GAP-0315).
-func TestManagedShellHooksIgnoreTheEnvironmentFailMode(t *testing.T) {
-	for _, name := range []string{
-		"antigravity-hook.sh", "claude-code-hook.sh", "codex-hook.sh", "cursor-hook.sh",
-		"devin-hook.sh", "hermes-hook.sh", "kiro-hook.sh", "openhands-hook.sh",
-	} {
-		for _, managed := range []bool{true, false} {
-			scripts, err := renderHookScripts("127.0.0.1:18970", "closed", ".token", []string{name}, managed, strings.TrimSuffix(name, "-hook.sh"), true, "", "", false, false)
-			if err != nil {
-				t.Fatalf("render %s: %v", name, err)
-			}
-			for _, script := range scripts {
-				if script.name != name {
-					continue
-				}
-				body := string(script.body)
-				// Neither hook lets the environment replace the rendered value;
-				// a per-user hook lets it only tighten to closed.
-				override := strings.Contains(body, `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-`)
-				pinned := strings.Contains(body, "\nFAIL_MODE=\"closed\"")
-				tighten := strings.Contains(body, perUserEnvTightenLine)
-				if override || !pinned {
-					t.Errorf("%s managed=%v: environment override = %v, rendered fail mode pinned = %v", name, managed, override, pinned)
-				}
-				if tighten == managed {
-					t.Errorf("%s managed=%v: tighten-only environment line present = %v", name, managed, tighten)
-				}
-			}
-		}
-	}
-}
-
 // rel-1-0-2 GAP-0530: a standalone Hermes hook that cannot get a verdict
 // blocks the tool call with a message that says why, and a fail mode in the
 // environment does not turn a response failure into an allow.
@@ -162,4 +128,37 @@ func runStandaloneShellHook(t *testing.T, f *hookSocketFixture, conn Connector, 
 		t.Fatalf("run hook: %v", err)
 	}
 	return code, stdout.String(), stderr.String()
+}
+
+// A managed shell hook takes only its rendered fail mode: a fail mode in the
+// environment cannot reopen it. Per-user hooks keep the override.
+func TestManagedShellHooksIgnoreTheEnvironmentFailMode(t *testing.T) {
+	for _, name := range []string{
+		"antigravity-hook.sh", "claude-code-hook.sh", "codex-hook.sh", "cursor-hook.sh",
+		"devin-hook.sh", "hermes-hook.sh", "kiro-hook.sh",
+	} {
+		for _, managed := range []bool{true, false} {
+			scripts, err := renderHookScripts("127.0.0.1:18970", "closed", ".token", []string{name}, managed, strings.TrimSuffix(name, "-hook.sh"), true, "", "", false, false)
+			if err != nil {
+				t.Fatalf("render %s: %v", name, err)
+			}
+			for _, script := range scripts {
+				if script.name != name {
+					continue
+				}
+				body := string(script.body)
+				// Neither hook lets the environment replace the rendered value;
+				// a per-user hook lets it only tighten to closed.
+				override := strings.Contains(body, `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-`)
+				pinned := strings.Contains(body, "\nFAIL_MODE=\"closed\"")
+				tighten := strings.Contains(body, perUserEnvTightenLine)
+				if override || !pinned {
+					t.Errorf("%s managed=%v: environment override = %v, rendered fail mode pinned = %v", name, managed, override, pinned)
+				}
+				if tighten == managed {
+					t.Errorf("%s managed=%v: tighten-only environment line present = %v", name, managed, tighten)
+				}
+			}
+		}
+	}
 }

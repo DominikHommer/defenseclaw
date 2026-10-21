@@ -52,9 +52,7 @@ describe('command generator shell safety', () => {
       matrix.connectors.map((connector) => [connector.id, connector.windowsSupport]),
     );
     assert.equal(statuses.size, matrix.connectors.length);
-    assert.equal(statuses.get('omnigent'), 'degraded');
     assert.equal(statuses.get('openclaw'), 'unsupported');
-    assert.equal(statuses.get('openhands'), 'unsupported');
     assert.equal(statuses.get('zeptoclaw'), 'unsupported');
     for (const status of statuses.values()) {
       assert.match(status, /^(supported|degraded|unsupported)$/);

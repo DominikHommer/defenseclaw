@@ -47,9 +47,7 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		{"hermes", func() Connector { return NewHermesConnector() }, false, true, true},
 		{"cursor", func() Connector { return NewCursorConnector() }, true, true, true},
 		{"copilot", func() Connector { return NewCopilotConnector() }, true, true, true},
-		// OpenHands uses Decode only to map the CLI's PascalCase SDK
 		// event_type onto the contract's snake_case event names.
-		{"openhands", func() Connector { return NewOpenHandsConnector() }, true, true, true},
 		// Antigravity uses Decode because agy v1 ships a nested
 		// `toolCall` wire shape that the generic normalizer cannot read.
 		// Cursor uses Decode only for its connector-native
@@ -60,7 +58,6 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		// hookOnlyProfileRespond opencode case.
 		{"opencode", func() Connector { return NewOpenCodeConnector() }, false, true, true},
 		{"amp", func() Connector { return NewAMPConnector() }, false, true, true},
-		{"omnigent", func() Connector { return NewOmnigentConnector() }, false, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1172,35 +1169,6 @@ func TestCursorProfileRespond_BeforeSubmitPromptBlockUsesContinue(t *testing.T) 
 	}
 	if _, hasPerm := out.Output["permission"]; hasPerm {
 		t.Errorf("beforeSubmitPrompt block must not rely on `permission` (Cursor ignores it): %#v", out.Output)
-	}
-}
-
-func TestOpenHandsProfileRespondConfirmContextIsPromptOnly(t *testing.T) {
-	caps := NewOpenHandsConnector().HookCapabilities(SetupOpts{})
-	for _, tc := range []struct {
-		event string
-		want  map[string]interface{}
-	}{
-		{event: "user_prompt_submit", want: map[string]interface{}{"additionalContext": "review this finding"}},
-		{event: "UserPromptSubmit", want: map[string]interface{}{"additionalContext": "review this finding"}},
-		{event: "pre_tool_use", want: nil},
-		{event: "stop", want: nil},
-	} {
-		t.Run(tc.event, func(t *testing.T) {
-			out := hookOnlyProfileRespond(HookRespondInput{
-				Req: HookProfileRequest{
-					ConnectorName: "openhands",
-					HookEventName: tc.event,
-				},
-				Action:            "alert",
-				RawAction:         "confirm",
-				AdditionalContext: "review this finding",
-				Caps:              caps,
-			})
-			if out.FieldName != "hook_output" || !reflect.DeepEqual(out.Output, tc.want) {
-				t.Fatalf("OpenHands %s confirm response = %#v/%#v, want hook_output/%#v", tc.event, out.FieldName, out.Output, tc.want)
-			}
-		})
 	}
 }
 

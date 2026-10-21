@@ -63,7 +63,6 @@ from defenseclaw.connector_paths import (
     connector_home,
     devin_hook_config_path,
     hermes_config_path,
-    omnigent_config_path,
 )
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
@@ -789,11 +788,9 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
 )
 
@@ -874,18 +871,6 @@ _SPECS: dict[str, _AgentSpec] = {
         "copilot",
         ("--version",),
     ),
-    "openhands": _AgentSpec(
-        (
-            ".openhands/hooks.json",
-            "~/.openhands/hooks.json",
-            "~/.openhands/mcp.json",
-            "~/.openhands/settings.json",
-            "~/.openhands/agent_settings.json",
-            "~/.openhands/cli_config.json",
-        ),
-        "openhands",
-        ("--version",),
-    ),
     "antigravity": _AgentSpec(
         # The documented global hooks file is configuration evidence, but
         # configuration alone never proves an installed official client.
@@ -924,11 +909,6 @@ _SPECS: dict[str, _AgentSpec] = {
             ".amp/settings.jsonc",
         ),
         "amp",
-        ("--version",),
-    ),
-    "omnigent": _AgentSpec(
-        ("~/.omnigent/config.yaml",),
-        "omnigent",
         ("--version",),
     ),
     "kiro": _AgentSpec(
@@ -1515,9 +1495,6 @@ def _agent_config_path(name: str, *, include_workspace_config: bool = True) -> s
         config_candidates = _dedup_nonempty_candidates(
             (amp_managed_settings_path(), *config_candidates)
         )
-    elif name == "omnigent":
-        config_path = omnigent_config_path()
-        config_candidates = (config_path,)
     elif name == "devin":
         workspace = os.getcwd()
         config_candidates = _dedup_nonempty_candidates(
@@ -2186,12 +2163,11 @@ def _version_for_binary(
     binary_name = _binary_command_name(binary_path)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name in {"openhands", "hermes"}:
-        # OpenHands' --version loads the whole Python agent stack (15 s idle
-        # on Linux); Hermes' runs a synchronous update check (17.5 s on
-        # Windows), and a timeout made init drop an enrolled Hermes (GAP-1604).
+    if binary_name == "hermes":
+        # Hermes runs a synchronous update check (17.5 s on Windows), and a
+        # timeout made init drop an enrolled Hermes (GAP-1604).
         timeout = 30.0
-    elif binary_name in {"claude", "omnigent"} or (
+    elif binary_name == "claude" or (
         os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
     ):
         timeout = 8.0
@@ -2202,8 +2178,6 @@ def _version_for_binary(
         # Keep discovery bounded, but do not reject the authentic client at
         # the generic two-second budget before signature/version admission.
         timeout = 10.0
-    if binary_name == "openhands":
-        env = {**os.environ, "OPENHANDS_SUPPRESS_BANNER": "1"}
     if timeout_override is not None:
         timeout = max(timeout, timeout_override)
 
@@ -2238,7 +2212,7 @@ def _version_for_binary(
         return "", f"version probe exited {result.returncode}"
     if not stdout:
         return "", "version probe returned empty stdout"
-    return _version_line_for_binary(binary_path, stdout), ""
+    return _version_line_for_binary(stdout), ""
 
 
 def _version_for_agent_binary(
@@ -2492,16 +2466,9 @@ def _windows_file_version_for_binary(
         return "", f"version metadata probe failed: {exc}"
 
 
-def _version_line_for_binary(binary_path: str, stdout: str) -> str:
+def _version_line_for_binary(stdout: str) -> str:
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    if not lines:
-        return ""
-    binary_name = _binary_command_name(binary_path)
-    if binary_name == "openhands":
-        for line in reversed(lines):
-            if "openhands cli" in line.lower():
-                return line
-    return lines[0]
+    return lines[0] if lines else ""
 
 
 def _first_existing_file(candidates: tuple[str, ...]) -> str:
@@ -2891,8 +2858,6 @@ def _normalize_connector(value: str | None) -> str:
     name = value.strip().lower()
     if name in {"claude-code", "claude_code", "claude"}:
         return "claudecode"
-    if name in {"open-hands", "open_hands"}:
-        return "openhands"
     return name
 
 

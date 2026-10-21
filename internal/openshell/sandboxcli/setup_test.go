@@ -1642,43 +1642,6 @@ func TestSetupTelemetryQuestionSaysItRestartsTheGateway(t *testing.T) {
 	}
 }
 
-// TestSetupHarnessLines pins the harness part of setup: one line per
-// harness it sets up with the model credential or the next step, the
-// --harness hint, the others by the names the command line takes, and an
-// image question for a harness nobody named (manual test R2-34).
-func TestSetupHarnessLines(t *testing.T) {
-	ta := setupApp(t, "y\nn\n", "", true)
-	ta.env["ANTHROPIC_API_KEY"] = "sk-test"
-	ta.images.missing = map[string]bool{"claudecode": true, "codex": true}
-	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
-	has(t, ta.output(),
-		"  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):\n"+
-			"    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓\n"+
-			"    Codex (codex)         model credential none found: before the first run, set OPENAI_API_KEY, or set AWS_BEARER_TOKEN_BEDROCK for Amazon Bedrock; or log in inside the sandbox\n"+
-			"  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands\n",
-		"Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]",
-		"Build the Codex image now?",
-		"skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)")
-	lacks(t, ta.output(), "[x]", "Credentials:")
-	if !slices.Equal(ta.images.built, []string{"claudecode"}) {
-		t.Fatalf("images built = %v, want only the one agreed to", ta.images.built)
-	}
-	// A harness named with --harness is asked for: its image is built
-	// without a question, and an image already built is only checked.
-	ta = setupApp(t, "", "", true)
-	ta.images.missing = map[string]bool{"codex": true}
-	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true, Harnesses: []string{"codex"}}))
-	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
-		t.Fatalf("images built = %v:\n%s", ta.images.built, ta.output())
-	}
-	ta.out.Reset()
-	ta.images.built, ta.images.missing = nil, nil
-	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
-	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
-		t.Fatalf("a current image was asked about: built = %v:\n%s", ta.images.built, ta.output())
-	}
-}
-
 // TestSetupCredentialFollowsOpenShellLLM pins that setup's credential line
 // reports what the configured openshell.llm choice finds: a provider
 // without its key is a refused run (no sandbox to log in inside), none
@@ -2114,7 +2077,7 @@ func TestDoctorWrapperHintNamesAConfiguredHarness(t *testing.T) {
 		want      string
 	}{
 		{nil, "none (`defenseclaw sandbox enable claude` makes `claude` run sandboxed)"},
-		{[]string{"kiro", "hermes", "openhands"}, "none (`defenseclaw sandbox enable hermes` makes `hermes` run sandboxed)"},
+		{[]string{"kiro", "hermes"}, "none (`defenseclaw sandbox enable hermes` makes `hermes` run sandboxed)"},
 		{[]string{"kiro"}, "none"},
 	} {
 		ta := newTestApp(t, "")
@@ -2411,4 +2374,41 @@ func TestTeardownWithTheDaemonStopped(t *testing.T) {
 			t.Fatalf("the binding was revoked under a running daemon: %v", err)
 		}
 	})
+}
+
+// TestSetupHarnessLines pins the harness part of setup: one line per
+// harness it sets up with the model credential or the next step, the
+// --harness hint, the others by the names the command line takes, and an
+// image question for a harness nobody named (manual test R2-34).
+func TestSetupHarnessLines(t *testing.T) {
+	ta := setupApp(t, "y\nn\n", "", true)
+	ta.env["ANTHROPIC_API_KEY"] = "sk-test"
+	ta.images.missing = map[string]bool{"claudecode": true, "codex": true}
+	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
+	has(t, ta.output(),
+		"  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):\n"+
+			"    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓\n"+
+			"    Codex (codex)         model credential none found: before the first run, set OPENAI_API_KEY, or set AWS_BEARER_TOKEN_BEDROCK for Amazon Bedrock; or log in inside the sandbox\n"+
+			"  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, opencode\n",
+		"Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]",
+		"Build the Codex image now?",
+		"skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)")
+	lacks(t, ta.output(), "[x]", "Credentials:")
+	if !slices.Equal(ta.images.built, []string{"claudecode"}) {
+		t.Fatalf("images built = %v, want only the one agreed to", ta.images.built)
+	}
+	// A harness named with --harness is asked for: its image is built
+	// without a question, and an image already built is only checked.
+	ta = setupApp(t, "", "", true)
+	ta.images.missing = map[string]bool{"codex": true}
+	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true, Harnesses: []string{"codex"}}))
+	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
+		t.Fatalf("images built = %v:\n%s", ta.images.built, ta.output())
+	}
+	ta.out.Reset()
+	ta.images.built, ta.images.missing = nil, nil
+	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
+	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
+		t.Fatalf("a current image was asked about: built = %v:\n%s", ta.images.built, ta.output())
+	}
 }

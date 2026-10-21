@@ -89,11 +89,9 @@ def refuse_first_run_when_managed() -> None:
             "cursor",
             "devin",
             "copilot",
-            "openhands",
             "antigravity",
             "opencode",
             "amp",
-            "omnigent",
             "kiro",
             "none",
         ],
@@ -1119,38 +1117,6 @@ def _prompt_trust_discovery_prefixes(
     )
 
 
-def _prompt_trust_protected_executables(
-    connectors: list[str],
-    *,
-    data_dir: str | os.PathLike[str] | None,
-    trusted_prompt_cache: dict[str, bool] | None = None,
-) -> None:
-    """Offer the trust prompt for an agent that protected setup would skip.
-
-    macOS OpenHands setup runs only an executable in a trusted directory. A
-    ``uv tool`` install puts a symlink on PATH whose target is not trusted,
-    so the selection skipped OpenHands with a copy-paste command (GAP-1058).
-    Ask here instead, the same way as for untrusted discovery binaries.
-    """
-    if platform_support.host_os() != "darwin":
-        return
-    if "openhands" not in {connector_paths.normalize(name) for name in connectors}:
-        return
-    from defenseclaw.agent_selection import untrusted_setup_executable
-    from defenseclaw.config import default_data_path
-
-    path = untrusted_setup_executable(os.fspath(data_dir or default_data_path()), "openhands")
-    if not path:
-        return
-    parent = os.path.dirname(path)
-    if trusted_prompt_cache is not None and parent in trusted_prompt_cache:
-        return
-    _confirm_trusted_prefix_rows(
-        [("openhands", path, parent)],
-        data_dir=data_dir,
-        trusted_prompt_cache=trusted_prompt_cache,
-        reason="Setup runs an agent only from a trusted directory; without it, init skips this agent.",
-    )
 
 
 def _confirm_trusted_prefix_rows(
@@ -1974,11 +1940,6 @@ def _prompt_first_run(
         data_dir=data_dir,
         trusted_prompt_cache=trusted_prompt_cache,
     )
-    _prompt_trust_protected_executables(
-        connectors,
-        data_dir=data_dir,
-        trusted_prompt_cache=trusted_prompt_cache,
-    )
     terminal_checkbox.restore_line_prompt_mode()
 
     # Scanner mode is process-wide guardrail config, so it is asked once
@@ -2326,26 +2287,6 @@ def _activate_additional_connectors(
             raise click.ClickException(
                 "native-Windows OpenCode extras require a fresh receipt-bound exact SST selection"
             )
-
-    if platform_support.host_os() == "darwin" and primary_name != "openhands" and "openhands" in selected_keys:
-        # The macOS gateway installs OpenHands hooks only from a setup-selected,
-        # digest-pinned executable. Record it the way `setup openhands` does;
-        # when it cannot be verified, setup warns with the reason and the
-        # connector is left out instead of being listed as configured.
-        from defenseclaw.commands.cmd_setup import (
-            _capture_setup_config_snapshot,
-            _record_windows_setup_agent_selections,
-        )
-
-        openhands_selection = _record_windows_setup_agent_selections(
-            cfg.data_dir,
-            tuple(selected_keys),
-            _prior_snapshot=_capture_setup_config_snapshot(cfg),
-            required={primary_name},
-        )
-        if openhands_selection is None or openhands_selection.record_for("openhands") is None:
-            selected_keys.remove("openhands")
-            extras = [s for s in extras if connector_paths.normalize(s["connector"]) != "openhands"]
 
     # Rebuild the multi map from the connector selection made in this init
     # run. Reusing the old map would keep unchecked/stale connectors active in

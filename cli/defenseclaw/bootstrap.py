@@ -48,7 +48,6 @@ from defenseclaw.connector_paths import (
     connector_config_files,
     connector_hook_config_paths,
     hermes_config_path,
-    omnigent_config_path,
     opencode_writable_plugin_folder,
 )
 from defenseclaw.inventory import agent_discovery
@@ -1259,11 +1258,7 @@ def _preflight_first_run_agent_selections(
     """Record one complete protected roster before first-run state mutation."""
 
     host_os = platform_support.host_os()
-    if host_os == "darwin" and _normalize_connector(connector) == "openhands":
-        # The macOS gateway installs OpenHands hooks only from a setup-selected,
-        # digest-pinned executable, the same receipt `setup openhands` writes.
-        selected_connectors = ("openhands",)
-    elif host_os != "windows":
+    if host_os != "windows":
         return None, ""
 
     from defenseclaw.agent_selection import (
@@ -2130,11 +2125,6 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Copilot hooks found")
         return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup copilot")
-    if connector == "openhands":
-        candidates = connector_hook_config_paths("openhands", cfg.connector_workspace_dir())
-        if any(os.path.isfile(path) for path in candidates):
-            return StepResult("Connector", "pass", "OpenHands hooks found")
-        return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup openhands")
     if connector == "antigravity":
         # DefenseClaw owns only the documented global hook file, under the
         # effective Antigravity config home. Workspace .agents/hooks.json is a
@@ -2190,30 +2180,6 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "warn",
             f"Amp system policy plugin not found at {path}",
             "defenseclaw setup amp",
-        )
-    if connector == "omnigent":
-        path = omnigent_config_path()
-        try:
-            config_text = Path(path).read_text(encoding="utf-8")
-            configured = all(
-                marker in config_text for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
-            )
-        except (OSError, UnicodeError):
-            configured = False
-        if configured:
-            return StepResult(
-                "Connector",
-                "warn",
-                f"OmniGent custom policy configured at {path}; OmniGent does not expose "
-                "a loaded policy generation/module identity, so live action/fail-closed "
-                "enforcement is unverified pending OmniGent reload/restart",
-                "defenseclaw doctor",
-            )
-        return StepResult(
-            "Connector",
-            "warn",
-            f"OmniGent custom policy not found at {path}",
-            "defenseclaw setup omnigent",
         )
     if connector == "kiro":
         # Kiro merges hooks from every scope; setup writes the global

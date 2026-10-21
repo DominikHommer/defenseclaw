@@ -115,15 +115,10 @@ class ResolveActiveConnectorTests(unittest.TestCase):
         app = make_ctx(enabled=True, connector="codex")
         app.cfg.guardrail.connectors = {
             "claudecode": SimpleNamespace(),
-            "openhands": SimpleNamespace(),
         }
         self.assertEqual(
             cmd_guardrail._resolve_member_connector(app, "claude-code"),
             "claudecode",
-        )
-        self.assertEqual(
-            cmd_guardrail._resolve_member_connector(app, "open-hands"),
-            "openhands",
         )
 
 

@@ -173,7 +173,7 @@ Every other DefenseClaw command is for administrators.`
 const launcherRunLong = `Runs the harness in a new sandbox on a copy of the current folder: your
 organization manages sandboxes on this computer, so every run works on a copy,
 with secret files held back, that you bring the changes back from after a review.
-The harness is claude, codex, copilot, opencode, kiro, hermes, openhands, omnigent
+The harness is claude, codex, copilot, opencode, kiro, hermes
 or antigravity, as far as your organization allows it for you ("defenseclaw sandbox
 policy explain" lists them). The harness gets your terminal; when it exits you get a
 summary, a review of the changed files, and the choice to bring the changes back or

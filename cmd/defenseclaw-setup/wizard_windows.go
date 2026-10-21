@@ -220,7 +220,6 @@ var (
 		{Label: "Cursor Agent", Value: "cursor"},
 		{Label: "Hermes Agent", Value: "hermes"},
 		{Label: "Devin CLI", Value: "devin"},
-		{Label: "OmniGent (native degraded)", Value: "omnigent"},
 		{Label: "OpenCode", Value: "opencode"},
 	}
 	wizardModeChoices = []wizardChoice{
@@ -789,8 +788,6 @@ func wizardCompletionDescription(connector string) string {
 		return "Google Antigravity is configured with its native Windows hooks." + wizardInstalledUsage
 	case "opencode":
 		return "OpenCode is configured with the native Windows bridge plugin. Restart OpenCode to load it." + wizardInstalledUsage
-	case "omnigent":
-		return "OmniGent's native degraded policy integration is configured; terminal and sandbox parity are not included." + wizardInstalledUsage
 	default:
 		return "Open a terminal and run defenseclaw init when you are ready to configure a connector." + wizardInstalledUsage
 	}
@@ -1044,6 +1041,9 @@ func applyInteractiveInstallDefaults(opts options, state *installState, autoStar
 	}
 	if !opts.ConnectorSet && validConnector(state.Connector) {
 		opts.Connector = state.Connector
+	} else if !opts.ConnectorSet && isRetiredNativeConnector(state.Connector) {
+		// until 1.1: never offer a removed connector as the selection.
+		opts.Connector = "none"
 	}
 	if !opts.ModeSet && validMode(state.Mode) {
 		opts.Mode = state.Mode

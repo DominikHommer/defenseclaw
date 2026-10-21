@@ -786,7 +786,7 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
 # Connectors `defenseclaw-gateway connector reconcile` can re-render
 # without the gateway (internal/cli/connector_cmd.go runConnectorReconcile).
 _RECONCILE_CONNECTORS = frozenset(
-    {"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "omnigent", "opencode"}
+    {"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes",  "opencode"}
 )
 
 

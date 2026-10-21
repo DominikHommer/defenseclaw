@@ -1340,7 +1340,17 @@ class RenderPlanConnectorTests(unittest.TestCase):
 
         self.assertEqual(got, expected)
 
-    def test_backup_roster_covers_all_native_lifecycle_connectors_and_legacy_receipts(self):
+
+class RemovedConnectorUninstallTests(unittest.TestCase):
+    """until 1.1: OpenHands and OmniGent (removed in 1.0.4) are still torn down."""
+
+    def _write(self, data_dir: str, rel: str, body: str = "{}") -> None:
+        path = os.path.join(data_dir, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+
+    def test_backup_roster_covers_native_lifecycle_and_removed_connectors(self):
         native_connectors = {
             "amp",
             "antigravity",
@@ -1349,15 +1359,12 @@ class RenderPlanConnectorTests(unittest.TestCase):
             "copilot",
             "cursor",
             "hermes",
-            "omnigent",
             "opencode",
             legacy_connector.RETIRED_DESKTOP_ID,
+            "omnigent",
+            "openhands",
         }
         self.assertLessEqual(native_connectors, set(cmd_uninstall._CONNECTOR_BACKUP_MARKERS))
-        self.assertIn(
-            os.path.join("connector_backups", "cursor", "config.json"),
-            cmd_uninstall._CONNECTOR_BACKUP_MARKERS["cursor"],
-        )
         self.assertIn(
             os.path.join("connector_backups", "cursor", "hooks.json.json"),
             cmd_uninstall._CONNECTOR_BACKUP_MARKERS["cursor"],
@@ -1374,6 +1381,62 @@ class RenderPlanConnectorTests(unittest.TestCase):
                 os.path.join("connector_backups", "omnigent", "pth.json"),
             },
         )
+        self.assertEqual(
+            cmd_uninstall._CONNECTOR_BACKUP_MARKERS["openhands"],
+            (os.path.join("connector_backups", "openhands", "config.json"),),
+        )
+
+    def test_removed_connector_backups_select_teardown(self):
+        for marker, name in (
+            (os.path.join("connector_backups", "openhands", "config.json"), "openhands"),
+            (os.path.join("connector_backups", "omnigent", "config.json"), "omnigent"),
+            (os.path.join("connector_backups", "omnigent", "module.json"), "omnigent"),
+            (os.path.join("connector_backups", "omnigent", "pth.json"), "omnigent"),
+        ):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as data_dir:
+                self._write(data_dir, marker)
+                got = cmd_uninstall._teardown_connectors(
+                    ("codex",),
+                    data_dir=data_dir,
+                    openclaw_config_file="",
+                    include_openclaw=False,
+                )
+                self.assertEqual(got, ("codex", name))
+
+    def test_active_roster_names_only_removed_connectors(self):
+        # Config loading drops the removed names; the gateway's active roster
+        # from an older release still names them.
+        for body, want in (
+            ('{"version": 3, "names": ["codex", "OpenHands", "omnigent"], "name": "codex"}', ("openhands", "omnigent")),
+            ('{"name": "omnigent"}', ("omnigent",)),
+            ('{"names": ["codex", "not-a-connector"]}', ()),
+            ("not json", ()),
+        ):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as data_dir:
+                self._write(data_dir, "active_connector.json", body)
+                got = cmd_uninstall._teardown_connectors(
+                    (),
+                    data_dir=data_dir,
+                    openclaw_config_file="",
+                    include_openclaw=False,
+                )
+                self.assertEqual(got, want)
+
+    def test_removed_connectors_reach_gateway_teardown(self):
+        plan = cmd_uninstall.UninstallPlan(
+            connector="codex",
+            connectors=("codex", "openhands", "omnigent"),
+            data_dir="/tmp/dc",
+            gateway_path="/opt/dc/defenseclaw-gateway",
+        )
+        with (
+            patch.object(cmd_uninstall, "_gateway_supports_connector_teardown", return_value=True),
+            patch.object(cmd_uninstall, "_run_gateway_connector_teardown", return_value=True) as run_mock,
+            patch.object(cmd_uninstall, "_gateway_connector_is_unknown") as unknown,
+        ):
+            cmd_uninstall._connector_teardown(plan)
+        self.assertEqual([c.args[0] for c in run_mock.call_args_list], ["codex", "openhands", "omnigent"])
+        unknown.assert_not_called()
 
 
 class ConnectorTeardownDispatchTests(unittest.TestCase):

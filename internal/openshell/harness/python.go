@@ -22,7 +22,6 @@ import (
 	"strings"
 )
 
-// Python harnesses (Hermes, OpenHands, OmniGent) are PyPI packages. Each is
 // installed with the community base's uv (digest-pinned with the base) as a
 // root-owned `uv tool` under InstallRoot, on a private python-build-standalone
 // interpreter at an exact version:
@@ -41,7 +40,6 @@ import (
 // record are the integrity boundary.
 const (
 	// pythonHarnessVersion is the exact CPython the Python harnesses run on:
-	// Hermes needs >=3.11,<3.14, OpenHands 3.12.*, OmniGent >=3.12.
 	pythonHarnessVersion = "3.12.13"
 	// pythonExcludeNewer is the dependency resolution cutoff (uv
 	// --exclude-newer), the date the pins below were reviewed.

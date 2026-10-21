@@ -51,9 +51,8 @@ type hookRegistrationGoldenFile struct {
 	Cases []hookRegistrationCase `json:"cases"`
 }
 
-// Connectors with no 1.0.2 support (OmniGent and OpenHands are deprecated) or
 // no agent hook file (the OpenClaw and ZeptoClaw proxies).
-var hookRegistrationGoldenSkipped = map[string]bool{"omnigent": true, "openhands": true}
+var hookRegistrationGoldenSkipped = map[string]bool{}
 
 func TestEveryHookConnectorSetupMatchesTheSharedGolden(t *testing.T) {
 	if runtime.GOOS != "linux" {

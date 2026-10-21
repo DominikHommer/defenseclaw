@@ -594,15 +594,17 @@ func reasonOrDefaultClaudeCode(reason string) string {
 
 // claudeCodeOmniGentShellTool is OmniGent's shell tool as Claude Code names
 // it when OmniGent's claude harness runs Claude Code: the MCP tool
-// sys_os_shell of the "omnigent" server, {"command": "..."}.
+// sys_os_shell of the "omnigent" server, {"command": "..."}. DefenseClaw no
+// longer ships an OmniGent connector (#1182), but OmniGent itself still runs
+// Claude Code with this server, so the Claude Code connector keeps the alias.
 const claudeCodeOmniGentShellTool = "mcp__omnigent__sys_os_shell"
 
 // claudeCodeTrustedActionTool names the tool the trusted-action parser sees.
 // OmniGent's MCP shell tool is the same shell shape under another name;
 // unmapped, its commands parsed to no command facts, so a CRITICAL command
 // rule stayed an unproven candidate and the nested Claude Code PreToolUse
-// allowed the call (GAP-1055; only OmniGent's own hook blocked it). This is a
-// name alias like agentHookTrustedActionTool's, not a capability grant.
+// allowed the call (GAP-1055). This is a name alias like
+// agentHookTrustedActionTool's, not a capability grant.
 func claudeCodeTrustedActionTool(toolName, actionTool string) string {
 	if strings.TrimSpace(toolName) == claudeCodeOmniGentShellTool {
 		return "shell"

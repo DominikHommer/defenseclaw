@@ -37,7 +37,7 @@ func TestManagedStandaloneShellHooksBlockAnUnusableAnswer(t *testing.T) {
 	}
 	for _, conn := range []Connector{
 		NewHermesConnector(), NewKiroConnector(), NewCursorConnector(),
-		NewDevinConnector(), NewAntigravityConnector(), NewOpenHandsConnector(),
+		NewDevinConnector(), NewAntigravityConnector(),
 	} {
 		hook := hookArgvConnectorCase(t, conn.Name())
 		for _, answer := range []struct {
@@ -82,7 +82,7 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 	}
 	for _, conn := range []Connector{
 		NewHermesConnector(), NewKiroConnector(), NewCursorConnector(),
-		NewDevinConnector(), NewAntigravityConnector(), NewOpenHandsConnector(),
+		NewDevinConnector(), NewAntigravityConnector(),
 	} {
 		hook := hookArgvConnectorCase(t, conn.Name())
 		for _, answer := range []struct {

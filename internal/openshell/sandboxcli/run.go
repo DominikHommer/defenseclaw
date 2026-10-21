@@ -303,8 +303,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			return err
 		}
 	}
-	// A launch the harness cannot take (OmniGent with a profile that names
-	// no default model and no --model) fails before a sandbox exists.
+	// A launch the harness cannot take fails before a sandbox exists.
 	pre := harness.LaunchOptions{Mode: harness.Interactive, Yolo: !o.Safe, Args: o.Args}
 	if o.Prompt != "" {
 		pre.Mode, pre.Prompt = harness.Headless, o.Prompt
@@ -538,12 +537,8 @@ func printMode(spec *harness.Spec, args []string) bool {
 		return has("--no-interactive")
 	case "hermes":
 		return has("-q", "--query")
-	case "openhands":
-		return has("--headless")
 	case "antigravity":
 		return has("-p", "--print", "--prompt", "-print", "-prompt")
-	case "omnigent":
-		return has("-p", "--prompt")
 	}
 	return false
 }
@@ -564,9 +559,7 @@ func printHint(spec *harness.Spec) string {
 		return ` or -- --no-interactive "TEXT"`
 	case "hermes":
 		return ` or -- chat -q "TEXT"`
-	case "openhands":
-		return ` or -- --headless -t "TEXT"`
-	case "antigravity", "omnigent":
+	case "antigravity":
 		return ` or -- -p "TEXT"`
 	}
 	return ""
@@ -2016,18 +2009,9 @@ var sessionKeys = map[string]string{
 	"opencode": "Esc interrupts OpenCode's turn; Ctrl-C (with an empty prompt) quits OpenCode, which ends the session",
 }
 
-// ownApprovals are the harnesses without a skip-permissions switch: their
-// approval pauses come from their own policies, DefenseClaw's among them.
-var ownApprovals = map[string]string{
-	"omnigent": "approvals from OmniGent's policies, DefenseClaw's included",
-}
-
-// permissionsText is the banner's permissions: skip-permissions on or off
-// (and why), or the harness's own policies.
+// permissionsText is the banner's permissions: skip-permissions on or off,
+// and why it is off.
 func (a *App) permissionsText(sb *sandboxapi.Sandbox) string {
-	if text, ok := ownApprovals[sb.Harness]; ok {
-		return text
-	}
 	if !sb.Launch.Yolo {
 		return "skip-permissions OFF (" + a.promptsKept(sb) + ")"
 	}

@@ -2591,9 +2591,9 @@ class GuardrailConfig:
         uniformly fall through to the global value. Lookup is
         connector-name-insensitive: an exact key hit is the fast path,
         otherwise keys are compared after ``connector_paths.normalize`` so
-        a request for the canonical name (e.g. ``"openhands"``) resolves an
+        a request for the canonical name (e.g. ``"claudecode"``) resolves an
         override written with different case or a hyphen/underscore alias
-        (e.g. ``"OpenHands"``, ``"open-hands"``). Mirrors
+        (e.g. ``"Claude-Code"``, ``"claude_code"``). Mirrors
         ``GuardrailConfig.connectorOverride`` in Go.
         """
         if not connector or not self.connectors:
@@ -2779,7 +2779,7 @@ class GuardrailConfig:
             if not name.strip():
                 raise ValueError("guardrail.connectors: empty connector name is not allowed")
             # Reject two distinct keys that canonicalize to the same connector
-            # (e.g. "claude-code" + "claudecode", or "OpenHands" + "openhands").
+            # (e.g. "claude-code" + "claudecode").
             # connector_override()/active_connectors() resolve keys through
             # connector_paths.normalize, so a duplicate would make per-connector
             # lookups and the active-connector roster ambiguous. Mirrors the Go
@@ -3945,8 +3945,6 @@ def _validate_connector_name_list(path: str, names: list[str]) -> None:
 
 def _normalize_connector_key(name: str | None) -> str:
     n = (name or "").strip().lower()
-    if n in {"open-hands", "open_hands"}:
-        return "openhands"
     if n in {"claude-code", "claude_code"}:
         return "claudecode"
     return n
@@ -4523,6 +4521,7 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
+        _drop_retired_connector_settings(existing)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
@@ -7227,6 +7226,134 @@ def _default_policy_dir(cfg_file: str, data_dir: str) -> str:
     return os.path.join(data_dir, "policies")
 
 
+# until 1.1: OpenHands and OmniGent were removed in 1.0.4 (#1182). Older
+# 0.8.x and 1.0.x files can still name them in connector fields.
+_RETIRED_CONNECTOR_NAMES = frozenset({"openhands", "omnigent", "open-hands", "open_hands"})
+
+
+def _is_retired_connector_name(name: Any) -> bool:
+    return isinstance(name, str) and name.strip().lower() in _RETIRED_CONNECTOR_NAMES
+
+
+def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
+    """Until 1.1, accept old rosters and discard removed connector settings.
+
+    Only connector fields are touched (mirrors ``dropRetiredConnectorSettings``
+    and ``migrateObservabilityV8LegacyConnectors`` in Go): a skill, MCP server
+    or route that happens to share a removed connector's name is kept. A list
+    that named only removed connectors must not widen into "every connector"
+    when it empties, so its owner is disabled or dropped instead.
+    """
+
+    changed = False
+
+    def child(parent: Any, key: str) -> Any:
+        return parent.get(key) if isinstance(parent, dict) else None
+
+    def drop_keys(mapping: Any) -> None:
+        nonlocal changed
+        if not isinstance(mapping, dict):
+            return
+        for key in [key for key in mapping if _is_retired_connector_name(key)]:
+            del mapping[key]
+            changed = True
+
+    def drop_names(parent: Any, key: str, *, omit_empty: bool = False) -> bool:
+        """Strip removed names from parent[key]; True when only removed names were listed.
+
+        omit_empty removes a key left empty, for the sandbox lists that refuse
+        an empty list (an absent key means no constraint, so the caller keeps
+        the section restrictive where that would widen it).
+        """
+        nonlocal changed
+        names = child(parent, key)
+        if not isinstance(names, list) or not names:
+            return False
+        kept = [name for name in names if not _is_retired_connector_name(name)]
+        if len(kept) == len(names):
+            return False
+        if kept or not omit_empty:
+            parent[key] = kept
+        else:
+            del parent[key]
+        changed = True
+        return not kept
+
+    guardrail = child(raw, "guardrail")
+    application = child(raw, "application_protection")
+    observability = child(raw, "observability")
+    openshell = child(raw, "openshell")
+    admin = child(openshell, "admin")
+
+    for mapping in (
+        child(guardrail, "connectors"),
+        child(child(raw, "asset_policy"), "connectors"),
+        child(application, "connectors"),
+        child(observability, "connectors"),
+        child(raw, "connector_hooks"),
+        child(child(child(raw, "enterprise"), "machine_policy"), "connectors"),
+    ):
+        drop_keys(mapping)
+
+    drop_names(child(guardrail, "judge"), "hook_connectors")
+    drop_names(application, "exclude_connectors")
+    if drop_names(application, "include_connectors"):
+        application["enabled"] = False
+    if drop_names(openshell, "harnesses"):
+        openshell["enabled"] = False
+    drop_names(admin, "required_for", omit_empty=True)
+    if drop_names(admin, "allowed_harnesses", omit_empty=True):
+        admin["allowed"] = False
+
+    profiles = child(guardrail, "profiles")
+    if isinstance(profiles, dict):
+        for profile in profiles.values():
+            drop_keys(child(profile, "connectors"))
+            sandbox = child(profile, "sandbox")
+            drop_names(sandbox, "required_for", omit_empty=True)
+            if drop_names(sandbox, "allowed_harnesses", omit_empty=True):
+                sandbox["allowed"] = False
+
+    assignments = child(guardrail, "profile_assignments")
+    if isinstance(assignments, list):
+        # An assignment for only removed connectors would match every
+        # connector once its list empties, so it goes.
+        assignments[:] = [
+            assignment for assignment in assignments if not drop_names(child(assignment, "match"), "connectors")
+        ]
+
+    destinations = child(observability, "destinations")
+    if isinstance(destinations, list):
+        kept_destinations = []
+        for destination in destinations:
+            routes = child(destination, "routes")
+            if isinstance(routes, list) and routes:
+                # A route for only removed connectors would select every
+                # connector (and fails the v8 schema's minItems) once emptied.
+                routes[:] = [route for route in routes if not drop_names(child(route, "selector"), "connectors")]
+                if not routes:
+                    # Every route was for removed connectors: empty routes are
+                    # refused and no routes would send every signal, so the
+                    # destination goes (as in Go).
+                    continue
+            kept_destinations.append(destination)
+        destinations[:] = kept_destinations
+
+    if isinstance(guardrail, dict) and _is_retired_connector_name(guardrail.get("connector")):
+        remaining = guardrail.get("connectors")
+        guardrail["connector"] = sorted(remaining)[0] if isinstance(remaining, dict) and remaining else ""
+        changed = True
+    claw = child(raw, "claw")
+    if isinstance(claw, dict) and _is_retired_connector_name(claw.get("mode")):
+        claw["mode"] = ""
+        changed = True
+    if changed:
+        logging.warning(
+            "until 1.1: removed OpenHands/OmniGent connector settings from loaded config; "
+            "run defenseclaw migrate"
+        )
+
+
 def load(
     *,
     data_dir: str | os.PathLike[str] | None = None,
@@ -7269,6 +7396,7 @@ def load(
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
+    _drop_retired_connector_settings(raw)
     if without_guardrail_profiles:
         raw = _without_guardrail_profiles(raw)
 

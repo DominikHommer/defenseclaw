@@ -269,12 +269,10 @@ register a connector hook route.
 | `POST` | `/api/v1/cursor/hook` | Cursor | [`internal/gateway/connector/hook_only.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/hook_only.go) |
 | `POST` | `/api/v1/devin/hook` | Devin | same; native CLI lifecycle events only |
 | `POST` | `/api/v1/copilot/hook` | GitHub Copilot CLI | same |
-| `POST` | `/api/v1/openhands/hook` | OpenHands (retired connector) | same |
 | `POST` | `/api/v1/antigravity/hook` | Antigravity | same |
 | `POST` | `/api/v1/hermes/hook` | Hermes | same |
 | `POST` | `/api/v1/opencode/hook` | OpenCode | same |
 | `POST` | `/api/v1/amp/hook` | Amp | [`internal/gateway/connector/amp.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/amp.go) |
-| `POST` | `/api/v1/omnigent/hook` | OmniGent (retired connector) | `internal/gateway/connector/omnigent.go` |
 | `POST` | `/api/v1/kiro/hook` | Kiro | [`internal/gateway/connector/kiro.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/kiro.go) |
 
 A connector that is unsupported on the host OS registers no route. In a
