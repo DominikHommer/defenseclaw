@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,8 +31,12 @@ import (
 // domain's namesake of the same uid on the machine, the legacy entry is
 // linked to neither account, and it stays unresolved for both: an
 // assignment with it selects the outage default for them (matchAgent) until
-// it names the account's current identity. Remove with
-// agentidentity.LegacyAgentID.
+// it names the account's current identity. So does an entry that is the
+// agent's legacy identity (its own record, or the hook path's derivation)
+// while no record proves which account it was written for: a prune keeps
+// the records the bridge reads (inventory.retireLegacyAgentIdentities), but
+// 1.0.3 itself pruned those of agents idle for the retention window. Remove
+// with agentidentity.LegacyAgentID.
 type profileAgentBridge struct {
 	once sync.Once
 	// entries are the assignments' agents entries, lower-cased.
@@ -45,6 +48,9 @@ type profileAgentBridge struct {
 	// ambiguous maps an identity to the legacy entries it may hold but
 	// does not prove (the namesakes' records).
 	ambiguous map[string]map[string]bool
+	// derived maps an identity the ledger records to its legacy identity,
+	// when an assignment names that.
+	derived map[string]string
 	// readAt is when the ledger is read again: a namesake recorded later
 	// takes a link back.
 	readAt time.Time
@@ -154,8 +160,8 @@ func (b *profileAgentBridge) legacyOf(agent string) (string, func(string) bool) 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if now := time.Now(); !now.Before(b.readAt) {
-		if legacy, ambiguous, ok := b.readLedger(); ok {
-			b.legacy, b.ambiguous, b.readAt = legacy, ambiguous, now.Add(profileAgentBridgeRefresh)
+		if ledger, ok := b.readLedger(); ok {
+			b.legacy, b.ambiguous, b.derived, b.readAt = ledger.legacy, ledger.ambiguous, ledger.derived, now.Add(profileAgentBridgeRefresh)
 		} else {
 			b.readAt = now.Add(profileAgentBridgeRetry)
 			if b.legacy == nil && !b.noted[""] {
@@ -172,7 +178,24 @@ func (b *profileAgentBridge) legacyOf(agent string) (string, func(string) bool) 
 	if entries := b.ambiguous[agent]; len(entries) > 0 {
 		return "", func(entry string) bool { return entries[entry] }
 	}
-	return b.legacy[agent], nil
+	if legacy := b.legacy[agent]; legacy != "" {
+		return legacy, nil
+	}
+	// agent's own legacy identity, which no record links to it.
+	legacy := b.derived[agent]
+	if legacy == "" {
+		legacy = derivedLegacyAgentID(agent)
+	}
+	if legacy == "" || !b.entries[legacy] {
+		return "", nil
+	}
+	if !b.noted["?"+legacy] {
+		b.note("?" + legacy)
+		fmt.Fprintf(os.Stderr, "[guardrail] profile assignment agent %s: no record shows which account 1.0.3 recorded it for; "+
+			"agent %s gets the default profile (default_lookup_failed) where it applies until it names the account's current agent identity\n",
+			legacy, agent)
+	}
+	return "", func(entry string) bool { return entry == legacy }
 }
 
 func (b *profileAgentBridge) note(key string) {
@@ -182,39 +205,49 @@ func (b *profileAgentBridge) note(key string) {
 	b.noted[key] = true
 }
 
+// profileAgentLinks is what the agent ledger says about the assignments'
+// legacy entries.
+type profileAgentLinks struct {
+	// legacy maps an identity to the legacy entry the ledger links to it.
+	legacy map[string]string
+	// ambiguous maps an identity to the legacy entries it may hold but the
+	// ledger does not prove.
+	ambiguous map[string]map[string]bool
+	// derived maps a recorded identity to its legacy identity, an entry.
+	derived map[string]string
+}
+
 // readLedger links each legacy entry the ledger proves to the identity its
 // account has now, and lists the identities that may hold an entry it does
-// not prove; false when the ledger cannot be read.
-func (b *profileAgentBridge) readLedger() (map[string]string, map[string]map[string]bool, bool) {
-	ids := make([]string, 0, len(b.entries))
-	for entry := range b.entries {
-		ids = append(ids, entry)
-	}
-	sort.Strings(ids)
-	records, ok := profileAgentLedger(inventory.AgentIdentityFilter{AgentIDs: ids})
+// not prove; false when the ledger cannot be read. It reads every record,
+// the ones a prune kept aside included.
+func (b *profileAgentBridge) readLedger() (profileAgentLinks, bool) {
+	records, ok := profileAgentLedger(inventory.AgentIdentityFilter{Retired: true})
 	if !ok {
-		return nil, nil, false
+		return profileAgentLinks{}, false
 	}
-	legacy := map[string]string{}
-	ambiguous := map[string]map[string]bool{}
+	links := profileAgentLinks{legacy: map[string]string{}, ambiguous: map[string]map[string]bool{}, derived: map[string]string{}}
 	uidRecords := map[string][]inventory.AgentIdentityRecord{}
+	for _, rec := range records {
+		uid := agentidentity.NormalizeUserID(rec.UserID)
+		uidRecords[uid] = append(uidRecords[uid], rec)
+	}
 	for _, rec := range records {
 		in := agentidentity.Inputs{
 			MachineHash: rec.MachineHash, UserID: rec.UserID, Account: rec.UserName,
 			Connector: rec.Connector, InstallFP: rec.InstallFP,
 		}
-		id := strings.ToLower(rec.AgentID)
-		if !b.entries[id] || !strings.EqualFold(agentidentity.LegacyAgentID(in), id) {
+		id, legacyID := strings.ToLower(rec.AgentID), strings.ToLower(agentidentity.LegacyAgentID(in))
+		if legacyID == "" || !b.entries[legacyID] {
 			continue
 		}
-		held, read := uidRecords[rec.UserID]
-		if !read {
-			if held, ok = profileAgentLedger(inventory.AgentIdentityFilter{User: rec.UserID}); !ok {
-				return nil, nil, false
+		if id != legacyID {
+			if id == strings.ToLower(agentidentity.AgentID(in)) {
+				links.derived[id] = legacyID
 			}
-			uidRecords[rec.UserID] = held
+			continue
 		}
-		if namesakes := profileAgentNamesakes(rec, held); len(namesakes) > 0 {
+		if namesakes := profileAgentNamesakes(rec, uidRecords[agentidentity.NormalizeUserID(rec.UserID)]); len(namesakes) > 0 {
 			if !b.noted[id] {
 				b.note(id)
 				fmt.Fprintf(os.Stderr, "[guardrail] profile assignment agent %s: recorded before the upgrade for more than one account of uid %s; "+
@@ -225,17 +258,51 @@ func (b *profileAgentBridge) readLedger() (map[string]string, map[string]map[str
 				holder := in
 				holder.Account = account
 				if current := strings.ToLower(agentidentity.AgentID(holder)); current != "" {
-					if ambiguous[current] == nil {
-						ambiguous[current] = map[string]bool{}
+					if links.ambiguous[current] == nil {
+						links.ambiguous[current] = map[string]bool{}
 					}
-					ambiguous[current][id] = true
+					links.ambiguous[current][id] = true
 				}
 			}
 			continue
 		}
-		legacy[strings.ToLower(agentidentity.AgentID(in))] = id
+		links.legacy[strings.ToLower(agentidentity.AgentID(in))] = id
 	}
-	return legacy, ambiguous, true
+	return links, true
+}
+
+// derivedLegacyAgentIDs maps the agent identities the hook path derived in
+// this process to their legacy identities (agentidentity.LegacyAgentID), so
+// an agent the ledger has not recorded yet is known by it too. Bounded:
+// past the cap, an identity is known by its record only.
+var derivedLegacyAgentIDs struct {
+	sync.Mutex
+	ids map[string]string
+}
+
+const derivedLegacyAgentIDsMax = 4096
+
+// noteDerivedLegacyAgentID remembers in's legacy identity for its identity.
+func noteDerivedLegacyAgentID(in agentidentity.Inputs) {
+	legacy := strings.ToLower(agentidentity.LegacyAgentID(in))
+	if legacy == "" {
+		return
+	}
+	id := strings.ToLower(agentidentity.AgentID(in))
+	derivedLegacyAgentIDs.Lock()
+	defer derivedLegacyAgentIDs.Unlock()
+	if derivedLegacyAgentIDs.ids == nil {
+		derivedLegacyAgentIDs.ids = map[string]string{}
+	}
+	if _, known := derivedLegacyAgentIDs.ids[id]; known || len(derivedLegacyAgentIDs.ids) < derivedLegacyAgentIDsMax {
+		derivedLegacyAgentIDs.ids[id] = legacy
+	}
+}
+
+func derivedLegacyAgentID(agent string) string {
+	derivedLegacyAgentIDs.Lock()
+	defer derivedLegacyAgentIDs.Unlock()
+	return derivedLegacyAgentIDs.ids[agent]
 }
 
 // profileAgentNamesakes returns the names of the accounts of another domain

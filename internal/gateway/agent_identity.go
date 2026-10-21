@@ -108,13 +108,15 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		Connector:  connectorName,
 		InstallFP:  agentIdentityInstallFP(connectorName, user),
 	}
-	facts.ID = agentidentity.AgentID(agentidentity.Inputs{
+	inputs := agentidentity.Inputs{
 		MachineHash: facts.MachineHash, UserID: facts.UserID, Account: account,
 		Connector: facts.Connector, InstallFP: facts.InstallFP, Incarnation: agentIdentityAccountIncarnation(user),
-	})
+	}
+	facts.ID = agentidentity.AgentID(inputs)
 	if facts.ID == "" {
 		return agentIdentityFacts{}
 	}
+	noteDerivedLegacyAgentID(inputs)
 	facts.Verified = machineVerified && user.Verified
 	if hint := claimedInstallHint(req.Payload); hint != "" &&
 		agentidentity.NormalizeInstallFP(hint) != agentidentity.NormalizeInstallFP(facts.InstallFP) {

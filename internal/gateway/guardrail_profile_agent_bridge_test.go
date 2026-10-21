@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -22,15 +23,10 @@ func legacyBridgeLedger(t *testing.T, records *[]inventory.AgentIdentityRecord) 
 	asked := 0
 	profileAgentLedger = func(filter inventory.AgentIdentityFilter) ([]inventory.AgentIdentityRecord, bool) {
 		asked++
-		var out []inventory.AgentIdentityRecord
-		for _, rec := range *records {
-			if len(filter.AgentIDs) > 0 && !slices.Contains(filter.AgentIDs, rec.AgentID) ||
-				filter.User != "" && rec.UserID != filter.User {
-				continue
-			}
-			out = append(out, rec)
+		if !filter.Retired {
+			t.Errorf("the bridge read the ledger without the records a prune kept aside: %+v", filter)
 		}
-		return out, true
+		return slices.Clone(*records), true
 	}
 	return &asked
 }
@@ -71,8 +67,8 @@ func TestLegacyAgentAssignmentSelectsOnlyItsRecordedAccount(t *testing.T) {
 	if got, _ := set.profileAgent(lab); got != lab {
 		t.Errorf("the lab namesake's agent matches as %q, want its own identity %q", got, lab)
 	}
-	if *asked != 2 {
-		t.Errorf("ledger read %d times, want twice (the entries, then their uid) for both requests", *asked)
+	if *asked != 1 {
+		t.Errorf("ledger read %d times, want once for both requests", *asked)
 	}
 	named := &guardrailProfileSet{assignments: []config.ProfileAssignment{
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
@@ -171,4 +167,108 @@ func TestUnresolvedLegacyAgentAssignmentSelectsTheOutageDefault(t *testing.T) {
 	if got, _ := hook(corp); got.Name != "watch" || got.Match != profileMatchAgent {
 		t.Errorf("named identity: profile %+v, want its agent assignment", got)
 	}
+}
+
+// legacyBridgeHook resolves the profile and hook mode of a request of agent
+// by alice (uid 70001) for codex under assignments: the 1.0.3 entry first
+// (relaxed), then every codex agent (watch); the default is strict.
+func legacyBridgeHook(t *testing.T, legacy string) func(agent string) (profileDecision, string) {
+	t.Helper()
+	stubProfileSources(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action"}, "relaxed": {Mode: "action"}, "watch": {Mode: "observe"},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
+		{Profile: "watch", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
+	}
+	cfg.Guardrail.DefaultProfile = "strict"
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	return func(agent string) (profileDecision, string) {
+		profileAgentSource = func(context.Context) (string, bool) { return agent, true }
+		ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "70001", UserName: "alice"})
+		ctx = api.withGuardrailProfileDecision(ctx, "codex")
+		return api.resolveProfile(ctx), api.agentHookMode(ctx, "codex")
+	}
+}
+
+// A 1.0.3 agents entry keeps selecting its account after the ledger's
+// retention pruned the record 1.0.3 wrote for it, and stays unresolved for
+// namesakes whose records were pruned: a readable ledger without the
+// record is no proof that the entry names no one, and a later, weaker
+// assignment never applies in its place.
+func TestPrunedLegacyAgentAssignmentKeepsItsAccount(t *testing.T) {
+	legacy := agentidentity.LegacyAgentID(legacyBridgeInputs("alice@corp.example"))
+	corp, lab := agentidentity.AgentID(legacyBridgeInputs("alice@corp.example")), agentidentity.AgentID(legacyBridgeInputs("alice@lab.example"))
+	old, now := time.Now().Add(-200*24*time.Hour), time.Now()
+	at := func(rec inventory.AgentIdentityRecord, seen time.Time) inventory.AgentIdentityRecord {
+		rec.FirstSeen, rec.LastSeen = seen, seen
+		return rec
+	}
+	pruned := func(t *testing.T, records ...inventory.AgentIdentityRecord) {
+		t.Helper()
+		st, err := inventory.NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		if err := st.UpsertAgentIdentities(t.Context(), records); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.PruneAgentIdentities(t.Context(), now.Add(-90*24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		previous := profileAgentLedger
+		t.Cleanup(func() { profileAgentLedger = previous })
+		profileAgentLedger = func(filter inventory.AgentIdentityFilter) ([]inventory.AgentIdentityRecord, bool) {
+			records, _, err := st.ListAgentIdentities(context.Background(), filter)
+			return records, err == nil
+		}
+	}
+	outage := func(t *testing.T, what string, got profileDecision, mode string) {
+		t.Helper()
+		if got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed || mode != "action" {
+			t.Errorf("%s: profile %+v, mode %q; want the outage default strict (action)", what, got, mode)
+		}
+	}
+	t.Run("pruned legacy record", func(t *testing.T) {
+		pruned(t, at(legacyBridgeRecord(legacy, "alice@corp.example"), old), at(legacyBridgeRecord(corp, "alice@corp.example"), now))
+		hook := legacyBridgeHook(t, legacy)
+		if got, _ := hook(corp); got.Name != "relaxed" || got.Match != profileMatchAgent {
+			t.Errorf("corp's agent after the prune: profile %+v, want its 1.0.3 assignment relaxed", got)
+		}
+	})
+	t.Run("pruned namesake", func(t *testing.T) {
+		pruned(t, at(legacyBridgeRecord(legacy, "alice@lab.example"), old), at(legacyBridgeRecord(corp, "alice@corp.example"), old))
+		hook := legacyBridgeHook(t, legacy)
+		got, mode := hook(lab)
+		outage(t, "lab's agent after the namesake's record was pruned", got, mode)
+	})
+	t.Run("pruned before the upgrade", func(t *testing.T) {
+		// 1.0.3 pruned its own record of the idle agent: only the record
+		// 1.0.4 wrote is left.
+		pruned(t, at(legacyBridgeRecord(corp, "alice@corp.example"), now))
+		hook := legacyBridgeHook(t, legacy)
+		got, mode := hook(corp)
+		outage(t, "corp's agent without a 1.0.3 record", got, mode)
+	})
+	t.Run("not recorded yet", func(t *testing.T) {
+		pruned(t)
+		previous := derivedLegacyAgentIDs.ids
+		t.Cleanup(func() { derivedLegacyAgentIDs.ids = previous })
+		derivedLegacyAgentIDs.ids = nil
+		noteDerivedLegacyAgentID(legacyBridgeInputs("alice@corp.example"))
+		hook := legacyBridgeHook(t, legacy)
+		got, mode := hook(corp)
+		outage(t, "corp's agent the hook path derived", got, mode)
+		bob := agentidentity.AgentID(agentidentity.Inputs{
+			MachineHash: agentidentity.MachineHash("0123456789abcdef0123456789abcdef"), UserID: "70002",
+			Connector: "codex", InstallFP: "/home/bob/.codex", Account: "bob@corp.example",
+		})
+		if got, mode := hook(bob); got.Name != "watch" || got.Match != profileMatchConnector || mode != "observe" {
+			t.Errorf("another account's agent: profile %+v, mode %q; want its connector assignment", got, mode)
+		}
+	})
 }
