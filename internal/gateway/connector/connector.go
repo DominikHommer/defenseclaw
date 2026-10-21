@@ -175,6 +175,14 @@ type SetupOpts struct {
 	// an unconditional force-closed override in generated hooks.
 	HookFailMode string
 
+	// ConfiguredHookFailMode is the hook fail mode the config sets
+	// explicitly for the connector (cfg.ConfiguredHookFailModeForConnector:
+	// "open", "closed", or "" when it sets none). A per-user Cursor
+	// HookFailMode follows its guardrail mode, which is no outage choice:
+	// its hooks fail open while the gateway is down only when this is open
+	// (OutageHookFailMode).
+	ConfiguredHookFailMode string
+
 	// SecureClientHookDelivery selects the Secure Client delivery contract
 	// (#1163): an unset HookFailMode renders open and an explicit value wins
 	// for every connector, Cursor included. Callers set it from

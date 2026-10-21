@@ -1,9 +1,29 @@
 #!/bin/bash
-{{$fail := "0"}}{{if .Sandbox}}{{$fail = "2"}}{{end}}{{$failure := printf "exit %s" $fail}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{$failure = "copilot_managed_failure"}}{{end}}# defenseclaw-managed-hook v7
+{{$fail := "0"}}{{if .Sandbox}}{{$fail = "2"}}{{end}}{{$failure := printf "exit %s" $fail}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{$failure = "copilot_managed_failure"}}{{end}}{{if and (not .Managed) (not .Sandbox)}}{{$failure = "copilot_user_failure"}}{{end}}# defenseclaw-managed-hook v7
 # DefenseClaw Copilot CLI hook — forwards Copilot CLI hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}# Copilot consumes a native JSON denial on tool boundaries. Keep this
+{{if and (not .Managed) (not .Sandbox)}}# Copilot CLI denies a tool only on a native JSON denial; an error status
+# alone lets it run. In fail mode closed every failure on a tool boundary
+# prints that denial (the gateway is down or does not answer, its answer
+# cannot be used); in fail mode open the call runs. An inherited
+# DEFENSECLAW_FAIL_MODE or strict availability can only tighten the
+# installed mode (GAP-0315).
+_DC_COPILOT_EVENT=""
+if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then _DC_COPILOT_EVENT="$2"; fi
+FAIL_MODE="{{.FailMode}}"
+case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) FAIL_MODE="closed" ;; esac
+case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) FAIL_MODE="closed" ;; esac
+copilot_user_failure() {
+  if [ "$FAIL_MODE" = "closed" ]; then
+    case "$_DC_COPILOT_EVENT" in
+      preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
+      permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+    esac
+  fi
+  exit 0
+}
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}# Copilot consumes a native JSON denial on tool boundaries. Keep this
 # available before helpers, credentials and the gateway are consulted.
 _DC_COPILOT_EVENT=""
 if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then _DC_COPILOT_EVENT="$2"; fi
@@ -57,7 +77,7 @@ export DEFENSECLAW_HOME
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
-  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+  if [ "$FAIL_MODE" = "closed" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     # Copilot CLI needs a native denial; an error status alone can allow.
     case "${2:-}" in
@@ -108,27 +128,28 @@ readonly FAIL_MODE
 {{else}}
 # Plan B4 / S0.4: shell-side hook hardening.
 if [ ! -r "${HOOK_DIR}/_hardening.sh" ]; then
-  echo "defenseclaw: hook hardening helper unavailable{{if and .Managed (not .SecureClient)}}{{else}}, allowing copilot tool{{end}}" >&2
+  echo "defenseclaw: hook hardening helper unavailable{{if .SecureClient}}, allowing copilot tool{{end}}" >&2
   {{$failure}}
 fi
 if ! . "${HOOK_DIR}/_hardening.sh"; then
-  echo "defenseclaw: hook hardening helper failed{{if and .Managed (not .SecureClient)}}{{else}}, allowing copilot tool{{end}}" >&2
+  echo "defenseclaw: hook hardening helper failed{{if .SecureClient}}, allowing copilot tool{{end}}" >&2
   {{$failure}}
 fi
 if ! defenseclaw_harden_resources; then
-  echo "defenseclaw: resource hardening failed{{if and .Managed (not .SecureClient)}}{{else}}, allowing copilot tool{{end}}" >&2
+  echo "defenseclaw: resource hardening failed{{if .SecureClient}}, allowing copilot tool{{end}}" >&2
   {{$failure}}
 fi
 if ! defenseclaw_harden_env; then
-  echo "defenseclaw: environment hardening failed{{if and .Managed (not .SecureClient)}}{{else}}, allowing copilot tool{{end}}" >&2
+  echo "defenseclaw: environment hardening failed{{if .SecureClient}}, allowing copilot tool{{end}}" >&2
   {{$failure}}
 fi
 
-# Copilot documents timeout failures as fail-open and has no connector-wide
-# transport fail-closed switch. Ignore inherited strict/closed settings here;
-# only a valid event-native gateway response may request enforcement.
-FAIL_MODE="{{if and .Managed (not .SecureClient)}}closed{{else}}open{{end}}"
-{{end}}
+{{if .Managed}}{{if .SecureClient}}# Secure Client: Copilot documents timeout failures as fail-open and has no
+# connector-wide transport fail-closed switch. Ignore inherited strict/closed
+# settings here; only a valid event-native gateway response may request
+# enforcement.
+FAIL_MODE="open"{{else}}FAIL_MODE="closed"{{end}}
+{{end}}{{end}}
 DEFENSECLAW_HOOK_CONNECTOR="copilot"
 DEFENSECLAW_HOOK_NAME="copilot-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
@@ -176,7 +197,7 @@ fail_response() {
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_log_hook_failure copilot copilot-hook "missing gateway token" transport "$FAIL_MODE"
-  echo "defenseclaw: missing gateway token{{if and .Managed (not .SecureClient)}}{{else}}, allowing copilot tool{{end}}" >&2
+  echo "defenseclaw: missing gateway token{{if .SecureClient}}, allowing copilot tool{{end}}" >&2
   {{$failure}}
 fi
 
@@ -200,13 +221,17 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
+{{if not .Managed}}  [ "$FAIL_MODE" != "closed" ] ||
+    defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" transport
+{{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
   {{$failure}}
 }
 
 fail_response() {
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE"
+{{if not .Managed}}  [ "$FAIL_MODE" != "closed" ] ||
+    defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" response
+{{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: copilot hook error: $1" >&2
   {{$failure}}
 }
@@ -277,7 +302,7 @@ defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unrea
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
 
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}case "$HTTP_CODE" in
+{{if and (not .SecureClient) (not .Sandbox)}}case "$HTTP_CODE" in
   [0-9][0-9][0-9]) ;;
   *) fail_response "invalid HTTP status" ;;
 esac
@@ -311,12 +336,12 @@ if [ "$ACTION" = "block" ]; then
   exit 2
 fi
 exit 0
-{{else}}{{if and .Managed (not .SecureClient)}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || fail_response "invalid action in gateway response"
+{{else}}{{if not .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || fail_response "invalid action in gateway response"
 case "$ACTION" in
   allow|block|confirm|alert) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
-if { [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; } && { [ "$ACTION" = "block" ] || [ "$ACTION" = "confirm" ]; }; then
+{{if .Managed}}if { [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; } && { [ "$ACTION" = "block" ] || [ "$ACTION" = "confirm" ]; }; then
   fail_response "missing native output in gateway response"
 fi
 if [ "$ACTION" = "block" ]; then
@@ -331,7 +356,30 @@ if [ "$ACTION" = "confirm" ] && [ "$COPILOT_HOOK_EVENT" = "preToolUse" ]; then
   NATIVE_ASK=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "ask"' 2>/dev/null) || fail_response "invalid native output in gateway response"
   [ "$NATIVE_ASK" = "true" ] || fail_response "missing native confirmation in gateway response"
 fi
-{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{else}}# A block whose native denial is missing or does not deny still denies a
+# tool boundary (as the Antigravity hook does); a confirmation needs
+# Copilot's native ask, or it is no usable answer.
+if [ "$ACTION" = "block" ]; then
+  NATIVE_DENY=""
+  case "$COPILOT_HOOK_EVENT" in
+    preToolUse) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "deny"' 2>/dev/null) || NATIVE_DENY="" ;;
+    permissionRequest) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "deny"' 2>/dev/null) || NATIVE_DENY="" ;;
+    *) NATIVE_DENY="true" ;;
+  esac
+  if [ "$NATIVE_DENY" != "true" ]; then
+    REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+    REASON="$(defenseclaw_json_escape "${REASON:-Blocked by DefenseClaw Copilot policy.}")"
+    case "$COPILOT_HOOK_EVENT" in
+      preToolUse) OUTPUT="$(printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}' "$REASON")" ;;
+      permissionRequest) OUTPUT="$(printf '{"behavior":"deny","message":"%s"}' "$REASON")" ;;
+    esac
+  fi
+fi
+if [ "$ACTION" = "confirm" ] && [ "$COPILOT_HOOK_EVENT" = "preToolUse" ]; then
+  NATIVE_ASK=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "ask"' 2>/dev/null) || NATIVE_ASK=""
+  [ "$NATIVE_ASK" = "true" ] || fail_response "missing native confirmation in gateway response"
+fi
+{{end}}{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
 exit 0

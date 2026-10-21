@@ -3271,8 +3271,14 @@ func TestCopilotLifecycleHomeRejectsNonExactBinding(t *testing.T) {
 }
 
 func TestCopilotShellBootstrapFailuresFollowProfile(t *testing.T) {
-	// Per-user and Secure Client retain their shipped response bytes.
-	for _, tc := range []struct{ managed, secureClient bool }{{false, false}, {true, true}} {
+	// Secure Client keeps its shipped response bytes. A per-user bootstrap
+	// failure answers through copilot_user_failure, which prints Copilot's
+	// native denial on a tool boundary in fail mode closed and lets the call
+	// run in fail mode open; neither exits 2, which Copilot does not enforce.
+	for _, tc := range []struct {
+		managed, secureClient bool
+		failure               string
+	}{{false, false, "copilot_user_failure"}, {true, true, "exit 0"}} {
 		script, err := renderHookTemplate("copilot-hook.sh", templateData{
 			APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: tc.managed, SecureClient: tc.secureClient,
 			TokenFile: ".hook-copilot.token", ScopedToken: true,
@@ -3280,26 +3286,26 @@ func TestCopilotShellBootstrapFailuresFollowProfile(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertCopilotShellBootstrapFailsOpen(t, string(script))
+		assertCopilotShellBootstrapFailure(t, string(script), tc.failure)
 	}
 }
 
-func assertCopilotShellBootstrapFailsOpen(t *testing.T, body string) {
+func assertCopilotShellBootstrapFailure(t *testing.T, body, failure string) {
 	t.Helper()
 	if strings.Contains(body, "exit 2") {
-		t.Fatalf("Copilot shell bootstrap contains a fail-closed exit: %s", body)
+		t.Fatalf("Copilot shell bootstrap contains an exit 2 Copilot does not enforce: %s", body)
 	}
 	for _, required := range []string{
-		`HOME="$(cd ~ 2>/dev/null && pwd)" || exit 0`,
-		`HOOK_BASE="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 0`,
-		`HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 0`,
+		`HOME="$(cd ~ 2>/dev/null && pwd)" || ` + failure,
+		`HOOK_BASE="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || ` + failure,
+		`HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || ` + failure,
 		`if [ ! -r "${HOOK_DIR}/_hardening.sh" ]; then`,
 		`if ! . "${HOOK_DIR}/_hardening.sh"; then`,
 		`if ! defenseclaw_harden_resources; then`,
 		`if ! defenseclaw_harden_env; then`,
 	} {
 		if !strings.Contains(body, required) {
-			t.Errorf("Copilot shell bootstrap missing fail-open guard %q", required)
+			t.Errorf("Copilot shell bootstrap missing failure guard %q", required)
 		}
 	}
 }
@@ -3859,11 +3865,15 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 		wantFailMode  string
 	}{
 		{name: "cursor_action_forces_fail_closed", connector: NewCursorConnector(), guardrailMode: "action", wantFailMode: "closed"},
-		{name: "cursor_observe_forces_fail_open", connector: NewCursorConnector(), guardrailMode: "observe", wantFailMode: "open"},
+		// Observe registers Cursor's hook fail-open, but its outages stay
+		// closed without an explicit open (OutageHookFailMode).
+		{name: "cursor_observe_keeps_outages_closed", connector: NewCursorConnector(), guardrailMode: "observe", wantFailMode: "closed"},
 		{name: "devin_supports_fail_closed", connector: NewDevinConnector(), wantFailMode: "closed"},
 		{name: "openhands_supports_fail_closed", connector: NewOpenHandsConnector(), wantFailMode: "closed"},
 		{name: "hermes_per_user_keeps_fail_closed", connector: NewHermesConnector(), wantFailMode: "closed"},
-		{name: "copilot_downgrades_to_fail_open", connector: NewCopilotConnector(), wantFailMode: "open"},
+		// The per-user Copilot hook prints Copilot's native denial for its
+		// own failures (hookBlocksItsOwnFailures).
+		{name: "copilot_per_user_keeps_fail_closed", connector: NewCopilotConnector(), wantFailMode: "closed"},
 	}
 
 	for _, tc := range cases {
@@ -3886,9 +3896,9 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 			}
 			want := "\nFAIL_MODE=\"" + tc.wantFailMode + "\"\n" + perUserEnvTightenComment
 			if tc.connector.Name() == "copilot" {
-				want = `FAIL_MODE="open"`
-				if strings.Contains(string(body), "DEFENSECLAW_FAIL_MODE:-") {
-					t.Fatalf("Copilot shell hook still accepts an inherited closed fail mode:\n%s", string(body))
+				want = "\nFAIL_MODE=\"" + tc.wantFailMode + "\"\n" + perUserEnvTightenLine
+				if strings.Contains(string(body), `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-`) {
+					t.Fatalf("Copilot shell hook lets the environment open it:\n%s", string(body))
 				}
 			}
 			if !strings.Contains(string(body), want) {

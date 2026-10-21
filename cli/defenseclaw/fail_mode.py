@@ -69,15 +69,15 @@ def upstream_fail_open(cfg: Any, connector: str) -> bool:
     """Whether *connector*'s hooks fail open whatever is configured.
 
     Copilot CLI, Antigravity and Hermes have no fail-closed hook contract of
-    their own. A managed deployment outside Secure Client blocks their tool
-    calls through the connector's native deny instead, so they follow the
-    administrator's fail mode there (Config.managed_outside_secure_client).
-    The per-user Hermes hook (the Linux
-    and macOS shell hook and the Windows native hook) blocks a call it cannot
-    check through Hermes' block directive when its fail mode is closed, so
-    an unset fail mode resolves closed there as for every other connector
-    (rel-1-0-3 GAP-0150, GAP-0269); only the Secure Client profile keeps
-    Hermes open, as its hook render does (CapableHookFailMode).
+    their own: each lets a call run when its hook times out. Their hooks
+    block a call they cannot check through the agent's native deny when
+    their fail mode is closed: a managed deployment outside Secure Client
+    (Config.managed_outside_secure_client), and the per-user Linux and macOS
+    shell hooks and Windows native hook. So an unset fail mode resolves
+    closed for them as for every other connector (Hermes: rel-1-0-3
+    GAP-0150, GAP-0269; Copilot and Antigravity: r104 W3 G3-upg); only the
+    Secure Client profile keeps them open, as its hook render does
+    (CapableHookFailMode).
     """
     name = normalize(connector)
     if name not in _UPSTREAM_FAIL_OPEN_CONNECTORS:
@@ -85,9 +85,7 @@ def upstream_fail_open(cfg: Any, connector: str) -> bool:
     standalone = getattr(cfg, "managed_outside_secure_client", None)
     if callable(standalone) and standalone():
         return False
-    if name == "hermes":
-        return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
-    return True
+    return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
 
 
 _SHARED_RUNTIME_CONNECTORS = frozenset({"claudecode", "codex"})

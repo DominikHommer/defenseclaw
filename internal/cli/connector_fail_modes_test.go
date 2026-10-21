@@ -119,10 +119,11 @@ func TestRefreshFailModesCarriesAnExternalConfigsOpen(t *testing.T) {
 	}
 }
 
-// A loaded config: Copilot's unset mode renders open (its vendor hook surface
-// cannot fail closed), but no operator chose it, so the refresh writes the
-// closed outage mode and a gateway-down native call is blocked. An explicit
-// connector open stays open.
+// A loaded config: an earlier render recorded Copilot's unset mode as open
+// (lowered because its vendor hook surface cannot fail closed) without a
+// source. No operator chose it, so the refresh writes the closed outage mode
+// and a gateway-down native call is blocked. An explicit connector open stays
+// open.
 func TestRefreshFailModesDoesNotTreatACapabilityOpenAsTheConfigs(t *testing.T) {
 	for _, test := range []struct {
 		name, config, want string
@@ -136,7 +137,7 @@ func TestRefreshFailModesDoesNotTreatACapabilityOpenAsTheConfigs(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(test.config), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			// What this release's render records for Copilot: open, no source.
+			// What the earlier render recorded for Copilot: open, no source.
 			writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"copilot":"open"}}`)
 			if got := buildHookOptions("copilot", "preToolUse", "", "").FailMode; got != test.want {
 				t.Fatalf("before the refresh the native hook fails %q, want %q", got, test.want)
@@ -149,6 +150,45 @@ func TestRefreshFailModesDoesNotTreatACapabilityOpenAsTheConfigs(t *testing.T) {
 			}
 			if got := buildHookOptions("copilot", "preToolUse", "", "").FailMode; got != test.want {
 				t.Fatalf("the native hook fails %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+// Cursor in observe: its resolved mode (open) follows the guardrail mode, so
+// a 1.0.x refresh that wrote it (with its config source) let the old and the
+// new hooks allow calls while the gateway was down. The refresh writes open
+// only for an explicit open, from a loaded config or from a 0.8.x document
+// alike, and never under action mode.
+func TestRefreshFailModesClosesACursorOpenNobodyChose(t *testing.T) {
+	const v9 = "config_version: 9\nobservability: {}\nguardrail:\n"
+	const v7 = "config_version: 7\nguardrail:\n"
+	for _, test := range []struct {
+		name, config, read, want string
+	}{
+		{"1.0.x observe, unset", v9 + "  mode: observe\n", "loaded", "closed"},
+		{"1.0.x observe, cursor open", v9 + "  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "loaded", "open"},
+		{"1.0.x action, cursor open", v9 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "loaded", "closed"},
+		{"0.8.x observe, unset", v7 + "  mode: observe\n", "document", "closed"},
+		{"0.8.x observe, cursor open", v7 + "  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "document", "open"},
+		{"0.8.x action, cursor open", v7 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "document", "closed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			isolateHookEnvForTest(t, home)
+			if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(test.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// The 0.8.10 to 1.0.3 render for an observe Cursor.
+			writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"cursor":"open"}}`)
+			if result := runRefreshFailModesForTest(t, home); result.Config != test.read || !reflect.DeepEqual(result.Refreshed, []string{"cursor"}) {
+				t.Fatalf("refresh %+v", result)
+			}
+			if got := oldHookFailMode(t, home, "cursor"); got != test.want {
+				t.Fatalf("the old cursor hook reads %q, want %q", got, test.want)
+			}
+			if got := buildHookOptions("cursor", "beforeShellExecution", "", "").FailMode; got != test.want {
+				t.Fatalf("the new cursor hook fails %q, want %q", got, test.want)
 			}
 		})
 	}

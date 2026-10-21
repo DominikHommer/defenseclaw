@@ -184,18 +184,20 @@ class StatusCommandTests(unittest.TestCase):
             self.assertNotIn("upstream-enforced fail-open", result.output)
             self.assertIn("closed", result.output)
 
-    def test_status_copilot_reports_upstream_fail_open_in_text_and_json(self):
-        # GAP-1246: guardrail status said "closed" while status said open.
+    def test_status_per_user_copilot_reports_its_closed_fail_mode_in_text_and_json(self):
+        # GAP-1246: text and JSON agree. r104 W3 G3-upg: the per-user Copilot
+        # hook blocks its own failures in fail mode closed, so it is no
+        # upstream fail-open.
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="copilot", hook_fail_mode="closed")
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("upstream-enforced fail-open", result.output)
+        self.assertNotIn("upstream-enforced fail-open", result.output)
         app = make_ctx(enabled=True, connector="copilot", hook_fail_mode="closed")
         result = runner.invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn('"fail_mode": "open"', result.output)
-        self.assertNotIn('"fail_mode": "closed"', result.output)
+        self.assertIn('"fail_mode": "closed"', result.output)
+        self.assertNotIn('"fail_mode": "open"', result.output)
 
     def test_secure_client_status_keeps_main_enabled_and_warnings(self):
         from defenseclaw.commands import cmd_status
@@ -256,18 +258,17 @@ class StatusCommandTests(unittest.TestCase):
             result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertNotIn("with fail mode open", result.output)
 
-    def test_fail_mode_view_reports_antigravity_and_copilot_upstream_fail_open(self):
-        # GAP-0336: the fail-mode view listed them closed while status, doctor
-        # and guardrail status said upstream fail-open.
+    def test_fail_mode_view_reports_per_user_antigravity_and_copilot_closed(self):
+        # GAP-0336: the fail-mode view agrees with status, doctor and guardrail
+        # status. r104 W3 G3-upg: per-user they follow their fail mode.
         for connector, label in (("antigravity", "Antigravity"), ("copilot", "Copilot")):
             app = make_ctx(enabled=True, connector=connector, hook_fail_mode="closed")
             result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
             self.assertEqual(result.exit_code, 0, msg=result.output)
             row = next(line for line in result.output.splitlines() if f"({connector}):" in line)
-            self.assertIn("open (", row)
-            self.assertIn("upstream; configured provenance: closed", row)
-            self.assertIn("remains fail-open", result.output)
-            self.assertNotIn("Still fail-open", result.output)
+            self.assertIn("closed", row)
+            self.assertNotIn("upstream; configured provenance", row)
+            self.assertNotIn("remains fail-open", result.output)
 
     def test_status_single_connector_uses_uniform_per_connector_block(self):
         # A single-connector install renders the SAME per-connector block

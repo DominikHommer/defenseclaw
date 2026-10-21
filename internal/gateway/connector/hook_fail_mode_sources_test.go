@@ -108,35 +108,92 @@ func TestHookConfigSidecarRecordsTheSourceOfEachMode(t *testing.T) {
 	}
 }
 
-// A per-user connector whose vendor hook surface cannot fail closed (Copilot)
-// renders open for an unset mode (CapableHookFailMode). That open is the
-// vendor's limit, not the operator's: the sidecar records it without a
-// source, so the native hook fails it closed, and the outage mode the
-// installers' refresh writes is closed. An explicit open is the config's.
-func TestCapabilityLoweredOpenIsNotRecordedAsTheConfigs(t *testing.T) {
+// cannotFailClosedForTest is a per-user connector whose vendor hook surface
+// cannot fail closed and whose hook does not block its own failures.
+type cannotFailClosedForTest struct{ Connector }
+
+func (cannotFailClosedForTest) HookCapabilities(SetupOpts) HookCapability {
+	return HookCapability{SupportsFailClosed: false}
+}
+
+// A per-user render records the config as the source of a mode only when it
+// is the outage mode the config chose (OutageHookFailMode). Copilot and
+// Antigravity render an unset mode closed (their hooks print the native
+// denial), and a Cursor in observe renders closed unless the config sets open
+// (its observe registration stays fail-open): both carry the source. An open
+// CapableHookFailMode lowered for a vendor that cannot fail closed is that
+// vendor's limit and has no source, so the native hook fails it closed and
+// the installers' refresh writes closed.
+func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 	for _, test := range []struct {
-		name, failMode, wantSource, wantOutage string
+		name                          string
+		conn                          Connector
+		opts                          SetupOpts
+		wantMode, wantSource, wantOut string
 	}{
-		{name: "unset", wantSource: "", wantOutage: "closed"},
-		{name: "explicit open", failMode: "open", wantSource: HookFailModeSourceConfig, wantOutage: "open"},
+		{"copilot unset", NewCopilotConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
+		{"copilot explicit open", NewCopilotConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"antigravity unset", NewAntigravityConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
+		{"cursor observe unset", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"cursor observe explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"cursor action explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"capability-lowered unset", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{}, "open", "", "closed"},
+		{"capability-lowered explicit open", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
 			hookDir := filepath.Join(dataDir, "hooks")
-			opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", HookFailMode: test.failMode}
-			conn := NewCopilotConnector()
-			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+			opts := test.opts
+			opts.DataDir, opts.APIAddr = dataDir, "127.0.0.1:18970"
+			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, test.conn); err != nil {
 				t.Fatal(err)
 			}
+			name := test.conn.Name()
 			state := readHookConfigSidecarForTest(t, hookDir)
-			if state.FailModes["copilot"] != "open" || state.FailModeSources["copilot"] != test.wantSource {
-				t.Fatalf("copilot sidecar %+v, want open with source %q", state, test.wantSource)
+			if state.FailModes[name] != test.wantMode || state.FailModeSources[name] != test.wantSource {
+				t.Fatalf("%s sidecar %+v, want %s with source %q", name, state, test.wantMode, test.wantSource)
 			}
-			if got := strings.Contains(readFlatHookRecordForTest(t, hookDir, "copilot"), "FAIL_MODE_SOURCE=config"); got != (test.wantSource != "") {
-				t.Fatalf("copilot flat record source = %v, want %v", got, test.wantSource != "")
+			if got := strings.Contains(readFlatHookRecordForTest(t, hookDir, name), "FAIL_MODE_SOURCE=config"); got != (test.wantSource != "") {
+				t.Fatalf("%s flat record source = %v, want %v", name, got, test.wantSource != "")
 			}
-			if got := OutageHookFailMode(opts, conn); got != test.wantOutage {
-				t.Fatalf("outage fail mode %q, want %q", got, test.wantOutage)
+			if got := OutageHookFailMode(opts, test.conn); got != test.wantOut {
+				t.Fatalf("outage fail mode %q, want %q", got, test.wantOut)
+			}
+			if got := HookFailClosed(opts, test.conn); got != (test.wantMode == "closed") {
+				t.Fatalf("HookFailClosed = %v, want %v", got, test.wantMode == "closed")
+			}
+		})
+	}
+}
+
+// A per-user Cursor's contract (its hook lock) follows the guardrail mode
+// while its outage mode is closed without an explicit open: the runtime
+// validation accepts a closed runtime under an open contract and still
+// refuses an open runtime under a closed one.
+func TestCursorRuntimeMayBeClosedUnderAnOpenContract(t *testing.T) {
+	cursor := NewCursorConnector()
+	for _, test := range []struct {
+		name     string
+		opts     SetupOpts
+		contract string
+		ok       bool
+	}{
+		{"observe, unset", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "open", true},
+		{"observe, explicit open", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", true},
+		{"open runtime, closed contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			opts := test.opts
+			opts.DataDir, opts.APIAddr = dataDir, "127.0.0.1:18970"
+			if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dataDir, "hooks"), opts, cursor); err != nil {
+				t.Fatal(err)
+			}
+			if test.contract == "open" && resolveHookFailMode(opts, cursor) != "open" {
+				t.Fatal("precondition: the observe contract is not open")
+			}
+			if err := ValidateHookRuntimeState(dataDir, "cursor", test.contract); (err == nil) != test.ok {
+				t.Fatalf("validate against %s: %v, want ok=%v", test.contract, err, test.ok)
 			}
 		})
 	}

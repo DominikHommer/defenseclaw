@@ -417,21 +417,23 @@ def test_connector_fail_mode_report_uses_disposable_windows_runtime(
 
 
 @pytest.mark.parametrize("connector", ["antigravity", "copilot"])
-def test_connector_fail_mode_report_upstream_fail_open_preserves_configured_but_reports_open(
+def test_per_user_copilot_and_antigravity_report_their_configured_fail_mode(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connector: str,
 ) -> None:
+    # r104 W3 G3-upg: the per-user hooks print the agent's native denial for
+    # their own failures in fail mode closed, so they are no upstream
+    # fail-open (Secure Client still is).
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
 
     report = connector_fail_mode_report(cfg, connector)
 
     assert report["configured"] == "closed"
-    assert report["effective"] == "open"
-    assert report["runtime"] == "open"
-    assert report["provenance"] == f"{connector}-upstream-fail-open"
-    assert report["current"] is True
-    assert report["sources"][-1] == {"name": f"{connector}-upstream", "mode": "open"}
+    assert report["effective"] == "closed"
+    assert report["provenance"] == "config"
+    cfg.deployment_mode = "managed_enterprise"
+    assert fail_mode_runtime.upstream_fail_open(cfg, connector) is True
 
 
 def test_windows_registration_freshness_uses_authenticated_packaged_root(
@@ -1006,7 +1008,7 @@ def test_hermes_reports_its_configured_fail_mode_on_every_os(
     assert report["effective"] == "closed"
     assert report["provenance"] == "config"
     assert fail_mode_runtime.upstream_fail_open(cfg, "hermes") is False
-    assert fail_mode_runtime.upstream_fail_open(cfg, "copilot") is True
+    assert fail_mode_runtime.upstream_fail_open(cfg, "copilot") is False
 
 
 # ── 1.0.4 review (GAP-0315): the environment only tightens ──────────────────

@@ -2546,20 +2546,21 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				t.Errorf("hook config sidecar API address = %q, want 127.0.0.1:18970", runtimeState.GatewayAddr)
 			}
 			// The rendered mode keeps closed for a connector whose hook
-			// blocks its own failures (the per-user Hermes hook, GAP-0269)
-			// and is open for the other connectors without a fail-closed
-			// contract. That open has no config source: the native hook
-			// fails it closed while the gateway is down (OutageHookFailMode).
-			resolved := resolveHookFailMode(opts, tt.conn)
-			wantFailMode := CapableHookFailMode(opts, tt.conn, resolved)
-			if tt.conn.Name() == "hermes" && wantFailMode != "closed" {
-				t.Errorf("per-user Hermes resolves fail mode %q, want closed", wantFailMode)
+			// blocks its own failures (the per-user Hermes, Copilot and
+			// Antigravity hooks, GAP-0269, r104 W3 G3-upg) and is open for
+			// the other connectors without a fail-closed contract. That
+			// open has no config source: the native hook fails it closed
+			// while the gateway is down (OutageHookFailMode).
+			outage := OutageHookFailMode(opts, tt.conn)
+			wantFailMode := renderedHookFailMode(opts, tt.conn)
+			if hookBlocksItsOwnFailures(opts, tt.conn) && wantFailMode != "closed" {
+				t.Errorf("per-user %s resolves fail mode %q, want closed", tt.conn.Name(), wantFailMode)
 			}
 			if got := runtimeState.FailModes[connectorName]; got != wantFailMode {
 				t.Errorf("hook config sidecar fail mode for %s = %q, want %q", connectorName, got, wantFailMode)
 			}
 			wantSource := ""
-			if wantFailMode == resolved {
+			if wantFailMode == outage {
 				wantSource = HookFailModeSourceConfig
 			}
 			if got := runtimeState.FailModeSources[connectorName]; got != wantSource {
