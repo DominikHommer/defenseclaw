@@ -1444,9 +1444,14 @@ func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
 			if rt.requests != 0 || rt.gotReq != nil {
 				t.Fatalf("unreviewed event %q reached the gateway", event)
 			}
-			if result.code != 0 || strings.Contains(result.stdout, `"deny"`) {
+			// The payload's event fields are never used. The input is not
+			// clearly another event, so the closed hook refuses it as a
+			// possible tool call (review round 3), with the binding as the
+			// reason, not a gateway verdict.
+			if result.code != 0 || !strings.Contains(result.stdout, `"decision":"deny"`) ||
+				!strings.Contains(result.stdout, "registered without an Antigravity event") {
 				t.Fatalf(
-					"unreviewed event %q synthesized enforcement: code=%d stdout=%q stderr=%q",
+					"unreviewed event %q: code=%d stdout=%q stderr=%q, want the binding refusal",
 					event, result.code, result.stdout, result.stderr,
 				)
 			}

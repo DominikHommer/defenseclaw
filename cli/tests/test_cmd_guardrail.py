@@ -1179,6 +1179,33 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertIn("will now BLOCK Hermes tool calls", result.output)
         self.assertIn("hook times out", result.output)
 
+    def test_set_native_deny_connector_closed_names_its_native_deny(self):
+        # Review round 3: closed Copilot and Antigravity hooks block with the
+        # agent's own deny and exit 0; the guidance said they exit 2.
+        expected = {
+            "copilot": "Copilot's own deny for preToolUse and permissionRequest",
+            "antigravity": "Antigravity's PreToolUse deny ({\"decision\":\"deny\"})",
+            "codex": "will exit 2 from this connector's hooks",
+        }
+        for connector, signal in expected.items():
+            with self.subTest(connector=connector):
+                app = make_multi_ctx({"claudecode": None, connector: None})
+                with patch(
+                    "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
+                ), patch("defenseclaw.fail_mode._is_windows", return_value=False):
+                    result = CliRunner().invoke(
+                        cmd_guardrail.fail_mode_cmd,
+                        ["closed", "--connector", connector, "--yes"],
+                        obj=app,
+                    )
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                output = " ".join(result.output.split())
+                self.assertIn(signal, output)
+                if connector != "codex":
+                    self.assertNotIn("exit 2", output)
+                    self.assertIn("exits 0", output)
+                    self.assertIn("hook times out", output)
+
     def test_per_connector_closed_for_copilot_and_antigravity_is_provenance_not_a_block(self):
         # 1.0.4 review (loop round 2): under Secure Client their hooks render
         # open under closed, so the setter must not promise a block or an

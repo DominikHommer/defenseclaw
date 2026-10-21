@@ -22,8 +22,8 @@
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 9926,
-      "sha256": "b120f9e37c1a8494592aaf7aa7e47cbd64deccab82101ebd1de5b7556c0e1d68"
+      "size": 12865,
+      "sha256": "59469cad05b59a49b08aeeb47c3c27b0f7001625670e589b2536ecab6c50ec94"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -69,8 +69,8 @@
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 8823,
-      "sha256": "dbf3d1016ff5d793b5d4d9740b3976e7a1b2a9bd6fdf167f2237a584c3e7c43b"
+      "size": 11936,
+      "sha256": "89bbb11359267971045c794ce4100aecf6280e1b796eca1e2365ef82217ce692"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -868,8 +868,8 @@
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 11147,
-      "sha256": "44fe7e396eb4c79da84c447f5c37426b5b97155d43ee2c4c39c47317e886a5b8"
+      "size": 12636,
+      "sha256": "c80897d57ae61b3b89bbc1ffb232c269e6bfdb5a6a9c034d23e2e32e39e53bb8"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -915,8 +915,8 @@
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 10028,
-      "sha256": "2928821e0e60dcd4b8d283a7aeda5e109099f2295a0583642123b37176ae0f14"
+      "size": 10861,
+      "sha256": "1c889885dafc8fede823ba1b15d971e75b0d2ce4627765f1a2f4d54e1cd31eaa"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1394,8 +1394,8 @@
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 9729,
-      "sha256": "751bd5eb8e03c1c67061266f3d169e8d6bdc08835ef7f1d7f2a99f8e761685f8"
+      "size": 12668,
+      "sha256": "45c904061014ab918ed9bab2208f163f3ec0ec370cca19bc6ebf2d99460b278f"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
@@ -1409,8 +1409,8 @@
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 10970,
-      "sha256": "5f1b06d2ca9324f67e801f09f6ce3bc9866d51efc818c4a4b5d1bdc47dc464b3"
+      "size": 12459,
+      "sha256": "34820fc09208061016652228bf4d7764cee7c81f4d440cdd00e773f6f06f37b2"
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",
@@ -1476,8 +1476,8 @@
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 9729,
-      "sha256": "0288714f8df32a1dcfd832e3b7e945f8b58d966cc5e8784627a98214e31b4aa8"
+      "size": 12668,
+      "sha256": "29520274133542d0ed57584d84842de0707b671bf93d2d749efbd0fd1a6d7c8c"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
@@ -1491,8 +1491,8 @@
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 10970,
-      "sha256": "a68b6eed026a3b6a5bed83734b70d4d326c75f5f5b98ec53391fd21258eb9712"
+      "size": 12459,
+      "sha256": "614eae5f8e3dba7b8397b542a4b584d51b1ca857842b9a0a7968504583e6812c"
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",

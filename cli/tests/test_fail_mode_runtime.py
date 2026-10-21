@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
@@ -368,7 +369,9 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
         drift=(),
     ).to_report()
     assert observe["effective"] == "open" and observe["drift"] == []
-    assert observe["note"] == "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode"
+    assert (
+        observe["note"] == "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode"
+    )
 
 
 def test_opencode_fail_mode_uses_baked_plugin_and_ignores_process_env(
@@ -386,9 +389,7 @@ def test_opencode_fail_mode_uses_baked_plugin_and_ignores_process_env(
     assert ("process-env", "open") not in state.sources
 
 
-def test_opencode_fail_mode_reports_managed_plugin_drift(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_opencode_fail_mode_reports_managed_plugin_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"opencode": "closed"})
     _write_opencode_runtime(cfg, tmp_path, plugin_mode="open", lock_mode="closed")
 
@@ -426,7 +427,10 @@ def test_native_deny_connector_reports_the_mode_its_hook_renders(
     # A per-user Copilot CLI, Antigravity or Hermes hook follows its fail
     # mode: closed blocks every failure DefenseClaw sees, and the report names
     # the vendor limit it keeps.
-    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    monkeypatch.setattr(fail_mode_runtime, "_native_deny_registration_freshness", lambda *_args: None, raising=False)
+    _register_native_deny_hook(monkeypatch, cfg, home, connector)
     script = f"{connector}-hook.sh"
     hook = Path(cfg.data_dir) / "hooks" / script
     hook.write_text("\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8")
@@ -470,7 +474,7 @@ def test_native_deny_connector_reads_the_windows_hookcfg(
     report = connector_fail_mode_report(cfg, connector)
 
     assert report["runtime"] == "open"
-    assert report["drift"] == ["windows-sidecar-open"]
+    assert "windows-sidecar-open" in report["drift"]
 
 
 @pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
@@ -579,9 +583,7 @@ def test_windows_resolver_reports_effective_mixed_modes(monkeypatch: pytest.Monk
     assert codex.current and codex.runtime == "open"
 
 
-def test_windows_resolver_accepts_sealed_claude_v2_contract(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_windows_resolver_accepts_sealed_claude_v2_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
     _write_current_runtime(cfg, home, {"claudecode": "closed"})
     lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
@@ -967,8 +969,9 @@ def test_unix_registration_freshness_checks_each_connectors_own_script(
     # GAP-0027: a current Devin registration was reported stale because the
     # check looked for codex-hook.sh in it.
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
-    with patch("defenseclaw.fail_mode.Path.home", return_value=home), patch(
-        "defenseclaw.connector_paths.Path.home", return_value=home
+    with (
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        patch("defenseclaw.connector_paths.Path.home", return_value=home),
     ):
         registration = Path(fail_mode_runtime.connector_config_files(connector, workspace_dir="")[0])
         registration.parent.mkdir(parents=True, exist_ok=True)
@@ -988,6 +991,8 @@ def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_m
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "hermes": ""})
     cfg.guardrail.hook_fail_mode = ""
     cfg.guardrail._secure_client = True
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: False
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
@@ -1064,7 +1069,7 @@ def test_hermes_reports_its_configured_fail_mode_on_every_os(
     assert report["configured"] == "closed"
     assert report["effective"] == "closed"
     assert report["provenance"] == "config"
-    assert report["drift"] == [("windows-sidecar" if windows else "hook-script") + "-missing"]
+    assert ("windows-sidecar" if windows else "hook-script") + "-missing" in report["drift"]
     assert fail_mode_runtime.upstream_fail_open(cfg, "hermes") is False
     assert fail_mode_runtime.upstream_fail_open(cfg, "copilot") is False
 
@@ -1169,7 +1174,9 @@ def test_the_callers_environment_does_not_hide_an_installed_open_hook(
         ({"version": 2, "fail_modes": "open", "legacy_fail_mode": "open"}, ("closed", False)),
         ({"version": 2, "fail_modes": {"codex": ""}, "legacy_fail_mode": "open"}, ("closed", False)),
         ({"version": 2, "fail_modes": {"codex": True}, "legacy_fail_mode": "open"}, ("closed", False)),
-        ({"version": 2, "fail_modes": {"codex": "bogus"}, "legacy_fail_mode": "open"}, ("closed", False)),
+        # An entry no installer writes is no readable mode (doctor fails it),
+        # never the legacy open (T4: hooks-upg loop 3 with w3-g3-hooks).
+        ({"version": 2, "fail_modes": {"codex": "bogus"}, "legacy_fail_mode": "open"}, (None, False)),
         # Controls: an unrefreshed install keeps its legacy mode.
         ({"version": 2, "legacy_fail_mode": "open"}, ("open", True)),
         ({"version": 2, "fail_modes": {"claudecode": "closed"}, "legacy_fail_mode": "open"}, ("open", True)),
@@ -1187,9 +1194,7 @@ def test_windows_sidecar_report_reads_a_malformed_map_as_the_native_hook_does(
     assert fail_mode_runtime._read_windows_hook_mode(path, "codex") == want
 
 
-def test_claude_settings_env_open_is_not_the_effective_mode(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_claude_settings_env_open_is_not_the_effective_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Claude Code passes its settings env to the hook, which ignores open: a
     # closed sidecar stays the effective mode, and the stale value is drift.
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
@@ -1242,3 +1247,451 @@ def test_opencode_fail_mode_reports_the_callers_environment_apart(
     assert state.effective == "open"
     assert state.provenance == "opencode-plugin"
     assert state.caller_env == "closed"
+
+
+def _stale_native_deny_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connectors: list[str], *, multi: bool
+) -> AppContext:
+    # config.yaml says closed while each hook is still rendered open (an
+    # older install, or a fail-mode change the hook never received).
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, dict.fromkeys(connectors, "closed") if multi else {})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.active_connector = lambda: connectors[0]
+    cfg.active_connectors = lambda: list(connectors)
+    for name in connectors:
+        script = f"{name}-hook.sh"
+        (Path(cfg.data_dir) / "hooks" / script).write_text(
+            "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/open"]) + "\n", encoding="utf-8"
+        )
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    return app
+
+
+@pytest.mark.parametrize("connector", ["antigravity", "copilot"])
+def test_closed_fail_mode_re_renders_a_single_native_deny_hook_still_rendered_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, [connector], multi=False)
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" not in result.output
+    assert "Re-applying hook fail mode" in result.output
+    reconcile.assert_called_once_with(app.cfg, connector)
+    restart.assert_not_called()
+
+
+def test_closed_fail_mode_re_renders_native_deny_hooks_with_the_gateway_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["antigravity", "copilot"], multi=True)
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" not in result.output
+    assert sorted(call.args[1] for call in reconcile.call_args_list) == ["antigravity", "copilot"]
+    restart.assert_not_called()
+
+
+def test_secure_client_native_deny_hooks_need_no_fail_mode_refresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Under Secure Client they stay open whatever is configured, so their open
+    # hooks are no stale runtime.
+    app = _stale_native_deny_app(monkeypatch, tmp_path, ["antigravity", "copilot"], multi=True)
+    app.cfg.deployment_mode = "managed_enterprise"
+    app.cfg.managed_outside_secure_client = lambda: False
+    with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile:
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" in result.output
+    reconcile.assert_not_called()
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_doctor_fails_an_open_rendered_hook_whatever_its_own_environment_says(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool
+) -> None:
+    # DEFENSECLAW_FAIL_MODE=closed in doctor's process is reported apart and
+    # does not make the open-rendered hook look closed: an agent without it
+    # runs the hook fail-open.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"copilot": "closed"})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.mode = "action"
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+    hook_dir = Path(cfg.data_dir) / "hooks"
+    if windows:
+        monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: True)
+        (hook_dir / ".hookcfg").write_text(
+            json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {"copilot": "open"}}),
+            encoding="utf-8",
+        )
+    else:
+        (hook_dir / "copilot-hook.sh").write_text(
+            "\n".join(_HOOK_FAIL_MODE_LINES["copilot-hook.sh/open"]) + "\n", encoding="utf-8"
+        )
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "closed")
+    report = connector_fail_mode_report(cfg, "copilot")
+    assert report["effective"] == "open"
+    assert report["caller_env"] == "closed"
+    emitted: list[tuple[str, str, str]] = []
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        cmd_doctor._check_connector_inventory(cfg, "copilot", cmd_doctor._DoctorResult())
+    mode_rows = [row for row in emitted if row[1] == "Mode"]
+    assert len(mode_rows) == 1 and mode_rows[0][0] == "fail", mode_rows
+    assert "fail-mode=open" in mode_rows[0][2] and "config wants fail-mode=closed" in mode_rows[0][2]
+
+
+_COPILOT_BOUND_EVENTS = ("preToolUse", "permissionRequest", "postToolUse")
+_ANTIGRAVITY_EVENTS = ("PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop")
+
+
+def _register_native_deny_hook(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: SimpleNamespace,
+    home: Path,
+    connector: str,
+    *,
+    lock_mode: str = "closed",
+    script: str = "",
+    binding: dict[str, str] | None = None,
+) -> Path:
+    """Write the lock entry and the live registration a per-user Setup writes.
+
+    binding maps an event to the registered command arguments that replace
+    the exact ones (for a stale or lost binding).
+    """
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("COPILOT_HOME", str(home / ".copilot"))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    script = script or str(Path(cfg.data_dir) / "hooks" / f"{connector}-hook.sh")
+    binding = binding or {}
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8")) if lock_path.exists() else {"version": 2, "connectors": {}}
+    lock["connectors"][connector] = {"hook_fail_mode": lock_mode}
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    if connector == "copilot":
+        path = home / ".copilot" / "hooks" / "defenseclaw.json"
+        hooks = {
+            event: [
+                {
+                    "type": "command",
+                    "bash": f"{script} {binding.get(event, '--event ' + event)}".strip(),
+                    "timeoutSec": 30,
+                }
+            ]
+            for event in _COPILOT_BOUND_EVENTS
+        }
+        document: object = {"version": 1, "hooks": hooks}
+    elif connector == "antigravity":
+        path = home / ".gemini" / "config" / "hooks.json"
+        document = {}
+        for event in _ANTIGRAVITY_EVENTS:
+            handler = {"type": "command", "command": f"{script} {binding.get(event, event)}".strip(), "timeout": 30}
+            entries = [{"matcher": "*", "hooks": [handler]}] if event.endswith("ToolUse") else [handler]
+            document[f"defenseclaw-antigravity-{event.lower()}"] = {event: entries}
+    else:
+        path = home / ".hermes" / "config.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"hooks:\n  pre_tool_call:\n  - command: {script}\n", encoding="utf-8")
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
+def test_native_deny_state_reports_a_stale_lock_or_registration_next_to_a_closed_script(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str
+) -> None:
+    # Review round 2: the hook script says closed, but the lock records open or
+    # the live registration still runs an older copy of the hook (which may be
+    # rendered open). Neither is current, so guardrail fail-mode closed
+    # reconciles instead of saying there is nothing to do.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    script = f"{connector}-hook.sh"
+    (Path(cfg.data_dir) / "hooks" / script).write_text(
+        "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8"
+    )
+
+    _register_native_deny_hook(monkeypatch, cfg, home, connector, lock_mode="open")
+    state = resolve_connector_fail_mode(cfg, connector)
+    assert state.runtime == "closed"
+    assert not state.current
+    assert {"registration-stale", "registration-lock-open"} <= set(state.drift)
+
+    old = tmp_path / "old-data" / "hooks" / script
+    old.parent.mkdir(parents=True)
+    old.write_text("\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/open"]) + "\n", encoding="utf-8")
+    _register_native_deny_hook(monkeypatch, cfg, home, connector, script=str(old))
+    state = resolve_connector_fail_mode(cfg, connector)
+    assert not state.current
+    assert state.drift == (("registration-command-stale",) if connector == "hermes" else ("registration-stale",))
+
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    cfg.guardrail.hook_fail_mode = "closed"
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services"),
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" not in result.output
+    reconcile.assert_called_once_with(cfg, connector)
+
+    _register_native_deny_hook(monkeypatch, cfg, home, connector)
+    assert resolve_connector_fail_mode(cfg, connector).current
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize(
+    ("connector", "event", "args"),
+    [
+        ("copilot", "preToolUse", ""),
+        ("copilot", "preToolUse", "--event postToolUse"),
+        ("copilot", "permissionRequest", "--event"),
+        ("antigravity", "PreToolUse", ""),
+        ("antigravity", "PreToolUse", "Stop"),
+    ],
+)
+def test_a_registration_that_loses_its_event_binding_is_drift_and_fails_doctor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str, event: str, args: str
+) -> None:
+    # Review round 2: neither agent names the event in its hook input, so a
+    # registered command that binds another event, or none, answers a tool
+    # call as an event that cannot block. Status and doctor said current.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    script = f"{connector}-hook.sh"
+    (Path(cfg.data_dir) / "hooks" / script).write_text(
+        "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8"
+    )
+    path = _register_native_deny_hook(monkeypatch, cfg, home, connector, binding={event: args})
+
+    state = resolve_connector_fail_mode(cfg, connector)
+    assert not state.current
+    assert "registration-stale" in state.drift
+
+    cfg.connector_workspace_dir = lambda: ""
+    emitted: list[tuple[str, str, str]] = []
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(cmd_doctor, "_edited_hook_problem", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        if connector == "copilot":
+            cmd_doctor._check_copilot_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+        else:
+            cmd_doctor._check_antigravity_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+    rows = [row for row in emitted if row[1].endswith("hooks")]
+    assert rows and rows[0][0] == "fail", emitted
+    assert "not bound to its registered event" in rows[0][2]
+
+    _register_native_deny_hook(monkeypatch, cfg, home, connector)
+    assert resolve_connector_fail_mode(cfg, connector).current
+    emitted.clear()
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(cmd_doctor, "_edited_hook_problem", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        if connector == "copilot":
+            cmd_doctor._check_copilot_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+        else:
+            cmd_doctor._check_antigravity_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+    assert [row[0] for row in emitted if row[1].endswith("hooks")] == ["pass"], emitted
+    assert path.exists()
+
+
+def _antigravity_entry(document: dict, event: str) -> dict:
+    return document[f"defenseclaw-antigravity-{event.lower()}"]
+
+
+def _skip_antigravity_disabled(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["enabled"] = False
+
+
+def _skip_antigravity_matcher(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["PreToolUse"][0]["matcher"] = "run_command"
+
+
+def _skip_antigravity_type(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["PreToolUse"][0]["hooks"][0]["type"] = "prompt"
+
+
+def _skip_antigravity_timeout(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["PreToolUse"][0]["hooks"][0]["timeout"] = 1
+
+
+def _skip_antigravity_extra(document: dict) -> None:
+    group = _antigravity_entry(document, "PreToolUse")["PreToolUse"]
+    group.append({"matcher": "*", "hooks": [dict(group[0]["hooks"][0])]})
+
+
+def _skip_copilot_type(document: dict) -> None:
+    document["hooks"]["preToolUse"][0]["type"] = "prompt"
+
+
+def _skip_copilot_timeout(document: dict) -> None:
+    document["hooks"]["permissionRequest"][0]["timeoutSec"] = 1
+
+
+def _skip_copilot_disabled(document: dict) -> None:
+    document["disableAllHooks"] = True
+
+
+def _skip_copilot_version(document: dict) -> None:
+    del document["version"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize(
+    ("connector", "skip"),
+    [
+        ("antigravity", _skip_antigravity_disabled),
+        ("antigravity", _skip_antigravity_matcher),
+        ("antigravity", _skip_antigravity_type),
+        ("antigravity", _skip_antigravity_timeout),
+        ("antigravity", _skip_antigravity_extra),
+        ("copilot", _skip_copilot_type),
+        ("copilot", _skip_copilot_timeout),
+        ("copilot", _skip_copilot_disabled),
+        ("copilot", _skip_copilot_version),
+    ],
+    ids=lambda value: value.__name__.removeprefix("_skip_") if callable(value) else value,
+)
+def test_a_registration_the_agent_skips_is_drift_and_fails_doctor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str, skip
+) -> None:
+    # Review round 3: the registration keeps the exact command and event, but
+    # the agent skips it (disabled, a narrowed matcher, not a command handler,
+    # a timeout shorter than Setup's), so some tool calls never run the hook.
+    # Status and doctor said current.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    script = f"{connector}-hook.sh"
+    (Path(cfg.data_dir) / "hooks" / script).write_text(
+        "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8"
+    )
+    path = _register_native_deny_hook(monkeypatch, cfg, home, connector)
+    assert resolve_connector_fail_mode(cfg, connector).current
+    document = json.loads(path.read_text(encoding="utf-8"))
+    skip(document)
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    state = resolve_connector_fail_mode(cfg, connector)
+    assert not state.current
+    assert any(item.startswith("registration-") for item in state.drift), state.drift
+
+    cfg.connector_workspace_dir = lambda: ""
+    emitted: list[tuple[str, str, str]] = []
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(cmd_doctor, "_edited_hook_problem", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        if connector == "copilot":
+            cmd_doctor._check_copilot_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+        else:
+            cmd_doctor._check_antigravity_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+    rows = [row for row in emitted if row[1].endswith("hooks")]
+    assert rows and rows[0][0] == "fail", emitted
+
+
+@pytest.mark.parametrize(
+    ("body", "mode", "legacy"),
+    [
+        ({"version": 2, "fail_modes": {"copilot": "OPEN"}}, "open", False),
+        ({"version": 2, "fail_modes": {"copilot": " Closed "}}, "closed", False),
+        ({"Version": 2, "Fail_Modes": {"Copilot": "open"}}, "open", False),
+        ({"version": 2, "fail_modes": {"copilot": "bogus"}}, None, False),
+        ({"version": 2, "fail_modes": {"copilot": "open", "COPILOT": "closed"}}, None, False),
+        ({"version": 2, "fail_modes": {}, "legacy_fail_mode": "Open"}, "open", True),
+        ({"version": "2", "fail_modes": {"copilot": "open"}}, None, False),
+        ("DEFENSECLAW_FAIL_MODE=closed\nDEFENSECLAW_FAIL_MODE=open\n", "open", True),
+        (f"export {fail_mode_runtime._native_hook_sidecar_key('copilot')}='OPEN'\n", "open", True),
+        ('DEFENSECLAW_FAIL_MODE="closed"\n', "closed", True),
+    ],
+)
+def test_windows_hookcfg_is_read_as_the_native_hook_reads_it(
+    tmp_path: Path, body: object, mode: str | None, legacy: bool
+) -> None:
+    # Review round 2: the native hook treats "open" in any case as open (and
+    # reads Go's case-insensitive JSON fields, the last KEY=value line, and a
+    # connector key); the reader rejected OPEN and reported no runtime mode.
+    path = tmp_path / ".hookcfg"
+    path.write_text(body if isinstance(body, str) else json.dumps(body), encoding="utf-8")
+    got_mode, got_legacy = fail_mode_runtime._read_windows_hook_mode(path, "copilot")
+    assert got_mode == mode
+    if mode is not None:
+        assert got_legacy is legacy
+
+
+@pytest.mark.parametrize(
+    ("sidecar", "phrase"),
+    [("OPEN", "fail-mode=open"), ("bogus", "no readable fail mode"), (None, "no readable fail mode")],
+)
+def test_doctor_mode_fails_a_windows_hook_rendered_open_or_without_a_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sidecar: str | None, phrase: str
+) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"copilot": "closed"})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.mode = "action"
+    cfg.skill_dirs = lambda connector=None: []
+    cfg.plugin_dirs = lambda connector=None: []
+    cfg.mcp_servers = lambda connector=None, **_: []
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: True)
+    monkeypatch.setattr(fail_mode_runtime, "_native_deny_registration_freshness", lambda *_args: None, raising=False)
+    _register_native_deny_hook(monkeypatch, cfg, home, "copilot")
+    if sidecar is not None:
+        (Path(cfg.data_dir) / "hooks" / ".hookcfg").write_text(
+            json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {"copilot": sidecar}}),
+            encoding="utf-8",
+        )
+    if sidecar == "OPEN":
+        # Doctor's own environment is reported apart and does not mask it.
+        monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "closed")
+    emitted: list[tuple[str, str, str]] = []
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        cmd_doctor._check_connector_inventory(cfg, "copilot", cmd_doctor._DoctorResult())
+    mode_rows = [row for row in emitted if row[1] == "Mode"]
+    assert len(mode_rows) == 1 and mode_rows[0][0] == "fail", mode_rows
+    assert phrase in mode_rows[0][2]

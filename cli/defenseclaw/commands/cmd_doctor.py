@@ -8648,6 +8648,19 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
             "fail-mode",
             f"lock={lock_mode or 'missing'} configured={configured_mode or 'missing'} effective={effective}",
         )
+    # The lock records what Setup asked for; the hook runs what was rendered
+    # (the hook script, Windows .hookcfg or the plugin). A Windows .hookcfg
+    # left open next to a closed lock lets calls run with the gateway down.
+    from defenseclaw.fail_mode import rendered_fail_mode, report_renders_fail_mode
+
+    rendered = rendered_fail_mode(fail_mode)
+    if report_renders_fail_mode(fail_mode) and rendered != lock_mode_target:
+        return ConnectorSetupReadiness(
+            False,
+            name,
+            "fail-mode",
+            f"rendered={rendered or 'missing'} lock={lock_mode} configured={configured_mode or 'missing'}",
+        )
 
     result = _DoctorResult(passive=True, quiet=True)
     try:
@@ -8748,7 +8761,7 @@ def _check_antigravity_hooks(cfg, r: _DoctorResult, platform_name: str | None = 
             r=r,
         )
     elif _hook_json_references(canonical, "antigravity-hook.sh"):
-        _emit("pass", "Antigravity hooks", f"reachable at {canonical}", r=r)
+        _emit_unix_event_binding(cfg, "antigravity", "Antigravity hooks", canonical, f"reachable at {canonical}", r)
     else:
         _emit(
             "fail",
@@ -8839,11 +8852,9 @@ def _check_copilot_hooks(
             _emit("fail", "Copilot hooks", f"{path} not found", r=r)
             return
         if _hook_json_references(path, "copilot-hook.sh"):
-            _emit(
-                "pass",
-                "Copilot hooks",
-                f"reachable at {path}; local settings verified; managed policy unverified",
-                r=r,
+            _emit_unix_event_binding(
+                cfg, "copilot", "Copilot hooks", path,
+                f"reachable at {path}; local settings verified; managed policy unverified", r,
             )
             return
         _emit("fail", "Copilot hooks", f"{path} does not reference DefenseClaw hook script", r=r)
@@ -8853,14 +8864,35 @@ def _check_copilot_hooks(
         _emit("fail", "Copilot hooks", f"{path} not found", r=r)
         return
     if _hook_json_references(path, "copilot-hook.sh"):
-        _emit(
-            "pass",
-            "Copilot hooks",
-            f"reachable at {path}; local settings verified; managed policy unverified",
-            r=r,
+        _emit_unix_event_binding(
+            cfg, "copilot", "Copilot hooks", path,
+            f"reachable at {path}; local settings verified; managed policy unverified", r,
         )
     else:
         _emit("fail", "Copilot hooks", f"{path} does not reference DefenseClaw hook script", r=r)
+
+
+def _emit_unix_event_binding(cfg, connector: str, label: str, path: str, healthy: str, r: _DoctorResult) -> None:
+    """Pass the Linux or macOS registration only when each event runs this install's hook exactly.
+
+    Copilot CLI and Antigravity name no event in their hook input: an entry
+    bound to another event, or to none, lets a tool call run unchecked.
+    """
+    from defenseclaw.doctor_hooks import unix_hook_event_binding_problem
+    from defenseclaw.hook_integrity import setup_command
+
+    script = os.path.join(getattr(cfg, "data_dir", "") or "", "hooks", f"{connector}-hook.sh")
+    state, problem = unix_hook_event_binding_problem(connector, path, script)
+    if state:
+        _emit(
+            "fail",
+            label,
+            f"{problem}; a tool call can run unchecked",
+            r=r,
+            remediation=f"re-register the hooks: {setup_command(connector)} --yes",
+        )
+        return
+    _emit("pass", label, healthy, r=r)
 
 
 def _check_zeptoclaw_config(cfg, r: _DoctorResult) -> None:
@@ -14255,11 +14287,19 @@ def _check_connector_inventory(
             mode = ""
         if mode:
             try:
-                from defenseclaw.fail_mode import connector_fail_mode_report
+                from defenseclaw.fail_mode import (
+                    connector_fail_mode_report,
+                    rendered_fail_mode,
+                    report_renders_fail_mode,
+                )
 
                 fail_mode = connector_fail_mode_report(cfg, connector)
+                rendered = rendered_fail_mode(fail_mode)
+                renders = report_renders_fail_mode(fail_mode)
             except Exception:  # noqa: BLE001 - doctor must still report partial state.
                 fail_mode = {"effective": "unknown", "provenance": "unavailable"}
+                rendered = None
+                renders = False
             if mode in {"observe", "action"}:
                 fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
                 detail = (
@@ -14267,12 +14307,24 @@ def _check_connector_inventory(
                     f"provenance={fail_mode['provenance']}"
                 )
                 desired = fail_mode.get("desired")
-                if fail_mode.get("runtime") is not None and desired in {"open", "closed"} and (
-                    fail_mode.get("effective") != desired
-                ):
+                # A DEFENSECLAW_FAIL_MODE=closed in doctor's own environment
+                # makes the effective mode closed, but the agent that runs an
+                # open-rendered hook may not have it, so the rendered mode is
+                # checked on its own.
+                rendered_open = desired == "closed" and rendered == "open"
+                # A hook or plugin that records its mode but has none that
+                # can be read (missing, or a value no installer writes) does
+                # not run the configured mode for certain.
+                rendered_missing = renders and rendered is None
+                runtime_mismatch = fail_mode.get("runtime") is not None and fail_mode.get("effective") != desired
+                if desired in {"open", "closed"} and (runtime_mismatch or rendered_open or rendered_missing):
                     # The hooks run another fail mode than config.yaml asks
                     # for (GAP-0009): an open hook while config says closed
                     # lets calls through with the gateway down.
+                    if rendered_missing:
+                        detail += "; the installed hook has no readable fail mode"
+                    elif rendered_open and fail_mode.get("effective") == desired:
+                        detail += "; the installed hook is rendered fail-mode=open"
                     _emit(
                         "fail" if desired == "closed" else "warn",
                         "Mode",

@@ -93,6 +93,11 @@ def _patch_registration_ready(monkeypatch, entry: dict[str, object]) -> None:
         "connector_registration_lock_state",
         lambda _cfg, _connector: (str(entry["hook_fail_mode"]), None),
     )
+    monkeypatch.setattr(
+        fail_mode,
+        "_registration_lock_state",
+        lambda _cfg, _connector, **_kwargs: (str(entry["hook_fail_mode"]), None),
+    )
 
 
 @pytest.mark.parametrize("connector", TEN_CONNECTORS)
@@ -246,6 +251,7 @@ def test_slow_real_dispatch_is_bounded_and_cannot_publish_late(monkeypatch, tmp_
         return True
 
     monkeypatch.setattr(cmd_doctor, "_file_references_marker", slow_marker)
+    monkeypatch.setattr(fail_mode, "_platform_runtime_source", lambda *_args: ("amp-plugin", "open"))
     before = time.monotonic()
     result = cmd_setup._wait_for_connector_runtime(str(tmp_path), ["amp"], None, None, timeout=0.15)
     elapsed = time.monotonic() - before
@@ -301,6 +307,7 @@ def test_hermes_pending_reload_is_not_setup_ready(monkeypatch, tmp_path: Path) -
             "registration is on disk but live=false",
         ),
     )
+    monkeypatch.setattr(fail_mode, "_platform_runtime_source", lambda *_args: ("hook-script", "open"))
     readiness = cmd_doctor.connector_setup_readiness(cfg, "hermes")
     assert not readiness
     assert readiness.connector == "hermes"
@@ -850,10 +857,48 @@ def test_copilot_stale_launcher_returns_executable_invariant(monkeypatch, tmp_pa
         lambda *_args, **_kwargs: WindowsHookCheck("stale", "registered launcher executable is stale"),
     )
     # os.name is faked: the Windows .hookcfg path cannot be built on this host.
-    monkeypatch.setattr("defenseclaw.fail_mode._platform_runtime_source", lambda *_args: ("windows-sidecar", None))
+    monkeypatch.setattr("defenseclaw.fail_mode._platform_runtime_source", lambda *_args: ("windows-sidecar", "open"))
     readiness = cmd_doctor.connector_setup_readiness(cfg, "copilot")
     assert not readiness
     assert (readiness.connector, readiness.invariant) == ("copilot", "executable")
+
+
+@pytest.mark.parametrize(("rendered", "ready"), [("open", False), (None, False), ("closed", True)])
+def test_readiness_requires_the_rendered_windows_mode_to_match_the_lock(
+    monkeypatch, tmp_path: Path, rendered: str | None, ready: bool
+) -> None:
+    # Review round 2: config and the lock say closed, but the Windows .hookcfg
+    # the native hook reads says open (or nothing). The hook then lets calls
+    # run with the gateway down, so Setup must not report ready.
+    cfg = _config(tmp_path)
+    cfg.guardrail = _guardrail(mode="action", fail_mode="closed")
+    entry = _entry("copilot", tmp_path)
+    entry["hook_fail_mode"] = "closed"
+    _patch_registration_ready(monkeypatch, entry)
+    monkeypatch.setattr(fail_mode, "_is_windows", lambda: True)
+    monkeypatch.setattr(fail_mode, "_native_deny_registration_freshness", lambda *_args: None, raising=False)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir(exist_ok=True)
+    if rendered is not None:
+        (hooks / ".hookcfg").write_text(
+            json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {"copilot": rendered}}),
+            encoding="utf-8",
+        )
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": {"copilot": entry}}),
+        encoding="utf-8",
+    )
+
+    def passing(label: str):
+        return lambda _cfg, _name, r, *_args, **_kwargs: cmd_doctor._emit("pass", label, "ok", r=r)
+
+    monkeypatch.setattr(cmd_doctor, "_check_hook_contract_lock", passing("Hook contract"))
+    monkeypatch.setattr(cmd_doctor, "_check_connector_hooks", passing("Copilot hooks"))
+    readiness = cmd_doctor.connector_setup_readiness(cfg, "copilot")
+    assert bool(readiness) is ready, readiness
+    if not ready:
+        assert readiness.invariant == "fail-mode"
+        assert f"rendered={rendered or 'missing'}" in readiness.detail
 
 
 def test_readiness_lock_reports_digest_drift(monkeypatch, tmp_path: Path) -> None:

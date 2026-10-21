@@ -3,15 +3,27 @@
 # DefenseClaw Copilot CLI hook — forwards Copilot CLI hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}# Copilot consumes a native JSON denial on tool boundaries. Keep this
-# available before helpers, credentials and the gateway are consulted.
+{{if and (not .Sandbox) (or (not .Managed) (not .SecureClient))}}# Copilot honours a native deny only on preToolUse and permissionRequest,
+# and its stdin does not name the event: setup binds a reviewed one with
+# --event. copilot_deny prints the deny with the text ($1) before helpers,
+# credentials and the gateway are consulted. A hook bound to no reviewed
+# event prints both denies, so whichever of the two Copilot ran it for is
+# denied; Copilot's other events ignore them.
 _DC_COPILOT_EVENT=""
-if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then _DC_COPILOT_EVENT="$2"; fi
-copilot_managed_failure() {
-  case "$_DC_COPILOT_EVENT" in
-    preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
-    permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then
+  case "$2" in
+    sessionStart|sessionEnd|userPromptSubmitted|userPromptTransformed|preToolUse|postToolUse|permissionRequest|agentStop|subagentStart|subagentStop|postToolUseFailure|errorOccurred|preCompact|notification) _DC_COPILOT_EVENT="$2" ;;
   esac
+fi
+copilot_deny() {
+  case "$_DC_COPILOT_EVENT" in
+    preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$1" ;;
+    permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$1" ;;
+    "") printf '{"permissionDecision":"deny","permissionDecisionReason":"%s","behavior":"deny","message":"%s"}\n' "$1" "$1" ;;
+  esac
+}
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}copilot_managed_failure() {
+  copilot_deny "DefenseClaw hook failed closed"
   exit 0
 }
 trap '_dc_copilot_rc=$?; if [ "$_dc_copilot_rc" -ne 0 ]; then copilot_managed_failure; fi' EXIT
@@ -21,22 +33,17 @@ trap '_dc_copilot_rc=$?; if [ "$_dc_copilot_rc" -ne 0 ]; then copilot_managed_fa
 # availability closes it too.
 case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) FAIL_MODE="closed" ;; esac
 case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) FAIL_MODE="closed" ;; esac
-_DC_COPILOT_EVENT=""
-if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then _DC_COPILOT_EVENT="$2"; fi
-# Copilot CLI lets a call run when its hook fails, but honours its native
-# deny on preToolUse and permissionRequest. In fail mode closed every failure
-# DefenseClaw sees prints that deny with the reason ($1); Copilot's other
-# events cannot block. Fail mode open lets the call run.
+# Copilot CLI lets a call run when its hook fails. In fail mode closed every
+# failure DefenseClaw sees prints Copilot's native deny with the reason ($1)
+# instead; Copilot's other events cannot block. Fail mode open lets the call
+# run.
 copilot_hook_failure() {
   [ "$FAIL_MODE" = "closed" ] || exit 0
   local text="DefenseClaw blocked this tool call (fail mode closed). Run \`defenseclaw doctor\` to see why."
   if [ -n "${1:-}" ] && declare -F defenseclaw_json_escape >/dev/null 2>&1; then
     text="$(defenseclaw_json_escape "DefenseClaw blocked this tool call: $1")"
   fi
-  case "$_DC_COPILOT_EVENT" in
-    preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$text" ;;
-    permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$text" ;;
-  esac
+  copilot_deny "$text"
   exit 0
 }
 {{end}}# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
@@ -165,14 +172,14 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 # the official stdin body.
 if [ "$#" -ne 2 ] || [ "$1" != "--event" ]; then
   echo "defenseclaw: copilot hook requires --event <event>" >&2
-  {{$failure}}
+  {{$failure}}{{if and (not .Managed) (not .Sandbox)}} "its DefenseClaw hook is registered without a Copilot event DefenseClaw reviewed. Run \`defenseclaw setup copilot\` to register it again."{{end}}
 fi
 COPILOT_HOOK_EVENT="$2"
 case "$COPILOT_HOOK_EVENT" in
   sessionStart|sessionEnd|userPromptSubmitted|userPromptTransformed|preToolUse|postToolUse|permissionRequest|agentStop|subagentStart|subagentStop|postToolUseFailure|errorOccurred|preCompact|notification) ;;
   *)
     echo "defenseclaw: copilot hook received unsupported event" >&2
-    {{$failure}}
+    {{$failure}}{{if and (not .Managed) (not .Sandbox)}} "its DefenseClaw hook is registered without a Copilot event DefenseClaw reviewed. Run \`defenseclaw setup copilot\` to register it again."{{end}}
     ;;
 esac
 
@@ -356,26 +363,35 @@ if [ "$ACTION" = "block" ]; then
   esac
   [ "$NATIVE_DENY" = "true" ] || fail_response "missing native deny in gateway response"
 fi
-if [ "$ACTION" = "confirm" ] && [ "$COPILOT_HOOK_EVENT" = "preToolUse" ]; then
-  NATIVE_ASK=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "ask"' 2>/dev/null) || fail_response "invalid native output in gateway response"
+if [ "$ACTION" = "confirm" ]; then
+  NATIVE_ASK=true
+  case "$COPILOT_HOOK_EVENT" in
+    preToolUse) NATIVE_ASK=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "ask"' 2>/dev/null) || fail_response "invalid native output in gateway response" ;;
+    permissionRequest) NATIVE_ASK=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "ask"' 2>/dev/null) || fail_response "invalid native output in gateway response" ;;
+  esac
   [ "$NATIVE_ASK" = "true" ] || fail_response "missing native confirmation in gateway response"
 fi
 {{else if not .Managed}}if [ "$FAIL_MODE" = "closed" ]; then
-  # Every verdict names its action, and a block on a tool boundary carries
-  # Copilot's native deny: anything else is no verdict, and would let the
-  # call run.
+  # Every verdict names its action, and on a tool boundary a block carries
+  # Copilot's native deny and a confirmation its native ask, as the Windows
+  # hook checks: anything else is no verdict, and would let the call run.
   ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || fail_response "invalid action in gateway response"
   case "$ACTION" in
     allow|block|confirm|alert) ;;
     *) fail_response "invalid or missing action in gateway response" ;;
   esac
-  if [ "$ACTION" = "block" ]; then
-    NATIVE_DENY=true
-    case "$COPILOT_HOOK_EVENT" in
-      preToolUse) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "deny"' 2>/dev/null) || NATIVE_DENY=false ;;
-      permissionRequest) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "deny"' 2>/dev/null) || NATIVE_DENY=false ;;
+  NATIVE_ANSWER=true
+  case "$COPILOT_HOOK_EVENT:$ACTION" in
+    preToolUse:block) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "deny"' 2>/dev/null) || NATIVE_ANSWER=false ;;
+    preToolUse:confirm) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "ask"' 2>/dev/null) || NATIVE_ANSWER=false ;;
+    permissionRequest:block) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "deny"' 2>/dev/null) || NATIVE_ANSWER=false ;;
+    permissionRequest:confirm) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "ask"' 2>/dev/null) || NATIVE_ANSWER=false ;;
+  esac
+  if [ "$NATIVE_ANSWER" != "true" ]; then
+    case "$ACTION" in
+      block) fail_response "missing native deny in gateway response" ;;
+      *) fail_response "missing native confirmation in gateway response" ;;
     esac
-    [ "$NATIVE_DENY" = "true" ] || fail_response "missing native deny in gateway response"
   fi
 fi
 {{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
