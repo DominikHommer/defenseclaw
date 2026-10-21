@@ -383,11 +383,11 @@ func literalPositionalShellRedirects(command, value, cwd, home string) []string 
 	return operands
 }
 
-func literalPipelineOperands(file *syntax.File, cwd, home string, depth int) []string {
+func literalPipelineOperands(file *syntax.File, called map[string]bool, cwd, home string, depth int) []string {
 	var operands []string
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if _, declaration := node.(*syntax.FuncDecl); declaration {
-			return false
+		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
+			return declaration.Name != nil && called[declaration.Name.Value]
 		}
 		binary, ok := node.(*syntax.BinaryCmd)
 		if !ok || binary.Op != syntax.Pipe && binary.Op != syntax.PipeAll {

@@ -1092,7 +1092,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
-		for _, operand := range hookpaths.BoundedShellWriteOperands(input.Command, input.CWD, input.ActiveHome) {
+		boundedOperands, boundedPattern := hookpaths.BoundedShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		if boundedPattern {
+			// Bash expands the bound redirect as a pathname pattern at run
+			// time, which may select a link to the protected file. The opened
+			// file is unknown, so fail closed.
+			return true
+		}
+		for _, operand := range boundedOperands {
 			if writeTarget(operand, false, false) {
 				return true
 			}

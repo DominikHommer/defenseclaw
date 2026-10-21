@@ -12,11 +12,14 @@ import (
 
 // BoundedShellWriteOperands resolves redirects whose one variable has an
 // exact value from a preceding printf assignment or a literal for list.
-// Other control flow and word expansions remain outside this proof.
-func BoundedShellWriteOperands(command, cwd, home string) []string {
+// Other control flow and word expansions remain outside this proof. unknown
+// reports a bound redirect whose target is a pathname pattern: Bash expands
+// an unquoted value or literal glob against the file system at run time, so
+// the opened file cannot be named from the command text.
+func BoundedShellWriteOperands(command, cwd, home string) (operands []string, unknown bool) {
 	file, ok := parseShell(command)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	if len(file.Stmts) == 2 {
 		if name, value, ok := boundedPrintfAssignment(file.Stmts[0], home); ok {
@@ -40,25 +43,26 @@ func BoundedShellWriteOperands(command, cwd, home string) []string {
 		}
 	}
 	if len(file.Stmts) != 1 {
-		return nil
+		return nil, false
 	}
 	loop, ok := file.Stmts[0].Cmd.(*syntax.ForClause)
 	if !ok || loop.Select || len(loop.Do) != 1 {
-		return nil
+		return nil, false
 	}
 	iteration, ok := loop.Loop.(*syntax.WordIter)
 	if !ok || iteration.Name == nil || len(iteration.Items) == 0 || len(iteration.Items) > 8 {
-		return nil
+		return nil, false
 	}
-	var operands []string
 	for _, item := range iteration.Items {
 		value, static := StaticWord(item, home)
 		if !static || strings.ContainsAny(value, "\x00\r\n") {
-			return nil
+			return nil, false
 		}
-		operands = append(operands, boundedStatementRedirects(loop.Do[0], cwd, home, iteration.Name.Value, value)...)
+		redirects, pattern := boundedStatementRedirects(loop.Do[0], cwd, home, iteration.Name.Value, value)
+		operands = append(operands, redirects...)
+		unknown = unknown || pattern
 	}
-	return operands
+	return operands, unknown
 }
 
 func boundedSimpleAssignment(stmt *syntax.Stmt, home string) (name, value string, ok bool) {
@@ -103,15 +107,14 @@ func boundedPrintfAssignment(stmt *syntax.Stmt, home string) (name, value string
 	return words[2], strings.Join(words[4:], ""), true
 }
 
-func boundedStatementRedirects(stmt *syntax.Stmt, cwd, home, name, value string) []string {
+func boundedStatementRedirects(stmt *syntax.Stmt, cwd, home, name, value string) (operands []string, unknown bool) {
 	if stmt == nil || stmt.Background || stmt.Negated {
-		return nil
+		return nil, false
 	}
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
 	if !ok || len(call.Assigns) != 0 {
-		return nil
+		return nil, false
 	}
-	var operands []string
 	for _, redirect := range stmt.Redirs {
 		switch redirect.Op {
 		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
@@ -121,11 +124,40 @@ func boundedStatementRedirects(stmt *syntax.Stmt, cwd, home, name, value string)
 		if !boundedWordUses(redirect.Word, name) {
 			continue
 		}
+		if boundedWordPattern(redirect.Word, name, value) {
+			unknown = true
+			continue
+		}
 		if target, known := boundedWord(redirect.Word, home, name, value); known && target != "" {
 			operands = append(operands, OperandPath(target, cwd))
 		}
 	}
-	return operands
+	return operands, unknown
+}
+
+// boundedWordPattern reports a redirect word that Bash may expand as a
+// pathname pattern: an unquoted literal glob, or an unquoted use of the bound
+// value that holds pattern characters. Extended patterns count because
+// startup files may enable extglob. In a value a backslash counts too: Bash
+// 5.0 globs a word whose only pattern character is a backslash.
+func boundedWordPattern(word *syntax.Word, name, value string) bool {
+	pattern := func(text string) bool {
+		return strings.ContainsAny(text, "*?[") ||
+			strings.Contains(text, "+(") || strings.Contains(text, "@(") || strings.Contains(text, "!(")
+	}
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			if pattern(part.Value) {
+				return true
+			}
+		case *syntax.ParamExp:
+			if part.Param != nil && part.Param.Value == name && (pattern(value) || strings.Contains(value, "\\")) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func boundedWordUses(word *syntax.Word, name string) bool {
@@ -148,11 +180,7 @@ func boundedWord(word *syntax.Word, home, name, value string) (string, bool) {
 	validParts := func(parts []syntax.WordPart) bool {
 		for _, part := range parts {
 			switch part := part.(type) {
-			case *syntax.Lit:
-				if strings.ContainsAny(part.Value, "*?[") {
-					return false
-				}
-			case *syntax.SglQuoted:
+			case *syntax.Lit, *syntax.SglQuoted:
 			case *syntax.ParamExp:
 				if part.Param == nil || part.Param.Value != name || part.Excl || part.Length ||
 					part.Index != nil || part.Slice != nil || part.Repl != nil || part.Exp != nil || len(part.Modifiers) != 0 {

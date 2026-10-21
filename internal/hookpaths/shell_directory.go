@@ -98,7 +98,11 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 	safety := SafeShellRedirectOccurrencesWithFacts(command, cwd, home, directoryFacts)
 	redirectIndex := 0
 	functions := map[string]*syntax.Stmt{}
-	functionDepth := 0
+	// Function calls are expanded at each call site with the caller's
+	// directory. The depth and the statements read inside bodies are bounded,
+	// so nested fan-out stays linear; past either bound a body that may write
+	// or change directory is unknown.
+	functionDepth, functionStatements := 0, 0
 	var walkList func([]*syntax.Stmt, *shellDirectoryState)
 	var walk func(*syntax.Stmt, *shellDirectoryState)
 	write := func(stmt *syntax.Stmt, s *shellDirectoryState) {
@@ -111,6 +115,8 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		}
 		statement := rendered.String()
 		redirects := make([]string, 0, len(stmt.Redirs))
+		// The redirect safety list is keyed in the starting directory.
+		keys := make([]string, 0, len(stmt.Redirs))
 		for _, redirect := range stmt.Redirs {
 			switch redirect.Op {
 			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
@@ -129,6 +135,7 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				unknown = true
 			}
 			redirects = append(redirects, OperandPath(name, s.logical))
+			keys = append(keys, OperandPath(name, cwd))
 		}
 		if !s.changed {
 			redirectIndex += len(redirects)
@@ -138,9 +145,11 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home}
 		facts := actionfacts.Analyze(inner)
 		writes := make([]RedirectOccurrence, 0, len(redirects)+len(literals))
-		for _, redirect := range redirects {
+		for i, redirect := range redirects {
 			occurrence := RedirectOccurrence{Path: redirect}
-			if redirectIndex < len(safety) {
+			// A function body or eval text can list a redirect the plain
+			// walk does not; only the same operand inherits its safety.
+			if redirectIndex < len(safety) && safety[redirectIndex].Path == keys[i] {
 				occurrence.Safe = safety[redirectIndex].Safe
 			}
 			redirectIndex++
@@ -362,6 +371,9 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		if stmt == nil {
 			return
 		}
+		if functionDepth > 0 {
+			functionStatements++
+		}
 		if stmt.Background {
 			child := s.clone()
 			copyStmt := *stmt
@@ -420,7 +432,7 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			}
 		case *syntax.CallExpr:
 			if name, _, static := shellCommandWord(cmd, home); static && functions[name] != nil {
-				if functionDepth < 8 {
+				if functionDepth < 8 && functionStatements < maxFunctionStatements {
 					functionDepth++
 					walk(functions[name], s)
 					functionDepth--
@@ -474,8 +486,12 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 	return operands, unknown
 }
 
+// maxFunctionStatements bounds the statements read inside function bodies
+// for one command.
+const maxFunctionStatements = 4096
+
 // A body made only of calls to itself cannot produce a file write or change
-// the working directory when the bounded walk reaches its depth limit.
+// the working directory when the bounded walk reaches its limit.
 func recursiveSelfCallsOnly(body *syntax.Stmt, name, home string) bool {
 	if body == nil {
 		return false

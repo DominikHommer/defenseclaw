@@ -47,9 +47,12 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 		operands = append(operands, OperandPath(name, cwd))
 	}
 	boundName, boundValue := boundedProgramAssignment(file, home)
+	// A definition runs nothing. A body is read once, where it is defined,
+	// when the command may call it, so an uncalled body stays inert.
+	called := calledFunctions(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if _, declaration := node.(*syntax.FuncDecl); declaration {
-			return false
+		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
+			return declaration.Name != nil && called[declaration.Name.Value]
 		}
 		stmt, ok := node.(*syntax.Stmt)
 		if !ok {
@@ -75,7 +78,7 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 		}
 		return true
 	})
-	operands = append(operands, literalPipelineOperands(file, cwd, home, depth)...)
+	operands = append(operands, literalPipelineOperands(file, called, cwd, home, depth)...)
 	operands = append(operands, literalGeneratedScriptOperands(file, cwd, home, depth)...)
 	return operands
 }

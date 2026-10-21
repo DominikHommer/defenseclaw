@@ -88,26 +88,13 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		return nil, false, false
 	}
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
-	functions := map[string]*syntax.Stmt{}
-	callDepth := 0
-	var visit func(syntax.Node) bool
-	visit = func(node syntax.Node) bool {
+	// A definition runs nothing. A body is read once, where it is defined,
+	// when the command may call it (GAP-1430). Expanding each call instead
+	// costs time exponential in the call nesting.
+	called := calledFunctions(file)
+	syntax.Walk(file, func(node syntax.Node) bool {
 		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
-			if declaration.Name != nil && declaration.Body != nil {
-				functions[declaration.Name.Value] = declaration.Body
-			}
-			return false
-		}
-		if stmt, isStmt := node.(*syntax.Stmt); isStmt {
-			if call, isCall := stmt.Cmd.(*syntax.CallExpr); isCall && len(call.Args) > 0 {
-				if name, static := staticShellWord(call.Args[0], env, home != ""); static {
-					if body := functions[name]; body != nil && callDepth < 8 {
-						callDepth++
-						syntax.Walk(body, visit)
-						callDepth--
-					}
-				}
-			}
+			return declaration.Name != nil && called[declaration.Name.Value]
 		}
 		redirect, isRedirect := node.(*syntax.Redirect)
 		if !isRedirect || redirect.Word == nil {
@@ -128,9 +115,48 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		}
 		operands = append(operands, OperandPath(name, cwd))
 		return true
-	}
-	syntax.Walk(file, visit)
+	})
 	return operands, true, dynamic
+}
+
+// calledFunctions marks each function the command may call: its name appears
+// as a word, or as a token inside a word, anywhere except its own definition
+// header. This over-approximates the shell's calls (a nested shell, trap or
+// redefinition may run the name), and it is linear in the command.
+func calledFunctions(file *syntax.File) map[string]bool {
+	names := map[string]bool{}
+	headers := map[*syntax.Lit]bool{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction && declaration.Name != nil {
+			names[declaration.Name.Value] = false
+			headers[declaration.Name] = true
+		}
+		return true
+	})
+	if len(names) == 0 {
+		return names
+	}
+	mark := func(text string) {
+		for _, token := range strings.FieldsFunc(text, func(r rune) bool {
+			return unicode.IsSpace(r) || strings.ContainsRune(";&|()<>'\"`{}=$\\", r)
+		}) {
+			if _, defined := names[token]; defined {
+				names[token] = true
+			}
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Lit:
+			if !headers[node] {
+				mark(node.Value)
+			}
+		case *syntax.SglQuoted:
+			mark(node.Value)
+		}
+		return true
+	})
+	return names
 }
 
 // OperandPath preserves dot-dot in the command operand until link resolution.
@@ -518,7 +544,10 @@ func Resolve(payload []byte) string {
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				literalOperands = LiteralWriteOperands(command, cwd, home)
-				literalOperands = append(literalOperands, BoundedShellWriteOperands(command, cwd, home)...)
+				// A bound pathname pattern has no fixed operand to list; the
+				// gateway reads the same result and fails closed on it.
+				boundedOperands, _ := BoundedShellWriteOperands(command, cwd, home)
+				literalOperands = append(literalOperands, boundedOperands...)
 				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
 				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
 				truncated = truncated || directoryUnknown
@@ -1012,9 +1041,14 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 
 // staticChangedDirectoryLink handles one ordered cd/link/write chain. The
 // physical cd target fixes the link's name without guessing about other shell
-// control flow. A nonempty CDPATH can redirect a relative cd elsewhere.
+// control flow. The hook cannot see the CDPATH of the agent's shell, which
+// startup files may set without exporting it, so only an absolute or ./
+// operand without dot-dot names a proven directory. After any other cd the
+// link may sit in another directory, where its relative target may name the
+// protected file: the chain is accepted only when the write cannot open the
+// new link.
 func staticChangedDirectoryLink(file *syntax.File, cwd, home string) (*syntax.CallExpr, string) {
-	if len(file.Stmts) != 1 || os.Getenv("CDPATH") != "" {
+	if len(file.Stmts) != 1 {
 		return nil, ""
 	}
 	var statements []*syntax.Stmt
@@ -1055,6 +1089,15 @@ func staticChangedDirectoryLink(file *syntax.File, cwd, home string) (*syntax.Ca
 			return nil, ""
 		}
 	}
+	if !cdBypassesSearchPath(path) {
+		target, _ := StaticWord(second.Args[2], home)
+		name, _ := StaticWord(second.Args[3], home)
+		written, static := StaticWord(statements[2].Redirs[0].Word, home)
+		if !static || written == "" || strings.ContainsAny(written, `/\`) || shellAuthorizedKeysBase(written) ||
+			written == filepath.Clean(name) || written == filepath.Base(target) {
+			return nil, ""
+		}
+	}
 	changed, ok := ResolveWriteTarget(OperandPath(path, cwd))
 	if !ok {
 		return nil, ""
@@ -1064,6 +1107,20 @@ func staticChangedDirectoryLink(file *syntax.File, cwd, home string) (*syntax.Ca
 		return nil, ""
 	}
 	return second, changed
+}
+
+// cdBypassesSearchPath reports a cd operand that Bash resolves without CDPATH
+// and without logical dot-dot processing against the event cwd.
+func cdBypassesSearchPath(path string) bool {
+	if !filepath.IsAbs(path) && path != "." && !strings.HasPrefix(path, "./") {
+		return false
+	}
+	for _, component := range strings.Split(filepath.ToSlash(path), "/") {
+		if component == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // dataPrograms only print, search or count text, so link API text in their
