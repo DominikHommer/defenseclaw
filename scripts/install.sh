@@ -484,12 +484,20 @@ installed_version() {
 
 stop_gateway() {
     # stop_gateway BINARY: stop the running gateway, preferring its own binary.
-    local binary="$1" pid waited=0
+    # The stop is the install's, not the operator's: the gateway.stopped
+    # marker `defenseclaw-gateway stop` writes is taken away again unless the
+    # operator's was already there. A hook that runs while the install holds
+    # .install.lock then reports a restart, not an operator stop; the hooks of
+    # 1.0.2 and earlier read only that marker (GAP-0140). The lock keeps every
+    # hook from starting the gateway meanwhile.
+    local binary="$1" pid waited=0 marker="${DEFENSECLAW_HOME}/gateway.stopped" operator_stop=false
     pid="$(gateway_pid || true)"
     [[ -n "${pid}" ]] || return 0
+    [[ -e "${marker}" || -L "${marker}" ]] && operator_stop=true
     if [[ -x "${binary}" ]]; then
         "${binary}" stop >/dev/null 2>&1 || true
     fi
+    [[ "${operator_stop}" == true ]] || rm -f "${marker:?}"
     while [[ -n "$(gateway_pid || true)" && ${waited} -lt 30 ]]; do
         sleep 1; waited=$((waited + 1))
         [[ ${waited} -eq 15 ]] && kill "${pid}" 2>/dev/null || true
