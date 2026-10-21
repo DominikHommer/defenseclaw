@@ -15,11 +15,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest, v: old, ref: 5bbc0ff3ecb1d51f751ccc18321f69eb0744b6a8 }
-          - { os: windows-latest, v: new, ref: "" }
-          - { os: windows-latest, v: new-repeat, ref: "" }
-          - { os: ubuntu-latest, v: old, ref: 5bbc0ff3ecb1d51f751ccc18321f69eb0744b6a8 }
-          - { os: ubuntu-latest, v: new, ref: "" }
+          - { os: windows-latest, v: new-cap200, ref: "", cap: "200", settle: "", ddrive: "" }
+          - { os: windows-latest, v: new-cap300-settle6, ref: "", cap: "300", settle: "6", ddrive: "" }
+          - { os: windows-latest, v: new-cap150-settle6, ref: "", cap: "150", settle: "6", ddrive: "" }
+          - { os: windows-latest, v: new-D-drive, ref: "", cap: "", settle: "", ddrive: "1" }
+          - { os: windows-latest, v: old-D-drive, ref: 5bbc0ff3ecb1d51f751ccc18321f69eb0744b6a8, cap: "", settle: "", ddrive: "1" }
+          - { os: ubuntu-latest, v: new-cap200, ref: "", cap: "200", settle: "", ddrive: "" }
     name: probe ${{ matrix.os }} ${{ matrix.v }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
@@ -37,8 +38,13 @@ jobs:
         env:
           DEFENSECLAW_HOOK_FLOOD_PROBE: "1"
           DEFENSECLAW_HOOK_FLOOD_CALLS: "6000"
+          GFLOOD_CAP_MS: ${{ matrix.cap }}
+          GFLOOD_SETTLE: ${{ matrix.settle }}
+          GFLOOD_DDRIVE: ${{ matrix.ddrive }}
         run: |
           git log --oneline -1
+          if [ "$GFLOOD_DDRIVE" = 1 ]; then export TMP="$RUNNER_TEMP" TEMP="$RUNNER_TEMP"; echo "TMP=$TMP"; fi
+          if [ -z "${{ matrix.ref }}" ]; then cp .github/zz-gfw/knobs.go internal/audit/zz_gfw_bench_knobs.go; fi
           go test -count=1 -timeout 45m -run '^TestHookFloodProbe$' -v ./internal/gateway/ > probe.log 2>&1 || true
           grep -E "minute|WAL|PASS|FAIL|sent|drained|flat|all |ok " probe.log || true
           grep -E -B3 -A12 "^--- FAIL|Error|panic" probe.log | head -60 || true
@@ -62,5 +68,6 @@ jobs:
       - name: audit tests
         shell: bash
         run: |
+          set -o pipefail
           go test -count=1 -timeout 40m -run 'Correlation|Migration|Ordered|Unread|TimeOrdered|Upgrade|V7|Legacy' ./internal/audit/ 2>&1 | tail -40
           go test -count=1 -timeout 20m -run 'TimeOrdered|OccurrenceID' ./internal/observability/ 2>&1 | tail -10
