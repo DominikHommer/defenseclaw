@@ -6,6 +6,8 @@ package enterprisestatus
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -120,5 +122,31 @@ func TestBundleReceiptPublishFailedReachesStatus(t *testing.T) {
 	if len(r.Warnings) != 2 || r.Warnings[1].Code != "receipt_publish_failed" ||
 		!strings.Contains(r.Warnings[1].Message, "bundle status are the record") {
 		t.Fatalf("publish failure omitted or duplicated: %+v", r.Warnings)
+	}
+}
+
+// receipt_events_dropped reaches warnings[] once, and the gateway marker
+// the lifecycle reads is the one the reporter writes (ReceiptEventReported).
+func TestBundleReceiptEventsDroppedReachesStatus(t *testing.T) {
+	r := &Result{Bundle: &BundleState{State: BundleFailed, WarningCodes: []string{"receipt_events_dropped"}}}
+	r.SetBundleReceiptWarnings()
+	r.SetBundleReceiptWarnings()
+	if len(r.Warnings) != 1 || r.Warnings[0].Code != "receipt_events_dropped" || !strings.Contains(r.Warnings[0].Message, "audit log") {
+		t.Fatalf("dropped events omitted or duplicated: %+v", r.Warnings)
+	}
+	dataDir := t.TempDir()
+	const id = "r-01JA0000000000000000000007"
+	if ReceiptEventReported(dataDir, id) || ReceiptEventReported(dataDir, "../x") {
+		t.Fatal("an unmarked or invalid id reads as reported")
+	}
+	marker := filepath.Join(dataDir, ReportedReceiptsDirName, id)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("reported\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !ReceiptEventReported(dataDir, id) {
+		t.Fatal("a marked receipt event does not read as reported")
 	}
 }

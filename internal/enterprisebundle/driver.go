@@ -166,13 +166,22 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	}
 	p.Manifest = res.Manifest
 	if res.AlreadyApplied {
+		raw, _, err := d.CurrentConfig()
+		if err != nil {
+			_ = d.Store.Discard(receipt)
+			return p, &Error{Code: CodeStateInvalid, Detail: "cannot read the current policy bundle: " + err.Error()}
+		}
+		// The repeat installs the current bundle config again over an
+		// installed config that may have drifted: a restart that change
+		// needs is deferred as for a new bundle, before any transaction.
+		if d.RefuseRestart != nil {
+			if reason := d.RefuseRestart(d.EnforcedConfig, raw); reason != "" {
+				return refuse(&Error{Code: CodeRestartDeferred, Detail: reason})
+			}
+		}
 		if err := d.Store.Discard(receipt); err != nil {
 			p.Warnings = append(p.Warnings, Warning{Code: "bundle_state_unreadable",
 				Message: "could not remove the receipt of the repeated delivery: " + err.Error()})
-		}
-		raw, _, err := d.CurrentConfig()
-		if err != nil {
-			return p, &Error{Code: CodeStateInvalid, Detail: "cannot read the current policy bundle: " + err.Error()}
 		}
 		p.Receipt, p.AlreadyApplied, p.Config, p.ConfigSHA256 = nil, true, raw, sha256Hex(raw)
 		return p, nil

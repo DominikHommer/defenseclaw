@@ -112,6 +112,23 @@ func PublicReceiptPath(configDir string) string {
 // ValidReceiptID permits only lifecycle receipt IDs in spool file names.
 func ValidReceiptID(id string) bool { return receiptIDPattern.MatchString(id) }
 
+// ReportedReceiptsDirName is the folder in the gateway data_dir where the
+// gateway's receipt reporter leaves one marker file per receipt event it
+// reported.
+const ReportedReceiptsDirName = "bundle-receipt.reported.d"
+
+// ReceiptEventReported reports whether the gateway with data_dir dataDir
+// reported the receipt event id (its marker file exists). The lifecycle
+// keeps an event the gateway has not reported when it trims
+// receipt-events/.
+func ReceiptEventReported(dataDir, id string) bool {
+	if !ValidReceiptID(id) || dataDir == "" {
+		return false
+	}
+	info, err := os.Lstat(filepath.Join(dataDir, ReportedReceiptsDirName, id))
+	return err == nil && info.Mode().IsRegular()
+}
+
 // CheckDeliveryID explains why id is not a delivery id `enterprise bundle
 // apply --delivery-id` accepts: 1 to MaxDeliveryIDBytes bytes of A-Z, a-z,
 // 0-9 and . _ : - (ASCII, no space or control character). The value is
