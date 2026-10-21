@@ -350,12 +350,12 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 // a Cursor fail mode the record proves rewritten as settled (G-small loop 4).
 func repairManagedStandaloneCursorFailMode(ctx context.Context, path string, raw []byte, opt configwrite.Options) (bool, error) {
 	recordPath := config.MigrationRecordPath(path)
-	recordRaw, err := os.ReadFile(recordPath)
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
+	recordRaw, err := readManagedMigrationRecord(recordPath, managedMigrationRecordMaxBytes)
 	if err != nil {
-		return false, fmt.Errorf("read %s: %w", recordPath, err)
+		return false, err
+	}
+	if recordRaw == nil {
+		return false, nil
 	}
 	var record config.MigrationRecord
 	if err := json.Unmarshal(recordRaw, &record); err != nil {
@@ -370,6 +370,54 @@ func repairManagedStandaloneCursorFailMode(ctx context.Context, path string, raw
 		return false, fmt.Errorf("restore the migrated Cursor hook_fail_mode in %s: %w", path, err)
 	}
 	return true, config.WriteMigrationRecord(path, updated)
+}
+
+// managedMigrationRecordMaxBytes bounds a migration-v9.json read, as the
+// Windows lifecycle bounds the config it sits beside.
+const managedMigrationRecordMaxBytes = 4 << 20
+
+// readManagedMigrationRecord reads the migration-v9.json at path, which the
+// lifecycle writes as a plain file next to the installed config: nil and no
+// error only when nothing is at path. Anything else there (a directory, a
+// symbolic link, a junction or another reparse point, a link whose target is
+// gone included), a record past limit, or one that changes while it is read
+// is an error, never no record. Reads that followed the path took a dangling
+// link for a missing record, and ensure reported compliance while the Cursor
+// correction the record may prove stayed unapplied (G-small).
+func readManagedMigrationRecord(path string, limit int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file (mode %s)", path, info.Mode().Type())
+	}
+	if info.Size() > limit {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, limit)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("read %s: it was replaced while it was read", path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, limit)
+	}
+	return raw, nil
 }
 
 // recordRestoredManagedStandaloneConfig records the config.yaml a lifecycle

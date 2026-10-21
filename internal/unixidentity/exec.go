@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 const (
@@ -124,9 +126,13 @@ func runTrustedCommand(ctx context.Context, path string, args []string, filters 
 	cmd.Stdout = out
 	cmd.Stderr = stderr
 	cmd.Stdin = nil
-	cmd.SysProcAttr = trustedCommandSysProcAttr()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
-	err := runBoundToParent(cmd)
+	// The timeout above is this process's: a managed hook ends with os.Exit
+	// once its answer is out, and a getent its failure-row lookup started
+	// kept running for as long as NSS stalled, one more for each hook call.
+	// On Linux RunTree has the kernel kill the tool with this process.
+	err := processutil.RunTree(cmd)
 	if stdout.exceeded {
 		return commandResult{}, errOutputLimit
 	}

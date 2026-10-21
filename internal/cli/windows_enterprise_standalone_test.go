@@ -3542,3 +3542,36 @@ func TestWindowsEnsureFailsWhenItCannotReadTheCursorRecord(t *testing.T) {
 		}
 	}
 }
+
+// G-small: a migration-v9.json that is a link, dangling or live, is an
+// error for the Cursor repair planner, never no record: a dangling link read
+// through its path looked missing, and ensure reported compliance while the
+// recorded Cursor correction stayed unapplied.
+func TestWindowsCursorRepairPlannerRefusesALinkedRecord(t *testing.T) {
+	previousLayout, previousBundle := windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent
+	t.Cleanup(func() {
+		windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent = previousLayout, previousBundle
+	})
+	managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+	for _, live := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "record.json")
+		if live {
+			if err := os.WriteFile(target, []byte(`{"schema_version":1}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		symlinkOrSkip(t, target, config.MigrationRecordPath(path))
+		windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+			return managed.StandaloneLayout{ConfigPath: path}, nil
+		}
+		pending, err := windowsEnterpriseCursorMigrationRepairPending()
+		if pending || err == nil || !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
+			t.Fatalf("live=%v: pending = %v, %v; want an error naming %s", live, pending, err, config.MigrationV9RecordFile)
+		}
+	}
+}

@@ -941,22 +941,15 @@ func readWindowsEnterpriseMigrationRecord() []byte {
 }
 
 // readWindowsEnterpriseMigrationRecordAt reads the migration-v9.json beside
-// configPath: nil and no error only when there is none. A record that is
-// there but cannot be read (access denied, not a file, more than
-// windowsEnterpriseHotConfigMaxBytes) is an error, never no record.
+// configPath: nil and no error only when nothing is there. A record that is
+// there but cannot be read (access denied, not a plain file, a link or
+// reparse point, more than managedMigrationRecordMaxBytes) is an error,
+// never no record (readManagedMigrationRecord).
 func readWindowsEnterpriseMigrationRecordAt(configPath string) ([]byte, error) {
 	if strings.TrimSpace(configPath) == "" {
 		return nil, errors.New("the standalone layout names no installed config")
 	}
-	path := config.MigrationRecordPath(configPath)
-	raw, err := readWindowsEnterpriseBoundedFile(path, windowsEnterpriseHotConfigMaxBytes)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return nil, nil
-	case err != nil:
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	return raw, nil
+	return readManagedMigrationRecord(config.MigrationRecordPath(configPath), managedMigrationRecordMaxBytes)
 }
 
 // A compliant ensure still needs the one-time Cursor correction recorded by
