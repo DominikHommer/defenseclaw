@@ -6,8 +6,6 @@
 package enterpriseunix
 
 import (
-	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,9 +81,10 @@ func runPostinstallTmpfiles(t *testing.T) (runs [][]string, beforeEnsure []bool)
 }
 
 // applyPackageTmpfiles applies the package's tmpfiles.d document inside the
-// fake host's root the way systemd-tmpfiles --create does for its "d"
-// lines: a missing folder is created and an existing one gets the line's
-// mode back. A boot-only line ("d!") is applied only with boot, as
+// fake host's root the way systemd-tmpfiles --create does for its "d" and
+// "f" lines: a missing folder is created and an existing one gets the
+// line's mode back; a missing file is created empty with the line's mode.
+// A boot-only line ("d!", "f!") is applied only with boot, as
 // systemd-tmpfiles skips it without --boot. Owners are not modeled.
 func applyPackageTmpfiles(t *testing.T, env *Env, boot bool) {
 	t.Helper()
@@ -99,10 +98,10 @@ func applyPackageTmpfiles(t *testing.T, env *Env, boot bool) {
 			continue
 		}
 		kind := fields[0]
-		if kind != "d" && kind != "d!" || len(fields) < 3 {
-			t.Fatalf("the test models only d lines: %q", line)
+		if kind != "d" && kind != "d!" && kind != "f!" || len(fields) < 3 {
+			t.Fatalf("the test models only d and f! lines: %q", line)
 		}
-		if kind == "d!" && !boot {
+		if strings.HasSuffix(kind, "!") && !boot {
 			continue
 		}
 		mode, err := strconv.ParseUint(fields[2], 8, 32)
@@ -110,6 +109,15 @@ func applyPackageTmpfiles(t *testing.T, env *Env, boot bool) {
 			t.Fatalf("%q: %v", line, err)
 		}
 		path := env.P(fields[1])
+		if kind == "f!" {
+			if _, err := os.Lstat(path); err == nil {
+				continue
+			}
+			if err := os.WriteFile(path, nil, os.FileMode(mode)); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -119,14 +127,14 @@ func applyPackageTmpfiles(t *testing.T, env *Env, boot bool) {
 	}
 }
 
-// Review P1 (GAP-0352, loop round 4): a package upgrade must not restore
-// trust in the record tree before the lifecycle checks it. While the record
-// root was loosened, an account moved its folder away during the guardian's
-// revocation and brought it back. The postinstall runs systemd-tmpfiles
-// before its ensure; when the package's tmpfiles.d entry put the root back
-// to 0711, the ensure found a tree the hook trusts, kept the old allow, and
-// the hook accepted it during the next outage. The record tree's lines are
-// boot only, so the ensure sees the loosened tree, and invalidates it.
+// Review P1 (GAP-0352, loop round 4; lead directive, loop round 1): a
+// package upgrade must not restore trust in the record tree before the
+// lifecycle ends every record in it. While the record root was loosened,
+// an account moved its folder away during a guardian removal and brought it
+// back. The postinstall runs systemd-tmpfiles before its ensure; the record
+// tree's lines are boot only, so that run leaves the loosened tree alone,
+// and the upgrade's ensure bumps the record generation first and again with
+// the folder closed, so the old allow proves nothing.
 func TestPackageUpgradeLeavesALoosenedHookSessionTreeForTheLifecycle(t *testing.T) {
 	runs, beforeEnsure := runPostinstallTmpfiles(t)
 	if len(runs) == 0 {
@@ -135,37 +143,17 @@ func TestPackageUpgradeLeavesALoosenedHookSessionTreeForTheLifecycle(t *testing.
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	root := h.env.P(h.env.Layout.HookSessionDir)
-	// The hook's rule as far as this fake host can model it: a root that
-	// group or other can write is refused.
-	previous := hookSessionTreeProblem
-	hookSessionTreeProblem = func(path string, _ enterprisepolicy.PublishedSessionTrust) error {
-		info, err := os.Lstat(path)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("%s is writable by group or other (%04o)", path, info.Mode().Perm())
-		}
-		return nil
-	}
-	t.Cleanup(func() { hookSessionTreeProblem = previous })
-	account, ok := enterprisepolicy.PublishedSessionIdentityDir(root, "1001")
-	if !ok {
-		t.Fatal("no account folder")
-	}
-	if err := os.MkdirAll(account, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	record := filepath.Join(account, "copilot-p-x.json")
-	if err := os.WriteFile(record, []byte("{}"), 0o640); err != nil {
-		t.Fatal(err)
-	}
+	record := publishHookSessionTestAllow(t, root)
 	// The administrator loosened the root; the account moved its folder
-	// away during a revocation and brought it back.
+	// away during a removal and brought it back.
 	if err := os.Chmod(root, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	aside := filepath.Join(filepath.Dir(root), "aside")
+	if err := os.Rename(filepath.Dir(record), aside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(aside, filepath.Dir(record)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -184,16 +172,17 @@ func TestPackageUpgradeLeavesALoosenedHookSessionTreeForTheLifecycle(t *testing.
 		t.Fatalf("the package's tmpfiles run must leave the record tree for the lifecycle: %v %v", info, err)
 	}
 	requireOK(t, h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.1")}))
-	if exists(record) || exists(account) {
-		t.Fatal("the upgrade's ensure must invalidate the records of a tree another account could change")
+	if hookSessionTestProves(root) {
+		t.Fatal("the upgrade's ensure must end the records of a tree another account could change")
 	}
 	if info, err := os.Lstat(root); err != nil || info.Mode().Perm() != 0o711 {
 		t.Fatalf("the ensure puts the root's mode back: %v %v", info, err)
 	}
 }
 
-// The boot-only lines still create the hook socket folder and the record
-// root at boot, when /run is empty, with their modes.
+// The boot-only lines still create the hook socket folder, the record root
+// and its generation file at boot, when /run is empty, with their modes: a
+// new generation every boot.
 func TestPackageTmpfilesCreateTheHookFoldersAtBoot(t *testing.T) {
 	h := newTestHost(t, "linux")
 	applyPackageTmpfiles(t, h.env, true)
@@ -202,13 +191,21 @@ func TestPackageTmpfilesCreateTheHookFoldersAtBoot(t *testing.T) {
 			t.Fatalf("%s: %v %v", path, info, err)
 		}
 	}
+	generation, _ := enterprisepolicy.PublishedSessionGenerationPath(h.env.Layout.HookSessionDir)
+	if info, err := os.Lstat(h.env.P(generation)); err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o644 {
+		t.Fatalf("%s: %v %v", generation, info, err)
+	}
 	document, err := systemdunits.ReadFile(systemdunits.TmpfilesName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{h.env.Layout.HookSocketDir, h.env.Layout.HookSessionDir} {
-		if !strings.Contains(string(document), "\nd! "+path+" ") {
-			t.Fatalf("%s must be a boot-only tmpfiles.d line", path)
+	for _, line := range []string{
+		"\nd! " + h.env.Layout.HookSocketDir + " ",
+		"\nd! " + h.env.Layout.HookSessionDir + " ",
+		"\nf! " + generation + " 0644 root root ",
+	} {
+		if !strings.Contains(string(document), line) {
+			t.Fatalf("%q must be a boot-only tmpfiles.d line", line)
 		}
 	}
 }

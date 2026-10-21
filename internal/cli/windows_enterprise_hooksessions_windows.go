@@ -34,12 +34,14 @@ import (
 // The gateway's protected foreign-hook session records (GAP-0352) live in
 // %ProgramData%\Cisco\DefenseClaw-HookSessions. This lifecycle step owns
 // the folder: install, upgrade, repair and ensure create it (or put its
-// owner and access list back), uninstall removes it, and status and verify
-// report a missing or untrusted folder. The gateway service creates one
-// folder per account in it, with a protected DACL that lets only that
-// account read it; a guarded connector's hook reads its own account's
-// record during a gateway outage under fail mode open, and blocks when the
-// record is missing or untrusted.
+// owner and access list back) and bump its record generation, uninstall
+// removes it, and status and verify report a missing or untrusted folder or
+// generation file. The gateway service creates one folder per account in
+// it, with a protected DACL that lets only that account read it; a guarded
+// connector's hook reads its own account's record during a gateway outage
+// under fail mode open, and blocks when the record is missing, untrusted or
+// of an earlier generation. Install, upgrade, repair and ensure bump the
+// generation when they start too (bumpWindowsHookSessionGeneration).
 
 var (
 	windowsHookSessionDir = func() (string, error) {
@@ -90,33 +92,54 @@ const windowsHookSessionRetiredInfix = ".retired-"
 // which setting the retired owner needs (replaceable in tests).
 var windowsHookSessionOwnerRestorePrivilege = enterprisehooks.RunWithWindowsAdministratorOwnerRestorePrivilege
 
-// windowsHookSessionTreeProblem reports what in the record tree under root
-// the hook would refuse (enterprisepolicy.PublishedSessionTreeProblem);
+// windowsHookSessionRootTrustProblem reports a record folder, or a folder
+// above it, that the hook refuses (enterprisepolicy.ValidatePublishedSessionRoot);
 // replaceable in tests.
-var windowsHookSessionTreeProblem = func(root string) error {
-	return enterprisepolicy.PublishedSessionTreeProblem(root, enterprisepolicy.PublishedSessionTrust{ServiceAccount: windowsHookSessionGatewayAccount})
+var windowsHookSessionRootTrustProblem = func(root string) error {
+	return enterprisepolicy.ValidatePublishedSessionRoot(root, enterprisepolicy.PublishedSessionTrust{ServiceAccount: windowsHookSessionGatewayAccount})
+}
+
+// bumpWindowsHookSessionGeneration bumps the record generation of an
+// existing record folder before an install, upgrade, repair or ensure
+// changes anything (GAP-0352): no record written before the action proves
+// anything once it started. ensureWindowsHookSessionRoot bumps again at the
+// end. Best effort: a folder that is missing or refused is replaced there.
+func bumpWindowsHookSessionGeneration(action string) {
+	switch action {
+	case "install", "upgrade", "repair", "ensure":
+	default:
+		return
+	}
+	if !windowsEnterpriseIsElevated() {
+		return
+	}
+	root, err := windowsHookSessionDir()
+	if err != nil || strings.TrimSpace(root) == "" {
+		return
+	}
+	if _, err := os.Lstat(root); err != nil {
+		return
+	}
+	_ = enterprisepolicy.BumpPublishedSessionGeneration(root)
 }
 
 // ensureWindowsHookSessionRoot makes root a folder this lifecycle created
-// with the protected DACL. A folder an unprivileged account created first
-// (ProgramData lets users create folders) is removed and created again: its
-// owner keeps WRITE_DAC over it.
+// with the protected DACL, and then bumps its record generation
+// (enterprisepolicy.BumpPublishedSessionGeneration): no record written
+// before, whatever another account could do to the folder while it was
+// loosened, proves anything after it. A folder an unprivileged account
+// created first (ProgramData lets users create folders) is moved aside and
+// created again: its owner keeps WRITE_DAC over it.
 //
-// Before it puts the DACL back on an existing folder, it checks the record
-// tree the way the hook does: the folder and every folder above it even
-// when it holds no account folder, then what is in it. Anything the hook
-// refuses, another account could have changed: with write access to the
-// folder, an account can move its own folder away while the guardian
-// revokes its records and bring it back after, until the access is put
-// back. Changing the DACL of that folder is not enough (GAP-0352 review
-// loop round 4): an account that opened it with WRITE_DAC while it could
-// keeps that access through its handle, so it could open the folder again
-// after the invalidation and bring its folder back before the final DACL.
-// So the folder object itself is retired (retireWindowsHookSessionRoot) and
-// a new, empty one is created; a folder another account owns is moved
-// aside the same way. When the folder cannot be moved (a handle that does
-// not share delete access), it keeps the retired owner, which the hook
-// refuses, and the step fails, so the next repair tries again.
+// A folder the hook refuses (enterprisepolicy.ValidatePublishedSessionRoot)
+// is not put back in place either: an account that opened it with WRITE_DAC
+// while it could keeps that access through its handle (GAP-0352 review
+// loop round 4), so it could loosen the folder again after the repair and
+// swap record folders written after the bump. So the folder object itself
+// is retired (retireWindowsHookSessionRoot) and a new, empty one is created.
+// When the folder cannot be moved (a handle that does not share delete
+// access), it keeps the retired owner, which the hook refuses, and the step
+// fails, so the next repair tries again.
 func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 	info, err := os.Lstat(root)
 	if err == nil {
@@ -132,7 +155,7 @@ func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 				return fmt.Errorf("replace %s, which an account other than Administrators or SYSTEM owns: %w", root, err)
 			}
 			err = os.ErrNotExist
-		} else if problem := windowsHookSessionTreeProblem(root); problem != nil {
+		} else if problem := windowsHookSessionRootTrustProblem(root); problem != nil {
 			if err := retireWindowsHookSessionRoot(root, gateway); err != nil {
 				return fmt.Errorf("replace %s, which another account could change (%v): %w", root, problem, err)
 			}
@@ -160,6 +183,9 @@ func ensureWindowsHookSessionRoot(root string, gateway *windows.SID) error {
 	}
 	if err := applyWindowsSDDL(root, windowsHookSessionSDDL(gateway)); err != nil {
 		return fmt.Errorf("protect %s: %w", root, err)
+	}
+	if err := enterprisepolicy.BumpPublishedSessionGeneration(root); err != nil {
+		return fmt.Errorf("start a new record generation in %s: %w", root, err)
 	}
 	// Earlier retired roots: best effort, the hook never reads them.
 	_ = removeWindowsRetiredHookSessionRoots(root)
@@ -267,19 +293,37 @@ func windowsHookSessionRootProblem() string {
 		err = errors.New("it is not owned by Administrators or SYSTEM")
 	}
 	if err == nil {
-		// The hook's own rule (GAP-0352 review): the folder, the account
-		// folders and records in it strict, and every folder above it with
-		// fatal verdicts, the shared Cisco folder included. The advisory
-		// ancestor verdicts of ValidateTrustedServiceRuntimeDir would hide a
-		// drifted Cisco folder that makes every hook refuse its record.
-		err = windowsHookSessionTreeProblem(root)
+		// The hook's own rule (GAP-0352 review): the folder strict, and every
+		// folder above it with fatal verdicts, the shared Cisco folder
+		// included. The advisory ancestor verdicts of
+		// ValidateTrustedServiceRuntimeDir would hide a drifted Cisco folder
+		// that makes every hook refuse its record.
+		err = windowsHookSessionRootTrustProblem(root)
+	}
+	if err == nil {
+		// The generation file the hook checks every record against.
+		err = windowsHookSessionGenerationProblem(root)
 	}
 	if err != nil {
-		return root + ": " + err.Error() + ". A guarded connector's hook refuses the session records there and blocks during a gateway outage," +
-			" and another account may have changed them. Fix: if a folder above it lets other accounts change it, put that folder's permissions back," +
-			" then run " + windowsEnterpriseAdminCommand("repair") + ", which invalidates the records and writes the folder's owner and permissions back"
+		return root + ": " + err.Error() + ". A guarded connector's hook refuses the session records there and blocks during a gateway outage." +
+			" Fix: if a folder above it lets other accounts change it, put that folder's permissions back," +
+			" then run " + windowsEnterpriseAdminCommand("repair") + ", which replaces the folder or writes its owner and permissions back, and starts a new record generation"
 	}
 	return ""
+}
+
+// windowsHookSessionGenerationProblem reports a generation file under root
+// that the hook refuses; replaceable in tests.
+var windowsHookSessionGenerationProblem = func(root string) error {
+	path, ok := enterprisepolicy.PublishedSessionGenerationPath(root)
+	if !ok {
+		return errors.New("it names no generation file")
+	}
+	if err := enterprisepolicy.ValidatePublishedSessionPath(path, enterprisepolicy.PublishedSessionTrust{ServiceAccount: windowsHookSessionGatewayAccount}); err != nil {
+		return err
+	}
+	_, err := enterprisepolicy.PublishedSessionGeneration(root)
+	return err
 }
 
 // applyWindowsStandaloneHookSessionRecords runs the folder's lifecycle step

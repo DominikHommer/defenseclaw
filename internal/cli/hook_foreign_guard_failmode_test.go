@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -123,6 +124,7 @@ const protectedRecordIdentity = "4242"
 func newProtectedRecordFixture(t *testing.T) *protectedRecordFixture {
 	t.Helper()
 	records := &protectedRecordFixture{root: t.TempDir(), untrusted: map[string]bool{}}
+	records.bump(t)
 	previousRecord, previousTrust, previousIdentity := hookForeignGuardSessionRecord, hookForeignGuardSessionRecordTrust, hookForeignGuardIdentity
 	hookForeignGuardSessionRecord = func(serviceUID int) (string, enterprisepolicy.PublishedSessionTrust, bool) {
 		records.consulted++
@@ -141,15 +143,36 @@ func newProtectedRecordFixture(t *testing.T) *protectedRecordFixture {
 	return records
 }
 
-// write stores the gateway's answer for one key, as the gateway does.
+// bump starts a new record generation, as the lifecycle and the guardian
+// do.
+func (r *protectedRecordFixture) bump(t *testing.T) {
+	t.Helper()
+	if err := enterprisepolicy.BumpPublishedSessionGeneration(r.root); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// generation is the current record generation, as the gateway reads it.
+func (r *protectedRecordFixture) generation(t *testing.T) string {
+	t.Helper()
+	path, _ := enterprisepolicy.PublishedSessionGenerationPath(r.root)
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strconv.FormatInt(info.ModTime().UnixNano(), 10)
+}
+
+// write stores the gateway's answer for one key, as the gateway does:
+// stamped with the current generation.
 func (r *protectedRecordFixture) write(t *testing.T, connector, kind, id string, blocked bool, reason string) string {
 	t.Helper()
 	path, ok := enterprisepolicy.PublishedSessionRecordPath(r.root, protectedRecordIdentity, connector, kind, id)
 	if !ok {
 		t.Fatalf("no record path for %s %s %s", connector, kind, id)
 	}
-	data, err := json.Marshal(enterprisepolicy.PublishedSessionRecord{Version: 1, Connector: connector, Kind: kind, ID: id,
-		Blocked: blocked, Reason: reason, At: time.Now().UTC().Format(time.RFC3339)})
+	data, err := json.Marshal(enterprisepolicy.PublishedSessionRecord{Version: 2, Connector: connector, Kind: kind, ID: id,
+		Blocked: blocked, Reason: reason, At: time.Now().UTC().Format(time.RFC3339), Generation: r.generation(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,10 +245,12 @@ func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T
 		blocked("a record the user can change")
 		delete(records.untrusted, processRecord)
 
+		now, generation := time.Now().UTC().Format(time.RFC3339), records.generation(t)
 		for name, content := range map[string]string{
-			"a corrupt record":            `{"v":1,`,
-			"a record of another process": `{"v":1,"connector":"` + connector + `","kind":"p","id":"other","blocked":false,"at":"2026-10-21T00:00:00Z"}`,
-			"a record of another agent":   `{"v":1,"connector":"codex","kind":"p","id":"` + process + `","blocked":false,"at":"2026-10-21T00:00:00Z"}`,
+			"a corrupt record":             `{"v":2,`,
+			"a record of another process":  `{"v":2,"connector":"` + connector + `","kind":"p","id":"other","blocked":false,"at":"` + now + `","gen":"` + generation + `"}`,
+			"a record of another agent":    `{"v":2,"connector":"codex","kind":"p","id":"` + process + `","blocked":false,"at":"` + now + `","gen":"` + generation + `"}`,
+			"a record of an earlier build": `{"v":1,"connector":"` + connector + `","kind":"p","id":"` + process + `","blocked":false,"at":"` + now + `"}`,
 		} {
 			if err := os.WriteFile(processRecord, []byte(content), 0o644); err != nil {
 				t.Fatal(err)
@@ -258,13 +283,32 @@ func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T
 		fixture.process = ""
 		blocked("an unnamed agent process with a clean session record")
 		fixture.process = process
-		old := time.Now().Add(-8 * 24 * time.Hour)
+		old := time.Now().Add(-time.Hour)
 		if err := os.Chtimes(processRecord, old, old); err != nil {
 			t.Fatal(err)
 		}
 		blocked("a record older than the limit")
 		records.write(t, connector, "p", process, false, "")
 		allowed("a fresh record")
+
+		// Lead directive (loop round 1): a record of an earlier generation
+		// proves nothing, and neither does any record without a generation
+		// file to check it against.
+		records.bump(t)
+		blocked("a record of an earlier generation")
+		records.write(t, connector, "p", process, false, "")
+		allowed("the record of the next exchange")
+		generationPath, _ := enterprisepolicy.PublishedSessionGenerationPath(records.root)
+		records.untrusted[generationPath] = true
+		blocked("a generation file the user can change")
+		delete(records.untrusted, generationPath)
+		if err := os.Remove(generationPath); err != nil {
+			t.Fatal(err)
+		}
+		blocked("no generation file")
+		records.bump(t)
+		records.write(t, connector, "p", process, false, "")
+		allowed("the record of the new generation")
 	}
 
 	// An unapproved hook the scan finds blocks with its own reason, record

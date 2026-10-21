@@ -224,11 +224,9 @@ func ValidateStrictServiceRuntimeFilePath(path, label, serviceAccount string, na
 // ValidateStrictServiceRuntimeDirPath is ValidateStrictServiceRuntimeFilePath
 // for a folder: the folder and the namedDirs folders nearest above it get
 // the strict leaf check, every folder above them the narrow ancestor mask,
-// all fatal. A negative namedDirs checks a folder that holds the named ones
-// (the folder above a missing record root): it and every folder above it
-// get the narrow ancestor mask. The lifecycle uses it to tell whether
-// another account could have changed the protected foreign-hook session
-// record tree (GAP-0352 review).
+// all fatal. The Windows lifecycle and status use it to tell whether the
+// protected foreign-hook session record folder is one the hook trusts
+// (GAP-0352 review).
 func ValidateStrictServiceRuntimeDirPath(path, label, serviceAccount string, namedDirs int) error {
 	if label == "" {
 		label = "managed runtime folder"
@@ -255,11 +253,7 @@ func validateStrictServiceRuntimePath(path string, isDir bool, label string, ser
 	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
-	scope := windowsTrustLeaf
-	if isDir && namedDirs < 0 {
-		scope = windowsTrustForeignAncestor
-	}
-	if err := validateTrustedWindowsPathElementWithWriter(clean, isDir, label, serviceSID, scope); err != nil {
+	if err := validateTrustedWindowsPathElementWithWriter(clean, isDir, label, serviceSID, windowsTrustLeaf); err != nil {
 		return err
 	}
 	for level, dir := 0, filepath.Dir(clean); ; level, dir = level+1, filepath.Dir(dir) {

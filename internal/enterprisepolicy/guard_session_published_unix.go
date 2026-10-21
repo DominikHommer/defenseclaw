@@ -20,6 +20,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -40,7 +43,42 @@ func expirePublishedSessionRecord(path string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file", path)
 	}
-	return os.Chtimes(path, publishedSessionRevokedTime, publishedSessionRevokedTime)
+	return publishedSessionSetTime(path, publishedSessionRevokedTime)
+}
+
+// setPublishedSessionTime sets the access and modification time of the
+// file at path, never through a symbolic link.
+func setPublishedSessionTime(path string, at time.Time) error {
+	stamp := unix.NsecToTimespec(at.UnixNano())
+	return unix.UtimesNanoAt(unix.AT_FDCWD, path, []unix.Timespec{stamp, stamp}, unix.AT_SYMLINK_NOFOLLOW)
+}
+
+// createPublishedSessionGeneration creates the generation file at path:
+// 0644, owned by this process (root, the only one that bumps it).
+func createPublishedSessionGeneration(path string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	return errors.Join(file.Chmod(0o644), file.Close())
+}
+
+// checkPublishedSessionGenerationOwner checks the owner of the generation file:
+// root for the gateway and the hook, and this process (root in production)
+// for the bump.
+func checkPublishedSessionGenerationOwner(path string, info os.FileInfo, self bool) error {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot read its owner", path)
+	}
+	want := uint32(0)
+	if self {
+		want = uint32(os.Geteuid())
+	}
+	if st.Uid != want {
+		return fmt.Errorf("%s is owned by uid %d, not uid %d", path, st.Uid, want)
+	}
+	return nil
 }
 
 // publishedSessionGrantReader gives uid read and search on the per-user
@@ -119,27 +157,18 @@ func publishedSessionOwnDir(path string, self uint32, rootOwnerOK bool) error {
 	return nil
 }
 
-// ValidatePublishedSessionPath checks a protected session record before the
-// hook reads it: the record and every folder above it are real files and
-// folders owned by root or the gateway service uid (from the root-owned
-// runtime descriptor, never from the environment), writable by no group or
-// other, with no access-list entry that grants write.
+// ValidatePublishedSessionPath checks a protected session record, or the
+// record folder's generation file, before the hook reads it: the file and
+// every folder above it are real files and folders owned by root or the
+// gateway service uid (from the root-owned runtime descriptor, never from
+// the environment), writable by no group or other, with no access-list entry
+// that grants write. The generation file must be root's: only root bumps it.
 func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) error {
-	return validatePublishedSessionWalk(path, false, trust)
-}
-
-// validatePublishedSessionFolder checks a folder of the record tree and
-// every folder above it the way ValidatePublishedSessionPath checks a record
-// (PublishedSessionTreeProblem).
-func validatePublishedSessionFolder(path string, trust PublishedSessionTrust, _ int) error {
-	return validatePublishedSessionWalk(path, true, trust)
-}
-
-func validatePublishedSessionWalk(path string, folder bool, trust PublishedSessionTrust) error {
 	clean, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
+	generation := filepath.Base(clean) == PublishedSessionGenerationFile
 	for cur, leaf := clean, true; ; cur, leaf = filepath.Dir(cur), false {
 		info, err := os.Lstat(cur)
 		if err != nil {
@@ -148,8 +177,8 @@ func validatePublishedSessionWalk(path string, folder bool, trust PublishedSessi
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("%s is a symbolic link", cur)
 		}
-		if file := leaf && !folder; file && !info.Mode().IsRegular() || !file && !info.IsDir() {
-			return fmt.Errorf("%s is not a regular %s", cur, map[bool]string{true: "file", false: "folder"}[file])
+		if leaf && !info.Mode().IsRegular() || !leaf && !info.IsDir() {
+			return fmt.Errorf("%s is not a regular %s", cur, map[bool]string{true: "file", false: "folder"}[leaf])
 		}
 		if info.Mode().Perm()&0o022 != 0 {
 			return fmt.Errorf("%s is writable by group or other (%04o)", cur, info.Mode().Perm())
@@ -157,6 +186,9 @@ func validatePublishedSessionWalk(path string, folder bool, trust PublishedSessi
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {
 			return fmt.Errorf("%s: cannot read its owner", cur)
+		}
+		if leaf && generation && st.Uid != 0 {
+			return fmt.Errorf("%s is owned by uid %d, not root", cur, st.Uid)
 		}
 		if st.Uid != 0 && (trust.ServiceUID <= 0 || st.Uid != uint32(trust.ServiceUID)) {
 			return fmt.Errorf("%s is owned by uid %d, not root or the gateway service account", cur, st.Uid)

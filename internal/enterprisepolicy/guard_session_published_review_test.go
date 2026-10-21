@@ -30,12 +30,11 @@ func publishedSessionTestExists(path string) bool {
 // Review P2 (GAP-0352, loop round 2): an answer dated after now proves
 // nothing. The clock was ahead when the gateway wrote the allow and was set
 // back since: without the bound both ages are negative, and the allow would
-// outlive the seven-day limit by as long as the clock was ahead. A small
+// outlive the age limit by as long as the clock was ahead. A small
 // step back of the clock (publishedSessionClockSkew) still passes, and the
 // prune drops a future-dated record like an expired one.
 func TestPublishedForeignHookSessionRefusesAFutureDatedAnswer(t *testing.T) {
-	withoutPublishedSessionACL(t)
-	root := t.TempDir()
+	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
 	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
@@ -44,7 +43,7 @@ func TestPublishedForeignHookSessionRefusesAFutureDatedAnswer(t *testing.T) {
 	}
 	publish := func(at, modified time.Time) {
 		t.Helper()
-		if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, at); err != nil {
+		if err := publishCurrent(root, identity, key, GuardDecision{}, at); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Chtimes(path, modified, modified); err != nil {
@@ -88,9 +87,8 @@ func TestPublishedForeignHookSessionRefusesAFutureDatedAnswer(t *testing.T) {
 	}
 }
 
-// Review P2 (GAP-0352, loop round 2): the removal step the gateway runs
-// again after the guardian changed its removals during an exchange. The
-// pending mark denies with its own reason, an unreadable ledger denies, a
+// Review P2 (GAP-0352, loop round 2): the removal step of every exchange
+// (ApplyForeignHookRemovals). The pending mark denies with its own reason, an unreadable ledger denies, a
 // removal recorded after the agent process started denies, and a later
 // process or another connector is not affected.
 func TestApplyForeignHookRemovalsDeniesForTheMarkAndTheLedger(t *testing.T) {
@@ -123,20 +121,15 @@ func TestApplyForeignHookRemovalsDeniesForTheMarkAndTheLedger(t *testing.T) {
 
 // Review P1 (GAP-0352, loop round 3): the pending mark is metadata of the
 // account's private session store in the gateway's data directory, not of
-// anything in the record tree a standard user can list. An account that
-// could change the record tree (move its folder away, or have the tree
-// invalidated) cannot clear it. Clearing it revokes the account's records,
-// even ones the account brought back, and removes the emptied folder, so
-// the next allow starts clean; a clear that cannot revoke a record keeps
-// the mark. A store the mark created goes with it; the gateway's own store
+// anything in the record tree a standard user can list: an account that
+// moves its record folder away, or empties the record root, does not clear
+// it. A store the mark created goes with the clear; the gateway's own store
 // keeps what it holds. A store that is not a folder denies.
 func TestForeignHookRemovalPendingMarkIsOutOfTheRecordTree(t *testing.T) {
-	withoutPublishedSessionACL(t)
-	dataDir, root := t.TempDir(), t.TempDir()
+	root, dataDir := publishedSessionTestRoot(t), t.TempDir()
 	identity := publishedSessionTestIdentity(t)
 	other := publishedSessionOtherIdentity(identity)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
-	record, _ := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
 	dir, _ := PublishedSessionIdentityDir(root, identity)
 	store := ForeignHookSessionStoreDir(dataDir, identity)
 	if filepath.Dir(store) != filepath.Join(dataDir, sessionDirName) {
@@ -150,18 +143,9 @@ func TestForeignHookRemovalPendingMarkIsOutOfTheRecordTree(t *testing.T) {
 		}
 		return got
 	}
-	check := func() error {
-		t.Helper()
-		_, err := CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll)
-		return err
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
 	}
-	allow := func() {
-		t.Helper()
-		if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	allow()
 	if pending(identity) {
 		t.Fatal("a clean account must not be held")
 	}
@@ -177,46 +161,20 @@ func TestForeignHookRemovalPendingMarkIsOutOfTheRecordTree(t *testing.T) {
 		}
 	}
 	// Whatever an account does to the record tree, the mark stays.
-	aside := filepath.Join(t.TempDir(), "aside")
-	if err := os.Rename(dir, aside); err != nil {
+	if err := os.Rename(dir, filepath.Join(t.TempDir(), "aside")); err != nil {
 		t.Fatal(err)
 	}
-	if err := InvalidatePublishedSessionRecords(root); err != nil {
+	if err := os.RemoveAll(root); err != nil {
 		t.Fatal(err)
 	}
 	if !pending(identity) {
-		t.Fatal("moving the record folder away, or invalidating the tree, must not clear the mark")
+		t.Fatal("moving the record folder away, or emptying the record root, must not clear the mark")
 	}
-	if err := os.Rename(aside, dir); err != nil {
+	if err := ClearForeignHookRemovalPending(dataDir, identity); err != nil {
 		t.Fatal(err)
 	}
-
-	// A clear that cannot revoke the record the account brought back keeps
-	// the mark.
-	release := heldOpenPublishedSessionRecord(t, record)
-	previousExpire, previousCreate := publishedSessionExpire, publishedSessionCreate
-	publishedSessionExpire = func(string) error { return errors.New("the volume is read-only") }
-	publishedSessionCreate = func(name string) (*os.File, error) {
-		return nil, &os.PathError{Op: "open", Path: name, Err: errors.New("no space left on device")}
-	}
-	t.Cleanup(func() { publishedSessionExpire, publishedSessionCreate = previousExpire, previousCreate })
-	if err := ClearForeignHookRemovalPending(dataDir, root, identity); err == nil || !pending(identity) {
-		t.Fatalf("a clear that cannot revoke a record must keep the mark: %v", err)
-	}
-	publishedSessionExpire, publishedSessionCreate = previousExpire, previousCreate
-	release()
-	if err := ClearForeignHookRemovalPending(dataDir, root, identity); err != nil {
-		t.Fatal(err)
-	}
-	if pending(identity) || publishedSessionTestExists(dir) || publishedSessionTestExists(store) {
-		t.Fatal("the clear must end the mark and remove the emptied record folder and the store the mark created")
-	}
-	if err := check(); !errors.Is(err, ErrPublishedSessionUnavailable) {
-		t.Fatalf("the record from before the clear must be revoked: %v", err)
-	}
-	allow()
-	if err := check(); err != nil {
-		t.Fatalf("after the clear, a new allow proves the process: %v", err)
+	if pending(identity) || publishedSessionTestExists(store) {
+		t.Fatal("the clear must end the mark and remove the store the mark created")
 	}
 
 	// The gateway's own store keeps what it holds; only the mark goes.
@@ -230,7 +188,7 @@ func TestForeignHookRemovalPendingMarkIsOutOfTheRecordTree(t *testing.T) {
 	if err := MarkForeignHookRemovalPending(dataDir, identity); err != nil || !pending(identity) {
 		t.Fatalf("mark the gateway's store: %v", err)
 	}
-	if err := ClearForeignHookRemovalPending(dataDir, root, identity); err != nil || pending(identity) || !publishedSessionTestExists(kept) {
+	if err := ClearForeignHookRemovalPending(dataDir, identity); err != nil || pending(identity) || !publishedSessionTestExists(kept) {
 		t.Fatalf("the clear must keep the gateway's records: %v", err)
 	}
 	if err := os.WriteFile(ForeignHookSessionStoreDir(dataDir, other), []byte("x"), 0o600); err != nil {
@@ -238,231 +196,6 @@ func TestForeignHookRemovalPendingMarkIsOutOfTheRecordTree(t *testing.T) {
 	}
 	if _, err := ForeignHookRemovalPending(dataDir, other); err == nil {
 		t.Fatal("a store that is not a folder must be an error, which denies")
-	}
-}
-
-// Review P1 (GAP-0352, loop round 2): the lifecycle asks whether the hook
-// would refuse anything in the record tree before it restores the tree's
-// access, and then invalidates every account's records. A refused root,
-// account folder or record, or an entry that is no account folder, is
-// something another account could have changed. The invalidation deletes
-// the records and the emptied account folders, removes the stray entry,
-// and revokes in place a record a reader holds open.
-func TestPublishedSessionRecordsAreInvalidatedWhereAnotherAccountCouldChangeThem(t *testing.T) {
-	withoutPublishedSessionACL(t)
-	root := t.TempDir()
-	identity := publishedSessionTestIdentity(t)
-	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
-	held := SessionKey{Connector: "copilot", Session: "s-2", Process: "p-2"}
-	for _, k := range []SessionKey{key, held} {
-		if err := PublishForeignHookSessionDecision(root, identity, k, GuardDecision{}, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	dir, _ := PublishedSessionIdentityDir(root, identity)
-	record, _ := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
-	heldRecord, _ := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, held.Process)
-	otherDir, _ := PublishedSessionIdentityDir(root, publishedSessionOtherIdentity(identity))
-	if err := os.MkdirAll(otherDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(otherDir, "copilot-p-x.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	refused := ""
-	refuse := func(path string) error {
-		if path == refused {
-			return errors.New(path + " is writable by another account")
-		}
-		return nil
-	}
-	previousFile, previousFolder := publishedSessionFileTrust, publishedSessionFolderTrust
-	publishedSessionFileTrust = func(path string, _ PublishedSessionTrust) error { return refuse(path) }
-	publishedSessionFolderTrust = func(path string, _ PublishedSessionTrust, _ int) error { return refuse(path) }
-	t.Cleanup(func() { publishedSessionFileTrust, publishedSessionFolderTrust = previousFile, previousFolder })
-	if err := PublishedSessionTreeProblem(root, PublishedSessionTrust{}); err != nil {
-		t.Fatalf("a tree the hook trusts: %v", err)
-	}
-	for _, path := range []string{root, dir, record} {
-		refused = path
-		if err := PublishedSessionTreeProblem(root, PublishedSessionTrust{}); err == nil || !strings.Contains(err.Error(), path) {
-			t.Fatalf("%s refused must be the tree's problem: %v", path, err)
-		}
-	}
-	refused = ""
-	stray := filepath.Join(root, "stray")
-	if err := os.WriteFile(stray, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := PublishedSessionTreeProblem(root, PublishedSessionTrust{}); err == nil || !strings.Contains(err.Error(), "not an account folder") {
-		t.Fatalf("an entry that is no account folder must be a problem: %v", err)
-	}
-	if err := PublishedSessionTreeProblem(filepath.Join(root, "missing"), PublishedSessionTrust{}); err != nil {
-		t.Fatalf("a missing root is no problem: %v", err)
-	}
-	// Review P1 (loop round 4): unless the folder above it is one another
-	// account could change, which can move the root back.
-	refused = root
-	if err := PublishedSessionTreeProblem(filepath.Join(root, "missing"), PublishedSessionTrust{}); err == nil || !strings.Contains(err.Error(), "is missing") {
-		t.Fatalf("a missing root under a folder the hook refuses must be a problem: %v", err)
-	}
-	refused = ""
-	// Review P1 (loop round 3): the root is checked whatever it holds. An
-	// account that could change it may have moved its folder out, to bring
-	// it back after the check; and a file in it is no account folder.
-	empty := t.TempDir()
-	refused = empty
-	if err := PublishedSessionTreeProblem(empty, PublishedSessionTrust{}); err == nil || !strings.Contains(err.Error(), empty) {
-		t.Fatalf("an empty root the hook refuses must be a problem: %v", err)
-	}
-	refused = ""
-	if err := PublishedSessionTreeProblem(empty, PublishedSessionTrust{}); err != nil {
-		t.Fatalf("an empty root the hook trusts is no problem: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(empty, "x.hold"), []byte("{}"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	if err := PublishedSessionTreeProblem(empty, PublishedSessionTrust{}); err == nil || !strings.Contains(err.Error(), "not an account folder") {
-		t.Fatalf("a file in the root must be a problem: %v", err)
-	}
-
-	release := heldOpenPublishedSessionRecord(t, heldRecord)
-	if err := InvalidatePublishedSessionRecords(root); err != nil {
-		t.Fatal(err)
-	}
-	for name, k := range map[string]SessionKey{"deleted": key, "held open": held} {
-		if got, err := CheckPublishedForeignHookSession(root, identity, k, GuardDecision{}, trustAll); err == nil && !got.Deny {
-			t.Fatalf("%s: an invalidated record must not allow: %+v", name, got)
-		}
-	}
-	if publishedSessionTestExists(record) || publishedSessionTestExists(stray) {
-		t.Fatal("the records and the stray entry must go")
-	}
-	if !publishedSessionTestExists(heldRecord) {
-		t.Fatal("the held record stays, revoked in place")
-	}
-	if publishedSessionTestExists(otherDir) {
-		t.Fatal("an emptied account folder must go")
-	}
-	release()
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll); err != nil {
-		t.Fatalf("the next allow after the invalidation proves the process: %v", err)
-	}
-}
-
-// Review P1 (GAP-0352, loop round 3): while the record root let another
-// account change it, the account moved its folder away, so the root was
-// empty when the lifecycle checked it, and brought the folder back before
-// the access was put back. The empty root is still the tree's problem, so
-// the lifecycle closes the root and invalidates what it then holds: the old
-// allow proves nothing.
-func TestPublishedSessionTreeProblemSeesAFolderMovedOutOfAnEmptyRoot(t *testing.T) {
-	withoutPublishedSessionACL(t)
-	root := t.TempDir()
-	identity := publishedSessionTestIdentity(t)
-	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	dir, _ := PublishedSessionIdentityDir(root, identity)
-	aside := filepath.Join(t.TempDir(), "aside")
-	if err := os.Rename(dir, aside); err != nil {
-		t.Fatal(err)
-	}
-	// The guardian's revocation finds nothing to revoke.
-	if err := RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}); err != nil {
-		t.Fatal(err)
-	}
-	previousFolder := publishedSessionFolderTrust
-	publishedSessionFolderTrust = func(path string, _ PublishedSessionTrust, _ int) error {
-		if path == root {
-			return errors.New(root + " is writable by another account")
-		}
-		return nil
-	}
-	t.Cleanup(func() { publishedSessionFolderTrust = previousFolder })
-	problem := PublishedSessionTreeProblem(root, PublishedSessionTrust{})
-	// The account brings the folder back after the check.
-	if err := os.Rename(aside, dir); err != nil {
-		t.Fatal(err)
-	}
-	if problem == nil {
-		t.Fatal("an empty root another account could change must be the tree's problem")
-	}
-	if err := InvalidatePublishedSessionRecords(root); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
-		t.Fatalf("the allow the account brought back must prove nothing: %+v %v", got, err)
-	}
-}
-
-// Review P1 (GAP-0352, loop round 3): the guardian trusts its revocation of
-// an account's records only in a tree the hook trusts: the root and the
-// folders above it, even with no account folder in the root, and the
-// account's folder and its files. Another account's folder is not this
-// account's problem, and a missing root is none.
-func TestPublishedSessionAccountProblemSeesWhatTheHookWouldRefuse(t *testing.T) {
-	withoutPublishedSessionACL(t)
-	root := t.TempDir()
-	identity := publishedSessionTestIdentity(t)
-	other := publishedSessionOtherIdentity(identity)
-	refused := ""
-	refuse := func(path string) error {
-		if path == refused {
-			return errors.New(path + " is writable by another account")
-		}
-		return nil
-	}
-	previousFile, previousFolder := publishedSessionFileTrust, publishedSessionFolderTrust
-	publishedSessionFileTrust = func(path string, _ PublishedSessionTrust) error { return refuse(path) }
-	publishedSessionFolderTrust = func(path string, _ PublishedSessionTrust, _ int) error { return refuse(path) }
-	t.Cleanup(func() { publishedSessionFileTrust, publishedSessionFolderTrust = previousFile, previousFolder })
-	if err := PublishedSessionAccountProblem(filepath.Join(root, "missing"), identity, PublishedSessionTrust{}); err != nil {
-		t.Fatalf("a missing root is no problem: %v", err)
-	}
-	// Review P1 (loop round 4): the account moved the whole root away
-	// while the folder above it was loosened. Until that folder is trusted
-	// again, the root can come back with the old allow. A missing folder
-	// above the root is checked at the nearest one that exists.
-	refused = root
-	for _, missing := range []string{filepath.Join(root, "missing"), filepath.Join(root, "a", "b", "missing")} {
-		if err := PublishedSessionAccountProblem(missing, identity, PublishedSessionTrust{}); err == nil || !strings.Contains(err.Error(), root) {
-			t.Fatalf("a missing root under a folder the hook refuses must be a problem: %v", err)
-		}
-	}
-	if err := PublishedSessionAccountProblem("", identity, PublishedSessionTrust{}); err == nil {
-		t.Fatal("a root that names no folder must be a problem")
-	}
-	refused = root
-	if err := PublishedSessionAccountProblem(root, identity, PublishedSessionTrust{}); err == nil {
-		t.Fatal("an empty root the hook refuses must be a problem")
-	}
-	refused = ""
-	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
-	for _, id := range []string{identity, other} {
-		if err := PublishForeignHookSessionDecision(root, id, key, GuardDecision{}, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := PublishedSessionAccountProblem(root, identity, PublishedSessionTrust{}); err != nil {
-		t.Fatalf("a tree the hook trusts: %v", err)
-	}
-	dir, _ := PublishedSessionIdentityDir(root, identity)
-	record, _ := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
-	for _, path := range []string{dir, record} {
-		refused = path
-		if err := PublishedSessionAccountProblem(root, identity, PublishedSessionTrust{}); err == nil || !strings.Contains(err.Error(), path) {
-			t.Fatalf("%s refused must be the account's problem: %v", path, err)
-		}
-	}
-	refused, _ = PublishedSessionIdentityDir(root, other)
-	if err := PublishedSessionAccountProblem(root, identity, PublishedSessionTrust{}); err != nil {
-		t.Fatalf("another account's folder is not this account's problem: %v", err)
 	}
 }
 

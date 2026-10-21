@@ -43,13 +43,24 @@ func TestWindowsHookSessionFolderSDDL(t *testing.T) {
 	}
 }
 
-// Review P1 (GAP-0352, loop round 2), on real folders: while the record
-// root let standard users add and delete folders, the account moved its
-// folder aside, the guardian's removal found nothing to revoke, and the
-// account put the folder back. Until the repair the hook refuses the tree;
-// the repair that restores the root's access must not let the hook trust
-// the old allow again, so it invalidates the records first.
-func TestWindowsHookSessionRepairInvalidatesRecordsMovedAsideAndBack(t *testing.T) {
+// windowsHookSessionTestPublish publishes an allow as the gateway does,
+// stamped with the generation it reads first.
+func windowsHookSessionTestPublish(root, identity string, key enterprisepolicy.SessionKey) error {
+	generation, err := enterprisepolicy.PublishedSessionGeneration(root)
+	if err != nil {
+		return err
+	}
+	return enterprisepolicy.PublishForeignHookSessionDecision(root, identity, key, enterprisepolicy.GuardDecision{}, generation, time.Now())
+}
+
+// Review P1 (GAP-0352, loop round 2; lead directive, loop round 1), on real
+// folders: while the record root let standard users add and delete
+// folders, the account moved its folder aside during a guardian removal and
+// put it back. Until the repair the hook refuses the tree; the repair that
+// restores the root's access must not let the hook trust the old allow
+// again. The generation bump ends it, and a repair of a root nobody
+// loosened ends every earlier allow the same way.
+func TestWindowsHookSessionRepairEndsRecordsMovedAsideAndBack(t *testing.T) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +76,7 @@ func TestWindowsHookSessionRepairInvalidatesRecordsMovedAsideAndBack(t *testing.
 		t.Skipf("the record folder cannot get its owner here (an elevated test): %v", err)
 	}
 	key := enterprisepolicy.SessionKey{Connector: "copilot", Session: "s-1", Process: "windows:b:1:100"}
-	if err := enterprisepolicy.PublishForeignHookSessionDecision(root, identity, key, enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
+	if err := windowsHookSessionTestPublish(root, identity, key); err != nil {
 		t.Fatal(err)
 	}
 	check := func() error {
@@ -80,15 +91,12 @@ func TestWindowsHookSessionRepairInvalidatesRecordsMovedAsideAndBack(t *testing.
 	if err := applyWindowsSDDL(root, drifted); err != nil {
 		t.Fatal(err)
 	}
-	if windowsHookSessionTreeProblem(root) == nil {
+	if windowsHookSessionRootTrustProblem(root) == nil {
 		t.Fatal("a root standard users can add folders to and delete them from must be a problem")
 	}
 	account, _ := enterprisepolicy.PublishedSessionIdentityDir(root, identity)
 	aside := filepath.Join(base, "aside")
 	if err := os.Rename(account, aside); err != nil {
-		t.Fatal(err)
-	}
-	if err := enterprisepolicy.RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(aside, account); err != nil {
@@ -100,20 +108,33 @@ func TestWindowsHookSessionRepairInvalidatesRecordsMovedAsideAndBack(t *testing.
 	if err := check(); !errors.Is(err, enterprisepolicy.ErrPublishedSessionUnavailable) {
 		t.Fatalf("after the repair the old allow must prove nothing: %v", err)
 	}
-	if err := enterprisepolicy.PublishForeignHookSessionDecision(root, identity, key, enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
+	if err := windowsHookSessionTestPublish(root, identity, key); err != nil {
 		t.Fatal(err)
 	}
 	if err := check(); err != nil {
 		t.Fatalf("the next allow after the repair proves the process: %v", err)
 	}
+	// A repair of a root the hook trusts keeps the folder and still ends
+	// every earlier allow. (The test account stands in for the gateway
+	// service, which the real check does not accept, so it is replaced.)
+	previousTrust := windowsHookSessionRootTrustProblem
+	windowsHookSessionRootTrustProblem = func(string) error { return nil }
+	t.Cleanup(func() { windowsHookSessionRootTrustProblem = previousTrust })
+	if err := ensureWindowsHookSessionRoot(root, self); err != nil {
+		t.Fatal(err)
+	}
+	if err := check(); !errors.Is(err, enterprisepolicy.ErrPublishedSessionUnavailable) {
+		t.Fatalf("after a repair of a trusted root the old allow must prove nothing: %v", err)
+	}
 }
 
 // Review P2 (GAP-0352, loop round 3): status and verify check the record
-// folder with the hook's own rule (windowsHookSessionTreeProblem), so a
+// folder with the hook's own rule (windowsHookSessionRootTrustProblem), so a
 // drift the hook refuses, such as a Cisco folder above it that standard
 // users can delete children of, is reported as
-// hook_session_records_untrusted. The advisory ancestor verdicts of
-// ValidateTrustedServiceRuntimeDir hid it.
+// hook_session_records_untrusted, and so is a generation file the hook
+// refuses. The advisory ancestor verdicts of
+// ValidateTrustedServiceRuntimeDir hid the first.
 func TestWindowsHookSessionStatusUsesTheHooksStrictRule(t *testing.T) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -122,13 +143,16 @@ func TestWindowsHookSessionStatusUsesTheHooksStrictRule(t *testing.T) {
 	root := filepath.Join(t.TempDir(), windowsHookSessionFolderName)
 	var drift error
 	var checked []string
-	previousDir, previousTree := windowsHookSessionDir, windowsHookSessionTreeProblem
+	previousDir, previousTree, previousGeneration := windowsHookSessionDir, windowsHookSessionRootTrustProblem, windowsHookSessionGenerationProblem
 	windowsHookSessionDir = func() (string, error) { return root, nil }
-	windowsHookSessionTreeProblem = func(path string) error {
+	windowsHookSessionRootTrustProblem = func(path string) error {
 		checked = append(checked, path)
 		return drift
 	}
-	t.Cleanup(func() { windowsHookSessionDir, windowsHookSessionTreeProblem = previousDir, previousTree })
+	t.Cleanup(func() {
+		windowsHookSessionDir, windowsHookSessionRootTrustProblem, windowsHookSessionGenerationProblem = previousDir, previousTree, previousGeneration
+	})
+	windowsHookSessionGenerationProblem = func(string) error { return nil }
 	if err := ensureWindowsHookSessionRoot(root, user.User.Sid); err != nil {
 		t.Skipf("the record folder cannot get its owner here (an elevated test): %v", err)
 	}
@@ -140,6 +164,12 @@ func TestWindowsHookSessionStatusUsesTheHooksStrictRule(t *testing.T) {
 	problem := windowsHookSessionRootProblem()
 	if !strings.Contains(problem, "delete its children") || len(checked) != 1 || checked[0] != root {
 		t.Fatalf("a drift the hook refuses must be reported (checked %v): %q", checked, problem)
+	}
+	// A generation file the hook refuses is reported too.
+	drift = nil
+	windowsHookSessionGenerationProblem = func(string) error { return errors.New("the generation file is owned by BUILTIN\\Users") }
+	if problem := windowsHookSessionRootProblem(); !strings.Contains(problem, "generation file is owned") {
+		t.Fatalf("a refused generation file must be reported: %q", problem)
 	}
 }
 
@@ -204,7 +234,7 @@ func windowsHookSessionReplacementTestRoot(t *testing.T) (root string, self *win
 		t.Skipf("the record folder cannot get its owner here (an elevated test): %v", err)
 	}
 	key := enterprisepolicy.SessionKey{Connector: "copilot", Session: "s-1", Process: "windows:b:1:100"}
-	if err := enterprisepolicy.PublishForeignHookSessionDecision(root, identity, key, enterprisepolicy.GuardDecision{}, time.Now()); err != nil {
+	if err := windowsHookSessionTestPublish(root, identity, key); err != nil {
 		t.Fatal(err)
 	}
 	check = func() error {
@@ -218,7 +248,7 @@ func windowsHookSessionReplacementTestRoot(t *testing.T) (root string, self *win
 	if err := applyWindowsSDDL(root, drifted); err != nil {
 		t.Fatal(err)
 	}
-	if windowsHookSessionTreeProblem(root) == nil {
+	if windowsHookSessionRootTrustProblem(root) == nil {
 		t.Fatal("a root standard users can change must be a problem")
 	}
 	return root, self, check, drifted
@@ -249,8 +279,8 @@ func TestWindowsHookSessionRepairReplacesARootARetainedHandleCanChange(t *testin
 	if windowsFileIndex(t, current) == before {
 		t.Fatal("the repair must replace the folder object a retained handle can change")
 	}
-	if windowsHookSessionTreeProblem(root) != nil {
-		t.Fatalf("the new root must be one the hook trusts: %v", windowsHookSessionTreeProblem(root))
+	if windowsHookSessionRootTrustProblem(root) != nil {
+		t.Fatalf("the new root must be one the hook trusts: %v", windowsHookSessionRootTrustProblem(root))
 	}
 	if trusted, err := windowsPathOwnedByAdministrators(root); err != nil || !trusted {
 		t.Fatalf("the new root is owned by Administrators: %v %v", trusted, err)

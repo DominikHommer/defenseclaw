@@ -61,8 +61,10 @@ gateway did not block the agent process. These calls stay blocked:
 - an agent that started while the gateway was down (no record yet), and an
   agent process DefenseClaw cannot name (a session record alone is not
   enough: a new agent can resume an old session);
-- a record that is missing, cannot be read or parsed, is older than 7 days,
-  or that a user account could change, including through a folder above it;
+- a record that is missing, cannot be read or parsed, is older than 15
+  minutes, is of an earlier record generation (an upgrade, a repair or a
+  guardian hook removal starts a new one), or that a user account could
+  change, including through a folder above it;
 - every guarded call under `closed` or an unset fail mode.
 
 On a managed standalone host `open` applies only to an outage: the gateway

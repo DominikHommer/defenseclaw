@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 	"unsafe"
@@ -132,38 +133,108 @@ func publishedSessionOwnedByTrusted(path string, service *windows.SID) bool {
 		current.IsWellKnown(windows.WinBuiltinAdministratorsSid) || current.IsWellKnown(windows.WinLocalSystemSid))
 }
 
-// ValidatePublishedSessionPath checks a protected session record before the
-// hook reads it: the record and every folder above it are on a fixed NTFS
-// drive, no reparse point, and no account but SYSTEM, Administrators,
-// TrustedInstaller and the gateway service can write them. Every verdict is
-// fatal, the shared Cisco folder included, and the account's folder and the
-// record root get the record's own strict mask: the account must not be
-// able to move a record folder away and bring it back after a revocation.
-// A record the check refuses blocks.
+// ValidatePublishedSessionPath checks a protected session record, or the
+// record folder's generation file, before the hook reads it: the file and
+// every folder above it are on a fixed NTFS drive, no reparse point, and no
+// account but SYSTEM, Administrators, TrustedInstaller and the gateway
+// service can write them. Every verdict is fatal, the shared Cisco folder
+// included, and the folders DefenseClaw creates with a protected DACL (the
+// account's folder and the record root above a record, the record root
+// above the generation file) get the file's own strict mask. The generation
+// file must be owned by SYSTEM or Administrators: only the SYSTEM lifecycle
+// and guardian bump it. A file the check refuses blocks.
 func ValidatePublishedSessionPath(path string, trust PublishedSessionTrust) error {
+	if filepath.Base(path) == PublishedSessionGenerationFile {
+		if err := managed.ValidateStrictServiceRuntimeFilePath(path, "protected foreign-hook session record generation", trust.ServiceAccount, 1); err != nil {
+			return err
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		return checkPublishedSessionGenerationOwner(path, info, false)
+	}
 	return managed.ValidateStrictServiceRuntimeFilePath(path, "protected foreign-hook session record", trust.ServiceAccount, publishedSessionNamedDirs)
 }
 
-// validatePublishedSessionFolder checks a folder of the record tree and
-// every folder above it the way ValidatePublishedSessionPath checks a record
-// (PublishedSessionTreeProblem): the folder and the named DefenseClaw
-// folders above it (1 for an account folder, 0 for the record root) get the
-// strict rule, the rest the narrow fatal one. named -1 is a folder above
-// the record root (publishedSessionMissingRootProblem): it and every folder
-// above it get the narrow fatal rule, as the hook gives them.
-func validatePublishedSessionFolder(path string, trust PublishedSessionTrust, named int) error {
-	return managed.ValidateStrictServiceRuntimeDirPath(path, "protected foreign-hook session record folder", trust.ServiceAccount, named)
+// ValidatePublishedSessionRoot checks the record folder root and every
+// folder above it the way the hook checks the folders above a record: the
+// root strict, every folder above it with the narrow fatal rule, the shared
+// Cisco folder included. The Windows lifecycle replaces a root it refuses
+// (another account may keep a handle that can change its access list), and
+// status and verify report it.
+func ValidatePublishedSessionRoot(root string, trust PublishedSessionTrust) error {
+	return managed.ValidateStrictServiceRuntimeDirPath(root, "protected foreign-hook session record folder", trust.ServiceAccount, 0)
 }
 
 // publishedSessionNamedDirs are the folders above a record that DefenseClaw
 // creates with a protected DACL: the account's folder and the record root.
 const publishedSessionNamedDirs = 2
 
+// publishedSessionGenerationSDDL is the protected DACL of the generation
+// file: SYSTEM and Administrators full control, standard users and services
+// (the gateway) read. It inherits nothing from the record root, which gives
+// the gateway modify.
+const publishedSessionGenerationSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)(A;;0x1200a9;;;SU)"
+
+// createPublishedSessionGeneration creates the generation file at path with
+// publishedSessionGenerationSDDL; this process (SYSTEM or an administrator)
+// owns it.
+func createPublishedSessionGeneration(path string) error {
+	descriptor, err := windows.SecurityDescriptorFromString(publishedSessionGenerationSDDL)
+	if err != nil {
+		return err
+	}
+	attributes := &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: descriptor,
+	}
+	pointer, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE, attributes,
+		windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			return fs.ErrExist
+		}
+		return err
+	}
+	return windows.CloseHandle(handle)
+}
+
+// checkPublishedSessionGenerationOwner checks that SYSTEM or Administrators own
+// the generation file, for the gateway, the hook and the bump alike.
+func checkPublishedSessionGenerationOwner(path string, _ os.FileInfo, _ bool) error {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		return fmt.Errorf("%s has no owner", path)
+	}
+	if !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) && !owner.IsWellKnown(windows.WinLocalSystemSid) {
+		return fmt.Errorf("%s is owned by %s, not SYSTEM or Administrators", path, owner.String())
+	}
+	return nil
+}
+
 // expirePublishedSessionRecord sets the modification time of the record at
-// path to publishedSessionRevokedTime (revokePublishedSessionRecord). It
-// opens the record for its attributes only, which no sharing mode of a
-// reader refuses, and without following a reparse point.
+// path to publishedSessionRevokedTime (revokePublishedSessionRecord).
 func expirePublishedSessionRecord(path string) error {
+	return publishedSessionSetTime(path, publishedSessionRevokedTime)
+}
+
+// setPublishedSessionTime sets the access and modification time of the
+// file at path. It opens the file for its attributes only, which no sharing
+// mode of a reader refuses, and without following a reparse point.
+func setPublishedSessionTime(path string, at time.Time) error {
 	pointer, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		return err
@@ -178,8 +249,8 @@ func expirePublishedSessionRecord(path string) error {
 		return err
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
-	revoked := windows.NsecToFiletime(publishedSessionRevokedTime.UnixNano())
-	return windows.SetFileTime(handle, nil, &revoked, &revoked)
+	stamp := windows.NsecToFiletime(at.UnixNano())
+	return windows.SetFileTime(handle, nil, &stamp, &stamp)
 }
 
 // publishedSessionPendingTime is the creation time that is the guardian's

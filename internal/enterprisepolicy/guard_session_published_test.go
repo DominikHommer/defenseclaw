@@ -26,8 +26,7 @@ func trustAll(string) error { return nil }
 // the protected record, and during an outage only a record that proves the
 // agent process not blocked lets a call go on.
 func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
-	withoutPublishedSessionACL(t)
-	root := t.TempDir()
+	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "linux:b:1:100"}
 	clean := GuardDecision{}
@@ -39,14 +38,14 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 	if _, err := check(key, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
 		t.Fatalf("no record must prove nothing: %v", err)
 	}
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := check(key, trustAll); err != nil || got.Deny {
 		t.Fatalf("an allowed process must be proven unblocked: %+v %v", got, err)
 	}
 	reason := foreignHookBlockedPrefix + " When this agent session started, the project hook file /repo/.github/hooks/x.json defined a hook."
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{Deny: true, Reason: reason}, time.Now()); err != nil {
+	if err := publishCurrent(root, identity, key, GuardDecision{Deny: true, Reason: reason}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := check(key, trustAll); err != nil || !got.Deny || got.Reason != reason {
@@ -61,7 +60,7 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 		t.Fatalf("a blocked session must deny: %+v %v", got, err)
 	}
 	// The allow that clears the block.
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := check(key, trustAll); err != nil || got.Deny {
@@ -88,13 +87,27 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("no record path")
 	}
+	generation, err := PublishedSessionGeneration(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Format(time.RFC3339)
+	// The writer's own encoding of the same record proves the process: the
+	// cases below differ from it in one point each.
+	if err := os.WriteFile(path, []byte(`{"v":2,"connector":"copilot","kind":"p","id":"`+key.Process+`","blocked":false,"at":"`+at+`","gen":"`+generation+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := check(key, trustAll); err != nil || got.Deny {
+		t.Fatalf("a well-formed record must prove the process: %+v %v", got, err)
+	}
 	for name, content := range map[string]string{
-		"corrupt":        `{"v":1,"connector":"copilot"`,
-		"unknown field":  `{"v":1,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"2026-10-21T00:00:00Z","x":1}`,
-		"other key":      `{"v":1,"connector":"copilot","kind":"p","id":"linux:b:9:9","blocked":false,"at":"2026-10-21T00:00:00Z"}`,
-		"other version":  `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"2026-10-21T00:00:00Z"}`,
-		"no time":        `{"v":1,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":""}`,
-		"trailing value": `{"v":1,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"2026-10-21T00:00:00Z"} {}`,
+		"corrupt":        `{"v":2,"connector":"copilot"`,
+		"unknown field":  `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"` + at + `","gen":"` + generation + `","x":1}`,
+		"other key":      `{"v":2,"connector":"copilot","kind":"p","id":"linux:b:9:9","blocked":false,"at":"` + at + `","gen":"` + generation + `"}`,
+		"other version":  `{"v":1,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"` + at + `","gen":"` + generation + `"}`,
+		"no time":        `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"","gen":"` + generation + `"}`,
+		"no generation":  `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"` + at + `"}`,
+		"trailing value": `{"v":2,"connector":"copilot","kind":"p","id":"` + key.Process + `","blocked":false,"at":"` + at + `","gen":"` + generation + `"} {}`,
 	} {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
@@ -103,29 +116,28 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 			t.Fatalf("%s: the record must prove nothing: %v", name, err)
 		}
 	}
-	// The guardian removed a Copilot hook of this account: every Copilot
-	// record goes, the other connectors' stay.
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+	// The guardian removed a hook of this account and bumped the
+	// generation: every earlier allow goes, of every connector.
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	opencode := SessionKey{Connector: "opencode", Session: "o-1", Process: key.Process}
-	if err := PublishForeignHookSessionDecision(root, identity, opencode, GuardDecision{}, time.Now()); err != nil {
+	if err := publishCurrent(root, identity, opencode, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}); err != nil {
+	if err := BumpPublishedSessionGeneration(root); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := check(key, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
-		t.Fatalf("a removal must clear the connector's records: %v", err)
-	}
-	if got, err := check(opencode, trustAll); err != nil || got.Deny {
-		t.Fatalf("another connector's record must stay: %+v %v", got, err)
+	for _, k := range []SessionKey{key, opencode} {
+		if _, err := check(k, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
+			t.Fatalf("%s: a bump must end the earlier allow: %v", k.Connector, err)
+		}
 	}
 	// Review P2: a session record alone proves nothing. An agent process the
 	// hook cannot name may be one that started during the outage and
 	// resumed the session ID, and a named one needs its own record.
 	unnamed := SessionKey{Connector: "copilot", Session: "u-1"}
-	if err := PublishForeignHookSessionDecision(root, identity, unnamed, GuardDecision{}, time.Now()); err != nil {
+	if err := publishCurrent(root, identity, unnamed, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := check(unnamed, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) || got.Deny {
@@ -140,8 +152,7 @@ func TestPublishedForeignHookSessionRecordRoundTrip(t *testing.T) {
 // record's time or its modification time, proves nothing, and neither does
 // a record that was deleted, replaced or expired after the hook read it.
 func TestPublishedForeignHookSessionRefusesAStaleOrChangedAnswer(t *testing.T) {
-	withoutPublishedSessionACL(t)
-	root := t.TempDir()
+	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
 	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
@@ -155,7 +166,7 @@ func TestPublishedForeignHookSessionRefusesAStaleOrChangedAnswer(t *testing.T) {
 	}
 	allow := func(at time.Time) {
 		t.Helper()
-		if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, at); err != nil {
+		if err := publishCurrent(root, identity, key, GuardDecision{}, at); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -206,8 +217,7 @@ func TestPublishedForeignHookSessionRefusesAStaleOrChangedAnswer(t *testing.T) {
 // expired in place, which needs no space, and the hook refuses it. Only when
 // every override fails is the revocation an error.
 func TestPublishedForeignHookSessionRevocationSurvivesAMarkerThatCannotBeCreated(t *testing.T) {
-	withoutPublishedSessionACL(t)
-	root := t.TempDir()
+	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
 	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
@@ -220,7 +230,7 @@ func TestPublishedForeignHookSessionRevocationSurvivesAMarkerThatCannotBeCreated
 	}
 	allow := func() {
 		t.Helper()
-		if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+		if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		if got, err := check(); err != nil || got.Deny {
@@ -233,11 +243,13 @@ func TestPublishedForeignHookSessionRevocationSurvivesAMarkerThatCannotBeCreated
 	t.Cleanup(func() { publishedSessionCreate = previousCreate })
 	revocations := map[string]func() error{
 		"block": func() error {
-			_ = PublishForeignHookSessionDecision(root, identity, key, GuardDecision{Deny: true, Reason: foreignHookBlockedPrefix + " x"}, time.Now())
+			_ = publishCurrent(root, identity, key, GuardDecision{Deny: true, Reason: foreignHookBlockedPrefix + " x"}, time.Now())
 			return nil
 		},
-		"guardian removal": func() error { return RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}) },
-		"withdrawal":       func() error { return WithdrawPublishedForeignHookSession(root, identity, key) },
+		"block of the process alone": func() error {
+			_ = publishCurrent(root, identity, SessionKey{Connector: key.Connector, Process: key.Process}, GuardDecision{Deny: true}, time.Now())
+			return nil
+		},
 	}
 	for name, revoke := range revocations {
 		allow()
@@ -273,7 +285,7 @@ func TestPublishedForeignHookSessionRevocationSurvivesAMarkerThatCannotBeCreated
 	previousExpire := publishedSessionExpire
 	publishedSessionExpire = func(string) error { return errors.New("the volume is read-only") }
 	t.Cleanup(func() { publishedSessionExpire = previousExpire })
-	if err := RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}); err == nil {
+	if err := revokePublishedSessionRecord(path, PublishedSessionRecord{Version: publishedSessionVersion, Connector: "copilot", Kind: sessionKindProcess, ID: key.Process, Blocked: true}); err == nil {
 		t.Fatal("a revocation that changed nothing must report it")
 	}
 }
@@ -284,16 +296,16 @@ func TestPublishedForeignHookSessionWithoutARootWritesNothing(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "missing")
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatalf("a missing root is not an error: %v", err)
 	}
 	if _, err := os.Lstat(root); !os.IsNotExist(err) {
 		t.Fatalf("the gateway must not create the lifecycle's root: %v", err)
 	}
-	if err := PublishForeignHookSessionDecision("", identity, key, GuardDecision{}, time.Now()); err != nil {
+	if err := publishCurrent("", identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := PublishForeignHookSessionDecision(t.TempDir(), identity, SessionKey{Connector: "../x", Session: "s"}, GuardDecision{}, time.Now()); err == nil {
+	if err := publishCurrent(t.TempDir(), identity, SessionKey{Connector: "../x", Session: "s"}, GuardDecision{}, time.Now()); err == nil {
 		t.Fatal("a connector name that is not a plain name must be refused")
 	}
 }
@@ -304,18 +316,17 @@ func TestPublishedForeignHookSessionBlockThatCannotBeWrittenRemovesTheAllow(t *t
 	if runtime.GOOS == "windows" {
 		t.Skip("mode bits do not make a Windows folder writable by others")
 	}
-	withoutPublishedSessionACL(t)
-	root := t.TempDir()
+	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(root, 0o777); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
-	err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{Deny: true, Reason: foreignHookBlockedPrefix + " x"}, time.Now())
+	err := publishCurrent(root, identity, key, GuardDecision{Deny: true, Reason: foreignHookBlockedPrefix + " x"}, time.Now())
 	if err == nil || !strings.Contains(err.Error(), "writable by group or other") {
 		t.Fatalf("an untrusted root must be refused: %v", err)
 	}
@@ -333,7 +344,7 @@ func TestPublishedForeignHookSessionPruneKeepsTheNewest(t *testing.T) {
 		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		mod := now.Add(-time.Duration(publishedSessionDirLimit+5-i) * time.Second)
+		mod := now.Add(-time.Duration(publishedSessionDirLimit+5-i) * time.Millisecond)
 		if err := os.Chtimes(path, mod, mod); err != nil {
 			t.Fatal(err)
 		}
@@ -342,7 +353,7 @@ func TestPublishedForeignHookSessionPruneKeepsTheNewest(t *testing.T) {
 	if err := os.WriteFile(old, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stale := now.Add(-sessionRecordTTL - time.Hour)
+	stale := now.Add(-publishedSessionMaxAge - time.Minute)
 	if err := os.Chtimes(old, stale, stale); err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +366,7 @@ func TestPublishedForeignHookSessionPruneKeepsTheNewest(t *testing.T) {
 		t.Fatalf("kept %d records, want %d", len(entries), publishedSessionDirLimit)
 	}
 	if _, err := os.Lstat(old); !os.IsNotExist(err) {
-		t.Fatal("a record past its TTL must be pruned")
+		t.Fatal("a record past its age must be pruned")
 	}
 }
 
@@ -389,8 +400,7 @@ func heldOpenPublishedSessionRecord(t *testing.T, path string) (release func()) 
 // record's deny marker, which the hook honours whatever the record says.
 // Only a later allow that replaced the record clears the marker.
 func TestPublishedForeignHookSessionRevocationSurvivesARecordThatCannotBeReplaced(t *testing.T) {
-	withoutPublishedSessionACL(t)
-	root := t.TempDir()
+	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
 	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
@@ -403,7 +413,7 @@ func TestPublishedForeignHookSessionRevocationSurvivesARecordThatCannotBeReplace
 	}
 	allow := func() {
 		t.Helper()
-		if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+		if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		if got, err := check(); err != nil || got.Deny {
@@ -415,7 +425,7 @@ func TestPublishedForeignHookSessionRevocationSurvivesARecordThatCannotBeReplace
 	// The gateway's block cannot replace or delete the held record.
 	release := heldOpenPublishedSessionRecord(t, path)
 	reason := foreignHookBlockedPrefix + " the project hook /repo/.github/hooks/x.json"
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{Deny: true, Reason: reason}, time.Now()); err == nil {
+	if err := publishCurrent(root, identity, key, GuardDecision{Deny: true, Reason: reason}, time.Now()); err == nil {
 		t.Fatal("a block that cannot replace the record must report it")
 	}
 	if data, err := os.ReadFile(path); err != nil || !strings.Contains(string(data), `"blocked":false`) {
@@ -425,7 +435,7 @@ func TestPublishedForeignHookSessionRevocationSurvivesARecordThatCannotBeReplace
 		t.Fatalf("the deny marker must deny with the gateway's reason: %+v %v", got, err)
 	}
 	// An allow that cannot replace the held record leaves the marker.
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err == nil {
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err == nil {
 		t.Fatal("an allow that cannot replace the record must report it")
 	}
 	if got, err := check(); err != nil || !got.Deny {
@@ -438,13 +448,13 @@ func TestPublishedForeignHookSessionRevocationSurvivesARecordThatCannotBeReplace
 		t.Fatalf("the replacing allow must remove the marker: %v", err)
 	}
 
-	// The guardian's removal cannot delete the held record.
+	// A block of the process alone cannot delete the held record either.
 	release = heldOpenPublishedSessionRecord(t, path)
-	if err := RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}); err != nil {
-		t.Fatalf("a marker written for a held record is a revocation, not an error: %v", err)
+	if err := publishCurrent(root, identity, SessionKey{Connector: key.Connector, Process: key.Process}, GuardDecision{Deny: true}, time.Now()); err == nil {
+		t.Fatal("a block that cannot replace the record must report it")
 	}
 	if got, err := check(); err != nil || !got.Deny || !strings.HasPrefix(got.Reason, foreignHookBlockedPrefix) {
-		t.Fatalf("the guardian's marker must deny: %+v %v", got, err)
+		t.Fatalf("the marker must deny: %+v %v", got, err)
 	}
 	// A marker whose record still exists survives the prune; once the record
 	// is gone, the marker goes with the next prune.
@@ -461,24 +471,6 @@ func TestPublishedForeignHookSessionRevocationSurvivesARecordThatCannotBeReplace
 		t.Fatalf("the prune must remove the marker of a record that is gone: %v", err)
 	}
 
-	// The gateway's withdrawn answer cannot delete the held record.
-	allow()
-	release = heldOpenPublishedSessionRecord(t, path)
-	if err := WithdrawPublishedForeignHookSession(root, identity, key); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := check(); err != nil || !got.Deny {
-		t.Fatalf("a withdrawn answer must not prove the process unblocked: %+v %v", got, err)
-	}
-	release()
-	// A withdrawal that can delete the records leaves them missing.
-	allow()
-	if err := WithdrawPublishedForeignHookSession(root, identity, key); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := check(); !errors.Is(err, ErrPublishedSessionUnavailable) {
-		t.Fatalf("a withdrawn answer must prove nothing: %v", err)
-	}
 	// Anything at a marker path denies, even what does not decode.
 	allow()
 	if err := os.WriteFile(publishedSessionDenyPath(path), []byte("x"), 0o644); err != nil {

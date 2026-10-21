@@ -47,17 +47,17 @@ func TestPublishedSessionDirSDDLGrantsOnlyTheAccountRead(t *testing.T) {
 
 // Review P1 (GAP-0352), on a real Windows file: the account opens its allow
 // record for reading without FILE_SHARE_DELETE, which refuses the gateway's
-// replacement and the guardian's deletion. The block and the removal must
-// still deny through the record's deny marker.
+// replacement and deletion. A block, of the session or of the process alone,
+// must still deny through the record's deny marker.
 func TestPublishedSessionRecordHeldOpenWithoutDeleteSharingIsStillRevoked(t *testing.T) {
-	root := t.TempDir()
+	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "windows:b:1:100"}
 	check := func() (GuardDecision, error) {
 		t.Helper()
 		return CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll)
 	}
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := check(); err != nil || got.Deny {
@@ -84,13 +84,13 @@ func TestPublishedSessionRecordHeldOpenWithoutDeleteSharingIsStillRevoked(t *tes
 		t.Fatal("the held record must refuse its deletion")
 	}
 	reason := foreignHookBlockedPrefix + " the project hook"
-	_ = PublishForeignHookSessionDecision(root, identity, key, GuardDecision{Deny: true, Reason: reason}, time.Now())
+	_ = publishCurrent(root, identity, key, GuardDecision{Deny: true, Reason: reason}, time.Now())
 	if got, err := check(); err != nil || !got.Deny || got.Reason != reason {
 		_ = windows.CloseHandle(handle)
 		t.Fatalf("a block of a held record must deny: %+v %v", got, err)
 	}
 	_ = windows.CloseHandle(handle)
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := check(); err != nil || got.Deny {
@@ -98,17 +98,9 @@ func TestPublishedSessionRecordHeldOpenWithoutDeleteSharingIsStillRevoked(t *tes
 	}
 	handle = hold()
 	defer func() { _ = windows.CloseHandle(handle) }()
-	if err := RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}); err != nil {
-		t.Fatal(err)
-	}
+	_ = publishCurrent(root, identity, SessionKey{Connector: key.Connector, Process: key.Process}, GuardDecision{Deny: true}, time.Now())
 	if got, err := check(); err != nil || !got.Deny {
-		t.Fatalf("the guardian's removal of a held record must deny: %+v %v", got, err)
-	}
-	if err := WithdrawPublishedForeignHookSession(root, identity, key); err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatal(err)
-	}
-	if got, err := check(); err != nil || !got.Deny {
-		t.Fatalf("a withdrawn answer of a held record must deny: %+v %v", got, err)
+		t.Fatalf("a block of the held process record must deny: %+v %v", got, err)
 	}
 }
 
@@ -118,10 +110,10 @@ func TestPublishedSessionRecordHeldOpenWithoutDeleteSharingIsStillRevoked(t *tes
 // reader's sharing mode does not refuse, and the hook refuses the expired
 // record.
 func TestPublishedSessionRecordHeldOpenIsRevokedWithoutItsMarker(t *testing.T) {
-	root := t.TempDir()
+	root := publishedSessionTestRoot(t)
 	identity := publishedSessionTestIdentity(t)
 	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "windows:b:1:100"}
-	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
@@ -143,7 +135,7 @@ func TestPublishedSessionRecordHeldOpenIsRevokedWithoutItsMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = windows.CloseHandle(handle) }()
-	if err := RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}); err != nil {
+	if err := revokePublishedSessionRecord(path, PublishedSessionRecord{Version: publishedSessionVersion, Connector: "copilot", Kind: sessionKindProcess, ID: key.Process, Blocked: true}); err != nil {
 		t.Fatalf("the expired record is a revocation: %v", err)
 	}
 	if _, err := os.Lstat(publishedSessionDenyPath(path)); !os.IsNotExist(err) {
@@ -158,5 +150,38 @@ func TestPublishedSessionRecordHeldOpenIsRevokedWithoutItsMarker(t *testing.T) {
 	}
 	if got, err := CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll); err == nil && !got.Deny {
 		t.Fatalf("the expired held record must not prove the allow: %+v", got)
+	}
+}
+
+// Lead directive (GAP-0352 review loop round 1), on a real Windows file: an
+// account that holds the generation file open with no sharing at all cannot
+// stop a bump. It moves the modification time through an attributes-only
+// handle, and the allow written before it proves nothing.
+func TestPublishedSessionGenerationHeldOpenStillBumps(t *testing.T) {
+	root := publishedSessionTestRoot(t)
+	identity := publishedSessionTestIdentity(t)
+	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "windows:b:1:100"}
+	if err := publishCurrent(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := PublishedSessionGenerationPath(root)
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	before := publishedSessionTestGeneration(t, root)
+	if err := BumpPublishedSessionGeneration(root); err != nil {
+		t.Fatal(err)
+	}
+	if after := publishedSessionTestGeneration(t, root); after <= before {
+		t.Fatalf("a held generation file must still move forward: %d after %d", after, before)
+	}
+	if _, err := CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll); !errors.Is(err, ErrPublishedSessionUnavailable) {
+		t.Fatalf("the allow from before the bump must prove nothing: %v", err)
 	}
 }
