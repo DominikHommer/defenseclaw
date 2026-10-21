@@ -74,6 +74,39 @@ func readSystemdCredential(dir, name string) ([]byte, error) {
 	return readBoundedCredential(path)
 }
 
+// StoredCredentialPresence reports whether the credential name in
+// secretsDir is stored and usable, with the checks the gateway reads a
+// protected credential file with (path trust, mode, one link, a bounded,
+// non-empty, single-line value): Linux and macOS bundle verify and apply
+// call it, so a credential the gateway cannot read is missing, as on
+// Windows. trust is the path trust check of the caller's rooted layout (nil:
+// ValidateTrustedFilePath). The value is dropped at once. A store the caller
+// cannot read is an error (ServiceCredentialPresence), so verify warns
+// secret_presence_unchecked.
+func StoredCredentialPresence(name, secretsDir string, trust func(path string) error) (bool, error) {
+	if !ValidCredentialName(name) || strings.TrimSpace(secretsDir) == "" {
+		return false, nil
+	}
+	if trust == nil {
+		trust = func(path string) error { return ValidateTrustedFilePath(path, "protected credential") }
+	}
+	path := filepath.Join(secretsDir, name)
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("inspect credential %s: %w", name, err)
+	case !info.Mode().IsRegular():
+		return false, nil
+	}
+	value, err := readStoredCredential(name, path, trust, validateProtectedCredentialMode)
+	for i := range value {
+		value[i] = 0
+	}
+	return ServiceCredentialPresence(err)
+}
+
 // validateProtectedCredentialFile requires a root-owned regular file whose
 // ancestors are administrator-owned, that no group or other principal can
 // write, and that other users cannot read. Group read is allowed so a
@@ -82,6 +115,13 @@ func validateProtectedCredentialFile(path string) error {
 	if err := ValidateTrustedFilePath(path, "protected credential"); err != nil {
 		return err
 	}
+	return validateProtectedCredentialMode(path)
+}
+
+// validateProtectedCredentialMode is the part of
+// validateProtectedCredentialFile below the path trust: no access for other
+// users and exactly one link.
+func validateProtectedCredentialMode(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err

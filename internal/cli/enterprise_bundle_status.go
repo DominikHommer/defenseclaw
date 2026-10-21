@@ -39,8 +39,11 @@ type bundleStatusResult struct {
 	Command       string `json:"command"`
 	OK            bool   `json:"ok"`
 	// BundleMode is true when the MDM installed the trust anchors.
-	BundleMode              bool                                  `json:"bundle_mode"`
-	Anchors                 string                                `json:"anchors,omitempty"`
+	BundleMode bool   `json:"bundle_mode"`
+	Anchors    string `json:"anchors,omitempty"`
+	// AnchorsSummary describes the installed trust anchors; absent when
+	// they are missing or fail their checks (see the warnings).
+	AnchorsSummary          *enterprisebundle.AnchorsSummary      `json:"anchors_summary,omitempty"`
 	Current                 *enterprisebundle.Ref                 `json:"current"`
 	LastGood                *enterprisebundle.Ref                 `json:"last_good"`
 	Floor                   uint64                                `json:"floor"`
@@ -115,10 +118,15 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		return &enterprisebundle.Error{Code: enterprisebundle.CodeNotManaged,
 			Detail: "this computer is not a standalone managed device; bundle status reports a device"}
 	}
+	var anchors *enterprisebundle.Anchors
+	var anchorsErr error
 	if path, err := bundleDefaultAnchors(); err == nil {
 		res.Anchors = path
 		_, statErr := os.Lstat(path)
 		res.BundleMode = statErr == nil
+		var raw []byte
+		anchors, raw, anchorsErr = enterprisebundle.ReadAnchorsFile(path, bundleAnchorTrust)
+		res.AnchorsSummary = enterprisebundle.SummarizeAnchors(anchors, raw)
 	}
 	store, err := bundleStore()
 	if err != nil {
@@ -234,7 +242,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	} else if st.Current != nil {
 		signer = st.Current.SignerKeyID
 	}
-	if warning := bundleCurrentSignerWarning(res.Anchors, signer); warning != nil {
+	if warning := bundleAnchorsSignerWarning(res.Anchors, anchors, anchorsErr, signer); warning != nil {
 		res.Warnings = append(res.Warnings, *warning)
 	}
 	if currentReceipt != nil {
@@ -295,7 +303,16 @@ func bundleCurrentSignerWarning(anchorsPath, signerKeyID string) *enterprisebund
 		return nil
 	}
 	anchors, err := enterprisebundle.LoadAnchors(anchorsPath, bundleAnchorTrust)
-	if err != nil {
+	return bundleAnchorsSignerWarning(anchorsPath, anchors, err, signerKeyID)
+}
+
+// bundleAnchorsSignerWarning is bundleCurrentSignerWarning for anchors the
+// caller already read from anchorsPath (loadErr: the read failed).
+func bundleAnchorsSignerWarning(anchorsPath string, anchors *enterprisebundle.Anchors, loadErr error, signerKeyID string) *enterprisebundle.Warning {
+	if anchorsPath == "" || signerKeyID == "" {
+		return nil
+	}
+	if loadErr != nil {
 		return &enterprisebundle.Warning{Code: "anchor_unreadable", Message: "the installed trust anchors could not be checked for the confirmed bundle signer"}
 	}
 	return bundleSignerWarning(anchors, signerKeyID)
@@ -338,6 +355,9 @@ func printStatusText(w io.Writer, res *bundleStatusResult) {
 		mode = "on"
 	}
 	fmt.Fprintf(w, "Bundle mode: %s\n", mode)
+	if a := res.AnchorsSummary; a != nil {
+		fmt.Fprintf(w, "Trust anchors: tenant %s, %d keys, minimum version %d, sha256 %s\n", a.TenantID, len(a.Keys), a.MinVersion, a.SHA256[:12])
+	}
 	describe := func(label string, ref *enterprisebundle.Ref) {
 		if ref == nil {
 			fmt.Fprintf(w, "%s: none\n", label)

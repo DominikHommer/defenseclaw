@@ -180,6 +180,14 @@ def _from_example(schema: str, index: int, change):
     return build
 
 
+# The openshell block every Windows status carries (OpenShellUnsupportedCapability).
+_WINDOWS_OPENSHELL = {"enabled": False, "driver_available": "none", "reason_code": "platform_unsupported"}
+
+
+def _windows_status(d):
+    d.update(platform="windows", openshell=dict(_WINDOWS_OPENSHELL))
+
+
 def _windows_result(change):
     def build(_: dict[str, dict]) -> object:
         document = copy.deepcopy(_WINDOWS_BUSY_RESULT)
@@ -362,11 +370,11 @@ MANAGEMENT_CONTRACT_RULES = (
     ("status connector without managed_hook or target counts", "lifecycle-result.schema.json",
      _linux_status(lambda d: [d["connectors"]["amp"].pop(k) for k in ("managed_hook", "targets")]), False),
     ("Windows status with connector target counts", "lifecycle-result.schema.json",
-     _linux_status(lambda d: d.update(platform="windows")), True),
+     _linux_status(_windows_status), True),
     ("Windows status managed_hook connector without target counts", "lifecycle-result.schema.json",
-     _linux_status(lambda d: [d.update(platform="windows"), d["connectors"]["codex"].pop("targets")]), False),
+     _linux_status(lambda d: [_windows_status(d), d["connectors"]["codex"].pop("targets")]), False),
     ("Windows status connector with unknown hooks and no target counts", "lifecycle-result.schema.json",
-     _linux_status(lambda d: [d.update(platform="windows"), d["connectors"]["codex"].pop("targets"),
+     _linux_status(lambda d: [_windows_status(d), d["connectors"]["codex"].pop("targets"),
                               d["connectors"]["codex"].update(hooks_installed="unknown")]), True),
     ("status openshell driver_available outside vm, docker, none", "lifecycle-result.schema.json",
      _linux_status(lambda d: d["openshell"].update(driver_available="kvm")), False),
@@ -379,8 +387,17 @@ MANAGEMENT_CONTRACT_RULES = (
     ("not_root result with a connectors block", "lifecycle-result.schema.json",
      _linux_status(_not_root_with_connectors), False),
     ("Windows status openshell platform_unsupported", "lifecycle-result.schema.json",
+     _linux_status(_windows_status), True),
+    ("Windows status openshell enabled with a docker driver", "lifecycle-result.schema.json",
      _linux_status(lambda d: d.update(platform="windows", openshell={
-         "enabled": False, "driver_available": "none", "reason_code": "platform_unsupported"})), True),
+         "enabled": True, "install": "prerequisite", "installed": True, "driver": "docker",
+         "driver_available": "docker"})), False),
+    ("Windows status openshell disabled with a Linux reason code", "lifecycle-result.schema.json",
+     _linux_status(lambda d: d.update(platform="windows", openshell={
+         "enabled": False, "driver_available": "none", "reason_code": "openshell_disabled"})), False),
+    ("Linux status openshell disabled keeps its own reason code", "lifecycle-result.schema.json",
+     _linux_status(lambda d: d.update(openshell={
+         "enabled": False, "driver_available": "none", "reason_code": "openshell_disabled"})), True),
 )
 
 
