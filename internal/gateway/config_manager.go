@@ -1278,6 +1278,15 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		exportCandidateKey()
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
+		// A saved listener change is held until restart, but it is still a
+		// writer-attributed change. Record it on the current runtime before
+		// advancing the source/generation watermark, once per saved write.
+		if len(pendingRestart) > 0 && m.logger != nil && !next.SecureClientIntegration() {
+			if activity, _, recorded := configChangeActivity(m.path, m.appliedRaw, source.raw,
+				pendingRestart, pendingRestart, m.appliedGeneration, m.appliedGenerationKnown); recorded {
+				_ = m.logger.LogActivity(activity)
+			}
+		}
 		// A bundle can advance its persistent generation while keeping
 		// config.yaml identical. An asset reload must still be able to
 		// attribute the later policy swap to that bundle.
@@ -1456,11 +1465,22 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 			// Client reads .env only at start (issue #1092).
 			config.LoadDotEnv(filepath.Join(defaultDataDir, ".env"))
 		}
-		compiled, compileErr := config.ParseCompileObservabilityV8(
-			m.path,
-			before.raw,
-			config.ObservabilityV8CompileOptions{DefaultDataDir: defaultDataDir},
-		)
+		compileRaw := before.raw
+		var compileErr error
+		if !secureClient && config.NeedsMigrationV9(compileRaw) {
+			// The runtime loader migrates v8 read-only as well. Validate the
+			// same candidate here, rather than rejecting its legacy keys before
+			// that loader can run. Do not export candidate secrets before apply.
+			compileRaw, _, compileErr = config.MigrateV8InMemoryCandidate(m.path, compileRaw, guardrail.RulePackDigest)
+			if compileErr != nil {
+				compileErr = config.InMemoryMigrationError(m.path, compileErr)
+			}
+		}
+		var compiled *config.ObservabilityV8CompiledConfig
+		if compileErr == nil {
+			compiled, compileErr = config.ParseCompileObservabilityV8(m.path, compileRaw,
+				config.ObservabilityV8CompileOptions{DefaultDataDir: defaultDataDir})
+		}
 		var next *config.Config
 		var loadErr error
 		if compileErr == nil {

@@ -776,7 +776,9 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     from defenseclaw.commands._audit_notice import saved_change_audit
     from defenseclaw.logger import Logger
 
-    logger = getattr(app, "logger", None) or Logger.from_config(cfg)
+    # Listener settings take effect on restart. Send this write's audit fact
+    # to the listener that was running before the save, using its credentials.
+    logger = getattr(app, "logger", None) or Logger.from_config(before_cfg or cfg)
     saved_change_audit(logger).log_config_change(
         f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
     )

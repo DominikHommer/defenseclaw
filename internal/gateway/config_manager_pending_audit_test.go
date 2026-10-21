@@ -1,0 +1,69 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+)
+
+func TestConfigManagerAttributesPendingListenerChangeOnce(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := []byte("config_version: 9\ndata_dir: " + filepath.ToSlash(dir) + "\ngateway:\n  api_port: 19080\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, logger := newNativeSkillRuntimeTestStore(t)
+	capture := &captureJudgeRuntimeV8Emitter{}
+	logger.SetRuntimeV8Emitter(capture)
+	mgr := newConfigManagerWithSnapshot(path, initial, logger, nil, "",
+		func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+			return nil
+		})
+	mgr.appliedRaw = raw
+	mgr.appliedGenerationKnown = true
+	if err := mgr.Reload(t.Context(), "settle"); err != nil {
+		t.Fatal(err)
+	}
+	after := bytes.ReplaceAll(raw, []byte("19080"), []byte("19081"))
+	if _, err := configwrite.Locked(t.Context(), path, configwrite.Options{Actor: "cli:operator", Reason: "defenseclaw config set"},
+		func() (bool, error) { return true, os.WriteFile(path, after, 0o600) }); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := mgr.Reload(t.Context(), "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if mgr.Current().Gateway.APIPort != 19080 {
+		t.Fatal("pending listener was activated without a restart")
+	}
+	records := capture.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("pending write produced %d audit records, want exactly one", len(records))
+	}
+	wire, err := json.Marshal(records[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"cli:operator", "gateway.api_port", "config_generation", "restart_required"} {
+		if !bytes.Contains(wire, []byte(want)) {
+			t.Fatalf("pending audit omitted %s: %s", want, wire)
+		}
+	}
+}
