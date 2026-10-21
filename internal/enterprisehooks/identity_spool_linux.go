@@ -163,7 +163,7 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	if err != nil {
 		return IdentitySpoolRecord{}, err
 	}
-	record := IdentitySpoolRecord{Key: strconv.Itoa(account.UID), User: nss.Name, UpdatedAt: now}
+	record := IdentitySpoolRecord{Key: strconv.Itoa(account.UID), User: nss.Name, UpdatedAt: now, AccountSID: facts.AccountSID}
 	if facts.Source != useridentity.SourceSSSD && facts.Source != useridentity.SourceWinbind {
 		record.Facts = facts
 		return record, nil

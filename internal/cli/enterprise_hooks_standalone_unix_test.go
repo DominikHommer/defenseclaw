@@ -1741,3 +1741,87 @@ func TestIdentitySpoolKeysChangeWhenAnOmittedAccountLeaves(t *testing.T) {
 		}
 	}
 }
+
+// W2B-G-enum review loop 4: the enumerator published a manifest that leaves
+// out an account the settings now exclude, but its later write of
+// eligible-accounts.json failed and left the old file. The guardian took the
+// account from that file, as a pseudo row for the scans and as an identity
+// account, and marked its uid seen before it read exclude_users, so its
+// identity record was never withdrawn. The current exclude_users and
+// exempt_users now apply before the rows and the eligible accounts, by uid,
+// by name, by another spelling the directory resolves, and by the spelling
+// the stale file carries while the directory does not answer.
+func TestStaleEligibleAccountsDoNotOverrideAnExclusion(t *testing.T) {
+	previousCfg := cfg
+	previousEligible, previousIdentity := enterpriseHookLoadEligibleAccounts, enterpriseHookLoadIdentityAccounts
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseHookLoadEligibleAccounts, enterpriseHookLoadIdentityAccounts = previousEligible, previousIdentity
+		enterprisehooks.SetStandaloneResolver(nil)
+	})
+	const manifest = "/etc/defenseclaw/hooks/manifest.json"
+	const aliceUID, bobUID = 1001, 94401104
+	stale := func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		return []enterprisehooks.UnixEligibleAccount{
+			{User: "alice", UID: aliceUID, Home: "/home/alice"},
+			{User: "bob@corp.example", UID: bobUID, Home: "/home/bob@corp.example"},
+		}, nil
+	}
+	enterpriseHookLoadEligibleAccounts, enterpriseHookLoadIdentityAccounts = stale, stale
+	bob := unixidentity.Account{Name: "bob@corp.example", UID: bobUID, GID: bobUID}
+	directory := standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"alice":            {Name: "alice", UID: aliceUID, GID: aliceUID},
+		"bob@corp.example": bob,
+		"bob":              bob,
+	}}
+	for _, tc := range []struct {
+		name            string
+		exclude, exempt []string
+		offline         bool
+	}{
+		{name: "excluded by name", exclude: []string{"bob@corp.example"}},
+		{name: "excluded by uid", exclude: []string{strconv.Itoa(bobUID)}},
+		{name: "excluded by another spelling", exclude: []string{"bob"}},
+		{name: "exempt by name", exempt: []string{"bob@corp.example"}},
+		{name: "excluded by name while the directory does not answer", exclude: []string{"bob@corp.example"}, offline: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.offline {
+				enterprisehooks.SetStandaloneResolver(standaloneTestResolver{transient: map[string]bool{"bob@corp.example": true}})
+			} else {
+				enterprisehooks.SetStandaloneResolver(directory)
+			}
+			cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+			cfg.Enterprise.Profile = managed.ProfileStandalone
+			cfg.Enterprise.Enrollment.ExcludeUsers, cfg.Enterprise.Enrollment.ExemptUsers = tc.exclude, tc.exempt
+			run := enterpriseHookReconcileRun{Manifest: manifest,
+				Rows: []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: aliceUID}}}
+			run.Rows = enterpriseHookEnrolledAccountRows(io.Discard, run)
+			if len(run.Rows) != 1 || run.Rows[0].UID != aliceUID {
+				t.Fatalf("rows = %+v, want alice's row only: the stale file added a scan row for the excluded account", run.Rows)
+			}
+			check := func(when string, run enterpriseHookReconcileRun) {
+				t.Helper()
+				accounts, keys := enterpriseHookIdentitySpoolAccounts(io.Discard, run)
+				var enrolled, left []int
+				for _, account := range accounts {
+					if account.Left {
+						left = append(left, account.UID)
+					} else {
+						enrolled = append(enrolled, account.UID)
+					}
+				}
+				if !slices.Equal(enrolled, []int{aliceUID}) || !slices.Equal(left, []int{bobUID}) || !slices.Contains(keys, "left:"+strconv.Itoa(bobUID)) {
+					t.Fatalf("%s: identity accounts %+v (keys %v), want alice enrolled and bob's record withdrawn", when, accounts, keys)
+				}
+			}
+			check("stale eligible accounts", run)
+			// A pseudo row built before the settings changed, or a row of a
+			// stale manifest, does not keep the record either.
+			run.Rows = append(run.Rows,
+				enterpriseHookReconcileRow{User: "bob@corp.example", UserHome: "/home/bob@corp.example", Connector: "opencode", OK: true, UID: bobUID},
+				enterpriseHookReconcileRow{User: "bob@corp.example", UserHome: "/home/bob@corp.example", Connector: "codex", OK: true, UID: bobUID})
+			check("a stale row", run)
+		})
+	}
+}

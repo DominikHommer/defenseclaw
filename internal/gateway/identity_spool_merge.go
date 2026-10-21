@@ -135,9 +135,13 @@ func identitySpoolAccountName(sid string) string {
 
 // readIdentitySpoolFactsForAccount rejects a reused uid's old record. A
 // missing name is also unverified; Windows uses the stable SID path above.
-func readIdentitySpoolFactsForAccount(key, accountName string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {
+// accountSID is the SID the gateway resolved for the uid now ("" for none):
+// a record that names another SID is an account recreated under the same
+// uid and name, whose UPN is not this one's.
+func readIdentitySpoolFactsForAccount(key, accountName, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {
 	record, ok := readIdentitySpoolFacts(key, now)
-	if !ok || record.User == "" || accountName == "" || !strings.EqualFold(record.User, accountName) {
+	if !ok || record.User == "" || accountName == "" || !strings.EqualFold(record.User, accountName) ||
+		(record.AccountSID != "" && accountSID != "" && !strings.EqualFold(record.AccountSID, accountSID)) {
 		return enterprisehooks.IdentitySpoolRecord{}, false
 	}
 	return record, true

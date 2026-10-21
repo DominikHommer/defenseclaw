@@ -497,11 +497,16 @@ avoid lookups.
 
 A group name that resolved before but does not resolve now (the directory
 is unreachable, or its lookup does not answer) keeps the SID it last
-resolved to. The group may have been deleted and recreated under the same
-name with a new SID, so that SID decides only the users it lists: they are
-still excluded (or included). Every user the filter would decide because they
-are not in that SID is pending until the name resolves again, so an exclusion
-is never lost and no one is revoked.
+resolved to, but that SID decides no one. The group may have been deleted
+and recreated under the same name with a new SID, so a user who holds the
+old SID may not be in the group now, and one who lacks it may be. Every user
+the entry would decide is pending until the name resolves again: they keep
+their existing hooks and get no new ones, and a signed-in user without hooks
+has their installed agents reported as `agent_unprotected`. A user another
+`exclude_groups` entry excludes is still excluded. While an `exclude_groups`
+name does not resolve, every other user is pending; while only an
+`include_groups` name does not resolve, a user another entry admits is still
+admitted. So an old SID never admits, excludes or revokes anyone.
 
 ## New, changed and removed users
 

@@ -163,6 +163,9 @@ func enterpriseHookManifestEnrollment() bool {
 // for per-user hook connectors: a deployment that selects only the
 // machine-policy connectors (Claude Code, Codex) has none, and its enrolled
 // accounts still need their identity records and per-user scans (GAP-0021).
+// An eligible account the current exclude_users or exempt_users name gets
+// none: eligible-accounts.json can be older than the settings and the
+// manifest, when its write failed after the manifest's.
 func enterpriseHookEnrolledAccountRows(stderr io.Writer, run enterpriseHookReconcileRun) []enterpriseHookReconcileRow {
 	rows := append([]enterpriseHookReconcileRow(nil), run.Rows...)
 	manifest := strings.TrimSpace(run.Manifest)
@@ -178,8 +181,9 @@ func enterpriseHookEnrolledAccountRows(stderr io.Writer, run enterpriseHookRecon
 	for _, row := range rows {
 		seen[row.UID] = true
 	}
+	leftOut := enterpriseHookEnrollmentLeftOut()
 	for _, account := range accounts {
-		if account.UID <= 0 || seen[account.UID] {
+		if account.UID <= 0 || seen[account.UID] || leftOut.has(account.UID, account.User) {
 			continue
 		}
 		seen[account.UID] = true

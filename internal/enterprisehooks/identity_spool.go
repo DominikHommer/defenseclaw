@@ -88,6 +88,13 @@ type IdentitySpoolRecord struct {
 	// InfoPipe no longer reported (UPNSource infopipe_kept): the UPN goes
 	// once it is IdentitySpoolKeptUPNMaxAge old.
 	UPNKeptSince time.Time `json:"upn_kept_since,omitzero"`
+	// AccountSID is the SID SSSD holds for the uid (Linux), the account's
+	// immutable directory identifier; empty for an account without one. An
+	// account recreated under the same uid, name and SSSD domain has another
+	// SID, so the facts an earlier record carries are another account's:
+	// the guardian keeps none of them for it (KeepVerifiedInfoPipeUPN,
+	// identitySpoolSameIdentity) and the gateway ignores the record.
+	AccountSID string `json:"account_sid,omitempty"`
 	// SSSDDomain is the SSSD domain that holds the uid by InfoPipe
 	// Users.FindByID (Linux): the gateway drops a domain, realm and
 	// principal of its own that name another domain (mergeSpoolFacts).
@@ -256,7 +263,11 @@ func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord 
 // the file). Rewriting the record as derived sent every account a users
 // assignment selects by UPN to the default profile within one guardian pass
 // (GAP-1114). It keeps the UPN only for the same account in the same SSSD
-// domain, and marks it infopipe_kept so status and verify can say why. It
+// domain: the same name and the same SID (AccountSID). A uid, name and domain
+// can all be reused by an account recreated in the directory, and a record
+// without a SID, or a previous record an older build wrote without one,
+// cannot show that it is the same account, so its UPN goes. It marks a kept
+// UPN infopipe_kept so status and verify can say why. It
 // keeps it for IdentitySpoolKeptUPNMaxAge from the first pass that kept it
 // (UPNKeptSince): a UPN removed in the directory stayed trusted for as long
 // as the guardian ran (GAP-1235). A kept record an older build wrote
@@ -265,7 +276,8 @@ func KeepVerifiedInfoPipeUPN(record, previous IdentitySpoolRecord) (IdentitySpoo
 	if record.Facts.UPN != "" || previous.Facts.UPN == "" ||
 		(previous.UPNSource != UPNSourceInfoPipe && previous.UPNSource != UPNSourceInfoPipeKept) ||
 		!strings.EqualFold(record.Key, previous.Key) || record.User == "" || !strings.EqualFold(record.User, previous.User) ||
-		record.SSSDDomain == "" || !strings.EqualFold(record.SSSDDomain, previous.SSSDDomain) {
+		record.SSSDDomain == "" || !strings.EqualFold(record.SSSDDomain, previous.SSSDDomain) ||
+		record.AccountSID == "" || !strings.EqualFold(record.AccountSID, previous.AccountSID) {
 		return record, false
 	}
 	since := previous.UPNKeptSince

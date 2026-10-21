@@ -21,6 +21,9 @@ import (
 // testDomainGroupSID's group.
 const testRecreatedGroupSID = "S-1-5-21-111111111-222222222-333333333-1207"
 
+// testOtherGroupSID is a group listed by SID, which needs no lookup.
+const testOtherGroupSID = "S-1-5-21-111111111-222222222-333333333-1209"
+
 // stubRecreatedGroupDirectory answers group name lookups with answer(name):
 // a SID, an error, or a call that blocks until release is called (stuck).
 // It shortens the lookup waits and drains the lookups still running at
@@ -64,6 +67,13 @@ func stubRecreatedGroupDirectory(t *testing.T, answer func(name string) (sid str
 // recreated group. A name that does not resolve this cycle now keeps its
 // cached SID only for the users it lists: a decision that rests on a user
 // not being in it is pending until the name resolves again.
+//
+// Review loop 4: the cached SID still decided the users it listed, so a
+// holder of the old SID was excluded by an exclude_groups name, or admitted
+// by an include_groups name and given a new row, although the recreated
+// group may not hold them. The cached SID now decides no one: every user the
+// entry would decide is pending, and only another entry still excludes or
+// admits.
 func TestWindowsGroupNameThatDoesNotResolveNowKeepsNoExclusionOfARecreatedGroup(t *testing.T) {
 	for _, failure := range []struct {
 		name  string
@@ -109,10 +119,18 @@ func TestWindowsGroupNameThatDoesNotResolveNowKeepsNoExclusionOfARecreatedGroup(
 				if got, reason := groups.decide(testDomainUserA); got != windowsEnrollmentUndecided || !strings.Contains(reason, "did not resolve this cycle") {
 					t.Fatalf("cycle %d: member of the recreated group: %d (%s), want pending, never enrolled", cycle, got, reason)
 				}
-				// A user the cached SID lists is still excluded.
+				// Nor is a holder of the cached SID excluded on it: the
+				// recreated group may not hold them.
 				old := newWindowsEnrollmentGroups(nil, exclude, map[string][]string{testDomainUserB: {testDomainGroupSID}}, nil, cache, nil)
-				if got, reason := old.decide(testDomainUserB); got != windowsEnrollmentExcluded {
-					t.Fatalf("cycle %d: holder of the cached SID: %d (%s), want excluded", cycle, got, reason)
+				if got, reason := old.decide(testDomainUserB); got != windowsEnrollmentUndecided || !strings.Contains(reason, "did not resolve this cycle") {
+					t.Fatalf("cycle %d: holder of the cached SID: %d (%s), want pending, never excluded on it", cycle, got, reason)
+				}
+				// Another exclude_groups entry still excludes, in either order.
+				for _, list := range [][]string{append([]string{testOtherGroupSID}, exclude...), append(append([]string(nil), exclude...), testOtherGroupSID)} {
+					other := newWindowsEnrollmentGroups(nil, list, map[string][]string{testDomainUserB: {testDomainGroupSID, testOtherGroupSID}}, nil, cache, nil)
+					if got, reason := other.decide(testDomainUserB); got != windowsEnrollmentExcluded {
+						t.Fatalf("cycle %d: %v: member of another excluded group: %d (%s), want excluded", cycle, list, got, reason)
+					}
 				}
 				// A local account is not decided on the unverified SID either.
 				local := newWindowsEnrollmentGroups(nil, exclude, map[string][]string{testLocalUserSID: {}}, nil, cache, nil)
@@ -124,15 +142,26 @@ func TestWindowsGroupNameThatDoesNotResolveNowKeepsNoExclusionOfARecreatedGroup(
 				}
 			}
 
-			// include_groups: a member of the recreated group is not revoked.
+			// include_groups: a member of the recreated group is not revoked,
+			// a holder of the cached SID is not admitted on it, and another
+			// entry still admits, in either order.
 			cache.Names[`contoso\developers`] = testDomainDevelopersSID
-			includes := newWindowsEnrollmentGroups([]string{`CONTOSO\Developers`}, nil,
-				map[string][]string{testDomainUserA: {"S-1-5-21-111111111-222222222-333333333-1208"}}, nil, cache, nil)
-			if got, reason, inDoubt := includes.evaluate(testDomainUserA); got != windowsEnrollmentExcluded || !inDoubt {
-				t.Fatalf("include of a recreated group: %d (%s) in doubt %v, want a non-member decision in doubt", got, reason, inDoubt)
-			}
-			if got, _ := includes.decide(testDomainUserA); got != windowsEnrollmentUndecided {
-				t.Fatalf("include of a recreated group: %d, want pending, never excluded", got)
+			for _, tc := range []struct {
+				name    string
+				include []string
+				token   []string
+				want    windowsEnrollmentDecision
+			}{
+				{"member of the recreated group", []string{`CONTOSO\Developers`}, []string{"S-1-5-21-111111111-222222222-333333333-1208"}, windowsEnrollmentUndecided},
+				{"holder of the cached SID", []string{`CONTOSO\Developers`}, []string{testDomainDevelopersSID}, windowsEnrollmentUndecided},
+				{"admitted by an entry listed after", []string{`CONTOSO\Developers`, testOtherGroupSID}, []string{testDomainDevelopersSID, testOtherGroupSID}, windowsEnrollmentEnrolled},
+				{"admitted by an entry listed before", []string{testOtherGroupSID, `CONTOSO\Developers`}, []string{testOtherGroupSID}, windowsEnrollmentEnrolled},
+			} {
+				includes := newWindowsEnrollmentGroups(tc.include, nil, map[string][]string{testDomainUserA: tc.token}, nil, cache, nil)
+				got, reason := includes.decide(testDomainUserA)
+				if got != tc.want || (tc.want == windowsEnrollmentUndecided && !strings.Contains(reason, "did not resolve this cycle")) {
+					t.Fatalf("include, %s: %d (%s), want %d", tc.name, got, reason, tc.want)
+				}
 			}
 
 			// Once the name resolves again, its new SID decides.
@@ -150,27 +179,41 @@ func TestWindowsGroupNameThatDoesNotResolveNowKeepsNoExclusionOfARecreatedGroup(
 	}
 }
 
-// The enumerator and the eligibility walk end to end: the user's new token
-// holds the recreated group's SID while the name does not resolve.
+// The enumerator and the eligibility walk end to end, while the name does
+// not resolve: the user's token holds the recreated group's SID, or still the
+// cached one (review loop 4), for an exclude_groups or an include_groups
+// name. Either way no row is published or revoked on the cached SID, and a
+// signed-in user without a row is reported pending.
 func TestEnumerateWindowsPublishesNoRowOnTheCachedSIDOfAnUnresolvedExcludeGroup(t *testing.T) {
 	stubMachineWinGet(t, nil)
 	previousActive, previousSignedIn := windowsActiveSessionGroups, windowsSignedInSessionUsers
 	t.Cleanup(func() { windowsActiveSessionGroups, windowsSignedInSessionUsers = previousActive, previousSignedIn })
 	windowsActiveSessionGroups, windowsSignedInSessionUsers = readWindowsActiveSessionGroups, readWindowsSignedInSessionUsers
 	for _, tc := range []struct {
-		name         string
-		resolves     bool
-		cached       bool
-		rows         bool
-		wantRows     string
-		wantExcluded string
-		wantPending  bool
-		wantEligible int
+		name string
+		// include: the name is an include_groups entry, not an
+		// exclude_groups one. holder: the user's token holds the cached
+		// (old) SID instead of the recreated group's.
+		include, holder bool
+		resolves        bool
+		cached          bool
+		rows            bool
+		wantRows        string
+		wantExcluded    string
+		wantPending     bool
+		wantEligible    int
 	}{
 		{name: "no row: none is published", cached: true, wantPending: true},
 		{name: "an existing row is kept, never revoked", cached: true, rows: true, wantRows: testDomainUserA},
+		{name: "holder of the cached SID without a row: reported, not excluded", holder: true, cached: true, wantPending: true},
+		{name: "holder of the cached SID: its row is kept", holder: true, cached: true, rows: true, wantRows: testDomainUserA},
+		{name: "include, holder of the cached SID without a row: none is published", include: true, holder: true, cached: true, wantPending: true},
+		{name: "include, holder of the cached SID: its row is kept", include: true, holder: true, cached: true, rows: true, wantRows: testDomainUserA},
+		{name: "include, member of the recreated group: its row is kept", include: true, cached: true, rows: true, wantRows: testDomainUserA},
 		{name: "control: the name resolves to the new SID", resolves: true, cached: true, rows: true, wantExcluded: testDomainUserA},
 		{name: "control: a name never resolved excludes no one", wantRows: testDomainUserA, wantEligible: 1},
+		{name: "include control: the name resolves to the new SID the user holds", include: true, resolves: true, cached: true, wantRows: testDomainUserA, wantEligible: 1},
+		{name: "include control: the name resolves, and the old SID admits no one", include: true, holder: true, resolves: true, cached: true, rows: true, wantExcluded: testDomainUserA},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubRecreatedGroupDirectory(t, func(string) (string, error, bool) {
@@ -180,7 +223,17 @@ func TestEnumerateWindowsPublishesNoRowOnTheCachedSIDOfAnUnresolvedExcludeGroup(
 				return "", errors.New("the domain controller is unreachable"), false
 			})
 			stubWindowsSessionAPI(t, []windowsSession{{id: 1, state: windows.WTSActive}}, map[uint32]string{1: testDomainUserA}, nil, nil)
-			stubWindowsSessionTokenGroups(map[uint32][]string{1: {testRecreatedGroupSID}}, nil)
+			token := testRecreatedGroupSID
+			if tc.holder {
+				token = testDomainGroupSID
+			}
+			stubWindowsSessionTokenGroups(map[uint32][]string{1: {token}}, nil)
+			var include, exclude []string
+			if tc.include {
+				include = []string{`CONTOSO\Contractors`}
+			} else {
+				exclude = []string{`CONTOSO\Contractors`}
+			}
 			home := codexProfile(t, "0.150.0")
 			injectWindowsProfileList(t, map[string]string{testDomainUserA: home})
 			enabled := true
@@ -197,7 +250,7 @@ func TestEnumerateWindowsPublishesNoRowOnTheCachedSIDOfAnUnresolvedExcludeGroup(
 				return cache
 			}
 			eligible, err := WindowsStandaloneEligibleProfilesFor(context.Background(), EnumerateOptions{
-				ExcludeGroups: []string{`CONTOSO\Contractors`}, GroupCache: newCache(),
+				IncludeGroups: include, ExcludeGroups: exclude, GroupCache: newCache(),
 			})
 			if err != nil || len(eligible) != tc.wantEligible {
 				t.Fatalf("eligible profiles %+v (%v), want %d", eligible, err, tc.wantEligible)
@@ -206,7 +259,8 @@ func TestEnumerateWindowsPublishesNoRowOnTheCachedSIDOfAnUnresolvedExcludeGroup(
 			pending := 0
 			manifest, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
 				ExistingManifestPath: writeWindowsTestManifest(t, rows...),
-				ExcludeGroups:        []string{`CONTOSO\Contractors`},
+				IncludeGroups:        include,
+				ExcludeGroups:        exclude,
 				GroupCache:           newCache(),
 				ReportExcluded:       func(target ManifestTarget) { excluded = append(excluded, target.SID) },
 				ReportUnprotected: func(agent UnprotectedAgent) {
