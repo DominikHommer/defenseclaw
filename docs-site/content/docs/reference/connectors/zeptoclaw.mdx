@@ -34,7 +34,7 @@ Proxy connector: not gated by a hook contract version.
 | Hook fail mode | current config; `closed` on a fresh install | `defenseclaw guardrail fail-mode <open\|closed>` |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (built-in copy) | `--block-message "<text>"` |
-| Redaction | v8 bucket and profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles` ([Redaction](/docs/observability/redaction#verify-policy)) |
+| Redaction | v8 bucket and profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles` ([Redaction](/docs/reference/redaction/)) |
 
 ```bash
 # Pilot: nothing blocks. Run for at least a week before promoting.
@@ -51,7 +51,7 @@ defenseclaw setup zeptoclaw --mode action --rule-pack strict --restart
 For a second-pass LLM judge, export a key and add `--detection-strategy regex_judge --judge-model <model> --judge-api-key-env DEFENSECLAW_LLM_KEY`. ZeptoClaw has no native ask, so a confirm takes its immediate fallback with `raw_action` preserved. The TUI and audit log can review it but cannot approve and resume it. See [Human approval](/docs/hitl).
 
 <Callout title="Treat local event history as sensitive data">
-The mandatory database is configured by `observability.local` (by default `~/.defenseclaw/audit.db`) and retains seven days on a fresh configuration. Set `observability.local.retention_days` to the reviewed retention period and limit host access to the DefenseClaw data directory. A global `observability.defaults.redaction_profile` or a bucket `redaction_profile` also governs SQLite. A destination or route profile governs only that export trust boundary. Verify the effective result with `defenseclaw config show --effective --section observability` and `defenseclaw observability plan`. See [Redaction](/docs/observability/redaction) and [Observability](/docs/observability#local-history). Retention removes eligible rows and frees their pages for SQLite reuse, but the file does not shrink automatically.
+The mandatory database is configured by `observability.local` (by default `~/.defenseclaw/audit.db`) and retains seven days on a fresh configuration. Set `observability.local.retention_days` to the reviewed retention period and limit host access to the DefenseClaw data directory. A global `observability.defaults.redaction_profile` or a bucket `redaction_profile` also governs SQLite. A destination or route profile governs only that export trust boundary. Verify the effective result with `defenseclaw config show --effective --section observability` and `defenseclaw observability plan`. See [Redaction](/docs/observability/redaction) and [Observability](/docs/features/observability/). Retention removes eligible rows and frees their pages for SQLite reuse, but the file does not shrink automatically.
 </Callout>
 
 On a fresh v8 configuration the local profile is `none`, so registered prompt, response, tool, path and identifier fields can stay full fidelity. A global or bucket profile can redact the local projection, and optional destinations receive their own projection.

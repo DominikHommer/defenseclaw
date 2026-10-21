@@ -861,13 +861,13 @@ it for `sandbox run`.
 | `harness` | Required. The connector to run, such as `claudecode` or `codex`. |
 | `project` | Required. The absolute host path of the launch folder. In mount mode the daemon checks and mounts it. In copy mode it only labels the sandbox: the CLI stages and uploads the copy after the create, then reports it with `POST …/{name}/workspace`. |
 | `name` | Optional. At most 19 lowercase letters, digits, and `-` (OpenShell 0.1.1 refuses longer names). Empty picks `<folder>-<random>`, the folder name cut to fit. |
-| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `process_tree`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/reference/sandbox-policy#how-the-effective-policy-is-computed). |
+| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `process_tree`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/reference/sandbox-policy/#how-the-policy-is-computed). |
 | `no_snapshot` | Skip the pre-session snapshot of a mounted project, and so undo. |
 | `no_build` | Refuse, with 409 `image_unavailable`, instead of building and hook-checking a missing harness image inside the request. A build can take minutes. |
 | `llm` | The model credential: `profile` (a provider profile the harness supports, such as `defenseclaw-anthropic`), `credentials` (its environment variable names and secret values), and `bedrock_region`. |
 | `credentials` | `--credential` bindings: `name`, `value`, `host`, and `port` (default 443). |
 | `env` | Non-secret environment variables. DefenseClaw, proxy, and loader variables, and variables the harness image pins, are refused. |
-| `repo_policy_digest` | Optional. The digest of the project's [repository policy](/docs/reference/sandbox-policy#repository-policy-defenseclawsandboxyaml) the client resolved the run with (`Explain.repo_policy.digest`), or `none` when it had none. The daemon reads the file itself and answers `409 conflict` when it changed since. |
+| `repo_policy_digest` | Optional. The digest of the project's [repository policy](/docs/reference/sandbox-policy/#repository-policy) the client resolved the run with (`Explain.repo_policy.digest`), or `none` when it had none. The daemon reads the file itself and answers `409 conflict` when it changed since. |
 
 Secret values in `llm.credentials` and `credentials` go to OpenShell as
 provider credentials. The daemon never stores them or returns them.
@@ -951,7 +951,7 @@ rejection to `openshell.egress.block`.
 `sandbox` scopes the unblock to one sandbox. Without it, `always` is
 required, and the host is saved to `openshell.egress.unblocked` for every
 sandbox. Only refusals the policy marks unblockable can be lifted; see
-[How a destination is decided](/docs/reference/sandbox-network#how-a-destination-is-decided).
+[How a destination is decided](/docs/reference/sandbox-network/).
 
 ### Policy explain
 
@@ -1217,7 +1217,7 @@ limits.
   On 80 and 443 the proxy relays only web traffic; other protocols such as
   SSH pass only on ports you add.
 
-**What it decides.** Each sandbox is decided by its own resolved policy (pack, `openshell` keys, run options, admin constraints). Another sandbox's pack, block list, ports or unblocks never apply to it, and the unblock, approval and triage checks ask the same decider as the proxy. The order of rules, and what an allow entry, an unblock and `openshell.admin.allow_unblock: false` change, are on [How a destination is decided](/docs/reference/sandbox-network#how-a-destination-is-decided).
+**What it decides.** Each sandbox is decided by its own resolved policy (pack, `openshell` keys, run options, admin constraints). Another sandbox's pack, block list, ports or unblocks never apply to it, and the unblock, approval and triage checks ask the same decider as the proxy. The order of rules, and what an allow entry, an unblock and `openshell.admin.allow_unblock: false` change, are on [How a destination is decided](/docs/reference/sandbox-network/).
 
 `POST /api/v1/sandbox/egress/unblock` refuses what can't be unblocked: the
 administrator's lists and `allow_unblock: false` answer `admin_violation`

@@ -22,9 +22,9 @@ Every [OpenShell sandbox](/docs/sandboxes) writes records into the standard [obs
 | A policy change: applied, a rule added or removed, an unblock or block | `log.policy.updated` | `compliance.activity` | Always written to local SQLite. Carries the OpenShell policy revision and the policy hash. |
 | A finding (`sandbox.<kind>`, see below) | `log.finding.observed` | `security.finding` | |
 | A process OpenShell launched or ended, an SSH session, a model call | `log.sandbox.process`, `log.sandbox.ssh`, `log.sandbox.inference` | `tool.activity`, `compliance.activity`, `model.io` | From OpenShell's own reports. Process and SSH records are paced per sandbox (a burst of 200, then 20 a second). An inference record names the provider, model, status and latency, never the content. |
-| A process joined or left the [process tree](/docs/sandboxes/guide#see-what-the-sandbox-runs) | `log.sandbox.process_tree` | `agent.lifecycle` | Only for a sandbox whose tree is on (`observe.process_tree`, or `sandbox run --process-tree`). Carries the parent and the ancestry. |
+| A process joined or left the [process tree](/docs/how-to/sandboxes/run-an-agent/) | `log.sandbox.process_tree` | `agent.lifecycle` | Only for a sandbox whose tree is on (`observe.process_tree`, or `sandbox run --process-tree`). Carries the parent and the ancestry. |
 | The integration's health | `log.subsystem.lifecycle`, `.ready`, `.degraded`, `.restored` | `platform.health` | Subsystem `openshell`. A transition is always written to local SQLite. |
-| An AI component found inside a sandbox | `ai_component.*` | `ai.discovery` | Carries `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name`. See [AI discovery](/docs/ai-discovery#inside-openshell-sandboxes). |
+| An AI component found inside a sandbox | `ai_component.*` | `ai.discovery` | Carries `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name`. See [AI discovery](/docs/reference/ai-discovery#inside-openshell-sandboxes). |
 | A hook decision | `log.compat.hook_decision` | | Carries the sandbox id and name of the binding that authenticated the hook, so a verdict joins to its sandbox. |
 
 The audit actions behind them are `sandbox-lifecycle`, `sandbox-workspace`,
@@ -215,8 +215,8 @@ The labels below are the ones the local Prometheus shows. In OTLP they are
 
 ## See also
 
-- [Sandbox guide: see where the sandbox connected](/docs/sandboxes/guide#see-where-the-sandbox-connected)
-- [Network and egress: destinations and shadow AI](/docs/sandboxes/network#destinations-and-shadow-ai)
+- [Sandbox guide: see where the sandbox connected](/docs/how-to/sandboxes/run-an-agent/)
+- [Network and egress: destinations and shadow AI](/docs/reference/sandbox-network/#destinations-and-shadow-ai)
 - [Grafana Sandboxes board](/docs/reference/dashboards#sandboxes-board)
 - [Splunk Observability dashboards and detector](/docs/reference/dashboards#splunk)
 - [Gateway API: sandbox status and destinations](/docs/reference/gateway-api)

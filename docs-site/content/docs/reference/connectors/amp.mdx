@@ -51,7 +51,7 @@ Amp documents no `session.end` and no separate subagent events. Oracle, Task lau
 
 `--workspace` also inventories that repository's `.amp/settings.json` or `.jsonc`, `.amp/plugins`, skills, checks, guidance, MCP servers and custom agents. Without it, global setup still governs tool calls but limits discovery to user and managed surfaces. The plugin is owner-only (private permissions, or the Windows user-only ACL) and holds a connector-scoped token. Setup preserves an existing file, teardown restores it, and a user-modified managed file is never silently removed.
 
-Plugin lists, scans and the AIBOM treat the file as connector configuration. `defenseclaw plugin remove`, `disable`, `block` and `quarantine` refuse `defenseclaw --connector amp`, because Amp runs unguarded without it. The built-in `admission.plugin.first_party_allow_list` entry for `defenseclaw` matches the Amp bridge only at `.config/amp/plugins/defenseclaw.ts` ([first-party assets](/docs/policies/admission#first-party-assets)).
+Plugin lists, scans and the AIBOM treat the file as connector configuration. `defenseclaw plugin remove`, `disable`, `block` and `quarantine` refuse `defenseclaw --connector amp`, because Amp runs unguarded without it. The built-in `admission.plugin.first_party_allow_list` entry for `defenseclaw` matches the Amp bridge only at `.config/amp/plugins/defenseclaw.ts` ([first-party assets](/docs/reference/admission/#first-party-assets)).
 
 Headless runs: `amp -x "your prompt" --plugin-ready-timeout 30`. Without the flag a turn can begin before plugins load. The three session and agent callbacks stay observe-only, and `defenseclaw doctor` reports this caveat.
 

@@ -186,7 +186,7 @@ When a directory lookup is cold, the create waits up to 10 seconds for it and th
 
 ## Telemetry and the fleet view
 
-Every sandbox record carries the profile (name, digest, match, matched group), the policy digest and generation, the registration id, whether the policy is provisional, the OpenShell version and install mode, and a keyed subject hash. Principals are hashed unless `ai_discovery.include_user_principal` is on. The Grafana Sandboxes board has a managed fleet section, and the Splunk saved searches and Splunk Observability charts cover the same questions: running sandboxes by profile, refused and unavailable host runs, access refusals, asks, foreign items, silence stops, re-matches, provisional rates and drift. See [Sandbox telemetry](/docs/observability/sandbox-telemetry#managed-computers).
+Every sandbox record carries the profile (name, digest, match, matched group), the policy digest and generation, the registration id, whether the policy is provisional, the OpenShell version and install mode, and a keyed subject hash. Principals are hashed unless `ai_discovery.include_user_principal` is on. The Grafana Sandboxes board has a managed fleet section, and the Splunk saved searches and Splunk Observability charts cover the same questions: running sandboxes by profile, refused and unavailable host runs, access refusals, asks, foreign items, silence stops, re-matches, provisional rates and drift. See [Sandbox telemetry](/docs/reference/sandbox-telemetry/#managed-computers).
 
 `defenseclaw.sandbox.active` is exported every minute while a sandbox runs, and exports `0` for a connector whose sandboxes stopped. After a gateway restart a running sandbox counts again within the next minute.
 

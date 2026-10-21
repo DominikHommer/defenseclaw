@@ -21,7 +21,7 @@ Everything is set in the one admin `config.yaml`. The user types `defenseclaw sa
 | Standalone, macOS (Apple silicon) | Yes, with OpenShell MicroVMs (`vm`). Intel Macs refuse. |
 | Standalone, Windows | No. A required agent is refused with a neutral message, or alerted, per `when_unavailable`. |
 | Secure Client | No. Every `sandbox` key is refused at load. |
-| Open-source per-user install | Yes. The user owns `config.yaml`, so the admin block is advisory there. See [Authoritative and advisory admin blocks](/docs/reference/sandbox-policy#authoritative-and-advisory-admin-blocks). |
+| Open-source per-user install | Yes. The user owns `config.yaml`, so the admin block is advisory there. See [Authoritative and advisory admin blocks](/docs/reference/sandbox-policy/). |
 
 This page assumes a standalone install (the enterprise rpm, deb, pkg or Windows Setup with an admin-owned `config.yaml`). Policy reaches the host with the package and `enterprise <os> ensure --config`; there is no MDM step. Identity is whatever the host's account database already says, so Active Directory through SSSD or a directory binding, Okta through SSSD and similar sources work; see [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
 

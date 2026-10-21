@@ -280,7 +280,7 @@ A per-user install reads `~/.defenseclaw/config.yaml` (Windows: `%USERPROFILE%\.
 | macOS Platform SSO, standalone | By the UPN | Only a local group that carries the membership |
 | macOS Platform SSO, per-user | No: the account reports `local` without a UPN | Only a local group |
 
-Set a strict `default_profile`: a failed lookup lands on it ([why](/docs/guardrail/user-and-group-policies#only-verified-facts-select-a-profile)).
+Set a strict `default_profile`: a failed lookup lands on it ([why](/docs/how-to/guardrail/give-a-group-its-own-policy/)).
 
 ## 6. Check
 
@@ -315,7 +315,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-exp
 - **A group change on Windows** reaches DefenseClaw when the user signs in again: the token is fixed at sign-in. The enumerator decides a signed-out user from the token it saw at the last sign-in. After a sign-in the enumerator reads the new token about 15 seconds later, but live hooks can use directory facts cached for up to 15 minutes. In the tests the token changed at the next sign-in (two to three minutes after the tenant change) and the hook decision about 13 minutes after sign-in. `profile-explain` can already show the new profile and the cached fact age. Microsoft documents that a new token can take up to 4 hours to carry a change.
 - **A group change on Linux** takes the Himmelblau or SSSD cache time plus DefenseClaw's 15 minutes. On macOS a change reaches DefenseClaw when the bridge script runs again.
 - **A user who has not signed in yet.** On Windows, the host may resolve an Entra name or UPN to a SID before first sign-in, but it has no sign-in token for group membership. On Azure Linux, NSS may resolve a name before it can map a uid back to the account; `profile explain` reports `unixidentity: not found` then.
-- **An Entra outage or no network.** In a nine-minute Windows sign-in endpoint outage test, open sessions kept the same hook decisions, including after a gateway restart: DefenseClaw reads the identity store, join state and token locally. Windows refused a new password sign-in while the endpoint was unavailable. On Linux, a failed lookup falls back to `default_profile` with `default_lookup_failed` after the gateway's cached answer expires (up to an hour); see the [lookup rules](/docs/guardrail/user-and-group-policies#only-verified-facts-select-a-profile).
+- **An Entra outage or no network.** In a nine-minute Windows sign-in endpoint outage test, open sessions kept the same hook decisions, including after a gateway restart: DefenseClaw reads the identity store, join state and token locally. Windows refused a new password sign-in while the endpoint was unavailable. On Linux, a failed lookup falls back to `default_profile` with `default_lookup_failed` after the gateway's cached answer expires (up to an hour); see the [lookup rules](/docs/how-to/guardrail/give-a-group-its-own-policy/).
 
 ## Troubleshooting
 

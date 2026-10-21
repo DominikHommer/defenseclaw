@@ -195,7 +195,7 @@ before applying the config. Create and copy its folders with `umask 022` so the
 gateway can read them, and run `rulepack validate` for the `custom_packs` pin.
 
 AI Discovery covers each enrolled user's inventory scan
-([Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)).
+([Per-user scans](/docs/reference/ai-discovery#per-user-scans-in-standalone-enterprise)).
 Skills and MCP servers are inventoried, not scanned: a managed deployment does not
 run the skill or MCP scanners. Read the inventory as root; the gateway's skill,
 MCP and tool-catalog API routes answer `501` on a managed host.
@@ -418,7 +418,7 @@ the gateway records `enterprise_managed_user_namespace`.
 
 AI Discovery runtime detection has three planes: A watches inference compute, B
 attributes network traffic and C records agent actions from kernel events
-([Runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran)). Plane C
+([Runtime planes](/docs/reference/ai-discovery/#runtime-planes)). Plane C
 runs in the root sensor helper. It is opt-in: set `ai_discovery.runtime.enabled`
 and `ai_discovery.runtime.enable_host_plane` to `true`. If the computer runs
 [Tetragon](https://tetragon.io), the helper uses it as a better source (`consume`),
@@ -461,7 +461,7 @@ refuses to run: `install.sh` refuses and changes nothing, `defenseclaw upgrade`
 refuses, and the per-user gateway refuses to start. Nothing migrates a per-user
 install. Before you deploy, have each user run
 `defenseclaw uninstall --binaries --yes` (add `--all` to delete `~/.defenseclaw`;
-[Uninstall](/docs/get-started/install#uninstall)).
+[Uninstall](/docs/get-started/install/)).
 
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
 device enforces: `defenseclaw config get`, `guardrail`, `status` and other
@@ -489,7 +489,7 @@ Run these as root from `/opt/defenseclaw/bin`.
 Uninstall removes each user's DefenseClaw hook registrations and DefenseClaw's own
 machine-policy entries first; administrator entries stay. If the sensor helper
 loaded policies into Tetragon, it deletes those `defenseclaw-*` policies before
-removing any file ([Remove the policies, or downgrade](/docs/enterprise/tetragon#remove-the-policies-or-downgrade)).
+removing any file ([Remove the policies, or downgrade](/docs/enterprise/tetragon/)).
 The result's `kept:` line names accounts that still have `~/.defenseclaw` or
 per-user binaries. With `--purge` it also stops each enrolled user's per-user
 gateway and removes `~/.defenseclaw`, the empty agent folders DefenseClaw created,
@@ -550,7 +550,7 @@ On a tarball host, `uninstall --purge` removes everything, including `/opt/defen
 - **Change the config.** Replace `/etc/defenseclaw/config.yaml`. The apply path
   unit runs `ensure`, which validates and applies it or rolls back
   ([Change the config](/docs/enterprise/lifecycle#change-the-config)).
-- **Tetragon.** Read [Remove the policies, or downgrade](/docs/enterprise/tetragon#remove-the-policies-or-downgrade)
+- **Tetragon.** Read [Remove the policies, or downgrade](/docs/enterprise/tetragon/)
   before you downgrade below the first release that supports Tetragon, and
   [Upgrades](/docs/enterprise/tetragon#upgrades) when a release changes a kernel
   control.

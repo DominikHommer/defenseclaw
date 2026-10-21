@@ -65,7 +65,7 @@ If you deploy through an MDM, the wrapper scripts run these same actions; see
 On Linux and macOS, a user's sandbox daemon is not restarted while that user has a
 sandbox running; `ensure` reports "pending restart" and the launcher restarts an idle,
 outdated daemon on the next command. See
-[Upgrade, roll back, uninstall](/docs/enterprise/sandboxes#upgrade-roll-back-uninstall).
+[Upgrade, roll back, uninstall](/docs/enterprise/sandbox-reference#upgrade-roll-back-uninstall).
 
 ### Windows
 
@@ -205,7 +205,7 @@ administrator config when you have one. The commands below pass it as `CONFIG=` 
   then puts the previous files back. Your own Tetragon policies are not touched. A
   deliberate rollback to a release before Tetragon support leaves those policies loaded, so
   clean them up first; see
-  [Remove the policies, or downgrade](/docs/enterprise/tetragon#remove-the-policies-or-downgrade).
+  [Remove the policies, or downgrade](/docs/enterprise/tetragon/).
 - **MDM wrapper.** The Linux wrapper installs `.rpm` files with `rpm -U`, so it refuses
   older RHEL packages.
 
@@ -553,7 +553,7 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   Tetragon before it removes any file, so no control keeps denying after the helper is gone. It
   then removes the helper's state in `/var/lib/defenseclaw-sensor` and its runtime directories
   (`--keep-state` keeps the state). Tetragon itself and your own policies stay. See
-  [Remove the policies, or downgrade](/docs/enterprise/tetragon#remove-the-policies-or-downgrade).
+  [Remove the policies, or downgrade](/docs/enterprise/tetragon/).
 - **Linux uninstall with the package kept.** The package's `/usr/lib/tmpfiles.d/defenseclaw.conf`
   names the `defenseclaw` account the uninstall removed, so the uninstall writes an override of
   the same name in `/etc/tmpfiles.d`; the next install or removing the package removes it.

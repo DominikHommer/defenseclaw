@@ -512,7 +512,7 @@ are one row a minute.
 
 With `ai_discovery.enabled: true` in the config, the gateway scans each user
 profile for AI agents, skills, MCP servers, plugins and running AI processes and
-sends the result to your observability destinations ([AI Discovery](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)).
+sends the result to your observability destinations ([AI Discovery](/docs/reference/ai-discovery#per-user-scans-in-standalone-enterprise)).
 Read the inventory on the computer from an elevated prompt:
 
 ```powershell title="Elevated Administrator prompt"
@@ -794,7 +794,7 @@ install checks every enrolled profile and stops in seconds, naming the folder an
 this command. A folder the account created itself without a per-user product is
 taken over. A running per-user gateway holds the API port, and Setup names it in
 `api_port_held`. See
-[Uninstall and preserved state](/docs/get-started/windows/install-lifecycle#uninstall-and-preserved-state).
+[Uninstall and preserved state](/docs/get-started/windows/).
 
 ## Remove
 
@@ -891,7 +891,7 @@ if ($sig.SignerCertificate) {
 checked against `checksums.txt`. `enterprise.trust` in the config can only narrow
 what the entry point accepts: `mode: authenticode` refuses a hash-pinned run
 (`1639`), also over a deployment installed hash-pinned
-([Payload trust](/docs/enterprise/configuration#payload-trust)). Hash-pinned files
+([Payload trust](/docs/enterprise/configuration/)). Hash-pinned files
 do not satisfy WDAC or AppLocker rules that require a publisher signature.
 
 The lifecycle CLI can also run from a folder with the payload files
@@ -955,7 +955,7 @@ Limits:
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
 | Amp | Per user | An in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent ([Kiro](/docs/connectors/kiro#enterprise-standalone-profile)) |
+| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent ([Kiro](/docs/reference/connectors/kiro#enterprise-standalone-profile)) |
 | OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them |
 
 See [Machine policy](/docs/enterprise/machine-policy) and

@@ -638,7 +638,7 @@ OPA/Rego owns admission and the final guardrail policy-domain decision. It does 
   <Message from="engine" to="gw"     kind="return" label="returns that package's result" />
 </Sequence>
 
-Guardrail events keep matching rule IDs, evaluation IDs, reasons and severity in their audit payloads. These power the per-rule breakdowns in [Splunk](/docs/how-to/observability/send-to-splunk) and [Grafana](/docs/how-to/observability/run-grafana-locally). An upgrade replaces the shipped `admission.rego` and `guardrail.rego` and saves your edited copy in `~/.defenseclaw/backups/rego-<time>/`; keep your own rules in a file of another name in `policies/rego` ([shipped policy files](/docs/get-started/upgrade#shipped-policy-files)).
+Guardrail events keep matching rule IDs, evaluation IDs, reasons and severity in their audit payloads. These power the per-rule breakdowns in [Splunk](/docs/how-to/observability/send-to-splunk) and [Grafana](/docs/how-to/observability/run-grafana-locally). An upgrade replaces the shipped `admission.rego` and `guardrail.rego` and saves your edited copy in `~/.defenseclaw/backups/rego-<time>/`; keep your own rules in a file of another name in `policies/rego` ([shipped policy files](/docs/get-started/upgrade/)).
 
 ## Source of truth and validation
 

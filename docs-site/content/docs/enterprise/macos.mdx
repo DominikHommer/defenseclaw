@@ -180,7 +180,7 @@ ai_discovery:
 Each key under `guardrail.connectors` turns on one agent
 ([Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)).
 AI Discovery covers each enrolled user's inventory scan
-([Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)).
+([Per-user scans](/docs/reference/ai-discovery#per-user-scans-in-standalone-enterprise)).
 Skills and MCP servers are inventoried, not scanned: a managed deployment does not
 run the skill or MCP scanners. Read the inventory as root; the gateway's skill,
 MCP and tool-catalog API routes answer `501` on a managed host.
@@ -346,7 +346,7 @@ copy; do not use it on a managed Mac.
 
 Nothing migrates a per-user install. Before you deploy, have each user run
 `defenseclaw uninstall --binaries --yes` (add `--all` to delete `~/.defenseclaw`;
-[Uninstall](/docs/get-started/install#uninstall)).
+[Uninstall](/docs/get-started/install/)).
 
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
 device enforces. The installed managed `defenseclaw` launcher offers only `sandbox`
@@ -442,7 +442,7 @@ folders; the gateway checks the grant every ten minutes.
 
 AI Discovery runtime detection has three planes: A watches inference compute, B
 attributes network traffic and C records agent actions from kernel events
-([Runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran)). Plane C
+([Runtime planes](/docs/reference/ai-discovery/#runtime-planes)). Plane C
 (`ai_discovery.runtime.enable_host_plane: true` with `c` in
 `ai_discovery.runtime.planes`) reads process and file events through Apple's
 `eslogger`, which the root sensor helper

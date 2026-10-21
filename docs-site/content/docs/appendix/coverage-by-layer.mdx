@@ -246,14 +246,14 @@ denied. They deny only through a native agent binary, and for
 one user per computer: a script-hosted agent (such as an npm install) and,
 when several users who finished burn-in have a native agent install, every one
 but the lowest uid stay in monitor mode
-([limits](/docs/enterprise/tetragon#the-kernel-controls)). Everything in
+([limits](/docs/enterprise/tetragon-reference#the-kernel-controls)). Everything in
 `enforce` mode is a cap, never a rejection: when a
 condition is not met, the controls stay in monitor mode and status names the
 reason.
 
 Read [Tetragon on a Linux fleet](/docs/enterprise/tetragon)
 for the setup, the readiness check, the pause runbook and the removal
-steps, and [Tetragon (Linux)](/docs/enterprise/configuration#tetragon-linux) for
+steps, and [Tetragon (Linux)](/docs/enterprise/configuration/) for
 the settings.
 
 ### Your own Tetragon policies

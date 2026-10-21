@@ -232,7 +232,7 @@ enabled:
   account's Claude Code and Codex address goes to your destinations on one
   `ai_component.observed` record per account and connector each discovery
   cycle, without entry names
-  ([Optional connector email](/docs/observability/end-user-identity#optional-connector-email)).
+  ([Optional connector email](/docs/reference/telemetry-identity/#optional-email)).
 - The gateway's own process detector does not run; the scan summary reports
   `detector_notes.process: provided by per-user scans`.
 - A user's results turn `gone` when the user leaves the manifest, or after the longer of three
@@ -604,7 +604,7 @@ per-user command.
   Enabled and AI, with a User column when more than one user is present.
   `Enter` opens a detail card with the version, publisher, where the enabled
   state came from, the scope, the matched AI signature and the times;
-  `PageUp` and `PageDown` scroll it. See the [TUI guide](/docs/tui#ide-plugins).
+  `PageUp` and `PageDown` scroll it. See the [TUI guide](/docs/features/tui/).
 - **Grafana.** The **AI Agent Usage & Detection** board has an IDE plugins
   section: plugins installed, AI plugins and disabled plugins as counters,
   plugins by IDE, AI against other plugins by IDE, plugins by enabled state,
@@ -1204,7 +1204,7 @@ OpenShell keep their roles; see
 setup, the readiness check and the pause runbook are on
 [Tetragon on a Linux fleet](/docs/enterprise/tetragon),
 and the settings are under
-[`enterprise.tetragon`](/docs/enterprise/configuration#tetragon-linux).
+[`enterprise.tetragon`](/docs/enterprise/configuration/).
 
 If you run Tetragon policies of your own on kprobe or LSM hooks, the helper
 also reports their events when they hit an AI agent (`customer_events`, on by

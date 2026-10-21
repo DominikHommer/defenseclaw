@@ -182,11 +182,11 @@ ai_discovery:
   ide_inventory: ai_only          # all | ai_only | off
 ```
 
-Check the file with `defenseclaw config validate`. A running gateway applies the change on its next reload; on a managed host, edit the [machine configuration](/docs/enterprise/configuration#where-the-config-lives) instead. Confirm with the audit export in [Join a Linux host to AD](/docs/enterprise/identity-ad-linux): the projected `principal` and `kerberos_principal` values are `null` while the setting is off. A home-directory path can still contain the UPN on SSSD hosts with fully qualified names; see [End-user identity](/docs/observability/end-user-identity#optional-principal).
+Check the file with `defenseclaw config validate`. A running gateway applies the change on its next reload; on a managed host, edit the [machine configuration](/docs/enterprise/configuration#where-the-config-lives) instead. Confirm with the audit export in [Join a Linux host to AD](/docs/enterprise/identity-ad-linux): the projected `principal` and `kerberos_principal` values are `null` while the setting is off. A home-directory path can still contain the UPN on SSSD hosts with fully qualified names; see [End-user identity](/docs/reference/telemetry-identity/#optional-principal).
 
 What stays on in either case: `user.id`, the account name, the domain, the directory type, the assurance, the session kind and the client address. There is no separate switch for them, so choose destinations accordingly. The principal, the Kerberos principal, the client address and the tenant ID are marked sensitive; the `strict` redaction profile (and a custom profile that extends it) removes them from what a destination receives, while `none`, `sensitive` and `content` keep them. See [Redaction](/docs/observability/redaction). The `identity.observed` record carries a group count, never group names. The Secure Client profile collects none of these facts.
 
-The IDE plugin inventory is part of AI discovery; see [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory).
+The IDE plugin inventory is part of AI discovery; see [IDE plugin inventory](/docs/reference/ai-discovery#ide-plugin-inventory).
 
 ## Next
 

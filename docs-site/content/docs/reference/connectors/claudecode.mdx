@@ -78,7 +78,7 @@ Commands typed in Claude Code's bash mode run without a pre-tool hook, as input 
 
 ## Telemetry and proxies
 
-Native OTLP uses managed loopback exporter settings with a Claude-scoped bearer. Logs and metrics are on. Traces are off. Prompt and assistant-response content logging are separate vendor opt-ins, and DefenseClaw leaves both off. The scoped credential cannot authenticate management or another connector. Redaction follows the v8 bucket and profile policy: see [Redaction](/docs/observability/redaction#verify-policy).
+Native OTLP uses managed loopback exporter settings with a Claude-scoped bearer. Logs and metrics are on. Traces are off. Prompt and assistant-response content logging are separate vendor opt-ins, and DefenseClaw leaves both off. The scoped credential cannot authenticate management or another connector. Redaction follows the v8 bucket and profile policy: see [Redaction](/docs/reference/redaction/).
 
 <Flow
   direction="TB"
@@ -106,7 +106,7 @@ Native OTLP uses managed loopback exporter settings with a Claude-scoped bearer.
 | Hook program | `~/.defenseclaw/hooks/claude-code-hook.sh` | `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` |
 | Credential sidecars | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 
-See the [Windows path reference](/docs/get-started/windows/paths-troubleshooting#filesystem-reference). DefenseClaw stores a hash-checked backup of `settings.json`. Teardown restores it byte for byte when the identity still matches. If the file drifted, it removes only DefenseClaw's entries.
+See the [Windows path reference](/docs/reference/paths/). DefenseClaw stores a hash-checked backup of `settings.json`. Teardown restores it byte for byte when the identity still matches. If the file drifted, it removes only DefenseClaw's entries.
 
 ## Inventory
 
@@ -135,7 +135,7 @@ The floor file sets `requiredMinimumVersion` to 2.1.154, the lowest version with
 
 ## OpenShell sandbox
 
-`defenseclaw sandbox run claude` runs Claude Code in an OpenShell sandbox ([macOS](/docs/sandboxes/guide#macos), [guide](/docs/sandboxes/guide)). The files below exist only in the image.
+`defenseclaw sandbox run claude` runs Claude Code in an OpenShell sandbox ([macOS](/docs/how-to/sandboxes/set-up-on-macos), [guide](/docs/sandboxes/guide)). The files below exist only in the image.
 
 | Item | Detail |
 | --- | --- |
@@ -143,5 +143,5 @@ The floor file sets `requiredMinimumVersion` to 2.1.154, the lowest version with
 | Skip permissions | On by default (`open` and `balanced` packs): `--dangerously-skip-permissions`. `--safe` or the `strict` pack keeps prompts, and managed settings refuse `bypassPermissions` from a flag or file. |
 | Sign-in | `--llm auto` shares `ANTHROPIC_API_KEY`, else `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`). OpenShell holds the secret; the sandbox gets a placeholder valid only at `api.anthropic.com`. `--llm bedrock`, and `auto` when neither is set, shares a short-term `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle Anthropic endpoint in `--bedrock-region` (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then `us-east-1`). `openshell.llm` sets the default. With `--llm none`, log in inside the sandbox; that login stays in the sandbox home. |
 | Bedrock models | Bedrock Mantle serves Claude only under `anthropic.*` ids. A Bedrock run starts on `anthropic.claude-sonnet-5` and maps Opus to `anthropic.claude-opus-4-8`, Sonnet to `anthropic.claude-sonnet-5`, and Haiku (also background tasks) to `anthropic.claude-haiku-4-5`. Pick another with `-- --model MODEL` or `/model`. |
-| Per-sandbox settings | A read-only `60-defenseclaw-run.json` wins over the image's. It pins the model provider (and Bedrock models), so a repository's `.claude/settings.json` cannot redirect the conversation. A read-only `/etc/claude-code/managed-mcp.json` lists the MCP servers brought from your setup. Repository `.mcp.json` servers do not start unless the pack sets [`mcp.project_servers: allow`](/docs/sandboxes/policy-packs#mcp-servers-in-a-sandbox). `--no-mcp` leaves yours behind. |
+| Per-sandbox settings | A read-only `60-defenseclaw-run.json` wins over the image's. It pins the model provider (and Bedrock models), so a repository's `.claude/settings.json` cannot redirect the conversation. A read-only `/etc/claude-code/managed-mcp.json` lists the MCP servers brought from your setup. Repository `.mcp.json` servers do not start unless the pack sets [`mcp.project_servers: allow`](/docs/reference/sandbox-policy/). `--no-mcp` leaves yours behind. |
 | Image | Claude Code 2.1.156 by default. A version without a reviewed Linux hook contract is refused. Verified end to end against a mock model, including hostile settings such as `disableAllHooks`, and in a live run where a blocked command was denied and the egress block list held. |

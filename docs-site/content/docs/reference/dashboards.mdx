@@ -34,7 +34,7 @@ Dashboards add no redaction, masking or field hiding. They show every field that
 | **DefenseClaw — Proxy & LLM Guard** (`defenseclaw-traffic`) | What happens on proxy and router deployments? Empty unless proxy mode is active. | Prometheus, Loki, Tempo |
 | **DefenseClaw — Sandboxes** (`defenseclaw-sandboxes`) | What are OpenShell sandboxes doing, reaching and being refused? See [Sandboxes board](#sandboxes-board). | Prometheus, Loki |
 | **DefenseClaw — Runtime & Reliability** (`defenseclaw-runtime`) | Is the process, database, exporter or destination delivery unhealthy? | Prometheus, Loki |
-| **DefenseClaw IoT Fleet** (`defenseclaw-fleet`) | Which edge devices are online and receiving verdicts? Empty until the [authenticated Fleet scrape](/docs/edge-connector/install#grafana-dashboard) is set up. | Prometheus |
+| **DefenseClaw IoT Fleet** (`defenseclaw-fleet`) | Which edge devices are online and receiving verdicts? Empty until the [authenticated Fleet scrape](/docs/how-to/install-the-edge-connector/) is set up. | Prometheus |
 
 The local stack ships these JSON files in `bundles/local_observability_stack/grafana/dashboards/`. `up` refreshes them on every start; pass `--no-refresh-config` to keep your edits. Edits made in the Grafana UI are not written back to disk, so copy a changed board out with **Dashboard → JSON Model**.
 

@@ -59,15 +59,15 @@ In action mode each event answers with its own official response.
 
 When a hook fails closed because DefenseClaw cannot decide, `Stop`, `SubagentStop` and `SessionEnd` are not blocked. A blocked stop would only make Codex try again. Codex ends the turn, and the next prompt or tool call is blocked until the gateway is back ([Stop and session-end events](/docs/reference/fail-modes#stop-and-session-end-events)).
 
-Codex loads a skill without a hook of its own. DefenseClaw refuses a skill on `asset_policy.skill.denied` when it is selected as `$name` and when a tool call reads its folder ([where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
+Codex loads a skill without a hook of its own. DefenseClaw refuses a skill on `asset_policy.skill.denied` when it is selected as `$name` and when a tool call reads its folder ([where a denied skill is refused](/docs/reference/admission/#where-a-denied-skill-is-refused)).
 
 ## Setup details
 
 Native logs, metrics and traces use the loopback `/v1/{logs,metrics,traces}` endpoints with `X-DefenseClaw-Source: codex` and a bearer in Codex's exporter configuration. The credential is separate from the gateway master token and the Codex hook credential, works only for Codex OTLP over loopback, and cannot call management or another connector. Do not print or copy the exporter header or its sidecar. Setup also pins Codex's `otel.environment` to DefenseClaw's configured environment (Codex defaults to `dev`), and doctor compares it with live runtime metadata.
 
-Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/observability/redaction#verify-policy). The alias options are in the [quick-alias reference](/docs/guardrail/aliases).
+Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/reference/redaction/). The alias options are in the [quick-alias reference](/docs/guardrail/aliases).
 
-On native Windows, DefenseClaw writes each event and contract into `%CODEX_HOME%\config.toml` and marks the hooks trusted there, because Codex on Windows does not read hooks from `managed_config.toml`. The registered command runs system Windows PowerShell with `-EncodedCommand`, which starts `defenseclaw-hook.exe` synchronously with inherited handles and the bound `--event` and `--hook-contract`. No POSIX shell or WSL is involved. On managed Windows, the enumerator enrolls Codex installed with npm, the official `install.ps1` at its default location, or WinGet. A relocated `CODEX_HOME`, or another folder that discovery finds but cannot enroll, is reported as `agent_unprotected` ([Enrollment](/docs/enterprise/enrollment#where-agents-are-found)). Managed enrollment publishes hooks in `%ProgramData%\OpenAI\Codex\requirements.toml`. The per-user `managed_config.toml` is read only to clean up older registrations.
+On native Windows, DefenseClaw writes each event and contract into `%CODEX_HOME%\config.toml` and marks the hooks trusted there, because Codex on Windows does not read hooks from `managed_config.toml`. The registered command runs system Windows PowerShell with `-EncodedCommand`, which starts `defenseclaw-hook.exe` synchronously with inherited handles and the bound `--event` and `--hook-contract`. No POSIX shell or WSL is involved. On managed Windows, the enumerator enrolls Codex installed with npm, the official `install.ps1` at its default location, or WinGet. A relocated `CODEX_HOME`, or another folder that discovery finds but cannot enroll, is reported as `agent_unprotected` ([Enrollment](/docs/enterprise/enrollment/#how-users-and-agents-are-found)). Managed enrollment publishes hooks in `%ProgramData%\OpenAI\Codex\requirements.toml`. The per-user `managed_config.toml` is read only to clean up older registrations.
 
 ## Files
 
@@ -77,7 +77,7 @@ On native Windows, DefenseClaw writes each event and contract into `%CODEX_HOME%
 | Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` |
 | Credential sidecars | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 
-See the [Windows path reference](/docs/get-started/windows/paths-troubleshooting#filesystem-reference).
+See the [Windows path reference](/docs/reference/paths/).
 
 ## Inventory surfaces
 
@@ -128,7 +128,7 @@ Codex activates project `.codex/` layers only for trusted projects. Inventory re
 
 ## OpenShell sandbox
 
-`defenseclaw sandbox run codex` runs Codex in an OpenShell sandbox ([macOS](/docs/sandboxes/guide#macos), [guide](/docs/sandboxes/guide)).
+`defenseclaw sandbox run codex` runs Codex in an OpenShell sandbox ([macOS](/docs/how-to/sandboxes/set-up-on-macos), [guide](/docs/sandboxes/guide)).
 
 | Item | Detail |
 | --- | --- |
@@ -136,6 +136,6 @@ Codex activates project `.codex/` layers only for trusted projects. Inventory re
 | Startup tip | The Codex TUI fetches a tip from `raw.githubusercontent.com` around the egress proxy. OpenShell refuses it and triage rejects the drafted rule (`harness_background_fetch`). It is not counted as a blocked site. |
 | Skip permissions | On by default (`open` and `balanced` packs): `--dangerously-bypass-approvals-and-sandbox`. `--safe` or the `strict` pack keeps approvals with `sandbox_mode="danger-full-access"` and `approval_policy="untrusted"`. A headless `--safe` run cannot ask and refuses those commands. `requirements.toml` refuses the `never` policy, and `--yolo`, `--full-auto` and `--ask-for-approval never` are dropped. |
 | Sign-in | `--llm auto` shares `OPENAI_API_KEY` (or `CODEX_API_KEY`), or else the key `codex login --with-api-key` stored in `~/.codex/auth.json`. A ChatGPT sign-in is not shared. The sandbox gets a placeholder valid only at `api.openai.com`. `--llm bedrock`, and `auto` when neither is set, shares `AWS_BEARER_TOKEN_BEDROCK` for a custom provider on the Bedrock Mantle OpenAI route in `--bedrock-region`, with multi-agent and web search off. A Bedrock run uses `openai.gpt-5.5` unless you pass `-- -m MODEL`. |
-| Per-sandbox settings | Each sandbox gets its own read-only `managed_config.toml` and `requirements.toml`. They pin the model provider and define the MCP servers brought from your setup. Unless the pack sets [`mcp.project_servers: allow`](/docs/sandboxes/policy-packs#mcp-servers-in-a-sandbox), only those servers are allowed. `--no-mcp` leaves yours behind. |
+| Per-sandbox settings | Each sandbox gets its own read-only `managed_config.toml` and `requirements.toml`. They pin the model provider and define the MCP servers brought from your setup. Unless the pack sets [`mcp.project_servers: allow`](/docs/reference/sandbox-policy/), only those servers are allowed. `--no-mcp` leaves yours behind. |
 | MCP gap | Codex matches an allowed server by command only and merges a repository's `[mcp_servers.<name>]` table key by key. DefenseClaw leaves such a server behind and names it at start. |
 | Image | Codex 0.146.0 by default, replacing the base image's older one. A version without a reviewed Linux hook contract is refused. Verified against a mock model with hostile config, and in a live run that honored a deny with a Bedrock Mantle model. |
