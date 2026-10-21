@@ -254,10 +254,12 @@ func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord 
 // the file). Rewriting the record as derived sent every account a users
 // assignment selects by UPN to the default profile within one guardian pass
 // (GAP-1114). It keeps the UPN only for the same account in the same SSSD
-// domain, and of the same account incarnation once the previous record
-// names one (a uid handed to another account of the same name and domain
-// does not inherit the UPN), and marks it infopipe_kept so status and
-// verify can say why. It
+// domain and of the same account incarnation, which both records must name
+// (a uid handed to another account of the same name and domain does not
+// inherit the UPN). A previous record that names none (one a guardian
+// before 1.0.4 wrote) cannot show that it was the same account, so after an
+// upgrade the UPN needs a fresh InfoPipe answer. It marks a kept UPN
+// infopipe_kept so status and verify can say why. It
 // keeps it for IdentitySpoolKeptUPNMaxAge from the first pass that kept it
 // (UPNKeptSince): a UPN removed in the directory stayed trusted for as long
 // as the guardian ran (GAP-1235). A kept record an older build wrote
@@ -267,7 +269,7 @@ func KeepVerifiedInfoPipeUPN(record, previous IdentitySpoolRecord) (IdentitySpoo
 		(previous.UPNSource != UPNSourceInfoPipe && previous.UPNSource != UPNSourceInfoPipeKept) ||
 		!strings.EqualFold(record.Key, previous.Key) || record.User == "" || !strings.EqualFold(record.User, previous.User) ||
 		record.SSSDDomain == "" || !strings.EqualFold(record.SSSDDomain, previous.SSSDDomain) ||
-		previous.AccountIncarnation != "" && record.AccountIncarnation != previous.AccountIncarnation {
+		previous.AccountIncarnation == "" || record.AccountIncarnation != previous.AccountIncarnation {
 		return record, false
 	}
 	since := previous.UPNKeptSince

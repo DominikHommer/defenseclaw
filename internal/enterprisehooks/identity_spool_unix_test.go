@@ -154,10 +154,13 @@ func TestIdentitySpoolKeepsTheLastKnownUPN(t *testing.T) {
 // not a verified change, so the record keeps the UPN it verified before, for
 // the same account in the same SSSD domain only (GAP-1114).
 func TestIdentitySpoolKeepsAnInfoPipeUPNThroughAnAnswerWithoutIt(t *testing.T) {
+	const incarnation = "sid:S-1-5-21-4-4-4-1999"
 	previous := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceInfoPipe,
-		Facts: useridentity.DirectoryFacts{UPN: "w4a2.alt@alt.dclab.test", Principal: "w4a2.alt@alt.dclab.test", Source: useridentity.SourceSSSDInfoPipe}}
+		AccountIncarnation: incarnation,
+		Facts:              useridentity.DirectoryFacts{UPN: "w4a2.alt@alt.dclab.test", Principal: "w4a2.alt@alt.dclab.test", Source: useridentity.SourceSSSDInfoPipe}}
 	derived := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceDerived,
-		Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
+		AccountIncarnation: incarnation,
+		Facts:              useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
 	got, kept := KeepVerifiedInfoPipeUPN(derived, previous)
 	if !kept || got.Facts.UPN != "w4a2.alt@alt.dclab.test" || got.Facts.Principal != got.Facts.UPN || got.UPNSource != UPNSourceInfoPipeKept {
 		t.Fatalf("record = %+v, want the verified UPN kept", got)
@@ -176,12 +179,13 @@ func TestIdentitySpoolKeepsAnInfoPipeUPNThroughAnAnswerWithoutIt(t *testing.T) {
 // GAP-1114 carry-forward still holds inside that bound.
 func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForADay(t *testing.T) {
 	start := time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC)
+	const incarnation = "sid:S-1-5-21-4-4-4-1999"
 	previous := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceInfoPipe,
-		UpdatedAt: start.Add(-time.Minute),
-		Facts:     useridentity.DirectoryFacts{UPN: "w4a2.alt@alt.dclab.test", Principal: "w4a2.alt@alt.dclab.test", Source: useridentity.SourceSSSDInfoPipe}}
+		UpdatedAt: start.Add(-time.Minute), AccountIncarnation: incarnation,
+		Facts: useridentity.DirectoryFacts{UPN: "w4a2.alt@alt.dclab.test", Principal: "w4a2.alt@alt.dclab.test", Source: useridentity.SourceSSSDInfoPipe}}
 	pass := func(at time.Time) IdentitySpoolRecord {
 		return IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceDerived,
-			UpdatedAt: at, Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
+			UpdatedAt: at, AccountIncarnation: incarnation, Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
 	}
 	first, kept := KeepVerifiedInfoPipeUPN(pass(start), previous)
 	if !kept || first.Facts.UPN != "w4a2.alt@alt.dclab.test" || !first.UPNKeptSince.Equal(start) {

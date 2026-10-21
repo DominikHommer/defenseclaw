@@ -362,17 +362,37 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
     group_partial: dict[str, list[str]] = {name: [] for name in groups}
     member_groups: dict[str, set[str]] = {}
 
+    def groups_of(user_id: str) -> set[str]:
+        if user_id not in member_groups:
+            member_groups[user_id] = {item["id"] for item in client.get_all(
+                f"/api/v1/users/{user_id}/groups?limit=200")}
+        return member_groups[user_id]
+
     def names_member(user_ids: set[str], group_id: str) -> bool:
         """Whether a user-scoped rule names a member of the group."""
         if len(user_ids) > 50:
             return True
-        for user_id in user_ids:
-            if user_id not in member_groups:
-                member_groups[user_id] = {item["id"] for item in client.get_all(
-                    f"/api/v1/users/{user_id}/groups?limit=200")}
-            if group_id in member_groups[user_id]:
-                return True
-        return False
+        return any(group_id in groups_of(user_id) for user_id in user_ids)
+
+    group_members: dict[str, list[str]] = {}
+
+    def preempts_members(group_id: str, rule_groups: set[str], user_ids: set[str],
+                         excluded_users: set[str], excluded_groups: set[str]) -> bool:
+        """Whether a rule scoped to other groups applies to a member of the group.
+
+        Okta takes the first rule a user matches, so a member of the group who
+        is also in one of the rule's groups gets that rule's sign-on before the
+        group's own later rule (GAP-1166). Without proof that no member is in
+        those groups (more than 50 members to check), it may.
+        """
+        if group_id not in group_members:
+            group_members[group_id] = [item["id"] for item in client.get_all(
+                f"/api/v1/groups/{group_id}/users?limit=200")]
+        members = [m for m in group_members[group_id]
+                   if m not in excluded_users and (not user_ids or m in user_ids)]
+        if len(members) > 50:
+            return True
+        return any(groups_of(m) & rule_groups and not groups_of(m) & excluded_groups for m in members)
     rules = sorted(client.get_all(f"/api/v1/policies/{policy['id']}/rules"),
                    key=lambda rule: int(rule.get("priority", 2**31)))
     bind_groups: set[str] | None = None
@@ -413,6 +433,12 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
                 continue
             applies = (not group_ids or group["id"] in group_ids) and group["id"] not in excluded_groups
             if not applies:
+                # A deny or stronger challenge scoped to other groups decides
+                # first for members also in one of them.
+                if (group_ids and group["id"] not in excluded_groups and not (password_allow and unrestricted)
+                        and preempts_members(group["id"], group_ids, user_ids, excluded_users, excluded_groups)):
+                    group_partial[name].append(
+                        f"rule '{rule.get('name')}' applies another sign-on to members also in its group(s)")
                 continue
             if user_ids:
                 # A rule for named users decides for them only. A deny or a

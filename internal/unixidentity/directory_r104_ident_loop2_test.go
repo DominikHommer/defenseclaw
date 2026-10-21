@@ -186,23 +186,27 @@ func TestAccountIncarnationNamesTheNSSOwner(t *testing.T) {
 		results            map[string]commandResult
 		want               string
 		known              bool
+		nslcd              bool
 	}{
 		{"LDAP holds the uid", "passwd: files ldap sss\n", "alice",
-			map[string]commandResult{"-s ldap passwd 41201": line, "-s sss passwd 41201": line}, "nss:ldap", true},
+			map[string]commandResult{"-s ldap passwd 41201": line, "-s sss passwd 41201": line}, "nss:ldap", true, false},
 		{"NIS holds the uid", "passwd: files nis sss\n", "alice",
-			map[string]commandResult{"-s nis passwd 41201": line, "-s sss passwd 41201": line}, "nss:nis", true},
+			map[string]commandResult{"-s nis passwd 41201": line, "-s sss passwd 41201": line}, "nss:nis", true, false},
 		{"LDAP that does not answer", "passwd: files ldap sss\n", "alice",
-			map[string]commandResult{"-s sss passwd 41201": line}, "", false},
+			map[string]commandResult{"-s sss passwd 41201": line}, "", false, false},
 		{"LDAP that answers without the uid", "passwd: files ldap sss\n", "alice",
-			map[string]commandResult{"-s sss passwd 41201": line, "-s ldap group": {stdout: []byte("ldap-users:*:9000:\n")}}, "sid:" + sid, true},
+			map[string]commandResult{"-s sss passwd 41201": line}, "sid:" + sid, true, true},
 		{"SSSD before LDAP", "passwd: files sss ldap\n", "alice",
-			map[string]commandResult{"-s sss passwd 41201": line, "-s ldap passwd 41201": line}, "sid:" + sid, true},
+			map[string]commandResult{"-s sss passwd 41201": line, "-s ldap passwd 41201": line}, "sid:" + sid, true, false},
 		{"the owner names another account", "passwd: files ldap sss\n", "bob",
-			map[string]commandResult{"-s ldap passwd 41201": line}, "", false},
+			map[string]commandResult{"-s ldap passwd 41201": line}, "", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			accountHost(t, "root:x:0:0::/root:/bin/sh\n", "", tc.nss)
 			startFakeSSSD(t, map[string]string{"uid:41201": sid, "sid:" + sid: "41201"})
+			if tc.nslcd {
+				startFakeNSLCD(t, &fakeNSLCD{})
+			}
 			got, known := newFakeNSS(&fakeRun{results: tc.results}).AccountIncarnation(uid, tc.account)
 			if got != tc.want || known != tc.known {
 				t.Fatalf("incarnation = %q, %v; want %q, %v", got, known, tc.want, tc.known)
@@ -217,13 +221,13 @@ func TestAccountIncarnationNamesTheNSSOwner(t *testing.T) {
 // over while SSSD still caches its SID. The incarnation changes, which makes
 // the gateway drop the facts and the guardian record it holds for the uid.
 func TestAccountIncarnationChangesWhenLDAPTakesOverAnSSSDUID(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	const sid = "S-1-5-21-1-1-1-1203"
 	line := commandResult{stdout: []byte("dave:*:41203:41203::/home/dave:/bin/bash\n")}
 	accountHost(t, "root:x:0:0::/root:/bin/sh\n", "", "passwd: files ldap sss\n")
 	startFakeSSSD(t, map[string]string{"uid:41203": sid, "sid:" + sid: "41203"})
-	results := map[string]commandResult{
-		"-s sss passwd 41203": line, "-s ldap group": {stdout: []byte("ldap-users:*:9000:\n")},
-	}
+	results := map[string]commandResult{"-s sss passwd 41203": line}
 	r := newFakeNSS(&fakeRun{results: results})
 	before, known := r.AccountIncarnation(41203, "dave")
 	if !known || before != "sid:"+sid {
@@ -237,8 +241,10 @@ func TestAccountIncarnationChangesWhenLDAPTakesOverAnSSSDUID(t *testing.T) {
 }
 
 // Review of GAP-0551 (loop 2): an account's facts are those of the NSS
-// service that answers its uid, not of SSSD's cached account under a uid a
-// NIS service holds, nor of SSSD's while an LDAP before it cannot answer.
+// service that answers its uid, never SSSD's cached account under a uid a
+// NIS service holds, nor SSSD's while an LDAP before it cannot answer. Since
+// loop 3 the NIS account gets none at all while SSSD still holds an account
+// under its uid: the uid does not tell the two apart (SharedUIDError).
 func TestDirectoryFactsAreTheNSSOwners(t *testing.T) {
 	const sid = "S-1-5-21-1-1-1-1202"
 	line := commandResult{stdout: []byte("carol:*:41202:41202::/home/carol:/bin/bash\n")}
@@ -250,8 +256,9 @@ func TestDirectoryFactsAreTheNSSOwners(t *testing.T) {
 		"passwd 41202": line, "-s nis passwd 41202": line, "-s sss passwd 41202": line,
 	}})
 	facts, err := r.DirectoryFactsWithoutGroupsForUID(41202, time.Now())
-	if err != nil || facts.Source == useridentity.SourceSSSD || facts.Domain != "" || facts.Realm != "" {
-		t.Fatalf("facts of the NIS account = %+v, %v; want none of SSSD's", facts, err)
+	var shared *SharedUIDError
+	if !errors.As(err, &shared) {
+		t.Fatalf("facts of the NIS account = %+v, %v; want none while SSSD holds an account under its uid", facts, err)
 	}
 
 	accountHost(t, "root:x:0:0::/root:/bin/sh\n", "", "passwd: files ldap sss\n")

@@ -40,6 +40,17 @@ const managedHookPeerHomeTTL = 5 * time.Minute
 // cold cache answers it for directory accounts until it is back (GAP-0256).
 const managedHookPeerLookupRetry = 15 * time.Second
 
+// managedHookPeerAccountRecheck is how long a uid's account (name, home and
+// incarnation) is served before a request asks the account database again,
+// while identity facts are on. A directory hands a uid from one account to
+// another without changing /etc/passwd, so the managedHookPeerHomeTTL answer
+// served the facts and the agent identity of the account that held the uid
+// before to the one that holds it now for up to 5 minutes (review of
+// GAP-0551). Requests of one uid share one recheck, and one that the
+// directory cannot answer keeps the last answer (the facts are served
+// through an outage) until managedHookPeerLookupRetry.
+const managedHookPeerAccountRecheck = time.Second
+
 var errManagedHookPeerNoResolver = errors.New("no account resolver")
 
 // managedHookPeerAccountsStamp identifies the state of the local account
@@ -131,6 +142,11 @@ type managedHookPeerHomeCache struct {
 	// this gateway saw hold the uid and the last one, persisted with the
 	// homes and names (agentIncarnation).
 	incarnations map[int]managedHookPeerIncarnations
+	// legacy marks the uids a build before 1.0.4 saw hold an account (the
+	// homes file it wrote names them) for which no account token has been
+	// adopted yet (agentIncarnation). It is kept across restarts with the
+	// homes.
+	legacy map[int]bool
 	// homesFile persists homes and names in the gateway's data directory,
 	// so a gateway that starts while the directory is away still has the
 	// last home and name of each uid and keeps its agent identity
@@ -145,10 +161,25 @@ type managedHookPeerHomeCache struct {
 }
 
 // managedHookPeerIncarnations are the first and the last account token a
-// uid resolved to.
+// uid resolved to. base is agentIncarnationUnproven when the first account
+// this gateway saw hold the uid cannot be shown to be the one older builds
+// saw (agentIncarnation).
 type managedHookPeerIncarnations struct {
 	base, last string
 }
+
+// agentIncarnationUnproven is the base token of a uid whose first account
+// seen after an upgrade from a build that kept no account token cannot be
+// shown to be the account the older build saw: no account holds the uid's
+// agent identities of before, and every account derives its own.
+const agentIncarnationUnproven = "unproven:legacy"
+
+// managedHookPeerHomesFormatKey is the entry of the homes file that marks
+// it written by a build that keeps account tokens (Format 1). Its key is no
+// uid, so every build skips it as an entry. A file without it was written
+// by an older build: each uid it names was seen before account tokens were
+// kept (legacy).
+const managedHookPeerHomesFormatKey = "format"
 
 type managedHookPeerHolder struct {
 	name, home string
@@ -201,6 +232,11 @@ type managedHookPeerLast struct {
 	// 1.0.4 ignore them.
 	BaseIncarnation string `json:"base_incarnation,omitempty"`
 	Incarnation     string `json:"incarnation,omitempty"`
+	// LegacyHolder marks a uid an older build saw for which no account
+	// token was adopted yet (managedHookPeerHomeCache.legacy).
+	LegacyHolder bool `json:"legacy_holder,omitempty"`
+	// Format is set on the managedHookPeerHomesFormatKey entry only.
+	Format int `json:"format,omitempty"`
 }
 
 // loadHomesLocked merges the persisted homes and names under the ones this
@@ -218,10 +254,18 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 	if json.Unmarshal(data, &stored) != nil {
 		return
 	}
+	legacyFile := stored[managedHookPeerHomesFormatKey].Format < 1
 	for key, last := range stored {
 		uid, err := strconv.Atoi(key)
 		if err != nil || uid < 0 {
 			continue
+		}
+		if _, adopted := c.incarnations[uid]; !adopted && (legacyFile || last.LegacyHolder) && !validAccountToken(last.BaseIncarnation) &&
+			len(c.legacy) < managedHookPeerHomesMax {
+			if c.legacy == nil {
+				c.legacy = make(map[int]bool)
+			}
+			c.legacy[uid] = true
 		}
 		if _, known := c.homes[uid]; !known && last.Home != "" &&
 			normalizeManagedHookPeerHome(last.Home) == last.Home && len(c.homes) < managedHookPeerHomesMax {
@@ -267,6 +311,12 @@ func (c *managedHookPeerHomeCache) saveHomesLocked() {
 		last.BaseIncarnation, last.Incarnation = tokens.base, tokens.last
 		stored[strconv.Itoa(uid)] = last
 	}
+	for uid := range c.legacy {
+		last := stored[strconv.Itoa(uid)]
+		last.LegacyHolder = true
+		stored[strconv.Itoa(uid)] = last
+	}
+	stored[managedHookPeerHomesFormatKey] = managedHookPeerLast{Format: 1}
 	data, err := json.Marshal(stored)
 	if err != nil {
 		return
@@ -292,6 +342,20 @@ type managedHookPeerAccount struct {
 	// that could not be told.
 	incarnation      string
 	incarnationKnown bool
+	// checked is when account and incarnation were last confirmed (or,
+	// after a recheck the directory could not answer, when the next one is
+	// due less managedHookPeerAccountRecheck); recheck is closed when the
+	// recheck in flight ends (recheckAccount). Both are guarded by c.mu,
+	// and so are account and the incarnation once a recheck may run.
+	checked time.Time
+	recheck chan struct{}
+}
+
+// rechecksAccounts reports whether account answers are rechecked every
+// managedHookPeerAccountRecheck: while identity facts are on, outside
+// Secure Client (which keeps main's lifetime, #1092).
+func rechecksAccounts() bool {
+	return identityFactsEnabled.Load() && !ManagedEnterpriseActive()
 }
 
 // account resolves uid through the cached platform resolver; false when the
@@ -315,13 +379,23 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 		select {
 		case <-entry.ready:
 			if now.Before(entry.expires) {
+				if entry.ok && rechecksAccounts() && !now.Before(entry.checked.Add(managedHookPeerAccountRecheck)) {
+					resolver := c.resolver
+					c.mu.Unlock()
+					c.recheckAccount(uid, entry, resolver)
+					c.mu.Lock()
+				}
+				account, ok := entry.account, entry.ok
 				c.mu.Unlock()
-				return entry.account, entry.ok
+				return account, ok
 			}
 		default:
 			c.mu.Unlock()
 			<-entry.ready
-			return entry.account, entry.ok
+			c.mu.Lock()
+			account, ok := entry.account, entry.ok
+			c.mu.Unlock()
+			return account, ok
 		}
 	}
 	entry := &managedHookPeerAccount{ready: make(chan struct{})}
@@ -357,9 +431,61 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	c.mu.Lock()
 	entry.account, entry.ok, entry.notFound, entry.expires = account, ok, unixidentity.IsNotFound(err), c.now().Add(retain)
 	entry.incarnation, entry.incarnationKnown = incarnation, incarnationKnown
+	entry.checked = c.now()
 	c.mu.Unlock()
 	close(entry.ready)
 	return account, ok
+}
+
+// recheckAccount asks the account database again for the account of uid
+// that entry holds (managedHookPeerAccountRecheck), and records its answer:
+// another name, home or incarnation then makes noteHolder drop the facts
+// cached for the former account before they are served. Concurrent
+// requests of the uid wait for the one recheck. An answer the directory
+// cannot give (a failed lookup, an incarnation it cannot name) keeps the
+// last one and is asked again after managedHookPeerLookupRetry.
+func (c *managedHookPeerHomeCache) recheckAccount(uid int, entry *managedHookPeerAccount, resolver unixidentity.Resolver) {
+	c.mu.Lock()
+	if wait := entry.recheck; wait != nil {
+		c.mu.Unlock()
+		<-wait
+		return
+	}
+	if c.now().Before(entry.checked.Add(managedHookPeerAccountRecheck)) {
+		c.mu.Unlock()
+		return
+	}
+	done := make(chan struct{})
+	entry.recheck = done
+	c.mu.Unlock()
+	defer close(done)
+
+	account, err := unixidentity.Account{}, errManagedHookPeerNoResolver
+	if resolver != nil {
+		if forget, can := resolver.(interface{ ForgetUID(int) }); can {
+			forget.ForgetUID(uid)
+		}
+		account, err = resolver.LookupUID(uid)
+	}
+	ok := err == nil && account.UID == uid
+	incarnation, incarnationKnown := "", false
+	if ok {
+		incarnation, incarnationKnown = managedHookPeerAccountIncarnation(account)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry.recheck = nil
+	now := c.now()
+	if !ok || !incarnationKnown {
+		entry.checked = now.Add(managedHookPeerLookupRetry - managedHookPeerAccountRecheck)
+		if !ok {
+			return
+		}
+	} else {
+		entry.checked = now
+	}
+	entry.account = account
+	entry.incarnation, entry.incarnationKnown = incarnation, incarnationKnown
 }
 
 // incarnation returns the account incarnation of uid that the last
@@ -373,6 +499,8 @@ func (c *managedHookPeerHomeCache) incarnation(uid int) (string, bool) {
 	}
 	select {
 	case <-entry.ready:
+		c.mu.Lock()
+		defer c.mu.Unlock()
 		return entry.incarnation, entry.incarnationKnown
 	default:
 		return "", false
@@ -732,6 +860,16 @@ func (c *managedHookPeerHomeCache) accountToken(uid int) (string, bool) {
 // IDs (review of GAP-0947). While the token cannot be told (a directory
 // outage) the last one stands, as the last name does. The tokens are kept
 // across restarts with the homes.
+//
+// After an upgrade from a build that kept no token, the account that holds
+// a uid the older build saw when this gateway first sees it is not proved
+// to be the account the older build saw: another domain's account of the
+// same name and home may have taken the uid over in between, and it got
+// the former account's agent IDs, match.agents profile and ledger history
+// (review of GAP-0947, loop 3). It keeps the IDs of before only when its
+// token shows continuity (legacyContinuity); otherwise the base is
+// agentIncarnationUnproven, every account derives its own IDs, and the rows
+// of before are retired.
 func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 	token, known := c.accountToken(uid)
 	c.mu.Lock()
@@ -745,6 +883,10 @@ func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 				return ""
 			}
 			tokens.base = token
+			if c.legacy[uid] && !legacyContinuity(uid, token) {
+				tokens.base = agentIncarnationUnproven
+			}
+			delete(c.legacy, uid)
 		}
 		tokens.last = token
 		if c.incarnations == nil {
@@ -759,6 +901,58 @@ func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 		return ""
 	}
 	return token
+}
+
+// legacyContinuity reports whether token, the first account token seen for
+// a uid an older build saw, shows that its account is the one the older
+// build saw. A token that does not tell accounts of one name and home apart
+// (files, sss, nss:<service>) cannot differ from the older account's either,
+// so this build would give both the same IDs: it shows continuity. A SID
+// does when SSSD's default id mapping derives uid from it (uid = 200000 +
+// slice * 200000 + RID): the uid then belongs to that SID, and an account
+// of another SID never held it. Any other SID (an RFC 2307 uid, winbind) or
+// a listed record (macOS) does not.
+func legacyContinuity(uid int, token string) bool {
+	sid, isSID := strings.CutPrefix(token, "sid:")
+	if !isSID {
+		return !strings.HasPrefix(token, "record:")
+	}
+	const rangeMin, rangeSize = 200000, 200000
+	i := strings.LastIndexByte(sid, '-')
+	if i < 0 {
+		return false
+	}
+	rid, err := strconv.ParseInt(sid[i+1:], 10, 64)
+	return err == nil && rid >= 0 && rid < rangeSize && uid >= rangeMin && int64(uid-rangeMin)%rangeSize == rid
+}
+
+// rowToken is the account token an agent identity row of uid is recorded
+// with: the token of the account that holds the uid now, or while that
+// cannot be told the last one (agentIncarnation). "" when none was ever
+// known.
+func (c *managedHookPeerHomeCache) rowToken(uid int) string {
+	if token, known := c.accountToken(uid); known {
+		return token
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loadHomesLocked()
+	return c.incarnations[uid].last
+}
+
+// holderHistory returns the last account token of uid and whether another
+// account than its holder is known to have held it, or the first holder
+// this gateway saw is not proved to be the one older builds saw: a row of
+// the uid that names no token is then not taken for the holder's.
+func (c *managedHookPeerHomeCache) holderHistory(uid int) (last string, changed bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loadHomesLocked()
+	tokens, seen := c.incarnations[uid]
+	if !seen {
+		return "", false
+	}
+	return tokens.last, tokens.base != tokens.last || tokens.base == agentIncarnationUnproven
 }
 
 // validAccountToken bounds an account token kept or read back.

@@ -19,7 +19,7 @@ import (
 // whichever runs first wins and the other is a no-op. The last_seen index
 // serves the listing's order and its pages.
 var agentIdentitiesDDL = []string{
-	`CREATE TABLE IF NOT EXISTS agent_identities (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0, user_domain TEXT)`,
+	`CREATE TABLE IF NOT EXISTS agent_identities (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0, user_domain TEXT, user_incarnation TEXT)`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identities_last_seen ON agent_identities(last_seen DESC, agent_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identities_connector ON agent_identities(connector)`,
 	// The sessions an agent identity has counted: the count is of distinct
@@ -43,13 +43,18 @@ type AgentIdentityRecord struct {
 	// UserDomain is the useridentity.AccountDomains of the account the
 	// agent ran as when it was last seen: the domains a qualified --user
 	// filter must name to select the row by its uid (inventory.db v7).
-	UserDomain    string    `json:"-"`
-	Connector     string    `json:"connector"`
-	InstallFP     string    `json:"install_fp,omitempty"`
-	MachineHash   string    `json:"machine_hash"`
-	FirstSeen     time.Time `json:"first_seen"`
-	LastSeen      time.Time `json:"last_seen"`
-	LastSessionID string    `json:"last_session_id,omitempty"`
+	UserDomain string `json:"-"`
+	// UserIncarnation is the account token of that account (its account
+	// incarnation or listed record, inventory.db v8): where both sides name
+	// one, it tells two accounts of one uid apart where their domains may
+	// overlap. "" for a row written before, or while none was known.
+	UserIncarnation string    `json:"-"`
+	Connector       string    `json:"connector"`
+	InstallFP       string    `json:"install_fp,omitempty"`
+	MachineHash     string    `json:"machine_hash"`
+	FirstSeen       time.Time `json:"first_seen"`
+	LastSeen        time.Time `json:"last_seen"`
+	LastSessionID   string    `json:"last_session_id,omitempty"`
 	// SessionsSeen is the session count. In an UpsertAgentIdentities batch
 	// it is the number of sessions this process first saw since the previous
 	// flush.
@@ -111,6 +116,12 @@ type AgentIdentityFilter struct {
 	// name, so a row recorded for it matches by id whatever spelling of its
 	// domain User has.
 	UserDomains string
+	// UserIncarnation is the account token of the account UserIDs name, and
+	// HolderChanged reports that another account is known to have held its
+	// uid, so a row that names no token is not taken for its own
+	// (useridentity.AccountFilter.WithAccountIncarnation).
+	UserIncarnation string
+	HolderChanged   bool
 	// RemovedAccount reports whether no account holds a row's user id now
 	// and the domain of a qualified User could have held it: such a User
 	// that resolves to no account (a deleted one) still selects its rows
@@ -128,7 +139,8 @@ type AgentIdentityFilter struct {
 // Account is the compiled user filter (useridentity.AccountFilter). Its
 // MatchesIn takes a row's UserDomain.
 func (f AgentIdentityFilter) Account() useridentity.AccountFilter {
-	return useridentity.NewAccountFilter(f.User, f.UserIDs...).WithAccountDomains(f.UserDomains).WithRemovedAccounts(f.RemovedAccount)
+	return useridentity.NewAccountFilter(f.User, f.UserIDs...).WithAccountDomains(f.UserDomains).
+		WithAccountIncarnation(f.UserIncarnation, f.HolderChanged).WithRemovedAccounts(f.RemovedAccount)
 }
 
 func ensureAgentIdentitiesTable(ctx context.Context, exec interface {
@@ -143,19 +155,22 @@ func ensureAgentIdentitiesTable(ctx context.Context, exec interface {
 }
 
 // restartAnotherAccountsAgentIdentity drops the stored row of rec's agent ID,
-// and the sessions it counted, when the row was recorded for an account of
-// other domains than rec: accounts of one bare name, uid and home in two
-// domains that nothing else tells apart derive one agent ID, and the upsert
-// gave the second account the first one's first_seen, last session and
-// session count (review of GAP-0947). The row then starts again from rec. A
-// side that names no domain (a row written before v7) proves nothing.
+// and the sessions it counted, when the row was recorded for another account
+// than rec: one of another account token, or, where a side names none, of
+// other domains. Accounts of one bare name, uid and home that nothing else
+// tells apart derive one agent ID, and the upsert gave the second account
+// the first one's first_seen, last session and session count (review of
+// GAP-0947). The row then starts again from rec. A side that names neither
+// (a row written before v7) proves nothing.
 func restartAnotherAccountsAgentIdentity(ctx context.Context, tx *sql.Tx, rec AgentIdentityRecord) error {
 	domains := strings.Fields(strings.ToLower(rec.UserDomain))
-	if len(domains) == 0 {
+	incarnation := strings.TrimSpace(rec.UserIncarnation)
+	if len(domains) == 0 && incarnation == "" {
 		return nil
 	}
-	var stored string
-	err := tx.QueryRowContext(ctx, `SELECT COALESCE(user_domain, '') FROM agent_identities WHERE agent_id = ?`, rec.AgentID).Scan(&stored)
+	var stored, storedIncarnation string
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(user_domain, ''), COALESCE(user_incarnation, '') FROM agent_identities WHERE agent_id = ?`,
+		rec.AgentID).Scan(&stored, &storedIncarnation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -163,7 +178,13 @@ func restartAnotherAccountsAgentIdentity(ctx context.Context, tx *sql.Tx, rec Ag
 		return err
 	}
 	previous := strings.Fields(strings.ToLower(stored))
-	if len(previous) == 0 || slices.ContainsFunc(previous, func(domain string) bool { return slices.Contains(domains, domain) }) {
+	switch {
+	case incarnation != "" && storedIncarnation != "":
+		if incarnation == storedIncarnation {
+			return nil
+		}
+	case len(domains) == 0 || len(previous) == 0 ||
+		slices.ContainsFunc(previous, func(domain string) bool { return slices.Contains(domains, domain) }):
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_identity_sessions WHERE agent_id = ?`, rec.AgentID); err != nil {
@@ -202,11 +223,12 @@ func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
 			return err
 		}
 		stmt, err := tx.PrepareContext(ctx, `INSERT INTO agent_identities
-			(agent_id, user_id, user_name, connector, install_fp, machine_hash, first_seen, last_seen, last_session_id, sessions_seen, user_domain)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(agent_id, user_id, user_name, connector, install_fp, machine_hash, first_seen, last_seen, last_session_id, sessions_seen, user_domain, user_incarnation)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(agent_id) DO UPDATE SET
 				user_name = COALESCE(NULLIF(excluded.user_name, ''), agent_identities.user_name),
 				user_domain = COALESCE(NULLIF(excluded.user_domain, ''), agent_identities.user_domain),
+				user_incarnation = COALESCE(NULLIF(excluded.user_incarnation, ''), agent_identities.user_incarnation),
 				first_seen = min(agent_identities.first_seen, excluded.first_seen),
 				last_seen = max(agent_identities.last_seen, excluded.last_seen),
 				last_session_id = CASE
@@ -275,7 +297,7 @@ func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
 			}
 			if _, err := stmt.ExecContext(ctx, rec.AgentID, rec.UserID, rec.UserName, rec.Connector,
 				rec.InstallFP, rec.MachineHash, formatAgentIdentityTime(first), formatAgentIdentityTime(last),
-				lastSessionID, sessions, strings.TrimSpace(rec.UserDomain)); err != nil {
+				lastSessionID, sessions, strings.TrimSpace(rec.UserDomain), strings.TrimSpace(rec.UserIncarnation)); err != nil {
 				return err
 			}
 		}
@@ -366,7 +388,7 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 		}
 	}
 	query := `SELECT agent_id, user_id, COALESCE(user_name, ''), connector, COALESCE(install_fp, ''), machine_hash,
-		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen, COALESCE(user_domain, '') FROM agent_identities` + where +
+		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen, COALESCE(user_domain, ''), COALESCE(user_incarnation, '') FROM agent_identities` + where +
 		` ORDER BY last_seen DESC, agent_id`
 	// The user filter runs in Go (useridentity.AccountFilter), so a
 	// bare name selects a row stored as user@realm or DOMAIN\user, and the
@@ -412,10 +434,10 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 		var rec AgentIdentityRecord
 		var first, last string
 		if err := rows.Scan(&rec.AgentID, &rec.UserID, &rec.UserName, &rec.Connector, &rec.InstallFP,
-			&rec.MachineHash, &first, &last, &rec.LastSessionID, &rec.SessionsSeen, &rec.UserDomain); err != nil {
+			&rec.MachineHash, &first, &last, &rec.LastSessionID, &rec.SessionsSeen, &rec.UserDomain, &rec.UserIncarnation); err != nil {
 			return nil, 0, err
 		}
-		if user != "" && !account.MatchesIn(rec.UserID, rec.UserName, rec.UserDomain) {
+		if user != "" && !account.MatchesIn(rec.UserID, rec.UserName, rec.UserDomain, rec.UserIncarnation) {
 			continue
 		}
 		matched++

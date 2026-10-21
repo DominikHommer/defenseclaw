@@ -600,6 +600,28 @@ var inventoryMigrations = []invMigration{
 			return nil
 		},
 	},
+	{
+		// v8 keeps the account token (account incarnation or listed record)
+		// of the account each agent identity was last seen for: the domains
+		// of two accounts of one uid can overlap (UPNs under one suffix), and
+		// a row without either kept being read as the uid's holder's after
+		// the uid moved (review of GAP-1263, loop 3). Rows written before,
+		// and by a build rolled back to, keep none.
+		description: "v8: record the account token of each agent identity",
+		apply: func(ex invDBExecer) error {
+			var present int
+			if err := ex.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('agent_identities') WHERE name = 'user_incarnation'`).Scan(&present); err != nil {
+				return fmt.Errorf("ai inventory: v8 migration: %w", err)
+			}
+			if present > 0 {
+				return nil
+			}
+			if _, err := ex.Exec(`ALTER TABLE agent_identities ADD COLUMN user_incarnation TEXT`); err != nil {
+				return fmt.Errorf("ai inventory: v8 migration: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 type invMigration struct {

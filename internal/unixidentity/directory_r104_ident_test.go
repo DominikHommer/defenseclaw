@@ -117,6 +117,8 @@ func TestNSSCompatListsItsServices(t *testing.T) {
 // the groups an RFC 2307 directory lists it in, and the directory's name of
 // its primary gid.
 func TestLocalAccountKeepsMemberListDirectoryGroups(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	oldPasswd, oldGroup, oldNSS := localPasswdPath, localGroupPath, nsswitchPath
 	t.Cleanup(func() { localPasswdPath, localGroupPath, nsswitchPath = oldPasswd, oldGroup, oldNSS })
 	dir := t.TempDir()
@@ -259,6 +261,8 @@ func TestSameNameAccountsKeepsCandidateLookupErrors(t *testing.T) {
 // local account fails its groups instead of dropping the groups it lists,
 // so a strict-profile LDAP group is never lost to an outage (fail closed).
 func TestLocalAccountGroupsFailWhenTheDirectoryDoesNotAnswer(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	oldPasswd, oldGroup, oldNSS := localPasswdPath, localGroupPath, nsswitchPath
 	t.Cleanup(func() { localPasswdPath, localGroupPath, nsswitchPath = oldPasswd, oldGroup, oldNSS })
 	dir := t.TempDir()

@@ -108,6 +108,9 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	if facts.UserDomain != "" {
 		rec.UserDomain = facts.UserDomain
 	}
+	if facts.UserIncarnation != "" {
+		rec.UserIncarnation = facts.UserIncarnation
+	}
 	sessionID = strings.TrimSpace(sessionID)
 	if _, sub := r.subSessions[subSessionKey(facts.ID, sessionID)]; sub {
 		sessionID = ""
@@ -500,12 +503,15 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 	}
 	user := strings.TrimSpace(q.Get("user"))
 	ids := adminViewAccountIDs(user)
+	incarnation, holderChanged := adminViewAccountProvenance(ids)
 	filter := inventory.AgentIdentityFilter{
-		User:           user,
-		UserIDs:        ids,
-		UserDomains:    adminViewAccountDomains(ids),
-		RemovedAccount: adminViewRemovedAccount(user),
-		Connector:      strings.ToLower(strings.TrimSpace(q.Get("connector"))),
+		User:            user,
+		UserIDs:         ids,
+		UserDomains:     adminViewAccountDomains(ids),
+		UserIncarnation: incarnation,
+		HolderChanged:   holderChanged,
+		RemovedAccount:  adminViewRemovedAccount(user),
+		Connector:       strings.ToLower(strings.TrimSpace(q.Get("connector"))),
 	}
 	// Write the buffered rows first, so one count of sessions serves the
 	// listing. A failed write leaves them buffered and merged below.
@@ -648,6 +654,9 @@ func mergeAgentIdentityRows(
 		if buffered.UserDomain != "" {
 			rec.UserDomain = buffered.UserDomain
 		}
+		if buffered.UserIncarnation != "" {
+			rec.UserIncarnation = buffered.UserIncarnation
+		}
 	}
 	rows := make([]agentIdentityRow, 0, len(order))
 	for _, id := range order {
@@ -728,11 +737,19 @@ func agentIdentityHeldByAnother(rec inventory.AgentIdentityRecord, holder string
 }
 
 // agentIdentityRecordedInAnotherDomain reports whether rec was recorded for
-// an account of other domains than the account whose facts the gateway holds
-// for its uid now: one bare name in two domains derives one agent ID, so the
-// row CORP\alice's agent left read as OTHER\alice's once OTHER\alice held the
-// uid (review of GAP-1263). A side that names no domain proves nothing.
+// another account than the one that holds its uid now: one of another
+// account token, or, where a side names none, of other domains than the
+// account whose facts the gateway holds for the uid. One bare name in two
+// domains derives one agent ID, so the row CORP\alice's agent left read as
+// OTHER\alice's once OTHER\alice held the uid (review of GAP-1263). Domains
+// alone may overlap (UPNs under one suffix), so the token decides where both
+// sides name one. A side that names neither proves nothing.
 func agentIdentityRecordedInAnotherDomain(rec inventory.AgentIdentityRecord) bool {
+	if recorded := strings.TrimSpace(rec.UserIncarnation); recorded != "" {
+		if current := agentIdentityAccountToken(rec.UserID); current != "" {
+			return current != recorded
+		}
+	}
 	recorded := strings.Fields(rec.UserDomain)
 	current := strings.Fields(agentIdentityAccountDomains(rec.UserID))
 	if len(recorded) == 0 || len(current) == 0 {
@@ -776,6 +793,18 @@ var adminViewAccountIDs = func(user string) []string {
 		return nil
 	}
 	return []string{id}
+}
+
+// adminViewAccountProvenance is the account token of the account ids name
+// (the uid a qualified filter resolves to) and whether another account is
+// known to have held that uid (agentIdentityHolderHistory), for
+// AgentIdentityFilter.UserIncarnation and HolderChanged.
+func adminViewAccountProvenance(ids []string) (string, bool) {
+	if len(ids) != 1 {
+		return "", false
+	}
+	last, changed := agentIdentityHolderHistory(ids[0])
+	return firstNonEmpty(agentIdentityAccountToken(ids[0]), last), changed
 }
 
 // adminViewAccountDomains is the useridentity.AccountDomains of the
@@ -849,7 +878,7 @@ func adminViewKnownDomain(domain, id string, extra ...string) bool {
 }
 
 func agentIdentityMatches(rec inventory.AgentIdentityRecord, filter inventory.AgentIdentityFilter) bool {
-	if filter.User != "" && !filter.Account().MatchesIn(rec.UserID, rec.UserName, rec.UserDomain) {
+	if filter.User != "" && !filter.Account().MatchesIn(rec.UserID, rec.UserName, rec.UserDomain, rec.UserIncarnation) {
 		return false
 	}
 	return filter.Connector == "" || rec.Connector == filter.Connector

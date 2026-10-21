@@ -13,11 +13,9 @@
 package unixidentity
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"net"
 	"os"
@@ -135,15 +133,26 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		Assurance:  useridentity.AssuranceVerified,
 		ResolvedAt: now,
 	}
-	// /etc/passwd is authoritative for a matching local name and uid.
-	// Check it before directory probes so an unavailable backend cannot
-	// make a local account's facts fail.
-	local, localErr := LocalAccounts(r.context())
-	if localErr != nil && !errors.Is(localErr, os.ErrNotExist) {
-		return useridentity.DirectoryFacts{}, localErr
+	// The facts are those of the account NSS answers the uid from, in the
+	// order of the passwd line (accountOwner): with "passwd: sss files" an
+	// SSSD account of the name and uid of a local one is the one NSS names,
+	// and taking the local entry first dropped its SSSD groups and domain.
+	// A local entry that leads the line answers without a directory probe,
+	// so an unavailable backend cannot make a local account's facts fail.
+	// A later service that cannot answer is passed by; a later service that
+	// holds the uid too is another account the uid does not tell from this
+	// one (SharedUIDError, fail closed). A service that holds no account of
+	// the uid at all leaves the facts plain.
+	service, _, ownerErr := r.accountOwner(uid, account.Name)
+	if ownerErr != nil && !IsNotFound(ownerErr) {
+		return useridentity.DirectoryFacts{}, ownerErr
 	}
-	_, isLocal := local[account.Name]
-	isLocal = isLocal && local[account.Name] == uid
+	if ownerErr == nil {
+		if err := r.checkUIDNotShared(uid, service, account); err != nil {
+			return useridentity.DirectoryFacts{}, err
+		}
+	}
+	isLocal := ownerErr == nil && service == "files"
 	// sssd is the connection to the SSSD NSS responder for an SSSD account,
 	// sid the SID SSSD holds for its uid ("" for none) and inDomain the SSSD
 	// domain that holds a user of its name with that SID.
@@ -152,17 +161,11 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		sid, inDomain string
 	)
 	if !isLocal {
-		// The facts are those of the service NSS answers the uid from, in
-		// the order of the passwd line (passwdOwner): a later service that
-		// still holds an older account under the uid, such as SSSD's cache
-		// of an account an LDAP or NIS service took the uid over from, names
-		// another account's SID, domain and groups (review of GAP-0551).
-		// A service DefenseClaw names no directory for (nis, compat) that
-		// answers keeps the facts plain.
-		service, _, ownerErr := r.passwdOwner(uid)
-		if ownerErr != nil && !IsNotFound(ownerErr) {
-			return useridentity.DirectoryFacts{}, ownerErr
-		}
+		// A later service that still holds an older account under the uid,
+		// such as SSSD's cache of an account an LDAP or NIS service took the
+		// uid over from, names another account's SID, domain and groups
+		// (review of GAP-0551). A service DefenseClaw names no directory for
+		// (nis, compat) that answers keeps the facts plain.
 		if known, ok := directoryServices[service]; ok && ownerErr == nil {
 			facts.Directory, facts.Source = known.directory, known.source
 			bare, domain := useridentity.SplitQualifiedName(account.Name)
@@ -924,11 +927,17 @@ var errDirectoryUnconfirmed = errors.New("the directory did not show that it ans
 
 // memberListGroupsOf returns the gids the member-list service (ldap, nis,
 // nisplus) lists account's name in; skip is set when the service holds
-// another account of that name, whose groups those are. An answer that names
-// neither the account nor a group counts only once the service shows it is
-// answering (serviceAnswers): otherwise a strict profile's LDAP group was
-// dropped while nslcd could not reach LDAP, and the account got a weaker
-// profile (review of GAP-0550).
+// another account of that name, whose groups those are. Only a search that
+// completed counts, also one that lists groups: a search across several
+// bases of which one failed lists some groups and leaves out the rest. For
+// LDAP, nslcd itself is asked the same two searches (account by name,
+// groups by member), and it tells a search that completed from one that
+// failed (nslcdSearchesComplete). getent cannot tell them apart for NIS:
+// there, a lookup that names no group is not taken for "in no group" (fail
+// closed). A service that still answered another query (it enumerated an
+// unrelated group) did not show that this one completed: a strict profile's
+// LDAP group was dropped during a partial outage, and the account got a
+// weaker profile (review of GAP-0550).
 func (r *NSSResolver) memberListGroupsOf(service string, account Account) ([]int, bool, error) {
 	holder, err := r.LookupUserInService(service, account.Name)
 	if err != nil && !IsNotFound(err) {
@@ -937,22 +946,38 @@ func (r *NSSResolver) memberListGroupsOf(service string, account Account) ([]int
 	if err == nil && holder.UID != account.UID {
 		return nil, true, nil
 	}
-	answered := err == nil
 	listed, err := r.groupIDsInService(service, account.Name)
 	if err != nil && !IsNotFound(err) {
 		return nil, false, err
 	}
-	if !answered && len(listed) == 0 {
-		if err := r.serviceAnswers(service); err != nil {
-			return nil, false, fmt.Errorf("unixidentity: %s groups of %s: %w", service, account.Name, err)
+	switch {
+	case service == "ldap":
+		if err := nslcdSearchesComplete(r.context(), account.Name); err != nil {
+			return nil, false, fmt.Errorf("unixidentity: ldap groups of %s: %w", account.Name, err)
 		}
+	case len(listed) == 0:
+		return nil, false, fmt.Errorf("unixidentity: %s groups of %s: %s lists none, and getent answers the same when %s did not answer: %w",
+			service, account.Name, service, service, errDirectoryUnconfirmed)
 	}
 	return listed, false, nil
 }
 
+// nslcdSearchesComplete reports, with nil, that nslcd completes the two
+// searches memberListGroupsOf reads through getent for name: its account
+// and the groups that list it as a member.
+func nslcdSearchesComplete(ctx context.Context, name string) error {
+	if _, _, err := nslcdPasswd(ctx, name, false); err != nil {
+		return fmt.Errorf("ldap account %s: %w", name, err)
+	}
+	if _, err := nslcdGroupsByMember(ctx, name); err != nil {
+		return fmt.Errorf("ldap groups listing %s: %w", name, err)
+	}
+	return nil
+}
+
 // confirmMemberListGroups returns ids, the groups all initgroups services
 // list together, once each member-list service among them shows that it
-// answers for account (memberListGroupsOf): the combined answer silently
+// answered for account (memberListGroupsOf): the combined answer silently
 // lacks the groups an unreachable nslcd or ypbind lists.
 func (r *NSSResolver) confirmMemberListGroups(account Account, services []string, ids []int) ([]int, error) {
 	asked := map[string]bool{}
@@ -966,71 +991,6 @@ func (r *NSSResolver) confirmMemberListGroups(account Account, services []string
 		}
 	}
 	return ids, nil
-}
-
-// serviceAnswers reports, with nil, that NSS service lists at least one
-// group or account when asked to enumerate them, which shows that it
-// answers. Only the first entry is read (firstEntry). A directory that does
-// not enumerate (nslcd with nss_disable_enumeration) cannot show it, and its
-// empty answers stay unconfirmed (fail closed).
-func (r *NSSResolver) serviceAnswers(service string) error {
-	if !validServiceName(service) {
-		return fmt.Errorf("unixidentity: invalid NSS service %q", service)
-	}
-	for _, database := range []string{"group", "passwd"} {
-		sample := &firstEntry{}
-		filters := []outputFilter{sample.wrap}
-		if database == "group" {
-			filters = append(filters, withoutGroupMembers)
-		}
-		result, err := r.runner(r.context(), r.path, []string{"-s", service, database}, filters...)
-		line := sample.line
-		if line == "" && err == nil && result.exitCode == getentExitOK {
-			if lines := nonEmptyLines(string(result.stdout)); len(lines) > 0 {
-				line = lines[0]
-			}
-		}
-		if database == "group" {
-			if _, _, ok := parseGroupName(line); ok {
-				return nil
-			}
-		} else if _, parseErr := ParsePasswdLine(line); line != "" && parseErr == nil {
-			return nil
-		}
-	}
-	return fmt.Errorf("unixidentity: NSS service %s lists no group or account: %w", service, errDirectoryUnconfirmed)
-}
-
-// errEnumerationSampled ends an enumeration once its first entry is read.
-var errEnumerationSampled = errors.New("unixidentity: enumeration sampled")
-
-// firstEntry keeps the first line a command writes and fails every write
-// after it, which closes the pipe and ends the command: one entry shows that
-// a directory answers, and listing the rest of a large one would take its
-// time and pass the output limit.
-type firstEntry struct {
-	partial []byte
-	line    string
-	done    bool
-}
-
-func (f *firstEntry) wrap(io.Writer) io.Writer { return f }
-
-func (f *firstEntry) Write(p []byte) (int, error) {
-	if f.done {
-		return 0, errEnumerationSampled
-	}
-	end := bytes.IndexByte(p, '\n')
-	if end < 0 {
-		if len(f.partial)+len(p) > defaultOutputLimit {
-			return 0, errOutputLimit
-		}
-		f.partial = append(f.partial, p...)
-		return len(p), nil
-	}
-	f.line = strings.TrimRight(string(append(f.partial, p[:end]...)), "\r")
-	f.done = true
-	return 0, errEnumerationSampled
 }
 
 // localGroupsListing returns the gids of the /etc/group entries whose member
@@ -1271,14 +1231,18 @@ func QualifiedUserName(ctx context.Context, r Resolver, name string) string {
 // own, and the directory account of each joined domain NSS answers
 // name@domain or NETBIOS\name with. A local and a directory account of one
 // name are two accounts (twins); an answer counts only when its own bare name
-// is that name and its uid is not account's (GAP-1087).
+// is that name and its uid is not account's (GAP-1087). Another account of
+// account's own uid (another service or domain holding it) is a
+// *SharedUIDError: the uid does not tell them apart.
 //
 // NSS answers a bare name with the first service that holds it, so with
 // passwd: files ldap the LDAP alice behind the local one, and the local
 // account behind an SSSD one, showed only when that service was asked on its
-// own. A service's "no such account" counts only when it shows that it
-// answers (passwdServiceAnswers): getent says the same while nslcd, ypbind,
-// winbindd or SSSD cannot answer. The joined domains are the ones realmd
+// own. A service's "no such account" counts only when it is definitive
+// (passwdAbsent): getent says the same while nslcd, ypbind, winbindd or SSSD
+// cannot answer, and SSSD and winbind say it for an account they do not
+// cache while their domain is offline, so they must also report every
+// domain online (sssdDomainsOnline, winbindDomainsOnline). The joined domains are the ones realmd
 // lists together with every other source DefenseClaw can read
 // (sameNameRealms). While a twin may exist that DefenseClaw cannot look up (a
 // service that does not show it answers, a domain list that may be
@@ -1290,10 +1254,24 @@ func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Accou
 	if r == nil || bare == "" {
 		return nil, nil
 	}
+	per, _ := r.(serviceResolver)
+	if per != nil {
+		// Another account of the same uid is no other uid to list, and the
+		// uid does not tell it from this one: the name is refused.
+		var shared *SharedUIDError
+		if err := per.uidNotShared(account.UID, account.Name); errors.As(err, &shared) {
+			return nil, err
+		}
+	}
 	candidates := []string{bare}
 	realms, realmErr := sameNameRealms(ctx)
 	if len(realms) > maxSameNameRealms {
+		// A twin in a domain past the bound would go unasked, so the
+		// answer cannot be that no twin exists.
 		realms = realms[:maxSameNameRealms]
+		if realmErr == nil {
+			realmErr = errTooManyDomains
+		}
 	}
 	for _, realm := range realms {
 		if realm.Domain != "" {
@@ -1311,9 +1289,19 @@ func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Accou
 			lookupErr = err
 		}
 	}
+	var sharedWith []string
 	add := func(found Account) {
 		foundBare, _ := useridentity.SplitQualifiedName(found.Name)
-		if seen[found.UID] || !useridentity.EqualFold(foundBare, bare) {
+		if !useridentity.EqualFold(foundBare, bare) {
+			return
+		}
+		if found.UID == account.UID && !useridentity.EqualFold(found.Name, account.Name) &&
+			!slices.ContainsFunc(sharedWith, func(name string) bool { return useridentity.EqualFold(name, found.Name) }) {
+			// Another name of the same uid: an account of another domain
+			// the uid does not tell from this one.
+			sharedWith = append(sharedWith, found.Name)
+		}
+		if seen[found.UID] {
 			return
 		}
 		seen[found.UID] = true
@@ -1337,7 +1325,6 @@ func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Accou
 	if err != nil {
 		note(err)
 	}
-	per, _ := r.(serviceResolver)
 	for _, service := range services {
 		if !validServiceName(service) {
 			continue
@@ -1354,11 +1341,31 @@ func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Accou
 				note(fmt.Errorf("look up %s in %s: %w", bare, service, lookup))
 			}
 		case IsNotFound(lookup):
-			if answerErr := per.passwdServiceAnswers(service); answerErr != nil {
+			if answerErr := per.passwdAbsent(service, bare, false); answerErr != nil {
 				note(fmt.Errorf("look up %s in %s: %w", bare, service, answerErr))
 			}
 		default:
 			note(fmt.Errorf("look up %s in %s: %w", bare, service, lookup))
+		}
+	}
+	if len(sharedWith) > 0 {
+		holders := []string{account.Name}
+		return nil, &SharedUIDError{UID: account.UID, Accounts: append(holders, sharedWith...)}
+	}
+	// A responder that accepts a connection answers an account it does not
+	// cache with "no such account" also while its domain is offline: SSSD
+	// and winbind then cannot have asked the directory, so a twin there is
+	// ruled out only while every domain they serve is online.
+	if slices.Contains(services, "sss") && sssdConfigured() {
+		if err := sssdDomainsOnline(ctx); err != nil {
+			note(fmt.Errorf("look up %s in sss: %w", bare, err))
+		}
+	}
+	if slices.Contains(services, "winbind") {
+		if _, statErr := os.Stat(sambaConfPath); !errors.Is(statErr, os.ErrNotExist) {
+			if err := winbindDomainsOnline(ctx); err != nil {
+				note(fmt.Errorf("look up %s in winbind: %w", bare, err))
+			}
 		}
 	}
 	if len(twins) == 0 && lookupErr != nil {
@@ -1382,6 +1389,11 @@ var errSSSDDomainsUnread = errors.New("the SSSD configuration cannot be read in 
 // maxSameNameRealms bounds the domains a bare name is qualified with, one
 // lookup each.
 const maxSameNameRealms = 64
+
+// errTooManyDomains is the reason a bare name is refused on a host that
+// serves more domains than SameNameAccounts asks: a twin in one it leaves
+// out would go unseen.
+var errTooManyDomains = fmt.Errorf("the host serves more than %d domains, more than DefenseClaw asks for an account of the same name", maxSameNameRealms)
 
 // sameNameRealms returns the domains SameNameAccounts qualifies a bare name
 // with: the realms realmd lists now, those of fallbackRealms (the realms
@@ -1471,7 +1483,9 @@ var entraIDServices = map[string]bool{"himmelblau": true, "aad": true}
 // sssdSubdomains lists the DNS domains of SSSD's published domain_realm
 // mappings (sssdPubconfKrb5Dir): its AD and IPA domains and the trusted
 // subdomains it discovered. With qualified names SSSD names a subdomain's
-// account name@subdomain, and a bare lookup reaches none of them.
+// account name@subdomain, and a bare lookup reaches none of them. It stops
+// one past maxSameNameRealms, so SameNameAccounts sees that the list does
+// not fit.
 func sssdSubdomains() []string {
 	entries, err := os.ReadDir(sssdPubconfKrb5Dir)
 	if err != nil {
@@ -1499,7 +1513,7 @@ func sssdSubdomains() []string {
 				slices.Contains(out, domain) {
 				continue
 			}
-			if out = append(out, domain); len(out) == maxSameNameRealms {
+			if out = append(out, domain); len(out) > maxSameNameRealms {
 				return out
 			}
 		}
@@ -1559,7 +1573,8 @@ var winbindTrustedDomains = func(ctx context.Context) ([]string, error) {
 }
 
 // parseWbinfoDomains reads the NetBIOS domain names of wbinfo -m output, one
-// per line, without BUILTIN, which holds no user accounts.
+// per line, without BUILTIN, which holds no user accounts. It stops one past
+// maxSameNameRealms, so SameNameAccounts sees that the list does not fit.
 func parseWbinfoDomains(output string) []string {
 	var out []string
 	for _, line := range strings.Split(output, "\n") {
@@ -1567,7 +1582,7 @@ func parseWbinfoDomains(output string) []string {
 		if name == "BUILTIN" || !validNetBIOSCandidate(name) || slices.Contains(out, name) {
 			continue
 		}
-		if out = append(out, name); len(out) == maxSameNameRealms {
+		if out = append(out, name); len(out) > maxSameNameRealms {
 			break
 		}
 	}
@@ -1794,12 +1809,14 @@ func compatIncludes(path string) bool {
 // errNoServiceLookup is a resolver that cannot ask one NSS service.
 var errNoServiceLookup = errors.New("unixidentity: the account resolver cannot ask one NSS service")
 
-// serviceResolver asks one NSS service for an account by name, and tells
-// whether that service's "no such account" is definitive (NSSResolver, and
-// a CachingResolver around one).
+// serviceResolver asks one NSS service for an account by name, tells
+// whether that service's "no such account" is definitive, and whether
+// another account holds a uid too (NSSResolver, and a CachingResolver
+// around one).
 type serviceResolver interface {
 	LookupUserInService(service, name string) (Account, error)
-	passwdServiceAnswers(service string) error
+	passwdAbsent(service, key string, byUID bool) error
+	uidNotShared(uid int, name string) error
 }
 
 // LookupUserInService asks the wrapped resolver's one NSS service; it is not
@@ -1811,20 +1828,29 @@ func (c *CachingResolver) LookupUserInService(service, name string) (Account, er
 	return Account{}, errNoServiceLookup
 }
 
-func (c *CachingResolver) passwdServiceAnswers(service string) error {
+func (c *CachingResolver) passwdAbsent(service, key string, byUID bool) error {
 	if inner, ok := c.inner.(serviceResolver); ok {
-		return inner.passwdServiceAnswers(service)
+		return inner.passwdAbsent(service, key, byUID)
 	}
 	return errNoServiceLookup
 }
 
-// passwdServiceAnswers reports, with nil, that a "no such account" answer of
-// service to a lookup by name is definitive: the service reads local files,
-// the directory it reaches is not configured on this host (no SSSD
-// configuration, no smb.conf), or it shows that it answers: SSSD's NSS
-// responder and winbindd accept a connection, a member-list directory lists
-// an entry (serviceAnswers). Any other service cannot show it.
-func (r *NSSResolver) passwdServiceAnswers(service string) error {
+func (c *CachingResolver) uidNotShared(uid int, name string) error {
+	if inner, ok := c.inner.(serviceResolver); ok {
+		return inner.uidNotShared(uid, name)
+	}
+	return nil
+}
+
+// passwdAbsent reports, with nil, that the "no such account" answer of
+// service to a lookup of key (an account name, or a uid when byUID) is
+// definitive: the service reads local files, the directory it reaches is
+// not configured on this host (no SSSD configuration, no smb.conf), SSSD's
+// NSS responder or winbindd accepts a connection, or nslcd completes the
+// same search and finds nothing (LDAP). getent cannot show it for NIS, nor
+// for a service DefenseClaw has no check for. SameNameAccounts also asks
+// SSSD and winbind whether their domains are online.
+func (r *NSSResolver) passwdAbsent(service, key string, byUID bool) error {
 	switch {
 	case nssLocalPasswdSources[service]:
 		return nil
@@ -1843,25 +1869,34 @@ func (r *NSSResolver) passwdServiceAnswers(service string) error {
 			return nil
 		}
 		return winbindAnswers(r.context())
+	case service == "ldap":
+		holder, found, err := nslcdPasswd(r.context(), key, byUID)
+		if err != nil {
+			return err
+		}
+		if found {
+			return fmt.Errorf("unixidentity: getent found no ldap account %s, but nslcd holds %s: %w", key, holder.Name, errDirectoryUnconfirmed)
+		}
+		return nil
 	case memberListServices[service]:
-		return r.serviceAnswers(service)
+		return fmt.Errorf("unixidentity: getent answers %s %s with no account also when %s did not answer: %w", service, key, service, errDirectoryUnconfirmed)
 	}
 	return fmt.Errorf("unixidentity: cannot tell whether NSS service %s answers: %w: %w", service, errServiceUncheckable, errDirectoryUnconfirmed)
 }
 
 // errServiceUncheckable marks an NSS service DefenseClaw has no way to see
-// answer (passwdServiceAnswers).
+// answer (passwdAbsent).
 var errServiceUncheckable = errors.New("DefenseClaw has no check for this NSS service")
 
 // passwdOwner names the NSS passwd service that holds uid, asking the
 // services of the passwd line in order as glibc does (passwdProviders), with
-// its answer. A service's "no such account" passes the uid on only when the
-// service shows that it answers (passwdServiceAnswers): getent reports an
-// nslcd, ypbind, winbindd or SSSD that cannot answer the same way, and an
-// account a later service still holds under the uid is then not proved to be
-// the one the uid belongs to. A service DefenseClaw has no check for (an
-// Entra ID module, another module) is taken at its word, as before.
-// ErrNotFound when every service says no account holds it.
+// its answer. A service's "no such account" passes the uid on only when it
+// is definitive (passwdAbsent): getent reports an nslcd, ypbind, winbindd or
+// SSSD that cannot answer the same way, and an account a later service
+// still holds under the uid is then not proved to be the one the uid
+// belongs to. A service DefenseClaw has no check for (an Entra ID module,
+// another module) is taken at its word, as before. ErrNotFound when every
+// service says no account holds it.
 func (r *NSSResolver) passwdOwner(uid int) (string, Account, error) {
 	services, err := passwdProviders()
 	if err != nil {
@@ -1878,11 +1913,173 @@ func (r *NSSResolver) passwdOwner(uid int) (string, Account, error) {
 		if !IsNotFound(err) {
 			return "", Account{}, err
 		}
-		if err := r.passwdServiceAnswers(service); err != nil && !errors.Is(err, errServiceUncheckable) {
+		if err := r.passwdAbsent(service, strconv.Itoa(uid), true); err != nil && !errors.Is(err, errServiceUncheckable) {
 			return "", Account{}, fmt.Errorf("unixidentity: NSS service %s holds no uid %d but cannot show that it answers: %w", service, uid, err)
 		}
 	}
 	return "", Account{}, ErrNotFound
+}
+
+// accountOwner is passwdOwner for the account name NSS gives uid. An
+// /etc/passwd entry of that name and uid that leads the passwd line answers
+// without asking a directory, so an unavailable one cannot fail a local
+// account. SSSD's files domain (RHEL 8) answers local accounts itself: an
+// SSSD answer that holds no SID and is the /etc/passwd entry of the uid in
+// every field is that entry, so its owner is files.
+func (r *NSSResolver) accountOwner(uid int, name string) (string, Account, error) {
+	services, err := passwdProviders()
+	if err != nil {
+		return "", Account{}, err
+	}
+	local, hasLocal, err := localPasswdEntryForUID(uid)
+	if err != nil {
+		return "", Account{}, err
+	}
+	if hasLocal && local.Name == name && leadingPasswdService(services) == "files" {
+		return "files", local, nil
+	}
+	service, owner, err := r.passwdOwner(uid)
+	if err != nil {
+		return "", Account{}, err
+	}
+	if hasLocal && !nssLocalPasswdSources[service] {
+		proxied, err := r.servesLocalEntry(service, owner, local)
+		if err != nil {
+			return "", Account{}, err
+		}
+		if proxied {
+			return "files", local, nil
+		}
+	}
+	return service, owner, nil
+}
+
+// leadingPasswdService is the first service glibc asks for an account.
+func leadingPasswdService(services []string) string {
+	for _, service := range services {
+		if validServiceName(service) {
+			return service
+		}
+	}
+	return ""
+}
+
+// servesLocalEntry reports whether account, the answer of service for a uid
+// /etc/passwd holds too, is the local entry local passed on: SSSD's files
+// domain, which holds no SID for it, answering with every field of it.
+func (r *NSSResolver) servesLocalEntry(service string, account, local Account) (bool, error) {
+	if service != "sss" || account != local {
+		return false, nil
+	}
+	sssd, err := dialSSSDNSS(r.context())
+	if err != nil {
+		return false, err
+	}
+	defer sssd.Close()
+	sid, err := sssdAccountSID(sssd, account.UID)
+	if err != nil {
+		return false, err
+	}
+	return sid == "", nil
+}
+
+// localPasswdEntryForUID returns the first /etc/passwd entry of uid, as
+// the files module answers it.
+func localPasswdEntryForUID(uid int) (Account, bool, error) {
+	data, err := readSmallFile(localPasswdPath, 16<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return Account{}, false, nil
+	}
+	if err != nil {
+		return Account{}, false, fmt.Errorf("unixidentity: read %s: %w", localPasswdPath, err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed == "" || strings.HasPrefix(trimmed, "#") ||
+			strings.HasPrefix(trimmed, "+") || strings.HasPrefix(trimmed, "-") {
+			continue
+		}
+		if account, err := ParsePasswdLine(line); err == nil && account.UID == uid {
+			return account, true, nil
+		}
+	}
+	return Account{}, false, nil
+}
+
+// SharedUIDError is a uid that more than one account holds: a local
+// account and a directory account, or accounts of two directories or
+// domains. The kernel gives them one identity, so the facts of the one NSS
+// names first would be served to the other, whose groups and domain then
+// select no profile. Such a uid gets no identity facts (the lookup fails
+// closed), and its bare name is refused in the administrator views.
+type SharedUIDError struct {
+	UID      int
+	Accounts []string
+}
+
+func (e *SharedUIDError) Error() string {
+	return fmt.Sprintf("unixidentity: uid %d is held by more than one account (%s); the uid does not tell them apart, "+
+		"so it gets no identity facts: give each account its own uid", e.UID, strings.Join(e.Accounts, ", "))
+}
+
+// checkUIDNotShared fails with a SharedUIDError when an NSS passwd service
+// after owner, the service that answers uid with account (accountOwner),
+// holds the uid too, or when /etc/passwd holds it while a directory owns
+// it. Services before owner answered that they hold none. Only an answer
+// counts: a directory that does not answer holds no account here, so it
+// cannot fail a local account's facts. Local sources other than files
+// (systemd's synthesized root and nobody) are not asked, and SSSD's files
+// domain passing a local entry on is that entry (servesLocalEntry).
+func (r *NSSResolver) checkUIDNotShared(uid int, owner string, account Account) error {
+	services, err := passwdProviders()
+	if err != nil {
+		return err
+	}
+	local, hasLocal, err := localPasswdEntryForUID(uid)
+	if err != nil {
+		return err
+	}
+	holders := []string{account.Name + " (" + owner + ")"}
+	after := false
+	for _, service := range services {
+		if !validServiceName(service) {
+			continue
+		}
+		if service == owner {
+			after = true
+			continue
+		}
+		if !after || nssLocalPasswdSources[service] {
+			continue
+		}
+		found, err := r.LookupUIDInService(service, uid)
+		if err != nil {
+			continue
+		}
+		if hasLocal {
+			if proxied, err := r.servesLocalEntry(service, found, local); err == nil && proxied {
+				continue
+			}
+		}
+		holders = append(holders, found.Name+" ("+service+")")
+	}
+	if hasLocal && !nssLocalPasswdSources[owner] && slices.Contains(services, "files") {
+		holders = append(holders, local.Name+" (files)")
+	}
+	if len(holders) > 1 {
+		return &SharedUIDError{UID: uid, Accounts: holders}
+	}
+	return nil
+}
+
+// uidNotShared is checkUIDNotShared for the account NSS gives uid under
+// name. An owner it cannot tell checks nothing here: the facts lookup of
+// the uid fails for it on its own.
+func (r *NSSResolver) uidNotShared(uid int, name string) error {
+	service, owner, err := r.accountOwner(uid, name)
+	if err != nil {
+		return nil
+	}
+	return r.checkUIDNotShared(uid, service, owner)
 }
 
 // winbindPipes are the sockets winbindd serves the NSS module on, the
@@ -1905,31 +2102,146 @@ func winbindAnswers(ctx context.Context) error {
 	return fmt.Errorf("unixidentity: winbindd does not answer: %w", errors.Join(errs...))
 }
 
+// sssctlPaths are where SSSD installs sssctl.
+var sssctlPaths = []string{"/usr/sbin/sssctl"}
+
+// sssdDomainsOnline reports, with nil, that every domain SSSD serves is
+// online (sssctl domain-list, then domain-status --online for each), so its
+// "no such account" for an account it does not cache comes from the
+// directory. sssctl answers root only. Tests replace it.
+var sssdDomainsOnline = func(ctx context.Context) error {
+	path, err := firstTrustedTool(sssctlPaths...)
+	if err != nil {
+		return fmt.Errorf("cannot ask SSSD whether its domains are online: %w", err)
+	}
+	listed, err := runTrustedCommand(ctx, path, []string{"domain-list"})
+	if err != nil || listed.exitCode != 0 {
+		return fmt.Errorf("sssctl domain-list failed (it needs root): %v, exit %d", err, listed.exitCode)
+	}
+	domains := nonEmptyLines(string(listed.stdout))
+	switch {
+	case len(domains) == 0:
+		return errors.New("sssctl domain-list lists no domain")
+	case len(domains) > maxSameNameRealms:
+		return errTooManyDomains
+	}
+	for _, domain := range domains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" || strings.HasPrefix(domain, "-") || strings.ContainsAny(domain, " \t/\\") {
+			return fmt.Errorf("sssctl domain-list named %q", domain)
+		}
+		status, err := runTrustedCommand(ctx, path, []string{"domain-status", domain, "--online"})
+		if err != nil || status.exitCode != 0 {
+			return fmt.Errorf("sssctl domain-status %s failed: %v, exit %d", domain, err, status.exitCode)
+		}
+		if !parseSSSDOnline(string(status.stdout)) {
+			return fmt.Errorf("SSSD domain %s is offline", domain)
+		}
+	}
+	return nil
+}
+
+// parseSSSDOnline reads sssctl domain-status --online: "Online status:
+// Online".
+func parseSSSDOnline(output string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if ok && strings.EqualFold(strings.TrimSpace(key), "online status") {
+			return strings.EqualFold(strings.TrimSpace(value), "online")
+		}
+	}
+	return false
+}
+
+// winbindDomainsOnline reports, with nil, that winbind has a connection to
+// every domain it serves (wbinfo --online-status), so its "no such
+// account" comes from the directory. Tests replace it.
+var winbindDomainsOnline = func(ctx context.Context) error {
+	path, err := firstTrustedTool(wbinfoPaths...)
+	if err != nil {
+		return fmt.Errorf("cannot ask winbind whether its domains are online: %w", err)
+	}
+	result, err := runTrustedCommand(ctx, path, []string{"--online-status"})
+	if err != nil || result.exitCode != 0 {
+		return fmt.Errorf("wbinfo --online-status failed: %v, exit %d", err, result.exitCode)
+	}
+	return parseWinbindOnline(string(result.stdout))
+}
+
+// parseWinbindOnline reads wbinfo --online-status, one "DOMAIN : status"
+// line per domain: "active connection" (or "online" from older Samba) for a
+// domain winbind reaches.
+func parseWinbindOnline(output string) error {
+	domains := 0
+	for _, line := range nonEmptyLines(output) {
+		name, status, ok := strings.Cut(line, ":")
+		if !ok {
+			return fmt.Errorf("wbinfo --online-status answered %q", line)
+		}
+		domains++
+		switch strings.ToLower(strings.TrimSpace(status)) {
+		case "active connection", "online":
+		default:
+			return fmt.Errorf("winbind domain %s has no active connection", strings.TrimSpace(name))
+		}
+	}
+	if domains == 0 {
+		return errors.New("wbinfo --online-status lists no domain")
+	}
+	return nil
+}
+
+// winbindUIDSID asks winbind for the SID of the account it maps uid to
+// (wbinfo --uid-to-sid). Tests replace it.
+var winbindUIDSID = func(ctx context.Context, uid int) (string, error) {
+	path, err := firstTrustedTool(wbinfoPaths...)
+	if err != nil {
+		return "", err
+	}
+	result, err := runTrustedCommand(ctx, path, []string{"--uid-to-sid=" + strconv.Itoa(uid)})
+	if err != nil {
+		return "", err
+	}
+	if result.exitCode != 0 {
+		return "", fmt.Errorf("wbinfo --uid-to-sid exited %d", result.exitCode)
+	}
+	sid := strings.TrimSpace(string(result.stdout))
+	if !validSID(sid) {
+		return "", fmt.Errorf("wbinfo --uid-to-sid answered %q", sid)
+	}
+	return sid, nil
+}
+
 // AccountIncarnation names the account that holds uid, where its name, uid
-// and home cannot: "files" for an account of /etc/passwd, and otherwise by
-// the NSS service that answers the uid (passwdOwner): the SID SSSD holds for
-// an SSSD account ("sid:S-1-5-..."), "sss" for one without a SID, and
-// "nss:<service>" for an account of another service (nss:ldap, nss:nis,
-// nss:winbind). Two accounts of one name, uid and home in two domains, one
-// deleted and created again with another SID, or an SSSD account whose uid an
+// and home cannot, by the NSS service that answers the uid (accountOwner):
+// "files" for an account of /etc/passwd; the SID SSSD holds for an SSSD
+// account ("sid:S-1-5-..."), "sss" for one without a SID; the SID winbind
+// maps the uid to for a winbind account; and "nss:<service>" for an account
+// of another service (nss:ldap, nss:nis). Two accounts of one name, uid and
+// home in two domains, one deleted and created again with another SID (an
+// RFC 2307 uid given to the new account), or an SSSD account whose uid an
 // LDAP account took over while SSSD still caches the first one's SID, differ
-// in it, so the gateway does not serve the facts or the guardian record of
-// one to the other (review of GAP-0551). known is false when it cannot tell:
-// a service before the owner cannot show that it answers, the owner names
-// another account than name, or SSSD does not answer.
+// in it, so the gateway does not serve the facts, the guardian record or the
+// agent identity of one to the other (review of GAP-0551). known is false
+// when it cannot tell: a service before the owner cannot show that it
+// answers, the owner names another account than name, or SSSD or winbind
+// does not name the SID.
 func (r *NSSResolver) AccountIncarnation(uid int, name string) (string, bool) {
-	local, err := LocalAccounts(r.context())
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", false
-	}
-	if localUID, ok := local[name]; ok && localUID == uid {
-		return "files", true
-	}
-	service, owner, err := r.passwdOwner(uid)
+	service, owner, err := r.accountOwner(uid, name)
 	if err != nil || owner.Name != name {
 		return "", false
 	}
-	if service != "sss" {
+	switch service {
+	case "files":
+		return "files", true
+	case "winbind":
+		sid, err := winbindUIDSID(r.context(), uid)
+		if err != nil {
+			return "", false
+		}
+		return "sid:" + strings.ToUpper(sid), true
+	case "sss":
+	default:
 		return "nss:" + service, true
 	}
 	sssd, err := dialSSSDNSS(r.context())
