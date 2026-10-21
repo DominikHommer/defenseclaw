@@ -9,38 +9,19 @@ keywords:
   - DefenseClaw configuration
 ---
 
-This is the supported environment-variable catalog generated from [`internal/envvars/registry.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.json). CI checks all `DEFENSECLAW_*` references and direct Fleet/Edge `DCLAW_*` readers against the registry.
+Every environment variable DefenseClaw reads, with defaults, accepted values and the file that reads it. The catalog is generated from `internal/envvars/registry.json`; CI checks every `DEFENSECLAW_*` reference and every direct Fleet and Edge `DCLAW_*` reader against it.
 
-<Callout title="Config v8 observability policy lives in YAML">
-V8 does not use ambient `DEFENSECLAW_OTEL_*`, standard
-`OTEL_EXPORTER_OTLP_*`, or `DEFENSECLAW_DISABLE_REDACTION` values as live
-collection/routing/redaction policy. Destinations refer to credential environment
-variables explicitly through fields such as `token_env`, `bearer_env`, or
-`{env: NAME}`. Entries below described as legacy observability inputs are read
-only by the automatic v7-to-v8 upgrade converter and are retired after their
-effective value is materialized. The generated table names that compatibility
-scope at each such row.
+<Callout title="Observability policy lives in config.yaml">
+Ambient `DEFENSECLAW_OTEL_*`, standard `OTEL_EXPORTER_OTLP_*` and `DEFENSECLAW_DISABLE_REDACTION` values are not live collection, routing or redaction policy. Destinations name credential variables explicitly through fields such as `token_env`, `bearer_env` or `{env: NAME}`. Rows described as legacy observability inputs are read only by the automatic upgrade converter and are retired after their value is materialized.
 </Callout>
 
-<Callout title="See live what's active">
 `defenseclaw doctor` reports active security override flags visible to the CLI process. Inspect the gateway and Edge Connector service environments separately when they run under systemd or another supervisor.
-</Callout>
 
 ## Managed hosts and the environment
 
-On a per-user install the environment is yours, and DefenseClaw reads the
-variables below as written. A **managed standalone** host is different: a
-device on `deployment_mode: managed_enterprise` with `enterprise.profile:
-standalone`, where an administrator owns `config.yaml` and that file is the
-policy. The core `DEFENSECLAW_*` registry policies prevent user-controlled
-opt-outs from weakening managed configuration. Every row has a **Managed host**
-policy. Per-user installs and the Secure Client profile read the raw environment,
-so that policy does not apply to them.
+Per-user installs and the Secure Client profile read the raw environment. A **managed standalone** host (`deployment_mode: managed_enterprise`, `enterprise.profile: standalone`) is different: the administrator owns `config.yaml`, and every row below has a **Managed host** policy that stops user-controlled opt-outs from weakening it.
 
-Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C
-service process. Some can weaken security, such as TLS verification overrides.
-Administrators must control the service environment; the CLI cannot inspect a
-separate systemd service's environment through `defenseclaw doctor`.
+Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C service process, and some (TLS verification overrides) can weaken security. Administrators control the service environment; `defenseclaw doctor` cannot inspect a separate systemd service's environment.
 
 | Managed host | What a managed standalone host does with the value |
 | --- | --- |
@@ -75,14 +56,7 @@ separate systemd service's environment through `defenseclaw doctor`.
   `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise` in a shell only makes that
   process's writers refuse changes (exit code `3`, `This device is managed`).
   It does not enrol the device or apply an administrator's policy.
-- **Settings have a config key where one exists.** The registry points to it:
-  `DEFENSECLAW_REPO` is the deprecated alias of `update.source`,
-  `DEFENSECLAW_NO_UPDATE_CHECK` has `update.check: false`, and
-  `DEFENSECLAW_JUDGE_TRACE` was replaced by `guardrail.judge.trace` (it is read
-  only on the Secure Client integration). `DEFENSECLAW_CUSTOM_PROVIDERS_PATH`
-  names the derived `custom-providers.json`, not an input. See
-  [Configuration: one source of truth](/docs/reference/source-of-truth#environment-variables-and-env)
-  for how the environment fits the model.
+- **Settings have a config key where one exists.** `DEFENSECLAW_REPO` is the deprecated alias of `update.source`, `DEFENSECLAW_NO_UPDATE_CHECK` has `update.check: false`, and `guardrail.judge.trace` replaces `DEFENSECLAW_JUDGE_TRACE` (which is read only on the Secure Client integration). `DEFENSECLAW_CUSTOM_PROVIDERS_PATH` names the derived `custom-providers.json`, not an input. See [Source of truth](/docs/reference/source-of-truth#environment-variables-and-env).
 
 {/* AUTOGEN-BEGIN: env-vars */}
 {/* The block below is auto-generated from `internal/envvars/registry.json` via `scripts/gen_envvars_docs.py`. Edit the JSON, not this file. */}
@@ -553,20 +527,13 @@ On macOS use `/opt/cisco/defenseclaw/etc/config.yaml`. On Windows, set
 in an elevated PowerShell first. See
 [Machine policy status](/docs/enterprise/operations#machine-policy-status).
 
-## When in doubt
+## Check what is active
 
-Run `defenseclaw doctor` to inspect the CLI process environment and core managed-host overrides. For Fleet and Edge services, also inspect the supervisor's environment file and resolved `config.yaml`; doctor cannot read another process's effective environment.
+Run `defenseclaw doctor` to inspect the CLI process environment and core managed-host overrides. For Fleet and Edge services, also inspect the supervisor's environment file and resolved `config.yaml`.
 
 ```bash
 defenseclaw doctor
 defenseclaw keys list
 ```
 
-## Reference
-
-- [`internal/envvars/registry.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.json) — single source of truth.
-- [`cli/defenseclaw/envvars.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/envvars.py) — Python loader.
-- [`internal/envvars/registry.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.go) — Go loader.
-- [Reference → Keys](/docs/reference/keys) — credential resolution order.
-- [Observability → Redaction](/docs/observability/redaction) — v8 profiles and the explicitly labeled v7 compatibility controls.
-- [Reference → Fail modes](/docs/reference/fail-modes) — `DEFENSECLAW_FAIL_MODE` / `DEFENSECLAW_STRICT_AVAILABILITY`.
+See also [Keys](/docs/reference/keys), [Redaction](/docs/reference/redaction), and [Fail modes](/docs/reference/fail-modes) for `DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY`.

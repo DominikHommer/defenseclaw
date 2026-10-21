@@ -1,6 +1,6 @@
 ---
 title: Gateway API
-description: The defenseclaw-gateway sidecar API — its registered route patterns, authentication and CSRF model, inspection verdict shape, the /api/v1/sandbox REST API, and the OpenShell sandbox hook ingress and egress proxy. The handler code is authoritative.
+description: The defenseclaw-gateway HTTP routes, authentication and CSRF, the verdict envelope, the sandbox API and the sandbox listeners.
 keywords:
   - DefenseClaw gateway API
   - defenseclaw-gateway endpoints
@@ -12,25 +12,9 @@ keywords:
   - DefenseClaw egress proxy
 ---
 
-`defenseclaw-gateway` exposes a sidecar management API used by hook scripts,
-connector plugins, the CLI, and the TUI. This page lists every static route
-pattern registered by `APIServer.Run`, the two provider routes installed by
-`registerProviderRoutes`, every built-in connector hook route, and the sandbox
-routes.
+`defenseclaw-gateway` serves a management API to hook scripts, connector plugins, the CLI and the TUI. This page lists the routes registered by `APIServer.Run` (`internal/gateway/api.go`), the two provider routes, every built-in connector hook route and the sandbox routes. It is not an OpenAPI specification: the handlers are authoritative for request and response shapes.
 
-This is **not** an OpenAPI specification. The canonical request and response
-shapes are the handlers in
-[`internal/gateway/api.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/api.go)
-and the files referenced from its `mux.HandleFunc` registrations.
-
-<Callout type="info">
-This page covers the sidecar API on `gateway.api_port`. The separate guardrail
-proxy listener on `guardrail.port` has its own OpenAI-compatible and provider
-routes in `internal/gateway/proxy.go`. The routes that manage OpenShell
-sandboxes are under [Sandbox API](#sandbox-api). The two listeners that
-sandboxes themselves reach, the hook ingress and the egress proxy, are
-described under [Sandbox listeners](#sandbox-listeners).
-</Callout>
+The guardrail proxy on `guardrail.port` has its own OpenAI-compatible and provider routes (`internal/gateway/proxy.go`). Sandbox management is under [Sandbox API](#sandbox-api); the two listeners sandboxes reach are under [Sandbox listeners](#sandbox-listeners).
 
 ## Bind address
 
@@ -39,16 +23,7 @@ described under [Sandbox listeners](#sandbox-listeners).
 | `gateway.api_port` | `18970` | Sidecar API port |
 | `gateway.api_bind` | empty | `127.0.0.1` when empty |
 
-The API binds to loopback unless `gateway.api_bind` names another address.
-(A 0.8.x host that ran the retired standalone sandbox kept it on
-`guardrail.host`, `10.200.0.1`; the upgrade to 1.0 resets that, see
-[Remove a retired standalone sandbox](/docs/sandboxes/guide#remove-a-retired-standalone-sandbox).)
-A non-loopback value expands access
-to the authenticated management surface; protect that listener with host
-firewalling and a deployment-specific network design.
-`gateway.host` and `gateway.port` describe the upstream agent gateway, while
-`guardrail.host`/`guardrail.port` control the separate guardrail proxy
-listener.
+The API binds to loopback unless `gateway.api_bind` names another address. A non-loopback value exposes the authenticated management surface; protect it with host firewalling. `gateway.host` and `gateway.port` are the upstream agent gateway; `guardrail.host` and `guardrail.port` are the guardrail proxy.
 
 ## Auth
 
@@ -95,13 +70,7 @@ OTLP credentials are source-specific for Codex and Claude Code. They send their 
 bearer to `/v1/{logs,metrics,traces}` together with
 `X-DefenseClaw-Source: codex|claudecode`; that header selects and must match the
 scoped credential. Once a scoped token exists for one of those sources, the
-master gateway token is rejected for that source's scoped route. Copilot CLI
-upstream documents optional OTel traces and metrics, but DefenseClaw does not
-configure, authenticate, ingest as a Copilot-native source, or certify that
-surface. Copilot connector telemetry therefore reaches this API through its
-authenticated hook route only. OmniGent's separately documented optional
-native source currently authenticates loopback `/v1/{signal}` requests with
-the master gateway token.
+master gateway token is rejected for that source's scoped route. GitHub Copilot CLI telemetry reaches this API only through its authenticated hook route; DefenseClaw does not configure or ingest Copilot's own OTel.
 
 The token is resolved from one of, in priority order:
 
@@ -110,13 +79,7 @@ The token is resolved from one of, in priority order:
 3. `OPENCLAW_GATEWAY_TOKEN` (legacy fallback for existing installs)
 4. `gateway.token` directly in `~/.defenseclaw/config.yaml`
 
-There is **no** standalone `~/.defenseclaw/gateway-token` file. On first boot
-the sidecar creates `DEFENSECLAW_GATEWAY_TOKEN` in
-`~/.defenseclaw/.env` when neither a supported environment nor dotenv source
-already supplies a token. Rotate a locally managed token with
-`defenseclaw setup rotate-token --yes`; that transaction restarts the gateway
-and refreshes active connector credentials. An externally managed custom
-`gateway.token_env` must be rotated by its owning secret system.
+There is no `~/.defenseclaw/gateway-token` file. On first boot the sidecar creates `DEFENSECLAW_GATEWAY_TOKEN` in `~/.defenseclaw/.env` when no environment or dotenv source supplies one. Rotate a local token with `defenseclaw setup rotate-token --yes`, which restarts the gateway and refreshes active connector credentials; an external `gateway.token_env` is rotated by its owner ([Keys](/docs/reference/keys)).
 
 A request that carries an OpenShell sandbox binding credential (a `dcsb_`
 value in `Authorization`, `X-DefenseClaw-Token`, `X-DC-Auth`, or an OTLP path
@@ -156,36 +119,15 @@ X-DefenseClaw-Client: cli
 | `GET` | `/status` | required | Health, process identity, provenance, an optional connected-gateway hello, legacy singular `connector_mode`, `connector_modes` (one entry per active connector), and the guardrail profile warnings `profile_assignment_warnings` (plus `profile_warnings` on the standalone profile). Used by `defenseclaw status`, the TUI, and Windows `enterprise windows status` and `verify`. |
 | `GET` | `/v1/connectors` | required | Lists every connector registered in the gateway (name, description, source, hook capabilities, tool inspection mode). |
 
-`/health` is unauthenticated by design. Any local process that can reach
-the API port can read it, including another account on a multi-user host.
-The document carries the gateway's config path (which names the owner's
-home directory), the active connectors with per-agent request and block
-counts, and the guardrail, routing and telemetry state, including
-telemetry destinations. In a managed install on the standalone profile it
-also carries `inspection` (whether local and AI Defense inspection are
-active), `directory` while directory lookups fail (how many accounts, since
-when, with neither a reason nor an account name), and
-`user_scoped_credentials.key_ids`, the non-secret SHA-256
-fingerprints of the per-machine keys from which the per-user credentials
-that authenticate right now are derived (the current key, plus a staged or
-retiring one during a key rotation). They let the lifecycle check a key
-rotation; they are not the key IDs the listener proof takes, which are the
-SHA-256 of one user's hook credential. It carries no tokens, key material or request
-content. The guardrail profile warnings name configured groups and
-`DOMAIN\user` selectors, so `/health` gives only their number:
-`profile_assignment_warning_count`, and on the standalone profile
-`profile_warning_count`, each present only when it is not zero. `/status`
-lists the warnings themselves. On Linux and macOS managed installs the hook
-socket also answers `GET /health` with the same document without peer
-authorization; there root alone also gets `profile_assignment_warnings`,
-`profile_warnings` and the uids of the accounts whose directory lookups fail,
-which is how `enterprise linux|macos status` and `verify` read them. Every
-other path there keeps peer authorization. This is accepted so that every
-health consumer works without a credential; see residual R33 in the
-enterprise threat model.
+`/health` is unauthenticated by design: any local process that can reach the API port can read it, including another account on a multi-user host. It carries the config path (which names the owner's home directory), the active connectors with per-agent request and block counts, and the guardrail, routing and telemetry state including destinations. It carries no tokens, key material or request content. On the standalone enterprise profile it also carries:
 
-When `openshell.enabled` is `true`, `/health` includes a `sandbox` subsystem
-for the OpenShell sandbox runtime:
+- `inspection`: whether local and AI Defense inspection are active.
+- `directory`, while directory lookups fail: how many accounts and since when, with no reason or account name.
+- `user_scoped_credentials.key_ids`: non-secret SHA-256 fingerprints of the per-machine keys the current per-user credentials derive from (the current key, plus a staged or retiring one during rotation). They let the lifecycle check a rotation; they are not the key IDs the listener proof takes, which are the SHA-256 of one user's hook credential.
+
+Profile warnings name configured groups and `DOMAIN\user` selectors, so `/health` gives only counts, `profile_assignment_warning_count` and on the standalone profile `profile_warning_count`, each present only when not zero; `/status` lists the warnings. On Linux and macOS managed installs the hook socket also answers `GET /health` with the same document without peer authorization (root alone also gets `profile_assignment_warnings`, `profile_warnings` and the uids of accounts whose directory lookups fail, which `enterprise linux|macos status` and `verify` read); every other path there keeps peer authorization. This is accepted so every health consumer works without a credential (residual R33 in the enterprise threat model).
+
+When `openshell.enabled` is `true`, `/health` includes a `sandbox` subsystem:
 
 - `running`, with the hook ingress and egress proxy addresses in
   `details.ingress` and `details.egress`;
@@ -201,8 +143,7 @@ for the OpenShell sandbox runtime:
   hooks fail closed;
 - `stopped` while the API listener restarts.
 
-Where `openshell.enabled` is `false`, the `sandbox` subsystem is absent from
-`/health`.
+With `openshell.enabled: false` the subsystem is absent.
 
 `GET /status` carries both a singular and a plural connector field so old and new clients keep working on a multi-connector install:
 
@@ -259,8 +200,7 @@ Where `openshell.enabled` is `false`, the `sandbox` subsystem is absent from
   report the effective `observe`/`action` posture; `hook_fail_mode` is the
   effective hook fail mode; `enabled` is the connector's effective guardrail
   enablement; `hook_enforcement` is true for a non-proxy connector in action
-  mode; `enforcement_surface` identifies the proxy, lifecycle-hook, or OmniGent
-  policy API path; `telemetry` lists reported wiring channels; and
+  mode; `enforcement_surface` identifies the proxy or lifecycle-hook path; `telemetry` lists reported wiring channels; and
   `proxy_intercept` is true only for proxy connectors. `mode`,
   `enforcement_surface`, and `proxy_intercept` are derived from the
   connector's declared LLM traffic mode, through the same predicate the
@@ -329,12 +269,12 @@ register a connector hook route.
 | `POST` | `/api/v1/cursor/hook` | Cursor | [`internal/gateway/connector/hook_only.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/hook_only.go) |
 | `POST` | `/api/v1/devin/hook` | Devin | same; native CLI lifecycle events only |
 | `POST` | `/api/v1/copilot/hook` | GitHub Copilot CLI | same |
-| `POST` | `/api/v1/openhands/hook` | OpenHands | same |
+| `POST` | `/api/v1/openhands/hook` | OpenHands (retired connector) | same |
 | `POST` | `/api/v1/antigravity/hook` | Antigravity | same |
 | `POST` | `/api/v1/hermes/hook` | Hermes | same |
 | `POST` | `/api/v1/opencode/hook` | OpenCode | same |
 | `POST` | `/api/v1/amp/hook` | Amp | [`internal/gateway/connector/amp.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/amp.go) |
-| `POST` | `/api/v1/omnigent/hook` | OmniGent | [`internal/gateway/connector/omnigent.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/omnigent.go) |
+| `POST` | `/api/v1/omnigent/hook` | OmniGent (retired connector) | `internal/gateway/connector/omnigent.go` |
 | `POST` | `/api/v1/kiro/hook` | Kiro | [`internal/gateway/connector/kiro.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/kiro.go) |
 
 A connector that is unsupported on the host OS registers no route. In a
@@ -344,11 +284,11 @@ reports its session scan there, authenticated by the hook socket's peer
 credentials or the user's per-user hook token for that connector. On any other
 profile the route answers `404`.
 
-All hook endpoints share a per-IP rate limiter (20 RPS, burst 40 — see `hookLimiter` in api.go). Loopback callers (the on-host hook scripts) are exempt; the limit only applies to remote callers.
+All hook endpoints share a per-IP rate limiter (20 RPS, burst 40, `hookLimiter` in `api.go`). Loopback callers are exempt.
 
 ### Inspection (rate-limited)
 
-The `/api/v1/inspect/*` family is the hot path that connector hooks and the OpenClaw plugin call to score a single tool call, prompt, or completion. Mounted under a sub-mux that wraps the per-IP rate limiter.
+The `/api/v1/inspect/*` family scores a single tool call, prompt or completion for connector hooks and the OpenClaw plugin, behind the per-IP rate limiter.
 
 | Method | Path | Used by | Purpose |
 | --- | --- | --- | --- |
@@ -357,27 +297,9 @@ The `/api/v1/inspect/*` family is the hot path that connector hooks and the Open
 | `POST` | `/api/v1/inspect/response` | Shared hook script | Inspect a model response. |
 | `POST` | `/api/v1/inspect/tool-response` | Shared hook script | Inspect a tool's output before it returns to the agent. |
 
-`/api/v1/inspect/tool` is the existing trusted tool-call entry point; there is
-no client-supplied `is_tool_call` switch and no additional semantic endpoint.
-The authenticated route and its server-side connector identity establish the
-boundary. A request with `tool: "message"` stays in the message lane and is not
-eligible for [structured tool-call CEL rules](/docs/policies/cel/engine).
+`/api/v1/inspect/tool` is the trusted tool-call entry point; there is no client-supplied `is_tool_call` switch. A request with `tool: "message"` stays in the message lane and is not eligible for [structured tool-call CEL rules](/docs/reference/cel/engine).
 
-Single-call semantic findings are available on this inspect route and on
-native pre-tool hooks. Ordered tool chains are stricter: they use durable
-SQLite state only on authenticated `/api/v1/{connector}/hook` events with
-canonical connector and session correlation. Inspect, proxy, router, and OTLP
-traffic never advance a chain. Only a matching authoritative successful result
-can promote an existing pending proposal into a durable successful predecessor.
-A chain can deny only its final step on an enforcement-safe synchronous
-pre-tool event. Post-tool and tool-result events never make the final blocking
-decision.
-See the [stateful connector lifecycle](/docs/policies/cel/tool-call-state) for
-the pairing, state-level, and cutoff contracts.
-Chain matches are `HIGH` severity and retain the connector's effective action
-matrix: default and permissive profiles alert, strict blocks, and eligible
-human-in-the-loop configurations confirm. A durable deny receipt is created
-only when that effective action is `block`.
+Single-call semantic findings are available on this route and on native pre-tool hooks. Ordered tool chains use durable SQLite state only on authenticated `/api/v1/{connector}/hook` events with canonical connector and session correlation; inspect, proxy, router and OTLP traffic never advance a chain. Only a matching authoritative successful result promotes a pending proposal to a successful predecessor. A chain can deny only its final step on an enforcement-safe synchronous pre-tool event; post-tool and tool-result events never make the final blocking decision ([tool-call state](/docs/reference/cel/tool-call-state)). Chain matches are `HIGH` severity and keep the connector's effective action matrix: default and permissive profiles alert, strict blocks, and eligible human-approval (HITL) configurations confirm. A durable deny receipt is created only when the effective action is `block`.
 
 | Ordered chain | Wall-clock window | Event horizon |
 | --- | ---: | ---: |
@@ -388,9 +310,7 @@ only when that effective action is `block`.
 | Sensitive secret read → external egress | 30 minutes | 64 events |
 | Workload identity access → lateral execution | 15 minutes | 32 events |
 
-Chain state contains bounded masks and fingerprints rather than raw commands,
-arguments, paths, endpoints, or tool payloads. Durable deny receipts replay
-the same final decision without duplicating finding telemetry.
+Chain state holds bounded masks and fingerprints, not raw commands, arguments, paths, endpoints or payloads. Durable deny receipts replay the same decision without duplicate finding telemetry.
 
 ### Code & network scanning
 
@@ -418,6 +338,7 @@ the same final decision without duplicating finding telemetry.
 | `POST` | `/skill/enable` | Ask the connected upstream agent gateway to enable a skill by key (`skills.update`). |
 | `POST` | `/plugin/disable` | Ask the connected upstream/OpenClaw gateway to disable a plugin through its config RPC. |
 | `POST` | `/plugin/enable` | Ask the connected upstream/OpenClaw gateway to enable a plugin through its config RPC. |
+| `POST` | `/config/patch` | Body `{path, value}`. Ask the connected upstream gateway to patch its config at `path` (`502` on an RPC failure, `503` when not connected). Registered only on a Secure Client device. |
 
 These routes return `503` when no upstream client object is present and `502`
 when an attempted upstream RPC fails, including a disconnected client. They do
@@ -426,6 +347,12 @@ not perform the CLI's filesystem quarantine/restore workflow.
 The gateway registers these routes and the three inventory routes below only
 when `openclaw` is an active connector, and never on a standalone enterprise
 deployment; elsewhere they return `404`.
+
+### Fleet
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| any | `/api/v1/fleet/...` | The Edge Connector fleet management API, mounted only when the fleet subsystem is configured ([Edge Connector API](/docs/reference/edge-connector/api)). |
 
 ### Inventory
 
@@ -446,7 +373,7 @@ deployment; elsewhere they return `404`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/policy/evaluate` | Dry-run the admission policy with `{domain?: "admission", input: {target_type, target_name, path?, connector?, scan_result?}}`, where `target_type` is `skill`, `mcp` or `plugin` and `scan_result` is `{scanner_name, max_severity, total_findings, exit_code?, scan_error?}`. DefenseClaw adds the `admission:` block for the type and the `asset_policy` block and allow rules from the live generation, and returns `{ok: true, data: <AdmissionOutput>}` with `verdict`, `reason`, `file_action`, `install_action` and `runtime_action`. Rules scoped to a connector match only when the request names it in `input.connector` (the OpenClaw plugin sends `openclaw`). Arbitrary OPA domains and input are rejected. See [Admission and the block/allow list](/docs/policies/admission). |
+| `POST` | `/policy/evaluate` | Dry-run the admission policy with `{domain?: "admission", input: {target_type, target_name, path?, connector?, scan_result?}}`, where `target_type` is `skill`, `mcp` or `plugin` and `scan_result` is `{scanner_name, max_severity, total_findings, exit_code?, scan_error?}`. DefenseClaw adds the `admission:` block for the type and the `asset_policy` block and allow rules from the live generation, and returns `{ok: true, data: <AdmissionOutput>}` with `verdict`, `reason`, `file_action`, `install_action` and `runtime_action`. Rules scoped to a connector match only when the request names it in `input.connector` (the OpenClaw plugin sends `openclaw`). Arbitrary OPA domains and input are rejected. See [Admission](/docs/reference/admission). |
 | `POST` | `/policy/reload` | Rebuild the policy generation now and return `{"status":"reloaded","policy_dir":"...","generation":N,"digest":"sha256:..."}` (the generation and digest that are enforcing now); it also clears the judge cache. The gateway already watches `config.yaml`, the policy assets it names and the rule packs, and applies a valid change on its own, so this only forces a rebuild (for example from a script). A change that fails to build leaves the running generation in place; see [the `policy` object](#the-policy-object). |
 
 ### Guardrail control plane
@@ -461,7 +388,7 @@ deployment; elsewhere they return `404`.
 
 These endpoints read and change the block and allow lists, which are the
 `asset_policy.<type>.denied` and `allowed` rules (and `asset_policy.tool`) in
-`config.yaml`. See [Admission and the block/allow list](/docs/policies/admission).
+`config.yaml`. See [Admission](/docs/reference/admission).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -508,8 +435,7 @@ race with another writer answers `409`.
 | `GET` | `/alerts` | Return recent alert rows. `limit` defaults to 50 and is capped at 500. |
 | `POST` | `/api/v1/alerts/disposition` | Preview or apply an audited alert acknowledgement/disposition operation. |
 
-There is no general audit-history or streaming HTTP route. Read/export history
-through the CLI:
+There is no audit-history or streaming HTTP route. Read history through the CLI:
 
 ```bash
 defenseclaw-gateway audit export --output audit.jsonl     # JSONL of audit_events
@@ -518,7 +444,7 @@ defenseclaw alerts                                          # Recent alerts (pag
 defenseclaw tui                                             # Live dashboard
 ```
 
-Audit export includes the legacy `details` text and, when present, first-class `structured` JSON from `audit_events.structured_json`. Connector hook rows use `schema: "defenseclaw.hook.v1"`; older parsers can still read the mirrored `details_json=` token inside `details`.
+Audit export includes the `details` text and, when present, `structured` JSON from `audit_events.structured_json`. Connector hook rows use `schema: "defenseclaw.hook.v1"`; the mirrored `details_json=` token inside `details` stays readable for older parsers.
 
 ### Runtime control and internal observability bridges
 
@@ -535,7 +461,7 @@ than general-purpose ingestion APIs.
 
 ### AI usage / discovery (AIBOM)
 
-The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) for the operator workflow.
+The continuous AI Discovery surface ([AI Discovery](/docs/reference/ai-discovery)).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -553,12 +479,7 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 
 #### Plane C backend on managed Linux
 
-On a managed Linux computer the Plane C entry of the snapshot carries a
-`backend` object. The same object is in `/health` under
-`ai_runtime.details.planes.c.backend`. `defenseclaw-gateway status` and
-`enterprise linux discovery` read it; the `defenseclaw` command line and TUI do
-not, because the managed packages ship neither in this release. Other computers
-omit it.
+On a managed Linux computer the Plane C entry of the snapshot carries a `backend` object, also in `/health` under `ai_runtime.details.planes.c.backend`. `defenseclaw-gateway status` and `enterprise linux discovery` read it; other computers omit it.
 
 ```json title="GET /health, ai_runtime.details.planes.c.backend (trimmed, values illustrative)"
 {
@@ -588,14 +509,7 @@ omit it.
 
 ### Identity, profiles and IDE inventory
 
-Three read-only routes back the identity features. They answer with the
-gateway token on loopback, like the rest of `/api/v1`. They are what
-`defenseclaw guardrail profile explain`, `defenseclaw agent identities` and
-`defenseclaw agent ide-plugins` call, and what the managed
-`enterprise <os> profile-explain`, `agent-identities` and `ide-plugins`
-commands read with the deployment's service token. Secure Client does not
-register these three routes; each returns `404` there. See
-[Identity and authentication](/docs/enterprise/identity-and-authentication).
+Three read-only routes back `defenseclaw guardrail profile explain`, `defenseclaw agent identities` and `defenseclaw agent ide-plugins`, and the managed `enterprise <os> profile-explain`, `agent-identities` and `ide-plugins` commands (which use the deployment's service token). They answer to the gateway token on loopback. Secure Client does not register them; each returns `404` there ([Identity and authentication](/docs/enterprise/identity-and-authentication)).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -727,9 +641,7 @@ discovery is off, `enabled` is `false` and the lists are empty.
 
 ### ACP guard
 
-`defenseclaw-acp` calls the two signed routes while it mediates an editor's
-agent; the two read routes report the built-in catalog and the configured ACP
-posture. See [ACP guard](/docs/acp-guard).
+`defenseclaw-acp` calls the two signed routes while it mediates an editor's agent; the two read routes report the built-in catalog and the ACP posture ([ACP guard](/docs/acp-guard)).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -777,7 +689,7 @@ rejections.
 | `POST` | `/v1/traces` | Ingest OTLP traces. |
 | `POST` | `/otlp/{source}/{token}/v1/{signal}` | Connector-scoped logs, metrics, or traces for a native exporter that cannot set an auth header. The path token is accepted only over loopback and is removed from route telemetry. |
 
-See [`internal/gateway/otel_ingest.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/otel_ingest.go) for the parsing details and [Local observability](/docs/observability/local-observability) for the operator setup.
+Parsing is in `internal/gateway/otel_ingest.go`; operator setup is on [Local observability](/docs/how-to/local-observability).
 
 ### Sandbox management
 
@@ -838,7 +750,7 @@ Notable behaviours:
   it on structured JSONL and audit/scan rows, but the current
   `ToolInspectVerdict` HTTP schema does not expose `evaluation_id` or
   `rule_ids`. Connector-hook responses do expose both fields, as shown below.
-  See [Observability §1.4](/docs/observability) for the per-surface contract.
+  See [Observability](/docs/reference/observability).
 - **Pattern-rule and CodeGuard decisions populate both representations** for
   backward compatibility. Clean verdicts can omit details, and static, MCP, or
   AID merge paths can add string `findings` without synthesizing matching
@@ -949,13 +861,13 @@ it for `sandbox run`.
 | `harness` | Required. The connector to run, such as `claudecode` or `codex`. |
 | `project` | Required. The absolute host path of the launch folder. In mount mode the daemon checks and mounts it. In copy mode it only labels the sandbox: the CLI stages and uploads the copy after the create, then reports it with `POST …/{name}/workspace`. |
 | `name` | Optional. At most 19 lowercase letters, digits, and `-` (OpenShell 0.1.1 refuses longer names). Empty picks `<folder>-<random>`, the folder name cut to fit. |
-| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `process_tree`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/sandboxes/policy-packs#how-the-effective-policy-is-computed). |
+| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `process_tree`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/reference/sandbox-policy#how-the-effective-policy-is-computed). |
 | `no_snapshot` | Skip the pre-session snapshot of a mounted project, and so undo. |
 | `no_build` | Refuse, with 409 `image_unavailable`, instead of building and hook-checking a missing harness image inside the request. A build can take minutes. |
 | `llm` | The model credential: `profile` (a provider profile the harness supports, such as `defenseclaw-anthropic`), `credentials` (its environment variable names and secret values), and `bedrock_region`. |
 | `credentials` | `--credential` bindings: `name`, `value`, `host`, and `port` (default 443). |
 | `env` | Non-secret environment variables. DefenseClaw, proxy, and loader variables, and variables the harness image pins, are refused. |
-| `repo_policy_digest` | Optional. The digest of the project's [repository policy](/docs/sandboxes/policy-packs#repository-policy-defenseclawsandboxyaml) the client resolved the run with (`Explain.repo_policy.digest`), or `none` when it had none. The daemon reads the file itself and answers `409 conflict` when it changed since. |
+| `repo_policy_digest` | Optional. The digest of the project's [repository policy](/docs/reference/sandbox-policy#repository-policy-defenseclawsandboxyaml) the client resolved the run with (`Explain.repo_policy.digest`), or `none` when it had none. The daemon reads the file itself and answers `409 conflict` when it changed since. |
 
 Secret values in `llm.credentials` and `credentials` go to OpenShell as
 provider credentials. The daemon never stores them or returns them.
@@ -1039,7 +951,7 @@ rejection to `openshell.egress.block`.
 `sandbox` scopes the unblock to one sandbox. Without it, `always` is
 required, and the host is saved to `openshell.egress.unblocked` for every
 sandbox. Only refusals the policy marks unblockable can be lifted; see
-[How a destination is decided](/docs/sandboxes/policy-packs#how-a-destination-is-decided).
+[How a destination is decided](/docs/reference/sandbox-network#how-a-destination-is-decided).
 
 ### Policy explain
 
@@ -1305,38 +1217,8 @@ limits.
   On 80 and 443 the proxy relays only web traffic; other protocols such as
   SSH pass only on ports you add.
 
-**What it decides.** Each sandbox is decided by its own resolved policy: its
-pack, your `openshell` keys, its run options, and the admin constraints.
-Another sandbox's pack, block list, ports, or unblocks never apply to it. The
-unblock and approval checks and the triage of OpenShell connection requests
-ask the same decider, so they never disagree with the proxy. In short:
+**What it decides.** Each sandbox is decided by its own resolved policy (pack, `openshell` keys, run options, admin constraints). Another sandbox's pack, block list, ports or unblocks never apply to it, and the unblock, approval and triage checks ask the same decider as the proxy. The order of rules, and what an allow entry, an unblock and `openshell.admin.allow_unblock: false` change, are on [How a destination is decided](/docs/reference/sandbox-network#how-a-destination-is-decided).
 
-- This machine is never reachable: loopback, its own addresses and names,
-  link-local, cloud metadata, and reserved addresses.
-- Private networks are reachable only when an allow entry names them: an
-  `openshell.egress.allow` entry, the pack's `egress.allow`, or
-  `openshell.admin.egress_allow_only`. An unblock never opens them. With
-  `openshell.admin.allow_unblock: false`, your own entries and those of a
-  custom pack you picked are ignored, so only `egress_allow_only` or a
-  required pack's list can open one; the `how_to_unblock` hint says so.
-- `openshell.admin.egress_block` (a host name there covers its subdomains),
-  a host outside `openshell.admin.egress_allow_only`, and the block list
-  (the pack's and `openshell.egress.block`) are refused, and can't be
-  unblocked.
-- Under `open`, host names are allowed unless the built-in feed of
-  exfiltration and abuse destinations lists them (paste sites, file drops,
-  webhook catchers, tunnels, anonymizers). A destination given as an IP
-  address is blocked, because it would get around the name-based feed. An
-  unblock, or an allow entry that names it, lifts the block.
-- Under `balanced`, only hosts on the allow list are reachable. The rest can
-  be unblocked.
-- Names are resolved by the proxy, and each answer is checked just before the
-  connection, so a DNS answer that changes between check and connect cannot
-  redirect it.
-
-The full order, with what an allow entry, an unblock, and
-`openshell.admin.allow_unblock: false` change, is under
-[How a destination is decided](/docs/sandboxes/policy-packs#how-a-destination-is-decided).
 `POST /api/v1/sandbox/egress/unblock` refuses what can't be unblocked: the
 administrator's lists and `allow_unblock: false` answer `admin_violation`
 ("blocked by your organization's DefenseClaw policy"). The block list,
