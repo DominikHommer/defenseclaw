@@ -247,21 +247,26 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	// cycle: it tells which users can have a changed agent version followed
 	// now, and carries their group membership.
 	var sessions map[string][]string
+	var sessionErr error
 	var groups *windowsEnrollmentGroups
 	if standalone {
-		var sessionErr error
 		sessions, sessionErr = windowsActiveSessionGroups()
 		if sessionErr != nil {
-			logfSafely(opts.Logger, "sessions", fmt.Sprintf("active sessions are unreadable; known rows keep their agent versions and group membership comes from the cache this cycle: %v", sessionErr))
-			sessions = map[string][]string{}
+			logfSafely(opts.Logger, "sessions", fmt.Sprintf("the groups of some active sessions are unreadable; a user whose group decision rests on groups cached at an earlier sign-in keeps their rows and gets no new ones this cycle, and a user whose session was not listed keeps their agent versions: %v", sessionErr))
+			if sessions == nil {
+				sessions = map[string][]string{}
+			}
 		}
-		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, opts.GroupCache, opts.Logger)
+		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, sessionErr, opts.GroupCache, opts.Logger)
 		listed := make(map[string]struct{}, len(profiles))
 		for _, profile := range profiles {
 			listed[canonicalManifestTargetSID(profile.SID)] = struct{}{}
 		}
 		groups.pruneCache(listed)
 	}
+	// The users signed in now whose token groups were not read still have an
+	// active session.
+	unreadSessions, _ := windowsSessionGroupsInDoubt(sessionErr)
 	running := map[string]map[string]string{}
 	for sid, agents := range opts.RunningAgents {
 		if canon := canonicalManifestTargetSID(sid); canon != "" {
@@ -317,7 +322,17 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
 		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() {
-			if groupDecision, groupReason := groups.decide(canonicalManifestTargetSID(profile.SID)); groupDecision != windowsEnrollmentEnrolled {
+			sid := canonicalManifestTargetSID(profile.SID)
+			groupDecision, groupReason, inDoubt := groups.evaluate(sid)
+			if inDoubt && (groupDecision != windowsEnrollmentExcluded || windowsHasPreviousRows(previous, sid)) {
+				// The decision rests on groups cached at an earlier sign-in,
+				// and the user may be signed in now with groups this cycle
+				// could not read: nothing changes for them. Their rows stay,
+				// they get no new ones, and a user without rows whom the
+				// cache excludes stays excluded.
+				groupDecision, groupReason = windowsEnrollmentUndecided, groups.inDoubtReason(sid)
+			}
+			if groupDecision != windowsEnrollmentEnrolled {
 				decision, reason = groupDecision, groupReason
 			}
 		}
@@ -333,6 +348,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			logfSafely(opts.Logger, profile.SID, reason)
 		}
 		_, sessionActive := sessions[canonicalManifestTargetSID(profile.SID)]
+		sessionActive = sessionActive || unreadSessions[canonicalManifestTargetSID(profile.SID)]
 		rowContext := windowsStandaloneRowContext{
 			sessionActive: sessionActive,
 			user:          filepath.Base(filepath.Clean(profile.Home)),
@@ -417,6 +433,18 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	})
 
 	return Manifest{Version: 1, Targets: targets}, nil
+}
+
+// windowsHasPreviousRows reports whether the previous manifest has a row of
+// the canonical SID sid.
+func windowsHasPreviousRows(previous map[string]ManifestTarget, sid string) bool {
+	prefix := sid + "\x00"
+	for key := range previous {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // reportUnenrolledRunningAgents reports each agent session running for the
@@ -1102,9 +1130,10 @@ type windowsUserProfile struct {
 // filters nothing, excluded profiles are skipped, and exempt profiles are
 // kept because their machine-policy hooks still run the foreign-hook guard.
 // A profile whose name-form entries cannot be evaluated (the account lookup
-// failed) is skipped this pass, so a directory outage never touches a user
-// who may be excluded. opts.GroupCache is read, never changed: the
-// enumerator is its only writer.
+// failed), or whose group decision rests on cached groups an unreadable
+// session token puts in doubt, is skipped this pass, so neither a directory
+// outage nor a stale cache ever touches a user who may be excluded.
+// opts.GroupCache is read, never changed: the enumerator is its only writer.
 func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOptions) ([]TargetCredentials, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1116,7 +1145,7 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 	var groups *windowsEnrollmentGroups
 	if len(opts.IncludeGroups)+len(opts.ExcludeGroups) > 0 {
 		sessions, sessionErr := windowsActiveSessionGroups()
-		if sessionErr != nil {
+		if sessions == nil {
 			sessions = map[string][]string{}
 		}
 		cache := NewWindowsEnrollmentGroupCache()
@@ -1128,7 +1157,7 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 				cache.Names[name] = sid
 			}
 		}
-		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, cache, nil)
+		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, sessionErr, cache, nil)
 	}
 	lookupAccount := newWindowsEnrollmentAccountLookup()
 	out := make([]TargetCredentials, 0, len(profiles))

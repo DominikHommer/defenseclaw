@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,6 +57,7 @@ func stubWindowsIdentityLookups(t *testing.T, facts func(sid string), budgets *[
 	t.Helper()
 	previousFacts, previousNames := windowsIdentityDirectoryFacts, windowsIdentityGroupNames
 	t.Cleanup(func() { windowsIdentityDirectoryFacts, windowsIdentityGroupNames = previousFacts, previousNames })
+	t.Cleanup(func() { waitIdentityLookupGateIdle(t, &windowsIdentityLookupGate) })
 	windowsIdentityDirectoryFacts = func(sid string, _ time.Duration) useridentity.DirectoryFacts {
 		if facts != nil {
 			facts(sid)
@@ -167,8 +169,8 @@ func TestWindowsIdentitySpoolPublishesNoRecordForAnExcludedAccount(t *testing.T)
 // an account's directory lookup ran synchronously, so a lookup that stalled
 // held the pass past the cycle's deadline and the other records went
 // unrefreshed. The pass stops waiting at the deadline and keeps the records;
-// a lookup that keeps running counts against a small limit, and at that
-// limit a pass starts no new lookup.
+// a lookup that keeps running holds only its own account: the next pass
+// starts no second lookup of it and refreshes the others.
 func TestWindowsIdentitySpoolStopsWaitingForABlockedLookupAtTheDeadline(t *testing.T) {
 	dir := t.TempDir()
 	oldA, oldB := time.Now().UTC().Add(-50*time.Minute), time.Now().UTC().Add(-time.Minute)
@@ -188,12 +190,7 @@ func TestWindowsIdentitySpoolStopsWaitingForABlockedLookupAtTheDeadline(t *testi
 			<-release // the directory never answers for the oldest account
 		}
 	}, nil)
-	t.Cleanup(func() {
-		close(release)
-		for deadline := time.Now().Add(5 * time.Second); windowsIdentityAbandoned.Load() != 0 && time.Now().Before(deadline); {
-			time.Sleep(5 * time.Millisecond)
-		}
-	})
+	t.Cleanup(func() { close(release) })
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -215,19 +212,110 @@ func TestWindowsIdentitySpoolStopsWaitingForABlockedLookupAtTheDeadline(t *testi
 			t.Fatalf("record of %s = %+v (%v), want it kept as it was", sid, record, err)
 		}
 	}
-	if windowsIdentityAbandoned.Load() != 1 {
-		t.Fatalf("lookups still running = %d, want the blocked one", windowsIdentityAbandoned.Load())
+	if windowsIdentityLookupGate.runningLookups() != 1 {
+		t.Fatalf("lookups still running = %d, want the blocked one", windowsIdentityLookupGate.runningLookups())
 	}
-	windowsIdentityAbandoned.Add(windowsIdentityAbandonedLimit - 1)
 	err = WriteWindowsIdentitySpool(context.Background(), dir, cache, nil, nil, nil, nil)
-	windowsIdentityAbandoned.Add(-(windowsIdentityAbandonedLimit - 1))
-	if !errors.Is(err, errWindowsIdentityLookupsStalled) {
-		t.Fatalf("err = %v at the limit of stalled lookups, want the pass stopped", err)
+	if err == nil || !strings.Contains(err.Error(), errIdentityLookupStillRunning.Error()) {
+		t.Fatalf("err = %v, want the account whose lookup still runs reported", err)
 	}
 	mu.Lock()
 	got = strings.Join(reached, ",")
 	mu.Unlock()
-	if got != testSpoolUserA {
-		t.Fatalf("lookups started for %s at the limit, want none", got)
+	if got != testSpoolUserA+","+testSpoolUserB {
+		t.Fatalf("lookups started for %s, want no second one for the stalled account", got)
+	}
+	if record, err := ReadIdentitySpoolRecord(dir, testSpoolUserA, nil); err != nil || !record.UpdatedAt.Equal(oldA) {
+		t.Fatalf("record of the stalled account = %+v (%v), want it kept", record, err)
+	}
+	if record, err := ReadIdentitySpoolRecord(dir, testSpoolUserB, nil); err != nil || record.UpdatedAt.Equal(oldB) {
+		t.Fatalf("record of the other account = %+v (%v), want it refreshed", record, err)
+	}
+}
+
+// W2B-G-enum review loop 2: the pass took the oldest record first and waited
+// for its lookup until the cycle ended, so an account whose directory never
+// answered kept every later account from being refreshed, and after four
+// cycles the limit of lookups left running stopped every lookup: the other
+// records aged past the gateway's hour and lost their UPN facts. Each
+// account now gets at most windowsIdentityAccountWait, an account whose
+// lookup still runs is skipped with its record kept, and the others are
+// refreshed on every cycle.
+func TestWindowsIdentitySpoolRefreshesOtherAccountsWhileOneLookupNeverReturns(t *testing.T) {
+	dir := t.TempDir()
+	oldA := time.Now().UTC().Add(-50 * time.Minute)
+	writeTestIdentityRecord(t, dir, testSpoolUserA, oldA)
+	writeTestIdentityRecord(t, dir, testSpoolUserB, time.Now().UTC().Add(-40*time.Minute))
+	cache := NewWindowsEnrollmentGroupCache()
+	cache.Users[testSpoolUserA] = []string{}
+	cache.Users[testSpoolUserB] = []string{}
+	previousWait := windowsIdentityAccountWait
+	t.Cleanup(func() { windowsIdentityAccountWait = previousWait })
+	windowsIdentityAccountWait = 50 * time.Millisecond
+	release := make(chan struct{})
+	var callsA, callsB atomic.Int32
+	stubWindowsIdentityLookups(t, func(sid string) {
+		switch sid {
+		case testSpoolUserA:
+			callsA.Add(1)
+			<-release // the directory never answers for A
+		case testSpoolUserB:
+			callsB.Add(1)
+		}
+	}, nil)
+	t.Cleanup(func() { close(release) })
+	for cycle := 1; cycle <= 6; cycle++ {
+		before := time.Now().UTC()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := WriteWindowsIdentitySpool(ctx, dir, cache, nil, nil, nil, nil)
+		cancel()
+		if err == nil || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), testSpoolUserA) {
+			t.Fatalf("cycle %d: err = %v, want only A reported unanswered, not the cycle stopped", cycle, err)
+		}
+		if record, err := ReadIdentitySpoolRecord(dir, testSpoolUserB, nil); err != nil || record.UpdatedAt.Before(before) {
+			t.Fatalf("cycle %d: record of B = %+v (%v), want it refreshed", cycle, record, err)
+		}
+		if record, err := ReadIdentitySpoolRecord(dir, testSpoolUserA, nil); err != nil || !record.UpdatedAt.Equal(oldA) {
+			t.Fatalf("cycle %d: record of A = %+v (%v), want it kept", cycle, record, err)
+		}
+	}
+	if callsA.Load() != 1 || callsB.Load() != 6 {
+		t.Fatalf("lookups started: A %d, B %d; want one for A while it runs and one for B per cycle", callsA.Load(), callsB.Load())
+	}
+}
+
+// The variant where the directory answers for A, but after the time a cycle
+// has left: once A's lookup has not answered in time, the pass takes A after
+// the others, so it cannot use up every cycle.
+func TestWindowsIdentitySpoolTakesASlowAccountAfterTheOthers(t *testing.T) {
+	dir := t.TempDir()
+	writeTestIdentityRecord(t, dir, testSpoolUserA, time.Now().UTC().Add(-50*time.Minute))
+	writeTestIdentityRecord(t, dir, testSpoolUserB, time.Now().UTC().Add(-40*time.Minute))
+	cache := NewWindowsEnrollmentGroupCache()
+	cache.Users[testSpoolUserA] = []string{}
+	cache.Users[testSpoolUserB] = []string{}
+	stubWindowsIdentityLookups(t, func(sid string) {
+		if sid == testSpoolUserA {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}, nil)
+	for cycle := 1; cycle <= 3; cycle++ {
+		before := time.Now().UTC()
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		err := WriteWindowsIdentitySpool(ctx, dir, cache, nil, nil, nil, nil)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("cycle %d: err = %v, want the cycle ended while A was resolved", cycle, err)
+		}
+		record, readErr := ReadIdentitySpoolRecord(dir, testSpoolUserB, nil)
+		if refreshed := readErr == nil && !record.UpdatedAt.Before(before); refreshed != (cycle > 1) {
+			t.Fatalf("cycle %d: B refreshed = %v (%+v, %v); want it refreshed once A has been late", cycle, refreshed, record, readErr)
+		}
+		// A's lookup answers before the next cycle starts.
+		for deadline := time.Now().Add(5 * time.Second); windowsIdentityLookupGate.runningLookups() != 0; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("A's lookup did not return")
+			}
+		}
 	}
 }

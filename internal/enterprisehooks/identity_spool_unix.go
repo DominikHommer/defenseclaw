@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -274,7 +273,7 @@ func identitySpoolDirectoryDeparture(ctx context.Context, dir, name string) iden
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
 	defer cancel()
-	account, err := identitySpoolBounded(lookupCtx, func(ctx context.Context) (unixidentity.Account, error) {
+	account, err := identityLookupGated(lookupCtx, &identitySpoolDepartureGate, key, func(ctx context.Context) (unixidentity.Account, error) {
 		return identitySpoolLookupUID(ctx, uid)
 	})
 	switch {
@@ -285,7 +284,7 @@ func identitySpoolDirectoryDeparture(ctx context.Context, dir, name string) iden
 	case account.UID != uid || (record.User != "" && !strings.EqualFold(account.Name, record.User)):
 		return identitySpoolDepartureOther
 	}
-	fresh, err := identitySpoolBounded(lookupCtx, func(ctx context.Context) (IdentitySpoolRecord, error) {
+	fresh, err := identityLookupGated(lookupCtx, &identitySpoolDepartureGate, key, func(ctx context.Context) (IdentitySpoolRecord, error) {
 		return identitySpoolCollect(ctx, IdentitySpoolAccount{UID: uid, User: account.Name}, time.Now().UTC())
 	})
 	if lookupCtx.Err() != nil || (err != nil && fresh.Key == "") {
@@ -340,47 +339,11 @@ var identitySpoolLookupUID = func(ctx context.Context, uid int) (unixidentity.Ac
 	return unixidentity.Default(ctx).LookupUID(uid)
 }
 
-// identitySpoolAbandonedLimit bounds the departure lookups still running
-// after their pass stopped waiting for them (an Open Directory or NSS call
-// that ignores its deadline): at the limit no new one starts until one ends.
-const identitySpoolAbandonedLimit = 4
-
-// identitySpoolAbandoned counts those lookups.
-var identitySpoolAbandoned atomic.Int32
-
-// errIdentitySpoolLookupsStalled is a departure lookup not started because
-// identitySpoolAbandonedLimit lookups of earlier passes still run.
-var errIdentitySpoolLookupsStalled = errors.New("identity spool: earlier directory lookups are still running")
-
-// identitySpoolBounded runs lookup and waits for it only until ctx ends. A
-// lookup that does not stop with ctx is left to finish on its own, counted
-// in identitySpoolAbandoned, and its answer is not used.
-func identitySpoolBounded[T any](ctx context.Context, lookup func(context.Context) (T, error)) (T, error) {
-	var zero T
-	if identitySpoolAbandoned.Load() >= identitySpoolAbandonedLimit {
-		return zero, errIdentitySpoolLookupsStalled
-	}
-	type answer struct {
-		value T
-		err   error
-	}
-	done := make(chan answer, 1)
-	go func() {
-		value, err := lookup(ctx)
-		done <- answer{value, err}
-	}()
-	select {
-	case got := <-done:
-		return got.value, got.err
-	case <-ctx.Done():
-		identitySpoolAbandoned.Add(1)
-		go func() {
-			<-done
-			identitySpoolAbandoned.Add(-1)
-		}()
-		return zero, ctx.Err()
-	}
-}
+// identitySpoolDepartureGate holds the departure lookups of the passes, by
+// uid: a lookup that does not stop with its deadline (an Open Directory or
+// NSS call) is left to finish on its own, and until it returns only its own
+// account's check is skipped (identityLookupGated).
+var identitySpoolDepartureGate identityLookupGate
 
 // identitySpoolOmitted holds, per spool directory, the young directory
 // records the last successful pass did not list although their directory

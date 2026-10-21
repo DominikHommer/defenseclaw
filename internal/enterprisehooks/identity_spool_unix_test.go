@@ -591,19 +591,23 @@ func TestIdentitySpoolFailedLookupDoesNotKeepAnotherDomainsUPN(t *testing.T) {
 // without the pass context, so a slow NSS or Open Directory lookup held the
 // pass, and the spool refreshes after it, past its deadline. They now end
 // with the pass; a record whose check did not finish stays with its mark, so
-// its removal is only deferred; and lookups that ignore their deadline are
-// capped.
+// its removal is only deferred; and a lookup that ignores its deadline
+// holds only its own account's checks until it returns.
 func TestIdentitySpoolDepartureChecksEndWithThePass(t *testing.T) {
 	const aliceUID, bobUID = 94401421, 94401422
 	dir := t.TempDir()
 	previousCollect, previousLookup := identitySpoolCollect, identitySpoolLookupUID
-	release := make(chan struct{})
-	t.Cleanup(func() {
-		close(release)
-		identitySpoolCollect, identitySpoolLookupUID = previousCollect, previousLookup
-		for deadline := time.Now().Add(5 * time.Second); identitySpoolAbandoned.Load() != 0 && time.Now().Before(deadline); {
-			time.Sleep(10 * time.Millisecond)
+	release, released := make(chan struct{}), false
+	releaseLookups := func() {
+		if !released {
+			released = true
+			close(release)
 		}
+	}
+	t.Cleanup(func() {
+		releaseLookups()
+		waitIdentityLookupGateIdle(t, &identitySpoolDepartureGate)
+		identitySpoolCollect, identitySpoolLookupUID = previousCollect, previousLookup
 	})
 	identitySpoolCollect = func(_ context.Context, account IdentitySpoolAccount, _ time.Time) (IdentitySpoolRecord, error) {
 		return testDirectoryRecord(account.UID, account.User, "dclab.test"), nil
@@ -641,20 +645,75 @@ func TestIdentitySpoolDepartureChecksEndWithThePass(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("pass 2 waited for a blocked departure lookup past its deadline")
 	}
-	if !has() || identitySpoolAbandoned.Load() != 1 {
-		t.Fatalf("pass 2: bob kept %v, lookups left running %d; want the record kept and one lookup counted", has(), identitySpoolAbandoned.Load())
+	if running := identitySpoolDepartureGate.runningLookups(); !has() || running != 1 {
+		t.Fatalf("pass 2: bob kept %v, lookups left running %d; want the record kept and one lookup counted", has(), running)
 	}
-	// At the cap no lookup starts and nothing is removed.
-	identitySpoolAbandoned.Add(identitySpoolAbandonedLimit - 1)
+	// While that lookup runs, no second lookup of bob starts and his record
+	// stays.
 	blocked.Store(false)
 	before := calls.Load()
 	if err := WriteIdentitySpool(context.Background(), dir, alice, nil, nil); err != nil || !has() || calls.Load() != before {
-		t.Fatalf("at the cap: err %v, bob kept %v, lookups started %d; want none started and the record kept", err, has(), calls.Load()-before)
+		t.Fatalf("while bob's lookup runs: err %v, bob kept %v, lookups started %d; want none started and the record kept", err, has(), calls.Load()-before)
 	}
-	identitySpoolAbandoned.Add(-(identitySpoolAbandonedLimit - 1))
+	releaseLookups()
+	waitIdentityLookupGateIdle(t, &identitySpoolDepartureGate)
 	// The mark survived both: the next pass that finds the uid gone removes
 	// the record.
 	if err := WriteIdentitySpool(context.Background(), dir, alice, nil, nil); err != nil || has() {
 		t.Fatalf("pass after the cut-short checks: err %v, bob kept %v; want the record removed", err, has())
+	}
+}
+
+// W2B-G-enum review loop 2: a departure lookup that never returned was
+// started again on every pass and counted against one limit shared by every
+// account, so after four passes no departure check ran for anyone: a record
+// whose uid now names another account kept its UPN facts until it aged out.
+// Now a lookup still running holds only its own account: bob's record stays
+// with its mark, and carol's uid, which no longer resolves, is still checked
+// and her record removed.
+func TestIdentitySpoolDepartureLookupThatNeverReturnsHoldsOnlyItsAccount(t *testing.T) {
+	const aliceUID, bobUID, carolUID = 94401431, 94401432, 94401433
+	dir := t.TempDir()
+	previousCollect, previousLookup := identitySpoolCollect, identitySpoolLookupUID
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		close(release)
+		waitIdentityLookupGateIdle(t, &identitySpoolDepartureGate)
+		identitySpoolCollect, identitySpoolLookupUID = previousCollect, previousLookup
+	})
+	identitySpoolCollect = func(_ context.Context, account IdentitySpoolAccount, _ time.Time) (IdentitySpoolRecord, error) {
+		return testDirectoryRecord(account.UID, account.User, "dclab.test"), nil
+	}
+	var bobCalls atomic.Int32
+	identitySpoolLookupUID = func(_ context.Context, uid int) (unixidentity.Account, error) {
+		if uid == bobUID {
+			bobCalls.Add(1)
+			<-release // an Open Directory call that ignores its deadline
+		}
+		return unixidentity.Account{}, unixidentity.ErrNotFound
+	}
+	writeTestSpoolRecord(t, dir, testDirectoryRecord(bobUID, "dcad-bob", "dclab.test"))
+	writeTestSpoolRecord(t, dir, testDirectoryRecord(carolUID, "dcad-carol", "dclab.test"))
+	alice := []IdentitySpoolAccount{{UID: aliceUID, User: "dcad-alice"}}
+	has := func(uid int) bool {
+		_, err := os.Stat(filepath.Join(dir, strconv.Itoa(uid)+".json"))
+		return err == nil
+	}
+	for pass := 1; pass <= 6; pass++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		err := WriteIdentitySpool(ctx, dir, alice, nil, nil)
+		cancel()
+		if err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if !has(bobUID) {
+			t.Fatalf("pass %d: bob's record was removed while his check never finished", pass)
+		}
+	}
+	if has(carolUID) {
+		t.Fatal("carol's record stays: her departure check never ran while bob's lookup was stuck")
+	}
+	if bobCalls.Load() != 1 {
+		t.Fatalf("bob's lookups started = %d, want one while it runs", bobCalls.Load())
 	}
 }

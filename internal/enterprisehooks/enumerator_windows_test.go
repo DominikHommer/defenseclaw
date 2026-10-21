@@ -1264,6 +1264,7 @@ func stubWindowsSessionAPI(t *testing.T, sessions []windowsSession, tokens map[u
 		}
 		return tokens[id], nil
 	}
+	windowsSessionAPI.tokenGroups = func(windows.Token) ([]string, error) { return []string{}, nil }
 	windowsSessionAPI.close = func(windows.Token) { closed++ }
 	return &closed
 }
@@ -1305,9 +1306,11 @@ func TestReadWindowsSignedInSessionUsersReportsASessionItCannotIdentify(t *testi
 			t.Fatalf("%s: users %v, err %v, tokens closed %d; want the identified user, an incomplete-answer error and %d closed",
 				tc.name, users, err, *closed, tc.wantClose)
 		}
-		// The active-session groups keep the sessions they could read.
-		if _, err := readWindowsActiveSessionGroups(); err != nil {
-			t.Fatalf("%s: active-session groups: %v", tc.name, err)
+		// The active-session groups keep the sessions they could read, and
+		// say when an active session's user was not identified.
+		groups, err := readWindowsActiveSessionGroups()
+		if _, ok := groups[canonicalManifestTargetSID(testLocalUserSID)]; !ok || errors.Is(err, errWindowsSessionsUnidentified) != (tc.session.state == windows.WTSActive) {
+			t.Fatalf("%s: active-session groups %v, err %v", tc.name, groups, err)
 		}
 	}
 }
