@@ -41,7 +41,7 @@ On Windows, run the same commands in PowerShell. Review observed events before y
 | --- | --- | --- |
 | User hooks | `~/.config/devin/config.json`, under `hooks` | `%APPDATA%\devin\config.json`, under `hooks` |
 | Project hooks (pinned workspace only) | `<workspace>/.devin/hooks.v1.json` | same |
-| Hook program | `~/.defenseclaw/hooks` | `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` |
+| Hook program | `~/.defenseclaw/hooks` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
 Other hooks and JSONC content in those files are kept.
 

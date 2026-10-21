@@ -40,7 +40,7 @@ On Windows, run the same commands in PowerShell. Quit and reopen Codex afterward
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
 | Hooks, OpenTelemetry, notify | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
-| Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` |
+| Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 | Proxy bypass for telemetry | `$CODEX_HOME/.env` (marked block, only when a proxy is set) | not written |
 
@@ -54,7 +54,15 @@ Everything outside DefenseClaw's marked fields is kept. Teardown restores the ba
 - After you rotate a model key, or after an upgrade, run `codex app-server daemon restart`. The daemon keeps the environment and telemetry credential it started with.
 - Each gateway start on Windows runs Codex's app-server once to read its requirements. That process contacts OpenAI.
 
+## On a managed computer
+
+The per-user commands on this page do not run on a computer with a standalone enterprise install. There `defenseclaw` offers only `sandbox` commands: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows the managed `defenseclaw` refuses `setup codex` and `setup remove`, and has no `guardrail` group. Protected requirements pin `[features] hooks = true`, so `codex features disable hooks` writes the user's config but hooks stay on.
+
+The administrator manages Codex in the managed `config.yaml`. `guardrail.connectors.codex: {}` adds it, the connector's `mode` and `hook_fail_mode` tune it, and `guardrail.connectors.codex.enabled: false` removes it. Apply the change as in [Change the config](/docs/enterprise/lifecycle#change-the-config), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/machine-policy#inspect-export-and-verify)).
+
 ## Turn it off
+
+These commands are for a per-user install.
 
 ```bash
 defenseclaw guardrail disable --connector codex --yes

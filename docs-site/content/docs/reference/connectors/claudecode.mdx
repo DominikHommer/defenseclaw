@@ -103,7 +103,7 @@ Native OTLP uses managed loopback exporter settings with a Claude-scoped bearer.
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
 | Settings | `~/.claude/settings.json` | `%CLAUDE_CONFIG_DIR%\settings.json` (default `%USERPROFILE%\.claude`) |
-| Hook program | `~/.defenseclaw/hooks/claude-code-hook.sh` | `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` |
+| Hook program | `~/.defenseclaw/hooks/claude-code-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Credential sidecars | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 
 See the [Windows path reference](/docs/reference/paths/). DefenseClaw stores a hash-checked backup of `settings.json`. Teardown restores it byte for byte when the identity still matches. If the file drifted, it removes only DefenseClaw's entries.
@@ -131,7 +131,7 @@ Claude Code gets machine policy instead of the per-user files. The `managed-sett
 | macOS | `/Library/Application Support/ClaudeCode` |
 | Windows | `C:\Program Files\ClaudeCode` |
 
-The floor file sets `requiredMinimumVersion` to 2.1.154, the lowest version with a verified DefenseClaw hook contract. Claude Code reads that setting only from 2.1.163, so builds older than 2.1.163 ignore it. Use application control to keep older builds off a host. Your own `requiredMinimumVersion` wins, and a file at that name that DefenseClaw did not write is yours: it is never rewritten or removed. Claude Code builds before 2.1.242 read the key only from a higher-precedence source (HKLM `Settings`, macOS managed preferences), which must carry it itself. See [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor).
+The machine-wide drop-in carries one hook contract for every account, not the version-selected one above. On Linux and macOS it is the 28-event `claudecode-hooks-v1` contract, with no `DirectoryAdded`, whatever Claude Code version a user runs, and the floor file sets `requiredMinimumVersion` to 2.1.154, the lowest version with a verified DefenseClaw hook contract. On standalone Windows the drop-in uses the 29-event `claudecode-hooks-v2` contract and the floor rises to 2.1.219 when every enrolled account runs Claude Code 2.1.219 or later; `enterprise policy show` and `verify` name the reason. Claude Code reads that setting only from 2.1.163, so builds older than 2.1.163 ignore it. Use application control to keep older builds off a host. Your own `requiredMinimumVersion` wins, and a file at that name that DefenseClaw did not write is yours: it is never rewritten or removed. Claude Code builds before 2.1.242 read the key only from a higher-precedence source (HKLM `Settings`, macOS managed preferences), which must carry it itself. See [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor).
 
 ## OpenShell sandbox
 

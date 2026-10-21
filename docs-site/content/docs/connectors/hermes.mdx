@@ -44,7 +44,7 @@ Then reload or restart every Hermes host. Hermes registers hooks in each running
 | Hooks | `$HERMES_HOME/config.yaml`, `hooks` block (Windows default `%LOCALAPPDATA%\hermes\config.yaml`) |
 | Approvals | `shell-hooks-allowlist.json` in the same folder |
 | Hook program, macOS and Linux | `~/.defenseclaw/hooks/hermes-hook.sh` |
-| Hook program, Windows | `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` |
+| Hook program, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
 ## Limits
 
@@ -54,7 +54,15 @@ Then reload or restart every Hermes host. Hermes registers hooks in each running
 - `hermes --safe-mode`, or a `HERMES_HOME` without the `hooks` block, runs with no DefenseClaw hook.
 - A host that is not reloaded keeps its old state, also after you turn the connector off.
 
+## On a managed computer
+
+The per-user commands on this page do not run on a computer with a standalone enterprise install. There `defenseclaw` offers only `sandbox` commands: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows the managed `defenseclaw` refuses `setup hermes` and `setup remove`, and has no `guardrail` group. Hermes is protected per user: the guardian writes the hooks and exact approvals into each enrolled account's Hermes config.
+
+The administrator manages Hermes in the managed `config.yaml`. `guardrail.connectors.hermes: {}` adds it for the accounts that [enrollment](/docs/enterprise/enrollment) selects, the connector's `mode` and `hook_fail_mode` tune it, and `guardrail.connectors.hermes.enabled: false` removes it. Apply the change as in [Change the config](/docs/enterprise/lifecycle#change-the-config), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/machine-policy#inspect-export-and-verify)).
+
 ## Turn it off
+
+These commands are for a per-user install.
 
 ```bash
 defenseclaw guardrail disable --connector hermes --yes

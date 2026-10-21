@@ -44,7 +44,7 @@ Interactive setup asks for the mode, whether to add to or replace an existing co
 | Global hooks | `~/.copilot/hooks/defenseclaw.json` (or under `$COPILOT_HOME`) |
 | Workspace hooks (only with `--workspace`) | `<workspace>/.github/hooks/defenseclaw.json` |
 | Hook program, macOS and Linux | `~/.defenseclaw/hooks/copilot-hook.sh` |
-| Hook program, Windows | `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` |
+| Hook program, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
 Teardown restores the exact earlier file when DefenseClaw's copy is unchanged. Otherwise it removes only its own handlers.
 

@@ -208,9 +208,9 @@ openshell:
     allow_host_ports: null     # false: no host port is ever opened to a sandbox
     allow_unblock: null        # false: no unblocking, no approve-always, no user allow entries
     allow_learn_mode: null     # false: learn mode is refused
-    allowed_harnesses: []      # only these harnesses may run; empty allows all
+    allowed_harnesses: [claudecode, codex]  # only these harnesses may run; leave out for no limit
     egress_block: []           # host globs that are always blocked (a name covers its subdomains)
-    egress_allow_only: []      # the only host globs any sandbox may reach
+    egress_allow_only: [api.example.com]    # the only host globs any sandbox may reach; leave out for no limit
     block_large_uploads: false # true: every sandbox's large uploads to new hosts are cut
     require_copy_for: []       # project path globs that must run in copy mode
     max_resources:             # ceilings for every sandbox

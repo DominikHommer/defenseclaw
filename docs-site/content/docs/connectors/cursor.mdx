@@ -40,7 +40,7 @@ On Windows, run the same commands in PowerShell. The default installs observe-mo
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
 | Hooks | `~/.cursor/hooks.json` | `%USERPROFILE%\.cursor\hooks.json` |
-| Hook program | `~/.defenseclaw/hooks/cursor-hook.sh` | `~/.defenseclaw/hooks/cursor-hook.ps1` and `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` |
+| Hook program | `~/.defenseclaw/hooks/cursor-hook.sh` | `~/.defenseclaw/hooks/cursor-hook.ps1` and `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
 Teardown restores the earlier file, or removes only DefenseClaw's entries, then its adapter files.
 

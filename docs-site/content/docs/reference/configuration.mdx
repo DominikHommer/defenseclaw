@@ -16,6 +16,10 @@ The current schema is `config_version: 9`. `defenseclaw config reference --forma
 The native Windows package uses an embedded runtime and `defenseclaw-hook.exe`; it installs no `.venv` and no shell hook scripts. See [Paths](/docs/reference/paths) before locating or editing Windows state.
 </Callout>
 
+<Callout title="Managed computers">
+On a computer with the standalone enterprise package, `defenseclaw` offers users only `sandbox` commands (every other command exits 2), and `defenseclaw-gateway` is not on their `PATH`. The `defenseclaw` and `defenseclaw-gateway` examples on this page are for a per-user install. The administrator edits the managed config and runs the packaged binary as root: `/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS, and `defenseclaw.exe enterprise ...` from an elevated PowerShell on Windows. Apply a change with `enterprise <os> ensure`, check it with `enterprise <os> verify`, and use `policy digest` and `policy reload` on the gateway binary. See [Change the config](/docs/enterprise/lifecycle#change-the-config) and [Enterprise settings](#enterprise-settings-enterprise).
+</Callout>
+
 ## Files
 
 Where each file lives on each OS is on [Paths](/docs/reference/paths). Only `config.yaml` and the assets it names by digest are policy. Everything else is one of three other kinds, and none of it is read back as input:
@@ -166,15 +170,14 @@ observability:
         buckets: [compliance.activity, security.finding, enforcement.action]
         redaction_profile: soc
 
-# Top-level LLM block, written by `defenseclaw setup llm`. `role` decides who
-# reads it: unified (default, every component without its own llm block),
-# agent (proxy connectors only), judge (writes guardrail.judge.llm directly).
+# Top-level LLM block, written by `defenseclaw setup llm`. Every component
+# without its own llm block reads it. `setup llm --role judge` writes
+# guardrail.judge.llm instead; the role is a command option, not a key.
 llm:
   provider: anthropic          # anthropic | openai | bedrock | vertex_ai | azure | custom
   model: claude-sonnet-4-6
   api_key_env: DEFENSECLAW_LLM_KEY
   base_url: ""                 # optional override; LiteLLM picks a default per provider. For an OpenAI-style provider (openai, openai-compatible, vllm, lm_studio) a bare host such as https://host gets /v1 added, so the judge, doctor and the scanners all call https://host/v1/chat/completions; a URL with a path is used as written
-  role: unified                # unified | agent | judge
   instance_name: ""            # binds to an llm_providers.custom entry; required with provider: custom
   region: ""                   # generic regional hint (Bedrock / Vertex); provider-specific sub-blocks below take precedence
   # forward_custom_headers: copy inbound agent HTTP headers to the upstream LLM
@@ -753,9 +756,9 @@ openshell:
     allow_host_ports: null
     allow_unblock: null      # also governs approve-always, user allow entries, turning the feed off
     allow_learn_mode: null
-    allowed_harnesses: []
+    allowed_harnesses: [claudecode, codex]   # nonempty; leave the key out for no limit
     egress_block: []         # always blocked, never unblockable
-    egress_allow_only: []    # forces an allowlist profile
+    egress_allow_only: [api.example.com]     # nonempty; forces an allowlist profile
     block_large_uploads: false # true: every sandbox's large uploads to new hosts are cut
     require_copy_for: []     # absolute or ~/ path globs that must run in copy mode
     max_resources: {cpu: "", memory: ""}
@@ -772,9 +775,9 @@ openshell:
 | `allow_host_ports` | `true`, `false`, `null` | `false` refuses every host port. |
 | `allow_unblock` | `true`, `false`, `null` | `false` refuses unblocks and approve-always, ignores saved unblocks and the allow entries of users and of custom packs they chose, and keeps the blocklist feed on. A one-time approval then can't reach a feed-listed or private-network destination. |
 | `allow_learn_mode` | `true`, `false`, `null` | `false` refuses learn mode. |
-| `allowed_harnesses` | Harness names | Only these harnesses may run. |
+| `allowed_harnesses` | Harness names, at least one | Only these harnesses may run. Leave the key out for no limit: an empty list is refused. |
 | `egress_block` | Host patterns | Always blocked, for every sandbox. Nothing unblocks or approves them. A host name also blocks its subdomains (`example.net` covers `www.example.net`). |
-| `egress_allow_only` | Host patterns | The only hosts any sandbox may reach. Raises the profile to at least `balanced`. Entries match exactly: list `*.<host>` for subdomains. |
+| `egress_allow_only` | Host patterns, at least one | Leave the key out for no limit: an empty list is refused. The only hosts any sandbox may reach. Raises the profile to at least `balanced`. Entries match exactly: list `*.<host>` for subdomains. |
 | `block_large_uploads` | `true`, `false` | `true` turns the large-upload block on for every sandbox (see `egress.block_large_uploads`) and keeps its report on: a pack's `large_upload_mb: 0` gets 25 MiB, and a threshold above 25 MiB (a pack's or `egress.large_upload_mb`) is lowered to 25 MiB, or to the required pack's own when that is higher. An unblock still lifts it for one host unless `allow_unblock` is `false`. |
 | `require_copy_for` | Path globs, at most 1024 | Projects that must run in copy mode. |
 | `max_resources.cpu`, `max_resources.memory` | Same formats as `resources` | Ceilings for every sandbox. |
@@ -958,7 +961,7 @@ Every hook setup writes the resolved path contract to `~/.defenseclaw/hook_contr
 
 ## Reload without restart
 
-A running gateway applies `config.yaml` changes by itself. One watcher sees the file (and the rule pack and Rego files it refers to), builds a new policy generation off the hot path and swaps it in atomically. A change that fails to build (invalid YAML, an unknown rule ID, a pack whose digest no longer matches) keeps the old generation, shows `last_reload_error` in `/health`, fails the **Policy** row in `defenseclaw doctor` and records a `config.reload.rejected` event.
+A running gateway applies `config.yaml` changes by itself. One watcher sees the file (and the rule pack and Rego files it refers to), builds a new policy generation off the hot path and swaps it in atomically. A change that fails to build (an unknown rule ID, a pack whose digest no longer matches) keeps the old generation, shows `last_reload_error` in `/health`, fails the **Policy** row in `defenseclaw doctor` and records a `config.reload.rejected` event. Invalid YAML does the same, except that doctor stops at the **Config validation** row with the line and column and shows no **Policy** row until the file parses.
 
 Only process-level keys need `defenseclaw-gateway restart`. A write that touches one prints the command, and the gateway keeps that key's running value until you restart it:
 
