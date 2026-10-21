@@ -338,6 +338,7 @@ func TestCheckProductVersion(t *testing.T) {
 	}{
 		{"", "dev", true}, {"1.0.2", "1.0.2", true}, {"1.0.2", "1.1.0", true}, {"1.0.2", "1.0.10", true},
 		{"1.0.2", "1.0.1", false}, {"1.0.2", "1.0.2-rc.1", false}, {"1.0.2", "dev", false}, {"1.0.2", "1.0.2+build.7", true},
+		{"1.0.4-01", "1.0.3", false},
 	} {
 		err := CheckProductVersion(tc.min, tc.running)
 		if (err == nil) != tc.ok || (err != nil && CodeOf(err) != CodeProductTooOld) {
