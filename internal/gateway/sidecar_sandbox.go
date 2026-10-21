@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -304,7 +305,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		GatewayResources:   manager.GatewayConfigResources(""),
 		VMDiskFree:         manager.GatewayVMDiskFree(""),
 		StartLock:          func() (func(), error) { return openshell.LockSandboxStart("") },
-		MigrateBootstrap:   migrateDockerBootstrap,
+		MigrateBootstrap:   dockerBootstrapMigrator(opts.Managed),
 		OnGateway:          rt.gatewayState,
 		Listeners:          rt.listenersReady,
 		DiscoveryRemoved:   discoveryRemoved,
@@ -763,13 +764,54 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 	return nil
 }
 
-// migrateDockerBootstrap is the sandbox manager's MigrateBootstrap: the
-// account's OpenShell gateway keeps its Docker sandboxes' bootstrap in the
-// account's state folder (openshell.UserStateHome).
-func migrateDockerBootstrap(sandboxID string) ([]string, error) {
+// dockerBootstrapMigrator is the sandbox manager's MigrateBootstrap: the
+// account's OpenShell gateway keeps its Docker sandboxes' bootstrap in its
+// state folder, and the migration looks in each one that gateway may use
+// (gatewayStateHomes).
+func dockerBootstrapMigrator(managedAccount bool) func(string) ([]string, error) {
+	return func(sandboxID string) ([]string, error) {
+		homes, err := gatewayStateHomes(managedAccount)
+		if err != nil {
+			return nil, err
+		}
+		var moved []string
+		for _, stateHome := range homes {
+			m, err := openshell.MigrateDockerBootstrap(stateHome, sandboxID)
+			moved = append(moved, m...)
+			if err != nil {
+				return moved, err
+			}
+		}
+		return moved, nil
+	}
+}
+
+// sandboxAccountHomeDir is the home of the account a managed daemon runs as,
+// the one its exec shim starts the gateway in; a seam for tests.
+var sandboxAccountHomeDir = func() string { return accountHome(os.Getuid()) }
+
+// gatewayStateHomes are the state folders the account's OpenShell gateway
+// may keep its state in. A managed daemon's gateway is the exec shim's,
+// which starts it with HOME and no XDG_STATE_HOME: openshell.DefaultStateHome
+// of the account's home, whatever $XDG_STATE_HOME the daemon itself has.
+// The per-user gateway's OpenShell is one the person started: under
+// $XDG_STATE_HOME (openshell.UserStateHome), or ~/.local/state when it
+// started without one.
+func gatewayStateHomes(managedAccount bool) ([]string, error) {
+	if managedAccount {
+		home := sandboxAccountHomeDir()
+		if home == "" {
+			return nil, errors.New("the account has no home directory for its OpenShell gateway's state")
+		}
+		return []string{openshell.DefaultStateHome(home)}, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	return openshell.MigrateDockerBootstrap(openshell.UserStateHome(os.Getenv, home), sandboxID)
+	homes := []string{openshell.UserStateHome(os.Getenv, home)}
+	if def := openshell.DefaultStateHome(home); filepath.Clean(def) != filepath.Clean(homes[0]) {
+		homes = append(homes, def)
+	}
+	return homes, nil
 }

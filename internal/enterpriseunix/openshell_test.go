@@ -87,7 +87,7 @@ func (f *fakeSandboxOps) Stop(_ context.Context, a SandboxAccount, scope StopSco
 	for _, item := range []struct {
 		scope StopScope
 		name  string
-	}{{StopDaemon, "daemon"}, {StopGateway, "gateway"}, {StopSocket, "socket"}} {
+	}{{StopKill, "kill"}, {StopDaemon, "daemon"}, {StopGateway, "gateway"}, {StopSocket, "socket"}} {
 		if scope&item.scope != 0 {
 			parts = append(parts, item.name)
 		}
