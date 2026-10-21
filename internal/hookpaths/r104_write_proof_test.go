@@ -31,6 +31,7 @@ func TestR104LiteralWriterOperands(t *testing.T) {
 		{"child shell", `sh -c 'python3 -c "open(\"alias\",\"a\").write(\"marker\")"'`},
 		{"bounded program", `p=python3; "$p" -c 'open("alias","a").write("marker")'`},
 		{"python copy", `python3 -c 'import shutil; shutil.copyfile("payload","alias")'`},
+		{"python isolated option", `python3 -I -c 'open("alias","a").write("marker")'`},
 		{"path object open", `python3 -c 'from pathlib import Path; Path("alias").open("a").write("marker")'`},
 		{"node stream", `node -e 'require("fs").createWriteStream("alias").write("marker")'`},
 		{"here document", "python3 - <<'PY'\nopen(\"alias\",\"a\").write(\"marker\")\nPY"},
@@ -48,6 +49,7 @@ func TestR104LiteralWriterOperands(t *testing.T) {
 		`f() { python3 -c 'open("alias","a").write("marker")'; }; echo ok`,
 		`python3 -c 'open("report.txt","a").write("marker")'`,
 		`python3 ordinary.py -c 'open("alias","a").write("marker")'`,
+		`python3 -X ordinary.py -c 'open("alias","a").write("marker")'`,
 		`node ordinary.js -e 'require("fs").writeFileSync("alias","marker")'`,
 	} {
 		if got := LiteralWriteOperands(command, cwd, home); slices.Contains(got, want) {

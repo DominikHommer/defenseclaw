@@ -1140,7 +1140,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
 			target = raw
 		}
-		ownCopy := (command.Program == "cp" || command.Program == "gcp") &&
+		ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
 			target == hookpaths.CopyDestination(command.Argv, clientCWD)
 		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
 			continue

@@ -66,6 +66,7 @@ func TestR104ExistingProtectedLinkWriters(t *testing.T) {
 		{"configured ssh child", `git -c core.sshCommand='sh -c "echo marker >> alias"' ls-remote origin`},
 		{"bounded program", `p=python3; "$p" -c 'open("alias","a").write("marker")'`},
 		{"literal copy", `python3 -c 'import shutil; shutil.copyfile("payload","alias")'`},
+		{"isolated interpreter", `python3 -I -c 'open("alias","a").write("marker")'`},
 		{"path object open", `python3 -c 'from pathlib import Path; Path("alias").open("a").write("marker")'`},
 		{"here document", "python3 - <<'PY'\nopen(\"alias\",\"a\").write(\"marker\")\nPY"},
 		{"directory function", `cd dirlink && f() { echo marker >> authorized_keys; }; f`},

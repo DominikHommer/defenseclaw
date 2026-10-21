@@ -239,8 +239,10 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 	}
 	switch {
 	case program == "python" || strings.HasPrefix(program, "python3") || program == "perl" || program == "ruby" || program == "node":
-		if len(words) >= 3 && (program == "python" || strings.HasPrefix(program, "python3")) && words[1] == "-c" {
-			return add(literalInterpreterWrites(words[2]))
+		if program == "python" || strings.HasPrefix(program, "python3") {
+			if code, ok := pythonLiteralCode(words); ok {
+				return add(literalInterpreterWrites(code))
+			}
 		}
 		if len(words) >= 3 && (program == "perl" || program == "ruby" || program == "node") && words[1] == "-e" {
 			return add(literalInterpreterWrites(words[2]))
@@ -278,6 +280,23 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		}
 	}
 	return nil
+}
+
+// pythonLiteralCode accepts only fixed no-argument switches before -c.
+// A script name or an option with an operand ends this proof.
+func pythonLiteralCode(words []string) (string, bool) {
+	for index := 1; index < len(words) && index <= 8; index++ {
+		switch words[index] {
+		case "-I", "-E", "-s", "-S", "-B", "-u", "-q", "-O", "-OO":
+			continue
+		case "-c":
+			if index+1 < len(words) {
+				return words[index+1], true
+			}
+		}
+		return "", false
+	}
+	return "", false
 }
 
 func literalQuotedHereDocument(redirect *syntax.Redirect) (string, bool) {
