@@ -23,11 +23,7 @@ import (
 // PersistentPreRunE or any command callback, so no operator config, database,
 // or daemon state is touched.
 func TestDocumentedGatewayCommandsParse(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test source path")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
+	repoRoot := cliTestRepoRoot(t)
 	docRoots := []string{
 		filepath.Join(repoRoot, "docs-site", "content", "docs"),
 		filepath.Join(repoRoot, "docs"),

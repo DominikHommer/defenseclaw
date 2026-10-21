@@ -256,8 +256,14 @@ func TestLoadAnchorsPermissions(t *testing.T) {
 		t.Fatalf("unchecked: %v", err)
 	}
 	// The temp folder and the file belong to the test account (and on
-	// Linux and macOS the temp root is writable by every account).
-	if _, err := LoadAnchors(good, TrustAnchorFile); CodeOf(err) != CodeAnchorInsecure {
+	// Linux and macOS the temp root is writable by every account). Run as
+	// LocalSystem, the account and its temp folder are trusted, so the file
+	// rightly loads; the cases below still hold.
+	if _, err := LoadAnchors(good, TrustAnchorFile); testRunsAsLocalSystem() {
+		if err != nil {
+			t.Fatalf("LocalSystem-owned: %v", err)
+		}
+	} else if CodeOf(err) != CodeAnchorInsecure {
 		t.Fatalf("user-owned: %v", err)
 	}
 	cases := map[string]string{"folder": filepath.Join(dir, "folder")}

@@ -22,7 +22,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -197,11 +196,7 @@ func TestRulePackDiagnosticRejectsUnsafeExportedErrorFields(t *testing.T) {
 
 func shippedRulePackForCLITest(t *testing.T, profile string) string {
 	t.Helper()
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot resolve rulepack test source path")
-	}
-	return filepath.Join(filepath.Dir(source), "..", "..", "policies", "guardrail", profile)
+	return filepath.Join(cliTestRepoRoot(t), "policies", "guardrail", profile)
 }
 
 // The validator is the rule-pack check enterprise hosts have (they ship no
