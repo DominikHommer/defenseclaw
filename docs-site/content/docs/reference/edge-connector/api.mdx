@@ -1,17 +1,30 @@
 ---
-title: Fleet API Reference
-description: REST API reference for DefenseClaw IoT fleet device registration, policy and emergency distribution, threat intelligence, and observability.
+title: Fleet API
+description: "REST API for Edge Connector fleets: device registration and keys, policy and emergency distribution, threat intelligence, health and Prometheus metrics."
 keywords:
   - Fleet API
   - REST API
   - device management
   - policy distribution
-  - threat intelligence
   - Prometheus metrics
-  - IoT fleet
 ---
 
 The Fleet API is mounted at `/api/v1/fleet/` on the DefenseClaw gateway HTTP server (`gateway.api_port`, `18970` by default). Set `fleet.enabled: true` in the gateway's `config.yaml` to register these routes. It provides device management, policy distribution, threat intelligence, and observability endpoints for IoT fleets running the Edge Connector.
+
+| Route | What it does |
+| --- | --- |
+| `GET /devices`, `POST /devices` | List and register devices. |
+| `GET /devices/{id}` | One device. |
+| `POST /devices/{id}/rotate-key` | Replace a device key. |
+| `POST /devices/decommission-batch` | Decommission devices. |
+| `POST /policy/push`, `POST /policy/simulate` | Compile, sign and publish a policy, or dry-run it. |
+| `GET /policy/versions` | Stored policy versions. |
+| `POST /policy/emergency` | Publish a signed emergency command. |
+| `POST /threat-intel/push` | Revoke allowed hashes from the verdict cache. |
+| `GET /health`, `GET /metrics` | Fleet health and Prometheus metrics. |
+| `POST /token/rotate` | Rotate the admin token. |
+
+All paths are under `/api/v1/fleet`.
 
 ## Authentication
 
@@ -292,11 +305,7 @@ POST /api/v1/fleet/policy/push
 
 Compiles a policy YAML, signs it with the explicit `DCLAW_OTA_HMAC_KEY` secret, stores the version, and publishes the signed binary to the target fleet's MQTT topic. The gateway assigns the wire version from stored fleet history, starting at 1 and increasing to 65534; a YAML `version` field does not select it. At 65534, a further push returns `409` and requires a new device policy lineage. A `200` response confirms broker publication, not device receipt or application. After an authenticated signed registration or heartbeat, the gateway can republish the latest stored policy to a device reporting an older version. Confirm application from a later signed heartbeat; MQTT publication alone is not an acknowledgment. Devices need the same secret and a production build with `-DDCLAW_ALLOW_HMAC_OTA=ON`. `DCLAW_OTA_KEY` is a public Ed25519 key name; the current C build has no Ed25519 verifier and does not use it as an HMAC secret. Emergency commands use the separate `DCLAW_EMERGENCY_KEY`.
 
-Policy compilation needs Python 3 and PyYAML on the gateway. Raw release tar installs must provision them; Linux enterprise RPM/DEB installs require an operator-provisioned, trusted `/usr/bin/python3` and PyYAML only when Fleet is enabled. Fleet-enabled managed install/ensure checks this prerequisite before changing the service. Per-user installers use bundled Python dependencies. A managed macOS `.pkg` with Fleet enabled requires PyYAML **6.0.3** in a trusted Python.org framework interpreter (3.10–3.14). For example, check `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -I -c 'import yaml; print(yaml.__version__)'`. The interpreter, framework parents, and PyYAML package tree must be root-owned and not group/world-writable; managed install/ensure refuses Fleet-enabled config if no candidate passes. Apple's `/usr/bin/python3` and Homebrew PATH are not selected. Managed Windows standalone Setup carries the compiler in its signed Setup payload; only authenticated Fleet-enabled config installs its active copy under `%ProgramFiles%\Cisco\DefenseClaw\lib\defenseclaw\` and uses the admitted scanner runtime Python/PyYAML under `%ProgramData%\Cisco\DefenseClaw-ScannerRuntime\python\`. Fleet-off Setup/upgrade leaves no active compiler; disabling Fleet removes it. Secure Client managed profiles on Windows and macOS currently reject Fleet-enabled configuration because they do not carry the compiler/runtime.
-
-Managed Linux/macOS packages carry the compiler as inert source in `<InstallRoot>/share/fleet/`. Only validated Fleet-enabled install/ensure activates a protected copy in `<InstallRoot>/lib/defenseclaw/`; Fleet-off install/upgrade needs no Python/PyYAML and activates no compiler. A Fleet-off raw payload install discards its optional compiler source, so later Fleet activation requires the staged release `--payload` again. Fleet API routes and their metrics exist only when `fleet.enabled: true`; Fleet dashboard and scrape templates are in the separate `defenseclaw-fleet-assets.tar.gz` release asset; operators install them when enabling Fleet.
-
-Standard per-user `install.sh`/`install.ps1` copy the matching compiler only when Fleet is already enabled in the existing config. The interactive `defenseclaw setup edge-connector` flow installs the optional compiler and enables Fleet after credential setup succeeds. A core gateway install alone does not start a C Edge Connector device service.
+Policy compilation needs Python 3 and PyYAML on the gateway; see [policy compiler requirements](/docs/reference/edge-connector/configuration#policy-compiler-requirements). Fleet API routes and metrics exist only when `fleet.enabled: true`. The dashboard and scrape templates are in the separate `defenseclaw-fleet-assets.tar.gz` release asset.
 
 **Request body**
 
@@ -578,7 +587,7 @@ With the admin token, returns aggregate fleet status and verdict cache statistic
 GET /api/v1/fleet/metrics
 ```
 
-Returns global metrics in Prometheus exposition format (`text/plain; version=0.0.4`). Scrape this endpoint with Prometheus using the **admin** bearer token; a tenant-scoped token receives `403 Forbidden` to prevent cross-tenant totals from leaking. The separate Fleet assets provide the dashboard and scrape example, both installed on request because the gateway REST API is bound to loopback by default. See [Fleet dashboard setup](/docs/edge-connector/install#grafana-dashboard).
+Returns global metrics in Prometheus exposition format (`text/plain; version=0.0.4`). Scrape this endpoint with Prometheus using the **admin** bearer token; a tenant-scoped token receives `403 Forbidden` to prevent cross-tenant totals from leaking. The separate Fleet assets provide the dashboard and scrape example, both installed on request because the gateway REST API is bound to loopback by default. See [Fleet dashboard setup](/docs/reference/edge-connector/configuration#grafana-dashboard).
 
 **Response** `200 OK` (text/plain)
 

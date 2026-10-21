@@ -1,10 +1,9 @@
 ---
-title: Policies
-description: Write Edge Connector policies with capability sequences, destination rules, and canary thresholds.
+title: Edge Connector policies
+description: "Edge Connector policy YAML: capability sequences, the destination allowlist, canary rollback, built-in limits and how to compile a policy."
 keywords:
   - Edge Connector policy
   - capability sequence
-  - content pattern
   - policy compiler
   - IoT policy
 ---
@@ -65,7 +64,7 @@ iot_extensions:
 The compiler rejects `destination_denylist`, `ssrf_protection`, and hostname entries rather than treating them as working controls. The built-in SSRF guard blocks private and metadata addresses across profiles. Replace `1.1.1.1` with an approved public literal for your service.
 </Callout>
 
-The current on-device SSRF check blocks hostname destinations across build profiles until an enforced egress resolver/proxy exists. Network tools also need a nonempty destination. The allowlist therefore needs a canonical public IPv4 or bracketed globally scoped IPv6 literal for a network destination; the parser does not prove external routability. `1.1.1.1` is an illustrative public IP; replace it with an approved address for your service in a real policy. Private, loopback, and link-local addresses, numeric aliases such as octal/hex/decimal forms, and malformed ports are blocked even if listed. A destination absent from the allowlist is also blocked.
+The on-device SSRF check blocks hostname destinations on every build profile. Network tools need a nonempty destination, so the allowlist needs a canonical public IPv4 or bracketed globally scoped IPv6 literal. The parser does not prove the address is routable. Private, loopback and link-local addresses, numeric aliases such as octal, hex or decimal forms, and malformed ports are blocked even if listed. A destination absent from the allowlist is also blocked. `1.1.1.1` in the examples is only an illustration; use an address approved for your service.
 
 ## Built-in rate and escalation behavior
 
@@ -73,7 +72,7 @@ The C runtime has fixed token-bucket limits of 60 tool calls, 30 network request
 
 ## Content inspection
 
-The current C build uses fixed content patterns for secrets, credentials, PII, exfiltration indicators, injection text, and dangerous commands. These patterns are generated from constants in the compiler source and are not configured by the policy YAML. The compiler rejects `content_inspection` and custom regex settings so a policy cannot appear to enable a protection the device will ignore. There is no YAML toggle to disable the built-in SSRF guard.
+The C build uses fixed content patterns for secrets, credentials, PII, exfiltration indicators, injection text, and dangerous commands. These patterns are generated from constants in the compiler source and are not configured by the policy YAML. The compiler rejects `content_inspection` and custom regex settings so a policy cannot appear to enable a protection the device will ignore. There is no YAML toggle to disable the built-in SSRF guard.
 
 ## Compile the policy
 
