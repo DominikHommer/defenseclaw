@@ -441,12 +441,14 @@ func runHook(ctx context.Context, opts Options) int {
 	// only (internal/cli: the Windows runtime generation or the Unix runtime
 	// descriptor), never from a connector or the caller's environment.
 	failMode := normalizeFailMode(opts.FailMode)
-	if opts.StrictAvailability && !opts.ManagedEnterprise {
-		// Strict availability closes a per-user hook whatever mode it was
-		// rendered with, as the Unix hooks do: the answer checks (decide)
-		// and every failure path read the closed mode, so a Windows
-		// sidecar rendered open cannot let a block without its native deny
-		// through.
+	if opts.StrictAvailability && !opts.ManagedEnterprise && (sp.connector == "copilot" || sp.connector == "antigravity") {
+		// Strict availability closes a per-user Copilot CLI or Antigravity
+		// hook whatever mode it was rendered with, as copilot-hook.sh and
+		// antigravity-hook.sh do: the answer checks (decide) and every
+		// failure path read the closed mode, so a Windows sidecar rendered
+		// open cannot let a block without its native deny through. Other
+		// connectors keep strict availability's transport and missing-token
+		// scope.
 		failMode = "closed"
 		opts.FailMode = "closed"
 	}
