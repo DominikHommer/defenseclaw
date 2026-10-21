@@ -21,7 +21,7 @@ mode applies consistently to both transport and invalid-response failures.
 | --- | --- | --- |
 | `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `closed` on a fresh install. Migrated legacy configs can retain explicit `open`. Secure Client deployments default to `open` when it is unset (see [Secure Client](#secure-client)). Can be overridden per connector. See [Which value applies](#which-value-applies). |
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force an otherwise closed connector open. | Unset. Per agent process; compatibility/managed-deployment override. |
-| `DEFENSECLAW_FAIL_MODE=closed` | Closes the hooks of one agent process. `open` is ignored: the environment cannot reopen a closed hook, except in the Secure Client shell hooks named under [Process override](#process-override-tighten-only). | Unset. Per agent process; set normal posture with the CLI. |
+| `DEFENSECLAW_FAIL_MODE=closed` | Closes the hooks of one agent process, except the per-user GitHub Copilot CLI hook, which stays open during a gateway outage (Copilot has no fail-closed hook surface). `open` is ignored: the environment cannot reopen a closed hook, except in the Secure Client shell hooks named under [Process override](#process-override-tighten-only). | Unset. Per agent process; set normal posture with the CLI. |
 
 You choose `open` or `closed`, and the default is `closed`. An explicit value
 always wins, on every install: the OSS per-user install, the standalone
@@ -366,7 +366,10 @@ failures closed rather than trusting a user-controlled process environment.
 ## Process override (tighten only)
 
 `DEFENSECLAW_FAIL_MODE=closed` closes the hooks of one agent process, the
-OpenCode plugin included, whatever mode is installed. Any other value is
+OpenCode plugin included, whatever mode is installed. The per-user GitHub
+Copilot CLI hook is the exception: Copilot has no fail-closed hook surface,
+so that hook ignores the variable and still lets a call through while the
+gateway is down (Linux, macOS and Windows alike). Any other value is
 ignored, so a project's agent settings or a parent process cannot turn a
 closed hook open. To run fail-open, choose it with
 `defenseclaw guardrail fail-mode open`, which saves it in the config and the
@@ -379,11 +382,12 @@ agent may have been started without it.
 The one exception is an authenticated Secure Client deployment: there the
 Antigravity, Devin, Hermes and Kiro shell hooks still take
 `DEFENSECLAW_FAIL_MODE` as a full override, so `open` opens them and `closed`
-closes them for that agent process. The Claude Code, Codex and Cursor shell
-hooks and the OpenCode plugin of a Secure Client deployment ignore the
-variable, and the native Windows hook only tightens. On every other managed
-install the shell hooks ignore it, and the OpenCode plugin and the native
-Windows hook only tighten.
+closes them for that agent process. The Claude Code, Codex, Cursor and
+GitHub Copilot CLI shell hooks and the OpenCode plugin of a Secure Client
+deployment ignore the variable, and the native Windows hook only tightens,
+also on top of an administrator's `open`, except for Hermes, which keeps its
+upstream fail-open there. On every other managed install the shell hooks
+ignore it, and the OpenCode plugin and the native Windows hook only tighten.
 
 The shared `inspect-*.sh` scripts serve every connector of one data
 directory, and `DEFENSECLAW_CONNECTOR` only picks the connector they report

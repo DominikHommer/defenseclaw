@@ -95,9 +95,10 @@ def test_doctor_rule_names_the_missing_agent(copilot_not_installed):
     data_dir = str(copilot_not_installed.data_dir)
     assert doctor_health.connector_agent_missing(data_dir, "copilot") is True
     assert doctor_health.connector_agent_missing(data_dir, "codex") is False
-    # Installed after the last discovery scan: not missing (GAP-0052).
+    # An executable on this shell's PATH after the scan is no proof that the
+    # agent runs the hooks (1.0.4 review, loop round 4); GAP-0052 only names it.
     copilot_not_installed.on_path["copilot"] = "/usr/local/bin/copilot"
-    assert doctor_health.connector_agent_missing(data_dir, "copilot") is False
+    assert doctor_health.connector_agent_missing(data_dir, "copilot") is True
 
 
 def test_no_discovery_scan_is_no_proof(tmp_path):
@@ -152,14 +153,36 @@ def test_status_without_the_gateway_names_the_missing_agent(copilot_not_installe
     assert "0 active, 1 not running" in _row(out, "Agents")
 
 
-def test_an_installed_agent_still_runs(copilot_not_installed):
-    copilot_not_installed.on_path["copilot"] = "/usr/local/bin/copilot"
-    out = _render(
-        _cfg(["copilot"], copilot_not_installed.data_dir),
-        {"connectors": [{"name": "copilot", "state": "running"}]},
-    )
-    assert "RUNNING" in _row(out, "GitHub Copilot CLI (copilot)")
-    assert "1 active" in _row(out, "Agents")
+@pytest.mark.parametrize("connector,label", [("copilot", "GitHub Copilot CLI (copilot)"), ("claudecode", "Claude Code (claudecode)")])
+def test_a_path_only_agent_is_not_proof_that_it_runs(copilot_not_installed, monkeypatch, connector, label):
+    """1.0.4 review (loop round 4): an executable named like the agent on the
+    PATH of the shell that runs status flipped a negative scan into a
+    RUNNING row and an active count, and doctor downgraded its failure to a
+    warning, with no hook call after the scan. The PATH is a hint only."""
+    copilot_not_installed.on_path[connector] = f"/home/user/bin/{connector}"
+    data_dir = copilot_not_installed.data_dir
+    assert doctor_health.connector_agent_missing(str(data_dir), connector) is True
+    cfg = _cfg([connector], data_dir)
+    health = {"connectors": [{"name": connector, "state": "running", "requests": 3}]}
+    out = _render(cfg, health)
+    row = _row(out, label)
+    assert "RUNNING" not in row and "OFF" in row, out
+    flat = " ".join(out.split())
+    assert f"/home/user/bin/{connector} on this shell's PATH is unverified" in flat, out
+    assert "defenseclaw agent discover --refresh" in flat, out
+    assert "0 active, 1 not running" in _row(out, "Agents")
+    roster = {r["name"]: r for r in cmd_status._connector_roster(cfg)}
+    assert roster[connector]["state"] == "off"
+    assert "unverified" in roster[connector]["runtime_detail"]
+    doctor = _doctor_row(cfg, connector, health, monkeypatch)
+    assert doctor["status"] == "fail", doctor
+    assert f"/home/user/bin/{connector} is on this shell's PATH, unverified" in doctor["detail"], doctor
+    assert doctor["remediation"].startswith("defenseclaw agent discover --refresh"), doctor
+    assert "Install" not in doctor["remediation"], doctor
+    # A hook call after the scan is the proof the PATH is not.
+    health["connectors"][0]["last_activity_at"] = (_SCANNED_AT + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    assert "RUNNING" in _row(_render(cfg, health), label)
+    assert _doctor_row(cfg, connector, health, monkeypatch)["status"] == "warn"
 
 
 def test_status_json_agrees(copilot_not_installed):
@@ -241,7 +264,9 @@ def test_doctor_admits_a_sandbox_only_connector_as_status_does(copilot_not_insta
 
 
 def test_doctor_reads_the_gateway_only_for_an_agent_the_scan_missed(copilot_not_installed, monkeypatch):
+    # The scan found Codex: no gateway read. It missed Copilot: an executable
+    # on this shell's PATH is no proof, so the gateway's hook calls are read.
     copilot_not_installed.on_path["copilot"] = "/usr/local/bin/copilot"
     cfg = _cfg(["codex", "copilot"], copilot_not_installed.data_dir)
-    for connector in ("codex", "copilot"):
-        assert _doctor_row(cfg, connector, {"connectors": []}, monkeypatch)["probes"] == 0
+    assert _doctor_row(cfg, "codex", {"connectors": []}, monkeypatch)["probes"] == 0
+    assert _doctor_row(cfg, "copilot", {"connectors": []}, monkeypatch)["probes"] == 1

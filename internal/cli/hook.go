@@ -603,15 +603,20 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		}
 		opts.ManagedRuntimeFailure = managedRuntimeFailure
 		// A managed hook takes its fail mode from administrator-owned runtime
-		// state only, never from the command line or the environment: the
-		// authenticated Windows runtime generation, or the root-owned Unix
-		// runtime descriptor. Each records the mode the administrator's config
-		// resolved (owner decision 2026-10-20: explicit open or closed wins,
-		// unset is closed, and open under Secure Client, #1163). A runtime
-		// failure, and anything but open, keeps the fail-closed,
-		// strict-availability contract.
+		// state, never from the command line: the authenticated Windows
+		// runtime generation, or the root-owned Unix runtime descriptor. Each
+		// records the mode the administrator's config resolved (owner
+		// decision 2026-10-20: explicit open or closed wins, unset is closed,
+		// and open under Secure Client, #1163). A runtime failure, and
+		// anything but open, keeps the fail-closed, strict-availability
+		// contract. The environment can only tighten it: an inherited
+		// DEFENSECLAW_FAIL_MODE=closed closes the native Windows hook of that
+		// agent process on top of an open generation, as status and the
+		// fail-mode docs report it (1.0.4 review, loop round 4). The Unix
+		// managed hooks ignore the variable.
 		opts.FailMode = enterpriseManagedHookRuntimeFailMode()
-		if managedRuntimeFailure != "" || opts.FailMode != "open" {
+		if managedRuntimeFailure != "" || opts.FailMode != "open" ||
+			(runtime.GOOS == "windows" && hookEnvTightensFailMode()) {
 			opts.FailMode = "closed"
 			opts.StrictAvailability = true
 		}

@@ -749,8 +749,10 @@ def test_agent_installed_after_discovery_names_the_refresh() -> None:
     ):
         cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=""), ["claudecode"], r)
     row = next(c for c in r.checks if c["label"] == "Connector compatibility: claudecode")
-    assert row["status"] == "warn"
-    assert "is installed now, after the last agent discovery" in row["detail"]
+    # The shell's PATH is no proof that the agent runs (1.0.4 review, loop
+    # round 4): still a failure, but the next step is the refresh.
+    assert row["status"] == "fail"
+    assert "/opt/bin/claude is on this shell's PATH, unverified" in row["detail"]
     assert row["remediation"].startswith("defenseclaw agent discover --refresh")
 
 

@@ -3198,18 +3198,21 @@ def _check_component_connector_compatibility(
         if finding.reason_code == "connector-agent-unavailable":
             from defenseclaw.inventory import agent_discovery
 
-            on_path = agent_discovery.binary_on_path(finding.connector)
-            seen = "" if on_path else hook_call_after_scan(data_dir, last_hook_call(finding.connector))
+            seen = hook_call_after_scan(data_dir, last_hook_call(finding.connector))
             harness = None
-            if not on_path and not seen:
+            if not seen:
                 from defenseclaw.sandbox_images import verified_harness_contract
 
                 harness = verified_harness_contract(data_dir, finding.connector)
+            on_path = "" if seen or harness is not None else agent_discovery.binary_on_path(finding.connector)
             if on_path:
-                # Installed after the last agent discovery: refresh the
-                # evidence rather than install it again (GAP-0052).
-                tag = "warn"
-                detail += f"; {on_path} is installed now, after the last agent discovery"
+                # Maybe installed after the last agent discovery: refresh the
+                # evidence rather than install it again (GAP-0052). This
+                # shell's PATH is not the agent's, so it stays a failure,
+                # as status keeps the row off (1.0.4 review, loop round 4).
+                detail += (
+                    f"; {on_path} is on this shell's PATH, unverified until agent discovery is refreshed"
+                )
                 remediation = _health_remediation_text(finding.remediations[1:])
             elif seen:
                 # The agent runs from a path or an IDE the scan did not see:
