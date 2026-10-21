@@ -1,0 +1,66 @@
+# Temporary G-flood-wal benchmark (bench/r104-g-flood-wal branch only; never merged).
+# Old = fix/r104-g-flood 5bbc0ff3ec (1.0.3 audit store); new = this branch's parent.
+name: zz G-flood-wal bench
+
+on:
+  push:
+    branches: [bench/r104-g-flood-wal]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, v: old, ref: 5bbc0ff3ecb1d51f751ccc18321f69eb0744b6a8 }
+          - { os: windows-latest, v: new, ref: "" }
+          - { os: windows-latest, v: new-repeat, ref: "" }
+          - { os: ubuntu-latest, v: old, ref: 5bbc0ff3ecb1d51f751ccc18321f69eb0744b6a8 }
+          - { os: ubuntu-latest, v: new, ref: "" }
+    name: probe ${{ matrix.os }} ${{ matrix.v }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ matrix.ref }}
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: probe
+        shell: bash
+        env:
+          DEFENSECLAW_HOOK_FLOOD_PROBE: "1"
+          DEFENSECLAW_HOOK_FLOOD_CALLS: "6000"
+        run: |
+          git log --oneline -1
+          go test -count=1 -timeout 45m -run '^TestHookFloodProbe$' -v ./internal/gateway/ > probe.log 2>&1 || true
+          grep -E "minute|WAL|PASS|FAIL|sent|drained|flat|all |ok " probe.log || true
+          grep -E -B3 -A12 "^--- FAIL|Error|panic" probe.log | head -60 || true
+
+  migration:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    name: audit store tests ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: audit tests
+        shell: bash
+        run: |
+          go test -count=1 -timeout 40m -run 'Correlation|Migration|Ordered|Unread|TimeOrdered|Upgrade|V7|Legacy' ./internal/audit/ 2>&1 | tail -40
+          go test -count=1 -timeout 20m -run 'TimeOrdered|OccurrenceID' ./internal/observability/ 2>&1 | tail -10
