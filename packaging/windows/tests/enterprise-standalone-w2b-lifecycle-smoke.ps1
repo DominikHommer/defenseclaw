@@ -9,6 +9,10 @@
 # purge removes the lifecycle lock gets a new protected one (GAP-1076), and
 # the vendor directory check and grant handle an administrator's own entry,
 # INTERACTIVE-only grants and group denies (GAP-0867, GAP-1439, GAP-1142).
+# Review fixes: the uninstall proves the InstallRoot rename before it
+# commits, a full standalone purge keeps a selector shared with another
+# deployment and works under the selector lock, and a deny for an account
+# that is not enrolled or no longer exists does not block the vendor check.
 # Runs elevated in a disposable directory; no service or machine root is
 # touched.
 
@@ -34,6 +38,7 @@ try {
         $savedProgramData = $script:ProgramData
         $savedProfile = Get-DefenseClawEnterpriseProfile
         $savedRetry = $script:InstallRootRetirementRetryMilliseconds
+        $savedSelectorTimeout = $script:RuntimeSelectorLockTimeoutSeconds
         $engine = [IO.Path]::Combine($PSHOME, $(if ($PSVersionTable.PSVersion.Major -ge 6) { 'pwsh.exe' } else { 'powershell.exe' }))
         function Start-TestHolder([string]$Path, [string]$Mode, [int]$HoldMilliseconds) {
             # A child process that opens Path (Read: shared read; DeleteOnClose:
@@ -137,6 +142,47 @@ $stream.Dispose()
                 }
             }
 
+            # Review of GAP-0149: the uninstall renames InstallRoot aside and
+            # back before it commits. A free InstallRoot ends up in place; a
+            # holder that outlasts the window stops the uninstall there, with
+            # InstallRoot in place and nothing retired.
+            $probe = [IO.Path]::Combine($Root, 'probe-install')
+            $probeRetired = [IO.Path]::Combine($Root, 'probe-install-retired')
+            $probeBinary = [IO.Path]::Combine($probe, 'bin', 'defenseclaw-hook.exe')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($probeBinary))
+            [IO.File]::WriteAllText($probeBinary, 'stand-in')
+            try {
+                Assert-DefenseClawInstallRootRetirable -Source $probe -Destination $probeRetired
+                if (-not [IO.File]::Exists($probeBinary) -or [IO.Directory]::Exists($probeRetired)) {
+                    $failures.Add('the pre-commit retirement probe did not put InstallRoot back')
+                }
+            }
+            catch {
+                $failures.Add("the pre-commit retirement probe failed on a free InstallRoot: $($_.Exception.Message)")
+            }
+            $script:InstallRootRetirementRetryMilliseconds = 1000
+            $holder = Start-TestHolder -Path $probeBinary -Mode Read -HoldMilliseconds 8000
+            try {
+                Assert-DefenseClawInstallRootRetirable -Source $probe -Destination $probeRetired
+                $failures.Add('the pre-commit retirement probe passed while a program held InstallRoot')
+            }
+            catch {
+                if ($_.Exception.Message -notlike '*stopped before it removed anything*' -or
+                    -not [IO.File]::Exists($probeBinary) -or [IO.Directory]::Exists($probeRetired)) {
+                    $failures.Add("the held InstallRoot probe: $($_.Exception.Message)")
+                }
+            }
+            finally {
+                [void]$holder.WaitForExit(30000)
+            }
+            $probeCalls = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'Assert-DefenseClawInstallRootRetirable' })
+            $commit = @($calls | Microsoft.PowerShell.Core\Where-Object { $_.GetCommandName() -ceq 'Complete-DefenseClawTransaction' })
+            if ($probeCalls.Count -ne 1 -or $commit.Count -lt 1 -or
+                $probeCalls[0].Extent.StartOffset -le $transaction[0].Extent.StartOffset -or
+                $probeCalls[0].Extent.StartOffset -ge $commit[0].Extent.StartOffset) {
+                $failures.Add('the InstallRoot retirement probe does not run inside the uninstall transaction before its commit')
+            }
+
             # GAP-1076: a run waiting for the lock while a purge holds it
             # with delete-on-close gets a new protected lock afterwards.
             $lockDirectory = [IO.Path]::Combine($Root, 'Cisco', 'DefenseClaw-Lifecycle')
@@ -192,6 +238,104 @@ $stream.Dispose()
             if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor)) {
                 $failures.Add('a service SID deny entry blocked the users check')
             }
+            # Review of GAP-1142: a deny for an account no one has (a retired
+            # user) beside a valid Users entry does not block, so Grant
+            # converges; a deny for a built-in group or for an enrolled user
+            # (this account, which has a profile here) still does.
+            $retiredDeny = '(D;;0x1200a0;;;S-1-5-21-1000-2000-3000-1234)'
+            Set-TestDirectorySddl $vendor ('O:BAG:BAD:P' + $retiredDeny + '(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a0;;;BU)')
+            if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor)) {
+                $failures.Add('a deny entry for a retired account blocked the users check')
+            }
+            Set-TestDirectorySddl $vendor ('O:BAG:BAD:P' + $retiredDeny + '(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            if (-not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor)) {
+                $failures.Add('the vendor grant did not converge beside a deny for a retired account')
+            }
+            Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(D;;0x1200a0;;;S-1-5-32-555)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a0;;;BU)'
+            if (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) {
+                $failures.Add('a deny entry for a built-in group was not detected')
+            }
+            $self = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            if (@(Get-DefenseClawManagedUserRuntimeHomes | Microsoft.PowerShell.Core\Where-Object { $_.sid -ceq $self }).Count -eq 1) {
+                Set-TestDirectorySddl $vendor ('O:BAG:BAD:P(D;;0x1200a0;;;{0})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a0;;;BU)' -f $self)
+                if (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) {
+                    $failures.Add('a deny entry for an enrolled user was not detected')
+                }
+            }
+
+            # Review of GAP-1158: the full standalone purge (the committed
+            # cleanup's selector step, then the orphaned-state step) keeps a
+            # selector that holds targets of this deployment and another,
+            # with its lock and bytes. A selector with only this deployment's
+            # targets goes, with or without a lock file, and neither step
+            # touches a selector while a hook holds its lock.
+            $ownHook = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe'
+            $otherHook = 'D:\Other\DefenseClaw\bin\defenseclaw-hook.exe'
+            $selectorPF = [IO.Path]::Combine($Root, 'selector-pf')
+            $selectorPD = [IO.Path]::Combine($Root, 'selector-pd')
+            $claudeDir = [IO.Path]::Combine($selectorPF, 'ClaudeCode', 'managed-settings.d')
+            $codexDir = [IO.Path]::Combine($selectorPD, 'OpenAI', 'Codex')
+            $cursorDir = [IO.Path]::Combine($selectorPD, 'Cursor')
+            $stateLeaf = '.defenseclaw-managed-runtime-selector.state'
+            $lockLeaf = '.defenseclaw-managed-runtime-selector.lock'
+            function New-TestSelector([string]$Directory, [string[]]$Hooks) {
+                [void][IO.Directory]::CreateDirectory($Directory)
+                $targets = @(for ($i = 0; $i -lt $Hooks.Count; $i++) {
+                        @{ connector = 'codex'; sid = "S-1-5-21-1-2-3-$(1001 + $i)"; hook_executable = $Hooks[$i] }
+                    })
+                $document = @{ schema_version = 1; connector = 'codex'; targets = $targets } |
+                    Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4
+                [IO.File]::WriteAllText([IO.Path]::Combine($Directory, $stateLeaf), $document)
+                [IO.File]::WriteAllText([IO.Path]::Combine($Directory, $lockLeaf), '')
+            }
+            function Invoke-TestSelectorPurge {
+                @(Remove-DefenseClawRuntimeSelectorState -HookPath $ownHook -Directories @($claudeDir, $codexDir, $cursorDir)) +
+                @(Remove-DefenseClawStandaloneOrphanedHookMachineState `
+                        -Layout @{ HookPath = $ownHook; CodexMachinePolicyDirectory = $codexDir } `
+                        -ProgramFiles $selectorPF `
+                        -ProgramData $selectorPD)
+            }
+            $codexState = [IO.Path]::Combine($codexDir, $stateLeaf)
+            $codexLock = [IO.Path]::Combine($codexDir, $lockLeaf)
+            $cursorState = [IO.Path]::Combine($cursorDir, $stateLeaf)
+            $cursorLock = [IO.Path]::Combine($cursorDir, $lockLeaf)
+            New-TestSelector $codexDir @($ownHook, $otherHook)
+            $mixed = [IO.File]::ReadAllText($codexState)
+            New-TestSelector $cursorDir @($ownHook)
+            $left = @(Invoke-TestSelectorPurge)
+            if (-not [IO.File]::Exists($codexState) -or -not [IO.File]::Exists($codexLock) -or
+                [IO.File]::ReadAllText($codexState) -cne $mixed -or
+                @($left | Microsoft.PowerShell.Core\Where-Object { $_ -like "*Codex*another DefenseClaw deployment*" }).Count -lt 1) {
+                $failures.Add("the full purge removed or changed a selector shared with another deployment: $($left -join '; ')")
+            }
+            if ([IO.File]::Exists($cursorState) -or [IO.File]::Exists($cursorLock)) {
+                $failures.Add("the full purge kept a selector with only this deployment's targets: $($left -join '; ')")
+            }
+            New-TestSelector $cursorDir @($ownHook)
+            [IO.File]::Delete($cursorLock)
+            $left = @(Invoke-TestSelectorPurge)
+            if ([IO.File]::Exists($cursorState) -or [IO.File]::Exists($cursorLock)) {
+                $failures.Add("a selector without a lock file stayed, or left a lock: $($left -join '; ')")
+            }
+            New-TestSelector $cursorDir @($ownHook)
+            $script:RuntimeSelectorLockTimeoutSeconds = 1
+            $hook = Start-TestHolder -Path $cursorLock -Mode Read -HoldMilliseconds 8000
+            try {
+                $left = @(Invoke-TestSelectorPurge)
+                if (-not [IO.File]::Exists($cursorState) -or
+                    @($left | Microsoft.PowerShell.Core\Where-Object { $_ -like "*Cursor*lock could not be taken*" }).Count -lt 1) {
+                    $failures.Add("a selector was removed while a hook held its lock: $($left -join '; ')")
+                }
+            }
+            finally {
+                [void]$hook.WaitForExit(30000)
+                $script:RuntimeSelectorLockTimeoutSeconds = $savedSelectorTimeout
+            }
+            $left = @(Invoke-TestSelectorPurge)
+            if ([IO.File]::Exists($cursorState) -or [IO.File]::Exists($cursorLock)) {
+                $failures.Add("the selector stayed after the hook released its lock: $($left -join '; ')")
+            }
 
             # GAP-0152: the retained key held by the deleted gateway's
             # per-service SID becomes administrator-only with its bytes kept;
@@ -235,6 +379,7 @@ $stream.Dispose()
         finally {
             $script:ProgramData = $savedProgramData
             $script:InstallRootRetirementRetryMilliseconds = $savedRetry
+            $script:RuntimeSelectorLockTimeoutSeconds = $savedSelectorTimeout
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
         }
         return , $failures

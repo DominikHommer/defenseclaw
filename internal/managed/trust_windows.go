@@ -104,6 +104,40 @@ func ValidateTrustedFilePath(path, label string) error {
 	)
 }
 
+// ValidateTrustedFilePathStrictAncestors is ValidateTrustedFilePath with no
+// advisory verdict: every folder above the file, the installer-owned Cisco
+// folders included, gets the narrow ancestor mask with fatal verdicts. It is
+// for an image an elevated process runs. A standard user who can delete the
+// children of a folder above it, or rename or re-ACL that folder, can swap
+// the image between the check and the launch, so drift on the Cisco tree
+// must refuse here, not warn.
+func ValidateTrustedFilePathStrictAncestors(path, label string) error {
+	if label == "" {
+		label = "managed file"
+	}
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
+		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
+	}
+	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, nil, windowsTrustLeaf); err != nil {
+		return err
+	}
+	for dir := filepath.Dir(clean); ; dir = filepath.Dir(dir) {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsTrustForeignAncestor); err != nil {
+			return err
+		}
+		if dir == filepath.Dir(dir) {
+			return nil
+		}
+	}
+}
+
 func ValidateTrustedRuntimeDir(path, label string) error {
 	return validateTrustedWindowsRuntimeDir(path, label, nil)
 }
