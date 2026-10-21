@@ -97,12 +97,38 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	// Under the same lock, so the protected record follows the store's
 	// order: the hook reads it when the gateway is down.
 	publishForeignHookSessionDecision(places.recordRoot, identity, exchange.Key, decision, generation)
+	decision = a.recheckForeignHookSessionAllow(places, identity, exchange.Key, decision, generation)
 	unlock()
 	if decision.Deny {
 		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(decision)
+}
+
+// recheckForeignHookSessionAllow reads the record generation and the
+// guardian's removals again after an exchange decided and published an
+// allow, right before it answers (GAP-0352, 1.0.4 review loop round 4): a
+// removal the guardian recorded (its ledger, or the account's pending mark)
+// while the exchange decided from the removals it read first must deny this
+// call, not only the next one. A removal that now denies the call, or
+// removals that can no longer be read, replace the allow with that denial,
+// which is published with the generation read for it. An allow the new
+// removals still allow is published again when the generation moved, so
+// the hook keeps a current answer during an outage: it was checked against
+// removals read after that generation. A denial is final and is returned
+// as it is.
+func (a *APIServer) recheckForeignHookSessionAllow(places foreignHookSessionPlaces, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, generation string) enterprisepolicy.GuardDecision {
+	if decision.Deny {
+		return decision
+	}
+	current := places.generation()
+	removals, removalsErr := a.readForeignHookRemovals(places, identity, current)
+	rechecked := enterprisepolicy.ApplyForeignHookRemovals(decision, key, removals, removalsErr, time.Now())
+	if rechecked.Deny || current != generation {
+		publishForeignHookSessionDecision(places.recordRoot, identity, key, rechecked, current)
+	}
+	return rechecked
 }
 
 // foreignHookSessionPublishRoot is the folder of the protected session

@@ -74,10 +74,13 @@ func TestForeignHookSessionGatewayPublishesTheProtectedRecord(t *testing.T) {
 // record generation before the guardian's removals, and the guardian bumps
 // it after it recorded a removal, so no interleaving leaves an allow that a
 // removal should have ended:
-//   - the guardian records and bumps after the gateway read the ledger: the
-//     answer it publishes (an allow, from the earlier ledger) carries the
-//     generation the bump ended, so the hook refuses it, and the next
-//     exchange is denied;
+//   - the guardian records and bumps after the gateway read the ledger,
+//     before the exchange answers: the allow it published first (from the
+//     earlier ledger) carries the generation the bump ended, so the hook
+//     refuses it, and the exchange reads the removals again before it
+//     answers, so this call is denied too and the denial is published with
+//     the current generation (1.0.4 review loop round 4: the call was
+//     allowed and only the next one denied);
 //   - the guardian records and bumps after the gateway read the generation,
 //     before the ledger: the exchange reads the new ledger and is denied;
 //   - the guardian rewrites the ledger in place, keeping its file, time and
@@ -135,11 +138,17 @@ func TestForeignHookSessionGatewayStampsTheGenerationItReadBeforeTheRemovals(t *
 	t.Cleanup(func() { foreignHookSessionPublish = previous })
 	afterRead = func() { guardian(server.alice, "/home/alice/.claude/settings.json") }
 	before := server.generation()
-	if got := server.call(server.aliceToken, allow); got.Deny {
-		t.Fatalf("an exchange answered before the removal was recorded is allowed: %+v", got)
+	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "started before DefenseClaw removed") {
+		t.Fatalf("an exchange whose removal the guardian recorded before it answered must be denied: %+v", got)
 	}
-	if published := last(); published.deny || published.generation != before || published.generation == server.generation() {
-		t.Fatalf("its allow must carry the generation the bump ended (%s, now %s): %+v", before, server.generation(), published)
+	if len(writes) < 2 {
+		t.Fatalf("the allow and the denial that replaces it must both be published: %+v", writes)
+	}
+	if published := writes[len(writes)-2]; published.deny || published.generation != before || published.generation == server.generation() {
+		t.Fatalf("its first allow must carry the generation the bump ended (%s, now %s): %+v", before, server.generation(), published)
+	}
+	if published := last(); !published.deny || published.generation != server.generation() {
+		t.Fatalf("the denial that replaces it carries the current generation: %+v", published)
 	}
 	if got := server.call(server.aliceToken, allow); !got.Deny || !strings.Contains(got.Reason, "started before DefenseClaw removed") {
 		t.Fatalf("the next exchange must be denied: %+v", got)
@@ -410,5 +419,92 @@ func TestForeignHookSessionGatewayDeniesWhenTheRecordFolderCannotBeLocated(t *te
 	foreignHookSessionGeneration = func(string) (string, error) { return "", errors.New("the generation file is not root's") }
 	if got := server.call(server.aliceToken, allow); got.Deny || len(writes) != 2 || writes[1].generation != "" {
 		t.Fatalf("without a generation the allow is published without one: %+v %+v", got, writes)
+	}
+}
+
+// Review P2 (GAP-0352, 1.0.4 loop round 4): the guardian records a removal
+// after an exchange read the removals and before it answers. The exchange
+// reads the generation and the removals again before it answers, so every
+// way the guardian records one denies this call, and the denial is the
+// record the hook finds: a ledger write followed by its bump, a pending
+// mark (a ledger write or a bump that failed), and a ledger write the
+// guardian has not bumped yet. A removal for another account, or a bump
+// alone, keeps the allow, published again with the new generation. With
+// nothing recorded, or a denial from the scan, the exchange publishes once.
+func TestForeignHookSessionGatewayRechecksTheRemovalsBeforeItAnswers(t *testing.T) {
+	process := runtime.GOOS + ":b:1:100"
+	allow := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-1", "process": process}, "decision": map[string]any{"deny": false}}
+	deny := map[string]any{"key": map[string]any{"connector": "claudecode", "session": "s-2", "process": process},
+		"decision": map[string]any{"deny": true, "reason": "enterprise_foreign_hook_blocked: unverifiable hook"}}
+	for _, c := range []struct {
+		name     string
+		guardian func(s *foreignHookPublishTestServer, ledger func(identity string))
+		update   map[string]any
+		deny     string // the reason the answer must carry, "" for an allow
+		writes   int
+	}{
+		{name: "ledger and bump", guardian: func(s *foreignHookPublishTestServer, ledger func(string)) { ledger(s.alice); s.bump() }, update: allow, deny: "started before DefenseClaw removed", writes: 2},
+		{name: "pending mark and bump", guardian: func(s *foreignHookPublishTestServer, _ func(string)) {
+			if err := enterprisepolicy.MarkForeignHookRemovalPending(s.dataDir, s.alice); err != nil {
+				s.t.Fatal(err)
+			}
+			s.bump()
+		}, update: allow, deny: "could not record the removal yet", writes: 2},
+		{name: "pending mark, bump failed", guardian: func(s *foreignHookPublishTestServer, _ func(string)) {
+			if err := enterprisepolicy.MarkForeignHookRemovalPending(s.dataDir, s.alice); err != nil {
+				s.t.Fatal(err)
+			}
+		}, update: allow, deny: "could not record the removal yet", writes: 2},
+		{name: "ledger not bumped yet", guardian: func(s *foreignHookPublishTestServer, ledger func(string)) { ledger(s.alice) }, update: allow, deny: "started before DefenseClaw removed", writes: 2},
+		{name: "another account's removal", guardian: func(s *foreignHookPublishTestServer, ledger func(string)) { ledger(s.bob); s.bump() }, update: allow, writes: 2},
+		{name: "bump alone", guardian: func(s *foreignHookPublishTestServer, _ func(string)) { s.bump() }, update: allow, writes: 2},
+		{name: "nothing recorded", guardian: func(*foreignHookPublishTestServer, func(string)) {}, update: allow, writes: 1},
+		{name: "a denial from the scan", guardian: func(s *foreignHookPublishTestServer, ledger func(string)) { ledger(s.alice); s.bump() }, update: deny, deny: "unverifiable hook", writes: 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var writes []foreignHookPublished
+			root := t.TempDir()
+			var server *foreignHookPublishTestServer
+			ran := false
+			server = newForeignHookPublishTestServer(t, root, func(r, identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, generation string, _ time.Time) error {
+				writes = append(writes, foreignHookPublished{r, identity, key, decision.Deny, generation})
+				if !ran {
+					// The guardian runs after the exchange decided, before
+					// it answers.
+					ran = true
+					c.guardian(server, func(identity string) {
+						now := time.Now().UTC()
+						data, _, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{{
+							Identity: identity, Connector: "claudecode", Path: "/home/x/.claude/settings.json", At: now.Format(time.RFC3339), Mark: runtime.GOOS + ":b:200",
+						}}, now)
+						if err != nil {
+							t.Fatal(err)
+						}
+						ledgerPath := filepath.Join(server.guardianDir, enterprisepolicy.ForeignHookRemovalsFile)
+						if err := os.WriteFile(ledgerPath+".tmp", data, 0o640); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Rename(ledgerPath+".tmp", ledgerPath); err != nil {
+							t.Fatal(err)
+						}
+					})
+				}
+				return nil
+			})
+			before := server.generation()
+			got := server.call(server.aliceToken, c.update)
+			if c.deny == "" && got.Deny || c.deny != "" && (!got.Deny || !strings.Contains(got.Reason, c.deny)) {
+				t.Fatalf("answer %+v, want deny reason %q", got, c.deny)
+			}
+			if len(writes) != c.writes {
+				t.Fatalf("published %+v, want %d writes", writes, c.writes)
+			}
+			if writes[0].generation != before || writes[0].deny != (c.update["decision"].(map[string]any)["deny"] == true) {
+				t.Fatalf("the first record is the exchange's own answer, with the generation it read first: %+v (generation %s)", writes[0], before)
+			}
+			if final := writes[len(writes)-1]; final.deny != got.Deny || len(writes) > 1 && final.generation != server.generation() {
+				t.Fatalf("the last record is the answer, with the current generation %s: %+v", server.generation(), final)
+			}
+		})
 	}
 }
