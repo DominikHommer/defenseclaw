@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -26,7 +27,10 @@ import (
 // action and its fallback handling unchanged.
 
 var (
-	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`(?s)\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];.*\bp\.write_text\(`)
+	trustedPathlibAuthorizedKeysAssign   = regexp.MustCompile(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];`)
+	trustedPathlibWriteText              = regexp.MustCompile(`\bp\.write_text\(`)
+	trustedPathlibReassign               = regexp.MustCompile(`\bp\s*:?=[^=]|\bfor\s+p\s+in\b|\bas\s+p\b`)
+	trustedPythonDynamicCode             = regexp.MustCompile(`\b(?:exec|eval|compile)\b`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
@@ -168,10 +172,13 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	}
 	switch command.Program {
 	case "python", "python3":
-		return command.Argv[1] == "-c" && facts.ActiveHome != "" &&
-			(trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedPythonPathAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
+		if command.Argv[1] != "-c" || facts.ActiveHome == "" {
+			return false
+		}
+		code := trustedPythonExecutedText(command.Argv[2])
+		return trustedPathlibAuthorizedKeysWrite(code) ||
+			trustedPythonPathAuthorizedKeysWrite.MatchString(code) ||
+			trustedInterpreterAuthorizedKeysWrite(code, facts.ActiveHome)
 	case "perl":
 		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			(trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
@@ -182,6 +189,32 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	default:
 		return false
 	}
+}
+
+// trustedPythonExecutedText is Python -c code with its comments and inert
+// triple-quoted strings blanked: a docstring that spells a write executes
+// nothing (GAP-1199); an f-string field runs and is kept. Code that may run
+// a string (exec, eval, compile) is kept whole, so such a string still proves
+// its write.
+func trustedPythonExecutedText(code string) string {
+	if trustedPythonDynamicCode.MatchString(code) {
+		return code
+	}
+	return guardrail.MaskPythonCommentsAndDocstrings(code)
+}
+
+// trustedPathlibAuthorizedKeysWrite proves p = Path.home() / ".ssh" /
+// "authorized_keys"; ... p.write_text(...) only when p is not bound again
+// before the write (GAP-1299).
+func trustedPathlibAuthorizedKeysWrite(code string) bool {
+	for _, assign := range trustedPathlibAuthorizedKeysAssign.FindAllStringIndex(code, -1) {
+		rest := code[assign[1]:]
+		write := trustedPathlibWriteText.FindStringIndex(rest)
+		if write != nil && !trustedPathlibReassign.MatchString(rest[:write[0]]) {
+			return true
+		}
+	}
+	return false
 }
 
 // A static shell redirect writes its target independently of the program's

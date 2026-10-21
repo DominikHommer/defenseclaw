@@ -141,6 +141,8 @@ _ASCII_CASE_FOLD = {0x130: "i", 0x131: "i", 0x17F: "s", 0x212A: "k"}
 _WINDOW_MIN_TEXT = 4096
 _WINDOW_SLACK = 512
 _ANCHOR_MIN_LEN = 3
+# Classes that match any character, newlines included.
+_ANY_CHAR_CLASSES = (r"[\s\S]", r"[\S\s]", r"[\w\W]", r"[\W\w]", r"[\d\D]", r"[\D\d]")
 
 # The C loader parses the default pack several times faster than the pure
 # Python one (GAP-2070); same safe semantics.
@@ -381,11 +383,15 @@ def _search(rule: _CompiledRule, text: str, folded: str) -> re.Match[str] | None
 def _anchors(node: _Required | None, pattern: re.Pattern[str]) -> list[str] | None:
     """A literal set one of which every match contains, for :func:`_search`.
 
-    None when there is no such set of usable literals, or when the pattern
-    has an end anchor (``$`` / ``\\Z`` without MULTILINE) that a window's
-    end would satisfy falsely.
+    None when there is no such set of usable literals, when the pattern has
+    an end anchor (``$`` / ``\\Z`` without MULTILINE) that a window's end
+    would satisfy falsely, or when a match can run across any number of
+    lines (``(?s)``, ``[\\s\\S]``): ``(?s)start.*finish`` matches words 80
+    lines apart, as the Go scanner finds, which no window holds (GAP-1316).
     """
     if node is None:
+        return None
+    if pattern.flags & re.DOTALL or any(c in pattern.pattern for c in _ANY_CHAR_CLASSES):
         return None
     if "\\Z" in pattern.pattern or "\\z" in pattern.pattern:
         return None

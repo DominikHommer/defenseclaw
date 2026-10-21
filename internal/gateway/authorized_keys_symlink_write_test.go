@@ -1304,7 +1304,7 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 						t.Errorf("%s = %.300s, want block", command, got)
 					}
 					if command == `tar xzf node.tgz && ./configure > build.log` &&
-						!strings.Contains(got, "run the extraction and the write as separate commands") {
+						!strings.Contains(got, "Run the extraction and the write as separate commands") {
 						t.Errorf("%s = %.300s, want archive chain guidance", command, got)
 					}
 				}

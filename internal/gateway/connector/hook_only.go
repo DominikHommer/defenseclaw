@@ -542,6 +542,21 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	return ApplyHookContract(profile, opts)
 }
 
+// copilotPatchText is the patch an apply_patch toolArgs string carries:
+// the text itself or a JSON string of it, starting with "*** Begin Patch".
+func copilotPatchText(toolName string, raw []byte) (string, bool) {
+	if !strings.EqualFold(strings.TrimSpace(toolName), "apply_patch") {
+		return "", false
+	}
+	text := string(raw)
+	if len(raw) >= 2 && raw[0] == '"' {
+		if json.Unmarshal(raw, &text) != nil {
+			return "", false
+		}
+	}
+	return text, strings.HasPrefix(text, "*** Begin Patch")
+}
+
 func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 	req := HookProfileRequest{
 		ConnectorName: "copilot",
@@ -567,6 +582,12 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 		raw := bytes.TrimSpace([]byte(value))
 		if len(raw) >= 2 && raw[0] == '{' && raw[len(raw)-1] == '}' && json.Valid(raw) {
 			req.ToolArgs = append(json.RawMessage(nil), raw...)
+		} else if patch, ok := copilotPatchText(req.ToolName, raw); ok {
+			// apply_patch is a freeform tool: its arguments are the patch
+			// text itself, sent raw or as a JSON string. Judge it as the
+			// patch it is; an unread one blocked every benign patch
+			// (GAP-0668).
+			req.ToolArgs, _ = json.Marshal(map[string]string{"patch": patch})
 		}
 	}
 	if CopilotVSCodeLocalTool(req.ToolName) && len(req.ToolArgs) != 0 {

@@ -16,7 +16,7 @@ var pythonModuleWrite = regexp.MustCompile(`\b(?:os\.(?:remove|unlink|rename|rep
 var pythonWriteOpen = regexp.MustCompile(`\bopen\s*\([^\n)]*,\s*["'][rbtU]*[wax+]`)
 
 func pythonPathWriteMatch(rule *regexp.Regexp, source string) []int {
-	code := maskPythonCommentsAndDocstrings(source)
+	code := MaskPythonCommentsAndDocstrings(source)
 	lines := strings.Split(code, "\n")
 	for _, hit := range rule.FindAllStringIndex(code, -1) {
 		lineNo := strings.Count(code[:hit[0]], "\n")
@@ -135,51 +135,171 @@ func pythonCallEnd(line string, open int) int {
 	return -1
 }
 
-// Comments and triple-quoted strings can mention paths without executing a
-// write. Blank them in place so matches retain their source offsets.
-func maskPythonCommentsAndDocstrings(source string) string {
+// MaskPythonCommentsAndDocstrings blanks the comments and the triple-quoted
+// strings of Python source in place, so matches keep their offsets: they can
+// mention paths without executing a write. An f- or t-string runs the
+// expressions of its replacement fields, so it is kept as it is. Source whose
+// strings the scan cannot follow (an unclosed string or field, nesting past
+// pythonMaxStringNesting) is returned unmasked: blanking from a wrong string
+// boundary could hide code.
+func MaskPythonCommentsAndDocstrings(source string) string {
 	out := []byte(source)
-	quote := byte(0)
-	triple := false
-	escaped := false
-	for i := 0; i < len(out); i++ {
-		c := out[i]
-		if quote != 0 {
-			if triple {
-				if i+2 < len(out) && out[i] == quote && out[i+1] == quote && out[i+2] == quote {
-					out[i], out[i+1], out[i+2] = ' ', ' ', ' '
-					i += 2
-					quote, triple = 0, false
-				} else if c != '\n' {
-					out[i] = ' '
-				}
-				continue
-			}
-			if escaped {
-				escaped = false
-			} else if c == '\\' {
-				escaped = true
-			} else if c == quote {
-				quote = 0
-			}
-			continue
-		}
-		if c == '#' {
+	for i := 0; i < len(out); {
+		switch out[i] {
+		case '#':
 			for i < len(out) && out[i] != '\n' {
 				out[i] = ' '
 				i++
 			}
-			continue
-		}
-		if c == '\'' || c == '"' {
-			if i+2 < len(out) && out[i+1] == c && out[i+2] == c {
-				quote, triple = c, true
-				out[i], out[i+1], out[i+2] = ' ', ' ', ' '
-				i += 2
-			} else {
-				quote = c
+		case '\'', '"':
+			end, ok := pythonStringEnd(out, i, 0)
+			if !ok {
+				return source
 			}
+			if pythonTripleQuoteAt(out, i) && !pythonFormatString(out, i) {
+				for j := i; j < end; j++ {
+					if out[j] != '\n' {
+						out[j] = ' '
+					}
+				}
+			}
+			i = end
+		default:
+			i++
 		}
 	}
 	return string(out)
+}
+
+// pythonMaxStringNesting bounds strings inside replacement fields inside
+// strings (f"{f'{x}'}").
+const pythonMaxStringNesting = 32
+
+func pythonTripleQuoteAt(src []byte, i int) bool {
+	return i+2 < len(src) && src[i+1] == src[i] && src[i+2] == src[i]
+}
+
+// pythonFormatString reports whether the string literal whose quote is at
+// src[i] has an f or t prefix (f"x", rf'x', t"""x"""), whose fields run.
+func pythonFormatString(src []byte, i int) bool {
+	start := i
+	for start > 0 && start > i-2 && pythonLetter(src[start-1]) {
+		start--
+	}
+	if start > 0 && (pythonLetter(src[start-1]) || src[start-1] == '_' ||
+		src[start-1] >= '0' && src[start-1] <= '9') {
+		return false // the end of a longer name, not a prefix
+	}
+	switch strings.ToLower(string(src[start:i])) {
+	case "f", "fr", "rf", "t", "tr", "rt":
+		return true
+	}
+	return false
+}
+
+func pythonLetter(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// pythonStringEnd returns the offset just past the string literal whose
+// opening quote is at src[i], following the replacement fields of an f- or
+// t-string, whose expressions may hold strings with the same quotes
+// (Python 3.12).
+func pythonStringEnd(src []byte, i, depth int) (int, bool) {
+	if depth > pythonMaxStringNesting {
+		return 0, false
+	}
+	quote, triple, format := src[i], pythonTripleQuoteAt(src, i), pythonFormatString(src, i)
+	j := i + 1
+	if triple {
+		j = i + 3
+	}
+	for j < len(src) {
+		c := src[j]
+		switch {
+		case c == '\\':
+			if format && j+1 < len(src) && src[j+1] == '{' {
+				j++ // a backslash does not escape a field
+				continue
+			}
+			j += 2
+			continue
+		case c == quote && !triple:
+			return j + 1, true
+		case c == quote && pythonTripleQuoteAt(src, j):
+			return j + 3, true
+		case c == '\n' && !triple:
+			return 0, false
+		case format && c == '{':
+			if j+1 < len(src) && src[j+1] == '{' {
+				j += 2
+				continue
+			}
+			end, ok := pythonFieldEnd(src, j+1, depth+1)
+			if !ok {
+				return 0, false
+			}
+			j = end
+			continue
+		}
+		j++
+	}
+	return 0, false
+}
+
+// pythonFieldEnd returns the offset just past the "}" that closes the
+// replacement field whose expression starts at src[j].
+func pythonFieldEnd(src []byte, j, depth int) (int, bool) {
+	brackets := 0
+	for j < len(src) {
+		switch src[j] {
+		case '\'', '"':
+			end, ok := pythonStringEnd(src, j, depth)
+			if !ok {
+				return 0, false
+			}
+			j = end
+			continue
+		case '#':
+			for j < len(src) && src[j] != '\n' {
+				j++
+			}
+			continue
+		case '(', '[', '{':
+			brackets++
+		case ')', ']':
+			brackets--
+		case '}':
+			if brackets == 0 {
+				return j + 1, true
+			}
+			brackets--
+		case ':':
+			if brackets == 0 {
+				return pythonFormatSpecEnd(src, j+1, depth)
+			}
+		}
+		j++
+	}
+	return 0, false
+}
+
+// pythonFormatSpecEnd returns the offset just past the "}" that closes a
+// field whose format spec (literal text with nested fields) starts at src[j].
+func pythonFormatSpecEnd(src []byte, j, depth int) (int, bool) {
+	for j < len(src) {
+		switch src[j] {
+		case '{':
+			end, ok := pythonFieldEnd(src, j+1, depth+1)
+			if !ok {
+				return 0, false
+			}
+			j = end
+			continue
+		case '}':
+			return j + 1, true
+		}
+		j++
+	}
+	return 0, false
 }

@@ -1492,7 +1492,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			}
 			title := rule.Title
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
-				title = "Archive extraction may create a link before a later write; run the extraction and the write as separate commands"
+				title = archiveBeforeWriteTitle
 			}
 			return append(kept, adjustConfidence(input.Tool, RuleFinding{
 				RuleID: rule.ID, Title: title, Severity: rule.Severity,
@@ -1539,6 +1539,14 @@ func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.
 		trustedGitBashAuthorizedKeysWrite(input) ||
 		trustedNestedAuthorizedKeysWrite(input, facts)
 }
+
+// archiveBeforeWriteTitle is the title of an authorized-keys block whose
+// write follows an archive extraction. It is ship-authored, so it reaches
+// the user as written (trustedBuiltInFindingLabel), and it holds no "; ",
+// which splits a reason into parts that were each redacted, so the
+// guidance never showed (GAP-1555).
+const archiveBeforeWriteTitle = "Archive extraction may create a link before a later write. " +
+	"Run the extraction and the write as separate commands"
 
 // trustedUnknownKeyAuthorizedKeysWrite judges the target of a native
 // file-write tool call (write, edit, multiedit, create) whose arguments

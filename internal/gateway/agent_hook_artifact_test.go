@@ -115,6 +115,74 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 	})
 }
 
+// GAP-1513: a migrated 0.8.x literal rule blocks a script the call runs only
+// when an executed command of the script carries the literal; the literal in
+// a comment of the script does not block it.
+func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	old := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(old, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	own := "version: 1\ncategory: acme-markers\nrules:\n" +
+		"  - id: ACME-OWN-MARKER\n    pattern: 'acme\\.own-7f3c'\n    title: \"Own marker\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n"
+	if err := os.WriteFile(filepath.Join(old, "rules", "acme.yaml"), []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := guardrail.PlanRulePackRebase(old)
+	if err != nil || plan == nil || len(plan.Expressed) != 1 {
+		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
+	}
+	rebased := t.TempDir()
+	for rel, data := range plan.Files {
+		target := filepath.Join(rebased, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pack, err := guardrail.LoadRulePack(rebased)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const connectorName = "artifact-migrated-literal"
+	if err := ApplyConnectorRulePackOverrides(connectorName, pack); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { RemoveConnectorRulePackOverrides(connectorName) })
+	dir := t.TempDir()
+	for i, tc := range []struct {
+		body string
+		want bool
+	}{
+		{"#!/bin/sh\n# see acme.own-7f3c in the runbook\nprintf '%s\\n' done\n", false},
+		{"#!/bin/sh\necho acme.own-7f3c > /tmp/acme-marker.txt\n", true},
+		// A quoted heredoc is data the command that reads it acts on.
+		{"#!/bin/sh\ncat > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		// A ':' heredoc comment block leaves the parse partial: never enforced.
+		{"#!/bin/sh\n: <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", false},
+	} {
+		body, want := tc.body, tc.want
+		path := filepath.Join(dir, fmt.Sprintf("script-%d.sh", i))
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: dir})
+		findings := promotedArtifactFindings(t.Context(), agentHookRequest{ConnectorName: connectorName}, facts, true, nil)
+		enforced := false
+		for _, finding := range findings {
+			if finding.RuleID == "ACME-OWN-MARKER" && finding.contributesToEnforcement() {
+				enforced = true
+			}
+		}
+		if enforced != want {
+			t.Errorf("%q: enforced=%t, want %t (%v)", body, enforced, want, FindingStrings(findings))
+		}
+	}
+}
+
 func TestPromotedArtifactPreservesActiveAgentInstructionContext(t *testing.T) {
 	requireNativePOSIXArtifactHost(t)
 	const connectorName = "artifact-active-agent-context-test"
