@@ -313,14 +313,30 @@ target paths. The refusal says DefenseClaw blocked the action under your
 organization's policy and may name "SSH authorized keys mutation." Split the
 command into smaller calls. Per-user mode is not affected.
 
-On Windows, a sustained flood of about 10 hook calls a second for many minutes
-can grow the DefenseClaw audit log (`audit.db-wal`) up to about 20 GB. During
-such a flood, hook answers slow down and many calls can be blocked (fail closed),
-sometimes every call for minutes at a time. No call is ever allowed because of
-it. Normal use does not reach this rate. Keep several tens of GB free on the
-system drive if you expect such floods. The file shrinks back once the flood
-stops. This limit remains in 1.0.4. The fix needs a change to how the audit
-store indexes hook records and is deferred to a later release.
+On Windows, on a disk with slow scattered writes (a cloud VM's network disk,
+say), a sustained flood of 3 to 10 hook calls a second slows hook answers. Most
+stay under 50 ms, but some wait for seconds while the audit log
+(`audit.db-wal`) is written back into `audit.db`. A call that waits past its
+hook's time budget is blocked (fail closed). No call is ever allowed because of
+it. Normal use does not reach this rate.
+
+The audit log stays bounded during such a flood on per-user and managed
+standalone installs, on every OS:
+
+- Once the log in use passes 256 MiB, the gateway holds hook writes for up to
+  2 seconds while it copies the log back, and the log starts again. A hold
+  that could not finish doubles the next one, up to 30 seconds.
+- The gateway log says `audit WAL over its 256 MiB limit` for each hold.
+- In GitHub's Windows runners, over 10 minutes, the file peaked at about
+  0.3 GB at 3 calls a second, 0.7 GB at 5 and 0.9 to 1.0 GB at 10 (1.0.3:
+  1.3, 4.7 and 9.5 GB). It went back to about 300 MB after each peak.
+- On Linux and macOS it stays under 256 MiB at 10 calls a second.
+
+Under Secure Client the gateway does not run this check in 1.0.4, so a flood
+can still grow the file there. Keep a few GB free on the system drive.
+
+Faster answers on such a disk need hook audit writes to be batched. That is
+planned for a later release.
 
 A tool call that DefenseClaw allowed while the gateway was running still runs
 if you approve it in the agent after the gateway stops. Every call checked
