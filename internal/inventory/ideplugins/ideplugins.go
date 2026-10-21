@@ -28,6 +28,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -187,7 +188,7 @@ func Scan(home, goos string, limits Limits) []Install {
 	if goos == "windows" {
 		for _, dir := range []string{s.layout.appSupport, s.layout.localData} {
 			if dir = filepath.Clean(dir); filepath.IsAbs(dir) && s.rootOf(dir) == nil {
-				s.roots = append(s.roots, scanRoot{path: dir})
+				s.roots = append(s.roots, scanRoot{path: dir, exact: true})
 			}
 		}
 	}
@@ -228,6 +229,11 @@ type scanner struct {
 // scanRoot is one folder a scan stays in.
 type scanRoot struct {
 	path string
+	// exact marks a redirected AppData folder: it must be reached without a
+	// link. Its owner can swap it for a link to another profile's folder
+	// between the enumerator's check and the scan, and that profile's files
+	// would then be named in place below the link's target.
+	exact bool
 	// real is the path as the system names an opened handle of it, read
 	// once (resolvedRoot).
 	real     string
@@ -480,6 +486,9 @@ func (s *scanner) openedInPlace(f *os.File, path string) bool {
 	}
 	got, ok := openedPath(f)
 	real := s.resolvedRoot(root)
+	if root.exact && (!ok || real == "") {
+		return false
+	}
 	if !ok || real == "" {
 		return s.openedObjectIsPath(f, path)
 	}
@@ -511,15 +520,32 @@ func (s *scanner) resolvedRoot(root *scanRoot) string {
 		return root.real
 	}
 	root.realRead = true
+	if root.exact {
+		if info, err := os.Lstat(root.path); err != nil || !info.IsDir() {
+			return ""
+		}
+	}
 	f, err := os.Open(root.path)
 	if err != nil {
 		return ""
 	}
 	defer f.Close()
 	if real, ok := openedPath(f); ok {
-		root.real = filepath.Clean(real)
+		real = filepath.Clean(real)
+		if root.exact && !samePath(real, root.path) {
+			return ""
+		}
+		root.real = real
 	}
 	return root.real
+}
+
+// samePath compares two cleaned paths as this system names files.
+func samePath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // clean bounds a metadata value: printable, single line, at most
