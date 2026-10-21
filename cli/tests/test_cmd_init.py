@@ -4522,6 +4522,27 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_unknown_action_connector_is_a_usage_error_and_changes_nothing(self, mock_discover, _gate):
+        # GAP-0044: the unknown entry was skipped with a warning after the run
+        # had replaced the enforcing roster with an observe-only connector.
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+        flags = ["--non-interactive", "--yes", "--scanner-mode", "local", "--skip-install",
+                 "--no-start-gateway", "--no-verify", "--json-summary"]
+        first = self._invoke(["--action-connectors", "claudecode", *flags])
+        self.assertEqual(first.exit_code, 0, first.output + (first.stderr or ""))
+        config = Path(self.tmp_dir, "config.yaml")
+        before = config.read_bytes()
+
+        result = self._invoke(["--action-connectors", "w0invalid", *flags])
+
+        out = result.output + (result.stderr or "")
+        self.assertEqual(result.exit_code, 2, out)
+        self.assertIn("w0invalid is not a hook connector; nothing was changed", out)
+        self.assertIn("claudecode", out.split("Choose from:", 1)[1])
+        self.assertEqual(config.read_bytes(), before)
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
     def test_action_connectors_only_configures_named_connector(self, mock_discover, _gate):
         mock_discover.return_value = self._disc({"codex", "claudecode"})
 
