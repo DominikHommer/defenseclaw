@@ -20,15 +20,9 @@ DefenseClaw collects each event once and builds one record from it. The record i
   <Node id="collect" kind="gateway">{`Bucket collection\nlogs · traces · metrics`}</Node>
   <Node id="rec" kind="generic">Record</Node>
   <Node id="sqlite" kind="datastore">{`Local SQLite\nevery log`}</Node>
-  <Node id="otlp" kind="generic">{`OTLP\nlogs · traces · metrics`}</Node>
-  <Node id="hec" kind="generic">{`Splunk HEC\nlogs`}</Node>
-  <Node id="gal" kind="generic">{`Galileo\ntraces`}</Node>
-  <Edge from="src" to="collect" label="emit" />
-  <Edge from="collect" to="rec" label="builds" />
+  <Node id="dest" kind="generic">{`Your destinations\nOTLP · Splunk HEC · Galileo\nfile · webhook`}</Node>
   <Edge from="rec" to="sqlite" />
-  <Edge from="rec" to="otlp" />
-  <Edge from="rec" to="hec" />
-  <Edge from="rec" to="gal" />
+  <Edge from="rec" to="dest" label="redacted copy" />
 </Flow>
 
 ## How it works
@@ -81,6 +75,7 @@ defenseclaw setup observability list
 
 ## Reference
 
+- All guides: [How-to > Observability](/docs/how-to/observability).
 - [Observability reference](/docs/reference/observability): buckets, routes, delivery limits, failure circuits, alert runbooks.
 - [Redaction](/docs/reference/observability/redaction) and [Dashboards](/docs/reference/observability/dashboards).
 - [Sandbox telemetry](/docs/reference/sandboxes/telemetry) and [Telemetry identity](/docs/reference/observability/telemetry-identity).

@@ -27,7 +27,14 @@ defenseclaw setup antigravity --mode action   # deny or ask at PreToolUse
 
 On Windows, run the same commands in PowerShell. Sign-in still goes through Windows Credential Manager or Google's browser flow.
 
-{/* needs-live-capture: output of defenseclaw setup antigravity */}
+## Check it
+
+```bash
+defenseclaw status
+```
+
+The agent appears under **Agents** with its mode. `defenseclaw doctor` passes the **Antigravity hooks** row.
+
 
 ## What it can block or ask
 
