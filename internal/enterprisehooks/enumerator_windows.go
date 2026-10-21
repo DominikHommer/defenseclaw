@@ -277,6 +277,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	// alone by the admin's choice). A running agent of any other account is
 	// reported after the loop, so it never drops out of the record.
 	judged := map[string]bool{}
+	signedIn := windowsSignedInCheck(opts.Logger)
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for _, profile := range profiles {
 		// Fast-fail per row so a wedged cycle never runs to
@@ -298,7 +299,12 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			// later Setup /ensure stopped at the activation evidence. No one
 			// can sign in as it, so its rows are revoked now (GAP-0430). An
 			// agent process that outlives the account is not judged here: it
-			// is reported with its owner unknown after the loop (GAP-0556).
+			// is reported with its owner unknown after the loop (GAP-0556),
+			// unless enterprise.enrollment.exclude_users names the account
+			// (GAP-0673): the admin chose to leave it alone.
+			if windowsEnrollmentListMatches(opts.ExcludeUsers, []string{profile.SID, filepath.Base(filepath.Clean(profile.Home))}) {
+				judged[canonicalManifestTargetSID(profile.SID)] = true
+			}
 			logfSafely(opts.Logger, profile.SID,
 				"the local account no longer exists; its rows are revoked although its profile folder remains")
 			continue
@@ -326,15 +332,16 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			user:          filepath.Base(filepath.Clean(profile.Home)),
 			report:        opts.ReportUnprotected,
 		}
-		if standalone && !sessionActive && len(running[canonicalManifestTargetSID(profile.SID)]) == 0 &&
-			windowsDisabledLocalAccount(profile.SID, lookupAccount) {
-			// A disabled account cannot start a new session, but an existing
-			// session can still run its agents. Suppress the stale warning
-			// only after the account has signed out (GAP-1034) and no agent
-			// process of it is left running (a scheduled task outlives the
-			// sign-out, GAP-0556).
+		if standalone && !sessionActive && !windowsRunsConnector(running[canonicalManifestTargetSID(profile.SID)], connectors) &&
+			windowsDisabledLocalAccount(profile.SID, lookupAccount) && !signedIn(profile.SID) {
+			// A disabled account cannot start a new session, but a session it
+			// still has, active or disconnected, can still run its agents.
+			// Suppress the stale warning only after the account has signed
+			// out of every session (GAP-1034, GAP-1463) and no agent of an
+			// enabled connector is left running for it (a scheduled task
+			// outlives the sign-out, GAP-0556).
 			logfSafely(opts.Logger, profile.SID,
-				"the local account is disabled and has no active session; its installed agents are not reported as unprotected")
+				"the local account is disabled and has no session; its installed agents are not reported as unprotected")
 			rowContext.report = nil
 		}
 		// The connectors this profile got a row or a report for, so a
@@ -438,6 +445,37 @@ func reportUnenrolledRunningAgents(
 	}
 }
 
+// windowsRunsConnector reports whether running lists an agent of one of
+// connectors, the enabled ones.
+func windowsRunsConnector(running map[string]string, connectors []string) bool {
+	for _, conn := range connectors {
+		if strings.TrimSpace(running[conn]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsSignedInCheck returns a check of whether a user has a session now,
+// active or disconnected. The sessions are read once per cycle, at the first
+// check; when they cannot be read every user counts as signed in, so no
+// warning is suppressed on a guess.
+func windowsSignedInCheck(logf EnumerationLogger) func(sid string) bool {
+	var users map[string]bool
+	read, unreadable := false, false
+	return func(sid string) bool {
+		if !read {
+			read = true
+			var err error
+			if users, err = windowsSignedInSessionUsers(); err != nil {
+				unreadable = true
+				logfSafely(logf, "sessions", fmt.Sprintf("signed-in sessions are unreadable; disabled accounts keep their unprotected-agent warnings this cycle: %v", err))
+			}
+		}
+		return unreadable || users[canonicalManifestTargetSID(sid)]
+	}
+}
+
 // windowsUnknownOwnerUser names the owner of a running agent whose account
 // SID names no account a profile pass judged.
 const windowsUnknownOwnerUser = "unknown"
@@ -458,8 +496,7 @@ func reportRunningAgentsOfUnknownOwners(running map[string]map[string]string, ju
 		if judged[sid] {
 			continue
 		}
-		parsed, err := windows.StringToSid(sid)
-		if err != nil || !sidIsInteractiveUser(parsed) {
+		if !WindowsInteractiveUserSID(sid) {
 			continue
 		}
 		sids = append(sids, sid)
@@ -476,8 +513,8 @@ func reportRunningAgentsOfUnknownOwners(running map[string]map[string]string, ju
 				SID:       sid,
 				Connector: conn,
 				Code:      UnprotectedCodeAgentUnprotected,
-				Reason: fmt.Sprintf("%s runs as this SID, but it names no account DefenseClaw enrolls (the account was deleted while the process kept running, or no user profile is listed for it), so no row enrolls it and DefenseClaw does not decide its tool calls; it counts as unprotected until the process exits",
-					label),
+				Reason: fmt.Sprintf("%s runs as this SID, but it names no account DefenseClaw enrolls (the account was deleted while the process kept running, or no user profile is listed for it), so no row enrolls it; %s; it counts as unprotected until the process exits",
+					label, windowsUnenrolledConsequence(conn)),
 			})
 		}
 	}
@@ -1314,6 +1351,15 @@ func expandProfileImagePathSystemDrive(profile string) (string, error) {
 // coverage. Same discipline as `sidIsNTService` (in
 // internal/ipc/acl_windows.go), inverted: this filter admits ONLY
 // interactive users; that one admits ONLY NT SERVICE principals.
+// WindowsInteractiveUserSID reports whether sid is the SID of an
+// interactive user account (local, domain or Microsoft Entra ID), the only
+// accounts the enumerator enrolls. Service, virtual (including IIS
+// application pool) and other well-known SIDs are not.
+func WindowsInteractiveUserSID(sid string) bool {
+	parsed, err := windows.StringToSid(strings.TrimSpace(sid))
+	return err == nil && sidIsInteractiveUser(parsed)
+}
+
 func sidIsInteractiveUser(sid *windows.SID) bool {
 	if sid == nil {
 		return false

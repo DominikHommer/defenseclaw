@@ -1332,8 +1332,8 @@ func (l *lifecycle) describeIdentityRecords() {
 	// The guardian removes the record of an account it no longer publishes
 	// (GAP-1113), so a stale record is one it still publishes and could not
 	// refresh: name the account and where the guardian says why.
-	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's oldest identity record, of uid %s, was last written at %s by "+
-		"this host's clock: the clock was stepped, the directory lookup for that account keeps failing, or the guardian is not "+
+	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's identity record of uid %s was last written at %s by "+
+		"this host's clock, over 30 minutes ago or in the future: the clock was stepped, the directory lookup for that account keeps failing, or the guardian is not "+
 		"running; records over an hour old are ignored, and accounts a guardrail profile assignment selects by UPN then get "+
 		"the default profile. The guardian rewrites them within about a minute of a clock step; if this persists, fix the "+
 		"lookup failure its log names for that uid (%s), or restart the hook guardian if it is not running",

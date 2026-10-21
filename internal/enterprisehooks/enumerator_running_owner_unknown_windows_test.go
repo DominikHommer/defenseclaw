@@ -30,6 +30,13 @@ const (
 // its SID answers lookupErr; running names the agents seen running.
 func enumerateDeletedAccountCycle(t *testing.T, lookupErr error, running map[string]map[string]string) (Manifest, []UnprotectedAgent) {
 	t.Helper()
+	return enumerateDeletedAccountCycleExcluding(t, lookupErr, running, nil)
+}
+
+// enumerateDeletedAccountCycleExcluding is enumerateDeletedAccountCycle with
+// enterprise.enrollment.exclude_users set to exclude.
+func enumerateDeletedAccountCycleExcluding(t *testing.T, lookupErr error, running map[string]map[string]string, exclude []string) (Manifest, []UnprotectedAgent) {
+	t.Helper()
 	stubMachineWinGet(t, nil)
 	stubUserWinGet(t, nil)
 	stubCodexMachinePolicyPublished(t, true)
@@ -48,6 +55,7 @@ func enumerateDeletedAccountCycle(t *testing.T, lookupErr error, running map[str
 	var reported []UnprotectedAgent
 	manifest, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
 		RunningAgents:     running,
+		ExcludeUsers:      exclude,
 		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
 	})
 	if err != nil {
@@ -91,11 +99,64 @@ func TestEnumerateWindowsKeepsTheRunningAgentOfADeletedAccountOwnerUnknown(t *te
 		for _, text := range []string{
 			"codex for user unknown (" + canonicalManifestTargetSID(want.sid) + ") is not protected",
 			want.label + " runs as this SID",
+			// The codex machine policy is published: its hooks refuse the
+			// account's tool calls, so the reason must not say that no
+			// decision is made (GAP-0673).
+			"its machine-policy hooks refuse this user's tool calls",
 			"until the process exits",
 		} {
 			if !strings.Contains(message, text) {
 				t.Fatalf("message %q does not contain %q", message, text)
 			}
+		}
+		if strings.Contains(message, "does not decide its tool calls") {
+			t.Fatalf("message %q claims no tool-call decision is made", message)
+		}
+	}
+}
+
+// A deleted account that enterprise.enrollment.exclude_users names is left
+// alone like any excluded account: its lingering agent is not reported with
+// the owner unknown (GAP-0673).
+func TestEnumerateWindowsLeavesTheRunningAgentOfAnExcludedDeletedAccountAlone(t *testing.T) {
+	_, reported := enumerateDeletedAccountCycleExcluding(t, windows.ERROR_NONE_MAPPED, map[string]map[string]string{
+		testDeletedLocalSID: {"codex": "codex (pid 11888)"},
+	}, []string{testDeletedLocalSID})
+	if len(reported) != 0 {
+		t.Fatalf("unprotected = %+v, want none for the excluded account", reported)
+	}
+}
+
+// The owner-unknown entry is reported on every cycle the process runs and
+// goes at the first cycle after it exits.
+func TestEnumerateWindowsReportsTheDeletedAccountAgentOnEveryCycleUntilItExits(t *testing.T) {
+	running := map[string]map[string]string{testDeletedLocalSID: {"codex": "codex (pid 11888)"}}
+	for cycle, want := range []int{1, 1, 0} {
+		if cycle == 2 {
+			running = nil
+		}
+		if _, reported := enumerateDeletedAccountCycle(t, windows.ERROR_NONE_MAPPED, running); len(reported) != want {
+			t.Fatalf("cycle %d: unprotected = %+v, want %d", cycle+1, reported, want)
+		}
+	}
+}
+
+// The owners of running agents are classified by account kind: IIS
+// application pool and other service SIDs are not user accounts (GAP-0673).
+func TestWindowsInteractiveUserSIDRejectsServiceIdentities(t *testing.T) {
+	for sid, want := range map[string]bool{
+		testLocalUserSID: true,
+		testDomainUserA:  true,
+		"S-1-12-1-1111111111-2222222222-333333333-44": true,
+		"S-1-5-18":           false,
+		"S-1-5-80-1-2-3-4-5": false,
+		"S-1-5-82-1-2-3-4-5": false,
+		"S-1-5-90-0-1":       false,
+		"":                   false,
+		"not a sid":          false,
+	} {
+		if got := WindowsInteractiveUserSID(sid); got != want {
+			t.Errorf("WindowsInteractiveUserSID(%q) = %v, want %v", sid, got, want)
 		}
 	}
 }

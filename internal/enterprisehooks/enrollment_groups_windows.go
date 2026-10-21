@@ -283,6 +283,7 @@ type windowsEnrollmentGroups struct {
 // machine SID. Tests replace them.
 var (
 	windowsActiveSessionGroups       = readWindowsActiveSessionGroups
+	windowsSignedInSessionUsers      = readWindowsSignedInSessionUsers
 	windowsResolveGroupName          = resolveWindowsGroupName
 	windowsLocalGroupDirectMembers   = readWindowsLocalGroupDirectMembers
 	windowsMachineAccountDomainSID   = readWindowsMachineAccountDomainSID
@@ -567,36 +568,11 @@ func (g *windowsEnrollmentGroups) pruneCache(profiles map[string]struct{}) {
 // session to the group SIDs of that session's token (logon SIDs excluded;
 // deny-only groups count, since the user is a member).
 func readWindowsActiveSessionGroups() (map[string][]string, error) {
-	var sessions *windows.WTS_SESSION_INFO
-	var count uint32
-	if err := windows.WTSEnumerateSessions(0, 0, 1, &sessions, &count); err != nil {
-		return nil, fmt.Errorf("enumerate Windows sessions: %w", err)
-	}
-	if sessions != nil {
-		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessions)))
-	}
 	out := map[string][]string{}
-	if count == 0 || sessions == nil {
-		return out, nil
-	}
-	for _, session := range unsafe.Slice(sessions, count) {
-		if session.State != windows.WTSActive {
-			continue
-		}
-		var token windows.Token
-		if err := windows.WTSQueryUserToken(session.SessionID, &token); err != nil {
-			continue
-		}
-		user, err := token.GetTokenUser()
-		if err != nil {
-			token.Close()
-			continue
-		}
-		sid := canonicalManifestTargetSID(user.User.Sid.String())
+	err := visitWindowsSessionTokens(func(state uint32) bool { return state == windows.WTSActive }, func(sid string, token windows.Token) {
 		groups, err := token.GetTokenGroups()
-		if sid == "" || err != nil {
-			token.Close()
-			continue
+		if err != nil {
+			return
 		}
 		for _, group := range groups.AllGroups() {
 			if group.Sid == nil || group.Attributes&windows.SE_GROUP_LOGON_ID == windows.SE_GROUP_LOGON_ID {
@@ -607,12 +583,63 @@ func readWindowsActiveSessionGroups() (map[string][]string, error) {
 		if _, ok := out[sid]; !ok {
 			out[sid] = []string{}
 		}
-		token.Close()
+	})
+	if err != nil {
+		return nil, err
 	}
 	for sid, groups := range out {
 		out[sid] = canonicalWindowsGroupSIDs(groups)
 	}
 	return out, nil
+}
+
+// readWindowsSignedInSessionUsers lists the SIDs of the users who have a
+// session now, active or disconnected. A disconnected session keeps running
+// the user's processes, so it can still start the user's agents.
+func readWindowsSignedInSessionUsers() (map[string]bool, error) {
+	out := map[string]bool{}
+	err := visitWindowsSessionTokens(func(state uint32) bool {
+		return state == windows.WTSActive || state == windows.WTSDisconnected
+	}, func(sid string, _ windows.Token) {
+		out[sid] = true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// visitWindowsSessionTokens calls visit with the canonical user SID and the
+// user token of each session whose state accept admits. A session whose
+// token or user cannot be read is skipped. The token is closed after visit.
+func visitWindowsSessionTokens(accept func(state uint32) bool, visit func(sid string, token windows.Token)) error {
+	var sessions *windows.WTS_SESSION_INFO
+	var count uint32
+	if err := windows.WTSEnumerateSessions(0, 0, 1, &sessions, &count); err != nil {
+		return fmt.Errorf("enumerate Windows sessions: %w", err)
+	}
+	if sessions != nil {
+		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessions)))
+	}
+	if count == 0 || sessions == nil {
+		return nil
+	}
+	for _, session := range unsafe.Slice(sessions, count) {
+		if !accept(session.State) {
+			continue
+		}
+		var token windows.Token
+		if err := windows.WTSQueryUserToken(session.SessionID, &token); err != nil {
+			continue
+		}
+		if user, err := token.GetTokenUser(); err == nil {
+			if sid := canonicalManifestTargetSID(user.User.Sid.String()); sid != "" {
+				visit(sid, token)
+			}
+		}
+		token.Close()
+	}
+	return nil
 }
 
 // resolveWindowsGroupName resolves a configured group name to its SID.
