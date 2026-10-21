@@ -81,6 +81,34 @@ var agentIdentityAccountName = func(identity string) string {
 	return managedHookPeerHomes.lastName(uid)
 }
 
+// agentIdentityAccountToken is the account token an agent identity row of
+// a uid is recorded with (managedHookPeerHomeCache.rowToken), "" for a SID
+// or a uid no token was ever known for. Tests replace it.
+var agentIdentityAccountToken = func(identity string) string {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return ""
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return ""
+	}
+	return managedHookPeerHomes.rowToken(uid)
+}
+
+// agentIdentityHolderHistory is the last account token of a uid and whether
+// another account is known to have held it (managedHookPeerHomeCache.holderHistory).
+// Tests replace it.
+var agentIdentityHolderHistory = func(identity string) (string, bool) {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return "", false
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return "", false
+	}
+	return managedHookPeerHomes.holderHistory(uid)
+}
+
 // agentIdentityIncarnation is the account incarnation a uid's agent identity
 // is keyed on besides its account name (managedHookPeerHomeCache.agentIncarnation):
 // "" for the first account this gateway saw hold the uid. Tests replace it.

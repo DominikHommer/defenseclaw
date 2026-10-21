@@ -11,11 +11,14 @@ import (
 )
 
 // Review of GAP-0551 (loop 2): a UPN SSSD InfoPipe stopped reporting is kept
-// for the same account incarnation only, once the previous record names one:
-// a uid handed to another account of the same name in the same SSSD domain
-// (deleted and created again with another SID) does not inherit the first
-// account's UPN for a day. A previous record an older guardian wrote names
-// none and is kept as before.
+// for the same account incarnation only: a uid handed to another account of
+// the same name in the same SSSD domain (deleted and created again with
+// another SID) does not inherit the first account's UPN for a day. Since
+// loop 3 both records must name it: a previous record a guardian before
+// 1.0.4 wrote names none, and after an upgrade the uid and name may already
+// be another account's, so its UPN is not copied into the new record (the
+// UPN then needs a fresh InfoPipe answer), nor into a record whose own
+// incarnation is unknown.
 func TestKeepVerifiedInfoPipeUPNNeedsTheSameIncarnation(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	// Both records carry the same SID, which w2b-g-enum requires as well.
@@ -31,8 +34,16 @@ func TestKeepVerifiedInfoPipeUPNNeedsTheSameIncarnation(t *testing.T) {
 	if got, kept := KeepVerifiedInfoPipeUPN(fresh, previous); !kept || got.Facts.UPN != "alice@corp.example" {
 		t.Fatalf("record of the same incarnation = %+v, kept %v; want the UPN kept", got, kept)
 	}
+	unknown := fresh
+	unknown.AccountIncarnation = ""
+	if got, kept := KeepVerifiedInfoPipeUPN(unknown, previous); kept || got.Facts.UPN != "" {
+		t.Fatalf("record of an unknown incarnation = %+v, kept %v; want no UPN carried over", got, kept)
+	}
+	// The upgrade case: the legacy record is CORP's former alice, the fresh
+	// one names the account that holds the uid and name now.
 	previous.AccountIncarnation = ""
-	if _, kept := KeepVerifiedInfoPipeUPN(fresh, previous); !kept {
-		t.Fatal("a previous record without an incarnation (an older guardian) no longer keeps the UPN")
+	fresh.AccountIncarnation = "sid:S-1-5-21-1-1-1-501"
+	if got, kept := KeepVerifiedInfoPipeUPN(fresh, previous); kept || got.Facts.UPN != "" {
+		t.Fatalf("record after a legacy record = %+v, kept %v; want the former account's UPN not carried over", got, kept)
 	}
 }

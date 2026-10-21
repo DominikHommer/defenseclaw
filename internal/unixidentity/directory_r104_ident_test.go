@@ -104,6 +104,7 @@ func TestNSSCompatListsItsServices(t *testing.T) {
 		}
 	}
 	line := []byte("bob:*:80001:80001::/home/bob:/bin/bash\n")
+	startFakeNSLCD(t, &fakeNSLCD{passwd: map[string]Account{"uid:80001": {Name: "bob", UID: 80001, GID: 80001, Home: "/home/bob", Shell: "/bin/bash"}}})
 	r := newFakeNSS(&fakeRun{results: map[string]commandResult{
 		"passwd 80001": {stdout: line}, "-s ldap passwd 80001": {stdout: line},
 	}})
@@ -117,6 +118,8 @@ func TestNSSCompatListsItsServices(t *testing.T) {
 // the groups an RFC 2307 directory lists it in, and the directory's name of
 // its primary gid.
 func TestLocalAccountKeepsMemberListDirectoryGroups(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	oldPasswd, oldGroup, oldNSS := localPasswdPath, localGroupPath, nsswitchPath
 	t.Cleanup(func() { localPasswdPath, localGroupPath, nsswitchPath = oldPasswd, oldGroup, oldNSS })
 	dir := t.TempDir()
@@ -259,6 +262,8 @@ func TestSameNameAccountsKeepsCandidateLookupErrors(t *testing.T) {
 // local account fails its groups instead of dropping the groups it lists,
 // so a strict-profile LDAP group is never lost to an outage (fail closed).
 func TestLocalAccountGroupsFailWhenTheDirectoryDoesNotAnswer(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	oldPasswd, oldGroup, oldNSS := localPasswdPath, localGroupPath, nsswitchPath
 	t.Cleanup(func() { localPasswdPath, localGroupPath, nsswitchPath = oldPasswd, oldGroup, oldNSS })
 	dir := t.TempDir()

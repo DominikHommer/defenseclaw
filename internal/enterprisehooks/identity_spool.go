@@ -273,13 +273,15 @@ func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord 
 // assignment selects by UPN to the default profile within one guardian pass
 // (GAP-1114). It keeps the UPN only for the same account in the same SSSD
 // domain: the same name and the same SID (AccountSID), and of the same
-// account incarnation once the previous record names one. A uid, name and
+// account incarnation, which both records must name. A uid, name and
 // domain can all be reused by an account recreated in the directory, and a
 // record without a SID, or a previous record an older build wrote without
 // one, cannot show that it is the same account, so its UPN goes; a uid
 // handed to another account of the same name and domain does not inherit
-// the UPN either. It marks a kept UPN infopipe_kept so status and verify can
-// say why. It
+// the UPN either. A previous record that names no incarnation (one a
+// guardian before 1.0.4 wrote) cannot show that it was the same account
+// either, so after an upgrade the UPN needs a fresh InfoPipe answer. It
+// marks a kept UPN infopipe_kept so status and verify can say why. It
 // keeps it for IdentitySpoolKeptUPNMaxAge from the first pass that kept it
 // (UPNKeptSince): a UPN removed in the directory stayed trusted for as long
 // as the guardian ran (GAP-1235). A kept record an older build wrote
@@ -290,7 +292,7 @@ func KeepVerifiedInfoPipeUPN(record, previous IdentitySpoolRecord) (IdentitySpoo
 		!strings.EqualFold(record.Key, previous.Key) || record.User == "" || !strings.EqualFold(record.User, previous.User) ||
 		record.SSSDDomain == "" || !strings.EqualFold(record.SSSDDomain, previous.SSSDDomain) ||
 		record.AccountSID == "" || !strings.EqualFold(record.AccountSID, previous.AccountSID) ||
-		previous.AccountIncarnation != "" && record.AccountIncarnation != previous.AccountIncarnation {
+		previous.AccountIncarnation == "" || record.AccountIncarnation != previous.AccountIncarnation {
 		return record, false
 	}
 	since := previous.UPNKeptSince

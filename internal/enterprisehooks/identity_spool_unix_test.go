@@ -216,12 +216,13 @@ func TestIdentitySpoolKeepsTheLastKnownUPN(t *testing.T) {
 // not a verified change, so the record keeps the UPN it verified before, for
 // the same account in the same SSSD domain only (GAP-1114).
 func TestIdentitySpoolKeepsAnInfoPipeUPNThroughAnAnswerWithoutIt(t *testing.T) {
+	const incarnation = "sid:S-1-5-21-4-4-4-1999"
 	previous := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceInfoPipe,
-		AccountSID: testAccountSID,
-		Facts:      useridentity.DirectoryFacts{UPN: "w4a2.alt@alt.dclab.test", Principal: "w4a2.alt@alt.dclab.test", Source: useridentity.SourceSSSDInfoPipe}}
+		AccountSID: testAccountSID, AccountIncarnation: incarnation,
+		Facts: useridentity.DirectoryFacts{UPN: "w4a2.alt@alt.dclab.test", Principal: "w4a2.alt@alt.dclab.test", Source: useridentity.SourceSSSDInfoPipe}}
 	derived := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceDerived,
-		AccountSID: testAccountSID,
-		Facts:      useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
+		AccountSID: testAccountSID, AccountIncarnation: incarnation,
+		Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
 	got, kept := KeepVerifiedInfoPipeUPN(derived, previous)
 	if !kept || got.Facts.UPN != "w4a2.alt@alt.dclab.test" || got.Facts.Principal != got.Facts.UPN || got.UPNSource != UPNSourceInfoPipeKept {
 		t.Fatalf("record = %+v, want the verified UPN kept", got)
@@ -240,12 +241,13 @@ func TestIdentitySpoolKeepsAnInfoPipeUPNThroughAnAnswerWithoutIt(t *testing.T) {
 // GAP-1114 carry-forward still holds inside that bound.
 func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForADay(t *testing.T) {
 	start := time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC)
+	const incarnation = "sid:S-1-5-21-4-4-4-1999"
 	previous := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceInfoPipe,
-		UpdatedAt: start.Add(-time.Minute), AccountSID: testAccountSID,
+		UpdatedAt: start.Add(-time.Minute), AccountSID: testAccountSID, AccountIncarnation: incarnation,
 		Facts: useridentity.DirectoryFacts{UPN: "w4a2.alt@alt.dclab.test", Principal: "w4a2.alt@alt.dclab.test", Source: useridentity.SourceSSSDInfoPipe}}
 	pass := func(at time.Time) IdentitySpoolRecord {
 		return IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceDerived,
-			UpdatedAt: at, AccountSID: testAccountSID,
+			UpdatedAt: at, AccountSID: testAccountSID, AccountIncarnation: incarnation,
 			Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
 	}
 	first, kept := KeepVerifiedInfoPipeUPN(pass(start), previous)
@@ -738,8 +740,9 @@ const (
 // it is the same account.
 func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForTheSameAccountSID(t *testing.T) {
 	record := func(sid string, upn bool) IdentitySpoolRecord {
+		// One incarnation on both sides, so the SID alone decides here.
 		r := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2", SSSDDomain: "dclab.test", AccountSID: sid, UpdatedAt: time.Now().UTC(),
-			UPNSource: UPNSourceDerived, Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
+			AccountIncarnation: testSameIncarnation, UPNSource: UPNSourceDerived, Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
 		if upn {
 			r.UPNSource, r.Facts.UPN, r.Facts.Principal, r.Facts.Source = UPNSourceInfoPipe, "w4a2.alt@alt.dclab.test", "w4a2.alt@alt.dclab.test", useridentity.SourceSSSDInfoPipe
 		}
@@ -761,7 +764,24 @@ func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForTheSameAccountSID(t *testing.T) {
 			t.Errorf("%s: kept %v, record %+v; want kept %v", tc.name, kept, got, tc.kept)
 		}
 	}
+	// T5 integration (w2b-g-enum's SID rule with w2b-g-ident's incarnation
+	// rule): the same SID does not keep the UPN of a previous record that
+	// names no incarnation (a guardian before 1.0.4 wrote it), nor one whose
+	// incarnation differs. Both rules must hold.
+	previous := record(testAccountSID, true)
+	previous.AccountIncarnation = ""
+	if got, kept := KeepVerifiedInfoPipeUPN(record(testAccountSID, false), previous); kept || got.Facts.UPN != "" {
+		t.Errorf("same SID, previous record without an incarnation: kept %v, record %+v; want the UPN gone", kept, got)
+	}
+	previous.AccountIncarnation = "nss:files"
+	if got, kept := KeepVerifiedInfoPipeUPN(record(testAccountSID, false), previous); kept || got.Facts.UPN != "" {
+		t.Errorf("same SID, another incarnation: kept %v, record %+v; want the UPN gone", kept, got)
+	}
 }
+
+// testSameIncarnation is the account incarnation of the SID tests: the
+// same on both records, so only the SID differs.
+const testSameIncarnation = "nss:sss"
 
 // The same account recreated under the same uid, name and SSSD domain, end
 // to end through the guardian pass: whether the new account's InfoPipe
@@ -773,6 +793,7 @@ func TestIdentitySpoolDropsTheUPNOfAnAccountRecreatedUnderTheSameUID(t *testing.
 	stubIdentitySpoolLookupUID(t, map[int]string{aliceUID: "dcad-alice", bobUID: "dcad-bob"})
 	withSID := func(record IdentitySpoolRecord, sid string) IdentitySpoolRecord {
 		record.AccountSID = sid
+		record.AccountIncarnation = testSameIncarnation
 		return record
 	}
 	withoutUPN := func(record IdentitySpoolRecord) IdentitySpoolRecord {

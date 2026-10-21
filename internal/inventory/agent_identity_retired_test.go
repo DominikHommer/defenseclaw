@@ -101,7 +101,7 @@ func TestRetiredListingKeepsTheLiveRowsAccountDomains(t *testing.T) {
 	legacy := AgentIdentityRecord{AgentID: agentidentity.LegacyAgentID(in), UserID: in.UserID, UserName: in.Account, Connector: in.Connector,
 		InstallFP: in.InstallFP, MachineHash: machine, FirstSeen: old, LastSeen: old}
 	fresh := AgentIdentityRecord{AgentID: agentidentity.AgentID(in), UserID: in.UserID, UserName: in.Account, Connector: in.Connector,
-		InstallFP: in.InstallFP, MachineHash: machine, FirstSeen: now, LastSeen: now, UserDomain: "corp.example"}
+		InstallFP: in.InstallFP, MachineHash: machine, FirstSeen: now, LastSeen: now, UserDomain: "corp.example", UserIncarnation: "sid:S-1-5-21-7-7-7-1001"}
 	if err := st.UpsertAgentIdentities(ctx, []AgentIdentityRecord{legacy, fresh}); err != nil {
 		t.Fatal(err)
 	}
@@ -112,11 +112,18 @@ func TestRetiredListingKeepsTheLiveRowsAccountDomains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	domains := map[string]string{}
+	domains, incarnations := map[string]string{}, map[string]string{}
 	for _, rec := range rows {
 		domains[rec.AgentID] = rec.UserDomain
+		incarnations[rec.AgentID] = rec.UserIncarnation
 	}
 	if len(domains) != 2 || domains[fresh.AgentID] != "corp.example" || domains[legacy.AgentID] != "" {
 		t.Fatalf("retired listing domains = %v, want the fresh row with corp.example and the legacy one with none", domains)
+	}
+	// T5 integration (g3-ident's retired union with w2b-g-ident's
+	// user_incarnation column): the live row keeps its incarnation, the
+	// retired one has none.
+	if incarnations[fresh.AgentID] != fresh.UserIncarnation || incarnations[legacy.AgentID] != "" {
+		t.Fatalf("retired listing incarnations = %v, want the fresh row's and none for the legacy one", incarnations)
 	}
 }

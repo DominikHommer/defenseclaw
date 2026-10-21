@@ -55,6 +55,8 @@ func crossServiceResults() map[string]commandResult {
 }
 
 func TestDirectoryGroupsBindToServiceThatOwnsUID(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	for _, tc := range []struct {
 		name, order, firstName string
 	}{
@@ -91,6 +93,8 @@ func TestDirectoryGroupsBindToServiceThatOwnsUID(t *testing.T) {
 }
 
 func TestDirectoryGroupsFollowEligibleNSSServices(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	for _, tc := range []struct {
 		name, passwdServices, initgroupsServices, localGroups string
 		extraPasswd, extraInitgroups                          commandResult
@@ -170,6 +174,8 @@ func TestDirectoryGroupsWithoutNSSConfiguration(t *testing.T) {
 }
 
 func TestSSSDSIDlessGroupConfirmationBindsToUID(t *testing.T) {
+	// An nslcd that completes every search (nslcdSearchesComplete).
+	startFakeNSLCD(t, &fakeNSLCD{})
 	for _, tc := range []struct {
 		name     string
 		ldapUser commandResult

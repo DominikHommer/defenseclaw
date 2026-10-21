@@ -164,7 +164,12 @@ type AccountFilter struct {
 	raw, account, domain string
 	ids                  []string
 	accountDomains       []string
-	removed              func(id string) bool
+	// incarnation is the account token of the account ids name, and
+	// holderChanged reports that another account is known to have held its
+	// uid (WithAccountIncarnation).
+	incarnation   string
+	holderChanged bool
+	removed       func(id string) bool
 }
 
 // NewAccountFilter compiles filter. ids are the ids (uid or SID) of the
@@ -204,29 +209,45 @@ func QualifiedAccountName(name string) bool {
 }
 
 // Matches reports whether the filter selects the row of account id recorded
-// as name. An empty filter selects every row.
-func (f AccountFilter) Matches(id, name string) bool { return f.MatchesIn(id, name, "") }
+// as name, a row that keeps no provenance of its account (an IDE plugin or
+// discovery row): a qualified filter selects it by the id it resolves to.
+// An empty filter selects every row.
+func (f AccountFilter) Matches(id, name string) bool {
+	return f.matches(id, name, "", func() bool { return true }, nil)
+}
 
-// MatchesIn is Matches for a row that also keeps the AccountDomains of the
-// account it was recorded for ("" for a row an older build wrote, or one
-// recorded before the account's facts were known). A qualified filter
-// selects a row by the uid it resolves to only when the row was recorded for
-// an account of the filter's domain: a uid handed from CORP\alice to
-// OTHER\alice kept CORP's rows, recorded with the bare name alice, under
-// alice@OTHER (review of GAP-1263). A row that keeps no domain is selected
-// by its uid, as before.
-func (f AccountFilter) MatchesIn(id, name, domains string) bool {
+// MatchesIn is Matches for an agent identity row, which also keeps the
+// AccountDomains and the account token (incarnation) of the account it was
+// recorded for. A qualified filter selects such a row by the uid it
+// resolves to only when the row was recorded for that account: a uid handed
+// from CORP\alice to OTHER\alice kept CORP's rows, recorded with the bare
+// name alice, under alice@OTHER (review of GAP-1263). The account token
+// decides where both sides name one: domains alone may overlap (two
+// accounts with UPNs under one suffix). A row that names no token (written
+// before v8, or while none was known) is selected by its uid only while no
+// other account is known to have held the uid, and then only when its
+// owning domains, if it names any, are the account's (review of GAP-1263,
+// loop 3). Its recorded name does not select a row recorded for another
+// account than the one the filter resolves to (recordedForAnother).
+func (f AccountFilter) MatchesIn(id, name, domains, incarnation string) bool {
+	return f.matches(id, name, domains, func() bool { return f.ownRow(id, domains, incarnation) },
+		func() bool { return f.recordedForAnother(id, incarnation) })
+}
+
+func (f AccountFilter) matches(id, name, domains string, own, another func() bool) bool {
 	id, name = strings.TrimSpace(id), strings.TrimSpace(name)
 	switch {
 	case f.raw == "":
 		return true
 	case id != "" && strings.EqualFold(f.raw, id):
 		return true
-	case id != "" && f.recordedIn(domains) && slices.ContainsFunc(f.ids, func(resolved string) bool {
+	case id != "" && slices.ContainsFunc(f.ids, func(resolved string) bool {
 		return strings.EqualFold(resolved, id)
-	}):
+	}) && own():
 		return true
 	case name == "":
+		return false
+	case another != nil && another():
 		return false
 	case EqualFold(f.raw, name):
 		return true
@@ -241,6 +262,54 @@ func (f AccountFilter) MatchesIn(id, name, domains string) bool {
 		return EqualFold(f.domain, rowDomain)
 	}
 	return len(f.ids) == 0 && id != "" && f.removed != nil && f.recordedIn(domains) && f.removed(id)
+}
+
+// ownRow reports whether a row of id recorded for an account of domains and
+// incarnation was recorded for the account the filter resolves to. A SID is
+// never handed on, so its domains alone decide (recordedIn).
+func (f AccountFilter) ownRow(id, domains, incarnation string) bool {
+	incarnation = strings.TrimSpace(incarnation)
+	if f.domain == "" || KindForID(strings.TrimSpace(id)) != KindPOSIXUID {
+		return f.recordedIn(domains)
+	}
+	switch {
+	case incarnation != "" && f.incarnation != "":
+		return incarnation == f.incarnation
+	case incarnation == "" && f.holderChanged:
+		return false
+	}
+	return f.recordedIn(domains)
+}
+
+// recordedForAnother reports whether a row was recorded for another account
+// than the one a qualified filter resolves to: the row and the account name
+// account tokens and they differ, or the row names none, is of the resolved
+// uid, and another account is known to have held that uid. A qualified
+// name is handed on with the uid (an account deleted and created again
+// with a new SID, its RFC 2307 uid and CORP\alice), so the recorded name
+// selected the former holder's rows, and their history, for the new account
+// (review of GAP-1263, loop 4). A bare filter names every account of the
+// name.
+func (f AccountFilter) recordedForAnother(id, incarnation string) bool {
+	if f.domain == "" {
+		return false
+	}
+	incarnation = strings.TrimSpace(incarnation)
+	switch {
+	case incarnation != "" && f.incarnation != "":
+		return incarnation != f.incarnation
+	case incarnation == "" && f.holderChanged:
+		return slices.ContainsFunc(f.ids, func(resolved string) bool { return strings.EqualFold(resolved, strings.TrimSpace(id)) })
+	}
+	return false
+}
+
+// WithAccountIncarnation gives the account token of the account a qualified
+// filter resolves to, and whether another account is known to have held its
+// uid (or its first holder is not proved to be the one older builds saw).
+func (f AccountFilter) WithAccountIncarnation(incarnation string, holderChanged bool) AccountFilter {
+	f.incarnation, f.holderChanged = strings.TrimSpace(incarnation), holderChanged
+	return f
 }
 
 // WithAccountDomains gives the AccountDomains of the account a qualified
@@ -269,12 +338,14 @@ func (f AccountFilter) recordedIn(domains string) bool {
 }
 
 // AccountDomains is the provenance an admin-view row keeps of the account
-// it was recorded for: the domains its verified directory facts name (DNS
-// domain, NetBIOS domain, realm, and the domain parts of its UPN and
-// principal), lower case and space separated, after "." for a local
-// account. A removed account's uid is handed to the next account, of the
-// same bare name in another domain too, and the provenance tells their rows
-// apart where the uid and the name cannot. "" when the facts name none.
+// it was recorded for: the domains that own its verified directory facts
+// (DNS domain, NetBIOS domain, realm), lower case and space separated, after
+// "." for a local account. A removed account's uid is handed to the next
+// account, of the same bare name in another domain too, and the provenance
+// tells their rows apart where the uid and the name cannot. The suffixes of
+// a UPN or principal are aliases, not the owner: two domains' accounts may
+// have UPNs under one suffix, and their rows read as one account's (review
+// of GAP-1263, loop 3). "" when the facts name none.
 func AccountDomains(facts DirectoryFacts) string {
 	var out []string
 	add := func(domain string) {
@@ -286,9 +357,7 @@ func AccountDomains(facts DirectoryFacts) string {
 	if facts.Directory == DirectoryLocal {
 		add(".")
 	}
-	_, upnDomain := SplitQualifiedName(facts.UPN)
-	_, principalDomain := SplitQualifiedName(facts.Principal)
-	for _, domain := range []string{facts.Domain, facts.AccountDomain, facts.Realm, upnDomain, principalDomain} {
+	for _, domain := range []string{facts.Domain, facts.AccountDomain, facts.Realm} {
 		add(domain)
 	}
 	return strings.Join(out, " ")

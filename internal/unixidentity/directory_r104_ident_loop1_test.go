@@ -57,17 +57,19 @@ func TestMemberListDirectoryMustShowItAnswers(t *testing.T) {
 	const ldapNSS = "passwd: files ldap\ninitgroups: files ldap\ngroup: files ldap\n"
 	for _, tc := range []struct {
 		name  string
-		extra map[string]commandResult
+		nslcd *fakeNSLCD
 		ok    bool
 	}{
-		{"LDAP does not answer", nil, false},
-		{"LDAP enumerates nothing", map[string]commandResult{"-s ldap group": {}, "-s ldap passwd": {}}, false},
-		{"LDAP lists a group", map[string]commandResult{"-s ldap group": {stdout: []byte("ldap-users:*:9000:\n")}}, true},
-		{"LDAP lists an account", map[string]commandResult{"-s ldap passwd": {stdout: []byte("bob:*:7001:7001::/home/bob:/bin/sh\n")}}, true},
+		{"nslcd does not answer", nil, false},
+		{"nslcd does not complete the search", &fakeNSLCD{incomplete: map[string]bool{"member:alice": true}}, false},
+		{"nslcd completes it with no group", &fakeNSLCD{}, true},
 	} {
 		t.Run("local account/"+tc.name, func(t *testing.T) {
 			accountHost(t, string(localLine), "local-team:x:7000:alice\n", ldapNSS)
-			r := newFakeNSS(&fakeRun{results: localResults(tc.extra)})
+			if tc.nslcd != nil {
+				startFakeNSLCD(t, tc.nslcd)
+			}
+			r := newFakeNSS(&fakeRun{results: localResults(nil)})
 			ids, err := r.GroupIDs(local)
 			if tc.ok != (err == nil) {
 				t.Fatalf("group ids = %v, %v; want ok %v", ids, err, tc.ok)
@@ -90,7 +92,7 @@ func TestMemberListDirectoryMustShowItAnswers(t *testing.T) {
 		if ids, err := newFakeNSS(&fakeRun{results: results}).GroupIDs(bob); err == nil {
 			t.Fatalf("group ids = %v without LDAP showing that it answers", ids)
 		}
-		results["-s ldap group"] = commandResult{stdout: []byte("ldap-users:*:9000:\n")}
+		startFakeNSLCD(t, &fakeNSLCD{})
 		if ids, err := newFakeNSS(&fakeRun{results: results}).GroupIDs(bob); err != nil || !reflect.DeepEqual(ids, []int{7100, 70001}) {
 			t.Fatalf("group ids = %v, %v; want [7100 70001]", ids, err)
 		}
@@ -108,24 +110,6 @@ func TestMemberListDirectoryMustShowItAnswers(t *testing.T) {
 			t.Fatalf("facts = %+v while the NIS a + line includes does not answer", facts)
 		}
 	})
-}
-
-// The enumeration that shows a directory answers reads its first entry and
-// stops: a directory with more entries than the output limit answers too.
-func TestServiceAnswersStopsAfterTheFirstEntry(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "getent")
-	writeTestFile(t, script, "#!/bin/sh\nwhile :; do echo 'ldap-users:*:9000:alice,bob,carol'; done\n")
-	if err := os.Chmod(script, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	r := &NSSResolver{path: script, runner: runTrustedCommand}
-	start := time.Now()
-	if err := r.serviceAnswers("ldap"); err != nil {
-		t.Fatalf("serviceAnswers = %v; want the first entry to show the directory answers", err)
-	}
-	if took := time.Since(start); took > defaultCommandTimeout {
-		t.Fatalf("serviceAnswers took %s: the enumeration did not stop", took)
-	}
 }
 
 // Review of GAP-1131 (loop 1): a bare name is checked against each passwd
@@ -174,7 +158,7 @@ func TestSameNameAccountsAsksEveryProvider(t *testing.T) {
 		results := map[string]commandResult{"passwd alice": {stdout: []byte(localLine)}}
 		twins, err := SameNameAccounts(context.Background(), newFakeNSS(&fakeRun{results: results}), local)
 		refused(t, twins, err)
-		results["-s ldap group"] = commandResult{stdout: []byte("ldap-users:*:9000:\n")}
+		startFakeNSLCD(t, &fakeNSLCD{})
 		if twins, err := SameNameAccounts(context.Background(), newFakeNSS(&fakeRun{results: results}), local); err != nil || len(twins) != 0 {
 			t.Fatalf("twins = %+v, %v; an answering LDAP without the name leaves the local account", twins, err)
 		}

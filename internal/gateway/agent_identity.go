@@ -48,10 +48,13 @@ type agentIdentityFacts struct {
 	UserID      string
 	UserName    string
 	// UserDomain is the useridentity.AccountDomains of the user's verified
-	// facts when the hook ran (agentIdentityAccountDomains).
-	UserDomain string
-	Connector  string
-	InstallFP  string
+	// facts when the hook ran (agentIdentityAccountDomains), and
+	// UserIncarnation the account token of the account that held the uid
+	// (agentIdentityAccountToken).
+	UserDomain      string
+	UserIncarnation string
+	Connector       string
+	InstallFP       string
 	// InstallHint is a config root the agent claimed (a CLAUDE_CONFIG_DIR or
 	// CODEX_HOME style override seen in the payload) that differs from
 	// InstallFP. It is recorded for operators and never moves the ID.
@@ -103,10 +106,11 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		// to the other admin views. defenseclaw.user.name stays bare. The
 		// account the ID is keyed on comes first: the listing tells a
 		// removed account's identity by it (GAP-0947).
-		UserName:   firstNonEmpty(account, user.Name),
-		UserDomain: agentIdentityAccountDomains(user.ID),
-		Connector:  connectorName,
-		InstallFP:  agentIdentityInstallFP(connectorName, user),
+		UserName:        firstNonEmpty(account, user.Name),
+		UserDomain:      agentIdentityAccountDomains(user.ID),
+		UserIncarnation: agentIdentityAccountToken(agentidentity.NormalizeUserID(user.ID)),
+		Connector:       connectorName,
+		InstallFP:       agentIdentityInstallFP(connectorName, user),
 	}
 	inputs := agentidentity.Inputs{
 		MachineHash: facts.MachineHash, UserID: facts.UserID, Account: account,
