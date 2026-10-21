@@ -4,7 +4,9 @@
  *
  * Type scale (major third, 1rem base): 0.8 · 0.875 · 1 · 1.25 · 1.563 ·
  * 1.953 · 2.441 · 3.052 · 3.815. One loud element per page: the hero
- * runbook (components/install). Everything else stays on paper, ruled. */
+ * install command (components/install/hero-install). The first screen says
+ * what DefenseClaw is, how to install it and where the docs are; the
+ * runbook and the decision trace follow. */
 
 /* ── Hero ──────────────────────────────────────────────────────────────── */
 
@@ -15,29 +17,113 @@
 
 .heroGrid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr);
-  column-gap: clamp(2rem, 4vw, 4.5rem);
+  grid-template-columns: minmax(0, 1fr) minmax(17rem, 22rem);
+  column-gap: clamp(2.5rem, 5vw, 5.5rem);
   align-items: start;
-  padding-block: clamp(2.5rem, 4.5vw, 4rem) clamp(3rem, 5vw, 4.5rem);
+  padding-block: clamp(2.5rem, 5vw, 4.5rem) clamp(2.5rem, 4.5vw, 4rem);
 }
 
-.heroCopy,
-.heroDemo {
+.heroCopy {
   min-width: 0;
 }
 
-.heroDemo :global(.feature-demo) {
+.heroInstall {
+  max-width: 62rem;
+  margin-top: 2rem;
+}
+
+/* ── Section index beside the hero ─────────────────────────────────────── */
+
+.heroMap {
+  /* Line the index up with the headline, below the enterprise hook. */
+  margin-top: 4.25rem;
+}
+
+.docMap {
+  min-width: 0;
+}
+
+.docMapTitle {
+  margin: 0 0 0.6rem;
+  color: var(--editorial-muted);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.docMapList {
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--editorial-rule);
+  list-style: none;
+}
+
+.docMapList li {
+  border-bottom: 1px solid var(--editorial-rule);
+}
+
+.docMapList a {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-inline: -0.75rem;
+  padding: 0.7rem 0.75rem 0.75rem;
+  border-radius: 6px;
+  color: var(--editorial-ink);
+  transition: background-color 140ms ease;
+}
+
+.docMapList strong {
+  font-size: 1rem;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+}
+
+.docMapList span {
+  color: var(--editorial-muted);
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.docMapList a:hover {
+  background: var(--editorial-soft);
+}
+
+.docMapList a:hover strong {
+  color: var(--editorial-blue);
+}
+
+.docMapList a:focus-visible {
+  outline: 2px solid var(--editorial-blue);
+  outline-offset: 0;
+}
+
+/* ── First block: runbook beside the decision trace ────────────────────── */
+
+.startGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr);
+  column-gap: clamp(2rem, 4vw, 4.5rem);
+  align-items: start;
+}
+
+.startDemo {
+  min-width: 0;
+}
+
+.startDemo :global(.feature-demo) {
   margin: 0;
 }
 
-.heroDemo :global(.scenario-header h2) {
+.startDemo :global(.scenario-header h2) {
   font-size: clamp(1.05rem, 1.25vw, 1.25rem);
 }
 
 /* On the landing the demo's labels read as plain text, not a mono eyebrow;
  * the synthetic-data notice stays, it's information. */
-.heroDemo :global(.scenario-eyebrow),
-.heroDemo :global(.scenario-status) {
+.startDemo :global(.scenario-eyebrow),
+.startDemo :global(.scenario-status) {
   font-family: var(--font-sans), sans-serif;
   font-size: 0.8rem;
   font-weight: 600;
@@ -45,42 +131,28 @@
   text-transform: none;
 }
 
-.heroDemo :global(.scenario-status) {
+.startDemo :global(.scenario-status) {
   font-weight: 500;
 }
 
 .heroTitle {
-  max-width: 14ch;
+  max-width: 15ch;
   margin: 1.5rem 0 0;
-  font-size: clamp(2.441rem, 4.1vw, 3.815rem);
-  font-weight: 600;
-  letter-spacing: -0.045em;
+  font-size: clamp(2.441rem, 4.4vw, 4.2rem);
+  font-weight: 650;
+  letter-spacing: -0.04em;
   line-height: 1.02;
   text-wrap: balance;
 }
 
 .heroLede {
-  max-width: 36rem;
+  max-width: 38rem;
   margin: 1.25rem 0 0;
   color: var(--editorial-muted);
-  font-size: clamp(1rem, 1.15vw, 1.125rem);
+  font-size: clamp(1.0625rem, 1.2vw, 1.1875rem);
   line-height: 1.6;
 }
 
-.heroRunbook {
-  max-width: 42rem;
-  margin-top: 1.75rem;
-}
-
-.heroAfter {
-  max-width: 42rem;
-  margin: 0.9rem 0 0;
-  color: var(--editorial-muted);
-  font-size: 0.875rem;
-  line-height: 1.55;
-}
-
-.heroAfter a,
 .textLink {
   color: var(--editorial-blue);
   font-weight: 600;
@@ -90,12 +162,10 @@
   text-underline-offset: 0.22em;
 }
 
-.heroAfter a:hover,
 .textLink:hover {
   text-decoration-color: currentColor;
 }
 
-.heroAfter a:focus-visible,
 .textLink:focus-visible,
 .enterpriseHook:focus-visible,
 .agent:focus-visible,
@@ -106,7 +176,7 @@
 }
 
 /* Enterprise hook: the first thing in the hero, quiet but unmissable. A
- * plain ruled link with a brand-blue edge; no pill, no arrow. */
+ * soft pill with the building icon in brand blue; no arrow. */
 .enterpriseHook {
   display: inline-flex;
   align-items: center;
@@ -115,7 +185,7 @@
   min-height: 2.75rem;
   padding: 0.55rem 1rem 0.55rem 0.85rem;
   border: 1px solid var(--editorial-rule);
-  border-left: 3px solid var(--editorial-blue);
+  border-radius: 999px;
   background: var(--editorial-soft);
   color: var(--editorial-ink);
   font-size: 0.875rem;
@@ -185,20 +255,24 @@
 
 /* ── Agents ────────────────────────────────────────────────────────────── */
 
+/* One rounded frame around ruled cells: the 1px gap shows the rule colour
+ * behind the cells, so the lines stay exact at every column count. */
 .agents {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
   margin: 0;
   padding: 0;
-  border-top: 1px solid var(--editorial-rule);
-  border-left: 1px solid var(--editorial-rule);
+  overflow: hidden;
+  border: 1px solid var(--editorial-rule);
+  border-radius: 12px;
+  background: var(--editorial-rule);
   list-style: none;
 }
 
 .agents > li {
   min-width: 0;
-  border-right: 1px solid var(--editorial-rule);
-  border-bottom: 1px solid var(--editorial-rule);
+  background: var(--editorial-paper);
 }
 
 .agent {
@@ -495,9 +569,14 @@
 }
 
 @media (max-width: 1023px) {
-  .heroGrid {
+  .heroGrid,
+  .startGrid {
     grid-template-columns: minmax(0, 1fr);
     row-gap: 3rem;
+  }
+
+  .heroMap {
+    margin-top: 0;
   }
 
   .storiesGrid,
@@ -577,6 +656,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .agent,
+  .docMapList a,
   .enterpriseHook {
     transition: none;
   }

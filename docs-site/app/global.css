@@ -20,7 +20,6 @@
   --brand-cisco: #006f9d;
   --brand-cisco-strong: #00658f;
   --brand-warn: oklch(0.74 0.18 50);
-  --brand-grain-opacity: 0.08;
 
   /* Enterprise architecture-diagram palette. Diagram primitives use
    * these dedicated tokens instead of Fumadocs card colors so the same
@@ -208,16 +207,6 @@
   box-shadow: 0 24px 48px -28px rgb(0 0 0 / 0.4);
 }
 
-/* Subtle SVG grain layer for the landing-page hero. Inline data URI to
- * keep the request graph clean (no extra HTTP roundtrip) and so the
- * grain ships in the same statically-exported HTML chunk as the hero.
- */
-.hero-grain {
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
-  opacity: var(--brand-grain-opacity);
-  mix-blend-mode: overlay;
-}
-
 /* Respect reduced-motion. The terminal animation, hero gradient
  * shimmer, and any decorative motion fall back to a static frame.
  */
@@ -240,28 +229,6 @@
   animation: terminal-blink 1s steps(2, end) infinite;
 }
 
-/* Rotating connector word in the hero h1. Each word remounts via a
- * React `key` change which retriggers this single-shot animation;
- * the absolute-positioned wrapper around it keeps the heading width
- * stable so the layout doesn't jiggle while the word swaps.
- */
-@keyframes connector-word-in {
-  0% {
-    opacity: 0;
-    transform: translateY(0.25em);
-    filter: blur(2px);
-  }
-  60% {
-    opacity: 1;
-    filter: blur(0);
-  }
-  100% {
-    opacity: 1;
-    transform: translateY(0);
-    filter: blur(0);
-  }
-}
-
 /* Form controls need a 3:1 boundary against the page (WCAG 1.4.11);
  * the hairline --color-fd-border (1.3:1) stays for cards and tables. */
 :root {
@@ -274,26 +241,6 @@
 
 :is(input, select, textarea, [role='radio'], [role='checkbox']).border-fd-border:not(:focus):not([aria-checked='true']) {
   border-color: var(--control-border);
-}
-
-.connector-word-in {
-  animation: connector-word-in 360ms cubic-bezier(0.2, 0.6, 0.2, 1) both;
-}
-
-/* CTA pulse — fired once via React adding the class, then auto-removes
- * itself on `animationend` so subsequent scrolls don't re-trigger.
- * The pulse expands a ring outward and fades, mimicking the iOS
- * "tap target" feedback so the eye is drawn to the install button
- * once the CTA section enters the viewport.
- */
-@keyframes cta-pulse {
-  0%   { box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand-cisco) 70%, transparent); }
-  70%  { box-shadow: 0 0 0 12px color-mix(in oklab, var(--brand-cisco) 0%, transparent); }
-  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand-cisco) 0%, transparent); }
-}
-
-.cta-pulse {
-  animation: cta-pulse 1.6s ease-out 1;
 }
 
 /* Diagram entrance animations. <DiagramLightbox> flips
@@ -672,8 +619,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .connector-word-in,
-  .cta-pulse,
   [data-animate='entered'] .fd-flow-node,
   [data-animate='entered'] .fd-flow-edge,
   [data-animate='entered'] .fd-flow-edge-label,
@@ -708,21 +653,24 @@
 
 /* Documentation editorial layer ---------------------------------------- */
 
+/* Page titles read as titles, not posters: one size step above h2, tight
+ * but not crushed tracking. The lead keeps a readable measure. */
 article#nd-page > h1 {
-  max-width: 19ch;
-  margin-bottom: 1rem;
-  font-size: clamp(2.4rem, 4vw, 4rem);
-  font-weight: 570;
-  letter-spacing: -0.052em;
-  line-height: 1.04;
+  max-width: 30ch;
+  margin-bottom: 0.75rem;
+  font-size: clamp(2rem, 3vw, 2.75rem);
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  line-height: 1.12;
+  text-wrap: balance;
 }
 
 article#nd-page > h1 + p {
-  max-width: 68rem;
-  margin-bottom: clamp(2rem, 3.5vw, 3rem);
+  max-width: 68ch;
+  margin-bottom: clamp(1.75rem, 3vw, 2.5rem);
   color: var(--color-fd-muted-foreground);
-  font-size: clamp(1.02rem, 1.35vw, 1.2rem);
-  line-height: 1.55;
+  font-size: clamp(1.0625rem, 1.2vw, 1.1875rem);
+  line-height: 1.6;
 }
 
 .docs-title-with-brand {
@@ -735,55 +683,50 @@ article#nd-page > h1 + p {
   margin-top: 0.08em;
 }
 
+/* Section headings: a hairline above each h2 marks the section break on
+ * long pages; sizes step down evenly h1 > h2 > h3. */
 article#nd-page .prose > h2 {
-  position: relative;
-  margin-top: 4.5rem;
-  padding-top: 1.1rem;
+  margin-top: 3.5rem;
+  padding-top: 1.5rem;
   border-top: 1px solid var(--color-fd-border);
-  font-size: clamp(1.7rem, 2.5vw, 2.35rem);
-  font-weight: 590;
-  letter-spacing: -0.035em;
-  line-height: 1.08;
-}
-
-article#nd-page .prose > h2::before {
-  position: absolute;
-  top: -1px;
-  left: 0;
-  width: 3.25rem;
-  height: 2px;
-  background: var(--brand-cisco);
-  content: '';
+  font-size: clamp(1.5rem, 2vw, 1.875rem);
+  font-weight: 650;
+  letter-spacing: -0.022em;
+  line-height: 1.2;
 }
 
 article#nd-page .prose > h3 {
-  margin-top: 2.75rem;
-  font-size: clamp(1.22rem, 1.7vw, 1.55rem);
-  font-weight: 610;
-  letter-spacing: -0.022em;
+  margin-top: 2.5rem;
+  font-size: clamp(1.1875rem, 1.4vw, 1.3125rem);
+  font-weight: 640;
+  letter-spacing: -0.012em;
+  line-height: 1.3;
+}
+
+/* Running text keeps a readable measure (about 75 characters) even on wide
+ * pages; tables, code, diagrams and the matrices still use the full width. */
+article#nd-page .prose > :where(p, ul, ol, blockquote, dl, h3, h4),
+article#nd-page .prose > :where(.editorial-callout) {
+  max-width: 75ch;
 }
 
 .editorial-cards {
-  gap: 0 !important;
-  border-top: 1px solid var(--color-fd-border);
-  border-left: 1px solid var(--color-fd-border);
+  gap: 0.75rem !important;
 }
 
 .editorial-card {
-  min-height: 8.25rem;
-  margin: -1px 0 0 -1px;
+  min-height: 7.5rem;
   border-color: var(--color-fd-border) !important;
-  border-radius: 0 !important;
-  background: transparent !important;
-  padding: 1.2rem !important;
+  border-radius: 10px !important;
+  background: var(--color-fd-background) !important;
+  padding: 1.1rem 1.2rem !important;
   box-shadow: none !important;
 }
 
 a[data-card='true'].editorial-card:hover,
 a[data-card='true'].editorial-card:focus-visible {
-  z-index: 1;
   border-color: var(--brand-cisco) !important;
-  background: color-mix(in oklab, var(--brand-cisco) 4%, transparent) !important;
+  background: color-mix(in oklab, var(--brand-cisco) 4%, var(--color-fd-background)) !important;
   transform: none !important;
   box-shadow: none !important;
 }
@@ -795,15 +738,17 @@ a[data-card='true'].editorial-card:focus-visible {
 }
 
 .editorial-callout {
+  overflow: hidden;
   border-color: var(--color-fd-border) !important;
-  border-radius: 0 !important;
+  border-radius: 8px !important;
   background: var(--color-fd-background) !important;
   box-shadow: none !important;
 }
 
 .editorial-tabs {
+  overflow: hidden;
   border-color: var(--color-fd-border) !important;
-  border-radius: 0 !important;
+  border-radius: 10px !important;
   background: var(--color-fd-secondary) !important;
   box-shadow: none !important;
 }
@@ -813,11 +758,11 @@ a[data-card='true'].editorial-card:focus-visible {
 }
 
 .editorial-tabs [role='tabpanel'] {
-  border-radius: 0 !important;
+  border-radius: 0 0 10px 10px !important;
 }
 
 article#nd-page :where(code):not(pre code) {
-  border-radius: 2px;
+  border-radius: 4px;
 }
 
 article#nd-page :where(table, thead, tbody, tr, th, td) {
@@ -875,15 +820,21 @@ article#nd-page :where(div.overflow-auto.prose-no-margin) > table :where(code) {
   font-size: 0.84em;
 }
 
-/* Code blocks share the square editorial geometry of callouts, tabs and
- * diagrams instead of the library's rounded, floating card. */
+/* Code blocks: a flat bordered panel with the same radius as callouts and
+ * tabs, no floating shadow. Inside tabs the tab panel is the frame. */
 article#nd-page figure.shiki {
-  border-radius: 3px;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 8px;
   box-shadow: none;
 }
 
+article#nd-page .editorial-tabs figure.shiki {
+  border-color: transparent;
+}
+
 article#nd-page figure.shiki pre {
-  line-height: 1.65;
+  font-size: 0.8125rem;
+  line-height: 1.7;
 }
 
 article#nd-page .prose :where(code):not(pre code) {
@@ -929,17 +880,14 @@ article#nd-page .prose :where(code):not(pre code) {
   }
 }
 
-/* Sidebar group labels (`---Label---` in meta.json) use the same mono
- * kicker as the "On this page" title, so groups read as structure and
- * not as links. */
+/* Sidebar group labels (`---Label---` in meta.json) are small, strong
+ * sentence-case headings, so groups read as structure and not as links. */
 :is(#nd-sidebar, #nd-sidebar-mobile) p.inline-flex.mt-6 {
-  margin-top: 1.4rem;
-  color: var(--brand-cisco-strong);
-  font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 0.66rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  margin-top: 1.5rem;
+  color: var(--color-fd-foreground);
+  font-size: 0.8125rem;
+  font-weight: 650;
+  letter-spacing: 0;
 }
 
 /* The built-in Fumadocs rail was previously suppressed by full-width
@@ -951,12 +899,9 @@ article#nd-page .prose :where(code):not(pre code) {
 }
 
 #nd-toc #toc-title {
-  color: var(--brand-cisco-strong);
-  font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  color: var(--color-fd-foreground);
+  font-size: 0.8125rem;
+  font-weight: 650;
 }
 
 .site-scroll-progress {
@@ -1089,29 +1034,28 @@ article#nd-page .prose :where(code):not(pre code) {
   color: var(--brand-cisco);
 }
 
-/* Interactive documentation tools share the same restrained geometry as
- * the scenario player and architecture figures. Keep status pills round,
- * but remove consumer-app card radii and floating shadows from structural
- * panels, controls, and catalog rows. */
+/* Interactive documentation tools share one geometry with code blocks,
+ * callouts and tabs: 10px panels, 6px controls, round status pills, and
+ * no floating shadows. */
 .command-generator,
 .policy-creator,
 .recipe-catalog,
 .capability-matrix {
-  border-radius: 0 !important;
+  border-radius: 10px !important;
   box-shadow: none !important;
 }
 
 .command-generator :where(.rounded-2xl, .rounded-xl, .rounded-lg, .rounded-md, .rounded),
 .policy-creator :where(.rounded-2xl, .rounded-xl, .rounded-lg, .rounded-md, .rounded),
 .recipe-catalog :where(.rounded-2xl, .rounded-xl, .rounded-lg, .rounded-md, .rounded) {
-  border-radius: 2px !important;
+  border-radius: 6px !important;
   box-shadow: none !important;
 }
 
 .command-generator :where(input, select, textarea),
 .policy-creator :where(input, select, textarea),
 .recipe-catalog :where(input, select, textarea) {
-  border-radius: 2px !important;
+  border-radius: 6px !important;
 }
 
 .command-generator :where(.rounded-full),
@@ -1125,49 +1069,17 @@ article#nd-page .prose :where(code):not(pre code) {
   contain-intrinsic-block-size: 15rem;
 }
 
-/* Catppuccin's default light green is too pale for 13px source text.
- * Fumadocs stores token colours in custom properties, so this targeted
- * substitution improves every generated code block without recolouring
- * the syntax system wholesale. */
-.shiki span[style*='--shiki-light:#40A02B' i] {
-  --shiki-light: #2d6f25 !important;
-}
-
-.shiki span[style*='--shiki-light:#7C7F93' i] {
-  --shiki-light: #626579 !important;
-}
-
-.shiki span[style*='--shiki-light:#FE640B' i] {
-  --shiki-light: #b84400 !important;
-}
-
-.shiki span[style*='--shiki-light:#DF8E1D' i] {
-  --shiki-light: #855500 !important;
-}
-
-.shiki span[style*='--shiki-light:#E64553' i] {
-  --shiki-light: #b42332 !important;
-}
-
-.shiki span[style*='--shiki-light:#EA76CB' i] {
-  --shiki-light: #963d83 !important;
-}
-
-.shiki span[style*='--shiki-light:#179299' i] {
-  --shiki-light: #0b6c72 !important;
-}
-
 @media (max-width: 767px) {
   article#nd-page > h1 {
-    font-size: clamp(2.25rem, 12vw, 3.4rem);
+    font-size: clamp(1.875rem, 8vw, 2.25rem);
   }
 
   article#nd-page > h1 + p {
-    margin-bottom: 2.5rem;
+    margin-bottom: 2rem;
   }
 
   article#nd-page .prose > h2 {
-    margin-top: 3.5rem;
+    margin-top: 3rem;
   }
 
   .connector-catalog {
@@ -1193,7 +1105,6 @@ article#nd-page .prose :where(code):not(pre code) {
   --editorial-amber: #8f5100;
   --editorial-green: #087a55;
   --editorial-on-blue: #ffffff;
-  --editorial-install-accent: #66c9ed;
 }
 
 .dark {
@@ -1208,7 +1119,6 @@ article#nd-page .prose :where(code):not(pre code) {
   --editorial-amber: #f2ad45;
   --editorial-green: #45c894;
   --editorial-on-blue: #081116;
-  --editorial-install-accent: #00658f;
 }
 
 .editorial-home {
@@ -1231,87 +1141,6 @@ article#nd-page .prose :where(code):not(pre code) {
   margin-inline: auto;
 }
 
-.editorial-hero {
-  position: relative;
-  isolation: isolate;
-  overflow: hidden;
-  border-bottom: 1px solid var(--editorial-rule);
-  background: var(--editorial-paper);
-}
-
-.editorial-motion-grid {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  opacity: 0.52;
-  -webkit-mask-image: linear-gradient(to right, black, transparent 46%);
-  mask-image: linear-gradient(to right, black, transparent 46%);
-}
-
-.editorial-motion-grid-cell {
-  border-right: 1px solid color-mix(in oklab, var(--editorial-rule) 52%, transparent);
-  border-bottom: 1px solid color-mix(in oklab, var(--editorial-rule) 42%, transparent);
-  background: transparent;
-}
-
-.editorial-motion-grid-cell.is-active {
-  background: color-mix(in oklab, var(--editorial-blue) 12%, transparent);
-}
-
-.editorial-hero-grid {
-  display: grid;
-  grid-template-columns: minmax(24rem, 0.76fr) minmax(42rem, 1.24fr);
-  gap: clamp(2rem, 4vw, 5rem);
-  align-items: center;
-  min-height: calc(100svh - 4rem);
-  padding-block: clamp(4rem, 8vw, 7.5rem);
-}
-
-.editorial-hero-copy {
-  min-width: 0;
-}
-
-.editorial-kicker {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  margin: 0;
-  color: var(--editorial-blue);
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  line-height: 1.3;
-  text-transform: uppercase;
-}
-
-.editorial-kicker span {
-  padding-right: 0.6rem;
-  border-right: 1px solid var(--editorial-rule);
-  color: var(--editorial-ink);
-}
-
-.editorial-kicker svg {
-  width: 1rem;
-  height: 1rem;
-}
-
-.editorial-hero h1 {
-  max-width: 11ch;
-  margin: 1.5rem 0 0;
-  font-size: clamp(3.25rem, 5.25vw, 6.8rem);
-  font-weight: 560;
-  letter-spacing: -0.055em;
-  line-height: 1.035;
-}
-
-.editorial-lede {
-  max-width: 40rem;
-  margin: 2rem 0 0;
-  color: var(--editorial-muted);
-  font-size: clamp(1.05rem, 1.25vw, 1.28rem);
-  line-height: 1.65;
-}
-
 .editorial-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1320,24 +1149,20 @@ article#nd-page .prose :where(code):not(pre code) {
   margin-top: 2rem;
 }
 
-.editorial-button,
-.editorial-text-link,
-.editorial-inline-link {
+.editorial-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
   min-height: 2.85rem;
+  padding: 0.7rem 1.1rem;
   border: 1px solid var(--editorial-rule);
+  border-radius: 8px;
+  background: var(--editorial-paper);
   color: var(--editorial-ink);
   font-size: 0.86rem;
   font-weight: 650;
   transition: color 180ms ease, border-color 180ms ease, background-color 180ms ease;
-}
-
-.editorial-button {
-  padding: 0.7rem 1.05rem;
-  background: var(--editorial-paper);
 }
 
 .editorial-button-primary {
@@ -1357,400 +1182,9 @@ article#nd-page .prose :where(code):not(pre code) {
   background: var(--editorial-blue-bright);
 }
 
-.editorial-text-link,
-.editorial-inline-link {
-  min-height: auto;
-  border: 0;
-  color: var(--editorial-blue);
-}
-
-.editorial-button svg,
-.editorial-text-link svg,
-.editorial-inline-link svg {
+.editorial-button svg {
   width: 1rem;
   height: 1rem;
-}
-
-.editorial-proof-strip {
-  display: grid;
-  grid-template-columns: 0.7fr 1.45fr 0.7fr;
-  margin: 2.75rem 0 0;
-  padding: 0;
-  border-block: 1px solid var(--editorial-rule);
-}
-
-.editorial-proof-strip div {
-  min-width: 0;
-  padding: 0.9rem 1rem;
-  border-right: 1px solid var(--editorial-rule);
-}
-
-.editorial-proof-strip div:first-child {
-  padding-left: 0;
-}
-
-.editorial-proof-strip div:last-child {
-  border-right: 0;
-}
-
-.editorial-proof-strip dt {
-  color: var(--editorial-muted);
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
-}
-
-.editorial-proof-strip dd {
-  margin: 0.32rem 0 0;
-  font-family: var(--font-mono), monospace;
-  font-size: 0.74rem;
-  line-height: 1.4;
-}
-
-.editorial-hero-demo {
-  min-width: 0;
-}
-
-.editorial-hero-demo .feature-demo {
-  margin: 0;
-}
-
-.editorial-hero-demo .scenario-header h2 {
-  font-size: clamp(1.05rem, 1.25vw, 1.35rem);
-}
-
-.editorial-section {
-  padding-block: clamp(5rem, 9vw, 8.5rem);
-  border-bottom: 1px solid var(--editorial-rule);
-}
-
-.editorial-section-tinted {
-  background: var(--editorial-soft);
-}
-
-.editorial-section-intro {
-  display: grid;
-  grid-template-columns: minmax(12rem, 0.45fr) minmax(20rem, 1fr) minmax(18rem, 0.7fr);
-  gap: 2rem;
-  align-items: start;
-  margin-bottom: 3.5rem;
-}
-
-.editorial-section-intro h2 {
-  margin: -0.15em 0 0;
-  font-size: clamp(2.2rem, 3.6vw, 4.6rem);
-  font-weight: 560;
-  letter-spacing: -0.05em;
-  line-height: 1.04;
-}
-
-.editorial-section-intro > p:last-child {
-  margin: 0;
-  color: var(--editorial-muted);
-  font-size: 1rem;
-  line-height: 1.65;
-}
-
-.lifecycle-rail {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  border-block: 1px solid var(--editorial-rule);
-}
-
-.lifecycle-rail article {
-  display: flex;
-  flex-direction: column;
-  min-height: 23rem;
-  padding: 1.5rem 2rem 2rem;
-  border-right: 1px solid var(--editorial-rule);
-}
-
-.lifecycle-rail article:first-child {
-  padding-left: 0;
-}
-
-.lifecycle-rail article:last-child {
-  border-right: 0;
-}
-
-.lifecycle-rail article > span,
-.capability-number,
-.story-list > li > a > span {
-  font-family: var(--font-mono), monospace;
-  color: var(--editorial-blue);
-  font-size: 0.72rem;
-}
-
-.lifecycle-rail h3 {
-  max-width: 8ch;
-  margin: 4rem 0 0;
-  font-size: 2rem;
-  font-weight: 560;
-  letter-spacing: -0.035em;
-  line-height: 1;
-}
-
-.lifecycle-rail p {
-  max-width: 27rem;
-  margin: 1.25rem 0 0;
-  color: var(--editorial-muted);
-  line-height: 1.65;
-}
-
-.lifecycle-rail ul {
-  margin: auto 0 0;
-  padding: 1rem 0 0;
-  border-top: 1px solid var(--editorial-rule);
-  list-style: none;
-}
-
-.lifecycle-rail li {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.45rem;
-  color: var(--editorial-muted);
-  font-size: 0.79rem;
-}
-
-.lifecycle-rail li svg {
-  width: 0.7rem;
-  height: 0.7rem;
-  color: var(--editorial-blue);
-}
-
-.capability-list {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  margin: 0;
-  padding: 0;
-  border-top: 1px solid var(--editorial-rule);
-  list-style: none;
-}
-
-.capability-list li {
-  border-right: 1px solid var(--editorial-rule);
-  border-bottom: 1px solid var(--editorial-rule);
-}
-
-.capability-list li:nth-child(even) {
-  border-right: 0;
-}
-
-.capability-list a {
-  display: grid;
-  grid-template-columns: 2rem 2.5rem minmax(0, 1fr) 1.25rem;
-  gap: 1rem;
-  align-items: center;
-  min-height: 8.5rem;
-  padding: 1.5rem 2rem;
-  color: var(--editorial-ink);
-  transition: color 180ms ease, background-color 180ms ease;
-}
-
-.capability-list a:hover,
-.capability-list a:focus-visible {
-  background: var(--editorial-paper);
-  color: var(--editorial-blue);
-}
-
-.capability-list a > svg {
-  width: 1.5rem;
-  height: 1.5rem;
-}
-
-.capability-list a > svg:last-child {
-  width: 1rem;
-  height: 1rem;
-}
-
-.capability-list strong {
-  max-width: 29rem;
-  font-size: 1.1rem;
-  font-weight: 570;
-}
-
-.connector-preview {
-  overflow-x: auto;
-  border-block: 1px solid var(--editorial-rule);
-}
-
-.connector-preview table {
-  width: 100%;
-  min-width: 48rem;
-  border-collapse: collapse;
-  font-size: 0.86rem;
-}
-
-.connector-preview th,
-.connector-preview td {
-  padding: 1rem 1.2rem;
-  border-bottom: 1px solid var(--editorial-rule);
-  text-align: left;
-}
-
-.connector-preview-name {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.65rem;
-}
-
-.connector-preview thead th {
-  color: var(--editorial-muted);
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.connector-preview tbody th {
-  font-weight: 570;
-}
-
-.connector-preview tbody th a:hover {
-  color: var(--editorial-blue);
-}
-
-.capability-yes,
-.capability-no {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-family: var(--font-mono), monospace;
-  font-size: 0.72rem;
-}
-
-.capability-yes {
-  color: var(--editorial-green);
-}
-
-.capability-no {
-  color: var(--editorial-muted);
-}
-
-.capability-yes svg,
-.capability-no svg {
-  width: 0.85rem;
-  height: 0.85rem;
-}
-
-.editorial-inline-link {
-  margin-top: 1.5rem;
-}
-
-.editorial-stories-grid {
-  display: grid;
-  grid-template-columns: 0.78fr 1.22fr;
-  gap: clamp(3rem, 8vw, 9rem);
-}
-
-.editorial-stories-grid .editorial-section-intro {
-  display: block;
-  margin: 0;
-}
-
-.editorial-stories-grid .editorial-section-intro h2 {
-  margin-top: 1.5rem;
-}
-
-.editorial-stories-grid .editorial-section-intro > p:last-child {
-  margin-top: 1.5rem;
-}
-
-.story-list {
-  margin: 0;
-  padding: 0;
-  border-top: 1px solid var(--editorial-rule);
-  list-style: none;
-}
-
-.story-list a {
-  display: grid;
-  grid-template-columns: 2rem 1fr 1.25rem;
-  gap: 1.5rem;
-  align-items: start;
-  padding: 1.35rem 0;
-  border-bottom: 1px solid var(--editorial-rule);
-  color: var(--editorial-ink);
-}
-
-.story-list a > svg {
-  width: 1rem;
-  height: 1rem;
-  margin-top: 0.25rem;
-  transition: transform 180ms ease;
-}
-
-.story-list a:hover > svg {
-  transform: translateX(4px);
-}
-
-.story-list strong {
-  font-size: 1rem;
-  font-weight: 580;
-}
-
-.story-list p {
-  margin: 0.35rem 0 0;
-  color: var(--editorial-muted);
-  font-size: 0.83rem;
-}
-
-.editorial-install {
-  padding-block: clamp(5rem, 9vw, 8rem);
-  background: var(--editorial-ink);
-  color: var(--editorial-paper);
-}
-
-.editorial-install .editorial-kicker {
-  color: var(--editorial-install-accent);
-}
-
-.editorial-install-grid {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 3rem;
-  align-items: end;
-}
-
-.editorial-install h2 {
-  max-width: 16ch;
-  margin: 1rem 0 0;
-  font-size: clamp(2.4rem, 4.5vw, 5.3rem);
-  font-weight: 540;
-  letter-spacing: -0.06em;
-  line-height: 1.04;
-}
-
-.editorial-install p:not(.editorial-kicker) {
-  margin: 1.5rem 0 0;
-  color: color-mix(in oklab, var(--editorial-paper) 70%, transparent);
-}
-
-.editorial-install .editorial-button:not(.editorial-button-primary) {
-  border-color: color-mix(in oklab, var(--editorial-paper) 30%, transparent);
-  background: transparent;
-  color: var(--editorial-paper);
-}
-
-.dark .editorial-install {
-  border-block: 1px solid var(--editorial-rule);
-  background: var(--color-fd-secondary);
-  color: var(--editorial-ink);
-}
-
-.dark .editorial-install .editorial-kicker {
-  color: var(--editorial-blue);
-}
-
-.dark .editorial-install p:not(.editorial-kicker) {
-  color: var(--editorial-muted);
-}
-
-.dark .editorial-install .editorial-button:not(.editorial-button-primary) {
-  border-color: var(--editorial-rule);
-  color: var(--editorial-ink);
 }
 
 /* Reusable scenario player ---------------------------------------------- */
@@ -2378,14 +1812,6 @@ article#nd-page .scenario-frame code {
 }
 
 @media (max-width: 1279px) {
-  .editorial-hero-grid {
-    grid-template-columns: minmax(21rem, 0.75fr) minmax(36rem, 1.25fr);
-    gap: 2rem;
-  }
-
-  .editorial-hero h1 {
-    font-size: clamp(3.1rem, 5.5vw, 5rem);
-  }
 
   .scenario-stage {
     grid-template-columns: minmax(0, 1.45fr) minmax(13rem, 0.72fr);
@@ -2396,55 +1822,9 @@ article#nd-page .scenario-frame code {
   }
 }
 
-@media (max-width: 1023px) {
-  .editorial-hero-grid {
-    grid-template-columns: 1fr;
-    min-height: auto;
-  }
-
-  .editorial-hero-copy {
-    max-width: 54rem;
-  }
-
-  .editorial-hero h1 {
-    max-width: 13ch;
-  }
-
-  .editorial-section-intro {
-    grid-template-columns: 0.55fr 1.45fr;
-  }
-
-  .editorial-section-intro > p:last-child {
-    grid-column: 2;
-  }
-
-  .editorial-stories-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .editorial-stories-grid .editorial-section-intro > p:last-child {
-    grid-column: auto;
-  }
-}
-
 @media (max-width: 767px) {
   .editorial-shell {
     width: min(100% - 1.5rem, 108rem);
-  }
-
-  .editorial-hero-grid {
-    padding-block: 3.5rem 4rem;
-  }
-
-  .editorial-hero h1 {
-    margin-top: 1.1rem;
-    font-size: clamp(2.75rem, 13vw, 4.3rem);
-    letter-spacing: -0.045em;
-    line-height: 1.05;
-  }
-
-  .editorial-lede {
-    margin-top: 1.4rem;
   }
 
   .editorial-actions {
@@ -2453,80 +1833,6 @@ article#nd-page .scenario-frame code {
 
   .editorial-actions .editorial-button {
     flex: 1 1 auto;
-  }
-
-  .editorial-proof-strip {
-    grid-template-columns: 1fr;
-  }
-
-  .editorial-proof-strip div,
-  .editorial-proof-strip div:first-child {
-    padding: 0.75rem 0;
-    border-right: 0;
-    border-bottom: 1px solid var(--editorial-rule);
-  }
-
-  .editorial-proof-strip div:last-child {
-    border-bottom: 0;
-  }
-
-  .editorial-section {
-    padding-block: 4.5rem;
-  }
-
-  .editorial-section-intro {
-    display: block;
-    margin-bottom: 2.5rem;
-  }
-
-  .editorial-section-intro h2 {
-    margin-top: 1.15rem;
-  }
-
-  .editorial-section-intro > p:last-child {
-    margin-top: 1rem;
-  }
-
-  .lifecycle-rail,
-  .capability-list {
-    grid-template-columns: 1fr;
-  }
-
-  .lifecycle-rail article,
-  .lifecycle-rail article:first-child {
-    min-height: auto;
-    padding: 1.25rem 0 1.8rem;
-    border-right: 0;
-    border-bottom: 1px solid var(--editorial-rule);
-  }
-
-  .lifecycle-rail article:last-child {
-    border-bottom: 0;
-  }
-
-  .lifecycle-rail h3 {
-    margin-top: 1.8rem;
-  }
-
-  .lifecycle-rail ul,
-  .lifecycle-rail article:first-child ul {
-    margin-top: 1.5rem;
-  }
-
-  .capability-list li,
-  .capability-list li:nth-child(even) {
-    border-right: 0;
-  }
-
-  .capability-list a {
-    grid-template-columns: 1.5rem 2rem minmax(0, 1fr) 1rem;
-    min-height: 6.5rem;
-    padding: 1rem 0;
-  }
-
-  .editorial-install-grid {
-    grid-template-columns: 1fr;
-    align-items: start;
   }
 
   .scenario-header {
