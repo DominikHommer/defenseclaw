@@ -532,6 +532,19 @@ func runWindowsEnterpriseStandaloneAction(
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
+	// Repair without CONFIG= on a bundle-mode device keeps the confirmed
+	// bundle config, not an edit made outside the lifecycle (GAP-0114). The
+	// restore comes before anything else this run changes: when it fails,
+	// repair stops with bundle_restore_failed and has changed nothing.
+	var bundleRestore windowsBundleRestore
+	if windowsBundleRestoreRequested(action, opts) {
+		if bundleRestore = restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts)); bundleRestore.failed() {
+			result := newWindowsEnterpriseStandaloneResult(action, opts)
+			bundleRestore.apply(result)
+			applyWindowsEnterpriseRecordedDeployment(result)
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+	}
 	hookRuntimeRepaired := ""
 	if action == "repair" && windowsEnterpriseIsElevated() {
 		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
@@ -548,17 +561,6 @@ func runWindowsEnterpriseStandaloneAction(
 		}
 		if kept != "" {
 			configReplaced = windowsEnterpriseUnparseableConfigChange(kept, action)
-		}
-	}
-	// Repair without CONFIG= on a bundle-mode device keeps the confirmed
-	// bundle config, not an edit made outside the lifecycle (GAP-0114).
-	var bundleRestore windowsBundleRestore
-	if windowsBundleRestoreRequested(action, opts) {
-		if bundleRestore = restoreWindowsBundleConfig(ctx, windowsBundleSettleReplacing(opts)); bundleRestore.failed() {
-			result := newWindowsEnterpriseStandaloneResult(action, opts)
-			bundleRestore.apply(result)
-			applyWindowsEnterpriseRecordedDeployment(result)
-			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 	}
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, args)

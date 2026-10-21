@@ -55,7 +55,7 @@ Under the Secure Client integration only, hooks fail open: an unset `guardrail.h
 
 | Connector | Behavior |
 | --- | --- |
-| GitHub Copilot CLI, Antigravity | The generated hooks stay open even when the effective mode is `closed`. On a managed standalone host the Copilot hook follows the effective mode: `closed` blocks `preToolUse` and `permissionRequest` while the gateway cannot answer. |
+| GitHub Copilot CLI, Antigravity | The hooks follow the effective mode on Linux, macOS and Windows: `closed` blocks `preToolUse` and `permissionRequest` (Antigravity: `PreToolUse`) while the gateway is down or answers unusably, and says why. Copilot and Antigravity still run a call when the hook times out or cannot start. Under Secure Client they stay open. |
 | Hermes | Its own hook has no fail-closed surface, but the DefenseClaw hook follows the effective mode on Linux, macOS and Windows: `closed` blocks a tool call while the gateway is down or answers unusably. Hermes itself still runs a call when the hook times out or cannot start. |
 | OpenClaw, ZeptoClaw | Proxy-backed, no hooks. Requests are blocked while the gateway is down, whatever `guardrail.hook_fail_mode` says. `guardrail fail-mode` lists them as `closed (proxy-backed, no hooks ...)`. |
 
@@ -128,6 +128,8 @@ Claude Code shows `open` because it has no value of its own; Codex shows `closed
 
 The mode is written to `guardrail.hook_fail_mode` (or the connector's `hook_fail_mode`) in `config.yaml` and baked into the generated hook scripts, each with a `# defenseclaw-derived: sha256=... fail_mode=closed` header. The command restarts the gateway by default to render them again. The key is not a [restart-required key](/docs/reference/cli#restart-required-keys): with `--no-restart` the running gateway still reloads the mode and, with hook self-heal on, renders the scripts itself. `guardrail status` shows configured and runtime values, and `defenseclaw doctor` warns with `stale generated script (... bakes hook fail mode open; config.yaml says closed)` and names the repair.
 
+Hooks follow an open fail mode only when your config sets it. On Windows an open that an earlier release left in the hook config is treated as closed until the gateway renders the hooks again. On Linux and macOS the earlier release's hook scripts keep the mode baked into them until the new gateway renders them. See [Upgrade](/docs/get-started/upgrade#upgrade).
+
 A connector turned off with `guardrail disable --connector X` has no hooks and no fail mode: `guardrail status` shows `-` in its Fail column and `guardrail fail-mode` lists it as `disabled (no hooks)`. On a managed standalone host the administrator sets `guardrail.hook_fail_mode`, or the connector's `hook_fail_mode`, in the managed `config.yaml` and applies it as in [Change the config](/docs/enterprise/lifecycle#change-the-config).
 
 ## Connector response shapes
@@ -139,9 +141,9 @@ Fail mode can block only where the agent protocol has a block shape. A closed fa
 | Claude Code | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` | Yes |
 | Codex | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | None | Yes |
 | Cursor | `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt` | None | Yes |
-| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down) |
+| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No (the DefenseClaw hook blocks `preToolUse` and `permissionRequest` in fail mode closed) |
 | Devin | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop` | None | Yes |
-| Antigravity | `PreToolUse` | `PreToolUse` | No |
+| Antigravity | `PreToolUse` | `PreToolUse` | No (the DefenseClaw hook blocks `PreToolUse` in fail mode closed) |
 | Hermes | `pre_tool_call` | None | No (managed standalone: blocks `pre_tool_call` when DefenseClaw cannot check it) |
 | OpenCode | `tool.execute.before` | None | Yes |
 | Kiro | `UserPromptSubmit`, `PreToolUse` | None | Yes |

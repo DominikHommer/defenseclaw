@@ -92,7 +92,7 @@
       "label": "Hermes",
       "windowsSupport": "supported",
       "windowsNote": "Native Windows x64 uses a direct, shell-free hook executable invocation.",
-      "summary": "Native lifecycle hooks with valid-JSON pre-tool blocking and unconditional failure-open behavior.",
+      "summary": "Native lifecycle hooks with valid-JSON pre-tool blocking.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
       "subprocessPolicy": "none",
