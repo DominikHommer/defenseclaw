@@ -88,7 +88,27 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		return nil, false, false
 	}
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
-	syntax.Walk(file, func(node syntax.Node) bool {
+	functions := map[string]*syntax.Stmt{}
+	callDepth := 0
+	var visit func(syntax.Node) bool
+	visit = func(node syntax.Node) bool {
+		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
+			if declaration.Name != nil && declaration.Body != nil {
+				functions[declaration.Name.Value] = declaration.Body
+			}
+			return false
+		}
+		if stmt, isStmt := node.(*syntax.Stmt); isStmt {
+			if call, isCall := stmt.Cmd.(*syntax.CallExpr); isCall && len(call.Args) > 0 {
+				if name, static := staticShellWord(call.Args[0], env, home != ""); static {
+					if body := functions[name]; body != nil && callDepth < 8 {
+						callDepth++
+						syntax.Walk(body, visit)
+						callDepth--
+					}
+				}
+			}
+		}
 		redirect, isRedirect := node.(*syntax.Redirect)
 		if !isRedirect || redirect.Word == nil {
 			return true
@@ -108,7 +128,8 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		}
 		operands = append(operands, OperandPath(name, cwd))
 		return true
-	})
+	}
+	syntax.Walk(file, visit)
 	return operands, true, dynamic
 }
 
@@ -497,6 +518,7 @@ func Resolve(payload []byte) string {
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				literalOperands = LiteralWriteOperands(command, cwd, home)
+				literalOperands = append(literalOperands, BoundedShellWriteOperands(command, cwd, home)...)
 				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
 				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
 				truncated = truncated || directoryUnknown
@@ -861,6 +883,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		links.unknown(true)
 		return links
 	}
+	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds := false, false
 	var copyScopes []string
@@ -896,7 +919,11 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			// A program named by a parameter or a substitution may be ln.
 			links.unknown(false)
 		case slices.Contains(linkPrograms, program):
-			if slices.Contains(static, false) || !links.add(program, words[1:], cwd) {
+			workingDirectory := cwd
+			if call == linkCall {
+				workingDirectory = linkCWD
+			}
+			if slices.Contains(static, false) || !links.add(program, words[1:], workingDirectory) {
 				links.unknown(true)
 			}
 		case slices.Contains(copyPrograms, program):
@@ -972,7 +999,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			links.unknownCopyIn(scope)
 		}
 	}
-	if len(links.aliases) > 0 && (renames || cds && links.relative) {
+	if len(links.aliases) > 0 && (renames || cds && links.relative && linkCall == nil) {
 		links.unknown(true)
 	}
 	// Scopes are read against the starting directory; after a directory
@@ -981,6 +1008,62 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		links.globalOpaque = true
 	}
 	return links
+}
+
+// staticChangedDirectoryLink handles one ordered cd/link/write chain. The
+// physical cd target fixes the link's name without guessing about other shell
+// control flow. A nonempty CDPATH can redirect a relative cd elsewhere.
+func staticChangedDirectoryLink(file *syntax.File, cwd, home string) (*syntax.CallExpr, string) {
+	if len(file.Stmts) != 1 || os.Getenv("CDPATH") != "" {
+		return nil, ""
+	}
+	var statements []*syntax.Stmt
+	var flatten func(*syntax.Stmt) bool
+	flatten = func(stmt *syntax.Stmt) bool {
+		if stmt == nil || stmt.Background || stmt.Negated {
+			return false
+		}
+		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+			return len(stmt.Redirs) == 0 && pair.Op == syntax.AndStmt && flatten(pair.X) && flatten(pair.Y)
+		}
+		statements = append(statements, stmt)
+		return len(statements) <= 3
+	}
+	if !flatten(file.Stmts[0]) || len(statements) != 3 {
+		return nil, ""
+	}
+	first, firstOK := statements[0].Cmd.(*syntax.CallExpr)
+	second, secondOK := statements[1].Cmd.(*syntax.CallExpr)
+	third, thirdOK := statements[2].Cmd.(*syntax.CallExpr)
+	if !firstOK || !secondOK || !thirdOK || len(statements[0].Redirs) != 0 || len(statements[1].Redirs) != 0 ||
+		len(first.Assigns) != 0 || len(first.Args) != 2 ||
+		len(second.Assigns) != 0 || len(second.Args) != 4 || len(third.Assigns) != 0 || len(third.Args) == 0 {
+		return nil, ""
+	}
+	cd, cdOK := StaticWord(first.Args[0], home)
+	path, pathOK := StaticWord(first.Args[1], home)
+	link, linkOK := StaticWord(second.Args[0], home)
+	option, optionOK := StaticWord(second.Args[1], home)
+	writer, writerOK := StaticWord(third.Args[0], home)
+	if !cdOK || cd != "cd" || !pathOK || path == "" || strings.HasPrefix(path, "-") ||
+		!linkOK || !slices.Contains(linkPrograms, programBase(link)) || !optionOK || option != "-s" ||
+		!writerOK || writer != "echo" || len(statements[2].Redirs) != 1 {
+		return nil, ""
+	}
+	for _, word := range second.Args[2:] {
+		if _, static := StaticWord(word, home); !static {
+			return nil, ""
+		}
+	}
+	changed, ok := ResolveWriteTarget(OperandPath(path, cwd))
+	if !ok {
+		return nil, ""
+	}
+	info, err := os.Stat(changed)
+	if err != nil || !info.IsDir() {
+		return nil, ""
+	}
+	return second, changed
 }
 
 // dataPrograms only print, search or count text, so link API text in their

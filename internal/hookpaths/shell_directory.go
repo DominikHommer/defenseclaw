@@ -97,6 +97,8 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 	state.physical, state.known = physical(state.logical)
 	safety := SafeShellRedirectOccurrencesWithFacts(command, cwd, home, directoryFacts)
 	redirectIndex := 0
+	functions := map[string]*syntax.Stmt{}
+	functionDepth := 0
 	var walkList func([]*syntax.Stmt, *shellDirectoryState)
 	var walk func(*syntax.Stmt, *shellDirectoryState)
 	write := func(stmt *syntax.Stmt, s *shellDirectoryState) {
@@ -409,7 +411,26 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			}
 		case *syntax.TimeClause:
 			walk(cmd.Stmt, s)
+		case *syntax.CoprocClause:
+			child := s.clone()
+			walk(cmd.Stmt, &child)
+		case *syntax.FuncDecl:
+			if cmd.Name != nil && cmd.Body != nil {
+				functions[cmd.Name.Value] = cmd.Body
+			}
 		case *syntax.CallExpr:
+			if name, _, static := shellCommandWord(cmd, home); static && functions[name] != nil {
+				if functionDepth < 8 {
+					functionDepth++
+					walk(functions[name], s)
+					functionDepth--
+				} else {
+					s.known, s.changed = false, true
+					unknown = true
+				}
+				write(stmt, s)
+				break
+			}
 			if change(cmd, s) {
 				break
 			}

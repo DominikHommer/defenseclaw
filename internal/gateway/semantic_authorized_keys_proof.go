@@ -26,7 +26,9 @@ import (
 // action and its fallback handling unchanged.
 
 var (
-	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`(?s)\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];.*\bp\.write_text\(`)
+	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"]`)
+	trustedPathlibWriteText              = regexp.MustCompile(`\bp\.write_text\s*\(`)
+	trustedPathlibSafeReassignment       = regexp.MustCompile(`^\s*;\s*p\s*=\s*(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*;\s*$`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
@@ -169,8 +171,8 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	switch command.Program {
 	case "python", "python3":
 		return command.Argv[1] == "-c" && facts.ActiveHome != "" &&
-			(trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedPythonPathAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
+			(trustedPathlibAuthorizedKeysWriteProof(command.Argv[2], facts.ActiveHome, facts.CWD) ||
+				trustedPythonPathAuthorizedKeysWriteProof(command.Argv[2]) ||
 				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
 	case "perl":
 		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
@@ -182,6 +184,68 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	default:
 		return false
 	}
+}
+
+func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string) bool {
+	for _, assignment := range trustedPathlibAuthorizedKeysWrite.FindAllStringIndex(code, -1) {
+		if !interpreterCodePosition(code, assignment[0]) {
+			continue
+		}
+		for _, write := range trustedPathlibWriteText.FindAllStringIndex(code, -1) {
+			if write[0] < assignment[1] || !interpreterCodePosition(code, write[0]) {
+				continue
+			}
+			between := code[assignment[1]:write[0]]
+			if safe := trustedPathlibSafeReassignment.FindStringSubmatch(between); len(safe) == 2 &&
+				trustedOrdinaryPathReassignment(safe[1], home, cwd) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func trustedPythonPathAuthorizedKeysWriteProof(code string) bool {
+	for _, match := range trustedPythonPathAuthorizedKeysWrite.FindAllStringIndex(code, -1) {
+		if interpreterCodePosition(code, match[0]) {
+			return true
+		}
+	}
+	return false
+}
+
+func trustedOrdinaryPathReassignment(name, home, cwd string) bool {
+	if name == "" || strings.ContainsAny(name, "\x00\r\n$`*?[") {
+		return false
+	}
+	if !filepath.IsAbs(name) {
+		if !filepath.IsAbs(cwd) {
+			return false
+		}
+		name = filepath.Join(cwd, name)
+	}
+	resolved, ok := hookpaths.ResolveWriteTarget(name)
+	if !ok {
+		return false
+	}
+	entry, entryErr := os.Stat(resolved)
+	if entryErr != nil && !os.IsNotExist(entryErr) {
+		return false
+	}
+	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
+		if canonicalSemanticPath(resolved) == canonicalSemanticPath(protected) {
+			return false
+		}
+		guarded, err := os.Stat(protected)
+		if err != nil && !os.IsNotExist(err) {
+			return false
+		}
+		if entryErr == nil && err == nil && os.SameFile(entry, guarded) {
+			return false
+		}
+	}
+	return true
 }
 
 // A static shell redirect writes its target independently of the program's
@@ -463,8 +527,15 @@ func interpreterCallArgs(call string) []string {
 
 func interpreterCodePosition(code string, position int) bool {
 	var quote byte
+	comment := false
 	for i := 0; i < position; i++ {
 		c := code[i]
+		if comment {
+			if c == '\n' {
+				comment = false
+			}
+			continue
+		}
 		if quote != 0 {
 			switch c {
 			case '\\':
@@ -474,9 +545,11 @@ func interpreterCodePosition(code string, position int) bool {
 			}
 		} else if c == '\'' || c == '"' {
 			quote = c
+		} else if c == '#' {
+			comment = true
 		}
 	}
-	return quote == 0
+	return quote == 0 && !comment
 }
 
 func trustedAuthorizedKeysPathInText(text, activeHome string) bool {
@@ -604,7 +677,39 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	if err != nil {
 		return false
 	}
+	var boundWord *syntax.Word
+	boundValue := ""
+	if len(file.Stmts) == 2 {
+		assignment, assignmentOK := file.Stmts[0].Cmd.(*syntax.CallExpr)
+		second := file.Stmts[1]
+		if binary, ok := second.Cmd.(*syntax.BinaryCmd); ok && binary.Op == syntax.AndStmt {
+			second = binary.X
+		}
+		child, childOK := second.Cmd.(*syntax.CallExpr)
+		if assignmentOK && childOK && len(assignment.Args) == 0 && len(assignment.Assigns) == 1 &&
+			len(file.Stmts[0].Redirs) == 0 && len(child.Args) > 0 {
+			item := assignment.Assigns[0]
+			if item.Name != nil && item.Value != nil {
+				if value, static := hookpaths.StaticWord(item.Value, input.ActiveHome); static && value == "ln" {
+					candidate := child.Args[0]
+					start, end := int(candidate.Pos().Offset()), int(candidate.End().Offset())
+					if start >= 0 && end <= len(input.Command) && end > start {
+						for _, spelling := range []string{"$" + item.Name.Value, "${" + item.Name.Value + "}",
+							`"$` + item.Name.Value + `"`, `"${` + item.Name.Value + `}"`} {
+							if input.Command[start:end] == spelling {
+								boundWord, boundValue = candidate, value
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	word := func(value *syntax.Word) string {
+		if value == boundWord {
+			return boundValue
+		}
 		text, ok := hookpaths.StaticWord(value, input.ActiveHome)
 		if !ok {
 			return ""
@@ -626,6 +731,9 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
+			return false
+		}
+		if _, declaration := node.(*syntax.FuncDecl); declaration {
 			return false
 		}
 		stmt, ok := node.(*syntax.Stmt)
@@ -980,6 +1088,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 		}
 		for _, operand := range hookpaths.LiteralWriteOperands(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand, false, false) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.BoundedShellWriteOperands(input.Command, input.CWD, input.ActiveHome) {
 			if writeTarget(operand, false, false) {
 				return true
 			}

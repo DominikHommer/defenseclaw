@@ -58,8 +58,18 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 		if text == "" {
 			continue
 		}
+		if !patchTool {
+			known, calls := patchShellInvocationsKnown(text)
+			if !known {
+				return nil, false
+			}
+			if calls == 0 {
+				// An envelope stored as command data is not an edit.
+				continue
+			}
+		}
 		paths, envelopes, parsed := patchEnvelopePaths(text)
-		if !parsed || !patchTool && !patchShellInvocationsKnown(text) {
+		if !parsed {
 			return nil, false
 		}
 		found = found || envelopes > 0
@@ -192,7 +202,8 @@ var (
 )
 
 // patchShellInvocationsKnown reports whether every apply_patch that a shell
-// text may run reads an envelope in that text. Lines of an envelope body are
+// text may run reads an envelope in that text, and how many calls are bound.
+// Lines of an envelope body are
 // patch data, not shell, while the quote or here-document that feeds the
 // envelope is still open. That state is tracked from the top of the text: it
 // is known only while every line before the envelope's opener is plain shell
@@ -201,7 +212,7 @@ var (
 // is not a patch line, or any doubt about the state makes the rest of the
 // text shell, so an apply_patch in it counts as a call of its own, and the
 // envelope binds no call.
-func patchShellInvocationsKnown(text string) bool {
+func patchShellInvocationsKnown(text string) (bool, int) {
 	lines := strings.Split(text, "\n")
 	bound := make([]int, len(lines))
 	body := make([]bool, len(lines))
@@ -281,11 +292,10 @@ func patchShellInvocationsKnown(text string) bool {
 		count := len(patchProgramWord.FindAllString(line, -1))
 		calls += count
 		if count > bound[i] {
-			return false
+			return false, calls
 		}
 	}
-	// The whole-text parser also sees scripts that a line scan might miss.
-	return calls > 0 || !invokesApplyPatch(text)
+	return true, calls
 }
 
 // patchFeed is the quote, here-document or PowerShell here-string that carries
