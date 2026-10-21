@@ -874,7 +874,7 @@ func (a *APIServer) finalizeAgentHook(
 		auditErr = a.logConnectorHookAuditEnvelope(ctx, env)
 		result.AuditPersisted = auditErr == nil
 	})
-	if !result.AuditPersisted && !panicked {
+	if !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured) {
 		if auditErr == nil {
 			auditErr = errors.New("the audit section panicked")
 		}
