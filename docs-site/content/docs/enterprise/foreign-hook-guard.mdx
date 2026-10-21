@@ -243,6 +243,11 @@ change:
 gateway creates each account's folder with one access entry for that account
 (a POSIX ACL entry on Linux, a macOS ACL entry, a protected DACL on Windows).
 
+A block, or a guardian hook removal, that cannot replace or delete a record
+(on Windows the account can hold its record open) writes a `.deny` file next
+to it instead. The hook blocks while that file exists; the next allow that
+replaces the record removes it.
+
 While the gateway cannot answer (it is stopped or restarting, or it ended
 without removing its hook socket), a guarded tool call runs only when the
 fail mode is `open` and that record shows the gateway did not block the agent

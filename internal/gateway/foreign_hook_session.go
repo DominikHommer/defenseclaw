@@ -75,7 +75,8 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	stateDir := foreignHookSessionStateDir(dataDir, identity)
-	removals, removalsErr := a.foreignHookRemovals.forIdentity(managed.HookGuardianAuthorizationDir(dataDir), identity)
+	removalsDir := managed.HookGuardianAuthorizationDir(dataDir)
+	removals, removalsStamp, removalsErr := a.foreignHookRemovals.forIdentity(removalsDir, identity)
 	// Each identity has its own store, so only that identity's exchanges
 	// are serialized; another account's exchange never waits on this one.
 	unlock := a.foreignHookSessionLocks.lock(stateDir)
@@ -90,7 +91,7 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	})
 	// Under the same lock, so the protected record follows the store's
 	// order: the hook reads it when the gateway is down (GAP-0352).
-	a.publishForeignHookSessionDecision(identity, exchange.Key, decision)
+	a.publishForeignHookSessionDecision(identity, exchange.Key, decision, removalsDir, removalsStamp)
 	unlock()
 	if decision.Deny {
 		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
@@ -104,16 +105,28 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 // replaceable in tests.
 var foreignHookSessionPublishRoot = standaloneHookSessionDir
 
-// foreignHookSessionPublish writes the protected record (replaceable in
-// tests, whose folders cannot carry the per-account access list).
-var foreignHookSessionPublish = enterprisepolicy.PublishForeignHookSessionDecision
+// foreignHookSessionPublish writes the protected record and
+// foreignHookSessionWithdraw revokes it (replaceable in tests, whose
+// folders cannot carry the per-account access list).
+var (
+	foreignHookSessionPublish  = enterprisepolicy.PublishForeignHookSessionDecision
+	foreignHookSessionWithdraw = enterprisepolicy.WithdrawPublishedForeignHookSession
+)
 
 // publishForeignHookSessionDecision writes the answer of one session
 // exchange into the caller's protected session record, which the hook reads
 // during a gateway outage under fail mode open (GAP-0352). Secure Client
 // and per-user gateways have no such record; a failure is logged and leaves
 // no allow behind, so the hook blocks during an outage.
-func (a *APIServer) publishForeignHookSessionDecision(identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision) {
+//
+// The decision used the guardian's removal ledger as removalsStamp names it,
+// read before the per-identity lock. The guardian writes its ledger first and
+// revokes the account's records after it, so an allow is withdrawn when the
+// ledger changed since it was read: either this check sees the new ledger,
+// or the guardian's revocation comes after this publication and removes it.
+// A withdrawn answer reads as missing, which blocks; the next exchange
+// publishes again from the new ledger.
+func (a *APIServer) publishForeignHookSessionDecision(identity string, key enterprisepolicy.SessionKey, decision enterprisepolicy.GuardDecision, removalsDir string, removalsStamp foreignHookRemovalStamp) {
 	cfg := a.scannerCfg
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
 		return
@@ -121,6 +134,11 @@ func (a *APIServer) publishForeignHookSessionDecision(identity string, key enter
 	root, err := foreignHookSessionPublishRoot()
 	if err == nil {
 		err = foreignHookSessionPublish(root, identity, key, decision, time.Now())
+		if !decision.Deny && removalsStamp.changed(removalsDir) {
+			if withdrawErr := foreignHookSessionWithdraw(root, identity, key); withdrawErr != nil {
+				err = errors.Join(err, withdrawErr)
+			}
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] foreign-hook session: the protected session record for %s was not written (the hook blocks during a gateway outage): %v\n",
@@ -342,8 +360,7 @@ func foreignHookSessionDenialTarget(exchange enterprisepolicy.SessionExchange) (
 type foreignHookRemovalCache struct {
 	mu        sync.Mutex
 	path      string
-	modTime   time.Time
-	size      int64
+	info      os.FileInfo
 	checkedAt time.Time
 	removals  []enterprisepolicy.ForeignHookRemoval
 	err       error
@@ -351,32 +368,57 @@ type foreignHookRemovalCache struct {
 
 const foreignHookRemovalRecheck = 2 * time.Second
 
+// foreignHookRemovalStamp is the removal ledger file an answer of
+// forIdentity came from; info is nil when there was no ledger.
+type foreignHookRemovalStamp struct{ info os.FileInfo }
+
+// changed reports whether the removal ledger in dir is no longer the file
+// the stamp names: the guardian wrote, replaced or removed it since. A
+// ledger that cannot be inspected counts as changed.
+func (s foreignHookRemovalStamp) changed(dir string) bool {
+	info, err := os.Lstat(filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return s.info != nil
+	}
+	return err != nil || !sameForeignHookRemovalsFile(s.info, info)
+}
+
+// sameForeignHookRemovalsFile reports one ledger file, unchanged: the
+// guardian replaces the ledger with a new file, so its identity changes
+// even when its time and size do not.
+func sameForeignHookRemovalsFile(a, b os.FileInfo) bool {
+	return a != nil && b != nil && os.SameFile(a, b) && a.ModTime().Equal(b.ModTime()) && a.Size() == b.Size()
+}
+
 // forIdentity returns the removals the guardian recorded for one caller
-// identity. A missing ledger records none; one that fails its trust check
-// or does not parse is an error, which denies the call.
-func (c *foreignHookRemovalCache) forIdentity(dir, identity string) ([]enterprisepolicy.ForeignHookRemoval, error) {
+// identity, with the stamp of the ledger file they came from. A missing
+// ledger records none; one that fails its trust check or does not parse is
+// an error, which denies the call.
+func (c *foreignHookRemovalCache) forIdentity(dir, identity string) ([]enterprisepolicy.ForeignHookRemoval, foreignHookRemovalStamp, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	path := filepath.Join(dir, enterprisepolicy.ForeignHookRemovalsFile)
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		c.path, c.removals, c.err = "", nil, nil
-		return nil, nil
+		c.path, c.info, c.removals, c.err = "", nil, nil, nil
+		return nil, foreignHookRemovalStamp{}, nil
+	}
+	if err != nil {
+		return nil, foreignHookRemovalStamp{}, err
 	}
 	now := time.Now()
 	// A failed read is not cached: the guardian sets the file's group only
 	// after it replaces the file, and a read in between must not deny every
 	// account's calls until the next recheck.
-	if err == nil && (c.err != nil || path != c.path || !info.ModTime().Equal(c.modTime) || info.Size() != c.size ||
-		now.Sub(c.checkedAt) >= foreignHookRemovalRecheck) {
-		c.path, c.modTime, c.size, c.checkedAt = path, info.ModTime(), info.Size(), now
+	if c.err != nil || path != c.path || !sameForeignHookRemovalsFile(c.info, info) || now.Sub(c.checkedAt) >= foreignHookRemovalRecheck {
+		// SameFile reads the Windows file ID on first use, by path: read it
+		// now, while the path still names the file the stamp describes.
+		_ = os.SameFile(info, info)
+		c.path, c.info, c.checkedAt = path, info, now
 		c.removals, c.err = readForeignHookRemovals(path)
 	}
-	if err != nil {
-		return nil, err
-	}
 	if c.err != nil {
-		return nil, c.err
+		return nil, foreignHookRemovalStamp{}, c.err
 	}
 	var out []enterprisepolicy.ForeignHookRemoval
 	for _, removal := range c.removals {
@@ -384,7 +426,7 @@ func (c *foreignHookRemovalCache) forIdentity(dir, identity string) ([]enterpris
 			out = append(out, removal)
 		}
 	}
-	return out, nil
+	return out, foreignHookRemovalStamp{info: c.info}, nil
 }
 
 func readForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {

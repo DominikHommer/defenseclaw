@@ -215,3 +215,133 @@ func TestPublishedForeignHookSessionPruneKeepsTheNewest(t *testing.T) {
 		t.Fatal("a record past its TTL must be pruned")
 	}
 }
+
+// heldOpenPublishedSessionRecord makes the replacement and the deletion of
+// the record at path fail the way Windows refuses them while the account
+// holds the record open without delete sharing.
+func heldOpenPublishedSessionRecord(t *testing.T, path string) (release func()) {
+	t.Helper()
+	held := true
+	previousRename, previousRemove := publishedSessionRename, publishedSessionRemove
+	sharing := errors.New("the process cannot access the file because it is being used by another process")
+	publishedSessionRename = func(from, to string) error {
+		if held && to == path {
+			return &os.LinkError{Op: "rename", Old: from, New: to, Err: sharing}
+		}
+		return previousRename(from, to)
+	}
+	publishedSessionRemove = func(name string) error {
+		if held && name == path {
+			return &os.PathError{Op: "remove", Path: name, Err: sharing}
+		}
+		return previousRemove(name)
+	}
+	t.Cleanup(func() { publishedSessionRename, publishedSessionRemove = previousRename, previousRemove })
+	return func() { held = false }
+}
+
+// Review P1 (GAP-0352): a record the account holds open so that it can be
+// neither replaced nor deleted must still stop proving an allow after a
+// block, a guardian removal or a withdrawn answer: each writes the
+// record's deny marker, which the hook honours whatever the record says.
+// Only a later allow that replaced the record clears the marker.
+func TestPublishedForeignHookSessionRevocationSurvivesARecordThatCannotBeReplaced(t *testing.T) {
+	withoutPublishedSessionACL(t)
+	root := t.TempDir()
+	identity := publishedSessionTestIdentity(t)
+	key := SessionKey{Connector: "copilot", Session: "s-1", Process: "p-1"}
+	path, ok := PublishedSessionRecordPath(root, identity, "copilot", sessionKindProcess, key.Process)
+	if !ok {
+		t.Fatal("no record path")
+	}
+	check := func() (GuardDecision, error) {
+		t.Helper()
+		return CheckPublishedForeignHookSession(root, identity, key, GuardDecision{}, trustAll)
+	}
+	allow := func() {
+		t.Helper()
+		if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := check(); err != nil || got.Deny {
+			t.Fatalf("the allow must prove the process unblocked: %+v %v", got, err)
+		}
+	}
+	allow()
+
+	// The gateway's block cannot replace or delete the held record.
+	release := heldOpenPublishedSessionRecord(t, path)
+	reason := foreignHookBlockedPrefix + " the project hook /repo/.github/hooks/x.json"
+	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{Deny: true, Reason: reason}, time.Now()); err == nil {
+		t.Fatal("a block that cannot replace the record must report it")
+	}
+	if data, err := os.ReadFile(path); err != nil || !strings.Contains(string(data), `"blocked":false`) {
+		t.Fatalf("the held record must still hold the old allow: %q %v", data, err)
+	}
+	if got, err := check(); err != nil || !got.Deny || got.Reason != reason {
+		t.Fatalf("the deny marker must deny with the gateway's reason: %+v %v", got, err)
+	}
+	// An allow that cannot replace the held record leaves the marker.
+	if err := PublishForeignHookSessionDecision(root, identity, key, GuardDecision{}, time.Now()); err == nil {
+		t.Fatal("an allow that cannot replace the record must report it")
+	}
+	if got, err := check(); err != nil || !got.Deny {
+		t.Fatalf("an allow that did not replace the record must not clear the marker: %+v %v", got, err)
+	}
+	// The allow that replaced the record clears it.
+	release()
+	allow()
+	if _, err := os.Lstat(publishedSessionDenyPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("the replacing allow must remove the marker: %v", err)
+	}
+
+	// The guardian's removal cannot delete the held record.
+	release = heldOpenPublishedSessionRecord(t, path)
+	if err := RemovePublishedForeignHookSessions(root, identity, []string{"copilot"}); err != nil {
+		t.Fatalf("a marker written for a held record is a revocation, not an error: %v", err)
+	}
+	if got, err := check(); err != nil || !got.Deny || !strings.HasPrefix(got.Reason, foreignHookBlockedPrefix) {
+		t.Fatalf("the guardian's marker must deny: %+v %v", got, err)
+	}
+	// A marker whose record still exists survives the prune; once the record
+	// is gone, the marker goes with the next prune.
+	prunePublishedSessionRecords(filepath.Dir(path), time.Now())
+	if _, err := os.Lstat(publishedSessionDenyPath(path)); err != nil {
+		t.Fatalf("the prune must keep the marker of a record that stays: %v", err)
+	}
+	release()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	prunePublishedSessionRecords(filepath.Dir(path), time.Now())
+	if _, err := os.Lstat(publishedSessionDenyPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("the prune must remove the marker of a record that is gone: %v", err)
+	}
+
+	// The gateway's withdrawn answer cannot delete the held record.
+	allow()
+	release = heldOpenPublishedSessionRecord(t, path)
+	if err := WithdrawPublishedForeignHookSession(root, identity, key); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := check(); err != nil || !got.Deny {
+		t.Fatalf("a withdrawn answer must not prove the process unblocked: %+v %v", got, err)
+	}
+	release()
+	// A withdrawal that can delete the records leaves them missing.
+	allow()
+	if err := WithdrawPublishedForeignHookSession(root, identity, key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := check(); !errors.Is(err, ErrPublishedSessionUnavailable) {
+		t.Fatalf("a withdrawn answer must prove nothing: %v", err)
+	}
+	// Anything at a marker path denies, even what does not decode.
+	allow()
+	if err := os.WriteFile(publishedSessionDenyPath(path), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := check(); err != nil || !got.Deny {
+		t.Fatalf("a marker that does not decode must still deny: %+v %v", got, err)
+	}
+}

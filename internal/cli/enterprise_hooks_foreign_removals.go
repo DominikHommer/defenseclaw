@@ -44,6 +44,13 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 // hook they loaded. It runs after the files were cleaned, so every process
 // that could have loaded one started before the recorded time. Failures are
 // logged; the per-call check still applies.
+//
+// Then it revokes the account's protected session records of those
+// connectors (GAP-0352), after the ledger write: the gateway withdraws an
+// allow whose ledger changed before it was published, so an exchange that
+// read the earlier ledger either sees the change or published before this
+// revocation, which removes its allow. Revoking only ever blocks, so it
+// runs when the ledger could not be written too.
 func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connectorName string, paths []string) {
 	identity, ok := connector.CanonicalUserScopedIdentity(account)
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
@@ -52,6 +59,20 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 	}
 	enterpriseForeignHookRemovalsMu.Lock()
 	defer enterpriseForeignHookRemovalsMu.Unlock()
+	connectors := enterprisepolicy.StandaloneConnectors(cfg)
+	affected := make([][]string, 0, len(paths))
+	var invalidated []string
+	for _, path := range paths {
+		names := enterprisepolicy.ForeignHookRemovalConnectors(home, path, connectorName, connectors)
+		affected = append(affected, names)
+		invalidated = append(invalidated, names...)
+	}
+	defer func() {
+		if err := enterpriseForeignHookRevokeSessionRecords(identity, invalidated); err != nil {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: revoke the protected session records of %s: %v\n",
+				foreignGuardLogField(account, 256), err)
+		}
+	}()
 	err := func() error {
 		dataDir := cfg.DataDir
 		if !filepath.IsAbs(managed.HookGuardianAuthorizationDir(dataDir)) {
@@ -62,28 +83,13 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 			return errors.New("the process clock is unavailable")
 		}
 		now := time.Now().UTC()
-		connectors := enterprisepolicy.StandaloneConnectors(cfg)
-		added := make([]enterprisepolicy.ForeignHookRemoval, 0, len(paths))
-		for _, path := range paths {
-			for _, name := range enterprisepolicy.ForeignHookRemovalConnectors(home, path, connectorName, connectors) {
+		added := make([]enterprisepolicy.ForeignHookRemoval, 0, len(invalidated))
+		for i, path := range paths {
+			for _, name := range affected[i] {
 				added = append(added, enterprisepolicy.ForeignHookRemoval{
 					Identity: identity, Connector: name, Path: foreignGuardLogField(path, 512),
 					At: now.Format(time.RFC3339), Mark: mark,
 				})
-			}
-		}
-		// The gateway now denies this account's agent processes of these
-		// connectors that started before the removal, so no protected session
-		// record may keep proving one of them unblocked for a gateway outage
-		// (GAP-0352). Deleting a record only ever blocks.
-		invalidated := make([]string, 0, len(added))
-		for _, removal := range added {
-			invalidated = append(invalidated, removal.Connector)
-		}
-		if layout, _, _, layoutErr := standaloneEnterprisePolicyLayout(); layoutErr == nil {
-			if err := enterprisepolicy.RemovePublishedForeignHookSessions(layout.HookSessionDir, identity, invalidated); err != nil {
-				fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: clear the protected session records of %s: %v\n",
-					foreignGuardLogField(account, 256), err)
 			}
 		}
 		path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
@@ -115,6 +121,18 @@ func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connec
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: record the %s hook removal for %s: %v\n",
 			connectorName, foreignGuardLogField(account, 256), err)
 	}
+}
+
+// enterpriseForeignHookRevokeSessionRecords revokes identity's protected
+// session records of connectors (replaceable in tests). Without the
+// standalone layout the hook finds no records either, so there is nothing
+// to revoke.
+var enterpriseForeignHookRevokeSessionRecords = func(identity string, connectors []string) error {
+	layout, _, _, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return nil
+	}
+	return enterprisepolicy.RemovePublishedForeignHookSessions(layout.HookSessionDir, identity, connectors)
 }
 
 func loadEnterpriseForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {
