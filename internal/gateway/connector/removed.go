@@ -386,10 +386,33 @@ func (p *removedCleanupPlan) addRecorded(dataDir, connectorName, logical string,
 	return path, nil
 }
 
+// readRemovedFileThrough reads a file teardown only checks and never changes,
+// following a link (a link to nothing is a missing file): what the agent
+// reads there is what counts. Anything but a regular file is
+// errRemovedNotRegular.
+func readRemovedFileThrough(path string) ([]byte, os.FileInfo, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, info, errRemovedNotRegular
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, nil
+	}
+	return data, info, err
+}
+
 // addUnrecorded plans a file no backup record names: it is left for the user
-// when it still names DefenseClaw.
+// when it still names DefenseClaw. It is never changed, so a link is read
+// through.
 func (p *removedCleanupPlan) addUnrecorded(path string, kind removedFileKind) error {
-	data, info, err := readRemovedFile(path)
+	data, info, err := readRemovedFileThrough(path)
 	switch {
 	case errors.Is(err, errRemovedNotRegular):
 		p.leave(path, "it is not a regular file", kind.step)
@@ -598,7 +621,7 @@ func (c removedOpenHandsConnector) hooksThatMayRunScript(p *removedCleanupPlan, 
 			}
 			continue
 		}
-		data, found, err := readRemovedFile(path)
+		data, found, err := readRemovedFileThrough(path)
 		if err != nil || found == nil {
 			continue
 		}
@@ -613,7 +636,8 @@ func (c removedOpenHandsConnector) hooksThatMayRunScript(p *removedCleanupPlan, 
 // script. It rules a command out only when it can see what the command runs:
 // the command is plain words (no variables, ~, globs, pipes, lists or
 // redirections; quotes are fine), it starts with an absolute path, and every
-// other word is an option, a number or an absolute path. A command found on
+// other word is a plain option (whose value is plain or an absolute path), a
+// number or an absolute path. A command found on
 // PATH, a relative path or any shell syntax may run anything, so it may run
 // the script. A path in the command may run the script when it names
 // DefenseClaw or the script, is the script (through links or as a hard link),
@@ -650,6 +674,9 @@ var (
 	// removedTextVariable finds a path that starts with a variable (group 1
 	// is its name; HOME is followed).
 	removedTextVariable = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?!$-])\}?["']?/`)
+	// removedOption is an option word the check can rule out: a plain
+	// name, then = and a value that is plain or an absolute path (group 1).
+	removedOption = regexp.MustCompile(`^--?[A-Za-z0-9][A-Za-z0-9_.-]*(?:=([A-Za-z0-9_.:,@%+-]*|/[A-Za-z0-9_./:,@%+ -]*))?$`)
 )
 
 func newRemovedScriptCheck(script string, info os.FileInfo, dataDir string) *removedScriptCheck {
@@ -709,7 +736,8 @@ func (c *removedScriptCheck) hooksMayRun(data []byte) bool {
 }
 
 func (c *removedScriptCheck) commandMayRun(command string) bool {
-	if strings.TrimSpace(command) == "" {
+	if strings.Trim(command, " \t0123456789") == "" {
+		// Blank, or a number (a timeout written as a string).
 		return false
 	}
 	words, ok := removedPlainWords(command)
@@ -724,11 +752,16 @@ func (c *removedScriptCheck) commandMayRun(command string) bool {
 		if i > 0 {
 			switch {
 			case strings.HasPrefix(word, "-"):
-				_, value, hasValue := strings.Cut(word, "=")
-				if !hasValue || !strings.Contains(value, "/") {
+				// An option is a plain name, with a plain or absolute
+				// value; anything else (-c code, say) may run anything.
+				match := removedOption.FindStringSubmatch(word)
+				if match == nil {
+					return true
+				}
+				if !strings.HasPrefix(match[1], "/") {
 					continue
 				}
-				path = value
+				path = match[1]
 			case strings.Trim(word, "0123456789") == "":
 				continue
 			}

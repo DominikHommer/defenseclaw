@@ -1582,6 +1582,13 @@ func TestRemovedOpenHandsTeardownChecksTheHooksItPutsBack(t *testing.T) {
 			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
 			return "/bin/sh --rcfile=" + link, []string{link}
 		}},
+		{"an option that holds code", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
+			return "/bin/sh '-cexec " + link + "'", []string{link}
+		}},
+		{"an option with a relative value", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "/bin/sh --rcfile=bin/oh-audit", nil
+		}},
 		{"a quoted symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
 			link := linkRemovedScript(t, h, filepath.Join(h.home, "my hooks", "audit"))
 			return "'" + link + "'", []string{link}
@@ -1729,7 +1736,7 @@ func TestRemovedOpenHandsTeardownTombstonesWhenEverySavedHookIsRuledOut(t *testi
 			saved := openHandsHooksRunning(t,
 				"/usr/local/bin/audit-hook",
 				plain,
-				"/bin/sh "+plain+" --audit 30 --level=high",
+				"/bin/sh "+plain+" --audit 30 --level=high -x",
 				"'"+spaced+"'",
 				compiled+" --config="+filepath.Join(h.home, "tools", "missing.toml"),
 			)
@@ -1787,6 +1794,20 @@ func TestRemovedOmnigentTeardownChecksEveryConfigOmniGentMayRead(t *testing.T) {
 		{"the default config with a config home", true, func(t *testing.T, h *omnigentHarness) string {
 			return filepath.Join(h.home, ".omnigent", "config.yaml")
 		}},
+		{"OMNIGENT_CONFIG that is a link", false, func(t *testing.T, h *omnigentHarness) string {
+			target := filepath.Join(h.home, "dotfiles", "omnigent.yaml")
+			writeRemovedFixture(t, target, omnigentPatchedConfig, 0o600)
+			link := filepath.Join(h.home, "policies", "active.yaml")
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("OMNIGENT_CONFIG", link)
+			// The test writes the config through the link.
+			return link
+		}},
 		{"a config the hook contract lock names", false, func(t *testing.T, h *omnigentHarness) string {
 			path := filepath.Join(h.home, "work", "omnigent.yaml")
 			if err := SaveHookContractLockEntry(h.dataDir, HookContractLockEntry{
@@ -1837,7 +1858,10 @@ func TestRemovedOmnigentTeardownChecksEveryConfigOmniGentMayRead(t *testing.T) {
 				t.Fatalf("finished teardown printed: %s", h.notices)
 			}
 			h.requireDone(t)
-			requireRemovedSnapshot(t, "teardown", map[string]string{active: omnigentCleanedConfig, h.configPath: omnigentOperatorConfig})
+			requireRemovedSnapshot(t, "teardown", map[string]string{h.configPath: omnigentOperatorConfig})
+			if data, err := os.ReadFile(active); err != nil || string(data) != omnigentCleanedConfig {
+				t.Fatalf("teardown changed %s: %q, %v", active, data, err)
+			}
 		})
 	}
 
@@ -2008,4 +2032,55 @@ func TestRemovedCleanupRollbackKeepsAConcurrentChange(t *testing.T) {
 		h.requireDone(t)
 		requireRemovedSnapshot(t, "retry", map[string]string{h.hooksPath: `{}`})
 	})
+}
+
+// A hooks file or config teardown only reads (no backup record names it) is
+// read through a link: a link to a hooks file whose hook may run the script
+// keeps the script, and a link to one that runs nothing lets the cleanup
+// finish (review loop round 4).
+func TestRemovedOpenHandsTeardownReadsAnUnrecordedHooksFileThroughALink(t *testing.T) {
+	h := newOpenHandsHarness(t, false)
+	h.setUp(t, true)
+	target := filepath.Join(h.home, "dotfiles", "hooks.json")
+	link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "oh-audit"))
+	writeRemovedFixture(t, target, openHandsHooksRunning(t, link), 0o600)
+	workspace := filepath.Join(h.home, "repo", ".openhands", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(workspace), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, workspace); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(h.script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(h.dataDir, HookContractLockEntry{
+		Connector:         removedOpenHandsID,
+		HookScriptDigests: map[string]string{removedOpenHandsHookScript: "sha256:" + sha256Hex(data)},
+		Locations:         ConnectorLocations{HookConfigPaths: []string{h.hooksPath, workspace}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := h.state(t)
+	for path, body := range removedSnapshot(t, workspace, target, link) {
+		before[path] = body
+	}
+	if err := h.teardown(); err != nil {
+		t.Fatalf("Teardown = %v, want the state left for manual cleanup", err)
+	}
+	requireRemovedSnapshot(t, "a teardown with a linked hooks file that may run the script", before)
+	if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(workspace) || !record.lists(h.script) {
+		t.Fatalf("manual cleanup record = %+v, %v; want %s and the script", record, ok, workspace)
+	}
+	writeRemovedFixture(t, target, `{}`, 0o600)
+	h.notices.Reset()
+	if err := h.teardown(); err != nil {
+		t.Fatalf("Teardown after the manual step: %v", err)
+	}
+	if h.notices.Len() != 0 {
+		t.Fatalf("finished teardown printed: %s", h.notices)
+	}
+	h.requireDone(t)
+	requireRemovedSnapshot(t, "teardown", map[string]string{workspace: "symlink:" + target, target: `{}`})
 }
