@@ -1,0 +1,17 @@
+{
+  "title": "Guardrail",
+  "pages": [
+    "turn-on-blocking",
+    "ask-before-risky-calls",
+    "allow-a-blocked-call",
+    "add-or-remove-an-agent",
+    "turn-off-the-guardrail",
+    "set-up-an-llm-key",
+    "give-a-group-its-own-policy",
+    "block-a-destructive-command",
+    "catch-prompt-injection",
+    "stop-a-secret-upload",
+    "route-models",
+    "generate-a-setup-command"
+  ]
+}

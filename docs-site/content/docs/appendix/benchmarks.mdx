@@ -16,7 +16,7 @@ tool-injection, and honest agent-trajectory datasets.
 <Callout type="info" title="How to read these results">
 The **Profile** column is the guardrail rule-pack profile (`default`,
 `permissive` or `strict`, see
-[profile posture](/docs/policies/deterministic-detection#profile-posture)).
+[profile posture](/docs/reference/detection#profile-posture)).
 These are not the `open`, `balanced` and `strict` network profiles of
 [OpenShell sandboxes](/docs/sandboxes/network#network-profiles).
 Balanced is the public name for the `default` rule pack. A false positive
@@ -27,7 +27,7 @@ attack trajectory does not make every tool call a malicious true positive.
 </Callout>
 
 For the model-based judge that covers what these rules leave unresolved,
-see the [contextual LLM judge benchmark](/docs/guardrail/llm-judge-benchmark):
+see the [contextual LLM judge benchmark](/docs/appendix/llm-judge-benchmark):
 Gemma 4 production-path F1, false positives, benign blocking, latency,
 tokens, cost, and connector intent context.
 
@@ -69,10 +69,10 @@ but they can still create alert fatigue.
 ## What changed
 
 <Cards>
-  <Card title="34 exact atomic rules" href="/docs/policies/deterministic-detection#exact-atomic-semantic-rules" description="Execution, persistence, privilege, credential access, impact, and security-control tampering proofs." />
-  <Card title="26 bounded chains" href="/docs/policies/deterministic-detection#bounded-tool-call-chains" description="Exact identity and result joins over at most the current event plus eight predecessors." />
-  <Card title="Ten YARA signatures" href="/docs/policies/deterministic-detection#yara-mcp-description-scanning" description="High-precision MCP description-injection signals that remain alert-only." />
-  <Card title="Five opt-in packs + one staged contract" href="/docs/policies/deterministic-detection#protection-packs-and-policy-provided-context" description="PII, cloud, database, infrastructure, and Kubernetes packs, plus a staged SSH integrity contract." />
+  <Card title="34 exact atomic rules" href="/docs/reference/detection#exact-atomic-semantic-rules" description="Execution, persistence, privilege, credential access, impact, and security-control tampering proofs." />
+  <Card title="26 bounded chains" href="/docs/reference/detection#bounded-tool-call-chains" description="Exact identity and result joins over at most the current event plus eight predecessors." />
+  <Card title="Ten YARA signatures" href="/docs/reference/detection#yara-mcp-description-scanning" description="High-precision MCP description-injection signals that remain alert-only." />
+  <Card title="Five opt-in packs + one staged contract" href="/docs/reference/detection#protection-packs-and-policy-provided-context" description="PII, cloud, database, infrastructure, and Kubernetes packs, plus a staged SSH integrity contract." />
 </Cards>
 
 The detector now uses four layers:
@@ -90,7 +90,7 @@ The detector now uses four layers:
 Failed, denied, cancelled, cross-session, replayed, unresolved,
 identity-mismatched, or mutated sequences cannot complete a proof.
 
-Read the [deterministic detection reference](/docs/policies/deterministic-detection)
+Read the [deterministic detection reference](/docs/reference/detection)
 for the complete rule-family inventory, all 34 exact rule IDs, every bounded
 chain and enforcement posture, YARA coverage, and protection-pack status.
 

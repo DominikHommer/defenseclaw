@@ -1,25 +1,14 @@
 ---
-title: User- and group-based policies
-description: Give a directory group, a user, a connector or a single agent its own guardrail policy with guardrail profiles. Write the assignments, see which profile a person gets, read the audit record, and ship the same config to managed hosts.
+title: Guardrail profiles
+description: Profile keys, assignment matching, match reasons, how identity is verified, and worked scenarios for guardrail profiles.
 keywords:
-  - DefenseClaw guardrail profiles
-  - per-user guardrail policy
-  - AD group policy
+  - guardrail profiles
   - profile_assignments
   - guardrail profile explain
   - identity-based policy
 ---
 
-One guardrail setting for everyone is rarely right. Contractors may need
-enforcement from day one, the ML team may need to stay in observe mode, and
-one connector may need a stricter threshold for one person. **Guardrail
-profiles** do that without one override per agent: you define a few named
-profiles, then assign them by directory group, user, connector or agent. The
-gateway picks the profile for each request after it knows who made it.
-
-A profile is a named set of guardrail overrides. Assignments are an ordered
-list; the first one that matches wins. A default profile catches everyone
-else.
+A guardrail profile is a named set of guardrail overrides. Assignments are an ordered list; the first one that matches wins; a default profile catches everyone else. For the task, see [Give a group its own policy](/docs/how-to/guardrail/give-a-group-its-own-policy).
 
 <Callout type="info" title="Where the identity comes from">
 DefenseClaw reads who a user is from the operating system and never calls
@@ -30,6 +19,7 @@ Group assignments follow the OS-verified account ID. When two accounts share
 a visible name, use each uid or SID with `guardrail profile explain --user`
 to inspect their decisions separately.
 </Callout>
+
 
 ## A complete example
 
@@ -93,8 +83,8 @@ defenseclaw guardrail profile explain --user alice@corp.example.com --connector 
 | --- | --- |
 | `description` | Free text for operators. |
 | `mode` | `observe` logs findings and blocks nothing; `action` enforces the thresholds. A profile's own `mode` (or its `connectors.<agent>.mode`) applies inside the person's managed sandboxes too, so an `observe` profile alerts there with "would block" as on the host. A sandbox whose profile sets no mode enforces, whatever `guardrail.mode` says. |
-| `block_at`, `alert_at` | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. These effective thresholds apply to tool calls, prompts, responses and proxy decisions. When unset, the selected rule pack supplies the levels (a `strict` pack blocks MEDIUM and above by default). A profile with `block_at: CRITICAL` can therefore turn a MEDIUM prompt finding from a strict-pack block into an alert, according to its effective `alert_at`. Secure Client rejects profiles and keeps its existing content thresholds. A plain regex rule that only matches text an inert command prints (`echo marker`) is recorded on a tool call but does not block; a rule meant to block a command needs an `expression` over the parsed command ([CEL rules](/docs/policies/cel/authoring)). |
-| `hilt` | `enabled` and `min_severity` (`LOW`, `MEDIUM`, `HIGH` or `CRITICAL`, in any case, like `block_at`) for [human approval](/docs/hitl). |
+| `block_at`, `alert_at` | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. These effective thresholds apply to tool calls, prompts, responses and proxy decisions. When unset, the selected rule pack supplies the levels (a `strict` pack blocks MEDIUM and above by default). A profile with `block_at: CRITICAL` can therefore turn a MEDIUM prompt finding from a strict-pack block into an alert, according to its effective `alert_at`. Secure Client rejects profiles and keeps its existing content thresholds. A plain regex rule that only matches text an inert command prints (`echo marker`) is recorded on a tool call but does not block; a rule meant to block a command needs an `expression` over the parsed command ([CEL rules](/docs/reference/cel/authoring)). |
+| `hilt` | `enabled` and `min_severity` (`LOW`, `MEDIUM`, `HIGH` or `CRITICAL`, in any case, like `block_at`) for [human approval](/docs/features/guardrail). |
 | `rule_pack` | A rule pack for this profile: `default`, `strict`, `permissive` or a `guardrail.custom_packs` name. When a custom pack's directory does not load as the gateway starts (it is created a moment later, for example by the MDM that delivers it), the profile scans with the base rule set and the gateway retries the pack every 30 seconds; `explain` says so meanwhile. A reload refuses a pack that does not load. |
 | `rules` | Rule customization for this profile: protections, rules turned on or off, severity overrides and suppressions. Edit it with `defenseclaw guardrail protection`, `rule` and `suppress`, which take `--profile P`. |
 | `block_message` | The text a blocked user sees. |
@@ -109,10 +99,9 @@ For one connector, the most specific value wins:
 
 1. the profile's `connectors.<name>` entry;
 2. the profile's own field;
-3. `guardrail.connectors.<name>` (see [Multi-connector](/docs/guardrail/multi-connector));
+3. `guardrail.connectors.<name>` (see [Multi-connector](/docs/reference/guardrail-setup#per-connector-overrides));
 4. the application protection overlay;
 5. the global `guardrail.*` value.
-
 ## Write the assignments
 
 Each assignment has a `profile` and a `match` with at least one of four keys.
@@ -418,6 +407,7 @@ A pin names one install, so keep three things in mind:
   install does not pin a sandboxed run. See
   [sandboxed agents](/docs/enterprise/identity-and-authentication#sandboxed-agents).
 
+
 ## Try it and read the result
 
 ### Ask the gateway
@@ -530,11 +520,8 @@ sessions do not supply those groups.
 Guardrail profiles are rejected under the Secure Client profile, which keeps
 its behavior as it was.
 
-## Next steps
+## Related
 
-<Cards>
-  <Card title="How DefenseClaw knows who a user is" href="/docs/enterprise/identity-sources" description="The OS facts behind a verified identity, per platform, and how Okta and Entra users appear." />
-  <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Supported identity types, agent identity, the AD guide and troubleshooting." />
-  <Card title="Configuration reference" href="/docs/reference/configuration#guardrail-profiles-and-identity-keys" description="Every key, its default and its allowed values." />
-  <Card title="Multi-connector" href="/docs/guardrail/multi-connector" description="Per-connector guardrail settings that profiles layer on top of." />
-</Cards>
+- [Identity sources](/docs/enterprise/identity-sources): the OS facts behind a verified identity.
+- [Configuration reference](/docs/reference/configuration#guardrail-profiles-and-identity-keys): every key and default.
+- [Per-connector overrides](/docs/reference/guardrail-setup#per-connector-overrides): the settings profiles layer on.
