@@ -357,20 +357,44 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
     group_covered = {name: False for name in groups}
     group_decided = {name: False for name in groups}
     # Why a group's coverage holds for only some of its members: an earlier
-    # rule for named users that are members, or the covering rule leaving out
-    # users or members of another group.
+    # rule for named users or for another group that matches some members, or
+    # the covering rule leaving out members.
     group_partial: dict[str, list[str]] = {name: [] for name in groups}
     member_groups: dict[str, set[str]] = {}
+    group_members: dict[str, set[str]] = {}
+
+    def members_of(group_id: str) -> set[str]:
+        if group_id not in group_members:
+            group_members[group_id] = {item["id"] for item in client.get_all(
+                f"/api/v1/groups/{group_id}/users?limit=200")}
+        return group_members[group_id]
 
     def names_member(user_ids: set[str], group_id: str) -> bool:
-        """Whether a user-scoped rule names a member of the group."""
+        """Whether some of the users are members of the group."""
         if len(user_ids) > 50:
-            return True
+            # Fewer calls than reading each user's groups.
+            return bool(user_ids & members_of(group_id))
         for user_id in user_ids:
             if user_id not in member_groups:
                 member_groups[user_id] = {item["id"] for item in client.get_all(
                     f"/api/v1/users/{user_id}/groups?limit=200")}
             if group_id in member_groups[user_id]:
+                return True
+        return False
+
+    def other_groups_match_members(group_id: str, user_ids: set[str], group_ids: set[str],
+                                   excluded_users: set[str], excluded_groups: set[str]) -> bool:
+        """Whether a rule for other groups (and maybe named users) matches some members of the group."""
+        members = members_of(group_id) - excluded_users
+        if user_ids:
+            members &= user_ids
+        for other in group_ids:
+            if not members:
+                break
+            matched = members & members_of(other)
+            for excluded in excluded_groups:
+                matched -= members_of(excluded)
+            if matched:
                 return True
         return False
     rules = sorted(client.get_all(f"/api/v1/policies/{policy['id']}/rules"),
@@ -411,25 +435,36 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
         for name, group in groups.items():
             if not group or group_decided[name]:
                 continue
-            applies = (not group_ids or group["id"] in group_ids) and group["id"] not in excluded_groups
-            if not applies:
+            if group["id"] in excluded_groups:
+                continue
+            if group_ids and group["id"] not in group_ids:
+                # A rule for other groups decides for members that are also in
+                # them: a deny or a stronger challenge there preempts this
+                # group's later allow for those members.
+                if (not (password_allow and unrestricted)
+                        and other_groups_match_members(group["id"], user_ids, group_ids,
+                                                       excluded_users, excluded_groups)):
+                    group_partial[name].append(
+                        f"rule '{rule.get('name')}' applies another sign-on to members also in other group(s)")
                 continue
             if user_ids:
                 # A rule for named users decides for them only. A deny or a
                 # stronger challenge for a member preempts the group's later
                 # allow for that member (GAP-1166).
-                if not (password_allow and unrestricted) and names_member(user_ids, group["id"]):
+                if not (password_allow and unrestricted) and names_member(user_ids - excluded_users, group["id"]):
                     group_partial[name].append(f"rule '{rule.get('name')}' applies another sign-on to some members")
                 continue
             if unrestricted or not password_allow:
                 group_covered[name] = password_allow and unrestricted
                 group_decided[name] = True
-                if group_covered[name] and excluded_users:
-                    group_partial[name].append(f"rule '{rule.get('name')}' leaves out some users")
-                if group_covered[name] and excluded_groups:
-                    # Members also in an excluded group fall through to the
-                    # rules after it (GAP-1164).
-                    group_partial[name].append(f"rule '{rule.get('name')}' leaves out members of other group(s)")
+                # Members the covering rule leaves out fall through to the
+                # rules after it.
+                if group_covered[name] and excluded_users and names_member(excluded_users, group["id"]):
+                    group_partial[name].append(f"rule '{rule.get('name')}' leaves out some members")
+                if group_covered[name] and any(members_of(group["id"]) & members_of(excluded)
+                                               for excluded in excluded_groups):
+                    group_partial[name].append(
+                        f"rule '{rule.get('name')}' leaves out members who are also in other group(s)")
     if bind and bind_covered:
         report.ok(f"password-only sign-on covers bind user {bind_login}")
     elif bind:
