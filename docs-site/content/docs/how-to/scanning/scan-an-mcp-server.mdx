@@ -41,13 +41,24 @@ Scan an MCP server before an agent calls it.
 
 ## Use it in CI
 
-A scan of one named server with `--json` prints one result object. `--all --json` prints one JSON array with a result object per server, and a failed scan is an error object in the same array. Count findings across every server:
+`--all --json` prints one JSON array with a result object per server. A failed scan is an error object in the same array, with an `error` field and no findings, and the command then exits 1. Save the output, then check it before you count, so a failed or empty scan fails the job:
 
 ```bash
-defenseclaw mcp scan --all --json | jq '[.[] | (.findings // [])[]] | length'
+defenseclaw mcp scan --all --json > mcp-scan.json
+jq -e 'length > 0 and all(.[]; has("error") | not)' mcp-scan.json > /dev/null
+jq '[.[] | (.findings // [])[]] | length' mcp-scan.json
 ```
 
-For one named server, `defenseclaw mcp scan filesystem --json | jq '.findings | length'` works because the output is a single object.
+Run the three lines as separate steps, or in a shell that stops on the first error. The first fails when a scan failed, the second when nothing was scanned or a row is an error, and the third prints the finding count.
+
+To scan one server, name its connector. Without `--connector`, a name configured on several connectors prints one JSON object per connector, one after the other:
+
+```bash
+defenseclaw mcp scan filesystem --connector claudecode --json > mcp-scan.json
+jq '.findings | length' mcp-scan.json
+```
+
+A server on the block list prints nothing and exits 2.
 
 ## Local servers: npx and uvx only
 
