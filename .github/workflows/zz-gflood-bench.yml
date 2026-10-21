@@ -14,11 +14,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - { os: windows-latest, v: v0-D-drive, holdmax: "0", settle: "", settled: "", nosync: "", cap: "", nopresync: "", fraction: "", ddrive: "1" }
           - { os: windows-latest, v: A-D-drive, holdmax: "", settle: "", settled: "", nosync: "", cap: "", nopresync: "", fraction: "", ddrive: "1" }
-          - { os: windows-latest, v: F-settle0-hold800, holdmax: "", settle: "0", settled: "", nosync: "", cap: "", nopresync: "", fraction: "", ddrive: "" }
-          - { os: windows-latest, v: G-nopresync-cap800, holdmax: "", settle: "", settled: "", nosync: "", cap: "800", nopresync: "1", fraction: "", ddrive: "" }
-          - { os: windows-latest, v: H-from64MiB, holdmax: "", settle: "", settled: "", nosync: "", cap: "", nopresync: "", fraction: "4", ddrive: "" }
-          - { os: windows-latest, v: A-repeat, holdmax: "", settle: "", settled: "", nosync: "", cap: "", nopresync: "", fraction: "", ddrive: "" }
+          - { os: windows-latest, v: N-nosync-nopresync, holdmax: "", settle: "", settled: "", nosync: "1", cap: "", nopresync: "1", fraction: "", ddrive: "" }
+          - { os: windows-latest, v: A-third, holdmax: "", settle: "", settled: "", nosync: "", cap: "", nopresync: "", fraction: "", ddrive: "" }
+          - { os: windows-latest, v: v0-repeat, holdmax: "0", settle: "", settled: "", nosync: "", cap: "", nopresync: "", fraction: "", ddrive: "" }
     name: probe ${{ matrix.os }} ${{ matrix.v }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
@@ -46,4 +46,6 @@ jobs:
         run: |
           nproc 2>/dev/null || echo "$NUMBER_OF_PROCESSORS"
           if [ "$GFLOOD_DDRIVE" = 1 ]; then export TMP="$RUNNER_TEMP" TEMP="$RUNNER_TEMP"; fi
-          go test -count=1 -timeout 45m -run '^TestHookFloodProbe$' -v ./internal/gateway/ 2>&1 | grep -E "minute|WAL|PASS|FAIL|sent|drained|flat|ok " || true
+          go test -count=1 -timeout 45m -run '^TestHookFloodProbe$' -v ./internal/gateway/ > probe.log 2>&1 || true
+          grep -E "minute|WAL|PASS|FAIL|sent|drained|flat|ok " probe.log || true
+          grep -E -B3 -A12 "^--- FAIL|Error|panic" probe.log | head -60 || true
