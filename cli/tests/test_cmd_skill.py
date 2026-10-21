@@ -2279,6 +2279,28 @@ class TestSkillList(SkillCommandTestBase):
         self.assertIn("quarantined", result.output)
         self.assertNotIn("removed", result.output)
 
+    def test_failed_quarantine_with_a_kept_record_is_not_quarantined(self):
+        # A quarantine that published its copy but could not remove the
+        # source keeps its pending record; the skill is still in place, so
+        # the journal's "quarantine failed" wins over the record.
+        from defenseclaw.commands.cmd_skill import _build_actions_map
+        from defenseclaw.models import ActionState
+
+        self.app.store.set_action(
+            "skill", "stuck-skill", "/h/.claude/skills/stuck-skill",
+            ActionState(install="block"), "quarantine failed: remove quarantined source: permission denied",
+        )
+        self.app.store.create_quarantine_record(
+            "skill", "stuck-skill", "/h/.claude/skills/stuck-skill",
+            "/h/.defenseclaw/quarantine/skills/stuck-skill", "sha256:x",
+            "watcher enforcement", "",
+        )
+
+        entry = _build_actions_map(self.app.store)["stuck-skill"]
+        self.assertEqual(entry.actions.install, "block")
+        self.assertNotEqual(entry.actions.file, "quarantine")
+        self.assertTrue(entry.reason.startswith("quarantine failed: "), entry.reason)
+
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_no_duplicate_entries(self, mock_list):
         """If a skill is in both OpenClaw list and actions DB, it shouldn't appear twice."""

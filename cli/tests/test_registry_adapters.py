@@ -242,6 +242,18 @@ class TestClawhubAdapter(unittest.TestCase):
                 fetch_clawhub(self._src(), resolver=_stub_resolver())
             self.assertIn("missing the plugins map", str(cm.exception))
 
+    def test_empty_nested_plugins_map_keeps_the_top_level_catalog(self):
+        # An empty openclaw.plugins must not hide a populated top-level
+        # plugins map: the zero-entry sync would promote an empty catalog and
+        # remove the source's registry rules.
+        body = b'{"openclaw":{"plugins":{}},"plugins":{"ok-name":{"version":"1.0.0"}}}'
+        with patch.object(
+            adapter_base.requests, "get",
+            _MockTransport(responses=[_FakeResp(body)]),
+        ):
+            manifest, _ = fetch_clawhub(self._src(), resolver=_stub_resolver())
+        self.assertEqual([e.name for e in manifest.entries], ["ok-name"])
+
     def test_empty_plugins_map_yields_empty_manifest(self):
         body = b'{"openclaw":{"plugins":{}}}'
         with patch.object(

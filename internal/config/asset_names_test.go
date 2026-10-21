@@ -26,6 +26,7 @@ func TestSameAssetNameFoldsLikeThePythonAdmission(t *testing.T) {
 		{"\u212ait", "kit", true},
 		{"\u1e9eig", "\u00dfig", true},
 		{"caf\u00e9", "CAFE\u0301", true},
+		{"\ua7c0kill", "\ua7c1kill", true},
 		{"stra\u00dfe", "strasse", false},
 		{"\u0130nfo", "info", false},
 		{"\u0131nfo", "info", false},

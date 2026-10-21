@@ -296,13 +296,15 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
     def test_names_fold_case_as_the_gateway_does(self):
         # p0 GAP-1305: Go strings.EqualFold (config.SameAssetName) uses
         # simple case folding. internal/config/asset_names_test.go holds the
-        # same table.
+        # same table. U+A7C0/U+A7C1 are one letter to Go; Python 3.10
+        # (Unicode 13) str.casefold kept them apart, so a deny written in one
+        # spelling let the other through the CLI pre-install check.
         from defenseclaw.enforce.admission import asset_name_key
 
         same = [
             ("\u03c3kill", "\u03c2kill"), ("\u03a3kill", "\u03c2kill"),
             ("MySkill", "myskill"), ("\u212ait", "kit"), ("\u1e9eig", "\u00dfig"),
-            ("caf\u00e9", "CAFE\u0301"),
+            ("caf\u00e9", "CAFE\u0301"), ("\ua7c0kill", "\ua7c1kill"),
         ]
         apart = [("stra\u00dfe", "strasse"), ("\u0130nfo", "info"), ("\u0131nfo", "info")]
         for a, b in same:
@@ -311,6 +313,9 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
             self.assertNotEqual(asset_name_key(a), asset_name_key(b), (a, b))
         policy = self._asset_policy(denied=[SimpleNamespace(name="\u03a3kill")])
         d = evaluate_admission(self.pe, target_type="skill", name="\u03c2kill", asset_policy=policy)
+        self.assertEqual(d.verdict, "blocked")
+        policy = self._asset_policy(denied=[SimpleNamespace(name="\ua7c0kill")])
+        d = evaluate_admission(self.pe, target_type="skill", name="\ua7c1kill", asset_policy=policy)
         self.assertEqual(d.verdict, "blocked")
 
     def test_connector_allowed_rule_overrides_global_denied_rule(self):
@@ -486,6 +491,18 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
             asset_policy=policy,
         )
         self.assertEqual(allowed.observed_reason, "")
+
+    def test_empty_registry_warn_is_kept_on_the_decision(self):
+        # registry_empty_action warn admits the asset in action mode too, but
+        # the warning must reach the install path so it can say so and audit
+        # it; evaluate_admission dropped it.
+        policy = self._asset_policy(
+            registry_required=True, registry=[], registry_empty_action="warn",
+        )
+        d = evaluate_admission(self.pe, target_type="mcp", name="demo", asset_policy=policy)
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.observed_source, "asset-policy-registry-required-empty-warn")
+        self.assertIn("registry_empty_action: warn", d.observed_reason)
 
     def _mcp_registry_rule(self):
         # A registry rule pinning the full command and exact argv.
