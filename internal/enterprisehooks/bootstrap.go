@@ -64,7 +64,8 @@ func defaultHookConfigStubForConnector(conn connector.Connector, opts connector.
 	case "antigravity":
 		// agy reads ~/.gemini/config/hooks.json but never creates it, so a
 		// user who has not written hooks yet would otherwise stay
-		// unprotected (seen live on RHEL). Standalone profile only, as for
+		// unprotected (seen live on RHEL). Standalone profile only: the
+		// Secure Client guardian never bootstrapped this file.
 		if !standaloneProfileProcess() {
 			return connector.HookConfigStub{}
 		}
