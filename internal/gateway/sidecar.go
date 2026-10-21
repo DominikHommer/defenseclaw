@@ -2713,9 +2713,10 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 			return hookRuntimePolicy{}, nil, false
 		}
 		return hookRuntimePolicy{
-			hookFailMode:  cfg.EffectiveHookFailModeForConnector(connectorName),
-			guardrailMode: cfg.EffectiveGuardrailModeForConnector(connectorName),
-			hiltEnabled:   cfg.EffectiveHILTForConnector(connectorName).Enabled,
+			hookFailMode:           cfg.EffectiveHookFailModeForConnector(connectorName),
+			configuredHookFailMode: cfg.ConfiguredHookFailModeForConnector(connectorName),
+			guardrailMode:          cfg.EffectiveGuardrailModeForConnector(connectorName),
+			hiltEnabled:            cfg.EffectiveHILTForConnector(connectorName).Enabled,
 		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
 	})
 }
@@ -2739,8 +2740,11 @@ func (s *Sidecar) refreshHookGuardPolicies(oldCfg, newCfg *config.Config) {
 	s.hookGuardsMu.RUnlock()
 	for _, guard := range guards {
 		conn := guard.activeConnector()
+		// A per-user Cursor's outage mode also follows the config's explicit
+		// value (connector.OutageHookFailMode), which can change alone.
 		if conn == nil || proxyShouldBindForConnector(conn, &newCfg.Guardrail) ||
-			oldCfg.EffectiveHookFailModeForConnector(conn.Name()) == newCfg.EffectiveHookFailModeForConnector(conn.Name()) {
+			(oldCfg.EffectiveHookFailModeForConnector(conn.Name()) == newCfg.EffectiveHookFailModeForConnector(conn.Name()) &&
+				oldCfg.ConfiguredHookFailModeForConnector(conn.Name()) == newCfg.ConfiguredHookFailModeForConnector(conn.Name())) {
 			continue
 		}
 		go func() {
@@ -6507,6 +6511,8 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		HookAPITokenScoped:   setupTokens.hookTokenScoped,
 		WorkspaceDir:         s.currentConfig().ConnectorWorkspaceDir(),
 		HookFailMode:         s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
+		// Per-user Cursor's outage mode is open only with an explicit open.
+		ConfiguredHookFailMode: s.currentConfig().ConfiguredHookFailModeForConnector(conn.Name()),
 		// Secure Client renders the resolved mode as is (#1163).
 		SecureClientHookDelivery: s.currentConfig().SecureClientIntegration(),
 		GuardrailMode:            s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),

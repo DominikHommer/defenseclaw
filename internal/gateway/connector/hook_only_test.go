@@ -3439,7 +3439,9 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 		wantFailMode  string
 	}{
 		{name: "cursor_action_forces_fail_closed", connector: NewCursorConnector(), guardrailMode: "action", wantFailMode: "closed"},
-		{name: "cursor_observe_forces_fail_open", connector: NewCursorConnector(), guardrailMode: "observe", wantFailMode: "open"},
+		// Observe registers Cursor's hook fail-open, but its outages stay
+		// closed without an explicit open (OutageHookFailMode).
+		{name: "cursor_observe_keeps_outages_closed", connector: NewCursorConnector(), guardrailMode: "observe", wantFailMode: "closed"},
 		{name: "devin_supports_fail_closed", connector: NewDevinConnector(), wantFailMode: "closed"},
 		{name: "hermes_per_user_keeps_fail_closed", connector: NewHermesConnector(), wantFailMode: "closed"},
 		{name: "copilot_per_user_keeps_fail_closed", connector: NewCopilotConnector(), wantFailMode: "closed"},

@@ -511,12 +511,19 @@ refresh_hook_fail_modes() {
     # mode nobody set, which its hooks follow while the gateway is down for
     # the swap. An open the config sets stays open, from a DEFENSECLAW_CONFIG
     # outside the data directory too. A release without the command (a
-    # downgrade) sets its own when its gateway starts.
+    # downgrade) sets its own when its gateway starts. Any other answer to
+    # the probe (an error, no output) fails: the hooks cannot be shown safe.
     [[ -d "${DEFENSECLAW_HOME}/hooks" ]] || return 0
+    local gateway="${STAGING}/bin/defenseclaw-gateway" help="" rc=0
+    help="$("${gateway}" connector refresh-fail-modes --help 2>&1)" || rc=$?
+    if [[ ${rc} -eq 0 && "${help}" == *"connector refresh-fail-modes"* ]]; then
+        "${gateway}" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}"
+        return
+    fi
     # An older gateway prints the connector help for an unknown subcommand.
-    "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --help 2>/dev/null \
-        | grep "connector refresh-fail-modes" >/dev/null || return 0
-    "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}"
+    [[ ${rc} -eq 0 && "${help}" == *"defenseclaw-gateway connector [command]"* ]] && return 0
+    warn "The new gateway did not answer 'connector refresh-fail-modes --help' (exit ${rc})"
+    return 1
 }
 
 warn_running_sandboxes() {

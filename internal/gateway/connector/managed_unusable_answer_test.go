@@ -114,7 +114,9 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 						HookAPIToken:       "connector-scoped-token",
 						HookAPITokenScoped: true,
 						HookFailMode:       failMode,
-						GuardrailMode:      "observe",
+						// The operator's choice: Cursor's open outage needs it.
+						ConfiguredHookFailMode: failMode,
+						GuardrailMode:          "observe",
 					}
 					if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
 						t.Fatal(err)
@@ -130,9 +132,7 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 							env = append(env, kv)
 						}
 					}
-					// Per-user Hermes, Cursor in observe and Antigravity render
-					// open (no fail-closed contract); a user who wants closed sets
-					// DEFENSECLAW_FAIL_MODE, as the A2R-02 cell did.
+					// The environment can only tighten the rendered mode.
 					cmd.Env = append(env, "HOME="+home, "DEFENSECLAW_FAIL_MODE="+failMode)
 					cmd.Stdin = strings.NewReader(hook.stdin)
 					var stdout, stderr bytes.Buffer

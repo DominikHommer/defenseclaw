@@ -464,6 +464,9 @@ def test_native_deny_connector_reads_the_windows_hookcfg(
     tmp_path: Path,
     connector: str,
 ) -> None:
+    # r104 W3 G3-upg: the per-user hooks print the agent's native denial for
+    # their own failures in fail mode closed, so they are no upstream
+    # fail-open (Secure Client still is).
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
     (Path(cfg.data_dir) / "hooks" / ".hookcfg").write_text(
         json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {connector: "open"}}),

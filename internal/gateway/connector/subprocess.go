@@ -1312,13 +1312,39 @@ func hookRuntimeRecordFile(path string) bool {
 // bakedHookFailModeOpens are the forms in which a per-user connector hook
 // script of 0.8.10 up to this release bakes an open fail mode or lets the
 // environment open it, each with its closed form. "_DC_HOME_FAIL_MODE" and
-// "[ "open" = "closed" ]" are the missing-home checks.
+// "[ "open" = "closed" ]" are the missing-home checks. The 1.0.0 to 1.0.3
+// per-user copilot-hook.sh let a tool call run on every gateway failure
+// whatever FAIL_MODE said (exit 0 with no denial), so its two failure
+// functions get Copilot's native denial for tool boundaries.
 var bakedHookFailModeOpens = strings.NewReplacer(
 	`FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-open}"`, `FAIL_MODE="closed"`,
 	`FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`, `FAIL_MODE="closed"`,
 	`FAIL_MODE="open"`, `FAIL_MODE="closed"`,
 	`[ "open" = "closed" ]`, `[ "closed" = "closed" ]`,
+	copilotOpenFailUnreachable, copilotClosedFailure(copilotOpenFailUnreachable),
+	copilotOpenFailResponse, copilotClosedFailure(copilotOpenFailResponse),
 )
+
+// The failure functions of the 1.0.0 to 1.0.3 per-user copilot-hook.sh, as
+// rendered, and the native denial their closed form prints before it exits.
+const (
+	copilotOpenFailUnreachable = "fail_unreachable() {\n" +
+		"  defenseclaw_log_hook_failure copilot copilot-hook \"$1\" transport \"$FAIL_MODE\"\n" +
+		"  defenseclaw_emit_unreachable_stderr \"copilot tool\" \"$1\"\n" +
+		"  exit 0\n}\n"
+	copilotOpenFailResponse = "fail_response() {\n" +
+		"  defenseclaw_log_hook_failure copilot copilot-hook \"$1\" response \"$FAIL_MODE\"\n" +
+		"  echo \"defenseclaw: copilot hook error: $1\" >&2\n" +
+		"  exit 0\n}\n"
+	copilotToolDenial = `  case "${COPILOT_HOOK_EVENT:-}" in` + "\n" +
+		`    preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;` + "\n" +
+		`    permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;` + "\n" +
+		"  esac\n"
+)
+
+func copilotClosedFailure(open string) string {
+	return strings.Replace(open, "  exit 0\n}\n", copilotToolDenial+"  exit 0\n}\n", 1)
+}
 
 // hookScriptMaxBytes bounds the hook script closeBakedHookFailMode reads.
 const hookScriptMaxBytes = 1 << 20
@@ -1353,11 +1379,34 @@ func closeBakedHookFailMode(path string) (bool, error) {
 // OutageHookFailMode is the fail mode conn's hooks follow while the gateway
 // is down when they answer for themselves (the native hook, the shared shell
 // readers, the installers' pre-swap refresh): the mode resolveHookFailMode
-// takes from the config. CapableHookFailMode's lowering of closed to open for
-// a vendor hook surface that cannot fail closed is not applied: that is the
-// vendor's limit, not an operator's open.
+// takes from the config, which keeps an unset mode closed outside Secure
+// Client. Two opens are not an operator's and are not applied here: a
+// per-user Cursor open, which resolveHookFailMode takes from the guardrail
+// mode (observe), is closed unless the config sets open
+// (opts.ConfiguredHookFailMode; Cursor's registration still follows its
+// mode), and CapableHookFailMode's lowering of closed to open for a vendor
+// hook surface that cannot fail closed is the vendor's limit.
 func OutageHookFailMode(opts SetupOpts, conn Connector) string {
-	return resolveHookFailMode(opts, conn)
+	mode := resolveHookFailMode(opts, conn)
+	if mode == "open" && perUserCursorRender(opts, conn) &&
+		!strings.EqualFold(strings.TrimSpace(opts.ConfiguredHookFailMode), "open") {
+		return "closed"
+	}
+	return mode
+}
+
+// perUserCursorRender reports a Cursor render whose resolved fail mode
+// follows its guardrail mode (resolveHookFailMode): neither managed nor
+// Secure Client.
+func perUserCursorRender(opts SetupOpts, conn Connector) bool {
+	return conn != nil && conn.Name() == "cursor" && !opts.ManagedEnterprise && !opts.SecureClientHookDelivery
+}
+
+// renderedHookFailMode is the fail mode conn's rendered hooks bake and its
+// sidecar entry records: the outage mode, lowered to open only for a vendor
+// hook surface that cannot fail closed (CapableHookFailMode).
+func renderedHookFailMode(opts SetupOpts, conn Connector) string {
+	return CapableHookFailMode(opts, conn, OutageHookFailMode(opts, conn))
 }
 
 // clearHookConfigSidecarEntry removes only one connector's runtime selection.
@@ -1493,7 +1542,14 @@ func validateHookRuntimeStateForContract(
 		return fmt.Errorf("unsupported hook config sidecar version %d", state.Version)
 	}
 	want := normalizeHookFailMode(failMode)
-	if got := state.FailModes[name]; got != want {
+	// failMode is the contract's (resolveHookFailMode). A per-user Cursor's
+	// contract follows its guardrail mode, while its hooks' outage mode is
+	// closed unless the config opens it (OutageHookFailMode): its runtime may
+	// be closed under an open contract, never open under a closed one.
+	current := func(got string) bool {
+		return got == want || (name == "cursor" && !managedEnterprise && want == "open" && got == "closed")
+	}
+	if got := state.FailModes[name]; !current(got) {
 		return fmt.Errorf("connector %s JSON fail mode %q, want %q", name, got, want)
 	}
 	flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+name)
@@ -1513,7 +1569,7 @@ func validateHookRuntimeStateForContract(
 	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
 		return fmt.Errorf("shell runtime connector %q, want %q", got, name)
 	}
-	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != want {
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); !current(got) || got != state.FailModes[name] {
 		return fmt.Errorf("connector %s shell fail mode %q, want %q", name, got, want)
 	}
 	return nil
@@ -1835,9 +1891,8 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 	if owner, ok := c.(HookScriptOwner); ok {
 		render.extras = owner.HookScriptNames(opts)
 	}
-	resolved := resolveHookFailMode(opts, c)
-	render.failMode = CapableHookFailMode(opts, c, resolved)
-	if render.failMode == resolved {
+	render.failMode = renderedHookFailMode(opts, c)
+	if render.failMode == OutageHookFailMode(opts, c) {
 		render.failModeSource = HookFailModeSourceConfig
 	}
 	render.token = opts.HookAPIToken
@@ -2102,7 +2157,7 @@ func failedSetupHookPlaceholder(vendorLabel string) string {
 // HookFailClosed reports whether conn blocks agent calls when its gateway is
 // unavailable under opts.
 func HookFailClosed(opts SetupOpts, conn Connector) bool {
-	return CapableHookFailMode(opts, conn, resolveHookFailMode(opts, conn)) == "closed"
+	return renderedHookFailMode(opts, conn) == "closed"
 }
 
 // disabledHookTombstone is the body writeDisabledHookTombstone writes.

@@ -395,6 +395,15 @@ function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Q
     return $LASTEXITCODE
 }
 
+function Get-NativeProbe([string]$FilePath, [string[]]$Arguments = @()) {
+    # A native command's output and exit code (-1 when it could not run).
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = ((& $FilePath @Arguments 2>&1) | Out-String)
+        return [pscustomobject]@{ Exit = $LASTEXITCODE; Output = $output }
+    } catch { return [pscustomobject]@{ Exit = -1; Output = "" } }
+}
+
 function Get-NativeOutput([string]$FilePath, [string[]]$Arguments = @()) {
     $ErrorActionPreference = "Continue"
     try { return ((& $FilePath @Arguments 2>&1) | Out-String) } catch { return "" }
@@ -1509,10 +1518,17 @@ function Update-HookFailModes([string]$Gateway) {
     # open the config sets stays open, from a DEFENSECLAW_CONFIG outside the
     # data folder too. False when the hooks could not be made safe. A release
     # without the command (a downgrade) sets its own when its gateway starts.
+    # Any other answer to the probe (an error, no output) is false: the hooks
+    # cannot be shown safe.
     if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) { return $true }
+    $probe = Get-NativeProbe $Gateway @("connector", "refresh-fail-modes", "--help")
+    if ($probe.Exit -eq 0 -and $probe.Output -match "connector refresh-fail-modes") {
+        return ((Invoke-Native $Gateway @("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0)
+    }
     # An older gateway prints the connector help for an unknown subcommand.
-    if ((Get-NativeOutput $Gateway @("connector", "refresh-fail-modes", "--help")) -notmatch "connector refresh-fail-modes") { return $true }
-    return ((Invoke-Native $Gateway @("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0)
+    if ($probe.Exit -eq 0 -and $probe.Output -match "defenseclaw-gateway connector \[command\]") { return $true }
+    Write-Warn "The new gateway did not answer 'connector refresh-fail-modes --help' (exit $($probe.Exit))"
+    return $false
 }
 
 function Install-HookFirst([string]$Slot) {

@@ -34,7 +34,12 @@ func TestNativeHookIgnoresAnEarlierReleasesSidecarOpen(t *testing.T) {
 		{name: "1.0.4 sidecar open from the config", sidecar: `{"version":2,"fail_modes":{"codex":"open"},"fail_mode_sources":{"codex":"config"}}`, connector: "codex", want: "open"},
 		{name: "1.0.4 source for a peer only", sidecar: `{"version":2,"fail_modes":{"codex":"open","claudecode":"closed"},"fail_mode_sources":{"claudecode":"config"}}`, connector: "codex", want: "closed"},
 		{name: "1.0.4 sidecar closed", sidecar: `{"version":2,"fail_modes":{"codex":"closed"},"fail_mode_sources":{"codex":"config"}}`, config: "guardrail:\n  hook_fail_mode: open\n", connector: "codex", want: "closed"},
-		{name: "cursor follows its sidecar entry only", sidecar: `{"version":2,"fail_modes":{"cursor":"open"}}`, config: "guardrail:\n  hook_fail_mode: open\n", connector: "cursor", want: "closed"},
+		// Cursor's sidecar open from an observe render is no operator choice;
+		// an explicit open outside action mode is (r104 W3 G3-upg).
+		{name: "cursor sidecar open, no config", sidecar: `{"version":2,"fail_modes":{"cursor":"open"}}`, connector: "cursor", want: "closed"},
+		{name: "cursor sidecar open, observe config", sidecar: `{"version":2,"fail_modes":{"cursor":"open"}}`, config: "guardrail:\n  mode: observe\n", connector: "cursor", want: "closed"},
+		{name: "cursor sidecar open, operator open", sidecar: `{"version":2,"fail_modes":{"cursor":"open"}}`, config: "guardrail:\n  hook_fail_mode: open\n", connector: "cursor", want: "open"},
+		{name: "cursor sidecar open, operator open under action", sidecar: `{"version":2,"fail_modes":{"cursor":"open"}}`, config: "guardrail:\n  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", connector: "cursor", want: "closed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()

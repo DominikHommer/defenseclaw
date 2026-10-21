@@ -1863,7 +1863,8 @@ def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_pat
     # sets their modes from the config before the old gateway stops and,
     # once it is stopped, again before the snapshot. An older staged gateway
     # (a downgrade) prints the connector help and is skipped; a failure
-    # refuses the swap.
+    # refuses the swap, and so does a probe that fails or says nothing
+    # (r104 W3 G3-upg: that was taken for a downgrade and the swap went on).
     calls = tmp_path / "calls"
     home = tmp_path / "dc"
     (home / "hooks").mkdir(parents=True)
@@ -1874,7 +1875,7 @@ def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_pat
         shutil.copy(gateway, staging / "bin" / "defenseclaw-gateway")
         script = tmp_path / f"refresh-{gateway.name}.sh"
         script.write_text(
-            "set -euo pipefail\n"
+            "set -euo pipefail\nwarn() { echo \"warn: $*\" >&2; }\n"
             + _install_sh_functions("refresh_hook_fail_modes")
             + f'DEFENSECLAW_HOME="{home}" STAGING="{staging}"\nrefresh_hook_fail_modes\n',
             encoding="utf-8",
@@ -1898,6 +1899,16 @@ def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_pat
     )
     failing.chmod(0o755)
     assert run(failing).returncode != 0
+    for name, body in (
+        ("probe-fails", "#!/bin/sh\necho 'error: cannot run' >&2\nexit 1\n"),
+        ("probe-silent", "#!/bin/sh\nexit 0\n"),
+    ):
+        probe = tmp_path / name
+        probe.write_text(body, encoding="utf-8")
+        probe.chmod(0o755)
+        result = run(probe)
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert "did not answer 'connector refresh-fail-modes --help'" in result.stderr
 
     text = INSTALL_SH.read_text(encoding="utf-8")
     swap = text[text.index('[[ -n "$(gateway_pid || true)" ]] && WAS_RUNNING=true') : text.index("if ! snapshot; then")]

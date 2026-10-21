@@ -962,19 +962,22 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	return out.Bytes(), false, nil
 }
 
-// normalizeCursorFailMode removes a v8 Cursor value that contradicts the
-// native hook contract. Other connectors keep their independent fail mode.
+// normalizeCursorFailMode closes a v8 Cursor open that action mode
+// contradicts: Cursor's action hooks are closed. It never writes open. An
+// observe-mode closed is the operator's outage choice, which this release's
+// per-user Cursor hooks follow (connector.OutageHookFailMode); 1.0.0 to
+// 1.0.3 rewrote it to open, which the hooks then followed while the gateway
+// was down (r104 W3 G3-upg). Other connectors keep their independent fail
+// mode.
 func (m *v9Migrator) normalizeCursorFailMode(root *yaml.Node) {
 	guardrail := v8YAMLMapValue(root, "guardrail")
 	if guardrail == nil || guardrail.Kind != yaml.MappingNode {
 		return
 	}
 	globalMode := yamlScalarValue(v8YAMLMapValue(guardrail, "mode"))
-	pinned := func(mode string) string {
-		if strings.EqualFold(strings.TrimSpace(mode), "action") {
-			return "closed"
-		}
-		return "open"
+	contradicted := func(mode string, stored *yaml.Node) bool {
+		return strings.EqualFold(strings.TrimSpace(mode), "action") &&
+			!strings.EqualFold(strings.TrimSpace(stored.Value), "closed")
 	}
 	connectors := v8YAMLMapValue(guardrail, "connectors")
 	if connectors != nil && connectors.Kind == yaml.MappingNode && len(connectors.Content) > 0 {
@@ -994,11 +997,10 @@ func (m *v9Migrator) normalizeCursorFailMode(root *yaml.Node) {
 			if strings.TrimSpace(mode) == "" {
 				mode = globalMode
 			}
-			want := pinned(mode)
-			if !strings.EqualFold(strings.TrimSpace(stored.Value), want) {
-				stored.Value = want
+			if contradicted(mode, stored) {
+				stored.Value = "closed"
 				m.moved("config", "guardrail.connectors.cursor.hook_fail_mode",
-					"guardrail.connectors.cursor.hook_fail_mode", want)
+					"guardrail.connectors.cursor.hook_fail_mode", "closed")
 			}
 		}
 		return
@@ -1007,12 +1009,9 @@ func (m *v9Migrator) normalizeCursorFailMode(root *yaml.Node) {
 		return
 	}
 	stored := v8YAMLMapValue(guardrail, "hook_fail_mode")
-	if stored != nil {
-		want := pinned(globalMode)
-		if !strings.EqualFold(strings.TrimSpace(stored.Value), want) {
-			stored.Value = want
-			m.moved("config", "guardrail.hook_fail_mode", "guardrail.hook_fail_mode", want)
-		}
+	if stored != nil && contradicted(globalMode, stored) {
+		stored.Value = "closed"
+		m.moved("config", "guardrail.hook_fail_mode", "guardrail.hook_fail_mode", "closed")
 	}
 }
 

@@ -1167,8 +1167,47 @@ def test_hook_fail_modes_are_rendered_before_the_gateway_stops_and_the_hook_swap
     update = _ps1_function("Update-HookFailModes")
     assert '@("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0' in update, update
     assert 'Join-Path $DataDir "hooks\\.hookcfg"' in update, update
-    # A downgrade's older gateway prints the connector help instead.
-    assert '-notmatch "connector refresh-fail-modes") { return $true }' in update, update
+    # A downgrade's older gateway prints the connector help instead; any other
+    # probe answer refuses the swap.
+    assert '-match "defenseclaw-gateway connector \\[command\\]") { return $true }' in update, update
+    assert update.rstrip().endswith("return $false\n}"), update
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_hook_fail_mode_refresh_refuses_a_probe_that_fails(tmp_path: Path) -> None:
+    # r104 W3 G3-upg: a staged gateway whose help probe failed or printed
+    # nothing was taken for an older one and the swap went on, so the gateway
+    # could stop with a stale open in hooks\.hookcfg. Only the newer
+    # gateway's help runs the refresh and only an older one's connector help
+    # skips it; every other answer is false.
+    data_dir = tmp_path / "dc"
+    (data_dir / "hooks").mkdir(parents=True)
+    (data_dir / "hooks" / ".hookcfg").write_text("{}", encoding="utf-8")
+    calls = tmp_path / "calls.txt"
+    cases = {
+        "newer": ("Write-Output '  defenseclaw-gateway connector refresh-fail-modes [flags]'; exit 0", True),
+        "older": ("Write-Output '  defenseclaw-gateway connector [command]'; exit 0", True),
+        "fails": ("[Console]::Error.WriteLine('cannot run'); exit 1", False),
+        "silent": ("exit 0", False),
+    }
+    for name, (help_body, want) in cases.items():
+        gateway = tmp_path / f"{name}.ps1"
+        gateway.write_text(
+            f"Add-Content -LiteralPath '{calls}' -Value ('{name} ' + ($args -join ' '))\n"
+            f"if ($args -contains '--help') {{ {help_body} }}\nexit 0\n",
+            encoding="utf-8",
+        )
+        script = (
+            "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+            f"$DataDir = '{data_dir}'\nfunction Write-Warn([string]$m) {{ [Console]::Error.WriteLine('warn: ' + $m) }}\n"
+            f"{_ps1_function('Invoke-Native')}\n{_ps1_function('Get-NativeProbe')}\n{_ps1_function('Update-HookFailModes')}\n"
+            f"if (Update-HookFailModes '{gateway}') {{ 'refresh=true' }} else {{ 'refresh=false' }}\n"
+        )
+        completed = _run_powershell(script)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert f"refresh={str(want).lower()}" in completed.stdout, (name, completed.stdout, completed.stderr)
+    ran = [line for line in calls.read_text(encoding="utf-8").splitlines() if "--data-dir" in line]
+    assert ran == [f"newer connector refresh-fail-modes --data-dir {data_dir}"]
 
 
 @pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
