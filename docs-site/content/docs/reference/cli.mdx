@@ -126,7 +126,7 @@ Hook setup aliases (`setup codex`, `setup claude-code` and the rest) add or reco
 | `defenseclaw setup skill-scanner` / `setup mcp-scanner` | Configure the skill and MCP scanners: analyzers, the LLM judge, optional VirusTotal, AI Defense and OSV lookups, and the scan policy. They write `scanners.skill_scanner.*` or `scanners.mcp_scanner.*` (and the shared `llm:` block) in `config.yaml`, then restart a running gateway, as most `setup` subcommands do. `--non-interactive` takes every choice from flags; the [flags are below](#setup-skill-scanner-and-setup-mcp-scanner-flags). See [Scanners](/docs/reference/scanners). |
 | `defenseclaw setup registry` | Interactive wizard that registers a skill or MCP catalog; the same as `defenseclaw registry wizard`. See [Registries](#registries). |
 | `defenseclaw setup migrate-llm [--dry-run] [--no-backup]` | Rewrite a `config.yaml` that still carries pre-v5 `inspect_llm`, `default_llm_*` or guardrail LLM fields into the unified `llm:` block, writing `config.yaml.bak` first unless `--no-backup`. On a current config it prints `Config already in v5 shape — nothing to migrate.` |
-| `defenseclaw setup routing --enable\|--disable\|--status` | Configure or inspect semantic model routing for proxy-mode OpenAI Chat Completions traffic. Managed mode requires Docker; all config changes activate on gateway restart. See [Semantic routing](/docs/guardrail/semantic-routing). |
+| `defenseclaw setup routing --enable\|--disable\|--status` | Configure or inspect semantic model routing for proxy-mode OpenAI Chat Completions traffic. Managed mode requires Docker; all config changes activate on gateway restart. See [Semantic routing](/docs/how-to/guardrail/route-models). |
 | `defenseclaw setup llm [--show] [--non-interactive] [--provider P] [--model M] [--api-key-env NAME]` | Write the unified or role-scoped LLM block (`--role unified\|agent\|judge`) in `config.yaml`; the key itself goes to `~/.defenseclaw/.env`. `--show` prints the resolved values and changes nothing. Supports SaaS providers and regional Bedrock / Vertex AI / Azure OpenAI via dedicated `--bedrock-*`, `--vertex-*`, `--azure-*` flags, plus `--instance-name` to bind a custom provider from `llm_providers` (use `--provider custom`) and `--inherit-from` to seed from a sibling component. `--ping` / `--no-ping` sends (or skips) a one-shot reachability probe after saving. See [LLM providers](/docs/reference/llm-providers). |
 | `defenseclaw setup provider add\|list\|show\|remove` | Manage `llm_providers.custom` entries that route LLM traffic through internal or self-hosted endpoints. `custom-providers.json` is derived from them; never edit it. `add` writes the entry and asks a running gateway to reload its provider registry (`--no-reload` skips); omit `--name` for the wizard. `list` prints the live registry. [`add` flags](#setup-provider-add-flags) are below. |
 | `defenseclaw setup claude-code` | Hook setup alias for Claude Code; defaults to observe, pass `--mode action` to block hook-side. |
@@ -251,8 +251,8 @@ defenseclaw setup mcp-scanner --non-interactive --analyzers yara --scan-prompts 
 
 `--llm-provider` accepts any provider `setup llm` does, plus `openai-compatible`.
 For what the analyzers, policies and the gate mean, see
-[Skill scanner](/docs/scanning/skill-scanner) and
-[MCP scanner](/docs/scanning/mcp-scanner).
+[Skill scanner](/docs/reference/scanners) and
+[MCP scanner](/docs/reference/scanners).
 
 ### Change one setting without a wizard
 
@@ -305,7 +305,7 @@ For what `setup` writes and where, see [Paths](/docs/reference/paths) and [Confi
 
 ## ACP guard
 
-Editor agents that speak the Agent Client Protocol (Zed, JetBrains) are guarded by `defenseclaw-acp`. See [ACP guard](/docs/acp-guard).
+Editor agents that speak the Agent Client Protocol (Zed, JetBrains) are guarded by `defenseclaw-acp`. See [ACP guard](/docs/features/acp-guard).
 
 | Command | Use it for |
 | --- | --- |
@@ -329,7 +329,7 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail mode observe\|action [--connector X] [--clear] [--no-restart] [--json]` | Switch between observe (log, block nothing) and action (enforce). Sets `guardrail.mode`, or with `--connector X` only `guardrail.connectors.X.mode`; `--clear --connector X` removes X's override. The running gateway applies it on its next reload. A changed hook fail mode is re-rendered into the hook scripts of Claude Code, Codex, Amp and OpenCode in place; other hook connectors restart the gateway (`--no-restart` skips; a stopped gateway is never started). `--json` prints `{"version": 1, "ok", "scope", "mode", "previous", "mode_source", "changed", "not_covered", "gateway", "message"}`. |
 | `defenseclaw guardrail block-at LEVEL [--connector X] [--json]` | Set the lowest severity the guardrail blocks at: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` (any case) or `inherit` to clear. Writes `guardrail.block_at`, or with `--connector X` only `guardrail.connectors.X.block_at`. A connector's own level wins over the global one, which wins over the rule pack's (strict blocks MEDIUM+, default and permissive CRITICAL). It applies in action mode to prompts, completions, tool calls and tool responses, on hooks and through the proxy; `policy edit guardrail --block-threshold` sets the same key. See [Tool-call levels](#tool-call-levels). Refused on a managed standalone device ([exit 3](#managed-devices-and-exit-code-3)). |
 | `defenseclaw guardrail alert-at LEVEL [--connector X] [--json]` | The same for the lowest severity that raises an alert (`guardrail.alert_at`, pack levels: strict LOW+, default MEDIUM+, permissive HIGH+). Anything that blocks also alerts, so an alert level above the block level alerts from the block level. |
-| `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops just that connector from the active set and removes its hooks. |
+| `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops only that connector from the active set and removes its hooks. |
 | `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set behavior for hook delivery, authentication, and invalid-response failures. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Fail modes](/docs/reference/fail-modes). |
 | `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. The running gateway applies a change without a restart; on a Secure Client computer the command restarts it (`--no-restart` to skip). |
 | `defenseclaw guardrail block-message ["<text>"] [--clear] [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. `--clear --connector X` removes that connector's override so it inherits the global message, or the built-in default when the global value is empty. Unscoped `--clear` also clears active connector overrides, returning the active roster to the built-in default. Do not pass text and `--clear` together. |
@@ -369,7 +369,7 @@ defenseclaw guardrail alert-at inherit --connector codex  # back to the global o
 defenseclaw guardrail protection enable database-destruction-protection --connector codex
 ```
 
-See [Multi-connector](/docs/guardrail/multi-connector) for the multi-connector model.
+See [Multi-connector](/docs/how-to/guardrail/add-or-remove-an-agent) for the multi-connector model.
 
 ### Tool-call levels
 
@@ -549,7 +549,7 @@ order, and requirement states.
 
 ## Multi-connector
 
-One gateway can protect N hook connectors at once (see [Multi-connector](/docs/guardrail/multi-connector)). That splits the CLI into a few contracts:
+One gateway can protect N hook connectors at once (see [Multi-connector](/docs/how-to/guardrail/add-or-remove-an-agent)). That splits the CLI into a few contracts:
 
 - **Read / status / inventory — fan out to all active connectors.** `defenseclaw status`, `defenseclaw doctor`, bare `defenseclaw guardrail status`, the bare `guardrail fail-mode` / `hilt` / `block-message` reads, and the list/status commands (`skill list`, `mcp list`, `plugin list`, `tool list`, `tool status`, `codeguard status`) render every active connector where applicable. Use `--connector X` on commands that expose it to narrow the view.
 - **Mutating guardrail commands — `--connector` means one connector.** `guardrail enable` / `disable` / `fail-mode` / `hilt` / `block-message` change one connector when given `--connector X`. Omit it for the broad path: enable/disable is global, while fail-mode, HITL, and block-message reconcile active connector posture where supported.
@@ -1053,7 +1053,7 @@ are not supported, and every `sandbox` command exits 3 there. The `sandbox`
 commands run coding agents in NVIDIA OpenShell 0.1 sandboxes. `defenseclaw sandbox` checks the command
 line, then hands it unchanged to `defenseclaw-gateway sandbox`. Every command
 and flag, with an example, is on [Sandbox CLI](/docs/reference/sandbox-cli);
-see also [Sandbox](/docs/sandboxes/guide).
+see also [Sandbox](/docs/how-to/sandboxes/run-an-agent).
 
 | Command | Use it for |
 | --- | --- |

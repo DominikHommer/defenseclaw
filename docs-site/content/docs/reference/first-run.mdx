@@ -74,6 +74,8 @@ defenseclaw quickstart --connector claudecode
 
 Quickstart configures **one** connector, with the `observe` profile, the `local` scanner, no judge and no HITL. Without `--connector` it uses the single configured or detected connector. If more than one is configured or detected, it exits and asks for `--connector <name>`. On an install that already guards other connectors, `quickstart --connector <name>` exits without changes; use `defenseclaw setup <name> --yes` to add an agent, or `defenseclaw init` to change the set.
 
+### `quickstart` flags
+
 <TypeTable
   type={{
     "--connector / --agent": {

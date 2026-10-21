@@ -55,14 +55,15 @@ You are an AI agent. Set up OpenShell sandboxes for the user, run one agent in a
    Expected: a list of `✓` rows ending with `✓ ready for sandboxes`.
    If it differs: report each row without `✓` and its message. Repeat step 3 after each fix the user approves, until the last line says `ready for sandboxes`.
 
-4. Run the agent in a sandbox, in the project folder the user names.
+4. Start the agent in a sandbox, in the project folder the user names. `sandbox run` gives the agent your terminal, and your shell has none, so either ask the user to run `defenseclaw sandbox run claude` in their own terminal, or run one task in the background:
 
    ```bash
-   defenseclaw sandbox run claude
+   defenseclaw sandbox run claude --prompt "<the task the user gave>" --detach
+   defenseclaw sandbox logs -f <name>
    ```
 
-   Expected: a banner that names the sandbox, the project folder and the policy, then the agent starts.
-   If the command is refused, quote the message.
+   Expected: a banner that names the sandbox, the project folder and the policy. A detached run returns after the banner; its `Asks` row names the sandbox (`defenseclaw sandbox approvals --watch --sandbox <name>`).
+   If it says `` `sandbox run` attaches Claude Code to your terminal, and there is none ``, you left out `--prompt`. If the command is refused for another reason, quote the message.
 
 5. Read a block. In a second terminal, list what the sandbox allowed and refused.
 

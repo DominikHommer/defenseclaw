@@ -82,7 +82,7 @@ Managed Windows pins each enrolled user to one of two reviewed contracts: `kiro-
 
 ## ACP guard
 
-The ACP guard is an enforcement path of its own. It vetoes prompts, output, permissions, filesystem, terminal and extension methods at the protocol boundary, whichever Kiro surface the editor launches. See the [ACP guard guide](/docs/acp-guard). It runs on every OS for per-user installs, for editors that start Kiro over ACP. ACP editors are not supported in enterprise managed mode.
+The ACP guard is an enforcement path of its own. It vetoes prompts, output, permissions, filesystem, terminal and extension methods at the protocol boundary, whichever Kiro surface the editor launches. See the [ACP guard guide](/docs/features/acp-guard). It runs on every OS for per-user installs, for editors that start Kiro over ACP. ACP editors are not supported in enterprise managed mode.
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro
@@ -94,7 +94,7 @@ Use `--client jetbrains` for JetBrains AI Assistant. Setup resolves absolute exe
 
 ## OpenShell sandbox
 
-`defenseclaw sandbox run kiro` runs Kiro CLI in an OpenShell sandbox ([macOS](/docs/how-to/sandboxes/set-up-on-macos), [guide](/docs/sandboxes/guide)). `defenseclaw sandbox image build kiro` builds the image ahead of time. `defenseclaw sandbox setup --harness claudecode --harness codex --harness kiro` builds several, and its `--harness` replaces the `openshell.harnesses` list.
+`defenseclaw sandbox run kiro` runs Kiro CLI in an OpenShell sandbox ([macOS](/docs/how-to/sandboxes/set-up-on-macos), [guide](/docs/how-to/sandboxes/run-an-agent)). `defenseclaw sandbox image build kiro` builds the image ahead of time. `defenseclaw sandbox setup --harness claudecode --harness codex --harness kiro` builds several, and its `--harness` replaces the `openshell.harnesses` list.
 
 | Item | Detail |
 | --- | --- |

@@ -16,7 +16,7 @@ Install and configure OpenShell sandboxes on an Apple-silicon Mac. Each sandbox 
 | You need | Details |
 | --- | --- |
 | A Mac with Apple silicon | The MicroVM driver runs on Apple silicon only. On an Intel Mac sandboxes are refused. If you run the Intel build of DefenseClaw under Rosetta, install the arm64 build. |
-| DefenseClaw | Installed and initialized ([quickstart](/docs/get-started/quickstart)), with the daemon running. The [macOS app](/docs/macos-app) starts it for you. Run everything as your own user. |
+| DefenseClaw | Installed and initialized ([quickstart](/docs/get-started/quickstart)), with the daemon running. The [macOS app](/docs/features/macos-app) starts it for you. Run everything as your own user. |
 | [Homebrew](https://brew.sh) | OpenShell installs from NVIDIA's `nvidia/openshell` formula and its gateway runs as a Homebrew service. NVIDIA's installer runs Homebrew as you, without `sudo`, so your account must be able to write to Homebrew's folders ([another account's Homebrew](#a-homebrew-that-belongs-to-another-account)). |
 | Xcode or the Command Line Tools | Current for your macOS release. Homebrew may build the formula from source and checks them first ([developer tools](#developer-tools)). |
 | `e2fsprogs` | The MicroVM driver formats each MicroVM's disks with its `mke2fs` and `debugfs`. Setup offers to install it with Homebrew. The driver looks only in the Homebrew kegs under `/opt/homebrew` and `/usr/local`. |

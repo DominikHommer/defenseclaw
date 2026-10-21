@@ -29,9 +29,9 @@ A connector is how DefenseClaw guards one coding agent. **Hook** connectors regi
 | [OpenClaw](/docs/connectors/openclaw) | Proxy | Requests, responses, tool calls | `before_tool_call` | Linux, macOS |
 | [ZeptoClaw](/docs/connectors/zeptoclaw) | Proxy | Requests, responses, tool calls | No | Linux, macOS |
 
-Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept. You can review it in audit or the TUI, but you cannot resume the call. The [capability matrix](/docs/reference/capability-matrix) has the full per-connector detail, and [Human approval](/docs/hitl) has the per-event matrix.
+Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept. You can review it in audit or the TUI, but you cannot resume the call. The [capability matrix](/docs/reference/capability-matrix) has the full per-connector detail, and [Human approval](/docs/features/guardrail) has the per-event matrix.
 
-One gateway can serve several hook connectors, each with its own posture under `guardrail.connectors.<name>`. Choose **Add**, not Replace, when you run a second `setup <connector>`. Proxy connectors own the traffic plane and cannot be combined this way. See [Multi-connector](/docs/guardrail/multi-connector).
+One gateway can serve several hook connectors, each with its own posture under `guardrail.connectors.<name>`. Choose **Add**, not Replace, when you run a second `setup <connector>`. Proxy connectors own the traffic plane and cannot be combined this way. See [Multi-connector](/docs/how-to/guardrail/add-or-remove-an-agent).
 
 ## Platform support
 
@@ -43,7 +43,7 @@ OpenClaw and ZeptoClaw need the guardrail proxy, which native Windows does not h
 
 ## OpenShell sandbox
 
-`defenseclaw sandbox run <harness>` runs a coding agent in an NVIDIA OpenShell sandbox. The [sandbox guide](/docs/sandboxes/guide) has setup and every command.
+`defenseclaw sandbox run <harness>` runs a coding agent in an NVIDIA OpenShell sandbox. The [sandbox guide](/docs/how-to/sandboxes/run-an-agent) has setup and every command.
 
 - **Run today:** [Claude Code](/docs/reference/connectors/claudecode#openshell-sandbox), [Codex](/docs/reference/connectors/codex#openshell-sandbox), [OpenCode](/docs/reference/connectors/opencode#openshell-sandbox), [GitHub Copilot CLI](/docs/reference/connectors/copilot#openshell-sandbox), [Kiro](/docs/reference/connectors/kiro#openshell-sandbox), [Hermes](/docs/reference/connectors/hermes#openshell-sandbox) and [Antigravity](/docs/reference/connectors/antigravity#openshell-sandbox).
 - **Cannot run yet:** [Amp](/docs/reference/connectors/amp#openshell-sandbox), [Cursor](/docs/reference/connectors/cursor#openshell-sandbox) and [Devin](/docs/reference/connectors/devin#openshell-sandbox) need a vendor account before any agent turn, so their images have not passed the hook check.

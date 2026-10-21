@@ -134,7 +134,7 @@ defenseclaw guardrail profile explain --user bob@corp.example.com --connector co
   applies (codex): mode=action block_at=MEDIUM alert_at=pack hilt=off rule_pack=...
 ```
 
-Use the group name exactly as `id -Gn` prints it. A Windows group is `CORP\Contractors`, the bare name or its SID. Users of a child domain of the joined domain match `users` assignments only when you list their domain in `ai_discovery.trusted_ad_child_domains`; see [Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm). Precedence, worked scenarios, the audit record and delivery to managed hosts are in [User- and group-based policies](/docs/guardrail/user-and-group-policies).
+Use the group name exactly as `id -Gn` prints it. A Windows group is `CORP\Contractors`, the bare name or its SID. Users of a child domain of the joined domain match `users` assignments only when you list their domain in `ai_discovery.trusted_ad_child_domains`; see [Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm). Precedence, worked scenarios, the audit record and delivery to managed hosts are in [User- and group-based policies](/docs/reference/guardrail-profiles).
 
 ## Check what DefenseClaw knows about a user
 
@@ -184,7 +184,7 @@ ai_discovery:
 
 Check the file with `defenseclaw config validate`. A running gateway applies the change on its next reload; on a managed host, edit the [machine configuration](/docs/enterprise/configuration#where-the-config-lives) instead. Confirm with the audit export in [Join a Linux host to AD](/docs/enterprise/identity-ad-linux): the projected `principal` and `kerberos_principal` values are `null` while the setting is off. A home-directory path can still contain the UPN on SSSD hosts with fully qualified names; see [End-user identity](/docs/reference/telemetry-identity/#optional-principal).
 
-What stays on in either case: `user.id`, the account name, the domain, the directory type, the assurance, the session kind and the client address. There is no separate switch for them, so choose destinations accordingly. The principal, the Kerberos principal, the client address and the tenant ID are marked sensitive; the `strict` redaction profile (and a custom profile that extends it) removes them from what a destination receives, while `none`, `sensitive` and `content` keep them. See [Redaction](/docs/observability/redaction). The `identity.observed` record carries a group count, never group names. The Secure Client profile collects none of these facts.
+What stays on in either case: `user.id`, the account name, the domain, the directory type, the assurance, the session kind and the client address. There is no separate switch for them, so choose destinations accordingly. The principal, the Kerberos principal, the client address and the tenant ID are marked sensitive; the `strict` redaction profile (and a custom profile that extends it) removes them from what a destination receives, while `none`, `sensitive` and `content` keep them. See [Redaction](/docs/reference/redaction). The `identity.observed` record carries a group count, never group names. The Secure Client profile collects none of these facts.
 
 The IDE plugin inventory is part of AI discovery; see [IDE plugin inventory](/docs/reference/ai-discovery#ide-plugin-inventory).
 
@@ -193,6 +193,6 @@ The IDE plugin inventory is part of AI discovery; see [IDE plugin inventory](/do
 <Cards>
   <Card title="Join a Linux host to AD" href="/docs/enterprise/identity-ad-linux" description="SSSD join, InfoPipe and what DefenseClaw learns." />
   <Card title="How DefenseClaw knows who a user is" href="/docs/enterprise/identity-sources" description="What the OS tells us, where it is read, and the limits." />
-  <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Write assignments, read the audit record, ship to managed hosts." />
+  <Card title="User- and group-based policies" href="/docs/reference/guardrail-profiles" description="Write assignments, read the audit record, ship to managed hosts." />
   <Card title="Deploy with Microsoft Entra ID" href="/docs/enterprise/identity-entra-id" description="Entra-joined Windows and Azure Linux VMs." />
 </Cards>

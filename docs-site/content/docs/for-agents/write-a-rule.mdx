@@ -68,13 +68,14 @@ You are an AI agent. Turn one sentence from the user into one rule in a custom r
    Expected:
 
    ```text
-   Rule pack valid: "~/.defenseclaw/policies/guardrail/my-rule"
-     rules: …/… enabled across … files
-     components: judges=… judge_categories=… local_patterns=… suppressions=… sensitive_tools=…
-     digest: <64 hex characters>
+   Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/my-rule"
+     rules: 240/244 enabled across 8 files
+     components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
+     digest: b8f9…13e9e0
+     files digest: 4b04…8fa71b (the guardrail.custom_packs pin)
    ```
 
-   If it prints `Rule pack invalid` and exits `1`: read the component and error code, fix the file and repeat. Do not apply an invalid pack.
+   If it prints `Rule pack invalid` and exits `1`: the next line is `<code> at <file>: <reason>`. Fix that file and repeat. Do not apply an invalid pack.
 
 5. Show the user the rule and the digest. Ask: "Apply this to `<agent>` only?"
 

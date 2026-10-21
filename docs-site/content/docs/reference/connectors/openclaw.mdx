@@ -84,7 +84,7 @@ Proxy connector: not gated by a hook contract version.
   <Message from="oc" to="p"  label="reports the answer (logged)" />
 </Sequence>
 
-For a `confirm` verdict in action mode the plugin returns OpenClaw's `requireApproval` object with `timeoutBehavior: "deny"`. OpenClaw applies the decision. The plugin's `onResolution` callback only logs it. It sends no separate "resolve approval" request to the gateway. OpenClaw is the only connector with plugin-mediated approval in its chat origin. Other native-ask connectors use their own host UI. See [Human approval](/docs/hitl) for the per-connector matrix.
+For a `confirm` verdict in action mode the plugin returns OpenClaw's `requireApproval` object with `timeoutBehavior: "deny"`. OpenClaw applies the decision. The plugin's `onResolution` callback only logs it. It sends no separate "resolve approval" request to the gateway. OpenClaw is the only connector with plugin-mediated approval in its chat origin. Other native-ask connectors use their own host UI. See [Human approval](/docs/features/guardrail) for the per-connector matrix.
 
 ## Transport coverage
 
@@ -112,7 +112,7 @@ The gateway client speaks the OpenClaw WebSocket handshake across protocol v3 to
 
 ## Setup defaults
 
-`defenseclaw setup openclaw` is the dedicated alias. It delegates to the shared guardrail setup and exposes the common options, not every `setup guardrail` flag ([quick-alias reference](/docs/guardrail/aliases), [full guardrail setup](/docs/guardrail)). The flags in the user page set the connector, mode, optional HITL and optional rule pack. Everything else uses the shipped defaults ([Defaults](/docs/policies/defaults)).
+`defenseclaw setup openclaw` is the dedicated alias. It delegates to the shared guardrail setup and exposes the common options, not every `setup guardrail` flag ([quick-alias reference](/docs/reference/guardrail-setup#aliases), [full guardrail setup](/docs/features/guardrail)). The flags in the user page set the connector, mode, optional HITL and optional rule pack. Everything else uses the shipped defaults ([Defaults](/docs/reference/policy-defaults)).
 
 | Knob | Value when omitted | Flag to override |
 | --- | --- | --- |

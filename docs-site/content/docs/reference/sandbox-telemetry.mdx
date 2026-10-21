@@ -8,7 +8,7 @@ keywords:
   - defenseclaw.sandbox.name
 ---
 
-Every [OpenShell sandbox](/docs/sandboxes) writes records into the standard [observability buckets](/docs/reference/observability#buckets). They go to local SQLite and to each destination whose routes select them, redacted by that destination's profile. The [Sandboxes board](/docs/reference/dashboards#sandboxes-board) and the Splunk Observability sandbox dashboard are built from them. The full attribute registry is [`docs/OPENSHELL_SANDBOX_EVENTS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OPENSHELL_SANDBOX_EVENTS.md).
+Every [OpenShell sandbox](/docs/features/sandboxes) writes records into the standard [observability buckets](/docs/reference/observability#buckets). They go to local SQLite and to each destination whose routes select them, redacted by that destination's profile. The [Sandboxes board](/docs/reference/dashboards#sandboxes-board) and the Splunk Observability sandbox dashboard are built from them. The full attribute registry is [`docs/OPENSHELL_SANDBOX_EVENTS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OPENSHELL_SANDBOX_EVENTS.md).
 
 ## What is recorded
 
@@ -198,6 +198,22 @@ The labels below are the ones the local Prometheus shows. In OTLP they are
 | `defenseclaw.sandbox.active` (gauge) | `connector` | Sandboxes provisioning, starting, ready or stopping, per harness connector. Exported every minute, including `0` after the connector's last sandbox stops. On a managed host, the daemon refreshes the gateway's count on its polls; after a gateway restart a running sandbox counts again within a minute. |
 | `defenseclaw.sandbox.transitions` (counter) | `connector`, phase from and to | One per phase change. |
 | `defenseclaw.egress.events` (counter) | `connector`, `source` (`openshell`, `dc-egress-proxy`), `decision` | One per decision; none for the end of a connection. A refusal that is audited only does not count. |
+
+## What to trust
+
+DefenseClaw reports a sandbox from several sources. Some it measures itself. Some are what OpenShell or the sandboxed program says about itself.
+
+| You want to know | Look at | Read it as |
+| --- | --- | --- |
+| Which sites the agent reached or tried | `sandbox activity`, `sandbox destinations NAME`, the TUI details, the Grafana Sandboxes board | Measured by DefenseClaw for what goes through the proxy. It never sees an HTTPS path or body, and the model provider's traffic is opened around the proxy. |
+| Whether the agent talked to another AI service | The `shadow AI` and `shadow AI?` kinds, a `shadow_ai` finding, `⚠` in the feed | A provider in the catalog is named. `shadow AI?` is a guess from the host's shape. |
+| Which program made a connection | The BINARY column of `destinations` | What the program calls itself. Parents appear only with the process tree on, for a process the 5-second sample saw. |
+| What the agent ran | `sandbox ps NAME --tree` (opt-in) | Names and arguments are the agent's own words, with secrets replaced. A view of what ran, not a control. |
+| What the agent installed in the sandbox | `sandbox discover NAME`, `agent usage --sandbox NAME` | Files as the agent left them, scanned on your machine. |
+| Whether the hooks still guard the agent | The banner's `Hooks` line, the `hook_silence` and `hook_tamper` findings | Claude Code and Codex keep their hooks in root-owned files. For the others, silence stops the sandbox under `balanced` and `strict`. A harness that works in bursts shorter than `silence_after` is not flagged. |
+| What the project asked for | The banner's `Policy` row, `policy explain` (source `repo`) | Untrusted input: it can only tighten the policy. |
+
+None of these sees what a program does in memory, or the contents of the files the agent writes. The end-of-session review flags the ones that can run code. Every signal is also a v8 record that reaches your telemetry destinations.
 
 ## What leaves the host
 

@@ -65,7 +65,7 @@ Codex loads a skill without a hook of its own. DefenseClaw refuses a skill on `a
 
 Native logs, metrics and traces use the loopback `/v1/{logs,metrics,traces}` endpoints with `X-DefenseClaw-Source: codex` and a bearer in Codex's exporter configuration. The credential is separate from the gateway master token and the Codex hook credential, works only for Codex OTLP over loopback, and cannot call management or another connector. Do not print or copy the exporter header or its sidecar. Setup also pins Codex's `otel.environment` to DefenseClaw's configured environment (Codex defaults to `dev`), and doctor compares it with live runtime metadata.
 
-Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/reference/redaction/). The alias options are in the [quick-alias reference](/docs/guardrail/aliases).
+Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/reference/redaction/). The alias options are in the [quick-alias reference](/docs/reference/guardrail-setup#aliases).
 
 On native Windows, DefenseClaw writes each event and contract into `%CODEX_HOME%\config.toml` and marks the hooks trusted there, because Codex on Windows does not read hooks from `managed_config.toml`. The registered command runs system Windows PowerShell with `-EncodedCommand`, which starts `defenseclaw-hook.exe` synchronously with inherited handles and the bound `--event` and `--hook-contract`. No POSIX shell or WSL is involved. On managed Windows, the enumerator enrolls Codex installed with npm, the official `install.ps1` at its default location, or WinGet. A relocated `CODEX_HOME`, or another folder that discovery finds but cannot enroll, is reported as `agent_unprotected` ([Enrollment](/docs/enterprise/enrollment/#how-users-and-agents-are-found)). Managed enrollment publishes hooks in `%ProgramData%\OpenAI\Codex\requirements.toml`. The per-user `managed_config.toml` is read only to clean up older registrations.
 
@@ -128,7 +128,7 @@ Codex activates project `.codex/` layers only for trusted projects. Inventory re
 
 ## OpenShell sandbox
 
-`defenseclaw sandbox run codex` runs Codex in an OpenShell sandbox ([macOS](/docs/how-to/sandboxes/set-up-on-macos), [guide](/docs/sandboxes/guide)).
+`defenseclaw sandbox run codex` runs Codex in an OpenShell sandbox ([macOS](/docs/how-to/sandboxes/set-up-on-macos), [guide](/docs/how-to/sandboxes/run-an-agent)).
 
 | Item | Detail |
 | --- | --- |

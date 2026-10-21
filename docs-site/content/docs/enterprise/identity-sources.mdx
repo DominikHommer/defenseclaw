@@ -453,7 +453,7 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
 - **Attribution, not authentication.** DefenseClaw does not sign anyone in and
   proves nothing to another system. Do not use these fields to grant access.
 - **Policy selection by facts the OS vouches for.** Only `verified` facts
-  choose a [guardrail profile](/docs/guardrail/user-and-group-policies).
+  choose a [guardrail profile](/docs/reference/guardrail-profiles).
   Headers, payloads and claimed facts never do.
 - **Local accounts have no directory groups.** A local account has only the
   groups its OS account database lists, no domain and no UPN.
@@ -509,7 +509,7 @@ What was exercised end to end on real hosts: local accounts on all three OSes; A
 
 A low-rate `identity.observed` record, once per user per cache lifetime,
 carries `defenseclaw.user.group_count` and never group names. See
-[End-user identity](/docs/observability/end-user-identity) for the full
+[End-user identity](/docs/reference/telemetry-identity) for the full
 attribute list and how to join records.
 
 ## Troubleshooting identity
@@ -555,6 +555,6 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-exp
 <Cards>
   <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Supported identity types, agent identity, and the checks." />
   <Card title="Join a Linux host to AD" href="/docs/enterprise/identity-ad-linux" description="SSSD join and what DefenseClaw learns." />
-  <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Write profiles and assignments, and read the audit record." />
-  <Card title="End-user identity" href="/docs/observability/end-user-identity" description="Every identity attribute and how to join records." />
+  <Card title="User- and group-based policies" href="/docs/reference/guardrail-profiles" description="Write profiles and assignments, and read the audit record." />
+  <Card title="End-user identity" href="/docs/reference/telemetry-identity" description="Every identity attribute and how to join records." />
 </Cards>

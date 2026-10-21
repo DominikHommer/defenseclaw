@@ -472,7 +472,7 @@ defenseclaw audit export --since 1h \
   | jq -c 'select(.action=="config-update") | select(tostring | contains("guardrail_profile_reload"))'
 ```
 
-The Grafana [Identity & Users](/docs/observability/grafana-dashboards) board
+The Grafana [Identity & Users](/docs/reference/dashboards) board
 charts decisions by profile and match reason and the digest timeline.
 
 ## Deliver it to managed hosts

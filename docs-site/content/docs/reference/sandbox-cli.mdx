@@ -48,7 +48,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   `image rm` removes only the harnesses you name. Amp, Cursor Agent, and Devin CLI are not verified
   end to end yet: their images build, but they never pass the hook check, so
   no sandbox runs them. The
-  [capability matrix](/docs/connectors/capability-matrix) says why for each harness.
+  [capability matrix](/docs/reference/capability-matrix) says why for each harness.
 - **Sandbox names.** A name is lowercase letters, digits, and `-`, at most
   19 characters: OpenShell refuses to create a sandbox with a longer
   name. Without `--name`, `run` picks `<folder>-<random>`, the folder name cut
@@ -398,7 +398,7 @@ block up. To skip the sandbox for one call, run the command with
 `DEFENSECLAW_NO_SANDBOX=1` set. Inside a sandbox the function runs the harness
 directly. The bash and zsh block first drops an alias of the same name (Claude
 Code's installer adds one), which would otherwise keep running the harness
-outside the sandbox, and drops it again just before the first prompt, in case
+outside the sandbox, and drops it again right before the first prompt, in case
 an installer or a file your rc sources defines one after the block. `--version`, `--help` and the harness's own management
 commands (`claude mcp add|list|…`, `claude config`, `claude update`,
 `claude setup-token`, `codex login`, `codex mcp …`) start no agent, so they

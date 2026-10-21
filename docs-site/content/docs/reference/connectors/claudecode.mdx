@@ -78,7 +78,7 @@ Commands typed in Claude Code's bash mode run without a pre-tool hook, as input 
 
 ## Telemetry and proxies
 
-Native OTLP uses managed loopback exporter settings with a Claude-scoped bearer. Logs and metrics are on. Traces are off. Prompt and assistant-response content logging are separate vendor opt-ins, and DefenseClaw leaves both off. The scoped credential cannot authenticate management or another connector. Redaction follows the v8 bucket and profile policy: see [Redaction](/docs/reference/redaction/).
+Native OTLP uses managed loopback exporter settings with a Claude-scoped bearer. Logs and metrics are on. Traces are off. Prompt and assistant-response content logging are separate vendor opt-ins, and DefenseClaw leaves both off. The scoped credential cannot authenticate management or another connector. Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/reference/redaction).
 
 <Flow
   direction="TB"
@@ -110,7 +110,7 @@ See the [Windows path reference](/docs/reference/paths/). DefenseClaw stores a h
 
 ## Inventory
 
-DefenseClaw reads these files without changing them. See [AI Discovery](/docs/ai-discovery).
+DefenseClaw reads these files without changing them. See [AI Discovery](/docs/features/ai-discovery).
 
 | Asset | Sources |
 | --- | --- |
@@ -135,7 +135,7 @@ The floor file sets `requiredMinimumVersion` to 2.1.154, the lowest version with
 
 ## OpenShell sandbox
 
-`defenseclaw sandbox run claude` runs Claude Code in an OpenShell sandbox ([macOS](/docs/how-to/sandboxes/set-up-on-macos), [guide](/docs/sandboxes/guide)). The files below exist only in the image.
+`defenseclaw sandbox run claude` runs Claude Code in an OpenShell sandbox ([macOS](/docs/how-to/sandboxes/set-up-on-macos), [guide](/docs/how-to/sandboxes/run-an-agent)). The files below exist only in the image.
 
 | Item | Detail |
 | --- | --- |

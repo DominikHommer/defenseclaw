@@ -31,7 +31,7 @@ An absent field means DefenseClaw could not establish it safely. Do not infer `i
 | `client.address` | Client address of an SSH or remote session, reported with the session kind. |
 | `defenseclaw.session.kerberos_principal` | Principal of the session's Kerberos ticket cache. Always claimed. Sent only with `ai_discovery.include_user_principal`. |
 | `defenseclaw.agent.identity.id` | The agent's stable identity (`agt-`), one per connector install, user and machine. |
-| `defenseclaw.guardrail.profile.name`, `.digest`, `.match`, `.matched_group` | The [guardrail profile](/docs/guardrail/user-and-group-policies) that decided the request, its policy digest, why it was chosen, and the matching group. |
+| `defenseclaw.guardrail.profile.name`, `.digest`, `.match`, `.matched_group` | The [guardrail profile](/docs/reference/guardrail-profiles) that decided the request, its policy digest, why it was chosen, and the matching group. |
 | `defenseclaw.user.group_count` | On the `identity.observed` record only: how many groups the user has, never their names. |
 
 The directory fields come only from the operating system; DefenseClaw never calls an identity provider. See [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources) and [Identity and authentication](/docs/enterprise/identity-and-authentication). The Secure Client profile emits none of the directory, session, agent identity or profile attributes.
@@ -107,4 +107,4 @@ The option governs the two principal attributes only. On a Linux host joined wit
 
 Every redaction profile preserves `defenseclaw.user.name`. Except under the Secure Client integration, that is the bare account name (`alice`) on every record, IDE plugin records included. The qualified form `alice@corp.example.com` is only the principal, which `strict` removes. If a destination must not receive even the bare account name, do not send it user-attributed telemetry: keep that route on a trusted destination or disable the export. See [Redaction](/docs/reference/redaction).
 
-See [AI discovery](/docs/ai-discovery) for profile inventory and the [IDE plugin inventory](/docs/reference/ai-discovery#ide-plugin-inventory).
+See [AI discovery](/docs/features/ai-discovery) for profile inventory and the [IDE plugin inventory](/docs/reference/ai-discovery#ide-plugin-inventory).

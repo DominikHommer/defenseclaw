@@ -51,7 +51,7 @@ On Windows the command is one directly quoted absolute `defenseclaw-hook.exe` ar
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway`. This does not reload Hermes. |
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`. Run its printed gateway-restart step before expecting exports. |
 
-The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message, add/replace and workspace options ([quick-alias reference](/docs/guardrail/aliases)). To tune Hermes later, use [`defenseclaw setup guardrail --connector hermes`](/docs/guardrail). On a host with several connectors, `defenseclaw setup guardrail --connector hermes --mode action` switches only Hermes.
+The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message, add/replace and workspace options ([quick-alias reference](/docs/reference/guardrail-setup#aliases)). To tune Hermes later, use [`defenseclaw setup guardrail --connector hermes`](/docs/features/guardrail). On a host with several connectors, `defenseclaw setup guardrail --connector hermes --mode action` switches only Hermes.
 
 Hermes registers shell callbacks in each running process, and DefenseClaw has no vendor-proven command that reloads every Hermes CLI, gateway, desktop and service host. So setup and doctor report `pending_reload` and `live: false`, and doctor shows the staged state as unhealthy. Reload every host after setup and after disable. Restarting `defenseclaw-gateway` does not reload Hermes. On Windows, disable first writes a direct-native disabled tombstone (`hermes-direct-native-state.json`) so stale cached callbacks no-op while revocation is pending.
 
@@ -94,7 +94,7 @@ To reduce this, prefer agents governed through machine policy, use application c
 
 ## OpenShell sandbox
 
-DefenseClaw builds a Hermes overlay image. Nothing on your host changes. `defenseclaw sandbox run hermes` runs it ([guide](/docs/sandboxes/guide)).
+DefenseClaw builds a Hermes overlay image. Nothing on your host changes. `defenseclaw sandbox run hermes` runs it ([guide](/docs/how-to/sandboxes/run-an-agent)).
 
 | Item | Detail |
 | --- | --- |

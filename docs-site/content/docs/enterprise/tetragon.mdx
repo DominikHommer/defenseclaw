@@ -51,7 +51,7 @@ Each step adds to the one before it, and you can stop at any step.
 | 3 | `observe` | DefenseClaw's own read-only policies, and two kernel controls in monitor mode that count what they would have denied | Loads three `defenseclaw-*` policies |
 | 4 | `enforce` | The two controls return `Operation not permitted` after a measured burn-in and your approval, for one user per computer whose agent is a native binary (see [the kernel controls](/docs/enterprise/tetragon-reference#the-kernel-controls)) | The same policies; the controls move to enforce mode |
 
-How this fits with hooks, sandboxes and the egress proxy is on [Agent segmentation, visibility and enforcement](/docs/segmentation).
+How this fits with hooks, sandboxes and the egress proxy is on [Agent segmentation, visibility and enforcement](/docs/appendix/coverage-by-layer).
 
 ## Before you start
 
@@ -757,7 +757,7 @@ exit 0
 
 **MDM compliance.** `detect.sh --require-tetragon consume|observe|enforce` runs `tetragon verify --ready-for <mode> --json` and maps it to the existing `exit`, `value` and `jamf` formats; `value` prints `tetragon-not-ready:<first failing check>`. The macOS copy refuses the flag with "Linux only". See [Install with an MDM](/docs/enterprise/mdm).
 
-**Grafana.** The AI Discovery Runtime dashboard has a first row, "Fleet: kernel controls per host", with Tetragon version, backend, mode, approval, enforced and enrolled users, burn-in, pause and digest per computer, and stats for stale approvals, computers on fallback and paused computers. See [Grafana dashboards](/docs/observability/grafana-dashboards).
+**Grafana.** The AI Discovery Runtime dashboard has a first row, "Fleet: kernel controls per host", with Tetragon version, backend, mode, approval, enforced and enrolled users, burn-in, pause and digest per computer, and stats for stale approvals, computers on fallback and paused computers. See [Grafana dashboards](/docs/reference/dashboards).
 
 ![fleet-readiness.sh enforce hosts.txt: one line per computer, then the summary with computers ready and not ready, users enforcing, ready for enforce, in burn-in, reset by a hit, monitor-only, with no agent installed, held in monitor, and the controls digests](/images/tetragon/terminal-fleet-readiness.png)
 
@@ -887,6 +887,6 @@ Removal, downgrade and cleanup of the policies DefenseClaw loaded are in the [re
 ## See also
 
 - [Tetragon reference](/docs/enterprise/tetragon-reference)
-- [Agent segmentation, visibility and enforcement](/docs/segmentation)
+- [Agent segmentation, visibility and enforcement](/docs/appendix/coverage-by-layer)
 - [Linux standalone deployment](/docs/enterprise/linux)
 - [Roll out in rings](/docs/enterprise/rollout)

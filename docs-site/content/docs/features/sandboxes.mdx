@@ -32,7 +32,7 @@ The sandbox is a locked room that holds only your project folder. Two layers bui
 | Use your model credential through a placeholder. | Read the real key: OpenShell adds it only on requests to the model provider. |
 | Reach a port on your machine you name with `--host-port`, once you approve it. | Reach DefenseClaw's own API or the OpenShell gateway, ever. Reach your local network unless you approve it. |
 
-The sandbox reaches your machine only at `host.openshell.internal`, which OpenShell maps to your loopback address. Hooks arrive on a dedicated hook ingress port and web traffic leaves through the egress proxy port. With the default API port 18970, the ingress is 18971 and the egress proxy 18972. The main API is never reachable. [Agent segmentation](/docs/segmentation) shows which layer enforces what.
+The sandbox reaches your machine only at `host.openshell.internal`, which OpenShell maps to your loopback address. Hooks arrive on a dedicated hook ingress port and web traffic leaves through the egress proxy port. With the default API port 18970, the ingress is 18971 and the egress proxy 18972. The main API is never reachable. [Agent segmentation](/docs/appendix/coverage-by-layer) shows which layer enforces what.
 
 <Video
   src="openshell-isolation"
@@ -102,14 +102,7 @@ DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2. Setup instal
 
 {/* chunk note: the r104 T1 train moves the pinned OpenShell release to 0.1.5. This section must follow the constants SupportedMin, SupportedBelow and InstallerVersion in internal/openshell/version.go when T1 lands. */}
 
-| Requirement | Linux | macOS |
-| --- | --- | --- |
-| Platform | amd64 or arm64 | Apple silicon |
-| DefenseClaw | Installed, initialized, daemon running, run as your own user (not root) | The same |
-| Container engine | Rootful Docker Engine 28 or newer with the buildx plugin, usable by your user | Docker Desktop running, with buildx |
-| Kernel | Landlock ABI 3 or newer in the `lsm=` list | None. Each MicroVM boots its own kernel. |
-| Other | systemd user manager, `loginctl enable-linger` recommended | Homebrew and `e2fsprogs` |
-| Disk | 5 GiB free for Docker (10 recommended); first image build downloads about 3 GB | The same, plus 12 GiB free (22 recommended) for a MicroVM's first start |
+The full lists are on [Set up on Linux](/docs/how-to/sandboxes/set-up-on-linux#before-you-start) and [Set up on macOS](/docs/how-to/sandboxes/set-up-on-macos#before-you-start). In short: run DefenseClaw as your own user (not root), with its daemon running, plus rootful Docker Engine 28 or newer and a Landlock kernel on Linux, or Docker Desktop and Homebrew on an Apple-silicon Mac. Allow at least 5 GiB of free disk for the images.
 
 ## Which agents run
 
@@ -128,23 +121,11 @@ Claude Code and Codex are set up by default. GitHub Copilot CLI, OpenCode, Kiro 
 | Amp | `amp` | user | Unverified |
 | Devin CLI | `devin` | user | Unverified |
 
-The hook tier says whether the agent could switch DefenseClaw's hooks off. **Managed**: the hook configuration is a root-owned file that user and project settings cannot override. **User**: the configuration lives where the agent could edit it, so the run banner says so and DefenseClaw watches for hooks that go silent. The [capability matrix](/docs/connectors/capability-matrix) lists each harness's hook file and version. Add another agent with `defenseclaw sandbox setup --harness NAME`.
+The hook tier says whether the agent could switch DefenseClaw's hooks off. **Managed**: the hook configuration is a root-owned file that user and project settings cannot override. **User**: the configuration lives where the agent could edit it, so the run banner says so and DefenseClaw watches for hooks that go silent. The [capability matrix](/docs/reference/capability-matrix) lists each harness's hook file and version. Add another agent with `defenseclaw sandbox setup --harness NAME`.
 
 ## What to trust
 
-DefenseClaw reports a sandbox from several sources. Some it measures itself. Some are what OpenShell or the sandboxed program says about itself.
-
-| You want to know | Look at | Read it as |
-| --- | --- | --- |
-| Which sites the agent reached or tried | `sandbox activity`, `sandbox destinations NAME`, the TUI details, the Grafana Sandboxes board | Measured by DefenseClaw for what goes through the proxy. It never sees an HTTPS path or body, and the model provider's traffic is opened around the proxy. |
-| Whether the agent talked to another AI service | The `shadow AI` and `shadow AI?` kinds, a `shadow_ai` finding, `⚠` in the feed | A provider in the catalog is named. `shadow AI?` is a guess from the host's shape. |
-| Which program made a connection | The BINARY column of `destinations` | What the program calls itself. Parents appear only with the process tree on, for a process the 5-second sample saw. |
-| What the agent ran | `sandbox ps NAME --tree` (opt-in) | Names and arguments are the agent's own words, with secrets replaced. A view of what ran, not a control. |
-| What the agent installed in the sandbox | `sandbox discover NAME`, `agent usage --sandbox NAME` | Files as the agent left them, scanned on your machine. |
-| Whether the hooks still guard the agent | The banner's `Hooks` line, the `hook_silence` and `hook_tamper` findings | Claude Code and Codex keep their hooks in root-owned files. For the others, silence stops the sandbox under `balanced` and `strict`. A harness that works in bursts shorter than `silence_after` is not flagged. |
-| What the project asked for | The banner's `Policy` row, `policy explain` (source `repo`) | Untrusted input: it can only tighten the policy. |
-
-None of these sees what a program does in memory, or the contents of the files the agent writes. The end-of-session review flags the ones that can run code. Every signal is also a v8 record that reaches your telemetry destinations ([sandbox telemetry](/docs/observability/sandbox-telemetry)).
+Some of what DefenseClaw reports about a sandbox it measures itself, and some is what OpenShell or the sandboxed program says about itself. [Sandbox telemetry](/docs/reference/sandbox-telemetry#what-to-trust) says which is which, signal by signal.
 
 ## What is in the image
 

@@ -74,7 +74,7 @@ scanners:
       api_key_env: SKILL_SCANNER_OPENAI_KEY
 ```
 
-Then store those custom env names just like the canonical key:
+Then store those custom env names the same way as the canonical key:
 
 ```bash
 defenseclaw keys set JUDGE_ANTHROPIC_KEY
@@ -195,12 +195,12 @@ You pick a model, not a Bifrost key: `gpt-4o-mini` resolves to `openai`, a `clau
   />
   <Card
     title="Skill Scanner"
-    href="/docs/scanning/skill-scanner"
+    href="/docs/reference/scanners"
     description="The skill scanner's LLM judge inherits the top-level llm: block (judge_source: inherit), so the unified key reaches it with no scanner-specific variable. Works with any LiteLLM-supported provider, including a local vLLM server."
   />
   <Card
     title="MCP Scanner"
-    href="/docs/scanning/mcp-scanner"
+    href="/docs/reference/scanners"
     description="The MCP scanner's LLM analyzer inherits the same llm: block (judge_source: inherit)."
   />
   <Card
@@ -359,7 +359,7 @@ otherwise silently bypass the entry at request time).
 A custom instance can carry the full regional posture (region, auth
 mode, deployment aliases) so a *single* `setup llm --instance-name X`
 call is all that's needed downstream. Same flags as the role-level
-regional flags below — they just attach to the `llm_providers.custom` entry instead.
+regional flags below — they attach to the `llm_providers.custom` entry instead.
 
 ```bash
 defenseclaw setup provider add \

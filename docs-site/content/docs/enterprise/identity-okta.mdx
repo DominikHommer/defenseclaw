@@ -164,7 +164,7 @@ Install DefenseClaw for the Okta users as for any Linux user: a [per-user instal
 
 - **Per-user install.** Merge the `guardrail` keys of `user-config.example.yaml` into `~/.defenseclaw/config.yaml`, then run `defenseclaw config validate`. The running gateway applies the change on its next reload.
 
-Both examples use only built-in settings (`mode`, `block_at`), so they need no rule pack. Profile keys, precedence and the audit record are in [User- and group-based policies](/docs/guardrail/user-and-group-policies). Set a strict `default_profile`: a request whose user DefenseClaw cannot look up gets it with the reason `default_lookup_failed`.
+Both examples use only built-in settings (`mode`, `block_at`), so they need no rule pack. Profile keys, precedence and the audit record are in [User- and group-based policies](/docs/reference/guardrail-profiles). Set a strict `default_profile`: a request whose user DefenseClaw cannot look up gets it with the reason `default_lookup_failed`.
 
 </Step>
 
@@ -236,7 +236,7 @@ This kit covers Linux hosts. For the other platforms DefenseClaw reports what th
 The installer prints the exact `sssd.conf.bak-<time>` it made and the previous `authselect` profile. On a rerun, use that run's backup. For a first install no backup exists: remove `/etc/sssd/sssd.conf` only after deciding no other service uses it, restore the previous authselect profile with `sudo authselect select <previous profile and features> --force`, and stop `sssd` and `oddjobd` only if this kit enabled them. Restore the exact `/etc/ssh/sshd_config.d/45-okta-ldap.conf.bak-<time>` or remove the drop-in, validate with `sudo sshd -t`, then reload sshd. In Okta, remove only objects you created: the sign-on policy and its rules (first assign the app another policy), the role and resource set, and the users' POSIX attributes and groups. Run `sudo sss_cache -E` before stopping SSSD; cached NSS entries can still resolve for about six minutes afterwards.
 
 <Cards>
-  <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Profile keys, precedence, the audit record and delivery to managed hosts." />
+  <Card title="User- and group-based policies" href="/docs/reference/guardrail-profiles" description="Profile keys, precedence, the audit record and delivery to managed hosts." />
   <Card title="How DefenseClaw knows who a user is" href="/docs/enterprise/identity-sources" description="The OS facts behind a verified identity, and how Okta and Entra users appear." />
   <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Supported identity types, agent identity and checks." />
 </Cards>

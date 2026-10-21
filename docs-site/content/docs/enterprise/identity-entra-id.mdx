@@ -247,7 +247,7 @@ Platform SSO stores each registered account's Entra UPN in its record (`AltSecur
 
 ## 5. Map users and groups to profiles
 
-Write `users` assignments with the principal the host actually resolves, and use the SID for Entra groups on Windows. On Azure Linux, check that NSS resolves the account by uid as well as name before relying on a `users` assignment. Starter files: `per-user-profiles.example.yaml` and `admin-config.windows.example.yaml`. The keys are in [User- and group-based policies](/docs/guardrail/user-and-group-policies); a UPN compares without regard to case.
+Write `users` assignments with the principal the host actually resolves, and use the SID for Entra groups on Windows. On Azure Linux, check that NSS resolves the account by uid as well as name before relying on a `users` assignment. Starter files: `per-user-profiles.example.yaml` and `admin-config.windows.example.yaml`. The keys are in [User- and group-based policies](/docs/reference/guardrail-profiles); a UPN compares without regard to case.
 
 ```yaml
 guardrail:
@@ -340,7 +340,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-exp
 
 <Cards>
   <Card title="Entra groups on Windows" href="/docs/enterprise/identity-sources#entra-groups-on-windows" description="The token rule, the Intune recipe and the limits." />
-  <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Write assignments, read the audit record, ship to managed hosts." />
+  <Card title="User- and group-based policies" href="/docs/reference/guardrail-profiles" description="Write assignments, read the audit record, ship to managed hosts." />
   <Card title="Prepare your Intune tenant" href="/docs/enterprise/mdm/intune-tenant" description="Licences, enrollment, groups and the scripts that set them up." />
   <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Supported identity types and checks." />
 </Cards>

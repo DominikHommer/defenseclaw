@@ -583,7 +583,7 @@ The gateway dials the OpenClaw or ZeptoClaw gateway at `gateway.host` and `gatew
 
 ### Routing
 
-The `routing` block affects OpenClaw and ZeptoClaw only on the proxy's OpenAI-compatible Chat Completions path. `defenseclaw keys list` discovers each non-empty `api_key_env`; the classifier never receives the key value. See [Semantic routing](/docs/guardrail/semantic-routing).
+The `routing` block affects OpenClaw and ZeptoClaw only on the proxy's OpenAI-compatible Chat Completions path. `defenseclaw keys list` discovers each non-empty `api_key_env`; the classifier never receives the key value. See [Semantic routing](/docs/how-to/guardrail/route-models).
 
 ### Observability defaults
 
@@ -827,7 +827,7 @@ A single gateway can enforce guardrail policy for several **hook** connectors at
 | `hilt` | `{ enabled, min_severity }` | `guardrail.hilt` |
 
 
-With more than one connector active, `claw.mode` and `guardrail.connector` keep naming the primary connector (the first in alphabetical order unless setup keeps the existing one), and the gateway leaves the OTel attribute `defenseclaw.claw.mode` off. Manage these blocks with `defenseclaw setup <connector>` (choose **Add**) and `defenseclaw guardrail ... --connector X` ([Multi-connector](/docs/guardrail/multi-connector)).
+With more than one connector active, `claw.mode` and `guardrail.connector` keep naming the primary connector (the first in alphabetical order unless setup keeps the existing one), and the gateway leaves the OTel attribute `defenseclaw.claw.mode` off. Manage these blocks with `defenseclaw setup <connector>` (choose **Add**) and `defenseclaw guardrail ... --connector X` ([Multi-connector](/docs/how-to/guardrail/add-or-remove-an-agent)).
 
 ## Enterprise settings (`enterprise.*`)
 

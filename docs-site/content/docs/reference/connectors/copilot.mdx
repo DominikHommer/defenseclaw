@@ -48,7 +48,7 @@ By default setup writes global hooks to `~/.copilot/hooks/defenseclaw.json`. `--
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`. Run its printed gateway-restart step before expecting exports. |
 | `--workspace / --workspace-dir` | unset | Opt into repo-local `.github/hooks`. |
 
-The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message and add/replace options ([quick-alias reference](/docs/guardrail/aliases)). For scanner, detection-strategy and judge settings use [full guardrail setup](/docs/guardrail). Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`). Example with the judge:
+The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message and add/replace options ([quick-alias reference](/docs/reference/guardrail-setup#aliases)). For scanner, detection-strategy and judge settings use [full guardrail setup](/docs/features/guardrail). Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`). Example with the judge:
 
 ```bash
 export DEFENSECLAW_LLM_KEY='replace-with-your-key'
@@ -84,7 +84,7 @@ Teardown restores the exact pre-Setup hook document when its managed copy is unc
 
 ## Inventory
 
-DefenseClaw reads agents, skills, MCP servers and plugins without changing them ([AI Discovery](/docs/ai-discovery)).
+DefenseClaw reads agents, skills, MCP servers and plugins without changing them ([AI Discovery](/docs/features/ai-discovery)).
 
 | Asset | Sources |
 | --- | --- |
@@ -143,7 +143,7 @@ Not covered yet:
 
 ## OpenShell sandbox
 
-`defenseclaw sandbox run copilot` runs Copilot CLI in an OpenShell sandbox ([macOS](/docs/how-to/sandboxes/set-up-on-macos), [guide](/docs/sandboxes/guide)). The first run builds the image. `defenseclaw sandbox image build copilot` builds it ahead of time. `defenseclaw sandbox setup --harness claudecode --harness codex --harness copilot` builds several, and its `--harness` replaces the `openshell.harnesses` list.
+`defenseclaw sandbox run copilot` runs Copilot CLI in an OpenShell sandbox ([macOS](/docs/how-to/sandboxes/set-up-on-macos), [guide](/docs/how-to/sandboxes/run-an-agent)). The first run builds the image. `defenseclaw sandbox image build copilot` builds it ahead of time. `defenseclaw sandbox setup --harness claudecode --harness codex --harness copilot` builds several, and its `--harness` replaces the `openshell.harnesses` list.
 
 | Item | Detail |
 | --- | --- |

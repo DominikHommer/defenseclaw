@@ -123,7 +123,7 @@ A disabled feature gives `NOT_USED`, never `OPTIONAL`.
 
 `keys list` shows effective names: with `guardrail.judge.llm.api_key_env: MY_JUDGE_KEY` it shows `MY_JUDGE_KEY` rather than `JUDGE_API_KEY`. A default install shows six rows; the judge and skill-scanner keys appear only when overridden.
 
-For routed traffic the classifier chooses only a configured alias; the gateway resolves that alias's credential and sends it only to the configured provider. The semantic-router container does not read `.env` ([Semantic routing](/docs/guardrail/semantic-routing)).
+For routed traffic the classifier chooses only a configured alias; the gateway resolves that alias's credential and sends it only to the configured provider. The semantic-router container does not read `.env` ([Semantic routing](/docs/how-to/guardrail/route-models)).
 
 ## Provider-specific variables
 

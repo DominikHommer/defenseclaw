@@ -110,7 +110,7 @@ For [Lemonade Server](https://lemonade-server.ai/models.html), the built-in sign
 
 Known model stores are automatic and additive. The scanner checks environment-selected roots (`HF_HUB_CACHE`, `HF_HOME`, `OLLAMA_MODELS`, `LM_STUDIO_HOME`, and `FLM_MODEL_PATH`), conventional Hugging Face, Ollama, LM Studio, llama.cpp, and MLX caches, Lemonade-configured model directories, and then eligible operator `scan_roots`. On native Windows it additionally prioritizes the documented [GPT4All LocalAppData store](https://docs.gpt4all.io/gpt4all_desktop/settings.html), the [Jan RoamingAppData model store](https://jan.ai/docs/data-folder), and the catalogued AnythingLLM model directory, so a bounded home scan does not need several cursor cycles to reach them. Setting `--scan-roots` does not disable specialized stores. Passive mode honors narrower configured roots but suppresses a root equal to a user home; enhanced mode also honors that broad home root.
 
-Windows discovery uses token-bound Known Folders rather than trusting process overrides for Profile, AppData, ProgramData, or Program Files. It inventories unique exact executable aliases across the full signature catalog and fails closed when a basename is shared by multiple products. Installed applications come from Start Menu/Programs roots, uninstall display names, and the current user's supported virtual AppsFolder, including launchable Store/MSIX/UWP registrations; discovery also covers both Windows PowerShell and PowerShell 7 history plus AppData-backed VS Code-family and JetBrains extension stores. Application display names and bounded, path-free package identity names are reduced to hashed evidence before they leave the detector, just like the existing macOS and Linux application inventory.
+Windows discovery uses token-bound Known Folders rather than trusting process overrides for Profile, AppData, ProgramData, or Program Files. It inventories unique exact executable aliases across the full signature catalog and fails closed when a basename is shared by multiple products. Installed applications come from Start Menu/Programs roots, uninstall display names, and the current user's supported virtual AppsFolder, including launchable Store/MSIX/UWP registrations; discovery also covers both Windows PowerShell and PowerShell 7 history plus AppData-backed VS Code-family and JetBrains extension stores. Application display names and bounded, path-free package identity names are reduced to hashed evidence before they leave the detector, as the macOS and Linux application inventory is.
 
 Each `local_model` signal keeps its potentially high-cardinality identity under a dedicated `model` block. For example, an installed Lemonade model can appear as:
 
@@ -288,7 +288,7 @@ excluded profile is not read.
 ### Inside OpenShell sandboxes
 
 While sandboxes are on (`openshell.enabled`), the gateway also inventories
-what the agent in each running [sandbox](/docs/sandboxes) installed and
+what the agent in each running [sandbox](/docs/features/sandboxes) installed and
 configured there, which its own scan of this machine never sees:
 
 - Once a sandbox is ready, every `scan_interval_min` while it runs, and on
@@ -374,7 +374,7 @@ defenseclaw agent signatures enable codex
 
 `disable` and `enable` take an individual signature ID, not a pack name; use
 `signatures list` to find the ID. The bundled pack covers every connector listed
-in [Capability matrix](/docs/connectors/capability-matrix). Custom packs are useful when
+in [Capability matrix](/docs/reference/capability-matrix). Custom packs are useful when
 you ship internal AI tooling and want it surfaced as a first-party signal
 rather than `unknown`.
 
@@ -609,7 +609,7 @@ per-user command.
   section: plugins installed, AI plugins and disabled plugins as counters,
   plugins by IDE, AI against other plugins by IDE, plugins by enabled state,
   and a per-user table. The `$user` box narrows the Loki panels to one user.
-  See [Grafana dashboards](/docs/observability/grafana-dashboards).
+  See [Grafana dashboards](/docs/reference/dashboards).
 - **Telemetry.** Each change is exported as an `ide.plugin.discovered`,
   `ide.plugin.changed` or `ide.plugin.removed` record, and the
   `defenseclaw.inventory.ide_plugins` gauge counts plugins per IDE, AI flag
@@ -787,9 +787,9 @@ custom JSON downstream if your SBOM tooling requires CycloneDX.
 
 ## Where the data lands
 
-Both continuous and on-demand discovery feed the same audit pipeline. Once you've got [Observability](/docs/observability) wired up, the bundled dashboards light up automatically.
+Both continuous and on-demand discovery feed the same audit pipeline. Once you've got [Observability](/docs/features/observability) wired up, the bundled dashboards light up automatically.
 
-Galileo is not one of these places. Its `galileo-rich-v2` trace profile carries agent, workflow, model, tool, retrieval and judge spans only, so discovery results never reach Galileo; use Grafana, Splunk or another OTLP destination for them (see [Galileo](/docs/observability/galileo)).
+Galileo is not one of these places. Its `galileo-rich-v2` trace profile carries agent, workflow, model, tool, retrieval and judge spans only, so discovery results never reach Galileo; use Grafana, Splunk or another OTLP destination for them (see [Galileo](/docs/how-to/observability/send-to-galileo)).
 
 ### Managed enterprise export
 
@@ -945,7 +945,7 @@ framework running inside a bare `python3` is invisible to it.
 
 <Callout type="warning" title="The runtime planes read more than the inventory does">
 argv is collected, and it is classified as **content** on the wire — each
-destination's [redaction profile](/docs/observability/redaction) governs whether it
+destination's [redaction profile](/docs/reference/redaction) governs whether it
 leaves the host. Provider hostnames are content for the same reason.
 Environment variable *values* are never read on any runtime path, matching the
 inventory scanner's names-only rule. Enabling runtime or continuous discovery on a
@@ -1354,7 +1354,7 @@ readable only for the caller's own processes — so an unprivileged run watches
 the whole machine *compute* and only its own share of it *talk*. Windows is the
 exception: its connection table carries the owning pid in every row.
 
-Note that Plane C is *running* here and still incomplete. Partial coverage is
+Plane C is *running* here and still incomplete. Partial coverage is
 reported as partial rather than as either healthy or down, because a plane
 delivering process events but not file events is missing a whole tactic class,
 and calling that complete would let an operator read reduced coverage as a
@@ -1390,7 +1390,7 @@ ai_discovery:
 chain. Too short and a patient agent never chains; too long and unrelated
 activity in the same session joins up. `sanctioned_endpoints` is where an
 environment states its own approved providers — matching egress still appears
-in the plane's output, it just stops being scored as unsanctioned.
+in the plane's output, it stops being scored as unsanctioned.
 
 `ai_discovery.runtime.correlate` defaults on. Setting it to `false` removes the
 inventory read entirely; it does **not** make findings score as though the

@@ -32,7 +32,7 @@ scheme instead of the gateway token:
 
 - `POST /api/v1/acp/challenge` and `POST /api/v1/acp/evaluate` accept only a
   loopback request signed with the ACP key (`X-DefenseClaw-ACP-Key-ID`, a
-  nonce and a request MAC; see [ACP guard](/docs/acp-guard)). The gateway
+  nonce and a request MAC; see [ACP guard](/docs/features/acp-guard)). The gateway
   token alone gets 401 there.
 - In a managed install on the standalone profile,
   `GET /api/v1/hook-listener-proof` answers before authentication. A loopback
@@ -641,7 +641,7 @@ discovery is off, `enabled` is `false` and the lists are empty.
 
 ### ACP guard
 
-`defenseclaw-acp` calls the two signed routes while it mediates an editor's agent; the two read routes report the built-in catalog and the ACP posture ([ACP guard](/docs/acp-guard)).
+`defenseclaw-acp` calls the two signed routes while it mediates an editor's agent; the two read routes report the built-in catalog and the ACP posture ([ACP guard](/docs/features/acp-guard)).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
