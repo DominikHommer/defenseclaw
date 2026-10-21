@@ -175,16 +175,23 @@ func TestR104InterpreterTextNeedsAnExecutableWrite(t *testing.T) {
 		{"comment without space", `#open('~/.ssh/authorized_keys','a').write('hello')`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			input := actionfacts.Input{Tool: "Bash", Command: "python3 -c '" + tc.code + "'", CWD: home,
+			// The command is POSIX-quoted, so the import-path check
+			// (g-hooks-parse) can read the one Python call and its argv: a
+			// call it cannot read keeps the code whole, and every string in
+			// it counts (T5 integration with g-hooks-wp's argv-only rows).
+			input := actionfacts.Input{Tool: "Bash", Command: "python3 -c '" + strings.ReplaceAll(tc.code, "'", `'\''`) + "'", CWD: home,
 				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
-			// The shell quoting of snippets with single quotes is irrelevant to
-			// this proof: ActionFacts may reject it, so give the command argv.
-			input.Command = ""
-			input.Argv = []string{"python3", "-c", tc.code}
-			if got := trustedInlineAuthorizedKeysWrite(actionfacts.Analyze(input)); got != tc.want {
+			if got := trustedInlineAuthorizedKeysWrite(input, actionfacts.Analyze(input)); got != tc.want {
 				t.Fatalf("inline write proof = %v, want %v", got, tc.want)
 			}
 		})
+	}
+	// An argv with no shell command to read: the import path cannot be
+	// proven, so docstring text keeps its write (fails closed).
+	argvOnly := actionfacts.Input{Tool: "Bash", CWD: home, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX,
+		Argv: []string{"python3", "-c", `"""Path('~/.ssh/authorized_keys').expanduser().write_text('example')"""; print('ok')`}}
+	if !trustedInlineAuthorizedKeysWrite(argvOnly, actionfacts.Analyze(argvOnly)) {
+		t.Fatal("argv-only docstring write: proof false, want true (import path unproven)")
 	}
 }
 

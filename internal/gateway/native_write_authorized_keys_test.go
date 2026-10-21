@@ -140,7 +140,7 @@ func TestNativeWriteToolsOfAuthorizedKeysAreBlockedOnTheHost(t *testing.T) {
 				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/"+call.connector+"/hook", strings.NewReader(body))
 				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set(hookpaths.Header, hookpaths.ResolveConnector(call.connector, []byte(body)))
+				req.Header.Set(hookpaths.Header, hookpaths.ResolveConnector(call.connector, "", "preToolUse", []byte(body)))
 				switch call.connector {
 				case "codex":
 					setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)

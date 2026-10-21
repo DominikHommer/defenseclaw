@@ -14,8 +14,10 @@ import (
 )
 
 // The managed native hook resolves a call's write targets as its connector's
-// gateway profile reads the call: for Copilot the camelCase toolName and
-// toolArgs, not a decoy tool_name beside them.
+// gateway profile reads the call: for a Copilot CLI hook command the
+// camelCase toolName and toolArgs, not a decoy tool_name beside them; for a
+// command of the vscode-local surface the Local tool_name and tool_input,
+// not a decoy toolName and toolArgs beside them.
 func TestManagedHookWriteEvidenceReadsTheConnectorsCall(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the managed hook sends write evidence on Linux and macOS only")
@@ -30,13 +32,28 @@ func TestManagedHookWriteEvidenceReadsTheConnectorsCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	header := http.Header{}
-	setHookRequestFacts(header, Options{Connector: "copilot", ManagedEnterprise: true}, payload)
-	targets, ok := hookpaths.Decode(header.Get(hookpaths.Header))
-	if !ok {
-		t.Fatal("no decodable write evidence")
+	local, err := json.Marshal(map[string]any{"cwd": cwd, "hook_event_name": "PreToolUse", "tool_name": "create_file",
+		"tool_input": map[string]any{"filePath": target, "content": "b"}, "toolName": "view", "toolArgs": `{"path":"x"}`})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, listed := targets[target]; !listed {
-		t.Fatalf("patch target missing from the evidence: %v", targets)
+	for name, call := range map[string]struct {
+		opts    Options
+		payload []byte
+	}{
+		"cli":          {Options{Connector: "copilot", Event: "preToolUse", ManagedEnterprise: true}, payload},
+		"vscode-local": {Options{Connector: "copilot", Event: "PreToolUse", HookSurface: copilotVSCodeLocalSurface, ManagedEnterprise: true}, local},
+	} {
+		t.Run(name, func(t *testing.T) {
+			header := http.Header{}
+			setHookRequestFacts(header, call.opts, call.payload)
+			targets, ok := hookpaths.Decode(header.Get(hookpaths.Header))
+			if !ok {
+				t.Fatal("no decodable write evidence")
+			}
+			if _, listed := targets[target]; !listed {
+				t.Fatalf("write target missing from the evidence: %v", targets)
+			}
+		})
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -23,7 +24,13 @@ import (
 // That evidence must describe the Copilot call the gateway judges: a decoy
 // tool_name or tool_input beside the camelCase toolName and toolArgs, a
 // toolArgs JSON string, or a VS Code Local tool name. Each write to the link
-// blocks; an ordinary file the evidence lists stays allowed.
+// blocks; an ordinary file the evidence lists stays allowed. A write over the
+// 64 KiB string limit is judged on its reduced call
+// (actionfacts.OverLimitWriteTargetReduction), and the evidence must describe
+// that call in the dialect the gateway reads: a VS Code Local body (the
+// vscode-local hook surface, or a CLI hook file the Local harness runs) with
+// CLI-shaped decoys beside it hid the target from the resolver, and the
+// reduction then dropped the marker that said so.
 func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway walk")
@@ -54,24 +61,47 @@ func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 		return "*** Begin Patch\n*** Update File: " + path + "\n@@\n # base\n+ssh-ed25519 AAAA marker\n*** End Patch\n"
 	}
 	jsonText := func(v any) string { return string(mustJSON(t, v)) }
+	big := strings.Repeat("# k\n", 17000)
+	local := func(path string, extra map[string]any) map[string]any {
+		body := map[string]any{"hook_event_name": "PreToolUse", "tool_name": "create_file",
+			"tool_input": map[string]any{"filePath": path, "content": big}}
+		for key, value := range extra {
+			body[key] = value
+		}
+		return body
+	}
+	cliDecoys := map[string]any{"toolName": "view", "toolArgs": jsonText(map[string]any{"path": notes})}
 	for _, row := range []struct {
-		name  string
-		body  map[string]any
-		block bool
+		name           string
+		surface, event string
+		body           map[string]any
+		block          bool
 	}{
-		{"apply_patch with a decoy tool_name", map[string]any{"toolName": "apply_patch", "tool_name": "read_file",
+		{"apply_patch with a decoy tool_name", "", "preToolUse", map[string]any{"toolName": "apply_patch", "tool_name": "read_file",
 			"toolArgs": patch(link)}, true},
-		{"apply_patch JSON string with a decoy tool_name", map[string]any{"toolName": "apply_patch", "tool_name": "view",
+		{"apply_patch JSON string with a decoy tool_name", "", "preToolUse", map[string]any{"toolName": "apply_patch", "tool_name": "view",
 			"toolArgs": jsonText(patch(link))}, true},
-		{"shell toolArgs JSON string", map[string]any{"toolName": "bash",
+		{"shell toolArgs JSON string", "", "preToolUse", map[string]any{"toolName": "bash",
 			"toolArgs": jsonText(map[string]any{"command": "echo marker >> deploy.cfg", "description": "x"})}, true},
-		{"shell toolArgs with a decoy tool_input", map[string]any{"toolName": "bash",
+		{"shell toolArgs with a decoy tool_input", "", "preToolUse", map[string]any{"toolName": "bash",
 			"toolArgs":   map[string]any{"command": "echo marker >> deploy.cfg"},
 			"tool_input": map[string]any{"command": "true"}}, true},
-		{"VS Code Local tool in a CLI body", map[string]any{"toolName": "create_file",
+		{"VS Code Local tool in a CLI body", "", "preToolUse", map[string]any{"toolName": "create_file",
 			"toolArgs": jsonText(map[string]any{"filePath": link, "content": "ssh-ed25519 AAAA marker\n"})}, true},
-		{"apply_patch of an ordinary file with a decoy tool_name", map[string]any{"toolName": "apply_patch",
+		{"apply_patch of an ordinary file with a decoy tool_name", "", "preToolUse", map[string]any{"toolName": "apply_patch",
 			"tool_name": "read_file", "toolArgs": patch(notes)}, false},
+		{"VS Code Local over-limit create_file with CLI decoys", connector.CopilotHookSurfaceVSCodeLocal, "PreToolUse",
+			local(link, cliDecoys), true},
+		{"VS Code Local over-limit create_file", connector.CopilotHookSurfaceVSCodeLocal, "PreToolUse", local(link, nil), true},
+		{"VS Code Local over-limit create_file with a decoy toolInput", connector.CopilotHookSurfaceVSCodeLocal, "PreToolUse",
+			local(link, map[string]any{"toolInput": map[string]any{"filePath": notes, "content": "x"}}), true},
+		{"VS Code Local over-limit create_file of an ordinary file", connector.CopilotHookSurfaceVSCodeLocal, "PreToolUse",
+			local(notes, nil), false},
+		{"CLI hook file run by the Local harness, over-limit, decoy args", "", "preToolUse",
+			local(link, map[string]any{"args": map[string]any{"filePath": notes}}), true},
+		{"CLI over-limit create with decoy snake fields", "", "preToolUse", map[string]any{"toolName": "create",
+			"toolArgs":  jsonText(map[string]any{"path": link, "file_text": big}),
+			"tool_name": "view", "tool_input": map[string]any{"path": notes}}, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if err := os.Chmod(homes, 0o700); err != nil {
@@ -81,7 +111,7 @@ func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 			row.body["timestamp"] = 1790483549431
 			row.body["cwd"] = project
 			body := mustJSON(t, row.body)
-			header := hookpaths.ResolveConnector("copilot", body)
+			header := resolveCopilotTestEvidence(row.surface, row.event, body)
 			if err := os.Chmod(homes, 0); err != nil {
 				t.Fatal(err)
 			}
@@ -91,7 +121,10 @@ func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(string(body)))
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
+			req.Header.Set("X-DefenseClaw-Copilot-Event", row.event)
+			if row.surface != "" {
+				req.Header.Set(connector.HookDialectHeader, row.surface)
+			}
 			req.Header.Set(hookpaths.Header, header)
 			req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
 			recorder := httptest.NewRecorder()
@@ -109,4 +142,10 @@ func TestManagedCopilotWriteThroughHomeSymlinkUsesTheJudgedCall(t *testing.T) {
 			}
 		})
 	}
+}
+
+// resolveCopilotTestEvidence is the managed native hook's write evidence for
+// a Copilot body sent by a hook command of surface bound to event.
+func resolveCopilotTestEvidence(surface, event string, body []byte) string {
+	return hookpaths.ResolveConnector("copilot", surface, event, body)
 }

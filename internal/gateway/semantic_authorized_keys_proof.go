@@ -161,31 +161,33 @@ func trustedGitBashAuthorizedKeysWrite(input actionfacts.Input) bool {
 	return parsed.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(parsed)
 }
 
-func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
+func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
 	if len(facts.Commands) != 1 {
 		return false
 	}
 	command := facts.Commands[0]
-	if command.Effect != actionfacts.EffectExecute || !command.ArgvComplete ||
+	if command.Effect != actionfacts.EffectExecute ||
 		command.ParentCommandID != 0 || len(command.Argv) != 3 ||
 		len(command.Redirects) != 0 || len(command.Wrappers) != 0 {
 		return false
 	}
 	switch command.Program {
 	case "python", "python3":
-		if command.Argv[1] != "-c" || facts.ActiveHome == "" {
+		importPathOverride, shellArgvProven := trustedPythonImportPathOverride(input, command.Argv)
+		if command.Argv[1] != "-c" || facts.ActiveHome == "" ||
+			(!command.ArgvComplete && !shellArgvProven) {
 			return false
 		}
-		text, calls := trustedPythonExecutedViews(command.Argv[2])
+		text, calls := trustedPythonExecutedViews(command.Argv[2], facts.CWD, importPathOverride)
 		return trustedPathlibAuthorizedKeysWrite(text, calls, facts.ActiveHome, facts.CWD) ||
 			trustedPythonPathExpandWrite(text, calls) ||
 			trustedInterpreterAuthorizedKeysWrite(text, facts.ActiveHome, "python")
 	case "perl":
-		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
+		return command.ArgvComplete && command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			(trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
 				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, "perl"))
 	case "ruby", "node":
-		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
+		return command.ArgvComplete && command.Argv[1] == "-e" && facts.ActiveHome != "" &&
 			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, command.Program)
 	default:
 		return false
@@ -204,12 +206,50 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 // working directory, ...), both views are the code whole, so such a string
 // still proves its write. An unused import of a preloaded module (os, sys)
 // runs nothing.
-func trustedPythonExecutedViews(code string) (text, calls string) {
+func trustedPythonExecutedViews(code, cwd string, importPathOverride bool) (text, calls string) {
 	calls = guardrail.MaskPythonStrings(code)
-	if guardrail.PythonStringsMayRun(calls) {
+	if importPathOverride || guardrail.PythonStringsMayRun(calls, cwd) {
 		return code, code
 	}
 	return guardrail.MaskPythonCommentsAndDocstrings(code), calls
+}
+
+// trustedPythonImportPathOverride checks the shell assignment syntax of the
+// one Python invocation. A per-call PYTHONPATH or PYTHONHOME can load a module
+// outside the inspected cwd, so inert-looking string text remains unproven.
+// A sole such assignment makes ActionFacts leave ArgvComplete false; the AST
+// can still prove the exact three arguments used by the Python call.
+func trustedPythonImportPathOverride(input actionfacts.Input, argv []string) (override, argvProven bool) {
+	command, ok := trustedBashCommandInput(input)
+	if !ok || len(command) > 64<<10 {
+		return true, false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return true, false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok {
+		return true, false
+	}
+	for _, assignment := range call.Assigns {
+		if assignment.Name == nil {
+			return true, false
+		}
+		switch assignment.Name.Value {
+		case "PYTHONPATH", "PYTHONHOME":
+			override = true
+		default:
+			return true, false
+		}
+	}
+	if !override || stmt.Negated || stmt.Background || len(stmt.Redirs) != 0 ||
+		len(call.Args) != len(argv) {
+		return override, false
+	}
+	fields, ok := trustedBashStaticFields(call)
+	return override, ok && slices.Equal(fields, argv)
 }
 
 // trustedPythonCodeAt reports whether text[i] is code in calls.
