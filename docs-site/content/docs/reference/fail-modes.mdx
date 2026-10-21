@@ -11,8 +11,9 @@ keywords:
 ---
 
 DefenseClaw has one persisted connector fail-mode policy plus two environment
-variables that can only make it stricter. The effective connector mode applies consistently to both transport
-and invalid-response failures.
+variables that can only make it stricter (one Secure Client exception, see
+[Process override](#process-override-tighten-only)). The effective connector
+mode applies consistently to both transport and invalid-response failures.
 
 ## Controls
 
@@ -20,7 +21,7 @@ and invalid-response failures.
 | --- | --- | --- |
 | `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `closed` on a fresh install. Migrated legacy configs can retain explicit `open`. Secure Client deployments default to `open` when it is unset (see [Secure Client](#secure-client)). Can be overridden per connector. See [Which value applies](#which-value-applies). |
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force an otherwise closed connector open. | Unset. Per agent process; compatibility/managed-deployment override. |
-| `DEFENSECLAW_FAIL_MODE=closed` | Closes the hooks of one agent process. `open` is ignored: the environment cannot reopen a closed hook. | Unset. Per agent process; set normal posture with the CLI. |
+| `DEFENSECLAW_FAIL_MODE=closed` | Closes the hooks of one agent process. `open` is ignored: the environment cannot reopen a closed hook, except in the Secure Client shell hooks named under [Process override](#process-override-tighten-only). | Unset. Per agent process; set normal posture with the CLI. |
 
 You choose `open` or `closed`, and the default is `closed`. An explicit value
 always wins, on every install: the OSS per-user install, the standalone
@@ -368,6 +369,15 @@ ignored, so a project's agent settings or a parent process cannot turn a
 closed hook open. To run fail-open, choose it with
 `defenseclaw guardrail fail-mode open`, which saves it in the config and the
 installed hooks, and which status and doctor report.
+
+The one exception is an authenticated Secure Client deployment: there the
+Antigravity, Devin, Hermes and Kiro shell hooks still take
+`DEFENSECLAW_FAIL_MODE` as a full override, so `open` opens them and `closed`
+closes them for that agent process. The Claude Code, Codex and Cursor shell
+hooks and the OpenCode plugin of a Secure Client deployment ignore the
+variable, and the native Windows hook only tightens. On every other managed
+install the shell hooks ignore it, and the OpenCode plugin and the native
+Windows hook only tighten.
 
 Environment keys are case-insensitive on Windows. Do not define multiple
 case-variants with different values.

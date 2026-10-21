@@ -22,6 +22,14 @@ from defenseclaw.fail_mode import (
 
 _WINDOWS_REGISTRATION_FRESHNESS = fail_mode_runtime._windows_registration_freshness
 
+# The fail-mode lines of real per-user Unix hook renders; the Go test
+# TestUnixHookFailModeLinesMatchTheSharedGolden checks them against Setup.
+_HOOK_FAIL_MODE_LINES = json.loads(
+    (
+        Path(__file__).resolve().parents[2] / "internal/gateway/connector/testdata/unix_hook_fail_mode_lines.json"
+    ).read_text(encoding="utf-8")
+)
+
 _SHARED_HOOK_SCRIPTS = (
     "inspect-tool.sh",
     "inspect-request.sh",
@@ -99,7 +107,7 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
     for name, mode in modes.items():
         script_name = "claude-code-hook.sh" if name == "claudecode" else f"{name}-hook.sh"
         script_path = hook_dir / script_name
-        script_body = f'FAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"\n'.encode()
+        script_body = ("\n".join(_HOOK_FAIL_MODE_LINES[f"{script_name}/{mode}"]) + "\n").encode()
         script_path.write_bytes(script_body)
         config_path = home / (".claude/settings.json" if name == "claudecode" else ".codex/managed_config.toml")
         entries[name] = {
@@ -329,24 +337,24 @@ def _write_opencode_runtime(
 def test_fail_mode_state_reports_effective_provenance() -> None:
     state = ConnectorFailModeState(
         connector="codex",
-        desired="closed",
-        configured="closed",
-        runtime="open",
+        desired="open",
+        configured="open",
+        runtime="closed",
         sources=(
-            ("config", "closed"),
-            ("windows-sidecar", "closed"),
-            ("process-env", "open"),
+            ("config", "open"),
+            ("windows-sidecar", "open"),
+            ("process-env", "closed"),
             ("registration-lock", "open"),
         ),
-        drift=("process-env-open",),
+        drift=("process-env-closed",),
     )
 
     report = state.to_report()
 
-    assert report["effective"] == "open"
+    assert report["effective"] == "closed"
     assert report["provenance"] == "process-env"
-    assert report["configured"] == "closed"
-    assert report["drift"] == ["process-env-open"]
+    assert report["configured"] == "open"
+    assert report["drift"] == ["process-env-closed"]
     assert report["note"] == ""
 
     # GAP-0129: closed in config.yaml with open hooks is intended in observe mode, and the report says so.
@@ -999,3 +1007,115 @@ def test_hermes_reports_its_configured_fail_mode_on_every_os(
     assert report["provenance"] == "config"
     assert fail_mode_runtime.upstream_fail_open(cfg, "hermes") is False
     assert fail_mode_runtime.upstream_fail_open(cfg, "copilot") is True
+
+
+# ── 1.0.4 review (GAP-0315): the environment only tightens ──────────────────
+
+
+@pytest.mark.parametrize("key", sorted(_HOOK_FAIL_MODE_LINES))
+def test_unix_resolver_reads_the_installed_mode_of_a_real_render(key: str, tmp_path: Path) -> None:
+    # A 1.0.4 render bakes FAIL_MODE="<mode>" and may tighten it from the
+    # environment; reading it as missing made a refresh fail verification.
+    script = tmp_path / "hook.sh"
+    script.write_text("#!/bin/bash\n" + "\n".join(_HOOK_FAIL_MODE_LINES[key]) + "\n", encoding="utf-8")
+    assert fail_mode_runtime._read_baked_hook_mode(script) == key.rsplit("/", 1)[1]
+
+
+@pytest.mark.parametrize("mode", ["open", "closed"])
+def test_unix_resolver_still_reads_a_legacy_render(mode: str, tmp_path: Path) -> None:
+    # 1.0.3 and older renders (and Secure Client renders) keep the override.
+    script = tmp_path / "hook.sh"
+    script.write_text(f'#!/bin/bash\nFAIL_MODE="${{DEFENSECLAW_FAIL_MODE:-{mode}}}"\n', encoding="utf-8")
+    assert fail_mode_runtime._read_baked_hook_mode(script) == mode
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_environment_open_does_not_reopen_a_closed_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "closed"})
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "open")
+    monkeypatch.setattr(fail_mode_runtime, "_codex_registration_current", lambda *_args: True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        states = [resolve_connector_fail_mode(cfg, name) for name in ("claudecode", "codex")]
+    for state in states:
+        assert state.current, state.drift
+        assert state.effective == "closed"
+        assert state.provenance != "process-env"
+        assert all(source != "process-env" for source, _mode in state.sources)
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_environment_closed_tightens_an_open_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "open"})
+    _write_current_runtime(cfg, home, {"codex": "open"})
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "Closed")
+    monkeypatch.setattr(fail_mode_runtime, "_codex_registration_current", lambda *_args: True)
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        state = resolve_connector_fail_mode(cfg, "codex")
+    assert state.effective == "closed"
+    assert state.provenance == "process-env"
+    assert "process-env-closed" in state.drift
+
+
+def test_claude_settings_env_open_is_not_the_effective_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Claude Code passes its settings env to the hook, which ignores open: a
+    # closed sidecar stays the effective mode, and the stale value is drift.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    settings = home / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    payload["env"]["DEFENSECLAW_FAIL_MODE"] = "open"
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert state.runtime == "closed"
+    assert state.provenance == "windows-sidecar"
+    assert "claude-env-open" in state.drift
+
+
+def test_managed_shell_hooks_ignore_the_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "open"})
+    _write_current_runtime(cfg, home, {"codex": "open"})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.managed_outside_secure_client = lambda: True
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "closed")
+    assert fail_mode_runtime._inherited_fail_mode(cfg, "codex", "closed") is None
+    assert fail_mode_runtime._inherited_fail_mode(cfg, "devin", "open") is None
+    assert fail_mode_runtime._inherited_fail_mode(cfg, "opencode", "closed") == "closed"
+    cfg.managed_outside_secure_client = lambda: False
+    # The authenticated Secure Client Devin render keeps the override (#1163);
+    # the pinned Secure Client OpenCode plugin reads no environment.
+    assert fail_mode_runtime._inherited_fail_mode(cfg, "devin", "open") == "open"
+    assert fail_mode_runtime._inherited_fail_mode(cfg, "codex", "closed") is None
+    assert fail_mode_runtime._inherited_fail_mode(cfg, "opencode", "closed") is None
+    with patch("defenseclaw.fail_mode._is_windows", return_value=True):
+        # The native Windows hook tightens in every mode.
+        assert fail_mode_runtime._inherited_fail_mode(cfg, "codex", "closed") == "closed"
+        assert fail_mode_runtime._inherited_fail_mode(cfg, "codex", "open") is None
+
+
+def test_opencode_fail_mode_reports_environment_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The plugin closes on DEFENSECLAW_FAIL_MODE=closed (GAP-0315).
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"opencode": "open"})
+    _write_opencode_runtime(cfg, tmp_path, plugin_mode="open", lock_mode="open")
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "closed")
+    state = resolve_connector_fail_mode(cfg, "opencode")
+    assert state.effective == "closed"
+    assert state.provenance == "process-env"

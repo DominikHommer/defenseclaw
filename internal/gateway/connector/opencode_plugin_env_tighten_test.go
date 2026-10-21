@@ -12,6 +12,8 @@ package connector
 
 import (
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,15 +26,21 @@ import (
 // outage DEFENSECLAW_STRICT_AVAILABILITY=1 blocks a plugin installed open, as
 // it does for the shell hooks, and DEFENSECLAW_FAIL_MODE can only tighten the
 // installed mode: closed blocks an open plugin, open never reopens a closed
-// one.
+// one. A gateway that answers HTTP 503 is an outage too: the plugin logs it as
+// transport, so strict availability closes it (GAP-0035 review).
 func TestOpenCodePluginEnvironmentOnlyTightensTheOutageAnswer(t *testing.T) {
 	nodeForTest(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := listener.Addr().String()
+	unreachable := listener.Addr().String()
 	_ = listener.Close()
+	unavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(unavailable.Close)
+	outages := map[string]string{"unreachable": unreachable, "http503": strings.TrimPrefix(unavailable.URL, "http://")}
 	dataDir := testenv.PrivateTempDir(t)
 	token := filepath.Join(dataDir, "hooks", ".hook-opencode.token")
 	if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
@@ -41,31 +49,33 @@ func TestOpenCodePluginEnvironmentOnlyTightensTheOutageAnswer(t *testing.T) {
 	if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		installed, strict, envMode string
-		wantBlock                  bool
-	}{
-		{"open", "", "", false},
-		{"open", "1", "", true},
-		{"open", "yes", "", true},
-		{"open", "", "closed", true},
-		{"closed", "", "open", true},
-		{"closed", "", "", true},
-	} {
-		t.Run(tc.installed+"/strict="+tc.strict+"/env="+tc.envMode, func(t *testing.T) {
-			t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", tc.strict)
-			t.Setenv("DEFENSECLAW_FAIL_MODE", tc.envMode)
-			lines := runOpenCodePluginHarness(t, templateData{
-				APIAddr:     addr,
-				TokenFileJS: javaScriptStringContent(token),
-				FailMode:    tc.installed,
-			}, 1)
-			if len(lines) == 0 {
-				t.Fatal("no verdict")
-			}
-			if blocked := strings.HasPrefix(lines[0], "block:"); blocked != tc.wantBlock {
-				t.Fatalf("verdict %q, want blocked=%v", lines[0], tc.wantBlock)
-			}
-		})
+	for outage, addr := range outages {
+		for _, tc := range []struct {
+			installed, strict, envMode string
+			wantBlock                  bool
+		}{
+			{"open", "", "", false},
+			{"open", "1", "", true},
+			{"open", "yes", "", true},
+			{"open", "", "closed", true},
+			{"closed", "", "open", true},
+			{"closed", "", "", true},
+		} {
+			t.Run(outage+"/"+tc.installed+"/strict="+tc.strict+"/env="+tc.envMode, func(t *testing.T) {
+				t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", tc.strict)
+				t.Setenv("DEFENSECLAW_FAIL_MODE", tc.envMode)
+				lines := runOpenCodePluginHarness(t, templateData{
+					APIAddr:     addr,
+					TokenFileJS: javaScriptStringContent(token),
+					FailMode:    tc.installed,
+				}, 1)
+				if len(lines) == 0 {
+					t.Fatal("no verdict")
+				}
+				if blocked := strings.HasPrefix(lines[0], "block:"); blocked != tc.wantBlock {
+					t.Fatalf("verdict %q, want blocked=%v", lines[0], tc.wantBlock)
+				}
+			})
+		}
 	}
 }

@@ -569,8 +569,9 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       signal: controller.signal,
     }, token), controller.signal);
     if (!res.ok) {
-      // Gateway answered with a bad status (auth/5xx). Honor fail mode.
-      if (DC_RUNTIME_FAIL_MODE === "closed") {
+      // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
+      // is an outage, as in the shell hooks, so strict availability closes it.
+      if ((res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_RUNTIME_FAIL_MODE) === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
       await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");

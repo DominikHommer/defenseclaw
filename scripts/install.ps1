@@ -1221,31 +1221,49 @@ function Remove-DeveloperFiles {
 function Install-File([string]$Source, [string]$Destination) {
     if ((Test-Path -LiteralPath $Destination) -and (Get-Sha256 $Source) -eq (Get-Sha256 $Destination)) { return }
     Copy-Item -LiteralPath $Source -Destination "$Destination.new" -Force
-    if ((Test-Path -LiteralPath $Destination -PathType Leaf) -and (Switch-InPlace "$Destination.new" $Destination)) { return }
+    if (Test-Path -LiteralPath $Destination -PathType Leaf) { Switch-InPlace "$Destination.new" $Destination; return }
     if (Test-Path -LiteralPath $Destination) { Remove-Aside $Destination }
     Move-Path "$Destination.new" $Destination
 }
 
-function Switch-InPlace([string]$New, [string]$Destination) {
+function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {
+    [IO.File]::Replace($New, $Destination, $Backup, $true)
+}
+
+function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) {
     # Swap the new file in with one ReplaceFile call, so the path is never
     # missing. Renaming the old file aside and the new one in left a gap,
     # often a second or more while a virus scanner held the new copy, in which
     # a hook an agent started found no defenseclaw-hook.exe and its PowerShell
     # bridge exited 1, which the agent does not treat as a block (rel-1-0-4
-    # GAP-0004). A file that cannot be replaced in place (a running program on
-    # some Windows versions) falls back to the rename.
+    # GAP-0004). ReplaceFile renames the old file to the backup name, which a
+    # running program allows; the backup of a running hook stays until the
+    # next install removes it. While a scanner or another program holds a
+    # file, retry; if it never lets go, fail and leave the installed file in
+    # place (the install is then undone) rather than fall back to the rename.
     $aside = "$Destination.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
-    for ($try = 0; $try -lt 3; $try++) {
+    for ($waited = 0; ; $waited++) {
         try {
-            [IO.File]::Replace($New, $Destination, $aside, $true)
+            Invoke-FileReplace $New $Destination $aside
             Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
-            return $true
+            return
         } catch {
-            if (-not (Test-Path -LiteralPath $New) -or -not (Test-Path -LiteralPath $Destination)) { throw }
+            $reason = $_.Exception.Message
         }
-        Start-Sleep -Milliseconds 300
+        if (-not (Test-Path -LiteralPath $Destination)) {
+            # ReplaceFile can stop after it renamed the old file to the backup
+            # (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2): finish the swap, or put the
+            # old file back.
+            if (Test-Path -LiteralPath $New) { Move-Path $New $Destination } else { Move-Path $aside $Destination }
+            Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
+            return
+        }
+        if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
+            Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
+            throw "Could not replace $Destination in place ($reason); it was left as it was"
+        }
+        Start-Sleep -Milliseconds 500
     }
-    return $false
 }
 
 function Write-PosixShim([string]$Target) {

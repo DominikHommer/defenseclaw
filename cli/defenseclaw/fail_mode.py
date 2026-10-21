@@ -33,7 +33,12 @@ _MAX_RUNTIME_FILE = 2 * 1024 * 1024
 # about 148 MiB, so a 128 MiB cap hashed it as '' and reported
 # registration-digest-stale on every check (GAP-1922).
 _MAX_DIGEST_FILE = 1024 * 1024 * 1024
-_FAIL_MODE_PATTERN = re.compile(r"FAIL_MODE=\"\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\}\"")
+# The installed mode of a rendered Unix hook: FAIL_MODE="closed" since 1.0.4
+# (the environment only tightens it, GAP-0315), FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"
+# in 1.0.3 and older renders and in Secure Client renders (#1163).
+_FAIL_MODE_PATTERN = re.compile(
+    r"^FAIL_MODE=\"(?:(open|closed)|\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\})\"", re.MULTILINE
+)
 _OPENCODE_FAIL_MODE_PATTERN = re.compile(r'const\s+DC_FAIL_MODE\s*=\s*"(open|closed)"\s*;')
 _AMP_FAIL_MODE_PATTERN = re.compile(r'\bconst\s+DC_FAIL_MODE:\s*string\s*=\s*"(open|closed)"')
 _EXPECTED_CONTRACTS = {
@@ -145,6 +150,9 @@ class ConnectorFailModeState:
         for candidate, mode in self.sources:
             if candidate in {"config", "registration-lock"} or mode is None:
                 continue
+            if candidate == "claude-env" and mode != self.runtime:
+                # A settings env value the hook ignores (open) supplied nothing.
+                continue
             source = candidate
         return source
 
@@ -209,19 +217,21 @@ def resolve_connector_fail_mode(
     runtime = runtime_source[1]
     if runtime_source[0].endswith("-legacy"):
         drift.append("windows-sidecar-legacy")
-    process_env = str(os.environ.get("DEFENSECLAW_FAIL_MODE", "")).strip().lower()
-    # Amp and OpenCode bake the mode into their installed plugins. The
-    # invoking CLI process cannot override an already-loaded registration.
-    if name not in {"amp", "opencode"} and process_env in _VALID_MODES:
+    process_env = _inherited_fail_mode(cfg, name, os.environ.get("DEFENSECLAW_FAIL_MODE"))
+    if process_env is not None:
         sources.append(("process-env", process_env))
         runtime = process_env
 
     workspace = _connector_workspace(cfg)
     if name == "claudecode":
         claude_env, registered = _claude_registration_state(workspace)
+        # Setup writes the mode into Claude Code's settings env, which Claude
+        # Code passes to its hooks: a stale value there is registration drift,
+        # but it changes the runtime only where the hook honors it.
         sources.append(("claude-env", claude_env))
-        if claude_env is not None:
-            runtime = claude_env
+        tightened = _inherited_fail_mode(cfg, name, claude_env)
+        if tightened is not None:
+            runtime = tightened
         if not registered:
             drift.append("registration-missing")
     # Windows Codex registration is a structured event matrix whose native
@@ -323,6 +333,34 @@ def connector_fail_mode_report(
     }
 
 
+def _inherited_fail_mode(cfg: Any, connector: str, value: object) -> str | None:
+    """Return the mode an inherited DEFENSECLAW_FAIL_MODE gives *connector*'s hooks, or None.
+
+    The environment only tightens (GAP-0315): ``closed`` closes the per-user
+    shell hooks, the native Windows hook and the current OpenCode plugin, and
+    ``open`` reopens nothing. Amp's plugin, the managed Unix shell hooks and the
+    pinned Secure Client OpenCode plugin read no fail mode from the
+    environment, except the authenticated Secure Client Devin shell hook, which
+    keeps the whole override (#1163).
+    """
+
+    mode = str(value or "").strip().lower()
+    if mode not in _VALID_MODES or connector == "amp":
+        return None
+    tightened = "closed" if mode == "closed" else None
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
+        return tightened
+    standalone = getattr(cfg, "managed_outside_secure_client", None)
+    secure_client = not (callable(standalone) and standalone())
+    if connector == "opencode":
+        return None if secure_client else tightened
+    if _is_windows():
+        return tightened
+    if secure_client and connector == "devin":
+        return mode
+    return None
+
+
 def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]:
     if connector == "amp":
         return "amp-plugin", _read_amp_plugin_mode(Path(amp_policy_plugin_path()))
@@ -368,7 +406,7 @@ def _read_baked_hook_mode(path: Path) -> str | None:
     if data is None:
         return None
     match = _FAIL_MODE_PATTERN.search(data)
-    return match.group(1) if match else None
+    return (match.group(1) or match.group(2)) if match else None
 
 
 def _read_opencode_plugin_mode(cfg: Any) -> str | None:

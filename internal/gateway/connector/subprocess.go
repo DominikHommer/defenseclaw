@@ -127,10 +127,10 @@ type templateData struct {
 // "closed" is the safer default: an absent or untrustworthy verdict BLOCKS
 // rather than forwarding an uninspected action. Operators who would rather
 // accept an observability gap than a hard block during a DefenseClaw
-// outage can flip this to "open" via DEFENSECLAW_FAIL_MODE=open at
-// runtime, or through the per-connector setup flow (which also
-// persists to guardrail.hook_fail_mode in config.yaml). Secure Client is the
-// one profile whose unset mode renders open (secureClientHookFailMode, #1163).
+// outage choose "open" with guardrail fail-mode or the per-connector setup
+// flow (both persist guardrail.hook_fail_mode in config.yaml); an inherited
+// DEFENSECLAW_FAIL_MODE can only tighten a per-user hook (GAP-0315).
+// Secure Client is the one profile whose unset mode renders open (secureClientHookFailMode, #1163).
 const defaultHookFailMode = "closed"
 
 // secureClientHookFailMode is the unset delivery mode under the Secure Client
