@@ -55,15 +55,21 @@ func TestPublishedForeignHookSessionRefusesAFutureDatedAnswer(t *testing.T) {
 		return err
 	}
 	now := time.Now()
-	for name, tc := range map[string]struct{ at, modified time.Time }{
-		"both a month ahead":          {now.Add(30 * 24 * time.Hour), now.Add(30 * 24 * time.Hour)},
-		"the record's time ahead":     {now.Add(time.Hour), now},
-		"the modification time ahead": {now, now.Add(time.Hour)},
-		"just past the skew":          {now.Add(publishedSessionClockSkew + 10*time.Second), now},
+	// The record exists first: a publication that creates one prunes the
+	// folder by the publication's time.
+	publish(now, now)
+	for _, tc := range []struct {
+		name         string
+		at, modified time.Time
+	}{
+		{"both a month ahead", now.Add(30 * 24 * time.Hour), now.Add(30 * 24 * time.Hour)},
+		{"the record's time ahead", now.Add(time.Hour), now},
+		{"the modification time ahead", now, now.Add(time.Hour)},
+		{"just past the skew", now.Add(publishedSessionClockSkew + 10*time.Second), now},
 	} {
 		publish(tc.at, tc.modified)
 		if err := check(); !errors.Is(err, ErrPublishedSessionUnavailable) {
-			t.Fatalf("%s: a future-dated answer must prove nothing: %v", name, err)
+			t.Fatalf("%s: a future-dated answer must prove nothing: %v", tc.name, err)
 		}
 	}
 	publish(now.Add(publishedSessionClockSkew/2), now.Add(publishedSessionClockSkew/2))
