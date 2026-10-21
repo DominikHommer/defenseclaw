@@ -169,3 +169,63 @@ func TestPerUserHookDeniesAConfirmationWithoutTheNativeAsk(t *testing.T) {
 		})
 	}
 }
+
+// Review round 2: an Antigravity hook whose registration lost its event (or
+// names one DefenseClaw did not review) denies a tool call in fail mode
+// closed before any other check answers it, its helpers missing included.
+// Any other input keeps the no-op answer, since Stop reads the same decision
+// field, and fail mode open and Secure Client are unchanged.
+func TestAntigravityHookDeniesAnUnboundToolCall(t *testing.T) {
+	toolCall := `{"conversationId":"c1","toolCall":{"name":"run_command","args":{"CommandLine":"echo ok"}}}`
+	for _, tc := range []struct {
+		name  string
+		data  templateData
+		args  []string
+		stdin string
+		want  string
+	}{
+		{"per-user closed", templateData{FailMode: "closed"}, nil, toolCall, "defenseclaw setup antigravity"},
+		{"per-user closed unknown event", templateData{FailMode: "closed"}, []string{"pretooluse"}, toolCall, "defenseclaw setup antigravity"},
+		{"per-user closed snake case", templateData{FailMode: "closed"}, nil, `{"tool_call" : {"name":"x"}}`, "defenseclaw setup antigravity"},
+		{"managed standalone", templateData{FailMode: "open", Managed: true}, nil, toolCall, "administrator"},
+		{"sandbox", templateData{FailMode: "closed", Sandbox: true}, nil, toolCall, "without its registered event"},
+		{"per-user closed stop input", templateData{FailMode: "closed"}, nil, `{"conversationId":"c1","terminationReason":"done"}`, ""},
+		{"per-user open", templateData{FailMode: "open"}, nil, toolCall, ""},
+		{"secure client", templateData{FailMode: "open", Managed: true, SecureClient: true, SecureClientDelivery: true}, nil, toolCall, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.data.APIAddr, tc.data.TokenFile, tc.data.ScopedToken = "127.0.0.1:1", ".hook-antigravity.token", true
+			body, err := renderHookTemplate("antigravity-hook.sh", tc.data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			script := filepath.Join(t.TempDir(), "antigravity-hook.sh")
+			if err := os.WriteFile(script, body, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			home := t.TempDir()
+			cmd := exec.Command("bash", append([]string{script}, tc.args...)...)
+			var env []string
+			for _, entry := range sanitizedTestEnv() {
+				if key, _, _ := strings.Cut(entry, "="); key != "HOME" && !strings.HasPrefix(key, "DEFENSECLAW_") {
+					env = append(env, entry)
+				}
+			}
+			cmd.Env = append(env, "HOME="+home, "DEFENSECLAW_HOME="+home)
+			cmd.Stdin = strings.NewReader(tc.stdin)
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			code := exitCodeOf(cmd.Run())
+			denied := strings.Contains(out.String(), `"decision":"deny"`)
+			if tc.want != "" {
+				if code != 0 || !denied || !strings.Contains(out.String(), tc.want) {
+					t.Fatalf("exit %d stdout %q, want Antigravity's deny naming %q", code, out.String(), tc.want)
+				}
+				return
+			}
+			if denied {
+				t.Fatalf("exit %d stdout %q, want no deny", code, out.String())
+			}
+		})
+	}
+}

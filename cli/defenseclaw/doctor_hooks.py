@@ -2592,6 +2592,107 @@ def _validate_antigravity_hook_matrix(document: dict[str, Any]) -> list[str]:
     return commands
 
 
+_UNIX_EVENT_BOUND_HOOK_SCRIPTS = {"antigravity": "antigravity-hook.sh", "copilot": "copilot-hook.sh"}
+_UNIX_REGISTRATION_LIMIT = 2 * 1024 * 1024
+
+
+def unix_hook_event_binding_problem(connector: str, config_path: str, script_path: str) -> tuple[str, str]:
+    """Why a Linux or macOS Copilot CLI or Antigravity registration does not run *script_path* with each event exactly.
+
+    Neither agent names the event in its hook input, so the hook takes it
+    from its registered command: ``copilot-hook.sh --event <event>`` (Copilot
+    runs the ``bash`` field in a shell) and ``antigravity-hook.sh <Event>``
+    (Antigravity splits the command at whitespace). An entry bound to another
+    event, or to none, answers a tool call as an event that cannot block, and
+    an entry that runs another copy of the hook may run it fail-open. Returns
+    ``("", "")`` when every DefenseClaw entry is exact, else a state
+    (missing, malformed, stale) and the reason.
+    """
+
+    script_name = _UNIX_EVENT_BOUND_HOOK_SCRIPTS[connector]
+    try:
+        with open(config_path, "rb") as handle:
+            raw = handle.read(_UNIX_REGISTRATION_LIMIT + 1)
+    except FileNotFoundError:
+        return "missing", f"{config_path} not found"
+    except OSError as exc:
+        return "malformed", f"cannot read {config_path}: {exc}"
+    try:
+        if len(raw) > _UNIX_REGISTRATION_LIMIT:
+            raise ValueError("file is too large")
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        return "malformed", f"cannot parse {config_path}: {exc}"
+    if not isinstance(document, dict):
+        return "malformed", f"{config_path} is not a JSON object"
+    expected = os.path.realpath(script_path)
+
+    def owned(tokens: list[str]) -> bool:
+        return bool(tokens) and os.path.basename(tokens[0]) == script_name
+
+    def runs_this_hook(tokens: list[str]) -> bool:
+        return os.path.realpath(tokens[0]) == expected
+
+    if connector == "antigravity":
+        seen: dict[str, int] = {}
+        for key, container in document.items():
+            if not isinstance(container, dict):
+                continue
+            for event, entries in container.items():
+                handlers: list[Any] = []
+                for entry in entries if isinstance(entries, list) else []:
+                    if isinstance(entry, dict) and isinstance(entry.get("hooks"), list):
+                        handlers.extend(entry["hooks"])
+                    else:
+                        handlers.append(entry)
+                for handler in handlers:
+                    command = handler.get("command") if isinstance(handler, dict) else None
+                    tokens = command.split() if isinstance(command, str) else []
+                    if not owned(tokens):
+                        continue
+                    canonical = key == f"defenseclaw-antigravity-{str(event).lower()}"
+                    if not canonical or event not in _ANTIGRAVITY_REQUIRED_HOOKS or tokens[1:] != [event]:
+                        return "stale", f"Antigravity {event} command is not bound to its registered event: {command}"
+                    if not runs_this_hook(tokens):
+                        return "stale", f"Antigravity {event} runs {tokens[0]}, not {script_path}"
+                    seen[event] = seen.get(event, 0) + 1
+        for event in _ANTIGRAVITY_REQUIRED_HOOKS:
+            if seen.get(event) != 1:
+                return (
+                    "missing" if not seen.get(event) else "stale",
+                    f"Antigravity {event} has {seen.get(event, 0)} DefenseClaw handlers; expected exactly one",
+                )
+        return "", ""
+
+    hooks = document.get("hooks")
+    if not isinstance(hooks, dict):
+        return "missing", f"{config_path} has no hooks object"
+    seen = {}
+    for event, entries in hooks.items():
+        for entry in entries if isinstance(entries, list) else []:
+            command = entry.get("bash") if isinstance(entry, dict) else None
+            if not isinstance(command, str) or script_name not in command:
+                continue
+            try:
+                tokens = shlex.split(command)
+            except ValueError:
+                return "malformed", f"Copilot {event} command cannot be parsed: {command}"
+            if not owned(tokens):
+                continue
+            if event not in _COPILOT_REQUIRED_HOOKS or tokens[1:] != ["--event", event]:
+                return "stale", f"Copilot {event} command is not bound to its registered event: {command}"
+            if not runs_this_hook(tokens):
+                return "stale", f"Copilot {event} runs {tokens[0]}, not {script_path}"
+            seen[event] = seen.get(event, 0) + 1
+    for event in ("preToolUse", "permissionRequest"):
+        if seen.get(event) != 1:
+            return (
+                "missing" if not seen.get(event) else "stale",
+                f"Copilot {event} has {seen.get(event, 0)} DefenseClaw handlers; expected exactly one",
+            )
+    return "", ""
+
+
 def _hook_json_value_targets_defenseclaw(value: Any, connector: str) -> bool:
     if isinstance(value, dict):
         if _handler_targets_defenseclaw(value, connector):

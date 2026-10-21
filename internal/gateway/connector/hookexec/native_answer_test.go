@@ -11,6 +11,7 @@
 package hookexec
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -86,6 +87,104 @@ func TestPerUserHookDeniesAnAnswerWithoutTheNativeDecision(t *testing.T) {
 			})
 			if result.code != 0 || !strings.Contains(result.stdout, tc.want) || strings.Count(result.stdout, "\n") != 1 {
 				t.Fatalf("code=%d stdout=%q stderr=%q, want one answer with %s", result.code, result.stdout, result.stderr, tc.want)
+			}
+		})
+	}
+}
+
+// Review round 2: a closed Copilot CLI hook whose registration lost its event
+// is refused before the early exits. An unavailable home, oversized input or
+// an invalid managed runtime answered it as an event that cannot block, so
+// Copilot ran the call.
+func TestClosedCopilotHookRefusesAnUnboundEventBeforeEarlyExits(t *testing.T) {
+	for _, event := range []string{"", "futureEvent"} {
+		for _, path := range []string{"home missing", "oversized", "managed runtime"} {
+			t.Run(event+"/"+path, func(t *testing.T) {
+				rt := ok(`{"action":"allow"}`)
+				result := run(t, "copilot", rt, func(opts *Options) {
+					opts.Event = event
+					opts.FailMode = "closed"
+					switch path {
+					case "home missing":
+						opts.Home = filepath.Join(opts.Home, "missing")
+					case "oversized":
+						opts.MaxBody = 2
+					case "managed runtime":
+						managedCodex(opts)
+						opts.ManagedRuntimeFailure = "enterprise_managed_runtime_invalid"
+					}
+				})
+				want := "defenseclaw setup copilot"
+				if path == "managed runtime" {
+					want = "administrator"
+				}
+				if rt.requests != 0 || result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
+					!strings.Contains(result.stdout, `"behavior":"deny"`) || !strings.Contains(result.stdout, want) {
+					t.Fatalf("code=%d requests=%d stdout=%q stderr=%q, want both denies naming %q",
+						result.code, rt.requests, result.stdout, result.stderr, want)
+				}
+			})
+		}
+	}
+	open := run(t, "copilot", ok(`{"action":"allow"}`), func(opts *Options) {
+		opts.Event = ""
+		opts.FailMode = "open"
+		opts.Home = filepath.Join(opts.Home, "missing")
+	})
+	if strings.Contains(open.stdout, "deny") {
+		t.Fatalf("fail mode open keeps Copilot's fail-open result: stdout=%q", open.stdout)
+	}
+}
+
+// Review round 2: an Antigravity hook whose registration lost its event
+// denies a tool call in fail mode closed, on every failure path, and keeps
+// the neutral answer for any other input (Stop reads the same decision
+// field) and in fail mode open. The gateway, which requires the event, is
+// never asked.
+func TestClosedAntigravityHookDeniesAnUnboundToolCall(t *testing.T) {
+	toolCall := `{"toolCall":{"name":"run_command","args":{"CommandLine":"echo ok"}}}`
+	stop := `{"conversationId":"c1","terminationReason":"done"}`
+	for _, tc := range []struct {
+		name, event, mode, input, path, want string
+		deny                                 bool
+	}{
+		{name: "unbound", input: toolCall, mode: "closed", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "unknown event", event: "FutureEvent", input: toolCall, mode: "closed", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "snake case tool call", input: `{"tool_call":{"name":"x","args":{}}}`, mode: "closed", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "strict", input: toolCall, mode: "strict", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "home missing", input: toolCall, mode: "closed", path: "home missing", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "oversized", input: toolCall, mode: "closed", path: "oversized", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "managed runtime", input: toolCall, mode: "closed", path: "managed runtime", deny: true, want: "administrator"},
+		{name: "stop input", input: stop, mode: "closed"},
+		{name: "stop input home missing", input: stop, mode: "closed", path: "home missing"},
+		{name: "open", input: toolCall, mode: "open"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := ok(`{"action":"allow"}`)
+			result := run(t, "antigravity", rt, func(opts *Options) {
+				opts.Event = tc.event
+				opts.FailMode = tc.mode
+				if tc.mode == "strict" {
+					opts.FailMode = "open"
+					opts.StrictAvailability = true
+				}
+				opts.Stdin = strings.NewReader(tc.input)
+				switch tc.path {
+				case "home missing":
+					opts.Home = filepath.Join(opts.Home, "missing")
+				case "oversized":
+					opts.MaxBody = 16
+				case "managed runtime":
+					managedCodex(opts)
+					opts.ManagedRuntimeFailure = "enterprise_managed_runtime_invalid"
+				}
+			})
+			if rt.requests != 0 || result.code != 0 {
+				t.Fatalf("code=%d requests=%d stderr=%q, want exit 0 and no gateway request", result.code, rt.requests, result.stderr)
+			}
+			denied := strings.Contains(result.stdout, `"decision":"deny"`)
+			if denied != tc.deny || (tc.deny && !strings.Contains(result.stdout, tc.want)) {
+				t.Fatalf("stdout=%q stderr=%q, want deny=%v naming %q", result.stdout, result.stderr, tc.deny, tc.want)
 			}
 		})
 	}

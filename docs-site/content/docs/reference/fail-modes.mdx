@@ -55,11 +55,11 @@ Under the Secure Client integration only, hooks fail open: an unset `guardrail.h
 
 | Connector | Behavior |
 | --- | --- |
-| GitHub Copilot CLI, Antigravity | The generated hooks stay open even when the effective mode is `closed`. On a managed standalone host the Copilot hook follows the effective mode: `closed` blocks `preToolUse` and `permissionRequest` while the gateway cannot answer. |
+| GitHub Copilot CLI, Antigravity | The hooks follow the effective mode on Linux, macOS and Windows: `closed` blocks `preToolUse` and `permissionRequest` (Antigravity: `PreToolUse`) while the gateway is down or answers unusably, and says why. Copilot and Antigravity still run a call when the hook times out or cannot start. Under Secure Client they stay open. |
 | Hermes | Its own hook has no fail-closed surface, but the DefenseClaw hook follows the effective mode on Linux, macOS and Windows: `closed` blocks a tool call while the gateway is down or answers unusably. Hermes itself still runs a call when the hook times out or cannot start. |
 | OpenClaw, ZeptoClaw | Proxy-backed, no hooks. Requests are blocked while the gateway is down, whatever `guardrail.hook_fail_mode` says. `guardrail fail-mode` lists them as `closed (proxy-backed, no hooks ...)`. |
 
-A managed GitHub Copilot hook whose registered command names no event DefenseClaw reviewed is refused in every fail mode. Copilot can block only `preToolUse` and `permissionRequest`, and its payload does not name the event, so the hook answers with both of Copilot's deny fields. `verify` reports a DefenseClaw hook registered for an event DefenseClaw does not publish, and `ensure` rewrites the drop-in.
+A GitHub Copilot hook whose registered command names no event DefenseClaw reviewed is refused in fail mode `closed`, and a managed one in every fail mode. Copilot can block only `preToolUse` and `permissionRequest`, and its payload does not name the event, so the hook answers with both of Copilot's deny fields. An Antigravity hook registered without its event denies a tool call in fail mode `closed` and gives anything else its no-op answer. `verify` reports a DefenseClaw hook registered for an event DefenseClaw does not publish, and `ensure` rewrites the drop-in. On a per-user install `defenseclaw doctor` names the entry, and `defenseclaw setup <connector>` registers it again.
 
 On a managed standalone host the administrator-owned hooks of GitHub Copilot CLI and Hermes follow the effective mode on every OS: `closed` blocks a tool call DefenseClaw cannot check (service not running, unusable answer, or a call too large to inspect), and the agent shows why. Only the administrator's `hook_fail_mode: open` lets such a call through.
 
@@ -139,9 +139,9 @@ Fail mode can block only where the agent protocol has a block shape. A closed fa
 | Claude Code | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` | Yes |
 | Codex | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | None | Yes |
 | Cursor | `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt` | None | Yes |
-| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down) |
+| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No (the DefenseClaw hook blocks `preToolUse` and `permissionRequest` in fail mode closed) |
 | Devin | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop` | None | Yes |
-| Antigravity | `PreToolUse` | `PreToolUse` | No |
+| Antigravity | `PreToolUse` | `PreToolUse` | No (the DefenseClaw hook blocks `PreToolUse` in fail mode closed) |
 | Hermes | `pre_tool_call` | None | No (managed standalone: blocks `pre_tool_call` when DefenseClaw cannot check it) |
 | OpenCode | `tool.execute.before` | None | Yes |
 | Kiro | `UserPromptSubmit`, `PreToolUse` | None | Yes |

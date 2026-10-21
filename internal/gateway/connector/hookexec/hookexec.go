@@ -442,6 +442,9 @@ func runHook(ctx context.Context, opts Options) int {
 	// descriptor), never from a connector or the caller's environment.
 	failMode := normalizeFailMode(opts.FailMode)
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
+		if code, handled := refuseClosedUnboundHook(&opts, sp, "closed"); handled {
+			return code
+		}
 		reason := strings.TrimSpace(opts.ManagedRuntimeFailure)
 		if strings.HasPrefix(reason, ForeignHookBlockedReasonPrefix) {
 			return failForeignHookBlocked(opts, sp, reason)
@@ -457,6 +460,13 @@ func runHook(ctx context.Context, opts Options) int {
 			"closed",
 			reason,
 		)
+	}
+
+	// A registration that lost its event is refused before an early exit
+	// (an unavailable home, oversized input) answers it as an event that
+	// cannot block.
+	if code, handled := refuseClosedUnboundHook(&opts, sp, failMode); handled {
+		return code
 	}
 
 	// DEFENSECLAW_HOME guard: an ordinary removed/disabled installation is an
@@ -530,17 +540,11 @@ func runHook(ctx context.Context, opts Options) int {
 		// Copilot's official camelCase stdin bodies do not identify the
 		// event. Setup supplies the reviewed event through an exact --event
 		// binding; never infer it from a body field or forward an untrusted
-		// registration. A standalone hook and a per-user hook in fail mode
-		// closed refuse with both of Copilot's denies; a Secure Client hook and
-		// a per-user hook in fail mode open give Copilot its documented
-		// fail-open result for this local integration failure.
-		if managedNativeDecision(opts) {
-			return failInvalidManagedCopilotBinding(opts, sp)
-		}
-		if perUserCopilotFailsClosed(opts, sp) {
-			return failInvalidPerUserCopilotBinding(opts, sp)
-		}
-		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), "missing or unsupported Copilot hook event binding")
+		// registration. A hook that fails closed was refused above
+		// (refuseClosedUnboundHook); a Secure Client hook and a per-user hook
+		// in fail mode open give Copilot its documented fail-open result for
+		// this local integration failure.
+		return failResponse(opts, sp, failMode, "missing or unsupported Copilot hook event binding")
 	}
 	deadline := answerDeadline(opts, startedAt)
 	// The work before the gateway request (the foreign-hook scan and
@@ -2274,6 +2278,78 @@ func failInvalidPerUserCopilotBinding(opts Options, sp spec) int {
 	return refuseInvalidCopilotBinding(opts, sp, sp.subject, "missing or unsupported Copilot hook event binding",
 		"DefenseClaw blocked this tool call: its DefenseClaw hook is registered without a Copilot event DefenseClaw reviewed. "+
 			"Run `defenseclaw setup copilot` to register it again.")
+}
+
+// unboundAntigravityBindingReason is the hook-failure reason of an Antigravity
+// hook whose registered command binds no reviewed event.
+const unboundAntigravityBindingReason = "missing or unsupported Antigravity hook event binding"
+
+// refuseClosedUnboundHook refuses a Copilot CLI or Antigravity hook that
+// fails closed (a standalone managed hook, or a per-user hook in fail mode
+// closed or strict availability) when its registered command binds no
+// reviewed event. Neither agent names the event in its hook input, so such a
+// hook would otherwise answer every failure as an event that cannot block.
+// Copilot gets both of its denies (refuseInvalidCopilotBinding). Antigravity
+// reads the same decision field on Stop, so only a tool call is denied: a
+// payload with a toolCall object, the shape only PreToolUse has and the one
+// the gateway reads an eventless legacy registration as. Any other payload
+// keeps the neutral answer. Secure Client hooks and hooks in fail mode open
+// are not handled here.
+func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool) {
+	closed := managedNativeDecision(*opts) ||
+		(!opts.ManagedEnterprise && (opts.StrictAvailability || failMode == "closed"))
+	if !closed {
+		return 0, false
+	}
+	switch {
+	case sp.connector == "copilot" && !validCopilotEventForOptions(*opts):
+		if managedNativeDecision(*opts) {
+			return failInvalidManagedCopilotBinding(*opts, sp), true
+		}
+		if perUserCopilotFailsClosed(*opts, sp) {
+			return failInvalidPerUserCopilotBinding(*opts, sp), true
+		}
+	case sp.connector == "antigravity" && !validAntigravityEvent(opts.Event):
+		// Read the input here, then hand the same bytes to the rest of Run.
+		data, err := io.ReadAll(io.LimitReader(opts.Stdin, opts.MaxBody+1))
+		opts.Stdin = io.MultiReader(bytes.NewReader(data), opts.Stdin)
+		if err != nil || !antigravityToolCallInput(data, int64(len(data)) > opts.MaxBody) {
+			return 0, false
+		}
+		text := "DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. " +
+			"Run `defenseclaw setup antigravity` to register it again."
+		if opts.ManagedEnterprise {
+			text = "DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. " +
+				"Ask your administrator to run ensure, which rewrites the DefenseClaw hooks."
+		}
+		opts.FailMode = "closed"
+		logHookFailure(*opts, sp, unboundAntigravityBindingReason, "response", "closed", true)
+		fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s (fail mode closed): %s (event %q)\n",
+			sp.subject, unboundAntigravityBindingReason, strings.TrimSpace(opts.Event))
+		fmt.Fprintln(opts.Stdout, `{"decision":"deny","reason":`+mustJSONString(text)+`}`)
+		return 0, true
+	}
+	return 0, false
+}
+
+// antigravityToolCallInput reports an Antigravity hook input that is a tool
+// call: a JSON object with a toolCall (or tool_call) object. An input over the
+// cap is a tool call when its prefix names one; Antigravity's other events
+// carry counters and short text only.
+func antigravityToolCallInput(data []byte, overflow bool) bool {
+	if overflow {
+		return bytes.Contains(data, []byte(`"toolCall"`)) || bytes.Contains(data, []byte(`"tool_call"`))
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return false
+	}
+	for _, key := range []string{"toolCall", "tool_call"} {
+		if raw := bytes.TrimSpace(fields[key]); len(raw) > 0 && raw[0] == '{' {
+			return true
+		}
+	}
+	return false
 }
 
 // refuseInvalidCopilotBinding writes both of Copilot's denies with text and

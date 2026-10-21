@@ -50,7 +50,7 @@ Teardown restores the exact earlier file when DefenseClaw's copy is unchanged. O
 
 ## Limits
 
-- Copilot has no fail-closed hook transport. An unreachable gateway, a timeout or a bad answer does not block the agent. The call is recorded in `~/.defenseclaw/logs/hook-failures.jsonl` and reported as a `guardrail-degraded` alert when the gateway starts again. A managed standalone host is stricter.
+- Copilot runs a call when its hook times out or cannot start. In fail mode `closed`, the default, DefenseClaw denies `preToolUse` and `permissionRequest` when the gateway is down or gives a bad answer, and says why. With `open` the call runs, is recorded in `~/.defenseclaw/logs/hook-failures.jsonl` and is reported as a `guardrail-degraded` alert when the gateway starts again.
 - DefenseClaw does not configure Copilot's own OpenTelemetry exporter. Telemetry comes from hook events.
 - Copilot's Windows sandbox does not enforce per-path denials. Do not rely on it for filesystem containment.
 - The VS Code Local harness reads its own hook format. The enterprise profile covers it; see the reference.
