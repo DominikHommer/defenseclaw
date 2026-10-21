@@ -214,6 +214,70 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	return nil
 }
 
+// ValidateServiceCanReadRotatedFile reports a JSONL destination whose rotated
+// files the gateway NT SERVICE virtual account could not read back.
+// Compression reopens each rotated file for reading, so a folder and file
+// that let the service create, append to, rotate and prune the file but not
+// read it passed ValidateServiceCanWriteFile, and the first compressed
+// rotation then failed (GAP-1432). An existing file must grant the read, and
+// the folder must pass it on to the files the service creates after each
+// rotation, to the service itself or through CREATOR OWNER. Call it only for
+// a destination that compresses its rotated files.
+func ValidateServiceCanReadRotatedFile(path, serviceAccount string) error {
+	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
+	if err != nil {
+		return &serviceAccountUnresolvedError{err: err}
+	}
+	if serviceSID == nil {
+		return nil
+	}
+	if runs, err := WindowsCurrentProcessRunsAsService(serviceSID); err == nil && runs {
+		return nil
+	}
+	sids, err := serviceTokenSIDs(serviceSID)
+	if err != nil {
+		return err
+	}
+	creatorOwner, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerSid)
+	if err != nil {
+		return err
+	}
+	creators := append(sids[:len(sids):len(sids)], creatorOwner)
+	folder, missing := filepath.Dir(filepath.Clean(path)), 0
+	for {
+		info, statErr := os.Lstat(folder)
+		if statErr == nil {
+			if !info.IsDir() {
+				return nil // ValidateServiceCanWriteFile names it
+			}
+			break
+		}
+		parent := filepath.Dir(folder)
+		if parent == folder {
+			return nil
+		}
+		folder, missing = parent, missing+1
+	}
+	// Files in a folder the gateway creates inherit only what passes through
+	// the folders above them.
+	require, skip := uint8(windows.OBJECT_INHERIT_ACE), uint8(0)
+	if missing > 0 {
+		require, skip = require|windows.CONTAINER_INHERIT_ACE, windows.NO_PROPAGATE_INHERIT_ACE
+	}
+	if !serviceDACLGrants(folder, creators, serviceFileReadBackAccess, require, skip) {
+		return fmt.Errorf("the gateway service account %s cannot read back the files it rotates in %s to compress them; "+
+			"grant it Modify on %s for its files, for example: icacls \"%s\" /grant \"%s:(OI)(CI)M\", or turn off rotation compress",
+			serviceAccount, folder, folder, folder, serviceGrantPrincipal(serviceAccount))
+	}
+	if info, err := os.Lstat(path); missing == 0 && err == nil && info.Mode().IsRegular() &&
+		!serviceHasAccess(path, sids, serviceFileReadBackAccess) {
+		return fmt.Errorf("the gateway service account %s cannot read back %s to compress it when it rotates; "+
+			"let the file inherit the folder permissions, for example: icacls \"%s\" /reset, or turn off rotation compress",
+			serviceAccount, path, path)
+	}
+	return nil
+}
+
 // serviceTokenSIDs is serviceSID with the groups every NT SERVICE virtual
 // account token carries.
 func serviceTokenSIDs(serviceSID *windows.SID) ([]*windows.SID, error) {
@@ -278,6 +342,10 @@ const (
 	// serviceFileAppendAccess is what the gateway opens an existing
 	// destination file with (FILE_APPEND_DATA).
 	serviceFileAppendAccess = windows.ACCESS_MASK(0x0004|0x0080) | windows.READ_CONTROL
+	// serviceFileReadBackAccess is GENERIC_READ on a file, which compression
+	// opens a rotated file with: read data, extended attributes and
+	// attributes, READ_CONTROL and SYNCHRONIZE.
+	serviceFileReadBackAccess = windows.ACCESS_MASK(0x120089)
 )
 
 // serviceFileGenericMapping maps generic rights to file rights.

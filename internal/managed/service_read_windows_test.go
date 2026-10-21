@@ -187,6 +187,50 @@ func TestValidateServiceCanWriteFileRequiresRotationPermission(t *testing.T) {
 	}
 }
 
+// GAP-1432: compression reads each rotated file back. A folder and file that
+// let the service create, append to, rotate and prune the file but not read
+// it pass the write check and fail the read-back check; Modify passes both.
+func TestValidateServiceCanReadRotatedFileRequiresReadData(t *testing.T) {
+	folder := t.TempDir()
+	path := filepath.Join(folder, "audit.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setDACL := func(path, sddl string) {
+		t.Helper()
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const account = `NT SERVICE\TrustedInstaller`
+	// Modify on the folder itself; its files get Modify without read data.
+	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)(A;OIIO;0x1301b6;;;BU)")
+	setDACL(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301b6;;;BU)")
+	if err := ValidateServiceCanWriteFile(path, account); err != nil {
+		t.Fatalf("write check: %v", err)
+	}
+	if err := ValidateServiceCanReadRotatedFile(path, account); err == nil || !strings.Contains(err.Error(), "cannot read back") {
+		t.Fatalf("accepted rotated files the service cannot read back: %v", err)
+	}
+	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICI;0x1301bf;;;BU)")
+	if err := ValidateServiceCanReadRotatedFile(path, account); err == nil || !strings.Contains(err.Error(), "cannot read back "+path) {
+		t.Fatalf("existing file without read data in a Modify folder: %v", err)
+	}
+	setDACL(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)")
+	if err := ValidateServiceCanReadRotatedFile(path, account); err != nil {
+		t.Fatalf("Modify folder and file: %v", err)
+	}
+}
+
 // A missing destination folder still needs the service to create it in the
 // nearest existing parent, and the folders it creates must let it create the
 // rest of the path (GAP-1328).
