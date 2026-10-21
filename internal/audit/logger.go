@@ -1151,6 +1151,9 @@ type ActivityInput struct {
 	// config.bundle.receipt record (LogPolicyBundleReceipt).
 	Bundle        *PolicyBundle
 	BundleReceipt *PolicyBundleReceipt
+	// ConfigChange is set only on a trust anchor or credential change
+	// record (LogConfigChange).
+	ConfigChange *ConfigChange
 }
 
 // ActivityDiffEntry records one canonical control-plane mutation delta.

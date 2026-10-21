@@ -36,8 +36,12 @@ import (
 // lifecycle writes when a receipt ends, emits one config.bundle.receipt audit event
 // (with the defenseclaw.policy.bundle.applies counter) per terminal receipt,
 // and records the defenseclaw.policy.bundle.version gauge for the bundle the
-// live generation runs. Reporting only: nothing here changes what is
-// enforced.
+// live generation runs. It also drains the change spool the root trust
+// anchor and credential commands write (enterprisestatus.ChangeEvent) and
+// emits one config.trust_anchors.changed, config.secret.changed or
+// config.secret.change_failed audit event per change, so a change made
+// while the gateway was stopped is reported at its next start. Reporting
+// only: nothing here changes what is enforced.
 
 var (
 	// bundleReceiptPollInterval is how often the receipt spool is read.
@@ -57,6 +61,7 @@ const bundleRefusalMarkerName = "bundle-refusal.reported"
 type bundleReceiptSink interface {
 	LogPolicyBundleReceipt(principal string, bundle audit.PolicyBundle, receipt audit.PolicyBundleReceipt) error
 	RecordPolicyBundleVersion(ctx context.Context, bundleVersion uint64) error
+	LogConfigChange(change audit.ConfigChange) error
 }
 
 type bundleReceiptReporter struct {
@@ -72,6 +77,9 @@ type bundleReceiptReporter struct {
 	attempts        int
 	gaugeVersion    uint64
 	seen            map[string]bool
+	// changeAttempts counts refused offers of one change event; after
+	// bundleReceiptRetries it is marked reported and not offered again.
+	changeAttempts map[string]int
 }
 
 // newBundleReceiptReporter returns the reporter of a standalone enterprise
@@ -122,6 +130,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 		}
 	}
 	r.reportSpool()
+	r.reportChanges()
 	info, err := os.Lstat(r.receiptPath)
 	if err != nil || !info.Mode().IsRegular() {
 		return
@@ -183,10 +192,19 @@ func (r *bundleReceiptReporter) spoolDir() string {
 	return filepath.Join(filepath.Dir(r.receiptPath), enterprisestatus.PublicReceiptEventsDirName)
 }
 
+func (r *bundleReceiptReporter) changeDir() string {
+	return filepath.Join(filepath.Dir(r.receiptPath), enterprisestatus.ChangeEventsDirName)
+}
+
 func (r *bundleReceiptReporter) seenDir() string { return r.markerPath + ".d" }
 
+// reportableID accepts a receipt id or a change event id as a marker name.
+func reportableID(id string) bool {
+	return enterprisestatus.ValidReceiptID(id) || enterprisestatus.ValidChangeEventID(id)
+}
+
 func (r *bundleReceiptReporter) hasSeen(id string) bool {
-	if !enterprisestatus.ValidReceiptID(id) {
+	if !reportableID(id) {
 		return false
 	}
 	if r.seen[id] {
@@ -197,7 +215,7 @@ func (r *bundleReceiptReporter) hasSeen(id string) bool {
 }
 
 func (r *bundleReceiptReporter) markSeen(id string) {
-	if !enterprisestatus.ValidReceiptID(id) {
+	if !reportableID(id) {
 		return
 	}
 	if r.seen == nil {
@@ -243,6 +261,36 @@ func (r *bundleReceiptReporter) reportSpool() {
 		if r.report(receipt) == nil {
 			r.markSeen(receipt.ReceiptID)
 		}
+	}
+}
+
+// reportChanges emits one audit event per change event not reported yet,
+// oldest first. A file that does not validate is skipped.
+func (r *bundleReceiptReporter) reportChanges() {
+	dir := r.changeDir()
+	for _, id := range enterprisestatus.ListChangeEventIDs(dir) {
+		if r.hasSeen(id) {
+			continue
+		}
+		ev, err := enterprisestatus.ReadChangeEvent(filepath.Join(dir, id+".json"))
+		if err != nil || ev.EventID != id {
+			continue
+		}
+		err = r.sink.LogConfigChange(audit.ConfigChange{
+			EventID: ev.EventID, Kind: ev.Kind, Action: ev.Action, Outcome: ev.Outcome, ReasonCode: ev.ReasonCode,
+			Actor: ev.Actor, ChangedAt: ev.Time, SHA256: ev.SHA256, PreviousSHA256: ev.PreviousSHA256,
+			KeyIDsAdded: ev.KeyIDsAdded, KeyIDsRemoved: ev.KeyIDsRemoved, SecretName: ev.SecretName,
+		})
+		if err != nil {
+			if r.changeAttempts == nil {
+				r.changeAttempts = make(map[string]int)
+			}
+			if r.changeAttempts[id]++; r.changeAttempts[id] < bundleReceiptRetries {
+				continue
+			}
+		}
+		delete(r.changeAttempts, id)
+		r.markSeen(id)
 	}
 }
 

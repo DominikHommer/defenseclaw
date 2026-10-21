@@ -40,6 +40,16 @@ type fakeBundleReceiptSink struct {
 	bundles    []audit.PolicyBundle
 	principals []string
 	versions   []uint64
+	changes    []audit.ConfigChange
+	changeErr  error
+}
+
+func (f *fakeBundleReceiptSink) LogConfigChange(change audit.ConfigChange) error {
+	if f.changeErr != nil {
+		return f.changeErr
+	}
+	f.changes = append(f.changes, change)
+	return nil
 }
 
 func (f *fakeBundleReceiptSink) LogPolicyBundleReceipt(principal string, b audit.PolicyBundle, r audit.PolicyBundleReceipt) error {

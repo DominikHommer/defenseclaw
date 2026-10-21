@@ -26,13 +26,24 @@ gateway.
   agent session already running when a bundle enables or changes its
   connector is not enforced until it restarts (4.3, sessions that need a
   restart).
-- **No audit of trust anchor and credential changes.** DefenseClaw records
+- **Audit of trust anchor and credential changes.** DefenseClaw records
   bundle applies (receipts, the `config.bundle.receipt` audit event and
-  OTel). It does not audit trust anchor installs (by the MDM kit, by Windows
-  `ensure --trust-anchors` or by `bundle anchors install`) or
-  `secret set` / `remove`. The agent reports those changes itself: the
-  anchors install result carries `sha256`, `previous_sha256` and `key_ids`,
-  and `secret status --json` carries `sha256_prefix`.
+  OTel). From 1.0.4 it also records every trust anchor install (`bundle
+  anchors install`, Windows `ensure --trust-anchors`, and the MDM kit, which
+  runs one of them) and every `secret set` / `remove` that changed
+  something, was refused or failed. The command writes a change event to
+  `<etc>/bundles/change-events/` (readable by root, or SYSTEM and
+  Administrators, and the gateway service only), and the gateway reports
+  each one once as an audit and OTel event: `config.trust_anchors.changed`
+  (actor, `sha256`, `previous_sha256`, key ids added and removed),
+  `config.secret.changed` and `config.secret.change_failed` (actor,
+  credential name, action, outcome, reason code). A change made while the
+  gateway is stopped is reported when it starts. No event carries a
+  credential value or a hash of one. Byte-identical anchors, a `set` of the
+  stored value and a `remove` of an absent credential record nothing. The
+  results still carry what the agent needs for its own report: `sha256`,
+  `previous_sha256` and `key_ids` from anchors install, `sha256_prefix` from
+  `secret status --json`.
 
 | Schema (this folder) | `$id` | Validates |
 |---|---|---|
@@ -904,8 +915,9 @@ off the device. The agent does not read `/health` itself (section 7); the
   `invalid_arguments`); 75 busy; Windows 5 / 1603 / 1618 / 1639. Every one
   prints its JSON document.
 - The value never appears in output, logs or audit; `status` shows only
-  presence and a digest prefix. No audit event records a set or remove
-  (section 0): the agent reports it.
+  presence and a digest prefix. A set or remove is audited as
+  `config.secret.changed` or `config.secret.change_failed`, with the name
+  and never the value (section 0).
 - After pushing the Cisco AI Defense key, check that AI Defense accepts it.
   `sha256_prefix` proves only what is stored. Read `inspection.ai_defense`
   from `enterprise <os> status --json` (4.4); the Linux and macOS `set`
@@ -986,7 +998,8 @@ is still the one owner.
   installed, an older one included, so the agent tracks which anchor file
   it last installed. The confirmed bundle version floor still applies.
 - stdout: `anchors-install.schema.json` (`sha256`, `previous_sha256` and
-  `key_ids` for the agent's own report; no audit event records the change).
+  `key_ids` for the agent's own report). The change is audited as
+  `config.trust_anchors.changed` (section 0).
   Exit: 0; 1; 2; 75.
 
 ```sh
@@ -1255,8 +1268,10 @@ the read-only commands answer (section 4).
 - `delivery_id` is caller-supplied and not authenticated, and no receipt
   records the delivery channel (MDM, agent, administrator): the apply cannot
   tell them apart without trusting the caller (2.6).
-- Trust anchor and credential changes are not audited by DefenseClaw
-  (section 0).
+- Trust anchor and credential change events reach the audit log only
+  when the gateway runs, and the spool keeps the newest 256 of them; builds
+  before 1.0.4 record none (section 0). A refusal before the command knows
+  it runs as root (or elevated) records nothing.
 - Windows `bundle apply` and `secret set` / `remove` default to no wait for
   `bundle.lock`; Linux and macOS wait 5 s. Pass `--lock-wait` on every OS.
 - The `identity` block cannot see an SSSD or Open Directory that answers

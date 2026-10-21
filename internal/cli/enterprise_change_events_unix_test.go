@@ -1,0 +1,131 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package cli
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
+func stubSecretChangeEnv(t *testing.T) (root string, layout managed.StandaloneLayout) {
+	t.Helper()
+	goos := enterpriseunix.CurrentGOOS()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Skip(err)
+	}
+	root = t.TempDir()
+	previous := newUnixLifecycleEnv
+	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 },
+			Lchown: func(string, int, int) error { return nil }}, nil
+	}
+	t.Cleanup(func() { newUnixLifecycleEnv = previous })
+	return root, layout
+}
+
+func spoolEvents(t *testing.T, root string, layout managed.StandaloneLayout) ([]enterprisestatus.ChangeEvent, string) {
+	t.Helper()
+	dir := filepath.Join(root, enterprisestatus.ChangeEventsDir(layout.ConfigDir))
+	var out []enterprisestatus.ChangeEvent
+	var raw strings.Builder
+	for _, id := range enterprisestatus.ListChangeEventIDs(dir) {
+		path := filepath.Join(dir, id+".json")
+		ev, err := enterprisestatus.ReadChangeEvent(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := os.ReadFile(path)
+		raw.Write(data)
+		out = append(out, ev)
+	}
+	return out, raw.String()
+}
+
+// Every Linux and macOS secret set or remove that changed a credential,
+// failed or was refused leaves one change event; a run that changed
+// nothing leaves none, and no event carries the value.
+func TestUnixSecretChangesLeaveOneChangeEventEach(t *testing.T) {
+	root, layout := stubSecretChangeEnv(t)
+
+	// A bad --name is refused before the value is read: the name is left out.
+	cmd := newEnterpriseSecretCommand("set", "")
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetIn(strings.NewReader("known-credential-value-7731\n"))
+	opts := enterpriseSecretOptions{name: "BAD_NAME", fromStdin: true}
+	if err := runEnterpriseSecret(cmd, "set", &opts); err == nil {
+		t.Fatal("a bad name was accepted")
+	}
+	ok := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "linux", "1.0.4")
+	ok.OK = true
+	recordUnixSecretChange("set", "splunk-hec-token", false, ok, nil)   // stored
+	recordUnixSecretChange("set", "splunk-hec-token", true, ok, nil)    // the stored value: nothing
+	recordUnixSecretChange("remove", "absent-token", false, ok, nil)    // nothing to remove
+	recordUnixSecretChange("remove", "splunk-hec-token", true, ok, nil) // removed
+	failed := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "linux", "1.0.4")
+	failed.AddError("apply_failed", "the ensure failed")
+	recordUnixSecretChange("set", "otlp-token", false, failed, nil)
+
+	events, raw := spoolEvents(t, root, layout)
+	if len(events) != 4 {
+		t.Fatalf("events = %+v", events)
+	}
+	want := []struct{ action, outcome, code, name string }{
+		{"set", enterprisestatus.ChangeRefused, "invalid_arguments", ""},
+		{"set", enterprisestatus.ChangeApplied, "", "splunk-hec-token"},
+		{"remove", enterprisestatus.ChangeApplied, "", "splunk-hec-token"},
+		{"set", enterprisestatus.ChangeFailed, "apply_failed", "otlp-token"},
+	}
+	for i, w := range want {
+		ev := events[i]
+		if ev.Kind != enterprisestatus.ChangeKindSecret || ev.Action != w.action || ev.Outcome != w.outcome ||
+			ev.ReasonCode != w.code || ev.SecretName != w.name || ev.Actor == "" {
+			t.Fatalf("event %d = %+v, want %+v", i, ev, w)
+		}
+	}
+	if strings.Contains(raw, "known-credential-value-7731") || strings.Contains(raw, "BAD_NAME") {
+		t.Fatalf("the spool carries the value or the refused name:\n%s", raw)
+	}
+}
+
+// A caller that is not root records nothing.
+func TestUnixSecretChangeNeedsRoot(t *testing.T) {
+	root, layout := stubSecretChangeEnv(t)
+	previous := newUnixLifecycleEnv
+	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+		env, err := previous(goos)
+		if env != nil {
+			env.Geteuid = func() int { return 1000 }
+		}
+		return env, err
+	}
+	ok := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "linux", "1.0.4")
+	ok.OK = true
+	recordUnixSecretChange("set", "splunk-hec-token", false, ok, nil)
+	if events, _ := spoolEvents(t, root, layout); len(events) != 0 {
+		t.Fatalf("a standard account recorded %+v", events)
+	}
+}

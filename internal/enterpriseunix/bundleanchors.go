@@ -30,9 +30,9 @@ import (
 // the managed trust check on the file and every folder above it) and read
 // once, the write happens under the lifecycle lock, so it cannot land in
 // the middle of a bundle apply, and the installed file is checked again and
-// put back when that check fails. No audit event records the change: the
-// agent reports it from the result (anchors and secrets are not audited by
-// DefenseClaw, management agent contract section 0).
+// put back when that check fails. Every install that changed the file,
+// was refused or failed leaves a change event the gateway reports as a
+// config.trust_anchors.changed audit event (recordAnchorsChange).
 
 // Results of InstallBundleAnchors.
 const (
@@ -60,6 +60,10 @@ type AnchorsInstall struct {
 	// SignerKeyID signed the confirmed bundle ("" for none): the caller warns
 	// when the new anchors no longer trust it.
 	SignerKeyID string
+	// previousKeyIDs are the key ids of the replaced file; attempted is set
+	// once the install started writing, so a refusal after it is a failure.
+	previousKeyIDs []string
+	attempted      bool
 }
 
 // InstallBundleAnchors installs the anchor file src as the device trust
@@ -68,11 +72,18 @@ type AnchorsInstall struct {
 // lifecycle_busy and state_invalid; nothing is written for any of them but
 // anchor_restore_failed.
 func (e *Env) InstallBundleAnchors(ctx context.Context, src string) (*AnchorsInstall, error) {
+	out, err := e.installBundleAnchors(ctx, src)
+	e.recordAnchorsChange(out, err)
+	return out, err
+}
+
+func (e *Env) installBundleAnchors(ctx context.Context, src string) (*AnchorsInstall, error) {
 	dest := e.bundleAnchorsPath()
 	out := &AnchorsInstall{Path: filepath.Join(e.Layout.ConfigDir, "trust", enterprisebundle.AnchorsName)}
+	attempted := false
 	refused := func(err error) (*AnchorsInstall, error) {
 		// Only the file still installed is reported, never the refused one.
-		out = &AnchorsInstall{Path: out.Path}
+		out = &AnchorsInstall{Path: out.Path, attempted: attempted}
 		if installed, readErr := readInstalledAnchors(dest); readErr == nil && installed != nil {
 			out.SHA256 = sha256Bytes(installed)
 		}
@@ -122,6 +133,14 @@ func (e *Env) InstallBundleAnchors(ctx context.Context, src string) (*AnchorsIns
 	if err := e.ensureDir(filepath.Dir(dest), 0o755, rootOwner()); err != nil {
 		return refuse(enterprisebundle.CodeStateInvalid, "prepare the trust anchor folder: %v", err)
 	}
+	if previous != nil {
+		if old, err := enterprisebundle.DecodeAnchors(previous); err == nil {
+			for _, key := range old.Keys {
+				out.previousKeyIDs = append(out.previousKeyIDs, key.KeyID)
+			}
+		}
+	}
+	attempted = true
 	if err := e.writeFileAtomic(dest, raw, 0o644, rootOwner()); err != nil {
 		return refuse(enterprisebundle.CodeStateInvalid, "write the trust anchor file: %v", err)
 	}

@@ -295,6 +295,10 @@ def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
     assert "$top -ceq 'receipt-events'" in classifier
     assert "return 'BundleDirectory'" in classifier
     assert "^receipt-events\\\\[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}\\.json$" in classifier
+    # Change events are readable by the gateway service, not by standard users.
+    assert "$top -ceq 'change-events'" in classifier
+    assert "^change-events\\\\c-[0-7][0-9A-HJKMNP-TV-Z]{25}\\.json$" in classifier
+    assert classifier.index("$top -ceq 'change-events'") < classifier.index("if ($IsDirectory) { return 'AdminDirectory' }")
     assert classifier.index("$top -ceq 'receipt-events'") < classifier.index("if ($IsDirectory) { return 'AdminDirectory' }")
     assert "if ($IsDirectory) { return 'AdminDirectory' }" in classifier
     assert "Get-DefenseClawBundlePathKind -RelativePath $relative" in contract

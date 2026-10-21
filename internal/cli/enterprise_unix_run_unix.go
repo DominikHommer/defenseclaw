@@ -378,6 +378,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return nil
 	}
 	result, existed, err := changeUnixSecret(cmd, action, opts, caller)
+	recordUnixSecretChange(action, opts.name, existed, result, err)
 	if err != nil {
 		return reportUnixSecretFailure(cmd, action, opts, err, opts.json)
 	}
@@ -388,6 +389,35 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return err
 	}
 	return lifecycleFailure(result, opts.json, "")
+}
+
+// recordUnixSecretChange leaves the change event of a secret set or remove
+// for the gateway: an applied change, a failed lifecycle run, or a refusal
+// before it. A set of the stored value and the removal of an absent
+// credential changed nothing and record nothing; a caller that is not root
+// cannot record.
+func recordUnixSecretChange(action, name string, existed bool, result *enterprisestatus.Result, err error) {
+	code, attempted := "", false
+	switch {
+	case err != nil:
+		code = secretFailureCode(err, enterprisestatus.UnixExitInvalidArgs)
+	case result != nil && len(result.Errors) > 0:
+		// The lifecycle run that writes or removes the credential failed.
+		code, attempted = result.Errors[0].Code, true
+		err = errors.New(code)
+	case result == nil:
+		return
+	}
+	changed := (action == "set" && !existed) || (action == "remove" && existed)
+	ev, ok := secretChangeEvent(action, name, changed, code, err, attempted)
+	if !ok {
+		return
+	}
+	env, envErr := newUnixLifecycleEnv(enterpriseunix.CurrentGOOS())
+	if envErr != nil {
+		return
+	}
+	_ = env.RecordChange(ev)
 }
 
 func runUnixSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) error {
