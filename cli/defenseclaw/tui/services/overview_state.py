@@ -663,15 +663,29 @@ class OverviewPanelModel:
                 and item.get("profile")
             }
 
-    def _applied_profile(self, connector: str = "") -> tuple[str, dict[str, Any]] | None:
-        """(name, effective settings) of the profile that decides for you."""
-
-        result = (
+    def _profile_result(self, connector: str = "") -> dict[str, Any]:
+        return (
             self.connector_guardrail_profiles.get(connector.strip().lower(), self.guardrail_profile)
             if connector else self.guardrail_profile
         ) or {}
+
+    def profile_lookup_error(self, connector: str = "") -> str:
+        """Why the gateway could not look up your account ("" when it could).
+
+        The profile it then names is a fallback, not the one your account
+        and groups select.
+        """
+
+        return " ".join(str(self._profile_result(connector).get("lookup_error") or "").split())
+
+    def _applied_profile(self, connector: str = "") -> tuple[str, dict[str, Any]] | None:
+        """(name, effective settings) of the profile that decides for you."""
+
+        result = self._profile_result(connector)
         name = str(result.get("profile") or "")
-        if not name or result.get("error"):
+        # A failed identity lookup named a fallback profile, which read as
+        # the one chosen for you (GAP-1271).
+        if not name or result.get("error") or result.get("lookup_error"):
             return None
         effective = result.get("effective")
         return name, effective if isinstance(effective, dict) else {}
@@ -839,6 +853,16 @@ class OverviewPanelModel:
                 )
             else:
                 notices.append(OverviewNotice("warn", "LLM guardrail not configured - press [g] to set up"))
+        if lookup_error := self.profile_lookup_error():
+            if len(lookup_error) > 80:
+                lookup_error = lookup_error[:79].rstrip() + "…"
+            notices.append(
+                OverviewNotice(
+                    "warn",
+                    f"Couldn't look up your account, so your guardrail profile is unknown ({lookup_error}) - "
+                    "check it with: defenseclaw guardrail profile explain",
+                )
+            )
         if not self.skill_scanner_available:
             notices.append(
                 OverviewNotice(
@@ -1631,6 +1655,8 @@ class OverviewPanelModel:
             roster = [self.active_connector_name()]
         if not connector and len(roster) == 1:
             connector = roster[0]
+        if self.profile_lookup_error(connector):
+            return f"{base}, profile unknown (user lookup failed)" if base else "profile unknown (user lookup failed)"
         if not connector and len(roster) > 1 and self.guardrail_profile:
             resolved = [self._applied_profile(name) for name in roster]
             if all(resolved):

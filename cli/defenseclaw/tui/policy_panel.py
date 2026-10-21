@@ -370,7 +370,9 @@ class PolicyPanelMixin:
         model = self.policy_model
         if not self._policy_detail_always() and not model.detail_open:
             return None
-        title, lines = model.aside()
+        size = getattr(self, "size", None)
+        height = int(getattr(size, "height", 0) or 0)
+        title, lines = model.aside(compact=not self._policy_aside_shown() and 0 < height < _TALL_ROWS)
         if not title:
             return None
         return Aside(title, "\n".join(rich_escape(line) for line in lines))
@@ -1022,7 +1024,9 @@ def hilt_change_modal(model: PoliciesPanelModel, row: Any, level: str) -> Conseq
         others = [str(getattr(r, "scope", "")) for r in model.postures if model.connector_of(r)]
         if others:
             details.append("Sets approval on every active connector: " + ", ".join(others) + ".")
-    details.append(_run_line(intent, "; the gateway restarts to apply it."))
+    # The gateway applies approval from the new config generation, with no
+    # restart (what `guardrail hilt` reports when it finishes).
+    details.append(_run_line(intent, "; a running gateway applies it now."))
     consequence = ""
     if weaker:
         lost = actions_weaken(severity_actions(block, alert, old), severity_actions(block, alert, level))

@@ -788,6 +788,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         background: TOKEN_SURFACE_RAISED;
     }
 
+    .panel-controls > .control-row {
+        height: 1;
+        width: auto;
+    }
+
     .panel-controls Button {
         height: 1;
         min-width: 8;
@@ -1652,19 +1657,27 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         compact=True,
                         tooltip="Run `defenseclaw keys fill-missing`",
                     )
-                with Horizontal(id="alerts-controls", classes="panel-controls hidden"):
-                    yield Button("Actionable", id="alerts-filter-actionable", compact=True)
-                    # h/l step through these chips; the digits stay panel
-                    # keys (GAP-1708).
-                    yield Button("All", id="alerts-filter-all", compact=True)
-                    yield Button("Critical", id="alerts-filter-critical", compact=True, classes="severity-critical")
-                    yield Button("High", id="alerts-filter-high", compact=True, classes="severity-high")
-                    yield Button("Medium", id="alerts-filter-medium", compact=True, classes="severity-medium")
-                    yield Button("Low", id="alerts-filter-low", compact=True, classes="severity-low")
-                    yield Button("Select all", id="alerts-select-all", compact=True)
-                    yield Button("Ack selected", id="alerts-ack-selected", compact=True)
-                    yield Button("Dismiss filtered", id="alerts-dismiss-filtered", compact=True, variant="warning")
-                    yield Button("Dismiss all", id="alerts-dismiss-all", compact=True, variant="error")
+                # Two rows, filters then actions: in one row the bar scrolled
+                # at 80 columns and cut "Select all" to "Select al" (GAP-0112).
+                with Vertical(id="alerts-controls", classes="panel-controls hidden"):
+                    with Horizontal(classes="control-row"):
+                        yield Button("Actionable", id="alerts-filter-actionable", compact=True)
+                        # h/l step through these chips; the digits stay panel
+                        # keys (GAP-1708).
+                        yield Button("All", id="alerts-filter-all", compact=True)
+                        yield Button(
+                            "Critical", id="alerts-filter-critical", compact=True, classes="severity-critical"
+                        )
+                        yield Button("High", id="alerts-filter-high", compact=True, classes="severity-high")
+                        yield Button("Medium", id="alerts-filter-medium", compact=True, classes="severity-medium")
+                        yield Button("Low", id="alerts-filter-low", compact=True, classes="severity-low")
+                    with Horizontal(classes="control-row"):
+                        yield Button("Select all", id="alerts-select-all", compact=True)
+                        yield Button("Ack selected", id="alerts-ack-selected", compact=True)
+                        yield Button(
+                            "Dismiss filtered", id="alerts-dismiss-filtered", compact=True, variant="warning"
+                        )
+                        yield Button("Dismiss all", id="alerts-dismiss-all", compact=True, variant="error")
                 with Horizontal(id="audit-controls", classes="panel-controls hidden"):
                     yield Button("All", id="audit-filter-all", compact=True)
                     yield Button("Risk", id="audit-filter-risk", compact=True, classes="severity-high")
@@ -3995,12 +4008,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if matches:
             palette.move_cursor(row=0, column=0, animate=False)
         else:
-            palette.add_row(
-                "No matching DefenseClaw command",
-                "",
-                "",
-                "Keep typing or use raw defenseclaw ...",
-            )
+            # Short cells: at 80 columns the long first cell pushed the hint
+            # past the right border ("Keep typing or use raw de").
+            palette.add_row(*_PALETTE_NO_MATCH_ROW)
 
     def _palette_matches(self, query: str, *, limit: int = 12) -> tuple[CmdEntry, ...]:
         normalized = query.strip().lower()
@@ -5495,7 +5505,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _render_panel_control_visibility(self) -> None:
         overview = self.query_one("#overview-controls", Horizontal)
-        alerts = self.query_one("#alerts-controls", Horizontal)
+        alerts = self.query_one("#alerts-controls", Vertical)
         audit = self.query_one("#audit-controls", Horizontal)
         inventory = self.query_one("#inventory-controls", Horizontal)
         inventory_filters = self.query_one("#inventory-filter-controls", Horizontal)
@@ -5526,7 +5536,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         inventory_filters.set_class(
             self.active_panel != "inventory"
             or self.help_open
-            or self.inventory_model.active_sub not in {"skills", "plugins"},
+            or self.inventory_model.active_sub not in {"skills", "plugins"}
+            or self._inventory_detail_short(),
             "hidden",
         )
         logs.set_class(self.active_panel != "logs" or self.help_open, "hidden")
@@ -9701,6 +9712,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         quick_actions = [
             ("s", "Scan all"),
             ("d", "Doctor"),
+            ("G", "Gateway"),
+            ("z", "AI Discovery"),
             ("i", "Inventory"),
             ("g", "Guardrail"),
             ("m", "Connector"),
@@ -10517,8 +10530,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "[#9FB2CC]Use the tabs or number keys to drill into Alerts, Audit, Logs, and Setup.[/]"
         )
 
+    def _inventory_detail_short(self) -> bool:
+        """An open Inventory detail on a short terminal (up to 30 rows).
+
+        At 80x24 the sub-tab line, the filter chips and the multi-connector
+        strip left the detail card one row, its top border, and PgDn showed
+        nothing (B-32). While a detail is open those two give their rows to
+        it; the sub-tab bar stays, and Esc brings them back.
+        """
+
+        height = int(getattr(self.size, "height", 0) or 0)
+        return bool(self.inventory_model.detail_open) and 0 < height <= 30
+
     def _inventory_body_text(self) -> str:
-        tabs = "  ".join(
+        tabs = "" if self._inventory_detail_short() else "  ".join(
             f"[{TOKENS.accent_violet} bold]{tab.display_label}[/]"
             if tab.active
             else f"[{TOKENS.text_secondary}]{tab.display_label}[/]"
@@ -10549,7 +10574,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             f"[bold #22D3EE]Inventory[/]  [{TOKENS.text_muted}]r scans:[/] {scan_scope}{filter_text}\n"
             f"{connector_chip}"
             f"{tabs}"
-        )
+        ).rstrip("\n")
 
     def _logs_body_text(self) -> str:
         """Header, search and (for Verdicts) the extra filter rows.
@@ -10661,8 +10686,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._status_panel = self.active_panel
             self._status_set_at = time.monotonic()
         self.status_text = text
-        strip = render_status_strip(self._hint_status_model())
-        rendered = f"{text}  [#444444]│[/]  {strip}"
+        width = int(getattr(self.size, "width", 0) or 0)
+        # The strip gets the cells the line has left after the text, the
+        # padding (2) and the separator (5), so it ends on a whole segment.
+        strip = render_status_strip(
+            self._hint_status_model(),
+            width=width - 2 - _status_text_cells(text) - 5 if width > 0 else None,
+        )
+        rendered = f"{text}  [#444444]│[/]  {strip}" if strip else text
         if self._config_error:
             rendered = f"[bold {TOKENS.accent_red}]{rich_escape(self._config_error)}[/]"
         elif _status_text_fills_line(text, self.size.width):
@@ -11828,6 +11859,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 key = "U"
             return self._apply_sandbox_action(self.sandbox_model.handle_key(key))
         if self.active_panel == "policies":
+            if key in {"pagedown", "page_down", "pageup", "page_up"} and self._panel_aside_below is not None:
+                # The detail under the table shows four lines at 80x24;
+                # PgUp/PgDn read the rest (GAP-0022).
+                return self._scroll_detail_panel(key)
             return self._apply_policy_action(self.policy_model.handle_key(_vim_key(key)))
         if self.active_panel == "alerts":
             if self.alerts_model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
@@ -13224,12 +13259,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # A Secure Client gateway reads its policy at start, so every
                 # save keeps the restart of main (issue #1092).
                 restart_keys = None
+            saved_config, synced = self._saved_config_snapshot(staged_config)
             roster_changed, storage_changed = self._apply_config_snapshot(
-                staged_config,
+                saved_config,
                 external=False,
                 refresh_disk=False,
             )
-            if self._config_watcher is not None:
+            if self._config_watcher is not None and not synced:
                 self._config_watcher.sync_to_disk()
             if roster_changed:
                 self._schedule_roster_catalog_refresh()
@@ -13738,6 +13774,32 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._schedule_signal_data_refresh()
         if roster_changed or storage_changed:
             self._schedule_roster_catalog_refresh()
+
+    def _saved_config_snapshot(self, staged: object) -> tuple[object, bool]:
+        """The config as saved, and whether the watcher already saw its generation.
+
+        A save merges only this editor's changes into config.yaml, so a key
+        another writer changed since the TUI loaded is kept on disk but was
+        still old in ``staged``; with that generation marked seen the TUI
+        showed the old value until restarted (GAP-1049). Read the file back
+        under the writer lock and mark exactly that generation seen. Falls
+        back to ``staged`` when it cannot be read back.
+        """
+
+        if not isinstance(staged, config_module.Config):
+            return staged, False
+        data_dir = getattr(staged, "data_dir", None) or None
+        path = str(config_module.config_path_for_data_dir(data_dir))
+        try:
+            with config_module.locked_config_yaml(path):
+                saved = config_module.load(data_dir=data_dir)
+                synced = self._config_watcher is not None and self._config_watcher.sync_to_disk()
+        except Exception as exc:  # noqa: BLE001 - the save itself succeeded; show what was written.
+            self._write_activity(
+                f"[#FBBF24]config read-back after save failed:[/] {rich_escape(str(exc))}; showing the saved edits."
+            )
+            return staged, False
+        return saved, synced
 
     def _apply_config_snapshot(
         self,
@@ -16889,13 +16951,19 @@ def _truncate_for_strip(value: str, width: int) -> str:
 _NEXT_STEP_SEP = " · next: "
 
 
+def _status_text_cells(text: str) -> int:
+    """Cells the status text takes on screen (markup removed)."""
+
+    try:
+        return Text.from_markup(text).cell_len
+    except Exception:  # noqa: BLE001 - text that is not valid markup shows as typed.
+        return Text(text).cell_len
+
+
 def _status_text_fills_line(text: str, width: int) -> bool:
     """True when ``text`` leaves no room for the status line's health strip."""
 
-    try:
-        cells = Text.from_markup(text).cell_len
-    except Exception:  # noqa: BLE001 - not markup; count it as typed.
-        cells = len(text)
+    cells = _status_text_cells(text)
     # The status line pads one cell on each side; the strip needs its
     # "  │  " separator and a few cells to say anything.
     return cells + 12 > max(0, width - 2)
@@ -16967,6 +17035,11 @@ def _palette_risk_style(badge: str) -> str:
     if risk == "read-only":
         return TOKENS.text_muted
     return TOKENS.text_secondary
+
+
+# The palette row for a query that matches no command. It fits an 80-column
+# terminal: Enter still runs a full command typed as is.
+_PALETTE_NO_MATCH_ROW = ("No match", "", "", "Keep typing, or type a full command")
 
 
 def _palette_row_for_entry(entry: CmdEntry) -> tuple[str, str, str, str]:
