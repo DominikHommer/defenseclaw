@@ -127,7 +127,13 @@ PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome re
 # native bridge that will handle the matching invocation. The script-marker
 # check matters because teardown intentionally leaves a v0 no-op tombstone (and
 # may leave the scoped token) for already-running host processes.
-CURSOR_ORIGIN_VERSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.cursor_version // empty' 2>/dev/null || true)"
+# Only a payload that names the field can carry it, so a Claude Code call
+# runs no jq for this check (issue #1130).
+CURSOR_ORIGIN_VERSION=""
+case "$PAYLOAD" in
+  *cursor_version*)
+    CURSOR_ORIGIN_VERSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.cursor_version // empty' 2>/dev/null || true)" ;;
+esac
 if [ -n "$CURSOR_ORIGIN_VERSION" ] && [ -f "${HOOK_DIR}/.hook-cursor.token" ]; then
   CURSOR_HOOK_MARKER=""
   if [ -r "${HOOK_DIR}/cursor-hook.sh" ]; then
@@ -319,8 +325,7 @@ RESPONSE=$(defenseclaw_hook_post) || {
 }
 defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-RESULT=$(echo "$RESPONSE" | sed '$d')
+defenseclaw_split_response
 
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"

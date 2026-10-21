@@ -238,8 +238,9 @@ defenseclaw_harden_env() {
   # and on systems without mktemp every hook invocation creates
   # hook-tmp.<PID>. Without this sweep those orphans accumulate
   # forever. Runs AFTER PATH lockdown so we don't pick up an attacker-
-  # planted `find`.
-  _defenseclaw_sweep_stale_hook_dirs
+  # planted `find`. Orphans come only from a killed hook, so one call in 32
+  # keeps them bounded without a find on every call (issue #1130).
+  [ $((RANDOM % 32)) -ne 0 ] || _defenseclaw_sweep_stale_hook_dirs
 }
 
 # Resolve optional connector identity for the shared inspect-* scripts.  The
@@ -886,8 +887,9 @@ defenseclaw_gateway_binary() {
 # left in RESPONSE for the caller's status handling.
 defenseclaw_retry_busy() {
   local attempt=0 waited=0 delay
-  while [ "$attempt" -lt 3 ] && [ "$(printf '%s\n' "$RESPONSE" | tail -1)" = "429" ]; do
-    delay="$(printf '%s\n' "$RESPONSE" | sed '$d' | _dc_jq -r '.retry_after_seconds // empty' 2>/dev/null || true)"
+  while [ "$attempt" -lt 3 ] && [ "${RESPONSE##*$'\n'}" = "429" ]; do
+    defenseclaw_split_response
+    delay="$(printf '%s\n' "$RESULT" | _dc_jq -r '.retry_after_seconds // empty' 2>/dev/null || true)"
     case "$delay" in
       ""|*[!0-9]*) delay=1 ;;
     esac
@@ -900,6 +902,18 @@ defenseclaw_retry_busy() {
     "$1" || return $?
   done
   return 0
+}
+
+# defenseclaw_split_response sets HTTP_CODE to the last line of RESPONSE (the
+# status curl's -w "\n%{http_code}" appends) and RESULT to the lines before
+# it, with no child process: each hook call used to run tail and sed for this
+# (issue #1130).
+defenseclaw_split_response() {
+  HTTP_CODE="${RESPONSE##*$'\n'}"
+  case "$RESPONSE" in
+    *$'\n'*) RESULT="${RESPONSE%$'\n'*}" ;;
+    *) RESULT="" ;;
+  esac
 }
 
 # _dc_hook_post_response is the POST defenseclaw_retry_busy runs for the
@@ -1471,23 +1485,17 @@ defenseclaw_read_stdin_capped() {
   case "$cap" in
     ''|*[!0-9]*) cap=1048576 ;;
   esac
-  # Tier 1 — bounded python3 read (preferred). python3 is byte-exact on
-  # every OS: it reads at most cap+1 bytes and reports overflow precisely.
-  # We prefer it over head(1) because BSD/macOS `head -c N` OVER-READS a
-  # pipe (it drains everything past N), which defeats any "is there a
-  # byte past the cap?" probe and would silently truncate an oversized
-  # body instead of failing closed. python3 is the same interpreter the
-  # _dc_jq shim already relies on, so requiring it here adds no new dep on
-  # the hosts these hooks actually run on.
+  # Tier 1 — bounded python3 read, only on a host without head(1). The
+  # head(1) tier below reads cap+1 bytes in one call and compares the length,
+  # which is exact on GNU and BSD head alike, so python3 is not started on
+  # every hook call (issue #1130: it was one of about 15 programs each Claude
+  # Code call ran). python3 reads at most cap+1 bytes and exits 3 on overflow.
   #
   # _dc_python3_usable (not a bare `command -v python3`) is the gate:
   # stock macOS hosts without CLT resolve /usr/bin/python3 to a launcher
   # stub that would trigger an OS installer dialog on first invocation
-  # and return no body at all — the hook would then post an empty payload
-  # to the gateway, get HTTP 400, and fail closed. Skipping the stub
-  # falls through to the head(1) tier which reads stdin correctly on
-  # stock macOS.
-  if _dc_python3_usable; then
+  # and return no body at all.
+  if ! command -v head >/dev/null 2>&1 && _dc_python3_usable; then
     local _dc_body _dc_rc
     _dc_body="$(DCHOOK_CAP="$cap" python3 -c \
 'import sys,os
@@ -1506,7 +1514,7 @@ sys.stdout.buffer.write(data)')"
     printf '%s' "$_dc_body"
     return 0
   fi
-  # Tier 2 — head(1) fallback for python3-less hosts. Read cap+1 bytes in a
+  # Tier 2 — head(1), the usual reader. Read cap+1 bytes in a
   # SINGLE call and compare the captured length: a two-call probe
   # (`head -c cap` then `head -c 1`) is unreliable because BSD head drains
   # the pipe on the first read, so the second read always sees EOF and an
@@ -1696,7 +1704,9 @@ defenseclaw_user_identity_args() {
   command -v id >/dev/null 2>&1 || return 0
 
   local uid name
-  uid="$(id -u 2>/dev/null)" || uid=""
+  # bash sets EUID itself (read-only, never taken from the environment), so
+  # this is id -u without a child process (issue #1130).
+  uid="${EUID:-}"
   case "$uid" in
     '' | *[!0-9]*) ;;
     *)
