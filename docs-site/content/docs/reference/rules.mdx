@@ -1,6 +1,6 @@
 ---
-title: "Rules: guardrail.rules and custom packs"
-description: Choose a guardrail rule pack, add your own pack pinned by digest, and adjust individual rules, suppressions and sensitive tools in config.yaml without copying a pack. Covers scopes, layering order and what happens when a pack or digest is wrong.
+title: Rules and custom packs
+description: The rule-pack keys in config.yaml - rule_pack, custom_packs and guardrail.rules - their scopes, layering, digest pinning and failure behavior.
 keywords:
   - guardrail.rules
   - guardrail.rule_pack
@@ -21,7 +21,7 @@ Three settings in `config.yaml` decide which rules the guardrail enforces. Use t
 | Add rules of your own or replace a bundled category | Add a custom pack, pinned by digest | `guardrail.custom_packs` and `guardrail.rule_pack` |
 | Turn a rule off, change its severity, add a suppression or switch on an opt-in protection pack | Customise the pack you already use | `guardrail.rules` |
 
-All of them work at four scopes (global, one connector, one guardrail profile, one connector inside a profile) and are applied by the running gateway without a restart. For the block and alert levels that go with a pack, see [Thresholds](/docs/policies/thresholds).
+All of them work at four scopes (global, one connector, one guardrail profile, one connector inside a profile) and are applied by the running gateway without a restart. For the block and alert levels that go with a pack, see [Thresholds](/docs/reference/thresholds).
 
 ## Choose a rule pack
 
@@ -44,99 +44,22 @@ defenseclaw guardrail list-packs                         # who enforces which
 
 A global `use-pack` removes the per-connector `rule_pack` entries and says which ones it removed. It also drops `enable`, `disable` and `severity_overrides` IDs that the new pack does not have (protection packs layered on it count), in the same save, and says which. That is the way out when a pack directory was deleted: `defenseclaw guardrail use-pack default` saves a valid config even though the rules the old pack defined are still named. Profile scopes have no `use-pack` option; set them with `defenseclaw config set guardrail.profiles.contractors.rule_pack strict`. The most specific scope wins: profile connector, then profile, then connector, then global. Pack names are lower case letters, digits, `-` and `_`, at most 64 characters.
 
-## Add your own pack
+## Custom packs
 
-A custom pack is a directory of rule files that you review and pin. `config.yaml` records the pack's path and its content digest, and the gateway refuses to load the pack if the directory no longer hashes to that digest. A change to the rules therefore reaches enforcement only through a config change that someone made on purpose.
+A custom pack is a directory of rule files that you review and pin. `config.yaml` records the pack's path and content digest, and the gateway refuses to load the pack if the directory no longer hashes to that digest. A change to the rules reaches enforcement only through a config change someone made on purpose. Steps: [write a custom rule](/docs/how-to/policies/write-a-custom-rule).
 
-<Steps>
-  <Step>
-    **Create the pack.** Copy the closest bundled pack, then add a rules file of your own. A rule file needs a `category` that no other file in the pack uses.
+```yaml title="~/.defenseclaw/config.yaml (written by use-pack)"
+guardrail:
+  rule_pack: acme-rules
+  custom_packs:
+    acme-rules:
+      path: /home/alice/.defenseclaw/policies/guardrail/acme-rules
+      digest: sha256:<files digest>
+```
 
-    ```bash
-    cp -r ~/.defenseclaw/policies/guardrail/default \
-          ~/.defenseclaw/policies/guardrail/acme-rules
-    ```
+`use-pack` takes a pack name under `~/.defenseclaw/policies/guardrail/` or a directory path (`./NAME` for a folder in the current directory). Add `--connector X` to select the pack for one connector only. A pattern-only rule can block matching prompts and content, but a tool-call pattern match is detection-only and never blocks, whatever `block_at` is. For a tool-call block, use an `expression` over complete action facts. `tool_call_only` limits where the pattern runs; it does not make it enforceable. See [CEL authoring](/docs/reference/cel/authoring).
 
-    ```yaml title="~/.defenseclaw/policies/guardrail/acme-rules/rules/acme.yaml"
-    version: 1
-    category: acme
-    rules:
-      - id: ACME-INTERNAL-DUMP
-        tool_call_only: true
-        pattern: (?i)\bpg_dump\b.{0,200}\bacme-prod\b
-        expression: f.commands.exists(c, c.argv_complete && c.program == 'pg_dump' && 'acme-prod' in c.argv)
-        title: "Dump of the acme-prod database"
-        severity: HIGH
-        confidence: 0.9
-        tags: [acme, database]
-    ```
-
-    With the default posture, this `HIGH` rule alerts; `CRITICAL` is the
-    blocking level. See [Thresholds](/docs/policies/thresholds#rule-pack-default-posture)
-    to choose the block and alert levels. The expression checks
-    `c.argv_complete` because enforcement needs the complete argument list;
-    incomplete argv can be recorded but cannot prove this tool-call block.
-
-    A pattern-only rule can block matching prompts and content, but a tool-call
-    pattern match is detection-only: it alerts and never blocks, regardless of
-    `block_at`. For a tool-call block, use an `expression` over complete action
-    facts as above. `tool_call_only` limits where the pattern runs; it does not
-    make the pattern enforceable. The [CEL rule guide](/docs/policies/cel/authoring)
-    explains the available facts and proof requirements.
-    A 0.8.x rule blocked a tool call with its pattern alone. The upgrade to 1.0
-    gives each of your rules whose pattern is a plain literal an expression, and
-    names the others so you can add one; see the
-    [v8 to v9 migration guide](/docs/reference/migrate-v9).
-  </Step>
-  <Step>
-    **Validate it.** The gateway's own loader checks the whole directory offline and prints the digest:
-
-    ```bash
-    defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/acme-rules
-    ```
-
-    ```text title="Terminal output"
-    Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/acme-rules"
-      rules: 240/244 enabled across 8 files
-      components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
-      digest: <compiled pack digest>
-      files digest: <SHA-256 of the pack files>
-    ```
-
-    Your counts and digest will differ from these. See [Validate rule packs](/docs/policies/rulepack-validation) for the exit codes and the `--json` form.
-  </Step>
-  <Step>
-    **Pin and select it.** `use-pack` validates the directory again, records the digest, and points the scope at the pack:
-
-    ```bash
-    defenseclaw guardrail use-pack acme-rules
-    ```
-
-    It writes both keys in one change:
-
-    ```yaml title="~/.defenseclaw/config.yaml"
-    guardrail:
-      rule_pack: acme-rules
-      custom_packs:
-        acme-rules:
-          path: /home/alice/.defenseclaw/policies/guardrail/acme-rules
-          digest: sha256:<files digest>
-    ```
-
-    `use-pack` takes a pack name under `~/.defenseclaw/policies/guardrail/` or a directory path (`./NAME` for a folder in the current directory). Add `--connector X` to select the pack for one connector only.
-  </Step>
-  <Step>
-    **Check it.** `list-packs` shows who enforces which pack, `config get` shows the pinned digest, and `doctor` validates every pack a connector uses:
-
-    ```bash
-    defenseclaw guardrail list-packs
-    defenseclaw config get guardrail.custom_packs.acme-rules.digest
-    defenseclaw doctor
-    ```
-  </Step>
-</Steps>
-
-On a managed host the Python CLI is not installed. Validate with `defenseclaw-gateway rulepack validate --dir /etc/acme/defenseclaw/packs/acme-rules` (it prints `valid rule pack: 8 files, 244 rules, digest ...`) and set `rule_pack` and `custom_packs` in the admin config, as [Custom rule packs](/docs/enterprise/configuration#custom-rule-packs) shows.
+On a managed host the Python CLI is not installed. Validate with `defenseclaw-gateway rulepack validate --dir PACK` and set `rule_pack` and `custom_packs` in the admin config ([custom rule packs](/docs/enterprise/configuration#custom-rule-packs)).
 
 ### What the digest covers
 
@@ -201,10 +124,10 @@ guardrail:
 | `enable` | Turns on rules the pack ships disabled, by rule ID. |
 | `disable` | Turns off rules, by rule ID. |
 | `severity_overrides` | Sets a rule's severity: `LOW`, `MEDIUM`, `HIGH` or `CRITICAL`, in any case. |
-| `suppressions` | Drops [LLM judge](/docs/policies) findings. Each entry has an `id` that is unique in the pack and the config, a `finding_pattern` (matched against the whole finding ID), an optional `entity_pattern` (matched against the reported text; left out, it matches every value) and a required `reason`. |
+| `suppressions` | Drops [LLM judge](/docs/reference/detection#llm-judge) findings. Each entry has an `id` that is unique in the pack and the config, a `finding_pattern` (matched against the whole finding ID), an optional `entity_pattern` (matched against the reported text; left out, it matches every value) and a required `reason`. |
 | `sensitive_tools` | Adds a tool to the pack's sensitive-tool list, or changes an existing one. `name` is the tool name the agent reports. With `result_inspection: true`, a result that carries at least `min_entities_for_alert` distinct sensitive values (default 1) raises a `tool-result-pii-alert` alert on every connector. It shows in `defenseclaw alerts` and the Alerts panel with the severity of the findings, and goes to the webhooks that accept `guardrail` events. The values are counted from the rule matches, so an address that two rules match counts once and the LLM judge being on or off does not change the count; the row carries the count and never the matched text. `judge_result` also sends the result to the LLM judge, for OpenClaw and ZeptoClaw tool results. |
 
-Inside one layer, the order is protections, then `enable`, `disable`, `severity_overrides`, `suppressions` and `sensitive_tools`. Suppressions never silence a regex or CEL rule finding; they act on the judge only, as the [suppression cookbook](/docs/policies/suppression-cookbook) explains.
+Inside one layer, the order is protections, then `enable`, `disable`, `severity_overrides`, `suppressions` and `sensitive_tools`. Suppressions never silence a regex or CEL rule finding; they act on the judge only ([tune the LLM judge](/docs/how-to/policies/tune-the-llm-judge)).
 
 The writer and the gateway refuse a layer that names a rule ID the pack does not have, lists the same rule under both `enable` and `disable`, repeats a suppression ID, or names a protection pack that does not exist. The refusal is immediate: `defenseclaw config validate` and every writer check the composed result against the pack before saving, and a change that the running gateway rejects leaves the previous generation in force.
 
@@ -237,7 +160,7 @@ defenseclaw guardrail protection enable kubernetes-production-protection \
 ✓ Rule CMD-REVSHELL-NC is turned off for every connector. Saved (config generation 21). The gateway isn't running; it loads this when it starts.
 ```
 
-A running gateway says so instead: `The running gateway applies it on its next reload.` `--connector X` requires a connector that is set up on this machine, and `--profile P` requires a profile that exists in `guardrail.profiles`. The stock opt-in packs are `privacy-high-assurance`, `cloud-production-protection`, `database-destruction-protection`, `infrastructure-destruction-protection` and `kubernetes-production-protection`; `ssh-authorized-keys-protection` is listed but refused until it has rules DefenseClaw can enforce. Turning a protection pack on asserts something about the environment (for example, that a connector's cloud credentials reach production). DefenseClaw takes that as your word and does not infer it from resource names; see [deterministic detection](/docs/policies/deterministic-detection#protection-packs-and-policy-provided-context).
+A running gateway says so instead: `The running gateway applies it on its next reload.` `--connector X` requires a connector that is set up on this machine, and `--profile P` requires a profile that exists in `guardrail.profiles`. The stock opt-in packs are `privacy-high-assurance`, `cloud-production-protection`, `database-destruction-protection`, `infrastructure-destruction-protection` and `kubernetes-production-protection`; `ssh-authorized-keys-protection` is listed but refused until it has rules DefenseClaw can enforce. Turning a protection pack on asserts something about the environment (for example, that a connector's cloud credentials reach production). DefenseClaw takes that as your word and does not infer it from resource names; see [deterministic detection](/docs/reference/detection#protection-packs-and-policy-provided-context).
 
 ## Scopes and layering
 
@@ -248,7 +171,7 @@ A running gateway says so instead: `The running gateway applies it on its next r
 3. Profile: `guardrail.profiles.<profile>.rules`
 4. Profile connector: `guardrail.profiles.<profile>.connectors.<connector>.rules`
 
-Each layer is applied on top of the result of the one before it, so a narrower scope wins a conflict. If the global layer disables a rule, a connector layer can `enable` it again for that connector; a profile layer can then change its severity for the people it selects. A connector that does not use a profile gets layers 1 and 2. A request from a user a profile selects gets all four that apply. [User- and group-based policies](/docs/guardrail/user-and-group-policies) explains how assignments choose the profile.
+Each layer is applied on top of the result of the one before it, so a narrower scope wins a conflict. If the global layer disables a rule, a connector layer can `enable` it again for that connector; a profile layer can then change its severity for the people it selects. A connector that does not use a profile gets layers 1 and 2. A request from a user a profile selects gets all four that apply. [User- and group-based policies](/docs/reference/guardrail-profiles) explains how assignments choose the profile.
 
 ```yaml title="~/.defenseclaw/config.yaml"
 guardrail:
@@ -278,7 +201,6 @@ Layers are applied to the pack of the scope they sit in, which is the pack that 
 
 The gateway composes the base pack and every layer in memory, once per policy generation. Nothing is generated on disk, so there are no composed directories to keep in sync, and `~/.defenseclaw/policies/guardrail/` holds only the packs you put there. The composed pack feeds the effective policy digest; `defenseclaw-gateway policy digest` lists one `rule_pack:` component per scope (`rule_pack:global`, `rule_pack:conn:codex`, `rule_pack:prof:contractors`, and so on).
 
-Before `config_version: 9`, `guardrail protection enable` wrote composed pack directories named `protected-<scope>/<profile>` and pointed `rule_pack_dir` at them. The v9 migration reads each one once, at the upgrade from 8, and turns it into a `protections` list on the base pack. Nothing reads those directories afterwards. See the [v8 to v9 migration guide](/docs/reference/migrate-v9).
 
 ## When something is wrong
 
@@ -291,12 +213,12 @@ Before `config_version: 9`, `guardrail protection enable` wrote composed pack di
 | A profile's rules cannot be applied | The gateway logs the profile and the reason, and subjects of that profile scan with the base rule set. |
 | You edit `config.yaml` by hand | The gateway applies it like a writer change and records it as a new config generation. If the edit is invalid, the previous generation keeps running and the failures above show. |
 
-On a managed device the writers refuse and the pack and rules belong in the admin config; see the [thresholds page](/docs/policies/thresholds#set-the-levels).
+On a managed device the writers refuse and the pack and rules belong in the admin config; see the [thresholds page](/docs/reference/thresholds#set-the-levels).
 
 ## See also
 
-- [Thresholds](/docs/policies/thresholds): `block_at`, `alert_at` and the pack's posture default
-- [Validate rule packs](/docs/policies/rulepack-validation): the validator, exit codes and partial packs
-- [Suppression cookbook](/docs/policies/suppression-cookbook): what the three suppression layers do
-- [Deterministic detection](/docs/policies/deterministic-detection): the shipped rules and the opt-in protection packs
+- [Thresholds](/docs/reference/thresholds): `block_at`, `alert_at` and the pack's posture default
+- [Validate rule packs](/docs/how-to/policies/validate-a-rule-pack): the validator, exit codes and partial packs
+- [Tune the LLM judge](/docs/how-to/policies/tune-the-llm-judge): what the three suppression layers do
+- [Deterministic detection](/docs/reference/detection): the shipped rules and the opt-in protection packs
 - [Reference: Configuration](/docs/reference/configuration): every key
