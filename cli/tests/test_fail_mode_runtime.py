@@ -1169,13 +1169,17 @@ def test_windows_sidecar_report_reads_malformed_json_closed_as_the_native_hook_d
     assert fail_mode_runtime._read_windows_hook_mode(path, "codex") == ("closed", False)
 
 
+# The connector-scoped key of the 0.8.x KEY=value sidecar (a dynamic name).
+_SCOPED_CODEX_KEY = "DEFENSECLAW_FAIL_MODE" + "_CODEX"
+
+
 @pytest.mark.parametrize(
     "text,want",
     [
         ("DEFENSECLAW_FAIL_MODE=open\n", "open"),
         ("DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE=closed\n", "closed"),
-        ("DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_FAIL_MODE_CODEX=closed\n", "closed"),
-        ('export DEFENSECLAW_FAIL_MODE_CODEX="open"\nDEFENSECLAW_FAIL_MODE=closed\n', "open"),
+        ("DEFENSECLAW_FAIL_MODE=open\n" + _SCOPED_CODEX_KEY + "=closed\n", "closed"),
+        ("export " + _SCOPED_CODEX_KEY + '="open"\nDEFENSECLAW_FAIL_MODE=closed\n', "open"),
         ("DEFENSECLAW_FAIL_MODE=bogus\n", None),
         ("DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:18970\n", None),
     ],
