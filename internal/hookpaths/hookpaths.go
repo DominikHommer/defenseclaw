@@ -142,6 +142,40 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 			queue = append(queue, name)
 		}
 	}
+	markAll := func() {
+		for defined := range definitions {
+			mark(defined)
+		}
+	}
+	// Trap handlers are shell programs, not just one word. Walk their call
+	// sites so `trap 'f argument' EXIT` reaches f without treating `echo f`
+	// as a call. A dynamic handler can name any function in this command.
+	markTrapHandler := func(value string, static bool) {
+		if !static {
+			markAll()
+			return
+		}
+		handler, ok := parseShell(value)
+		if !ok {
+			mark(strings.TrimSpace(value))
+			return
+		}
+		syntax.Walk(handler, func(node syntax.Node) bool {
+			call, ok := node.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			if name, fixed := StaticWord(call.Args[0], home); fixed {
+				mark(name)
+				if name == "eval" || name == "source" || name == "." || name == "trap" {
+					markAll()
+				}
+			} else {
+				markAll()
+			}
+			return true
+		})
+	}
 	boundName, boundValue := boundedProgramAssignment(file, home)
 	scan := func(node syntax.Node) bool {
 		if _, definition := node.(*syntax.FuncDecl); definition {
@@ -158,20 +192,34 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 		if !static {
 			// A dynamic command word can name any of the defined functions.
 			if !allMarked {
-				for defined := range definitions {
-					mark(defined)
-				}
+				markAll()
 				allMarked = true
 			}
 			return true
 		}
 		mark(name)
-		if name == "eval" {
-			for _, arg := range call.Args[1:] {
-				if value, ok := StaticWord(arg, home); ok {
-					mark(strings.TrimSpace(value))
+		if name == "trap" {
+			// EXIT, ERR, DEBUG and RETURN can all execute a handler.
+			handler := 1
+			if len(call.Args) > handler {
+				if value, ok := StaticWord(call.Args[handler], home); ok && value == "--" {
+					handler++
 				}
 			}
+			if len(call.Args) > handler {
+				value, static := StaticWord(call.Args[handler], home)
+				markTrapHandler(value, static)
+			}
+		}
+		if name == "eval" {
+			for _, arg := range call.Args[1:] {
+				value, static := StaticWord(arg, home)
+				markTrapHandler(value, static)
+			}
+		}
+		if name == "source" || name == "." {
+			// The sourced file can invoke a definition in this shell.
+			markAll()
 		}
 		return true
 	}
@@ -556,11 +604,15 @@ func Resolve(payload []byte) string {
 	}
 	var safeRedirects []RedirectOccurrence
 	opaqueFacts := map[string]string{}
+	var unprovenReason string
 	var toolArgs map[string]json.RawMessage
 	if json.Unmarshal(args, &toolArgs) == nil {
 		for _, key := range []string{"command", "cmd"} {
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
+				if !isApplyPatchToolName(tool) && unprovenReason == "" {
+					unprovenReason = UnprovenProtectedWrite(command, cwd, home)
+				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
@@ -698,6 +750,14 @@ func Resolve(payload []byte) string {
 		targets[key] = opaqueFacts[key]
 		size += entry
 	}
+	if unprovenReason != "" {
+		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			return unprovenEvidence(cwd, unprovenReason)
+		}
+		targets[UnprovenReasonKey] = unprovenReason
+		size += entry
+	}
 	if truncated {
 		targets[TruncatedKey] = "1"
 	}
@@ -722,6 +782,11 @@ func incompleteEvidence(cwd string) string {
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
+func unprovenEvidence(cwd, reason string) string {
+	encoded, _ := json.Marshal(map[string]string{CWDKey: cwd, UnprovenReasonKey: reason})
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
 func jsonString(value string) []byte {
 	encoded, _ := json.Marshal(value)
 	return encoded
@@ -737,8 +802,9 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+2 ||
-		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") {
+	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+3 ||
+		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
+		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}
 	for key, value := range targets {

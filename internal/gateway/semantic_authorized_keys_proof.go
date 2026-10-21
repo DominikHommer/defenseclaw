@@ -875,6 +875,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {
 		return false
 	}
+	if hookpaths.UnprovenWriteTitle(request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]) != "" {
+		return true
+	}
 	// One list for the path, hard-link and missing-final-file checks, the
 	// same files the direct-write rule protects (GAP-1370).
 	protectedPaths := hookpaths.ProtectedAuthorizedKeysPaths(facts.ActiveHome)
@@ -1093,6 +1096,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if json.Unmarshal(input.Args, &args) == nil {
 			input.Command = args.Cmd
 		}
+	}
+	if hookpaths.UnprovenProtectedWrite(input.Command, input.CWD, facts.ActiveHome) != "" {
+		return true
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
 		return true

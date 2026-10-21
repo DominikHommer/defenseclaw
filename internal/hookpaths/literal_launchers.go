@@ -238,14 +238,18 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		return names
 	}
 	switch {
-	case program == "python" || strings.HasPrefix(program, "python3") || program == "perl" || program == "ruby" || program == "node":
+	case program == "python" || strings.HasPrefix(program, "python3") || program == "perl" || program == "ruby" || program == "node" || program == "nodejs":
 		if program == "python" || strings.HasPrefix(program, "python3") {
 			if code, ok := pythonLiteralCode(words); ok {
 				return add(literalInterpreterWrites(code, "python"))
 			}
 		}
-		if len(words) >= 3 && (program == "perl" || program == "ruby" || program == "node") && words[1] == "-e" {
-			return add(literalInterpreterWrites(words[2], program))
+		if len(words) >= 3 && (program == "perl" || program == "ruby" || program == "node" || program == "nodejs") && words[1] == "-e" {
+			language := program
+			if language == "nodejs" {
+				language = "node"
+			}
+			return add(literalInterpreterWrites(words[2], language))
 		}
 		if program == "python" || strings.HasPrefix(program, "python3") {
 			if len(words) >= 2 && words[1] == "-" && stmt != nil {
@@ -297,6 +301,18 @@ func pythonLiteralCode(words []string) (string, bool) {
 		return "", false
 	}
 	return "", false
+}
+
+func fixedInterpreterCodePrefix(words []string) bool {
+	if len(words) < 3 {
+		return false
+	}
+	program := programBase(words[0])
+	if program == "python" || strings.HasPrefix(program, "python3") {
+		_, ok := pythonLiteralCode(words)
+		return ok
+	}
+	return (program == "node" || program == "nodejs" || program == "ruby" || program == "perl") && words[1] == "-e"
 }
 
 func literalQuotedHereDocument(redirect *syntax.Redirect) (string, bool) {

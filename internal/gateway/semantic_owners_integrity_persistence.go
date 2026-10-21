@@ -1491,6 +1491,13 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				}
 			}
 			title := rule.Title
+			reason := request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]
+			if reason == "" {
+				reason = hookpaths.UnprovenProtectedWrite(input.Command, input.CWD, input.ActiveHome)
+			}
+			if unproven := hookpaths.UnprovenWriteTitle(reason); unproven != "" {
+				title = unproven + "; use a literal path or split the command"
+			}
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = "Archive extraction may create a link before a later write; run the extraction and the write as separate commands"
 			}
