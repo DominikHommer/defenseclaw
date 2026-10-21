@@ -22,6 +22,66 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+// r102 GAP-0430: removing an account's last connector left the shared hook
+// scripts and the hook contract lock in a ~/.defenseclaw that existed
+// before; a remaining connector keeps them.
+func TestRemoveUserHooksRemovesTheSharedRuntimeWithTheLastConnector(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	facts := filepath.Join(dataDir, "session-facts.json")
+	if err := os.WriteFile(facts, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := func(name, version string) InstallOptions {
+		return InstallOptions{
+			ConnectorName: name, UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(),
+			APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000", APIToken: "test-token",
+			OTLPPathToken: strings.Repeat("d", 64), GuardrailMode: "action", HookFailMode: "closed",
+			AgentVersion: version, Registry: connector.NewDefaultRegistry(),
+		}
+	}
+	codex := options("codex", "codex-cli 0.142.0")
+	if _, err := Install(context.Background(), codex); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	shared := filepath.Join(dataDir, "hooks", "_hardening.sh")
+	lock := filepath.Join(dataDir, "hook_contract_lock.json")
+	for _, path := range []string{shared, lock} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("install wrote no %s: %v", path, err)
+		}
+	}
+	// Another connector's runtime record keeps the shared runtime.
+	peer := filepath.Join(dataDir, "hooks", ".hookcfg.hermes")
+	if err := os.WriteFile(peer, []byte("DEFENSECLAW_FAIL_MODE=closed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveUserHooks(context.Background(), codex); err != nil {
+		t.Fatalf("RemoveUserHooks: %v", err)
+	}
+	if _, err := os.Stat(shared); err != nil {
+		t.Fatalf("the shared scripts went while another connector's record remained: %v", err)
+	}
+	if err := os.Remove(peer); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveUserHooks(context.Background(), codex); err != nil {
+		t.Fatalf("RemoveUserHooks: %v", err)
+	}
+	for _, path := range []string{shared, filepath.Join(dataDir, "hooks", "inspect-tool.sh"), lock} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s was kept after the last connector was removed: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(facts); err != nil {
+		t.Fatalf("the account's other DefenseClaw file went: %v", err)
+	}
+}
+
 func TestRemoveUserHooksKeepsTheUsersOwnConfig(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)

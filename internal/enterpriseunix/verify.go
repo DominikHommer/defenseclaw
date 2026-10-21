@@ -476,9 +476,19 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	}
 	// A pack file a standard user came to own (or that turned writable)
 	// changes enforcement at the next restart with no trace (GAP-0552).
+	// A configured pack that is gone fails the next gateway restart, while
+	// the running gateway keeps the rules it loaded (p0 GAP-1207). Shipped
+	// packs are payload files, checked with the other installed files.
 	for _, label := range config.RulePackCheckOrder(record.RulePacks) {
 		dir := record.RulePacks[label]
-		if err := env.Trust(env.P(dir), TrustRulePack); err != nil && !errors.Is(err, os.ErrNotExist) {
+		shipped := pathWithin(dir, env.Layout.VendorPolicyDir)
+		if _, err := os.Lstat(env.P(dir)); errors.Is(err, os.ErrNotExist) {
+			if !shipped {
+				add("%s %q is missing: the gateway cannot load it when it restarts; restore the pack, or remove it from config.yaml and run ensure", label, dir)
+			}
+			continue
+		}
+		if err := env.Trust(env.P(dir), TrustRulePack); err != nil && (!shipped || !errors.Is(err, os.ErrNotExist)) {
 			add("%s %q is not administrator-controlled: %v; %s", label, dir, err, rulePackTrustAdvice)
 		}
 	}

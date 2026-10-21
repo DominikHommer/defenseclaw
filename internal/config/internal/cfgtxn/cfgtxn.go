@@ -358,19 +358,23 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return GenerationState{}, fmt.Errorf("configwrite: read %s before update: %w", path, readErr)
 	}
+	// An existing record keeps its read access: the enterprise lifecycle
+	// gives it to the service group (0640), and a literal 0600 took that
+	// away on every update (p0 GAP-1153). Write and execute bits for group
+	// and other are never kept.
 	mode := os.FileMode(0o600)
 	if existed {
 		info, statErr := os.Stat(path)
 		if statErr != nil {
 			return GenerationState{}, fmt.Errorf("configwrite: stat %s before update: %w", path, statErr)
 		}
-		mode = info.Mode().Perm()
+		mode = info.Mode().Perm() & 0o644
 	}
 	write := t.generationWrite
 	if write == nil {
 		write = WriteFileDurable
 	}
-	if err := write(path, encoded, 0o600); err != nil {
+	if err := write(path, encoded, mode); err != nil {
 		// WriteFileDurable may have renamed the file before a directory fsync
 		// failed. Put the old record back before Commit restores config.yaml.
 		current, currentErr := os.ReadFile(path)

@@ -60,6 +60,34 @@ func TestRestorePublishedDirsAddsOnlyTheMissingModeBits(t *testing.T) {
 	}
 }
 
+// GAP-0924: Codex opens /etc/codex/requirements.toml by name, so the repair
+// of an administrator's 0700 /etc/codex adds search only: listing it showed
+// its unrelated files to every account.
+func TestRestorePublishedDirsAddsOnlySearchAboveASingleFile(t *testing.T) {
+	withHigherSources(t)
+	opts := publishTestOptions(t)
+	if _, err := Publish(opts, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	vendor := filepath.Join(opts.Root, "etc/codex")
+	if err := os.WriteFile(filepath.Join(vendor, "admin-notes.toml"), []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(vendor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := RestorePublishedPolicyDirs(opts)
+	if err != nil || !containsString(restored, vendor) {
+		t.Fatalf("restore published dirs = %v, %v", restored, err)
+	}
+	if info, err := os.Stat(vendor); err != nil || info.Mode().Perm() != 0o711 {
+		t.Fatalf("%s: mode %v (%v) after the repair, want 0711", vendor, info.Mode().Perm(), err)
+	}
+	if problem := publishedDirProblem(opts, filepath.Join("/etc/codex", "requirements.toml")); problem != "" {
+		t.Fatalf("a searchable /etc/codex is still reported: %s", problem)
+	}
+}
+
 // GAP-1323: the macOS repair ran `chmod -N`, which removed every ACL entry
 // of the vendor directory, an administrator's unrelated ones too. It
 // removes only the entries that deny search or list, and the ones that

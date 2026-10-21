@@ -56,7 +56,15 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 	}
 	env.RefuseCapabilityLoss = opts.refuseCapabilityLoss
 	env.DeferRestart = opts.deferRestart
-	result := enterpriseunix.Run(cmd.Context(), env, unixBundleApplyOptions(opts, bundle))
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	applyOptions := unixBundleApplyOptions(opts, bundle)
+	var stop func()
+	applyOptions.Interrupted, stop = settleInterruptedLifecycle(cmd.ErrOrStderr(), "enterprise bundle apply", platform)
+	defer stop()
+	result := enterpriseunix.Run(cmd.Context(), env, applyOptions)
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
