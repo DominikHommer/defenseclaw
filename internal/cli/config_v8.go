@@ -632,6 +632,13 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 	}
 	names := make([]string, 0, len(configured))
 	for name := range configured {
+		// until 1.1: the runtime loader drops a connector 1.0.4 removed
+		// (OpenHands, OmniGent) so the gateway can start and tear it down;
+		// expecting it to survive refused every published config that set it
+		// up before cleanup could run (GAP-0290).
+		if config.IsRetiredConnector(name) {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)

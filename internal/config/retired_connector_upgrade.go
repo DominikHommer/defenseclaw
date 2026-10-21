@@ -18,7 +18,10 @@ package config
 
 import "sort"
 
-func isRetiredConnector(name string) bool {
+// IsRetiredConnector reports whether name (any spelling the loader accepts)
+// is a connector 1.0.4 removed. until 1.1: the loader drops its settings, and
+// the staged upgrade check must expect that (GAP-0290).
+func IsRetiredConnector(name string) bool {
 	switch normalizeConnectorKey(name) {
 	case "openhands", "omnigent":
 		return true
@@ -29,7 +32,7 @@ func isRetiredConnector(name string) bool {
 func dropRetiredKeys[T any](entries map[string]T) bool {
 	changed := false
 	for name := range entries {
-		if isRetiredConnector(name) {
+		if IsRetiredConnector(name) {
 			delete(entries, name)
 			changed = true
 		}
@@ -43,7 +46,7 @@ func dropRetiredNames(names []string) ([]string, bool) {
 	}
 	var kept []string
 	for _, name := range names {
-		if isRetiredConnector(name) {
+		if IsRetiredConnector(name) {
 			continue
 		}
 		kept = append(kept, name)
@@ -56,7 +59,7 @@ func isOnlyRetiredNames(names []string) bool {
 		return false
 	}
 	for _, name := range names {
-		if !isRetiredConnector(name) {
+		if !IsRetiredConnector(name) {
 			return false
 		}
 	}
@@ -128,11 +131,11 @@ func dropRetiredConnectorSettings(cfg *Config) {
 		allowed := false
 		cfg.OpenShell.Admin.Allowed = &allowed
 	}
-	if isRetiredConnector(cfg.Guardrail.Connector) {
+	if IsRetiredConnector(cfg.Guardrail.Connector) {
 		cfg.Guardrail.Connector = ""
 		changed = true
 	}
-	if isRetiredConnector(string(cfg.Claw.Mode)) {
+	if IsRetiredConnector(string(cfg.Claw.Mode)) {
 		cfg.Claw.Mode = ""
 		changed = true
 	}

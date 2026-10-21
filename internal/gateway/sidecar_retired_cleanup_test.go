@@ -101,6 +101,7 @@ func stageRetiredOmnigent(t *testing.T) retiredOmnigentHost {
 	}
 	t.Cleanup(restoreHome)
 	t.Setenv("OMNIGENT_CONFIG_HOME", "")
+	t.Setenv("OMNIGENT_CONFIG", "")
 	h := retiredOmnigentHost{dataDir: testenv.PrivateTempDir(t)}
 	h.configPath = filepath.Join(home, ".omnigent", "config.yaml")
 	h.modulePath = filepath.Join(h.dataDir, "hooks", retiredOmnigentModule+".py")

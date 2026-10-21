@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -136,6 +137,7 @@ func newRemovedHarness(t *testing.T) *removedHarness {
 	}
 	t.Cleanup(restoreHome)
 	t.Setenv("OMNIGENT_CONFIG_HOME", "")
+	t.Setenv("OMNIGENT_CONFIG", "")
 	notices := &bytes.Buffer{}
 	previous := removedConnectorNotices
 	removedConnectorNotices = notices
@@ -241,6 +243,9 @@ type omnigentSetup struct {
 type omnigentHarness struct {
 	*removedHarness
 	configPath, modulePath, pthPath, hookDir string
+	// keptModule is the module a finished cleanup leaves ("" = none);
+	// keptPth, the .pth ("" = none naming the hook directory).
+	keptModule, keptPth string
 }
 
 func newOmnigentHarness(t *testing.T, configHome bool) *omnigentHarness {
@@ -265,7 +270,8 @@ func newOmnigentHarness(t *testing.T, configHome bool) *omnigentHarness {
 func (h *omnigentHarness) setUp(t *testing.T, s omnigentSetup) {
 	t.Helper()
 	h.recordSetup(t, removedOmnigentID, "config", h.configPath, s.config, !s.configCreated, omnigentPatchedConfig)
-	h.recordSetup(t, removedOmnigentID, "pth", h.pthPath, s.pth, s.pth != "", s.pth+h.hookDir+"\n")
+	// Setup wrote the .pth with DefenseClaw's line alone.
+	h.recordSetup(t, removedOmnigentID, "pth", h.pthPath, s.pth, s.pth != "", h.hookDir+"\n")
 	h.recordSetup(t, removedOmnigentID, "module", h.modulePath, s.module, s.module != "", omnigentModule)
 }
 
@@ -307,10 +313,14 @@ func (h *omnigentHarness) requireDone(t *testing.T) {
 			t.Fatalf("config.yaml still names the module (%v): %s", err, data)
 		}
 	}
-	if data, err := os.ReadFile(h.pthPath); err == nil && strings.Contains(string(data), h.hookDir) {
+	if h.keptPth != "" {
+		requireRemovedSnapshot(t, "teardown", map[string]string{h.pthPath: h.keptPth})
+	} else if data, err := os.ReadFile(h.pthPath); err == nil && strings.Contains(string(data), h.hookDir) {
 		t.Fatalf(".pth still names the hook directory: %q", data)
 	}
-	if _, err := os.Lstat(h.modulePath); !os.IsNotExist(err) {
+	if h.keptModule != "" {
+		requireRemovedSnapshot(t, "teardown", map[string]string{h.modulePath: h.keptModule})
+	} else if _, err := os.Lstat(h.modulePath); !os.IsNotExist(err) {
 		t.Fatalf("policy module survived: %v", err)
 	}
 	for _, record := range h.records() {
@@ -345,7 +355,7 @@ func TestRemovedOmnigentTeardownUndoesByteIdenticalSetup(t *testing.T) {
 		{name: "config created by setup", setup: omnigentSetup{configCreated: true}, wantConfig: removedMissing, wantPth: removedMissing},
 		{name: "config home", configHome: true, setup: omnigentSetup{config: omnigentOperatorConfig}, wantConfig: omnigentOperatorConfig, wantPth: removedMissing},
 		{name: "pth had a user line", setup: omnigentSetup{config: omnigentOperatorConfig, pth: "/opt/user-site\n"}, wantConfig: omnigentOperatorConfig, wantPth: "/opt/user-site\n"},
-		{name: "older module replaced", setup: omnigentSetup{config: omnigentOperatorConfig, module: "# defenseclaw-managed-policy v1\n# older\n"}, wantConfig: omnigentOperatorConfig, wantPth: removedMissing},
+		{name: "saved module is what setup wrote (GAP-1926)", setup: omnigentSetup{config: omnigentOperatorConfig, module: omnigentModule}, wantConfig: omnigentOperatorConfig, wantPth: removedMissing},
 		{
 			name:  "user already removed DefenseClaw from config",
 			setup: omnigentSetup{config: omnigentOperatorConfig},
@@ -390,11 +400,45 @@ func TestRemovedOmnigentTeardownLeavesUnprovableStateUntouched(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		setup omnigentSetup
+		// savedPth is the .pth setup found, given the hook directory.
+		savedPth func(hookDir string) string
 		// drift makes the unprovable state and returns the file the
 		// warning must name; fix does the recorded step.
 		drift func(t *testing.T, h *omnigentHarness) string
 		fix   func(t *testing.T, h *omnigentHarness)
 	}{
+		// Review loop round 3: a saved module or .pth that names DefenseClaw
+		// was dropped (the module) or put back without DefenseClaw's line
+		// (the .pth) although it may be the user's. Now only a copy that is
+		// byte for byte what setup wrote is dropped; any other is left.
+		{
+			name: "saved module names DefenseClaw but is not what setup wrote", setup: omnigentSetup{config: omnigentOperatorConfig, module: "# defenseclaw-managed-policy v1\n# older\n"},
+			drift: func(t *testing.T, h *omnigentHarness) string { return h.modulePath },
+			fix:   func(t *testing.T, h *omnigentHarness) { _ = os.Remove(h.modulePath) },
+		},
+		{
+			name: "saved module is user code that quotes the marker", setup: omnigentSetup{config: omnigentOperatorConfig, module: "def check(event):\n    return None\n# copied from # defenseclaw-managed-policy v1\n"},
+			drift: func(t *testing.T, h *omnigentHarness) string { return h.modulePath },
+			fix:   func(t *testing.T, h *omnigentHarness) { _ = os.Remove(h.modulePath) },
+		},
+		{
+			name: "saved .pth names the hook directory next to a user line", setup: omnigentSetup{config: omnigentOperatorConfig},
+			savedPth: func(d string) string { return "/opt/user-site\n" + d + "\n" },
+			drift:    func(t *testing.T, h *omnigentHarness) string { return h.pthPath },
+			fix:      func(t *testing.T, h *omnigentHarness) { writeRemovedFixture(t, h.pthPath, "/opt/user-site\n", 0o600) },
+		},
+		{
+			name: "saved .pth with CRLF and a comment names the hook directory", setup: omnigentSetup{config: omnigentOperatorConfig},
+			savedPth: func(d string) string { return "/opt/user-site\r\n" + d + "\r\n# keep me\r\n" },
+			drift:    func(t *testing.T, h *omnigentHarness) string { return h.pthPath },
+			fix:      func(t *testing.T, h *omnigentHarness) { _ = os.Remove(h.pthPath) },
+		},
+		{
+			name: "saved .pth with only the hook directory, padded", setup: omnigentSetup{config: omnigentOperatorConfig},
+			savedPth: func(d string) string { return "\n  " + d + "  \n\n" },
+			drift:    func(t *testing.T, h *omnigentHarness) string { return h.pthPath },
+			fix:      func(t *testing.T, h *omnigentHarness) { _ = os.Remove(h.pthPath) },
+		},
 		{
 			name: "config edited", setup: omnigentSetup{config: omnigentOperatorConfig},
 			drift: func(t *testing.T, h *omnigentHarness) string {
@@ -518,6 +562,9 @@ func TestRemovedOmnigentTeardownLeavesUnprovableStateUntouched(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newOmnigentHarness(t, false)
+			if tc.savedPth != nil {
+				tc.setup.pth = tc.savedPth(h.hookDir)
+			}
 			h.setUp(t, tc.setup)
 			left := tc.drift(t, h)
 			other := filepath.Join(h.home, "omnigent-env", "config.yaml")
@@ -540,6 +587,10 @@ func TestRemovedOmnigentTeardownLeavesUnprovableStateUntouched(t *testing.T) {
 				for _, item := range record.Items {
 					if item.Reason == "" || item.Step == "" {
 						t.Fatalf("manual cleanup item without a reason or step: %+v", item)
+					}
+					// A saved copy left for the user says where it is.
+					if strings.Contains(item.Reason, "saved before its setup") && !strings.Contains(item.Step, "pristine_bytes") {
+						t.Fatalf("manual step for a saved copy does not say where it is: %+v", item)
 					}
 				}
 				if err := h.verify(); err != nil {
@@ -625,6 +676,9 @@ const openHandsOperatorHooks = `{"pre_tool_use":[{"matcher":"*","hooks":[{"type"
 type openHandsHarness struct {
 	*removedHarness
 	hooksPath, script string
+	// noScript: a finished cleanup leaves no hook script (the user deleted
+	// it), so there is no tombstone either.
+	noScript bool
 }
 
 func newOpenHandsHarness(t *testing.T, configHome bool) *openHandsHarness {
@@ -640,6 +694,7 @@ func newOpenHandsHarness(t *testing.T, configHome bool) *openHandsHarness {
 	}
 	h.script = filepath.Join(h.dataDir, "hooks", removedOpenHandsHookScript)
 	writeRemovedFixture(t, h.script, "#!/bin/sh\n# defenseclaw-managed-hook v1\n", 0o700)
+	h.recordScript(t)
 	writeRemovedFixture(t, filepath.Join(h.dataDir, "hooks", ".hookcfg.openhands"), "DEFENSECLAW_CONNECTOR=openhands\n", 0o600)
 	writeRemovedFixture(t, filepath.Join(h.dataDir, "hooks", ".otlp-openhands.token"), strings.Repeat("a", 64)+"\n", 0o600)
 	if _, err := EnsureHookAPIToken(h.dataDir, removedOpenHandsID); err != nil {
@@ -648,11 +703,34 @@ func newOpenHandsHarness(t *testing.T, configHome bool) *openHandsHarness {
 	return h
 }
 
+// recordScript saves what an older setup saved for its hook script: its
+// digest in the hook contract lock.
+func (h *openHandsHarness) recordScript(t *testing.T) {
+	t.Helper()
+	data, err := os.ReadFile(h.script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(h.dataDir, HookContractLockEntry{
+		Connector:         removedOpenHandsID,
+		HookScriptDigests: map[string]string{removedOpenHandsHookScript: "sha256:" + sha256Hex(data)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // hooksDoc renders the hooks.json an older release wrote.
 func (h *openHandsHarness) hooksDoc(t *testing.T) string {
 	t.Helper()
+	return h.hooksDocOver(t, openHandsOperatorHooks)
+}
+
+// hooksDocOver renders the hooks.json an older release wrote over saved, the
+// hooks.json its setup found.
+func (h *openHandsHarness) hooksDocOver(t *testing.T, saved string) string {
+	t.Helper()
 	doc := map[string]interface{}{}
-	if err := json.Unmarshal([]byte(openHandsOperatorHooks), &doc); err != nil {
+	if err := json.Unmarshal([]byte(saved), &doc); err != nil {
 		t.Fatal(err)
 	}
 	for _, event := range []string{"pre_tool_use", "post_tool_use", "stop"} {
@@ -701,8 +779,9 @@ func (h *openHandsHarness) requireDone(t *testing.T) {
 	if data, err := os.ReadFile(h.hooksPath); err == nil && strings.Contains(string(data), h.script) {
 		t.Fatalf("hooks.json still runs DefenseClaw's hook: %s", data)
 	}
-	body, err := os.ReadFile(h.script)
-	if err != nil || !strings.Contains(string(body), "disabled tombstone") {
+	if h.noScript {
+		requireRemovedSnapshot(t, "teardown", map[string]string{h.script: removedMissing})
+	} else if body, err := os.ReadFile(h.script); err != nil || !removedOpenHandsTombstone(body) {
 		t.Fatalf("hook script is not the disabled tombstone: %q, %v", body, err)
 	}
 	for _, gone := range []string{
@@ -795,11 +874,217 @@ func TestRemovedOpenHandsTeardownLeavesUnprovableStateUntouched(t *testing.T) {
 				t.Fatalf("VerifyClean with the steps recorded: %v", err)
 			}
 
+			if _, err := os.Lstat(managedFileBackupPath(h.dataDir, removedOpenHandsID, "config")); os.IsNotExist(err) {
+				// With no record of the hooks file setup found, a hook
+				// DefenseClaw cannot see through (here a command found on
+				// PATH) keeps the script, not the tombstone (review loop
+				// round 3); one it can rule out lets the cleanup finish
+				// (round 4).
+				writeRemovedFixture(t, h.hooksPath, openHandsHooksRunning(t, "audit-hook"), 0o600)
+				h.notices.Reset()
+				if err := h.teardown(); err != nil {
+					t.Fatalf("Teardown after the hooks step: %v", err)
+				}
+				if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(h.script) || !record.lists(h.hooksPath) {
+					t.Fatalf("manual cleanup record = %+v, %v; want the script and hooks.json", record, ok)
+				}
+			}
 			writeRemovedFixture(t, h.hooksPath, openHandsOperatorHooks, 0o600)
 			if err := h.teardown(); err != nil {
 				t.Fatalf("Teardown after the manual step: %v", err)
 			}
 			h.requireDone(t)
+		})
+	}
+}
+
+// Review loop round 3: a recorded hooks.json the user changed so that it
+// runs DefenseClaw's hook script without naming its path (a link, a
+// wrapper, $HOME, a relative or doubled path) was taken as clean, and the
+// still-run script became the tombstone, which exits 0: an allow-all hook
+// with no warning. Now such a hooks file and the script are left for the
+// user, byte for byte, until the script is gone.
+func TestRemovedOpenHandsTeardownKeepsAScriptAHookMayStillRun(t *testing.T) {
+	hooks := func(command string) string {
+		data, err := json.Marshal(map[string]interface{}{"pre_tool_use": []interface{}{map[string]interface{}{
+			"matcher": "*", "hooks": []interface{}{map[string]interface{}{"type": "command", "command": command}},
+		}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	for _, tc := range []struct {
+		name       string
+		configHome bool
+		noRecord   bool
+		// command returns the hook command and any file it made.
+		command func(t *testing.T, h *openHandsHarness) (string, []string)
+	}{
+		{name: "through a symlink", command: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := filepath.Join(h.home, "bin", "oh-hook")
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(h.script, link); err != nil {
+				t.Fatal(err)
+			}
+			return link, []string{link}
+		}},
+		{name: "through a wrapper", command: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			wrapper := filepath.Join(h.home, "bin", "wrap.sh")
+			writeRemovedFixture(t, wrapper, "#!/bin/sh\nexec \"$HOME/.defenseclaw/hooks/openhands-hook.sh\" \"$@\"\n", 0o700)
+			return wrapper + " --audit", []string{wrapper}
+		}},
+		{name: "through $HOME", command: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "$HOME/.defenseclaw/hooks/" + removedOpenHandsHookScript, nil
+		}},
+		{name: "by a relative path", command: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "cd ~/.defenseclaw/hooks && ./" + removedOpenHandsHookScript, nil
+		}},
+		{name: "by a doubled path", command: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return filepath.Join(h.dataDir, "hooks") + "//" + removedOpenHandsHookScript, nil
+		}},
+		{name: "config home, through a symlink", configHome: true, command: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := filepath.Join(h.home, "oh-hook")
+			if err := os.Symlink(h.script, link); err != nil {
+				t.Fatal(err)
+			}
+			return link, []string{link}
+		}},
+		{name: "no record, through a symlink", noRecord: true, command: func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := filepath.Join(h.home, "oh-hook")
+			if err := os.Symlink(h.script, link); err != nil {
+				t.Fatal(err)
+			}
+			return link, []string{link}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newOpenHandsHarness(t, tc.configHome)
+			h.setUp(t, true)
+			if tc.noRecord {
+				discardManagedFileBackup(h.dataDir, removedOpenHandsID, "config")
+			}
+			command, made := tc.command(t, h)
+			writeRemovedFixture(t, h.hooksPath, hooks(command), 0o600)
+			before := h.state(t)
+			for path, body := range removedSnapshot(t, made...) {
+				before[path] = body
+			}
+			for run := 1; run <= 2; run++ {
+				h.notices.Reset()
+				if err := h.teardown(); err != nil {
+					t.Fatalf("Teardown run %d = %v, want the state left for manual cleanup", run, err)
+				}
+				requireRemovedSnapshot(t, "a teardown that cannot prove no hook runs the script", before)
+				h.requirePeerUnchanged(t)
+				notice := h.notices.String()
+				if got := strings.Count(notice, "WARNING"); got != 1 || !strings.Contains(notice, h.hooksPath) || !strings.Contains(notice, h.script) {
+					t.Fatalf("run %d printed %d warnings, want one naming %s and %s:\n%s", run, got, h.hooksPath, h.script, notice)
+				}
+				if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(h.hooksPath) || !record.lists(h.script) {
+					t.Fatalf("manual cleanup record = %+v, %v; want hooks.json and the script", record, ok)
+				}
+				if err := h.verify(); err != nil {
+					t.Fatalf("VerifyClean with the steps recorded: %v", err)
+				}
+			}
+			if err := os.Remove(removedCleanupRecordPath(h.dataDir, removedOpenHandsID)); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.verify(); err == nil || !strings.Contains(err.Error(), "openhands cleanup incomplete") {
+				t.Fatalf("VerifyClean without the record = %v, want the cleanup named incomplete", err)
+			}
+
+			// The user removes the script: nothing can run it any more.
+			if err := os.Remove(h.script); err != nil {
+				t.Fatal(err)
+			}
+			h.notices.Reset()
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown after the manual step: %v", err)
+			}
+			if h.notices.Len() != 0 {
+				t.Fatalf("finished teardown printed: %s", h.notices)
+			}
+			h.noScript = true
+			h.requireDone(t)
+			requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: hooks(command)})
+		})
+	}
+}
+
+// A hooks file the hook contract lock says setup wrote (a workspace's
+// .openhands/hooks.json) is checked even with no backup record for it: while
+// it runs the script, nothing changes and the script is not the tombstone.
+func TestRemovedOpenHandsTeardownChecksTheHooksFilesTheLockNames(t *testing.T) {
+	h := newOpenHandsHarness(t, false)
+	h.setUp(t, true)
+	workspace := filepath.Join(t.TempDir(), "repo", ".openhands", "hooks.json")
+	writeRemovedFixture(t, workspace, `{"stop":[{"matcher":"*","hooks":[{"type":"command","command":"`+h.script+`"}]}]}`, 0o600)
+	data, err := os.ReadFile(h.script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(h.dataDir, HookContractLockEntry{
+		Connector:         removedOpenHandsID,
+		HookScriptDigests: map[string]string{removedOpenHandsHookScript: "sha256:" + sha256Hex(data)},
+		Locations:         ConnectorLocations{HookConfigPaths: []string{h.hooksPath, workspace}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := h.state(t)
+	before[workspace] = removedSnapshot(t, workspace)[workspace]
+	if err := h.teardown(); err != nil {
+		t.Fatalf("Teardown = %v, want the state left for manual cleanup", err)
+	}
+	requireRemovedSnapshot(t, "a teardown with a workspace hooks file that runs the script", before)
+	if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(workspace) {
+		t.Fatalf("manual cleanup record = %+v, %v; want %s", record, ok, workspace)
+	}
+	writeRemovedFixture(t, workspace, `{}`, 0o600)
+	h.notices.Reset()
+	if err := h.teardown(); err != nil {
+		t.Fatalf("Teardown after the manual step: %v", err)
+	}
+	h.requireDone(t)
+	requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: openHandsOperatorHooks, workspace: `{}`})
+}
+
+// A changed hooks.json that provably runs nothing (gone, back to the copy
+// setup found, or holding no command) lets the script become the tombstone
+// with no warning.
+func TestRemovedOpenHandsTeardownTombstonesWhenNoHookCanRunTheScript(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string // "" removes hooks.json
+	}{
+		{"hooks.json emptied", `{}`},
+		{"only matchers left", `{"stop":[{"matcher":"*","hooks":[]}],"pre_tool_use":[]}`},
+		{"blank command", `{"stop":[{"matcher":"*","hooks":[{"type":"command","command":"  "}]}]}`},
+		{"hooks.json deleted", ""},
+		{"hooks.json put back as setup found it", openHandsOperatorHooks},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newOpenHandsHarness(t, false)
+			h.setUp(t, true)
+			if tc.body == "" {
+				if err := os.Remove(h.hooksPath); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeRemovedFixture(t, h.hooksPath, tc.body, 0o600)
+			}
+			want := removedSnapshot(t, h.hooksPath)
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			if h.notices.Len() != 0 {
+				t.Fatalf("a clean teardown printed: %s", h.notices)
+			}
+			h.requireDone(t)
+			requireRemovedSnapshot(t, "teardown", want)
 		})
 	}
 }
@@ -856,4 +1141,946 @@ func TestRemovedOpenHandsTeardownCreatesNothing(t *testing.T) {
 			t.Fatalf("teardown created %s: %v", path, err)
 		}
 	}
+}
+
+// --- Review fixes (loop rounds 2 and 3) ---
+
+// A saved copy that does not name DefenseClaw goes back byte for byte, and so
+// does a saved .pth that names the hook directory when the user's own policy
+// module stays there: that module needs the line (review loop round 3). A
+// module the user wrote since setup is left alone, and a saved copy that is
+// exactly what setup wrote is dropped.
+func TestRemovedOmnigentTeardownPutsSavedCopiesBackExactly(t *testing.T) {
+	const userModule = "def check(event):\n    return None\n"
+	for _, tc := range []struct {
+		name       string
+		setup      omnigentSetup
+		pth        func(hookDir string) string // the saved .pth ("" = none)
+		edit       func(t *testing.T, h *omnigentHarness)
+		keptPth    func(hookDir string) string // what the .pth must hold after ("" = removed)
+		keptModule string
+	}{
+		{name: "saved module is the user's", setup: omnigentSetup{config: omnigentOperatorConfig, module: userModule}, keptModule: userModule},
+		{
+			name: "user rewrote the module after setup", setup: omnigentSetup{config: omnigentOperatorConfig},
+			edit: func(t *testing.T, h *omnigentHarness) {
+				writeRemovedFixture(t, h.modulePath, userModule, 0o600)
+			},
+			keptModule: userModule,
+		},
+		{
+			name: "saved .pth holds only user lines", setup: omnigentSetup{config: omnigentOperatorConfig},
+			pth:     func(string) string { return "/opt/user-site\r\nimport site\n" },
+			keptPth: func(string) string { return "/opt/user-site\r\nimport site\n" },
+		},
+		{
+			name: "saved .pth is what setup wrote (GAP-1926)", setup: omnigentSetup{config: omnigentOperatorConfig},
+			pth: func(d string) string { return d + "\n" },
+		},
+		{
+			name: "saved user module and the .pth line it needs", setup: omnigentSetup{config: omnigentOperatorConfig, module: userModule},
+			pth:        func(d string) string { return d + "\n" },
+			keptPth:    func(d string) string { return d + "\n" },
+			keptModule: userModule,
+		},
+		{
+			name: "saved user module and a .pth with its line among user lines", setup: omnigentSetup{config: omnigentOperatorConfig, module: userModule},
+			pth:        func(d string) string { return "/opt/a\r\n  " + d + "\r\n# keep me" },
+			keptPth:    func(d string) string { return "/opt/a\r\n  " + d + "\r\n# keep me" },
+			keptModule: userModule,
+		},
+		{
+			name: "user module written after setup keeps the saved .pth line", setup: omnigentSetup{config: omnigentOperatorConfig},
+			pth: func(d string) string { return d + "\n/opt/user-site\n" },
+			edit: func(t *testing.T, h *omnigentHarness) {
+				writeRemovedFixture(t, h.modulePath, userModule, 0o600)
+			},
+			keptPth:    func(d string) string { return d + "\n/opt/user-site\n" },
+			keptModule: userModule,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newOmnigentHarness(t, false)
+			if tc.pth != nil {
+				tc.setup.pth = tc.pth(h.hookDir)
+			}
+			h.setUp(t, tc.setup)
+			if tc.edit != nil {
+				tc.edit(t, h)
+			}
+			h.keptModule = tc.keptModule
+			want := map[string]string{h.configPath: omnigentOperatorConfig, h.pthPath: removedMissing}
+			if tc.keptPth != nil {
+				want[h.pthPath] = tc.keptPth(h.hookDir)
+				if strings.Contains(want[h.pthPath], h.hookDir) {
+					h.keptPth = want[h.pthPath]
+				}
+			}
+			for run := 1; run <= 2; run++ {
+				if err := h.teardown(t); err != nil {
+					t.Fatalf("Teardown run %d: %v", run, err)
+				}
+				h.requireDone(t)
+			}
+			requireRemovedSnapshot(t, "teardown", want)
+			if h.notices.Len() != 0 {
+				t.Fatalf("a clean teardown printed: %s", h.notices)
+			}
+		})
+	}
+}
+
+// A hook script DefenseClaw cannot prove it wrote (a link to another script,
+// an edited script, no digest, not a file) stops the whole cleanup: hooks.json,
+// the script and a link's target stay byte for byte and the step is recorded.
+// Once the user deletes the script, the next teardown restores hooks.json and
+// writes no tombstone. A script that is already a tombstone needs no record.
+func TestRemovedOpenHandsTeardownLeavesForeignHookScript(t *testing.T) {
+	const userScript = "#!/bin/sh\nexec /usr/local/bin/my-hook \"$@\"\n"
+	for _, tc := range []struct {
+		name  string
+		drift func(t *testing.T, h *openHandsHarness) (extra string)
+	}{
+		{"script is a link to another script", func(t *testing.T, h *openHandsHarness) string {
+			target := filepath.Join(t.TempDir(), "my-hook.sh")
+			writeRemovedFixture(t, target, userScript, 0o700)
+			if err := os.Remove(h.script); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, h.script); err != nil {
+				t.Fatal(err)
+			}
+			return target
+		}},
+		{"script is a link to a missing file", func(t *testing.T, h *openHandsHarness) string {
+			target := filepath.Join(t.TempDir(), "gone.sh")
+			if err := os.Remove(h.script); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, h.script); err != nil {
+				t.Fatal(err)
+			}
+			return target
+		}},
+		{"script edited", func(t *testing.T, h *openHandsHarness) string {
+			writeRemovedFixture(t, h.script, "#!/bin/sh\n# defenseclaw-managed-hook v1\n# my tweak\n", 0o700)
+			return ""
+		}},
+		{"script without a digest", func(t *testing.T, h *openHandsHarness) string {
+			if err := ClearHookContractLockEntry(h.dataDir, removedOpenHandsID); err != nil {
+				t.Fatal(err)
+			}
+			return ""
+		}},
+		{"script is a directory", func(t *testing.T, h *openHandsHarness) string {
+			if err := os.Remove(h.script); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(h.script, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return ""
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newOpenHandsHarness(t, false)
+			h.setUp(t, true)
+			extra := tc.drift(t, h)
+			paths := []string{h.hooksPath, filepath.Join(h.dataDir, "hooks", ".hookcfg.openhands"),
+				removedTokenFile(t, h.dataDir, removedOpenHandsID), managedFileBackupPath(h.dataDir, removedOpenHandsID, "config")}
+			if info, err := os.Lstat(h.script); err == nil && !info.IsDir() {
+				paths = append(paths, h.script)
+			}
+			if extra != "" {
+				paths = append(paths, extra)
+			}
+			before := removedSnapshot(t, paths...)
+			for run := 1; run <= 2; run++ {
+				h.notices.Reset()
+				if err := h.teardown(); err != nil {
+					t.Fatalf("Teardown run %d = %v, want the state left for manual cleanup", run, err)
+				}
+				requireRemovedSnapshot(t, "a teardown that cannot prove the hook script is DefenseClaw's", before)
+				h.requirePeerUnchanged(t)
+				if got := strings.Count(h.notices.String(), "WARNING"); got != 1 || !strings.Contains(h.notices.String(), h.script) {
+					t.Fatalf("run %d printed %d warnings, want one naming %s:\n%s", run, got, h.script, h.notices)
+				}
+				if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(h.script) || record.lists(h.hooksPath) {
+					t.Fatalf("manual cleanup record = %+v, %v; want only the script", record, ok)
+				}
+				if err := h.verify(); err != nil {
+					t.Fatalf("VerifyClean with the steps recorded: %v", err)
+				}
+			}
+			if err := os.RemoveAll(h.script); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown after the manual step: %v", err)
+			}
+			h.noScript = true
+			h.requireDone(t)
+			requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: openHandsOperatorHooks})
+			if extra != "" {
+				requireRemovedSnapshot(t, "teardown", map[string]string{extra: before[extra]})
+			}
+		})
+	}
+	for _, label := range []string{"OpenHands", "openhands"} {
+		t.Run("script is the tombstone "+label+" teardown wrote", func(t *testing.T) {
+			h := newOpenHandsHarness(t, false)
+			h.setUp(t, true)
+			writeRemovedFixture(t, h.script, disabledHookTombstone(label), 0o700)
+			if err := ClearHookContractLockEntry(h.dataDir, removedOpenHandsID); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			requireRemovedSnapshot(t, "teardown", map[string]string{h.script: disabledHookTombstone(label)})
+			h.requireDone(t)
+			if h.notices.Len() != 0 {
+				t.Fatalf("a clean teardown printed: %s", h.notices)
+			}
+		})
+	}
+}
+
+// failParentSyncOnce makes the next parent-directory sync after a rename into
+// dir fail, with the new file already in place.
+func failParentSyncOnce(t *testing.T, dir string) *int {
+	t.Helper()
+	return failParentSyncOnceWhile(t, dir, nil)
+}
+
+// failParentSyncOnceWhile is failParentSyncOnce that first runs during (when
+// set): another process changing files while the cleanup runs.
+func failParentSyncOnceWhile(t *testing.T, dir string, during func()) *int {
+	t.Helper()
+	failed := 0
+	previous := atomicFileSyncParent
+	atomicFileSyncParent = func(d string) error {
+		if failed == 0 && sameManagedTargetPath(d, dir) {
+			failed++
+			if during != nil {
+				during()
+			}
+			return errors.New("injected: sync parent directory failed")
+		}
+		return previous(d)
+	}
+	t.Cleanup(func() { atomicFileSyncParent = previous })
+	return &failed
+}
+
+// A change whose new bytes are in place when it fails (the parent directory
+// sync after the rename) is rolled back with the changes before it, for
+// every file a removed connector's cleanup writes: nothing is left half
+// cleaned, and the retry finishes.
+func TestRemovedCleanupRollsBackAWriteThatFailedAfterItsRename(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the parent directory is synced only on Linux and macOS")
+	}
+	for _, tc := range []struct {
+		name string
+		dir  func(h *omnigentHarness) string
+	}{
+		{"config.yaml", func(h *omnigentHarness) string { return filepath.Dir(h.configPath) }},
+		{".pth", func(h *omnigentHarness) string { return filepath.Dir(h.pthPath) }},
+		{"module", func(h *omnigentHarness) string { return h.hookDir }},
+	} {
+		t.Run("omnigent "+tc.name, func(t *testing.T) {
+			h := newOmnigentHarness(t, false)
+			const userModule = "def check(event):\n    return None\n"
+			h.setUp(t, omnigentSetup{config: omnigentOperatorConfig, pth: "/opt/user-site\n", module: userModule})
+			before := h.state(t)
+			failed := failParentSyncOnce(t, tc.dir(h))
+			if err := h.teardown(t); err == nil || !strings.Contains(err.Error(), "injected") {
+				t.Fatalf("Teardown = %v, want the injected failure", err)
+			}
+			if *failed != 1 {
+				t.Fatalf("the injected failure ran %d times", *failed)
+			}
+			requireRemovedSnapshot(t, "a teardown whose write failed after its rename", before)
+			h.requirePeerUnchanged(t)
+			if err := h.verify(); err == nil {
+				t.Fatal("VerifyClean passed after a failed teardown")
+			}
+			if err := h.teardown(t); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			h.keptModule = userModule
+			h.requireDone(t)
+			requireRemovedSnapshot(t, "retry", map[string]string{h.configPath: omnigentOperatorConfig, h.pthPath: "/opt/user-site\n"})
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		dir  func(h *openHandsHarness) string
+	}{
+		{"hooks.json", func(h *openHandsHarness) string { return filepath.Dir(h.hooksPath) }},
+		{"tombstone", func(h *openHandsHarness) string { return filepath.Dir(h.script) }},
+	} {
+		t.Run("openhands "+tc.name, func(t *testing.T) {
+			h := newOpenHandsHarness(t, false)
+			h.setUp(t, true)
+			before := h.state(t)
+			failParentSyncOnce(t, tc.dir(h))
+			if err := h.teardown(); err == nil || !strings.Contains(err.Error(), "injected") {
+				t.Fatalf("Teardown = %v, want the injected failure", err)
+			}
+			requireRemovedSnapshot(t, "a teardown whose write failed after its rename", before)
+			if err := h.verify(); err == nil {
+				t.Fatal("VerifyClean passed after a failed teardown")
+			}
+			if err := h.teardown(); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			h.requireDone(t)
+		})
+	}
+}
+
+// The writer removed connectors use never writes through a link: it refuses
+// a link (or anything not a regular file) and leaves its target alone, and it
+// replaces or creates a regular file.
+func TestAtomicWriteFileNoFollowNeverWritesThroughALink(t *testing.T) {
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "regular")
+	writeRemovedFixture(t, regular, "old", 0o600)
+	if err := atomicWriteFileNoFollow(regular, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created := filepath.Join(dir, "created")
+	if err := atomicWriteFileNoFollow(created, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireRemovedSnapshot(t, "atomicWriteFileNoFollow", map[string]string{regular: "new", created: "new"})
+	if err := atomicWriteFileNoFollow(dir, []byte("new"), 0o600); err == nil {
+		t.Fatal("wrote over a directory")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	target := filepath.Join(t.TempDir(), "target")
+	writeRemovedFixture(t, target, "theirs", 0o600)
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFileNoFollow(link, []byte("new"), 0o600); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("atomicWriteFileNoFollow(link) = %v, want a refusal", err)
+	}
+	requireRemovedSnapshot(t, "a refused write", map[string]string{target: "theirs", link: "symlink:" + target})
+}
+
+// The manual cleanup record is never written through a link either.
+func TestRemovedManualCleanupRecordIsNotWrittenThroughALink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	h := newOmnigentHarness(t, false)
+	h.setUp(t, omnigentSetup{config: omnigentOperatorConfig})
+	writeRemovedFixture(t, h.configPath, omnigentPatchedConfig+"model: local\n", 0o600)
+	target := filepath.Join(t.TempDir(), "theirs.json")
+	writeRemovedFixture(t, target, "theirs", 0o600)
+	record := removedCleanupRecordPath(h.dataDir, removedOmnigentID)
+	if err := os.MkdirAll(filepath.Dir(record), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, record); err != nil {
+		t.Fatal(err)
+	}
+	before := h.state(t)
+	if err := h.teardown(t); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("Teardown = %v, want the linked record refused", err)
+	}
+	requireRemovedSnapshot(t, "a refused record write", map[string]string{target: "theirs", record: "symlink:" + target})
+	requireRemovedSnapshot(t, "a refused record write", before)
+}
+
+// --- Review fixes (loop round 4) ---
+
+// openHandsHooksRunning renders a hooks.json with one hook per command.
+func openHandsHooksRunning(t *testing.T, commands ...string) string {
+	t.Helper()
+	hooks := make([]interface{}, 0, len(commands))
+	for _, command := range commands {
+		hooks = append(hooks, map[string]interface{}{"type": "command", "command": command, "timeout": 30})
+	}
+	data, err := json.Marshal(map[string]interface{}{"pre_tool_use": []interface{}{
+		map[string]interface{}{"matcher": "*", "hooks": hooks},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// linkRemovedScript makes path a symlink to the OpenHands hook script.
+func linkRemovedScript(t *testing.T, h *openHandsHarness, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(h.script, path); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// setUpOver does what an older OpenHands setup did over saved, the
+// hooks.json it found; back puts hooks.json back to saved afterwards, as a
+// user who undid DefenseClaw's hooks by hand would.
+func (h *openHandsHarness) setUpOver(t *testing.T, saved string, back bool) {
+	t.Helper()
+	h.recordSetup(t, removedOpenHandsID, "config", h.hooksPath, saved, true, h.hooksDocOver(t, saved))
+	if back {
+		writeRemovedFixture(t, h.hooksPath, saved, 0o600)
+	}
+}
+
+// Review loop round 4: the copy of hooks.json setup found, which the cleanup
+// puts back, was not checked: a hook in it that ran DefenseClaw's script
+// without naming its path (a link, a wrapper, $HOME) was put back and the
+// script became the tombstone, which exits 0. A hooks file already back to
+// that copy was taken as proof too. Now every command in the hooks the
+// cleanup leaves, the copy it puts back included, must be ruled out first;
+// otherwise nothing changes, hooks.json and the script are left for the
+// user, and the cleanup finishes once the script is gone.
+func TestRemovedOpenHandsTeardownChecksTheHooksItPutsBack(t *testing.T) {
+	wrapper := func(t *testing.T, h *openHandsHarness, body string) string {
+		t.Helper()
+		path := filepath.Join(h.home, "tools", "audit.sh")
+		writeRemovedFixture(t, path, "#!/bin/sh\n"+body, 0o700)
+		return path
+	}
+	for _, tc := range []struct {
+		name string
+		// command returns the saved hook command and the files it made.
+		command func(t *testing.T, h *openHandsHarness) (string, []string)
+	}{
+		{"a symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
+			return link, []string{link}
+		}},
+		{"a hard link", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := filepath.Join(h.home, "hooks-of-mine", "audit")
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(h.script, link); err != nil {
+				t.Fatal(err)
+			}
+			return link, []string{link}
+		}},
+		{"an interpreter that runs a symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
+			return "/bin/sh " + link + " --audit 30", []string{link}
+		}},
+		{"an option that names a symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
+			return "/bin/sh --rcfile=" + link, []string{link}
+		}},
+		{"an option that holds code", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
+			return "/bin/sh '-cexec " + link + "'", []string{link}
+		}},
+		{"an option with a relative value", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "/bin/sh --rcfile=bin/oh-audit", nil
+		}},
+		{"a quoted symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "my hooks", "audit"))
+			return "'" + link + "'", []string{link}
+		}},
+		{"a wrapper that names the script under HOME", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			path := wrapper(t, h, "exec \"$HOME/.defenseclaw/hooks/openhands-hook.sh\" \"$@\"\n")
+			return path, []string{path}
+		}},
+		{"a wrapper that runs another symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
+			path := wrapper(t, h, "exec "+link+" \"$@\"\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a symlink under ~", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
+			path := wrapper(t, h, "exec ~/lib/run \"$@\"\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a symlink under a quoted HOME", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
+			path := wrapper(t, h, "exec \"$HOME\"/lib/run \"$@\"\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper's wrapper", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			inner := filepath.Join(h.home, "lib", "inner.sh")
+			writeRemovedFixture(t, inner, "#!/bin/sh\nexec \"$HOME/.defenseclaw/hooks/openhands-hook.sh\"\n", 0o700)
+			path := wrapper(t, h, "exec "+inner+"\n")
+			return path, []string{path, inner}
+		}},
+		{"a wrapper that runs a symlink found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "oh-audit"))
+			path := wrapper(t, h, "exec oh-audit \"$@\"\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a relative path", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
+			path := wrapper(t, h, "cd "+filepath.Dir(link)+" && ./run\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a path from a variable", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
+			path := wrapper(t, h, "LIB="+filepath.Dir(link)+"\nexec \"$LIB/run\"\n")
+			return path, []string{path, link}
+		}},
+		{"a wrapper that runs a path beside itself", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "tools", "run"))
+			path := wrapper(t, h, "exec \"$(dirname \"$0\")/run\"\n")
+			return path, []string{path, link}
+		}},
+		{"a directory that holds a symlink", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "run"))
+			return "/bin/ls " + filepath.Dir(link), []string{link}
+		}},
+		{"$HOME", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "$HOME/.defenseclaw/hooks/" + removedOpenHandsHookScript, nil
+		}},
+		{"~", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "~/.defenseclaw/hooks/" + removedOpenHandsHookScript, nil
+		}},
+		{"a doubled path", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return filepath.Join(h.dataDir, "hooks") + "//" + removedOpenHandsHookScript, nil
+		}},
+		{"a command found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "oh-audit", nil
+		}},
+		{"a relative path", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			return "bin/oh-audit", nil
+		}},
+		{"a shell list", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
+			return "/bin/true; " + link, []string{link}
+		}},
+	} {
+		for _, back := range []bool{false, true} {
+			mode := "put back by the cleanup"
+			if back {
+				mode = "already back to the saved copy"
+			}
+			t.Run(tc.name+", "+mode, func(t *testing.T) {
+				h := newOpenHandsHarness(t, false)
+				command, made := tc.command(t, h)
+				saved := openHandsHooksRunning(t, "/usr/local/bin/audit-hook", command)
+				h.setUpOver(t, saved, back)
+				before := h.state(t)
+				for path, body := range removedSnapshot(t, made...) {
+					before[path] = body
+				}
+				for run := 1; run <= 2; run++ {
+					h.notices.Reset()
+					if err := h.teardown(); err != nil {
+						t.Fatalf("Teardown run %d = %v, want the state left for manual cleanup", run, err)
+					}
+					requireRemovedSnapshot(t, "a teardown that cannot rule out a hook it puts back", before)
+					h.requirePeerUnchanged(t)
+					notice := h.notices.String()
+					if got := strings.Count(notice, "WARNING"); got != 1 || !strings.Contains(notice, h.hooksPath) || !strings.Contains(notice, h.script) {
+						t.Fatalf("run %d printed %d warnings, want one naming %s and %s:\n%s", run, got, h.hooksPath, h.script, notice)
+					}
+					if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(h.hooksPath) || !record.lists(h.script) {
+						t.Fatalf("manual cleanup record = %+v, %v; want hooks.json and the script", record, ok)
+					}
+					if err := h.verify(); err != nil {
+						t.Fatalf("VerifyClean with the steps recorded: %v", err)
+					}
+				}
+				if err := os.Remove(removedCleanupRecordPath(h.dataDir, removedOpenHandsID)); err != nil {
+					t.Fatal(err)
+				}
+				if err := h.verify(); err == nil || !strings.Contains(err.Error(), "openhands cleanup incomplete") {
+					t.Fatalf("VerifyClean without the record = %v, want the cleanup named incomplete", err)
+				}
+
+				// The user deletes the script: nothing can run it any more.
+				if err := os.Remove(h.script); err != nil {
+					t.Fatal(err)
+				}
+				h.notices.Reset()
+				if err := h.teardown(); err != nil {
+					t.Fatalf("Teardown after the manual step: %v", err)
+				}
+				if h.notices.Len() != 0 {
+					t.Fatalf("finished teardown printed: %s", h.notices)
+				}
+				h.noScript = true
+				h.requireDone(t)
+				requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: saved})
+			})
+		}
+	}
+}
+
+// A saved hooks.json whose every command is ruled out (a path that is not
+// there, a plain wrapper, an interpreter with a plain script, a quoted path,
+// a binary) is put back and the script becomes the tombstone with no warning.
+func TestRemovedOpenHandsTeardownTombstonesWhenEverySavedHookIsRuledOut(t *testing.T) {
+	for _, back := range []bool{false, true} {
+		t.Run(map[bool]string{false: "put back by the cleanup", true: "already back to the saved copy"}[back], func(t *testing.T) {
+			h := newOpenHandsHarness(t, false)
+			plain := filepath.Join(h.home, "tools", "audit.sh")
+			writeRemovedFixture(t, plain, "#!/bin/sh\n# audit every tool call\necho audited >&2\nexit 0\n", 0o700)
+			spaced := filepath.Join(h.home, "my hooks", "audit.sh")
+			writeRemovedFixture(t, spaced, "#!/usr/bin/env sh\nexit 0\n", 0o700)
+			compiled := filepath.Join(h.home, "tools", "audit-bin")
+			writeRemovedFixture(t, compiled, "\x7fELF\x02\x01\x01\x00\x00/usr/lib/x\x00", 0o700)
+			saved := openHandsHooksRunning(t,
+				"/usr/local/bin/audit-hook",
+				plain,
+				"/bin/sh "+plain+" --audit 30 --level=high -x",
+				"'"+spaced+"'",
+				compiled+" --config="+filepath.Join(h.home, "tools", "missing.toml"),
+			)
+			h.setUpOver(t, saved, back)
+			if err := h.teardown(); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			if h.notices.Len() != 0 {
+				t.Fatalf("a clean teardown printed: %s", h.notices)
+			}
+			h.requireDone(t)
+			requireRemovedSnapshot(t, "teardown", map[string]string{h.hooksPath: saved})
+		})
+	}
+}
+
+// Review loop round 4: OmniGent teardown did not read the config that
+// OMNIGENT_CONFIG selects (OmniGent reads it before any config home), and
+// with a config home given it read no other config. Every config OmniGent
+// may read is checked now, whichever is given: one that still names the
+// module keeps every file in place until the user removes the entries.
+func TestRemovedOmnigentTeardownChecksEveryConfigOmniGentMayRead(t *testing.T) {
+	explicit := func(env string, parts ...string) func(t *testing.T, h *omnigentHarness) string {
+		return func(t *testing.T, h *omnigentHarness) string {
+			t.Setenv("OMNIGENT_CONFIG", env)
+			return filepath.Join(append([]string{h.home}, parts...)...)
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		configHome bool
+		// active selects the config OmniGent reads and returns its path.
+		active func(t *testing.T, h *omnigentHarness) string
+	}{
+		{"OMNIGENT_CONFIG", false, func(t *testing.T, h *omnigentHarness) string {
+			path := filepath.Join(h.home, "policies", "active.yaml")
+			t.Setenv("OMNIGENT_CONFIG", path)
+			return path
+		}},
+		{"OMNIGENT_CONFIG with a config home", true, func(t *testing.T, h *omnigentHarness) string {
+			path := filepath.Join(h.home, "policies", "active.yaml")
+			t.Setenv("OMNIGENT_CONFIG", "  "+path+"  ")
+			return path
+		}},
+		{"OMNIGENT_CONFIG under ~", false, explicit("~/policies/active.yaml", "policies", "active.yaml")},
+		{"relative OMNIGENT_CONFIG", false, func(t *testing.T, h *omnigentHarness) string {
+			t.Chdir(h.home)
+			return explicit(filepath.Join("policies", "active.yml"), "policies", "active.yml")(t, h)
+		}},
+		{"OMNIGENT_CONFIG_HOME with a config home", true, func(t *testing.T, h *omnigentHarness) string {
+			other := filepath.Join(h.home, "omnigent-env")
+			t.Setenv("OMNIGENT_CONFIG_HOME", other)
+			return filepath.Join(other, "config.yaml")
+		}},
+		{"the default config with a config home", true, func(t *testing.T, h *omnigentHarness) string {
+			return filepath.Join(h.home, ".omnigent", "config.yaml")
+		}},
+		{"OMNIGENT_CONFIG that is a link", false, func(t *testing.T, h *omnigentHarness) string {
+			target := filepath.Join(h.home, "dotfiles", "omnigent.yaml")
+			writeRemovedFixture(t, target, omnigentPatchedConfig, 0o600)
+			link := filepath.Join(h.home, "policies", "active.yaml")
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("OMNIGENT_CONFIG", link)
+			// The test writes the config through the link.
+			return link
+		}},
+		{"a config the hook contract lock names", false, func(t *testing.T, h *omnigentHarness) string {
+			path := filepath.Join(h.home, "work", "omnigent.yaml")
+			if err := SaveHookContractLockEntry(h.dataDir, HookContractLockEntry{
+				Connector: removedOmnigentID,
+				Locations: ConnectorLocations{HookConfigPaths: []string{path}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newOmnigentHarness(t, tc.configHome)
+			h.setUp(t, omnigentSetup{config: omnigentOperatorConfig})
+			active := tc.active(t, h)
+			writeRemovedFixture(t, active, omnigentPatchedConfig, 0o600)
+			before := h.state(t, active)
+			for run := 1; run <= 2; run++ {
+				h.notices.Reset()
+				if err := h.teardown(t); err != nil {
+					t.Fatalf("Teardown run %d = %v, want the state left for manual cleanup", run, err)
+				}
+				requireRemovedSnapshot(t, "a teardown while a config OmniGent reads names the module", before)
+				h.requirePeerUnchanged(t)
+				if got := strings.Count(h.notices.String(), "WARNING"); got != 1 || !strings.Contains(h.notices.String(), active) {
+					t.Fatalf("run %d printed %d warnings, want one naming %s:\n%s", run, got, active, h.notices)
+				}
+				if record, ok := h.manualRecord(t, removedOmnigentID); !ok || !record.lists(active) {
+					t.Fatalf("manual cleanup record = %+v, %v; want %s", record, ok, active)
+				}
+				if err := h.verify(); err != nil {
+					t.Fatalf("VerifyClean with the steps recorded: %v", err)
+				}
+			}
+			if err := os.Remove(removedCleanupRecordPath(h.dataDir, removedOmnigentID)); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.verify(); err == nil || !strings.Contains(err.Error(), active) {
+				t.Fatalf("VerifyClean without the record = %v, want %s named", err, active)
+			}
+
+			writeRemovedFixture(t, active, omnigentCleanedConfig, 0o600)
+			h.notices.Reset()
+			if err := h.teardown(t); err != nil {
+				t.Fatalf("Teardown after the manual step: %v", err)
+			}
+			if h.notices.Len() != 0 {
+				t.Fatalf("finished teardown printed: %s", h.notices)
+			}
+			h.requireDone(t)
+			requireRemovedSnapshot(t, "teardown", map[string]string{h.configPath: omnigentOperatorConfig})
+			if data, err := os.ReadFile(active); err != nil || string(data) != omnigentCleanedConfig {
+				t.Fatalf("teardown changed %s: %q, %v", active, data, err)
+			}
+		})
+	}
+
+	t.Run("OMNIGENT_CONFIG that does not name the module", func(t *testing.T) {
+		h := newOmnigentHarness(t, false)
+		h.setUp(t, omnigentSetup{config: omnigentOperatorConfig})
+		active := filepath.Join(h.home, "policies", "active.yaml")
+		t.Setenv("OMNIGENT_CONFIG", active)
+		writeRemovedFixture(t, active, omnigentCleanedConfig, 0o600)
+		if err := h.teardown(t); err != nil {
+			t.Fatalf("Teardown: %v", err)
+		}
+		if h.notices.Len() != 0 {
+			t.Fatalf("a clean teardown printed: %s", h.notices)
+		}
+		h.requireDone(t)
+		requireRemovedSnapshot(t, "teardown", map[string]string{active: omnigentCleanedConfig, h.configPath: omnigentOperatorConfig})
+	})
+}
+
+// Review loop round 4: a failed cleanup's rollback wrote the bytes the plan
+// read over every file it had changed without looking at them, so a change
+// another process made to such a file in the meantime was lost. Now a file is
+// written back only while it holds what the cleanup wrote: one changed since
+// (edited, deleted, recreated or replaced by a link, the failing file itself
+// included) is kept as it is and named in the error, the other files are
+// rolled back, the backup records and the token stay, and the retry plans
+// from what is there.
+func TestRemovedCleanupRollbackKeepsAConcurrentChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the parent directory is synced only on Linux and macOS")
+	}
+	const userModule = "def check(event):\n    return None\n"
+	edited := omnigentOperatorConfig + "# my edit\n"
+	allWrites := omnigentSetup{config: omnigentOperatorConfig, pth: "/opt/user-site\n", module: userModule}
+	for _, tc := range []struct {
+		name  string
+		setup omnigentSetup
+		// failDir is the directory whose sync fails; during changes a file
+		// first and returns it with the bytes it must keep.
+		failDir func(h *omnigentHarness) string
+		during  func(t *testing.T, h *omnigentHarness) (string, string)
+		// retryLeaves: the retry leaves the changed file for the user.
+		retryLeaves bool
+	}{
+		{name: "config.yaml edited after it was put back", setup: allWrites,
+			failDir: func(h *omnigentHarness) string { return h.hookDir },
+			during: func(t *testing.T, h *omnigentHarness) (string, string) {
+				writeRemovedFixture(t, h.configPath, edited, 0o600)
+				return h.configPath, edited
+			}},
+		{name: "config.yaml deleted after it was put back", setup: allWrites,
+			failDir: func(h *omnigentHarness) string { return h.hookDir },
+			during: func(t *testing.T, h *omnigentHarness) (string, string) {
+				if err := os.Remove(h.configPath); err != nil {
+					t.Fatal(err)
+				}
+				return h.configPath, removedMissing
+			}},
+		{name: "config.yaml replaced by a link after it was put back", setup: allWrites, retryLeaves: true,
+			failDir: func(h *omnigentHarness) string { return h.hookDir },
+			during: func(t *testing.T, h *omnigentHarness) (string, string) {
+				target := filepath.Join(h.home, "elsewhere.yaml")
+				writeRemovedFixture(t, target, edited, 0o600)
+				if err := os.Remove(h.configPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, h.configPath); err != nil {
+					t.Fatal(err)
+				}
+				return h.configPath, "symlink:" + target
+			}},
+		{name: ".pth edited after it was put back", setup: allWrites,
+			failDir: func(h *omnigentHarness) string { return h.hookDir },
+			during: func(t *testing.T, h *omnigentHarness) (string, string) {
+				writeRemovedFixture(t, h.pthPath, "/opt/user-site\n/opt/more\n", 0o600)
+				return h.pthPath, "/opt/user-site\n/opt/more\n"
+			}},
+		{name: ".pth recreated after the cleanup removed it", setup: omnigentSetup{config: omnigentOperatorConfig, module: userModule},
+			failDir: func(h *omnigentHarness) string { return h.hookDir },
+			during: func(t *testing.T, h *omnigentHarness) (string, string) {
+				writeRemovedFixture(t, h.pthPath, "/opt/mine\n", 0o600)
+				return h.pthPath, "/opt/mine\n"
+			}},
+		{name: "module edited while its own write failed", setup: allWrites,
+			failDir: func(h *omnigentHarness) string { return h.hookDir },
+			during: func(t *testing.T, h *omnigentHarness) (string, string) {
+				writeRemovedFixture(t, h.modulePath, userModule+"# mine\n", 0o600)
+				return h.modulePath, userModule + "# mine\n"
+			}},
+		{name: "config.yaml edited while its own write failed", setup: allWrites,
+			failDir: func(h *omnigentHarness) string { return filepath.Dir(h.configPath) },
+			during: func(t *testing.T, h *omnigentHarness) (string, string) {
+				writeRemovedFixture(t, h.configPath, edited, 0o600)
+				return h.configPath, edited
+			}},
+	} {
+		t.Run("omnigent "+tc.name, func(t *testing.T) {
+			h := newOmnigentHarness(t, false)
+			h.setUp(t, tc.setup)
+			want := h.state(t)
+			var changed string
+			failed := failParentSyncOnceWhile(t, tc.failDir(h), func() {
+				var body string
+				changed, body = tc.during(t, h)
+				want[changed] = body
+			})
+			err := h.teardown(t)
+			if err == nil || !strings.Contains(err.Error(), "injected") || !strings.Contains(err.Error(), changed) ||
+				!strings.Contains(err.Error(), "kept as it is") {
+				t.Fatalf("Teardown = %v, want the injected failure and %s kept", err, changed)
+			}
+			if *failed != 1 {
+				t.Fatalf("the injected failure ran %d times", *failed)
+			}
+			requireRemovedSnapshot(t, "a failed teardown that met a concurrent change", want)
+			h.requirePeerUnchanged(t)
+			if _, ok := h.manualRecord(t, removedOmnigentID); ok {
+				t.Fatal("a failed teardown recorded manual steps")
+			}
+
+			h.notices.Reset()
+			if err := h.teardown(t); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			requireRemovedSnapshot(t, "retry", map[string]string{changed: want[changed]})
+			record, left := h.manualRecord(t, removedOmnigentID)
+			if tc.retryLeaves {
+				if !left || !record.lists(changed) {
+					t.Fatalf("manual cleanup record = %+v, %v; want %s", record, left, changed)
+				}
+				return
+			}
+			if left {
+				t.Fatalf("retry left manual steps: %+v", record)
+			}
+			if err := h.verify(); err != nil {
+				t.Fatalf("VerifyClean after the retry: %v", err)
+			}
+			for _, path := range h.records() {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("%s survived the retry: %v", path, err)
+				}
+			}
+			if token, err := LoadHookAPIToken(h.dataDir, removedOmnigentID); err != nil || token != "" {
+				t.Fatalf("omnigent token = %q, %v; want revoked", token, err)
+			}
+			h.requirePeerUnchanged(t)
+		})
+	}
+
+	t.Run("openhands hooks.json edited after it was put back", func(t *testing.T) {
+		h := newOpenHandsHarness(t, false)
+		h.setUp(t, true)
+		want := h.state(t)
+		failParentSyncOnceWhile(t, filepath.Dir(h.script), func() {
+			writeRemovedFixture(t, h.hooksPath, `{}`, 0o600)
+			want[h.hooksPath] = `{}`
+		})
+		if err := h.teardown(); err == nil || !strings.Contains(err.Error(), h.hooksPath) || !strings.Contains(err.Error(), "kept as it is") {
+			t.Fatalf("Teardown = %v, want %s kept", err, h.hooksPath)
+		}
+		requireRemovedSnapshot(t, "a failed teardown that met a concurrent change", want)
+		h.requirePeerUnchanged(t)
+		if err := h.teardown(); err != nil {
+			t.Fatalf("retry: %v", err)
+		}
+		h.requireDone(t)
+		requireRemovedSnapshot(t, "retry", map[string]string{h.hooksPath: `{}`})
+	})
+}
+
+// A hooks file or config teardown only reads (no backup record names it) is
+// read through a link: a link to a hooks file whose hook may run the script
+// keeps the script, and a link to one that runs nothing lets the cleanup
+// finish (review loop round 4).
+func TestRemovedOpenHandsTeardownReadsAnUnrecordedHooksFileThroughALink(t *testing.T) {
+	h := newOpenHandsHarness(t, false)
+	h.setUp(t, true)
+	target := filepath.Join(h.home, "dotfiles", "hooks.json")
+	link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "oh-audit"))
+	writeRemovedFixture(t, target, openHandsHooksRunning(t, link), 0o600)
+	workspace := filepath.Join(h.home, "repo", ".openhands", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(workspace), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, workspace); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(h.script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(h.dataDir, HookContractLockEntry{
+		Connector:         removedOpenHandsID,
+		HookScriptDigests: map[string]string{removedOpenHandsHookScript: "sha256:" + sha256Hex(data)},
+		Locations:         ConnectorLocations{HookConfigPaths: []string{h.hooksPath, workspace}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := h.state(t)
+	for path, body := range removedSnapshot(t, workspace, target, link) {
+		before[path] = body
+	}
+	if err := h.teardown(); err != nil {
+		t.Fatalf("Teardown = %v, want the state left for manual cleanup", err)
+	}
+	requireRemovedSnapshot(t, "a teardown with a linked hooks file that may run the script", before)
+	if record, ok := h.manualRecord(t, removedOpenHandsID); !ok || !record.lists(workspace) || !record.lists(h.script) {
+		t.Fatalf("manual cleanup record = %+v, %v; want %s and the script", record, ok, workspace)
+	}
+	writeRemovedFixture(t, target, `{}`, 0o600)
+	h.notices.Reset()
+	if err := h.teardown(); err != nil {
+		t.Fatalf("Teardown after the manual step: %v", err)
+	}
+	if h.notices.Len() != 0 {
+		t.Fatalf("finished teardown printed: %s", h.notices)
+	}
+	h.requireDone(t)
+	requireRemovedSnapshot(t, "teardown", map[string]string{workspace: "symlink:" + target, target: `{}`})
 }
