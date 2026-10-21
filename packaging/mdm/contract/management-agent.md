@@ -45,9 +45,10 @@ gateway.
   changed. The command holds room for its event from that check until the
   event is written, so concurrent commands cannot fill the spool in
   between. A record that fails after the change is the warning
-  `change_unrecorded`; a command that ends between its change and its
-  event is reported as failed with reason `interrupted` when the next
-  change is recorded. A `BUNDLE=` `TRUSTANCHORS=` run whose bundle is not
+  `change_unrecorded`; a command that ends after that check and before
+  its event (killed, or the device restarted) is reported as failed with
+  reason `interrupted` when the next change event is written, whether or
+  not it had changed anything. A `BUNDLE=` `TRUSTANCHORS=` run whose bundle is not
   confirmed records one refused anchor install. No event carries a credential value or a hash of
   one. Byte-identical anchors, a `set` of the
   stored value and a `remove` of an absent credential record nothing. The
