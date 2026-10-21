@@ -425,6 +425,33 @@ func TestGatewayConfigRollback(t *testing.T) {
 	})
 }
 
+// GAP-0347: a raw OpenShell client does not take DefenseClaw's lifecycle
+// lock. Rollback must check again after restoring files and reloading units,
+// since such a client can start a MicroVM while those steps run.
+func TestRollbackRefusesAMicroVMStartedDuringRestore(t *testing.T) {
+	f := newGatewayFixture(t)
+	f.write(t, "gateway.toml", operatorTOML)
+	res, err := f.apply(f.plan(t, bothChanges))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	f.cfg.CheckStopped = func(context.Context) error {
+		checks++
+		if checks == 1 {
+			return nil // stopped before restore
+		}
+		if got := f.read(t, "gateway.toml"); got != operatorTOML {
+			t.Fatalf("check ran before restore: %q", got)
+		}
+		return fmt.Errorf("%w: a raw OpenShell client started a MicroVM", openshell.ErrUnflushed)
+	}
+	err = f.cfg.Rollback(context.Background(), res)
+	if !errors.Is(err, openshell.ErrUnflushed) || checks != 2 || f.restarts() != 1 {
+		t.Fatalf("rollback after concurrent start = %v; checks %d, restarts %d", err, checks, f.restarts())
+	}
+}
+
 var errProbe = errors.New("could not confirm the gateway requires a client certificate: i/o timeout")
 
 // TestGatewayConfigRefusesBindMountsOnExposedGateway covers the gateway

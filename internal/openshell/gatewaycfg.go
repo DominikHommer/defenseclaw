@@ -1618,6 +1618,12 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	if err := g.restore(ctx, res); err != nil {
 		return err
 	}
+	// Restoring files and reloading units can take long enough for a raw
+	// OpenShell client, which does not take our lifecycle lock, to start a
+	// MicroVM. Recheck after both before the restart that would end it.
+	if err := g.CheckStopped(ctx); err != nil {
+		return fmt.Errorf("the previous gateway files were restored, but the restart is pending; stop the sandbox shown and run `defenseclaw sandbox doctor --fix`: %w", err)
+	}
 	return g.restart(ctx)
 }
 
