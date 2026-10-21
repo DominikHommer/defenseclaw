@@ -337,6 +337,12 @@ func TestAccountOpenShellDrift(t *testing.T) {
 	if drift, err := r.o.Drift(s); err != nil || driftFields(drift) != "Docker sandbox namespace" {
 		t.Fatalf("default namespace: %v %v", drift, err)
 	}
+	// So does one in the account's own namespace: a managed sandbox made
+	// there is lost to the rendered gateway after its next start.
+	write(openshell.GatewayTOMLFile, "[openshell]\nversion = 2\n[openshell.drivers.docker]\nsandbox_label = \""+openshell.AccountDockerNamespace(5001)+"\"\n")
+	if drift, err := r.o.Drift(s); err != nil || driftFields(drift) != "Docker sandbox namespace" {
+		t.Fatalf("own namespace: %v %v", drift, err)
+	}
 	managedNS := "[openshell.drivers.docker]\nsandbox_label = \"" + openshell.ManagedDockerNamespace + "\"\n"
 	write(openshell.GatewayTOMLFile, "[openshell]\nversion = 2\n"+managedNS)
 	if drift, err := r.o.Drift(s); err != nil || len(drift) != 0 {

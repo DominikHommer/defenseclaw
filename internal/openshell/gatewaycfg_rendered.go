@@ -77,6 +77,16 @@ type RenderedGateway struct {
 	DefaultDockerNamespaceBridge bool
 }
 
+// dockerNamespace is the docker sandbox namespace r renders:
+// ManagedDockerNamespace, or OpenShell's default one under the 1.0.1
+// upgrade bridge (remove with DefaultDockerNamespaceBridge).
+func (r RenderedGateway) dockerNamespace() string {
+	if r.DefaultDockerNamespaceBridge {
+		return DefaultDockerNamespace
+	}
+	return ManagedDockerNamespace
+}
+
 // renderedHeader marks the files the lifecycle owns.
 const renderedHeader = "# Written by the DefenseClaw enterprise lifecycle from enterprise.openshell. Do not edit.\n"
 
@@ -361,11 +371,16 @@ func (s *GatewayConfigState) Drift(want RenderedGateway) []SettingDrift {
 		id := s.VM.Identity()
 		add("MicroVM workload identity", VMIdentity{UID: want.VMSandboxUID, GID: want.VMSandboxGID}.String(), id.String())
 	}
-	if want.ComputeDriver == DriverDocker && !want.DefaultDockerNamespaceBridge && s.SharesDefaultDockerNamespace() {
-		// A gateway in the shared default namespace removes the supervisors
-		// of other accounts' sandboxes each time it starts; the rendered
-		// gateways keep theirs in ManagedDockerNamespace.
-		drift = append(drift, SettingDrift{Field: "Docker sandbox namespace", Want: ManagedDockerNamespace, Have: DefaultDockerNamespace})
+	if want.ComputeDriver == DriverDocker {
+		// A gateway lists only its own namespace's sandboxes: one made in
+		// another is lost to the rendered gateway, with its unpulled work,
+		// and one in the shared default namespace removes the supervisors
+		// of other accounts' sandboxes each time it starts.
+		have := s.DockerNamespace
+		if have == "" {
+			have = DefaultDockerNamespace
+		}
+		add("Docker sandbox namespace", want.dockerNamespace(), have)
 	}
 	add("OpenShell telemetry", strconv.FormatBool(want.TelemetryEnabled), strconv.FormatBool(s.TelemetryEnabled()))
 	return drift
