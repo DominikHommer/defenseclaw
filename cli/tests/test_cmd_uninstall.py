@@ -653,7 +653,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
         with (
             patch.object(cmd_uninstall, "_validate_plan", side_effect=lambda _: order.append("validate")),
             patch.object(cmd_uninstall, "_stop_gateway", side_effect=lambda _: order.append("stop")),
-            patch.object(cmd_uninstall, "_connector_teardown", side_effect=lambda _: order.append("teardown")),
+            patch.object(cmd_uninstall, "_connector_teardown", side_effect=lambda *_: order.append("teardown")),
             patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=True),
             patch.object(
                 cmd_uninstall,
@@ -847,7 +847,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
 
             teardown_plans = []
 
-            def record_teardown(plan):
+            def record_teardown(plan, connectors=None):
                 teardown_plans.append(plan)
 
             isolated_env = {
@@ -1429,13 +1429,24 @@ class RemovedConnectorManualCleanupGateTests(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(body)
 
-    def _run(self, plan: cmd_uninstall.UninstallPlan, deferred: bool = False) -> dict:
-        calls = {}
+    def _run(self, plan: cmd_uninstall.UninstallPlan, deferred: bool = False, teardown=None) -> dict:
+        calls: dict = {}
+
+        def record(name):
+            return lambda *args, **kwargs: calls.setdefault(name, True)
+
+        def connector_teardown(plan, connectors=None):
+            names = tuple(plan.connectors if connectors is None else connectors)
+            calls.setdefault("teardown", []).append(names)
+            if teardown is not None:
+                teardown(names)
+
         with (
             patch.object(cmd_uninstall, "_validate_plan"),
-            patch.object(cmd_uninstall, "_stop_gateway"),
-            patch.object(cmd_uninstall, "_connector_teardown", side_effect=lambda _: calls.setdefault("teardown", True)),
-            patch.object(cmd_uninstall, "_turn_guardrail_off"),
+            patch.object(cmd_uninstall, "_sandbox_teardown", side_effect=record("sandbox")),
+            patch.object(cmd_uninstall, "_stop_gateway", side_effect=record("gateway_stop")),
+            patch.object(cmd_uninstall, "_connector_teardown", side_effect=connector_teardown),
+            patch.object(cmd_uninstall, "_turn_guardrail_off", side_effect=record("guardrail_off")),
             patch.object(cmd_uninstall, "_remove_probe_created_state"),
             patch.object(cmd_uninstall, "_remove_created_dirs"),
             patch.object(cmd_uninstall, "_remove_orphan_copilot_plugin"),
@@ -1500,6 +1511,80 @@ class RemovedConnectorManualCleanupGateTests(unittest.TestCase):
             self._record(data_dir, "omnigent", "{}")
             calls = self._run(cmd_uninstall.UninstallPlan(data_dir=data_dir, connectors=("omnigent",)))
         self.assertNotIn("error", calls)
+
+    _PENDING = json.dumps(
+        {
+            "connector": "omnigent",
+            "label": "OmniGent",
+            "items": [{"path": "/home/u/.omnigent/config.yaml", "reason": "it changed", "step": "remove the entry"}],
+        }
+    )
+
+    def test_blocked_removal_leaves_the_surviving_connectors_protected(self):
+        # Review loop round 3: the check ran after the gateway stop, every
+        # connector's teardown and (with --binaries alone) guardrail.enabled =
+        # false, so a blocked uninstall left Codex unprotected. Only the
+        # removed connector's own teardown may run before the check.
+        for flags in ({"remove_data_dir": True}, {"remove_binaries": True}, {"remove_data_dir": True, "remove_binaries": True}):
+            for when in ("recorded before", "recorded by its teardown"):
+                for deferred in (False, True):
+                    with (
+                        self.subTest(flags=flags, when=when, deferred=deferred),
+                        tempfile.TemporaryDirectory() as data_dir,
+                    ):
+                        teardown = None
+                        if when == "recorded before":
+                            self._record(data_dir, "omnigent", self._PENDING)
+                        else:
+
+                            def teardown(names, data_dir=data_dir):
+                                if "omnigent" in names:
+                                    self._record(data_dir, "omnigent", self._PENDING)
+
+                        plan = cmd_uninstall.UninstallPlan(
+                            data_dir=data_dir,
+                            connectors=("codex", "omnigent", "claudecode"),
+                            sandbox_teardown=True,
+                            **flags,
+                        )
+                        calls = self._run(plan, deferred=deferred, teardown=teardown)
+                        self.assertIn("No data or binaries were removed", calls.get("error", ""))
+                        self.assertIn("/home/u/.omnigent/config.yaml (it changed): remove the entry", calls["error"])
+                        self.assertEqual(calls.get("teardown"), [("omnigent",)])
+                        for skipped in ("sandbox", "gateway_stop", "guardrail_off", "data", "binaries", "deferred"):
+                            self.assertNotIn(skipped, calls)
+
+    def test_finished_manual_cleanup_lets_the_uninstall_go_on(self):
+        # The rerun after the steps: the removed connector's teardown clears
+        # its record, so the check passes and the rest runs in order.
+        for flags in ({"remove_data_dir": True}, {"remove_binaries": True}):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as data_dir:
+                self._record(data_dir, "omnigent", self._PENDING)
+                record = os.path.join(data_dir, "removed_connector_cleanup", "omnigent.json")
+
+                def teardown(names, record=record):
+                    if "omnigent" in names:
+                        os.remove(record)
+
+                plan = cmd_uninstall.UninstallPlan(data_dir=data_dir, connectors=("codex", "omnigent"), **flags)
+                calls = self._run(plan, teardown=teardown)
+                self.assertNotIn("error", calls)
+                self.assertEqual(calls.get("teardown"), [("omnigent",), ("codex",)])
+                self.assertTrue(calls.get("gateway_stop"))
+                if flags.get("remove_data_dir"):
+                    self.assertTrue(calls.get("data"))
+                    self.assertNotIn("guardrail_off", calls)
+                else:
+                    self.assertTrue(calls.get("binaries"))
+                    self.assertTrue(calls.get("guardrail_off"))
+
+    def test_plain_uninstall_tears_down_in_plan_order(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            self._record(data_dir, "omnigent", self._PENDING)
+            calls = self._run(cmd_uninstall.UninstallPlan(data_dir=data_dir, connectors=("codex", "omnigent")))
+        self.assertNotIn("error", calls)
+        self.assertEqual(calls.get("teardown"), [("codex", "omnigent")])
+        self.assertTrue(calls.get("gateway_stop") and calls.get("guardrail_off"))
 
 
 class ConnectorTeardownDispatchTests(unittest.TestCase):
@@ -1887,7 +1972,7 @@ class ExecutePlanConnectorTests(unittest.TestCase):
             stop_mock, teardown_mock, plugin_mock, wipe_mock, bin_mock = mocks
             cmd_uninstall._execute_plan(plan)
             stop_mock.assert_called_once()
-            teardown_mock.assert_called_once_with(plan)
+            teardown_mock.assert_called_once_with(plan, ("codex",))
             plugin_mock.assert_not_called()
             wipe_mock.assert_not_called()
             bin_mock.assert_not_called()

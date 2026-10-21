@@ -32,10 +32,12 @@ package connector
 // no record, it is a link, or it cannot be read) is left byte for byte, and
 // then nothing at all is changed: the steps to finish by hand are recorded,
 // which status and doctor show, and printed once. A file is never parsed and
-// written back; only the saved copy of DefenseClaw's own .pth file is put back
-// without DefenseClaw's line. Writes replace the file itself, never a link's
-// target, and a change that fails, even after its new bytes are in place, is
-// rolled back with the changes before it.
+// written back: a saved copy goes back byte for byte, and one that names
+// DefenseClaw is dropped only when it is exactly what setup itself wrote. The
+// OpenHands hook script becomes the tombstone only when no hooks file can
+// still run it. Writes replace the file itself, never a link's target, and a
+// change that fails, even after its new bytes are in place, is rolled back
+// with the changes before it.
 
 import (
 	"bytes"
@@ -284,12 +286,16 @@ type removedFileKind struct {
 	// names reports whether bytes still hold DefenseClaw's entry. An error
 	// means teardown cannot tell, which counts as naming it.
 	names func([]byte) (bool, error)
-	// withoutEntry is set for a file DefenseClaw owns by name (the policy
-	// module, its .pth file). When the copy setup found names DefenseClaw too
-	// (an earlier setup, GAP-1926), it returns that copy without
-	// DefenseClaw's entry, or nil to remove the file. Without it (the
-	// agent's own config) such a file is left for the user.
-	withoutEntry func(saved []byte) []byte
+	// ownedName is set for a file under DefenseClaw's own name (the policy
+	// module, its .pth file). When the copy setup found names DefenseClaw
+	// too, the file is removed only if that copy is byte for byte what setup
+	// itself wrote: an earlier DefenseClaw setup left it (GAP-1926). Any
+	// other such copy may be the user's and is left for them, as is every
+	// such copy of the agent's own config.
+	ownedName bool
+	// keepSaved puts the saved copy back byte for byte even when it names
+	// DefenseClaw: the .pth line the user's own policy module needs.
+	keepSaved bool
 	// step says how to remove DefenseClaw's entry by hand.
 	step string
 }
@@ -357,12 +363,13 @@ func (p *removedCleanupPlan) addRecorded(dataDir, connectorName, logical string,
 		}
 		names, err := kind.names(saved)
 		switch {
-		case err == nil && !names:
+		case kind.keepSaved || (err == nil && !names):
 			file.restore = saved
-		case err == nil && kind.withoutEntry != nil:
-			file.restore = kind.withoutEntry(saved)
+		case err == nil && kind.ownedName && sha256Hex(saved) == record.PostSHA256:
+			// The saved copy is what setup wrote: an earlier setup's.
 		default:
-			p.leave(path, "the copy DefenseClaw saved before its setup names DefenseClaw too", kind.step)
+			p.leave(path, "the copy DefenseClaw saved before its setup names DefenseClaw too, so it may be yours",
+				"copy what you need from that copy (pristine_bytes, base64, in "+recordPath+"), then "+kind.step)
 			return path, nil
 		}
 		if file.restore != nil {
@@ -391,6 +398,26 @@ func (p *removedCleanupPlan) addUnrecorded(path string, kind removedFileKind) er
 	}
 	p.addFound(path, data, kind, "DefenseClaw has no record of writing it")
 	return nil
+}
+
+// plans reports whether the plan changes path; lists, whether it leaves path
+// for the user.
+func (p *removedCleanupPlan) plans(path string) bool {
+	for _, file := range p.files {
+		if sameManagedTargetPath(file.path, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *removedCleanupPlan) lists(path string) bool {
+	for _, item := range p.manual {
+		if sameManagedTargetPath(item.Path, path) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *removedCleanupPlan) addFound(path string, data []byte, kind removedFileKind, reason string) {
@@ -473,12 +500,23 @@ func (removedOpenHandsConnector) hookScript(opts SetupOpts) string {
 
 // hooksPaths are the hooks.json files an older release may have written
 // besides the one its setup backup names: the explicit config home native
-// maintenance passes, else the user-global default.
-func (removedOpenHandsConnector) hooksPaths(opts SetupOpts) []string {
+// maintenance passes, else the user-global default, and every hooks.json the
+// hook contract lock says setup wrote (a workspace's .openhands/hooks.json).
+func (c removedOpenHandsConnector) hooksPaths(opts SetupOpts) []string {
+	var paths []string
 	if home := strings.TrimSpace(opts.ConfigHome); home != "" && filepath.IsAbs(home) {
-		return []string{filepath.Join(filepath.Clean(home), "hooks.json")}
+		paths = append(paths, filepath.Join(filepath.Clean(home), "hooks.json"))
+	} else {
+		paths = append(paths, homePath(".openhands", "hooks.json"))
 	}
-	return []string{homePath(".openhands", "hooks.json")}
+	if entry, err := LoadHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise); err == nil {
+		for _, path := range entry.Locations.HookConfigPaths {
+			if filepath.IsAbs(path) && filepath.Base(path) == "hooks.json" {
+				paths = append(paths, filepath.Clean(path))
+			}
+		}
+	}
+	return uniqueNonEmptyStrings(paths)
 }
 
 func (c removedOpenHandsConnector) plan(opts SetupOpts) (*removedCleanupPlan, error) {
@@ -492,6 +530,10 @@ func (c removedOpenHandsConnector) plan(opts SetupOpts) (*removedCleanupPlan, er
 	if err != nil {
 		return nil, err
 	}
+	var checked []string
+	if recorded != "" {
+		checked = append(checked, recorded)
+	}
 	for _, path := range c.hooksPaths(opts) {
 		if recorded != "" && sameManagedTargetPath(path, recorded) {
 			continue
@@ -499,21 +541,87 @@ func (c removedOpenHandsConnector) plan(opts SetupOpts) (*removedCleanupPlan, er
 		if err := p.addUnrecorded(path, kind); err != nil {
 			return nil, err
 		}
+		checked = append(checked, path)
 	}
 	// Last: the script becomes the tombstone only once no hooks file runs it.
-	if err := c.addHookScript(p, opts); err != nil {
+	if err := c.addHookScript(p, opts, c.hooksThatMayRunScript(p, opts, checked)); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+// hooksThatMayRunScript lists the hooks files in paths that the plan neither
+// changes nor leaves for the user, and that may still run the hook script
+// without naming its path: through a link, a wrapper, $HOME or a relative
+// path. A hooks file is proven not to run it when it is gone, is byte for
+// byte the copy setup found before it wrote its hooks, or runs nothing (no
+// string in it but a matcher or a hook type).
+func (c removedOpenHandsConnector) hooksThatMayRunScript(p *removedCleanupPlan, opts SetupOpts, paths []string) []string {
+	record, recordErr := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config"))
+	var out []string
+	for _, path := range paths {
+		if p.plans(path) || p.lists(path) {
+			continue
+		}
+		data, info, err := readRemovedFile(path)
+		if err != nil || info == nil {
+			continue
+		}
+		if recordErr == nil && record.Existed && sameManagedTargetPath(record.Path, path) && bytes.Equal(data, record.PristineBytes) {
+			continue
+		}
+		if removedJSONRunsNothing(data) {
+			continue
+		}
+		out = append(out, path)
+	}
+	return out
+}
+
+// removedJSONRunsNothing reports whether a hooks file holds no command: it is
+// one JSON document with no non-blank string except a "matcher" or "type"
+// value.
+func removedJSONRunsNothing(data []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var document interface{}
+	if err := decoder.Decode(&document); err != nil {
+		return false
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return false
+	}
+	var runs func(value interface{}, key string) bool
+	runs = func(value interface{}, key string) bool {
+		switch v := value.(type) {
+		case string:
+			return strings.TrimSpace(v) != "" && key != "matcher" && key != "type"
+		case []interface{}:
+			for _, item := range v {
+				if runs(item, key) {
+					return true
+				}
+			}
+		case map[string]interface{}:
+			for k, item := range v {
+				if runs(item, k) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return !runs(document, "")
 }
 
 // addHookScript plans DefenseClaw's hook script: a script exactly as setup
 // wrote it (its digest in the hook contract lock) becomes the disabled
 // tombstone, so an OpenHands conversation that loaded the hook before
 // teardown keeps working. A script DefenseClaw cannot prove it wrote (it
-// changed, there is no digest, or it is a link or not a regular file) is
-// left for the user, and so is everything else.
-func (c removedOpenHandsConnector) addHookScript(p *removedCleanupPlan, opts SetupOpts) error {
+// changed, there is no digest, or it is a link or not a regular file), or one
+// a hooks file in mayRun may still run, is left for the user with those
+// hooks files, and so is everything else: a tombstone exits 0, so a hook that
+// still ran it would allow everything with no warning.
+func (c removedOpenHandsConnector) addHookScript(p *removedCleanupPlan, opts SetupOpts, mayRun []string) error {
 	script := c.hookScript(opts)
 	const step = "delete it once no OpenHands hooks file runs it"
 	data, info, err := readRemovedFile(script)
@@ -526,6 +634,10 @@ func (c removedOpenHandsConnector) addHookScript(p *removedCleanupPlan, opts Set
 	case info == nil, removedOpenHandsTombstone(data):
 		return nil
 	}
+	for _, path := range mayRun {
+		p.leave(path, "DefenseClaw cannot prove that none of its hooks runs "+script+" through a link, a wrapper or another path",
+			"remove every hook that runs "+script+", directly or through a link or a wrapper")
+	}
 	entry, err := LoadHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise)
 	if err != nil {
 		p.leave(script, fmt.Sprintf("DefenseClaw cannot read its record of the script: %v", err), step)
@@ -536,6 +648,8 @@ func (c removedOpenHandsConnector) addHookScript(p *removedCleanupPlan, opts Set
 		p.leave(script, "DefenseClaw has no record of writing it", step)
 	case !strings.EqualFold(strings.TrimPrefix(want, "sha256:"), sha256Hex(data)):
 		p.leave(script, "it changed after DefenseClaw wrote it", step)
+	case len(mayRun) > 0:
+		p.leave(script, "an OpenHands hooks file DefenseClaw cannot check may still run it", step)
 	default:
 		p.files = append(p.files, removedFile{
 			path: script, data: data, mode: info.Mode().Perm(),
@@ -645,44 +759,52 @@ const removedOmnigentModuleMarker = "# defenseclaw-managed-policy v"
 // module the user put there before setup is put back, and one the user wrote
 // since is left alone.
 var removedOmnigentModuleKind = removedFileKind{
-	names: func(data []byte) (bool, error) {
-		return bytes.Contains(data, []byte(removedOmnigentModuleMarker)), nil
-	},
-	withoutEntry: func([]byte) []byte { return nil },
-	step:         "delete it once config.yaml no longer names " + removedOmnigentModuleName,
+	names:     removedOmnigentModuleNames,
+	ownedName: true,
+	step: "delete it once config.yaml no longer names " + removedOmnigentModuleName +
+		" (to keep it as yours, delete its line that starts with " + removedOmnigentModuleMarker + ")",
 }
 
-func removedOmnigentImportPathKind(hookDir string) removedFileKind {
-	isEntry := func(line string) bool {
-		entry := strings.TrimSpace(line)
-		return entry != "" && sameManagedTargetPath(entry, hookDir)
-	}
+func removedOmnigentModuleNames(data []byte) (bool, error) {
+	return bytes.Contains(data, []byte(removedOmnigentModuleMarker)), nil
+}
+
+// removedOmnigentImportPathKind reads DefenseClaw's .pth file. Its saved copy
+// goes back byte for byte when the user's own policy module stays in hookDir
+// (userModule), since that module needs the line.
+func removedOmnigentImportPathKind(hookDir string, userModule bool) removedFileKind {
 	return removedFileKind{
 		names: func(data []byte) (bool, error) {
 			for _, line := range strings.Split(string(data), "\n") {
-				if isEntry(line) {
+				if entry := strings.TrimSpace(line); entry != "" && sameManagedTargetPath(entry, hookDir) {
 					return true, nil
 				}
 			}
 			return false, nil
 		},
-		// Setup wrote the .pth with DefenseClaw's line alone, so the lines
-		// the user had in the copy it saved are put back without that line
-		// (the file is removed when nothing else is left).
-		withoutEntry: func(saved []byte) []byte {
-			var rest strings.Builder
-			for _, line := range strings.SplitAfter(string(saved), "\n") {
-				if !isEntry(line) {
-					rest.WriteString(line)
-				}
-			}
-			if strings.TrimSpace(rest.String()) == "" {
-				return nil
-			}
-			return []byte(rest.String())
-		},
-		step: "delete the line " + hookDir + " once config.yaml no longer names " + removedOmnigentModuleName,
+		ownedName: true,
+		keepSaved: userModule,
+		step:      "delete the line " + hookDir + " once config.yaml no longer names " + removedOmnigentModuleName,
 	}
+}
+
+// userModuleStays reports whether a policy module of the user's own (one
+// without DefenseClaw's marker) is in DefenseClaw's hook directory after the
+// cleanup: setup saved one, or the user wrote one since.
+func (c removedOmnigentConnector) userModuleStays(opts SetupOpts) bool {
+	own := c.modulePath(opts)
+	record, err := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "module"))
+	if err == nil && record.Existed && sameManagedTargetPath(record.Path, own) {
+		if names, _ := removedOmnigentModuleNames(record.PristineBytes); !names {
+			return true
+		}
+	}
+	data, info, err := readRemovedFile(own)
+	if err != nil || info == nil {
+		return false
+	}
+	names, _ := removedOmnigentModuleNames(data)
+	return !names
 }
 
 // plan lists config.yaml first, then the .pth file, then the module: changes
@@ -703,7 +825,8 @@ func (c removedOmnigentConnector) plan(opts SetupOpts) (*removedCleanupPlan, err
 		}
 	}
 	own := c.modulePath(opts)
-	if _, err := p.addRecorded(opts.DataDir, c.name, "pth", removedOmnigentImportPathKind(filepath.Dir(own))); err != nil {
+	pthKind := removedOmnigentImportPathKind(filepath.Dir(own), c.userModuleStays(opts))
+	if _, err := p.addRecorded(opts.DataDir, c.name, "pth", pthKind); err != nil {
 		return nil, err
 	}
 	module, err := p.addRecorded(opts.DataDir, c.name, "module", removedOmnigentModuleKind)

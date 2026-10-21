@@ -429,20 +429,25 @@ or OmniGent before 1.0.4:
   module. It changes a file only when the file is exactly as that setup left
   it: the file goes back to what it was before setup, is removed if setup
   created it, or (the OpenHands hook script) becomes a stub that does nothing.
-  If you changed one of these files since, replaced it with a link, or
-  DefenseClaw has no record of writing it, the gateway changes none of them.
+  If you changed one of these files since, replaced it with a link,
+  DefenseClaw has no record of writing it, the copy DefenseClaw saved before
+  its setup already named DefenseClaw, or an OpenHands hook may still run the
+  hook script another way (through a link or a wrapper script), the gateway
+  changes none of them.
   It prints one warning with the steps to remove
   DefenseClaw's entries by hand, and `defenseclaw status` and
   `defenseclaw doctor` show the same steps. When you have done them, run
   `defenseclaw-gateway connector teardown --connector omnigent` (or
   `openhands`) to remove the rest. Your other connectors start either way. If
   a file can't be written, nothing is changed and the gateway tries again on
-  the next start. Their settings are dropped from `config.yaml`, including a
+  the next start. The upgrade accepts a `config.yaml` that still lists them.
+  Their settings are dropped from `config.yaml`, including a
   telemetry destination whose every route selected only these connectors;
   `defenseclaw migrate` saves that. `defenseclaw uninstall` runs the same
   cleanup. While steps are left, the agent still uses DefenseClaw's files, so
-  `defenseclaw uninstall --all` (or `--binaries`) stops before it removes
-  anything, and Windows Setup's uninstall with **Delete user data** keeps
+  `defenseclaw uninstall --all` (or `--binaries`) stops before it stops the
+  gateway or removes anything, so your other connectors stay protected, and
+  Windows Setup's uninstall with **Delete user data** keeps
   `%USERPROFILE%\.defenseclaw`. Do the steps, then run the uninstall again.
 
 <Accordions type="multiple">

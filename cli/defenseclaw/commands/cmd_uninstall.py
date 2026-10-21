@@ -2055,20 +2055,31 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         phases.append(ExecutionPhaseResult(name, "succeeded"))
 
     run_phase("plan validation", lambda: _validate_plan(plan))
+    # until 1.1: data or binary removal waits for a removed connector's
+    # manual cleanup. Its teardown runs first and the check right after, both
+    # before anything else changes, so a blocked uninstall leaves the gateway
+    # running, the surviving connectors set up and the guardrail on.
+    removal_gated = bool((plan.remove_data_dir or plan.remove_binaries) and plan.data_dir)
+    retired = ()
+    if removal_gated:
+        retired = tuple(name for name in plan.connectors if name in _REMOVED_CONNECTOR_BACKUP_MARKERS)
+    if retired:
+        run_phase("removed connector teardown", lambda: _connector_teardown(plan, retired))
+    if removal_gated:
+        run_phase(
+            "removed connector cleanup check",
+            lambda: _require_removed_connector_cleanup_done(plan.data_dir),
+        )
     if plan.sandbox_teardown:
         # Before the sidecar stops: the daemon deletes its own sandboxes.
         run_phase("sandbox teardown", lambda: _sandbox_teardown(plan))
     if plan.stop_gateway:
         run_phase("gateway stop", lambda: _stop_gateway(plan))
-    if plan.connectors:
-        run_phase("connector teardown", lambda: _connector_teardown(plan))
-        if not plan.remove_data_dir:
-            _turn_guardrail_off(plan.data_dir)
-    if (plan.remove_data_dir or plan.remove_binaries) and plan.data_dir:
-        run_phase(
-            "removed connector cleanup check",
-            lambda: _require_removed_connector_cleanup_done(plan.data_dir),
-        )
+    surviving = tuple(name for name in plan.connectors if name not in retired)
+    if surviving:
+        run_phase("connector teardown", lambda: _connector_teardown(plan, surviving))
+    if plan.connectors and not plan.remove_data_dir:
+        _turn_guardrail_off(plan.data_dir)
     if plan.stop_gateway and plan.data_dir:
         _remove_probe_created_state(plan.data_dir)
         # The gateway is stopped, so its watcher no longer uses them.
@@ -3220,17 +3231,20 @@ def _gateway_supports_connector_teardown(gateway_path: str | None = None) -> boo
     return "teardown" in combined and "list-backups" in combined
 
 
-def _connector_teardown(plan: UninstallPlan) -> None:
+def _connector_teardown(plan: UninstallPlan, connectors: tuple[str, ...] | None = None) -> None:
     """Run connector teardown via the canonical sentinel, falling back
     to the OpenClaw-specific Python helpers when the gateway binary
     is too old (pre-S7.2) or the connector isn't OpenClaw.
+
+    *connectors* (default: all of ``plan.connectors``) are torn down in order.
 
     For non-OpenClaw connectors the Python fallback path is **not**
     safe — calling ``restore_openclaw_config`` against a Codex install
     would corrupt it — so we hard-fail in that case with a clear
     remediation pointing at the gateway upgrade path.
     """
-    connectors = plan.connectors
+    if connectors is None:
+        connectors = plan.connectors
     gateway_supported = _gateway_supports_connector_teardown(plan.gateway_path or None)
     for name in connectors:
         if gateway_supported:
