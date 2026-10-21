@@ -228,6 +228,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 			return result, fmt.Errorf("audit: sync the database file before the WAL catch-up: %w", err)
 		}
 		took := time.Since(began)
+		gfwTrace("presync round=%d took=%v", round, took)
 		result.Syncs++
 		result.SyncLongest = max(result.SyncLongest, took)
 		if took <= walSettledSync || round == walSettleRounds {
@@ -272,6 +273,8 @@ func (s *Store) copyWAL(ctx context.Context, db *sql.DB, hook func(context.Conte
 	if hook != nil {
 		hook(ctx)
 	}
+	gfwBegan := time.Now()
+	defer func() { gfwTrace("copy frames=%d copied=%d complete=%v took=%v", ckpt.frames, ckpt.copied, ckpt.complete, time.Since(gfwBegan)) }()
 	if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&ckpt.busy, &ckpt.frames, &ckpt.copied); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ckpt, fmt.Errorf("audit: copy SQLite WAL: %w", ctxErr)
@@ -363,6 +366,8 @@ func (s *Store) catchUpWALOnIdleWriter(ctx context.Context, db *sql.DB, window t
 		return false, 0, err == nil, err
 	}
 	acquired := time.Now()
+	gfwTrace("writer taken window=%v", window)
+	defer func() { gfwTrace("writer phase complete=%v held=%v deferred=%v", complete, held, deferred) }()
 	holdCtx, cancelHold := context.WithTimeout(ctx, walCatchUpCap)
 	defer cancelHold()
 	done := make(chan walCopyResult, 1)

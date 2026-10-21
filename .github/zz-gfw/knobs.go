@@ -5,6 +5,7 @@
 package audit
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -22,5 +23,13 @@ func init() {
 	ms("GFLOOD_IDLEWAIT_MS", &walIdleWait)
 	if n, err := strconv.Atoi(os.Getenv("GFLOOD_SETTLE")); err == nil {
 		walSettleRounds = n
+	}
+}
+
+var gfwTraceOn = os.Getenv("GFW_TRACE") == "1"
+
+func gfwTrace(format string, args ...any) {
+	if gfwTraceOn {
+		fmt.Fprintf(os.Stderr, "gfw %s "+format+"\n", append([]any{time.Now().Format("15:04:05.000")}, args...)...)
 	}
 }
