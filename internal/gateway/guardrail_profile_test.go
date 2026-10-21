@@ -897,7 +897,7 @@ func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
 		!strings.Contains(warning, "timeout") {
 		t.Fatalf("view %v, warning %q; want the lookup failure named", view, warning)
 	}
-	if note := unnamedGroupsNote(&explained); !strings.Contains(note, "1 of this account's 1 group(s) are shown by number") {
+	if note := unnamedGroupsNote(&explained, nil); !strings.Contains(note, "1 of this account's 1 group(s) are shown by number") {
 		t.Fatalf("unnamed groups note = %q", note)
 	}
 }
@@ -938,7 +938,7 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 		t.Fatal("a gateway without a spool has no record to wait for")
 	}
 	named := &profileSubject{Groups: []string{"S-1-1-0", "Everyone", "S-1-5-21-1-2-3-9001", "S-1-5-21-1-2-3-9002"}}
-	if note := unnamedGroupsNote(named); !strings.Contains(note, "2 of this account's 3 group(s) have no name, only a SID") {
+	if note := unnamedGroupsNote(named, nil); !strings.Contains(note, "2 of this account's 3 group(s) have no name, only a SID") {
 		t.Fatalf("unnamed SID note = %q", note)
 	}
 }

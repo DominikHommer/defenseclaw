@@ -435,6 +435,9 @@ func TestVerifiedSubjectIsNamedFromTheGuardianRecordWhenItsLookupFails(t *testin
 	for uid, record := range map[string]enterprisehooks.IdentitySpoolRecord{
 		"94401115": {User: "dcad-frank@dclab.test", UpdatedAt: time.Now().UTC()},
 		"94401116": {User: "dcad-old@dclab.test", UpdatedAt: time.Now().UTC().Add(-2 * time.Hour)},
+		// GAP-1195: a fresh record of a uid the gateway last saw held by
+		// another account names the previous holder, not the caller.
+		"94401118": {User: "dcad-gone@dclab.test", UpdatedAt: time.Now().UTC()},
 	} {
 		record.Key = uid
 		data, err := enterprisehooks.MarshalIdentitySpoolRecord(record)
@@ -445,21 +448,29 @@ func TestVerifiedSubjectIsNamedFromTheGuardianRecordWhenItsLookupFails(t *testin
 			t.Fatal(err)
 		}
 	}
-	restoreValidate, restoreDirectory := validateManagedGuardianAuthorization, managedHookPeerDirectory
+	restoreValidate, restoreDirectory, restoreLast := validateManagedGuardianAuthorization, managedHookPeerDirectory, managedHookPeerLastName
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) { return useridentity.DirectoryFacts{}, false }
+	managedHookPeerLastName = func(uid int) string {
+		return map[int]string{94401115: "dcad-frank@dclab.test", 94401116: "dcad-old@dclab.test", 94401118: "dcad-new@dclab.test"}[uid]
+	}
 	t.Cleanup(func() {
-		validateManagedGuardianAuthorization, managedHookPeerDirectory = restoreValidate, restoreDirectory
+		validateManagedGuardianAuthorization, managedHookPeerDirectory, managedHookPeerLastName = restoreValidate, restoreDirectory, restoreLast
 		setIdentitySpoolDir("")
 	})
 	setIdentitySpoolDir(dir)
-	for uid, want := range map[string]string{"94401115": "dcad-frank", "94401116": "", "94401117": ""} {
+	for uid, want := range map[string]string{"94401115": "dcad-frank", "94401116": "", "94401117": "", "94401118": ""} {
 		ctx := attachVerifiedSubject(context.Background(), nil, uid, "", subjectSourcePeerCredentials)
 		pid, _ := strconv.Atoi(uid)
 		caller := auditCallerIdentity(withManagedHookPeer(ctx, managedHookPeer{UID: pid}))
 		if id := AgentIdentityFromContext(ctx); id.UserID != uid || id.UserName != want || caller.ID != uid || caller.Name != want {
 			t.Errorf("uid %s: agent identity %+v, audit caller %+v, want the uid and the name %q", uid, id, caller, want)
 		}
+	}
+	// A uid the gateway never saw named keeps no name either.
+	managedHookPeerLastName = func(int) string { return "" }
+	if id := AgentIdentityFromContext(attachVerifiedSubject(context.Background(), nil, "94401115", "", subjectSourcePeerCredentials)); id.UserName != "" {
+		t.Errorf("uid never seen named was named %q from the guardian record", id.UserName)
 	}
 }
 

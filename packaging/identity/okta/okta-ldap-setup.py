@@ -356,6 +356,23 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
     bind_decided = False
     group_covered = {name: False for name in groups}
     group_decided = {name: False for name in groups}
+    # Why a group's coverage holds for only some of its members: an earlier
+    # rule for named users that are members, or the covering rule leaving out
+    # users or members of another group.
+    group_partial: dict[str, list[str]] = {name: [] for name in groups}
+    member_groups: dict[str, set[str]] = {}
+
+    def names_member(user_ids: set[str], group_id: str) -> bool:
+        """Whether a user-scoped rule names a member of the group."""
+        if len(user_ids) > 50:
+            return True
+        for user_id in user_ids:
+            if user_id not in member_groups:
+                member_groups[user_id] = {item["id"] for item in client.get_all(
+                    f"/api/v1/users/{user_id}/groups?limit=200")}
+            if group_id in member_groups[user_id]:
+                return True
+        return False
     rules = sorted(client.get_all(f"/api/v1/policies/{policy['id']}/rules"),
                    key=lambda rule: int(rule.get("priority", 2**31)))
     bind_groups: set[str] | None = None
@@ -392,19 +409,37 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
                     bind_covered = password_allow and unrestricted
                     bind_decided = True
         for name, group in groups.items():
-            if group and not group_decided[name] and not user_ids and not excluded_users:
-                if ((not group_ids or group["id"] in group_ids)
-                        and group["id"] not in excluded_groups):
-                    if unrestricted or not password_allow:
-                        group_covered[name] = password_allow and unrestricted
-                        group_decided[name] = True
+            if not group or group_decided[name]:
+                continue
+            applies = (not group_ids or group["id"] in group_ids) and group["id"] not in excluded_groups
+            if not applies:
+                continue
+            if user_ids:
+                # A rule for named users decides for them only. A deny or a
+                # stronger challenge for a member preempts the group's later
+                # allow for that member (GAP-1166).
+                if not (password_allow and unrestricted) and names_member(user_ids, group["id"]):
+                    group_partial[name].append(f"rule '{rule.get('name')}' applies another sign-on to some members")
+                continue
+            if unrestricted or not password_allow:
+                group_covered[name] = password_allow and unrestricted
+                group_decided[name] = True
+                if group_covered[name] and excluded_users:
+                    group_partial[name].append(f"rule '{rule.get('name')}' leaves out some users")
+                if group_covered[name] and excluded_groups:
+                    # Members also in an excluded group fall through to the
+                    # rules after it (GAP-1164).
+                    group_partial[name].append(f"rule '{rule.get('name')}' leaves out members of other group(s)")
     if bind and bind_covered:
         report.ok(f"password-only sign-on covers bind user {bind_login}")
     elif bind:
         report.problem(f"no active password-only ALLOW rule covers bind user {bind_login}",
                        "Run: okta-ldap-setup.py signon-policy --group GROUP --bind-login LOGIN")
     for name, group in groups.items():
-        if group and group_covered[name]:
+        if group and group_covered[name] and group_partial[name]:
+            report.problem(f"password-only sign-on covers group {name} only in part: {'; '.join(group_partial[name])}",
+                           "Give those members the same password-only rule, or remove the exclusion.")
+        elif group and group_covered[name]:
             report.ok(f"password-only sign-on covers group {name}")
         elif group:
             report.problem(f"no active password-only ALLOW rule covers group {name}",

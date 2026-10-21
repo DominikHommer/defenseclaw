@@ -208,6 +208,26 @@ def test_explain_names_a_failed_lookup_instead_of_a_group_count(monkeypatch):
     assert "0 group(s)" not in result.output
 
 
+def test_explain_fails_for_an_account_it_could_not_resolve(monkeypatch):
+    """GAP-1239: an unknown account is printed, and the command exits 1."""
+    answer = {
+        "profiles_configured": True,
+        "profile": "",
+        "match": "default",
+        "subject": {"user_id": "", "user_name": "typo", "group_count": 0},
+        "lookup_error": "no account named typo",
+    }
+    result = _explain(monkeypatch, dict(answer), "--json")
+    assert result.exit_code == 1
+    assert json.loads(result.output)["lookup_error"] == "no account named typo"
+    result = _explain(monkeypatch, dict(answer))
+    assert result.exit_code == 1
+    assert "user lookup failed: no account named typo" in result.output
+    resolved = dict(answer, subject={"user_id": "1001", "user_name": "alice", "group_count": 0},
+                    lookup_error="directory unavailable")
+    assert _explain(monkeypatch, resolved, "--json").exit_code == 0
+
+
 def test_explain_match_line_names_default_lookup_failed(monkeypatch):
     """GAP-0275: "match: default" while requests get default_lookup_failed."""
     result = _explain(

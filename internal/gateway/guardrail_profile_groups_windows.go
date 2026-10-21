@@ -52,7 +52,16 @@ var profileGroupExists = func(_ context.Context, name string) (bool, error) {
 		kind == windows.SidTypeWellKnownGroup, nil
 }
 
-func init() { profileGroupSIDLookup = lsaProfileGroupSID }
+func init() {
+	profileGroupSIDLookup = lsaProfileGroupSID
+	profileGroupLocalDomain = func() string {
+		computer, err := windows.ComputerName()
+		if err != nil {
+			return ""
+		}
+		return computer
+	}
+}
 
 // lsaProfileGroupSID resolves an assignment group name (DOMAIN\name or a bare
 // name) to the SID of that group (LookupAccountName). A name the LSA maps to

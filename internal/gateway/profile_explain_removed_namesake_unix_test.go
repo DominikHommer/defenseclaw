@@ -89,7 +89,7 @@ func TestL1ExplainedRemovedNamesakeDoesNotPoisonLiveName(t *testing.T) {
 	delete(resolver.accounts, oldUID)
 	resolver.accounts[liveUID] = live
 	stamp = "after" // local account database changed when alice was removed
-	if twins := sameNameProfileAccounts(context.Background(), resolver, "alice", live); len(twins) != 0 {
+	if twins, _ := sameNameProfileAccounts(context.Background(), resolver, "alice", live); len(twins) != 0 {
 		t.Fatalf("bare name alice became ambiguous from removed uid: %+v", twins)
 	}
 	if uid, _, ok := managedHookPeerHomes.cachedHolder("alice"); ok {

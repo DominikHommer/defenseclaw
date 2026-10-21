@@ -84,6 +84,22 @@ var directoryServices = map[string]directoryService{
 // while the first finished within two (GAP-0230).
 const groupQueryBatch = 64
 
+// coldGroupLookup is how long a cold SSSD takes to name one group, and
+// directoryLookupBase the budget of the rest of one account's lookups.
+var (
+	coldGroupLookup     = 30 * time.Millisecond
+	directoryLookupBase = 20 * time.Second
+)
+
+// DirectoryLookupBudget bounds one resolution of an account's directory
+// facts: its account lookups plus the naming of maxDirectoryGroups groups
+// one cold SSSD answer at a time. A fixed 20 seconds ran out for an account
+// in about 700 groups, which then had no facts until SSSD's cache warmed
+// (GAP-1247); the largest membership DefenseClaw names now fits.
+func DirectoryLookupBudget() time.Duration {
+	return directoryLookupBase + time.Duration(maxDirectoryGroups)*coldGroupLookup
+}
+
 // DirectoryFactsForUID resolves the verified directory facts of uid. The
 // caller has verified the uid (peer credentials or a per-user credential);
 // everything here comes from the host's own account database.
@@ -200,9 +216,11 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 	}
 	if includeGroups {
 		if isLocal {
-			// Local account memberships come from the local group database.
-			// A name-only NSS lookup can combine groups of distinct accounts.
-			_, facts.Groups, err = localAccountGroups(account)
+			// Local account memberships come from the local group database,
+			// and from the member lists of a directory that holds no account
+			// of that name (localAccountGroupsWithDirectory). A name-only
+			// NSS lookup can combine groups of distinct accounts.
+			_, facts.Groups, err = r.localAccountGroupsWithDirectory(account)
 		} else {
 			var ids []int
 			var qualified bool
@@ -796,6 +814,86 @@ func localAccountGroups(account Account) ([]int, []string, error) {
 	return ids, names, nil
 }
 
+// memberListServices are the NSS group services that list a group's
+// members by account name (RFC 2307 memberUid, NIS member lists), whether
+// or not that directory holds an account of the name: such a group may list
+// a local account. sss, winbind and the Entra ID modules answer initgroups
+// only for an account of their own.
+var memberListServices = map[string]bool{"ldap": true, "nis": true, "nisplus": true}
+
+// localAccountGroupsWithDirectory is localAccountGroups for a local account,
+// plus the groups a member-list directory (memberListServices) lists it in
+// and the directory's names of the gids /etc/group does not name (GAP-0550).
+// A service that resolves the name to another uid is skipped: its answer is
+// that account's. A directory that does not answer adds nothing, so the
+// local account's facts never fail with it.
+func (r *NSSResolver) localAccountGroupsWithDirectory(account Account) ([]int, []string, error) {
+	ids, names, err := localAccountGroups(account)
+	if err != nil {
+		return nil, nil, err
+	}
+	services, err := nssInitgroupsServices()
+	if err != nil {
+		return ids, names, nil
+	}
+	named := make(map[int]string, len(ids))
+	for i, id := range ids {
+		if names[i] != strconv.Itoa(id) {
+			named[id] = names[i]
+		}
+	}
+	extra := false
+	for _, service := range services {
+		if !memberListServices[service] || !validServiceName(service) {
+			continue
+		}
+		holder, lookupErr := r.LookupUserInService(service, account.Name)
+		if lookupErr != nil && !IsNotFound(lookupErr) || lookupErr == nil && holder.UID != account.UID {
+			continue
+		}
+		listed, listErr := r.groupIDsInService(service, account.Name)
+		if listErr != nil {
+			continue
+		}
+		for _, id := range listed {
+			if !slices.Contains(ids, id) {
+				ids = append(ids, id)
+				extra = true
+			}
+		}
+	}
+	if extra {
+		slices.Sort(ids)
+		if len(ids) > maxDirectoryGroups {
+			return nil, nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
+		}
+	}
+	var unnamed []int
+	for _, id := range ids {
+		if _, ok := named[id]; !ok {
+			unnamed = append(unnamed, id)
+		}
+	}
+	if len(unnamed) > 0 && slices.ContainsFunc(services, func(service string) bool { return service != "files" }) {
+		if resolved, nameErr := r.groupNames(unnamed); nameErr == nil {
+			for i, id := range unnamed {
+				if resolved[i] != strconv.Itoa(id) {
+					named[id] = resolved[i]
+				}
+			}
+		}
+	}
+	names = make([]string, 0, len(ids))
+	for _, id := range ids {
+		if name, ok := named[id]; ok {
+			names = append(names, name)
+		} else {
+			names = append(names, strconv.Itoa(id))
+		}
+	}
+	return ids, names, nil
+}
+
 // localGroupsListing returns the gids of the /etc/group entries whose member
 // list names name, split and compared as the glibc files module does, so
 // DefenseClaw and id(1) agree: white space before each member is skipped,
@@ -879,8 +977,36 @@ func (r *NSSResolver) groupBatchNames(ids []int) (map[int]string, error) {
 
 // ParseNSSwitchServices lists the services on the line of database
 // ("passwd", "group") of an nsswitch.conf, in order, lower-cased, without
-// actions.
+// actions. The compat service of passwd, group and shadow reads the local
+// file and the services of the database's _compat line in its place (nis
+// when there is none), so it is listed as "files" followed by those: an SSSD
+// account included with a "+" line through passwd_compat: sss was taken for
+// a local account (GAP-1123).
 func ParseNSSwitchServices(content, database string) []string {
+	services := nssSwitchLine(content, database)
+	switch database {
+	case "passwd", "group", "shadow":
+	default:
+		return services
+	}
+	var out []string
+	for _, service := range services {
+		if service != "compat" {
+			out = append(out, service)
+			continue
+		}
+		included := nssSwitchLine(content, database+"_compat")
+		if included == nil {
+			included = []string{"nis"}
+		}
+		out = append(out, "files")
+		out = append(out, included...)
+	}
+	return out
+}
+
+// nssSwitchLine lists the services of one database line of nsswitch.conf.
+func nssSwitchLine(content, database string) []string {
 	for _, line := range strings.Split(content, "\n") {
 		if i := strings.IndexByte(line, '#'); i >= 0 {
 			line = line[:i]
@@ -1006,20 +1132,27 @@ func QualifiedUserName(ctx context.Context, r Resolver, name string) string {
 // NETBIOS\name with. A local and a directory account of one name are two
 // accounts (twins); an answer counts only when its own bare name is that
 // name and its uid is not account's (GAP-1087).
-func SameNameAccounts(ctx context.Context, r Resolver, account Account) []Account {
+//
+// The joined domains come from realmd, or, where realmd fails or lists none
+// (an SSSD joined without it), from the realms it last listed, the default
+// realm of krb5.conf and the domains of sssd.conf (sameNameRealms). With no
+// twin found and none of those, while NSS asks a directory for accounts,
+// the answer is a *useridentity.NamesakesUnknownError: a directory twin may
+// exist and cannot be looked up, and taking the local account alone hid it
+// (GAP-1131, GAP-1132).
+func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Account, error) {
 	bare, _ := useridentity.SplitQualifiedName(account.Name)
 	if r == nil || bare == "" {
-		return nil
+		return nil, nil
 	}
 	candidates := []string{bare}
-	if realms, err := hostRealms(ctx); err == nil {
-		for _, realm := range realms {
-			if realm.Domain != "" {
-				candidates = append(candidates, bare+"@"+realm.Domain)
-			}
-			if realm.NetBIOS != "" {
-				candidates = append(candidates, realm.NetBIOS+`\`+bare)
-			}
+	realms, realmErr := sameNameRealms(ctx)
+	for _, realm := range realms {
+		if realm.Domain != "" {
+			candidates = append(candidates, bare+"@"+realm.Domain)
+		}
+		if realm.NetBIOS != "" {
+			candidates = append(candidates, realm.NetBIOS+`\`+bare)
 		}
 	}
 	seen := map[int]bool{account.UID: true}
@@ -1037,7 +1170,102 @@ func SameNameAccounts(ctx context.Context, r Resolver, account Account) []Accoun
 		seen[found.UID] = true
 		twins = append(twins, found)
 	}
-	return twins
+	if len(twins) == 0 && realmErr != nil {
+		return nil, &useridentity.NamesakesUnknownError{Name: bare, Err: realmErr}
+	}
+	return twins, nil
+}
+
+// sameNameRealms returns the joined realms SameNameAccounts qualifies a
+// bare name with, and an error only when they are unknown: realmd failed,
+// nothing stands in for it, and NSS consults a directory for accounts.
+func sameNameRealms(ctx context.Context) ([]Realm, error) {
+	realms, err := hostRealms(ctx)
+	if err == nil && len(realms) > 0 {
+		return realms, nil
+	}
+	if fallback := fallbackRealms(); len(fallback) > 0 {
+		return fallback, nil
+	}
+	if err != nil && nssConsultsDirectory() {
+		return nil, err
+	}
+	return nil, nil
+}
+
+var (
+	krb5ConfPath = "/etc/krb5.conf"
+	sssdConfPath = "/etc/sssd/sssd.conf"
+)
+
+// fallbackRealms names the joined domains without realmd: the realms
+// realmd last listed (lastListedRealms), the default realm of krb5.conf and
+// the domains sssd.conf serves (readable by root only, as a managed gateway
+// runs). Each gives a DNS domain only, so a bare name is qualified as
+// name@domain.
+func fallbackRealms() []Realm {
+	out := lastListedRealms()
+	add := func(domain string) {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain == "" || !strings.Contains(domain, ".") || strings.ContainsAny(domain, " \t@\\/") {
+			return
+		}
+		for _, realm := range out {
+			if strings.EqualFold(realm.Domain, domain) {
+				return
+			}
+		}
+		out = append(out, Realm{Domain: domain, Name: strings.ToUpper(domain)})
+	}
+	if data, err := readSmallFile(krb5ConfPath, 1<<20); err == nil {
+		add(iniValue(string(data), "libdefaults", "default_realm"))
+	}
+	if data, err := readSmallFile(sssdConfPath, 1<<20); err == nil {
+		for _, domain := range strings.Split(iniValue(string(data), "sssd", "domains"), ",") {
+			add(domain)
+		}
+	}
+	return out
+}
+
+// iniValue returns the value of key in [section] of an INI-style file
+// (krb5.conf, sssd.conf), or "".
+func iniValue(content, section, key string) string {
+	current := ""
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			current = strings.ToLower(strings.TrimSpace(line[1 : len(line)-1]))
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if ok && current == section && strings.EqualFold(strings.TrimSpace(name), key) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+// nssConsultsDirectory reports whether the passwd line of nsswitch.conf
+// names a directory service; true when the file cannot be read, as its
+// answer is then unknown. Without the file glibc reads the local files.
+func nssConsultsDirectory() bool {
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	for _, service := range ParseNSSwitchServices(string(data), "passwd") {
+		if _, ok := directoryServices[service]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // parseGroupName reads the name and gid of a group(5) line. Unlike

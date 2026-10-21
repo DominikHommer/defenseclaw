@@ -733,7 +733,8 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 	}
 	id, userName, err := profileExplainAccount(name)
 	var ambiguous *useridentity.AmbiguousAccountError
-	if errors.As(err, &ambiguous) {
+	var namesakesUnknown *useridentity.NamesakesUnknownError
+	if errors.As(err, &ambiguous) || errors.As(err, &namesakesUnknown) {
 		return profileSubject{UserName: name}, err
 	}
 	if err != nil {
