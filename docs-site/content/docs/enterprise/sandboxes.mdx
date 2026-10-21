@@ -285,7 +285,7 @@ Put `required_for` only in the profiles whose people must not run these agents u
 
 ## What users see
 
-Users get a `defenseclaw` command that offers only the `sandbox` commands. Anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. The administrator commands remain `defenseclaw-gateway enterprise …`, which only root can use. Run it by its packaged path (`/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS): the folder is not on the `PATH` of a fresh root login shell. `defenseclaw sandbox setup` is refused: there is nothing for the person to set up. `sandbox enable` records only the shell wrapper in the person's rc file.
+On Linux and macOS, users get a `defenseclaw` command that offers only the `sandbox` commands, `help` and `--version`. Anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. The administrator commands remain `defenseclaw-gateway enterprise …`, which only root can use. Run it by its packaged path (`/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS): the folder is not on the `PATH` of a fresh root login shell. `defenseclaw sandbox setup` is refused: there is nothing for the person to set up. `sandbox enable` records only the shell wrapper in the person's rc file.
 
 A banner line shows the person's profile and its description, and only that:
 
