@@ -468,7 +468,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	}
 	staging, err := store.Stage(receipt, b)
 	if err != nil {
-		return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeArchiveInvalid, Detail: "cannot stage the bundle: " + err.Error()})
+		return refuse(enterprisebundle.StageError(err))
 	}
 	// Everything below reads the staged copy only.
 	staged, err := enterprisebundle.ReadDir(staging)
