@@ -7,11 +7,14 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // The group help names apply on every OS it is registered on, with the
@@ -59,5 +62,22 @@ func TestEnterpriseBundleVerifyAnchorsReadDeniedIsNotAdmin(t *testing.T) {
 	out, code = runBundle(t, "verify", "--bundle", signed, "--anchors", e.anchors, "--platform", "linux", "--json")
 	if code != bundleFailureExitCode() || !strings.Contains(out, "anchor_insecure") {
 		t.Fatalf("--anchors denied (exit %d):\n%s", code, out)
+	}
+}
+
+// bundle apply --json answers an argument error with one invalid_arguments
+// document and the invalid-arguments exit code of this OS, also when --json
+// follows the flag the parse stopped at.
+func TestEnterpriseBundleApplyArgumentErrorPrintsOneDocument(t *testing.T) {
+	saved := secretRawArgs
+	t.Cleanup(func() { secretRawArgs = saved })
+	args := []string{"apply", "--bogus", "--json"}
+	secretRawArgs = func() []string { return append([]string{"enterprise", "bundle"}, args...) }
+	out, code := runBundle(t, args...)
+	var doc bundleApplyResult
+	if err := json.Unmarshal([]byte(out), &doc); err != nil || code != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) ||
+		doc.OK || doc.Command != "apply" || len(doc.Errors) != 1 || doc.Errors[0].Code != "invalid_arguments" ||
+		!strings.Contains(doc.Errors[0].Message, "--bogus") {
+		t.Fatalf("exit %d, stdout %q (%v)", code, out, err)
 	}
 }

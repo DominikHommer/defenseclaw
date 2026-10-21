@@ -553,8 +553,26 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	l.describeBundle()
 	if run.confirmPending && code == 0 {
 		code = enterprisestatus.BusyExitCode(env.GOOS)
+		l.scheduleBundleSettle(ctx, receipt)
 	}
 	return code
+}
+
+// scheduleBundleSettle makes the apply trigger settle a bundle this run left
+// applied but not confirmed (the gateway stopped reporting its policy). On
+// macOS the apply LaunchDaemon watches config.yaml and runs once this run
+// releases the lock (GAP-0042). On Linux the transaction stops the apply path
+// unit while it writes config.yaml, so that write never starts the apply
+// service: a deferred start does, once the gateway had time to come back,
+// bounded as every apply retry is (#1321).
+func (l *lifecycle) scheduleBundleSettle(ctx context.Context, receipt *enterprisebundle.Receipt) {
+	if l.env.GOOS != "linux" || receipt == nil {
+		return
+	}
+	// scheduleApplyRetry reports the deferred run (or its limit) as an
+	// input_changed warning; nothing scheduled leaves the resubmit, which
+	// not_confirmed already asks for.
+	_ = l.scheduleApplyRetry(ctx, fmt.Sprintf("policy bundle %s version %d is applied but the gateway has not confirmed it", receipt.BundleID, receipt.Version))
 }
 
 // lateConfirmMessage is the bundle_confirmed_after_interrupt warning.
