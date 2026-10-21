@@ -20,6 +20,22 @@ func openNonblocking(path string, _ bool) (*os.File, error) {
 	return os.Open(path)
 }
 
+// openedOneName reports whether f is a folder or a file with one name.
+func openedOneName(f *os.File) bool {
+	conn, err := f.SyscallConn()
+	if err != nil {
+		return false
+	}
+	ok := false
+	_ = conn.Control(func(fd uintptr) {
+		var info windows.ByHandleFileInformation
+		if windows.GetFileInformationByHandle(windows.Handle(fd), &info) == nil {
+			ok = info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 || info.NumberOfLinks == 1
+		}
+	})
+	return ok
+}
+
 // openedPath returns the final path Windows gives the opened handle.
 func openedPath(f *os.File) (string, bool) {
 	conn, err := f.SyscallConn()

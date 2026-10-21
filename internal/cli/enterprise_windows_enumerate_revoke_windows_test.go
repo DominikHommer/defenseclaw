@@ -5,7 +5,9 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -13,39 +15,52 @@ import (
 )
 
 // A revoke that fails for a profile the cycle stopped enrolling is retried
-// at the next cycle, though the next manifest no longer lists the profile,
-// and is dropped once the profile is enrolled again (GAP-1269).
-func TestEnterpriseWindowsDroppedProfileRevokeIsRetried(t *testing.T) {
-	previous := enterpriseWindowsInventoryReadRevoker
+// by a later enumerator process, from the grant ledger alone, and a profile
+// whose rows are all disabled loses its access too (GAP-1269, GAP-1193).
+func TestEnterpriseWindowsInventoryGrantRevokeSurvivesARestart(t *testing.T) {
+	previousRevoker, previousLoader, previousSaver := enterpriseWindowsInventoryReadRevoker, enterpriseWindowsInventoryGrantLedgerLoader, enterpriseWindowsInventoryGrantLedgerSaver
 	t.Cleanup(func() {
-		enterpriseWindowsInventoryReadRevoker = previous
-		clear(enterpriseWindowsDroppedRevokes.targets)
+		enterpriseWindowsInventoryReadRevoker = previousRevoker
+		enterpriseWindowsInventoryGrantLedgerLoader, enterpriseWindowsInventoryGrantLedgerSaver = previousLoader, previousSaver
 	})
-	clear(enterpriseWindowsDroppedRevokes.targets)
-	alice := enterprisehooks.ManifestTarget{SID: "S-1-5-21-1-2-3-1001", User: "alice", UserHome: `C:\Users\alice`}
-	bob := enterprisehooks.ManifestTarget{SID: "S-1-5-21-1-2-3-1002", User: "bob", UserHome: `C:\Users\bob`}
-	carol := enterprisehooks.ManifestTarget{SID: "S-1-5-21-1-2-3-1003", User: "carol", UserHome: `C:\Users\carol`}
+	var ledger []byte
+	enterpriseWindowsInventoryGrantLedgerLoader = func(string) ([]enterprisehooks.ManifestTarget, error) {
+		if ledger == nil {
+			return nil, fmt.Errorf("ledger: %w", os.ErrNotExist)
+		}
+		return enterprisehooks.ParseInventoryGrantLedger(ledger)
+	}
+	enterpriseWindowsInventoryGrantLedgerSaver = func(_ string, targets []enterprisehooks.ManifestTarget) error {
+		data, err := enterprisehooks.MarshalInventoryGrantLedger(targets)
+		ledger = data
+		return err
+	}
+	off := false
+	alice := enterprisehooks.ManifestTarget{SID: "S-1-5-21-1-2-3-1001", User: "alice", UserHome: `C:\Users\alice`, Connector: "codex"}
+	bob := enterprisehooks.ManifestTarget{SID: "S-1-5-21-1-2-3-1002", User: "bob", UserHome: `C:\Users\bob`, Connector: "codex"}
 	fail := true
 	var calls []string
 	enterpriseWindowsInventoryReadRevoker = func(dropped enterprisehooks.Manifest) error {
-		var users []string
+		var homes []string
 		for _, target := range dropped.Targets {
-			users = append(users, target.User)
+			homes = append(homes, target.UserHome)
 		}
-		calls = append(calls, strings.Join(users, ","))
+		calls = append(calls, strings.Join(homes, ","))
 		if fail {
 			return errors.New("access is denied")
 		}
 		return nil
 	}
-	current := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{alice}}
-	revokeEnterpriseWindowsDroppedInventoryRead(io.Discard, enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{bob, carol}}, current)
+	both := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{alice, bob}}
+	reconcileEnterpriseWindowsInventoryGrants(io.Discard, `C:\ProgramData\DefenseClaw\targets.yaml`, nil, both)
+	onlyAlice := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{alice}}
+	reconcileEnterpriseWindowsInventoryGrants(io.Discard, `C:\ProgramData\DefenseClaw\targets.yaml`, &both, onlyAlice)
+	// A new enumerator process: only the ledger remembers bob.
 	fail = false
-	// carol is enrolled again before the retry: only bob is still owed.
-	current.Targets = append(current.Targets, carol)
-	revokeEnterpriseWindowsDroppedInventoryRead(io.Discard, enterprisehooks.Manifest{}, current)
-	revokeEnterpriseWindowsDroppedInventoryRead(io.Discard, enterprisehooks.Manifest{}, current)
-	if got := strings.Join(calls, ";"); got != "bob,carol;bob" {
-		t.Fatalf("revokes = %q, want the failed pair, then bob's retry alone, then none", got)
+	aliceDisabled := alice
+	aliceDisabled.Enabled = &off
+	reconcileEnterpriseWindowsInventoryGrants(io.Discard, `C:\ProgramData\DefenseClaw\targets.yaml`, &onlyAlice, enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{aliceDisabled}})
+	if got := strings.Join(calls, ";"); got != `C:\Users\bob;C:\Users\alice,C:\Users\bob` {
+		t.Fatalf("revokes = %q, want bob's failed revoke, then alice's (disabled only) with bob's retry", got)
 	}
 }
