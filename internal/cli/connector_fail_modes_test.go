@@ -4,12 +4,18 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 type refreshFailModesResult struct {
@@ -209,5 +215,118 @@ func TestRefreshFailModesLeavesAManagedInstallAlone(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(filepath.Join(home, "hooks", ".hookcfg")); string(got) != body {
 		t.Fatalf("managed sidecar rewritten: %s", got)
+	}
+}
+
+// A 0.8.x config with automatic protection on: its overlay's open, or a
+// connector set up by hand with its own open, is the mode the 0.8.x gateway
+// rendered for the operator. The refresh keeps it, and an open nobody chose
+// is closed. Before r104 W3 G3-upg round 3 the document read ignored the
+// whole config whenever automatic protection was on, so the refresh closed
+// those opens: a false block while the gateway was down for the upgrade.
+func TestRefreshFailModesKeepsA08xAutomaticProtectionOpen(t *testing.T) {
+	const ap = "application_protection:\n  enabled: true\n"
+	for _, test := range []struct {
+		name, doc string
+		want      map[string]string
+	}{
+		{"overlay open", "config_version: 7\nguardrail:\n  mode: observe\n" + ap + "  guardrail:\n    hook_fail_mode: open\n",
+			map[string]string{"codex": "open", "claudecode": "open"}},
+		{"connector overlay open", "config_version: 7\nguardrail:\n  mode: observe\n" + ap + "  connectors:\n    claudecode:\n      guardrail:\n        hook_fail_mode: open\n",
+			map[string]string{"codex": "closed", "claudecode": "open"}},
+		{"set up by hand", "config_version: 7\nguardrail:\n  mode: observe\n  connectors:\n    codex:\n      hook_fail_mode: open\n" + ap + "  guardrail:\n    hook_fail_mode: closed\n",
+			map[string]string{"codex": "open", "claudecode": "closed"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			isolateHookEnvForTest(t, home)
+			if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(test.doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","claudecode":"open"}}`)
+			if result := runRefreshFailModesForTest(t, home); result.Config != "document" {
+				t.Fatalf("refresh %+v", result)
+			}
+			for name, want := range test.want {
+				if got := oldHookFailMode(t, home, name); got != want {
+					t.Fatalf("the old %s hook reads %q, want %q", name, got, want)
+				}
+				if got := buildHookOptions(name, "PreToolUse", "", "").FailMode; got != want {
+					t.Fatalf("the new %s hook fails %q, want %q", name, got, want)
+				}
+			}
+		})
+	}
+}
+
+// The installers run the refresh with --hold-until-exit for a running
+// gateway: it says when the first refresh is written and the lock held,
+// and it ends only once that gateway has exited.
+func TestRefreshFailModesHoldsUntilTheGatewayExits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sleep(1) as the gateway")
+	}
+	home := t.TempDir()
+	isolateHookEnvForTest(t, home)
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("config_version: 7\nguardrail:\n  mode: observe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open"}}`)
+	gateway := exec.Command("sleep", "60")
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = gateway.Process.Kill(); _ = gateway.Wait() })
+
+	previousCfg, previousDir, previousJSON := cfg, connectorFlagDataDir, connectorFlagJSON
+	previousPID, previousTimeout := refreshFailModesHoldPID, refreshFailModesHoldTimeout
+	t.Cleanup(func() {
+		cfg, connectorFlagDataDir, connectorFlagJSON = previousCfg, previousDir, previousJSON
+		refreshFailModesHoldPID, refreshFailModesHoldTimeout = previousPID, previousTimeout
+		connectorRefreshFailModesCmd.SetOut(nil)
+	})
+	connectorFlagDataDir, connectorFlagJSON = home, false
+	refreshFailModesHoldPID, refreshFailModesHoldTimeout = gateway.Process.Pid, time.Minute
+	reader, writer := io.Pipe()
+	connectorRefreshFailModesCmd.SetOut(writer)
+	done := make(chan error, 1)
+	go func() {
+		err := runConnectorRefreshFailModes(connectorRefreshFailModesCmd, nil)
+		_ = writer.Close()
+		done <- err
+	}()
+	holding := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(reader)
+		for scanner.Scan() {
+			if strings.HasPrefix(scanner.Text(), hookFailModeHoldMarker) {
+				close(holding)
+			}
+		}
+	}()
+	select {
+	case <-holding:
+	case err := <-done:
+		t.Fatalf("the hold ended before the gateway exited: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the hold never said it was holding")
+	}
+	if got := oldHookFailMode(t, home, "codex"); got != "closed" {
+		t.Fatalf("while holding the old hook reads %q, want closed", got)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("the hold ended while the gateway runs: %v", err)
+	default:
+	}
+	_ = gateway.Process.Kill()
+	_ = gateway.Wait()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the hold did not end after the gateway exited")
 	}
 }

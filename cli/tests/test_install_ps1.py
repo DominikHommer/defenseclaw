@@ -1148,29 +1148,41 @@ def test_the_new_hook_goes_in_before_the_data_copy() -> None:
     assert 'Restore-BinDir (Join-Path $Slot "bin")' in _ps1_function("Restore-Slot")
 
 
-def test_hook_fail_modes_are_rendered_before_the_gateway_stops_and_the_hook_swaps() -> None:
-    # An earlier release's sidecar can hold an open nobody chose; the new
-    # gateway sets the modes from the config before the old gateway stops
-    # (the old hook then fails closed) and, once it is stopped, again before
-    # the new hook goes in. Hooks it cannot make safe refuse the swap: before
-    # the stop nothing changed, after it the old gateway comes back.
+def test_hook_fail_modes_are_held_from_before_the_gateway_stops_until_it_exits() -> None:
+    # An earlier release's sidecar can hold an open nobody chose. For a
+    # running gateway the new one sets the modes from the config and holds
+    # the lock every release's hook writer takes until the old gateway has
+    # exited, then sets them again (r104 W3 G3-upg round 3: the old gateway
+    # could render its open again between two separate refreshes). Hooks it
+    # cannot make safe refuse the swap: before the stop nothing changed,
+    # after it the old gateway comes back. With no gateway running, one
+    # refresh.
     install = _ps1_function("Invoke-Install")
-    first = install.index("if (-not (Update-HookFailModes $stagedGateway))")
-    second = install.index("if (-not (Update-HookFailModes $stagedGateway))", first + 1)
+    hold = install.index("if (-not (Start-HookFailModeHold $stagedGateway $gatewayProcess.Id))")
     stop = install.index("if (-not (Stop-Gateway))")
-    assert first < stop < second < install.index("$saved = Save-Snapshot"), install
-    assert install.index("$stagedGateway = Join-Path $Staging") < first
-    before = install[first:stop]
+    finish = install.index("if (-not (Complete-HookFailModeHold))")
+    plain = install.index("} elseif (-not (Update-HookFailModes $stagedGateway))")
+    assert hold < stop < finish < plain < install.index("$saved = Save-Snapshot"), install
+    assert install.index("$stagedGateway = Join-Path $Staging") < hold
+    before = install[hold:stop]
     assert "Restore-SetupInstall" in before and "nothing was changed (see above)" in before, before
-    after = install[second : install.index("Stop-Watchdog", second)]
+    stopped = install[stop:finish]
+    assert stopped.index("Stop-HookFailModeHold") < stopped.index("did not stop; nothing was changed"), stopped
+    after = install[finish:plain]
     assert after.index("Clear-StagedRelease") < after.index("Restart-Old") < after.index("$(Get-RestoredNote)"), after
+    start = _ps1_function("Start-HookFailModeHold")
+    assert '--hold-until-exit $GatewayId' in start and 'Contains("Holding the hook fail modes")' in start, start
+    assert 'Join-Path $DataDir "hooks\\.hookcfg"' in start, start
+    assert "Stop-HookFailModeHold" in start and start.rstrip().endswith("return $false\n}"), start
+    assert "$hold.Process.ExitCode -eq 0" in _ps1_function("Complete-HookFailModeHold")
     update = _ps1_function("Update-HookFailModes")
     assert '@("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0' in update, update
     assert 'Join-Path $DataDir "hooks\\.hookcfg"' in update, update
     # A downgrade's older gateway prints the connector help instead; any other
     # probe answer refuses the swap.
-    assert '-match "defenseclaw-gateway connector \\[command\\]") { return $true }' in update, update
-    assert update.rstrip().endswith("return $false\n}"), update
+    probe = _ps1_function("Test-HookFailModeRefresh")
+    assert '-match "defenseclaw-gateway connector \\[command\\]") { return 1 }' in probe, probe
+    assert probe.rstrip().endswith("return 2\n}"), probe
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -1200,7 +1212,8 @@ def test_hook_fail_mode_refresh_refuses_a_probe_that_fails(tmp_path: Path) -> No
         script = (
             "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
             f"$DataDir = '{data_dir}'\nfunction Write-Warn([string]$m) {{ [Console]::Error.WriteLine('warn: ' + $m) }}\n"
-            f"{_ps1_function('Invoke-Native')}\n{_ps1_function('Get-NativeProbe')}\n{_ps1_function('Update-HookFailModes')}\n"
+            f"{_ps1_function('Invoke-Native')}\n{_ps1_function('Get-NativeProbe')}\n"
+            f"{_ps1_function('Test-HookFailModeRefresh')}\n{_ps1_function('Update-HookFailModes')}\n"
             f"if (Update-HookFailModes '{gateway}') {{ 'refresh=true' }} else {{ 'refresh=false' }}\n"
         )
         completed = _run_powershell(script)

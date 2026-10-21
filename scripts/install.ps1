@@ -1509,26 +1509,107 @@ function Save-Snapshot {
     return $true
 }
 
-function Update-HookFailModes([string]$Gateway) {
-    # Set the hooks' outage fail modes (hooks\.hookcfg) from the config with
-    # this release's gateway before the running gateway stops and before the
-    # new hook goes in: an earlier release may have recorded open for a mode
-    # nobody set (0.8.x and 1.0.2 resolved an unset mode from the guardrail
-    # mode), and the old hook would follow it while the gateway is down. An
-    # open the config sets stays open, from a DEFENSECLAW_CONFIG outside the
-    # data folder too. False when the hooks could not be made safe. A release
-    # without the command (a downgrade) sets its own when its gateway starts.
-    # Any other answer to the probe (an error, no output) is false: the hooks
-    # cannot be shown safe.
-    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) { return $true }
+function Test-HookFailModeRefresh([string]$Gateway) {
+    # 0: the staged gateway has 'connector refresh-fail-modes'. 1: an older
+    # one (a downgrade), which prints the connector help for an unknown
+    # subcommand and sets its own modes when it starts. 2: any other answer
+    # (an error, no output): the hooks cannot be shown safe.
     $probe = Get-NativeProbe $Gateway @("connector", "refresh-fail-modes", "--help")
-    if ($probe.Exit -eq 0 -and $probe.Output -match "connector refresh-fail-modes") {
-        return ((Invoke-Native $Gateway @("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0)
-    }
-    # An older gateway prints the connector help for an unknown subcommand.
-    if ($probe.Exit -eq 0 -and $probe.Output -match "defenseclaw-gateway connector \[command\]") { return $true }
+    if ($probe.Exit -eq 0 -and $probe.Output -match "connector refresh-fail-modes") { return 0 }
+    if ($probe.Exit -eq 0 -and $probe.Output -match "defenseclaw-gateway connector \[command\]") { return 1 }
     Write-Warn "The new gateway did not answer 'connector refresh-fail-modes --help' (exit $($probe.Exit))"
+    return 2
+}
+
+function Update-HookFailModes([string]$Gateway) {
+    # Set the hooks' outage fail modes (hooks\.hookcfg and the adapters) from
+    # the config with this release's gateway before the new hook goes in: an
+    # earlier release may have recorded open for a mode nobody set (0.8.x and
+    # 1.0.2 resolved an unset mode from the guardrail mode), and the old hook
+    # would follow it while the gateway is down. An open the config sets
+    # stays open, from a DEFENSECLAW_CONFIG outside the data folder too.
+    # False when the hooks could not be made safe. Used when no gateway runs;
+    # a running one gets Start-HookFailModeHold.
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) { return $true }
+    switch (Test-HookFailModeRefresh $Gateway) {
+        0 { return ((Invoke-Native $Gateway @("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0) }
+        1 { return $true }
+    }
     return $false
+}
+
+$script:FailModeHold = $null
+
+function Start-HookFailModeHold([string]$Gateway, [int]$GatewayId) {
+    # Update-HookFailModes for the running gateway $GatewayId, which is about
+    # to stop. The staged gateway refreshes, holds the lock every release's
+    # hook writer takes until that gateway has exited, and refreshes again:
+    # the old gateway may render its hooks again while it runs or shuts down
+    # (a 1.0.x Codex registration check does), and the old hook would follow
+    # that open while it is down. True once the first refresh is written and
+    # the lock held; Complete-HookFailModeHold waits for the rest.
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) { return $true }
+    switch (Test-HookFailModeRefresh $Gateway) {
+        0 { }
+        1 { return $true }
+        default { return $false }
+    }
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $Gateway
+    $info.Arguments = "connector refresh-fail-modes --data-dir `"$($DataDir.TrimEnd([char]92))`" --hold-until-exit $GatewayId"
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($info)
+    $script:FailModeHold = [pscustomobject]@{ Process = $process; Rest = $null; Errors = $process.StandardError.ReadToEndAsync() }
+    $pending = $process.StandardOutput.ReadLineAsync()
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($clock.Elapsed.TotalSeconds -lt 60) {
+        if (-not $pending.Wait(100)) { continue }
+        $line = $pending.Result
+        if ($null -eq $line) { [void](Complete-HookFailModeHold); return $false }
+        if ($line.Contains("Holding the hook fail modes")) {
+            $script:FailModeHold.Rest = $process.StandardOutput.ReadToEndAsync()
+            return $true
+        }
+        Write-Host $line
+        $pending = $process.StandardOutput.ReadLineAsync()
+    }
+    Write-Warn "The new gateway did not set the hooks' fail modes within a minute"
+    Stop-HookFailModeHold
+    return $false
+}
+
+function Complete-HookFailModeHold {
+    # Wait for the hold, which ends once the gateway it holds for has exited,
+    # and show what it said. True when it set the modes.
+    $hold = $script:FailModeHold
+    if (-not $hold) { return $true }
+    $script:FailModeHold = $null
+    $hold.Process.WaitForExit()
+    $rest = if ($hold.Rest) { $hold.Rest.GetAwaiter().GetResult() } else { $hold.Process.StandardOutput.ReadToEnd() }
+    $errors = $hold.Errors.GetAwaiter().GetResult()
+    foreach ($text in @($rest, $errors)) {
+        if ($text) { $text.TrimEnd() -split "`r?`n" | ForEach-Object { Write-Host $_ } }
+    }
+    $ok = $hold.Process.ExitCode -eq 0
+    $hold.Process.Dispose()
+    return $ok
+}
+
+function Stop-HookFailModeHold {
+    # Let go of the hold early: the gateway did not stop.
+    $hold = $script:FailModeHold
+    if (-not $hold) { return }
+    $script:FailModeHold = $null
+    try {
+        if (-not $hold.Process.HasExited) {
+            $hold.Process.Kill()
+            [void]$hold.Process.WaitForExit(5000)
+        }
+    } catch { }
+    $hold.Process.Dispose()
 }
 
 function Install-HookFirst([string]$Slot) {
@@ -2731,23 +2812,28 @@ function Invoke-Install {
         if ($Setup.CodexHome -and -not $env:CODEX_HOME) { $env:CODEX_HOME = $Setup.CodexHome }
         if ($Setup.ClaudeConfigDir -and -not $env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR = $Setup.ClaudeConfigDir }
     }
-    $WasRunning = [bool](Get-GatewayProcess)
-    if (-not (Update-HookFailModes $stagedGateway)) {
-        if ($Setup) { Restore-SetupInstall }
-        Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
-    }
+    $gatewayProcess = Get-GatewayProcess
+    $WasRunning = [bool]$gatewayProcess
     if ($WasRunning) {
+        if (-not (Start-HookFailModeHold $stagedGateway $gatewayProcess.Id)) {
+            if ($Setup) { Restore-SetupInstall }
+            Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
+        }
         Write-Info "Stopping the gateway [$(Get-UtcClock)]"
         if (-not (Stop-Gateway)) {
+            Stop-HookFailModeHold
             if ($Setup) { Restore-SetupInstall }
             Die "The running gateway did not stop; nothing was changed"
         }
-        # Again once it is stopped: it may have rendered them while it ran.
-        if (-not (Update-HookFailModes $stagedGateway)) {
+        # The hold refreshes again once the gateway has exited.
+        if (-not (Complete-HookFailModeHold)) {
             Clear-StagedRelease
             Restart-Old
             Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down. $(Get-RestoredNote)"
         }
+    } elseif (-not (Update-HookFailModes $stagedGateway)) {
+        if ($Setup) { Restore-SetupInstall }
+        Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
     }
     Stop-Watchdog
     if ($versionChange) {
