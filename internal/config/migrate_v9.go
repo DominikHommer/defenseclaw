@@ -35,6 +35,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -675,11 +676,33 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 	// The v8 file still holds the inline key; the v9 document names its
 	// variable instead, so the variable carries the key for this process
 	// (the scanners inherit it) until the file is migrated. A value already
-	// in the environment or .env wins, as it does for any api_key_env.
-	if result.EnvKey != "" && os.Getenv(result.EnvKey) == "" {
-		_ = os.Setenv(result.EnvKey, result.EnvValue)
-	}
+	// in the environment or .env wins, as it does for any api_key_env; a
+	// value an earlier in-memory load set is replaced, so a rotated inline
+	// key applies on reload (GAP-0995).
+	exportInMemoryKey(result.EnvKey, result.EnvValue)
 	return result.Migrated, nil
+}
+
+// inMemoryExportedKeys holds the value each environment variable got from
+// an in-memory migration of this process (exportInMemoryKey).
+var inMemoryExportedKeys sync.Map // variable -> value
+
+// exportInMemoryKey sets key to value for this process unless the
+// environment holds a value this process did not set from an inline key.
+func exportInMemoryKey(key, value string) {
+	if key == "" {
+		return
+	}
+	current := os.Getenv(key)
+	if current != "" {
+		exported, ok := inMemoryExportedKeys.Load(key)
+		if !ok || exported.(string) != current {
+			return
+		}
+	}
+	if err := os.Setenv(key, value); err == nil {
+		inMemoryExportedKeys.Store(key, value)
+	}
 }
 
 // InMemoryMigrationError is the load error for a config_version 8 file whose
@@ -788,6 +811,9 @@ type v9Migrator struct {
 	configPath string
 	root       *yaml.Node
 	record     MigrationRecord
+	// dataJSON is the data.json the migration planned from; the commit
+	// refuses one that changed since.
+	dataJSON *v9DataJSON
 	// rows are the audit.db rows moved into asset_policy, cleared after the
 	// config commit.
 	rows              []v9ActionRow
@@ -862,6 +888,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	m.dataJSON = data
 	m.migratePolicyDir(root)
 	if err := m.migrateRulePacks(root); err != nil {
 		return nil, false, err
@@ -1055,6 +1082,10 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 	if !exists || !bytes.Equal(current, source) {
 		return nil, errors.New("config: config.yaml changed while the config_version 9 migration ran; run it again")
 	}
+	if m.dataJSON.dataJSONChanged(m.in.DataJSONPath) {
+		// Its edit would be neither in the v9 config nor read again.
+		return nil, fmt.Errorf("config: %s changed while the config_version 9 migration ran; run it again", m.in.DataJSONPath)
+	}
 	// Reserve audit.db before writing config so a changed operator decision
 	// cannot be committed from a stale snapshot.
 	var auditDB *sql.DB
@@ -1193,7 +1224,9 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 	// without its policy data (see leftOutsideRollbackCopy).
 	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && !m.in.Managed && !m.leftOutsideRollbackCopy(dj) {
 		if _, statErr := os.Stat(dj); statErr == nil {
-			if err := os.Rename(dj, dj+DataJSONMigratedSuffix); err != nil {
+			if m.dataJSON.dataJSONChanged(dj) {
+				m.note("%s changed while the migration ran, so it was left in place: compare it with config.yaml, then run defenseclaw migrate again", dj)
+			} else if err := os.Rename(dj, dj+DataJSONMigratedSuffix); err != nil {
 				m.note("could not rename %s: %v", dj, err)
 			} else {
 				written = append(written, dj+DataJSONMigratedSuffix)
@@ -1718,8 +1751,11 @@ type v9DataJSONAction struct {
 
 type v9DataJSON struct {
 	present bool
-	raw     map[string]json.RawMessage
-	Config  struct {
+	// sum is the sha256 of the bytes read, which the commit compares the
+	// file with (GAP-1148).
+	sum    [sha256.Size]byte
+	raw    map[string]json.RawMessage
+	Config struct {
 		AllowListBypassScan *bool `json:"allow_list_bypass_scan"`
 		ScanOnInstall       *bool `json:"scan_on_install"`
 	}
@@ -1756,8 +1792,21 @@ func readV9DataJSON(path string) (*v9DataJSON, error) {
 	if err := json.Unmarshal(raw, &data.raw); err != nil {
 		return nil, fmt.Errorf("config: decode %s: %w", path, err)
 	}
-	data.present = true
+	data.present, data.sum = true, sha256.Sum256(raw)
 	return data, nil
+}
+
+// dataJSONChanged reports whether the data.json at path is no longer the one
+// the migration planned from: changed, created or removed since.
+func (d *v9DataJSON) dataJSONChanged(path string) bool {
+	if d == nil || strings.TrimSpace(path) == "" {
+		return false
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return d.present
+	}
+	return err != nil || !d.present || sha256.Sum256(raw) != d.sum
 }
 
 var v9Severities = []string{"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}
