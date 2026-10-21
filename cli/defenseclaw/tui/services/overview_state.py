@@ -43,6 +43,18 @@ NoticeLevel = Literal["info", "warn", "error"]
 STALENESS_WINDOW = timedelta(minutes=15)
 DOCTOR_CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 MAX_AI_DISCOVERY_OVERVIEW_ROWS = 8
+# Text width of one Overview notice line in an 80-column terminal: the body is
+# 72 wide and the icon column takes 5. At 80x24 only the first line of a
+# notice is above the fold, so a notice whose key must stay visible fits here.
+OVERVIEW_NOTICE_WIDTH = 67
+# Shorter words for the degraded-cause heads, used only when the heads do not
+# fit on one notice line; the Runtime panel (N) keeps the full reasons.
+# "partial coverage: " heads the plane-badge fallback; DEGRADED already says it.
+_RUNTIME_HEAD_SHORT = (
+    (" available but not running", " not running"),
+    (" partially covered", " partial"),
+    ("partial coverage: ", ""),
+)
 # Cursor merges hooks Enterprise > Team > Project > User and has no API to
 # detect a higher-priority file, so DefenseClaw infers none. Plain words, not
 # the old "priority-conflict-detection=unavailable" token (GAP-2561).
@@ -1029,18 +1041,17 @@ class OverviewPanelModel:
                 )
             )
         elif runtime.scanned and runtime.findings == 0 and runtime.processes and not self.gateway_down():
-            # One short line like the other notices; the Runtime panel (N)
-            # carries the full reason and what to do about it (GAP-2533).
-            why, tail = "", "no findings above the reporting floor"
+            # The Runtime panel (N) carries the full reason, the counts and
+            # what to do about it (GAP-2533).
+            title = runtime.health_title or "watching"
             if runtime.degraded_reason:
-                why, tail = f" ({runtime.degraded_reason})", "no findings; N for details"
-            notices.append(
-                OverviewNotice(
-                    "info",
-                    f"Runtime is {runtime.health_title or 'watching'}{why}: {runtime.processes} processes, "
-                    f"{runtime.connections} connections, {tail}",
+                message = runtime_degraded_notice(title, runtime.degraded_reason)
+            else:
+                message = (
+                    f"Runtime is {title}: {runtime.processes} processes, "
+                    f"{runtime.connections} connections, no findings above the reporting floor"
                 )
-            )
+            notices.append(OverviewNotice("info", message))
 
         return tuple(notices)
 
@@ -1951,6 +1962,30 @@ def _connector_saw_traffic(connector: ConnectorHealth) -> bool:
         or connector.tool_blocks
         or connector.subprocess_blocks
     )
+
+
+def runtime_degraded_notice(title: str, summary: str, width: int = OVERVIEW_NOTICE_WIDTH) -> str:
+    """One Overview line for a degraded Runtime: the N key first, then the cause.
+
+    At 80x24 only a notice's first line is above the fold, so the line fits
+    ``width``: the cause heads in full when they fit, else in shorter words,
+    else the first head and how many more, else the first head and "…". The
+    cause is never dropped.
+    """
+
+    lead = f"Runtime {title} · N for details: "
+    heads = [head.strip() for head in summary.split(", ") if head.strip()] or [summary.strip()]
+    short = list(heads)
+    for long_words, short_words in _RUNTIME_HEAD_SHORT:
+        short = [head.replace(long_words, short_words) for head in short]
+    candidates = [", ".join(heads), ", ".join(short)]
+    if len(short) > 1:
+        candidates.append(f"{short[0]} +{len(short) - 1} more")
+    room = max(width - len(lead), 2)
+    for cause in candidates:
+        if len(cause) <= room:
+            return lead + cause
+    return lead + short[0][: room - 1].rstrip() + "…"
 
 
 def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> str:

@@ -1633,7 +1633,7 @@ func validateEnterpriseConfig(cfg *Config) error {
 			return &V8SemanticError{
 				Path:    "$.enterprise.network.https_proxy",
 				Summary: err.Error(),
-				Action:  "use http://host:port or https://host:port, without a user name, password or path",
+				Action:  netguard.ProxyURLAdvice,
 				cause:   err,
 			}
 		}

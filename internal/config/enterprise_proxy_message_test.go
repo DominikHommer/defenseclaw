@@ -12,7 +12,7 @@ import (
 // r103.GAP-0088: a refused enterprise.network.https_proxy says that the
 // proxy takes http:// or https:// and never repeats the configured URL.
 func TestEnterpriseProxyRefusalStatesTheSchemeRule(t *testing.T) {
-	for _, proxy := range []string{"socks5://proxy.example.test:1080", "proxy.example.test:3128", "http://user:hunter2@proxy.example.test:3128"} {
+	for _, proxy := range []string{"socks5://proxy.example.test:1080", "proxy.example.test:3128", "http://user:hunter2@proxy.example.test:3128", "http://[proxy.example.test"} {
 		cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone",
 			Network: EnterpriseNetworkConfig{HTTPSProxy: proxy}}}
 		err := validateEnterpriseConfig(&cfg)
@@ -23,6 +23,11 @@ func TestEnterpriseProxyRefusalStatesTheSchemeRule(t *testing.T) {
 		text := semantic.Summary + " " + semantic.Action
 		if !strings.Contains(text, "http://") || !strings.Contains(text, "https://") {
 			t.Fatalf("%s: refusal %q does not state the scheme rule", proxy, text)
+		}
+		// The parse error says what is wrong and the Action says what to
+		// write, so the joined refusal gives the advice once.
+		if n := strings.Count(err.Error(), "http://host:port"); n != 1 {
+			t.Fatalf("%s: refusal gives the advice %d times, want once: %v", proxy, n, err)
 		}
 		if strings.Contains(err.Error(), "proxy.example.test") || strings.Contains(err.Error(), "hunter2") {
 			t.Fatalf("%s: refusal repeats the configured URL: %v", proxy, err)
