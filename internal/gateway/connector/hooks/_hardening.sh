@@ -332,11 +332,14 @@ defenseclaw_shared_hook_token_file() {
 # Resolve the selected connector's fail mode from the connector-aware shared
 # runtime state. An inherited DEFENSECLAW_FAIL_MODE can only tighten it to
 # closed (GAP-0315); guardian-managed hooks trust only installer-owned state.
-# An open counts only with its config source (FAIL_MODE_SOURCE,
+# A per-user open counts only with its config source (FAIL_MODE_SOURCE,
 # fail_mode_sources): an earlier release's open may be an unset mode it
 # resolved open, and an open lowered for a vendor that cannot fail closed is
-# not an operator's choice. Malformed, ambiguous, or missing state fails
-# closed.
+# not an operator's choice. A managed hook's guardian-written records carry no
+# source (the managed readers decode them canonically); their open is the
+# administrator's explicit choice, so it counts when the hook is managed and
+# hooks/.hookcfg says managed_enterprise (defenseclaw_managed_runtime_sidecar).
+# Malformed, ambiguous, or missing state fails closed.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
@@ -365,15 +368,32 @@ defenseclaw_shared_runtime_fail_mode() {
         source="$(jq -r '.legacy_fail_mode_source // empty' "$config" 2>/dev/null || true)"
       fi
     elif command -v python3 >/dev/null 2>&1; then
-      mode="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); c=sys.argv[2]; m=(d.get("fail_modes") or {}).get(c, "") if c else d.get("legacy_fail_mode", ""); s=(d.get("fail_mode_sources") or {}).get(c, "") if c else d.get("legacy_fail_mode_source", ""); print(m if s == "config" else "closed")' "$config" "$connector" 2>/dev/null || true)"
-      source="config"
+      mode="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); c=sys.argv[2]; m=(d.get("fail_modes") or {}).get(c, "") if c else d.get("legacy_fail_mode", ""); s=(d.get("fail_mode_sources") or {}).get(c, "") if c else d.get("legacy_fail_mode_source", ""); print("%s|%s" % (m, s))' "$config" "$connector" 2>/dev/null || true)"
+      case "$mode" in
+        *"|"*) source="${mode#*|}"; mode="${mode%%|*}" ;;
+        *) mode="" ;;
+      esac
     fi
   fi
-  if [ "$mode" = "open" ] && [ "$source" = "config" ]; then
+  if [ "$mode" = "open" ] && { [ "$source" = "config" ] || defenseclaw_managed_runtime_sidecar "$config"; }; then
     printf open
   else
     printf closed
   fi
+}
+
+# defenseclaw_managed_runtime_sidecar returns 0 when this hook is managed (its
+# script sets DEFENSECLAW_MANAGED_HOOK) and config, hooks/.hookcfg, records
+# managed_enterprise true, which only the guardian's managed writer sets. A
+# per-user hook that inherits DEFENSECLAW_MANAGED_HOOK=1 reads a per-user
+# sidecar without it, so its unsourced open stays closed. Builtins only: jq
+# and python3 are not on every hardened PATH.
+defenseclaw_managed_runtime_sidecar() {
+  local config="$1" body=""
+  [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ] || return 1
+  [ -f "$config" ] && [ ! -L "$config" ] || return 1
+  IFS= read -r -d '' -n 65536 body < "$config" 2>/dev/null || [ -n "$body" ] || return 1
+  [[ "$body" =~ \"managed_enterprise\"[[:space:]]*:[[:space:]]*true([^A-Za-z0-9_]|$) ]]
 }
 
 # _defenseclaw_sweep_stale_hook_dirs removes orphaned hook-tmp.*
