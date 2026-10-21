@@ -122,7 +122,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if b.phase == audit.SandboxPhaseReady {
 			st.Running++
 		}
-		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason, b.rec.StopAskedIn) {
+		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
 			live++
 		}
 	}
@@ -238,9 +238,7 @@ func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, e
 	if err := m.refuseRetained(b); err != nil {
 		return nil, err
 	}
-	// Only the user's own stop (sandboxapi.WithLetGo: `defenseclaw sandbox
-	// stop`) lets go a MicroVM OpenShell does not stop.
-	if err := m.stop(ctx, b, sandboxapi.LetGoFrom(ctx)); err != nil {
+	if err := m.stop(ctx, b); err != nil {
 		return nil, err
 	}
 	v := m.viewOf(b)
@@ -334,10 +332,10 @@ func (m *Manager) refuseRetained(b *box) error {
 		"sandbox %s was deleted; only its undo point is kept (undo, review or delete it)", name)
 }
 
-// stop stops the sandbox of b. letGo marks its user's own stop: a MicroVM
-// that OpenShell then does not stop, and that may linger, is let go
-// (Manager.letGo); a stop DefenseClaw makes on its own lets none go.
-func (m *Manager) stop(ctx context.Context, b *box, letGo bool) error {
+// stop stops the sandbox of b. One whose main process completed or failed
+// OpenShell returns as it is: it keeps its phase, and with it the
+// OpenShell gateway (HoldsCompute), until OpenShell reports another.
+func (m *Manager) stop(ctx context.Context, b *box) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return err
@@ -348,7 +346,8 @@ func (m *Manager) stop(ctx context.Context, b *box, letGo bool) error {
 	name, reason, driver := b.rec.Name, b.rec.PhaseReason, b.rec.Driver
 	// OpenShell stops nothing of a sandbox whose workload ended: its phase
 	// stays until OpenShell reports another.
-	ended := mayLinger(b.phase, reason)
+	ended := b.phase == audit.SandboxPhaseCompleted ||
+		b.phase == audit.SandboxPhaseError && !openshell.VMGone(reason) && !openshell.ProvisioningTimedOut(reason)
 	m.mu.Unlock()
 	if err := m.checkSandbox(ctx, gw, b); err != nil {
 		return err
@@ -380,12 +379,6 @@ func (m *Manager) stop(ctx context.Context, b *box, letGo bool) error {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
 		if e := m.errorPhaseRefusal(name, reason, driver, err); e != nil {
-			if letGo && m.letGo(b, audit.SandboxPhaseError) {
-				// The OpenShell before SandboxMin that refuses this stop
-				// no longer holds back its own upgrade for it.
-				return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: sandboxapi.AsError(e).Message,
-					Detail: LetGoNote(name) + ". " + errorPhaseWayOn(name, "", m.upgradeWayOn(m.gatewayRelease()), false)}
-			}
 			return e
 		}
 		if e := m.errorPhaseNow(b); e != nil {
@@ -402,8 +395,9 @@ func (m *Manager) stop(ctx context.Context, b *box, letGo bool) error {
 		// OpenShell returns a sandbox whose workload completed, or whose
 		// main process failed, as it is: it stops nothing, and flushes
 		// nothing, of its MicroVM, which may still run what its workload
-		// left running (openshell.MayLinger). The user's own stop lets
-		// it go instead (LetGoNote).
+		// left running, so it still holds the gateway
+		// (openshell.HoldsGateway; the caller says how to stop it:
+		// openshell.StopWayOn).
 		var cond *audit.SandboxCondition
 		if ph == audit.SandboxPhaseError && reason != "" {
 			cond = &audit.SandboxCondition{Reason: reason}
@@ -412,9 +406,6 @@ func (m *Manager) stop(ctx context.Context, b *box, letGo bool) error {
 		b.sb = stopped
 		m.mu.Unlock()
 		m.lifecycle(ctx, b, ph, audit.SandboxTriggerStop, false, cond, stopped.Status.ExitCode)
-		if letGo {
-			m.letGo(b, ph)
-		}
 		return nil
 	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
@@ -1563,7 +1554,7 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 		if !req.Stop {
 			return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "stop sandbox %s before undoing its changes", name)
 		}
-		if err := m.stop(ctx, b, false); err != nil {
+		if err := m.stop(ctx, b); err != nil {
 			return nil, err
 		}
 		resp.Stopped = true

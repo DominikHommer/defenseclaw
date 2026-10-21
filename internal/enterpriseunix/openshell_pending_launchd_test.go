@@ -31,7 +31,7 @@ func TestMacOSPendingLaunchAgentAdvice(t *testing.T) {
 	entry.Kind = "restart"
 	r = &enterprisestatus.Result{}
 	(&lifecycle{env: h.env, result: r}).describePending(entry)
-	want := fmt.Sprintf("pending restart for user sample-user since %s (the signed gateway binary changed): 2 sandboxes run (or are starting, stopping, or a MicroVM whose workload ended that the user has not let go); it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running. The user's `defenseclaw sandbox stop NAME` flushes and stops a running one, and lets the change stop a MicroVM whose workload completed or that is in OpenShell's error state, which nothing in OpenShell flushes or stops (what it has not written to disk by then is lost); `defenseclaw sandbox delete NAME` deletes one\n",
+	want := fmt.Sprintf("pending restart for user sample-user since %s (the signed gateway binary changed): 2 sandboxes run (or are starting, stopping, or a MicroVM that OpenShell does not report stopped); it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running. The user's `defenseclaw sandbox stop NAME` flushes and stops a running one; a MicroVM whose workload completed or that is in OpenShell's error state, which OpenShell does not stop and whose VM may still run, holds the change until OpenShell reports it stopped (the user's `defenseclaw sandbox stop NAME` says how) or the user deletes it (`defenseclaw sandbox delete NAME`)\n",
 		entry.Since, h.env.lifecycleCommand(ActionEnsure))
 	if got := messagesOf(r.Warnings, codeSandboxPending); got != want {
 		t.Fatalf("restart advice changed: got %q, want %q", got, want)

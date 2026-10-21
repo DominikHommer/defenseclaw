@@ -62,7 +62,7 @@ type gatewayFixture struct {
 	// probe answers ProbeClientAuth; probes counts the calls.
 	probe  func() error
 	probes int
-	// flush answers QuiesceSandboxes; flushes counts the calls.
+	// flush answers CheckStopped; flushes counts the calls.
 	flush   error
 	flushes int
 	// staleManager answers ServiceDockerGroupMissing.
@@ -119,7 +119,7 @@ func newGatewayFixture(t *testing.T) *gatewayFixture {
 		Runner:                    f.runner,
 		VerifyGateway:             func(context.Context) error { f.verified++; return f.verify },
 		ProbeClientAuth:           func(context.Context, *openshell.Registration) error { f.probes++; return f.probe() },
-		QuiesceSandboxes:          func(context.Context) error { f.flushes++; return f.flush },
+		CheckStopped:              func(context.Context) error { f.flushes++; return f.flush },
 		Now:                       func() time.Time { return time.Date(2026, 9, 26, 19, 0, 0, 0, time.UTC) },
 		ServiceDockerGroupMissing: func() bool { return f.staleManager },
 		// The tests' preflight answers to the bare name, whatever this

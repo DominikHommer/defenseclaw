@@ -56,7 +56,7 @@ type DoctorOptions struct {
 }
 
 func (a *App) defaultDoctor() *openshell.Doctor {
-	d := &openshell.Doctor{StopsAsked: a.stopsAsked, GatewayApplied: func(res *openshell.GatewayApplyResult) {
+	d := &openshell.Doctor{GatewayApplied: func(res *openshell.GatewayApplyResult) {
 		// A fix's gateway edit is DefenseClaw's, as setup's is: teardown
 		// restores the file only while it holds what DefenseClaw last wrote.
 		if err := a.recordGatewayApply(res); err != nil {
@@ -303,9 +303,10 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		oldGateway = !openshell.RunsSandboxes(st.Gateway.Version)
 		managed = st.Managed != nil
 	}
-	// The MicroVMs in the error state that may linger (openshell.MayLinger),
-	// which nothing in OpenShell flushes or stops, and that their users
-	// have not let go.
+	// The MicroVMs in the error state that hold the gateway
+	// (openshell.HoldsGateway): an OpenShell older than SandboxMin neither
+	// stops nor starts them, so the upgrade is refused until they are
+	// deleted.
 	var heldVMs []string
 	otherDriver := otherDriverSandboxes(list, liveDriver)
 	otherDriverNames := map[string]bool{}
@@ -322,9 +323,10 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 			timedOut = append(timedOut, sb.Name)
 		default:
 			errored = append(errored, sb.Name)
-			if d, ok := openshell.LookupDriver(sb.Driver); (!ok || !d.StopFlushes) && openshell.MayLinger(openshell.PhaseError, sb.PhaseReason) && sb.StopAskedIn != sb.Phase {
-				heldVMs = append(heldVMs, sb.Name)
-			}
+		}
+		if d, ok := openshell.LookupDriver(sb.Driver); sb.Phase == "error" && !otherDriverNames[sb.Name] && (!ok || !d.StopFlushes) &&
+			openshell.HoldsGateway(openshell.PhaseError, sb.PhaseReason, false) {
+			heldVMs = append(heldVMs, sb.Name)
 		}
 		if sb.Phase != "ready" && sb.Phase != "error" && sb.Hooks.Silent && sb.Hooks.OnSilence == "stop" {
 			stoppedSilent = append(stoppedSilent, sb.Name)
@@ -369,9 +371,10 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 			// The upgrade first; after it, the way on of the upgraded
 			// gateway, which still refuses to stop a sandbox whose
 			// provisioning timed out. The upgrade (per user, or the
-			// administrator's pin move on a managed computer) waits for a
-			// MicroVM in the error state that may linger, which nothing
-			// flushes or stops, until its user lets it go or deletes it.
+			// administrator's pin move on a managed computer) is refused
+			// while OpenShell does not report a MicroVM in the error state
+			// stopped (heldVMs), which this OpenShell neither stops nor
+			// starts: only its delete lets the upgrade go ahead.
 			c.Detail += ", where this OpenShell can neither stop nor start " + itThem(append(slices.Clone(errored), timedOut...))
 			upgrade, move, waits := "upgrade OpenShell to "+openshell.InstallerVersion, "the upgrade", []string{"see Gateway"}
 			if managed {
@@ -379,13 +382,15 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 					" on its own where DefenseClaw installs OpenShell (ask IT otherwise)", "the move", nil
 			}
 			if len(heldVMs) > 0 {
-				waits = append(waits, move+" waits for "+strings.Join(heldVMs, ", ")+", whose MicroVM may still run what "+itsTheir(heldVMs)+
-					" workload left running, which nothing in OpenShell flushes or stops: `"+CommandName+" stop NAME` lets "+move+
-					" stop it with the gateway (what is not on its disk by then is lost), and `"+CommandName+" delete NAME` deletes it")
+				waits = append(waits, move+" is refused while OpenShell does not report "+strings.Join(heldVMs, ", ")+" stopped, and this OpenShell neither "+
+					"stops nor starts a MicroVM in its error state: `"+CommandName+" delete NAME` deletes "+itThem(heldVMs)+" with "+itsTheir(heldVMs)+" work")
 			}
 			if len(waits) > 0 {
 				upgrade += " (" + strings.Join(waits, "; ") + ")"
 			}
+			// What survives the upgrade: not the MicroVMs deleted for it.
+			deleted := func(name string) bool { return slices.Contains(heldVMs, name) }
+			errored, timedOut = slices.DeleteFunc(errored, deleted), slices.DeleteFunc(timedOut, deleted)
 			var after []string
 			if len(errored) > 0 {
 				after = append(after, "`"+CommandName+" stop NAME` and `"+CommandName+" start NAME` for "+strings.Join(errored, ", ")+
@@ -395,7 +400,10 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 				after = append(after, "for "+strings.Join(timedOut, ", ")+" wait a minute for OpenShell's cleanup, then `"+CommandName+
 					" start NAME` with no stop: OpenShell "+openshell.SandboxMin+" refuses to stop a sandbox whose provisioning timed out")
 			}
-			c.Fix = &openshell.Fix{Summary: upgrade + ", then " + strings.Join(after, "; ")}
+			if len(after) > 0 {
+				upgrade += ", then " + strings.Join(after, "; ")
+			}
+			c.Fix = &openshell.Fix{Summary: upgrade}
 		}
 	case len(stoppedSilent) > 0:
 		c.Status = openshell.StatusWarn
@@ -898,9 +906,9 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 					// The restart's own gate refuses it under them.
 					def = false
 					if o.Output != OutputJSON {
-						a.warn(c.Title + ": this restarts the OpenShell gateway: " + held)
+						a.warn(c.Title + ": this restarts the OpenShell gateway, and " + held)
 						if o.Yes {
-							a.note("not fixed with --yes while a MicroVM whose workload ended holds the gateway; let it go or delete it first")
+							a.note("not fixed with --yes while OpenShell does not report every MicroVM sandbox on the gateway stopped")
 						}
 					}
 				}

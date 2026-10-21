@@ -220,12 +220,12 @@ func versionNote(version string) string {
 
 // describePending reports a change that waits for an account's sandboxes.
 func (l *lifecycle) describePending(entry pending) {
-	waiting := fmt.Sprintf("%d sandboxes run (or are starting, stopping, or a MicroVM whose workload ended that the user has not let go)", entry.Sandboxes)
+	waiting := fmt.Sprintf("%d sandboxes run (or are starting, stopping, or a MicroVM that OpenShell does not report stopped)", entry.Sandboxes)
 	switch {
 	case entry.Sandboxes < 0:
 		waiting = "the lifecycle could not tell whether sandboxes run"
 	case entry.Sandboxes == 1:
-		waiting = "1 sandbox runs (or is starting, stopping, or a MicroVM whose workload ended that the user has not let go)"
+		waiting = "1 sandbox runs (or is starting, stopping, or a MicroVM that OpenShell does not report stopped)"
 	case entry.Sandboxes == 0:
 		waiting = "waiting to be tried again"
 	}
@@ -238,8 +238,9 @@ func (l *lifecycle) describePending(entry pending) {
 		return
 	}
 	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running. "+
-		"The user's `defenseclaw sandbox stop NAME` flushes and stops a running one, and lets the change stop a MicroVM whose workload completed or that is in OpenShell's error state, "+
-		"which nothing in OpenShell flushes or stops (what it has not written to disk by then is lost); `defenseclaw sandbox delete NAME` deletes one",
+		"The user's `defenseclaw sandbox stop NAME` flushes and stops a running one; a MicroVM whose workload completed or that is in OpenShell's error state, "+
+		"which OpenShell does not stop and whose VM may still run, holds the change until OpenShell reports it stopped (the user's `defenseclaw sandbox stop NAME` says how) "+
+		"or the user deletes it (`defenseclaw sandbox delete NAME`)",
 		entry.Kind, entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionEnsure)))
 }
 

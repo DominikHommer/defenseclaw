@@ -88,12 +88,6 @@ func syncsIn(e *harnessEnv, name string, n int) int {
 	return got
 }
 
-// letGoStop is the user's own stop (`defenseclaw sandbox stop`).
-func letGoStop(t *testing.T, e *harnessEnv, name string) (*sandboxapi.Sandbox, error) {
-	t.Helper()
-	return e.m.Stop(sandboxapi.WithLetGo(t.Context()), name)
-}
-
 var (
 	mainFailed  = stream.Condition{Type: "Ready", Status: "False", Reason: "MainProcessFailed", Message: "Canonical main process exited with status 1"}
 	vmExited    = stream.Condition{Type: "Ready", Status: "False", Reason: "ProcessExited", Message: "VM process exited with status 1"}
@@ -104,18 +98,17 @@ var (
 // A MicroVM whose workload ended still runs its VM (GAP-0012), with
 // whatever its workload left running (a background process its main one
 // forked), and nothing in OpenShell flushes or stops it: it runs no
-// command in it, and its stop returns it as it is. The round before let
-// such a MicroVM go two minutes after DefenseClaw saw its workload end, so
-// a managed pin switch, the daemon's idle stop or an upgrade could then
-// kill that process with its last writes unflushed. Now the status counts
-// it (they wait for it) however long it has been so, until its user's own
-// stop lets it go for the phase it is in, or it is deleted: a stop that
-// DefenseClaw, a session or a pull makes lets none go, and a phase change
-// holds it again. One whose VM is gone, or whose provisioning timed out,
-// runs nothing; one whose VM OpenShell could not poll, or in the error
-// state for another reason, may linger. On docker a completed sandbox is
-// an exited container: nothing waits.
-func TestALingeringMicroVMHoldsTheGatewayUntilItsUserLetsItGo(t *testing.T) {
+// command in it, and its stop returns it as it is. The rounds before let
+// such a MicroVM go two minutes after DefenseClaw saw its workload end,
+// then on its user's own stop, so a managed pin switch, the daemon's idle
+// stop or an upgrade could kill that process with its last writes
+// unflushed. Now only OpenShell's own state releases it: the status
+// counts it (they wait for it) however long it has been so, and whoever
+// stops it, until OpenShell reports it stopped, deleting or with its VM
+// gone. A completed, failed, unpolled or timed-out MicroVM holds; a
+// stopped or deleting one does not. On docker a completed sandbox is an
+// exited container: nothing waits.
+func TestAnEndedMicroVMHoldsTheGatewayUntilOpenShellReportsItStopped(t *testing.T) {
 	e, advance := newEndedVM(t, "donebox")
 	n := len(e.fake.ExecCalls())
 	endIn(t, e, "donebox", openshell.PhaseCompleted)
@@ -127,55 +120,26 @@ func TestALingeringMicroVMHoldsTheGatewayUntilItsUserLetsItGo(t *testing.T) {
 		t.Fatalf("a completed MicroVM a day on: busy %d, want 1", got)
 	}
 
-	// A stop that is not its user's own (a session's end, a pull's, the
-	// daemon's) lets nothing go: OpenShell returns it as it is.
+	// No stop releases it, the user's own included: OpenShell returns it
+	// as it is.
 	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
 	e.stopBox("donebox")
 	b := e.boxOf("donebox")
-	if e.fake.Calls(openshelltest.MethodStopSandbox) != stops+1 || b.phase != audit.SandboxPhaseCompleted || busy(t, e) != 1 || b.rec.StopAskedIn != "" {
-		t.Fatalf("a stop not the user's own: phase %s, busy %d, let go in %q", b.phase, busy(t, e), b.rec.StopAskedIn)
+	if e.fake.Calls(openshelltest.MethodStopSandbox) != stops+1 || b.phase != audit.SandboxPhaseCompleted || busy(t, e) != 1 {
+		t.Fatalf("a session's stop: phase %s, busy %d", b.phase, busy(t, e))
 	}
-	lb, unlock, err := e.m.lockBox("donebox")
-	must(t, err)
-	err = e.m.stop(t.Context(), lb, false)
-	unlock()
-	if err != nil || busy(t, e) != 1 {
-		t.Fatalf("DefenseClaw's own stop: %v, busy %d", err, busy(t, e))
-	}
-
-	// Its user's own stop lets it go, and runs nothing in it.
-	v, err := letGoStop(t, e, "donebox")
-	if err != nil || v.Phase != "completed" || v.StopAskedIn != "completed" || HoldsCompute(*v) {
-		t.Fatalf("the user's stop of a completed MicroVM = %+v, %v", v, err)
-	}
-	if got := busy(t, e); got != 0 {
-		t.Fatalf("a completed MicroVM its user let go: busy %d", got)
+	v, err := e.m.Stop(t.Context(), "donebox")
+	if err != nil || v.Phase != "completed" || !HoldsCompute(*v) || busy(t, e) != 1 {
+		t.Fatalf("the user's stop of a completed MicroVM = %+v, %v (busy %d)", v, err, busy(t, e))
 	}
 	if got := syncsIn(e, "donebox", n); got != 0 {
 		t.Fatalf("%d sync(1) tried in a completed MicroVM", got)
-	}
-	// A daemon that loads it again keeps that.
-	e.m.mu.Lock()
-	b.phase = ""
-	e.m.mu.Unlock()
-	endIn(t, e, "donebox", openshell.PhaseCompleted)
-	if got := busy(t, e); got != 0 {
-		t.Fatalf("a let-go MicroVM a daemon loads: busy %d", got)
-	}
-	// Started again, and in another phase: it holds the gateway again.
-	endIn(t, e, "donebox", openshell.PhaseProvisioning)
-	if b.rec.StopAskedIn != "" {
-		t.Fatalf("a phase change kept the let-go: %q", b.rec.StopAskedIn)
-	}
-	endIn(t, e, "donebox", openshell.PhaseCompleted)
-	if got := busy(t, e); got != 1 {
-		t.Fatalf("a completed MicroVM after a new session: busy %d", got)
 	}
 
 	for _, tc := range []struct {
 		cond stream.Condition
 		busy int
-	}{{mainFailed, 1}, {vmUnpolled, 1}, {vmExited, 0}, {provTimeout, 0}} {
+	}{{mainFailed, 1}, {vmUnpolled, 1}, {provTimeout, 1}, {vmExited, 0}} {
 		endIn(t, e, "donebox", openshell.PhaseProvisioning)
 		endIn(t, e, "donebox", openshell.PhaseError, tc.cond)
 		advance(24 * time.Hour)
@@ -192,13 +156,20 @@ func TestALingeringMicroVMHoldsTheGatewayUntilItsUserLetsItGo(t *testing.T) {
 		t.Fatalf("a republished error state: busy %d, reason %q", got, e.boxOf("donebox").rec.PhaseReason)
 	}
 
-	// Its main process failed: OpenShell returns its stop as it is, and
-	// the user's own stop lets it go.
+	// Its main process failed: OpenShell returns its stop as it is, and it
+	// still holds.
 	endIn(t, e, "donebox", openshell.PhaseProvisioning)
 	endIn(t, e, "donebox", openshell.PhaseError, mainFailed)
 	exitedWith(t, e, "donebox", 1)
-	if v, err := letGoStop(t, e, "donebox"); err != nil || v.StopAskedIn != "error" || busy(t, e) != 0 {
+	if v, err := e.m.Stop(t.Context(), "donebox"); err != nil || v.Phase != "error" || busy(t, e) != 1 {
 		t.Fatalf("the user's stop of a failed main process = %+v, %v (busy %d)", v, err, busy(t, e))
+	}
+	// OpenShell reports it stopped, or deleting: it holds nothing.
+	for _, phase := range []openshell.SandboxPhase{openshell.PhaseStopped, openshell.PhaseDeleting} {
+		endIn(t, e, "donebox", phase)
+		if got := busy(t, e); got != 0 {
+			t.Errorf("a MicroVM OpenShell reports %s: busy %d", phase, got)
+		}
 	}
 
 	d := newEnv(t, nil)
@@ -208,7 +179,7 @@ func TestALingeringMicroVMHoldsTheGatewayUntilItsUserLetsItGo(t *testing.T) {
 		t.Fatalf("a completed docker sandbox: busy %d", got)
 	}
 	m := len(d.fake.ExecCalls())
-	if v, err := letGoStop(t, d, "dockerdone"); err != nil || v.StopAskedIn != "" {
+	if v, err := d.m.Stop(t.Context(), "dockerdone"); err != nil || HoldsCompute(*v) {
 		t.Fatalf("the user's stop of a completed docker sandbox = %+v, %v", v, err)
 	}
 	if got := syncsIn(d, "dockerdone", m); got != 0 {
@@ -218,14 +189,14 @@ func TestALingeringMicroVMHoldsTheGatewayUntilItsUserLetsItGo(t *testing.T) {
 
 // An OpenShell before 0.1.5 (the 0.1.3 of DefenseClaw 1.0.3) neither stops
 // nor starts a MicroVM in its error state, and DefenseClaw starts no
-// sandbox on it. The round before told the user the upgrade waits two
-// minutes for its guest to write its disk back and then keeps its work.
-// What its workload left running may still write: the upgrade (per user,
-// or the managed pin move) now waits for it until its user lets it go,
-// which the refused stop does when it is the user's own, or deletes it, as
-// the feed and the refused stop say. One whose VM is gone runs nothing,
-// and the way on is the upgrade, then stop and start.
-func TestOldGatewayErrorMicroVMHoldsTheUpgradeUntilItsUserLetsItGo(t *testing.T) {
+// sandbox on it. The rounds before let the upgrade go ahead after two
+// minutes, then on the user's refused stop, under a VM that may still
+// write. Now the upgrade (per user, or the managed pin move) is refused
+// while OpenShell does not report the MicroVM stopped, whoever asked for a
+// stop, and the feed and the refused stop say that only its delete lets
+// the upgrade go ahead. One whose VM is gone runs nothing, and the way on
+// is the upgrade, then stop and start.
+func TestOldGatewayErrorMicroVMHoldsTheUpgradeUntilOpenShellReportsItGone(t *testing.T) {
 	e, advance := newEndedVM(t, "box")
 	connectAtFakeRelease(e)
 	e.fake.SetRelease("0.1.3")
@@ -236,6 +207,8 @@ func TestOldGatewayErrorMicroVMHoldsTheUpgradeUntilItsUserLetsItGo(t *testing.T)
 		t.Fatalf("gateway release = %q", got)
 	}
 	upgrade := "upgrade OpenShell 0.1.3 to " + openshell.InstallerVersion + " in place with `defenseclaw sandbox setup --install-openshell`"
+	deleteFirst := "this OpenShell can neither stop nor start a sandbox in its error state, and DefenseClaw stops no OpenShell gateway, so upgrades none, " +
+		"while OpenShell has not reported a MicroVM on it stopped: `defenseclaw sandbox delete box` deletes it and its work, after which " + upgrade
 	n := len(e.fake.ExecCalls())
 	feedLine := func() string {
 		var line string
@@ -246,13 +219,10 @@ func TestOldGatewayErrorMicroVMHoldsTheUpgradeUntilItsUserLetsItGo(t *testing.T)
 		}
 		return line
 	}
-	for _, cond := range []stream.Condition{mainFailed, vmUnpolled} {
+	for _, cond := range []stream.Condition{mainFailed, vmUnpolled, provTimeout} {
 		endIn(t, e, "box", openshell.PhaseProvisioning)
 		endIn(t, e, "box", openshell.PhaseError, cond)
-		wayOn := "its MicroVM may still run what its workload left running, which nothing in OpenShell flushes or stops, so the upgrade waits for it: " +
-			"`defenseclaw sandbox stop box` lets the upgrade stop it with the gateway (what is not on its disk by then is lost), and `defenseclaw sandbox delete box` deletes it. " +
-			upgrade + ", then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`, which bring it back with its disk"
-		if line := feedLine(); !strings.Contains(line, wayOn) || strings.Contains(line, "disk back") {
+		if line := feedLine(); !strings.Contains(line, deleteFirst) || strings.Contains(line, "disk back") || strings.Contains(line, "lets the upgrade") {
 			t.Fatalf("the feed's line (%s): %q", cond.Reason, line)
 		}
 		advance(24 * time.Hour)
@@ -262,23 +232,18 @@ func TestOldGatewayErrorMicroVMHoldsTheUpgradeUntilItsUserLetsItGo(t *testing.T)
 	}
 
 	refused := &types.StatusError{Code: types.ErrorConflict, Message: "sandbox must be Ready or in an automatic restart to stop (current phase: Error)"}
-	// A stop that is not the user's own is refused and lets nothing go.
+	// The user's stop is refused by OpenShell and releases nothing.
 	e.fake.FailNext(openshelltest.MethodStopSandbox, refused)
-	if _, err := e.m.Stop(t.Context(), "box"); err == nil || busy(t, e) != 1 {
-		t.Fatalf("a refused stop not the user's own: %v, busy %d", err, busy(t, e))
-	}
-	e.fake.FailNext(openshelltest.MethodStopSandbox, refused)
-	_, err := letGoStop(t, e, "box")
+	_, err := e.m.Stop(t.Context(), "box")
 	apiErr := wantCode(t, err, sandboxapi.CodeConflict)
-	if !strings.Contains(apiErr.Message, "box is in OpenShell's error state") || !strings.Contains(apiErr.Detail, LetGoNote("box")) ||
-		!strings.Contains(apiErr.Detail, upgrade+", then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`") {
+	if !strings.Contains(apiErr.Message, "box is in OpenShell's error state") || !strings.Contains(apiErr.Detail, deleteFirst) {
 		t.Fatalf("the user's refused stop = %+v", apiErr)
 	}
 	if got := syncsIn(e, "box", n); got != 0 {
 		t.Fatalf("%d sync(1) tried in a MicroVM in the error state, which OpenShell refuses", got)
 	}
-	if got := busy(t, e); got != 0 {
-		t.Fatalf("a MicroVM its user let go: busy %d, want the upgrade to go ahead", got)
+	if got := busy(t, e); got != 1 {
+		t.Fatalf("a MicroVM whose stop OpenShell refused: busy %d, want the upgrade held", got)
 	}
 
 	// Its VM is gone: nothing runs, nothing waits.

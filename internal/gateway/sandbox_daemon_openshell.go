@@ -1092,8 +1092,15 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context, handover bo
 		running, err := d.sweepForeign(sweep)
 		cancel()
 		switch {
+		case err != nil && !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable):
+			// The gateway answered, but its sandboxes could not be read:
+			// nothing proves that none of the account's runs, so it is kept,
+			// and looked at again soon. One DefenseClaw cannot connect to
+			// (Unavailable) runs nothing a stop could reach.
+			d.logf("check the OpenShell gateway for sandboxes before stopping it: %v; it keeps running", err)
+			d.scheduleCheck(foreignRecheckEvery)
+			return
 		case err != nil:
-			d.logf("check the OpenShell gateway for foreign sandboxes before stopping it: %v", err)
 		case !running:
 		case handover:
 			// One the policy leaves running (alert) does not hold the one
@@ -1105,6 +1112,14 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context, handover bo
 		default:
 			// Otherwise it keeps its gateway while it runs; look again soon,
 			// so the port is free shortly after it ends (GAP-0237).
+			d.scheduleCheck(foreignRecheckEvery)
+			return
+		}
+		// The sweep read the gateway's sandboxes afresh, right before the
+		// stop: one of the account's that OpenShell does not report stopped
+		// (started since the count, by another OpenShell client) keeps it
+		// (manager.HoldsCompute).
+		if n, err := d.runningSandboxes(ctx); err != nil || n > 0 {
 			d.scheduleCheck(foreignRecheckEvery)
 			return
 		}
@@ -1285,11 +1300,18 @@ func (d *SandboxDaemon) reportDrift(ctx context.Context, registration string, dr
 }
 
 // stopOpenShellIfIdle stops the account's managed gateway when the daemon
-// exits with no sandbox of the account running.
+// exits with no sandbox of the account that holds it (manager.HoldsCompute).
+// It counts them right before the stop, holding the lifecycle, so no
+// create or start of the daemon's comes between; one it cannot take within
+// the bound keeps the gateway.
 func (d *SandboxDaemon) stopOpenShellIfIdle() {
 	s := d.currentSettings()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if err := d.lockLifecycle(ctx); err != nil {
+		return
+	}
+	defer d.unlockLifecycle()
 	if n, err := d.runningSandboxes(ctx); err != nil || n > 0 {
 		return
 	}

@@ -481,40 +481,40 @@ func TestPrepareUpgrade(t *testing.T) {
 	unavailable := &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"}
 
 	c, _ := gateway(t, openshell.DriverDocker, running)
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull, nil); err != nil || pulls != 1 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 1 {
 		t.Fatalf("docker: %v, pulled %d times", err, pulls)
 	}
 	pullErr := fmt.Errorf("%w (docker pull: offline)", openshell.ErrRuntimeImages)
-	if err := openshell.PrepareUpgrade(context.Background(), c, func(context.Context) error { return pullErr }, nil); !errors.Is(err, openshell.ErrRuntimeImages) {
+	if err := openshell.PrepareUpgrade(context.Background(), c, func(context.Context) error { return pullErr }); !errors.Is(err, openshell.ErrRuntimeImages) {
 		t.Fatalf("docker, pull failed: %v", err)
 	}
 
 	pulls = 0
 	c, _ = gateway(t, openshell.DriverVM, running)
-	err := openshell.PrepareUpgrade(context.Background(), c, pull, nil)
-	if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "(dc-a, dc-b: stop them first with `defenseclaw sandbox stop NAME`") || pulls != 0 {
+	err := openshell.PrepareUpgrade(context.Background(), c, pull)
+	if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "dc-a (ready): `defenseclaw sandbox stop dc-a`; dc-b (provisioning): wait until") || pulls != 0 {
 		t.Fatalf("vm, sandboxes running: %v (pulled %d times)", err, pulls)
 	}
 	c, _ = gateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-c": openshell.PhaseStopped})
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull, nil); err != nil || pulls != 0 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 0 {
 		t.Fatalf("vm, none running: %v (pulled %d times)", err, pulls)
 	}
 
 	c, f := gateway(t, openshell.DriverVM, running)
 	f.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull, nil); !errors.Is(err, openshell.ErrSandboxesRunning) || pulls != 0 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull); !errors.Is(err, openshell.ErrSandboxesRunning) || pulls != 0 {
 		t.Fatalf("driver unknown, sandboxes running: %v (pulled %d times)", err, pulls)
 	}
 	c, f = gateway(t, openshell.DriverVM, running)
 	f.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
 	f.FailNext(openshelltest.MethodListSandboxes, &v1.StatusError{Code: v1.ErrorInternal, Message: "store locked"})
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull, nil); !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "could not be listed: ") {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull); !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "could not be listed: ") {
 		t.Fatalf("driver unknown, list failed: %v", err)
 	}
 	c, f = gateway(t, openshell.DriverVM, running)
 	f.FailNext(openshelltest.MethodGatewayInfo, unavailable)
 	f.FailNext(openshelltest.MethodListSandboxes, unavailable)
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull, nil); err != nil || pulls != 0 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 0 {
 		t.Fatalf("gateway down: %v (pulled %d times)", err, pulls)
 	}
 }

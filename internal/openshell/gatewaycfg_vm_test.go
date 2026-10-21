@@ -348,21 +348,20 @@ func TestGatewayConfigSeedsASharedHomebrewPrefix(t *testing.T) {
 	}
 }
 
-// TestQuiesceSandboxesBeforeARestart: a restart stops every sandbox on
-// the gateway, and a MicroVM stopped without a flush brings back empty
+// TestCheckSandboxesStoppedBeforeARestart: a restart stops every sandbox
+// on the gateway, and a MicroVM stopped without a flush brings back empty
 // what it wrote since its last one (OpenShell 0.1.1): its VM ends with the
-// gateway. A sync(1) before the restart left the sandbox running, free to
-// write again before the restart (the round before ran one and restarted).
-// On the vm driver of OpenShell 0.1.5 every ready sandbox, of every owner,
-// is now stopped first with OpenShell's own stop, which flushes the
-// guest's disk once its workload ended, and waited for until it is
-// stopped; nothing is run in it. A stop that fails refuses the restart,
-// and so does a sandbox another client started meanwhile. A gateway older
-// than 0.1.5, whose stop does not flush, refuses with the ready ones
-// named; the docker driver's stop keeps what a container wrote. A gateway
-// whose driver could not be read is judged like a MicroVM one, and only
-// one that answers neither call is taken to be down.
-func TestQuiesceSandboxesBeforeARestart(t *testing.T) {
+// gateway. The rounds before synced a ready MicroVM and restarted under it
+// (it could write again before the restart), then stopped it themselves
+// with OpenShell's stop. Now the restart stops and runs nothing in a
+// sandbox: on the vm driver it is refused, with each sandbox named with
+// its phase and the exact way to stop it, until OpenShell reports every
+// sandbox on the gateway, of every owner, stopped; once it does, the
+// restart goes ahead. That holds on every release, and the docker driver's
+// stop keeps what a container wrote. A gateway whose driver could not be
+// read is judged like a MicroVM one, and only one that answers neither
+// call is taken to be down.
+func TestCheckSandboxesStoppedBeforeARestart(t *testing.T) {
 	gateway := func(t *testing.T, d openshell.ComputeDriver, release string, phases map[string]openshell.SandboxPhase) *openshelltest.Fake {
 		t.Helper()
 		f := openshelltest.New(openshelltest.WithDriver(d))
@@ -380,125 +379,153 @@ func TestQuiesceSandboxesBeforeARestart(t *testing.T) {
 		}
 		return f
 	}
-	phaseOf := func(f *openshelltest.Fake, name string) openshell.SandboxPhase {
-		sb, err := f.Sandboxes().Get(context.Background(), openshell.DefaultWorkspace, name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return sb.Status.Phase
-	}
-	quiesced := func(t *testing.T, f *openshelltest.Fake, names ...string) {
+	untouched := func(t *testing.T, f *openshelltest.Fake) {
 		t.Helper()
-		if n := f.Calls(openshelltest.MethodStopSandbox); n != len(names) {
-			t.Fatalf("%d stops, want one each of %v", n, names)
-		}
-		for _, name := range names {
-			if ph := phaseOf(f, name); ph != openshell.PhaseStopped {
-				t.Fatalf("%s is %s before the restart, want stopped", name, ph)
-			}
-		}
-		if len(f.ExecCalls()) != 0 {
-			t.Fatalf("ran commands in sandboxes it stops: %+v", f.ExecCalls())
+		if n := f.Calls(openshelltest.MethodStopSandbox); n != 0 || len(f.ExecCalls()) != 0 {
+			t.Fatalf("the check stopped %d sandboxes and ran %+v in them", n, f.ExecCalls())
 		}
 	}
 	phases := map[string]openshell.SandboxPhase{"dc-a": openshell.PhaseReady, "dc-b": openshell.PhaseStopped, "theirs": openshell.PhaseReady}
-	const flushing = openshell.SandboxMin
+	const refused = "; OpenShell has not reported these stopped: dc-a (ready): `defenseclaw sandbox stop dc-a`; theirs (ready): `defenseclaw sandbox stop theirs`; then try again"
 
-	vm := gateway(t, openshell.DriverVM, flushing, phases)
-	if err := openshell.QuiesceSandboxes(context.Background(), vm.Client(openshell.ClientOptions{}), nil); err != nil {
-		t.Fatal(err)
-	}
-	quiesced(t, vm, "dc-a", "theirs")
-
-	// An OpenShell whose stop does not flush: nothing is stopped, the
-	// ready ones are named.
-	for _, release := range []string{"0.1.3", "0.1.5-pre.3"} {
-		old := gateway(t, openshell.DriverVM, release, phases)
-		err := openshell.QuiesceSandboxes(context.Background(), old.Client(openshell.ClientOptions{}), nil)
-		if !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "(dc-a, theirs): OpenShell "+release+" stops a MicroVM without flushing its disk") ||
-			old.Calls(openshelltest.MethodStopSandbox) != 0 || len(old.ExecCalls()) != 0 {
-			t.Fatalf("OpenShell %s: %v (stops %d)", release, err, old.Calls(openshelltest.MethodStopSandbox))
+	for _, release := range []string{openshell.SandboxMin, "0.1.3", "0.1.5-pre.3"} {
+		vm := gateway(t, openshell.DriverVM, release, phases)
+		c := vm.Client(openshell.ClientOptions{})
+		if err := openshell.CheckSandboxesStopped(context.Background(), c); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused) {
+			t.Fatalf("OpenShell %s, ready MicroVMs: %v", release, err)
+		}
+		untouched(t, vm)
+		// Their users stop them: OpenShell reports them stopped.
+		for _, name := range []string{"dc-a", "theirs"} {
+			if err := vm.SetPhase(openshell.DefaultWorkspace, name, openshell.PhaseStopped); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := openshell.CheckSandboxesStopped(context.Background(), c); err != nil {
+			t.Fatalf("OpenShell %s, every MicroVM stopped: %v", release, err)
 		}
 	}
 
-	docker := gateway(t, openshell.DriverDocker, flushing, phases)
-	if err := openshell.QuiesceSandboxes(context.Background(), docker.Client(openshell.ClientOptions{}), nil); err != nil || docker.Calls(openshelltest.MethodStopSandbox) != 0 {
-		t.Fatalf("docker: %v, stops %d", err, docker.Calls(openshelltest.MethodStopSandbox))
+	docker := gateway(t, openshell.DriverDocker, openshell.SandboxMin, phases)
+	if err := openshell.CheckSandboxesStopped(context.Background(), docker.Client(openshell.ClientOptions{})); err != nil {
+		t.Fatalf("docker: %v", err)
 	}
+	untouched(t, docker)
 
-	stuck := gateway(t, openshell.DriverVM, flushing, phases)
-	stuck.FailNext(openshelltest.MethodStopSandbox, &v1.StatusError{Code: v1.ErrorInternal, Message: "driver stop failed"})
-	err := openshell.QuiesceSandboxes(context.Background(), stuck.Client(openshell.ClientOptions{}), nil)
-	if !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "dc-a: ") || !strings.Contains(err.Error(), "driver stop failed") {
-		t.Fatalf("a stop that fails = %v", err)
-	}
-
-	// Started by another client while the others stopped: the list after
-	// the stops refuses it.
-	raced := gateway(t, openshell.DriverVM, flushing, phases)
-	raced.Intercept(func(method string) error {
-		if method == openshelltest.MethodStopSandbox {
-			_ = raced.SetPhase(openshell.DefaultWorkspace, "dc-b", openshell.PhaseReady)
-		}
-		return nil
-	})
-	err = openshell.QuiesceSandboxes(context.Background(), raced.Client(openshell.ClientOptions{}), nil)
-	if !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "(dc-b, ready): started again while the others stopped") {
-		t.Fatalf("a sandbox started during the stops = %v", err)
-	}
-
-	// A gateway whose driver could not be read is stopped all the same:
-	// one failed GetGatewayInfo does not mean nothing runs on it.
+	// A gateway whose driver could not be read refuses all the same: one
+	// failed GetGatewayInfo does not mean nothing runs on it.
 	for _, infoErr := range []error{
 		&v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"},
 		&v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"},
 		&v1.StatusError{Code: v1.ErrorUnimplemented, Message: "unknown method GetGatewayInfo"},
 	} {
-		busy := gateway(t, openshell.DriverVM, flushing, phases)
+		busy := gateway(t, openshell.DriverVM, openshell.SandboxMin, phases)
 		busy.FailNext(openshelltest.MethodGatewayInfo, infoErr)
-		if err := openshell.QuiesceSandboxes(context.Background(), busy.Client(openshell.ClientOptions{}), nil); err != nil {
+		if err := openshell.CheckSandboxesStopped(context.Background(), busy.Client(openshell.ClientOptions{})); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused) {
 			t.Fatalf("GatewayInfo failed with %v: %v", infoErr, err)
 		}
-		quiesced(t, busy, "dc-a", "theirs")
+		untouched(t, busy)
 	}
 
 	// A gateway that refuses both calls has nothing a stop could reach.
-	down := gateway(t, openshell.DriverVM, flushing, phases)
+	down := gateway(t, openshell.DriverVM, openshell.SandboxMin, phases)
 	down.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
 	down.FailNext(openshelltest.MethodListSandboxes, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
-	if err := openshell.QuiesceSandboxes(context.Background(), down.Client(openshell.ClientOptions{}), nil); err != nil || down.Calls(openshelltest.MethodStopSandbox) != 0 {
-		t.Fatalf("gateway down: %v, stops %d", err, down.Calls(openshelltest.MethodStopSandbox))
+	if err := openshell.CheckSandboxesStopped(context.Background(), down.Client(openshell.ClientOptions{})); err != nil {
+		t.Fatalf("gateway down: %v", err)
 	}
 
 	// One that answers the list with an error, or times out on it (a
-	// busy host), is not down: the restart waits until its sandboxes can
-	// be stopped.
+	// busy host), is not down.
 	for _, listErr := range []error{
 		&v1.StatusError{Code: v1.ErrorInternal, Message: "store locked"},
 		&v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"},
 	} {
-		unlisted := gateway(t, openshell.DriverVM, flushing, phases)
+		unlisted := gateway(t, openshell.DriverVM, openshell.SandboxMin, phases)
 		unlisted.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
 		unlisted.FailNext(openshelltest.MethodListSandboxes, listErr)
-		if err := openshell.QuiesceSandboxes(context.Background(), unlisted.Client(openshell.ClientOptions{}), nil); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), listErr.(*v1.StatusError).Message) {
+		if err := openshell.CheckSandboxesStopped(context.Background(), unlisted.Client(openshell.ClientOptions{})); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), listErr.(*v1.StatusError).Message) {
 			t.Fatalf("GatewayInfo and the list (%v) failed: %v, want ErrUnflushed", listErr, err)
 		}
 	}
 	// Nor is one whose context ended.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	ended := gateway(t, openshell.DriverVM, flushing, phases)
+	ended := gateway(t, openshell.DriverVM, openshell.SandboxMin, phases)
 	ended.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
 	ended.FailNext(openshelltest.MethodListSandboxes, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
-	if err := openshell.QuiesceSandboxes(ctx, ended.Client(openshell.ClientOptions{}), nil); !errors.Is(err, openshell.ErrUnflushed) {
-		t.Fatalf("quiesce on an ended context: %v, want ErrUnflushed", err)
+	if err := openshell.CheckSandboxesStopped(ctx, ended.Client(openshell.ClientOptions{})); !errors.Is(err, openshell.ErrUnflushed) {
+		t.Fatalf("the check on an ended context: %v, want ErrUnflushed", err)
+	}
+}
+
+// TestARestartChecksTheSandboxesRightBeforeItActs: a check made once,
+// before the question (setup's and doctor's consent), does not see a
+// sandbox another OpenShell client starts after it. Restart checks again,
+// under the lifecycle lock, right before it restarts: a MicroVM started
+// since refuses it with nothing restarted, and the restart goes ahead
+// once OpenShell reports it stopped. Apply's second restart, the one that
+// brings the previous files back after a restarted gateway that is not
+// healthy, makes the same check: under a sandbox started on the restarted
+// gateway it leaves the gateway on the new files, with the restart
+// pending, and does not stop it.
+func TestARestartChecksTheSandboxesRightBeforeItActs(t *testing.T) {
+	f := newGatewayFixture(t)
+	running := openshell.DriverVM
+	f.onHomebrew(t, homebrewTOML, &running)
+	fake := openshelltest.New(openshelltest.WithDriver(openshell.DriverVM))
+	fake.SetRelease(openshell.SandboxMin)
+	c := fake.Client(openshell.ClientOptions{})
+	if _, err := c.CreateSandbox(context.Background(), "dc-a", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fake.SetPhase(openshell.DefaultWorkspace, "dc-a", openshell.PhaseStopped); err != nil {
+		t.Fatal(err)
+	}
+	f.cfg.CheckStopped = func(ctx context.Context) error { return openshell.CheckSandboxesStopped(ctx, c) }
+	// The consent's look: nothing runs.
+	if err := openshell.CheckSandboxesStopped(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	// Another client starts dc-a after it.
+	if err := fake.SetPhase(openshell.DefaultWorkspace, "dc-a", openshell.PhaseReady); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.cfg.Restart(context.Background()); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "dc-a (ready): `defenseclaw sandbox stop dc-a`") || f.brewRestarts() != 0 {
+		t.Fatalf("Restart under a MicroVM started after the consent = %v (restarts %d)", err, f.brewRestarts())
+	}
+	if n := fake.Calls(openshelltest.MethodStopSandbox); n != 0 {
+		t.Fatalf("the restart stopped %d sandboxes itself", n)
+	}
+	if err := fake.SetPhase(openshell.DefaultWorkspace, "dc-a", openshell.PhaseStopped); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.cfg.Restart(context.Background()); err != nil || f.brewRestarts() != 1 {
+		t.Fatalf("Restart once dc-a stopped = %v (restarts %d)", err, f.brewRestarts())
+	}
+
+	// Apply restarts onto the new files, the restarted gateway is not
+	// healthy, and dc-a was started on it meanwhile: no second restart.
+	f.runner.OnFunc("brew services restart nvidia/openshell/openshell", func(context.Context, openshell.Command) ([]byte, error) {
+		_ = fake.SetPhase(openshell.DefaultWorkspace, "dc-a", openshell.PhaseReady)
+		return nil, nil
+	})
+	f.verify = errors.New("gateway not healthy")
+	restarts := f.brewRestarts()
+	_, err := f.apply(f.plan(t, microVMs))
+	if err == nil || !strings.Contains(err.Error(), "gateway not healthy") || !strings.Contains(err.Error(), "still runs on the new ones, since it was not restarted again") ||
+		!errors.Is(err, openshell.ErrUnflushed) || f.brewRestarts() != restarts+1 {
+		t.Fatalf("Apply whose rollback finds a MicroVM started on the restarted gateway = %v (restarts %d)", err, f.brewRestarts()-restarts)
+	}
+	if st, _ := f.cfg.Read(); st.RestartPendingSince.IsZero() {
+		t.Fatalf("the restart that was not made is not pending: %+v", st)
 	}
 }
 
 // TestGatewayRestartsHoldTheLifecycleLock: a sandbox DefenseClaw started
 // after the restart's check ran into the restart unflushed. Apply,
 // Restart and Rollback now hold the lifecycle lock from their check of the
-// sandboxes (QuiesceSandboxes) to the healthy gateway after the restart:
+// sandboxes (CheckStopped) to the healthy gateway after the restart:
 // DefenseClaw's create and start are refused meanwhile, and allowed again
 // once it returns, the restart refused or failed included. One held by a
 // create or start past the wait refuses the restart before anything is
@@ -509,7 +536,7 @@ func TestGatewayRestartsHoldTheLifecycleLock(t *testing.T) {
 	f.onHomebrew(t, homebrewTOML, &running)
 	var during []error
 	starts := func() { _, err := openshell.LockSandboxStart(f.dir); during = append(during, err) }
-	f.cfg.QuiesceSandboxes = func(context.Context) error { f.flushes++; starts(); return f.flush }
+	f.cfg.CheckStopped = func(context.Context) error { f.flushes++; starts(); return f.flush }
 	f.cfg.VerifyGateway = func(context.Context) error { f.verified++; starts(); return f.verify }
 	free := func(what string) {
 		t.Helper()

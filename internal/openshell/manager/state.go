@@ -198,12 +198,6 @@ type record struct {
 	// stopping it, so without a flush: what it wrote in its last seconds
 	// may be missing, empty or cut short (GAP-0367).
 	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
-	// StopAskedIn is the phase the sandbox was in when its user's own stop
-	// found a MicroVM that OpenShell did not stop and that may linger
-	// (mayLinger): its user let it go (letGo), and what stops the gateway
-	// no longer waits for it while it stays in that phase (HoldsCompute).
-	// Empty in any other case, and cleared by the next phase change.
-	StopAskedIn string `json:"stop_asked_in,omitempty"`
 	// StoppedAt is when the sandbox stopped running, by a stop or because
 	// its main process ended (completed); zero while it is in another
 	// phase. delete_stopped_after counts from it (deleteExpired).

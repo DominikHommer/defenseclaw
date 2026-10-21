@@ -20,6 +20,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,6 +129,64 @@ func TestSandboxDaemonForeignAlertSandboxDoesNotHoldTheHandover(t *testing.T) {
 		t.Fatalf("the hand-over took %s", took)
 	}
 	f.d.stops.Store(0)
+}
+
+// TestSandboxDaemonChecksAgainRightBeforeItStopsTheGateway: the idle stop
+// of the account's gateway counted its sandboxes once, then swept the
+// gateway, which reads OpenShell's sandboxes afresh, and stopped it: a
+// sandbox another OpenShell client started between the count and the
+// sweep went down with it, and so did every sandbox when the sweep could
+// not read OpenShell at all. Now the count is made again after the sweep,
+// under the same lifecycle, right before the stop, and a sweep that fails
+// keeps the gateway; it stops once the gateway holds nothing.
+func TestSandboxDaemonChecksAgainRightBeforeItStopsTheGateway(t *testing.T) {
+	prev := foreignRecheckEvery
+	foreignRecheckEvery = time.Hour
+	t.Cleanup(func() { foreignRecheckEvery = prev })
+	var fx *sandboxDaemonFixture
+	var startedMeanwhile, sweepFails atomic.Bool
+	fx = newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.sweepForeign = func(context.Context) (bool, error) {
+			if sweepFails.Load() {
+				return false, errors.New("openshell: list sandboxes: context deadline exceeded")
+			}
+			if startedMeanwhile.Load() {
+				fx.running.Store(1)
+			}
+			return false, nil
+		}
+	})
+	fx.run(t)
+	ctx := context.Background()
+	idle := func() {
+		fx.os.holder.Store(int64(os.Getuid()))
+		fx.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())
+	}
+	idle()
+	startedMeanwhile.Store(true)
+	if fx.d.check(ctx); fx.os.stopped.Load() != 0 {
+		t.Fatal("stopped the gateway under a sandbox the sweep found started")
+	}
+	startedMeanwhile.Store(false)
+	fx.running.Store(0)
+	sweepFails.Store(true)
+	idle()
+	if fx.d.check(ctx); fx.os.stopped.Load() != 0 {
+		t.Fatal("stopped the gateway when OpenShell's sandboxes could not be read")
+	}
+	sweepFails.Store(false)
+	idle()
+	if fx.d.check(ctx); fx.os.stopped.Load() != 1 {
+		t.Fatalf("an idle gateway was not stopped: %d", fx.os.stopped.Load())
+	}
+	// One DefenseClaw cannot connect to runs nothing a stop could reach.
+	unreachable := newSandboxDaemonFixture(t)
+	unreachable.run(t)
+	unreachable.os.holder.Store(int64(os.Getuid()))
+	unreachable.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())
+	if unreachable.d.check(ctx); unreachable.os.stopped.Load() != 1 {
+		t.Fatalf("a gateway DefenseClaw cannot reach was not stopped: %d", unreachable.os.stopped.Load())
+	}
 }
 
 // A stop or delete of a kept sandbox starts the account's gateway the daemon

@@ -170,9 +170,6 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 			if err := decodeSandboxBody(r, &req, true); err != nil {
 				return nil, err
 			}
-			if r.URL.Query().Get(sandboxapi.QueryLetGo) == "1" {
-				ctx = sandboxapi.WithLetGo(ctx)
-			}
 			return c.Stop(ctx, name)
 		case "start":
 			var req sandboxapi.StartRequest

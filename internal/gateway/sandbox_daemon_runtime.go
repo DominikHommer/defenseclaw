@@ -958,8 +958,9 @@ func (d *SandboxDaemon) runningSandboxes(ctx context.Context) (int, error) {
 }
 
 // sandboxesHoldingCompute counts the sandboxes of list that may run or
-// hold compute (manager.HoldsCompute): a MicroVM that completed or is in
-// OpenShell's error state counts until its user lets it go or deletes it.
+// hold compute (manager.HoldsCompute): a MicroVM counts until OpenShell
+// reports it stopped, deleting or gone, completed and error states
+// included (but for one whose VM is gone).
 func sandboxesHoldingCompute(list []sandboxapi.Sandbox) int {
 	n := 0
 	for _, sb := range list {

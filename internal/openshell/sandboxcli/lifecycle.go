@@ -30,7 +30,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
-	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -834,8 +833,7 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 			}
 		}
 	}
-	// The user's own stop: a MicroVM that OpenShell does not stop is let go.
-	stopped, err := api.StopLetGo(ctx, o.Name)
+	stopped, err := api.Stop(ctx, o.Name)
 	if err != nil {
 		return apiError(err)
 	}
@@ -843,33 +841,42 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	if copyAt != nil && !stopped.Hooks.LastHookAt.After(sb.Hooks.LastHookAt) {
 		a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
 	}
-	if stopped.StopAskedIn != "" && stopped.StopAskedIn == stopped.Phase {
-		a.warn(stopped.Name + " is " + stopped.Phase + ": " + manager.LetGoNote(stopped.Name))
+	if note := notStoppedNote(ctx, api, stopped); note != "" {
+		a.warn(note)
 		return nil
 	}
 	a.ok(stopped.Name + " is " + stopped.Phase)
 	return nil
 }
 
-// stopsAsked lists the sandboxes whose users let them go, by name, with
-// the phase they were let go in (openshell.StopsAsked), from the daemon:
-// none when it does not answer.
-func (a *App) stopsAsked(ctx context.Context) map[string]string {
-	api, err := a.api()
-	if err != nil {
-		return nil
+// notStoppedNote is what a stop that OpenShell returned as it was leaves
+// the user to do, "" when sb stopped or holds nothing: OpenShell does not
+// stop a MicroVM whose main process completed or failed, which may still
+// run, and DefenseClaw stops, restarts or upgrades no OpenShell gateway,
+// and moves no account to another OpenShell setup, while one does
+// (openshell.HoldsGateway). It names how to bring it to stopped
+// (openshell.StopWayOn) on the release the daemon's gateway reports.
+func notStoppedNote(ctx context.Context, api API, sb *sandboxapi.Sandbox) string {
+	var phase openshell.SandboxPhase
+	is := "completed"
+	switch sb.Phase {
+	case "completed":
+		phase = openshell.PhaseCompleted
+	case "error":
+		phase, is = openshell.PhaseError, "in OpenShell's error state"
+	default:
+		return ""
 	}
-	list, err := api.List(ctx)
-	if err != nil {
-		return nil
+	if d, ok := openshell.LookupDriver(sb.Driver); ok && d.StopFlushes || !openshell.HoldsGateway(phase, sb.PhaseReason, false) {
+		return ""
 	}
-	out := map[string]string{}
-	for _, sb := range list {
-		if sb.StopAskedIn != "" && sb.StopAskedIn == sb.Phase {
-			out[sb.Name] = sb.StopAskedIn
-		}
+	runs := false
+	if st, err := api.Status(ctx); err == nil && st.Gateway != nil {
+		runs = openshell.RunsSandboxes(st.Gateway.Version)
 	}
-	return out
+	return sb.Name + " is " + is + ": OpenShell does not stop it, so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades " +
+		"no OpenShell gateway under it, nor moves this account to another OpenShell setup, until OpenShell reports it stopped: " +
+		openshell.StopWayOn(sb.Name, phase, sb.PhaseReason, runs)
 }
 
 // copyAtStop looks at the copy of sb, which is about to stop, within a

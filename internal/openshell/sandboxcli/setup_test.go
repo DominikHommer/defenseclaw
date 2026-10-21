@@ -549,14 +549,16 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 			[]string{"⚠ OpenShell 0.1.1 is kept: Docker could not pull the images the upgraded gateway starts with (docker pull: no such host): let Docker reach ghcr.io"}},
 		// The restart would stop a running MicroVM without a flush.
 		{"MicroVMs running", "", true, SetupOptions{}, openshell.DriverVM, 2, nil, false,
-			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the 2 MicroVM sandboxes running on it " +
-				names + " without a flush", "→ stop them first (`defenseclaw sandbox stop NAME` flushes their disks), then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, and DefenseClaw makes it only once OpenShell " +
+				"reports every MicroVM sandbox on the gateway stopped, which it does not for these: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a`; " +
+				"dc-claude-theirs-b (ready): `defenseclaw sandbox stop dc-claude-theirs-b`; then try again", "→ then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
 		{"MicroVMs running, --install-openshell", "", false, flag, openshell.DriverVM, 2, nil, false,
-			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the 2 MicroVM sandboxes"}},
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, and DefenseClaw makes it only once OpenShell"}},
 		{"no MicroVM running", "", false, flag, openshell.DriverVM, 0, nil, true,
 			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: no sandbox runs on it now"}},
 		{"a MicroVM started meanwhile", "", false, flag, openshell.DriverVM, 0, fmt.Errorf("%w (dc-late): stop them first", openshell.ErrSandboxesRunning), true,
-			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade's gateway restart would stop running MicroVM sandboxes without a flush (dc-late): stop them first"}},
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade was not run: its gateway restart stops every MicroVM on the gateway with no flush, so DefenseClaw upgrades only " +
+				"once OpenShell reports each sandbox on it stopped (dc-late): stop them first"}},
 		// GAP-0056, GAP-0064: sudo refused or cancelled before the script.
 		{"no sudo", "", false, flag, "", 0, fmt.Errorf("%w: cancelled at sudo's password prompt", openshell.ErrSudo), true,
 			[]string{"⚠ OpenShell 0.1.1 is kept, the upgrade did not run: the install needs sudo: cancelled at sudo's password prompt",
@@ -1864,10 +1866,11 @@ func TestDoctorJudgesMicroVMsAgainstTheAdminMaximum(t *testing.T) {
 }
 
 // TestDoctorFixAsksBeforeARestartStopsSandboxes: a fix that restarts a
-// MicroVM gateway stops every sandbox running on it, with OpenShell's
-// flushing stop, which this gateway (0.1.1) lacks, so it names them as what
-// refuses the restart. With none running it is a yes by default, as every fix; with
-// some running it names them and is a no by default, which --yes takes.
+// MicroVM gateway stops every sandbox on it with no flush, so the restart
+// is refused while OpenShell does not report one stopped: the question
+// names each with how to stop it. With none running it is a yes by
+// default, as every fix; with some running it is a no by default, which
+// --yes takes.
 // On docker, whose stop keeps what a container wrote, nothing changes.
 func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	applied := 0
@@ -1881,8 +1884,8 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	}
 	report := on(openshell.DriverVM)
 	const question = `Fix "MicroVM resources": raise them and restart the gateway?`
-	const stops = "MicroVM resources: this restarts the OpenShell gateway, which this OpenShell refuses while sandboxes run on it (dc-claude-theirs-a): " +
-		"it stops a MicroVM without flushing its disk (OpenShell " + openshell.SandboxMin + " flushes it), so stop them first with `defenseclaw sandbox stop NAME`"
+	const stops = "MicroVM resources: this restarts the OpenShell gateway, and DefenseClaw makes it only once OpenShell reports every MicroVM sandbox on the gateway stopped, " +
+		"which it does not for these: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a`; then try again"
 
 	ta := newTestApp(t, "\n")
 	ta.IO.TTY = true
@@ -1898,7 +1901,7 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	ta.HostDoctor = report
 	runningOn(t, ta, 1)
 	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
-	has(t, ta.output(), stops, "not fixed with --yes while sandboxes run on the gateway")
+	has(t, ta.output(), stops, "not fixed with --yes while OpenShell does not report every MicroVM sandbox on the gateway stopped")
 	_ = ta.fresh().RunDoctor(bg, DoctorOptions{Fix: true, Yes: true, Output: OutputJSON})
 	if applied != 0 {
 		t.Fatalf("--yes applied the fix %d times", applied)

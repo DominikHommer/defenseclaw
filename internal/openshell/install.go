@@ -31,7 +31,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -59,12 +58,13 @@ var (
 	// ErrUnmanagedUpgrade means Upgrade found a supported CLI that NVIDIA's
 	// installer did not install, and would not replace.
 	ErrUnmanagedUpgrade = errors.New("openshell: DefenseClaw upgrades only an OpenShell that NVIDIA's installer installed")
-	// ErrSandboxesRunning means Upgrade ran nothing: sandboxes run (or may
-	// run) on a gateway whose driver's stop keeps only what they synced (the
-	// MicroVM driver). NVIDIA's script restarts the gateway, which stops
-	// them, only after its downloads and the install, so a flush before the
-	// script would leave all they wrote meanwhile to be lost.
-	ErrSandboxesRunning = errors.New("openshell: the upgrade's gateway restart would stop running MicroVM sandboxes without a flush")
+	// ErrSandboxesRunning means Upgrade ran nothing: on a gateway whose
+	// driver's stop keeps only what the sandboxes synced (the MicroVM
+	// driver), OpenShell does not report every sandbox stopped. NVIDIA's
+	// script restarts the gateway, which stops them with no flush, only
+	// after its downloads and the install (PrepareUpgrade).
+	ErrSandboxesRunning = errors.New("openshell: the upgrade was not run: its gateway restart stops every MicroVM on the gateway with no flush, " +
+		"so DefenseClaw upgrades only once OpenShell reports each sandbox on it stopped")
 	// ErrRuntimeImages means Upgrade ran nothing: Docker could not pull the
 	// release's supervisor images (Installer.PrepareUpgrade), without which
 	// the restarted gateway's docker driver does not start.
@@ -246,10 +246,6 @@ type Installer struct {
 	// discover the Discover registration, dial it and PrepareUpgrade, with
 	// the images gateway.toml leaves to the release: RuntimeImages).
 	PrepareUpgrade func(ctx context.Context, release Version) error
-	// StopsAsked lists the sandboxes whose user let them go (LetGo): the
-	// default PrepareUpgrade refuses the upgrade under any other MicroVM
-	// that may linger (MayLinger). Nil lets none go.
-	StopsAsked StopsAsked
 	// LockLifecycle takes the lifecycle lock that keeps DefenseClaw from
 	// creating or starting a sandbox from PrepareUpgrade's check to the
 	// healthy upgraded gateway, minutes later (default:
@@ -693,7 +689,7 @@ func (i *Installer) prepareUpgrade(ctx context.Context, release Version) error {
 	return PrepareUpgrade(ctx, c, func(ctx context.Context) error {
 		st, _ := (&GatewayConfigurator{Dir: i.Discover.ConfigDir, GOOS: i.GOOS, Runner: i.Runner}).Read()
 		return PullRuntimeImages(ctx, i.Runner, st.RuntimeImages(release))
-	}, stopsAsked(ctx, i.StopsAsked))
+	})
 }
 
 // PrepareUpgrade readies the gateway c talks to for the restart of an
@@ -705,26 +701,20 @@ func (i *Installer) prepareUpgrade(ctx context.Context, release Version) error {
 //     release's supervisor images unless they are local, and does not
 //     start without them.
 //   - Elsewhere (the MicroVM driver, or a gateway whose driver
-//     GetGatewayInfo did not name) the restart stops every sandbox, and a
-//     MicroVM stopped without a flush loses what it wrote since its last
-//     sync: a flush before the script would leave minutes of writes
-//     unsynced. A sandbox that may hold compute (MayHoldCompute: running,
-//     starting, stopping, or in a phase OpenShell does not name) refuses
-//     the upgrade (ErrSandboxesRunning, naming them), and so does a list
-//     that fails. So does a MicroVM that may linger (MayLinger: its
-//     workload completed, or it is in the error state), which may still
-//     run what its workload left running and which nothing in OpenShell
-//     flushes or stops, unless its user let it go (asked, LetGo). One
-//     whose VM is gone (VMGone) runs nothing, and one whose provisioning
-//     timed out ran nothing since its last stop: the upgraded gateway's
-//     start provisions it again. A gateway that answers neither call is
-//     taken to be down, and runs nothing.
+//     GetGatewayInfo did not name) the restart stops every sandbox with no
+//     flush. The upgrade is refused (ErrSandboxesRunning, naming each with
+//     the exact way to stop it: StopWayOn) unless OpenShell reports every
+//     sandbox on the gateway stopped, deleting, or in the error state with
+//     its VM gone (HoldsGateway), and so is a list that fails. Nothing is
+//     stopped or run in a sandbox, and nothing is inferred from time. A
+//     gateway that answers neither call is taken to be down, and runs
+//     nothing.
 //
 // The caller holds the lifecycle lock (LockGatewayLifecycle) from this
 // check until the upgraded gateway is healthy, so DefenseClaw starts no
 // sandbox while the script runs; another OpenShell client is not held
 // back.
-func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) error, asked map[string]string) error {
+func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) error) error {
 	info, infoErr := c.GatewayInfo(ctx)
 	if infoErr == nil {
 		if d, err := GatewayDriver(info); err == nil && d.StopFlushes {
@@ -739,35 +729,9 @@ func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) er
 		if infoErr != nil && ctx.Err() == nil && IsUnavailable(err) {
 			return nil
 		}
-		return fmt.Errorf("%w, and the sandboxes on it could not be listed: %v", ErrSandboxesRunning, err)
+		return fmt.Errorf("%w (the sandboxes on it could not be listed: %v); then upgrade", ErrSandboxesRunning, err)
 	}
-	return runningRefusal(list, asked)
-}
-
-// runningRefusal is ErrSandboxesRunning for the sandboxes of list that an
-// upgrade's gateway restart would stop with work in them (riskReady,
-// riskActive, and riskLingering where asked does not let them go), nil
-// when there are none.
-func runningRefusal(list []*Sandbox, asked map[string]string) error {
-	var running []string
-	for _, sb := range list {
-		if r := restartRiskOf(sb); r == riskReady || r == riskActive {
-			running = append(running, sb.Name)
-		}
-	}
-	held := lingering(list, asked)
-	if len(running) == 0 && len(held) == 0 {
-		return nil
-	}
-	slices.Sort(running)
-	var parts []string
-	if len(running) > 0 {
-		parts = append(parts, strings.Join(running, ", ")+": stop them first with `defenseclaw sandbox stop NAME`, which flushes their disks")
-	}
-	if len(held) > 0 {
-		parts = append(parts, strings.Join(phaseNames(held), "; ")+": "+lingerWayOn)
-	}
-	return fmt.Errorf("%w (%s), then upgrade", ErrSandboxesRunning, strings.Join(parts, "; and "))
+	return stoppedRefusal(ErrSandboxesRunning, list, func() bool { return gatewayRunsSandboxes(ctx, c) }, "upgrade")
 }
 
 // runtimeImageRepository holds the images OpenShell's docker driver runs

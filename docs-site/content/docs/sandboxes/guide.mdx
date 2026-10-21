@@ -1997,10 +1997,10 @@ setup then stops on the **Gateway** check. In the TUI, turn **Install
 OpenShell** on: it stays off for an upgrade. On the MicroVM driver, first stop
 the sandboxes that run, start or stop with `defenseclaw sandbox stop <name>`.
 A MicroVM that completed or is in OpenShell's error state still runs its VM,
-with whatever its workload left running, and nothing in OpenShell flushes or
-stops it. The upgrade waits for it. `defenseclaw sandbox stop <name>` lets the
-upgrade stop it with the gateway (what is not on its disk by then is lost),
-and `defenseclaw sandbox delete <name>` deletes it. After the
+with whatever its workload left running. OpenShell 0.1.3 neither stops nor
+starts it, so the upgrade is refused until you delete it
+(`defenseclaw sandbox delete <name>`). Setup names each such sandbox and the
+command to run. After the
 upgrade, stop and start each sandbox that kept running through it: until it
 stops, it runs the old release's supervisor, and DefenseClaw says so
 (``⚠ <name>'s session started on OpenShell 0.1.3``) in the activity feed and
@@ -2023,20 +2023,31 @@ What the upgrade does:
   pulled.
 - On the MicroVM driver the restart stops every running sandbox. A MicroVM
   stopped that way loses what it wrote since its last sync, and the restart
-  comes minutes after the installer starts, so setup does not upgrade while
-  a sandbox runs or starts: it keeps the release you have and names the sandboxes to stop.
+  comes minutes after the installer starts. So setup upgrades only once
+  OpenShell reports every sandbox on the gateway stopped (or deleting, or its
+  VM gone). Until then it keeps the release you have, and names each sandbox
+  with the command that stops it.
   `defenseclaw sandbox stop <name>` flushes a sandbox's disk and stops it,
   and `defenseclaw sandbox start <name>` starts it again after the upgrade.
   From its check to the upgraded gateway, DefenseClaw creates and starts no
   sandbox: `defenseclaw sandbox start` says the gateway is being upgraded.
 - A gateway restart that DefenseClaw makes (`sandbox doctor --fix`, `sandbox
-  setup`) on the MicroVM driver of OpenShell 0.1.5 first stops each running
-  sandbox with OpenShell's own stop, which ends its workload and flushes its
-  disk, and the sandboxes stay stopped after it (`defenseclaw sandbox start`).
-  An older OpenShell's stop does not flush, so the restart is refused while a
-  sandbox runs. It is also refused while a MicroVM that completed or is in
-  OpenShell's error state holds the gateway, until you stop or delete it as
-  above.
+  setup`) on the MicroVM driver follows the same rule, on every OpenShell
+  release. It is refused while OpenShell does not report a sandbox stopped,
+  whether that sandbox is running, starting, stopping, in an unknown phase,
+  completed, or in its error state. DefenseClaw stops nothing itself and does
+  not go by elapsed time. The refusal names each sandbox and the exact command
+  that brings it to stopped:
+  - running: `defenseclaw sandbox stop <name>`;
+  - completed, or failed on OpenShell 0.1.5: `defenseclaw sandbox start
+    <name>`, then `stop`;
+  - on an older OpenShell: `defenseclaw sandbox delete <name>`.
+
+  DefenseClaw checks again under its lifecycle lock right before the restart,
+  so a sandbox started after the question still refuses it. From that check to
+  the healthy gateway, DefenseClaw creates and starts no sandbox.
+- `defenseclaw sandbox stop` of a MicroVM whose workload completed or failed
+  says that OpenShell left it as it was, and prints the commands that stop it.
 - OpenShell's patch releases do not intentionally break its stable
   interfaces, so docker sandboxes made on 0.1.1 to 0.1.4 should start on 0.1.5. The
   MicroVM driver is experimental upstream and makes no such promise.

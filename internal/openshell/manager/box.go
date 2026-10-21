@@ -482,11 +482,6 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	if phase == audit.SandboxPhaseError && (cond != nil || previous != phase) {
 		b.rec.PhaseReason = errorPhaseReason(cond)
 	}
-	// The user let the MicroVM go (letGo) for the phase it was in: any
-	// other phase holds it again.
-	if b.rec.StopAskedIn != "" && b.rec.StopAskedIn != string(phase) {
-		b.rec.StopAskedIn = ""
-	}
 	// The record written below keeps the hook counts reached so far.
 	b.noteHookCountsLocked()
 	id := b.identity()
@@ -541,95 +536,35 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	m.syncObserve(b, phase)
 }
 
-// MayHoldCompute reports whether a sandbox in phase (sandboxapi's, as
-// audit.SandboxPhase spells it, or a view's missing) on the compute driver
-// driver (a record's: "" is docker) may hold compute that stopping its
-// OpenShell gateway would end without the flush a DefenseClaw stop does
-// first, or half started (openshell.MayHoldCompute): every phase but
-// stopped, deleting, deleted and missing (OpenShell no longer has the
-// sandbox), an unknown or empty one included, except that a sandbox whose
-// workload ended (completed, or OpenShell's error state) holds none on a
-// driver whose own stop keeps the workload's writes (docker: a container
-// that exited). A MicroVM keeps running after its workload completes or
-// fails, until it is deleted or its gateway stops (GAP-0012), with what
-// its workload left running, and nothing in OpenShell flushes or stops it
-// (openshell.MayLinger), so whatever stops the gateway on its own (a
-// managed setup switch, the daemon's idle stop of the gateway, an
-// upgrade) waits for it: HoldsCompute says until when.
-func MayHoldCompute(phase, driver string) bool {
-	switch audit.SandboxPhase(phase) {
-	case audit.SandboxPhaseStopped, audit.SandboxPhaseDeleting, audit.SandboxPhaseDeleted, phaseMissing:
-		return false
-	case audit.SandboxPhaseCompleted, audit.SandboxPhaseError:
-		return stopLosesWrites(driver)
-	}
-	return true
-}
-
 // phaseMissing is the phase of the view of a sandbox OpenShell no longer
 // has, whose state DefenseClaw still holds.
 const phaseMissing audit.SandboxPhase = "missing"
 
-// HoldsCompute is MayHoldCompute for the sandbox v as the manager reports
-// it: one in OpenShell's error state holds nothing once its MicroVM is
-// gone (openshell.VMGone) or OpenShell gave up provisioning it, since
-// nothing ran in it after its last stop; a MicroVM that may linger
-// (mayLinger: its workload completed, or another error state) holds the
-// gateway, however long it has been so, until its user lets it go
-// (v.StopAskedIn, letGo) or deletes it, since what its workload left
-// running may still write and nothing in OpenShell flushes or stops it.
-// What stops the gateway on its own waits for the others.
+// HoldsCompute reports whether the sandbox v, as the manager reports it,
+// keeps what stops its OpenShell gateway on its own (a managed setup
+// switch, the daemon's idle stop of the gateway, its exit for a pending
+// restart) from stopping it: openshell.HoldsGateway on its phase (as
+// sandboxapi spells it), error-phase reason and compute driver ("" is
+// docker). Only OpenShell's own state releases a MicroVM: stopped,
+// deleting, deleted, missing (OpenShell no longer has it), or the error
+// state with its VM gone. Every other phase holds, an unknown or empty
+// one included, and so does a MicroVM whose workload completed or failed,
+// which keeps running until it is deleted or its gateway stops (GAP-0012),
+// with what its workload left running, and which OpenShell does not stop.
 func HoldsCompute(v sandboxapi.Sandbox) bool {
-	return holdsCompute(audit.SandboxPhase(v.Phase), v.Driver, v.PhaseReason, v.StopAskedIn)
+	return holdsCompute(audit.SandboxPhase(v.Phase), v.Driver, v.PhaseReason)
 }
 
-// holdsCompute is HoldsCompute on a sandbox's phase, driver, error-phase
-// reason and StopAskedIn.
-func holdsCompute(phase audit.SandboxPhase, driver, reason, stopAskedIn string) bool {
-	switch {
-	case !MayHoldCompute(string(phase), driver):
+// holdsCompute is HoldsCompute on a sandbox's phase, driver and
+// error-phase reason (the record's PhaseReason).
+func holdsCompute(phase audit.SandboxPhase, driver, reason string) bool {
+	switch phase {
+	case audit.SandboxPhaseStopped, audit.SandboxPhaseDeleting, audit.SandboxPhaseDeleted, phaseMissing:
 		return false
-	case phase == audit.SandboxPhaseError && !openshell.MayLinger(openshell.PhaseError, reason):
-		return false
-	case mayLinger(phase, reason):
-		return stopAskedIn != string(phase)
-	}
-	return true
-}
-
-// mayLinger is openshell.MayLinger on a sandbox's phase and error-phase
-// reason (the record's PhaseReason).
-func mayLinger(phase audit.SandboxPhase, reason string) bool {
-	return phase == audit.SandboxPhaseCompleted || phase == audit.SandboxPhaseError && openshell.MayLinger(openshell.PhaseError, reason)
-}
-
-// LetGoNote says what the user's stop of name, a MicroVM OpenShell did
-// not stop (openshell.MayLinger), did instead (letGo).
-func LetGoNote(name string) string {
-	return "OpenShell does not stop a MicroVM whose workload completed or that is in its error state, and nothing in OpenShell flushes one: " +
-		name + "'s VM runs on, with whatever its workload left running, until it is deleted or the OpenShell gateway stops. " +
-		"DefenseClaw no longer keeps the gateway up for it, so the next restart, upgrade or stop of the gateway stops it, " +
-		"and what is not on its disk by then is lost; `defenseclaw sandbox delete " + name + "` deletes it now"
-}
-
-// letGo records that the user's own stop asked for b, a MicroVM in phase
-// that OpenShell did not stop and that may linger (mayLinger), to be
-// stopped: what stops the gateway no longer waits for it while it stays in
-// that phase (holdsCompute; openshell.LetGo for DefenseClaw's gateway
-// restarts and upgrades). It reports whether it did.
-func (m *Manager) letGo(b *box, phase audit.SandboxPhase) bool {
-	m.mu.Lock()
-	ok := b.phase == phase && stopLosesWrites(b.rec.Driver) && mayLinger(phase, b.rec.PhaseReason)
-	if ok {
-		b.rec.StopAskedIn = string(phase)
-	}
-	name := b.rec.Name
-	m.mu.Unlock()
-	if !ok {
-		return false
-	}
-	if err := m.saveRecord(b); err != nil {
-		m.logf("save the record of %s: %v", name, err)
+	case audit.SandboxPhaseCompleted:
+		return openshell.HoldsGateway(openshell.PhaseCompleted, reason, !stopLosesWrites(driver))
+	case audit.SandboxPhaseError:
+		return openshell.HoldsGateway(openshell.PhaseError, reason, !stopLosesWrites(driver))
 	}
 	return true
 }
@@ -654,23 +589,21 @@ func stopLosesWrites(driver string) bool {
 // gateway that runs sandboxes) is how OpenShell is upgraded first, and the
 // way on after it is the one of the upgraded gateway, which for a
 // provisioning timeout is still the start with no stop. On a MicroVM
-// (microVM) that may linger (openshell.MayLinger) the upgrade waits for
-// it, since what its workload left running may still write and nothing
-// in OpenShell flushes or stops it: until its user lets it go (letGo) or
-// deletes it.
+// (microVM) that holds the gateway (openshell.HoldsGateway: every error
+// state but a VM that is gone) the upgrade is refused, since that VM may
+// still run and the older gateway neither stops nor starts it: only its
+// delete lets the upgrade go ahead.
 func errorPhaseWayOn(name, reason, upgrade string, microVM bool) string {
 	switch {
 	case reason == overlayDiskFullText:
 		return overlayDiskWayOn(name)
+	case upgrade != "" && microVM && openshell.HoldsGateway(openshell.PhaseError, reason, false):
+		return "this OpenShell can neither stop nor start a sandbox in its error state, and DefenseClaw stops no OpenShell gateway, so upgrades none, " +
+			"while OpenShell has not reported a MicroVM on it stopped: `defenseclaw sandbox delete " + name + "` deletes it and its work, after which " + upgrade
 	case upgrade != "" && openshell.ProvisioningTimedOut(reason):
 		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then wait a minute for OpenShell's cleanup of " +
 			"the provisioning that timed out and `defenseclaw sandbox start " + name + "` (no stop: OpenShell " + openshell.SandboxMin +
 			" refuses to stop a sandbox whose provisioning timed out), which provisions it again"
-	case upgrade != "" && microVM && openshell.MayLinger(openshell.PhaseError, reason):
-		return "this OpenShell can neither stop nor start a sandbox in its error state, and its MicroVM may still run what its workload left running, " +
-			"which nothing in OpenShell flushes or stops, so the upgrade waits for it: `defenseclaw sandbox stop " + name + "` lets the upgrade stop it " +
-			"with the gateway (what is not on its disk by then is lost), and `defenseclaw sandbox delete " + name + "` deletes it. " + upgrade +
-			", then `defenseclaw sandbox stop " + name + "` and `defenseclaw sandbox start " + name + "`, which bring it back with its disk"
 	case upgrade != "":
 		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then `defenseclaw sandbox stop " + name +
 			"` and `defenseclaw sandbox start " + name + "`, which keep the sandbox and its work"
@@ -693,9 +626,9 @@ func (m *Manager) upgradeWayOn(release string) string {
 	}
 	if m.managedMode() {
 		return "on this managed computer the OpenShell release is your administrator's (enterprise.openshell.version): ask IT for " +
-			openshell.InstallerVersion + " or later; where DefenseClaw installs OpenShell for you, your gateway moves to it once none of your sandboxes runs " +
-			"or holds a MicroVM whose workload ended (`defenseclaw sandbox stop NAME` flushes and stops a running one, and lets the move stop one whose " +
-			"workload completed or that is in OpenShell's error state, which nothing in OpenShell flushes or stops)"
+			openshell.InstallerVersion + " or later; where DefenseClaw installs OpenShell for you, your gateway moves to it once OpenShell reports each of " +
+			"your sandboxes stopped (`defenseclaw sandbox stop NAME` flushes and stops a running one; this OpenShell neither stops nor starts a MicroVM " +
+			"whose workload completed or that is in its error state, which only `defenseclaw sandbox delete NAME` ends, with its work)"
 	}
 	return "upgrade OpenShell " + v.String() + " to " + openshell.InstallerVersion + " in place with `defenseclaw sandbox setup --install-openshell`"
 }
@@ -1122,7 +1055,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	if b.placeholderInSessionLocked() {
 		v.Hooks.PlaceholderRefusedAt = b.hooks.placeholderAt
 	}
-	v.UnflushedAt, v.StopAskedIn = r.UnflushedAt, r.StopAskedIn
+	v.UnflushedAt = r.UnflushedAt
 	for _, a := range m.approvals {
 		if a.sandbox == r.Name && a.status == sandboxapi.ApprovalPending {
 			v.PendingApprovals++

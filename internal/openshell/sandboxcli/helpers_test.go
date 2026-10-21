@@ -445,7 +445,11 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 				log.Name, log.KeptAt = name, time.Now()
 				d.runLogs[name] = &log
 			}
-			sb.Phase = "stopped"
+			// OpenShell returns the stop of a MicroVM whose main process
+			// completed or failed as it is.
+			if sb.Driver != "vm" || sb.Phase != "completed" && (sb.Phase != "error" || !strings.Contains(sb.PhaseReason, "MainProcessFailed")) {
+				sb.Phase = "stopped"
+			}
 			reply(sb)
 		case verb == "start":
 			var req sandboxapi.StartRequest
