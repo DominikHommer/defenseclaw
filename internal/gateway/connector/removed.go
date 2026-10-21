@@ -638,10 +638,19 @@ func (c removedOpenHandsConnector) hooksThatMayRunScript(p *removedCleanupPlan, 
 // script. It rules a command out only when it can see what the command runs:
 // the command is plain words (no variables, ~, globs, pipes, lists or
 // redirections; quotes are fine), it starts with an absolute path, and every
-// other word is a plain option (whose value is plain or an absolute path), a
-// number or an absolute path. A command found on
-// PATH, a relative path or any shell syntax may run anything, so it may run
-// the script. A path in the command may run the script when it names
+// other word is an absolute path or a bare flag (-x, or --name with no
+// value) given to a program other than a shell. A program may run what an
+// argument names: a command found on PATH (env -S relay, env 30), a module
+// (python3 -mrelay), a command line split at its blanks (env -S '/bin/env
+// relay') or a list (--require=/a,relay), and a shell's own options may run
+// its startup files (sh -l). So an option with a value is ruled out only
+// when the value is an absolute path, an absolute path is ruled out only
+// when it and every part of it (split at blanks, :, , and =) is an absolute
+// path that is ruled out, and a number, any other word, a cluster of flags
+// (-Srelay) and a shell's option before its script may run the script. A
+// command found on PATH, a relative path or any shell syntax may run
+// anything, so it may run the script. A path in the command may run the
+// script when it names
 // DefenseClaw or the script, is the script (through links or as a hard link),
 // is a directory that holds the script or names DefenseClaw, or is a file
 // whose bytes name either. A text file (a wrapper) may also run it through
@@ -679,9 +688,14 @@ var (
 	// removedTextVariable finds a path that starts with a variable (group 1
 	// is its name; HOME is followed).
 	removedTextVariable = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?!$-])\}?["']?/`)
-	// removedOption is an option word the check can rule out: a plain
-	// name, then = and a value that is plain or an absolute path (group 1).
-	removedOption = regexp.MustCompile(`^--?[A-Za-z0-9][A-Za-z0-9_.-]*(?:=([A-Za-z0-9_.:,@%+-]*|/[A-Za-z0-9_./:,@%+ -]*))?$`)
+	// removedBareOption is a flag with no value: -x, or --name.
+	removedBareOption = regexp.MustCompile(`^(?:-[A-Za-z0-9]|--[A-Za-z0-9][A-Za-z0-9_.-]*)$`)
+	// removedPathOption is an option whose value is an absolute path
+	// (group 1): -name=/path or --name=/path.
+	removedPathOption = regexp.MustCompile(`^--?[A-Za-z0-9][A-Za-z0-9_.-]*=(/.*)$`)
+	// removedArgument is an absolute path argument the check can read: plain
+	// characters and blanks.
+	removedArgument = regexp.MustCompile(`^/[A-Za-z0-9_./:,@%+= \t-]*$`)
 )
 
 func newRemovedScriptCheck(script string, info os.FileInfo, dataDir string) *removedScriptCheck {
@@ -721,7 +735,15 @@ func (c *removedScriptCheck) hooksMayRun(data []byte) bool {
 	runs = func(value interface{}, key string) bool {
 		switch v := value.(type) {
 		case string:
-			return key != "matcher" && key != "type" && c.commandMayRun(v)
+			switch {
+			case key == "matcher", key == "type":
+				return false
+			case key != "command" && strings.Trim(v, " \t0123456789") == "":
+				// A number written as a string (a timeout, say). A
+				// command that is a number runs what PATH finds.
+				return false
+			}
+			return c.commandMayRun(v)
 		case []interface{}:
 			for _, item := range v {
 				if runs(item, key) {
@@ -741,37 +763,82 @@ func (c *removedScriptCheck) hooksMayRun(data []byte) bool {
 }
 
 func (c *removedScriptCheck) commandMayRun(command string) bool {
-	if strings.Trim(command, " \t0123456789") == "" {
-		// Blank, or a number (a timeout written as a string).
+	if strings.TrimSpace(command) == "" {
 		return false
 	}
 	words, ok := removedPlainWords(command)
 	if !ok || len(words) == 0 {
 		return true
 	}
+	// shellOptions: the last program named is a shell and no operand came
+	// after it, so an option is the shell's own (-l reads its profile).
+	shellOptions := false
 	for i, word := range words {
 		if c.names([]byte(word)) {
 			return true
 		}
-		path := word
-		if i > 0 {
-			switch {
-			case strings.HasPrefix(word, "-"):
-				// An option is a plain name, with a plain or absolute
-				// value; anything else (-c code, say) may run anything.
-				match := removedOption.FindStringSubmatch(word)
-				if match == nil {
-					return true
-				}
-				if !strings.HasPrefix(match[1], "/") {
-					continue
-				}
-				path = match[1]
-			case strings.Trim(word, "0123456789") == "":
+		switch {
+		case i == 0:
+			// The shell runs the first word as it is.
+			if !filepath.IsAbs(word) || c.pathMayRun(word, 0) {
+				return true
+			}
+		case strings.HasPrefix(word, "-"):
+			if shellOptions {
+				return true
+			}
+			if removedBareOption.MatchString(word) {
 				continue
 			}
+			match := removedPathOption.FindStringSubmatch(word)
+			if match == nil || c.argumentMayRun(match[1]) {
+				return true
+			}
+			continue
+		case c.argumentMayRun(word):
+			return true
 		}
-		if !filepath.IsAbs(path) || c.pathMayRun(path, 0) {
+		shellOptions = removedRunsShell(word)
+	}
+	return false
+}
+
+// argumentMayRun reports whether a word given to a program (an argument or
+// an option's value) may run the script. The program may read it whole, or
+// split it at its blanks (env -S) or as a list (a:b, a,b, a=b), so the whole
+// and every part must be an absolute path that is ruled out.
+func (c *removedScriptCheck) argumentMayRun(value string) bool {
+	if !removedArgument.MatchString(value) || c.pathMayRun(value, 0) {
+		return true
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool { return strings.ContainsRune(" \t:,=", r) })
+	if len(parts) < 2 {
+		return false
+	}
+	for _, part := range parts {
+		if !filepath.IsAbs(part) || c.pathMayRun(part, 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// removedCommandShells are the shells whose own options (-l, -i, --rcfile,
+// -c) may run code the command does not show.
+var removedCommandShells = map[string]bool{
+	"sh": true, "bash": true, "rbash": true, "dash": true, "zsh": true, "ksh": true, "mksh": true, "pdksh": true,
+	"oksh": true, "ash": true, "csh": true, "tcsh": true, "fish": true, "yash": true, "posh": true, "busybox": true,
+}
+
+// removedRunsShell reports whether path is a shell, by its name or the name
+// of what it links to (a version suffix such as bash5.2 dropped).
+func removedRunsShell(path string) bool {
+	names := []string{filepath.Base(path)}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		names = append(names, filepath.Base(resolved))
+	}
+	for _, name := range names {
+		if removedCommandShells[strings.TrimRight(strings.ToLower(name), "0123456789.-")] {
 			return true
 		}
 	}

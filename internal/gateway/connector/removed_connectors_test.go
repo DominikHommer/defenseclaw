@@ -1739,6 +1739,65 @@ func TestRemovedOpenHandsTeardownChecksTheHooksItPutsBack(t *testing.T) {
 			link := linkRemovedScript(t, h, filepath.Join(h.home, "hooks-of-mine", "audit"))
 			return "/bin/true; " + link, []string{link}
 		}},
+		// Review fixes (G-deadcode loop round 2): an option or argument the
+		// program runs (env -S, --split-string, -m, --require, a number
+		// found on PATH, a command line split at its blanks, a list, a
+		// shell's own -l) was ruled out as a plain option or a path that is
+		// not there.
+		{"env -S that runs a command found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
+			return "/usr/bin/env -Srelay", []string{link}
+		}},
+		{"env --split-string that runs a command found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
+			return "/usr/bin/env --split-string=relay", []string{link}
+		}},
+		{"env -S with its command line in the next word", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
+			return "/usr/bin/env -S '/usr/bin/env relay'", []string{link}
+		}},
+		{"env -S with its command line attached", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
+			return "/usr/bin/env '-S/usr/bin/env relay'", []string{link}
+		}},
+		{"--split-string with an absolute command line", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
+			return "/usr/bin/env '--split-string=/usr/bin/env relay'", []string{link}
+		}},
+		{"an option whose list names a command", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
+			return "/usr/bin/env --list=/dev/null,relay", []string{link}
+		}},
+		{"an interpreter option that runs a module", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
+			return "/usr/bin/python3 -mrelay", []string{link}
+		}},
+		{"an option that names a module to load", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "relay"))
+			return "/usr/bin/node --require=relay", []string{link}
+		}},
+		{"a number found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "30"))
+			return "/usr/bin/env 30", []string{link}
+		}},
+		{"a command that is a number found on PATH", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "bin", "30"))
+			return "30", []string{link}
+		}},
+		{"a login shell", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "relay"))
+			profile := filepath.Join(h.home, ".profile")
+			writeRemovedFixture(t, profile, link+"\n", 0o600)
+			path := wrapper(t, h, "exit 0\n")
+			return "/bin/sh -l " + path, []string{link, profile, path}
+		}},
+		{"a login shell that env runs", func(t *testing.T, h *openHandsHarness) (string, []string) {
+			link := linkRemovedScript(t, h, filepath.Join(h.home, "lib", "relay"))
+			profile := filepath.Join(h.home, ".profile")
+			writeRemovedFixture(t, profile, link+"\n", 0o600)
+			path := wrapper(t, h, "exit 0\n")
+			return "/usr/bin/env -i /bin/sh --login " + path, []string{link, profile, path}
+		}},
 	} {
 		for _, back := range []bool{false, true} {
 			mode := "put back by the cleanup"
@@ -1818,9 +1877,10 @@ func TestRemovedOpenHandsTeardownTombstonesWhenEverySavedHookIsRuledOut(t *testi
 			saved := openHandsHooksRunning(t,
 				"/usr/local/bin/audit-hook",
 				plain,
-				"/bin/sh "+plain+" --audit 30 --level=high -x",
+				"/bin/sh "+plain+" --audit -x --log="+filepath.Join(h.home, "tools", "audit.log"),
 				"'"+spaced+"'",
 				compiled+" --config="+filepath.Join(h.home, "tools", "missing.toml"),
+				compiled+" -v --paths=/dev/null,"+filepath.Join(h.home, "tools", "missing.d")+" /dev/null",
 				quoted,
 			)
 			h.setUpOver(t, saved, back)
