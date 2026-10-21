@@ -38,7 +38,8 @@ standard user can and cannot do is the same ([Who can change what](/docs/enterpr
 | One profile per computer | The profiles share the gateway port and, on Windows, the service names. The standalone lifecycle refuses to install over a Secure Client deployment |
 
 Enterprise enforcement is opt-in: installing a release does not create a machine
-service until an administrator runs the lifecycle with a managed config.
+service until an administrator runs the lifecycle with a managed config. A per-user install is
+not affected: normal mode uses the existing per-user repair loop.
 
 <Flow
   direction="TB"

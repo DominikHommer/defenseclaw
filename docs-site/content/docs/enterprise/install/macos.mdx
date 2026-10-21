@@ -90,7 +90,7 @@ ai_discovery:
   enabled: true
 ```
 
-Each key under `guardrail.connectors` turns on one agent
+AI Discovery is off unless the config sets `ai_discovery.enabled: true`, as above. Each key under `guardrail.connectors` turns on one agent
 ([choose the agents](/docs/enterprise/configure/configuration#choose-the-agents-to-protect)).
 Without a config the pkg installs a default that protects nothing.
 

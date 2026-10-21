@@ -3581,7 +3581,12 @@ def test_restricted_environment_status_uses_trusted_machine_roots() -> None:
 
 def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
     matrix = read(MATRIX_TEST)
-    documentation = read(DEPLOYMENT_DOC)
+    # The deployment page and its reference page together hold the contract.
+    documentation = " ".join(
+        (
+            read(DEPLOYMENT_DOC) + read(DEPLOYMENT_DOC.parent / "reference" / "secure-client.mdx")
+        ).split()
+    )
     harness = read(HARNESS)
     service_host = read(WINDOWS_SERVICE_HOST)
     service_host_test = read(WINDOWS_SERVICE_HOST_TEST)
@@ -3600,11 +3605,8 @@ def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
         assert mode in matrix
 
     assert "normal mode uses the existing per-user repair loop" in documentation
-    assert "Enterprise service enforcement is opt-in." in documentation
-    assert (
-        "Installing a release that contains Windows enterprise support does not create a machine service"
-        in documentation
-    )
+    assert "Enterprise enforcement is opt-in" in documentation
+    assert "installing a release does not create a machine service" in documentation
     assert "Test-NormalModePreinstallNoOp" in harness
     assert "Test-NormalModeLiveAutoHeal" in harness
     assert "normal-mode-live-hook-auto-heal-preserved" in harness

@@ -96,7 +96,7 @@ defenseclaw sandbox enable claude
   apply it now: source ~/.zshrc · bypass once: DEFENSECLAW_NO_SANDBOX=1 claude · undo: defenseclaw sandbox disable claude
 ```
 
-`enable` adds a marked block to your shell's rc file that defines a `claude` function starting `sandbox run claude`. `DEFENSECLAW_NO_SANDBOX=1 claude` runs the harness directly, once, where your organization allows it. In the TUI Sandboxes panel, `w` switches the wrappers on and off.
+`enable` adds a marked block to your shell's rc file that defines a `claude` function starting `sandbox run claude`. `DEFENSECLAW_NO_SANDBOX=1 claude` runs the harness directly, once, where your organization allows it; on a managed computer, an agent in `required_for` is still refused. In the TUI Sandboxes panel, `w` switches the wrappers on and off.
 
 ## Check it worked
 

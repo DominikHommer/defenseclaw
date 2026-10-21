@@ -44,13 +44,13 @@ def test_linux_removal_keeps_administrator_policies() -> None:
 
 
 def test_restore_notice_lifetime_is_explained() -> None:
-    text = page("troubleshooting/enterprise.mdx")
+    text = page("troubleshooting/enterprise/index.mdx")
     assert "The warning clears at the next successful guardian refresh." in text
     assert "`settings_lost`" in text
 
 
 def test_rpm_architecture_is_checked_before_install() -> None:
-    text = page("troubleshooting/enterprise.mdx")
+    text = page("troubleshooting/enterprise/index.mdx")
     assert "`.deb` and for an RPM, before installation" in text
     assert "reaches `rpm -U`" not in text
 
@@ -79,6 +79,6 @@ def test_configmgr_config_change_checks_the_config_hash() -> None:
 
 
 def test_group_names_match_without_regard_to_case() -> None:
-    text = page("enterprise/identity/entra-id.mdx")
+    text = page("enterprise/identity/reference.mdx")
     assert "without regard to case" in text
     assert "exactly, including case" not in text
