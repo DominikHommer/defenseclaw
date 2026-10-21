@@ -3387,7 +3387,7 @@ def _run_gateway_connector_teardown(
             if _ANSI_ESCAPE.sub("", line).strip().endswith(f"{connector} teardown complete"):
                 continue
             ux.echo(f"  {ux.dim('·')} {line.strip()}")
-    if proc.stderr and proc.returncode != 0:
+    if proc.stderr:
         for line in proc.stderr.splitlines():
             ux.echo(f"  {ux._style('⚠', fg='yellow', bold=True)} {line}")
     if proc.returncode == 0:
