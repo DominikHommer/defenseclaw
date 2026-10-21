@@ -134,15 +134,26 @@ _ASCII_CASE_FOLD = {0x130: "i", 0x131: "i", 0x17F: "s", 0x212A: "k"}
 
 # Windowed search (GAP-2070): in a file over _WINDOW_MIN_TEXT characters a
 # rule is searched only in the lines around its anchor literals (every match
-# contains one), _WINDOW_SLACK characters and one line on each side, and only in windows
-# that hold all of the rule's required literals. Python's re otherwise walks
-# every position of a 400 KB adapter for each prose rule. Small files and
-# rules without a usable anchor get a plain search.
+# contains one), and only in windows that hold all of the rule's required
+# literals. Python's re otherwise walks every position of a 400 KB adapter
+# for each prose rule. A window is _WINDOW_SLACK characters on each side of
+# the anchor, widened to whole lines, plus the rule's reach (the most lines a
+# match can cross, :func:`_line_reach`) and one more line on each side; blank
+# lines do not count. Small files and rules without a usable anchor or with
+# an unbounded reach get a plain search.
 _WINDOW_MIN_TEXT = 4096
 _WINDOW_SLACK = 512
 _ANCHOR_MIN_LEN = 3
-# Classes that match any character, newlines included.
-_ANY_CHAR_CLASSES = (r"[\s\S]", r"[\S\s]", r"[\w\W]", r"[\W\w]", r"[\d\D]", r"[\D\d]")
+# A rule whose matches may cross more lines than this gets a plain search.
+_WINDOW_MAX_REACH = 32
+_NON_BLANK = re.compile(r"\S")
+_MAXREPEAT = _sre_parse.MAXREPEAT
+# Categories that cannot match a newline; any other may.
+_NO_NEWLINE_CATEGORIES = {
+    "CATEGORY_DIGIT", "CATEGORY_WORD", "CATEGORY_NOT_SPACE", "CATEGORY_NOT_LINEBREAK",
+    "CATEGORY_UNI_DIGIT", "CATEGORY_UNI_WORD", "CATEGORY_UNI_NOT_SPACE", "CATEGORY_UNI_NOT_LINEBREAK",
+}
+_SPACE_CATEGORIES = {"CATEGORY_SPACE", "CATEGORY_UNI_SPACE"}
 
 # The C loader parses the default pack several times faster than the pure
 # Python one (GAP-2070); same safe semantics.
@@ -162,6 +173,9 @@ class _CompiledRule:
     required: _Required | None = None
     # Literals one of which every match contains (None: plain search).
     anchors: list[str] | None = None
+    # Most non-blank lines a match can cross (:func:`_line_reach`), for the
+    # size of a search window.
+    reach: int = 0
     # Rules whose expression is a write/append/delete of a path. On Python
     # source a hit counts only when the matched value reaches a write call:
     # a file name in a data list or a message is not an access (GAP-2069,
@@ -360,13 +374,11 @@ def _search(rule: _CompiledRule, text: str, folded: str) -> re.Match[str] | None
     spans.sort()
     windows: list[list[int]] = []
     for lo, hi in spans:
-        # Whole lines, plus one more line on each side, so a match that
-        # spans a long line and the next one (a CSV header and a row) fits.
-        lo = text.rfind("\n", 0, max(lo - _WINDOW_SLACK, 0))
-        lo = text.rfind("\n", 0, lo) + 1 if lo > 0 else 0
-        hi = text.find("\n", min(hi + _WINDOW_SLACK, len(text)))
-        hi = text.find("\n", hi + 1) if hi >= 0 else -1
-        hi = len(text) if hi < 0 else hi
+        # Whole lines, the lines a match can cross and one more line on each
+        # side, so a match that spans a long line and the next one (a CSV
+        # header and a row) fits.
+        lo = _lines_back(text, max(lo - _WINDOW_SLACK, 0), rule.reach + 1)
+        hi = _lines_forward(text, min(hi + _WINDOW_SLACK, len(text)), rule.reach + 1)
         if windows and lo <= windows[-1][1]:
             windows[-1][1] = max(windows[-1][1], hi)
         else:
@@ -380,18 +392,146 @@ def _search(rule: _CompiledRule, text: str, folded: str) -> re.Match[str] | None
     return None
 
 
+def _lines_back(text: str, pos: int, lines: int) -> int:
+    """The start of the line *lines* non-blank lines before the one at *pos*."""
+    start = text.rfind("\n", 0, pos) + 1
+    while lines > 0 and start > 0:
+        prev = text.rfind("\n", 0, start - 1) + 1
+        if _NON_BLANK.search(text, prev, start - 1):
+            lines -= 1
+        start = prev
+    return start
+
+
+def _lines_forward(text: str, pos: int, lines: int) -> int:
+    """The end of the line *lines* non-blank lines after the one at *pos*."""
+    end = text.find("\n", pos)
+    while end >= 0 and lines > 0:
+        nxt = text.find("\n", end + 1)
+        stop = len(text) if nxt < 0 else nxt
+        if _NON_BLANK.search(text, end + 1, stop):
+            lines -= 1
+        end = nxt
+    return len(text) if end < 0 else end
+
+
+def _prefilter(pattern: re.Pattern[str]) -> tuple[_Required | None, list[str] | None, int]:
+    """The required literals, anchors and reach of *pattern* (one parse)."""
+    try:
+        parsed = _sre_parse.parse(pattern.pattern)
+    except Exception:  # noqa: BLE001 - no prefilter is always safe
+        return None, None, 0
+    try:
+        required = _required_seq(parsed)
+    except Exception:  # noqa: BLE001
+        required = None
+    try:
+        reach, _ = _line_reach(parsed, bool(pattern.flags & re.DOTALL))
+    except Exception:  # noqa: BLE001 - unknown reach: plain search
+        reach = None
+    if reach is None or reach > _WINDOW_MAX_REACH:
+        return required, None, 0
+    return required, _anchors(required, pattern), reach
+
+
+def _line_reach(items, dotall: bool) -> tuple[int | None, bool]:
+    """How many non-blank lines a match of the parsed *items* can cross.
+
+    Returns (reach, blank): reach is the most newlines a match, its
+    lookarounds included, can hold outside runs of whitespace, and None when
+    that is unbounded or unknown (``(?s)a.*b``, ``(?s:a.*b)``, ``a[^#]*b``,
+    ``a(?:.*\\n)*b``, ``a(?=[\\s\\S]*b)``, a backreference); blank is True
+    when the items match only whitespace. A run of whitespace (``\\s+``)
+    crosses blank lines only, which windows do not count, so it adds one
+    (GAP-1316).
+    """
+    total, blank = 0, True
+    for op, av in items:
+        reach, part_blank = _item_reach(getattr(op, "name", str(op)), av, dotall)
+        if reach is None:
+            return None, False
+        total += reach
+        blank = blank and part_blank
+    return (min(total, 1) if blank else total), blank
+
+
+def _item_reach(name: str, av, dotall: bool) -> tuple[int | None, bool]:
+    if name == "LITERAL":
+        return (1 if av == 10 else 0), chr(av).isspace()
+    if name == "NOT_LITERAL":
+        return (0 if av == 10 else 1), False
+    if name == "ANY":
+        return (1 if dotall else 0), False
+    if name == "IN":
+        return _class_reach(av)
+    if name == "CATEGORY":
+        cat = getattr(av, "name", str(av))
+        return (0 if cat in _NO_NEWLINE_CATEGORIES else 1), cat in _SPACE_CATEGORIES
+    if name == "AT":
+        return 0, True
+    if name == "SUBPATTERN":
+        _group, add, remove, sub = av
+        if add & re.DOTALL:
+            dotall = True
+        if remove & re.DOTALL:
+            dotall = False
+        return _line_reach(sub, dotall)
+    if name == "ATOMIC_GROUP":
+        return _line_reach(av, dotall)
+    if name in _REPEATS:
+        _lo, hi, sub = av
+        reach, blank = _line_reach(sub, dotall)
+        if reach is None or reach == 0 or blank:
+            return reach, blank
+        if hi == _MAXREPEAT:
+            return None, False
+        return reach * hi, False
+    if name in ("BRANCH", "GROUPREF_EXISTS"):
+        alts = av[1] if name == "BRANCH" else [b for b in av[1:] if b is not None]
+        best, blank = 0, True
+        for alt in alts:
+            reach, alt_blank = _line_reach(alt, dotall)
+            if reach is None:
+                return None, False
+            best, blank = max(best, reach), blank and alt_blank
+        return best, blank
+    if name in ("ASSERT", "ASSERT_NOT"):
+        # A lookaround reads text past the match; it is not a run.
+        reach, _ = _line_reach(av[1], dotall)
+        return reach, False
+    return None, False  # a backreference or an unknown node
+
+
+def _class_reach(items) -> tuple[int, bool]:
+    negate, newline, blank = False, False, True
+    for op, av in items:
+        name = getattr(op, "name", str(op))
+        if name == "NEGATE":
+            negate, blank = True, False
+        elif name == "LITERAL":
+            newline = newline or av == 10
+            blank = blank and chr(av).isspace()
+        elif name == "RANGE":
+            newline = newline or av[0] <= 10 <= av[1]
+            blank = False
+        elif name == "CATEGORY":
+            cat = getattr(av, "name", str(av))
+            newline = newline or cat not in _NO_NEWLINE_CATEGORIES
+            blank = blank and cat in _SPACE_CATEGORIES
+        else:
+            return 1, False  # unknown: it may match a newline
+    return (1 if newline != negate else 0), blank
+
+
 def _anchors(node: _Required | None, pattern: re.Pattern[str]) -> list[str] | None:
     """A literal set one of which every match contains, for :func:`_search`.
 
-    None when there is no such set of usable literals, when the pattern has
-    an end anchor (``$`` / ``\\Z`` without MULTILINE) that a window's end
-    would satisfy falsely, or when a match can run across any number of
-    lines (``(?s)``, ``[\\s\\S]``): ``(?s)start.*finish`` matches words 80
-    lines apart, as the Go scanner finds, which no window holds (GAP-1316).
+    None when there is no such set of usable literals, or when the pattern
+    has an end anchor (``$`` / ``\\Z`` without MULTILINE) that a window's end
+    would satisfy falsely. :func:`_prefilter` calls it only for a pattern
+    whose matches cross a bounded number of lines.
     """
     if node is None:
-        return None
-    if pattern.flags & re.DOTALL or any(c in pattern.pattern for c in _ANY_CHAR_CLASSES):
         return None
     if "\\Z" in pattern.pattern or "\\z" in pattern.pattern:
         return None
@@ -410,14 +550,6 @@ def _anchors(node: _Required | None, pattern: re.Pattern[str]) -> list[str] | No
         return None
     # Prefer the child with the longest shortest literal: rarer in text.
     return max(usable, key=lambda a: (min(len(x) for x in a), -len(a)))
-
-
-def _required_literals(pattern: str) -> _Required | None:
-    """Literals every match of *pattern* contains, or None when unknown."""
-    try:
-        return _required_seq(_sre_parse.parse(pattern))
-    except Exception:  # noqa: BLE001 - no prefilter is always safe
-        return None
 
 
 def _uncased(cp: int) -> bool:
@@ -600,7 +732,7 @@ def _compile_rules_file(raw: dict, pack: RulePack) -> None:
         if compiled is None:
             continue
         expression = str(rule.get("expression", "") or "")
-        required = _required_literals(compiled.pattern)
+        required, anchors, reach = _prefilter(compiled)
         pack.rules.append(
             _CompiledRule(
                 rule_id=rule_id,
@@ -611,7 +743,8 @@ def _compile_rules_file(raw: dict, pack: RulePack) -> None:
                 tags=[str(t) for t in (rule.get("tags") or [])],
                 category=category,
                 required=required,
-                anchors=_anchors(required, compiled),
+                anchors=anchors,
+                reach=reach,
                 path_write="f.paths" in expression
                 and "f.commands" not in expression
                 and any(f"PATH_ACCESS_{a}" in expression for a in ("WRITE", "APPEND", "DELETE")),
@@ -632,7 +765,7 @@ def _compile_local_patterns(raw: dict, pack: RulePack) -> None:
             compiled = _compile(str(pattern), rule_id)
             if compiled is None:
                 continue
-            required = _required_literals(compiled.pattern)
+            required, anchors, reach = _prefilter(compiled)
             pack.rules.append(
                 _CompiledRule(
                     rule_id=rule_id,
@@ -643,7 +776,8 @@ def _compile_local_patterns(raw: dict, pack: RulePack) -> None:
                     tags=[tag],
                     category="local-pattern",
                     required=required,
-                    anchors=_anchors(required, compiled),
+                    anchors=anchors,
+                    reach=reach,
                 )
             )
 

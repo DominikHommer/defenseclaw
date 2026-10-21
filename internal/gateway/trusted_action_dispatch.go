@@ -590,8 +590,9 @@ func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) [
 		texts = append(texts, command.Argv...)
 		// The quoted heredoc a command reads (cat > file <<'EOF') is data
 		// the command acts on, so a migrated literal in it counts in a
-		// script body too.
-		if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
+		// script body too, unless the command is known never to read it.
+		if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous &&
+			!literalStdinUnread(command) {
 			texts = append(texts, command.LiteralStdin)
 		}
 		for _, argument := range command.Arguments {
@@ -611,6 +612,47 @@ func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) [
 		texts = append(texts, network.Host)
 	}
 	return texts
+}
+
+// stdinIgnoringPrograms never read stdin, whatever their arguments (no
+// prompt, no "-" operand): a heredoc fed to one is not data it acts on.
+var stdinIgnoringPrograms = map[string]bool{
+	":": true, "true": true, "false": true, "echo": true, "printf": true,
+	"test": true, "[": true, "sleep": true, "pwd": true, "cd": true,
+	"export": true, "unset": true, "exit": true, "return": true, "shift": true,
+	"umask": true, "mkdir": true, "rmdir": true, "touch": true, "ls": true,
+	"chmod": true, "chown": true, "chgrp": true, "basename": true,
+	"dirname": true, "readlink": true, "realpath": true, "stat": true,
+	"uname": true, "whoami": true, "id": true, "hostname": true,
+}
+
+// literalStdinUnread reports whether command, fed a quoted heredoc, is known
+// never to read it: a program of stdinIgnoringPrograms, or cat with file
+// operands and no "-" one. A wrapper, an argument the parse did not resolve,
+// or any other program may read it (fail closed).
+func literalStdinUnread(command actionfacts.CommandFact) bool {
+	if len(command.Wrappers) != 0 || !command.ArgvComplete || len(command.Argv) == 0 {
+		return false
+	}
+	if stdinIgnoringPrograms[command.Program] {
+		return true
+	}
+	if command.Program != "cat" {
+		return false
+	}
+	operands, options := 0, true
+	for _, arg := range command.Argv[1:] {
+		switch {
+		case options && arg == "--":
+			options = false
+		case arg == "-":
+			return false
+		case options && strings.HasPrefix(arg, "-"):
+		default:
+			operands++
+		}
+	}
+	return operands > 0
 }
 
 // appendJSONStrings appends every string of the JSON value raw, object keys

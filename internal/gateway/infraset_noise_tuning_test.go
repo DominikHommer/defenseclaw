@@ -311,6 +311,15 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"python f-string write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("dccert-block-marker")}"""'`, "", "", true},
 		{"python f-string same quotes write", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{"""a""" + str(p.write_text("dccert-block-marker"))}"""'`, "", "", true},
 		{"python docstring write beside an f-string", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print(f"{1}")'`, "", "", false},
+		// Literal f-string text runs nothing; only its fields do.
+		{"python f-string literal text write", `python3 -c "from pathlib import Path; p=Path.home()/'.ssh'/'authorized_keys'; f'''p.write_text('sample')'''"`, "", "", false},
+		{"python f-string text beside a write field", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""note: {p.write_text("dccert-block-marker")}"""'`, "", "", true},
+		// Dynamic-code words in a comment or a docstring run nothing; in code
+		// (an alias, getattr, a child interpreter) they keep the string whole.
+		{"python exec comment beside a docstring write", `python3 -c '"""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")  # no exec here'`, "", "", false},
+		{"python exec word in a docstring write", `python3 -c '"""exec this: p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""; print("ok")'`, "", "", false},
+		{"python getattr exec docstring write", `python3 -c 'from pathlib import Path; getattr(__builtins__, "ex" + "ec")("""p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")""")'`, "", "", true},
+		{"python child interpreter docstring write", `python3 -c 'import subprocess; subprocess.run(["python3", "-c", """from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p.write_text("example")"""])'`, "", "", true},
 		// A path bound again before the write is not the keys file (GAP-1299).
 		{"python reassigned path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; p = Path("notes.txt"); p.write_text("example")'`, "", "", false},
 		{"python append absolute", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "a").write("dccert-block-marker")'`, "", "", true},

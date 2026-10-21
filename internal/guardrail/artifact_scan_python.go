@@ -138,10 +138,10 @@ func pythonCallEnd(line string, open int) int {
 // MaskPythonCommentsAndDocstrings blanks the comments and the triple-quoted
 // strings of Python source in place, so matches keep their offsets: they can
 // mention paths without executing a write. An f- or t-string runs the
-// expressions of its replacement fields, so it is kept as it is. Source whose
-// strings the scan cannot follow (an unclosed string or field, nesting past
-// pythonMaxStringNesting) is returned unmasked: blanking from a wrong string
-// boundary could hide code.
+// expressions of its replacement fields, so those fields are kept whole and
+// only its literal text is blanked. Source whose strings the scan cannot
+// follow (an unclosed string or field, nesting past pythonMaxStringNesting) is
+// returned unmasked: blanking from a wrong string boundary could hide code.
 func MaskPythonCommentsAndDocstrings(source string) string {
 	out := []byte(source)
 	for i := 0; i < len(out); {
@@ -152,16 +152,19 @@ func MaskPythonCommentsAndDocstrings(source string) string {
 				i++
 			}
 		case '\'', '"':
-			end, ok := pythonStringEnd(out, i, 0)
+			var fields [][2]int
+			end, ok := pythonStringEnd(out, i, 0, &fields)
 			if !ok {
 				return source
 			}
-			if pythonTripleQuoteAt(out, i) && !pythonFormatString(out, i) {
-				for j := i; j < end; j++ {
-					if out[j] != '\n' {
-						out[j] = ' '
-					}
+			if pythonTripleQuoteAt(out, i) {
+				// Blank the literal text around the fields, which run.
+				from := i
+				for _, field := range fields {
+					blankPythonText(out[from:field[0]])
+					from = field[1]
 				}
+				blankPythonText(out[from:end])
 			}
 			i = end
 		default:
@@ -169,6 +172,15 @@ func MaskPythonCommentsAndDocstrings(source string) string {
 		}
 	}
 	return string(out)
+}
+
+// blankPythonText blanks text in place, newlines kept.
+func blankPythonText(text []byte) {
+	for j, c := range text {
+		if c != '\n' {
+			text[j] = ' '
+		}
+	}
 }
 
 // pythonMaxStringNesting bounds strings inside replacement fields inside
@@ -204,8 +216,9 @@ func pythonLetter(c byte) bool {
 // pythonStringEnd returns the offset just past the string literal whose
 // opening quote is at src[i], following the replacement fields of an f- or
 // t-string, whose expressions may hold strings with the same quotes
-// (Python 3.12).
-func pythonStringEnd(src []byte, i, depth int) (int, bool) {
+// (Python 3.12). When fields is not nil, the span of each replacement field
+// of this string ("{" to its closing "}") is appended to it.
+func pythonStringEnd(src []byte, i, depth int, fields *[][2]int) (int, bool) {
 	if depth > pythonMaxStringNesting {
 		return 0, false
 	}
@@ -239,6 +252,9 @@ func pythonStringEnd(src []byte, i, depth int) (int, bool) {
 			if !ok {
 				return 0, false
 			}
+			if fields != nil {
+				*fields = append(*fields, [2]int{j, end})
+			}
 			j = end
 			continue
 		}
@@ -254,7 +270,7 @@ func pythonFieldEnd(src []byte, j, depth int) (int, bool) {
 	for j < len(src) {
 		switch src[j] {
 		case '\'', '"':
-			end, ok := pythonStringEnd(src, j, depth)
+			end, ok := pythonStringEnd(src, j, depth, nil)
 			if !ok {
 				return 0, false
 			}

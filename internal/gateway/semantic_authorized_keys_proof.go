@@ -30,7 +30,7 @@ var (
 	trustedPathlibAuthorizedKeysAssign   = regexp.MustCompile(`\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];`)
 	trustedPathlibWriteText              = regexp.MustCompile(`\bp\.write_text\(`)
 	trustedPathlibReassign               = regexp.MustCompile(`\bp\s*:?=[^=]|\bfor\s+p\s+in\b|\bas\s+p\b`)
-	trustedPythonDynamicCode             = regexp.MustCompile(`\b(?:exec|eval|compile)\b`)
+	trustedPythonDynamicCode             = regexp.MustCompile(`\b(?:exec\w*|eval|compile|getattr|globals|locals|vars|__dict__|__import__|__builtins__|builtins|importlib|runpy|subprocess|system|popen|spawn\w*|pty|marshal|pickle|ctypes|interact|InteractiveInterpreter|InteractiveConsole)\b`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
@@ -193,14 +193,16 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 
 // trustedPythonExecutedText is Python -c code with its comments and inert
 // triple-quoted strings blanked: a docstring that spells a write executes
-// nothing (GAP-1199); an f-string field runs and is kept. Code that may run
-// a string (exec, eval, compile) is kept whole, so such a string still proves
-// its write.
+// nothing (GAP-1199); an f-string field runs and is kept. Code whose executed
+// text may run a string (exec, eval, compile, getattr, subprocess, ...) is
+// kept whole, so such a string still proves its write; the same words in a
+// comment or a docstring run nothing.
 func trustedPythonExecutedText(code string) string {
-	if trustedPythonDynamicCode.MatchString(code) {
+	masked := guardrail.MaskPythonCommentsAndDocstrings(code)
+	if trustedPythonDynamicCode.MatchString(masked) {
 		return code
 	}
-	return guardrail.MaskPythonCommentsAndDocstrings(code)
+	return masked
 }
 
 // trustedPathlibAuthorizedKeysWrite proves p = Path.home() / ".ssh" /

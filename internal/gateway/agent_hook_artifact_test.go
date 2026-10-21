@@ -161,6 +161,13 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 		{"#!/bin/sh\necho acme.own-7f3c > /tmp/acme-marker.txt\n", true},
 		// A quoted heredoc is data the command that reads it acts on.
 		{"#!/bin/sh\ncat > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncat - > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ntee /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncat -n -- - > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		// A command that never reads stdin does not act on its heredoc.
+		{"#!/bin/sh\ntrue <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", false},
+		{"#!/bin/sh\nmkdir -p /tmp/acme <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		{"#!/bin/sh\ncat /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
 		// A ':' heredoc comment block leaves the parse partial: never enforced.
 		{"#!/bin/sh\n: <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", false},
 	} {
