@@ -72,22 +72,6 @@ func TestAuditWALGuardPassReportsAWriterHoldOverTheBudget(t *testing.T) {
 	}
 }
 
-// A Windows catch-up may hold the writer up to the limit it reports: only a
-// hold past that limit is logged, with the limit as the budget.
-func TestAuditWALGuardPassReportsAWindowsCatchUpOnlyPastItsLimit(t *testing.T) {
-	fake := &fakeWALCheckpointer{result: audit.WALCheckpoint{Restarted: true, WriterHeld: 600 * time.Millisecond, WriterLimit: 800 * time.Millisecond}}
-	var log bytes.Buffer
-	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
-	if log.Len() != 0 {
-		t.Fatalf("a catch-up within its limit logged %q", log.String())
-	}
-	fake.result.WriterHeld = 900 * time.Millisecond
-	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
-	if !strings.Contains(log.String(), "audit WAL checkpoint held the audit writer for 900ms (budget 800ms)") {
-		t.Fatalf("log = %q", log.String())
-	}
-}
-
 // rel-1-0-3 GAP-0288: a writer statement that overran its budget returned a
 // deadline error, and the guard logged only "yielded the writer after 200ms",
 // so a 1.1-1.7 s hold never produced the held line. Both lines are logged,

@@ -259,8 +259,8 @@ func TestCheckpointWALIfLargeCatchesUpALongLogUnderWritesWithoutARestartOnTheWri
 	if err != nil || !pass.Restarted || pass.Truncated || pass.WriterDeferred || pass.FileBytes == 0 || phases.Load() != 1 {
 		t.Fatalf("long log under writes: %+v, %v, writer phases %d; want one catch-up that keeps the file", pass, err, phases.Load())
 	}
-	if pass.WriterLimit < walCatchUpCap || pass.WriterHeld <= 0 || pass.WriterHeld > pass.WriterLimit+50*time.Millisecond {
-		t.Fatalf("catch-up held the writer for %v with limit %v; want more than zero and at most the limit (at least the %v cap)", pass.WriterHeld, pass.WriterLimit, walCatchUpCap)
+	if pass.WriterHeld <= 0 || pass.WriterHeld > walCatchUpCap+50*time.Millisecond {
+		t.Fatalf("catch-up held the writer for %v; want more than zero and at most the %v cap", pass.WriterHeld, walCatchUpCap)
 	}
 	if store.WALOverLimit() {
 		t.Fatal("a pass that brought the log to its end left the store marked over the WAL limit")
@@ -282,10 +282,6 @@ func TestCheckpointWALIfLargeCatchesUpALongLogUnderWritesWithoutARestartOnTheWri
 func TestCheckpointWALIfLargeCatchUpGivesTheWriterBackAtItsCap(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
-	// The cap on every OS: no longer Windows hold after a slow sync.
-	originalHoldMax := walCatchUpHoldMax
-	walCatchUpHoldMax = 0
-	t.Cleanup(func() { walCatchUpHoldMax = originalHoldMax })
 	logWALGuardEvents(t, store, 200)
 	writeDuringEveryCopy(t, store)
 	entered := make(chan struct{})
@@ -602,72 +598,6 @@ func TestAuditConnectionsMapTheDatabaseOnlyOffWindows(t *testing.T) {
 		var size int64
 		if err := db.QueryRow(`PRAGMA mmap_size`).Scan(&size); err != nil || size != want {
 			t.Fatalf("%s connection mmap_size = %d, %v; want %d", name, size, err, want)
-		}
-	}
-}
-
-// rel-1-0-3 GAP-0320, GAP-0325 (rel-1-0-4 G-flood): Windows writes a file's
-// dirty pages one at a time, so the copy under the writer, which writes and
-// syncs what the hooks committed during the last sync, outlasted
-// walCatchUpCap and the log was never restarted during a flood. Where
-// walCatchUpHoldMax allows it, the catch-up holds the writer for twice the last
-// sync plus walCatchUpCap, so a copy that needs longer than the cap still
-// brings the log to its end, and a hook waits at most that limit.
-func TestCheckpointWALIfLargeHoldsTheWriterLongerAfterASlowSync(t *testing.T) {
-	store, cleanup := newTestStore(t)
-	defer cleanup()
-	logWALGuardEvents(t, store, 200)
-	originalHoldMax, originalRounds := walCatchUpHoldMax, walSettleRounds
-	walCatchUpHoldMax, walSettleRounds = 10*walCatchUpCap, 0
-	t.Cleanup(func() { walCatchUpHoldMax, walSettleRounds = originalHoldMax, originalRounds })
-	slowSync := 2 * walCatchUpCap
-	originalSync, originalWriter := walSyncPhaseHook, walWriterPhaseHook
-	walSyncPhaseHook = func(context.Context) { time.Sleep(slowSync) }
-	// The copy under the writer takes three times the cap, within the limit.
-	walWriterPhaseHook = func(context.Context) { time.Sleep(3 * walCatchUpCap) }
-	t.Cleanup(func() { walSyncPhaseHook, walWriterPhaseHook = originalSync, originalWriter })
-	writes := writeDuringEveryCopy(t, store)
-	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
-	if err != nil || !pass.Restarted || pass.WriterDeferred || pass.Syncs != 1 {
-		t.Fatalf("catch-up after a slow sync: %+v, %v; want one sync and the log brought to its end", pass, err)
-	}
-	if pass.WriterLimit < 2*slowSync+walCatchUpCap || pass.WriterLimit > walCatchUpHoldMax {
-		t.Fatalf("hold limit %v after a %v sync; want at least 2x the sync plus %v and at most %v",
-			pass.WriterLimit, slowSync, walCatchUpCap, walCatchUpHoldMax)
-	}
-	if pass.WriterHeld < 3*walCatchUpCap || pass.WriterHeld > pass.WriterLimit+50*time.Millisecond {
-		t.Fatalf("catch-up held the writer for %v; want the copy's %v, within the %v limit", pass.WriterHeld, 3*walCatchUpCap, pass.WriterLimit)
-	}
-	if count, want := countWALGuardEvents(t, store), 200+int(writes.Load()); count != want {
-		t.Fatalf("events after the catch-up = %d; want %d", count, want)
-	}
-}
-
-// The longer hold is Windows only: elsewhere every catch-up keeps
-// walCatchUpCap, whatever its sync took.
-func TestWALCatchUpHoldIsTheCapOutsideWindows(t *testing.T) {
-	want := time.Duration(0)
-	if runtime.GOOS == "windows" {
-		want = 800 * time.Millisecond
-	}
-	if walCatchUpHoldMaxDefault != want {
-		t.Fatalf("walCatchUpHoldMaxDefault = %v on %s; want %v", walCatchUpHoldMaxDefault, runtime.GOOS, want)
-	}
-	original := walCatchUpHoldMax
-	t.Cleanup(func() { walCatchUpHoldMax = original })
-	walCatchUpHoldMax = 0
-	if got := walCatchUpHold(time.Second); got != walCatchUpCap {
-		t.Fatalf("walCatchUpHold without a hold limit = %v; want the %v cap", got, walCatchUpCap)
-	}
-	walCatchUpHoldMax = 800 * time.Millisecond
-	for sync, want := range map[time.Duration]time.Duration{
-		0:                      walCatchUpCap,
-		100 * time.Millisecond: 2*100*time.Millisecond + walCatchUpCap,
-		300 * time.Millisecond: 2*300*time.Millisecond + walCatchUpCap,
-		time.Second:            800 * time.Millisecond,
-	} {
-		if got := walCatchUpHold(sync); got != want {
-			t.Fatalf("walCatchUpHold(%v) = %v; want %v", sync, got, want)
 		}
 	}
 }
