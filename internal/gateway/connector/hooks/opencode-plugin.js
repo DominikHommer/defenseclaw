@@ -40,6 +40,8 @@ import { lstat, mkdir, open } from "node:fs/promises";
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
 const DC_API_ADDR = "{{.APIAddr}}";
 {{if .Sandbox}}const DC_FAIL_MODE = "closed"; // sandbox hooks always fail closed
+const DC_RUNTIME_FAIL_MODE = DC_FAIL_MODE;
+const DC_TRANSPORT_FAIL_MODE = DC_FAIL_MODE;
 const DC_TIMEOUT_MS = {{.SandboxMaxTime}}000;
 const DC_RETRY_TIMEOUT_MS = {{.SandboxRetryMaxTime}}000;
 const DC_PLUGIN_URL = import.meta.url;
@@ -53,6 +55,12 @@ const DC_FOREIGN_GUARD = "";
 const DC_INSTALL_MARKER = "";
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}";
 const DC_FAIL_MODE = "{{if and .Managed (not .SecureClient)}}closed{{else}}{{.FailMode}}{{end}}"; // "open" or "closed"
+// The process environment can only tighten the installed mode, as in the
+// shell hooks: DEFENSECLAW_FAIL_MODE=closed closes every failure (GAP-0315),
+// and DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035).
+// Neither can open a closed plugin.
+const DC_RUNTIME_FAIL_MODE = String(process.env.DEFENSECLAW_FAIL_MODE || "").trim().toLowerCase() === "closed" ? "closed" : DC_FAIL_MODE;
+const DC_TRANSPORT_FAIL_MODE = ["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || "")) ? "closed" : DC_RUNTIME_FAIL_MODE;
 // Standalone managed installs talk to the gateway's peer-authorized unix
 // hook socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user
@@ -625,7 +633,7 @@ async function defenseclawLogFailOpen(reason, category) {
     }, token), controller.signal);{{end}}
     if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode.
-      if (DC_FAIL_MODE === "closed") {
+      if (DC_RUNTIME_FAIL_MODE === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
 {{if not .Sandbox}}      await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
@@ -637,7 +645,7 @@ async function defenseclawLogFailOpen(reason, category) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
 {{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
-{{if not .Managed}}      if (DC_FAIL_MODE === "open") {
+{{if not .Managed}}      if (DC_RUNTIME_FAIL_MODE === "open") {
         await defenseclawLogFailOpen("invalid gateway verdict", "response");
         return null;
       }
@@ -659,7 +667,7 @@ async function defenseclawLogFailOpen(reason, category) {
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
-    if (DC_FAIL_MODE === "closed") {
+    if (DC_TRANSPORT_FAIL_MODE === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }

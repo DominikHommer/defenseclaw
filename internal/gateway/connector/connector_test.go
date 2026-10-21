@@ -9932,7 +9932,10 @@ func TestHookScript_FailureLogWriteErrorStaysQuiet(t *testing.T) {
 	}
 }
 
-func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
+// TestHookScript_FailureLogIgnoresAForgedEnvFailMode: the environment no
+// longer supplies the fail mode a per-user hook logs (GAP-0315), so a forged
+// DEFENSECLAW_FAIL_MODE can neither reopen the hook nor reach the failure log.
+func TestHookScript_FailureLogIgnoresAForgedEnvFailMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -9949,8 +9952,8 @@ func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
 		"DEFENSECLAW_HOME="+dcHome,
 		"DEFENSECLAW_FAIL_MODE=open\"\n,\"forged\":\"yes",
 	)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("hook should fail-open (exit 0) on transport failure by default, got: %v", err)
+	if err := cmd.Run(); exitCodeOf(err) != 2 {
+		t.Fatalf("closed hook should block (exit 2) on transport failure, got: %v", err)
 	}
 
 	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
@@ -9965,11 +9968,8 @@ func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
 		t.Fatalf("hook failure log is not valid JSON: %v\n%s", err, lines[0])
 	}
-	if _, ok := record["forged"]; ok {
-		t.Fatalf("fail_mode injected a forged JSON field: %#v", record)
-	}
-	if got := record["fail_mode"]; !strings.Contains(got, `forged`) || !strings.Contains(got, `"`) {
-		t.Fatalf("fail_mode was not preserved as an escaped string value: %#v", record)
+	if _, ok := record["forged"]; ok || record["fail_mode"] != "closed" || strings.Contains(string(failureLog), "forged") {
+		t.Fatalf("failure record took the environment's value: %#v", record)
 	}
 }
 
@@ -10129,28 +10129,53 @@ func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
 	}
 }
 
-// TestHookScript_FailOpen_Override covers the operator override:
-// DEFENSECLAW_FAIL_MODE=open allows both response and transport failures even
-// when the baked-in template default is closed. Strict availability can still
-// force this path closed, as covered above.
-func TestHookScript_FailOpen_Override(t *testing.T) {
+// TestHookScript_EnvFailModeOnlyTightens covers GAP-0315: an inherited
+// DEFENSECLAW_FAIL_MODE=open cannot reopen a per-user hook installed closed,
+// and DEFENSECLAW_FAIL_MODE=closed still closes one installed open. Only the
+// persisted mode (guardrail fail-mode) opens a hook.
+func TestHookScript_EnvFailModeOnlyTightens(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
-	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:1", "tok-test"); err != nil {
-		t.Fatalf("WriteHookScriptsWithToken: %v", err)
-	}
-
-	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
-	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
-	cmd.Env = append(os.Environ(),
-		"PATH="+os.Getenv("PATH"),
-		"DEFENSECLAW_FAIL_MODE=open",
-	)
-	err := cmd.Run()
-	if err != nil {
-		t.Errorf("hook should fail-open (exit 0) when DEFENSECLAW_FAIL_MODE=open, got: %v", err)
+	for _, agent := range []struct {
+		conn    Connector
+		script  string
+		args    []string
+		payload string
+	}{
+		{NewCodexConnector(), "codex-hook.sh", []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v1"}, `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`},
+		{NewClaudeCodeConnector(), "claude-code-hook.sh", nil, `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`},
+	} {
+		for _, tc := range []struct {
+			installed, env string
+			wantBlock      bool
+		}{
+			{"closed", "open", true},
+			{"closed", "OPEN", true},
+			{"open", "closed", true},
+			{"open", "Closed", true},
+			{"open", "", false},
+			{"closed", "", true},
+		} {
+			t.Run(agent.conn.Name()+"/"+tc.installed+"/env="+tc.env, func(t *testing.T) {
+				home := t.TempDir()
+				hookDir := filepath.Join(home, "hooks")
+				opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: tc.installed}
+				if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, agent.conn); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, agent.script)}, agent.args...)...)
+				cmd.Stdin = strings.NewReader(agent.payload)
+				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_HOME=" + home,
+					"DEFENSECLAW_GATEWAY_AUTOSTART=0", "DEFENSECLAW_FAIL_MODE=" + tc.env}
+				out, err := cmd.CombinedOutput()
+				blocked := err != nil || strings.Contains(string(out), `"decision":"block"`) ||
+					strings.Contains(string(out), `"permission":"deny"`) || strings.Contains(string(out), `"permissionDecision":"deny"`)
+				if blocked != tc.wantBlock {
+					t.Fatalf("installed %s env %q: blocked=%v want %v err=%v\n%s", tc.installed, tc.env, blocked, tc.wantBlock, err, out)
+				}
+			})
+		}
 	}
 }
 
@@ -10281,8 +10306,8 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			// agent will see at runtime — substitution failures
 			// that leave a literal `{{.FailMode}}` would surface
 			// here, not just in a unit test of the helper.
-			wantLine := "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-" + tc.wantFailMode + "}\""
-			if !strings.Contains(rendered, wantLine) {
+			wantLine := "\nFAIL_MODE=\"" + tc.wantFailMode + "\"\n" + perUserEnvTightenComment
+			if !strings.Contains(rendered, wantLine) || !strings.Contains(rendered, perUserEnvTightenLine) {
 				t.Errorf("rendered hook missing %q\nfull script:\n%s", wantLine, rendered)
 			}
 		})

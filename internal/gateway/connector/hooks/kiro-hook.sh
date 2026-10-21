@@ -86,7 +86,10 @@ defenseclaw_harden_env
 # installer-owned delivery policy; an inherited DEFENSECLAW_FAIL_MODE cannot
 # weaken an explicitly closed managed hook. Secure Client hooks keep the
 # environment override (#1163).
-FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+FAIL_MODE="{{.FailMode}}"{{else if .SecureClientDelivery}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{else}}FAIL_MODE="{{.FailMode}}"
+# An inherited DEFENSECLAW_FAIL_MODE can only tighten the installed mode:
+# a project or parent process cannot reopen a closed hook (GAP-0315).
+case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) FAIL_MODE="closed" ;; esac{{end}}
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="kiro"
 DEFENSECLAW_HOOK_NAME="kiro-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME

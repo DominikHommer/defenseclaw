@@ -1221,8 +1221,31 @@ function Remove-DeveloperFiles {
 function Install-File([string]$Source, [string]$Destination) {
     if ((Test-Path -LiteralPath $Destination) -and (Get-Sha256 $Source) -eq (Get-Sha256 $Destination)) { return }
     Copy-Item -LiteralPath $Source -Destination "$Destination.new" -Force
+    if ((Test-Path -LiteralPath $Destination -PathType Leaf) -and (Switch-InPlace "$Destination.new" $Destination)) { return }
     if (Test-Path -LiteralPath $Destination) { Remove-Aside $Destination }
     Move-Path "$Destination.new" $Destination
+}
+
+function Switch-InPlace([string]$New, [string]$Destination) {
+    # Swap the new file in with one ReplaceFile call, so the path is never
+    # missing. Renaming the old file aside and the new one in left a gap,
+    # often a second or more while a virus scanner held the new copy, in which
+    # a hook an agent started found no defenseclaw-hook.exe and its PowerShell
+    # bridge exited 1, which the agent does not treat as a block (rel-1-0-4
+    # GAP-0004). A file that cannot be replaced in place (a running program on
+    # some Windows versions) falls back to the rename.
+    $aside = "$Destination.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
+    for ($try = 0; $try -lt 3; $try++) {
+        try {
+            [IO.File]::Replace($New, $Destination, $aside, $true)
+            Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
+            return $true
+        } catch {
+            if (-not (Test-Path -LiteralPath $New) -or -not (Test-Path -LiteralPath $Destination)) { throw }
+        }
+        Start-Sleep -Milliseconds 300
+    }
+    return $false
 }
 
 function Write-PosixShim([string]$Target) {

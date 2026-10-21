@@ -314,7 +314,7 @@ func hookFailureExitCode(failure hookFailureContext) int {
 // hookPreRunFailsClosed reports whether the failed invocation's policy is to
 // fail closed, with buildHookOptionsForRuntime's precedence: a managed hook
 // always does; otherwise --fail-mode, else the sidecar, then an inherited
-// DEFENSECLAW_FAIL_MODE (for a packaged hook only when it tightens).
+// DEFENSECLAW_FAIL_MODE only when it tightens.
 func hookPreRunFailsClosed(failure hookFailureContext) bool {
 	if failure.managed || implicitEnterpriseManagedHook() {
 		return true
@@ -327,10 +327,19 @@ func hookPreRunFailsClosed(failure hookFailureContext) bool {
 	if mode == "" {
 		mode = hookSidecarFailMode(readHookSidecar(filepath.Join(home, "hooks", ".hookcfg")), failure.connector)
 	}
-	if v := os.Getenv("DEFENSECLAW_FAIL_MODE"); v != "" && (!trusted || strings.EqualFold(strings.TrimSpace(v), "closed")) {
-		mode = v
+	if hookEnvTightensFailMode() {
+		mode = "closed"
 	}
 	return nativeHookFailMode(mode) == "closed"
+}
+
+// hookEnvTightensFailMode reports whether an inherited DEFENSECLAW_FAIL_MODE
+// asks for closed. The environment can only tighten the installed mode, for
+// packaged and source hooks alike: a project's agent settings or a parent
+// process cannot reopen a closed hook (GAP-0315). An explicit per-user open is
+// chosen with guardrail fail-mode, which persists it in config and the hooks.
+func hookEnvTightensFailMode() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEFENSECLAW_FAIL_MODE")), "closed")
 }
 
 // nativeHookFailMode resolves the fail mode a hook command ends with (flag,
@@ -542,12 +551,8 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	if failMode == "" {
 		failMode = hookSidecarFailMode(sidecar, connector)
 	}
-	if v := os.Getenv("DEFENSECLAW_FAIL_MODE"); v != "" {
-		if !trustedNativeState || strings.EqualFold(strings.TrimSpace(v), "closed") {
-			// A packaged native hook accepts inherited environment only when it
-			// tightens policy. Project settings cannot turn a baked closed mode open.
-			failMode = v
-		}
+	if hookEnvTightensFailMode() {
+		failMode = "closed"
 	}
 	failMode = nativeHookFailMode(failMode)
 	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")

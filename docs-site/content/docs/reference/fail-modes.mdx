@@ -11,7 +11,7 @@ keywords:
 ---
 
 DefenseClaw has one persisted connector fail-mode policy plus two environment
-overrides. The effective connector mode applies consistently to both transport
+variables that can only make it stricter. The effective connector mode applies consistently to both transport
 and invalid-response failures.
 
 ## Controls
@@ -20,7 +20,7 @@ and invalid-response failures.
 | --- | --- | --- |
 | `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `closed` on a fresh install. Migrated legacy configs can retain explicit `open`. Secure Client deployments default to `open` when it is unset (see [Secure Client](#secure-client)). Can be overridden per connector. See [Which value applies](#which-value-applies). |
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force an otherwise closed connector open. | Unset. Per agent process; compatibility/managed-deployment override. |
-| `DEFENSECLAW_FAIL_MODE` | Temporary process-level replacement for the persisted mode. | Unset. Use only for bounded diagnosis; persist normal posture with the CLI. |
+| `DEFENSECLAW_FAIL_MODE=closed` | Closes the hooks of one agent process. `open` is ignored: the environment cannot reopen a closed hook. | Unset. Per agent process; set normal posture with the CLI. |
 
 You choose `open` or `closed`, and the default is `closed`. An explicit value
 always wins, on every install: the OSS per-user install, the standalone
@@ -360,13 +360,14 @@ and status can reconcile and report it.
 Administrator-managed hooks force the relevant unavailable-home and transport
 failures closed rather than trusting a user-controlled process environment.
 
-## Temporary process override
+## Process override (tighten only)
 
-`DEFENSECLAW_FAIL_MODE` can replace the persisted mode for one agent process.
-It is useful only for bounded compatibility diagnosis. It is not the normal
-policy surface because it can disagree with configuration, status, and a
-different agent process. Remove the override and use
-`defenseclaw guardrail fail-mode` for durable posture.
+`DEFENSECLAW_FAIL_MODE=closed` closes the hooks of one agent process, the
+OpenCode plugin included, whatever mode is installed. Any other value is
+ignored, so a project's agent settings or a parent process cannot turn a
+closed hook open. To run fail-open, choose it with
+`defenseclaw guardrail fail-mode open`, which saves it in the config and the
+installed hooks, and which status and doctor report.
 
 Environment keys are case-insensitive on Windows. Do not define multiple
 case-variants with different values.

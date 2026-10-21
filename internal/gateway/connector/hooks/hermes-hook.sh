@@ -91,7 +91,10 @@ hermes_sandbox_block() {
 # installer-owned delivery policy; an inherited DEFENSECLAW_FAIL_MODE cannot
 # weaken an explicitly closed managed hook. Secure Client hooks keep the
 # environment override (#1163).
-FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+FAIL_MODE="{{.FailMode}}"{{else if .SecureClientDelivery}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{else}}FAIL_MODE="{{.FailMode}}"
+# An inherited DEFENSECLAW_FAIL_MODE can only tighten the installed mode:
+# a project or parent process cannot reopen a closed hook (GAP-0315).
+case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) FAIL_MODE="closed" ;; esac{{end}}
 
 # Bail early on missing token via the shared helper so the bypass is
 # logged to hook-failures.jsonl AND honors strict availability — the

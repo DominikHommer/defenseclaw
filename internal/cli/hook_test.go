@@ -205,11 +205,47 @@ func TestBuildHookOptionsFlagAndEnvBeatSidecar(t *testing.T) {
 		t.Errorf("api addr = %q, want flag value over sidecar", opts.APIAddr)
 	}
 
-	// The env var wins over the sidecar fail mode.
+	// An inherited environment cannot reopen the installed closed mode
+	// (GAP-0315).
 	t.Setenv("DEFENSECLAW_FAIL_MODE", "open")
 	opts = buildHookOptions("codex", "", "", "")
-	if opts.FailMode != "open" {
-		t.Errorf("fail mode = %q, want env override 'open' over sidecar", opts.FailMode)
+	if opts.FailMode != "closed" {
+		t.Errorf("fail mode = %q, want the sidecar's closed over env 'open'", opts.FailMode)
+	}
+	if hookPreRunFailsClosed(hookFailureContext{connector: "kiro"}) != true {
+		t.Error("pre-run failure: env 'open' reopened a closed kiro hook")
+	}
+
+	// It can tighten an installed open mode.
+	writeHookSidecarForTest(t, home, "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:12345\nDEFENSECLAW_FAIL_MODE=open\n")
+	t.Setenv("DEFENSECLAW_FAIL_MODE", "")
+	if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "open" {
+		t.Errorf("fail mode = %q, want the sidecar's open", opts.FailMode)
+	}
+	t.Setenv("DEFENSECLAW_FAIL_MODE", " Closed ")
+	if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "closed" {
+		t.Errorf("fail mode = %q, want env 'closed' to tighten the sidecar's open", opts.FailMode)
+	}
+	if opts = buildHookOptions("codex", "", "", "open"); opts.FailMode != "closed" {
+		t.Errorf("fail mode = %q, want env 'closed' to tighten --fail-mode open", opts.FailMode)
+	}
+
+	// Upgrade path: the 0.8.x and 1.0.2 sidecar shapes keep the open mode
+	// the user chose (persisted state, not the environment), and an inherited
+	// open still cannot reopen a connector the v2 sidecar records closed.
+	t.Setenv("DEFENSECLAW_FAIL_MODE", "")
+	for _, body := range []string{
+		"DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:12345\nDEFENSECLAW_FAIL_MODE=open\n",
+		`{"version":2,"gateway_addr":"127.0.0.1:12345","fail_modes":{"codex":"open","claudecode":"closed"}}`,
+	} {
+		writeHookSidecarForTest(t, home, body)
+		if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "open" {
+			t.Errorf("sidecar %q: fail mode = %q, want the persisted open", body, opts.FailMode)
+		}
+	}
+	t.Setenv("DEFENSECLAW_FAIL_MODE", "open")
+	if opts = buildHookOptions("claudecode", "", "", ""); opts.FailMode != "closed" {
+		t.Errorf("v2 sidecar closed claudecode: fail mode = %q, want closed over env open", opts.FailMode)
 	}
 }
 

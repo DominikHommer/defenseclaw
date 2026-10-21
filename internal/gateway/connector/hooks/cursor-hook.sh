@@ -132,7 +132,10 @@ defenseclaw_harden_env
 
 {{if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
 # DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
-FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="{{.FailMode}}"
+# An inherited DEFENSECLAW_FAIL_MODE can only tighten the installed mode:
+# a project or parent process cannot reopen a closed hook (GAP-0315).
+case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) FAIL_MODE="closed" ;; esac{{end}}
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="cursor"
 DEFENSECLAW_HOOK_NAME="cursor-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME

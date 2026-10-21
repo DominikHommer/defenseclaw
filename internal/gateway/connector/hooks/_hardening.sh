@@ -329,15 +329,17 @@ defenseclaw_shared_hook_token_file() {
 }
 
 # Resolve the selected connector's fail mode from the connector-aware shared
-# runtime state.  An explicit process value still wins for non-managed
-# ephemeral shells; guardian-managed hooks trust only installer-owned state.
+# runtime state. An inherited DEFENSECLAW_FAIL_MODE can only tighten it to
+# closed (GAP-0315); guardian-managed hooks trust only installer-owned state.
 # Malformed, ambiguous, or missing state fails closed.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
-  local mode="${DEFENSECLAW_FAIL_MODE:-}"
-  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ]; then
-    mode=""
+  local mode=""
+  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != "1" ]; then
+    case "${DEFENSECLAW_FAIL_MODE:-}" in
+      [Cc][Ll][Oo][Ss][Ee][Dd]) printf closed; return 0 ;;
+    esac
   fi
   local config="${hook_dir}/.hookcfg"
   local flat_config="${hook_dir}/.hookcfg.legacy"

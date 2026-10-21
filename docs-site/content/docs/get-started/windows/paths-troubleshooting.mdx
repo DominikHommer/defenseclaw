@@ -130,10 +130,11 @@ including `defenseclaw upgrade`, or DefenseClaw will look for a different
 install.
 
 `DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY` change runtime
-behavior; they are not path settings. For normal use, set the fail mode with
-`defenseclaw guardrail fail-mode open|closed`. OpenCode ignores the
-environment variables: its setup writes the saved fail mode into the plugin,
-and `defenseclaw status` and `defenseclaw doctor` report a difference.
+behavior; they are not path settings, and they can only make hooks stricter
+(`DEFENSECLAW_FAIL_MODE=open` is ignored). Set the fail mode with
+`defenseclaw guardrail fail-mode open|closed`; setup writes it into the hooks
+and the OpenCode plugin, and `defenseclaw status` and `defenseclaw doctor`
+report it.
 
 DefenseClaw restricts its private files to the current user, Administrators,
 and SYSTEM. The [Windows security model](/docs/get-started/windows/telemetry-security#ownership-and-filesystem-boundary)

@@ -1166,3 +1166,43 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         assert not (slot / "HOOK_FIRST").exists()
     # Undo leaves the old hook live.
     assert live.read_text(encoding="utf-8").strip() == "old", out
+
+
+# ── 1.0.4 (GAP-0004) ────────────────────────────────────────────────────────
+
+
+def _ps_functions(*names: str) -> str:
+    text = _text()
+    out = []
+    for name in names:
+        start = text.index(f"function {name}(")
+        out.append(text[start : text.index("\n}\n", start) + 3])
+    return "\n".join(out)
+
+
+def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
+    # rel-1-0-4 GAP-0004: renaming the old defenseclaw-hook.exe aside before
+    # the new one was in place left a gap in which an agent's registered hook
+    # found no launcher. Install-File swaps an existing file in with
+    # File.Replace first and renames only when that fails.
+    install_file = _ps_functions("Install-File")
+    assert install_file.index("Switch-InPlace") < install_file.index("Remove-Aside")
+    assert "[IO.File]::Replace($New, $Destination, $aside, $true)" in _ps_functions("Switch-InPlace")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_install_file_never_leaves_the_destination_missing(tmp_path: Path) -> None:
+    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    source.write_text("new", encoding="ascii")
+    dest.write_text("old", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
+function Move-Path([string]$From, [string]$To) {{ throw "rename used: $From" }}
+{_ps_functions("Get-Sha256", "Install-File", "Switch-InPlace")}
+Install-File '{source}' '{dest}'
+"""
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert dest.read_text(encoding="ascii") == "new"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
