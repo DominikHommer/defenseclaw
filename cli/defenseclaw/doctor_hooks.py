@@ -2674,7 +2674,9 @@ def unix_hook_event_binding_problem(connector: str, config_path: str, script_pat
             if not isinstance(command, str) or script_name not in command:
                 continue
             try:
-                tokens = shlex.split(command)
+                # posix=False only where doctor's tests run this Unix check on
+                # Windows paths, whose backslashes are no shell escapes.
+                tokens = shlex.split(command, posix=os.name != "nt")
             except ValueError:
                 return "malformed", f"Copilot {event} command cannot be parsed: {command}"
             if not owned(tokens):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
@@ -426,6 +427,8 @@ def test_native_deny_connector_reports_the_mode_its_hook_renders(
     # mode: closed blocks every failure DefenseClaw sees, and the report names
     # the vendor limit it keeps.
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    monkeypatch.setattr(fail_mode_runtime, "_native_deny_registration_freshness", lambda *_args: None, raising=False)
     _register_native_deny_hook(monkeypatch, cfg, home, connector)
     script = f"{connector}-hook.sh"
     hook = Path(cfg.data_dir) / "hooks" / script
@@ -1346,6 +1349,7 @@ def _register_native_deny_hook(
     return path
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 @pytest.mark.parametrize("connector", ["antigravity", "copilot", "hermes"])
 def test_native_deny_state_reports_a_stale_lock_or_registration_next_to_a_closed_script(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str
@@ -1392,6 +1396,7 @@ def test_native_deny_state_reports_a_stale_lock_or_registration_next_to_a_closed
     assert resolve_connector_fail_mode(cfg, connector).current
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 @pytest.mark.parametrize(
     ("connector", "event", "args"),
     [
