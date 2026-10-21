@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
@@ -445,12 +444,6 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		uid, gid, _, err := statOwnerMode(path)
 		return uid, gid, err
 	}
-	// The record tree of a fake host lies in the test account's temporary
-	// folder, which the hook's trust walk refuses; the tests of the tree
-	// check replace this.
-	previousTree := hookSessionTreeProblem
-	hookSessionTreeProblem = func(string, enterprisepolicy.PublishedSessionTrust) error { return nil }
-	t.Cleanup(func() { hookSessionTreeProblem = previousTree })
 	h.services = newFakeServices(env)
 	env.Services = h.services
 	h.accounts = &fakeAccounts{accounts: map[string]Account{}}

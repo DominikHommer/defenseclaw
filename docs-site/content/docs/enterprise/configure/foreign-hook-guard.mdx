@@ -46,19 +46,9 @@ removing the hook, restart the agent.
 
 The last sentence appears only when the hook was present at session start. With `foreign_hooks: report`, the agent runs and the hook prints a warning that names the file and digest. An approval you add while a session is blocked applies to the next agent session.
 
-## Session records and gateway outages
+## Gateway outages
 
-The gateway keeps each agent session's hook record. After every check it also writes its answer (a block, or the allow that clears it) for the agent process into a protected record that only that account can read and only the gateway service can change:
-
-| OS | Folder |
-| --- | --- |
-| Linux | `/run/defenseclaw-hook/sessions/<account digest>/` |
-| macOS | `/opt/cisco/defenseclaw/run/sessions/<account digest>/` |
-| Windows | `%ProgramData%\Cisco\DefenseClaw-HookSessions\<account digest>\` |
-
-`ensure`, `repair` and Setup create the folder; uninstall removes it. Each account's folder has one access entry for that account (a POSIX ACL entry on Linux, a macOS ACL entry, a protected DACL on Windows).
-
-While the gateway cannot answer (it is stopped or restarting, or it ended without removing its hook socket), a guarded tool call runs only when the fail mode is `open` and that record shows the gateway did not block the agent process. Otherwise the call is blocked: under `closed` or an unset fail mode, for a session the gateway blocked (it gets the gateway's own block message), for an agent that started while the gateway was down or an agent process DefenseClaw cannot name, and for a record that is missing, older than 7 days, dated more than a minute in the future (the clock was ahead when it was written), or that the account could change. Other blocked calls get the outage message:
+While the gateway cannot answer (it is stopped or restarting), guarded tool calls are blocked whatever the fail mode, `open` included:
 
 ```text
 enterprise_foreign_hook_blocked: DefenseClaw could not check this agent
@@ -66,15 +56,7 @@ session's hook record with its gateway, so the call is blocked. Retry when
 the DefenseClaw gateway is running; if the block continues, restart the agent.
 ```
 
-The block applies to tool calls and, where the agent lets a hook block them, to prompts and session starts. Stop and session-end events get the agent's normal allow, so a blocked agent can still end its turn and exit.
-
-How the records stay trustworthy:
-
-- A block, or a guardian hook removal, that cannot replace or delete a record (on Windows the account can hold its record open) sets the record's modification time to 1970, which the hook reads as expired, and writes a `.deny` file next to it. Either one blocks, so a full disk that refuses the `.deny` file does not keep the old answer. The next allow that replaces the record clears both.
-- The record folder holds no removal state: users can list it. When the guardian cannot write its removal ledger (for example, the disk is full), or removes a hook while the hook would refuse the account's part of the record folder, it marks the account in the gateway's own session store, in the gateway's data directory, which no user can reach. While the mark is set, the gateway blocks every guarded call of that account. The next guardian pass that can write the ledger, with a record folder the hook trusts, records the removal for every connector, deletes the account's records and clears the mark. Agents that were running then stay blocked until they restart.
-- After it writes an allow, the gateway checks the ledger and the mark again. If the guardian changed one of them during the check, the gateway decides the call again. A Windows gateway that cannot find the record folder's protected registration blocks every guarded call.
-- On Windows the hook refuses a record when anyone but SYSTEM, Administrators or the gateway service can change the record, its folder, `DefenseClaw-HookSessions` or `C:\ProgramData\Cisco`. If other software loosens the permissions on `C:\ProgramData\Cisco`, guarded calls block during an outage. Windows `status` and `verify` use the same rule and warn `hook_session_records_untrusted`.
-- Before `ensure`, `repair` or Setup puts the folder's owner and permissions back, it checks the folder the way the hook does, also when it is empty. If the hook would refuse anything, it first closes the folder to every user and then deletes every account's records. If you fix the permissions by hand instead, also delete the account folders in it; the gateway creates them again.
+This is a known limit in 1.0.4: the guard keeps each session's hook record in the gateway, so it cannot prove during an outage that a session is clean. Calls of unguarded connectors follow the fail mode as usual. Stop and session-end events get the agent's normal allow, so a blocked agent can still end its turn and exit.
 
 ## Approve a hook
 

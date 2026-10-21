@@ -2292,8 +2292,6 @@ func (l *lifecycle) keepRunningDuringChange(p *plan) map[string]bool {
 func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 	env := l.env
 	created := []string{}
-	// Before any folder above it is put back (GAP-0352 review).
-	sessionProblem := env.hookSessionRecordsProblem(p.dirs)
 	for _, dir := range p.dirs {
 		path := env.P(dir.Path)
 		if dir.External {
@@ -2309,15 +2307,6 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 		}
 		if l.reportChanges && env.metadataDiffers(path, dir.Mode, dir.Owner) {
 			l.noteChange("restored the mode and owner of %s", dir.Path)
-		}
-		if sessionProblem != nil && dir.Path == env.Layout.HookSessionDir {
-			invalidated, err := env.invalidateHookSessionRecords(path, dir.Owner)
-			if err != nil {
-				return nil, err
-			}
-			if l.reportChanges && invalidated {
-				l.noteChange("invalidated the protected foreign-hook session records in %s, which another account could change (%v)", dir.Path, sessionProblem)
-			}
 		}
 		if err := env.ensureDir(path, dir.Mode, dir.Owner); err != nil {
 			return nil, err
@@ -2513,70 +2502,6 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 		}
 	}
 	return changed, nil
-}
-
-// hookSessionTreeProblem is enterprisepolicy.PublishedSessionTreeProblem and
-// hookSessionInvalidate is enterprisepolicy.InvalidatePublishedSessionRecords
-// (replaceable in tests, whose folders the test account owns).
-var (
-	hookSessionTreeProblem = enterprisepolicy.PublishedSessionTreeProblem
-	hookSessionInvalidate  = enterprisepolicy.InvalidatePublishedSessionRecords
-)
-
-// hookSessionRecordsProblem reports what in the existing protected
-// foreign-hook session record tree (Layout.HookSessionDir) the hook would
-// refuse, before the lifecycle puts back the owner and mode of the tree and
-// of the folders above it. Anything the hook refuses, another account could
-// have changed: with write access to the folder, an account can move its own
-// folder away while the guardian revokes its records and bring it back
-// after. Restoring the mode would then restore trust in the old records.
-func (e *Env) hookSessionRecordsProblem(dirs []desiredDir) error {
-	for _, dir := range dirs {
-		if dir.Path != "" && dir.Path == e.Layout.HookSessionDir && !dir.External {
-			return hookSessionTreeProblem(e.P(dir.Path), enterprisepolicy.PublishedSessionTrust{ServiceUID: dir.Owner.UID})
-		}
-	}
-	return nil
-}
-
-// invalidateHookSessionRecords closes the record tree at path to every
-// account, then revokes every account's records in it
-// (enterprisepolicy.InvalidatePublishedSessionRecords). The owner goes back
-// first, so an account that owned the folder cannot open it again after the
-// mode change, and then the mode becomes 0700: the hook cannot reach a
-// record, and the mask of an access list gives its named entries nothing.
-// The closed state is checked before anything is revoked, so nothing comes
-// back into the tree while the records are invalidated (GAP-0352 review).
-// The caller then puts the tree's mode back. It reports whether the closed
-// tree held anything to invalidate.
-func (e *Env) invalidateHookSessionRecords(path string, owner fileOwner) (bool, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("inspect %s: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return false, fmt.Errorf("%s is not a directory", path)
-	}
-	if err := e.Lchown(path, owner.UID, owner.GID); err != nil {
-		return false, fmt.Errorf("chown %s: %w", path, err)
-	}
-	if err := os.Chmod(path, 0o700); err != nil {
-		return false, fmt.Errorf("chmod %s: %w", path, err)
-	}
-	if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode()&(os.ModePerm|os.ModeSticky)&^0o700 != 0 {
-		return false, fmt.Errorf("%s could not be closed to other accounts before its records are invalidated", path)
-	}
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return false, fmt.Errorf("read %s: %w", path, err)
-	}
-	if err := hookSessionInvalidate(path); err != nil {
-		return false, fmt.Errorf("invalidate the protected foreign-hook session records in %s: %w", path, err)
-	}
-	return len(entries) > 0, nil
 }
 
 // metadataDiffers reports whether path's permission bits or owner differ

@@ -13,7 +13,6 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -51,12 +50,13 @@ func runGuardEvent(t *testing.T, fixture *foreignGuardFixture, connector, event,
 	return opts
 }
 
-// When the gateway cannot answer the session exchange (it is stopped,
-// restarting or not answering) and the fail mode is not open for the
-// outage (unset, closed, strict), a guarded connector's call is blocked with
-// the outage's reason, and an unapproved hook the scan finds blocks with its
-// own reason. Open is covered by the protected-record tests below.
-func TestForeignHookGuardBlocksAGatewayOutageUnlessOpen(t *testing.T) {
+// Bounded review P1 (fallback): the gateway keeps the session record in its
+// protected data directory, and the hook has no copy of it that the user
+// cannot write. So when the gateway cannot answer the session exchange (it
+// is stopped, restarting or not answering), a guarded connector's call is
+// blocked with the outage's reason in every fail mode, open included, and an
+// unapproved hook the scan finds blocks with its own reason.
+func TestForeignHookGuardBlocksAGatewayOutageInEveryFailMode(t *testing.T) {
 	notRunning := fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
 	for connector, event := range guardOutageConnectors() {
 		// The guard takes no fail mode: the exchange error alone decides.
@@ -85,237 +85,40 @@ func TestForeignHookGuardBlocksAGatewayOutageUnlessOpen(t *testing.T) {
 	}
 }
 
-// Only an outage that follows the administrator's open (a standalone hook
-// outside Secure Client, not strict, not a held port) is marked, with the
-// service uid from the runtime descriptor; the marked error still names the
-// outage.
-func TestForeignHookSessionExchangeErrorMarksOnlyAnOpenOutage(t *testing.T) {
-	notRunning := fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
-	open := hookexec.Options{Connector: "copilot", ManagedEnterprise: true, ExplainUnenrolledAccount: true, FailMode: "open", ManagedServiceUID: 990}
-	var marked *foreignHookSessionOutageOpen
-	if err := foreignHookSessionExchangeError(open, notRunning); !errors.As(err, &marked) || marked.serviceUID != 990 || !hookexec.ManagedGatewayNotRunning(err) {
-		t.Fatalf("open outage: %v", err)
-	}
-	for name, opts := range map[string]hookexec.Options{
-		"closed": func() hookexec.Options { o := open; o.FailMode = "closed"; return o }(),
-		"strict": func() hookexec.Options { o := open; o.StrictAvailability = true; return o }(),
-	} {
-		if err := foreignHookSessionExchangeError(opts, notRunning); errors.As(err, &marked) || err != notRunning {
-			t.Fatalf("%s outage must keep its error: %v", name, err)
-		}
-	}
-	if err := foreignHookSessionExchangeError(open, errors.New("invalid session gateway decision")); errors.As(err, &marked) {
-		t.Fatalf("a non-outage error must not be marked: %v", err)
-	}
-}
-
-// protectedRecordFixture points the guard at a temporary protected session
-// record root for account 4242; trust fails for the paths in untrusted (the
-// production check refuses a record or folder the user can change).
-type protectedRecordFixture struct {
-	root      string
-	untrusted map[string]bool
-	consulted int
-}
-
-const protectedRecordIdentity = "4242"
-
-func newProtectedRecordFixture(t *testing.T) *protectedRecordFixture {
-	t.Helper()
-	records := &protectedRecordFixture{root: t.TempDir(), untrusted: map[string]bool{}}
-	previousRecord, previousTrust, previousIdentity := hookForeignGuardSessionRecord, hookForeignGuardSessionRecordTrust, hookForeignGuardIdentity
-	hookForeignGuardSessionRecord = func(serviceUID int) (string, enterprisepolicy.PublishedSessionTrust, bool) {
-		records.consulted++
-		return records.root, enterprisepolicy.PublishedSessionTrust{ServiceUID: serviceUID}, true
-	}
-	hookForeignGuardSessionRecordTrust = func(path string, _ enterprisepolicy.PublishedSessionTrust) error {
-		if records.untrusted[path] {
-			return fmt.Errorf("%s is writable by the user", path)
-		}
-		return nil
-	}
-	hookForeignGuardIdentity = func() (string, bool) { return protectedRecordIdentity, true }
-	t.Cleanup(func() {
-		hookForeignGuardSessionRecord, hookForeignGuardSessionRecordTrust, hookForeignGuardIdentity = previousRecord, previousTrust, previousIdentity
-	})
-	return records
-}
-
-// write stores the gateway's answer for one key, as the gateway does.
-func (r *protectedRecordFixture) write(t *testing.T, connector, kind, id string, blocked bool, reason string) string {
-	t.Helper()
-	path, ok := enterprisepolicy.PublishedSessionRecordPath(r.root, protectedRecordIdentity, connector, kind, id)
-	if !ok {
-		t.Fatalf("no record path for %s %s %s", connector, kind, id)
-	}
-	data, err := json.Marshal(enterprisepolicy.PublishedSessionRecord{Version: 1, Connector: connector, Kind: kind, ID: id,
-		Blocked: blocked, Reason: reason, At: time.Now().UTC().Format(time.RFC3339)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-// GAP-0352: under the administrator's open, a gateway outage lets a guarded
-// connector's call go on only when the gateway's protected session record
-// proves the agent process not blocked. A missing, untrusted, corrupt or
-// foreign record blocks with the outage's reason; a blocking record denies
-// with the gateway's reason; nothing under the account's home is read; an
-// unapproved hook the scan finds blocks with its own reason; and an outage
-// that does not follow open (unset, closed, strict) never reads the record.
-func TestForeignHookGuardOpenOutageFollowsTheProtectedSessionRecord(t *testing.T) {
-	notRunning := fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
-	openOutage := func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
-		return enterprisepolicy.GuardDecision{}, &foreignHookSessionOutageOpen{err: notRunning, serviceUID: 990}
-	}
-	const process = "agent-process"
+// Bounded review P1: a session the gateway blocked at its start (an
+// unapproved hook, since deleted while the agent still runs it) stays
+// blocked when the gateway then stops and the administrator chose open, and
+// no file under the account's home changes that: neither a record that says
+// the session is not blocked, nor deleting every record there.
+func TestForeignHookGuardKeepsAGatewaySessionBlockThroughAnOpenOutage(t *testing.T) {
 	for connector, event := range guardOutageConnectors() {
 		fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
 		fixture.guard(connector)
-		fixture.process = process
-		records := newProtectedRecordFixture(t)
-		hookForeignGuardExchange = openOutage
-		blocked := func(step string) {
-			t.Helper()
-			got := runGuardEvent(t, fixture, connector, event, "s-1")
-			if got.ManagedRuntimeFailure != hookexec.ManagedGatewayNotRunningReason {
-				t.Fatalf("%s: %s must block with the not-running reason: %q", connector, step, got.ManagedRuntimeFailure)
-			}
+		fixture.process = "agent-process"
+		hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+			return enterprisepolicy.GuardDecision{Deny: true, Reason: hookexec.ForeignHookBlockedReasonPrefix + " blocked since earlier in this session"}, nil
 		}
-		allowed := func(step string) {
-			t.Helper()
-			if got := runGuardEvent(t, fixture, connector, event, "s-1"); got.ManagedRuntimeFailure != "" {
-				t.Fatalf("%s: %s must allow: %q", connector, step, got.ManagedRuntimeFailure)
-			}
+		if held := runGuardEvent(t, fixture, connector, event, "s-1"); !strings.HasPrefix(held.ManagedRuntimeFailure, hookexec.ForeignHookBlockedReasonPrefix) {
+			t.Fatalf("%s: the gateway's session block must hold: %q", connector, held.ManagedRuntimeFailure)
 		}
-
-		blocked("no protected record")
-		// A record under the account's home (the 1.0.3 rc mirror) is not read.
-		fixture.write(t, enterprisepolicy.SessionPath(fixture.home, connector, "p", process),
-			`{"v":1,"connector":"`+connector+`","process":"`+process+`","started":"2026-10-20T00:00:00Z","state":"x","blocked":false}`)
-		blocked("a home record")
-
-		processRecord := records.write(t, connector, "p", process, false, "")
-		allowed("a record that proves the process unblocked")
-
-		reason := hookexec.ForeignHookBlockedReasonPrefix + " When this agent session started, the project hook file /repo/x.json defined a hook. Restart the agent."
-		records.write(t, connector, "s", "s-1", true, reason)
-		if got := runGuardEvent(t, fixture, connector, event, "s-1"); got.ManagedRuntimeFailure != reason {
-			t.Fatalf("%s: a blocking session record must deny with the gateway's reason: %q", connector, got.ManagedRuntimeFailure)
-		}
-		records.write(t, connector, "s", "s-1", false, "")
-		allowed("the allow that cleared the block")
-
-		records.write(t, connector, "p", process, true, "")
-		if got := runGuardEvent(t, fixture, connector, event, "s-1"); !strings.HasPrefix(got.ManagedRuntimeFailure, hookexec.ForeignHookBlockedReasonPrefix) {
-			t.Fatalf("%s: a blocking process record without a reason must still deny: %q", connector, got.ManagedRuntimeFailure)
-		}
-
-		records.write(t, connector, "p", process, false, "")
-		records.untrusted[processRecord] = true
-		blocked("a record the user can change")
-		delete(records.untrusted, processRecord)
-
-		for name, content := range map[string]string{
-			"a corrupt record":            `{"v":1,`,
-			"a record of another process": `{"v":1,"connector":"` + connector + `","kind":"p","id":"other","blocked":false,"at":"2026-10-21T00:00:00Z"}`,
-			"a record of another agent":   `{"v":1,"connector":"codex","kind":"p","id":"` + process + `","blocked":false,"at":"2026-10-21T00:00:00Z"}`,
-		} {
-			if err := os.WriteFile(processRecord, []byte(content), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			blocked(name)
-		}
-		if err := os.Remove(processRecord); err != nil {
-			t.Fatal(err)
-		}
-		blocked("a deleted record")
-
-		// An outage that does not follow open never reads the record.
-		records.write(t, connector, "p", process, false, "")
-		records.consulted = 0
+		// The user rewrites or deletes whatever the account's home holds.
+		records := filepath.Join(fixture.home, ".defenseclaw", "foreign-hook-sessions")
+		fixture.write(t, enterprisepolicy.SessionPath(fixture.home, connector, "s", "s-1"),
+			`{"v":1,"connector":"`+connector+`","session":"s-1","started":"2026-10-20T00:00:00Z","state":"x","blocked":false}`)
+		notRunning := fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
 		hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 			return enterprisepolicy.GuardDecision{}, notRunning
 		}
-		blocked("an outage under unset or closed")
-		if records.consulted != 0 {
-			t.Fatalf("%s: an outage under unset or closed must not read the protected record", connector)
-		}
-		hookForeignGuardExchange = openOutage
-		allowed("the proven process again")
-
-		// Review P2: an agent process the hook cannot name is not proven by a
-		// clean session record (it may have started during the outage and
-		// resumed the session ID), and a record older than the limit proves
-		// nothing.
-		records.write(t, connector, "s", "s-1", false, "")
-		fixture.process = ""
-		blocked("an unnamed agent process with a clean session record")
-		fixture.process = process
-		old := time.Now().Add(-8 * 24 * time.Hour)
-		if err := os.Chtimes(processRecord, old, old); err != nil {
-			t.Fatal(err)
-		}
-		blocked("a record older than the limit")
-		records.write(t, connector, "p", process, false, "")
-		allowed("a fresh record")
-	}
-
-	// An unapproved hook the scan finds blocks with its own reason, record
-	// or not.
-	fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
-	fixture.guard("copilot")
-	fixture.process = process
-	records := newProtectedRecordFixture(t)
-	records.write(t, "copilot", "p", process, false, "")
-	hookForeignGuardExchange = openOutage
-	foreign := filepath.Join(fixture.project, ".github", "hooks", "x.json")
-	fixture.write(t, foreign, `{"hooks": {"preToolUse": [{"bash": "./rewrite.sh"}]}}`)
-	found := fixture.runEvent(t, "copilot", "preToolUse", "sessionId", "s-1")
-	if !strings.HasPrefix(found.ManagedRuntimeFailure, hookexec.ForeignHookBlockedReasonPrefix) || !strings.Contains(found.ManagedRuntimeFailure, foreign) {
-		t.Fatalf("an unapproved hook must block with its own reason: %q", found.ManagedRuntimeFailure)
-	}
-}
-
-// GAP-0352: the check the standalone Hermes hook and the OpenCode plugin run
-// gives exactly the allow they accept when the protected record proves the
-// process unblocked during an open outage, and the outage denial otherwise.
-func TestForeignHookCheckFollowsTheProtectedSessionRecordDuringAnOpenOutage(t *testing.T) {
-	notRunning := fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
-	connectors := map[string]string{"opencode": "tool.execute.before"}
-	if runtime.GOOS != "windows" {
-		connectors["hermes"] = "pre_tool_call"
-	}
-	for connector, event := range connectors {
-		fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
-		fixture.guard(connector)
-		fixture.process = "agent-process"
-		records := newProtectedRecordFixture(t)
-		hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
-			return enterprisepolicy.GuardDecision{}, &foreignHookSessionOutageOpen{err: notRunning}
-		}
-		check := func() (foreignHookCheckResult, string) {
-			t.Helper()
-			var out bytes.Buffer
-			runForeignHookCheck(connector, strings.NewReader(`{"hook_event_name":"`+event+`","session_id":"s-1"}`), &out)
-			var result foreignHookCheckResult
-			if err := json.Unmarshal(out.Bytes(), &result); err != nil {
-				t.Fatalf("%s: %v: %q", connector, err, out.String())
+		for _, step := range []string{"edited", "deleted"} {
+			if step == "deleted" {
+				if err := os.RemoveAll(records); err != nil {
+					t.Fatal(err)
+				}
 			}
-			return result, strings.TrimSpace(out.String())
-		}
-		if result, _ := check(); !result.Deny || !strings.Contains(result.Reason, hookexec.ManagedGatewayNotRunningReason) {
-			t.Fatalf("%s: no record must deny with the not-running reason: %+v", connector, result)
-		}
-		records.write(t, connector, "p", "agent-process", false, "")
-		if result, raw := check(); result.Deny || raw != `{"deny":false}` {
-			t.Fatalf("%s: a proven process must get exactly the allow: %q", connector, raw)
+			held := runGuardEvent(t, fixture, connector, event, "s-1")
+			if held.ManagedRuntimeFailure == "" {
+				t.Fatalf("%s: an open outage lifted the session block after the home records were %s", connector, step)
+			}
 		}
 	}
 }

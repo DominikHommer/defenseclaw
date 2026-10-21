@@ -66,14 +66,7 @@ type StandaloneLayout struct {
 	// written hook runtime state: the per-user connector enrollments and
 	// runtime selectors and the public machine policy summary. The state
 	// root is not readable by standard users, so it cannot live there.
-	HookRuntimeDir string
-	// HookSessionDir holds the gateway's protected foreign-hook session
-	// records (enterprisepolicy.PublishForeignHookSessionDecision): one
-	// folder per account that only that account can read and only the
-	// gateway service writes. The lifecycle creates it (root/SYSTEM), owned
-	// by or writable for the gateway service; a hook reads its own record
-	// during a gateway outage under fail mode open.
-	HookSessionDir  string
+	HookRuntimeDir  string
 	HookSocketPath  string
 	SensorSocketDir string
 
@@ -122,7 +115,6 @@ func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 			GuardianAuthDir: "/var/lib/defenseclaw-hook-guardian",
 			LogDir:          "/var/log/defenseclaw",
 			HookSocketDir:   "/run/defenseclaw-hook",
-			HookSessionDir:  "/run/defenseclaw-hook/sessions",
 			HookSocketPath:  "/run/defenseclaw-hook/hook.sock",
 			SensorSocketDir: "/run/defenseclaw-sensor",
 			ServiceUser:     StandaloneLinuxServiceUser,
@@ -150,7 +142,6 @@ func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 			// needs cgo, so the gateway binds the hook socket itself in a
 			// lifecycle-created directory that only _defenseclaw can write.
 			HookSocketDir:   root + "/run",
-			HookSessionDir:  root + "/run/sessions",
 			HookSocketPath:  root + "/run/hook.sock",
 			SensorSocketDir: "/var/run/defenseclaw-sensor",
 			ServiceUser:     StandaloneDarwinServiceUser,
@@ -193,7 +184,6 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 		HookSocketDir:   install + `\ipc`,
 		HookSocketPath:  "",
 		HookRuntimeDir:  programData + `\Cisco\DefenseClaw-HookRuntime`,
-		HookSessionDir:  programData + `\Cisco\DefenseClaw-HookSessions`,
 		SensorSocketDir: install + `\ipc`,
 		ServiceUser:     `NT SERVICE\` + StandaloneWindowsGatewaySvc,
 		ServiceGroup:    "",
@@ -264,7 +254,7 @@ func (l StandaloneLayout) Validate() error {
 	for _, value := range []string{
 		l.InstallRoot, l.BinDir, l.ConfigDir, l.ConfigPath, l.PolicyDir, l.VendorPolicyDir, l.SecretsDir,
 		l.ManifestPath, l.DescriptorPath, l.LifecycleDir, l.DataDir, l.GuardianAuthDir,
-		l.LogDir, l.HookSocketDir, l.HookSessionDir, l.HookSocketPath, l.SensorSocketDir,
+		l.LogDir, l.HookSocketDir, l.HookSocketPath, l.SensorSocketDir,
 	} {
 		if value == "" || !path.IsAbs(value) || path.Clean(value) != value {
 			return fmt.Errorf("standalone layout path %q is not absolute and clean", value)
