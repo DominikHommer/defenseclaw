@@ -11,6 +11,7 @@
 package hookexec
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -92,6 +93,47 @@ func TestPerUserHookDeniesAnAnswerWithoutTheNativeDecision(t *testing.T) {
 	}
 }
 
+// Review round 3: strict availability closes a per-user hook rendered open
+// (an explicit open Windows sidecar) for the answer checks too. The checks
+// read the raw open mode, so a block or confirm without the native deny, or
+// an answer with no valid action, let the call run.
+func TestStrictAvailabilityClosesAnOpenPerUserHookAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name, connector, event, body, want string
+	}{
+		{"copilot preToolUse block", "copilot", "preToolUse", `{"action":"block"}`, `"permissionDecision":"deny"`},
+		{"copilot preToolUse block allow", "copilot", "preToolUse",
+			`{"action":"block","hook_output":{"permissionDecision":"allow"}}`, `"permissionDecision":"deny"`},
+		{"copilot permissionRequest confirm", "copilot", "permissionRequest", `{"action":"confirm"}`, `"behavior":"deny"`},
+		{"copilot preToolUse invalid action", "copilot", "preToolUse", `{"action":"maybe"}`, `"permissionDecision":"deny"`},
+		{"antigravity block", "antigravity", "PreToolUse", `{"action":"block"}`, `"decision":"deny"`},
+		{"antigravity confirm allow", "antigravity", "PreToolUse",
+			`{"action":"confirm","hook_output":{"decision":"allow"}}`, `"decision":"deny"`},
+		{"antigravity invalid action", "antigravity", "PreToolUse", `{"action":"maybe"}`, `"decision":"deny"`},
+		{"antigravity not json", "antigravity", "PreToolUse", `not json`, `"decision":"deny"`},
+	} {
+		for _, strict := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/strict=%v", tc.name, strict), func(t *testing.T) {
+				result := run(t, tc.connector, ok(tc.body), func(opts *Options) {
+					opts.Event = tc.event
+					opts.FailMode = "open"
+					opts.StrictAvailability = strict
+				})
+				if !strict {
+					// Fail mode open without strict availability lets it run.
+					if strings.Contains(result.stdout, "deny") {
+						t.Fatalf("open: stdout=%q, want no deny", result.stdout)
+					}
+					return
+				}
+				if result.code != 0 || !strings.Contains(result.stdout, tc.want) || strings.Count(result.stdout, "\n") != 1 {
+					t.Fatalf("code=%d stdout=%q stderr=%q, want one answer with %s", result.code, result.stdout, result.stderr, tc.want)
+				}
+			})
+		}
+	}
+}
+
 // Review round 2: a closed Copilot CLI hook whose registration lost its event
 // is refused before the early exits. An unavailable home, oversized input or
 // an invalid managed runtime answered it as an event that cannot block, so
@@ -157,7 +199,19 @@ func TestClosedAntigravityHookDeniesAnUnboundToolCall(t *testing.T) {
 		{name: "managed runtime", input: toolCall, mode: "closed", path: "managed runtime", deny: true, want: "administrator"},
 		{name: "stop input", input: stop, mode: "closed"},
 		{name: "stop input home missing", input: stop, mode: "closed", path: "home missing"},
+		{name: "invocation input", input: `{"conversationId":"c1","invocationNum":2,"initialNumSteps":0}`, mode: "closed"},
 		{name: "open", input: toolCall, mode: "open"},
+		// Review round 3: only an input that is clearly another event keeps
+		// the neutral answer; one that may be a tool call is denied.
+		{name: "no tool call", input: `{"conversationId":"c1"}`, mode: "closed", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "null tool call", input: `{"toolCall":null}`, mode: "closed", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "string tool call", input: `{"toolCall":"run_command"}`, mode: "closed", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "tool step", input: `{"stepIdx":3,"terminationReason":"done"}`, mode: "closed", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "not json", input: `run_command`, mode: "closed", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "empty", input: ``, mode: "closed", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "array", input: `[{"terminationReason":"done"}]`, mode: "closed", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "oversized stop", input: stop, mode: "closed", path: "oversized", deny: true, want: "defenseclaw setup antigravity"},
+		{name: "managed runtime no tool call", input: `{"conversationId":"c1"}`, mode: "closed", path: "managed runtime", deny: true, want: "administrator"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt := ok(`{"action":"allow"}`)

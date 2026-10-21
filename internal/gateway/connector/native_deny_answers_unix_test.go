@@ -190,6 +190,17 @@ func TestAntigravityHookDeniesAnUnboundToolCall(t *testing.T) {
 		{"managed standalone", templateData{FailMode: "open", Managed: true}, nil, toolCall, "administrator"},
 		{"sandbox", templateData{FailMode: "closed", Sandbox: true}, nil, toolCall, "without its registered event"},
 		{"per-user closed stop input", templateData{FailMode: "closed"}, nil, `{"conversationId":"c1","terminationReason":"done"}`, ""},
+		{"per-user closed invocation input", templateData{FailMode: "closed"}, nil, `{"conversationId":"c1","invocationNum":2,"initialNumSteps":0}`, ""},
+		// Review round 3: an input that may be a tool call is denied; only
+		// one that is clearly another event keeps the neutral answer.
+		{"per-user closed no tool call", templateData{FailMode: "closed"}, nil, `{"conversationId":"c1"}`, "defenseclaw setup antigravity"},
+		{"per-user closed null tool call", templateData{FailMode: "closed"}, nil, `{"toolCall":null}`, "defenseclaw setup antigravity"},
+		{"per-user closed string tool call", templateData{FailMode: "closed"}, nil, `{"toolCall":"run_command"}`, "defenseclaw setup antigravity"},
+		{"per-user closed tool step", templateData{FailMode: "closed"}, nil, `{"stepIdx":3,"terminationReason":"done"}`, "defenseclaw setup antigravity"},
+		{"per-user closed not json", templateData{FailMode: "closed"}, nil, `run_command terminationReason`, "defenseclaw setup antigravity"},
+		{"per-user closed empty", templateData{FailMode: "closed"}, nil, ``, "defenseclaw setup antigravity"},
+		{"managed standalone no tool call", templateData{FailMode: "open", Managed: true}, nil, `{"conversationId":"c1"}`, "administrator"},
+		{"sandbox no tool call", templateData{FailMode: "closed", Sandbox: true}, nil, `{"conversationId":"c1"}`, "without its registered event"},
 		{"per-user open", templateData{FailMode: "open"}, nil, toolCall, ""},
 		{"secure client", templateData{FailMode: "open", Managed: true, SecureClient: true, SecureClientDelivery: true}, nil, toolCall, ""},
 	} {
@@ -225,6 +236,9 @@ func TestAntigravityHookDeniesAnUnboundToolCall(t *testing.T) {
 			}
 			if denied {
 				t.Fatalf("exit %d stdout %q, want no deny", code, out.String())
+			}
+			if tc.data.FailMode == "closed" && strings.TrimSpace(out.String()) != "{}" {
+				t.Fatalf("exit %d stdout %q, want the neutral answer {}", code, out.String())
 			}
 		})
 	}

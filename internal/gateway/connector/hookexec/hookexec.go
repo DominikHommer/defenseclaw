@@ -441,6 +441,15 @@ func runHook(ctx context.Context, opts Options) int {
 	// only (internal/cli: the Windows runtime generation or the Unix runtime
 	// descriptor), never from a connector or the caller's environment.
 	failMode := normalizeFailMode(opts.FailMode)
+	if opts.StrictAvailability && !opts.ManagedEnterprise {
+		// Strict availability closes a per-user hook whatever mode it was
+		// rendered with, as the Unix hooks do: the answer checks (decide)
+		// and every failure path read the closed mode, so a Windows
+		// sidecar rendered open cannot let a block without its native deny
+		// through.
+		failMode = "closed"
+		opts.FailMode = "closed"
+	}
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		if code, handled := refuseClosedUnboundHook(&opts, sp, "closed"); handled {
 			return code
@@ -2290,11 +2299,10 @@ const unboundAntigravityBindingReason = "missing or unsupported Antigravity hook
 // reviewed event. Neither agent names the event in its hook input, so such a
 // hook would otherwise answer every failure as an event that cannot block.
 // Copilot gets both of its denies (refuseInvalidCopilotBinding). Antigravity
-// reads the same decision field on Stop, so only a tool call is denied: a
-// payload with a toolCall object, the shape only PreToolUse has and the one
-// the gateway reads an eventless legacy registration as. Any other payload
-// keeps the neutral answer. Secure Client hooks and hooks in fail mode open
-// are not handled here.
+// reads the same decision field on Stop, so it gets PreToolUse's deny for
+// any input that may be a tool call; only an input that is clearly another
+// event (antigravityNonToolInput) keeps the neutral answer. Secure Client
+// hooks and hooks in fail mode open are not handled here.
 func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool) {
 	closed := managedNativeDecision(*opts) ||
 		(!opts.ManagedEnterprise && (opts.StrictAvailability || failMode == "closed"))
@@ -2313,7 +2321,7 @@ func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool
 		// Read the input here, then hand the same bytes to the rest of Run.
 		data, err := io.ReadAll(io.LimitReader(opts.Stdin, opts.MaxBody+1))
 		opts.Stdin = io.MultiReader(bytes.NewReader(data), opts.Stdin)
-		if err != nil || !antigravityToolCallInput(data, int64(len(data)) > opts.MaxBody) {
+		if err == nil && antigravityNonToolInput(data, int64(len(data)) > opts.MaxBody) {
 			return 0, false
 		}
 		text := "DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. " +
@@ -2332,20 +2340,27 @@ func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool
 	return 0, false
 }
 
-// antigravityToolCallInput reports an Antigravity hook input that is a tool
-// call: a JSON object with a toolCall (or tool_call) object. An input over the
-// cap is a tool call when its prefix names one; Antigravity's other events
-// carry counters and short text only.
-func antigravityToolCallInput(data []byte, overflow bool) bool {
+// antigravityNonToolInput reports an Antigravity hook input that is clearly
+// not a tool call: a JSON object with a field of PreInvocation,
+// PostInvocation or Stop and no tool field (toolCall, tool_call, stepIdx).
+// Anything else (a missing or malformed toolCall, input that is not JSON or
+// over the cap) may be a tool call. Antigravity's other events carry
+// counters and short text only.
+func antigravityNonToolInput(data []byte, overflow bool) bool {
 	if overflow {
-		return bytes.Contains(data, []byte(`"toolCall"`)) || bytes.Contains(data, []byte(`"tool_call"`))
+		return false
 	}
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(data, &fields) != nil {
 		return false
 	}
-	for _, key := range []string{"toolCall", "tool_call"} {
-		if raw := bytes.TrimSpace(fields[key]); len(raw) > 0 && raw[0] == '{' {
+	for _, key := range []string{"toolCall", "tool_call", "stepIdx"} {
+		if _, ok := fields[key]; ok {
+			return false
+		}
+	}
+	for _, key := range []string{"invocationNum", "initialNumSteps", "executionNum", "terminationReason", "fullyIdle"} {
+		if _, ok := fields[key]; ok {
 			return true
 		}
 	}

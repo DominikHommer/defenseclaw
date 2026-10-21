@@ -28,26 +28,30 @@ case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_BOOT_FAI
 }
 trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ]; then antigravity_bootstrap_failure "$_dc_boot_rc"; fi' EXIT
 # A registration that lost its event gets no verdict: the gateway requires
-# the event. In fail mode closed a tool call (an input with a toolCall
-# object, the shape only PreToolUse has) gets PreToolUse's deny before
-# anything else can answer it. Any other input keeps the no-op answer: Stop
-# reads the same decision field.
+# the event. In fail mode closed any input that may be a tool call gets
+# PreToolUse's deny before anything else can answer it. Only an input that
+# is clearly another event keeps the no-op answer (Stop reads the same
+# decision field): a JSON object with a field of PreInvocation,
+# PostInvocation or Stop and no tool field (toolCall, tool_call, stepIdx).
 case "$HOOK_EVENT" in
   PreInvocation|PreToolUse|PostToolUse|PostInvocation|Stop) ;;
   *)
     if [ "$_DC_BOOT_FAIL_MODE" = "closed" ]; then
       _dc_unbound_input=""
       IFS= read -r -d '' -n 1048576 _dc_unbound_input || true
-      _dc_tool_call_re='"(toolCall|tool_call)"[[:space:]]*:[[:space:]]*\{'
-      if [[ "$_dc_unbound_input" =~ $_dc_tool_call_re ]]; then
-        echo "defenseclaw: antigravity hook is registered without a reviewed event; blocking the tool call (fail mode closed)" >&2
-{{if .Sandbox}}        printf '%s\n' '{"decision":"deny","reason":"DefenseClaw hook was called without its registered event, so the tool call is blocked."}'
-{{else if .Managed}}        printf '%s\n' '{"decision":"deny","reason":"DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. Ask your administrator to run ensure, which rewrites the DefenseClaw hooks."}'
-{{else}}        printf '%s\n' '{"decision":"deny","reason":"DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. Run `defenseclaw setup antigravity` to register it again."}'
-{{end}}        exit 0
+      _dc_object_re='^[[:space:]]*\{'
+      _dc_tool_field_re='"(toolCall|tool_call|stepIdx)"[[:space:]]*:'
+      _dc_other_event_re='"(invocationNum|initialNumSteps|executionNum|terminationReason|fullyIdle)"[[:space:]]*:'
+      if [ "${#_dc_unbound_input}" -lt 1048576 ] && [[ "$_dc_unbound_input" =~ $_dc_object_re ]] &&
+        [[ "$_dc_unbound_input" =~ $_dc_other_event_re ]] && ! [[ "$_dc_unbound_input" =~ $_dc_tool_field_re ]]; then
+        printf '%s\n' '{}'
+        exit 0
       fi
-      printf '%s\n' '{}'
-      exit 0
+      echo "defenseclaw: antigravity hook is registered without a reviewed event; blocking an input that may be a tool call (fail mode closed)" >&2
+{{if .Sandbox}}      printf '%s\n' '{"decision":"deny","reason":"DefenseClaw hook was called without its registered event, so the tool call is blocked."}'
+{{else if .Managed}}      printf '%s\n' '{"decision":"deny","reason":"DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. Ask your administrator to run ensure, which rewrites the DefenseClaw hooks."}'
+{{else}}      printf '%s\n' '{"decision":"deny","reason":"DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. Run `defenseclaw setup antigravity` to register it again."}'
+{{end}}      exit 0
     fi
     ;;
 esac

@@ -1461,6 +1461,104 @@ def test_a_registration_that_loses_its_event_binding_is_drift_and_fails_doctor(
     assert path.exists()
 
 
+def _antigravity_entry(document: dict, event: str) -> dict:
+    return document[f"defenseclaw-antigravity-{event.lower()}"]
+
+
+def _skip_antigravity_disabled(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["enabled"] = False
+
+
+def _skip_antigravity_matcher(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["PreToolUse"][0]["matcher"] = "run_command"
+
+
+def _skip_antigravity_type(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["PreToolUse"][0]["hooks"][0]["type"] = "prompt"
+
+
+def _skip_antigravity_timeout(document: dict) -> None:
+    _antigravity_entry(document, "PreToolUse")["PreToolUse"][0]["hooks"][0]["timeout"] = 1
+
+
+def _skip_antigravity_extra(document: dict) -> None:
+    group = _antigravity_entry(document, "PreToolUse")["PreToolUse"]
+    group.append({"matcher": "*", "hooks": [dict(group[0]["hooks"][0])]})
+
+
+def _skip_copilot_type(document: dict) -> None:
+    document["hooks"]["preToolUse"][0]["type"] = "prompt"
+
+
+def _skip_copilot_timeout(document: dict) -> None:
+    document["hooks"]["permissionRequest"][0]["timeoutSec"] = 1
+
+
+def _skip_copilot_disabled(document: dict) -> None:
+    document["disableAllHooks"] = True
+
+
+def _skip_copilot_version(document: dict) -> None:
+    del document["version"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize(
+    ("connector", "skip"),
+    [
+        ("antigravity", _skip_antigravity_disabled),
+        ("antigravity", _skip_antigravity_matcher),
+        ("antigravity", _skip_antigravity_type),
+        ("antigravity", _skip_antigravity_timeout),
+        ("antigravity", _skip_antigravity_extra),
+        ("copilot", _skip_copilot_type),
+        ("copilot", _skip_copilot_timeout),
+        ("copilot", _skip_copilot_disabled),
+        ("copilot", _skip_copilot_version),
+    ],
+    ids=lambda value: value.__name__.removeprefix("_skip_") if callable(value) else value,
+)
+def test_a_registration_the_agent_skips_is_drift_and_fails_doctor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connector: str, skip
+) -> None:
+    # Review round 3: the registration keeps the exact command and event, but
+    # the agent skips it (disabled, a narrowed matcher, not a command handler,
+    # a timeout shorter than Setup's), so some tool calls never run the hook.
+    # Status and doctor said current.
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    script = f"{connector}-hook.sh"
+    (Path(cfg.data_dir) / "hooks" / script).write_text(
+        "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8"
+    )
+    path = _register_native_deny_hook(monkeypatch, cfg, home, connector)
+    assert resolve_connector_fail_mode(cfg, connector).current
+    document = json.loads(path.read_text(encoding="utf-8"))
+    skip(document)
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    state = resolve_connector_fail_mode(cfg, connector)
+    assert not state.current
+    assert any(item.startswith("registration-") for item in state.drift), state.drift
+
+    cfg.connector_workspace_dir = lambda: ""
+    emitted: list[tuple[str, str, str]] = []
+    with (
+        patch.object(cmd_doctor, "_workspace_dir", return_value=""),
+        patch.object(cmd_doctor, "_edited_hook_problem", return_value=""),
+        patch.object(
+            cmd_doctor, "_emit", side_effect=lambda tag, label, detail="", **_: emitted.append((tag, label, detail))
+        ),
+    ):
+        if connector == "copilot":
+            cmd_doctor._check_copilot_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+        else:
+            cmd_doctor._check_antigravity_hooks(cfg, cmd_doctor._DoctorResult(), platform_name="posix")
+    rows = [row for row in emitted if row[1].endswith("hooks")]
+    assert rows and rows[0][0] == "fail", emitted
+
+
 @pytest.mark.parametrize(
     ("body", "mode", "legacy"),
     [

@@ -56,8 +56,8 @@
     "/usr/local/lib/defenseclaw/hooks/antigravity-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 12153,
-      "sha256": "2a05f44e13eb932f2d536b4a5808b07f5d395557d3ed2e9b6d466048d3b1a324"
+      "size": 12579,
+      "sha256": "df5561a9103084eb3e39018d00a7e383fa3435e40165524ce8bde938e22e350d"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",

@@ -1524,24 +1524,21 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         ux.echo(
             f"  {ux.bold(f'Changing {label} hook fail mode:')} {configured_mode} {ux.dim('→')} {ux.accent(mode)}"
         )
-    if normalize_connector(key) == "hermes" and mode == "closed" and upstream_fail_open(app.cfg, key):
+    if mode == "closed" and upstream_fail_open(app.cfg, key):
         ux.warn(
-            "Hermes will remain fail-open; this value is stored only as requested policy provenance.",
+            f"{label} will remain fail-open; this value is stored only as requested policy provenance.",
             indent="  ",
         )
-        ux.subhead(
-            "Timeout, nonzero exit, malformed output, authentication, and transport failures continue "
-            "in upstream Hermes. Only valid synchronous JSON can block.",
-            indent="    ",
-        )
+        ux.subhead(_SECURE_CLIENT_OPEN_NOTES.get(normalize_connector(key), ""), indent="    ")
     elif normalize_connector(key) == "hermes" and mode == "closed":
         ux.warn(f"Invalid or unavailable gateway responses will now BLOCK {label} tool calls.", indent="  ")
         ux.subhead(_HERMES_UPSTREAM_TIMEOUT_NOTE, indent="    ")
     elif mode == "closed":
         ux.warn(f"Invalid or unavailable gateway responses will now BLOCK {label}.", indent="  ")
         ux.subhead(
-            "A 4xx, malformed/incomplete response, timeout, or connection failure will exit 2 from this "
-            "connector's hooks. Make sure your gateway is healthy first.",
+            "A 4xx, malformed or incomplete response, timeout, or connection failure "
+            + _CLOSED_FAILURE_SIGNALS.get(normalize_connector(key), "will exit 2 from this connector's hooks.")
+            + " Make sure your gateway is healthy first.",
             indent="    ",
         )
     else:
@@ -2126,6 +2123,29 @@ def _refuse_cursor_fail_mode(gc, name: str, mode: str, pinned: str) -> None:
 # What fail mode closed cannot change for Hermes on Linux and macOS: its hook
 # blocks every failure DefenseClaw sees, but Hermes itself lets a call run when
 # a hook times out or cannot start (GAP-0150).
+# How a closed hook blocks a call it cannot check, for the connectors that
+# answer with the agent's own deny instead of exit 2.
+_CLOSED_FAILURE_SIGNALS = {
+    "copilot": (
+        "gets Copilot's own deny for preToolUse and permissionRequest; the hook exits 0. Copilot itself "
+        "still lets a call run when the hook times out or cannot start."
+    ),
+    "antigravity": (
+        'gets Antigravity\'s PreToolUse deny ({"decision":"deny"}); the hook exits 0. Antigravity itself '
+        "still lets a call run when the hook times out or cannot start."
+    ),
+}
+
+# Why a closed value does not change a hook that Secure Client keeps open.
+_SECURE_CLIENT_OPEN_NOTES = {
+    "hermes": (
+        "Timeout, nonzero exit, malformed output, authentication, and transport failures continue "
+        "in upstream Hermes. Only valid synchronous JSON can block."
+    ),
+    "copilot": "Under Secure Client a call DefenseClaw cannot check runs, and the failure is logged.",
+    "antigravity": "Under Secure Client a call DefenseClaw cannot check runs, and the failure is logged.",
+}
+
 _HERMES_UPSTREAM_TIMEOUT_NOTE = (
     "A gateway that is down or gives an unusable answer blocks the Hermes tool call; Hermes itself "
     "still lets a call run when the hook times out or cannot start."
