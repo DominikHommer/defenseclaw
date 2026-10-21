@@ -688,8 +688,12 @@ def _build_plan(
     data_dir = str(config_module.default_data_path())
     install_root, binary_targets = _owned_binary_targets(platform_name)
     binary_targets += _installer_uv_targets(install_root, platform_name)
+    # Reset keeps .venv, so the launchers that run it keep working and stay:
+    # its closing advice is to run 'defenseclaw quickstart' (GAP-0029).
     data_bound_launchers = (
-        _data_bound_launchers(binary_targets, data_dir, platform_name) if wipe_data and not binaries else ()
+        _data_bound_launchers(binary_targets, data_dir, platform_name)
+        if wipe_data and not binaries and ".venv" not in preserve_data_entries
+        else ()
     )
 
     # Config identifies active connectors. If it is missing or unreadable,

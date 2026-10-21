@@ -947,6 +947,41 @@ def test_an_empty_local_stops_with_exit_2(tmp_path: Path, arguments: list[str]) 
     assert not (tmp_path / "home").exists()
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["-Version="], "-Version needs a value such as 1.2.3"),
+        (["-Version", ""], "-Version needs a value such as 1.2.3"),
+        (["-Version", "w0-invalid-version"], "-Version must look like 1.2.3, got 'w0-invalid-version'"),
+    ],
+)
+def test_an_empty_or_malformed_version_stops_with_exit_2(tmp_path: Path, arguments: list[str], message: str) -> None:
+    # GAP-0069: a malformed -Version exited 1, and an empty one installed the
+    # latest release; both are usage errors before anything changes.
+    env = {
+        **os.environ,
+        "USERPROFILE": str(tmp_path),
+        "LOCALAPPDATA": str(tmp_path / "AppData" / "Local"),
+        "APPDATA": str(tmp_path / "AppData" / "Roaming"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home"),
+    }
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), *arguments],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        env=env,
+        check=False,
+    )
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 2, out
+    assert message in out and "nothing was changed" in out
+    assert not (tmp_path / "home").exists()
+
+
 # ── 1.0.2 (DELTA-11): the rollback moves an audit store as one unit ─────────
 
 _POWERSHELLS = sorted({p for p in (shutil.which("powershell.exe"), shutil.which("pwsh.exe") or shutil.which("pwsh")) if p})

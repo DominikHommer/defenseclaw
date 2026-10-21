@@ -276,6 +276,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     # GAP-2593: the LLM key's env var name too.
     llm_api_key_env = _validated_api_key_env_name(llm_api_key_env, "'--llm-api-key-env'", "DEFENSECLAW_LLM_KEY")
     connector = _single_connector_option(connector)
+    _refuse_unknown_action_connectors(action_connectors)
     requested_connectors = []
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))
@@ -973,6 +974,23 @@ def _parse_connector_list(raw: str | None) -> list[str]:
         if norm and norm not in out:
             out.append(norm)
     return out
+
+
+def _refuse_unknown_action_connectors(raw: str | None) -> None:
+    """Stop on an --action-connectors entry that is not a hook connector.
+
+    The entry used to be skipped with a warning after the run had already
+    replaced the guarded roster, so a typo turned an enforcing install into
+    an observe-only one for another connector (GAP-0044).
+    """
+    from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
+
+    unknown = [name for name in _parse_connector_list(raw) if name not in _HOOK_ENFORCED_CONNECTORS]
+    if unknown:
+        raise click.UsageError(
+            f"--action-connectors: {', '.join(unknown)} is not a hook connector; nothing was changed. "
+            f"Choose from: {', '.join(sorted(_HOOK_ENFORCED_CONNECTORS))}."
+        )
 
 
 def _prompt_checkbox_selection(
@@ -1828,8 +1846,6 @@ def _build_noninteractive_connector_settings(
     the named ``--action-connectors`` enforced. The two flags are composable so
     scripts can declare exactly which agents observe and which act.
     """
-    from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
-
     action_list = _parse_connector_list(action_connectors)
 
     def _single(connector_name: str | None, *, discover: bool) -> list[dict]:
@@ -1874,13 +1890,6 @@ def _build_noninteractive_connector_settings(
     if observe_all:
         configured.extend(detected)
     for name in action_list:
-        if name not in _HOOK_ENFORCED_CONNECTORS:
-            if not quiet:
-                ux.echo(
-                    f"  ⚠ {name}: not a hook-enforced connector; skipping --action-connectors entry.",
-                    err=True,
-                )
-            continue
         if name not in detected:
             if not quiet:
                 ux.echo(
