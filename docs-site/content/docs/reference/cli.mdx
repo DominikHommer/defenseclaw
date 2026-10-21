@@ -986,16 +986,23 @@ and exits `3`. `policy activate` is refused there too. Where the Python CLI is
 installed, `config get`, `config show`, `config validate` and `status` still
 work.
 
-A standard user on a computer with the standalone enterprise package does not
-get the Python CLI. The `defenseclaw` command there offers only `sandbox`
-commands: every other command, readers included (`status`, `doctor`,
-`config get`, `skill list`), prints "This computer is managed; only
-`defenseclaw sandbox` commands are available here." and exits `2`, not `3`.
-`defenseclaw-gateway` is not on that user's `PATH`. The administrator reads and
-checks the computer with `defenseclaw-gateway enterprise ...` by its packaged
-path, as root (`/opt/defenseclaw/bin` on Linux, `/opt/cisco/defenseclaw/bin` on
-macOS), or with `defenseclaw.exe enterprise ...` from an elevated PowerShell on
-Windows.
+A standard user on a Linux or macOS computer with the standalone enterprise
+package does not get the Python CLI. The `defenseclaw` command there offers
+only `sandbox` commands, `help` and `--version`. Every other command, readers
+included (`status`, `doctor`, `config get`, `skill list`), prints "This
+computer is managed; only `defenseclaw sandbox` commands are available here."
+and exits `2`, not `3`. `defenseclaw-gateway` is not on that user's `PATH`.
+The administrator runs it by its packaged path, as root
+(`/opt/defenseclaw/bin` on Linux, `/opt/cisco/defenseclaw/bin` on macOS).
+
+Windows has no sandbox-only command. There `defenseclaw.exe` is the
+administrator's command. It answers `setup`, `doctor`, `upgrade` and
+`rollback` with a note that the computer is managed, refuses `config set`,
+`config unset` and the `block`, `allow` and `unblock` writers with exit `3`,
+and has no `guardrail` group. A standard account's
+`enterprise windows status` or `verify` only says that it needs an elevated
+prompt. The administrator runs `defenseclaw.exe enterprise ...` from an
+elevated PowerShell.
 
 ## Registries
 
