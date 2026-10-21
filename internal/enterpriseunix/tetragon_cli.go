@@ -1395,6 +1395,9 @@ func statusNext(in tetragonInputs, probes tetragonProbes, now time.Time) []strin
 		if mode == config.TetragonModeEnforce {
 			counted = enforcedUsers(in.State.UIDs)
 			sentence = fmt.Sprintf("Next: %d of %d %s enforced", counted, a.Users, users)
+			if armed := armedUsers(in.State.UIDs); armed > 0 {
+				sentence += fmt.Sprintf("; %d armed with no running agent session anchored yet", armed)
+			}
 		}
 		if counted < a.Users {
 			if eta, ok := nextReady(in, now); ok {
@@ -1406,11 +1409,24 @@ func statusNext(in tetragonInputs, probes tetragonProbes, now time.Time) []strin
 	return nil
 }
 
-// enforcedUsers counts the users the helper enforces for now.
+// enforcedUsers counts the users the helper denies for now: an anchored
+// session of theirs runs (an armed user is not counted, GAP-0166).
 func enforcedUsers(users []kernelpolicy.UIDStatus) int {
 	n := 0
 	for _, user := range users {
 		if user.State == kernelpolicy.UIDEnforcing {
+			n++
+		}
+	}
+	return n
+}
+
+// armedUsers counts the users enforce is loaded for with no running agent
+// session anchored.
+func armedUsers(users []kernelpolicy.UIDStatus) int {
+	n := 0
+	for _, user := range users {
+		if user.State == kernelpolicy.UIDArmed {
 			n++
 		}
 	}
@@ -1424,6 +1440,11 @@ func userStateWords(user TetragonUser, progress burnInProgress) (state, why stri
 	switch user.State {
 	case kernelpolicy.UIDEnforcing:
 		return "enforcing", ""
+	case kernelpolicy.UIDArmed:
+		if user.Reason == kernelpolicy.ReasonKernelUnconfirmed {
+			return "armed", "enforce is loaded; Tetragon has not reported the start of a running agent session, so none is counted as denied"
+		}
+		return "armed", "enforce is loaded; no running agent session is anchored yet"
 	case kernelpolicy.UIDBurnIn:
 		if progress.Reset {
 			return "reset by a hit", ""

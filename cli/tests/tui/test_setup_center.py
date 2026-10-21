@@ -93,13 +93,18 @@ def test_statuses_follow_the_config(config) -> None:
 
 
 def test_fail_mode_status_is_the_effective_value_per_connector(config) -> None:
-    # GAP-0152: an observe-mode connector fails open whatever the global value says.
+    # GAP-0152: the status is each connector's effective value. An
+    # observe-mode connector follows the global value; under Secure Client an
+    # unset global is open (#1163).
     from defenseclaw.config import PerConnectorGuardrailConfig
 
     config.guardrail.enabled = True
     config.guardrail.hook_fail_mode = "closed"
     config.guardrail.connectors = {"claudecode": PerConnectorGuardrailConfig()}
 
+    assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail closed"
+    config.guardrail._secure_client = True
+    config.guardrail.hook_fail_mode = ""
     assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail open"
     config.guardrail.connectors["codex"] = PerConnectorGuardrailConfig(hook_fail_mode="closed")
     assert _status(SetupWizard.GUARDRAIL_ACTIONS, config).text == "fail closed, 1 open"

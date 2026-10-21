@@ -346,10 +346,11 @@ func windowsEnterpriseHotConfigApply(
 		failBundle("bundle_config_validation_failed", "the installed bundle config failed post-write validation")
 		return false, nil
 	}
-	if bundleChange && len(startOnly) == 0 {
+	if gatewayOnlyRestart && len(startOnly) == 0 {
 		// The watcher also observes the atomic write, but its notification is
-		// best effort on Windows. A reload request makes a policy-only bundle
-		// deterministic; a failed request cannot bypass adoption confirmation.
+		// best effort on Windows. A reload request makes a policy-only bundle,
+		// and the payload-less rollback of one, deterministic; a failed
+		// request cannot bypass adoption confirmation.
 		if err := windowsEnterpriseHotBundleReload(ctx, layout); err != nil {
 			result.AddWarning("bundle_reload_request_failed", "the direct gateway reload request failed; waiting for the gateway's file watcher and checking its reported policy: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		}
@@ -376,18 +377,27 @@ func windowsEnterpriseHotConfigApply(
 			return false, startOnly
 		}
 	}
+	gatewayOnNewConfig := gatewayRestarted || (opts.bundle != nil && opts.bundle.gatewayRestarted)
+	// restartAfterUndo puts a gateway this attempt restarted back on the
+	// restored config, so it does not keep the start-only settings of the
+	// config that was undone. A payload-less rollback has no bundle run, so
+	// the local restart state counts too.
+	restartAfterUndo := func() {
+		if !gatewayOnNewConfig {
+			return
+		}
+		if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
+			_, _ = windowsEnterpriseHotConfigRecover()
+		}
+	}
 	adoptionWait := windowsEnterpriseHotConfigTimeout
-	if gatewayRestarted || (opts.bundle != nil && opts.bundle.gatewayRestarted) {
+	if gatewayOnNewConfig {
 		adoptionWait = windowsEnterpriseHotConfigRestartTimeout
 	}
 	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait, opts.bundle) {
 		undo()
 		failBundle("bundle_policy_not_adopted", "the gateway did not report the bundle policy, generation and identity before the apply deadline")
-		if opts.bundle != nil && opts.bundle.gatewayRestarted {
-			if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
-				_, _ = windowsEnterpriseHotConfigRecover()
-			}
-		}
+		restartAfterUndo()
 		return false, nil
 	}
 	// The enumerator publishes the targets the new config enrolls, as the
@@ -397,11 +407,7 @@ func windowsEnterpriseHotConfigApply(
 		if err := windowsEnterpriseHotConfigRefreshTargets(ctx, layout); err != nil {
 			undo()
 			failBundle("bundle_targets_refresh_failed", "the bundle's enrolled targets could not be refreshed")
-			if opts.bundle != nil && opts.bundle.gatewayRestarted {
-				if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
-					_, _ = windowsEnterpriseHotConfigRecover()
-				}
-			}
+			restartAfterUndo()
 			return false, nil
 		}
 	}
@@ -416,11 +422,7 @@ func windowsEnterpriseHotConfigApply(
 			message += ": " + windowsEnterpriseVerifyFailureDetail(verifyReport, "")
 		}
 		failBundle("bundle_post_verify_failed", message)
-		if opts.bundle != nil && opts.bundle.gatewayRestarted {
-			if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
-				_, _ = windowsEnterpriseHotConfigRecover()
-			}
-		}
+		restartAfterUndo()
 		return false, nil
 	}
 	accepted := *verifyReport
@@ -665,7 +667,7 @@ func windowsHotConfigWriteOptions(opts *windowsEnterpriseLifecycleOptions, expec
 	if opts != nil && opts.bundleRollbackTo != nil {
 		// A rollback to the confirmed bundle records it as that bundle again,
 		// so /health and the digest scope name the bundle that enforces.
-		return windowsBundleRestoreWriteOptions(opts.bundleRollbackTo.store, opts.bundleRollbackTo.ref, expectSHA)
+		return opts.bundleRollbackTo.writeOptions(expectSHA)
 	}
 	if opts != nil && opts.bundle != nil && opts.bundle.prepared != nil && !opts.bundle.prepared.AlreadyApplied {
 		if opt, ok := enterprisebundle.GenerationOptions(opts.bundle.prepared.Receipt); ok {

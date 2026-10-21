@@ -874,11 +874,15 @@ def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> 
 
 
 def test_macos_redaction_sheet_exposes_the_complete_advanced_cli_surface() -> None:
-    source = (
-        ROOT / "macos/DefenseClawMac/DefenseClawMac/Features/LogsView.swift"
+    view = (
+        ROOT / "macos/DefenseClawMac/DefenseClawMac/Features/RedactionPolicyView.swift"
     ).read_text(encoding="utf-8")
+    commands = (
+        ROOT / "macos/DefenseClawMac/DefenseClawMac/DataLayer/RedactionCommands.swift"
+    ).read_text(encoding="utf-8")
+    source = view + commands
 
-    assert 'DisclosureGroup("Show advanced settings"' in source
+    assert 'DisclosureGroup("Show advanced settings"' in view
     for action in (
         "case bucketList",
         "case bucketSet",

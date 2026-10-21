@@ -114,6 +114,58 @@ func TestUninstallStopsRepairersBeforeRemovingRegistrations(t *testing.T) {
 	}
 }
 
+// GAP-0185: an agent must never be left with a DefenseClaw hook
+// registration that names a removed hook binary while the deployment's policy
+// is in force (the agent runs a missing command as a non-blocking hook error
+// and the tool call runs). Uninstall removes every per-user and machine-policy
+// registration while the hook binary and the runtime descriptor are still in
+// place, so a hook started from a registration up to that point either gets
+// the gateway's decision or fails closed (descriptor present, gateway
+// stopping). Only then are the binaries removed.
+func TestUninstallRemovesRegistrationsWhileTheHookBinaryExists(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			hook := h.env.P(filepath.Join(h.env.Layout.BinDir, binHook))
+			descriptor := h.env.P(h.env.Layout.DescriptorPath)
+			if !exists(hook) || !exists(descriptor) {
+				t.Fatalf("install left no hook binary (%v) or descriptor (%v)", exists(hook), exists(descriptor))
+			}
+			var problems []string
+			check := func(step string) {
+				if !exists(hook) {
+					problems = append(problems, step+": the hook binary was already removed")
+				}
+				if !exists(descriptor) {
+					problems = append(problems, step+": the runtime descriptor was already removed")
+				}
+			}
+			removeAll, policyRemoved := false, false
+			h.env.Runner = observingRunner{Runner: h.runner, observe: func(name string, args []string) {
+				if joined := strings.Join(args, " "); strings.Contains(joined, "hooks remove-all") && !strings.HasSuffix(joined, " --check") {
+					removeAll = true
+					check("per-user remove-all")
+				}
+			}}
+			h.env.MachinePolicy = observingPolicy{MachinePolicyManager: h.env.MachinePolicy, observe: func() {
+				policyRemoved = true
+				check("machine policy removal")
+			}}
+			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			if !removeAll || !policyRemoved {
+				t.Fatalf("uninstall skipped a registration removal: per-user=%v machine-policy=%v", removeAll, policyRemoved)
+			}
+			if len(problems) > 0 {
+				t.Fatalf("registrations outlived the hook binary they name:\n%s", strings.Join(problems, "\n"))
+			}
+			if goos == "darwin" && exists(hook) {
+				t.Fatal("the macOS uninstall kept the hook binary")
+			}
+		})
+	}
+}
+
 // An uninstall that cannot remove one file keeps the deployment record, so
 // rerunning uninstall finishes the removal and a reinstall through ensure
 // (the package postinstall, an MDM run) restores the deployment without
@@ -296,7 +348,7 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 				if left {
 					return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false,"removed":2,"failed":["alice/devin: devin teardown: remove hook entries: permission denied"]}`)}, errors.New("exit 1")
 				}
-				return CommandResult{Stdout: []byte(`{"ok":true,"removed":1,"purged":["alice"]}`)}, nil
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":1,"purged":["alice"],"purged_detail":{"alice":{"data":true,"binaries":true,"gateway":true}}}`)}, nil
 			}}
 			failed := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireError(t, failed, codePerUserHooks)
@@ -422,15 +474,15 @@ func TestUninstallPurgeNamesOnlyWhatEachAccountHad(t *testing.T) {
 		!strings.HasSuffix(bob, "after stopping its per-user gateway") {
 		t.Fatalf("bob had a full per-user install: %q", bob)
 	}
-	if got := purgedUserChange("carol", &purgedUserDetail{}); got != "found no DefenseClaw per-user data or binaries of user carol to remove" {
+	if got := purgedUserChange("carol", purgedUserDetail{}); got != "found no DefenseClaw per-user data or binaries of user carol to remove" {
 		t.Fatalf("an account with nothing to remove: %q", got)
 	}
 	// GAP-1947: the uv cache entries the purge removed are named too.
-	if got := purgedUserChange("dave", &purgedUserDetail{Data: true, UVCache: true}); !strings.Contains(got, "~/.defenseclaw") ||
+	if got := purgedUserChange("dave", purgedUserDetail{Data: true, UVCache: true}); !strings.Contains(got, "~/.defenseclaw") ||
 		!strings.HasSuffix(got, "and DefenseClaw's entries in its uv cache (~/.cache/uv)") {
 		t.Fatalf("an account with uv cache entries: %q", got)
 	}
-	if got := purgedUserChange("erin", &purgedUserDetail{UVCache: true}); got != "removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user erin" {
+	if got := purgedUserChange("erin", purgedUserDetail{UVCache: true}); got != "removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user erin" {
 		t.Fatalf("an account with only uv cache entries: %q", got)
 	}
 }

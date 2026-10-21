@@ -591,6 +591,30 @@ func TestStartOnVMComparesTheBakedRunConfig(t *testing.T) {
 	}
 }
 
+// GAP-0179: the first start after the person withdraws a personal MCP
+// server that a MicroVM sandbox's image was baked with is refused, and the
+// record still names what the image carries until a start succeeds.
+func TestStartOnVMRefusesAWithdrawnImportedMCPServer(t *testing.T) {
+	e := newVMEnv(t, nil)
+	e.m.opts.MCP = &fakeMCP{entries: []config.MCPServerEntry{{Name: "personal", Command: "npx"}}}
+	e.create(sandboxapi.CreateRequest{Name: "vm-mcp", Copy: true})
+	if rec := readRecord(t, e, "vm-mcp"); rec.MCP == nil || !slices.Contains(rec.MCP.Imported, "personal") {
+		t.Fatalf("create did not import the personal server: %+v", rec.MCP)
+	}
+	e.stopBox("vm-mcp")
+	withdrawn := &fakeMCP{}
+	e.m.opts.MCP = withdrawn
+	for i := range 2 {
+		_, err := e.m.Start(t.Context(), "vm-mcp", sandboxapi.StartRequest{})
+		if apiErr := wantCode(t, err, sandboxapi.CodePolicyViolation); !strings.Contains(apiErr.Message, "baked into its image") {
+			t.Fatalf("start %d after the server was withdrawn = %+v", i+1, apiErr)
+		}
+	}
+	if len(withdrawn.calls) != 2 {
+		t.Fatalf("each start reads the current MCP servers: %d reads", len(withdrawn.calls))
+	}
+}
+
 // On docker a start that rewrites the run files records their new digests,
 // so the session's workload check compares with what was just written.
 func TestStartOnDockerRecordsTheRewrittenDigests(t *testing.T) {
@@ -638,7 +662,7 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 	disk(e)
 	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-full", Copy: true})
 	if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || !strings.Contains(err.Error(), "not enough free disk space for this sandbox's first start: "+
-		"the MicroVM driver prepares a disk of about 5.0 GiB from its image in "+cache+", where 2.0 GiB is free and at least 6.0 GiB is needed") {
+		"the MicroVM driver's first start uses about 11.0 GiB while preparing a disk from its image in "+cache+", where 2.0 GiB is free and at least 12.0 GiB is needed") {
 		t.Fatalf("create on a full disk = %v", err)
 	}
 	if _, err := e.m.Get(t.Context(), "vm-full"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {

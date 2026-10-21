@@ -32,7 +32,7 @@ import { execFile{{if not .Sandbox}}, execFileSync{{end}} } from "node:child_pro
 {{if .Sandbox}}import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
 {{else}}import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { lstat, open } from "node:fs/promises";
+import { lstat, mkdir, open } from "node:fs/promises";
 {{end}}import { {{if not .Sandbox}}homedir, {{end}}userInfo } from "node:os";
 {{if not .Sandbox}}import { dirname, join } from "node:path";
 {{end}}
@@ -551,7 +551,35 @@ function defenseclawShowNotice(client, message, variant) {
   }
 }
 
-async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
+{{if not .Sandbox}}// defenseclawLogFailOpen appends the hook-failures.jsonl line the shell and
+// native hooks write, for a call that went ahead because DefenseClaw could
+// not check it (fail mode open), in this install's data directory (the one
+// that holds the hook credential). The gateway's fail-open report reads it,
+// so such a call is never silent (rel-1-0-2 GAP-0446). Best effort: a log
+// that cannot be written never changes the verdict.
+async function defenseclawLogFailOpen(reason, category) {
+  try {
+    const dir = join(dirname(dirname(DC_TOKEN_FILE)), "logs");
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const file = await open(join(dir, "hook-failures.jsonl"), "a", 0o600);
+    try {
+      await file.appendFile(JSON.stringify({
+        ts: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+        connector: "opencode",
+        hook: "opencode-plugin",
+        reason: String(reason || "unknown"),
+        category,
+        fail_mode: "open",
+      }) + "\n");
+    } finally {
+      await file.close();
+    }
+  } catch (_) {
+    // A notice of a failure never fails the tool call.
+  }
+}
+
+{{end}}async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -561,7 +589,8 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     // unless the managed deployment itself was uninstalled.
     if (await defenseclawDeploymentRemoved()) return null;
     if (actionable) return { reason: "DefenseClaw hook credential is unavailable." };
-    return null;
+{{if not .Sandbox}}    await defenseclawLogFailOpen("hook credential unavailable", "transport");
+{{end}}    return null;
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
@@ -599,14 +628,20 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       if (DC_FAIL_MODE === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
-      return null;
+{{if not .Sandbox}}      await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
+{{end}}      return null;
     }
     const data = await res.json();
 {{if .Sandbox}}    // A reply without a known verdict is as untrustworthy as no reply.
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
-{{else}}{{if and .Managed (not .SecureClient)}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+{{else}}{{if not .SecureClient}}    if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+{{if not .Managed}}      if (DC_FAIL_MODE === "open") {
+        await defenseclawLogFailOpen("invalid gateway verdict", "response");
+        return null;
+      }
+{{end}}
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
 {{end}}{{end}}    const out = data && data.hook_output;
@@ -616,7 +651,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
 {{if .Sandbox}}    if (data.action === "block") {
       return { reason: data.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
     }
-{{else}}{{if and .Managed (not .SecureClient)}}    if (data.action === "block") {
+{{else}}{{if not .SecureClient}}    if (data.action === "block" || data.action === "confirm") {
       return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
     }
 {{end}}{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
@@ -628,7 +663,8 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }
-    return null;
+{{if not .Sandbox}}    await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
+{{end}}    return null;
   } finally {
     clearTimeout(timer);
   }

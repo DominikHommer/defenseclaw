@@ -48,6 +48,10 @@ const (
 // ErrLockBusy means another writer held the lock past the timeout.
 var ErrLockBusy = errors.New("configwrite: another DefenseClaw process is changing config.yaml")
 
+// ErrFileLockBusy means another writer held a file's sibling lock past the
+// timeout (LockFile).
+var ErrFileLockBusy = errors.New("configwrite: another DefenseClaw process is changing the file")
+
 // ErrConflict means the file changed after the transaction read it.
 var ErrConflict = errors.New("configwrite: config.yaml changed since it was read")
 
@@ -152,35 +156,71 @@ type Txn struct {
 // Begin takes the writer lock for configPath, waiting up to timeout (zero
 // means DefaultLockTimeout). The config directory must exist.
 func Begin(ctx context.Context, configPath string, timeout time.Duration) (*Txn, error) {
-	if timeout <= 0 {
-		timeout = DefaultLockTimeout
-	}
 	abs, err := filepath.Abs(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("configwrite: resolve %s: %w", configPath, err)
 	}
-	lock, err := openLockFile(LockPath(abs))
+	lock, busy, err := acquireLock(ctx, LockPath(abs), timeout)
 	if err != nil {
-		return nil, fmt.Errorf("configwrite: open %s: %w", LockPath(abs), err)
+		return nil, err
+	}
+	if busy {
+		return nil, ErrLockBusy
+	}
+	return &Txn{path: abs, lock: lock}, nil
+}
+
+// LockFile takes path's sibling lock, path+".lock", the sentinel that
+// Python's file_lock.locked_file_update takes for the same file (the .env
+// writers of keys set and setup use it). It waits up to timeout (zero means
+// DefaultLockTimeout); the directory must exist. A writer that also holds
+// config.yaml.lock takes that one first. release drops the lock.
+func LockFile(ctx context.Context, path string, timeout time.Duration) (release func(), err error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("configwrite: resolve %s: %w", path, err)
+	}
+	lock, busy, err := acquireLock(ctx, abs+LockSuffix, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if busy {
+		return nil, fmt.Errorf("%w: %s", ErrFileLockBusy, abs)
+	}
+	return func() {
+		unlock(lock)
+		_ = lock.Close()
+	}, nil
+}
+
+// acquireLock opens lockPath and takes it, waiting up to timeout (zero
+// means DefaultLockTimeout). busy reports a lock still held at the deadline.
+func acquireLock(ctx context.Context, lockPath string, timeout time.Duration) (lock *os.File, busy bool, err error) {
+	if timeout <= 0 {
+		timeout = DefaultLockTimeout
+	}
+	lock, err = openLockFile(lockPath)
+	if err != nil {
+		return nil, false, fmt.Errorf("configwrite: open %s: %w", lockPath, err)
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		busy, lockErr := tryLock(lock)
+		held, lockErr := tryLock(lock)
 		if lockErr != nil {
 			_ = lock.Close()
-			return nil, fmt.Errorf("configwrite: lock %s: %w", LockPath(abs), lockErr)
+			return nil, false, fmt.Errorf("configwrite: lock %s: %w", lockPath, lockErr)
 		}
-		if !busy {
-			return &Txn{path: abs, lock: lock}, nil
+		if !held {
+			return lock, false, nil
 		}
 		if time.Now().After(deadline) {
 			_ = lock.Close()
-			return nil, ErrLockBusy
+			return nil, true, nil
 		}
 		select {
 		case <-ctx.Done():
 			_ = lock.Close()
-			return nil, ctx.Err()
+			return nil, false, ctx.Err()
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
@@ -294,8 +334,8 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 		TransactionSummary:       w.TransactionSummary,
 	}
 	previous, err := ReadGenerationState(t.path)
-	switch {
-	case err == nil:
+	switch err {
+	case nil:
 		next.Generation = previous.Generation + 1
 	default:
 		// Missing or corrupt: say so. A corrupt file may still carry a

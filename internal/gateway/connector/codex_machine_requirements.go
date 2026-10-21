@@ -882,7 +882,7 @@ func marshalWindowsCodexMachineOwnership(state windowsCodexMachineOwnership) ([]
 	}
 	data = append(data, '\n')
 	if len(data) > windowsCodexMachineOwnershipLimit {
-		return nil, fmt.Errorf("Codex requirements ownership exceeds %d bytes", windowsCodexMachineOwnershipLimit)
+		return nil, fmt.Errorf("Codex requirements ownership exceeds %d bytes", windowsCodexMachineOwnershipLimit) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return data, nil
 }

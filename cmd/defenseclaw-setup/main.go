@@ -1260,56 +1260,6 @@ func nativeYAMLScalarChild(mapping *yaml.Node, name string) (string, error) {
 	return child.Value, nil
 }
 
-func readBoundedNativeStateFile(path string, limit int64) ([]byte, bool, error) {
-	if err := rejectReparseAncestors(path); err != nil {
-		return nil, false, err
-	}
-	before, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	if !before.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("native state path is not a regular file")
-	}
-	if before.Size() > limit {
-		return nil, false, fmt.Errorf("native state exceeds %d bytes", limit)
-	}
-
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, false, err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return nil, false, err
-	}
-	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		return nil, false, fmt.Errorf("native state changed while opening")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, limit+1))
-	if err != nil {
-		return nil, false, err
-	}
-	if int64(len(data)) > limit {
-		return nil, false, fmt.Errorf("native state exceeds %d bytes", limit)
-	}
-	after, err := os.Lstat(path)
-	if err != nil {
-		return nil, false, err
-	}
-	if !after.Mode().IsRegular() || !os.SameFile(opened, after) {
-		return nil, false, fmt.Errorf("native state changed while reading")
-	}
-	if err := rejectReparseAncestors(path); err != nil {
-		return nil, false, err
-	}
-	return data, true, nil
-}
-
 func runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action string, env []string) error {
 	if !pathExists(gatewayPath) {
 		return fmt.Errorf("connector %s %s requires the selected trusted gateway binary", connectorName, action)

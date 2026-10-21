@@ -168,7 +168,7 @@ func TestRunConfigClaudeCodePinsProviderAndLocksMCP(t *testing.T) {
 		}
 	}
 	if notice := findWarning(sb.Warnings, "MCP: blocked the repository's servers"); !strings.Contains(notice, "repo-tool, zeta and 1 with an unprintable name") ||
-		!strings.Contains(notice, "mcp.project_servers: allow") {
+		!strings.Contains(notice, "ask your administrator for a sandbox pack") {
 		t.Fatalf("notice = %q in %q", notice, sb.Warnings)
 	}
 	if n := findWarning(sb.Warnings, "MCP: github:"); !strings.Contains(n, "GITHUB_TOKEN") || !strings.Contains(findWarning(sb.Warnings, "MCP: "), "--credential") {

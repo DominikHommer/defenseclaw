@@ -33,11 +33,17 @@ unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 {{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+_DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  # A registered closed hook cannot treat missing local state as retirement.
+  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+    echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
+    exit 2
+  fi
   exit 0
 fi
 {{end}}
@@ -55,9 +61,10 @@ defenseclaw_harden_env
 # status, so no failed, refused or unparseable reply may turn into an allow.
 # OpenHands blocks on exit status 2, which every failure below returns.
 FAIL_MODE="closed"
-readonly FAIL_MODE{{else if and .Managed (not .SecureClient)}}# Managed standalone hooks use the installer-owned delivery policy; an
-# inherited DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed
-# hook. Secure Client hooks keep the environment override.
+readonly FAIL_MODE{{else if and .Managed (not .SecureClientDelivery)}}# Managed hooks outside an authenticated Secure Client deployment use the
+# installer-owned delivery policy; an inherited DEFENSECLAW_FAIL_MODE cannot
+# weaken an explicitly closed managed hook. Secure Client hooks keep the
+# environment override (#1163).
 FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 DEFENSECLAW_HOOK_CONNECTOR="openhands"
 DEFENSECLAW_HOOK_NAME="openhands-hook"
@@ -152,9 +159,10 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/openhands/hook" "$PAYLOAD" \
 }{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
   fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
 fi
-# A refused connection means this account's gateway is not running (after
-# a reboot, for example): start it once and retry. See
-# defenseclaw_gateway_cold_start in _hardening.sh.
+# A refused or dropped connection means this account's gateway is
+# restarting or not running (after a reboot, for example): send the call
+# again for up to 3 seconds, starting the gateway after a refusal. See
+# defenseclaw_await_gateway in _hardening.sh.
 # defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
 # payload on descriptors, never on its command line.
 defenseclaw_hook_post() {
@@ -167,8 +175,7 @@ defenseclaw_hook_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
-  RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
+  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"
 }
 defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 
@@ -186,7 +193,10 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-{{if .Sandbox}}# Every DefenseClaw verdict names its action: an empty or unknown one is a
+{{if or .Sandbox (not .SecureClient)}}{{/* Every DefenseClaw verdict names its action: an empty or unknown one is no
+verdict, never an allow (a sandbox workload may have shaped it; a hook in fail
+mode closed blocks on it, open lets the call run: rel-1-0-3 GAP-0037, GAP-0153;
+a Secure Client render keeps its own contract). */}}# Every DefenseClaw verdict names its action: an empty or unknown one is a
 # reply the workload may have shaped, never an allow. A block always exits 2,
 # the status OpenHands enforces, with or without a rendered directive.
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {

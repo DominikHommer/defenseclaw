@@ -77,14 +77,16 @@ The four services:
 The gateway needs no "Log on as a service" grant. Existing virtual-account
 installs move to LocalSystem on upgrade or repair; the service SID remains
 the gateway's write boundary. The gateway refuses reads and scans inside
-user profiles. Its install watcher skips profile roots for skills, plugins
-and MCP servers. `defenseclaw-gateway status --json` reports a degraded
-watcher with `health.watcher.details.profile_roots_skipped: true` when it skips
-them. The enterprise `status` and `verify` results do not report that field
+user profiles. Its install watcher skips profile roots for skills and
+plugins. `defenseclaw-gateway status --json` reports a degraded watcher with
+`health.watcher.details.profile_roots_skipped: true` when it skips them. The
+enterprise `status` and `verify` results do not report that field
 separately. For an administrator scan, copy the asset to a readable folder
 outside profiles and use the [scan commands](#scan-skills-mcp-servers-and-plugins).
-Keep shared skills outside profiles. A brokered scan as the enrolled user
-is planned for a later release.
+Keep shared skills outside profiles; a scan of profile skills and plugins as
+the enrolled user is planned for a later release. MCP servers in profiles are
+scanned: the hook enumerator starts each one as its user for the scan (see
+[MCP servers in user profiles](#mcp-servers-in-user-profiles)).
 For skills and plugins in profiles, set
 `asset_policy.skill.runtime_detection.enabled: true` and
 `asset_policy.plugin.runtime_detection.enabled: true` so hooks apply default,
@@ -360,11 +362,15 @@ the lifecycle from there. See [Payload trust](#payload-trust) for how the
 lifecycle decides which files to trust. It also generates the target manifest from the
 profiles on the computer, so you never write `targets.yaml`.
 
-To turn Fleet on or off, run the signed standalone Setup so it installs or
-removes the optional policy compiler with the config change. On a host that
-uses signed policy bundles, deliver the Fleet-changing `BUNDLE=` through
-Setup; the installed CLI refuses that transition because it has no compiler
-payload. Repeating `/ensure` with Fleet off and the same config is a no-op.
+Managed Setup does not carry the optional Fleet policy compiler. A host that
+1.0.2 Setup installed with Fleet on keeps the compiler it has: an upgrade
+leaves the file and its recorded hash unchanged, and the uninstall removes it
+only while it still matches that hash. Setup refuses a Fleet-on config on a
+host with no recorded compiler, before it changes anything. To turn Fleet
+off, run the signed standalone Setup with the new config; it removes the
+compiler. On a host that uses signed policy bundles, deliver a Fleet-changing
+`BUNDLE=` through Setup; the installed CLI refuses that transition. Repeating
+`/ensure` with Fleet off and the same config is a no-op.
 
 An empty `C:\Program Files\Cisco\DefenseClaw` an earlier removal left (it
 carries the default Program Files permissions, including the inherit-only
@@ -389,9 +395,12 @@ removed. `security_complete` stays `false` until that session restarts.
 Claude Code, Codex and Cursor use machine policy hooks, so this restore case
 does not apply to them.
 
-If the hook guardian's restore record cannot be read, Windows `status` and
-`verify` report `agent_sessions_restart_required` with "restart status unknown"
-and set `security_complete` to `false`, even when no session was listed. A
+If the hook guardian's restore record cannot be read, or its content is
+invalid, `status` and `verify` (on Windows, Linux and macOS) report
+`agent_sessions_restart_required` with "restart status unknown" and set
+`security_complete` to `false`, even when no session was listed. When the
+guardian replaces an invalid record, it dates every enrolled target at that
+pass, so the warning then names their sessions that started before it. A
 running agent with no account name is checked by its owner SID when available;
 with neither an account name nor a SID, its restart status is unknown.
 
@@ -749,8 +758,11 @@ lists them as well.
 On Windows, `agent_unprotected` also covers a running enabled agent whose
 account SID cannot be resolved; the warning names the account when known and
 otherwise says the owner is unknown. A per-user WinGet package listing that
-reaches its entry limit or deadline is reported as "not fully scanned" for
-that account, instead of as no install found.
+reaches its entry limit or deadline, or whose earlier listing has not
+returned, is reported as "not fully scanned" for that account, instead of as
+no install found. The message says which: too many entries (remove the
+packages the user no longer needs), or a folder whose storage does not answer
+(check that a redirected or network profile folder is reachable).
 Cursor's machine hooks file is published only while a user is enrolled for
 Cursor; see [Machine policy](/docs/enterprise/machine-policy#routes-by-connector).
 `include_groups` and `exclude_groups` apply on Windows as described there.
@@ -913,20 +925,21 @@ of the admin config:
   is admitted by the rescan that the config change starts: the
   `install-allowed` row follows, the block is released and `status` stops
   warning `asset_not_scanned` for it.
-- A stdio server started with `npx` or `uvx` is scanned only when the
-  launcher is installed for all users in a folder that only administrators
-  can change, such as Node.js in `C:\Program Files\nodejs` or uv under
-  `C:\Program Files`. A launcher in a user profile (uv installs `uvx.exe` in
-  `%USERPROFILE%\.local\bin` by default) fails the scan, and the server is
-  blocked (`MCPStdioLaunchError ... untrusted Windows path`). There is no
-  per-user trusted-paths list on a managed computer; install the launcher
-  under Program Files instead.
+- A stdio server the gateway starts itself (a server in the admin config) is
+  scanned only when its `npx` or `uvx` launcher is installed for all users in
+  a folder that only administrators can change, such as Node.js in
+  `C:\Program Files\nodejs` or uv under `C:\Program Files`. A launcher in a
+  user profile fails that scan, and the server is blocked
+  (`MCPStdioLaunchError ... untrusted Windows path`). There is no per-user
+  trusted-paths list on a managed computer. An enrolled user's own servers
+  start as that user instead, under the same launcher rule (see
+  [MCP servers in user profiles](#mcp-servers-in-user-profiles)).
 - Claude Code keeps user-scope and local-scope MCP servers in `.claude.json`
   in the profile folder, which the gateway service cannot read. The hook
   enumerator reads that file, and the `.mcp.json` of each project inside the
   profile, every 30 seconds and publishes their inventory to the gateway.
-  The LocalSystem watcher still skips their profile paths, so publication
-  does not start an install scan.
+  A new or changed server gets an install scan, run as the user (see
+  [MCP servers in user profiles](#mcp-servers-in-user-profiles)).
   The enumerator opens each project folder and its `.mcp.json` under the
   enrolled user's own token, so it reads only what that user can read, and it
   never follows a project key that points to a network, mapped or substituted
@@ -944,8 +957,8 @@ of the admin config:
 - Kiro keeps user MCP servers in `.kiro\settings\mcp.json`. For a user
   enrolled for Kiro, the hook guardian protects the `.kiro` folder, so the
   gateway service cannot read that file either. The hook enumerator reads and
-  publishes it the same way, but the LocalSystem watcher skips its profile
-  path instead of scanning the server. When the enumerator cannot read or
+  publishes it the same way, and its servers are scanned as the user, as
+  Claude Code servers are. When the enumerator cannot read or
   parse the file, DefenseClaw refuses that user's Kiro MCP tool calls, and
   status and `verify` warn with `kiro_mcp_unreadable`.
 - A watched folder outside profiles created after the gateway starts is
@@ -982,6 +995,53 @@ of the admin config:
   watched roots outside profiles carry no per-user attribution. The `scan`
   row includes `judge=<model>` when the LLM judge ran. A `quarantine` row
   has no `user=<account>` field from a watcher owner there.
+
+### MCP servers in user profiles
+
+The Claude Code and Kiro MCP servers of an enrolled user (user scope, local
+scope and the `.mcp.json` of a project in the profile) get an install scan
+like any other server, and admission decides on it as on any other server.
+The scanner runs in the gateway service as always, so the user
+cannot change its verdict. Only the server's own process runs as the user:
+
+- The hook enumerator starts it with the user's signed-in session token,
+  through the Windows Secondary Logon service (`seclogon`). The gateway never
+  starts a user's server with its own rights and never reads the profile.
+- The enumerator starts only the definition it published for that user, and
+  only when it is the one the gateway is scanning. A server that changed in
+  between is scanned again at the next poll.
+- The same launcher rules apply as everywhere: only `npx` or `uvx` with a
+  package argument, and no code-running flag. The server's `env` entries
+  apply on top of the user's environment, and the launcher is the `npx.cmd`
+  or `uvx.exe` the agent would run with them (the server's folder first,
+  then `PATH`). As for a server the gateway starts itself, it must be
+  installed for all users under Program Files, in a folder only
+  administrators can change. A launcher in the profile, or another file of
+  the same name earlier on `PATH` (including a `PATH` the server sets), is
+  refused.
+- The server starts in its `cwd` when it names one (an absolute folder),
+  else in its project, else in the profile folder. The enumerator checks
+  that folder while it acts as the user: it must be on a local fixed drive,
+  inside the project or the user's own profile, in no other user's profile,
+  with no link or junction on the way. Otherwise the server is not started
+  and the scan fails with the reason; no other folder stands in for a
+  refused `cwd`.
+- The server runs hidden, in a job that ends every process it started when
+  the scan ends, after five minutes at most. It runs in the services session
+  (session 0) on a desktop made for it that only that user and LocalSystem
+  can open, not on the user's own desktop: Windows starts a process with
+  another user's token in the caller's session. The scan speaks MCP over
+  stdio and needs no desktop. A server that needs the user's interactive
+  desktop, clipboard or other session-only resources fails its scan and
+  stays blocked.
+
+Any failure blocks the server as not scanned, with the reason in the
+`install-scan-error` audit row. A user who is not signed in has no session
+token: their servers stay blocked until they sign in, and the gateway scans
+them again within about 30 seconds. If the Secondary Logon service is
+disabled, the reason says so; set it back to Manual. MCP servers of other
+connectors in a profile (Codex `config.toml`, for example) are not published
+by the enumerator and get no install scan.
 
 ### Release a blocked or quarantined skill
 
@@ -1111,6 +1171,34 @@ The next uninstall removes one that an earlier build left and says so in a
 `stale_lifecycle_journal_removed` warning, so a later config change does not
 make that uninstall fail with "managed-hook teardown journal does not match
 the protected deployment".
+
+A lifecycle also removes the old hook runtime copies it published for each
+account. When it cannot verify or apply the permissions of an account's
+`%USERPROFILE%\.defenseclaw` folder or its `hooks` folder (a stale or
+foreign profile, for example one whose folder denies even Administrators),
+it changes nothing in that folder, leaves that account's old copies there
+(they are inert: the protected selector names the copy in force), finishes
+the run for every other account, and names the account and the folder in a
+`user_runtime_folder_untrusted` warning. Such a folder used to roll the whole
+upgrade back with `1603`. An upgrade from 1.0.2, whose installed release
+stops at that folder before the new one runs, reports it in a
+`stale_lifecycle_journal_removed` warning instead. To remove the old copies,
+inspect the folder, reset its permissions or remove it if the account no
+longer uses DefenseClaw, then run Setup `/ensure` again. A Setup `/ensure`
+that finds the deployment compliant runs the same collection on its own: it
+keeps naming each folder that is still untrusted, removes the old copies of
+every account it can, and lists them under `changes`. With a pending
+transaction the run still fails with `1603` and names the same remedy.
+
+The same holds for an enrolled account that is signed out when the run
+starts and whose own `.defenseclaw` or `hooks` folder no longer has the
+owner or permissions DefenseClaw set. The guardian repairs that account's
+hooks only in its own Windows session, so an upgrade, Setup `/ensure` or
+`repair` goes on without it and names the account and the folder in a
+`user_runtime_folder_untrusted` warning; the account stays pending until its
+next sign-in, when the guardian repairs it. An upgrade from 1.0.2 used to
+fail with `1603` here. Any other failure of a signed-out account's hooks
+still stops the run and names the account.
 
 A hardening script that removes `NT SERVICE\DefenseClawGateway` from
 `C:\ProgramData\Cisco\DefenseClaw\runtime` or `etc` stops the gateway from
@@ -1390,11 +1478,12 @@ uninstall, the marker key, the Add/Remove Programs entry and a
 `DisableSelfUpdate` value that the lifecycle wrote are gone, and so are their
 parent keys and `C:\Program Files\Cisco` when nothing else is left in them
 (after a CLI uninstall, once its cleanup finishes).
-The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. A default uninstall
-also keeps the administrator-only
-`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, which serializes
-lifecycle runs. Setup with `PURGE=1` removes that lock and its directory after
-cleanup; do not delete a lock while a lifecycle run is active. On a
+The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. A standalone Setup
+uninstall removes the administrator-only
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock` and its directory
+after cleanup, even without `PURGE=1`. The Secure Client profile keeps the lock
+unless `PURGE=1` is set. The lock serializes lifecycle runs; do not delete one
+while a lifecycle run is active. On a
 computer without DefenseClaw, uninstall succeeds and changes nothing.
 
 Run the CLI uninstall with `defenseclaw.exe`. The other installed binaries,
@@ -1428,6 +1517,20 @@ lists removals that failed, including a registration that a connector's
 removal left in the user's agent configuration (the message names the file).
 An uninstall that did not run as LocalSystem attempts no removal, so it
 reports only `user_registrations_pending`.
+
+Claude Code's DefenseClaw hooks are machine policy, but an older install
+registered a per-user hook in `%USERPROFILE%\.claude\settings.json`. The
+uninstall removes that exact hook (the command that runs the account's own
+`%USERPROFILE%\.local\bin\defenseclaw-hook.exe`) and keeps the account's
+other hooks, its owner and its permissions. `changes` lists each settings
+file it edited and how many commands it removed. A command that still names
+a DefenseClaw launcher in another shape (written by hand, or wrapped in a
+script) is kept, and a `claude_settings_hook_left` warning names the file,
+the hook event and the DefenseClaw launcher the command names (never the
+command's arguments, which can hold private values), so the administrator
+can remove it as that user: Claude Code would otherwise keep running a
+launcher that is gone. If the uninstall cannot read or check a user's
+settings file, that account is listed as a failed cleanup instead.
 To clean every user, run the uninstall as LocalSystem while they are signed
 in (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 

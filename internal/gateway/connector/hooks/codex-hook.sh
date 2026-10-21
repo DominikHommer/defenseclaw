@@ -45,11 +45,17 @@ unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 {{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+_DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  # A registered closed hook cannot treat missing local state as retirement.
+  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+    echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
+    exit 2
+  fi
   exit 0
 fi
 {{end}}
@@ -91,13 +97,18 @@ BOUND_CONTRACT=
 
 fail_binding() {
   local reason="$1"
-  defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response "$FAIL_MODE"
+{{if and .Managed (not .SecureClient)}}  # A managed binding error is integrity, not an outage: closed in every
+  # fail mode, as in the native runner.
+  defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response closed
+  echo "defenseclaw: codex hook binding error: $reason" >&2
+  exit 2
+{{else}}  defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: codex hook binding error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
   fi
   exit 2
-}
+{{end}}}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -127,22 +138,13 @@ case "${BOUND_CONTRACT}:${BOUND_EVENT}" in
   *) fail_binding "registered event is not part of the bound Codex hook contract" ;;
 esac
 
-# Bail early when neither the companion .token file nor the env var
-# carries a token: without one the gateway will reject every request
-# with 401, so the historical default is exit-0 (don't brick the
-# agent). The helper preserves that default and additionally lets an
-# operator who set DEFENSECLAW_STRICT_AVAILABILITY=1 fail-closed on a
-# missing-token misconfiguration; either way, the bypass is recorded
-# in hook-failures.jsonl.
 DEFENSECLAW_HOOK_CONNECTOR="codex"
 DEFENSECLAW_HOOK_NAME="codex-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-{{if .Sandbox}}defenseclaw_sandbox_require_token codex codex-hook "codex tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token codex codex-hook "codex tool" "${HOOK_DIR}/{{.TokenFile}}"
-fi{{end}}
-
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
+  [ "$FAIL_MODE" != "closed" ] ||
+    defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
   echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
@@ -160,6 +162,16 @@ fi
 if [ "$PAYLOAD_EVENT" != "$BOUND_EVENT" ]; then
   fail_binding "Codex hook stdin event does not match the registered event"
 fi
+
+# Neither the companion .token file nor the env var carries a token: without
+# one the gateway rejects every request with 401, so the helper follows the
+# fail mode (exit 0 when open) and records the bypass in hook-failures.jsonl.
+# It runs after the binding check, as in the native runner, so a stop event
+# that gets the fail-closed exception has a payload that matches its
+# registered event.
+{{if .Sandbox}}defenseclaw_sandbox_require_token codex codex-hook "codex tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+  defenseclaw_handle_missing_token codex codex-hook "codex tool" "${HOOK_DIR}/{{.TokenFile}}" "$BOUND_EVENT" ""
+fi{{end}}
 
 API_ADDR="{{.APIAddr}}"
 
@@ -187,6 +199,10 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 # refused, the request timed out, or the gateway answered with 5xx.
 # Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
+  # A blocked Stop only keeps Codex running the turn (#1140).
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$1" transport
+  fi
   defenseclaw_log_hook_delivery_failure codex codex-hook "$1" transport "$FAIL_MODE"
 {{if .Sandbox}}  # Codex shows this line under the blocked step: a prompt hook blocks the
   # prompt, every other hook a tool call.
@@ -215,6 +231,8 @@ fail_unreachable() {
 fail_response() {
   local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
+  [ "$FAIL_MODE" = "open" ] ||
+    defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$reason" response
   defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: codex hook error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then
@@ -318,20 +336,24 @@ codex_gateway_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 
-CURL_STATUS=0
-RESPONSE=$(codex_gateway_post) || CURL_STATUS=$?
-# A refused connection means this account's gateway is not running (after a
-# reboot, for example): start it once and retry. SessionEnd has no time for a
-# start. See defenseclaw_gateway_cold_start in _hardening.sh.
-if [ "$CURL_STATUS" -ne 0 ] && [ "$BOUND_EVENT" != "SessionEnd" ] &&
-  defenseclaw_gateway_cold_start "$CURL_STATUS"; then
-  CURL_STATUS=0
-  RESPONSE=$(codex_gateway_post) || CURL_STATUS=$?
-fi
-# defenseclaw_retry_busy resends a call the gateway answered 429 (POST sets RESPONSE).
+# defenseclaw_await_gateway and defenseclaw_retry_busy send the call again
+# through this (POST sets RESPONSE).
 codex_gateway_post_response() {
   RESPONSE=$(codex_gateway_post)
 }
+CURL_STATUS=0
+RESPONSE=$(codex_gateway_post) || CURL_STATUS=$?
+# A refused or dropped connection means this account's gateway is restarting
+# or not running (after a reboot, for example): send the call again for up to
+# 3 seconds, starting the gateway after a refusal. SessionEnd has no time for
+# it. See defenseclaw_await_gateway in _hardening.sh.
+if [ "$CURL_STATUS" -ne 0 ] && [ "$BOUND_EVENT" != "SessionEnd" ]; then
+  if defenseclaw_await_gateway "$CURL_STATUS" codex_gateway_post_response; then
+    CURL_STATUS=0
+  else
+    CURL_STATUS=$?
+  fi
+fi
 if [ "$CURL_STATUS" -eq 0 ]; then
   defenseclaw_retry_busy codex_gateway_post_response || CURL_STATUS=$?
 fi

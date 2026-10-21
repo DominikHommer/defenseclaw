@@ -28,7 +28,7 @@ import (
 )
 
 // TestSafeEvaluateHook_ObserveRecovery exercises safeEvaluateHook directly:
-// a recovered evaluation error keeps observe mode and its audit fields.
+// a recovered evaluation error denies a blockable event even in observe mode.
 func TestSafeEvaluateHook_ObserveRecovery(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	api := &APIServer{}
@@ -43,8 +43,8 @@ func TestSafeEvaluateHook_ObserveRecovery(t *testing.T) {
 	if !panicked {
 		t.Fatal("safeEvaluateHook panicked=false, want true")
 	}
-	if evalResp.Action != "allow" || evalResp.Mode != "observe" || !evalResp.WouldBlock {
-		t.Fatalf("safeEvaluateHook panic response = %+v, want observe allow + would_block", evalResp)
+	if evalResp.Action != "block" || evalResp.Mode != "action" || evalResp.WouldBlock {
+		t.Fatalf("safeEvaluateHook panic response = %+v, want fail-closed block", evalResp)
 	}
 
 	resp := safeHookPanicResponse("codex", "PreToolUse")
@@ -160,14 +160,14 @@ func TestHandleAgentHook_PanicReturnsSafeResponse(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
 		t.Fatalf("response body is not valid JSON after panic: %v body=%s", err, w.Body.String())
 	}
-	if got, _ := parsed["action"].(string); got != "allow" {
-		t.Errorf("response action = %q, want observe allow", got)
+	if got, _ := parsed["action"].(string); got != "block" {
+		t.Errorf("response action = %q, want closed block", got)
 	}
-	if got, _ := parsed["mode"].(string); got != "observe" {
-		t.Errorf("response mode = %q, want observe", got)
+	if got, _ := parsed["mode"].(string); got != "action" {
+		t.Errorf("response mode = %q, want action", got)
 	}
-	if got, _ := parsed["would_block"].(bool); !got {
-		t.Errorf("response would_block = false, want true (panic carries guardrail intent)")
+	if got, _ := parsed["would_block"].(bool); got {
+		t.Errorf("response would_block = true, want enforced block")
 	}
 	if reason, _ := parsed["reason"].(string); !strings.Contains(reason, "internal evaluator error") {
 		t.Errorf("response reason = %q, want 'internal evaluator error' substring", reason)
@@ -206,14 +206,14 @@ func TestHandleAgentHook_EmitPanicReturnsSafeResponse(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
 		t.Fatalf("response body is not valid JSON after emit panic: %v body=%s", err, w.Body.String())
 	}
-	if got, _ := parsed["action"].(string); got != "allow" {
-		t.Errorf("response action = %q, want observe allow", got)
+	if got, _ := parsed["action"].(string); got != "block" {
+		t.Errorf("response action = %q, want closed block", got)
 	}
-	if got, _ := parsed["mode"].(string); got != "observe" {
-		t.Errorf("response mode = %q, want observe", got)
+	if got, _ := parsed["mode"].(string); got != "action" {
+		t.Errorf("response mode = %q, want action", got)
 	}
-	if got, _ := parsed["would_block"].(bool); !got {
-		t.Errorf("response would_block = false, want true")
+	if got, _ := parsed["would_block"].(bool); got {
+		t.Errorf("response would_block = true, want enforced block")
 	}
 }
 
@@ -534,9 +534,9 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 		{"claudecode", "PreToolUse", "action", "open", "allow"},
 		{"codex", "PreToolUse", "action", "open", "allow"},
 		{"hermes", "pre_tool_call", "action", "open", "allow"},
-		{"claudecode", "PreToolUse", "observe", "closed", "allow"},
-		{"codex", "PreToolUse", "observe", "closed", "allow"},
-		{"hermes", "pre_tool_call", "observe", "closed", "allow"},
+		{"claudecode", "PreToolUse", "observe", "closed", "block"},
+		{"codex", "PreToolUse", "observe", "closed", "block"},
+		{"hermes", "pre_tool_call", "observe", "closed", "block"},
 		{"claudecode", "PostToolUse", "action", "closed", "allow"},
 	} {
 		t.Run(strings.Join([]string{tc.connector, tc.event, tc.mode, tc.failMode}, "/"), func(t *testing.T) {
@@ -563,8 +563,12 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 			response := postDecisionForTest(t, api, tc.connector, tc.event, "echo done")
 			wantWouldBlock := tc.wantAction != "block"
-			if response["action"] != tc.wantAction || response["raw_action"] != "block" || response["mode"] != tc.mode || response["would_block"] != wantWouldBlock {
-				t.Fatalf("response=%v, want %s/%s/would_block=%v", response, tc.wantAction, tc.mode, wantWouldBlock)
+			wantMode := tc.mode
+			if tc.wantAction == "block" {
+				wantMode = "action"
+			}
+			if response["action"] != tc.wantAction || response["raw_action"] != "block" || response["mode"] != wantMode || response["would_block"] != wantWouldBlock {
+				t.Fatalf("response=%v, want %s/%s/would_block=%v", response, tc.wantAction, wantMode, wantWouldBlock)
 			}
 			if tc.wantAction == "block" && tc.event == "PreToolUse" {
 				field := "hook_output"
@@ -640,12 +644,12 @@ func TestHandleAgentHookSynthetic_RecoveredEvaluationUsesFailMode(t *testing.T) 
 		Payload: map[string]interface{}{"hook_event_name": "Stop"},
 	}
 	resp := api.handleAgentHookSynthetic(t.Context(), "codex", req, nil)
-	if resp.Action != "block" || resp.RawAction != "block" || resp.Mode != "action" || resp.WouldBlock {
-		t.Fatalf("synthetic response=%+v, want block/action", resp)
+	if resp.Action != "allow" || resp.RawAction != "block" || resp.Mode != "action" || !resp.WouldBlock {
+		t.Fatalf("synthetic response=%+v, want neutral lifecycle allow/action", resp)
 	}
 	row := soleHookDecisionForTest(t, store)
-	if row.Structured["result"] != "panic" || row.Structured["action"] != "block" {
-		t.Fatalf("synthetic audit=%v, want panic/block", row.Structured)
+	if row.Structured["result"] != "panic" || row.Structured["action"] != "allow" {
+		t.Fatalf("synthetic audit=%v, want panic/allow", row.Structured)
 	}
 }
 
@@ -687,11 +691,12 @@ func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
 
 // TestHookPanicResponseFailModeMatrix pins the recovered-evaluation verdict
 // for every registered connector that can block, in every guardrail mode and
-// for each place hook_fail_mode: open can come from. A standalone managed
-// device fails closed for every tool and prompt event whatever the mode or
-// fail mode says, and answers a stop or session-end event neutrally.
-// Per-user installs and the Secure Client profile keep their fail-mode
-// verdict.
+// for each place hook_fail_mode: open can come from. Closed installs, per-user
+// and standalone managed alike, deny failed blockable checks even in observe
+// mode and answer a stop or session-end event neutrally; an explicit open
+// (on a standalone managed device the administrator's, owner decision
+// 2026-10-20) and Secure Client's unset default keep their open failure
+// behavior; an explicit closed denies under Secure Client too.
 func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 	type deployment int
 	const (
@@ -752,9 +757,10 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 				for _, failSource := range failSources {
 					cfg := newConfig(t, d, mode, failSource, connectorName)
 					api := &APIServer{scannerCfg: cfg}
-					// Cursor fails closed in action mode off Secure Client
-					// whatever hook_fail_mode says.
-					open := d == secureClient || (failSource != "closed" && connectorName != "cursor")
+					// Per-user Cursor fails closed in action mode whatever
+					// hook_fail_mode says; a managed Cursor takes the
+					// administrator's mode.
+					open := failSource != "closed" && (connectorName != "cursor" || d != perUser)
 					for _, event := range append(append([]string{}, blocking...), lifecycle...) {
 						name := strings.Join([]string{dName, connectorName, event, mode, failSource}, "/")
 						req := agentHookRequest{ConnectorName: connectorName, HookEventName: event}
@@ -767,12 +773,10 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 						capable, _ := mapHookActionForProfile("block", "action", event, profile.Capabilities, profile, nil)
 						wantAction, wantMode := "allow", mode
 						switch {
-						case d == standalone && !isLifecycle:
-							wantAction, wantMode = "block", "action"
-						case d == standalone, mode != "action":
+						case isLifecycle:
 						case open:
 						case capable == "block":
-							wantAction = "block"
+							wantAction, wantMode = "block", "action"
 						}
 						if resp.Action != wantAction || resp.Mode != wantMode || resp.WouldBlock != (wantAction != "block") {
 							t.Errorf("%s: action=%q mode=%q would_block=%v, want %s/%s", name, resp.Action, resp.Mode, resp.WouldBlock, wantAction, wantMode)

@@ -67,17 +67,19 @@ emit_cursor_deny() {
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 {{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+_DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
-  # Disabling DefenseClaw (or an absent install) must fail OPEN for the
-  # agent. Cursor treats a failClosed:true hook entry that produces empty
-  # stdout as a hook failure and blocks the tool, so emit an explicit
-  # allow instead of exiting silently — otherwise dropping the .disabled
-  # marker would brick a fail-closed Cursor install with no way to
-  # self-recover.
+  # A registered closed hook cannot treat missing local state as retirement.
+  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+    echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
+    exit 2
+  fi
+  # A configured open hook keeps its explicit Cursor allow shape if its
+  # installation has been removed.
   emit_cursor_allow
   exit 0
 fi
@@ -161,6 +163,7 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
+  defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" transport
   defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   echo "defenseclaw: sandbox ingress unreachable, blocking cursor tool (sandbox hooks fail closed): $1" >&2
   emit_cursor_deny "DefenseClaw hook failed closed"
@@ -168,6 +171,7 @@ fail_unreachable() {
 }
 
 fail_response() {
+  defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: cursor hook error, blocking cursor tool (sandbox hooks fail closed): $1" >&2
   emit_cursor_deny "DefenseClaw hook failed closed"
@@ -175,6 +179,9 @@ fail_response() {
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   MISSING_TOKEN_REASON="missing gateway token: ${HOOK_DIR}/{{.TokenFile}} not found"
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event cursor cursor-hook "" "$PAYLOAD" "$MISSING_TOKEN_REASON" transport
+  fi
   defenseclaw_log_hook_delivery_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: ${MISSING_TOKEN_REASON}, blocking cursor tool (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
@@ -201,6 +208,9 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" transport
+  fi
   defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "cursor tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
@@ -212,6 +222,8 @@ fail_unreachable() {
 }
 
 fail_response() {
+  [ "$FAIL_MODE" = "open" ] ||
+    defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: cursor hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
@@ -263,9 +275,10 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/cursor/hook" "$PAYLOAD" \
 }{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
   fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
 fi
-# A refused connection means this account's gateway is not running (after
-# a reboot, for example): start it once and retry. See
-# defenseclaw_gateway_cold_start in _hardening.sh.
+# A refused or dropped connection means this account's gateway is
+# restarting or not running (after a reboot, for example): send the call
+# again for up to 3 seconds, starting the gateway after a refusal. See
+# defenseclaw_await_gateway in _hardening.sh.
 # defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
 # payload on descriptors, never on its command line.
 defenseclaw_hook_post() {
@@ -278,8 +291,7 @@ defenseclaw_hook_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
-  RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
+  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"
 }
 defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 
@@ -297,7 +309,10 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-{{if .Sandbox}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{if or .Sandbox (not .SecureClient)}}{{/* Every DefenseClaw verdict names its action: an empty or unknown one is no
+verdict, never an allow (a sandbox workload may have shaped it; a hook in fail
+mode closed blocks on it, open lets the call run: rel-1-0-3 GAP-0037, GAP-0153;
+a Secure Client render keeps its own contract). */}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 case "$ACTION" in
@@ -305,7 +320,7 @@ case "$ACTION" in
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
 if [ "$ACTION" = "block" ]; then
-  # Exit 2 denies whatever the object says; the event-native object carries
+{{if or .Sandbox .Managed}}  # Exit 2 denies whatever the object says; the event-native object carries
   # DefenseClaw's reason when the gateway rendered one.
   if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
     echo "$OUTPUT"
@@ -313,7 +328,16 @@ if [ "$ACTION" = "block" ]; then
     emit_cursor_deny "Blocked by DefenseClaw Cursor policy."
   fi
   exit 2
-fi
+{{else}}  # A per-user hook keeps the exit-0 contract, where the object decides: a
+  # block whose object does not deny is answered with DefenseClaw's own deny.
+  if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ] &&
+    echo "$OUTPUT" | _dc_jq -e '.permission == "deny" or .continue == false' >/dev/null 2>&1; then
+    echo "$OUTPUT"
+  else
+    emit_cursor_deny "Blocked by DefenseClaw Cursor policy."
+  fi
+  exit 0
+{{end}}fi
 {{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 else

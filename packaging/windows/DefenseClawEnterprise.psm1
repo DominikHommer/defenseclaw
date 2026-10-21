@@ -211,6 +211,37 @@ $script:DefenseClawCursorAdapterRestored = $false
 # (the managed-hook lifecycle retire report's leftovers). Reset per lifecycle
 # run.
 $script:DefenseClawRollbackLeftovers = @()
+# Standalone: each account whose old managed runtime generations a
+# managed-hook lifecycle retire left in place, because DefenseClaw could not
+# verify or apply the permissions of that account's DefenseClaw folder
+# (#1105, GAP-0781). Reset per lifecycle run.
+$script:DefenseClawRetireSkipped = @()
+# Standalone: each signed-out account whose guardian row failed only because
+# its DefenseClaw folder does not carry the owner or permissions DefenseClaw
+# set, which a manifest adoption went on without ("<account>: <folder>",
+# #1105, GAP-0211). Reset per lifecycle run.
+$script:DefenseClawSignedOutUntrustedFolders = @()
+# The whole error a guardian (1.0.2 and this release) records for a protected
+# Windows target whose account is signed out and whose verification failed on
+# the owner or permissions of the account's DefenseClaw folder (data) or its
+# hooks folder (hook). Keep it equal to
+# enterpriseHookSignedOutUntrustedFolderPattern in the gateway.
+$script:SignedOutUntrustedFolderPattern = [regex]::new(
+    '^enterprise hooks: protected target requires repair but its exact active Windows session is unavailable ' +
+    '\(verification: enterprise hooks: managed (data|hook) directory verification failed: enterprise hooks: (?:' +
+    'managed Windows DACL on (.+) has \d+ ACEs, expected \d+|' +
+    'managed Windows DACL is not protected on (.+)|' +
+    'managed Windows DACL on (.+) contains unexpected or duplicate ACE for principal S-[0-9-]+ \(mask 0x[0-9a-f]+, inheritance 0x[0-9a-f]+\)|' +
+    'managed Windows DACL on (.+) contains non-canonical ACE type at index \d+|' +
+    'owner SID \S+ does not match target SID S-[0-9-]+ on (.+)|' +
+    'null or unreadable Windows DACL on (.+))\)$',
+    [Text.RegularExpressions.RegexOptions]::CultureInvariant
+)
+# Standalone: how many old managed runtime generations the collect of a
+# compliant ensure removed, and why that collect could not run (#1105,
+# GAP-0211). Set by Invoke-DefenseClawStandaloneRuntimeGenerationCollect.
+$script:DefenseClawRuntimeGenerationsCollected = 0
+$script:DefenseClawRuntimeGenerationCollectError = ''
 # Standalone pending-transaction recovery that may leave the restored release
 # stopped when it cannot be reactivated (Test-DefenseClawRecoveryActivationDeferral),
 # and whether this run did. Set per recovery; reset per lifecycle run.
@@ -4074,7 +4105,6 @@ function Assert-DefenseClawCanonicalRawPathAcl {
     $protectedFlag = [int](
         [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
     )
-    $unprotectedDacl = $false
     if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
         if (Test-DefenseClawTrustStrictAncestors) {
             # Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1):
@@ -4082,18 +4112,13 @@ function Assert-DefenseClawCanonicalRawPathAcl {
             # unit tests that pin the strict path.
             throw "managed DACL is not protected after exact ACL replacement: $Path"
         }
-        # Previously this throw also fired for callers that did not opt
-        # into -AllowSelfHeal. That split (validation-only paths see raw
-        # drift; stamp paths opt into repair) made sense when the drift
-        # was benign, but it stranded the user on uninstall every time an
-        # on-disk DACL came back without SE_DACL_PROTECTED. The one-shot
-        # icacls /inheritance:r + native re-read below is non-destructive
-        # if the DACL is already protected (idempotent) and converges to a
-        # protected shape otherwise. Running it on validation-only paths
-        # too may mask drift the deeper tamper-check pipeline wanted to
-        # see; the AclSelfHealAdvisory warning emitted on persistent
-        # drift is the forensic trail for that case.
-        $AllowSelfHeal = $true  # keep the variable live for the branch below
+        # Only stamp-and-verify callers (-AllowSelfHeal) get the one-shot
+        # icacls /inheritance:r retry below; a validation-only caller sees
+        # the drift as it is. A DACL that is still not protected afterwards
+        # is refused on every profile (rel-1-0-3 main-sync review finding 3).
+        if (-not $AllowSelfHeal) {
+            throw "managed DACL is not protected after exact ACL replacement: $Path"
+        }
         # Self-heal: PowerShell's native Set-Acl can silently drop
         # PROTECTED_DACL_SECURITY_INFORMATION even when the input
         # descriptor had SetAccessRuleProtection($true, $false). Force
@@ -4119,34 +4144,7 @@ function Assert-DefenseClawCanonicalRawPathAcl {
             )
         }
         if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
-            if (Test-DefenseClawTrustStrictAncestors) {
-                throw "managed DACL is not protected after exact ACL replacement: $Path"
-            }
-            # Even icacls could not disable inheritance - this is a
-            # system-wide ACL policy (GPO push, filesystem driver, or
-            # Group Policy ACL template actively re-enabling
-            # inheritance). The AVC-managed trust envelope is still
-            # the real enforcement boundary; fail-closed here would
-            # leave the endpoint without the DefenseClaw gateway
-            # mediating agent traffic, which is strictly worse than
-            # running on a path whose DACL inherits from a parent
-            # Administrators + SYSTEM own anyway. Warn and continue. On
-            # standalone that is only past the lost flag itself: the owner,
-            # the explicit ACEs and every inherited grant are still judged
-            # below (Assert-DefenseClawUnprotectedRawDACL), so a foreign owner
-            # or an inherited write grant to a standard user stays fatal.
-            Write-DefenseClawAclSelfHealAdvisory `
-                -Path $Path `
-                -Reason (
-                    'DACL could not be marked protected even after ' +
-                    'icacls /inheritance:r - continuing with managed state'
-                )
-            if (-not (Test-DefenseClawStandaloneProfile)) {
-                # Secure Client keeps its earlier check, which ends here
-                # (Secure Client is out of scope for this fix).
-                return
-            }
-            $unprotectedDacl = $true
+            throw "managed DACL is not protected after exact ACL replacement: $Path"
         }
     }
     $ownerSID = if ($null -eq $Actual.Owner) {
@@ -4180,95 +4178,9 @@ function Assert-DefenseClawCanonicalRawPathAcl {
             "descriptor after ACL replacement: $Path"
         )
     }
-    if ($unprotectedDacl) {
-        Assert-DefenseClawUnprotectedRawDACL `
-            -Path $Path `
-            -Actual $Actual `
-            -Expected $expectedDescriptor
-        return
-    }
     if (-not (Test-DefenseClawExactRawDACL `
         -Actual $Actual `
         -Expected $expectedDescriptor)) {
-        throw "managed path does not have the exact canonical DACL: $Path"
-    }
-}
-
-function Assert-DefenseClawUnprotectedRawDACL {
-    <#
-        Judges a managed DACL that lost SE_DACL_PROTECTED and could not get it
-        back (Group Policy or a filesystem driver re-enabling inheritance).
-        Clearing the flag needs WRITE_DAC, which a standard user does not hold
-        on a managed path, so the lost flag alone may continue with a warning.
-        What the lost flag lets in may not: the explicit ACEs must still be
-        exactly the canonical ones, and no inherited ACE may grant write-like
-        rights to a principal the canonical DACL does not already let write.
-        An inherited %ProgramData% "Users may create files" grant therefore
-        stays fatal, while an inherited Users read grant does not.
-    #>
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)]
-        [Security.AccessControl.RawSecurityDescriptor]$Actual,
-        [Parameter(Mandatory)]
-        [Security.AccessControl.RawSecurityDescriptor]$Expected
-    )
-    $actualDACL = $Actual.DiscretionaryAcl
-    $expectedDACL = $Expected.DiscretionaryAcl
-    if ($null -eq $actualDACL -or $null -eq $expectedDACL) {
-        throw "managed path has an absent or null DACL: $Path"
-    }
-    # WriteData/CreateFiles, AppendData/CreateDirectories, WriteEA,
-    # DeleteChild, WriteAttributes, Delete, WRITE_DAC, WRITE_OWNER, and
-    # GENERIC_ALL/GENERIC_WRITE: the rights Test-DefenseClawWriteLikeRights
-    # treats as write-like.
-    $writeLikeMask = [int64]0x500D0156
-    $inheritedFlag = [int][Security.AccessControl.AceFlags]::Inherited
-    $inheritOnlyFlag = [int][Security.AccessControl.AceFlags]::InheritOnly
-    $allowed = [Security.AccessControl.AceQualifier]::AccessAllowed
-    $trustedWriters = @{}
-    foreach ($ace in @($expectedDACL)) {
-        if ($ace -is [Security.AccessControl.CommonAce] -and
-            $ace.AceQualifier -eq $allowed -and
-            ((([int64]$ace.AccessMask) -band 0xffffffffL) -band $writeLikeMask) -ne 0) {
-            $trustedWriters[$ace.SecurityIdentifier.Value] = $true
-        }
-    }
-    $explicit = [Collections.Generic.List[object]]::new()
-    foreach ($ace in @($actualDACL)) {
-        if (([int]$ace.AceFlags -band $inheritedFlag) -eq 0) {
-            $explicit.Add($ace)
-            continue
-        }
-        if ($ace -isnot [Security.AccessControl.CommonAce]) {
-            throw "managed path inherits an unrecognized ACE: $Path"
-        }
-        if ($ace.AceQualifier -ne $allowed -or
-            ((([int64]$ace.AccessMask) -band 0xffffffffL) -band $writeLikeMask) -eq 0) {
-            continue
-        }
-        $sid = $ace.SecurityIdentifier.Value
-        if ($trustedWriters.ContainsKey($sid)) {
-            continue
-        }
-        # CREATOR OWNER / CREATOR GROUP templates grant nothing on this path,
-        # only to whoever creates a child, which already needs write access.
-        if ($sid -in @('S-1-3-0', 'S-1-3-1') -and
-            ([int]$ace.AceFlags -band $inheritOnlyFlag) -ne 0) {
-            continue
-        }
-        throw "untrusted principal $sid has inherited write-like access to managed path: $Path"
-    }
-    $canonical = @($expectedDACL)
-    $exact = $explicit.Count -eq $canonical.Count
-    for ($index = 0; $exact -and $index -lt $canonical.Count; $index++) {
-        $actualBytes = [byte[]]::new($explicit[$index].BinaryLength)
-        $expectedBytes = [byte[]]::new($canonical[$index].BinaryLength)
-        $explicit[$index].GetBinaryForm($actualBytes, 0)
-        $canonical[$index].GetBinaryForm($expectedBytes, 0)
-        $exact = [Convert]::ToBase64String($actualBytes) -ceq [Convert]::ToBase64String($expectedBytes)
-    }
-    if (-not $exact) {
         throw "managed path does not have the exact canonical DACL: $Path"
     }
 }
@@ -5462,20 +5374,9 @@ function Assert-DefenseClawPathAcl {
     $verdicts = @(Get-DefenseClawPathAclVerdicts @verdictArgs)
     $selfHealed = $false
     if (-not [string]::IsNullOrWhiteSpace($SelfHealKind)) {
-        # Access verdicts (foreign SIDs with write-like access, e.g. an
-        # orphan per-service SID surviving from a prior unsigned install
-        # with a different scoped service name) are repairable through
-        # the same canonical re-stamp path as Contract/Rights verdicts.
-        # The canonical descriptor built by New-DefenseClawCanonicalPathAcl
-        # excludes any SID outside the trusted writer set and forces
-        # SE_DACL_PROTECTED, so a re-stamp that holds strips every untrusted
-        # ACE and the re-read below comes back clean. On standalone a
-        # re-stamp is a repair, never a pardon: what still fails the re-read
-        # is judged below exactly as if no repair had been attempted
-        # (GAP-0010).
         $repairable = @(
             $verdicts |
-                Microsoft.PowerShell.Core\Where-Object { $_.Kind -in @('Contract', 'Rights', 'Access') }
+                Microsoft.PowerShell.Core\Where-Object { $_.Kind -in @('Contract', 'Rights') }
         )
         if ($repairable.Count -gt 0) {
             if ([string]::IsNullOrWhiteSpace($SelfHealGatewayServiceSID)) {
@@ -5518,43 +5419,13 @@ function Assert-DefenseClawPathAcl {
     $fatal = $null
     foreach ($verdict in $verdicts) {
         $downgradable = switch ($verdict.Kind) {
-            # Access verdicts (foreign SIDs on managed paths) downgrade only
-            # for drift a standard user cannot have created:
-            #   - the caller passed -AdvisoryUntrustedAccess (the Secure Client
-            #     state root, which AVC re-ACLs; never the standalone profile);
-            #   - a Read-severity verdict in non-strict mode: Group Policy,
-            #     WDAC or a filesystem driver dropping SE_DACL_PROTECTED and
-            #     re-admitting an inherited BUILTIN\Users READ ACE. Adding
-            #     any ACE needs WRITE_DAC, which a standard user does not hold
-            #     on a managed path;
-            #   - an Inheritance verdict (SE_DACL_PROTECTED lost) that survived
-            #     the canonical re-stamp, in non-strict mode. Every inherited
-            #     ACE is still judged on its own: an inherited write grant to
-            #     an untrusted principal is a separate Write verdict.
-            #
-            # Write-severity verdicts are FATAL on the standalone profile, with
-            # or without the strict pin and whether or not the re-stamp ran: an
-            # untrusted principal with write-like access to a managed path can
-            # tamper with gateway state, inject hook commands, or replace the
-            # lifecycle lock contents (GAP-0010). Secure Client keeps its
-            # earlier rule, where a re-stamp downgrades every surviving Access
-            # verdict (Secure Client is out of scope for this fix).
-            #
-            # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 restores every
-            # refusal; it only tightens.
-            'Access' {
-                if (Test-DefenseClawStandaloneProfile) {
-                    $advisory -or
-                    (-not $strict -and (
-                        [string]$verdict.Severity -ceq 'Read' -or
-                        ($selfHealed -and [string]$verdict.Severity -ceq 'Inheritance')
-                    ))
-                }
-                else {
-                    $advisory -or $selfHealed -or
-                    (-not $strict -and [string]$verdict.Severity -ceq 'Read')
-                }
-            }
+            # An Access verdict (a foreign SID on a managed path) downgrades
+            # only when the caller passed -AdvisoryUntrustedAccess (the Secure
+            # Client state root, which AVC re-ACLs; never the standalone
+            # profile). A re-stamp repairs Contract and Rights verdicts only:
+            # a surviving untrusted writer stays fatal (rel-1-0-3 main-sync
+            # review finding 4).
+            'Access' { $advisory }
             'Contract' { $advisory -and $selfHealed }
             default { $false }
         }
@@ -8663,6 +8534,7 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.InstallRoot -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.BinDirectory -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.LibexecDirectory -Kind InstallDirectory -GatewayServiceSID $gatewaySID
+    # A kept 1.0.2 Fleet compiler (GAP-0274) and its directories, when present.
     foreach ($directory in @(
         (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
         (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
@@ -9925,11 +9797,13 @@ function Get-DefenseClawLayout {
         # treats an absent key as the Secure Client broker deployment.
         $layout['Profile'] = 'Standalone'
         $layout['BrokerEnabled'] = $false
-        # The Fleet compiler is executable Python source. Keep it in the
-        # protected installation, outside writable per-user runtimes.
-        $layout['CompilerLibDirectory'] = [IO.Path]::Combine($InstallRoot, 'lib')
-        $layout['CompilerDirectory'] = [IO.Path]::Combine($InstallRoot, 'lib', 'defenseclaw')
-        $layout['CompilerPath'] = [IO.Path]::Combine($InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
+        # Where a 1.0.2 standalone install put the Fleet policy compiler.
+        # Setup carries no compiler now; a Fleet-enabled host keeps the one it
+        # has, unchanged, while deployment metadata records it (GAP-0274).
+        # Keep through the 1.0.x upgrade bridge.
+        $layout['CompilerLibDirectory'] = [IO.Path]::Combine($layout.InstallRoot, 'lib')
+        $layout['CompilerDirectory'] = [IO.Path]::Combine($layout.InstallRoot, 'lib', 'defenseclaw')
+        $layout['CompilerPath'] = [IO.Path]::Combine($layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
     }
     return $layout
 }
@@ -9985,8 +9859,6 @@ function New-DefenseClawLayoutDirectories {
         $Layout.InstallRoot,
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory),
         $Layout.StateRoot,
         $Layout.ConfigDirectory,
         $Layout.RuntimeDirectory,
@@ -10647,6 +10519,8 @@ function New-DefenseClawDeploymentMetadata {
     foreach ($entry in @(
         @('broker', $Layout.BrokerPath),
         @('gateway', $Layout.GatewayPath),
+        # A kept 1.0.2 Fleet compiler keeps its record (GAP-0274); the
+        # Fleet-off retire deletes the file first, which drops the record.
         @('compiler', (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath)),
         @('acp', $Layout.ACPPath),
         @('hook', $Layout.HookPath),
@@ -11462,6 +11336,7 @@ function New-DefenseClawTransaction {
         $Layout.HookPath,
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
+        # A rollback restores a compiler the Fleet-off retire deleted.
         (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),
         $Layout.ConfigPath,
         $Layout.ManifestPath,
@@ -19334,6 +19209,7 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         [Parameter(Mandatory)]
         [ValidateSet(
             'capture',
+            'collect',
             'restore',
             'retire',
             'retire-committed',
@@ -19391,7 +19267,15 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
             $probe.output
         }
         $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $detail
-        throw "managed-hook lifecycle snapshot $Action failed: $detail"
+        # The gateway's own error from its one validated report rides on the
+        # exception, apart from the message, so a caller can tell a refusal
+        # the gateway reported from any other failure (#1105, GAP-0781).
+        $exception = [Management.Automation.RuntimeException]::new(
+            "managed-hook lifecycle snapshot $Action failed: $detail"
+        )
+        $exception.Data['DefenseClawLifecycleAction'] = $Action
+        $exception.Data['DefenseClawLifecycleReportError'] = [string]$report.error
+        throw $exception
     }
     $journal = $report.PSObject.Properties['journal_path']
     if ($null -eq $journal -or
@@ -19415,6 +19299,7 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         'retire' { @('absent', 'retired') }
         'retire-committed' { 'adopted' }
         'classify-activation' { 'classified' }
+        'collect' { 'collected' }
     }
     if ([string]$report.phase -notin @($expectedPhase)) {
         throw "managed-hook lifecycle snapshot $Action returned invalid phase: $($report.phase)"
@@ -19423,7 +19308,75 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
     if ($null -ne $restored -and $restored.Value -is [bool] -and [bool]$restored.Value) {
         $script:DefenseClawCursorAdapterRestored = $true
     }
+    # A retire skips an account whose DefenseClaw folder it cannot trust and
+    # names it; keep each one for the result (#1105, GAP-0781).
+    $skipped = $report.PSObject.Properties['retire_skipped']
+    if ($null -ne $skipped -and $null -ne $skipped.Value) {
+        $kept = [Collections.Generic.List[string]]::new()
+        foreach ($item in @($script:DefenseClawRetireSkipped)) {
+            $kept.Add([string]$item)
+        }
+        foreach ($item in @($skipped.Value)) {
+            $text = ConvertTo-DefenseClawBoundedDiagnostic `
+                -Value ([string]$item) `
+                -MaxLength 1024
+            if ($text.Trim().Length -gt 0 -and -not $kept.Contains($text) -and $kept.Count -lt 256) {
+                $kept.Add($text)
+            }
+        }
+        $script:DefenseClawRetireSkipped = @($kept)
+    }
+    $collected = $report.PSObject.Properties['collected']
+    if ($null -ne $collected -and $null -ne $collected.Value) {
+        $script:DefenseClawRuntimeGenerationsCollected += [int]$collected.Value
+    }
     return $report
+}
+
+function Invoke-DefenseClawStandaloneRuntimeGenerationCollect {
+    <#
+        Standalone Verify of an ensure that found the deployment compliant
+        (-CollectRuntimeGenerations). Runs the gateway's collect, the
+        generation collection of a retire for the accounts the protected
+        manifest names now, under the lifecycle lock and only between
+        transactions. Without it the old copies a retire left in a per-user
+        folder it could not trust stayed after the folder was fixed, and the
+        next ensure no longer named that folder (#1105, GAP-0211). Each
+        account whose folder is still untrusted is kept for the result
+        (lifecycle_retire_skipped), the number removed too, and a failure is
+        reported, not thrown: the old copies are inert, so a compliant
+        deployment stays compliant.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $script:DefenseClawRetireSkipped = @()
+    $script:DefenseClawRuntimeGenerationsCollected = 0
+    $script:DefenseClawRuntimeGenerationCollectError = ''
+    if (-not (Test-DefenseClawStandaloneProfile) -or -not (Test-DefenseClawAdministrator)) {
+        return
+    }
+    try {
+        $lock = Enter-DefenseClawLifecycleLock -Layout $Layout
+        try {
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf) {
+                throw 'a lifecycle transaction is pending; Setup /ensure finishes it and collects the old runtime copies'
+            }
+            [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action collect)
+        }
+        finally {
+            Exit-DefenseClawLifecycleLock -Lock $lock
+        }
+    }
+    catch {
+        $script:DefenseClawRuntimeGenerationCollectError = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value ([string]$_.Exception.Message) `
+            -MaxLength 1024
+    }
 }
 
 function Test-DefenseClawLocalSystemToken {
@@ -19462,6 +19415,8 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawStaleTeardownJournalRemoved = ''
     $script:DefenseClawCursorAdapterRestored = $false
     $script:DefenseClawRollbackLeftovers = @()
+    $script:DefenseClawRetireSkipped = @()
+    $script:DefenseClawSignedOutUntrustedFolders = @()
     $script:DefenseClawRecoveryActivationDeferrable = $false
     $script:DefenseClawRecoveryActivationDeferred = $false
     if (-not (Test-DefenseClawStandaloneProfile)) {
@@ -19969,17 +19924,62 @@ function Invoke-DefenseClawManagedHooksLifecycleRecoveryStep {
     return $report
 }
 
+function Get-DefenseClawCommittedRetireRefusal {
+    <#
+        Names the installed-gateway retire refusal a committed managed-hook
+        lifecycle journal may be removed for: 'invalid_bundle' (a release
+        before GAP-1322 refuses to collect the contractless Kiro bundles 1.0.1
+        wrote) or 'untrusted_folder' (a release before #1105 / GAP-0781 failed
+        the whole retire at the first per-user folder it could not trust);
+        '' for anything else. It reads only the error the gateway put in its
+        one validated retire report, which
+        Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand attaches to the
+        exception, never the exception text: a failure running the command,
+        reading its report, or any other step cannot match, nor can a report
+        of another phase. The error must also have the whole shape of that
+        release's generation-collection failure for one account.
+    #>
+    param([AllowNull()][Management.Automation.ErrorRecord]$Failure)
+    if ($null -eq $Failure -or $null -eq $Failure.Exception) {
+        return ''
+    }
+    $data = $Failure.Exception.Data
+    if ($null -eq $data -or
+        -not $data.Contains('DefenseClawLifecycleAction') -or
+        -not $data.Contains('DefenseClawLifecycleReportError') -or
+        [string]$data['DefenseClawLifecycleAction'] -cne 'retire') {
+        return ''
+    }
+    $reportError = [string]$data['DefenseClawLifecycleReportError']
+    $collection = '^retire [a-z0-9_-]+ managed runtime generations for SID S-1-[0-9]+(-[0-9]+)+( \([^\r\n]+?\))?: '
+    if ($reportError -cmatch ($collection +
+            'enterprise hooks: managed runtime generation directory is untrusted: \S')) {
+        return 'untrusted_folder'
+    }
+    if ($reportError -cmatch $collection -and
+        $reportError.IndexOf(
+            'refusing to collect an invalid managed runtime bundle',
+            [StringComparison]::Ordinal
+        ) -ge 0) {
+        return 'invalid_bundle'
+    }
+    return ''
+}
+
 function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
     <#
         Retires the managed-hook lifecycle journal an earlier, committed
         lifecycle left behind, with the installed gateway, before a new
         lifecycle opens its transaction. Standalone only: when that gateway
-        authenticated the journal but refused to collect an old runtime
-        generation (a release before GAP-1322 refuses the contractless Kiro
-        bundles 1.0.1 wrote), this removes the journal itself. No pending
-        transaction depends on it, and the replacement gateway's retire after
-        the commit collects the same generations, because collection covers
-        every target of the protected manifest. Any other failure is thrown.
+        authenticated the journal but reported one of the refusals
+        Get-DefenseClawCommittedRetireRefusal names (it refused to collect an
+        old runtime generation, or stopped at a per-user folder it could not
+        trust), this removes the journal itself. No pending transaction
+        depends on it, and the replacement gateway's retire after the commit
+        collects the same generations, because collection covers every target
+        of the protected manifest; it skips and names an untrusted folder.
+        With a pending transaction an untrusted folder is refused with the
+        remedy. Any other failure is thrown.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -19996,35 +19996,27 @@ function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
         $failure = $_
     }
     $message = [string]$failure.Exception.Message
-    if ((Test-DefenseClawStandaloneProfile) -and
-        $message.IndexOf(
-            'managed runtime generation directory is untrusted',
-            [StringComparison]::OrdinalIgnoreCase
-        ) -ge 0) {
-        throw (
-            "gateway service $GatewayServiceName failed while retiring the managed-hook lifecycle snapshot " +
-            'because a per-user hooks folder has untrusted permissions. Have an administrator inspect the ' +
-            'folder named in the error, reset its permissions or remove it, then run Setup /ensure again. ' +
-            $message
-        )
+    $refusal = ''
+    if (Test-DefenseClawStandaloneProfile) {
+        $refusal = Get-DefenseClawCommittedRetireRefusal -Failure $failure
     }
-    if (-not (Test-DefenseClawStandaloneProfile) -or
-        -not $message.StartsWith(
-            'managed-hook lifecycle snapshot retire failed: retire ',
-            [StringComparison]::Ordinal
-        ) -or
-        $message.IndexOf(
-            ' managed runtime generations for SID ',
-            [StringComparison]::Ordinal
-        ) -lt 0 -or
-        $message.IndexOf(
-            'refusing to collect an invalid managed runtime bundle',
-            [StringComparison]::Ordinal
-        ) -lt 0 -or
-        (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $Layout.PendingPath)) {
+    if ([string]::IsNullOrEmpty($refusal)) {
         throw $failure
     }
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
+        if ($refusal -ceq 'untrusted_folder') {
+            throw (
+                "gateway service $GatewayServiceName failed while retiring the managed-hook lifecycle snapshot " +
+                'because a per-user hooks folder has untrusted permissions. Have an administrator inspect the ' +
+                'folder named in the error, reset its permissions or remove it, then run Setup /ensure again. ' +
+                $message
+            )
+        }
+        throw $failure
+    }
+    # The journal only lets the installed release's retire collect old
+    # generations, which are inert: remove it, and this release's retire
+    # after the commit collects every account (naming any it skips).
     $journalPath = [string]$Layout.ManagedHooksLifecycleJournalPath
     Assert-DefenseClawNoReparsePath -Path $journalPath
     Microsoft.PowerShell.Management\Remove-Item `
@@ -21537,6 +21529,61 @@ function New-DefenseClawRequiredRights {
     return $required
 }
 
+function Get-DefenseClawSignedOutUntrustedFolder {
+    <#
+        Standalone manifest adoption. Returns the DefenseClaw folder of a
+        failed guardian row whose only recorded failure is that its account
+        is signed out and that folder (<profile>\.defenseclaw or its hooks
+        folder) does not carry the owner or permissions DefenseClaw set, or
+        '' for any other row (#1105, GAP-0211). The guardian repairs such a
+        target only in the account's own Windows session, at its next
+        sign-in, so no lifecycle run can fix it, and refusing the run kept
+        the whole computer on the older release. A connected account's row,
+        a folder of another account or any other failure returns ''.
+    #>
+    param($Row)
+    if ($null -eq $Row) {
+        return ''
+    }
+    $value = {
+        param([string]$Name)
+        $property = $Row.PSObject.Properties[$Name]
+        if ($null -eq $property) {
+            return $null
+        }
+        return $property.Value
+    }
+    if ([bool](& $value 'ok') -or [bool](& $value 'pending') -or $null -ne (& $value 'result')) {
+        return ''
+    }
+    $profileHome = ([string](& $value 'user_home')).Trim().Replace('/', '\').TrimEnd('\')
+    if ([string]::IsNullOrWhiteSpace($profileHome)) {
+        return ''
+    }
+    $found = $script:SignedOutUntrustedFolderPattern.Match(([string](& $value 'error')).Trim())
+    if (-not $found.Success) {
+        return ''
+    }
+    $folder = ''
+    for ($index = 2; $index -lt $found.Groups.Count; $index++) {
+        if ($found.Groups[$index].Success) {
+            $folder = $found.Groups[$index].Value
+            break
+        }
+    }
+    $expected = $profileHome + '\.defenseclaw'
+    if ($found.Groups[1].Value -ceq 'hook') {
+        $expected += '\hooks'
+    }
+    if (-not [string]::Equals(
+            $folder.Replace('/', '\').TrimEnd('\'),
+            $expected,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        return ''
+    }
+    return $expected
+}
+
 function Get-DefenseClawStandaloneManifestAdoption {
     <#
         Standalone only. The hook enumerator service republishes targets.yaml
@@ -21560,11 +21607,12 @@ function Get-DefenseClawStandaloneManifestAdoption {
         [Parameter(Mandatory)][string]$InstalledManifestSHA256
     )
     $result = {
-        param([bool]$Ok, [string]$Reason, [int64]$TargetCount)
+        param([bool]$Ok, [string]$Reason, [int64]$TargetCount, [string[]]$UntrustedFolders = @())
         return [pscustomobject][ordered]@{
             ok = $Ok
             reason = $Reason
             target_count = $TargetCount
+            untrusted_folders = [string[]]@($UntrustedFolders)
         }
     }
     if (-not (Test-DefenseClawStandaloneProfile)) {
@@ -21684,13 +21732,29 @@ function Get-DefenseClawStandaloneManifestAdoption {
     # help: name the accounts, and say what to do first.
     $signedOut = [Collections.Generic.List[string]]::new()
     $otherFailure = $false
+    # A signed-out account whose only failure is its DefenseClaw folder's
+    # owner or permissions waits for its next sign-in too, when the guardian
+    # repairs it: the adoption goes on and names the folder (#1105,
+    # GAP-0211). The gateway counts none of these rows (its counts are all
+    # or nothing), so the adoption counts them, and the waiting rows with
+    # them, itself.
+    $untrustedFolders = [Collections.Generic.List[string]]::new()
+    $folderRows = [int64]0
+    $waitingRows = [int64]0
     foreach ($row in @(& $field $records.state 'results')) {
         if ($null -eq $row -or
             [bool](& $field $row 'ok') -or
             [bool](& $field $row 'pending')) {
             continue
         }
-        if ([string](& $field $row 'error') -notmatch
+        if (([string](& $field $row 'error')).Trim().StartsWith(
+                'enterprise hooks: protected target waits for its account''s next sign-in',
+                [StringComparison]::Ordinal)) {
+            $waitingRows++
+        }
+        $untrustedFolder = Get-DefenseClawSignedOutUntrustedFolder -Row $row
+        if ([string]::IsNullOrEmpty($untrustedFolder) -and
+            [string](& $field $row 'error') -notmatch
             'exact active Windows session is unavailable|no active interactive session token matches') {
             $otherFailure = $true
             continue
@@ -21713,9 +21777,23 @@ function Get-DefenseClawStandaloneManifestAdoption {
         elseif (-not [string]::IsNullOrWhiteSpace($sid)) {
             $account = "$account ($sid)"
         }
+        if (-not [string]::IsNullOrEmpty($untrustedFolder)) {
+            $folderRows++
+            $entry = "${account}: $untrustedFolder"
+            if (-not $untrustedFolders.Contains($entry)) {
+                $untrustedFolders.Add($entry)
+            }
+            continue
+        }
         if (-not $signedOut.Contains($account)) {
             $signedOut.Add($account)
         }
+    }
+    if ($folderRows -gt 0) {
+        # Every failed row must be one of these or a waiting row: a removed
+        # account's rows (which only the gateway can tell) or any other
+        # failure keep the adoption refused.
+        $excused = $folderRows + $waitingRows
     }
     $nextStep = ''
     if ($signedOut.Count -gt 0 -and -not $otherFailure) {
@@ -21759,7 +21837,30 @@ function Get-DefenseClawStandaloneManifestAdoption {
     if ($targetCount -lt 0 -or $targetCount -gt 384) {
         return & $result $false 'guardian activation target count is outside its bound' -1
     }
-    return & $result $true '' $targetCount
+    return & $result $true '' $targetCount ([string[]]@($untrustedFolders))
+}
+
+function Add-DefenseClawSignedOutUntrustedFolders {
+    <#
+        Keeps the folders an accepted manifest adoption went on without for
+        the result (signed_out_untrusted_folders, the
+        user_runtime_folder_untrusted warning; #1105, GAP-0211).
+    #>
+    param($Adoption)
+    if ($null -eq $Adoption -or -not [bool]$Adoption.ok) {
+        return
+    }
+    $kept = [Collections.Generic.List[string]]::new()
+    foreach ($item in @($script:DefenseClawSignedOutUntrustedFolders)) {
+        $kept.Add([string]$item)
+    }
+    foreach ($item in @($Adoption.untrusted_folders)) {
+        $text = ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$item) -MaxLength 1024
+        if ($text.Trim().Length -gt 0 -and -not $kept.Contains($text) -and $kept.Count -lt 256) {
+            $kept.Add($text)
+        }
+    }
+    $script:DefenseClawSignedOutUntrustedFolders = @($kept)
 }
 
 function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
@@ -21820,6 +21921,7 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
             " ($([string]$adoption.reason))"
         )
     }
+    Add-DefenseClawSignedOutUntrustedFolders -Adoption $adoption
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         throw 'rebinding standalone managed-hook activation evidence requires PowerShell 7'
     }
@@ -21949,6 +22051,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             }
             throw $message
         }
+        Add-DefenseClawSignedOutUntrustedFolders -Adoption $adoption
     }
     if ($RequireReadiness -and
         [string]$managedHooksActivation.state -cne 'activated') {
@@ -22203,6 +22306,14 @@ function Assert-DefenseClawEnterpriseDeployment {
             -SelfHealKind InstallDirectory `
             -SelfHealGatewayServiceSID $gatewaySID
     }
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.LibexecDirectory `
+        -AllowedWriterSIDs $adminWriters `
+        -RequiredRights $installRights `
+        -AllowUsersRead `
+        -SelfHealKind InstallDirectory `
+        -SelfHealGatewayServiceSID $gatewaySID
+    # A kept 1.0.2 Fleet compiler (GAP-0274) stays writable by admins only.
     foreach ($directory in @(
         (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
         (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
@@ -22225,13 +22336,6 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RequiredRights $serviceInstallRights `
             -AllowUsersRead
     }
-    Assert-DefenseClawPathAcl `
-        -Path $Layout.LibexecDirectory `
-        -AllowedWriterSIDs $adminWriters `
-        -RequiredRights $installRights `
-        -AllowUsersRead `
-        -SelfHealKind InstallDirectory `
-        -SelfHealGatewayServiceSID $gatewaySID
     Assert-DefenseClawPathAcl `
         -Path $Layout.GatewayPath `
         -AllowedWriterSIDs $adminWriters `
@@ -22851,32 +22955,19 @@ function Assert-DefenseClawRecordedArtifactHashes {
     else {
         @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
     }
-    $strict = Test-DefenseClawTrustStrictAncestors
+    # Every gap below refuses the lifecycle action (rel-1-0-3: the retired
+    # Fleet compiler and the upgrade and uninstall hash gates); main's #1068
+    # warn-and-continue posture is not taken.
     foreach ($required in $requiredArtifacts) {
         if ($required -notin $ReplacedArtifacts -and
             $null -eq $Metadata.hashes.PSObject.Properties[$required]) {
-            if ($strict) {
-                throw "deployment metadata is missing required artifact hash: $required"
-            }
-            # Bulldoze posture: metadata is already corrupt. Refusing to
-            # proceed strands the install both ways (uninstall can't clean
-            # what install won't adopt; reinstall can't recover drift
-            # without a replacement upgrade). Warn and continue - the
-            # lifecycle caller re-records hashes on commit.
-            Write-DefenseClawAclSelfHealAdvisory `
-                -Path 'deployment.hashes' `
-                -Reason "metadata is missing required artifact hash: $required (continuing bulldoze)"
+            throw "deployment metadata is missing required artifact hash: $required"
         }
     }
     if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.CLIPath -PathType Leaf) -and
         'cli' -notin $ReplacedArtifacts -and
         $null -eq $Metadata.hashes.PSObject.Properties['cli']) {
-        if ($strict) {
-            throw 'deployment metadata does not authenticate the installed CLI'
-        }
-        Write-DefenseClawAclSelfHealAdvisory `
-            -Path 'deployment.hashes.cli' `
-            -Reason 'metadata does not authenticate the installed CLI (continuing bulldoze)'
+        throw 'deployment metadata does not authenticate the installed CLI'
     }
     foreach ($property in $Metadata.hashes.PSObject.Properties) {
         if ($property.Name -in $ReplacedArtifacts) {
@@ -22884,13 +22975,7 @@ function Assert-DefenseClawRecordedArtifactHashes {
         }
         $path = Get-DefenseClawArtifactPath -Layout $Layout -Name $property.Name
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
-            if ($strict) {
-                throw "recorded managed artifact is missing before lifecycle mutation: $($property.Name)"
-            }
-            Write-DefenseClawAclSelfHealAdvisory `
-                -Path $path `
-                -Reason "recorded artifact is missing before mutation: $($property.Name) (continuing bulldoze)"
-            continue
+            throw "recorded managed artifact is missing before lifecycle mutation: $($property.Name)"
         }
         Assert-DefenseClawNoReparsePath -Path $path
         $actual = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
@@ -22899,16 +22984,11 @@ function Assert-DefenseClawRecordedArtifactHashes {
             [string]$property.Value,
             [StringComparison]::OrdinalIgnoreCase
         )) {
-            if ($strict) {
-                throw (
-                    "$Action refuses unrecorded artifact hash drift: $($property.Name) " +
-                    "at $path does not match deployment metadata; run Upgrade with " +
-                    "the replacement for $($property.Name) to re-record it"
-                )
-            }
-            Write-DefenseClawAclSelfHealAdvisory `
-                -Path $path `
-                -Reason "$Action encountered artifact hash drift on $($property.Name) (continuing bulldoze; re-record on commit)"
+            throw (
+                "$Action refuses unrecorded artifact hash drift: $($property.Name) " +
+                "at $path does not match deployment metadata; run Upgrade with " +
+                "the replacement for $($property.Name) to re-record it"
+            )
         }
     }
 }
@@ -23493,6 +23573,27 @@ function Get-DefenseClawLifecycleStatus {
                 $script:DefenseClawRollbackLeftovers
             )
         }
+        # The accounts whose untrusted DefenseClaw folder a retire skipped.
+        if (@($script:DefenseClawRetireSkipped).Count -gt 0) {
+            $status['lifecycle_retire_skipped'] = [string[]]@(
+                $script:DefenseClawRetireSkipped
+            )
+        }
+        # The signed-out accounts whose untrusted DefenseClaw folder a
+        # manifest adoption went on without (GAP-0211).
+        if (@($script:DefenseClawSignedOutUntrustedFolders).Count -gt 0) {
+            $status['signed_out_untrusted_folders'] = [string[]]@(
+                $script:DefenseClawSignedOutUntrustedFolders
+            )
+        }
+        # What the collect of a compliant ensure removed, or why it could
+        # not run (GAP-0211).
+        if ([int]$script:DefenseClawRuntimeGenerationsCollected -gt 0) {
+            $status['lifecycle_generations_collected'] = [int]$script:DefenseClawRuntimeGenerationsCollected
+        }
+        if (-not [string]::IsNullOrEmpty($script:DefenseClawRuntimeGenerationCollectError)) {
+            $status['lifecycle_collect_error'] = $script:DefenseClawRuntimeGenerationCollectError
+        }
         $status['claude_effective_policy_stale_reason'] = $(
             if ([string]::IsNullOrEmpty($claudeEffectivePolicyStaleReason)) {
                 $null
@@ -24057,6 +24158,102 @@ function Remove-DefenseClawStandaloneManagedIPCDirectory {
     [IO.Directory]::Delete($directory, $false)
 }
 
+function Get-DefenseClawEmptyRetiredCompilerDirectories {
+    <#
+        GAP-0270: a 1.0.2 standalone install created InstallRoot\lib\defenseclaw
+        for the Fleet policy compiler, which this release no longer installs.
+        Returns those two retired directories that exist as plain directories
+        and hold nothing (lib may hold only an empty lib\defenseclaw), deepest
+        first. A directory with any other content, or a reparse point, is not
+        returned, so the callers keep refusing it.
+    #>
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    $lib = [IO.Path]::GetFullPath([IO.Path]::Combine($InstallRoot, 'lib')).TrimEnd('\')
+    $empty = [Collections.Generic.List[string]]::new()
+    foreach ($directory in @([IO.Path]::Combine($lib, 'defenseclaw'), $lib)) {
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item -or -not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            continue
+        }
+        $content = @(
+            Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force |
+                Microsoft.PowerShell.Core\Where-Object {
+                    [IO.Path]::GetFullPath([string]$_.FullName).TrimEnd('\') -notin $empty
+                }
+        )
+        if ($content.Count -eq 0) {
+            $empty.Add($directory)
+        }
+    }
+    return $empty.ToArray()
+}
+
+function Get-DefenseClawRecordedStandaloneCompilerPath {
+    <#
+        GAP-0274: Setup carries no Fleet policy compiler, so a Fleet-enabled
+        1.0.2 standalone host keeps the compiler it installed, unchanged.
+        Returns that compiler's full path when it is a plain file whose SHA-256
+        matches the hash the protected deployment metadata records for it, and
+        '' when there is no compiler file or no record (callers then refuse or
+        retire it as before). A compiler whose bytes differ from its record is
+        refused here, before anything changes.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return ''
+    }
+    $compilerPath = [IO.Path]::GetFullPath(
+        [IO.Path]::Combine($Layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
+    )
+    Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf)) {
+        return ''
+    }
+    $Metadata = $null
+    if (-not [string]::IsNullOrWhiteSpace((Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name MetadataPath))) {
+        $Metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    }
+    $recorded = ''
+    if ($null -ne $Metadata -and
+        $null -ne $Metadata.PSObject.Properties['hashes'] -and
+        $null -ne $Metadata.hashes) {
+        $property = $Metadata.hashes.PSObject.Properties['compiler']
+        if ($null -ne $property) {
+            $recorded = ([string]$property.Value).Trim()
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($recorded)) {
+        return ''
+    }
+    $actual = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $compilerPath -Algorithm SHA256).Hash
+    if (-not [string]::Equals($actual, $recorded, [StringComparison]::OrdinalIgnoreCase)) {
+        throw (
+            "the installed Fleet policy compiler does not match the hash deployment metadata records for it: $compilerPath. " +
+            'DefenseClaw keeps a recorded compiler only while it is unchanged; nothing was changed'
+        )
+    }
+    return $compilerPath
+}
+
+function Remove-DefenseClawRetiredStandaloneCompiler {
+    <#
+        Fleet-off Install, Upgrade and Repair remove the Fleet compiler an
+        older standalone install left, then lib\defenseclaw and lib once they
+        are empty, so a later uninstall finds no leftover tree (GAP-0270). A
+        directory with any other content stays for the uninstall to refuse.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $compilerPath = [IO.Path]::Combine($Layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
+    Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
+        [IO.File]::Delete($compilerPath)
+    }
+    foreach ($directory in @(Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot)) {
+        [IO.Directory]::Delete($directory, $false)
+    }
+}
+
 function Remove-DefenseClawSecureClientSensorHelperSocket {
     <#
         Secure Client uninstall: after the sensor helper service is removed,
@@ -24092,11 +24289,10 @@ function Assert-DefenseClawManagedInstallTree {
     $managedIPCSocketPath = (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ManagedIPCSocketPath)
     $refuseUnexpected = (Test-DefenseClawTrustStrictAncestors) -or
         (Test-DefenseClawStandaloneProfile)
+    $retiredLibRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($Layout.InstallRoot, 'lib')).TrimEnd('\')
     $allowedDirectories = @(
         $Layout.BinDirectory,
         $Layout.LibexecDirectory,
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory),
         $Layout.ManagedIPCDirectory
     )
     # Standalone keeps its managed IPC directory (sensor helper socket)
@@ -24105,6 +24301,11 @@ function Assert-DefenseClawManagedInstallTree {
     $standaloneIPCLeaves = @(Get-DefenseClawStandaloneIPCSocketLeaves -Layout $Layout)
     if ($standaloneIPCLeaves.Count -gt 0) {
         $allowedDirectories += [IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')
+    }
+    # The empty lib tree a 1.0.2 standalone install left for the retired
+    # Fleet compiler (GAP-0270). Anything inside it is still refused.
+    if (Test-DefenseClawStandaloneProfile) {
+        $allowedDirectories += @(Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot)
     }
     # A Secure Client layout with the sensor helper also admits its exact
     # socket leaf; every other reparse point is still refused below.
@@ -24118,7 +24319,6 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.CLIPath,
         $Layout.InstallerPath,
         $Layout.ModulePath,
-        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),
         $managedIPCSocketPath
     )
     # Standalone also carries the managed OpenCode plugin under share\opencode.
@@ -24127,6 +24327,15 @@ function Assert-DefenseClawManagedInstallTree {
         $allowedDirectories += [string]$openCodePlugin.ShareDirectory
         $allowedDirectories += [string]$openCodePlugin.PluginDirectory
         $allowedFiles += [string]$openCodePlugin.PluginPath
+    }
+    # A Fleet-enabled 1.0.2 host keeps its compiler (GAP-0274). Only the
+    # recorded, unchanged compiler and its two directories are accepted; an
+    # unrecorded compiler stays refused and a changed one throws.
+    $recordedCompiler = Get-DefenseClawRecordedStandaloneCompilerPath -Layout $Layout
+    if (-not [string]::IsNullOrEmpty($recordedCompiler)) {
+        $allowedFiles += $recordedCompiler
+        $allowedDirectories += [IO.Path]::GetDirectoryName($recordedCompiler)
+        $allowedDirectories += [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($recordedCompiler))
     }
     $expectedIPCSocket = ''
     if (-not [string]::IsNullOrWhiteSpace($managedIPCSocketPath)) {
@@ -24164,6 +24373,12 @@ function Assert-DefenseClawManagedInstallTree {
             )) {
             throw "refusing to remove managed install tree containing a reparse point: $($item.FullName)"
         }
+        # The retired lib tree (the 1.0.2 Fleet compiler's lib\defenseclaw)
+        # keeps its refusal on every profile, Secure Client included
+        # (rel-1-0-3 GAP-0270, GAP-0274): an unexpected item there is never
+        # bulldozed with the tree.
+        $inRetiredLib = [string]::Equals($full.TrimEnd('\'), $retiredLibRoot, [StringComparison]::OrdinalIgnoreCase) -or
+            $full.StartsWith($retiredLibRoot + '\', [StringComparison]::OrdinalIgnoreCase)
         if ($item.PSIsContainer) {
             if ($full -notin $allowedDirectories) {
                 # Bulldoze posture: unexpected directories inside InstallRoot
@@ -24175,7 +24390,7 @@ function Assert-DefenseClawManagedInstallTree {
                 # The standalone profile keeps its refusal (GAP-1190): an
                 # item DefenseClaw did not install there stops the uninstall
                 # before anything changes.
-                if ($refuseUnexpected) {
+                if ($refuseUnexpected -or $inRetiredLib) {
                     throw "refusing to remove unexpected directory from managed install root: $full"
                 }
                 Write-DefenseClawAclSelfHealAdvisory `
@@ -24185,7 +24400,7 @@ function Assert-DefenseClawManagedInstallTree {
             }
         }
         elseif ($full -notin $allowedFiles) {
-            if ($refuseUnexpected) {
+            if ($refuseUnexpected -or $inRetiredLib) {
                 throw "refusing to remove unexpected file from managed install root: $full"
             }
             Write-DefenseClawAclSelfHealAdvisory `
@@ -26495,8 +26710,16 @@ function Add-DefenseClawUserRegistrationCleanupResult {
     }
     # The standalone finalize names each enrolled account's per-user folder
     # that stays (with purge, each one it could not remove and why) and,
-    # with purge, each account whose per-user data and binaries it removed.
-    foreach ($name in @('user_state_remaining', 'user_state_purged')) {
+    # with purge, each account whose per-user data and binaries it removed;
+    # each user settings file it edited (#1290) and each hook command a
+    # user's Claude Code settings keep that still names a DefenseClaw
+    # launcher (#1286).
+    foreach ($name in @(
+            'user_state_remaining',
+            'user_state_purged',
+            'user_settings_edited',
+            'user_settings_hooks_left'
+        )) {
         $state = $null
         if ($null -ne $report) {
             $state = $report.PSObject.Properties[$name]
@@ -27529,14 +27752,7 @@ function Remove-DefenseClawCommittedEmptyInstallRoot {
         [IO.Path]::GetFullPath($Layout.ManagedIPCDirectory).TrimEnd('\')
     )
     if (Test-DefenseClawStandaloneProfile) {
-        foreach ($directory in @(
-            (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerLibDirectory),
-            (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerDirectory)
-        )) {
-            if (-not [string]::IsNullOrWhiteSpace([string]$directory)) {
-                $allowed += [IO.Path]::GetFullPath($directory).TrimEnd('\')
-            }
-        }
+        $allowed += @(Get-DefenseClawEmptyRetiredCompilerDirectories -InstallRoot $Layout.InstallRoot)
     }
     # A layout without the socket key tolerates no leaf file at all.
     $managedIPCSocketPath = Get-DefenseClawOptionalLayoutValue `
@@ -29824,13 +30040,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             }
         }
         if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {
-            $compilerPath = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath
-            if (-not [string]::IsNullOrWhiteSpace($compilerPath)) {
-                Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
-                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
-                    [IO.File]::Delete($compilerPath)
-                }
-            }
+            Remove-DefenseClawRetiredStandaloneCompiler -Layout $Layout
         }
         foreach ($requiredPath in @(
             $Layout.GatewayPath,
@@ -33486,7 +33696,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$LauncherTemp,
         # Standalone Uninstall only: remove the deployment without recovering
         # its pending transaction (Setup /uninstall FORCE=1).
-        [switch]$Force
+        [switch]$Force,
+        # Standalone Verify only: the Verify of an ensure that found the
+        # deployment compliant also collects old managed runtime generations
+        # (Invoke-DefenseClawStandaloneRuntimeGenerationCollect, GAP-0211).
+        [switch]$CollectRuntimeGenerations
     )
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
     $script:DefenseClawLauncherTemp = [string]$LauncherTemp
@@ -33627,6 +33841,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     if ($Force -and ($Action -ne 'Uninstall' -or -not (Test-DefenseClawStandaloneProfile))) {
         throw '-Force is valid only with a standalone Uninstall'
+    }
+    if ($CollectRuntimeGenerations -and ($Action -ne 'Verify' -or -not (Test-DefenseClawStandaloneProfile))) {
+        throw '-CollectRuntimeGenerations is valid only with a standalone Verify'
     }
     if ($SelfUninstallCallerPID -lt 0 -or
         ($SelfUninstallCallerPID -gt 0 -and $Action -ne 'Uninstall')) {
@@ -33817,6 +34034,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -RequireReadiness
+        if ($CollectRuntimeGenerations) {
+            Invoke-DefenseClawStandaloneRuntimeGenerationCollect `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName
+        }
         return Get-DefenseClawLifecycleStatus `
             -Action $Action `
             -Layout $layout `
@@ -33886,13 +34108,18 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     -Sources $sources
                 $standaloneFleetStateKnown = $true
                 if ($standaloneFleetEnabled) {
-                    if ([string]::IsNullOrWhiteSpace($PolicyCompiler)) {
-                        throw 'Fleet-enabled standalone Setup requires -PolicyCompiler from its signed payload'
+                    if (-not [string]::IsNullOrWhiteSpace($PolicyCompiler)) {
+                        Add-DefenseClawStandaloneFleetCompilerSource `
+                            -Sources $sources `
+                            -PolicyCompiler $PolicyCompiler `
+                            -AllowUnsigned:$AllowUnsigned
                     }
-                    Add-DefenseClawStandaloneFleetCompilerSource `
-                        -Sources $sources `
-                        -PolicyCompiler $PolicyCompiler `
-                        -AllowUnsigned:$AllowUnsigned
+                    elseif ([string]::IsNullOrEmpty((Get-DefenseClawRecordedStandaloneCompilerPath -Layout $layout))) {
+                        # GAP-0274: Setup carries no compiler. It keeps the
+                        # recorded compiler of a Fleet-enabled 1.0.2 install
+                        # in place, unchanged, and installs none.
+                        throw 'Fleet-enabled standalone Setup carries no Fleet policy compiler and this host has no recorded one to keep; turn Fleet off in the config, then run Setup again'
+                    }
                 }
             }
         }

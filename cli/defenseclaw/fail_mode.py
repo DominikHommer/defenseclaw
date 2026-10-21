@@ -58,6 +58,33 @@ _UNIX_REGISTRATION_HOOK_SCRIPTS = {
     "codex": "codex-hook.sh",
     "devin": "devin-hook.sh",
 }
+
+
+def upstream_fail_open(cfg: Any, connector: str) -> bool:
+    """Whether *connector*'s hooks fail open whatever is configured.
+
+    Copilot CLI, Antigravity and Hermes have no fail-closed hook contract of
+    their own. A managed deployment outside Secure Client blocks their tool
+    calls through the connector's native deny instead, so they follow the
+    administrator's fail mode there (Config.managed_outside_secure_client).
+    The per-user Hermes hook (the Linux
+    and macOS shell hook and the Windows native hook) blocks a call it cannot
+    check through Hermes' block directive when its fail mode is closed, so
+    an unset fail mode resolves closed there as for every other connector
+    (rel-1-0-3 GAP-0150, GAP-0269); only the Secure Client profile keeps
+    Hermes open, as its hook render does (CapableHookFailMode).
+    """
+    name = normalize(connector)
+    if name not in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+        return False
+    standalone = getattr(cfg, "managed_outside_secure_client", None)
+    if callable(standalone) and standalone():
+        return False
+    if name == "hermes":
+        return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    return True
+
+
 _SHARED_RUNTIME_CONNECTORS = frozenset({"claudecode", "codex"})
 _WINDOWS_LAUNCHER_CONNECTORS = frozenset({"claudecode", "codex"})
 _SHARED_HOOK_SCRIPTS = frozenset(
@@ -125,10 +152,12 @@ class ConnectorFailModeState:
     def note(self) -> str:
         """Why the effective mode is not the configured guardrail.hook_fail_mode, or "".
 
-        A connector in observe mode without a value of its own stays fail-open
-        whatever the global value says (GuardrailConfig.effective_hook_fail_mode),
-        so ``closed`` in config.yaml next to ``open`` in the hooks is intended;
-        reporting says so instead of looking like drift (GAP-0129).
+        Per-user Cursor follows its guardrail mode (observe open, action
+        closed) whatever the global value says
+        (GuardrailConfig.effective_hook_fail_mode), so ``closed`` in
+        config.yaml next to ``open`` in its observe-mode hooks is intended;
+        reporting says so instead of looking like drift (GAP-0129). Every
+        other connector follows its configured value in observe mode too.
         """
 
         if self.configured == self.desired or self.effective != self.desired:
@@ -260,7 +289,7 @@ def connector_fail_mode_report(
     guardrail = cfg.guardrail
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     configured = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
-    if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+    if upstream_fail_open(cfg, name):
         return {
             "effective": "open",
             "provenance": f"{name}-upstream-fail-open",

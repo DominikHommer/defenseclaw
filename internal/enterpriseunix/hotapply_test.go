@@ -192,3 +192,68 @@ func TestEnsureStaysANoopWhenTheSameConfigIsInstalledAgainDuringTheCheck(t *test
 		t.Fatalf("config group = %d, want the service group %d", gid, serviceGID)
 	}
 }
+
+// GAP-0738 (#1104): a second config push that lands while the apply of the
+// first one waits for the running gateway's policy keeps the gateway
+// running. The first run waited out the hot-apply timeout and restarted the
+// gateway; its follow-up transaction now applies the second push hot.
+func TestAConfigPushedDuringAHotApplyKeepsTheGatewayRunning(t *testing.T) {
+	digest := func(c string) string { return "sha256:" + strings.Repeat(c, 64) }
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			runner := &policyDigestRunner{fakeRunner: h.runner, digest: digest("a")}
+			h.env.Runner = runner
+			gateway := unitOf(goos, "gateway")
+			first := strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: action", 1)
+			second := first + "# second push\n"
+			calls, pushAt := 0, -1
+			h.env.HealthGet = func(context.Context) (int, []byte, error) {
+				if !h.healthy || !h.services.isActive(gateway) {
+					return 0, nil, errors.New("connection refused")
+				}
+				calls++
+				if calls == pushAt {
+					// The administrator pushes again before the gateway has
+					// applied the first push; the gateway follows the file.
+					if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), []byte(second), 0o640); err != nil {
+						t.Error(err)
+					}
+					runner.digest = digest("c")
+				}
+				config := h.read(h.env.Layout.ConfigPath)
+				reported := digest("a")
+				switch {
+				case strings.Contains(config, "# second push"):
+					reported = digest("c")
+				case strings.Contains(config, "mode: action"):
+					reported = digest("b")
+				}
+				return 200, []byte(`{"api":{"state":"running"},"policy":{"effective_digest":"` + reported + `"},"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
+			}
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), []byte(first), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			runner.digest = digest("b")
+			// Call 1 is the hot-apply check; call 2 is the first look of
+			// the settle wait, after this run computed the policy it waits for.
+			calls, pushAt = 0, 2
+			from := len(h.services.calls)
+			r := h.run(Options{Action: ActionEnsure})
+			requireOK(t, r)
+			if calls < pushAt {
+				t.Fatalf("health asked %d times; the second push never landed", calls)
+			}
+			for _, call := range h.services.calls[from:] {
+				if strings.HasSuffix(call, " "+gateway) && !strings.HasPrefix(call, "enable ") {
+					t.Fatalf("the gateway was touched (%s); changes = %q", call, r.Changes)
+				}
+			}
+			record, _ := h.env.loadDeployment()
+			if record == nil || record.ConfigSHA256 != sha256Bytes([]byte(second)) || !hasWarning(r, "input_changed") {
+				t.Fatalf("the second push is not applied: warnings = %+v, changes = %q", r.Warnings, r.Changes)
+			}
+		})
+	}
+}

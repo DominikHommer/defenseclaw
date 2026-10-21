@@ -120,3 +120,96 @@ func TestWindowsManagedHooksTeardownAcceptsTargetsAwaitingSignIn(t *testing.T) {
 		a.ProtectedTargets = a.ProtectedTargets[1:]
 	})
 }
+
+// #1105, GAP-0211: the 1.0.2 -> 1.0.3 upgrade classifies the 1.0.2
+// guardian's records. A signed-out account whose only failure is its own
+// DefenseClaw folder's permissions waits for its next sign-in, like a row
+// an earlier release protected, and keeps its carried-forward protected
+// row. Another account's folder, a connected account's row and a target not
+// authorized for deferred enrollment are still refused.
+func TestWindowsManagedHooksLegacyActivationAcceptsSignedOutUntrustedFolder(t *testing.T) {
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	previousStateTrust, previousOwnership := enterpriseHookGuardianStateFileTrustCheck, enterpriseHookAuthorizationOwnershipSetter
+	t.Cleanup(func() {
+		enterpriseHookGuardianStateFileTrustCheck, enterpriseHookAuthorizationOwnershipSetter = previousStateTrust, previousOwnership
+	})
+	enterpriseHookGuardianStateFileTrustCheck = func(string) error { return nil }
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	previousCfg := cfg
+	t.Cleanup(func() { cfg = previousCfg })
+	cfg = nil
+
+	scope := t.TempDir()
+	runtimeDir := filepath.Join(scope, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(hookGuardianAuthorizationDirEnv, filepath.Join(scope, "authorization"))
+	manifestPath := filepath.Join(scope, "targets.yaml")
+	manifestSHA256 := strings.Repeat("b", 64)
+	folderError := func(dataDir string) string {
+		return "enterprise hooks: protected target requires repair but its exact active Windows session is unavailable " +
+			"(verification: enterprise hooks: managed hook directory verification failed: enterprise hooks: managed Windows DACL on " +
+			filepath.Join(dataDir, "hooks") + " has 8 ACEs, expected 7)"
+	}
+
+	var targets []windowsManagedHooksTeardownTarget
+	var protected, failing []enterpriseHookReconcileRow
+	for index, sid := range []string{"S-1-12-1-1-2-3-1017", "S-1-12-1-1-2-3-1123"} {
+		home := filepath.Join(scope, sid)
+		dataDir := filepath.Join(home, ".defenseclaw")
+		targets = append(targets, windowsManagedHooksTeardownTarget{
+			Connector: "claudecode", SID: sid, DataDir: dataDir, Deferred: true,
+		})
+		row := enterpriseHookReconcileRow{SID: sid, UserHome: home, Connector: "claudecode", OK: true}
+		protected = append(protected, row)
+		if index == 1 {
+			row = enterpriseHookReconcileRow{SID: sid, UserHome: home, Connector: "claudecode", Error: folderError(dataDir)}
+		}
+		failing = append(failing, row)
+	}
+	// 1.0.2 protected both targets; its next reconcile found the signed-out
+	// account's hooks folder loosened.
+	if err := writeEnterpriseHookGuardianState(runtimeDir, manifestPath, manifestSHA256, protected, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEnterpriseHookGuardianState(runtimeDir, manifestPath, manifestSHA256, failing, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	activation, _, err := loadEnterpriseHookGuardianActivation(runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, _, err := loadEnterpriseHookGuardianAuthorization(runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := loadEnterpriseHookGuardianState(runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := windowsManagedHooksLifecycleContext{manifestPath: manifestPath, targets: targets}
+	if err := validateLegacyWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256); err != nil {
+		t.Fatalf("the upgrade refused a signed-out account's untrusted folder: %v", err)
+	}
+	refuse := func(name string, mutate func(*enterpriseHookGuardianState, *windowsManagedHooksLifecycleContext)) {
+		t.Helper()
+		s, c := state, ctx
+		s.Results = append([]enterpriseHookReconcileRow(nil), state.Results...)
+		c.targets = append([]windowsManagedHooksTeardownTarget(nil), ctx.targets...)
+		mutate(&s, &c)
+		if err := validateLegacyWindowsManagedHooksGuardianActivation(activation, authorization, s, c, manifestSHA256); err == nil {
+			t.Fatalf("%s: the upgrade accepted the records", name)
+		}
+	}
+	refuse("another account's folder", func(s *enterpriseHookGuardianState, _ *windowsManagedHooksLifecycleContext) {
+		s.Results[1].Error = folderError(targets[0].DataDir)
+	})
+	refuse("connected account", func(s *enterpriseHookGuardianState, _ *windowsManagedHooksLifecycleContext) {
+		s.Results[1].Error = "enterprise hooks: managed hook directory verification failed: enterprise hooks: managed Windows DACL on " +
+			filepath.Join(targets[1].DataDir, "hooks") + " has 8 ACEs, expected 7"
+	})
+	refuse("non-deferred target", func(_ *enterpriseHookGuardianState, c *windowsManagedHooksLifecycleContext) {
+		c.targets[1].Deferred = false
+	})
+}

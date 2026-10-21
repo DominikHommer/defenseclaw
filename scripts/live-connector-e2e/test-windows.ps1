@@ -4839,9 +4839,9 @@ threading.Event().wait()
             $wizardHookContract.Contains($marker)) `
             "Windows setup and wizard contracts require the Amp plugin marker: $marker"
     }
-    Assert-True ($doctorSetupContract -match '\$expectedAmpFailMode\s*=\s*if\s*\(\$script:LastSetupMode\s*-eq\s*''action''\)\s*\{\s*''closed''\s*\}\s*else\s*\{\s*''open''\s*\}' -and
+    Assert-True ($doctorSetupContract -match '\$expectedAmpFailMode\s*=\s*''closed''' -and
         $doctorSetupContract -match 'const DC_FAIL_MODE: string = .*expectedAmpFailMode') `
-        'Amp setup validator binds the generated plugin fail mode to the requested setup posture'
+        'Amp setup validator expects the closed fail mode an unset Setup posture resolves to outside Secure Client'
     Assert-True ($doctorSetupContract -match "\`$Connector -eq 'devin'" -and
         $doctorSetupContract -match 'Get-DevinWindowsHookCommand \$devinCommand ''setup-created Devin PreToolUse''') `
         'Devin setup validation verifies its POSIX-quoted direct native launcher'
@@ -5040,8 +5040,8 @@ threading.Event().wait()
         'OpenCode setup loads the managed plugin while convergence is waiting and cleans up a failed setup child'
     Assert-True ($gatewayHookReadiness -match "'--connector', 'hermes', '--event', 'pre_tool_call'" -and
         $gatewayHookReadiness -match '\$probeID ''pre_tool_call''' -and
-        $gatewayHookReadiness -match 'canonical fail-open allow decision') `
-        'Hermes readiness uses its official event name and forced fail-open effective posture'
+        $gatewayHookReadiness -match 'canonical allow decision') `
+        'Hermes readiness uses its official event name and a canonical allow decision'
     Assert-True ($gatewayHookReadiness -match '\$toolDecision\.action -cne ''allow''' -and
         $gatewayHookReadiness -match '\$toolDecision\.raw_action -cne ''allow''' -and
         $gatewayHookReadiness -match '\$toolDecision\.would_block') `

@@ -81,7 +81,7 @@ type builderImages struct {
 
 func (b *builderImages) store() *image.Store { return image.NewStore(b.app.imageDataDir()) }
 
-func (b *builderImages) spec(h *harness.Spec, microVM bool) image.BuildSpec {
+func (b *builderImages) spec(h *harness.Spec, microVM bool) (image.BuildSpec, error) {
 	a := b.app
 	bs := image.BuildSpec{
 		Harness: h, UID: os.Getuid(), GID: os.Getgid(), FailMode: connector.SandboxFailMode,
@@ -91,13 +91,21 @@ func (b *builderImages) spec(h *harness.Spec, microVM bool) image.BuildSpec {
 		bs.HarnessVersion = a.Cfg.OpenShell.Image.HarnessVersions[h.Name]
 		bs.BaseImage = a.Cfg.OpenShell.Image.Base
 		bs.IngressPort = a.Cfg.OpenShellIngressPort()
+		trusted, err := image.TrustedCAsFor(a.Cfg)
+		if err != nil {
+			return image.BuildSpec{}, err
+		}
+		bs.TrustedCAs = trusted
 	}
-	return bs
+	return bs, nil
 }
 
 func (b *builderImages) Build(ctx context.Context, h *harness.Spec, microVM, force bool, log io.Writer) (image.Record, bool, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: log}
-	spec := b.spec(h, microVM)
+	spec, err := b.spec(h, microVM)
+	if err != nil {
+		return image.Record{}, false, err
+	}
 	if !force {
 		// An image for the MicroVM driver not checked for it yet is
 		// probed again by the build (image.Record.MicroVMUnchecked).
@@ -119,12 +127,20 @@ func (b *builderImages) Build(ctx context.Context, h *harness.Spec, microVM, for
 
 func (b *builderImages) Preflight(ctx context.Context, h *harness.Spec, microVM, force bool) error {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
-	return builder.Preflight(ctx, b.spec(h, microVM), image.BuildOptions{Force: force})
+	spec, err := b.spec(h, microVM)
+	if err != nil {
+		return err
+	}
+	return builder.Preflight(ctx, spec, image.BuildOptions{Force: force})
 }
 
 func (b *builderImages) Current(h *harness.Spec, microVM bool) (bool, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
-	rec, ok, err := builder.Current(b.spec(h, microVM))
+	spec, err := b.spec(h, microVM)
+	if err != nil {
+		return false, err
+	}
+	rec, ok, err := builder.Current(spec)
 	// A MicroVM image whose MicroVM check settled nothing is checked
 	// again before its next sandbox, so it is not current yet.
 	return ok && rec.HookFireVerified && !rec.MicroVMUnchecked(), err
@@ -140,7 +156,11 @@ func (b *builderImages) Gone(ctx context.Context, recs []image.Record) (map[stri
 func (b *builderImages) Size(ctx context.Context, h *harness.Spec, microVM bool, ref string) (uint64, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
 	if h != nil {
-		rec, ok, err := builder.Current(b.spec(h, microVM))
+		spec, err := b.spec(h, microVM)
+		if err != nil {
+			return 0, err
+		}
+		rec, ok, err := builder.Current(spec)
 		if err != nil || !ok {
 			return 0, err
 		}

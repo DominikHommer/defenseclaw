@@ -1662,6 +1662,18 @@ function Stage-PackageData(
     foreach ($name in @('splunk_local_bridge', 'local_observability_stack', 'splunk_o11y_dashboards')) {
         Copy-Tree (Join-Path $WorkspaceRoot "bundles\$name") (Join-Path $data $name)
     }
+    # As make _bundle-data: the optional Fleet assets stay out of the default
+    # per-user package; they ship in defenseclaw-fleet-assets.tar.gz.
+    foreach ($relative in @(
+        'docker-compose.fleet.yml',
+        'prometheus\examples\fleet.yml',
+        'grafana\dashboards\defenseclaw-fleet.json'
+    )) {
+        $fleetAsset = Join-Path $data "local_observability_stack\$relative"
+        if (Test-Path -LiteralPath $fleetAsset -PathType Leaf) {
+            Remove-Item -LiteralPath $fleetAsset -Force
+        }
+    }
     $extensionSource = Join-Path $WorkspaceRoot 'extensions\defenseclaw'
     $extensionIndex = Join-Path $extensionSource 'dist\index.js'
     if (Test-Path -LiteralPath $extensionIndex -PathType Leaf) {
@@ -3994,10 +4006,13 @@ function New-WizardAgentFixtures([string]$Root) {
         [pscustomobject]@{
             Path = $codexPath
             ClassName = 'CodexVersionFixture'
-            # The wizard contract installs the complete ten-event matrix, whose
-            # first truthful minimum is Codex 0.133.0. Older supported tiers are
-            # covered independently by boundary and real-client compatibility
-            # probes instead of being mislabeled as full-matrix certification.
+            # The wizard contract installs the complete ten-event matrix
+            # (Codex 0.133.0 and later), and setup selects Codex only from
+            # 0.136.0, the first release with app-server --stdio
+            # (CODEX_APP_SERVER_STDIO_MIN_VERSION), so the fixture reports
+            # that floor. Older supported tiers are covered independently by
+            # boundary and real-client compatibility probes instead of being
+            # mislabeled as full-matrix certification.
             Source = @"
 using System;
 public static class CodexVersionFixture {
@@ -4017,7 +4032,7 @@ public static class CodexVersionFixture {
             }
             return 0;
         }
-        Console.WriteLine("codex-cli 0.133.0");
+        Console.WriteLine("codex-cli 0.136.0");
         return 0;
     }
 }
@@ -4129,7 +4144,7 @@ public static class OpenCodeVersionFixture {
             }
         }
         $codexVersion = Invoke-WindowsNativeProcess $codexPath @('--version') -TimeoutSeconds 30
-        if ($codexVersion.StdOut.Trim() -ne 'codex-cli 0.133.0') {
+        if ($codexVersion.StdOut.Trim() -ne 'codex-cli 0.136.0') {
             throw "Codex fixture returned an unexpected version: $($codexVersion.StdOut)"
         }
         $claudeVersion = Invoke-WindowsNativeProcess $claudePath @('--version') -TimeoutSeconds 30
@@ -4836,6 +4851,11 @@ function Assert-WizardHookRegistration(
         ))
         $codexEventsByContract = @{
             'codex-hooks-v3' = @(
+                'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest',
+                'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact',
+                'PostCompact', 'Stop'
+            )
+            'codex-hooks-v3-generic' = @(
                 'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest',
                 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact',
                 'PostCompact', 'Stop'

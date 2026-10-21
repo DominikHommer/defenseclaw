@@ -405,7 +405,7 @@ func canonicalProtectedConnectorNames(field string, rawNames []string) ([]string
 // file. Callers that need teardown intent must use ConnectorExplicitlyInactive;
 // an empty active set alone never suppresses a connector guard.
 func ReadActiveConnectorState(dataDir string) (names []string, exists bool, err error) {
-	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, activeConnectorFile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -430,7 +430,7 @@ func ReadActiveConnectorState(dataDir string) (names []string, exists bool, err 
 // treated as intentional teardown: the hook guard continues to heal in those
 // cases. An explicit active entry wins over a stale inactive entry.
 func ConnectorExplicitlyInactive(dataDir, name string) bool {
-	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
+	data, err := readConnectorStateFile(filepath.Join(dataDir, activeConnectorFile))
 	if err != nil {
 		return false
 	}
@@ -489,7 +489,7 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 	want := strings.TrimSpace(name)
 	err = withActiveConnectorStateLock(path, func() error {
 		var readErr error
-		original, readErr = os.ReadFile(path)
+		original, readErr = readConnectorStateFile(path)
 		existed = true
 		if readErr != nil {
 			if !os.IsNotExist(readErr) {
@@ -528,7 +528,7 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 
 	return func() error {
 		return withActiveConnectorStateLock(path, func() error {
-			current, readErr := os.ReadFile(path)
+			current, readErr := readConnectorStateFile(path)
 			if readErr != nil && !os.IsNotExist(readErr) {
 				return readErr
 			}
@@ -565,8 +565,42 @@ func MarkConnectorInactive(dataDir, name string) (restore func() error, err erro
 	}, nil
 }
 
+// A connector state file is published by atomic replacement. On Windows the
+// publisher keeps its renamed handle for a short validation step, and another
+// process (an indexer or antivirus scan) can hold the file briefly too, so a
+// reader waits a bounded time for such a lock before it reports the error
+// (rel-1-0-3 GAP-0300).
+const (
+	connectorStateReadAttempts   = 10
+	connectorStateReadRetryDelay = 100 * time.Millisecond
+)
+
+// connectorStateReadSleep is the wait between attempts; tests replace it.
+var connectorStateReadSleep = time.Sleep
+
+func openConnectorStateFileWithRetry(path string) (*os.File, error) {
+	for attempt := 1; ; attempt++ {
+		file, err := openConnectorStateFile(path)
+		if err == nil || !connectorStateFileBusy(err) || attempt >= connectorStateReadAttempts {
+			return file, err
+		}
+		connectorStateReadSleep(connectorStateReadRetryDelay)
+	}
+}
+
+// readConnectorStateFile is os.ReadFile with the sharing and bounded lock wait
+// of openConnectorStateFileWithRetry.
+func readConnectorStateFile(path string) ([]byte, error) {
+	file, err := openConnectorStateFileWithRetry(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(file)
+}
+
 func loadInactiveConnectorNames(path string) []string {
-	data, err := os.ReadFile(path)
+	data, err := readConnectorStateFile(path)
 	if err != nil {
 		return nil
 	}
@@ -1283,7 +1317,7 @@ func HookRuntimeRegistrationCurrent(
 		return true, nil
 	}
 	if strings.TrimSpace(opts.DataDir) == "" || !filepath.IsAbs(opts.DataDir) {
-		return false, errors.New("Codex runtime registration requires an absolute data directory")
+		return false, errors.New("Codex runtime registration requires an absolute data directory") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
@@ -1471,9 +1505,7 @@ func ResolvedConnectorLocations(opts SetupOpts, conn Connector) ConnectorLocatio
 		caps := hp.HookCapabilities(opts)
 		loc.HookConfigPaths = uniqueNonEmptyStrings(append(loc.HookConfigPaths, caps.ConfigPath))
 	}
-	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
-		loc.HookScriptPaths = append(loc.HookScriptPaths, path)
-	}
+	loc.HookScriptPaths = append(loc.HookScriptPaths, hookRuntimeArtifactPaths(opts, conn)...)
 	loc.HookScriptPaths = uniqueNonEmptyStrings(loc.HookScriptPaths)
 
 	cp, ok := conn.(ConnectorCapabilityProvider)
@@ -2020,6 +2052,7 @@ func stableManagedArtifactDigestWithAge(
 		!after.ModTime().Equal(opened.ModTime()) {
 		return "", true, fmt.Errorf("%s changed during bounded digest", label)
 	}
+	remember := stamped
 	if stamped {
 		stampOf := managedArtifactStampOf
 		if attributeOnly {
@@ -2030,11 +2063,44 @@ func stableManagedArtifactDigestWithAge(
 			later.USN = 0
 		}
 		if !ok || later != stamp {
-			return "", true, fmt.Errorf("%s changed during bounded digest", label)
+			if !ok || !managedArtifactStampMovedOnlyInJournal(stamp, later) {
+				return "", true, fmt.Errorf("%s changed during bounded digest", label)
+			}
+			// Only the change-journal number moved: another process ended
+			// the change epoch of the file during this read, as its own full
+			// read of the shared hook binary does (a status or verify call
+			// next to the guardian, GAP-0256). No handle could write the file
+			// while this deny-write handle was open, but the stamp no longer
+			// names this read, so it is not remembered. The two-pass check
+			// that unguarded files get confirms the bytes instead.
+			second, secondSize, err := hashOnce()
+			if err != nil {
+				return "", true, err
+			}
+			final, err := file.Stat()
+			if err != nil {
+				return "", true, err
+			}
+			current, err := os.Lstat(path)
+			if err != nil {
+				return "", true, fmt.Errorf("%s changed after open: %w", label, err)
+			}
+			last, ok := stampOf(file)
+			if attributeOnly {
+				last.USN = 0
+			}
+			if !ok || second != first || secondSize != firstSize ||
+				final.Size() != opened.Size() || !final.ModTime().Equal(opened.ModTime()) ||
+				current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() ||
+				!os.SameFile(opened, current) ||
+				(last != stamp && !managedArtifactStampMovedOnlyInJournal(stamp, last)) {
+				return "", true, fmt.Errorf("%s changed during bounded digest", label)
+			}
+			remember = false
 		}
 	}
 	digest := "sha256:" + hex.EncodeToString(first[:])
-	if stamped {
+	if remember {
 		rememberManagedArtifactDigest(path, stamp, digest, attributeOnly, fullStampAvailable)
 	}
 	return digest, true, nil
@@ -2450,7 +2516,7 @@ func readStablePrivateStateFile(dataDir, name string, limit int64) ([]byte, bool
 	if err := hookAPIValidateOwner(path, before); err != nil {
 		return nil, false
 	}
-	file, err := os.Open(path)
+	file, err := openConnectorStateFileWithRetry(path)
 	if err != nil {
 		return nil, false
 	}

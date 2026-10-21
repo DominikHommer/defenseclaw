@@ -937,6 +937,9 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	}
 	currentSnap, err := w.snapshotForEvent(evt)
 	if errors.Is(err, os.ErrNotExist) {
+		if evt.Type == InstallMCP {
+			fmt.Fprintf(os.Stderr, "[rescan] mcp %s is no longer listed; skipped\n", evt.Name)
+		}
 		return rescanSkipped
 	}
 	if errors.Is(err, errLinkedAssetOutsideRoots) {
@@ -1061,7 +1064,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	}
 
 	if reason == "content-changed" && !w.secureClientActive() {
-		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint)
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
 	}
 
 	fmt.Fprintf(os.Stderr, "[rescan] scanning %s %s (%s)\n", evt.Type, evt.Name, reason)
@@ -1188,7 +1191,7 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 	if res.Interrupted || res.ScanID == "" || moved {
 		return rescanScanned
 	}
-	if _, err := os.Lstat(evt.Path); err == nil {
+	if w.targetStillPresent(evt) {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
 	}
 	return rescanScanned
@@ -1200,10 +1203,13 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 // new install would be. The rescan used to scan it and emit drift only, so
 // the rejected verdict was never acted on and the agents kept loading it
 // (GAP-1086). The drift alerts stay. A scan that failed or was cut off
-// leaves the old baseline (F-3188), so the next cycle admits it again.
-// Secure Client keeps main's rescan (issue #1092).
-func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint string) rescanOutcome {
-	fmt.Fprintf(os.Stderr, "[rescan] %s %s changed; running install admission\n", evt.Type, evt.Name)
+// leaves the old baseline (F-3188), so the next cycle admits it again. An
+// MCP server whose changed definition admission allows is released from the
+// watcher's own rejection of its old one (GAP-0266). source names what saw
+// the change in gateway.log: the rescan cycle, or the watch of the MCP
+// server list. Secure Client keeps main's rescan (issue #1092).
+func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint, source string) rescanOutcome {
+	fmt.Fprintf(os.Stderr, "[%s] %s %s changed; running install admission\n", source, evt.Type, evt.Name)
 	res := w.runAdmission(ctx, evt)
 	w.notifyAdmission(res)
 	if res.ScanID != "" {
@@ -1219,7 +1225,7 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 		w.markInterruptedAdmission(evt, snap, fingerprint)
 	case res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt):
 	default:
-		if _, err := os.Lstat(evt.Path); err == nil {
+		if w.targetStillPresent(evt) {
 			scanID := res.ScanID
 			if scanID == "" {
 				// Decided before a scan (a list match): keep the last
@@ -1227,6 +1233,10 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 				scanID = baseline.ScanID
 			}
 			w.persistSnapshot(evt, snap, scanID, w.admissionFingerprint(res, fingerprint))
+			switch res.Verdict {
+			case VerdictClean, VerdictAllowed, VerdictWarning:
+				w.releaseSupersededMCPRejection(evt, res.Verdict)
+			}
 		}
 	}
 	return rescanScanned
@@ -1268,7 +1278,7 @@ func (w *InstallWatcher) readmitInterrupted(ctx context.Context, evt InstallEven
 	if res.Interrupted || res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt) {
 		return rescanScanned
 	}
-	if _, err := os.Lstat(evt.Path); err == nil {
+	if w.targetStillPresent(evt) {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
 	}
 	return rescanScanned
@@ -1967,12 +1977,10 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 		return nil, err
 	}
 
-	raw, err := json.Marshal(entry)
+	hash, err := mcpDefinitionHash(*entry)
 	if err != nil {
 		return nil, fmt.Errorf("marshal mcp server %s: %w", name, err)
 	}
-	sum := sha256.Sum256(raw)
-	hash := hex.EncodeToString(sum[:])
 
 	snap := &TargetSnapshot{
 		ContentHash:      hash,
@@ -1986,6 +1994,35 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 		snap.NetworkEndpoints = []string{entry.URL}
 	}
 	return snap, nil
+}
+
+// mcpDefinitionHash is the content hash of an MCP server's baseline: every
+// field of its definition (command, arguments, folder, environment, URL,
+// headers, transport), so a verdict is for one definition, not a name. The
+// account and the project are not in the hash: they are in the baseline's
+// key (MCPEventPath), so each account's and each project's server has a
+// baseline of its own.
+func mcpDefinitionHash(entry config.MCPServerEntry) (string, error) {
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// targetStillPresent reports whether the target of evt is still there after
+// its admission: an MCP server still listed under its key, a skill or plugin
+// still at its path. An MCP event path is a key, not a file, so the Lstat
+// the readmissions used always failed for a server: an edited server never
+// got its new baseline and was admitted again on every cycle.
+func (w *InstallWatcher) targetStillPresent(evt InstallEvent) bool {
+	if evt.Type == InstallMCP {
+		_, err := w.lookupMCPServer(evt)
+		return err == nil
+	}
+	_, err := os.Lstat(evt.Path)
+	return err == nil
 }
 
 // MCPEventPath is the key of an MCP server in the watcher: its event Path

@@ -80,6 +80,9 @@ const (
 	sandboxTextUnloadable        = "Your organization's sandbox policy can't be loaded right now. Try again later or contact your IT help desk."
 	sandboxTextUnavailable       = "Sandboxes aren't available on this computer."
 	sandboxTextBadRequest        = "The sandbox request is malformed."
+	sandboxTextDaemonOutdated    = "Your sandbox service runs an older DefenseClaw version than this computer and can't apply " +
+		"your organization's complete sandbox policy, so it can't start sandboxes or take policy updates. " +
+		"Stop your running sandboxes with defenseclaw sandbox stop so it restarts on the new version, or sign out and back in."
 	sandboxTextAccountUnknown    = sandboxapi.AccountUnknownText
 	sandboxRequestAccessFallback = "contact your IT help desk"
 )
@@ -105,6 +108,7 @@ type sandboxAuthority struct {
 	// records is each account's sandbox telemetry records budget, and
 	// eventRecords the budget of the records of its daemon's other events.
 	records, eventRecords sandboxRecordBudget
+	eventReplay           sandboxEventReplay
 	guestSignals          sandboxGuestSignals
 }
 
@@ -139,11 +143,6 @@ func (s *sandboxAuthority) stopText(uid int, id string) string {
 	return run.StopText
 }
 
-// sandboxAuthorities holds each API server's authority, created on first
-// use. Package state rather than an APIServer field: the server type is
-// shared by every lane of this change.
-var sandboxAuthorities sync.Map // *APIServer -> *sandboxAuthorityHolder
-
 // sandboxAuthorityHolder creates an API server's authority once it can:
 // a failure (an unusable data directory, a key that can't be loaded yet)
 // is retried on the next call instead of answering 503 until a restart.
@@ -174,8 +173,7 @@ func (a *APIServer) sandboxAuth() (*sandboxAuthority, error) {
 	if a == nil {
 		return nil, errors.New("no API server")
 	}
-	entry, _ := sandboxAuthorities.LoadOrStore(a, &sandboxAuthorityHolder{})
-	holder := entry.(*sandboxAuthorityHolder)
+	holder := &a.sandboxAuthority
 	if auth := holder.ready.Load(); auth != nil {
 		return auth, nil
 	}
@@ -322,9 +320,60 @@ func (a *APIServer) serveSandboxRoute(authorizer *managedHookAuthorizer, peer ma
 		return
 	}
 	defer release()
+	if sandboxDaemonOutdated(r) && !sandboxOutdatedDaemonRoute(r.URL.Path) {
+		refuseOutdatedSandboxDaemon(w, peer, route)
+		return
+	}
 	ctx := attachVerifiedSubject(r.Context(), a.observabilityV8RuntimeEmitter(), strconv.Itoa(peer.UID), peer.Name, subjectSourcePeerCredentials)
 	ctx = context.WithValue(ctx, sandboxRouteAuthorizerKey{}, authorizer)
 	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// sandboxDaemonOutdated reports a call from a daemon below the floor
+// contract (sandboxrelay.DaemonContract): it would mark a partial floor
+// confirmed (GAP-0182). A package upgrade leaves the account's old daemon
+// running until its sandboxes stop.
+func sandboxDaemonOutdated(r *http.Request) bool {
+	contract, err := strconv.Atoi(strings.TrimSpace(r.Header.Get(sandboxrelay.DaemonContractHeader)))
+	return err != nil || contract < sandboxrelay.DaemonContract
+}
+
+// sandboxOutdatedDaemonRoute reports a sandbox route a daemon below the
+// floor contract still reaches; every other one is refused before its
+// handler. Settings and the sandbox events (the audit of what the daemon
+// does) are answered as usual, and a deletion is recorded. Resolve
+// records its refusal (GAP-0148), and policy/current and the state report
+// pass a revocation and a stopped sandbox through but never confirm a
+// floor or renew a running one (serveSandboxCurrent).
+func sandboxOutdatedDaemonRoute(path string) bool {
+	switch path {
+	case sandboxrelay.PathSettings, sandboxrelay.PathEvents, sandboxrelay.PathPolicyResolve, sandboxrelay.PathPolicyCurrent:
+		return true
+	}
+	if id, ok := strings.CutPrefix(path, sandboxrelay.PathRegistrations); ok {
+		return strings.HasSuffix(id, sandboxrelay.RegistrationStateSub) || strings.HasSuffix(id, sandboxrelay.RegistrationDelSub)
+	}
+	return false
+}
+
+// sandboxOutdatedDaemonLogged holds the uids whose outdated daemon this
+// gateway already logged, so a running sandbox's hooks log it once.
+var sandboxOutdatedDaemonLogged sync.Map
+
+// refuseOutdatedSandboxDaemon answers a daemon below the floor contract
+// with ReasonDaemonOutdated.
+func refuseOutdatedSandboxDaemon(w http.ResponseWriter, peer managedHookPeer, route string) {
+	logOutdatedSandboxDaemon(peer, route)
+	writeSandboxReason(w, sandboxrelay.ReasonDaemonOutdated, sandboxTextDaemonOutdated)
+}
+
+// logOutdatedSandboxDaemon logs the first refusal of peer's outdated daemon.
+func logOutdatedSandboxDaemon(peer managedHookPeer, route string) {
+	if _, logged := sandboxOutdatedDaemonLogged.LoadOrStore(peer.UID, true); !logged {
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] uid=%d route=%s reason=%s: the account's sandbox daemon does not state contract %d; "+
+			"new sandboxes and policy confirmations are refused until it restarts on this version\n",
+			peer.UID, route, sandboxrelay.ReasonDaemonOutdated, sandboxrelay.DaemonContract)
+	}
 }
 
 // sandboxDecide runs decide(peer, connectorName, "sandbox") for a sandbox
@@ -616,7 +665,7 @@ func (a *APIServer) sandboxPolicyKey(ctx context.Context, cfg *config.Config) st
 // never with another group's profile, which the host generation would
 // reveal. The daemon compares it for equality only.
 func (a *APIServer) sandboxViewGeneration(cfg *config.Config, reg sandboxreg.Registration) uint64 {
-	floor, floorDigest, err := sandboxFloorFor(cfg, reg.Profile)
+	floor, floorDigest, err := sandboxRegistrationFloor(cfg, reg)
 	if err != nil {
 		floorDigest = "unloadable"
 	}
@@ -635,6 +684,36 @@ func (a *APIServer) sandboxViewGeneration(cfg *config.Config, reg sandboxreg.Reg
 // sandbox_policy_unloadable.
 var sandboxFloorFor = func(cfg *config.Config, profile string) (config.OpenShellAdminConfig, string, error) {
 	return cfg.SandboxManagedFloor(profile)
+}
+
+// sandboxRegistrationFloor is the floor F of a registered sandbox and its
+// digest: the floor of the profile it is matched to now, tightened by the
+// floor of the profile it was created under when a profile-assignment
+// change has since moved it (Registration.CreateProfile). Floors are pinned
+// at create per sandbox: a re-match may tighten a running sandbox, never
+// loosen it, and the person's next sandbox takes the new profile alone
+// (GAP-0242). An administrator's edit of a profile's own settings applies
+// to both floors, so it still reaches a running sandbox. Floors that do not
+// combine (a contradiction, or a create profile no longer defined) fail
+// closed like any floor that does not load.
+func sandboxRegistrationFloor(cfg *config.Config, reg sandboxreg.Registration) (config.OpenShellAdminConfig, string, error) {
+	floor, digest, err := sandboxFloorFor(cfg, reg.Profile)
+	if err != nil || reg.CreateProfile == nil || *reg.CreateProfile == reg.Profile {
+		return floor, digest, err
+	}
+	created, createdDigest, err := sandboxFloorFor(cfg, *reg.CreateProfile)
+	if err != nil {
+		return config.OpenShellAdminConfig{}, "", fmt.Errorf("the floor of profile %q the sandbox was created under: %w", *reg.CreateProfile, err)
+	}
+	pinned, err := config.TightenOpenShellAdmin(floor, &created)
+	if err != nil {
+		return config.OpenShellAdminConfig{}, "", err
+	}
+	if access := strings.TrimSpace(floor.RequestAccess); access != "" {
+		// The contact of the profile the person is assigned to now.
+		pinned.RequestAccess = floor.RequestAccess
+	}
+	return pinned, sandboxDigestOf([]string{"create-pinned-v1", digest, createdDigest}), nil
 }
 
 // sandboxDigestOf is "sha256:" and the hex SHA-256 of v's JSON.

@@ -39,8 +39,10 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winsession"
@@ -51,6 +53,30 @@ import (
 // long enough for the new session's user token to become the exact active
 // token the guardian impersonates.
 var enterpriseHookWatchSessionSettle = 5 * time.Second
+
+// enterpriseHookWatchDebounceMaxWait bounds how long filesystem events can
+// postpone the pass they armed. Every event re-armed the debounce with no
+// limit, so writes faster than the debounce held the pass back until the
+// interval pass, long enough to start an agent without hooks and put the
+// file back unseen (GAP-0532).
+var enterpriseHookWatchDebounceMaxWait = 3 * time.Second
+
+// enterpriseHookWatchDebounceDelay is the delay to arm the debounce with at
+// now for a burst whose first event armed it at first: the debounce, cut to
+// what is left of maxWait (never below zero).
+func enterpriseHookWatchDebounceDelay(now, first time.Time, debounce, maxWait time.Duration) time.Duration {
+	if first.IsZero() || maxWait <= 0 {
+		return debounce
+	}
+	left := maxWait - now.Sub(first)
+	if left < 0 {
+		left = 0
+	}
+	if left < debounce {
+		return left
+	}
+	return debounce
+}
 
 // enterpriseHookTargetsWaitTimeout is the bounded window the hook-guardian
 // will fsnotify-wait for a missing targets.yaml before returning a
@@ -334,7 +360,7 @@ func init() {
 	enterpriseHooksWatchCmd.Flags().DurationVar(&enterpriseHookWatchInterval, "interval", time.Minute,
 		"Periodic reconcile backstop interval")
 	enterpriseHooksWatchCmd.Flags().DurationVar(&enterpriseHookWatchDebounce, "debounce", 750*time.Millisecond,
-		"Filesystem-event debounce before reconcile")
+		"Filesystem-event debounce before reconcile; a burst of events reaches its reconcile within 3s of its first event")
 	enterpriseHooksWatchCmd.Flags().DurationVar(&enterpriseHookWatchSettle, "settle", 2*time.Second,
 		"Post-reconcile quiet window: fsnotify events observed within this window after a reconcile completes are ignored (the guardian's own writes into watched dirs would otherwise loop-trigger reconcile forever)")
 
@@ -407,6 +433,9 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		return enterpriseHooksInstallError(cmd, err)
 	}
 	if err := validateEnterpriseHookManagedRuntime(); err != nil {
+		return enterpriseHooksInstallError(cmd, err)
+	}
+	if err := enterpriseHookInstallConnectorPublished(cfg, enterpriseHookConnector); err != nil {
 		return enterpriseHooksInstallError(cmd, err)
 	}
 	target, err := resolveEnterpriseHookTarget()
@@ -488,6 +517,30 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s hooks installed for %s\n", Style("✓", "fg=green", "bold"), result.Connector, result.UserHome)
 	return nil
+}
+
+// enterpriseHookInstallConnectorPublished refuses, on a standalone managed
+// deployment, a hook install for a connector the installed config does not
+// publish (enterprisepolicy.StandaloneConnectorPublished): its hook would
+// get no usable answer from the gateway, so every call of that agent would
+// be blocked with a message that does not name the cause (rel-1-0-3
+// GAP-0235). Other deployments are unchanged.
+func enterpriseHookInstallConnectorPublished(cfg *config.Config, name string) error {
+	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(name) == "" {
+		return nil
+	}
+	if enterprisepolicy.StandaloneConnectorPublished(cfg, name) {
+		return nil
+	}
+	published := enterprisepolicy.StandaloneConnectors(cfg)
+	list := "none"
+	if len(published) > 0 {
+		list = strings.Join(published, ", ")
+	}
+	return fmt.Errorf("enterprise hooks install: connector %q is not enabled by this computer's DefenseClaw configuration "+
+		"(enabled: %s), so its hooks would block every call; add it under guardrail.connectors in the "+
+		"administrator config and run ensure, which installs its hooks for every enrolled account",
+		config.NormalizeConnectorName(name), list)
 }
 
 func enterpriseHooksInstallError(cmd *cobra.Command, err error) error {
@@ -2116,7 +2169,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		started := time.Now()
 		run, err := runEnterpriseHookReconcileOnceStandaloneUnix(ctx)
 		if err == nil {
-			recordEnterpriseHookStandaloneUnixRestores(os.Stderr, cfg.DataDir, started, run)
+			// A restore that is not recorded is not named by status: report
+			// it and retry with the repair backoff (GAP-0626).
+			if restoreErr := recordEnterpriseHookStandaloneUnixRestores(os.Stderr, cfg.DataDir, started, run); restoreErr != nil && run.StateErr == nil {
+				run.StateErr = fmt.Errorf("record the restored targets: %w", restoreErr)
+			}
 		}
 		return run, err
 	}
@@ -2264,6 +2321,13 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					sharedFiles[f] = struct{}{}
 				}
 			}
+			platformDirs, platformFiles := enterpriseHookPlatformWatchFiles(target.Connector, resolved.home)
+			for _, dir := range platformDirs {
+				watchDirs[dir] = struct{}{}
+			}
+			for _, f := range platformFiles {
+				exclusiveFiles[f] = struct{}{}
+			}
 			if err == nil {
 				var result enterprisehooks.InstallResult
 				var repaired bool
@@ -2323,7 +2387,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		rows = append(rows, row)
 	}
 	enterpriseHookStartup.target(os.Stderr, len(manifest.Targets), len(manifest.Targets))
-	recordEnterpriseHookGuardianRestores(os.Stderr, cfg.DataDir, rows, restored)
+	// A restore that is not recorded is not named by status, so the pass
+	// reports it and retries instead of waiting for the interval (GAP-0626).
+	restoreErr := recordEnterpriseHookGuardianRestores(os.Stderr, cfg.DataDir, rows, restored)
 	if runtime.GOOS == "windows" && enterpriseHookGuardianRestoresEnabled() {
 		// The standalone Windows guardian; Linux and macOS record theirs
 		// in their own reconcile, and Secure Client records none.
@@ -2360,6 +2426,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			"publish exact protected enrollment set: %w",
 			enrollmentErr,
 		)
+	}
+	if stateErr == nil && restoreErr != nil {
+		stateErr = fmt.Errorf("record the restored targets: %w", restoreErr)
 	}
 	enterpriseHookStandalonePlatformFinish(ctx, os.Stderr, rows, time.Now())
 	run.Rows = rows
@@ -2419,6 +2488,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// / WatchSharedFiles after each reconcile.
 	exclusiveOwned := map[string]struct{}{} // DC-only writers — any event triggers
 	sharedOwned := map[string]struct{}{}    // agent + DC writers — Create/Remove/Rename trigger
+	// ownedSnapshot is each owned file's fingerprint as the last reconcile
+	// left it. A Write or Chmod that the writer policy or the settle window
+	// drops still counts when the file no longer matches it.
+	ownedSnapshot := map[string]string{}
 	// Post-reconcile guards against the self-trigger loop. Every
 	// reconcile writes into watched dirs (chmod on hook configs and
 	// hook scripts inside hardenInstallFootprint, plus writing
@@ -2490,6 +2563,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		for _, f := range run.WatchSharedFiles {
 			sharedOwned[filepath.Clean(f)] = struct{}{}
 		}
+		takeEnterpriseHookOwnedSnapshot(ownedSnapshot, exclusiveOwned, sharedOwned, enterpriseHookOwnedFileFingerprint)
 		status := "ok"
 		if run.Failures > 0 || run.StateErr != nil {
 			status = "attention"
@@ -2584,6 +2658,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 	debouncePending := false
 	debounceReason := ""
+	// debounceArmedAt is when the pending debounce was first armed.
+	var debounceArmedAt time.Time
 	repairRetry := time.NewTimer(time.Hour)
 	if !repairRetry.Stop() {
 		<-repairRetry.C
@@ -2656,9 +2732,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			//     ~/.codex/config.toml, ~/.claude/settings.json,
 			//     ~/.cursor/hooks.json): the agent itself constantly
 			//     rewrites these during normal use. Create, Remove,
-			//     and Rename are real tamper signals; Write and Chmod
-			//     are the agent doing its own thing
-			//     and the 5-min backstop handles any in-place stripping.
+			//     and Rename are real tamper signals; a Write or Chmod
+			//     counts only when the file's content or mode is no
+			//     longer what the last reconcile left there (an
+			//     in-place rewrite of the hooks waited for the interval
+			//     pass, GAP-0045).
 			//
 			// Events on unowned paths (agent session state, sqlite
 			// WAL churn, cache writes, workspace snapshots) are
@@ -2668,18 +2746,25 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// Empty maps means we haven't run a reconcile yet (only
 			// possible pre-startup); fall through so the startup
 			// reconcile flow is unaffected.
-			if !enterpriseHookWatchOwnedEventActionable(event, exclusiveOwned, sharedOwned) {
-				continue
-			}
-			// Drop Write/Chmod events observed inside the
-			// post-reconcile settle window: they are almost certainly
-			// the tail of writes the reconcile itself just made.
-			// Create/Remove/Rename must still reconcile because a
-			// user can atomically replace a protected path inside the
-			// settle window, leaving the destination present just like
-			// the guardian's own atomic rename tail.
-			if enterpriseHookWatchEventInSettleWindow(time.Now(), settleUntil, event.Op) {
-				droppedInSettle++
+			// Write/Chmod events observed inside the post-reconcile
+			// settle window are almost always the tail of writes the
+			// reconcile itself just made. Create/Remove/Rename must
+			// still reconcile because a user can atomically replace a
+			// protected path inside the settle window, leaving the
+			// destination present just like the guardian's own atomic
+			// rename tail.
+			actionable := enterpriseHookWatchOwnedEventActionable(event, exclusiveOwned, sharedOwned)
+			settling := actionable && enterpriseHookWatchEventInSettleWindow(time.Now(), settleUntil, event.Op)
+			// A Write or Chmod dropped by either rule still counts when
+			// the owned file no longer holds what the last reconcile left
+			// there: an in-place overwrite of the scoped token right after
+			// a pass waited for the interval pass (GAP-0044), as did an
+			// in-place rewrite of a shared agent config (GAP-0045).
+			if (!actionable || settling) &&
+				!enterpriseHookWatchOwnedFileChanged(event.Name, exclusiveOwned, sharedOwned, ownedSnapshot, enterpriseHookOwnedFileFingerprint) {
+				if settling {
+					droppedInSettle++
+				}
 				continue
 			}
 			// Log once when the first non-suppressed event lands after
@@ -2692,15 +2777,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 			// Record which specific event armed the debounce so the
 			// resulting reconcile log line names the culprit path.
-			// Preserve the FIRST event of a burst rather than
-			// overwriting; that's the one that actually caused the
-			// debounce arm, subsequent events during the 750ms window
-			// are already-scheduled noise.
-			if lastTriggerPath == "" {
-				lastTriggerPath = filepath.Clean(event.Name)
-				lastTriggerOp = event.Op
+			lastTriggerPath, lastTriggerOp = enterpriseHookWatchNoteTrigger(lastTriggerPath, lastTriggerOp, event)
+			if !debouncePending {
+				debounceArmedAt = time.Now()
 			}
-			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
+			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounceDelay(time.Now(), debounceArmedAt, enterpriseHookWatchDebounce, enterpriseHookWatchDebounceMaxWait))
 			debouncePending = true
 			debounceReason = "fsnotify"
 		case err, ok := <-events.Errors:
@@ -2714,7 +2795,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		case <-events.Overflow:
 			// Events were dropped while a reconcile ran; reconcile once more
 			// so a dropped change is not left to the interval pass.
-			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
+			if !debouncePending {
+				debounceArmedAt = time.Now()
+			}
+			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounceDelay(time.Now(), debounceArmedAt, enterpriseHookWatchDebounce, enterpriseHookWatchDebounceMaxWait))
 			debouncePending = true
 			if debounceReason == "" {
 				debounceReason = "fsnotify"
@@ -2751,6 +2835,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// (never fires otherwise) can make a deferred row's exact
 			// active session available; reconcile after the same
 			// debounce instead of waiting for the interval tick.
+			if !debouncePending {
+				// A later filesystem event of this pass is bounded from
+				// here, not from the start of an earlier burst.
+				debounceArmedAt = time.Now()
+			}
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchSessionSettle)
 			debouncePending = true
 			if debounceReason == "" {
@@ -3093,6 +3182,53 @@ func enterpriseHookWatchOwnedEventActionable(event fsnotify.Event, exclusiveOwne
 		return false
 	}
 	return event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0
+}
+
+// enterpriseHookWatchNoteTrigger keeps the path of the first event of a burst
+// (the one that armed the debounce) and joins the ops of later events on that
+// same path. An in-place overwrite on macOS reports the truncation (Chmod)
+// before the Write, so the pass names both, not Chmod alone.
+func enterpriseHookWatchNoteTrigger(path string, op fsnotify.Op, event fsnotify.Event) (string, fsnotify.Op) {
+	name := filepath.Clean(event.Name)
+	if path == "" {
+		return name, event.Op
+	}
+	if path == name {
+		return path, op | event.Op
+	}
+	return path, op
+}
+
+// enterpriseHookOwnedFileFingerprint fingerprints an owned file for the
+// watch loop and the standalone Unix owned-files record; tests replace it.
+var enterpriseHookOwnedFileFingerprint = enterprisehooks.OwnedFileFingerprint
+
+// takeEnterpriseHookOwnedSnapshot replaces snapshot with the fingerprint of
+// every owned file as the reconcile that just finished left it.
+func takeEnterpriseHookOwnedSnapshot(snapshot map[string]string, exclusiveOwned, sharedOwned map[string]struct{}, fingerprint func(string) string) {
+	for path := range snapshot {
+		delete(snapshot, path)
+	}
+	for _, owned := range []map[string]struct{}{exclusiveOwned, sharedOwned} {
+		for path := range owned {
+			snapshot[path] = fingerprint(path)
+		}
+	}
+}
+
+// enterpriseHookWatchOwnedFileChanged reports whether path is an owned file
+// whose fingerprint is no longer the one the last reconcile left (snapshot).
+// An owned file without a snapshot entry counts as changed; an unowned path
+// never does.
+func enterpriseHookWatchOwnedFileChanged(path string, exclusiveOwned, sharedOwned map[string]struct{}, snapshot map[string]string, fingerprint func(string) string) bool {
+	cleaned := filepath.Clean(path)
+	_, exclusive := exclusiveOwned[cleaned]
+	_, shared := sharedOwned[cleaned]
+	if !exclusive && !shared {
+		return false
+	}
+	before, ok := snapshot[cleaned]
+	return !ok || fingerprint(cleaned) != before
 }
 
 func syncEnterpriseHookWatchDirs(fsw *fsnotify.Watcher, watched map[string]struct{}, dirs []string) error {

@@ -38,6 +38,8 @@ the same config.
 | Tetragon | Optional. 1.7.x on RHEL 9 x86_64 is the target platform (expected, not verified yet). See [Tetragon on a Linux fleet](/docs/enterprise/tetragon). |
 | Application control | fapolicyd: the deb and rpm ship every file an agent loads (the binaries and the managed OpenCode plugin), so package-database trust covers them. After a payload install, add `/opt/defenseclaw/` to a trust file. See [Application control must allow DefenseClaw files](/docs/enterprise/threat-model#application-control-must-allow-defenseclaw-files). |
 
+If a payload install reports that the staged gateway could not run, check fapolicyd trust, SELinux policy, execute permission, and `noexec` mount options before retrying. The error preserves the operating system's refusal.
+
 The systemd version decides how the gateway reads secrets:
 
 | systemd | Secrets |
@@ -211,6 +213,12 @@ guardrail:
 Each key under `guardrail.connectors` turns on protection for that agent. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
+
+For a custom rule pack, follow [Custom rule packs](/docs/enterprise/configuration#custom-rule-packs)
+before applying the config. Create and copy its folders with `umask 022` so
+the gateway can read them; a folder made under a restrictive umask may be
+unreadable even when root can validate its files. Run `rulepack validate` to
+obtain the `custom_packs` pin, then apply the config.
 
 AI Discovery (each enrolled user's inventory scan in `ai-discovery/`, and the
 skill, MCP and AI component records it feeds) is off unless the config sets
@@ -534,7 +542,7 @@ the sandbox policy of each person's directory group. They are off until
 `openshell.enabled` is on. The rpm and deb package the `defenseclaw` launcher
 and the user units; you provide OpenShell (`install: prerequisite`) or let each
 person's daemon download it (`install: setup`). The Docker driver needs Docker
-Engine 28 or newer with BuildKit, Landlock (kernel 6.2 or newer) and the person
+Engine 28 or newer with BuildKit, Landlock ABI 3 or newer (kernel 6.2 upstream; a distribution kernel may carry a backport, and `sandbox doctor` reports the ABI of the running kernel) and the person
 in the `docker` group. The optional MicroVM driver also needs `/dev/kvm`, the
 `kvm` group and `e2fsprogs`, and falls back to Docker where KVM does not work;
 its agent images are built in Docker, so it needs the `docker` group too.
@@ -596,7 +604,7 @@ install, `status` and `verify` name each such account with the
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment, its config, secrets and logs, most of its data and lifecycle state, and the `defenseclaw` account. When an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay. They are root-owned while the service account is gone; the next `ensure` adopts them. Each user keeps `~/.defenseclaw`, and your policies in `/etc/defenseclaw/policies` (custom rule packs, Rego) stay. | `defenseclaw-gateway enterprise linux uninstall --json` |
+| Stop and remove the deployment, its config, secrets and logs, most of its data and lifecycle state, and the `defenseclaw` account. When an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay, with the root-only sandbox setup record `/var/lib/defenseclaw-enterprise/openshell-state.kept.json`. They are root-owned while the service account is gone; the next `ensure` adopts them. Each user keeps `~/.defenseclaw`, and your policies in `/etc/defenseclaw/policies` (custom rule packs, Rego) stay. | `defenseclaw-gateway enterprise linux uninstall --json` |
 | Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise linux uninstall --purge --json` |
 | Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise linux uninstall --keep-state --json` |
 | Keep only the `defenseclaw` account | Add `--keep-service-account` |
@@ -614,7 +622,11 @@ stops each enrolled user's per-user gateway and removes all of that user's
 `~/.defenseclaw`, the empty agent folders DefenseClaw created in that home,
 the per-user binaries and launcher links in `~/.local/bin`, and the
 DefenseClaw wheels earlier per-user installs left in `~/.cache/uv`, and the
-result names every user it purged or left alone. To delete the users' data,
+result names every user it purged or left alone. A user's own DefenseClaw
+install from before the enrollment is moved to `~/.defenseclaw-backup-<UTC
+time>` in that home first, and a user whose home folder is gone is reported
+as already clean (see
+[Uninstall](/docs/enterprise/lifecycle#uninstall)). To delete the users' data,
 run `--purge` instead of the plain uninstall: the plain uninstall removes the
 enrollment record that a later `--purge` needs to find the enrolled accounts.
 A purge after it warns (`per_user_state_remaining`) and names each account
@@ -650,7 +662,7 @@ binaries and units in place, so dpkg or rpm still lists
 | Package command | Effect |
 | --- | --- |
 | `apt remove defenseclaw-enterprise` | Runs plain `uninstall`, then removes the package files and `/opt/defenseclaw/share/policies`. The config, most state and the `defenseclaw` account go, also after a package install that failed and rolled back; `/etc/defenseclaw/policies` stays. If an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay; each user keeps `~/.defenseclaw`. Use lifecycle `--purge` before removal for a clean image. |
-| `apt purge defenseclaw-enterprise` | Runs the same plain lifecycle uninstall, then deletes what it left of `/etc/defenseclaw`, `/var/lib/defenseclaw` (including `sandbox` and `redaction-correlation.key`), `/var/lib/defenseclaw-hook-guardian` and `/var/log/defenseclaw`, plus lifecycle state except for the root-owned `/var/lib/defenseclaw-enterprise/lifecycle.lock`. It does not purge each enrolled account's home; run lifecycle `--purge` before package removal to do that. |
+| `apt purge defenseclaw-enterprise` | Runs the same plain lifecycle uninstall, then deletes what it left of `/etc/defenseclaw`, `/var/lib/defenseclaw` (including `sandbox` and `redaction-correlation.key`), `/var/lib/defenseclaw-hook-guardian` and `/var/log/defenseclaw`, plus lifecycle state except for the root-owned `/var/lib/defenseclaw-enterprise/lifecycle.lock`. It does not purge each enrolled account's home; run lifecycle `--purge` before package removal to do that. The sandboxes the accounts kept in their homes are no longer known to a later install, because their registrations are gone: pull their work first. |
 | `dnf remove defenseclaw-enterprise` | Runs plain `uninstall`, then removes the package files and `/opt/defenseclaw/share/policies`. The config, most state and the `defenseclaw` account go, also after a package install that failed and rolled back; `/etc/defenseclaw/policies` stays (delete it by hand when you no longer need it). If an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay; each user keeps `~/.defenseclaw`. Use lifecycle `--purge` before removal for a clean image. |
 
 These rows describe a successful removal. If `uninstall` refuses before any
@@ -683,7 +695,8 @@ On a tarball host, `uninstall --purge` removes everything, including
   [Upgrade](/docs/enterprise/lifecycle#upgrade) and
   [Roll back](/docs/enterprise/lifecycle#roll-back). The first `ensure` of a
   new release migrates a `config_version: 8` config to 9 and keeps
-  `config.yaml.v8.bak` and `migration-v9.json` next to it.
+  `config.yaml.v8.bak` and `migration-v9.json` next to it. A host that never
+  needed that migration has no v8 backup.
 - **A package older than the config.** The package refuses to install,
   before it replaces any file, when `/etc/defenseclaw/config.yaml` has a
   `config_version` newer than the release reads (a config written for a

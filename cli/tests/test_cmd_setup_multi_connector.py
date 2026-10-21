@@ -68,6 +68,71 @@ from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabili
 from tests.helpers import cleanup_app, make_app_context, record_test_setup_agent_selections
 
 
+def test_unsupported_codex_batch_refuses_without_roster_change():
+    app, root, db_path = make_app_context()
+    try:
+        before = tuple(app.cfg.active_connectors())
+        ctx = click.Context(setup_group, obj=app)
+        with (
+            ctx,
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=False,
+            ),
+            patch.object(app.cfg, "save") as save,
+            pytest.raises(click.ClickException, match="did not pass setup preflight"),
+        ):
+            cmd_setup._apply_setup_batch(
+                ctx, app, ["codex"], mode="action", restart=False,
+                prompt_per_connector=False,
+            )
+        save.assert_not_called()
+        assert tuple(app.cfg.active_connectors()) == before
+    finally:
+        cleanup_app(app, db_path, root)
+
+
+def test_batch_probes_all_selected_versions_in_one_cache_publication():
+    app, root, db_path = make_app_context()
+    try:
+        ctx = click.Context(setup_group, obj=app)
+        with (
+            ctx,
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="linux"),
+            patch("defenseclaw.commands.cmd_setup.agent_discovery.discover_with_probes") as discover,
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=False,
+            ) as check,
+            pytest.raises(click.ClickException, match="did not pass setup preflight"),
+        ):
+            cmd_setup._apply_setup_batch(
+                ctx, app, ["codex", "cursor"], mode="action", restart=False,
+                prompt_per_connector=False,
+            )
+        discover.assert_called_once()
+        assert discover.call_args.args[0] == ["codex", "cursor"]
+        assert check.call_args.kwargs["_discovery"] is discover.return_value
+    finally:
+        cleanup_app(app, db_path, root)
+
+
+def test_batch_rollback_restores_prior_cursor_discovery_version():
+    app, root, db_path = make_app_context()
+    try:
+        cache = os.path.join(root, "agent_discovery.json")
+        prior = b'{"agents":{"cursor":{"version":"2026.10.01-14929f9"}}}\n'
+        atomic_write_private_bytes(cache, prior)
+        snapshot = cmd_setup._capture_setup_config_snapshot(app.cfg)
+        atomic_write_private_bytes(cache, b'{"agents":{"cursor":{"version":""}}}\n')
+        cmd_setup._restore_setup_config_snapshot(app, snapshot)
+        with open(cache, "rb") as source:
+            assert source.read() == prior
+    finally:
+        cleanup_app(app, db_path, root)
+
+
 def _invoke(args, app):
     runner = CliRunner()
     return runner.invoke(setup_group, args, obj=app, catch_exceptions=False)
@@ -119,6 +184,9 @@ def _setup_patches(prompt=None):
 class TestAdditiveSetupCommand(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        preflight = patch("defenseclaw.commands.cmd_setup._preflight_opencode_plugin_folder")
+        preflight.start()
+        self.addCleanup(preflight.stop)
         self.cfg_path = os.path.join(self.tmp_dir, "config.yaml")
         self.app.cfg.save = lambda: atomic_write_private_bytes(  # type: ignore[assignment]
             self.cfg_path, b"x\n"
@@ -227,6 +295,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             connectors=["codex", "cursor"],
             wait_for_connector_ready=True,
             start_if_stopped=True,
+            required_connectors=frozenset({"codex", "cursor"}),
         )
 
     def test_bare_batch_cannot_report_success_when_readiness_gate_fails(self):
@@ -1005,6 +1074,77 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertNotEqual(self.app.cfg.guardrail.connector, "claudecode")
         self.assertFalse(os.path.exists(self.cfg_path))
 
+    def test_setup_guardrail_refuses_switch_from_single_codex_without_roster(self):
+        self._seed_single("codex")
+        self.app.cfg.guardrail.enabled = True
+        with _setup_patches() as restart:
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "action"],
+                obj=self.app,
+            )
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("No changes made", result.output)
+        self.assertIn("set up: codex", result.output)
+        restart.assert_not_called()
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
+        self.assertEqual(self.app.cfg.guardrail.connectors, {})
+        self.assertFalse(os.path.exists(self.cfg_path))
+
+    def test_setup_guardrail_refuses_switch_when_only_claw_mode_names_codex(self):
+        self._seed_single("codex")
+        self.app.cfg.guardrail.connector = ""
+        with _setup_patches() as restart:
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "action"],
+                obj=self.app,
+            )
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Claude Code is not set up here (set up: codex)", result.output)
+        restart.assert_not_called()
+        self.assertEqual(self.app.cfg.claw.mode, "codex")
+        self.assertFalse(os.path.exists(self.cfg_path))
+
+    def test_setup_guardrail_can_select_connector_on_unconfigured_install(self):
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.claw.mode = ""
+        self.app.cfg.guardrail.connectors = {}
+        with _setup_patches():
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
+
+    def test_setup_guardrail_accepts_connector_recorded_only_in_claw_mode(self):
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.claw.mode = "claudecode"
+        self.app.cfg.guardrail.connectors = {}
+        with _setup_patches():
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+
+    def test_setup_guardrail_default_unsaved_openclaw_allows_first_connector_choice(self):
+        # The loader's OpenClaw default is not a saved registration.
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.claw.mode = "openclaw"
+        self.app.cfg.guardrail.connectors = {}
+        self.assertFalse(os.path.exists(self.cfg_path))
+        with _setup_patches():
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+
     # GAP-0371 reopen: an earlier build left guardrail.connector at claudecode
     # with only Codex on the roster. Re-running setup for Codex must repair the
     # mirror, not name Claude Code or enroll it.
@@ -1167,7 +1307,11 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         gc.hook_fail_mode = "closed"
         _write_connector_identity(self.app.cfg, "codex", "add")
         self.assertEqual(gc.connectors["claudecode"].hook_fail_mode, "")
-        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "open")
+        # Observe mode follows the global closed too, under Secure Client as
+        # well, and so does action mode.
+        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
+        gc._secure_client = True
+        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
         gc.connectors["claudecode"].mode = "action"
         self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
 
@@ -1250,7 +1394,7 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertNotIn("gateway.jsonl", out)
         self.assertNotIn("Get-Content -LiteralPath", out)
 
-    def test_hermes_action_summary_reports_fail_open_posture(self):
+    def test_hermes_action_summary_reports_its_fail_mode_on_windows(self):
         self._seed_map("hermes")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -1264,7 +1408,9 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
 
         self.assertIn("pre_tool deny; pre_verify continue", out)
         self.assertIn("hook failure posture:", out)
-        self.assertIn("upstream fail-open", out)
+        # rel-1-0-3 GAP-0269: the Windows native Hermes hook follows its fail mode.
+        self.assertIn("fail mode applies", out)
+        self.assertNotIn("upstream fail-open", out)
         self.assertIn("native ask/approve:", out)
         self.assertIn("unsupported", out)
         self.assertIn("native OTel:", out)

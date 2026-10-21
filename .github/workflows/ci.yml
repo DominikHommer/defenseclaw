@@ -845,6 +845,7 @@ jobs:
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: scripts/build-release-assets.sh 9.9.9 "$RUNNER_TEMP/assets" linux/amd64 windows/amd64
+      - run: test -s "$RUNNER_TEMP/assets/defenseclaw-fleet-assets.tar.gz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: install-smoke-assets
@@ -979,7 +980,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -1003,15 +1004,19 @@ jobs:
       - name: Go tests of the standalone lifecycle packages
         if: matrix.part == 'lifecycle'
         shell: bash
-        run: >-
-          go test -count=1 -timeout 20m
-          ./internal/enterpriseunix/...
-          ./internal/unixidentity/...
-          ./internal/peercred/...
-          ./internal/managed/...
-          ./internal/enterprisehooks/...
-          ./internal/enterprisepolicy/...
-          ./internal/ipc/...
+        run: |
+          set -euo pipefail
+          # Keep the longest suite separate and name each test in the log.
+          # A stalled hosted runner then shows the test or compile phase,
+          # rather than silently cancelling the whole job at 30 minutes.
+          go test -count=1 -timeout 20m -p 2 -v ./internal/enterpriseunix/...
+          go test -count=1 -timeout 20m -p 2 \
+            ./internal/unixidentity/... \
+            ./internal/peercred/... \
+            ./internal/managed/... \
+            ./internal/enterprisehooks/... \
+            ./internal/enterprisepolicy/... \
+            ./internal/ipc/...
       - name: Go tests of the darwin paths in the agent-process, connector, gateway and CLI packages
         # The go-test jobs run these packages on Linux only. On macOS this runs
         # the kern.proc agent-process lookup, the gethostuuid machine id behind
@@ -1165,11 +1170,9 @@ jobs:
           retention-days: 3
 
   enterprise-fleet-compiler-payload:
-    # Fleet is opt-in. Inspect and execute its inert package payload in a
-    # separate gate so RPM/DEB core install and upgrade do not acquire an
-    # optional Python/PyYAML dependency or change host package repositories.
-    name: Enterprise Fleet Compiler Payload
-    needs: enterprise-install-assets
+    # Managed packages exclude the opt-in Fleet compiler on every platform.
+    name: Enterprise Package Fleet Exclusion
+    needs: [enterprise-install-assets, enterprise-install-assets-windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -1180,20 +1183,23 @@ jobs:
         with:
           name: enterprise-install-linux
           path: ${{ runner.temp }}/enterprise-install
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Install RPM archive reader on the disposable runner
         shell: bash
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libarchive-tools
-      - name: Check opt-in compiler source and compile a policy from each package
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: enterprise-install-windows
+          path: ${{ runner.temp }}/enterprise-install-windows/
+      - name: Check managed packages exclude the Fleet compiler
         shell: bash
         env:
           LANE_VERSION: ${{ needs.enterprise-install-assets.outputs.linux-version }}
         run: |
           set -euo pipefail
-          for kind in deb rpm; do
-            uv run --no-project --with pyyaml==6.0.3 bash scripts/test-enterprise-fleet-compiler-package.sh \
-              "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-${LANE_VERSION}-linux-amd64.${kind}"
-          done
+          bash scripts/test-managed-package-no-fleet-compiler.sh \
+            "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-${LANE_VERSION}-linux-amd64.deb" \
+            "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-${LANE_VERSION}-linux-amd64.rpm" \
+            "$RUNNER_TEMP/enterprise-install-windows/DefenseClawSetup-Enterprise-Standalone-x64.exe"
 
   enterprise-linux-install:
     # The deb installs on the Ubuntu 24.04 runner itself (systemd 255 is PID

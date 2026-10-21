@@ -39,8 +39,11 @@ type ProxyOptions struct {
 	Stdout    io.Writer
 	Stderr    io.Writer
 	Evaluator Evaluator
-	// Managed marks the guard of a managed enrollment, whose user has no
-	// DefenseClaw command to run and is pointed at the administrator.
+	// Managed marks the guard of a standalone managed enrollment (never
+	// Secure Client), whose user has no DefenseClaw command to run and is
+	// pointed at the administrator. Such a guard refuses a frame it could
+	// not evaluate in observe mode too, unless the profile's fail_mode is
+	// explicitly open (observeRefuses).
 	Managed bool
 	// SetupCommand writes this editor entry again ("" when unknown).
 	SetupCommand string
@@ -67,7 +70,10 @@ func (o ProxyOptions) setupCommandFor(profile string, mode Mode) string {
 
 // Run starts an ACP agent without a shell and mediates every NDJSON frame in
 // both directions. In action mode malformed frames and evaluator failures are
-// fail-closed. Observe mode records evaluations but preserves traffic.
+// fail-closed. Observe mode records evaluations but preserves traffic, except
+// that a frame it could not evaluate is refused when the profile's fail_mode
+// is explicitly closed, and by a standalone managed guard unless that
+// session's fail_mode is explicitly open.
 func Run(ctx context.Context, opts ProxyOptions) error {
 	if opts.Command == "" || opts.Stdin == nil || opts.Stdout == nil || opts.Stderr == nil {
 		return errors.New("ACP proxy requires command, stdin, stdout, and stderr")
@@ -168,6 +174,11 @@ type proxyState struct {
 	// one guard for every thread (Zed) showed nothing in a new thread after
 	// a revoke (GAP-0354).
 	uncheckedNotified map[string]bool
+	// openSessions are the sessions whose last authenticated verdict said
+	// the profile's fail_mode is open; a failed authentication clears them.
+	// failClosed is the last authenticated verdict's "closed".
+	openSessions map[string]bool
+	failClosed   bool
 	// silenceGen and silenceTimer drive the notice for an agent that does
 	// not answer a prompt (armSilenceNotice).
 	silenceGen   uint64
@@ -221,6 +232,51 @@ func (s *proxyState) agentSpoke() {
 		s.silenceTimer.Stop()
 		s.silenceTimer = nil
 	}
+}
+
+// recordFailMode keeps the fail mode an authenticated verdict for a frame
+// of session reported for the profile (Verdict.FailMode). An open fail mode
+// belongs to that session only: a verdict of one thread never opens another
+// one the guard also carries.
+func (s *proxyState) recordFailMode(session string, verdict Verdict) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failClosed = verdict.FailMode == "closed"
+	switch {
+	case session == "":
+	case verdict.FailMode != "open":
+		delete(s.openSessions, session)
+	case len(s.openSessions) < MaxPendingIDs:
+		if s.openSessions == nil {
+			s.openSessions = map[string]bool{}
+		}
+		s.openSessions[session] = true
+	}
+}
+
+// forgetFailOpen drops every open fail mode: an answer that failed
+// authentication, or a credential the gateway refused, says nothing about
+// the profile, and no later outage may be read as permission to go open.
+func (s *proxyState) forgetFailOpen() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.openSessions = nil
+}
+
+// sessionFailsOpen reports whether the last authenticated verdict of
+// session said the profile's fail_mode is explicitly open.
+func (s *proxyState) sessionFailsOpen(session string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return session != "" && s.openSessions[session]
+}
+
+// profileFailsClosed reports whether the last authenticated verdict said
+// the profile's fail_mode is explicitly closed.
+func (s *proxyState) profileFailsClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failClosed
 }
 
 // checkingResumed re-arms the unchecked notice after an evaluation worked.
@@ -592,6 +648,39 @@ func unavailableReason(err error) string {
 	return evaluationUnavailableReason
 }
 
+// authenticationFailure is an evaluation that failed authentication: an
+// answer whose MAC does not verify, or a credential the gateway refused. It
+// is not an outage.
+func authenticationFailure(err error) bool {
+	return errors.Is(err, ErrResponseAuthentication) || errors.Is(err, ErrCredentialRejected) ||
+		errors.Is(err, ErrCredentialOtherAccount)
+}
+
+// observeRefuses reports an observe-mode frame whose evaluation failed and
+// that is not delivered. An administrator who set the profile's fail_mode
+// closed, which an authenticated verdict reported, gets that on every host.
+// A standalone managed guard (Managed) refuses by default: outside Secure
+// Client a step DefenseClaw cannot check is not delivered unchecked, in
+// observe mode too (rel-1-0-3 GAP-0037), as the managed hooks do. The
+// administrator chooses otherwise with fail_mode: open (owner decision
+// 2026-10-20), which an authenticated verdict of the same session must have
+// reported (proxyState.sessionFailsOpen); a failed authentication is not an
+// outage and stays refused. An administrator who switched ACP checking off
+// (ErrACPDisabled) gave an answer, not a failure, so that frame goes through
+// with the notice.
+func observeRefuses(opts ProxyOptions, state *proxyState, msg Message, err error) bool {
+	if opts.Mode != ModeObserve || errors.Is(err, ErrACPDisabled) {
+		return false
+	}
+	if state.profileFailsClosed() {
+		return true
+	}
+	if !opts.Managed {
+		return false
+	}
+	return authenticationFailure(err) || !state.sessionFailsOpen(promptSessionID(msg))
+}
+
 // refusalReason is what the editor sees for a frame refused because it
 // could not be evaluated. A revoked credential used to read as a gateway
 // that did not answer, and a managed user was told to run commands the host
@@ -627,6 +716,8 @@ func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
 	case errors.Is(err, ErrGatewayNotReady):
 		return prefix + "the gateway is not ready to check ACP traffic yet (it may still be loading a setup change), " +
 			"so it was not delivered. Try again in a few seconds; " + next
+	case errors.Is(err, ErrResponseAuthentication):
+		return prefix + "its answer could not be verified as the gateway's, so it was not delivered. Try again; " + next
 	}
 	return prefix + "the gateway did not answer, so it was not delivered. Try again; " + next
 }
@@ -664,14 +755,11 @@ func (s *proxyState) noticeUnchecked(opts ProxyOptions, direction Direction, msg
 		why = "ACP checking is switched off"
 	case errors.Is(err, ErrCredentialOtherAccount):
 		why = "the ACP credential this editor entry uses was issued to another account"
-	case opts.Managed:
-		why = "the gateway did not accept this editor's ACP credential (your administrator may have revoked your access)"
 	}
+	// A standalone managed guard reaches this only for ErrACPDisabled: it
+	// refuses every other failed authentication (observeRefuses).
 	next := "Contact your administrator."
 	switch {
-	case opts.Managed && errors.Is(err, ErrCredentialRejected):
-		// Setup cannot restore a revoked credential (GAP-0905).
-		next = "Ask your administrator to enroll you again; running setup cannot restore a revoked credential."
 	case errors.Is(err, ErrCredentialOtherAccount):
 		next = "Ask your administrator to enroll you for this editor and agent."
 	case !opts.Managed && opts.SetupCommand != "":
@@ -892,6 +980,11 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			// is not a gateway problem to report (GAP-0351).
 			return nil
 		}
+		if evalErr == nil {
+			state.recordFailMode(promptSessionID(msg), verdict)
+		} else if authenticationFailure(evalErr) {
+			state.forgetFailOpen()
+		}
 		if evalErr == nil && state.peerProtocolFixes {
 			state.checkingResumed()
 		}
@@ -905,10 +998,16 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			if errors.Is(evalErr, ErrModeMismatch) {
 				return fmt.Errorf("ACP evaluation unavailable: %w", evalErr)
 			}
-			if opts.Mode == ModeAction {
+			if opts.Mode == ModeAction || observeRefuses(opts, state, msg, evalErr) {
 				// Fail closed for this frame only, exactly as for a block.
 				logf(opts.Stderr, "[defenseclaw-acp] evaluation unavailable, refused %s %s: %v\n", direction, msg.Method, evalErr)
 				verdict = Verdict{Action: "block", Reason: state.refusalReason(opts, evalErr)}
+				if opts.Mode != ModeAction {
+					if err := writeBlock(state, direction, msg, verdict.Reason, dst, rejectDst); err != nil {
+						return err
+					}
+					continue
+				}
 			} else {
 				logf(opts.Stderr, "[defenseclaw-acp] observe evaluation error: %v\n", evalErr)
 				verdict = Verdict{Action: "allow"}

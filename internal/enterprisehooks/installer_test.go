@@ -1455,6 +1455,8 @@ func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
 	wantExclusive := []string{
 		filepath.Join(hookDir, "codex-hook.sh"),
 		filepath.Join(hookDir, ".hook-codex.token"),
+		// The flat runtime record the hook script reads (GAP-0671).
+		filepath.Join(hookDir, ".hookcfg.codex"),
 		filepath.Join(hookDir, "inspect-tool.sh"),
 		filepath.Join(hookDir, "inspect-request.sh"),
 		filepath.Join(hookDir, "inspect-response.sh"),
@@ -2448,8 +2450,9 @@ func TestHookConfigTheAccountOwnsIsTightened(t *testing.T) {
 
 // TestPrepareHookContractRefusesUnverifiedOutsideSecureClient keeps
 // origin/main's contract gate for every profile but Secure Client: in action
-// mode an unverified agent version is refused, observe mode installs, and
-// the configured delivery mode is never relaxed to open.
+// mode an unverified agent version is refused, observe mode installs only an
+// agent whose contract is known (rel-1-0-3 GAP-0151), and the configured
+// delivery mode is never relaxed to open.
 func TestPrepareHookContractRefusesUnverifiedOutsideSecureClient(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	setStandaloneProfileForTest(t, true)
@@ -2458,10 +2461,14 @@ func TestPrepareHookContractRefusesUnverifiedOutsideSecureClient(t *testing.T) {
 	for _, tc := range []struct {
 		name, agentVersion string
 		refused            bool
+		// observeRefused: the standalone guardian installs no hooks for an
+		// agent version with no hook contract in observe mode either
+		// (rel-1-0-3 GAP-0151).
+		observeRefused bool
 	}{
 		{name: "unversioned", refused: true},
-		{name: "unnormalized", agentVersion: "codex nightly", refused: true},
-		{name: "unsupported", agentVersion: "codex 0.123.0", refused: true},
+		{name: "unnormalized", agentVersion: "codex nightly", refused: true, observeRefused: true},
+		{name: "unsupported", agentVersion: "codex 0.123.0", refused: true, observeRefused: true},
 		{name: "known", agentVersion: "codex 0.142.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2475,7 +2482,11 @@ func TestPrepareHookContractRefusesUnverifiedOutsideSecureClient(t *testing.T) {
 				t.Fatalf("action prepare = %+v, %v; want closed", prepared, err)
 			}
 			prepared, err = prepareHookContract("observe", conn, opts)
-			if err != nil || prepared.HookFailMode != "closed" {
+			if tc.observeRefused {
+				if err == nil || !strings.Contains(err.Error(), "is not verified against a known hook contract") {
+					t.Fatalf("observe prepare = %+v, %v; want the hook_contract_unverified refusal", prepared, err)
+				}
+			} else if err != nil || prepared.HookFailMode != "closed" {
 				t.Fatalf("observe prepare = %+v, %v; want closed and no refusal", prepared, err)
 			}
 		})

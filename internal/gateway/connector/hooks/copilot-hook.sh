@@ -50,11 +50,23 @@ unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 {{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+_DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)" || {{$failure}}
 export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  # A registered closed hook cannot treat missing local state as retirement.
+  if [ "{{.FailMode}}" = "closed" ] || [ "${DEFENSECLAW_STRICT_AVAILABILITY:-}" = "1" ]; then
+    echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
+    # Copilot CLI needs a native denial; an error status alone can allow.
+    case "${2:-}" in
+      preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
+      permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+      *) {{$failure}} ;;
+    esac
+    exit 0
+  fi
   exit 0
 fi
 {{end}}
@@ -150,12 +162,14 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
+  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" transport
   defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
   echo "defenseclaw: sandbox ingress unreachable, blocking copilot tool (sandbox hooks fail closed): $1" >&2
   exit 2
 }
 
 fail_response() {
+  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" response
   defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: copilot hook error, blocking copilot tool (sandbox hooks fail closed): $1" >&2
   exit 2
@@ -239,9 +253,10 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/copilot/hook" "$PAYLOAD" \
 }{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
   fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
 fi
-# A refused connection means this account's gateway is not running (after
-# a reboot, for example): start it once and retry. See
-# defenseclaw_gateway_cold_start in _hardening.sh.
+# A refused or dropped connection means this account's gateway is
+# restarting or not running (after a reboot, for example): send the call
+# again for up to 3 seconds, starting the gateway after a refusal. See
+# defenseclaw_await_gateway in _hardening.sh.
 # defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
 # payload on descriptors, never on its command line.
 defenseclaw_hook_post() {
@@ -255,8 +270,7 @@ defenseclaw_hook_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
-  RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
+  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"
 }
 defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 

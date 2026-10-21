@@ -100,6 +100,15 @@ func init() {
 	// bundle status and verify ask whether this is a standalone managed
 	// device; on Windows the deployment record answers.
 	bundleManagedDevice = windowsEnterpriseStandaloneInstalled
+	// A standard user cannot read deployment.json, so bundle verify cannot
+	// tell a managed device from an unmanaged one (GAP-0009).
+	bundleDeviceRecordUnreadable = func() bool {
+		if windowsEnterpriseIsElevated() {
+			return false
+		}
+		deployment, err := windowsEnterpriseDeploymentInspector(managed.ProfileStandalone)
+		return err == nil && deployment.State == winpath.EnterpriseDeploymentUnknown
+	}
 	bundlePrivilege = func() error {
 		if !windowsEnterpriseIsElevated() {
 			return &enterprisebundle.Error{Code: enterprisebundle.CodeNotAdmin,
@@ -108,6 +117,7 @@ func init() {
 		return nil
 	}
 	managedStandaloneBundleGeneration = windowsStagedBundleGeneration
+	managedStandaloneBundleCurrent = windowsBundleCurrent
 	bundleSettleStatus = settleWindowsBundleStatus
 }
 
@@ -250,6 +260,20 @@ func windowsStagedBundleGeneration(path string, raw []byte) (configwrite.Options
 	return opt, true, nil
 }
 
+// windowsBundleCurrent reports a current (confirmed) policy bundle in the
+// Windows bundle store.
+func windowsBundleCurrent() (bool, error) {
+	layout, err := windowsBundleLayout()
+	if err != nil {
+		return false, nil
+	}
+	state, err := newWindowsBundleDriver(layout).Store.LoadState()
+	if err != nil {
+		return false, fmt.Errorf("read the policy bundle state: %w", err)
+	}
+	return state.Current != nil, nil
+}
+
 // windowsBundleRun is the bundle state of one ensure run.
 type windowsBundleRun struct {
 	ctx      context.Context
@@ -265,6 +289,8 @@ type windowsBundleRun struct {
 	anchorPath     string
 	anchorPrevious []byte
 	anchorExisted  bool
+	// previousGeneration is config.generation.json as the run found it.
+	previousGeneration configwrite.GenerationState
 	// anchorOnly records the anchor file a TRUSTANCHORS= run without
 	// BUNDLE= replaced, for the result (settleAnchorOnlyEnsure).
 	anchorOnly *anchorOnlyChange
@@ -655,7 +681,12 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		// Installing the anchors puts the computer in bundle mode, which
 		// refuses CONFIG=; installing them first would let this one run
 		// apply an unsigned config past that check.
-		return refuse("invalid_arguments", "TRUSTANCHORS= (--trust-anchors) cannot be combined with CONFIG= (--config): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=")
+		// The code is bundle_required, as for a CONFIG= on a computer
+		// already in bundle mode; the exit stays 1639, because the command
+		// line itself can never succeed (#1288).
+		return true, writeWindowsBundleRefusalWithExit(cmd, action, opts, string(enterprisebundle.CodeBundleRequired),
+			"TRUSTANCHORS= (--trust-anchors) cannot be combined with CONFIG= (--config): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=",
+			floorSource, enterprisestatus.WindowsExitInvalidArgs)
 	}
 	if !windowsEnterpriseMutationAction(action) {
 		return false, nil
@@ -737,6 +768,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		return refuse(string(enterprisebundle.CodeStateInvalid), "cannot read the enforced config: "+readConfigErr.Error())
 	}
 	run.previous = installed
+	run.previousGeneration, _ = configwrite.ReadGenerationState(layout.ConfigPath)
 	driver.EnforcedConfig = installed
 	driver.RefuseCapabilityLoss = opts.refuseCapabilityLoss
 	driver.DeliveryID = opts.bundleDeliveryID
@@ -751,7 +783,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if len(rollback) > 0 {
 		// The installed config is a bundle that was never confirmed, not a
 		// last good config: a rollback of this run must not report it as one.
-		run.previous = nil
+		run.previous, run.previousGeneration = nil, configwrite.GenerationState{}
 		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: string(enterprisebundle.CodeNotConfirmed),
 			Message: "an earlier bundle was installed but never confirmed; this run installs the new bundle over it"})
 	}
@@ -933,11 +965,20 @@ func refuseWindowsBundleRequired(cmd *cobra.Command, action string, opts *window
 // transaction: nothing was installed, so the result is the host as it is
 // with the bundle block of the receipt.
 func writeWindowsBundleRefusal(cmd *cobra.Command, action string, opts *windowsEnterpriseLifecycleOptions, code, message, floorSource string) error {
+	return writeWindowsBundleRefusalWithExit(cmd, action, opts, code, message, floorSource, 0)
+}
+
+// writeWindowsBundleRefusalWithExit is writeWindowsBundleRefusal with an
+// explicit exit code; 0 derives it from the error code.
+func writeWindowsBundleRefusalWithExit(cmd *cobra.Command, action string, opts *windowsEnterpriseLifecycleOptions, code, message, floorSource string, exit int) error {
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
 	applyWindowsEnterpriseRecordedDeployment(result)
 	result.FloorSource = floorSource
 	result.AddError(code, message)
-	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+	if exit == 0 {
+		exit = windowsEnterpriseFailureCodeFor(result)
+	}
+	return finishWindowsEnterpriseStandalone(cmd, opts, result, exit)
 }
 
 func windowsBundleCode(err error, fallback enterprisebundle.Code) enterprisebundle.Code {
@@ -1105,6 +1146,19 @@ func windowsBundleHasCode(messages []enterprisestatus.Message, code string) bool
 type windowsBundleRollbackTarget struct {
 	store *enterprisebundle.Store
 	ref   *enterprisebundle.Ref
+	// before is config.generation.json as the run found it, restored the
+	// hex SHA-256 of the config the rollback installs. A record that named
+	// the bundle for exactly these bytes names it again, also once the
+	// bundle's receipt was pruned (GAP-0011).
+	before   configwrite.GenerationState
+	restored string
+}
+
+// writeOptions records the rollback write as the confirmed bundle: its
+// principal and bundle fields, so the gateway digests the restored config in
+// the bundle's scope and status, verify and ensure find the bundle enforcing.
+func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) configwrite.Options {
+	return configwrite.RestoreOptions(t.before, t.restored, windowsBundleRestoreWriteOptions(t.store, t.ref, expectSHA))
 }
 
 // rollbackWindowsBundle installs the last good config again (the current
@@ -1131,7 +1185,8 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 	rollback := *opts
 	rollback.bundle, rollback.bundleRollback, rollback.bundleRollbackTo = nil, true, nil
 	if ref != nil {
-		rollback.bundleRollbackTo = &windowsBundleRollbackTarget{store: run.driver.Store, ref: ref}
+		rollback.bundleRollbackTo = &windowsBundleRollbackTarget{store: run.driver.Store, ref: ref,
+			before: run.previousGeneration, restored: configwrite.SHA256Hex(last)}
 	}
 	rollback.bundlePath, rollback.trustAnchors, rollback.configPath = "", "", path
 	rollback.jsonOutput = true

@@ -61,7 +61,7 @@ and you do not edit them:
 | --- | --- |
 | `config.generation.json` | The config generation: `generation`, `config_sha256`, `actor` (`lifecycle`, `migration`, or a user), `reason` and `written_at`. Every config write updates it |
 | `config.yaml.lock` | The lock every config writer takes |
-| `config.yaml.v8.bak` | The `config_version: 8` file the first migration replaced (root-only). Pass it as `--config` to go back to a release that reads version 8 |
+| `config.yaml.v8.bak` | The `config_version: 8` file the first migration replaced (root-only), if the host needed that migration. Pass it as `--config` to go back to a release that reads version 8; otherwise use a compatible administrator config |
 | `migration-v9.json` | What the migration moved, what conflicted and what it left out. `defenseclaw-gateway config migrate --config /etc/defenseclaw/config.yaml --ack` marks it read on Linux; on macOS use `--config /opt/cisco/defenseclaw/etc/config.yaml` |
 
 They sit in `/etc/defenseclaw` on Linux, `/opt/cisco/defenseclaw/etc` on macOS
@@ -429,11 +429,13 @@ rules on Linux and macOS:
    The packages ship no copy before they install, so for a first install put
    the pack in place before the package (with your MDM, for example) or install
    with the built-in packs first and switch `rule_pack` afterwards. To repair a
-   copy made with restrictive modes, change only the created parent folders
-   and this pack. On macOS, run
-   `sudo chmod 0755 /opt/cisco/defenseclaw/etc/policies /opt/cisco/defenseclaw/etc/policies/guardrail`
+   copy made with restrictive modes, change only the `guardrail` folder
+   and this pack, and leave `policies` itself to the lifecycle: it keeps that
+   folder at `0750`, owned by root with the service group, and restores it on
+   the next `ensure`, so do not open it to every account. On macOS, run
+   `sudo chmod 0755 /opt/cisco/defenseclaw/etc/policies/guardrail`
    and `sudo chmod -R u=rwX,go=rX /opt/cisco/defenseclaw/etc/policies/guardrail/my-pack`.
-   On Linux, run `sudo chmod 0755 /etc/defenseclaw/policies /etc/defenseclaw/policies/guardrail`
+   On Linux, run `sudo chmod 0755 /etc/defenseclaw/policies/guardrail`
    and `sudo chmod -R u=rwX,go=rX /etc/defenseclaw/policies/guardrail/my-pack`.
    Keep every file and folder owned by root,
    not writable by group or others, and readable by the gateway (for example
@@ -562,8 +564,8 @@ and `bearer_env` do not work in this profile.
 | `token_credential` (`splunk_hec`) | `NAME` | `token_env` |
 | `bearer_credential` (`http_jsonl`) | `NAME` | `bearer_env` |
 
-`NAME` follows the credential name rules of the AI Defense key: lowercase
-letters, digits and dashes, starting with a letter or digit. A destination
+`NAME` is 1 to 63 lowercase letters, digits or dashes, starting with a
+letter or digit. A destination
 sets either the credential field or the environment field, not both.
 
 1. **Store the credential**, the same way as the AI Defense key (see
@@ -575,6 +577,10 @@ sets either the credential field or the environment field, not both.
    printf '%s' "$GALILEO_API_KEY" | sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name galileo-api-key --from-stdin
    unset GALILEO_API_KEY
    ```
+
+   With `--json`, a refused source file, empty or oversized value, or invalid
+   name returns a result with `ok: false` and an `errors` entry. The value is
+   never printed.
 
    `enterprise secret set` needs an installed deployment. On a new host,
    install with a config that does not reference the credential yet, or

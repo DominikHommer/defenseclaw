@@ -182,6 +182,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Direction:     "tool_call",
 			Connector:     "claudecode",
 			MCPServerName: req.MCPServerName,
+			callerCWD:     req.CWD,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, toolName, actionTool, toolArgs)
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
@@ -201,7 +202,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Connector:                     "claudecode",
 			EnforcementCapable:            true,
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
-			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
+			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: toolArgs}),
 			SandboxGuestCWD:               req.guestCWD,
 			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)

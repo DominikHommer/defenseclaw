@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // unixLifecycleOptions are the flags of `enterprise linux|macos <action>`.
@@ -64,6 +65,9 @@ deployment reads:
 
   - the Cisco AI Defense API key named by
     enterprise.inspection.ai_defense.credential;
+  - the API key of the LLM judge and the skill, MCP and plugin scanners
+    named by enterprise.inspection.llm.credential (they never read
+    llm.api_key_env or the service environment);
   - observability destination credentials named by a header value
     {credential: NAME} (otlp, http_jsonl), token_credential (splunk_hec)
     or bearer_credential (http_jsonl).
@@ -236,8 +240,8 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		}
 		addLockWaitFlag(flags, &opts.lockWait)
 	case "uninstall":
-		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
-		flags.BoolVar(&opts.keepState, "keep-state", false, "keep the machine state (config, secrets, gateway and guardian state, logs, lifecycle state) and the service account, so a reinstall resumes with them; without it uninstall removes all of it")
+		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); an account's own DefenseClaw install from before the enrollment is moved to ~/.defenseclaw-backup-<UTC time> in its home first; the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
+		flags.BoolVar(&opts.keepState, "keep-state", false, unixKeepStateUsage(platform))
 		flags.BoolVar(&opts.keepServiceAccount, "keep-service-account", false, "keep the gateway service account, which uninstall deletes otherwise")
 		addLockWaitFlag(flags, &opts.lockWait)
 	case "reconcile", "rotate-credentials":
@@ -245,6 +249,23 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	}
 	flags.BoolVar(&opts.json, "json", false, "print the lifecycle result as JSON")
 	return cmd
+}
+
+// unixKeepStateUsage is the uninstall --keep-state help. It names the paths
+// of the sandbox state a plain uninstall keeps, as the uninstall summary
+// does (GAP-0067).
+func unixKeepStateUsage(platform string) string {
+	goos := "linux"
+	if platform == "macos" {
+		goos = "darwin"
+	}
+	kept := "the gateway's sandbox registrations, their key and the lifecycle's sandbox setup record"
+	if layout, err := managed.StandaloneLayoutFor(goos); err == nil {
+		store, key, record := layout.KeptSandboxStatePaths()
+		kept = "the gateway's sandbox registrations (" + store + "), their key (" + key + ") and the lifecycle's sandbox setup record (" + record + ")"
+	}
+	return "keep the config, secrets, gateway and guardian state, logs and the service account, so a reinstall resumes with them (the deployment record goes either way); without it uninstall removes that state except " +
+		kept + " while an account keeps sandboxes; --purge removes those too"
 }
 
 // invalidLifecycleArguments labels err with the lifecycle's invalid-arguments
@@ -276,7 +297,10 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		},
 	}
 	if action != "status" {
-		cmd.Flags().StringVar(&opts.name, "name", "", "credential name (lowercase letters, digits and dashes)")
+		cmd.Flags().StringVar(&opts.name, "name", "", "credential name (1-63 lowercase letters, digits or dashes; starts with a letter or digit)")
+		cmd.Flags().Lookup("name").Annotations = map[string][]string{
+			secureClientUsageAnnotation: {"credential name (lowercase letters, digits and dashes)"},
+		}
 		_ = cmd.MarkFlagRequired("name")
 	}
 	if action == "set" {

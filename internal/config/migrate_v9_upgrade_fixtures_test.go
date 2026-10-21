@@ -36,7 +36,8 @@ import (
 //   - 1.0.0, 1.0.1: the config_version 9 home that release's upgrade left
 //     (config.yaml is the output of that release's MigrateV9 on the 0.8.10
 //     home, with the policy file at an absolute path, since neither could
-//     upgrade one named custom), plus a hand-written overlay added later.
+//     upgrade one named custom), plus a hand-written overlay added later,
+//     which the upgrade folds into llm_providers.custom (GAP-0163).
 //
 // Each home is upgraded, rolled back the way the installer does it (its copy
 // of the data home is put back), then upgraded again. Both upgrades must leave

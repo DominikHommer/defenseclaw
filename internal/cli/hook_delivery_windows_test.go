@@ -25,15 +25,21 @@ func TestManagedHookDeliveryUsesAuthenticatedGenerationPolicy(t *testing.T) {
 				})
 				t.Setenv("DEFENSECLAW_FAIL_MODE", "open")
 				t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "0")
+				savedSecureClient := secureClientHost
+				t.Cleanup(func() { secureClientHost = savedSecureClient })
 				if prepareEnterpriseManagedHookRuntime(agent) {
 					t.Fatal("active authenticated generation no-opped")
 				}
-				opts := buildHookOptionsForRuntime(agent, "PreToolUse", "", "open", true)
-				// Only an authenticated open (Secure Client) generation relaxes
-				// managed delivery; a closed one keeps origin/main's
-				// fail-closed, strict-availability contract.
-				if opts.FailMode != mode || opts.StrictAvailability != (mode != "open") || opts.ManagedRuntimeFailure != "" {
-					t.Fatalf("hook policy did not match authenticated %s mode: %+v", mode, opts)
+				// The administrator chooses the fail mode (owner 2026-10-20):
+				// outside Secure Client too, the authenticated generation's
+				// mode is the managed hook's mode, and only an open one
+				// relaxes strict availability.
+				for _, sc := range []bool{false, true} {
+					secureClientHost = func() bool { return sc }
+					opts := buildHookOptionsForRuntime(agent, "PreToolUse", "", "open", true)
+					if opts.FailMode != mode || opts.StrictAvailability != (mode != "open") || opts.ManagedRuntimeFailure != "" {
+						t.Fatalf("hook policy did not match authenticated %s mode (secure client %v): %+v", mode, sc, opts)
+					}
 				}
 				t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "1")
 				if opts := buildHookOptionsForRuntime(agent, "PreToolUse", "", "open", true); !opts.StrictAvailability {

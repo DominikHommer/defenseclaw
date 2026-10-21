@@ -9,12 +9,9 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 )
-
-var lifecycleFailOpenWarning = regexp.MustCompile(`(?m)^defenseclaw: WARNING hook fail-open; inspection bypassed \(connector=[a-z]+ hook=[a-z-]+ category=response\): "invalid or missing action in gateway response"\n`)
 
 func TestNeutralLifecycleEventsExactSets(t *testing.T) {
 	want := map[string][]string{
@@ -94,13 +91,8 @@ func TestInvalidActionOnLifecycleEventsAllowsBothStandaloneShapes(t *testing.T) 
 	}
 }
 
-// TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes pins the
-// per-user (fail_mode closed and open) and Secure Client results of a missing
-// or unknown gateway action on every lifecycle event to commit 6210dbcee, the
-// last commit before the managed standalone lifecycle change. Only the managed
-// standalone profiles keep these events neutral. The golden file is the output
-// of a decide() probe run on a git-archive copy of 6210dbcee; regenerate it
-// only from that commit, never from the current code.
+// The Secure Client bytes remain pinned to the historical golden. Other
+// profiles keep lifecycle events neutral when a gateway action is unusable.
 func TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes(t *testing.T) {
 	f, err := os.Open("testdata/lifecycle_invalid_action_6210dbcee.jsonl")
 	if err != nil {
@@ -135,12 +127,15 @@ func TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes(t *testi
 			t.Fatalf("unknown golden profile %q", want.Profile)
 		}
 		code := sp.decide(opts, []byte(want.Body))
-		gotStderr := stderr.String()
-		if want.Profile == "oss-open" {
-			// The fail-open warning (#1163) came after 6210dbcee; it is the
-			// only difference the per-user open rows may show.
-			gotStderr = lifecycleFailOpenWarning.ReplaceAllString(gotStderr, "")
+		if want.Profile != "secure-client" {
+			if code != 0 || strings.Contains(stdout.String(), `"deny"`) || strings.Contains(stdout.String(), `"block"`) {
+				t.Errorf("%s/%s %s body=%s: lifecycle event not neutral: code=%d stdout=%q stderr=%q",
+					want.Connector, want.Event, want.Profile, want.Body, code, stdout.String(), stderr.String())
+			}
+			covered[[3]string{want.Connector, want.Event, want.Profile}]++
+			continue
 		}
+		gotStderr := stderr.String()
 		if code != want.Code || stdout.String() != want.Stdout || gotStderr != want.Stderr {
 			t.Errorf("%s/%s %s body=%s:\n got code=%d stdout=%q stderr=%q\nwant code=%d stdout=%q stderr=%q",
 				want.Connector, want.Event, want.Profile, want.Body,

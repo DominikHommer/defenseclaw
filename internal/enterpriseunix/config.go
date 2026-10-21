@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -24,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/local"
@@ -86,6 +88,10 @@ type validatedConfig struct {
 	// Raw is then the migrated config_version 9 document, and the apply
 	// keeps the v8 bytes and the migration record next to config.yaml.
 	Migration *configMigration
+	// FailModeRepair is set when Raw is the installed config with a Cursor
+	// hook_fail_mode the 1.0.0-1.0.2 migration rewrote to open restored to
+	// closed; the apply stores it as migration-v9.json.
+	FailModeRepair *config.MigrationRecord
 }
 
 // configMigration is the v8 to v9 migration of an administrator config.
@@ -139,6 +145,54 @@ func (e *Env) migrateConfigV9(ctx context.Context, raw []byte, v8 *validatedConf
 	return result, nil
 }
 
+// repairMigratedCursorFailMode is config.RepairMigratedCursorFailMode on
+// the installed config: the repaired config, validated, with the migration
+// record the apply stores next to it, or nil when the record proves no
+// rewrite (no record means no change).
+func (e *Env) repairMigratedCursorFailMode(installed *validatedConfig) (*validatedConfig, error) {
+	if fromBundle, err := e.installedConfigFromBundle(); err != nil || fromBundle {
+		return nil, err
+	}
+	raw, err := readBounded(e.P(config.MigrationRecordPath(e.Layout.ConfigPath)), maxInputBytes)
+	if err != nil {
+		return nil, nil
+	}
+	var record config.MigrationRecord
+	if json.Unmarshal(raw, &record) != nil {
+		return nil, nil
+	}
+	repaired, updated, ok := config.RepairMigratedCursorFailMode(installed.Raw, record)
+	if !ok {
+		return nil, nil
+	}
+	validated, err := e.validateConfig(repaired)
+	if err != nil {
+		return nil, fmt.Errorf("the config with its Cursor hook_fail_mode restored to closed does not validate: %w", err)
+	}
+	validated.FailModeRepair = &updated
+	return validated, nil
+}
+
+// installedConfigFromBundle reports whether the installed config belongs to
+// a signed policy bundle: its config generation record names a bundle, or a
+// bundle is current in the bundle store. An unreadable record counts as a
+// bundle's, so the v9 Cursor repair never rewrites an explicit, signed value
+// (a bundle whose bytes match an old migration result).
+func (e *Env) installedConfigFromBundle() (bool, error) {
+	state, err := configwrite.ReadGenerationState(e.P(e.Layout.ConfigPath))
+	switch {
+	case err == nil && state.BundleID != "":
+		return true, nil
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return true, nil
+	}
+	current, err := e.bundleStore().LoadState()
+	if err != nil {
+		return false, fmt.Errorf("read the policy bundle state: %w", err)
+	}
+	return current.Current != nil, nil
+}
+
 // envPinMu serializes the temporary process-environment pins validation
 // needs: the config loader reads the service pins from the environment.
 var envPinMu sync.Mutex
@@ -179,6 +233,11 @@ func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig,
 			return nil, &plainConfigError{msg: plain, err: err}
 		}
 		return nil, e.explainConfigError(err, source)
+	}
+	if source != "" {
+		if err := config.ValidateManagedStandaloneLiteralCandidate(validated.Loaded, raw); err != nil {
+			return nil, e.explainConfigError(err, source)
+		}
 	}
 	return validated, nil
 }

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
 
@@ -231,7 +233,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 			if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(authored, "", !cfg.SecureClientIntegration(), enumerationLoggerForStderr(stderr)); grantErr != nil {
 				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 			}
-			publishEnterpriseWindowsMCPServers(cfg, authored, stderr)
+			_ = publishEnterpriseWindowsMCPServers(cfg, authored, stderr) // logged; the next cycle publishes again
 		} else if cfg.StandaloneEnterprise() {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not load administrator targets for identity facts: %v\n", loadErr)
 		}
@@ -294,7 +296,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		}); spoolErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", spoolErr)
 		}
-		publishEnterpriseWindowsMCPServers(cfg, manifest, stderr)
+		_ = publishEnterpriseWindowsMCPServers(cfg, manifest, stderr) // logged; the next cycle publishes again
 		unprotected = append(unprotected, ownerUnknown...)
 		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
@@ -454,6 +456,12 @@ func runEnterpriseWindowsEnumerateInterval(
 	opts *enterpriseWindowsEnumerateOptions,
 	manifestPath string,
 ) error {
+	// The gateway's MCP admission scan starts an enrolled user's server
+	// as that user through this service (#1164).
+	serveCtx, stopServe := context.WithCancel(ctx)
+	defer stopServe()
+	go serveEnterpriseWindowsMCPAsUser(serveCtx, stderr, manifestPath)
+
 	// Initial cycle after the configurable delay (default 30 s)
 	// so gateway + guardian publish their startup lines first.
 	initial := time.NewTimer(opts.initialDelay)
@@ -521,7 +529,7 @@ func runEnterpriseWindowsEnumerateInterval(
 				}
 			}
 		case <-mcpRefresh.C:
-			refreshEnterpriseWindowsMCPServers(stderr, manifestPath)
+			_ = enterpriseWindowsMCPRefresh.Run(ctx, func() error { return refreshEnterpriseWindowsMCPServers(stderr, manifestPath) })
 		case <-ticker.C:
 			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
@@ -532,43 +540,118 @@ func runEnterpriseWindowsEnumerateInterval(
 	}
 }
 
+// enterpriseWindowsMCPAsUserRetry is how long the as-user scan server waits
+// before it serves again after its pipe failed.
+var enterpriseWindowsMCPAsUserRetry = 30 * time.Second
+
+// enterpriseWindowsMCPAsUserServe is the pipe server seam.
+var enterpriseWindowsMCPAsUserServe = mcpasuser.Serve
+
+// serveEnterpriseWindowsMCPAsUser serves the gateway's as-user MCP scans
+// (#1164) until ctx ends: the standalone profile only (the Secure Client
+// profile gateway has no enrolled-user watcher), for the gateway service the
+// service environment names. The starter reads the enrollment and the
+// published records again for every request. The same pipe serves the
+// gateway's refresh before an MCP tool call: the enrolled users' servers are
+// published again from their files, so the call is decided on the
+// definition the user has now (GAP-0216).
+func serveEnterpriseWindowsMCPAsUser(ctx context.Context, stderr io.Writer, manifestPath string) {
+	if !managed.IsStandaloneProfile(managed.NormalizeEnterpriseProfile(os.Getenv(managed.EnterpriseProfileEnv))) {
+		return
+	}
+	gatewayService := strings.TrimSpace(os.Getenv(mcpasuser.GatewayServiceEnv))
+	if gatewayService == "" {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN %s is not set; MCP servers in user profiles cannot be scanned as their users\n", mcpasuser.GatewayServiceEnv)
+		return
+	}
+	starter := enterprisehooks.WindowsMCPAsUserStarter{
+		Manifest: func() (enterprisehooks.Manifest, error) { return enterprisehooks.LoadManifest(manifestPath) },
+		AuthorizationDir: func() (string, error) {
+			cfg, err := enterpriseWindowsEnumerateConfigLoader()
+			if err != nil {
+				return "", fmt.Errorf("load config: %w", err)
+			}
+			if !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
+				return "", errors.New("this deployment does not scan enrolled users' MCP servers")
+			}
+			return managed.HookGuardianAuthorizationDir(cfg.DataDir), nil
+		},
+	}
+	logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
+	refresh := func(ctx context.Context) error {
+		return enterpriseWindowsMCPRefresh.Run(ctx, func() error { return refreshEnterpriseWindowsMCPServers(stderr, manifestPath) })
+	}
+	for {
+		err := enterpriseWindowsMCPAsUserServe(ctx, gatewayService, refresh, starter.Start, logf)
+		if ctx.Err() != nil {
+			return
+		}
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN MCP as-user scan server stopped: %v; retrying in %s\n", err, enterpriseWindowsMCPAsUserRetry)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(enterpriseWindowsMCPAsUserRetry):
+		}
+	}
+}
+
 // enterpriseWindowsClaudeMCPSpoolInterval is how often the Claude Code and Kiro MCP
 // servers of enrolled users are published between enumeration cycles.
 const enterpriseWindowsClaudeMCPSpoolInterval = 30 * time.Second
+
+// enterpriseWindowsMCPPublishMu serializes the publications: the interval
+// loop and the gateway's refreshes through the as-user pipe write the same
+// records.
+var enterpriseWindowsMCPPublishMu sync.Mutex
+
+// enterpriseWindowsMCPRefresh shares one publication among the refreshes
+// that wait for it (mcpasuser.Coalescer).
+var enterpriseWindowsMCPRefresh mcpasuser.Coalescer
 
 // publishEnterpriseWindowsMCPServers publishes the Claude Code and Kiro MCP
 // servers of the users manifest enrolls for the gateway, whose service
 // account cannot read ~/.claude.json (GAP-0424) nor a protected
 // ~/.kiro/settings/mcp.json (GAP-1468). Standalone only: the Secure Client
-// profile gateway has no enrolled-user watcher.
-func publishEnterpriseWindowsMCPServers(cfg *config.Config, manifest enterprisehooks.Manifest, stderr io.Writer) {
+// profile gateway has no enrolled-user watcher. It returns why a record
+// folder could not be written (also logged).
+func publishEnterpriseWindowsMCPServers(cfg *config.Config, manifest enterprisehooks.Manifest, stderr io.Writer) error {
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
-		return
+		return nil
 	}
+	enterpriseWindowsMCPPublishMu.Lock()
+	defer enterpriseWindowsMCPPublishMu.Unlock()
 	logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
 	authorizationDir := managed.HookGuardianAuthorizationDir(cfg.DataDir)
+	var errs []error
 	if err := enterpriseWindowsClaudeMCPSpoolWriter(enterprisehooks.ClaudeMCPSpoolDir(authorizationDir), manifest,
 		enterpriseHookAuthorizationOwnershipSetter, logf); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish Claude Code MCP servers: %v\n", err)
+		errs = append(errs, fmt.Errorf("publish Claude Code MCP servers: %w", err))
 	}
 	if err := enterpriseWindowsKiroMCPSpoolWriter(enterprisehooks.KiroMCPSpoolDir(authorizationDir), manifest,
 		enterpriseHookAuthorizationOwnershipSetter, logf); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish Kiro MCP servers: %v\n", err)
+		errs = append(errs, fmt.Errorf("publish Kiro MCP servers: %w", err))
 	}
+	return errors.Join(errs...)
 }
 
 // refreshEnterpriseWindowsMCPServers republishes them from the last
-// published manifest.
-func refreshEnterpriseWindowsMCPServers(stderr io.Writer, manifestPath string) {
+// published manifest. The error says why nothing was published; a
+// deployment that publishes no MCP servers has nothing to refresh.
+func refreshEnterpriseWindowsMCPServers(stderr io.Writer, manifestPath string) error {
 	cfg, err := enterpriseWindowsEnumerateConfigLoader()
-	if err != nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		return
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
 	}
 	manifest, err := enterprisehooks.LoadManifest(manifestPath)
 	if err != nil {
-		return
+		return fmt.Errorf("load the enrollment manifest: %w", err)
 	}
-	publishEnterpriseWindowsMCPServers(cfg, manifest, stderr)
+	return publishEnterpriseWindowsMCPServers(cfg, manifest, stderr)
 }
 
 // enumerationLoggerForStderr wraps the enumerator's per-drop logger

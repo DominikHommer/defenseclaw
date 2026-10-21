@@ -67,6 +67,9 @@ const (
 	LabelVersion        = "io.defenseclaw.defenseclaw-version"
 	// LabelOwner is the Store.Owner of the data dir that built the image.
 	LabelOwner = "io.defenseclaw.owner"
+	// LabelTrustedCAs is the digest of the trusted CAs an image carries
+	// (BuildSpec.TrustedCAs); absent without any.
+	LabelTrustedCAs = "io.defenseclaw.trusted-cas"
 )
 
 // ErrUnknownContract is returned when the pinned harness version has no
@@ -108,6 +111,16 @@ type BuildSpec struct {
 	// Dockerfile, the content hash and so the tag it had before MicroVM
 	// images existed.
 	MicroVM bool
+	// TrustedCAs is the PEM bundle of openshell.trusted_ca_bundle
+	// (openshell.ParseTrustedCAs): CA certificates the image's system store
+	// takes, so programs in the sandbox trust a TLS-inspecting proxy's
+	// re-signed certificates (the shells add them to OpenShell's bundle,
+	// harness trustedCAScript). The build adds them before any download, so
+	// the image's own installs trust them too. They are build-context
+	// files, so the content hash covers them;
+	// an image without any has the Dockerfile and the content hash it had
+	// before.
+	TrustedCAs []byte
 }
 
 // MicroVMTarget reports whether the images of sandboxes on compute driver
@@ -144,7 +157,10 @@ type Context struct {
 	Spec           BuildSpec
 	HarnessVersion string
 	Contract       string
-	Artifacts      connector.SandboxArtifacts
+	// TrustedCAs are the parsed BuildSpec.TrustedCAs (Spec.TrustedCAs is
+	// their normalized PEM).
+	TrustedCAs openshell.TrustedCAs
+	Artifacts  connector.SandboxArtifacts
 	// ImageFiles are the connector artifacts plus the harness launcher and
 	// its shell environment files (harness.Spec.ShellFiles).
 	ImageFiles []ImageFile
@@ -192,7 +208,8 @@ func NewContext(spec BuildSpec) (*Context, error) {
 		spec.BaseImage = openshell.DefaultBaseImage
 	}
 	if !digestRE.MatchString(spec.BaseImage) {
-		return nil, fmt.Errorf("openshell image: base image %q is not digest-pinned", spec.BaseImage)
+		return nil, fmt.Errorf("openshell image: base image %q is not digest-pinned: name it name@sha256:<digest>; "+
+			"for an image built on this computer the digest is its image ID (docker image inspect --format '{{.Id}}' <image>)", spec.BaseImage)
 	}
 	if spec.Repository == "" {
 		spec.Repository = DefaultRepository
@@ -214,6 +231,14 @@ func NewContext(spec BuildSpec) (*Context, error) {
 		spec.FailMode = connector.SandboxFailMode
 	default:
 		return nil, fmt.Errorf("openshell image: sandbox hooks always fail closed; fail mode %q is refused", spec.FailMode)
+	}
+	var trusted openshell.TrustedCAs
+	if len(spec.TrustedCAs) != 0 {
+		cas, err := openshell.ParseTrustedCAs(spec.TrustedCAs)
+		if err != nil {
+			return nil, fmt.Errorf("openshell image: the trusted CAs (%s): %w", openshell.TrustedCAKey, err)
+		}
+		trusted, spec.TrustedCAs = cas, cas.PEM
 	}
 	version := strings.TrimSpace(spec.HarnessVersion)
 	if version == "" {
@@ -237,7 +262,7 @@ func NewContext(spec BuildSpec) (*Context, error) {
 	}
 
 	c := &Context{Spec: spec, HarnessVersion: version, Contract: artifacts.HookContract, Artifacts: artifacts,
-		ImageBinaries: []string{harness.SupervisorInterpreter}}
+		TrustedCAs: trusted, ImageBinaries: []string{harness.SupervisorInterpreter}}
 	sources := append([]connector.SandboxFile(nil), artifacts.Files...)
 	sources = append(sources, spec.Harness.Launcher())
 	sources = append(sources, spec.Harness.ShellFiles()...)
@@ -280,6 +305,9 @@ func NewContext(spec BuildSpec) (*Context, error) {
 
 	c.Dockerfile = renderDockerfile(c, steps)
 	c.Files = append(c.Files, ContextFile{Name: "Dockerfile", Mode: 0o644, Data: c.Dockerfile})
+	for i, data := range c.TrustedCAs.Files() {
+		c.Files = append(c.Files, ContextFile{Name: trustedCAContextName(i), Mode: 0o644, Data: data})
+	}
 	for _, f := range c.ImageFiles {
 		c.Files = append(c.Files, ContextFile{Name: contextName(f.Path), Mode: f.Mode, UID: f.UID, GID: f.GID, Data: f.Data})
 	}
@@ -300,7 +328,62 @@ func NewContext(spec BuildSpec) (*Context, error) {
 		LabelVersion:        spec.DefenseClawVersion,
 		LabelOwner:          spec.Owner,
 	}
+	if d := trusted.Digest(); d != "" {
+		c.Labels[LabelTrustedCAs] = d
+	}
 	return c, nil
+}
+
+// trustedCAContextName is the build-context entry of trusted CA i, and
+// trustedCAImageName its file in openshell.SandboxTrustedCADir.
+func trustedCAContextName(i int) string { return "trusted-ca/" + trustedCAImageName(i) }
+
+func trustedCAImageName(i int) string { return fmt.Sprintf("defenseclaw-trusted-ca-%02d.crt", i+1) }
+
+// trustedCAStep is the Dockerfile part of an image with trusted CAs
+// (BuildSpec.TrustedCAs): one root-owned file per certificate in
+// openshell.SandboxTrustedCADir, then update-ca-certificates, and a check
+// that every one reached the system bundle. It comes right
+// after USER root, before any download. A base without
+// update-ca-certificates fails the build: an image that silently left the
+// CAs out would fail every intercepted TLS connection with no word why.
+func trustedCAStep(c *Context) string {
+	dir, bundle := openshell.SandboxTrustedCADir, openshell.SandboxSystemCABundle
+	var b strings.Builder
+	b.WriteString("# The trusted CAs of " + openshell.TrustedCAKey + " (a TLS-inspecting proxy's root): in the system store, which\n" +
+		"# this build's downloads use and the sandbox shells add to OpenShell's bundle.\n")
+	fmt.Fprintf(&b, "RUN install -d -o root -g root -m 0755 %s\n", dir)
+	for i := range c.TrustedCAs.Certs {
+		fmt.Fprintf(&b, "COPY --chown=0:0 --chmod=0644 %s %s/%s\n", trustedCAContextName(i), dir, trustedCAImageName(i))
+	}
+	b.WriteString(`RUN set -eu; PATH=` + connector.SandboxHookPATH + `; ` +
+		`command -v update-ca-certificates >/dev/null 2>&1 || { echo "` + openshell.TrustedCAKey + `: the base image has no update-ca-certificates (the ca-certificates package), so its system store cannot take the trusted CAs" >&2; exit 1; }; ` +
+		`update-ca-certificates >/dev/null; ` +
+		`for f in ` + dir + `/*.crt; do line="$(sed -n 2p "$f")"; grep -qxF -- "$line" ` + bundle + ` || { echo "update-ca-certificates did not add $f to ` + bundle + `" >&2; exit 1; }; done` + "\n")
+	b.WriteString("# The build's own downloads (npm, uv, pip, curl) go through the proxy too, and Node, npm, pip and uv do not\n" +
+		"# read the system store: every one is pointed at it for this build only (ARG, not ENV: the sandbox shells\n" +
+		"# point them at the bundle that also holds OpenShell's CA).\n")
+	for _, name := range BuildCAEnv {
+		fmt.Fprintf(&b, "ARG %s=%s\n", name, bundle)
+	}
+	return b.String()
+}
+
+// BuildCAEnv are the variables the build steps of an image with trusted CAs
+// (trustedCAStep) take as ARGs naming the system bundle, so that every
+// download of the build trusts a TLS-inspecting proxy's root: Node and npm
+// (the npm harness installs) use their own root list and add only
+// NODE_EXTRA_CA_CERTS or npm's cafile, pip its certifi copy unless PIP_CERT
+// or REQUESTS_CA_BUNDLE, uv its bundled roots unless SSL_CERT_FILE, and Deno
+// DENO_CERT (GAP-0192: the pinned @openai/codex install failed with
+// UNABLE_TO_VERIFY_LEAF_SIGNATURE behind an inspecting proxy, though the
+// system store held the CA). ARG and not ENV: a sandbox never sees them in
+// its image environment, where npm's cafile would replace Node's roots with
+// a bundle that lacks OpenShell's CA; the sandbox shells set the runtime
+// values (harness trustedCAScript).
+var BuildCAEnv = []string{
+	"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO",
+	"NODE_EXTRA_CA_CERTS", "npm_config_cafile", "PIP_CERT", "DENO_CERT",
 }
 
 // localhostStep is the Dockerfile step of an image for the MicroVM driver
@@ -381,6 +464,9 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 		LabelHookContract, c.Contract, LabelUID, spec.UID, LabelGID, spec.GID, LabelIngressPort, spec.IngressPort,
 		LabelVersion, spec.DefenseClawVersion)
 	b.WriteString("USER root\n")
+	if !c.TrustedCAs.Empty() {
+		b.WriteString(trustedCAStep(c))
+	}
 	b.WriteString("# The hooks need jq and curl on the baked hook PATH, not just the image PATH.\n")
 	b.WriteString(`RUN set -eu; PATH=` + connector.SandboxHookPATH + `; missing=""; for tool in jq curl; do command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"; done; ` +
 		`if [ -n "$missing" ]; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing && rm -rf /var/lib/apt/lists/*; fi` + "\n")

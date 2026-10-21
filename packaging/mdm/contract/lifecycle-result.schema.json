@@ -88,7 +88,7 @@
         }
       }
     },
-    "coverage_complete": { "type": "boolean", "description": "True only when required services are ready and no known running agent session still needs a restart to load managed hooks." },
+    "coverage_complete": { "type": "boolean", "description": "True only when required services are ready, no installed agent runs without a verified hook contract, and no known running agent session still needs a restart to load managed hooks." },
     "security_complete": { "type": "boolean" },
     "errors": { "type": "array", "items": { "$ref": "#/$defs/message" } },
     "warnings": { "type": "array", "items": { "$ref": "#/$defs/message" } },

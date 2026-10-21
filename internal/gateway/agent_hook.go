@@ -248,6 +248,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// A tool call's hook waits a few seconds for the decision; tell it
+		// when the decision waits on a remote scanner (hook_progress.go).
+		w, r, closeProgress := withHookProgress(w, r)
+		defer closeProgress()
 		// Resolve the identity-based guardrail profile once, after
 		// authentication, from the route's connector, the verified subject
 		// and the agent identity derived from both (never the payload).
@@ -386,7 +390,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			targets, ok := hookpaths.Decode(header)
 			if !ok {
 				// Evidence that is present but unreadable never proves a
-				// write safe: every operand is unknown.
+				// write safe: every operand is unknown. The marker also drops
+				// the client's cwd, so a gateway that cannot resolve an
+				// operand itself denies a write it cannot place (GAP-0278
+				// review): a malformed header is never more permissive than
+				// a valid one without the fact.
 				targets = map[string]string{hookpaths.TruncatedKey: "1"}
 			}
 			r = r.WithContext(context.WithValue(r.Context(), resolvedWritesContextKey{}, targets))
@@ -941,11 +949,13 @@ func (a *APIServer) hookDecisionMeta(
 	meta = a.applyCursorToolEventOutcome(meta, req.HookEventName, req.Payload)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
-	if snapshot, ok := a.hookPhaseSnapshot(meta); ok {
-		// The lifecycle emitter advanced the execution cursor immediately
-		// before evaluation. Reuse its phase/sequence/operation identifiers
-		// so the decision nests beside that hook transition rather than
-		// looking like a second, synthetic phase change.
+	if snapshot, ok := a.hookDeliveryPhaseSnapshot(meta, req.Payload); ok {
+		// The lifecycle emitter recorded this delivery's transition
+		// immediately before evaluation. Reuse its phase/sequence/operation
+		// identifiers so the decision nests beside that hook transition
+		// rather than looking like a second, synthetic phase change. The
+		// transition is this request's own (by its tool-use id), never the
+		// session cursor's latest, which a concurrent hook may have advanced.
 		//
 		// Start events are the important exception to the ordinary merge
 		// rule: mergeHookSessionLifecycle intentionally preserves a newly
@@ -1499,13 +1509,11 @@ func safeHookPanicResponse(connectorName, eventName string) agentHookResponse {
 // hookPanicResponse renders one fail-mode verdict for every recovery path.
 // Sandbox ingress has its own mandatory closed verdict and is rendered once.
 //
-// A recovered error produced no policy verdict. On a standalone managed
-// device it is answered like every other missing verdict there (gateway
-// unreachable, invalid response): the administrator-owned hook fails closed
-// whatever the guardrail mode or hook_fail_mode says, so a blockable tool or
-// prompt event gets the connector's native deny in observe mode too, and a
-// stop or session-end event keeps its neutral allow. Per-user installs and
-// the Secure Client profile keep the configured mode and fail mode.
+// A recovered error produced no policy verdict. A closed hook denies a
+// blockable tool or prompt event even when policy verdicts are observed.
+// Stop and session-end events keep their neutral allow; a resolved open
+// (explicit, or Secure Client's unset default) keeps its open failure
+// behavior.
 func (a *APIServer) hookPanicResponse(
 	ctx context.Context,
 	connectorName string,
@@ -1528,11 +1536,14 @@ func (a *APIServer) hookPanicResponse(
 		return a.failSandboxHookClosed(ctx, profile, connectorName, req, rawBody, payload, resp)
 	}
 	cfg := a.decisionConfig(ctx)
-	standalone := cfg != nil && cfg.StandaloneEnterprise()
-	lifecycle := standalone && hookexec.NeutralLifecycleEvent(connectorName, req.HookEventName)
-	if standalone && action == "block" && !lifecycle {
-		// Observe mode lets policy verdicts through; it does not let a
-		// missing verdict through on a managed device.
+	lifecycle := hookexec.NeutralLifecycleEvent(connectorName, req.HookEventName)
+	// A failed check follows the connector's resolved fail mode, the
+	// administrator's on a managed computer (owner decision 2026-10-20): an
+	// explicit closed wins everywhere, Secure Client included, whose unset
+	// value resolves to open (#1163).
+	failOpen := cfg != nil && cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"
+	if !failOpen && action == "block" && !lifecycle {
+		// Observe mode applies to policy verdicts, not failed checks.
 		mode = "action"
 	}
 	if mode != "action" {
@@ -1540,13 +1551,9 @@ func (a *APIServer) hookPanicResponse(
 	}
 	plain := "DefenseClaw could not complete its hook check because of an internal evaluator error. "
 	switch {
-	case mode != "action":
-		plain += "The call was allowed because the guardrail is in observe mode. Ask your administrator to review the hook and audit log."
-	case !standalone && cfg != nil && (cfg.SecureClientIntegration() || cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"):
+	case failOpen:
 		action, wouldBlock = "allow", true
 		plain += "The call was allowed because the hook fails open. Ask your administrator to review the hook and audit log."
-	case action != "block":
-		plain += "The call could not be blocked on this hook event. Ask your administrator to review the hook and audit log."
 	case lifecycle:
 		// A denied stop or session-end event keeps the session running
 		// instead of stopping a tool call. Standalone managed hooks answer
@@ -1554,6 +1561,8 @@ func (a *APIServer) hookPanicResponse(
 		// uses for foreign-hook failures and invalid gateway actions.
 		action, wouldBlock = "allow", true
 		plain += "The event was allowed because it ends the session, and a denial would keep the session running. Ask your administrator to review the hook and audit log."
+	case action != "block":
+		plain += "The call could not be blocked on this hook event. Ask your administrator to review the hook and audit log."
 	default:
 		plain += "The call was blocked because the hook fails closed. Retry the call; if this continues, contact your administrator."
 	}
@@ -2301,6 +2310,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Direction:     "tool_call",
 			Connector:     req.ConnectorName,
 			MCPServerName: payloadString(req.Payload, "mcp_server_name"),
+			callerCWD:     req.CWD,
 		}
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)

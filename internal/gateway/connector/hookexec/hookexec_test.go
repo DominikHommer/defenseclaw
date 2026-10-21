@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +30,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -112,9 +112,10 @@ func runWithContext(
 		HTTPClient: &http.Client{Transport: rt},
 		Now:        func() time.Time { return time.Unix(0, 0).UTC() },
 	}
-	if connector == "codex" {
+	switch connector {
+	case "codex":
 		opts.HookContractID = "codex-hooks-v4"
-	} else if connector == "copilot" {
+	case "copilot":
 		// Copilot's official registration binds the exact camelCase event
 		// out-of-band because stdin does not carry an event discriminator.
 		opts.Event = "preToolUse"
@@ -137,6 +138,79 @@ func runWithContext(
 }
 
 func ok(body string) *stubRT { return &stubRT{status: 200, body: body} }
+
+// claudeBlocked reports a Claude Code result that blocks: exit 2, or the
+// structured deny or block a per-user hook whose gateway is down answers
+// with (emitPerUserClaudeGatewayDown).
+func claudeBlocked(r runResult) bool {
+	return r.code == blockExit || (r.code == 0 &&
+		(strings.Contains(r.stdout, `"permissionDecision":"deny"`) || strings.Contains(r.stdout, `"decision":"block"`)))
+}
+
+func TestClaudeAndCodexNativeOutputAgreesWithGatewayAction(t *testing.T) {
+	for _, connector := range []string{"claudecode", "codex"} {
+		field := "claude_code_output"
+		if connector == "codex" {
+			field = "codex_output"
+		}
+		for _, managed := range []bool{false, true} {
+			mode := "per-user closed"
+			if managed {
+				mode = "managed"
+			}
+			for _, tc := range []struct {
+				name        string
+				action      string
+				decision    string
+				outputEvent string
+				blocked     bool
+				failed      bool
+			}{
+				{name: "block with allow output", action: "block", decision: "allow", blocked: true, failed: true},
+				{name: "block for another event", action: "block", decision: "deny", outputEvent: "UserPromptSubmit", blocked: true, failed: true},
+				{name: "block with deny output", action: "block", decision: "deny", blocked: true},
+				{name: "confirm with allow output", action: "confirm", decision: "allow", blocked: true, failed: true},
+				{name: "confirm with ask output", action: "confirm", decision: "ask"},
+				{name: "allow", action: "allow", decision: "allow"},
+			} {
+				t.Run(connector+"/"+mode+"/"+tc.name, func(t *testing.T) {
+					var home string
+					outputEvent := tc.outputEvent
+					if outputEvent == "" {
+						outputEvent = "PreToolUse"
+					}
+					body := fmt.Sprintf(`{"action":%q,"reason":"policy reason",%q:{"hookSpecificOutput":{"hookEventName":%q,"permissionDecision":%q}}}`,
+						tc.action, field, outputEvent, tc.decision)
+					r := run(t, connector, ok(body), func(o *Options) {
+						o.FailMode = "closed"
+						o.ManagedEnterprise = managed
+						home = o.Home
+					})
+					if tc.blocked {
+						denied := claudeBlocked(r)
+						if connector == "codex" {
+							denied = r.code == 0 && strings.Contains(r.stdout, `"permissionDecision":"deny"`)
+						}
+						if !denied || strings.Contains(r.stdout, `"permissionDecision":"allow"`) {
+							t.Fatalf("block result: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+						}
+					} else if r.code != 0 || !strings.Contains(r.stdout, `"permissionDecision":"`+tc.decision+`"`) {
+						t.Fatalf("native result: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+					}
+					log, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+					if tc.failed {
+						if err != nil || !strings.Contains(string(log), `"reason":"native output contradicts gateway action"`) ||
+							!strings.Contains(string(log), `"fail_mode":"closed"`) {
+							t.Fatalf("missing closed failure record: log=%q err=%v", log, err)
+						}
+					} else if err == nil && strings.Contains(string(log), "native output contradicts gateway action") {
+						t.Fatalf("valid decision recorded as contradiction: %q", log)
+					}
+				})
+			}
+		}
+	}
+}
 
 func TestRunPrefersConnectorScopedToken(t *testing.T) {
 	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
@@ -511,7 +585,7 @@ func TestDecisionGolden(t *testing.T) {
 		{
 			name:       "cursor allow echoes hook_output exit 0",
 			connector:  "cursor",
-			respBody:   `{"hook_output":{"permission":"allow"}}`,
+			respBody:   `{"action":"allow","hook_output":{"permission":"allow"}}`,
 			wantStdout: `{"permission":"allow"}` + "\n",
 			wantCode:   0,
 		},
@@ -525,35 +599,35 @@ func TestDecisionGolden(t *testing.T) {
 		{
 			name:       "cursor echoes hook_output exit 0",
 			connector:  "cursor",
-			respBody:   `{"hook_output":{"permission":"deny","user_message":"no","agent_message":"no"}}`,
+			respBody:   `{"action":"block","hook_output":{"permission":"deny","user_message":"no","agent_message":"no"}}`,
 			wantStdout: `{"permission":"deny","user_message":"no","agent_message":"no"}` + "\n",
 			wantCode:   0,
 		},
 		{
 			name:       "copilot allow echoes hook_output exit 0",
 			connector:  "copilot",
-			respBody:   `{"hook_output":{"permissionDecision":"allow"}}`,
+			respBody:   `{"action":"allow","hook_output":{"permissionDecision":"allow"}}`,
 			wantStdout: `{"permissionDecision":"allow"}` + "\n",
 			wantCode:   0,
 		},
 		{
 			name:       "copilot echoes hook_output exit 0",
 			connector:  "copilot",
-			respBody:   `{"hook_output":{"permissionDecision":"deny"}}`,
+			respBody:   `{"action":"block","hook_output":{"permissionDecision":"deny"}}`,
 			wantStdout: `{"permissionDecision":"deny"}` + "\n",
 			wantCode:   0,
 		},
 		{
 			name:       "openhands deny in hook_output exits 2",
 			connector:  "openhands",
-			respBody:   `{"hook_output":{"decision":"deny","reason":"no"}}`,
+			respBody:   `{"action":"block","hook_output":{"decision":"deny","reason":"no"}}`,
 			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
 			wantCode:   2,
 		},
 		{
 			name:       "openhands allow in hook_output exits 0",
 			connector:  "openhands",
-			respBody:   `{"hook_output":{"decision":"allow"}}`,
+			respBody:   `{"action":"allow","hook_output":{"decision":"allow"}}`,
 			wantStdout: `{"decision":"allow"}` + "\n",
 			wantCode:   0,
 		},
@@ -600,7 +674,7 @@ func TestDecisionGolden(t *testing.T) {
 		{
 			name:       "antigravity echoes hook_output deny exit 0",
 			connector:  "antigravity",
-			respBody:   `{"hook_output":{"decision":"deny","reason":"no"}}`,
+			respBody:   `{"action":"block","hook_output":{"decision":"deny","reason":"no"}}`,
 			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
 			wantCode:   0,
 		},
@@ -768,12 +842,14 @@ func TestHermesMalformedOrMismatchedGatewayOutputFailsOpen(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// A per-user hook in fail mode open: these answers never block.
+			// In fail mode closed a tool call blocks instead
+			// (TestPerUserHermesToolCallFailsClosedUnlessOpen).
 			input := fmt.Sprintf(`{"event":%q}`, tc.event)
 			result := run(t, "hermes", ok(tc.response), func(opts *Options) {
 				opts.Event = ""
 				opts.Stdin = strings.NewReader(input)
-				opts.FailMode = "closed"
-				opts.StrictAvailability = true
+				opts.FailMode = "open"
 			})
 			if result.code != 0 || result.stdout != "" {
 				t.Fatalf(
@@ -968,30 +1044,36 @@ func TestConnectionRefusedColdStartsAndRetriesExactlyOnce(t *testing.T) {
 			Header:     make(http.Header),
 		}, nil
 	}
-	recoveries := 0
+	var recoveries atomic.Int64
 	r := run(t, "codex", rt, func(opts *Options) {
 		opts.GatewayRecovery = func(context.Context, error) error {
-			recoveries++
+			recoveries.Add(1)
 			return nil
 		}
 	})
-	if r.code != 0 || recoveries != 1 || rt.requests != 2 {
-		t.Fatalf("cold-start retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
+	if r.code != 0 || recoveries.Load() != 1 || rt.requests != 2 {
+		t.Fatalf("cold-start retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries.Load(), rt.requests, r.stderr)
 	}
 }
 
-func TestColdStartNeverRetriesMoreThanOnce(t *testing.T) {
+// A per-user hook starts its gateway once per call, then keeps sending the
+// call within the restart budget; a gateway still down at its end blocks
+// the call in fail mode closed (GAP-0107).
+func TestColdStartRunsOncePerCall(t *testing.T) {
+	fastRestartRetries(t)
 	rt := &stubRT{err: syscall.ECONNREFUSED}
-	recoveries := 0
+	var recoveries atomic.Int64
 	r := run(t, "claudecode", rt, func(opts *Options) {
 		opts.FailMode = "closed"
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 300*time.Millisecond)
 		opts.GatewayRecovery = func(context.Context, error) error {
-			recoveries++
+			recoveries.Add(1)
 			return nil
 		}
 	})
-	if r.code != 2 || recoveries != 1 || rt.requests != 2 {
-		t.Fatalf("bounded retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
+	if !claudeBlocked(r) || recoveries.Load() != 1 || rt.requests < 2 ||
+		!strings.Contains(r.stdout+r.stderr, "restarting or not running") {
+		t.Fatalf("bounded retry result code=%d recoveries=%d requests=%d stdout=%q stderr=%q", r.code, recoveries.Load(), rt.requests, r.stdout, r.stderr)
 	}
 }
 
@@ -1027,58 +1109,63 @@ func TestColdStartFailurePreservesFailClosedPolicy(t *testing.T) {
 			return errors.New("foreign process owns gateway state")
 		}
 	})
-	if r.code != 2 || rt.requests != 1 {
+	if !claudeBlocked(r) || rt.requests != 1 {
 		t.Fatalf("failed cold start code=%d requests=%d stderr=%q", r.code, rt.requests, r.stderr)
 	}
 }
 
-func TestColdStartWaitRespectsOverallHookDeadline(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
-	defer cancel()
+// A start that takes longer than the restart budget (another start or a
+// restart holds the start lock) does not hold the call: it is blocked at
+// the end of the budget, never allowed (GAP-0094).
+func TestAColdStartThatOutlastsTheRestartBudgetDoesNotHoldTheCall(t *testing.T) {
+	fastRestartRetries(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	started := time.Now()
-	r := runWithContext(t, ctx, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
+	r := run(t, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		opts.FailMode = "closed"
-		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
-			<-ctx.Done()
-			return ctx.Err()
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 300*time.Millisecond)
+		opts.GatewayRecovery = func(context.Context, error) error {
+			<-release
+			return nil
 		}
 	})
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("hook exceeded bounded deadline: %s", elapsed)
+	if elapsed := time.Since(started); elapsed > 1500*time.Millisecond {
+		t.Fatalf("the call waited %s for the start", elapsed)
 	}
-	if r.code != 2 {
+	if !claudeBlocked(r) {
 		t.Fatalf("deadline fail-closed code=%d stderr=%q", r.code, r.stderr)
 	}
 }
 
-func TestDefaultTransportColdStartReceivesRegisteredHookDeadline(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	var remaining time.Duration
-	r := run(t, "claudecode", &stubRT{}, func(opts *Options) {
+// The start a per-user hook runs after a refused connection outlives the
+// call: a gateway that takes longer than the restart budget to start still
+// comes up for the next call. It keeps the registered hook deadline as its
+// bound.
+func TestPerUserColdStartOutlivesTheCall(t *testing.T) {
+	fastRestartRetries(t)
+	startCtx := make(chan context.Context, 1)
+	release := make(chan struct{})
+	r := run(t, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		opts.Event = "MessageDisplay"
-		opts.APIAddr = addr
-		opts.HTTPClient = nil
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 200*time.Millisecond)
 		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
-			deadline, ok := ctx.Deadline()
-			if !ok {
-				return errors.New("cold-start context has no registered hook deadline")
-			}
-			remaining = time.Until(deadline)
-			return errors.New("test stops before gateway start")
+			startCtx <- ctx
+			<-release // still starting when the call ends
+			return nil
 		}
 	})
+	defer close(release)
 	if r.code != 0 {
 		t.Fatalf("MessageDisplay fail-open code=%d stderr=%q", r.code, r.stderr)
 	}
-	if remaining <= 0 || remaining > hookRequestTimeout("claudecode", "MessageDisplay") {
-		t.Fatalf("cold-start deadline remaining=%s, want within registered request budget", remaining)
+	ctx := <-startCtx
+	if ctx.Err() != nil {
+		t.Fatalf("the cold start context ended with the call: %v", ctx.Err())
+	}
+	deadline, ok := ctx.Deadline()
+	if remaining := time.Until(deadline); !ok || remaining <= 0 || remaining > hookRequestTimeout("claudecode", "MessageDisplay") {
+		t.Fatalf("cold-start deadline remaining=%s (set %v), want within the registered request budget", remaining, ok)
 	}
 }
 
@@ -1177,6 +1264,9 @@ func TestMixedConnectorEffectiveFailModeResponseMatrix(t *testing.T) {
 		for _, connector := range connectors {
 			t.Run(failure.name+"/"+connector.name, func(t *testing.T) {
 				r := run(t, connector.name, failure.rt(), func(o *Options) { o.FailMode = connector.mode })
+				if connector.name == "claudecode" && claudeBlocked(r) {
+					return
+				}
 				if r.code != connector.code {
 					t.Fatalf("code = %d, want %d; stderr=%q", r.code, connector.code, r.stderr)
 				}
@@ -1353,9 +1443,10 @@ func TestNativeConnectorEndpointMatrix(t *testing.T) {
 				t.Errorf("authorization = %q", got)
 			}
 			wantBody := `{"event":"x"}`
-			if connector == "codex" {
+			switch connector {
+			case "codex":
 				wantBody = `{"hook_event_name":"PreToolUse"}`
-			} else if connector == "copilot" {
+			case "copilot":
 				wantBody = `{"sessionId":"s","timestamp":1,"cwd":"C:\\work","toolName":"powershell","toolArgs":{"command":"Get-ChildItem"}}`
 			}
 			if got := string(rt.gotBody); got != wantBody {
@@ -1378,26 +1469,36 @@ func TestNativeConnectorEndpointMatrix(t *testing.T) {
 	}
 }
 
+// An unreviewed bound event never reaches the gateway. A Secure Client hook
+// keeps Copilot's fail-open result; a managed hook outside Secure Client
+// refuses with Copilot's native denies (failInvalidManagedCopilotBinding;
+// re-review P2: it allowed under closed before).
 func TestCopilotEventBindingRequiresReviewedExactEvent(t *testing.T) {
 	for _, event := range []string{"PreToolUse", "futureEvent", ""} {
-		t.Run(fmt.Sprintf("event_%s", event), func(t *testing.T) {
-			rt := ok(`{"action":"allow"}`)
-			result := run(t, "copilot", rt, func(opts *Options) {
-				opts.Event = event
-				opts.FailMode = "closed"
-				opts.StrictAvailability = true
-				opts.ManagedEnterprise = true
+		for _, secureClient := range []bool{false, true} {
+			t.Run(fmt.Sprintf("event_%s_secure_client_%v", event, secureClient), func(t *testing.T) {
+				rt := ok(`{"action":"allow"}`)
+				result := run(t, "copilot", rt, func(opts *Options) {
+					opts.Event = event
+					opts.FailMode = "closed"
+					opts.StrictAvailability = true
+					opts.ManagedEnterprise = true
+					opts.SecureClient = secureClient
+				})
+				if rt.requests != 0 || rt.gotReq != nil {
+					t.Fatalf("unreviewed event %q reached the gateway", event)
+				}
+				if secureClient && (result.code != 0 || result.stdout != "") {
+					t.Fatalf("Secure Client: unreviewed event %q synthesized enforcement: code=%d stdout=%q stderr=%q",
+						event, result.code, result.stdout, result.stderr)
+				}
+				if !secureClient && (result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
+					!strings.Contains(result.stdout, `"behavior":"deny"`) || strings.Contains(result.stderr, "fail-open")) {
+					t.Fatalf("managed: unreviewed event %q must be refused: code=%d stdout=%q stderr=%q",
+						event, result.code, result.stdout, result.stderr)
+				}
 			})
-			if rt.requests != 0 || rt.gotReq != nil {
-				t.Fatalf("unreviewed event %q reached the gateway", event)
-			}
-			if result.code != 0 || result.stdout != "" {
-				t.Fatalf(
-					"unreviewed event %q synthesized enforcement: code=%d stdout=%q stderr=%q",
-					event, result.code, result.stdout, result.stderr,
-				)
-			}
-		})
+		}
 	}
 }
 
@@ -1428,7 +1529,7 @@ func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
 // Per-user Copilot hooks fail open on every DefenseClaw-side failure;
 // administrator-managed (standalone enterprise) Copilot hooks deny the tool
 // call with Copilot's native structured decision instead.
-func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
+func TestCopilotFailureContract(t *testing.T) {
 	type failureCase struct {
 		name   string
 		rt     *stubRT
@@ -1467,6 +1568,8 @@ func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
 				want := ""
 				if managedHook {
 					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw policy service is unavailable."}` + "\n"
+				} else if tc.name == "unavailable-home" {
+					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}` + "\n"
 				}
 				if result.code != 0 || result.stdout != want {
 					t.Fatalf(
@@ -1858,7 +1961,7 @@ func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
 			var out, errb bytes.Buffer
 			home := tc.home(t)
 			code := Run(context.Background(), Options{
-				Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home,
+				Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home, FailMode: "open",
 				HookDir: filepath.Join(home, "hooks"), Token: "t",
 				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
 				HTTPClient: &http.Client{Transport: rt},
@@ -2050,25 +2153,43 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	}) {
 		t.Fatalf("refusal reports = %+v, want one codex PreToolUse shell refusal", reports)
 	}
-	// Hermes has no fail-closed contract: the same refusal allows, so the
-	// hook must not claim to block.
-	out.Reset()
-	errb.Reset()
-	code = Run(context.Background(), Options{
-		Connector:                "hermes",
-		APIAddr:                  "127.0.0.1:1",
-		Home:                     home,
-		HookDir:                  filepath.Join(home, "hooks"),
-		ManagedEnterprise:        true,
-		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
-		ExplainUnenrolledAccount: true,
-		Stdin:                    strings.NewReader("{}"),
-		Stdout:                   &out,
-		Stderr:                   &errb,
-		HTTPClient:               &http.Client{Transport: rt},
-	})
-	if code != 0 || rt.requests != 0 || strings.Contains(errb.String(), "blocking") {
-		t.Fatalf("unenrolled Hermes: code = %d requests = %d stderr = %q, want an allow that does not claim a block", code, rt.requests, errb.String())
+	// Hermes has no fail-closed contract: a Hermes event that cannot block
+	// gets the neutral result, and the hook must not claim to block. An
+	// invocation whose payload names no event may be a tool call (the
+	// installed command binds none), so the managed hook blocks it and names
+	// the enrollment (rel-1-0-3 B-20).
+	for _, tc := range []struct {
+		stdin  string
+		blocks bool
+	}{
+		{`{"hook_event_name":"pre_llm_call"}`, false},
+		{"{}", true},
+	} {
+		out.Reset()
+		errb.Reset()
+		code = Run(context.Background(), Options{
+			Connector:                "hermes",
+			APIAddr:                  "127.0.0.1:1",
+			Home:                     home,
+			HookDir:                  filepath.Join(home, "hooks"),
+			ManagedEnterprise:        true,
+			ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+			ExplainUnenrolledAccount: true,
+			Stdin:                    strings.NewReader(tc.stdin),
+			Stdout:                   &out,
+			Stderr:                   &errb,
+			HTTPClient:               &http.Client{Transport: rt},
+		})
+		if tc.blocks {
+			if code != 0 || rt.requests != 0 || !strings.Contains(out.String(), `"action":"block"`) ||
+				!strings.Contains(out.String(), "this account is not enrolled") {
+				t.Fatalf("unenrolled Hermes %s: code = %d requests = %d stdout = %q, want a block that names the enrollment", tc.stdin, code, rt.requests, out.String())
+			}
+			continue
+		}
+		if code != 0 || rt.requests != 0 || strings.Contains(errb.String(), "blocking") || strings.Contains(out.String(), "block") {
+			t.Fatalf("unenrolled Hermes %s: code = %d requests = %d stderr = %q, want an allow that does not claim a block", tc.stdin, code, rt.requests, errb.String())
+		}
 	}
 }
 
@@ -2124,7 +2245,7 @@ func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
 			var out, errb bytes.Buffer
 			home := tc.home(t)
 			code := Run(context.Background(), Options{
-				Connector: "cursor", Home: home, HookDir: filepath.Join(home, "hooks"),
+				Connector: "cursor", Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "open",
 				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
 			})
 			if code != 0 {
@@ -2330,8 +2451,14 @@ func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PostCompact") + "}\n",
 		},
 		{
+			// A blocked stop event keeps Codex running the turn (#1140):
+			// it gets the neutral allow.
 			event:      "SubagentStop",
-			wantStdout: `{"decision":"block","reason":` + gatewayDownReason("SubagentStop") + "}\n",
+			wantStdout: "",
+		},
+		{
+			event:      "Stop",
+			wantStdout: "",
 		},
 		{
 			event: "PreToolUse",
@@ -2383,8 +2510,8 @@ func TestCodexLegacyAndInvalidContractsDoNotBackfillLifecycleControls(t *testing
 		{name: "v1 SessionStart", event: "SessionStart", contractID: "codex-hooks-v1"},
 		{name: "v2 PreCompact", event: "PreCompact", contractID: "codex-hooks-v2"},
 		{name: "v2 PostCompact", event: "PostCompact", contractID: "codex-hooks-v2"},
-		{name: "missing contract", event: "SubagentStop"},
-		{name: "invalid contract", event: "SubagentStop", contractID: "codex-hooks-v999"},
+		{name: "missing contract", event: "PreCompact"},
+		{name: "invalid contract", event: "PreCompact", contractID: "codex-hooks-v999"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2612,7 +2739,9 @@ func TestRunChargesWorkBeforeRunToTheRequestBudget(t *testing.T) {
 	if r.rt.requests != 0 {
 		t.Fatalf("a spent budget must not contact the gateway: %d requests", r.rt.requests)
 	}
-	if r.code == 0 || !strings.Contains(r.stderr, "budget exhausted") {
+	// A tool call whose answer budget is spent too gets the answer
+	// watchdog's no-answer block at once.
+	if r.code == 0 || (!strings.Contains(r.stderr, "budget exhausted") && !strings.Contains(r.stderr, perUserGatewayNoAnswerReason)) {
 		t.Fatalf("a spent budget must fail closed: code=%d stderr=%q", r.code, r.stderr)
 	}
 	if fresh := run(t, "cursor", ok(`{"action":"allow"}`), func(o *Options) { o.FailMode = "closed" }); fresh.rt.requests != 1 {
@@ -2732,9 +2861,29 @@ func TestSecureClientCopilotHookFollowsItsDeliveryMode(t *testing.T) {
 	if _, stdout, _ := run(open, unenrolled); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
 		t.Fatalf("an unenrolled account's call was allowed: %q", stdout)
 	}
-	standalone := func(opts *Options) { opts.SecureClient = false; opts.ExplainUnenrolledAccount = true }
+	// A standalone hook follows the administrator's mode (owner decision
+	// 2026-10-20): open allows a stopped gateway, closed denies it.
+	standalone := func(opts *Options) {
+		opts.SecureClient = false
+		opts.ExplainUnenrolledAccount = true
+		opts.FailMode = "open"
+	}
+	standaloneOutage := func(opts Options) int {
+		return failUnreachable(withManagedOutage(opts, errManagedGatewayNotRunning), sp, "open", managedGatewayNotRunningReason)
+	}
+	if _, stdout, _ := run(standalone, standaloneOutage); strings.Contains(stdout, "deny") {
+		t.Fatalf("a standalone managed Copilot hook in fail mode open denied a stopped gateway: %q", stdout)
+	}
+	// A failure that is not an outage is closed there in fail mode open.
 	if _, stdout, _ := run(standalone, unreachable); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
-		t.Fatalf("a standalone managed Copilot hook allowed a stopped gateway: %q", stdout)
+		t.Fatalf("a standalone managed Copilot hook allowed a failure that is not an outage: %q", stdout)
+	}
+	if _, stdout, _ := run(standalone, response); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("a standalone managed Copilot hook allowed an unreadable response: %q", stdout)
+	}
+	standaloneClosed := func(opts Options) int { return failUnreachable(opts, sp, "closed", managedGatewayNotRunningReason) }
+	if _, stdout, _ := run(standalone, standaloneClosed); !strings.Contains(stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("a standalone managed Copilot hook in fail mode closed allowed a stopped gateway: %q", stdout)
 	}
 }
 
@@ -2829,7 +2978,7 @@ func TestManagedNativeDecisionRejectsMissingActionAndOutput(t *testing.T) {
 			t.Run(tc.connector+"/"+body, func(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				opts := Options{Connector: tc.connector, Event: tc.event, ManagedEnterprise: true,
-					ManagedStandalone: true, FailMode: "open", Stdout: &stdout, Stderr: &stderr}
+					ManagedStandalone: true, FailMode: "closed", Stdout: &stdout, Stderr: &stderr}
 				code := specs[tc.connector].decide(opts, []byte(body))
 				got := stdout.String()
 				if tc.connector == "kiro" {
@@ -2843,7 +2992,7 @@ func TestManagedNativeDecisionRejectsMissingActionAndOutput(t *testing.T) {
 	}
 }
 
-func TestOSSNativeDecisionMissingActionAndOutputUnchanged(t *testing.T) {
+func TestOSSOpenNativeDecisionMissingActionUsesOpenFailure(t *testing.T) {
 	for _, tc := range []struct {
 		connector, event, body, wantOutput string
 	}{
@@ -2851,7 +3000,7 @@ func TestOSSNativeDecisionMissingActionAndOutputUnchanged(t *testing.T) {
 		{"copilot", "preToolUse", `{}`, ""},
 		{"devin", "PreToolUse", `{}`, ""},
 		{"kiro", "PreToolUse", `{}`, ""},
-		{"opencode", "tool.execute.before", `{}`, "{}\n"},
+		{"opencode", "tool.execute.before", `{}`, ""},
 		{"cursor", "beforeShellExecution", `{"action":"allow"}`, `{"permission":"allow"}` + "\n"},
 		{"copilot", "preToolUse", `{"action":"allow"}`, ""},
 		{"devin", "PreToolUse", `{"action":"allow"}`, ""},
@@ -2859,7 +3008,7 @@ func TestOSSNativeDecisionMissingActionAndOutputUnchanged(t *testing.T) {
 		{"opencode", "tool.execute.before", `{"action":"allow"}`, `{"action":"allow"}` + "\n"},
 	} {
 		var stdout, stderr bytes.Buffer
-		opts := Options{Connector: tc.connector, Event: tc.event, Stdout: &stdout, Stderr: &stderr}
+		opts := Options{Connector: tc.connector, Event: tc.event, FailMode: "open", Stdout: &stdout, Stderr: &stderr}
 		code := specs[tc.connector].decide(opts, []byte(tc.body))
 		if code != 0 || stdout.String() != tc.wantOutput {
 			t.Errorf("%s %s: code=%d stdout=%q stderr=%q, want %q", tc.connector, tc.body, code, stdout.String(), stderr.String(), tc.wantOutput)

@@ -4,7 +4,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 DOCS = Path(__file__).resolve().parents[1] / "content/docs"
 
 
@@ -29,11 +28,22 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
         recovery = section(text, "For any `audit.db.corrupt-<time>` archive", "- On a host")
         for phrase in (
             "whether from a 0.x upgrade or a later gateway start",
-            "copy the main file with its `-wal` and `-shm` files and any `-journal` file to a new folder before opening it with SQLite tools",
+            (
+                "copy the main file with its `-wal` and `-shm` files and any "
+                "`-journal` file to a new folder before opening it with "
+                "SQLite tools"
+            ),
             "SQLite can change files it opens, so work on the copy",
-            'If the first bytes of the main file are zeroed and SQLite says "file is not a database", repair the header on the copy, never on the original archive',
+            (
+                "If the first bytes of the main file are zeroed and SQLite "
+                'says "file is not a database", repair the header on the '
+                "copy, never on the original archive"
+            ),
             "A hot rollback journal is rolled back when the gateway starts and is not archived",
-            "if the store is still corrupt afterward, the start warning says the pre-existing `-journal` was not preserved",
+            (
+                "if the store is still corrupt afterward, the start warning "
+                "says the pre-existing `-journal` was not preserved"
+            ),
         ):
             self.assertIn(phrase, recovery)
         self.assert_public(recovery)
@@ -47,16 +57,28 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
             for phrase in (
                 "never set up sandboxes completes without a teardown override",
                 "Its sandbox directory is absent or holds only empty lock files and empty folders",
-                "no OpenShell state or user gateway config sits beside them, and no OpenShell sandbox setting or wrapper is enabled",
+                (
+                    "no OpenShell state or user gateway config sits beside them, "
+                    "and no OpenShell sandbox setting or wrapper is enabled"
+                ),
                 "Neither `uninstall` nor `reset` reads the sandbox list or runs teardown then",
                 "records, snapshots, non-empty files, links or unreadable entries",
                 "enabled OpenShell settings",
                 "empty lock file alongside OpenShell state or a user gateway config",
             ):
                 self.assertIn(phrase.lower(), block.lower())
-        self.assertIn("When sandbox state is present, uninstall also removes DefenseClaw's OpenShell sandboxes and images", install)
-        self.assertIn("This list check applies only when sandbox teardown is planned. If the sandbox list cannot be read", install)
-        self.assertIn("This preflight runs only when sandbox teardown is planned. If DefenseClaw cannot read the sandbox list", guide)
+        self.assertIn(
+            ("When sandbox state is present, uninstall also removes DefenseClaw's OpenShell sandboxes and images"),
+            install,
+        )
+        self.assertIn(
+            ("This list check applies only when sandbox teardown is planned. If the sandbox list cannot be read"),
+            install,
+        )
+        self.assertIn(
+            ("This preflight runs only when sandbox teardown is planned. If DefenseClaw cannot read the sandbox list"),
+            guide,
+        )
         self.assertIn("`defenseclaw uninstall` runs teardown when sandbox state is present", guide)
         self.assertNotIn("Uninstall also removes DefenseClaw's OpenShell sandboxes and images", install)
         self.assertNotIn("`defenseclaw uninstall` runs teardown too", guide)
@@ -66,13 +88,19 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
         windows = page("enterprise/windows.mdx")
         enrollment = page("enterprise/enrollment.mdx")
         troubleshooting = page("enterprise/troubleshooting.mdx")
-        restart = section(windows, "If the hook guardian's restore record cannot be read", "Windows `status`, `verify`, `ensure`")
+        restart = section(
+            windows, "If the hook guardian's restore record cannot be read", "Windows `status`, `verify`, `ensure`"
+        )
         reports = section(windows, "`status` and `verify` also report agents", "Cursor's machine hooks file")
         enrolled = section(enrollment, "When a running agent has no account name", "An agent CLI installed")
         unprotected = section(troubleshooting, "| `agent_unprotected` |", "| `agent_settings_not_restored` |")
         sessions = section(troubleshooting, "| `agent_sessions_restart_required` |", "| `no_connectors_enabled` |")
         for phrase in (
-            '`agent_sessions_restart_required` with "restart status unknown" and set `security_complete` to `false`, even when no session was listed',
+            (
+                '`agent_sessions_restart_required` with "restart status '
+                'unknown" and set `security_complete` to `false`, even when '
+                "no session was listed"
+            ),
             "a running agent with no account name is checked by its owner SID when available",
             "with neither an account name nor a SID, its restart status is unknown",
         ):
@@ -82,12 +110,25 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
             "Each warning applies to one account",
             "a running enabled agent whose account SID cannot be resolved",
             "the warning names the account when known and otherwise says the owner is unknown",
-            'reaches its entry limit or deadline is reported as "not fully scanned"',
+            (
+                "reaches its entry limit or deadline, or whose earlier "
+                'listing has not returned, is reported as "not fully scanned"'
+            ),
+            "a folder whose storage does not answer",
         ):
             self.assertIn(phrase, reports)
-        self.assertIn('If a per-user WinGet Packages listing reaches its entry limit or deadline, the account is reported as "not fully scanned" and is scanned again on the next enumeration', enrollment)
+        self.assertIn(
+            (
+                "If a per-user WinGet Packages listing reaches its entry "
+                'limit or deadline, the account is reported as "not fully '
+                'scanned" and is scanned again on the next enumeration'
+            ),
+            enrollment,
+        )
         self.assertIn("the enumerator uses its owner SID to check enrollment", enrolled)
-        self.assertIn("if neither is available, an enabled agent is reported as not protected with its owner unknown", enrolled)
+        self.assertIn(
+            ("if neither is available, an enabled agent is reported as not protected with its owner unknown"), enrolled
+        )
         for phrase in (
             "could not finish the Windows per-user WinGet package listing",
             "a process with no account name is checked by its owner SID",
@@ -98,13 +139,25 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
             "This usually names a user running an agent CLI",
             "For a known restart time, the warning clears once the sessions are restarted",
             "when those times can be read",
-            'an unreadable guardian restore record reports "restart status unknown" and sets `security_complete` to `false`, even when no session was listed',
+            (
+                "On Linux, macOS and Windows a guardian restore record that "
+                "cannot be read, or whose content is invalid, reports "
+                '"restart status unknown" and sets `security_complete` to '
+                "`false`, even when no session was listed"
+            ),
+            "it dates every enrolled target at that pass",
             "with neither name nor SID, its restart status is unknown",
             "if the restore record is unreadable, resolve that read failure and recheck",
         ):
             self.assertIn(phrase, sessions)
         self.assertNotIn("Each is one account's agent", windows)
-        self.assertNotIn("The enumerator found an agent installed for a user but could not enroll it; the message gives the reason", troubleshooting)
+        self.assertNotIn(
+            (
+                "The enumerator found an agent installed for a user but could "
+                "not enroll it; the message gives the reason"
+            ),
+            troubleshooting,
+        )
         self.assertNotIn("The warning clears once the sessions are restarted.", sessions)
         self.assertNotIn("It names sessions older than the activation or than a guardian restore.", sessions)
         self.assert_public(restart, reports, enrolled, unprotected, sessions)
@@ -117,7 +170,10 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
         warning = section(troubleshooting, "| `agent_settings_not_restored` |", "| `guardian_target_failed` |")
         namespace = section(guide, "On Linux, setup gives each per-user Docker gateway", "On a Mac, setup asks instead")
         for phrase in (
-            "`agent_settings_not_restored` when the hook guardian puts back a missing Hermes `config.yaml` or Devin `config.json`",
+            (
+                "`agent_settings_not_restored` when the hook guardian puts "
+                "back a missing Hermes `config.yaml` or Devin `config.json`"
+            ),
             "last known good copy or the pristine backup",
             "recreates the file with hooks only when no copy is available",
             "review settings that may not have been restored",
@@ -129,7 +185,11 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
             "the last known good copy or the pristine backup",
             "recreated it with DefenseClaw's hooks only when no copy was available",
             "settings need to be entered again if no copy held them",
-            "This warning alone does not fail `verify`, set `security_complete` to `false`, change the exit code or fail MDM detection",
+            (
+                "This warning alone does not fail `verify`, set "
+                "`security_complete` to `false`, change the exit code or fail "
+                "MDM detection"
+            ),
         ):
             self.assertIn(phrase, warning)
         for phrase in (
@@ -160,11 +220,16 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
             if not name.endswith("linux-config-management.mdx"):
                 self.assertIn("the kept sandbox store and key", text, name)
         self.assertIn("use `--purge` for a clean image", page("enterprise/mdm/linux-config-management.mdx"))
-        self.assertNotIn("removes the machine state (config, credentials, state and logs)",
-                         page("enterprise/mdm/linux-config-management.mdx"))
-        self.assertNotIn("removes the machine state (config, policies, key, state and logs)",
-                         page("enterprise/mdm/intune-linux.mdx"))
-        self.assertNotIn("The uninstall always removes the config, credentials, state and logs", page("enterprise/mdm/jamf.mdx"))
+        self.assertNotIn(
+            "removes the machine state (config, credentials, state and logs)",
+            page("enterprise/mdm/linux-config-management.mdx"),
+        )
+        self.assertNotIn(
+            "removes the machine state (config, policies, key, state and logs)", page("enterprise/mdm/intune-linux.mdx")
+        )
+        self.assertNotIn(
+            ("The uninstall always removes the config, credentials, state and logs"), page("enterprise/mdm/jamf.mdx")
+        )
 
 
 if __name__ == "__main__":

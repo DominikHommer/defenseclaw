@@ -172,14 +172,26 @@ pre-tool-call hook blocks only when DefenseClaw returns valid synchronous
 Hermes block JSON. A `confirm` result is recorded and alerted but
 returns no hook output because Hermes has no native ask/approve or general
 message response; the TUI can review the audit event but cannot resume the
-call. The standalone enterprise profile blocks it instead (see above). A requested global/per-connector
-`fail_mode: closed`, strict availability, timeout, nonzero exit, malformed
-output, auth failure, or gateway outage cannot create Hermes enforcement and
-remains fail-open. Such a call is recorded in
+call. The standalone enterprise profile blocks it instead (see above). On
+Linux, macOS and Windows the hook follows the effective fail mode: with `closed`, the
+default when no `hook_fail_mode` is set, a gateway outage, an auth failure or
+an unusable gateway answer blocks the tool call with Hermes' block answer and
+names the next step, such as `defenseclaw-gateway start`; only an explicit
+`open` lets it run. Hermes itself still runs the call when the hook times out
+or cannot start. With `open`, a call that ran unchecked is recorded in
 `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports it as a
 `guardrail-degraded` alert when it starts again. On a managed standalone host
-the administrator-owned Hermes hook is stricter: it blocks `pre_tool_call`
-while the gateway service is not running.
+(Linux, macOS and Windows) the administrator-owned Hermes hook is stricter: it
+blocks a `pre_tool_call` DefenseClaw cannot check (the gateway service is not
+running, its answer cannot be used, or the call is too large to inspect). The
+block text says why and what to do next, for example "DefenseClaw blocked this
+tool call: the DefenseClaw gateway service is not running on this computer. Try
+again in a moment; if this continues, ask your administrator ...". Hermes shows
+no hook text itself: the text goes to the model as the tool's error, and the
+model words the reply, so the reply may shorten it. Each block is a
+`fail_mode: closed` line in the user's `hook-failures.jsonl`; the gateway is
+down while it happens, so its audit history shows the service stopping and
+starting, not each blocked call.
 
 </Tab>
 
@@ -328,6 +340,13 @@ only in the image; nothing on your host changes.
     `defenseclaw-bedrock-mantle-openai-<region>`, through the image's managed
     `defenseclaw` provider (`--provider defenseclaw -m <model>`)
   - `defenseclaw-anthropic`, through Hermes' built-in `anthropic` provider
+- **Model limit.** The image's pinned Hermes Agent 0.19.0 sends `max_tokens`
+  for models it does not know. The Bedrock `gpt-5.6-luna` model refuses it
+  (HTTP 400, `unsupported_parameter`) and accepts `max_completion_tokens`, so
+  a sandboxed Hermes cannot complete a call on that model, while Hermes 0.21
+  on the host can. This is the harness version's request shape, not a
+  DefenseClaw or OpenShell block. Use another model of the profile in the
+  sandbox, or run Hermes on the host.
 - **Launch flags.** Skip-permissions mode adds `--yolo`. A run with `--safe`
   drops `--yolo` and every prefix Hermes accepts for it. A headless run is
   `hermes chat -q <prompt> -Q`; pass `-- chat -q "TEXT"` to `sandbox run`

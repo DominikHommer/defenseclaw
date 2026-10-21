@@ -59,13 +59,6 @@ var enterpriseHookSignedOutAccount = func(row enterpriseHookReconcileRow) string
 	return enterpriseHookWindowsAccountLabel(row)
 }
 
-// enterpriseHookSessionUnavailable matches the two errors a protected
-// target records while its account has no active Windows session.
-func enterpriseHookSessionUnavailable(message string) bool {
-	return strings.Contains(message, "exact active Windows session is unavailable") ||
-		strings.Contains(message, "no active interactive session token matches")
-}
-
 // enterpriseHookWindowsAccountLabel is "user (SID)", looking the account up
 // when the row carries only its SID.
 func enterpriseHookWindowsAccountLabel(row enterpriseHookReconcileRow) string {

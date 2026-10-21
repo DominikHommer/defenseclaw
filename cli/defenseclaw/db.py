@@ -500,7 +500,7 @@ class Store:
         self.db.commit()
 
     def _ensure_audit_connector_columns(self) -> None:
-        """Mirror Go's additive audit_events connector columns and indexes."""
+        """Mirror Go's additive audit_events connector columns."""
 
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()}
         for column, ddl in (
@@ -511,11 +511,11 @@ class Store:
         ):
             if column not in columns:
                 self.db.execute(ddl)
-        self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)")
-        self.db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp "
-            "ON audit_events(action, connector, timestamp DESC)"
-        )
+        # No reader filters audit_events on connector (the TUI filters it in
+        # memory), so neither idx_audit_connector nor
+        # idx_audit_action_connector_timestamp is created: each was one more
+        # B-tree page per audit row in the gateway's write-ahead log, and the
+        # gateway drops them (unreadAuditIndexes in internal/audit/store.go).
         self.db.commit()
 
     def _ensure_v8_alert_projection_schema(self) -> None:
@@ -687,9 +687,9 @@ class Store:
 
     def list_events(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector,
+            f"""SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector,
                       enforced
-               FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               FROM audit_events ORDER BY {self._audit_event_order()} LIMIT ?""",
             (max(limit, 1),),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
@@ -747,7 +747,7 @@ class Store:
             f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
                       severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced
-               FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               FROM audit_events ORDER BY {self._audit_event_order()} LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._summary_row_to_event(r) for r in cur.fetchall()]
@@ -782,7 +782,7 @@ class Store:
                       AND (' ' || COALESCE(details, '')) LIKE '% action=block%')
                   OR action LIKE '%block%' OR action LIKE '%deny%'
                   OR action LIKE '%quarantine%' OR action LIKE '%reject%')
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             params,
         )
         return [self._summary_row_to_event(r) for r in cur.fetchall()]
@@ -796,7 +796,7 @@ class Store:
                       severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced
                FROM audit_events
                WHERE {_ACTIONABLE_EVENT_WHERE}
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._summary_row_to_event(r) for r in cur.fetchall()]
@@ -821,12 +821,12 @@ class Store:
         """List recent connector-hook rows without the actionable filter."""
 
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor,
+            f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
                       severity, run_id, NULL AS structured_json, connector
                FROM audit_events
                WHERE action = 'connector-hook'
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
@@ -974,6 +974,29 @@ class Store:
             )
             self._audit_schema_version = schema_version
         return self._audit_event_columns_cache, self._audit_tables_cache
+
+    def _audit_event_order(self, alias: str = "", *, newest: bool = True) -> str:
+        """Order audit rows by their exact instant, with stable insert ties."""
+        columns, _ = self._audit_projection_schema()
+        prefix = f"{alias}." if alias else ""
+        instant = (
+            f"{prefix}retention_timestamp_unix_nano"
+            if "retention_timestamp_unix_nano" in columns
+            else f"julianday({prefix}timestamp)"
+        )
+        direction = "DESC" if newest else "ASC"
+        return f"{instant} {direction}, {prefix}rowid {direction}"
+
+    def _scan_result_order(self, alias: str = "") -> str:
+        """Newest scan by parsed instant, then insertion order."""
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(scan_results)")}
+        prefix = f"{alias}." if alias else ""
+        instant = (
+            f"{prefix}retention_timestamp_unix_nano"
+            if "retention_timestamp_unix_nano" in columns
+            else f"julianday({prefix}timestamp)"
+        )
+        return f"{instant} DESC, {prefix}rowid DESC"
 
     @staticmethod
     def _sql_string_values(values: tuple[str, ...]) -> str:
@@ -1244,7 +1267,7 @@ class Store:
                       run_id, structured_json, connector
                FROM audit_events
                WHERE {where}
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             (max(limit, 1),),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
@@ -1261,7 +1284,7 @@ class Store:
                       run_id, NULL AS structured_json, connector
                FROM audit_events
                WHERE {where}
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
@@ -1278,7 +1301,7 @@ class Store:
                       run_id, NULL AS structured_json, connector
                FROM audit_events
                WHERE {where}
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
@@ -1379,7 +1402,7 @@ class Store:
                      SELECT candidate.rowid FROM scan_results candidate
                      WHERE candidate.scanner = sr.scanner
                        AND candidate.target = sr.target{succeeded}
-                     ORDER BY candidate.timestamp DESC, candidate.rowid DESC
+                     ORDER BY {self._scan_result_order("candidate")}
                      LIMIT 1
                  )""",
             (scanner_name,),
@@ -1421,7 +1444,7 @@ class Store:
                  AND sr.rowid = (
                      SELECT candidate.rowid FROM scan_results candidate
                      WHERE candidate.scanner = sr.scanner AND candidate.target = sr.target
-                     ORDER BY candidate.timestamp DESC, candidate.rowid DESC
+                     ORDER BY {self._scan_result_order("candidate")}
                      LIMIT 1
                  )""",
             (scanner_name,),
@@ -1438,13 +1461,13 @@ class Store:
     ) -> dict[str, int]:
         """Return {severity: count} from the most recent scan for target+scanner."""
         cur = self.db.execute(
-            """SELECT f.severity, COUNT(*) as cnt
+            f"""SELECT f.severity, COUNT(*) as cnt
                FROM findings f
                INNER JOIN scan_results sr ON f.scan_id = sr.id
                WHERE sr.id = (
                    SELECT id FROM scan_results
                    WHERE target = ? AND scanner = ?
-                   ORDER BY timestamp DESC, rowid DESC LIMIT 1
+                   ORDER BY {self._scan_result_order()} LIMIT 1
                )
                GROUP BY f.severity""",
             (target, scanner),
@@ -1458,13 +1481,13 @@ class Store:
     ) -> list[dict[str, Any]]:
         """Return findings from the most recent scan for target+scanner."""
         cur = self.db.execute(
-            """SELECT f.severity, f.title, f.location
+            f"""SELECT f.severity, f.title, f.location
                FROM findings f
                INNER JOIN scan_results sr ON f.scan_id = sr.id
                WHERE sr.id = (
                    SELECT id FROM scan_results
                    WHERE target = ? AND scanner = ?
-                   ORDER BY timestamp DESC, rowid DESC LIMIT 1
+                   ORDER BY {self._scan_result_order()} LIMIT 1
                )
                ORDER BY CASE f.severity
                    WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
@@ -1576,7 +1599,7 @@ class Store:
                 AND (h.action IN ('connector-hook', 'guardrail-verdict', 'hook_decision', 'action')
                       OR h.action LIKE 'inspect-tool-%')
                WHERE f.id IN ({placeholders}) AND COALESCE(f.request_id, '') <> ''
-               ORDER BY h.timestamp ASC, h.rowid ASC""",
+               ORDER BY {self._audit_event_order("h", newest=False)}""",
             ids,
         )
         out: dict[str, list[str]] = {}
@@ -2243,7 +2266,7 @@ class Store:
             "SELECT id, timestamp, action, target, actor,"
             " details, severity, run_id, structured_json"
             " FROM audit_events WHERE action = 'drift'"
-            " ORDER BY timestamp DESC LIMIT ?",
+            f" ORDER BY {self._audit_event_order()} LIMIT ?",
             (limit,),
         ).fetchall()
         return [self._row_to_event(r) for r in rows]

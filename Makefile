@@ -1373,6 +1373,10 @@ dist-cli: _bundle-data _stage-extension-fingerprint
 	@rm -rf build cli/*.egg-info
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv build --wheel --out-dir $(DIST_DIR)
+	tar -czf "$(DIST_DIR)/defenseclaw-fleet-assets.tar.gz" -C . \
+		edge-connector bundles/local_observability_stack/docker-compose.fleet.yml \
+		bundles/local_observability_stack/prometheus/examples/fleet.yml \
+		bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json
 
 _bundle-data: _checkout-write-preflight
 	@rm -rf cli/defenseclaw/_data/policies/rego
@@ -1380,12 +1384,8 @@ _bundle-data: _checkout-write-preflight
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/envvars
 	@mkdir -p cli/defenseclaw/_data/skills
+	@# Fleet sources are a separate opt-in release asset, never wheel data.
 	@rm -rf cli/defenseclaw/_data/edge-connector
-	@mkdir -p cli/defenseclaw/_data/edge-connector
-	cp edge-connector/CMakeLists.txt cli/defenseclaw/_data/edge-connector/
-	cp -R edge-connector/src edge-connector/include edge-connector/generated \
-		edge-connector/third_party edge-connector/tools edge-connector/policies \
-		edge-connector/packaging cli/defenseclaw/_data/edge-connector/
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
 	@mkdir -p cli/defenseclaw/_data/llm
@@ -1461,7 +1461,10 @@ _bundle-data: _checkout-write-preflight
 	    rm -rf "cli/defenseclaw/_data/$$d/.grafana-admin-password" \
 	      "cli/defenseclaw/_data/$$d"/..grafana-admin-password.*.tmp \
 	      "cli/defenseclaw/_data/$$d/.grafana-access-mode" \
-	      "cli/defenseclaw/_data/$$d"/..grafana-access-mode.*.tmp; \
+	      "cli/defenseclaw/_data/$$d"/..grafana-access-mode.*.tmp \
+	      "cli/defenseclaw/_data/$$d/docker-compose.fleet.yml" \
+	      "cli/defenseclaw/_data/$$d/prometheus/examples/fleet.yml" \
+	      "cli/defenseclaw/_data/$$d/grafana/dashboards/defenseclaw-fleet.json"; \
 	  fi; \
 	done
 	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/

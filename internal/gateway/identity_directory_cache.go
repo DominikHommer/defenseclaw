@@ -232,11 +232,14 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		if entry.ok {
 			return entry.facts, true
 		}
-		return facts, true
+		// The lookup dropped the facts: nothing confirms them any more
+		// (identityFactsUnconfirmedError), so this request gets none either
+		// (GAP-0191).
+		return zero, false
 	}
 	wait := entry.inflight
 	c.mu.Unlock()
-	if !(block || first) || wait == nil {
+	if (!block && !first) || wait == nil {
 		return zero, false
 	}
 	timer := time.NewTimer(identityDirectoryBudget)

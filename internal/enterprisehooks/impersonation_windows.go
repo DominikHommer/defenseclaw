@@ -470,6 +470,13 @@ func withWindowsEnterpriseSessionImpersonation(target *windows.SID, expectedHome
 	return withWindowsEnterpriseTargetTokenImpersonation(target, expectedHome, windowsEnterpriseSignedInTargetTokenResolver, fn)
 }
 
+// windowsSessionHasNoUser reports the WTSQueryUserToken error of a session
+// nobody is signed in to (ERROR_NO_TOKEN). Any other error (access denied, a
+// missing privilege) stays a failure.
+func windowsSessionHasNoUser(err error) bool {
+	return errors.Is(err, windows.ERROR_NO_TOKEN)
+}
+
 func resolveWindowsEnterpriseSessionToken(target *windows.SID, allowDisconnected bool) (windows.Token, error) {
 	var sessions *windows.WTS_SESSION_INFO
 	var count uint32
@@ -493,6 +500,11 @@ func resolveWindowsEnterpriseSessionToken(target *windows.SID, allowDisconnected
 	for _, sessionID := range sessionIDs {
 		var primary windows.Token
 		if err := windows.WTSQueryUserToken(sessionID, &primary); err != nil {
+			if windowsSessionHasNoUser(err) {
+				// Nobody is signed in to that session (its user signed
+				// out after the list was read): it is not the target's.
+				continue
+			}
 			queryFailures = append(queryFailures, fmt.Sprintf("session %d: %v", sessionID, err))
 			continue
 		}

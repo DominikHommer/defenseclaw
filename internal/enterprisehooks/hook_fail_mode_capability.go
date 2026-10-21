@@ -10,29 +10,30 @@
 
 package enterprisehooks
 
-import "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+import (
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
 
-// renderedHookFailMode is mode as the hook renderer writes it into conn's
-// hooks (connector resolveConnectorHookRender): closed becomes open when the
-// agent cannot fail closed (Hermes and Copilot never block on a hook error
-// or timeout), so what status, verify and the runtime records say is what
-// the hook does (GAP-0001).
-func renderedHookFailMode(conn connector.Connector, opts connector.SetupOpts, mode string) string {
-	if mode != "closed" {
+// renderedHookFailModeFor is mode as the managed hook renderer writes it into
+// the hooks of the registry connector named name for cfg
+// (connector.CapableHookFailMode), so what status, verify and the runtime
+// records say is what the hook does (GAP-0001). Outside Secure Client every
+// connector keeps the mode the administrator's config resolved: its hooks
+// block a call they cannot check through the native deny. Under Secure Client
+// closed becomes open for an agent that cannot fail closed (Hermes and Copilot
+// never block on a hook error or timeout). A name the registry does not know
+// keeps mode.
+func renderedHookFailModeFor(cfg *config.Config, name, mode string) string {
+	if mode != "closed" || (cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) && !cfg.SecureClientIntegration()) {
 		return mode
 	}
-	if provider, ok := conn.(connector.HookCapabilityProvider); ok && !provider.HookCapabilities(opts).SupportsFailClosed {
-		return "open"
-	}
-	return mode
-}
-
-// renderedHookFailModeFor is renderedHookFailMode for the registry
-// connector named name; a name the registry does not know keeps mode.
-func renderedHookFailModeFor(name, mode string) string {
 	conn, ok := connector.NewDefaultRegistry().Get(name)
 	if !ok {
 		return mode
 	}
-	return renderedHookFailMode(conn, connector.SetupOpts{}, mode)
+	// A managed render without the standalone socket or binary is the Secure
+	// Client profile's (connector.shellHookSecureClientProfile).
+	return connector.CapableHookFailMode(connector.SetupOpts{ManagedEnterprise: true}, conn, mode)
 }

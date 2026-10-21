@@ -425,7 +425,7 @@ func TestSetupCtrlCAtAQuestionSaysWhereItStopped(t *testing.T) {
 	useGateway(ta)
 	ta.HostDoctor = upgradableReport(nil)
 	sig := make(chan os.Signal, 1)
-	ta.App.interrupts = func() (<-chan os.Signal, func()) {
+	ta.interrupts = func() (<-chan os.Signal, func()) {
 		sig <- os.Interrupt
 		return sig, func() {}
 	}
@@ -1312,12 +1312,12 @@ func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	ta.GOOS = "darwin"
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
-	ta.App.Gateway = emptyPlans{ta.gateway}
+	ta.Gateway = emptyPlans{ta.gateway}
 	ta.HostDoctor = macReport(openshell.DriverVM, nil)
 	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
 	has(t, ta.output(), "✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✓ MicroVM driver  ✓ OpenShell 0.1.1\n",
 		"every run works on a copy (the MicroVM driver mounts no host folders)",
-		"the first run of each image prepares its MicroVM disk")
+		"the first run of each image uses about 11 GiB while preparing its MicroVM disk")
 	lacks(t, ta.output(), "Run sandboxes in OpenShell MicroVMs?", "Allow sandboxes to mount", "Restart the OpenShell gateway")
 	if len(ta.gateway.planned) != 1 || ta.gateway.applied != 0 || ta.gateway.restarts != 0 {
 		t.Fatalf("plans %+v, applied %d, restarts %d", ta.gateway.planned, ta.gateway.applied, ta.gateway.restarts)
@@ -1328,7 +1328,7 @@ func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
 	ta = setupApp(t, "\ny\n", "", false)
 	ta.GOOS = "darwin"
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
-	ta.App.Gateway = emptyPlans{ta.gateway}
+	ta.Gateway = emptyPlans{ta.gateway}
 	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { r.ConfiguredDriver = openshell.DriverVM })
 	runningOn(t, ta, 1)
 	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
@@ -1359,7 +1359,7 @@ func TestSetupBuildsTheImagesForItsDriver(t *testing.T) {
 			ta.IO.TTY = false
 			if tc.mac {
 				ta.GOOS = "darwin"
-				ta.App.Gateway = emptyPlans{ta.gateway}
+				ta.Gateway = emptyPlans{ta.gateway}
 				ta.HostDoctor = macReport(tc.driver, nil)
 			}
 			ta.gateway.applyRes = &openshell.GatewayApplyResult{}

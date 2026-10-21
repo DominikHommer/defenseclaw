@@ -153,7 +153,7 @@ func (rp *RulePack) applyCustomization(layer Customization, protections Protecti
 			return &ComposeError{Field: "severity_overrides", Reason: fmt.Sprintf("unknown rule %s", id)}
 		}
 		if !validSeverity(severity) {
-			return &ComposeError{Field: "severity_overrides", Reason: fmt.Sprintf("rule %s severity must be LOW, MEDIUM, HIGH or CRITICAL", id)}
+			return &ComposeError{Field: "severity_overrides", Reason: fmt.Sprintf("rule %s severity must be CRITICAL, HIGH, MEDIUM or LOW, in any case", id)}
 		}
 		rule.Severity = severity
 	}

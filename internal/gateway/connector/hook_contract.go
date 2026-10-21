@@ -568,9 +568,18 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 	}},
 	"hermes": {
+		// A Hermes git install prints no release, only the date of the
+		// release it is on ("Hermes Agent vunknown (2026.9.24)"), and
+		// discovery reads that date. Each pin is the date tag of an
+		// official release in this range (v2026.7.20 is 0.19.0, v2026.8.27
+		// is 0.20.6, read from pyproject.toml at each tag). A date below
+		// the first pin, or between the two contracts' pins, has no
+		// contract; a date after the newest pin of v2 is an untested
+		// newer version (GAP-0151).
 		{
 			Connector:               "hermes",
 			ContractID:              "hermes-hooks-v1",
+			ExactAgentVersions:      []string{"2026.7.20", "2026.7.30", "2026.8.3", "2026.8.13", "2026.8.16", "2026.8.16.2", "2026.8.18", "2026.8.19", "2026.8.27"},
 			MinAgentVersion:         "0.19.0",
 			MaxAgentVersion:         "0.21.0",
 			DefaultForUnversioned:   false,
@@ -635,9 +644,12 @@ var builtinHookContracts = map[string][]HookContract{
 				"The v1 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
 			},
 		},
+		// Release-date pins (see hermes-hooks-v1): v2026.8.31 is 0.21.0
+		// and v2026.9.24 is 0.21.5.
 		{
 			Connector:               "hermes",
 			ContractID:              "hermes-hooks-v2",
+			ExactAgentVersions:      []string{"2026.8.31", "2026.9.7", "2026.9.11", "2026.9.14", "2026.9.21", "2026.9.24"},
 			MinAgentVersion:         "0.21.0",
 			MaxAgentVersion:         "0.22.0",
 			DefaultForUnversioned:   true,

@@ -20,6 +20,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // #1202 (GAP-0713, GAP-0705): a keep-on-exit stop failure printed
@@ -47,5 +49,14 @@ func TestGatewayTransportTextHidesRawGRPC(t *testing.T) {
 	if strings.Contains(msg, "grpc") || !strings.Contains(msg, "the connection to the OpenShell gateway closed") ||
 		!strings.Contains(msg, "retry `defenseclaw sandbox delete r5r`") {
 		t.Fatalf("delete failure = %q", msg)
+	}
+}
+
+func TestManagedDeleteTransportErrorHasRecoveryText(t *testing.T) {
+	err := &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: wait for sandbox r5r deletion failed",
+		Detail: "Cancelled: grpc: the client connection is closing"}
+	text, ok := managedErrorText(err, nil)
+	if !ok || strings.Contains(text, "grpc") || !strings.Contains(text, "sandbox doctor") || !strings.Contains(text, "retry") {
+		t.Fatalf("managed transport error = %q, %v", text, ok)
 	}
 }

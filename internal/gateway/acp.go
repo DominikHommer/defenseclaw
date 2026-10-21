@@ -202,7 +202,8 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	// selected ACP traffic (GAP-0311).
 	ctx = a.withGuardrailProfileDecision(ctx, agent.ConnectorID)
 	if slices.Contains(profile.DeniedMethods, req.Method) {
-		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: "method denied by ACP profile"}
+		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: "method denied by ACP profile",
+			FailMode: acpProfileFailMode(profile, mode)}
 		if mode != string(acp.ModeAction) {
 			verdict.Action, verdict.WouldBlock = "allow", true
 		}
@@ -245,7 +246,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	verdict.applyMode(mode)
 	result := acp.Verdict{
 		Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
-		Reason: verdict.Reason, WouldBlock: verdict.WouldBlock,
+		Reason: verdict.Reason, WouldBlock: verdict.WouldBlock, FailMode: acpProfileFailMode(profile, mode),
 	}
 	record := func(recordCtx context.Context) hookEvaluationContext {
 		var evaluation hookEvaluationContext
@@ -280,6 +281,21 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		result.Reason = acpWithheldOutputReason(result.Reason)
 	}
 	a.writeJSON(w, http.StatusOK, result)
+}
+
+// acpProfileFailMode is the Verdict.FailMode of profile in mode: its
+// explicit fail_mode ("open" or "closed") in observe mode, "" when unset or
+// in action mode, which is always closed (and keeps the verdict of a guard
+// that predates the field).
+func acpProfileFailMode(profile config.ACPProfile, mode string) string {
+	if mode == string(acp.ModeAction) {
+		return ""
+	}
+	switch failMode := strings.ToLower(strings.TrimSpace(profile.FailMode)); failMode {
+	case "open", "closed":
+		return failMode
+	}
+	return ""
 }
 
 // acpWithheldOutputReason words a block of the agent's own output
@@ -793,7 +809,8 @@ type acpSignedResponse struct {
 func (w *acpSignedResponse) Header() http.Header { return w.header }
 
 func (w *acpSignedResponse) WriteHeader(status int) {
-	if w.status == 0 {
+	// An informational response (a hook progress report) is not the answer.
+	if w.status == 0 && status >= 200 {
 		w.status = status
 	}
 }

@@ -6,6 +6,7 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -93,6 +94,19 @@ func TestManagedGatewayStoppedTextNamesThisPlatformAndRefusalCode(t *testing.T) 
 	}
 }
 
+// GAP-0759: a missing DefenseClaw folder names that cause and its code
+// instead of "not set up correctly"; any other runtime refusal keeps it.
+func TestManagedRuntimeHomeMissingTextNamesTheFolder(t *testing.T) {
+	text := managedStandaloneFailClosedText("PreToolUse", "transport", managedRuntimeHomeMissingReason)
+	if !strings.Contains(text, "DefenseClaw folder") || strings.Contains(text, "not set up correctly") ||
+		!strings.HasSuffix(text, " ("+managedRuntimeHomeMissingReason+")") || !strings.HasPrefix(text, "DefenseClaw blocked this tool call: ") {
+		t.Fatalf("text = %q", text)
+	}
+	if other := managedStandaloneFailClosedText("PreToolUse", "transport", "enterprise_managed_runtime_state_invalid"); !strings.Contains(other, "not set up correctly") {
+		t.Fatalf("state invalid text = %q", other)
+	}
+}
+
 func TestHookEventSubject(t *testing.T) {
 	for event, want := range map[string]string{
 		"beforeSubmitPrompt":  "prompt",
@@ -130,7 +144,7 @@ func TestWindowsStandaloneHeldAPIPortFailsClosedNamingThePort(t *testing.T) {
 		var out, errb bytes.Buffer
 		Run(context.Background(), Options{
 			Connector: "codex", Event: "PreToolUse", HookContractID: "codex-hooks-v4", APIAddr: "127.0.0.1:1",
-			Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "open", ManagedEnterprise: true,
+			Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "closed", ManagedEnterprise: true,
 			ExplainUnenrolledAccount: explain, AuthenticatedManagedToken: &token,
 			Stdin:  strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell"}`),
 			Stdout: &out, Stderr: &errb, HTTPClient: &http.Client{Transport: portHeldRT{}},
@@ -152,8 +166,9 @@ func TestWindowsStandaloneHeldAPIPortFailsClosedNamingThePort(t *testing.T) {
 // A Windows standalone managed hook (ExplainUnenrolledAccount) whose gateway
 // service is stopped fails closed with the plain text and says the service
 // is not running, in the agent's denial and in hook-failures.jsonl
-// (GAP-0013). A Secure Client hook follows its fail mode instead: open allows
-// the call, closed keeps the generic text; both log the not-running reason.
+// (GAP-0013). An authenticated Secure Client hook follows its fail mode
+// instead (#1163): open allows the call, closed keeps the generic text; both
+// log the not-running reason.
 func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T) {
 	run := func(explain bool, failMode string) (int, string, string, string) {
 		home := t.TempDir()
@@ -179,7 +194,7 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 		failures, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
 		return code, out.String(), errb.String(), string(failures)
 	}
-	code, stdout, stderr, failures := run(true, "open")
+	code, stdout, stderr, failures := run(true, "closed")
 	want := "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
 		"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `" +
 		managedStatusCommand(runtime.GOOS) + "` names what to do. (enterprise_managed_gateway_not_running)"
@@ -292,6 +307,46 @@ func TestWindowsStandaloneFirstCallRetriesA401WithoutOperatorAdvice(t *testing.T
 	for _, leaked := range []string{"token drift", "doctor --fix", "defenseclaw-gateway restart"} {
 		if strings.Contains(r.stdout+r.stderr, leaked) {
 			t.Fatalf("a standard user sees operator advice %q: %q", leaked, r.stdout+r.stderr)
+		}
+	}
+}
+
+// A managed hook that fails closed because the account's DefenseClaw folder
+// is missing must not create that folder to write its failure log. Claude
+// Code runs one hook process per event: the session-start event's log line
+// created .defenseclaw, so the prompt's hook found a folder, refused it as
+// state_invalid and printed the generic "not set up correctly" text instead
+// of the missing-folder one (GAP-0154, GAP-0759).
+func TestManagedHookFailureLogDoesNotRecreateAMissingHome(t *testing.T) {
+	profile := t.TempDir()
+	t.Setenv("HOME", profile)
+	t.Setenv("USERPROFILE", profile)
+	home := filepath.Join(profile, ".defenseclaw")
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		// The Windows hook whose protected runtime failed passes no home.
+		{"runtime failure", Options{ManagedRuntimeFailure: managedRuntimeHomeMissingReason}},
+		{"home guard", Options{Home: home, HookDir: filepath.Join(home, "hooks")}},
+	} {
+		for _, event := range []string{"SessionStart", "UserPromptSubmit"} {
+			opts := tc.opts
+			opts.Connector = "claudecode"
+			opts.APIAddr = "127.0.0.1:1"
+			opts.ManagedEnterprise = true
+			opts.StrictAvailability = true
+			opts.FailMode = "closed"
+			opts.Stdin = strings.NewReader(`{"hook_event_name":"` + event + `"}`)
+			var out, errb bytes.Buffer
+			opts.Stdout, opts.Stderr = &out, &errb
+			Run(context.Background(), opts)
+			if !strings.Contains(out.String()+errb.String(), managedRuntimeHomeMissingReason) {
+				t.Fatalf("%s %s: output %q %q, want %s", tc.name, event, out.String(), errb.String(), managedRuntimeHomeMissingReason)
+			}
+			if _, err := os.Lstat(home); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s %s: the hook created %s (Lstat: %v)", tc.name, event, home, err)
+			}
 		}
 	}
 }

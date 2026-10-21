@@ -38,7 +38,12 @@ class Delta19DocsTest(unittest.TestCase):
         guide = (DOCS / "sandboxes/guide.mdx").read_text()
         events = (ROOT / "docs/OPENSHELL_SANDBOX_EVENTS.md").read_text()
         for text in (telemetry, events):
-            for value in ("log.sandbox.registration_without_guest", "relay_without_guest", "running_without_guest", "Sandbox registrations without a guest"):
+            for value in (
+                "log.sandbox.registration_without_guest",
+                "relay_without_guest",
+                "running_without_guest",
+                "Sandbox registrations without a guest",
+            ):
                 self.assertIn(value, text)
             self.assertIn("compliance.activity", text)
             self.assertIn("no outcome", text)

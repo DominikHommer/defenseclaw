@@ -544,7 +544,7 @@ func (r *EventRouter) resolveAgentRunExecutionLocked(observation *agentRunObserv
 		runID:          observation.key.runID,
 	}
 	state, found := r.agentRunExecutions[key]
-	if found && !(state.terminal && observation.key.event == "start") {
+	if found && (!(state.terminal) || observation.key.event != "start") {
 		observation.topology.executionID = state.executionID
 		return
 	}

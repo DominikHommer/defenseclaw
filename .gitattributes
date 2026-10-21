@@ -27,6 +27,13 @@ internal/gateway/connector/testdata/bridge_host/** text eol=lf
 # (STOCK_PROFILE_DIGESTS); keep them LF on Windows checkouts too.
 policies/guardrail/** text eol=lf
 
+# A Fleet-off upgrade retires these optional templates only when their bytes
+# match the reviewed SHA-256 (bundle_refresh._LOCAL_OBSERVABILITY_RETIRED_SHA256); keep
+# them LF on Windows checkouts too.
+bundles/local_observability_stack/docker-compose.fleet.yml text eol=lf
+bundles/local_observability_stack/prometheus/examples/fleet.yml text eol=lf
+bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json text eol=lf
+
 # The MDM kit scripts are uploaded to MDM consoles as committed and the Unix
 # ones run under /bin/sh; keep them LF on Windows checkouts too.
 packaging/mdm/**/*.sh text eol=lf
@@ -59,6 +66,22 @@ internal/gateway/testdata/secure_client_evaluation/** text eol=lf
 # TestDigestIsPinned, the CHANGELOG digest line and tetragon verify); a CRLF
 # checkout changed the digest. Keep them LF on Windows checkouts too.
 policies/kernel/** text eol=lf
+
+# The shipped managed config templates are signed into bundles and matched
+# by digest (internal/gateway TestOfflineSignShippedTemplateMatchesDeviceDigest
+# edits them by exact LF text); a CRLF checkout broke that test on Windows.
+testdata/enterprise-configs/*.yaml text eol=lf
+
+# The local observability bundle upgrade removes a retired or Fleet asset only
+# when its SHA-256 matches a shipped digest (bundle_refresh
+# _LOCAL_OBSERVABILITY_RETIRED_SHA256, taken over LF bytes); keep the bundle
+# LF on Windows checkouts too.
+bundles/local_observability_stack/** text eol=lf
+
+# The Windows standalone Setup build scripts run under bash on the release
+# runner, and cmd/defenseclaw-enterprise-setup build_contract_test.go reads
+# their multi-line commands by exact LF text; keep them LF on Windows too.
+packaging/windows/standalone/*.sh text eol=lf
 
 # The sandbox golden texts are compared byte-for-byte; keep them LF on
 # Windows checkouts too.

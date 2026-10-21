@@ -125,6 +125,25 @@ def test_macos_trusted_path_refuses_write_acl_entries(tmp_path: Path) -> None:
         assert trusted("darwin", entry)[0], entry
     assert trusted("linux", write)[0]
 
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_missing_staging_folder_returns_structured_refusal(tmp_path: Path) -> None:
+    for platform in ("linux", "macos"):
+        wrapper = _text(MDM / platform / "defenseclaw-enterprise.sh")
+        stage = tmp_path / "missing"
+        functions = "\n".join(_shell_function(wrapper, name) for name in ("dc_stage_parent",))
+        script = (
+            "set -u\nDC_EXIT_FAILURE=1\n"
+            f"DC_SCRIPT_OS={platform}\nDC_STAGING_DIR='{stage}'\n"
+            "dc_trusted_path() { return 1; }\n"
+            "dc_fail_result() { printf '%s|%s|%s' \"$1\" \"$2\" \"$3\"; }\n"
+            f"{functions}\ndc_stage_parent\n"
+        )
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert "mdm_staging_untrusted" in result.stdout
+        assert "missing" in result.stdout
+
 def test_intune_entrypoints_refuse_constrained_language_before_native_helpers() -> None:
     entrypoints = {
         MDM / "intune" / "windows" / "Install-DefenseClawIntune.ps1": "1603",
@@ -214,6 +233,51 @@ def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
     # inline-secret setting.
     assert "DC_SECRET_VALUE" not in text
     assert "Never put credentials here" in text
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("", 'credential is empty (check "value" < 1)'),
+        ("gateway unavailable", "gateway unavailable"),
+    ],
+)
+def test_unix_wrapper_secret_refusal_carries_gateway_reason(
+    tmp_path: Path, os_dir: str, stderr: str, expected: str
+) -> None:
+    wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_log", "dc_fail_result",
+        "dc_secret_json_error", "dc_store_secret",
+    ))
+    gateway = tmp_path / "gateway"
+    gateway.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$DC_TEST_DOCUMENT"\n'
+        'if [ -n "$DC_TEST_STDERR" ]; then printf "%s\\n" "$DC_TEST_STDERR" >&2; fi\n'
+        'exit 2\n',
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    document = {"errors": [{"code": "secret_value_invalid", "message": 'credential is empty (check "value" < 1)'}]}
+    script = (
+        f'DC_ACTION=ensure DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"}\n'
+        f'DC_STAGE="{tmp_path}" DC_LOG="" DC_FORMAT=json DC_EXIT_FAILURE=1\n'
+        'DC_SECRET_NAME=test-key secret_data=placeholder\n'
+        f'{functions}\ndc_store_secret "{gateway}"\n'
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        env={"PATH": os.environ["PATH"], "DC_TEST_DOCUMENT": json.dumps(document).replace("<", "\\u003c"), "DC_TEST_STDERR": stderr},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 2, result.stderr
+    output = json.loads(result.stdout)
+    assert output["errors"] == [{
+        "code": "mdm_secret_failed",
+        "message": f"storing credential 'test-key' failed, so the config was not applied: {expected}",
+    }]
 
 
 def _run(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -411,7 +475,8 @@ _PACKAGE_TOOL_STUBS = {
     "dpkg": """case "$1" in --print-architecture) echo amd64 ;; -i) echo "dpkg -i" >>"$DC_TEST_LOG" ;; esac""",
     "dpkg-query": "exit 1",
     "rpm": """case "$1" in
-    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *ARCH*) echo x86_64 ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    --eval) echo x86_64 ;;
     -q) exit 1 ;;
     -U) echo "rpm -U" >>"$DC_TEST_LOG" ;;
 esac""",
@@ -501,7 +566,8 @@ def test_unix_wrapper_repairs_an_rpm_left_with_two_installed_versions(tmp_path: 
     rpm.write_text(
         """#!/bin/sh
 case "$1" in
-    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo 1.0.4101-1 ;; esac ;;
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *ARCH*) echo x86_64 ;; *) echo 1.0.4101-1 ;; esac ;;
+    --eval) echo x86_64 ;;
     -q) [ "$2" = --qf ] && printf '1.0.3602-1\\n1.0.4101-1\\n'; exit 0 ;;
     -U) case " $* " in *" --replacepkgs "*) echo "rpm -U --replacepkgs" >>"$DC_TEST_LOG" ;; *) echo "package is already installed" >&2; exit 1 ;; esac ;;
 esac
@@ -1075,6 +1141,18 @@ echo "changed=$DC_ANCHORS_CHANGED verb=$DC_ANCHORS_VERB"
     assert [line for line in calls if re.fullmatch(r"-[rwx-]{9}", line)] == ["-rw-------", "-rw-------"], calls
 
 
+# A lifecycle result that changed nothing (GAP-0034 tests).
+_NOOP_ENSURE_RESULT = {
+    "schema_version": 2, "ok": True, "action": "ensure", "noop": True, "noop_reason": "already_applied",
+    "profile": "standalone", "platform": "linux", "product_version": "1.0.3", "installed_version": "1.0.3",
+    "installed": True, "transaction_pending": False, "services": [],
+    "readiness": {"gateway": True, "guardian": True, "enumerator": True, "sensor_helper": True},
+    "inspection": {"local": "active", "ai_defense": "disabled"}, "machine_policy": {},
+    "enrollment": {"targets": 0, "pending": 0, "failed": 0, "exempt": 0},
+    "coverage_complete": True, "security_complete": True, "errors": [],
+}
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize("reason", ["already_applied", "compliant"])
 def test_unix_wrapper_result_reports_the_trust_anchors_it_installed(tmp_path: Path, reason: str) -> None:
@@ -1086,15 +1164,7 @@ def test_unix_wrapper_result_reports_the_trust_anchors_it_installed(tmp_path: Pa
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
     functions = "\n".join(_shell_function(text, name) for name in ("dc_json_escape", "dc_annotate_anchors_step"))
     anchors = tmp_path / "trust" / "bundle-anchors.json"
-    base = {
-        "schema_version": 2, "ok": True, "action": "ensure", "noop": True, "noop_reason": reason,
-        "profile": "standalone", "platform": "linux", "product_version": "1.0.3", "installed_version": "1.0.3",
-        "installed": True, "transaction_pending": False, "services": [],
-        "readiness": {"gateway": True, "guardian": True, "enumerator": True, "sensor_helper": True},
-        "inspection": {"local": "active", "ai_defense": "disabled"}, "machine_policy": {},
-        "enrollment": {"targets": 0, "pending": 0, "failed": 0, "exempt": 0},
-        "coverage_complete": True, "security_complete": True, "errors": [],
-    }
+    base = dict(_NOOP_ENSURE_RESULT, noop_reason=reason)
     validator = _schema_validator()
 
     def run(changed: str, previous: str, changes: list[str] | None = None) -> dict:
@@ -1124,6 +1194,103 @@ cat "$DC_RESULT"
     assert first["changes"] == [f"installed trust anchors in {anchors}", "restarted the gateway"], first
     unchanged = run("0", "")
     assert unchanged["noop"] is True and unchanged["noop_reason"] == reason and "changes" not in unchanged, unchanged
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("previous", [False, True])
+@pytest.mark.parametrize("applied", [True, False])
+def test_unix_wrapper_main_keeps_and_reports_the_anchors_of_a_confirmed_apply(
+    tmp_path: Path, os_dir: str, previous: bool, applied: bool
+) -> None:
+    # dc_main itself, in both copies, with a bundle and a trust anchor file:
+    # after the bundle apply succeeds the run commits the anchors (the EXIT
+    # trap's anchor restore must not undo them) and the result still names
+    # them although the apply found the bundle already applied (GAP-0034).
+    # A failed apply puts back the as-found file, which shows the restore is
+    # wired to the same run.
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh").rstrip()
+    entry = '\ndc_main "$@"'
+    assert text.endswith(entry)
+    gateway = tmp_path / "bin" / "defenseclaw-gateway"
+    gateway.parent.mkdir()
+    apply_stub = (
+        'if [ "$1 $2 $3" = "enterprise bundle apply" ]; then\n'
+        '    printf \'%s\\n\' "$*" >>"$STUB_LOG"\n'
+        '    cat "$STUB_APPLY"\n'
+        '    exit "$STUB_APPLY_EXIT"\n'
+        'fi\n'
+    )
+    gateway.write_text(_STUB_GATEWAY.replace("#!/bin/sh\n", "#!/bin/sh\n" + apply_stub, 1), encoding="utf-8")
+    gateway.chmod(0o755)
+    anchors = tmp_path / "etc" / "trust" / "bundle-anchors.json"
+    staged_anchors = tmp_path / "new-anchors.json"
+    staged_anchors.write_text('{"v": 2}', encoding="utf-8")
+    bundle = tmp_path / "policy.dcbundle"
+    bundle.write_bytes(b"signed bundle stand-in")
+    stage_parent = tmp_path / "stage"
+    stage_parent.mkdir()
+    document = dict(_NOOP_ENSURE_RESULT, exit_code=0) if applied else dict(
+        _NOOP_ENSURE_RESULT, ok=False, noop=False, noop_reason=None, exit_code=1,
+        errors=[{"code": "bundle_apply_failed", "message": "the bundle did not apply"}])
+    document = {key: value for key, value in document.items() if value is not None}
+    reply = tmp_path / "apply.json"
+    reply.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    log = tmp_path / "gateway.log"
+    # Stand-ins for the root, platform and trust steps; the anchor install,
+    # the bundle apply, the annotation and the EXIT trap run as shipped.
+    overrides = f"""
+dc_layout() {{
+    DC_GATEWAY='{gateway}'
+    DC_ANCHORS='{anchors}'
+    DC_PACKAGE_RESULT='{tmp_path}/last-package-result.json'
+    DC_OS_GROUP=linux
+    DC_LOG=''
+}}
+dc_parse_args() {{ DC_BUNDLE_FILE='{bundle}'; DC_TRUST_ANCHOR_FILE='{staged_anchors}'; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{stage_parent}'; }}
+dc_sweep_stages() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_trusted_path() {{ return 0; }}
+dc_binaries_damaged() {{ return 1; }}
+chown() {{ :; }}
+dc_main
+"""
+    script = text[: -len(entry)] + "\n" + overrides
+    env = _anchors_env(log, anchors, STUB_VERSION=_VERSION_CONTRACT, STUB_APPLY=str(reply),
+                       STUB_APPLY_EXIT="0" if applied else "1")
+    validator = _schema_validator()
+    for shell in ("sh", "bash"):
+        log.unlink(missing_ok=True)
+        shutil.rmtree(anchors.parent.parent, ignore_errors=True)
+        anchors.parent.mkdir(parents=True)
+        if previous:
+            anchors.write_text('{"v": 1}', encoding="utf-8")
+        result = subprocess.run([shell, "-c", script], env=env, capture_output=True, text=True, timeout=30)
+        out = json.loads(result.stdout)
+        assert not sorted(validator.iter_errors(out), key=str), (shell, out)
+        calls = log.read_text(encoding="utf-8").splitlines()
+        installs = [call for call in calls if call.startswith("enterprise bundle anchors install")]
+        applies = [call for call in calls if call.startswith("enterprise bundle apply")]
+        assert len(applies) == 1 and applies[0].startswith(f"enterprise bundle apply --bundle {stage_parent}/"), (shell, calls)
+        assert not list(stage_parent.iterdir()), (shell, result.stderr)
+        if not applied:
+            assert result.returncode == 1 and out["ok"] is False, (shell, result.stdout, result.stderr)
+            if previous:
+                assert anchors.read_text(encoding="utf-8") == '{"v": 1}' and len(installs) == 2, (shell, calls)
+            else:
+                assert not anchors.exists() and len(installs) == 1, (shell, calls)
+            continue
+        assert result.returncode == 0, (shell, result.stdout, result.stderr)
+        verb = "replaced the trust anchors in" if previous else "installed trust anchors in"
+        assert out["noop"] is False and "noop_reason" not in out, (shell, out)
+        assert out["changes"] == [f"{verb} {anchors}"], (shell, out)
+        # Committed: one install, no restore, and the new file in place.
+        assert len(installs) == 1, (shell, calls)
+        assert anchors.read_text(encoding="utf-8") == '{"v": 2}', shell
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
@@ -2191,6 +2358,44 @@ def test_signing_helpers_refuse_without_credentials(tmp_path: Path) -> None:
             subprocess.run(["shellcheck", "-S", "warning", str(path)], check=True)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the release jobs run the signing helpers with bash on Linux and macOS")
+@pytest.mark.skipif(shutil.which("openssl") is None, reason="needs openssl")
+def test_signing_helper_prints_the_pfx_thumbprint(tmp_path: Path) -> None:
+    # #1280: build-setup.sh takes the signer pin as --expected-signer-sha256;
+    # --thumbprint prints it from the PFX without signing anything.
+    key, cert, pfx = tmp_path / "key.pem", tmp_path / "cert.pem", tmp_path / "test.pfx"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-subj", "/CN=DefenseClaw thumbprint test", "-keyout", str(key), "-out", str(cert)],
+                   check=True, capture_output=True)
+    subprocess.run(["openssl", "pkcs12", "-export", "-inkey", str(key), "-in", str(cert), "-out", str(pfx),
+                    "-passout", "pass:"], check=True, capture_output=True)
+    der = subprocess.run(["openssl", "x509", "-in", str(cert), "-outform", "DER"], check=True, capture_output=True).stdout
+    result = subprocess.run(["bash", str(MDM / "signing" / "authenticode-sign.sh"), "--thumbprint"],
+                            capture_output=True, text=True,
+                            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "AUTHENTICODE_PFX": str(pfx)})
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == hashlib.sha256(der).hexdigest()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the release jobs run build-setup.sh with bash on Linux")
+def test_signed_standalone_build_runs_on_linux_with_osslsigncode(tmp_path: Path) -> None:
+    # #1280: the signed channels no longer need a Windows build host; on Linux
+    # and macOS they need osslsigncode, checked before any build work.
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    (tools / "uname").symlink_to(shutil.which("uname"))
+    builder = ROOT / "packaging" / "windows" / "standalone" / "build-setup.sh"
+    sign = MDM / "signing" / "authenticode-sign.sh"
+    result = subprocess.run(
+        [shutil.which("bash"), str(builder), "--version", "1.0.0", "--sign-command", str(sign),
+         "--signing-type", "DEV", "--expected-signer-sha256", "ab" * 32],
+        capture_output=True, text=True, env={"PATH": str(tools)},
+    )
+    assert result.returncode == 1, result.stderr
+    assert "need osslsigncode 2.5 or later" in result.stderr
+    assert "Windows build host" not in result.stderr
+
+
 # The macOS app job needs these five for every release (release.yaml).
 _MACOS_APP_SECRETS = {
     "MACOS_DEVELOPER_ID_P12_BASE64": "cDEy",
@@ -2300,3 +2505,52 @@ def test_standalone_installer_binds_native_output_to_the_process_deadline() -> N
     assert "native process output timed out" in native
     assert "DC_LIFECYCLE_PHASE:" in module
     assert "transaction quiesce stop services" in module
+
+
+# #1298: after a Linux MDM purge an empty root-only /var/lib/defenseclaw-mdm
+# (the wrapper's staging folder) stayed. A purge removes it when it is empty
+# and root's own directory; anything else stays.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize(
+    ("purge", "platform", "owner", "content", "removed"),
+    [
+        ("1", "linux", "0", "", True),
+        ("1", "linux", "0", "defenseclaw-mdm.abc123", False),
+        ("0", "linux", "0", "", False),
+        ("1", "darwin", "0", "", False),
+        ("1", "linux", "501", "", False),
+        ("1", "linux", "0", "symlink", False),
+    ],
+)
+def test_unix_uninstall_purge_removes_the_empty_staging_folder(
+    tmp_path: Path, purge: str, platform: str, owner: str, content: str, removed: bool
+) -> None:
+    function = _shell_function(_text(MDM / "linux" / "uninstall.sh"), "dc_remove_stage_parent")
+    parent = tmp_path / "defenseclaw-mdm"
+    if content == "symlink":
+        (tmp_path / "elsewhere").mkdir()
+        parent.symlink_to(tmp_path / "elsewhere")
+    else:
+        parent.mkdir(mode=0o700)
+        if content:
+            (parent / content).mkdir()
+    script = f"""DC_PURGE={purge}
+DC_SCRIPT_OS={platform}
+DC_LINUX_STAGE_PARENT="{parent}"
+dc_log() {{ :; }}
+dc_stat_uid() {{ echo {owner}; }}
+{function}
+dc_remove_stage_parent
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert (not os.path.lexists(parent)) is removed
+    if content == "symlink":
+        assert (tmp_path / "elsewhere").is_dir()
+
+
+def test_unix_uninstall_removes_the_staging_folder_after_the_package_and_without_a_gateway() -> None:
+    text = _text(MDM / "linux" / "uninstall.sh")
+    assert text.count("\ndc_remove_stage_parent\n") + text.count("    dc_remove_stage_parent\n") == 2
+    assert 'DC_LINUX_STAGE_PARENT=/var/lib/defenseclaw-mdm' in text
+    assert "DC_STAGE_PARENT=/var/lib/defenseclaw-mdm" in _text(MDM / "linux" / "defenseclaw-enterprise.sh")

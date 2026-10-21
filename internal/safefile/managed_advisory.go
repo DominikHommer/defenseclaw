@@ -23,8 +23,11 @@ var ManagedWriteModeAdvisory func(path string) bool
 // outside ManagedWriteModeAdvisory: a group or world write bit lets someone
 // other than the owner change the path, which is exactly what the
 // private-path check exists to refuse.
+//
+//nolint:unused // used by the non-Windows protect and reclaim paths (protect_other.go, reclaim_unix.go)
 const groupOtherWrite os.FileMode = 0o022
 
+//nolint:unused // used by the non-Windows protect and reclaim paths (protect_other.go, reclaim_unix.go)
 func relaxModeVerdict(path string, perm os.FileMode, verdict error) error {
 	if verdict == nil {
 		return nil
@@ -38,6 +41,7 @@ func relaxModeVerdict(path string, perm os.FileMode, verdict error) error {
 	return verdict
 }
 
+//nolint:unused // used by the non-Windows protect and reclaim paths (protect_other.go, reclaim_unix.go)
 func managedWriteModeAdvisory(path string) bool {
 	hook := ManagedWriteModeAdvisory
 	return hook != nil && hook(path)

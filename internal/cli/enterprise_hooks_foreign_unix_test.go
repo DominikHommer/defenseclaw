@@ -321,11 +321,14 @@ func TestStandaloneForeignCleanupSkipsRecreatedHomes(t *testing.T) {
 // uninstall stopped halfway; it now resolves them as reconcile does, and a
 // row it cannot resolve is failed under a name, never an empty one.
 func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {
-	previousCheck := enterpriseHookCheckHome
+	previousCheck, previousGone := enterpriseHookCheckHome, enterpriseHookRecordedHomeGone
 	t.Cleanup(func() {
-		enterpriseHookCheckHome = previousCheck
+		enterpriseHookCheckHome, enterpriseHookRecordedHomeGone = previousCheck, previousGone
 		enterprisehooks.SetStandaloneResolver(nil)
 	})
+	// /home/pending is a home that is not available yet (an unmounted
+	// volume), not one that is gone.
+	enterpriseHookRecordedHomeGone = func(home string) bool { return home != "/home/pending" && previousGone(home) }
 	enterpriseHookCheckHome = func(home string, _ int) enterprisehooks.HomeCheck {
 		if home == "/home/pending" {
 			return enterprisehooks.HomeCheck{State: enterprisehooks.HomePending}
@@ -370,9 +373,11 @@ func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {
 			t.Fatalf("the home-only row did not resolve to the home's owner: %+v", dana)
 		}
 	}
-	if strings.Join(pending, ",") != "carol/codex" || len(failed) != 2 ||
-		!strings.HasPrefix(failed[0], "legacy/codex: target account \"legacy\" does not exist") ||
-		!strings.HasPrefix(failed[1], missingHome+"/claudecode: user home "+missingHome+" is not available") {
+	// A home-only row whose home is gone is already clean: pending with the
+	// reason, never a failure that refuses the uninstall (#1287).
+	if len(pending) != 2 || pending[0] != "carol/codex" ||
+		!strings.HasPrefix(pending[1], missingHome+"/claudecode: its home "+missingHome+" no longer exists") || len(failed) != 1 ||
+		!strings.HasPrefix(failed[0], "legacy/codex: target account \"legacy\" does not exist") {
 		t.Fatalf("pending %v failed %v", pending, failed)
 	}
 }

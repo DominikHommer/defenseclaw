@@ -95,7 +95,9 @@ func isNoPost(sel tpSelector) bool {
 //  5. no exec hook, no kprobe Override, nothing but file_open and tcp_connect;
 //  6. every path is absolute, clean, inside an enrolled home (or a listed
 //     system path) and free of symlinks;
-//  7. at most 5 selectors per hook, 4 pids per selector, DNS-1123 names,
+//  7. one entry per LSM hook name (Tetragon 1.7.0 keeps only the last one,
+//     cilium/tetragon#4578), at most 5 selectors per hook, 4 pids per
+//     selector, DNS-1123 names,
 //     bounded value lists, and at most 4 values in a numeric Equal list
 //     (Tetragon refuses more; the uid list of a pid anchor uses InMap);
 //  8. the text round-trips through the typed schema with unknown fields
@@ -139,6 +141,24 @@ func Lint(data []byte, opts LintOptions) []Violation {
 		add(7, -1, -1, "policy has no hook")
 	}
 
+	// Rule 7: Tetragon 1.7.0 pins every lsmhooks entry's maps under the hook
+	// name, so a second entry for the same hook overwrites the first one's
+	// selectors and only the last entry ever matches (cilium/tetragon#4578):
+	// a policy with two file_open entries denied nothing its first entry
+	// named (GAP-0218).
+	hookNames := map[string]int{}
+	var names []string
+	for _, hook := range tp.Spec.LsmHooks {
+		if hookNames[hook.Hook] == 0 {
+			names = append(names, hook.Hook)
+		}
+		hookNames[hook.Hook]++
+	}
+	for _, name := range names {
+		if n := hookNames[name]; n > 1 {
+			add(7, -1, -1, "LSM hook %q has %d entries; Tetragon 1.7.0 runs only the last one", name, n)
+		}
+	}
 	for h, hook := range tp.Spec.LsmHooks {
 		// Rule 5: the only LSM hook is file_open. Exec hooks are never
 		// rendered, with or without Override.

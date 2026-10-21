@@ -142,6 +142,22 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	r.Installed = true
 	r.InstalledVersion = record.ProductVersion
+	if env.GOOS == "linux" && record.Channel == ChannelPackage {
+		if duplicates := env.rpmDuplicateRecords(ctx); len(duplicates) > 1 {
+			r.AddWarning(codeVerify, fmt.Sprintf(
+				"the rpm database records %d versions of %s (%s); remove duplicate records with `sudo dnf remove --duplicates %s`, then reinstall the package with `sudo dnf reinstall %s`",
+				len(duplicates), linuxPackageName, strings.Join(duplicates, ", "), linuxPackageName, linuxPackageName))
+		}
+	}
+	// The 1.0.2 loader accepted these literals. Keep an installed deployment
+	// running while pointing the administrator to the candidate-safe form.
+	if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil {
+		if installed, err := config.LoadRuntimeV8InspectionCandidateFromBytes(env.Layout.ConfigPath, raw); err == nil {
+			if paths := config.ManagedStandaloneUpgradeAdvisories(installed, raw); len(paths) > 0 {
+				r.AddWarning("managed_literal_credentials", "installed config uses literals at "+strings.Join(paths, ", ")+"; use {credential: NAME} or {env: NAME} where supported; webhook URLs remain supported")
+			}
+		}
+	}
 	if failure := env.lastPackageInstallFailure(); failure != "" {
 		// A package reinstall or upgrade the lifecycle refused (a full disk,
 		// a config it rejected) printed Complete and left status and verify
@@ -159,6 +175,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddWarning(codeUnitDropIn, "local drop-ins change DefenseClaw units: "+strings.Join(dropIns, ", ")+"; they keep the units' account, sandbox and config")
 	}
 	l.describe(ctx, record, true)
+	l.warnDirectoryUnreachable()
 	l.warnSELinuxConfinedUsers()
 	problems = append(problems, l.describeMachinePolicy(record)...)
 	problems = append(problems, l.describeTetragon(ctx)...)
@@ -1094,8 +1111,9 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
+	l.describeChangedGuardianFiles()
 	l.describeGuardianCleanups()
-	l.describeDeletedEnrolledAccounts()
+	l.describeUnavailableEnrolledHomes()
 	l.describeDiscoveryHomeDirs()
 	l.describeIdentityRecords()
 	l.describeDestinations()
@@ -1118,7 +1136,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 }
 
 // runningDeploymentPrefix starts each warning describeRunning adds.
-const runningDeploymentPrefix = "running deployment (the refused config changed nothing): "
+const runningDeploymentPrefix = enterprisestatus.RunningDeploymentPrefix
 
 // describeRunning is describe for a run that refused the submitted config
 // before it changed anything. The services, readiness, policy and advisories
@@ -1131,12 +1149,7 @@ func (l *lifecycle) describeRunning(ctx context.Context, record *Deployment) {
 	r := l.result
 	before := len(r.Warnings)
 	l.describe(ctx, record, false)
-	r.ConfigRefused = true
-	for i := before; i < len(r.Warnings); i++ {
-		if r.Warnings[i].Code != codeConfigRejected {
-			r.Warnings[i].Message = runningDeploymentPrefix + r.Warnings[i].Message
-		}
-	}
+	r.LabelRunningDeployment(before, codeConfigRejected)
 }
 
 // codeSandboxPackDir warns about a sandbox packs folder other accounts could
@@ -1170,6 +1183,27 @@ func (l *lifecycle) describeSandboxPolicy(ctx context.Context) {
 // codeDirectoryLookups warns that the gateway cannot resolve some accounts in
 // the directory (a domain controller or SSSD that does not answer).
 const codeDirectoryLookups = "directory_lookups_failing"
+
+// warnDirectoryUnreachable reports the guardian's current reachability
+// observation independently of the gateway's count of failed account lookups.
+// Cached directory facts can keep that count at zero throughout an outage.
+func (l *lifecycle) warnDirectoryUnreachable() {
+	env := l.env
+	dir := enterprisehooks.IdentitySpoolDir(env.P(env.Layout.GuardianAuthDir))
+	domains := enterprisehooks.ReadDirectoryUnreachable(dir, func(path, _ string) error {
+		return env.Trust(path, TrustAdminFile)
+	}, env.Now())
+	if len(domains) == 0 {
+		return
+	}
+	check := "Check SSSD or the domain controller"
+	if env.GOOS == "darwin" {
+		check = "Check the directory binding of this Mac (dsconfigad -show) or the domain controller"
+	}
+	l.result.AddWarning(codeDirectoryLookups, "the hook guardian reports a directory controller unreachable for "+
+		strings.Join(domains, ", ")+"; cached account facts may still select their verified profiles. "+check+
+		"; `"+env.lifecycleCommand("profile-explain --user <account>")+"` shows each account's current match")
+}
 
 const codeOptionalDestination = "optional_destination_failing"
 

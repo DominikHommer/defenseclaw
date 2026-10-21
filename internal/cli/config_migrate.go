@@ -19,7 +19,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +39,26 @@ import (
 // bundle whose rendered config is the file installed by Setup.
 var managedStandaloneBundleGeneration = func(string, []byte) (configwrite.Options, bool, error) {
 	return configwrite.Options{}, false, nil
+}
+
+// managedStandaloneBundleCurrent reports a current (confirmed) signed policy
+// bundle on this host; the Windows bundle lifecycle supplies it.
+var managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
+
+// managedStandaloneConfigFromBundle reports whether the installed config at
+// path belongs to a signed policy bundle: its config generation record names
+// a bundle, or a bundle is current on this host. An unreadable record counts
+// as a bundle's, so the v9 Cursor repair never rewrites an explicit, signed
+// value (a bundle whose bytes match an old migration result).
+func managedStandaloneConfigFromBundle(path string) (bool, error) {
+	state, err := configwrite.ReadGenerationState(path)
+	switch {
+	case err == nil && state.BundleID != "":
+		return true, nil
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return true, nil
+	}
+	return managedStandaloneBundleCurrent()
 }
 
 // config is the operator-facing config group of the gateway binary. Like
@@ -130,6 +153,29 @@ func init() {
 		"mark migration-v9.json as read; a pending record is completed first, without its audit.db cleanup")
 	configCmd.AddCommand(configMigrateCmd)
 	rootCmd.AddCommand(configCmd)
+}
+
+// printProvidersFold reports the fold of a legacy custom-providers.json into
+// a config already at config_version 9 (GAP-0163).
+func printProvidersFold(out io.Writer, fold *config.ProvidersFold, written []string, dryRun bool) error {
+	switch {
+	case fold.Refused != "":
+		fmt.Fprintf(out, "config.yaml is config_version 9; %s was not folded into it.\n", fold.Overlay)
+	case dryRun:
+		fmt.Fprintf(out, "Would fold %s into config.yaml llm_providers.custom: %s.\n", fold.Overlay, strings.Join(fold.Folded, ", "))
+	default:
+		fmt.Fprintf(out, "Folded %s into config.yaml llm_providers.custom: %s.\n", fold.Overlay, strings.Join(fold.Folded, ", "))
+	}
+	for _, note := range fold.Notes {
+		fmt.Fprintf(out, "  note     %s\n", note)
+	}
+	if fold.Retired != "" {
+		fmt.Fprintf(out, "  retired  %s -> %s\n", fold.Overlay, fold.Retired)
+	}
+	if len(written) > 0 {
+		fmt.Fprintf(out, "Wrote %s.\n", strings.Join(written, ", "))
+	}
+	return nil
 }
 
 // rebaseRulePackForMigration is guardrail.PlanRulePackRebase in the config
@@ -267,6 +313,19 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 		// those files, not to the readable config (GAP-0440).
 		return restoreACL(append(written, path, path+config.ConfigV8BackupSuffix, config.MigrationRecordPath(path))...)
 	}
+	fromBundle := opt.Bundle.ID != ""
+	if !fromBundle {
+		if fromBundle, err = managedStandaloneConfigFromBundle(path); err != nil {
+			return err
+		}
+	}
+	if !fromBundle {
+		if repaired, err := repairManagedStandaloneCursorFailMode(ctx, path, raw, opt); err != nil {
+			return err
+		} else if repaired {
+			return restoreACL(append(written, path, config.MigrationRecordPath(path))...)
+		}
+	}
 	if state, err := configwrite.ReadGenerationState(path); err == nil &&
 		state.ConfigSHA256 == configwrite.SHA256Hex(raw) &&
 		(opt.Bundle.ID == "" || state.Actor == opt.Actor && state.BundleID == opt.Bundle.ID &&
@@ -280,6 +339,31 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 		return err
 	}
 	return restoreACL(written...)
+}
+
+// repairManagedStandaloneCursorFailMode writes config.RepairMigratedCursorFailMode
+// for the installed config through the config writer (lifecycle actor,
+// compare-and-swap on raw), then its migration record. An open the 1.0.0-1.0.2
+// migration wrote is not the administrator's, and managed hooks honour an
+// explicit open since 1.0.3. No record means no change.
+func repairManagedStandaloneCursorFailMode(ctx context.Context, path string, raw []byte, opt configwrite.Options) (bool, error) {
+	recordRaw, err := os.ReadFile(config.MigrationRecordPath(path))
+	if err != nil {
+		return false, nil
+	}
+	var record config.MigrationRecord
+	if json.Unmarshal(recordRaw, &record) != nil {
+		return false, nil
+	}
+	repaired, updated, ok := config.RepairMigratedCursorFailMode(raw, record)
+	if !ok {
+		return false, nil
+	}
+	opt.ExpectSHA256 = configwrite.SHA256Hex(raw)
+	if _, err := configwrite.ReplaceDocument(ctx, path, repaired, opt); err != nil {
+		return false, fmt.Errorf("restore the migrated Cursor hook_fail_mode in %s: %w", path, err)
+	}
+	return true, config.WriteMigrationRecord(path, updated)
 }
 
 // recordRestoredManagedStandaloneConfig records the config.yaml a lifecycle
@@ -315,11 +399,12 @@ func printConfigMigrateResult(cmd *cobra.Command, result *config.MigrateV9Result
 	already := result.Record.FromVersion == config.ConfigVersionV9
 	if configMigrateJSON {
 		payload := struct {
-			Migrated bool                   `json:"migrated"`
-			DryRun   bool                   `json:"dry_run"`
-			Written  []string               `json:"written"`
-			Record   config.MigrationRecord `json:"record"`
-		}{!already && !configMigrateDryRun, configMigrateDryRun, result.Written, result.Record}
+			Migrated      bool                   `json:"migrated"`
+			DryRun        bool                   `json:"dry_run"`
+			Written       []string               `json:"written"`
+			Record        config.MigrationRecord `json:"record"`
+			ProvidersFold *config.ProvidersFold  `json:"providers_fold,omitempty"`
+		}{!already && !configMigrateDryRun, configMigrateDryRun, result.Written, result.Record, result.ProvidersFold}
 		if payload.Written == nil {
 			payload.Written = []string{}
 		}
@@ -328,6 +413,9 @@ func printConfigMigrateResult(cmd *cobra.Command, result *config.MigrateV9Result
 		return enc.Encode(payload)
 	}
 	if already {
+		if fold := result.ProvidersFold; fold != nil {
+			return printProvidersFold(out, fold, result.Written, configMigrateDryRun)
+		}
 		_, err := fmt.Fprintln(out, "config.yaml is already config_version 9; nothing to migrate.")
 		return err
 	}

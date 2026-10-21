@@ -18,6 +18,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -833,9 +834,7 @@ func TestReadMCPServersOpenCode_V11810PrecedenceJSONCAndDisabled(t *testing.T) {
 			positions[layer.Scope] = index
 		}
 	}
-	if !(positions["project-directory"] < positions["home-directory"] &&
-		positions["home-directory"] < positions["custom-directory"] &&
-		positions["custom-directory"] < positions["inline"]) {
+	if (positions["project-directory"] >= positions["home-directory"] || positions["home-directory"] >= positions["custom-directory"]) || positions["custom-directory"] >= positions["inline"] {
 		t.Fatalf("layer positions = %+v, want project < home < custom < inline", positions)
 	}
 	var remote, managed bool
@@ -1439,5 +1438,45 @@ func TestHasConnectorConfigured(t *testing.T) {
 	multi.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {}}
 	if !multi.HasConnectorConfigured() {
 		t.Error("populated guardrail.connectors map must report configured")
+	}
+}
+
+// GAP-0219: the managed enumerator read a project .mcp.json that did not
+// parse, or a server whose fields had the wrong type, as no servers, so its
+// servers silently stayed out of admission. The strict reader fails and
+// names the file; the per-user reader keeps skipping such a file.
+func TestClaudeStateMCPServersRefusesAServerListThatDoesNotParse(t *testing.T) {
+	project := filepath.Join(t.TempDir(), "proj")
+	state := func(local string) []byte {
+		data, err := json.Marshal(map[string]any{"projects": map[string]any{project: json.RawMessage(local)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	for name, file := range map[string]string{
+		"not json":          `{"mcpServers":{"x":`,
+		"args not an array": `{"mcpServers":{"x":{"command":"npx","args":"-y pkg"}}}`,
+	} {
+		_, err := ClaudeStateMCPServers(state(`{}`), func(string) ([]byte, error) { return []byte(file), nil })
+		var fileErr *MCPFileParseError
+		if !errors.As(err, &fileErr) || fileErr.Path != filepath.Join(project, ".mcp.json") {
+			t.Errorf("%s: err %v, want a parse error naming the project .mcp.json", name, err)
+		}
+	}
+	if _, err := ClaudeStateMCPServers(state(`{"mcpServers":{"x":{"command":"npx","env":"A=1"}}}`), nil); err == nil {
+		t.Error("a local-scope server whose env is not a map was read as no servers")
+	}
+	if _, err := ClaudeStateMCPServers([]byte(`{"mcpServers":{"x":{"command":7}}}`), nil); err == nil {
+		t.Error("a user-scope server whose command is a number was read as no servers")
+	}
+	servers, err := ClaudeStateMCPServers(state(`{}`), func(string) ([]byte, error) { return []byte(" \n"), nil })
+	if err != nil || len(servers) != 0 {
+		t.Errorf("an empty .mcp.json: %+v, %v; want no servers", servers, err)
+	}
+	lenient, err := claudeStateProjectServers(map[string]any{"projects": map[string]any{project: map[string]any{}}},
+		func(string) ([]byte, error) { return []byte(`{"mcpServers":{"x":`), nil }, false)
+	if err != nil || len(lenient) != 0 {
+		t.Errorf("per-user reader: %+v, %v; want the file skipped", lenient, err)
 	}
 }

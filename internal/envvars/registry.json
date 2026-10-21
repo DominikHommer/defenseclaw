@@ -285,6 +285,47 @@
       "since": "0.8.11"
     },
     {
+      "name": "DEFENSECLAW_HOOKEXEC_TEST_CPU_BURN",
+      "category": "test_fixture",
+      "purpose": "Marks a child process of the hookexec answer-watchdog tests that keeps one CPU busy, so the tests can fill every CPU of the host while a hook call runs.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hookexec/answer_watchdog_test.go",
+          "description": "TestCPUBurnHelper runs only in the child processes startCPUContention starts with the variable set"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_WINDOWS_LIFECYCLE_PRIORITY",
+      "category": "test_fixture",
+      "purpose": "Marks the child process of the Windows lifecycle-priority test that reports the priority class it inherited from a lifecycle run.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "child",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/windows_enterprise_priority_test.go",
+          "description": "TestWindowsLifecycleRunYieldsTheCPUToTheHooks starts itself with the variable set to read the inherited priority class"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
       "name": "DEFENSECLAW_AUDIT_DB_LOCK_HELPER_PATH",
       "category": "test_fixture",
       "purpose": "Passes the temporary audit database path to isolated subprocesses that verify SQLite kernel-lock and WAL lifecycle behavior.",
@@ -2027,6 +2068,126 @@
         }
       ],
       "since": "0.8.8"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_FLOOD_CALLS",
+      "category": "test_fixture",
+      "purpose": "Sets the number of hook calls in each probe flood.",
+      "default": "unset",
+      "accepted_values": [
+        "non-negative integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_flood_probe_test.go",
+          "description": "Opt-in hook flood test fixture; never read by production gateway"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_FLOOD_FLOODS",
+      "category": "test_fixture",
+      "purpose": "Sets the number of consecutive probe floods.",
+      "default": "unset",
+      "accepted_values": [
+        "non-negative integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_flood_probe_test.go",
+          "description": "Opt-in hook flood test fixture; never read by production gateway"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_FLOOD_IDLE",
+      "category": "test_fixture",
+      "purpose": "Sets idle seconds after each probe flood.",
+      "default": "unset",
+      "accepted_values": [
+        "non-negative integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_flood_probe_test.go",
+          "description": "Opt-in hook flood test fixture; never read by production gateway"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_FLOOD_OUT",
+      "category": "test_fixture",
+      "purpose": "Selects the output directory for probe profiles.",
+      "default": "unset",
+      "accepted_values": [
+        "temporary directory path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_flood_probe_test.go",
+          "description": "Opt-in hook flood test fixture; never read by production gateway"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_FLOOD_PROBE",
+      "category": "test_fixture",
+      "purpose": "Enables the opt-in hook flood probe test.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_flood_probe_test.go",
+          "description": "Opt-in hook flood test fixture; never read by production gateway"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_FLOOD_RATE",
+      "category": "test_fixture",
+      "purpose": "Sets hook calls per second in the probe.",
+      "default": "unset",
+      "accepted_values": [
+        "non-negative integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_flood_probe_test.go",
+          "description": "Opt-in hook flood test fixture; never read by production gateway"
+        }
+      ],
+      "since": "1.0.3"
     },
     {
       "name": "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR",
@@ -4132,6 +4293,30 @@
         }
       ],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_SANDBOX_CA_BASE",
+      "category": "hook_internal",
+      "purpose": "Records OpenShell's original CA bundle path in a sandbox process tree so a nested login shell preserves a caller-set SSL_CERT_FILE while refreshing DefenseClaw's combined sandbox CA bundle. Set by the sandbox launcher or shell profile; do not override manually.",
+      "default": "unset (set by DefenseClaw in a trusted-CA sandbox)",
+      "accepted_values": [
+        "absolute path to OpenShell's CA bundle",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/openshell/trustedca.go",
+          "description": "Go constant naming the sandbox shell's original CA bundle variable"
+        },
+        {
+          "location": "internal/openshell/harness/shellenv.go",
+          "description": "Launcher and login-shell fragment records the original bundle to preserve caller overrides in nested shells"
+        }
+      ],
+      "since": "1.0.3"
     },
     {
       "name": "DEFENSECLAW_SANDBOX_ID",
@@ -6663,6 +6848,29 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_VENV",
+      "category": "runtime_path",
+      "purpose": "Absolute Python runtime path selected by the macOS app and passed to its upgrade and gateway actions so each action stays on the selected installation.",
+      "default": "${DEFENSECLAW_HOME}/.venv (or the managed package runtime)",
+      "accepted_values": [
+        "any-absolute-path"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "macos/DefenseClawMac/DefenseClawMac/DataLayer/InstallationContext.swift",
+          "description": "Selects and pins the app's Python runtime for subprocesses"
+        },
+        {
+          "location": "macos/DefenseClawMac/GatewayAdminHelper/main.swift",
+          "description": "Passes the selected runtime to the gateway action"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
       "name": "DEFENSECLAW_WEBEX_TOKEN",
       "category": "credential",
       "purpose": "Webex bot token default for webhook entries.",
@@ -7254,6 +7462,30 @@
       ],
       "since": "1.0.1",
       "security_note": "Skips recovery of a pending transaction, so it is honoured only in the environment the signed, elevated lifecycle CLI builds for the installer and cleared before any child starts."
+    },
+    {
+      "name": "DEFENSECLAW_STANDALONE_COLLECT_RUNTIME_GENERATIONS",
+      "category": "upgrade_internal",
+      "purpose": "Asks the standalone Windows installer's Verify, run by an elevated ensure that found the deployment compliant, to collect the old managed hook runtime copies a retire left and to name each per-user DefenseClaw folder still untrusted. It is not an installer parameter because the installer parameter set is the Secure Client command line. The installer reads it only for a Verify and clears it so no child process inherits it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/windows_enterprise_standalone.go",
+          "description": "Sets it in the strict installer environment only for the Verify of an elevated ensure that found the deployment compliant"
+        },
+        {
+          "location": "packaging/windows/install-enterprise.ps1",
+          "description": "Reads and clears it, and passes CollectRuntimeGenerations to the lifecycle only for the Verify action"
+        }
+      ],
+      "since": "1.0.3"
     },
     {
       "name": "DCLAW_FLEET_API_TOKEN",

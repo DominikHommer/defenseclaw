@@ -29,7 +29,9 @@ name: Release
 # without the release environment's secrets. It never signs to the public
 # Sigstore log, creates a release or draft, or pushes a tag, branch, package or
 # image; the unsigned assets and an unsigned checksums.txt are uploaded as the
-# run's "release" artifact instead.
+# run's "release" artifact instead. It also proves the Authenticode path of the
+# Windows standalone Setup with a throwaway self-signed test certificate
+# (enterprise-windows-signing-proof); that Setup is never uploaded.
 on:
   workflow_dispatch:
     inputs:
@@ -355,12 +357,18 @@ jobs:
           set -euo pipefail
           args=(--version "$VERSION" --out-dir enterprise-windows)
           if [[ -n "${WINDOWS_AUTHENTICODE_PFX_BASE64:-}" ]]; then
-            sudo apt-get install -y -q osslsigncode
+            sudo apt-get update -q && sudo apt-get install -y -q osslsigncode
             AUTHENTICODE_PFX="$RUNNER_TEMP/codesign.pfx"; export AUTHENTICODE_PFX
             ( umask 077; printf '%s' "$WINDOWS_AUTHENTICODE_PFX_BASE64" | base64 --decode > "$AUTHENTICODE_PFX" )
             trap 'rm -f "$AUTHENTICODE_PFX"' EXIT
             export AUTHENTICODE_PFX_PASSWORD="${WINDOWS_AUTHENTICODE_PFX_PASSWORD:-}"
-            args+=(--sign-command "$GITHUB_WORKSPACE/packaging/mdm/signing/authenticode-sign.sh")
+            # windows-avc-assembler verifies every signed inner file with
+            # osslsigncode against this signer and a chain to a root the
+            # runner trusts (PROD) before it appends the payload.
+            signer=$(packaging/mdm/signing/authenticode-sign.sh --thumbprint)
+            export AUTHENTICODE_EXPECTED_SHA256="$signer"
+            args+=(--sign-command "$GITHUB_WORKSPACE/packaging/mdm/signing/authenticode-sign.sh"
+                   --signing-type PROD --expected-signer-sha256 "$signer")
           else
             echo "::notice title=Unsigned standalone Setup::WINDOWS_AUTHENTICODE_PFX_BASE64 is not set; the Setup ships hash-pinned (flavor standalone-unsigned)."
           fi
@@ -375,6 +383,32 @@ jobs:
             enterprise-windows/DefenseClawSetup-Enterprise-Standalone-x64.payload-manifest.json
           if-no-files-found: error
           retention-days: 7
+
+  # Dry run only: prove the Authenticode path of the standalone Setup build
+  # (sign, verify with osslsigncode, append, sign the outer Setup) with a
+  # throwaway self-signed certificate the script creates and deletes. It
+  # reads no secret and uploads nothing: the release ships the Setup the
+  # enterprise-windows job builds.
+  enterprise-windows-signing-proof:
+    name: Prove the standalone Setup signing path (test certificate)
+    if: inputs.operation == 'release' && inputs.dry_run
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      # build-setup.sh builds the Python scanner runtime with uv.
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Build and sign with a throwaway self-signed certificate
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q && sudo apt-get install -y -q osslsigncode
+          packaging/windows/standalone/prove-signing-path.sh --version "$VERSION" --out-dir "$RUNNER_TEMP/signing-proof"
 
   # Standalone managed-enterprise pkg for MDMs. Developer ID signing and
   # notarization run only when the Apple installer secrets are configured;
@@ -472,7 +506,7 @@ jobs:
   dry-run-assets:
     name: Checksum the dry-run assets (unsigned)
     if: inputs.dry_run
-    needs: [build, macos-app, enterprise-windows, enterprise-macos]
+    needs: [build, macos-app, enterprise-windows, enterprise-windows-signing-proof, enterprise-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

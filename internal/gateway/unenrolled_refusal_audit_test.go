@@ -77,3 +77,20 @@ func TestUnenrolledRefusalWritesACoalescedBlockRowForTheAccount(t *testing.T) {
 		t.Fatalf("connector-hook row connector=%q structured=%v", block.Connector, block.Structured)
 	}
 }
+
+func TestUnenrolledRefusalAuditorFlushesEndedWindowOnShutdown(t *testing.T) {
+	var rows []unenrolledRefusalRow
+	auditor := newUnenrolledRefusalAuditor(func(row unenrolledRefusalRow) { rows = append(rows, row) })
+	now := time.Unix(1_800_000_000, 0)
+	auditor.now = func() time.Time { return now }
+	report := refusalpipe.Report{Connector: "codex", Reason: refusalpipe.ReasonSIDUnregistered}
+	auditor.record("account-sid", report)
+	auditor.record("account-sid", report)
+	now = now.Add(unenrolledRefusalWindow)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	auditor.run(ctx)
+	if len(rows) != 2 || rows[1].Attempts != 1 || rows[1].SID != "account-sid" {
+		t.Fatalf("shutdown rows = %+v, want the ended window's coalesced refusal", rows)
+	}
+}

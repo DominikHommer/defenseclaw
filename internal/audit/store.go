@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -236,6 +238,14 @@ type Store struct {
 	// checkpoints. It is opened on first use and closed with the store.
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
+	// walGuardMu guards the checkpoint connection's data_version as of the
+	// previous WAL guard pass (CheckpointWALIfLarge).
+	walGuardMu      sync.Mutex
+	walGuardSeen    bool
+	walGuardVersion int64
+	// walPressure is true while the last WAL guard pass left the log over
+	// its limit; background writers wait for it (awaitWALHeadroom).
+	walPressure atomic.Bool
 
 	// plannerStatsRows is the history size at the last ANALYZE
 	// (RefreshPlannerStatistics).
@@ -317,10 +327,13 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //     returning SQLITE_BUSY, absorbing the
 //     vast majority of write contention.
 //   - wal_autocheckpoint=0      disables SQLite's connection-local commit
-//     hook. DefenseClaw checkpoints through the serialized Store connection
-//     in health and retention maintenance; running a second checkpoint from
+//     hook. DefenseClaw copies the log on a dedicated checkpoint connection
+//     (the WAL guard, health and retention maintenance); running a checkpoint from
 //     inside a commit can race a retiring sidecar process over the shared WAL
 //     mapping and terminate the gateway with SIGBUS.
+//   - journal_size_limit=64MiB  cuts the WAL file back to 64 MiB when a
+//     writer restarts the log, so a burst does not keep its disk space
+//     (rel-1-0-2:GAP-0709; see CheckpointWALIfLarge).
 //   - synchronous=NORMAL        the sweet spot for WAL: durable
 //     across crashes (loses only the last
 //     transaction on power loss) while ~3x
@@ -330,9 +343,9 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //   - temp_store=MEMORY         spill temp tables to RAM instead of
 //     disk; eliminates a common contention
 //     source on writes that allocate temp.
-//   - mmap_size=268435456       map up to 256 MB of the DB into the
-//     process address space for read-heavy
-//     queries (audit views, exports).
+//   - mmap_size                 map up to 256 MB of the DB into the
+//     process address space for read-heavy queries (audit views, exports),
+//     except on Windows (auditMmapSizeBytes).
 //   - foreign_keys=ON           defenseclaw relies on the FK between
 //     findings and scan_results; turning
 //     this off at the DSN level would be a
@@ -344,8 +357,9 @@ type auditIntegerPragma struct {
 }
 
 var auditMandatoryIntegerPragmas = [...]auditIntegerPragma{
-	{name: "busy_timeout", dsnValue: "5000", want: 5000},
+	{name: "busy_timeout", dsnValue: strconv.Itoa(auditBusyTimeoutMillis), want: auditBusyTimeoutMillis},
 	{name: "wal_autocheckpoint", dsnValue: "0", want: 0},
+	{name: "journal_size_limit", dsnValue: strconv.Itoa(auditWALJournalSizeLimitBytes), want: auditWALJournalSizeLimitBytes},
 	{name: "synchronous", dsnValue: "NORMAL", want: 1},
 	{name: "cache_size", dsnValue: "-20000", want: -20000},
 	{name: "temp_store", dsnValue: "MEMORY", want: 2},
@@ -360,8 +374,25 @@ func buildAuditPragmas() string {
 	for _, pragma := range auditMandatoryIntegerPragmas {
 		fmt.Fprintf(&result, "&_pragma=%s(%s)", pragma.name, pragma.dsnValue)
 	}
-	result.WriteString("&_pragma=mmap_size(268435456)")
+	fmt.Fprintf(&result, "&_pragma=mmap_size(%d)", auditMmapSizeBytes())
 	return result.String()
+}
+
+// auditMmapSizeBytes is the mmap_size of every audit connection: 256 MiB,
+// and 0 on Windows. On Windows a FlushFileBuffers of the memory-mapped
+// audit.db cost about as much with a few dirty pages as with many and grew
+// with the database: 120 ms at about 100 MB and 500 ms at 1.2 GB under a
+// 10 calls/s hook flood, while the same sync of the WAL file, which SQLite
+// does not map, took about 10 ms at 30 GB. The checkpoint that lets SQLite
+// restart the log ends with that database sync, so it never fit in the WAL
+// guard's hold of the writer, the log was never restarted and the WAL file
+// grew past 12 GB (rel-1-0-3 GAP-0247, GAP-0136). Windows reads the pages
+// through the file cache instead.
+func auditMmapSizeBytes() int64 {
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	return 256 << 20
 }
 
 // openSQLite opens a SQLite connection with the audit-tier hardening
@@ -1862,16 +1893,35 @@ func tableExists(ex dbExecer, table string) (bool, error) {
 
 // unreadAuditIndexes are audit_events indexes no query reads. Every hook
 // writes several audit rows, and each index is another B-tree page per row in
-// the write-ahead log (GAP-0246), so a store outside Secure Client drops them
-// after the migrations, which still create them as main does. The schema
+// the write-ahead log (GAP-0246, B-26), so a store outside Secure Client drops
+// them after the migrations, which still create them as main does. The schema
 // version does not move, so an older binary opened on the store after a
 // rollback runs without them.
+//
+// The readers of audit_events (the Go store, retention, export and alert
+// projection, the Python CLI and TUI, the evidence scripts) filter, join or
+// sort on id, timestamp, retention_timestamp_unix_nano, action, severity,
+// bucket, event_name, run_id, request_id, session_id, evaluation_id and
+// enforcement_action_id; their indexes stay. No reader filters on the columns
+// below: the session lifecycle lookup (connector, session_id, agent_id) uses
+// idx_audit_session_id, the scan-target join drives from the row id, and the
+// TUI filters connectors in memory. The last two are created by the Python
+// CLI, which no longer creates them (cli/defenseclaw/db.py); the gateway drops
+// what an older CLI left.
 var unreadAuditIndexes = []struct{ name, create string }{
 	{"idx_audit_policy_id", `CREATE INDEX IF NOT EXISTS idx_audit_policy_id ON audit_events(policy_id)`},
 	{"idx_audit_tool_name", `CREATE INDEX IF NOT EXISTS idx_audit_tool_name ON audit_events(tool_name)`},
 	{"idx_audit_generation", `CREATE INDEX IF NOT EXISTS idx_audit_generation ON audit_events(generation)`},
 	{"idx_audit_sidecar_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_sidecar_instance_id ON audit_events(sidecar_instance_id)`},
 	{"idx_audit_finding_id", `CREATE INDEX IF NOT EXISTS idx_audit_finding_id ON audit_events(finding_id)`},
+	{"idx_audit_trace_id", `CREATE INDEX IF NOT EXISTS idx_audit_trace_id ON audit_events(trace_id)`},
+	{"idx_audit_turn_id", `CREATE INDEX IF NOT EXISTS idx_audit_turn_id ON audit_events(turn_id)`},
+	{"idx_audit_agent_id", `CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_events(agent_id)`},
+	{"idx_audit_agent_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_agent_instance_id ON audit_events(agent_instance_id)`},
+	{"idx_audit_scan_id", `CREATE INDEX IF NOT EXISTS idx_audit_scan_id ON audit_events(scan_id)`},
+	{"idx_audit_source_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_source_timestamp ON audit_events(source, timestamp)`},
+	{"idx_audit_connector", `CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)`},
+	{"idx_audit_action_connector_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp ON audit_events(action, connector, timestamp DESC)`},
 }
 
 // trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client
@@ -2510,7 +2560,7 @@ func (s *Store) ListActivityEvents(limit int) ([]ActivityEventRow, error) {
 			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
 			COALESCE(schema_version,0), COALESCE(content_hash,''), COALESCE(generation,0),
 			COALESCE(binary_version,''), COALESCE(agent_id,''), COALESCE(sidecar_instance_id,'')
-		FROM activity_events ORDER BY timestamp DESC LIMIT ?`, limit)
+		FROM activity_events ORDER BY `+s.timeOrderForTable("activity_events", "", true)+` LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list activity events: %w", err)
 	}
@@ -3052,10 +3102,35 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 // v8 retention migration (an unmigrated 0.8.x store; kept while 0.8.x
 // upgrades are supported) has no such column and sorts by julianday instead.
 func (s *Store) auditEventsNewestFirst() string {
-	if ok, err := hasColumnDB(s.db, "audit_events", "retention_timestamp_unix_nano"); err == nil && ok {
-		return "retention_timestamp_unix_nano DESC, rowid DESC"
+	return s.auditEventsNewestFirstForAlias("")
+}
+
+func (s *Store) auditEventsNewestFirstForAlias(alias string) string {
+	if alias != "" {
+		alias += "."
 	}
-	return "julianday(timestamp) DESC, rowid DESC"
+	if ok, err := hasColumnDB(s.db, "audit_events", "retention_timestamp_unix_nano"); err == nil && ok {
+		return alias + "retention_timestamp_unix_nano DESC, " + alias + "rowid DESC"
+	}
+	return "julianday(" + alias + "timestamp) DESC, " + alias + "rowid DESC"
+}
+
+// timeOrderForTable uses the exact timestamp filled by the retention migration.
+// The date fallback keeps read-only access to older audit databases working.
+func (s *Store) timeOrderForTable(table, alias string, newest bool) string {
+	direction := " DESC"
+	if !newest {
+		direction = " ASC"
+	}
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	instant := "julianday(" + prefix + "timestamp)"
+	if ok, err := hasColumnDB(s.db, table, "retention_timestamp_unix_nano"); err == nil && ok {
+		instant = prefix + "retention_timestamp_unix_nano"
+	}
+	return instant + direction + ", " + prefix + "rowid" + direction
 }
 
 // scanAuditEventRow holds the column-scan logic of ListEvents so the
@@ -3910,7 +3985,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 			 SELECT 1 FROM alert_acknowledgement_projection AS projection
 			 WHERE projection.alert_id = event.id
 		 )
-		 ORDER BY event.timestamp DESC LIMIT ?`
+		 ORDER BY ` + s.auditEventsNewestFirstForAlias("event") + ` LIMIT ?`
 	args := make([]any, 0, len(legacyActions)+1)
 	for _, action := range legacyActions {
 		args = append(args, action)
@@ -3965,7 +4040,7 @@ func (s *Store) ListScanResults(limit int) ([]ScanResultRow, error) {
 	}
 	rows, err := s.queryDB(context.Background(), "audit",
 		`SELECT id, scanner, target, timestamp, duration_ms, finding_count, max_severity
-		 FROM scan_results ORDER BY timestamp DESC LIMIT ?`, limit,
+		 FROM scan_results ORDER BY `+s.timeOrderForTable("scan_results", "", true)+` LIMIT ?`, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list scan results: %w", err)
@@ -4177,16 +4252,18 @@ type LatestScanInfo struct {
 
 func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, error) {
 	rows, err := s.queryDB(context.Background(), "audit", `
-		SELECT sr.id, sr.target, sr.timestamp, sr.finding_count, sr.max_severity, sr.raw_json
-		FROM scan_results sr
-		INNER JOIN (
-			SELECT target, MAX(timestamp) as max_ts
-			FROM scan_results
-			WHERE scanner = ? AND COALESCE(exit_code, 0) = 0 AND COALESCE(error, '') = ''
-			GROUP BY target
-		) latest ON sr.target = latest.target AND sr.timestamp = latest.max_ts
-		WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0 AND COALESCE(sr.error, '') = ''
-	`, scannerName, scannerName)
+		SELECT id, target, timestamp, finding_count, max_severity, raw_json
+		FROM (
+			SELECT sr.id, sr.target, sr.timestamp, sr.finding_count,
+				sr.max_severity, sr.raw_json,
+				ROW_NUMBER() OVER (
+					PARTITION BY sr.target ORDER BY `+s.timeOrderForTable("scan_results", "sr", true)+`
+				) AS dc_rank
+			FROM scan_results sr
+			WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0
+				AND COALESCE(sr.error, '') = ''
+		)
+		WHERE dc_rank = 1`, scannerName)
 	if err != nil {
 		return nil, fmt.Errorf("audit: latest scans by scanner: %w", err)
 	}

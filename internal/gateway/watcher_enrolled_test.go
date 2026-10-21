@@ -160,6 +160,13 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 		watcher.MCPEventPath(servers[0]) == watcher.MCPEventPath(servers[2]) {
 		t.Fatalf("enrolled MCP servers = %+v", servers)
 	}
+	// #1164: every enrolled user's server starts as that user for its scan,
+	// never with the gateway's rights.
+	for i, want := range []string{"S-1-5-21-1-1001", "S-1-5-21-1-1001", "S-1-5-21-1-1002", "S-1-5-21-1-1002"} {
+		if servers[i].RunAsSID != want {
+			t.Fatalf("server %q starts as %q; want %q", servers[i].Name, servers[i].RunAsSID, want)
+		}
+	}
 }
 
 // GAP-0829: an enrolled user whose ~/.claude.json the hook enumerator could

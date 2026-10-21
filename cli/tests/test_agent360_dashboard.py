@@ -50,12 +50,11 @@ def test_agent360_has_dynamic_directory_and_required_drilldown_surfaces() -> Non
 
     variables = {item["name"]: item for item in dashboard["templating"]["list"]}
     assert {"connector", "agent", "scope_label", "lifecycle", "execution", "trace"} <= variables.keys()
-    assert variables["agent"]["datasource"]["uid"] == "defenseclaw-loki"
-    assert '{service_name="defenseclaw"}' in variables["agent"]["definition"]
-    assert "body_$scope_label" in variables["agent"]["definition"]
-    assert "$scope_label" in variables["agent"]["definition"]
-    assert variables["lifecycle"]["datasource"]["uid"] == "defenseclaw-loki"
-    assert variables["execution"]["datasource"]["uid"] == "defenseclaw-loki"
+    # Loki cannot list record-body fields in a box (GAP-0241): the identity
+    # drilldowns are regex text boxes the directory links fill in.
+    for name in ("agent", "lifecycle", "execution"):
+        assert variables[name]["type"] == "textbox", name
+        assert variables[name]["query"] == variables[name]["current"]["value"] == ".+", name
     assert variables["lifecycle"]["label"] == "Lifecycle (drilldown)"
     assert variables["execution"]["label"] == "Execution (drilldown)"
     variable_order = [item["name"] for item in dashboard["templating"]["list"]]
@@ -364,7 +363,7 @@ def test_agent360_trace_selection_drives_waterfall_and_topology() -> None:
     for query in (*edge_queries, *node_queries):
         assert "count_over_time(" in query
         assert "label_format" in query
-        assert '|= "$agent" | json | __error__=""' in query
+        assert '|~ "$agent" | json | __error__=""' in query
         assert 'body_$scope_label=~"$agent"' in query
         assert "defenseclaw_event_name=" in query
     assert 'defenseclaw_agent_lifecycle_id=~"$lifecycle"' not in edge_query
@@ -876,7 +875,9 @@ def test_agent360_agent_scoped_loki_queries_prefilter_before_json_parsing() -> N
             if datasource != "loki" or 'body_$scope_label=~"$agent"' not in expression:
                 continue
             checked.append(panel["title"])
-            assert '|= "$agent" | json' in expression, panel["title"]
+            # $agent is a regex text box, so the line prefilter is a regex too.
+            assert '|~ "$agent" | json' in expression, panel["title"]
+            assert '|= "$agent"' not in expression, panel["title"]
 
     assert checked
 

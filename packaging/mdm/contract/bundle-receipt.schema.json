@@ -46,6 +46,9 @@
     "change_summary": {
       "type": "string"
     },
+    "rollback_of": {
+      "type": "string"
+    },
     "state": {
       "enum": [
         "confirmed",

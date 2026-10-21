@@ -64,6 +64,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
 	"github.com/defenseclaw/defenseclaw/internal/version"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
 // APIServer exposes a local REST API for CLI and plugin communication
@@ -73,6 +74,8 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// sandboxAuthority is owned by this server and initialized on first use.
+	sandboxAuthority sandboxAuthorityHolder
 
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).
@@ -100,6 +103,14 @@ type APIServer struct {
 	// hermesTasks gives a Hermes hook that names only its task the session
 	// of that task.
 	hermesTasks hermesTaskSessions
+
+	// mcpAdmissionPending names an MCP server the install watcher admits
+	// but has not admitted yet (GAP-0112). Set once before serving.
+	mcpAdmissionPending func(connector, server, home, cwd string) (string, bool)
+	// mcpRefreshBeforeCall brings the gateway's view of the enrolled users'
+	// MCP servers up to date before an MCP tool call is decided (GAP-0216).
+	// Set once before serving.
+	mcpRefreshBeforeCall func(ctx context.Context, connector string) error
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
@@ -290,11 +301,15 @@ type APIServer struct {
 	codexPendingThreads               []codexPendingThread
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
-	hookPhaseStates                   map[string]hookPhaseState
-	hookPhaseStateOrder               []string
-	otlpMetricMu                      sync.Mutex
-	otlpMetricCumulative              map[string]otlpCumulativePoint
-	otlpMetricCumulativeOrder         []string
+	// hookLifecycleHistoryRead holds the session keys whose signed lifecycle
+	// history this process has read once (restoreHookSessionLifecycle).
+	hookLifecycleHistoryRead      map[string]struct{}
+	hookLifecycleHistoryReadOrder []string
+	hookPhaseStates               map[string]hookPhaseState
+	hookPhaseStateOrder           []string
+	otlpMetricMu                  sync.Mutex
+	otlpMetricCumulative          map[string]otlpCumulativePoint
+	otlpMetricCumulativeOrder     []string
 
 	// stepIdxMu guards stepIdxBySession, the per-session 1-indexed
 	// turn counter used to populate audit.Event.StepIdx. A "turn" is
@@ -1021,6 +1036,25 @@ func (a *APIServer) SetShutdownRequester(request func()) {
 		return
 	}
 	a.shutdownRequester = request
+}
+
+// SetMCPAdmissionPending wires the install watcher's pending-admission
+// check (GAP-0112). Call it before the server starts.
+func (a *APIServer) SetMCPAdmissionPending(pending func(connector, server, home, cwd string) (string, bool)) {
+	if a == nil {
+		return
+	}
+	a.mcpAdmissionPending = pending
+}
+
+// SetMCPRefreshBeforeCall wires the refresh of the enrolled users' MCP
+// servers before an MCP tool call (GAP-0216). Call it before the server
+// starts.
+func (a *APIServer) SetMCPRefreshBeforeCall(refresh func(ctx context.Context, connector string) error) {
+	if a == nil {
+		return
+	}
+	a.mcpRefreshBeforeCall = refresh
 }
 
 func (a *APIServer) runtimeConfigSnapshot() *config.Config {
@@ -2458,6 +2492,11 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 			if a.store != nil {
 				_ = a.store.ClearActionFieldForConnector(req.TargetType, policyName, req.Connector, "file")
 				_ = a.store.ClearActionFieldForConnector(req.TargetType, policyName, req.Connector, "runtime")
+				if req.TargetType == "mcp" {
+					// The enrolled accounts' own rows of that name too
+					// (GAP-0216).
+					_ = watcher.ClearAccountMCPJournal(a.store, policyName, req.Connector, "runtime")
+				}
 			}
 		}
 	}

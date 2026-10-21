@@ -3814,9 +3814,10 @@ func TestCursorHooksHighCardinalityForeignRegistrationsStayWithinLifecycleBudget
 		verifyMatcher := newCursorHookCommandMatcher(verifyCommands)
 		// Exercise the exact post-write scan twice. Setup performs the first check;
 		// the published-hook presence gate performs the same high-cardinality scan.
-		if !cursorHookContractPresent(hooks, currentCommand, verifyMatcher, false) ||
-			!cursorHookContractPresent(hooks, currentCommand, verifyMatcher, false) {
-			t.Fatal("high-cardinality Cursor contract did not retain one exact managed entry per event")
+		for scan := 0; scan < 2; scan++ {
+			if !cursorHookContractPresent(hooks, currentCommand, verifyMatcher, false) {
+				t.Fatal("high-cardinality Cursor contract did not retain one exact managed entry per event")
+			}
 		}
 	}
 	elapsed := time.Since(started)
@@ -3861,7 +3862,7 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 		{name: "cursor_observe_forces_fail_open", connector: NewCursorConnector(), guardrailMode: "observe", wantFailMode: "open"},
 		{name: "devin_supports_fail_closed", connector: NewDevinConnector(), wantFailMode: "closed"},
 		{name: "openhands_supports_fail_closed", connector: NewOpenHandsConnector(), wantFailMode: "closed"},
-		{name: "hermes_downgrades_to_fail_open", connector: NewHermesConnector(), wantFailMode: "open"},
+		{name: "hermes_per_user_keeps_fail_closed", connector: NewHermesConnector(), wantFailMode: "closed"},
 		{name: "copilot_downgrades_to_fail_open", connector: NewCopilotConnector(), wantFailMode: "open"},
 	}
 
@@ -3906,7 +3907,7 @@ func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
 			t.Fatalf("path=%s want /api/v1/openhands/hook", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"hook_output":{"decision":"deny","reason":"policy denied"}}`))
+		_, _ = w.Write([]byte(`{"action":"block","hook_output":{"decision":"deny","reason":"policy denied"}}`))
 	}))
 	defer server.Close()
 	addr := strings.TrimPrefix(server.URL, "http://")
@@ -3949,7 +3950,7 @@ func TestOpenHandsHookScript_RetriesBusyGateway(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":"rate_limited","retry_after_seconds":"1"}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"hook_output":{"decision":"allow"}}`))
+		_, _ = w.Write([]byte(`{"action":"allow","hook_output":{"decision":"allow"}}`))
 	}))
 	defer server.Close()
 	dir := t.TempDir()

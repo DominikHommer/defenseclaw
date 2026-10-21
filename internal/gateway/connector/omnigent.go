@@ -905,7 +905,7 @@ func validateOmnigentHomeInterpreter(found, resolved string) error {
 				return fmt.Errorf("omnigent connector: Python interpreter under the user's home is refused: %s is not owned by the user", current)
 			}
 			isLink := info.Mode()&os.ModeSymlink != 0
-			if isLink && !(symlinkOK && current == path) {
+			if isLink && (!(symlinkOK) || current != path) {
 				return fmt.Errorf("omnigent connector: Python interpreter under the user's home is refused: %s is a symbolic link", current)
 			}
 			if !isLink && info.Mode().Perm()&0o022 != 0 {

@@ -53,7 +53,7 @@ var (
 	// register again.
 	ErrTombstoned = errors.New("sandboxreg: the sandbox was revoked and cannot register again")
 	// ErrInUse: the binding id or sandbox id is already bound to another
-	// registration of the uid.
+	// registration on the managed gateway.
 	ErrInUse = errors.New("sandboxreg: the sandbox is already registered")
 	// ErrDriverMismatch: the sandbox was created on another compute driver
 	// than the one its registration was resolved for (a sandbox never
@@ -499,7 +499,10 @@ func (s *FileStore) evict(u *uidRecords) []Registration {
 	for _, evictable := range []func(Registration) bool{
 		func(r Registration) bool { return r.State == StateRevoked && r.RevokedReason == ReasonDeleted },
 		func(r Registration) bool { return PendingExpired(r, now) },
-		func(r Registration) bool { return r.State == StateRevoked },
+		func(r Registration) bool {
+			return r.State == StateRevoked && (r.RevokedReason != ReasonPolicyChanged ||
+				!now.Before(r.RevokedAt.Add(RevokedTelemetryWindow)))
+		},
 	} {
 		for len(u.regs) >= limit {
 			oldest := -1
@@ -602,7 +605,7 @@ func (s *FileStore) Run(uid int, id string) (Run, bool, error) {
 
 // Bind turns uid's pending, unexpired registration id live for the sandbox
 // b names. A binding id or sandbox id that matches a tombstone or a
-// retired sandbox, or that another registration of uid already holds, is
+// retired sandbox, or that another registration already holds, is
 // refused.
 func (s *FileStore) Bind(uid int, id string, b sandboxrelay.BindRequest) (Registration, error) {
 	if err := ValidBind(b); err != nil {
@@ -616,6 +619,38 @@ func (s *FileStore) Bind(uid int, id string, b sandboxrelay.BindRequest) (Regist
 	u, err := s.loadLocked(uid)
 	if err != nil {
 		return Registration{}, err
+	}
+	// The IDs are caller supplied. A different account can make the same
+	// claim, so reserve each ID across the whole managed gateway.
+	uids, err := storeUIDs(s.dir)
+	if err != nil {
+		return Registration{}, err
+	}
+	seen := map[int]bool{}
+	for _, otherUID := range uids {
+		seen[otherUID] = true
+	}
+	for otherUID := range s.uids {
+		seen[otherUID] = true
+	}
+	for otherUID := range seen {
+		if otherUID == uid {
+			continue
+		}
+		other, err := s.loadLocked(otherUID)
+		if err != nil {
+			return Registration{}, err
+		}
+		for _, held := range other.regs {
+			if held.BindingID == b.BindingID || held.SandboxID == b.SandboxID {
+				return Registration{}, ErrInUse
+			}
+		}
+		for _, retired := range other.retired {
+			if retired.BindingID == b.BindingID || retired.SandboxID == b.SandboxID {
+				return Registration{}, ErrInUse
+			}
+		}
 	}
 	at := -1
 	for i, r := range u.regs {
@@ -760,8 +795,10 @@ func (s *FileStore) Deleted(uid int, id string) error {
 			r.State, r.RevokedReason, r.RevokedAt = StateRevoked, ReasonDeleted, s.now()
 			next.regs[i] = r
 		case StateRevoked:
-			s.retire(next, r)
-			next.regs = slices.Delete(next.regs, i, i+1)
+			if r.RevokedReason != ReasonPolicyChanged || !s.now().Before(r.RevokedAt.Add(RevokedTelemetryWindow)) {
+				s.retire(next, r)
+				next.regs = slices.Delete(next.regs, i, i+1)
+			}
 		default:
 			next.regs = slices.Delete(next.regs, i, i+1)
 		}
@@ -925,8 +962,8 @@ func (s *FileStore) ListAll() ([]Registration, error) {
 
 // Update rewrites uid's registration r.ID in place (re-match). The id, uid,
 // subject, state, sandbox and times stay the store's but for a later
-// PolicyAt; only the match, digests, generation and provisional flag
-// change. Its run record stays.
+// PolicyAt, and a CreateProfile once set stays; only the match, digests,
+// generation and provisional flag change. Its run record stays.
 func (s *FileStore) Update(uid int, r Registration) error {
 	return s.UpdateRun(uid, r, nil)
 }
@@ -955,6 +992,11 @@ func (s *FileStore) UpdateRun(uid int, r Registration, run *Run) error {
 		have.Profile, have.ProfileMatch, have.MatchedGroup = r.Profile, r.ProfileMatch, r.MatchedGroup
 		have.ProfileDigest, have.EffectiveDigest, have.FactsDigest = r.ProfileDigest, r.EffectiveDigest, r.FactsDigest
 		have.Generation, have.Provisional = r.Generation, r.Provisional
+		if have.CreateProfile == nil && r.CreateProfile != nil {
+			// Set once: the profile a sandbox was created under never moves.
+			created := *r.CreateProfile
+			have.CreateProfile = &created
+		}
 		if r.PolicyAt.After(have.PolicyAt) {
 			have.PolicyAt = r.PolicyAt
 		}

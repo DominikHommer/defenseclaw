@@ -65,6 +65,9 @@ const (
 	codeBundleInbox         = "bundle_inbox_refused"
 	codeBundleConfirmedLate = enterprisebundle.WarnConfirmedAfterInterrupt
 	codeBundleNotCurrent    = "bundle_not_current"
+	// codeBundleConfirmedWithErrors names a bundle this run committed and
+	// confirmed although a later step of the run failed.
+	codeBundleConfirmedWithErrors = "bundle_confirmed_with_errors"
 
 	// bundleConfigFileName is the rendered config of the bundle a run
 	// applies, root-only in the lifecycle directory; the transaction reads it
@@ -89,6 +92,12 @@ type bundleRun struct {
 	// confirmed: the receipt stays applied for the next run to settle, and
 	// the run exits with the retry code (GAP-0032).
 	confirmPending bool
+	// committed is set once the transaction of this run committed the
+	// deployment of the bundle config, after the gateway reported its policy.
+	committed bool
+	// settled is set once finishBundle ran for this run: a receipt it left
+	// applied is settled by the next changing run, not again by this one.
+	settled bool
 }
 
 // bundleAnchorsPath is <etc>/trust/bundle-anchors.json (rooted).
@@ -452,7 +461,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	m := res.Manifest
 	if err := store.Advance(receipt, enterprisebundle.StateVerified, func(rc *enterprisebundle.Receipt) {
 		rc.TenantID, rc.DeviceGroup, rc.Principal = m.TenantID, m.Target.DeviceGroup, m.CreatedBy
-		rc.ChangeSummary = m.ChangeSummary
+		rc.ChangeSummary, rc.RollbackOf = m.ChangeSummary, m.RollbackOf
 		rc.SignerKeyID, rc.ManifestSHA256, rc.ExpectedDigest = res.Signature.KeyID, sha256Bytes(staged.Manifest), res.ExpectedDigest
 		rc.SetDigestComparison(res.DigestVerified, res.DigestUnverifiable, res.DigestLayoutUnverifiable)
 	}); err != nil {
@@ -469,6 +478,10 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	current, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
 	if err != nil {
 		return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: "cannot read the enforced config: " + err.Error()})
+	}
+	deviceLayout := enterprisebundle.DeviceLayoutFromManaged(env.Layout)
+	if err := enterprisebundle.RefuseDeviceKeyMove(current, rendered, env.GOOS, &deviceLayout); err != nil {
+		return refuse(err)
 	}
 	loss, err := enterprisebundle.DisabledByBundle(current, rendered)
 	if err != nil {
@@ -575,12 +588,18 @@ func (l *lifecycle) markBundleApplied(digest string, generation uint64, configSH
 // gateway; anything else fails the receipt.
 func (l *lifecycle) finishBundle(ctx context.Context) {
 	env, r, run := l.env, l.result, l.bundle
-	if run == nil || run.confirmPending || enterprisebundle.Finished(run.receipt.State) {
+	if run == nil || run.settled || enterprisebundle.Finished(run.receipt.State) {
 		return
 	}
+	run.settled = true
 	rc := run.receipt
 	record, _ := env.loadDeployment()
-	committed := record != nil && len(r.Errors) == 0 && record.ConfigSHA256 == run.configSHA
+	// A step that fails after this run committed the bundle deployment (the
+	// per-user sandbox report, the guardian report) does not undo the
+	// commit: the bundle config is the deployment, and the gateway reported
+	// its policy before the commit (GAP-0271). Failing the receipt then left
+	// a receipt that said failed over a policy that was in force.
+	committed := record != nil && record.ConfigSHA256 == run.configSHA && (len(r.Errors) == 0 || run.committed)
 	checked := false
 	if committed && rc.State == enterprisebundle.StateStaged {
 		// Recorded without a reload: the gateway reports the generation it
@@ -601,6 +620,14 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 		checked = true
 	}
 	if committed && rc.State == enterprisebundle.StateApplied {
+		if len(r.Errors) > 0 {
+			// committedBundleEnforced asked the gateway again after the
+			// commit, so bundleStillEnforced does not ask a second time.
+			if !l.committedBundleEnforced(ctx, record, rc) {
+				return
+			}
+			checked = true
+		}
 		if env.fault("committed") != nil {
 			// The test seam ends the run here, as a crash between the commit
 			// and the swap would: settle finishes it on the next run.
@@ -673,6 +700,31 @@ func (l *lifecycle) bundleStillEnforced(ctx context.Context, record *Deployment,
 		"policy bundle %s version %d is installed, but the gateway stopped reporting its policy before the bundle was confirmed (%v); the receipt stays applied and the last good bundle stays current: resubmit the same bundle, and the next lifecycle run confirms it once the gateway reports its policy, or puts the last good bundle back",
 		displayID(rc), rc.Version, err))
 	return false
+}
+
+// committedBundleEnforced reports whether the gateway still enforces the
+// policy of the bundle this run committed, when a step after the commit
+// failed. Then the bundle is confirmed as after a clean run, and a warning
+// says the errors of the run did not change the policy. Otherwise the
+// receipt stays applied, never failed while its config is the deployment:
+// the next changing run confirms it or applies the last good bundle again
+// (settleUnconfirmedBundle).
+func (l *lifecycle) committedBundleEnforced(ctx context.Context, record *Deployment, rc *enterprisebundle.Receipt) bool {
+	r := l.result
+	digest, _, err := l.awaitBundlePolicy(ctx, record.ServiceUID, true, rc)
+	if err == nil && digest != rc.EffectivePolicyDigest {
+		err = fmt.Errorf("the installed config computes to %s, not %s, which the gateway reported before the commit", shortDigest(digest), shortDigest(rc.EffectivePolicyDigest))
+	}
+	if err != nil {
+		r.AddError(string(bundleConfirmationCode(err)), fmt.Sprintf(
+			"policy bundle %s version %d is installed, but after a later step of this run failed the gateway did not report its policy again: %v; the next lifecycle run confirms it or applies the last good bundle again",
+			displayID(rc), rc.Version, err))
+		return false
+	}
+	r.AddWarning(codeBundleConfirmedWithErrors, fmt.Sprintf(
+		"policy bundle %s version %d is in force and confirmed: the gateway enforces its policy; the errors of this run come from steps after the policy change committed",
+		displayID(rc), rc.Version))
+	return true
 }
 
 // failBundle ends the receipt of run as failed(code), records whether the
@@ -805,6 +857,22 @@ func (l *lifecycle) confirmRecoveredBundle(ctx context.Context) error {
 	}
 	if err := check(); err == nil {
 		return nil
+	}
+	if l.keepThroughRollback[gateway.Name] {
+		// The gateway kept running through the rollback of a hot change:
+		// give it the hot-apply wait to reload the restored config before
+		// it is restarted (GAP-0238).
+		deadline := env.Now().Add(min(hotApplyTimeout, env.ReadyTimeout))
+		for env.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(env.PollInterval):
+			}
+			if err := check(); err == nil {
+				return nil
+			}
+		}
 	}
 	// A hot applied gateway can retain the new policy after the files were
 	// restored. Restart it once to load the confirmed generation.

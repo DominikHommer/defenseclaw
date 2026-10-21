@@ -283,15 +283,53 @@ func (e *Env) userUnitPath(u userUnit, channel string) string {
 // userUnitBytes reads a unit's embedded definition: the user units under
 // packaging/systemd/user and the LaunchAgents under
 // packaging/launchd-standalone/agents, which the system units' embed globs do
-// not carry (UserUnitSource overrides it in tests).
+// not carry (UserUnitSource overrides it in tests). On a managed Mac, a
+// verified packaged gateway copy gets a content-addressed program path.
 func (e *Env) userUnitBytes(u userUnit) ([]byte, error) {
 	if e.UserUnitSource != nil {
 		return e.UserUnitSource(u.Source)
 	}
 	if e.GOOS == "darwin" {
-		return launchdstandalone.ReadAgentPlist(strings.TrimSuffix(u.Source, ".plist"))
+		data, err := launchdstandalone.ReadAgentPlist(strings.TrimSuffix(u.Source, ".plist"))
+		if err != nil {
+			return nil, err
+		}
+		gateway := filepath.Join(e.Layout.BinDir, binGateway)
+		program, err := e.launchAgentProgram()
+		if err != nil {
+			return nil, err
+		}
+		return []byte(strings.Replace(string(data), gateway, program, 1)), nil
 	}
 	return systemdunits.ReadUserUnit(u.Source)
+}
+
+// launchAgentProgram is the gateway file both macOS LaunchAgents execute: the
+// package's content-addressed copy of the installed gateway when it is there,
+// else the gateway itself. A copy that is not a regular file or differs from
+// the gateway is refused.
+func (e *Env) launchAgentProgram() (string, error) {
+	gateway := filepath.Join(e.Layout.BinDir, binGateway)
+	digest, err := sha256File(e.P(gateway))
+	if os.IsNotExist(err) {
+		return gateway, nil // A fresh non-package payload has not installed the gateway yet.
+	}
+	if err != nil {
+		return "", fmt.Errorf("identify the LaunchAgent gateway: %w", err)
+	}
+	program := filepath.Join(e.Layout.BinDir, "launch-agents", digest, binGateway)
+	info, err := os.Lstat(e.P(program))
+	if os.IsNotExist(err) {
+		return gateway, nil // Older and non-package installations use the canonical path.
+	}
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("the packaged LaunchAgent gateway is not a regular file: %s", program)
+	}
+	copyDigest, err := sha256File(e.P(program))
+	if err != nil || copyDigest != digest {
+		return "", fmt.Errorf("the packaged LaunchAgent gateway differs from %s", gateway)
+	}
+	return program, nil
 }
 
 // wantsLinkFor is the symlink that enables the sandbox socket for every
@@ -350,7 +388,7 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 	env := l.env
 	settings := openshellSettingsOf(env.GOOS, p.config.Loaded)
 	op := &openshellPlan{settings: settings}
-	op.defaultNamespaceBridge = dockerBridgeHolds(env.GOOS, settings, env.loadOpenShellState().Applied)
+	op.defaultNamespaceBridge = dockerBridgeHolds(env.GOOS, settings, l.openShellAppliedForPlan())
 	p.openshell = op
 	l.osPlan = op
 
@@ -807,9 +845,11 @@ func (e *Env) desiredLinks(channel string, socket []byte) []desiredLink {
 }
 
 // removeOpenShellFiles removes, on uninstall, the links the lifecycle made
-// and the folders its user units left empty, and the lifecycle's own sandbox
-// records. The unit files and the rendered configuration are in the
-// deployment record and go with it. A link someone else made is left alone.
+// and the folders its user units left empty, and removes the lifecycle's own
+// sandbox records. When sandboxes stay, their applied setup record moves to a
+// root-only kept name for the next ensure; a rerun of a failed uninstall keeps
+// the record moved by the first run. The unit files and rendered config are in
+// the deployment record and go with it. A link someone else made is left alone.
 func (l *lifecycle) removeOpenShellFiles(record *Deployment) {
 	env := l.env
 	channel := ChannelPayload
@@ -831,5 +871,11 @@ func (l *lifecycle) removeOpenShellFiles(record *Deployment) {
 			_ = removeDirIfEmpty(env.P(filepath.Join("/etc/systemd/user", u.Name+".d")))
 		}
 	}
-	env.removeOpenShellMachineState(channel)
+	kept, err := env.removeOpenShellMachineState(channel, !l.opts.Purge && len(l.sandboxesKept) > 0)
+	l.openshellRecordKept = kept
+	if err != nil {
+		// The record only helps the next activation report a changed setup;
+		// a problem with it must not stop an uninstall or a package removal.
+		l.result.AddWarning(codeOpenShell, err.Error())
+	}
 }

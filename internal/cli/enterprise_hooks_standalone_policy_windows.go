@@ -129,20 +129,10 @@ var windowsOpenCodeMachinePolicy = func() (string, bool) {
 	return path, err == nil && present
 }
 
+// windowsStandaloneGuardianOptions is the guardian's machine policy options
+// from the loaded config.
 func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, bool, error) {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return enterprisepolicy.Options{}, nil, false, nil
-	}
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
-	if err != nil {
-		return enterprisepolicy.Options{}, nil, true, err
-	}
-	opts, err := enterprisepolicy.StandaloneOptions(layout, programFiles, programData, cfg)
-	if err != nil {
-		return enterprisepolicy.Options{}, nil, true, err
-	}
-	opts.ClaudeMachineHookContract = standaloneClaudeMachineHookContract(layout)
-	return opts, enterprisepolicy.StandaloneConnectors(cfg), true, nil
+	return standaloneGuardianOptionsFor(cfg)
 }
 
 // enterpriseHookStandalonePlatformPrepare publishes the Go-owned Windows

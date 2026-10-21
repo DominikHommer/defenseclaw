@@ -191,10 +191,10 @@ func WindowsCursorEnterpriseAdapterTargetModes(adapter []byte, hookBinary string
 
 func renderWindowsCursorAdapterWithTargets(hookBinary, failMode string, managed bool, timeoutMS int, targetModesJSON64 string) ([]byte, error) {
 	if strings.TrimSpace(hookBinary) == "" {
-		return nil, fmt.Errorf("Cursor hook executable is empty")
+		return nil, fmt.Errorf("Cursor hook executable is empty") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if timeoutMS <= 0 {
-		return nil, fmt.Errorf("Cursor hook adapter timeout must be positive")
+		return nil, fmt.Errorf("Cursor hook adapter timeout must be positive") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	tmpl, err := hookFS.ReadFile("hooks/cursor-hook.ps1")
 	if err != nil {
@@ -244,7 +244,7 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode st
 		entries, ok := cursorHookEntryList(raw)
 		if !ok {
 			if cursorHookEventManaged(event) {
-				return nil, fmt.Errorf("Cursor hooks event %q must be an array", event)
+				return nil, fmt.Errorf("Cursor hooks event %q must be an array", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
 			continue
 		}
@@ -265,7 +265,7 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode st
 	for _, event := range cursorEnterpriseHookEvents {
 		entries, ok := cursorHookEntryList(hooks[event])
 		if !ok {
-			return nil, fmt.Errorf("Cursor hooks event %q must be an array", event)
+			return nil, fmt.Errorf("Cursor hooks event %q must be an array", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		hooks[event] = append(entries, windowsCursorEnterpriseHookEntry(command, failMode))
 	}
@@ -350,7 +350,7 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 			return err
 		}
 		if owned != 1 {
-			return fmt.Errorf("Cursor hooks event %q has %d DefenseClaw entries, want exactly 1", event, owned)
+			return fmt.Errorf("Cursor hooks event %q has %d DefenseClaw entries, want exactly 1", event, owned) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 	}
 	if allowRetired {
@@ -635,7 +635,7 @@ func isASCIIAlpha(value byte) bool {
 
 func decodeCursorHooksJSON(data []byte) (map[string]interface{}, error) {
 	if len(data) > windowsCursorEnterpriseHooksJSONMax {
-		return nil, fmt.Errorf("Cursor hooks JSON exceeds %d bytes", windowsCursorEnterpriseHooksJSONMax)
+		return nil, fmt.Errorf("Cursor hooks JSON exceeds %d bytes", windowsCursorEnterpriseHooksJSONMax) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return map[string]interface{}{}, nil
@@ -661,10 +661,10 @@ func decodeCursorHooksJSON(data []byte) (map[string]interface{}, error) {
 
 func decodeCursorJSONValue(data []byte) (interface{}, error) {
 	if len(data) > windowsCursorEnterpriseHooksJSONMax {
-		return nil, fmt.Errorf("Cursor hooks JSON exceeds %d bytes", windowsCursorEnterpriseHooksJSONMax)
+		return nil, fmt.Errorf("Cursor hooks JSON exceeds %d bytes", windowsCursorEnterpriseHooksJSONMax) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return nil, fmt.Errorf("Cursor hooks JSON is empty")
+		return nil, fmt.Errorf("Cursor hooks JSON is empty") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -740,18 +740,18 @@ func requireCursorHooksVersionOne(cfg map[string]interface{}, create bool) error
 	raw, exists := cfg["version"]
 	if !exists || raw == nil {
 		if !create {
-			return fmt.Errorf("Cursor hooks version is missing")
+			return fmt.Errorf("Cursor hooks version is missing") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		cfg["version"] = 1
 		return nil
 	}
 	number, ok := raw.(json.Number)
 	if !ok {
-		return fmt.Errorf("Cursor hooks version must be the integer 1")
+		return fmt.Errorf("Cursor hooks version must be the integer 1") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	version, err := number.Int64()
 	if err != nil || version != 1 {
-		return fmt.Errorf("Cursor hooks version must be the integer 1")
+		return fmt.Errorf("Cursor hooks version must be the integer 1") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	cfg["version"] = 1
 	return nil
@@ -769,7 +769,7 @@ func cursorHooksObject(cfg map[string]interface{}, create bool) (map[string]inte
 	}
 	hooks, ok := raw.(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("Cursor hooks must be a JSON object")
+		return nil, fmt.Errorf("Cursor hooks must be a JSON object") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return hooks, nil
 }

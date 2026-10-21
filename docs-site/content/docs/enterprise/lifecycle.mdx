@@ -199,9 +199,10 @@ upgrade rewrites a `config_version: 8` administrator config as
 `config_version: 9` in place, and an older release refuses that file as
 written by a newer DefenseClaw. Give the older
 release a version 8 config explicitly: your own version 8 administrator
-config, or the copy the upgrade kept next to the installed file
-(`config.yaml.v8.bak`, root- or SYSTEM-only). That copy is the config as it
-was just before this host's last version 8 to 9 migration: changes made
+config, or the copy the upgrade kept next to the installed file when it
+migrated from version 8 (`config.yaml.v8.bak`, root- or SYSTEM-only). That copy
+exists only after a version 8 to 9 migration and holds the config as it
+was just before that migration: changes made
 since then are not in it, so prefer your own current administrator config
 when you have one. The commands below pass it as `CONFIG=` or `--config`.
 Without it, the older release reads the installed version 9 file and fails
@@ -217,9 +218,9 @@ version 8 file: it applies the installed config.
 | OS and channel | How to go back |
 | --- | --- |
 | Windows | `/ensure` refuses to install an older version (`downgrade_refused`, exit `1603`). Run the older release's Setup with `/upgrade CONFIG=<version 8 config> JSON=1`: an explicit `upgrade` does not compare versions. Uninstalling and installing the older release also works |
-| Debian and Ubuntu | Create the root-owned rollback marker, then install the older package: `sudo touch /var/lib/defenseclaw-enterprise/allow-downgrade`, then `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb`. A release that reads `config_version: 8` then needs `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --allow-downgrade --config /etc/defenseclaw/config.yaml.v8.bak --json` |
-| RHEL | Create the same marker, then `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm` (`rpm -U` refuses an older package). A release that reads `config_version: 8` then needs the same `ensure --from-package --allow-downgrade --config ...` |
-| Linux payload | Extract the older release as in [Upgrade](#linux), then run `sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --allow-downgrade --config /etc/defenseclaw/config.yaml.v8.bak --json` |
+| Debian and Ubuntu | Create the root-owned rollback marker, then install the older package: `sudo touch /var/lib/defenseclaw-enterprise/allow-downgrade`, then `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb`. Its postinstall applies the installed config if compatible. If it refuses a version 9 config, finish with `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --allow-downgrade --config <version 8 config> --json`, using your version 8 administrator config or `/etc/defenseclaw/config.yaml.v8.bak` if that file exists |
+| RHEL | Create the same marker, then `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm` (`rpm -U` refuses an older package). If its postinstall refuses a version 9 config, use the same `ensure --from-package --allow-downgrade --config <version 8 config>` recovery |
+| Linux payload | Extract the older release as in [Upgrade](#linux), then run `sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --allow-downgrade --config <compatible config> --json`; use `/etc/defenseclaw/config.yaml` if it is already compatible, or a version 8 administrator config or the v8 backup if one exists |
 | macOS | Create the root-owned rollback marker, then install the older package: `sudo touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`, then `sudo installer -pkg ./defenseclaw-enterprise-<older>-darwin-arm64.pkg -target /`. An older release that reads `config_version: 9` applies the installed config and is done (`last-package-result.json` reads `ok`). Only a release that reads version 8 fails on the version 9 config; then run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --from-package --allow-downgrade --config <version 8 config> --json` with your version 8 administrator config, or `/opt/cisco/defenseclaw/etc/config.yaml.v8.bak` (the config before this host's last migration) |
 
 - **Linux packages and macOS.** The package's preinstall script refuses an
@@ -230,8 +231,8 @@ version 8 file: it applies the installed config.
   rollback needs a new marker. An `ensure --from-package` that you run
   yourself, to finish an install or a rollback, records its result in
   `last-package-result.json` as the install script does.
-- **A release that reads `config_version: 8` (Linux).** Its install script
-  cannot apply the version 9 config, so it records the failure in
+- **A release that reads `config_version: 8` (Linux).** If the installed
+  config is version 9, its install script records the failure in
   `last-package-result.json`. Run the `ensure --from-package
   --allow-downgrade --config ...` command above right after the package
   manager finishes: until it runs, the older release cannot read a version 9
@@ -393,8 +394,10 @@ back with it. On Windows the Setup transaction does the same: it migrates a
 version 8 config, keeps the same two files, records the generation with the
 actor `lifecycle` and reports `policy`.
 
-The result's `changes` list says what was written, for example
+On Linux and macOS, the result's `changes` list says what was written, for example
 `migrated /etc/defenseclaw/config.yaml to config_version 9 (N values moved, 0 conflicts; the v8 file is kept as /etc/defenseclaw/config.yaml.v8.bak, the --config a rollback to a config_version 8 release needs)`.
+Windows Setup results report `policy` and the installed version, but do not
+include a `changes` list.
 When the host holds local block or allow entries in `audit.db`, the run adds
 the warning `local_enforcement_entries_ignored` (see
 [Troubleshooting](/docs/enterprise/troubleshooting#warnings)).
@@ -533,8 +536,39 @@ gateway, and on a managed host they refuse, also when you run them as root;
 run as root, the refusal names the commands below. Restart the managed
 gateway through the service manager instead. On Linux
 systemd keeps the hook and API sockets open while the gateway restarts, so a
-hook that connects meanwhile waits; on macOS a hook that runs during the
-restart fails closed.
+hook that connects meanwhile waits for the gateway that starts. On every OS a
+managed hook that meets a restarting gateway (a refused or dropped
+connection, a stopped service) sends its call again for up to about 3 seconds
+from the start of the hook, so a quick restart is not visible to the agent:
+the new gateway answers from the policy it loads, the last one applied. A
+restart that lasts longer blocks each call within those 3 seconds. On Linux,
+where the call waits in the socket systemd holds, the block names
+`enterprise_managed_gateway_restarting`; on macOS and Windows, where nothing
+accepts the call, it is the usual `enterprise_managed_gateway_not_running`
+(or the hook's generic refusal when the connection failed another way). A
+hook never allows a call because the gateway was restarting.
+
+A hook for a tool call (`PreToolUse` and the like) also waits at most about 3.5
+seconds from its start for the gateway's decision, whatever holds it up: a
+restart, an upgrade, a rollback, a repair, a configuration change, or a
+gateway too busy to answer in time. After that it blocks the call with
+`enterprise_managed_gateway_no_answer`, so DefenseClaw never holds an agent's
+tool call for more than about 5 seconds. A decision that waits on Cisco AI
+Defense or the LLM judge gets a little longer: the gateway tells the hook,
+and the call waits up to about 4 seconds from its start for that verdict,
+then is blocked the same way. Prompts and session, stop and other events
+keep their whole budget.
+
+The 3.5 seconds count from the start of the command the agent runs (on Windows
+that includes the PowerShell bridge some registrations use), and they hold on
+a busy computer: the hook prepares its block as soon as it has read the call,
+before it loads its settings, and gives it at the deadline even when its own
+work is running late. The rest of the 5 seconds is left for a busy computer
+that runs the hook late, and on Windows the hook runs at above-normal CPU
+priority. Lifecycle runs
+(`install`, `upgrade`, `repair`, `ensure` and bundle applies) run at a lower
+CPU priority than the hooks on every OS, so a repair does not take the CPU the
+hooks need to answer in time.
 
 | OS | Restart the gateway | Re-apply the deployment and restart every service |
 | --- | --- | --- |
@@ -600,6 +634,17 @@ Uninstall does the following on every OS:
   entries stay. On Linux and macOS it restores the preimages it recorded.
 - It stops and removes the services.
 
+The registrations go before the hook binary and the runtime descriptor: up to
+that point a hook started from a registration gets the gateway's decision or
+is blocked. An agent session that started before the uninstall keeps the hook
+registration it read at its start until it is restarted. Once the uninstall
+has removed the hook binary, such a session runs that hook as a missing
+command, which the agent treats as a non-blocking hook error, so its tool calls
+run without DefenseClaw. Restart the agents after an uninstall. To go back to
+an older release without that window, use [Roll back](#roll-back)
+instead of an uninstall followed by an install: the rollback replaces the
+release in place and the hooks stay registered.
+
 On a standalone deployment it also removes the config, credentials, most
 machine state and logs, with the kept-sandbox exception below.
 Each user's DefenseClaw folder (`~/.defenseclaw`) and per-user binaries stay.
@@ -614,10 +659,19 @@ store (`/var/lib/defenseclaw/sandbox` on Linux or
 file, and its key (`/var/lib/defenseclaw/redaction-correlation.key` or
 `/opt/cisco/defenseclaw/runtime/redaction-correlation.key`) stays if it is a
 regular file. They are root-owned while the service account is gone; the next
-`ensure` adopts them.
+`ensure` adopts them. The lifecycle directory then also keeps the root-only
+record of the sandbox setup those sandboxes were made under
+(`openshell-state.kept.json`), so the next `ensure` reports a driver or
+version switch for them and keeps the 1.0.1 upgrade bridge.
 The root-owned `lifecycle.lock` stays in its lifecycle directory so waiting
 runs keep using the same lock. Use `--purge` for a clean image or to remove the
-retained sandbox store and key. On Linux, the files in your policies folder,
+retained sandbox store and key, and the setup record. Purge in the first removal: a
+purge runs the deployment's own binary, which a payload uninstall, `apt
+remove`, `dnf remove` and the MDM removal scripts delete. After one of those,
+install the package or payload again and purge, or delete
+`/var/lib/defenseclaw` (macOS: `/opt/cisco/defenseclaw/runtime`) and the
+lifecycle directory by hand. A purge also deletes each enrolled account's
+sandboxes and any sandbox work not pulled yet. On Linux, the files in your policies folder,
 `/etc/defenseclaw/policies`, stay. The vendor policies in
 `/opt/defenseclaw/share/policies` and any policy folder left without a file
 go; `ensure` writes the vendor policies again. To turn the
@@ -639,7 +693,7 @@ to keep the machine state for a reinstall instead.
 - **Linux packages.** Removing the package runs the lifecycle `uninstall`
   first, without purge, which removes most machine state and the
   `defenseclaw` account; the kept sandbox store and key above
-  stay when an account keeps sandboxes. This also runs when a package install
+  stay when an account keeps sandboxes, with the setup record. This also runs when a package install
   failed and rolled back (then the rejected `config.yaml` goes too). `apt purge` also deletes what a failed uninstall
   left of `/etc/defenseclaw`, `/var/lib/defenseclaw` (including a kept sandbox
   store and key), `/var/lib/defenseclaw-hook-guardian`, and `/var/log/defenseclaw`;
@@ -676,8 +730,10 @@ to keep the machine state for a reinstall instead.
 - **macOS.** A pkg has no uninstaller. The lifecycle removes the binaries
   itself and forgets the package receipt (`com.cisco.defenseclaw.enterprise`).
 - **Registrations left, warning (Linux and macOS).** Each user's registrations
-  are removed as that user. If the user's home is unavailable, the directory
-  gives a removed account no home while its recorded home remains, or a
+  are removed as that user. If the user's home is unavailable, the recorded
+  home of a removed or re-homed account is gone (nothing is left to remove),
+  the directory gives a removed account no home while its recorded home
+  remains, or a
   re-homed account's current home was cleaned but its old home cannot be
   trusted, uninstall warns with `per_user_hooks_remaining` and goes on. The
   warning names what may remain. When the home is available, remove
@@ -721,6 +777,42 @@ to keep the machine state for a reinstall instead.
   that could not be stopped. Fix the cause and run the same uninstall again.
   Back up `~/.defenseclaw/foreign-hooks-backup` first if a user wants their
   own moved-aside hooks back.
+- **A user's own install from before the enrollment (Linux and macOS).** When
+  a user's `~/.defenseclaw` holds a personal DefenseClaw install from before
+  the managed deployment enrolled them (it has a `config.yaml`, `.env`,
+  `audit.db` or `previous`), the purge first moves that install's data, as
+  the user, to a new `~/.defenseclaw-backup-<UTC time>` folder (mode `0700`,
+  owned by the user) with a `DEFENSECLAW-BACKUP.txt` that says how to restore
+  it: the config, secrets, audit history, policies, logs, upgrade copies and
+  `foreign-hooks-backup`. The hook scripts, hook credentials, connector
+  backups, the session cache and the install's Python environment and `uv`
+  caches are not kept; a reinstall recreates them. The move is a rename on
+  the same filesystem, so it needs no free space. The result says so for that
+  user. If the move fails, the purge keeps that user's state and names the
+  user. Delete the backup folder when the user does not need it.
+- **A user whose home is gone (Linux and macOS).** When an enrolled user's
+  home folder no longer exists (it was deleted or moved away, for example the
+  home of a macOS mobile account), the hooks and `~/.defenseclaw` went with
+  it. The uninstall warns (`per_user_hooks_remaining`) with the home and
+  goes on; it does not stop for that user. A home that does not answer, or
+  whose parent folder is missing too (an unmounted volume), is not available
+  rather than gone: the result names it so you can rerun the purge once it
+  is mounted.
+- **Sandboxes (Linux and macOS).** The uninstall stops the sandbox daemon
+  and OpenShell gateway of each account. On Linux, `apt remove`, `dnf remove`
+  and `rpm -e` also stop the sandbox user units in the user manager of every
+  signed-in account before the package's files go, and remove the socket's
+  global enable link, so no daemon keeps running from a deleted unit. When a
+  user manager still runs one of those units after three stops, or does not
+  answer whether it does, the removal fails and keeps the package files; the
+  message names the accounts. Stop the units as each named user
+  (`systemctl --user stop defenseclaw-sandbox.socket defenseclaw-sandbox.service defenseclaw-openshell-gateway.service`)
+  or sign the user out, then run the removal again. The macOS pkg installs
+  both LaunchAgents also with sandboxes off, so the macOS uninstall unloads
+  them whatever the sandbox setting was. On
+  macOS the uninstall unloads both sandbox LaunchAgents from the `gui` and
+  `user` launchd domains of every signed-in account, and removes the
+  `defenseclaw` launcher link and both plists from `/Library/LaunchAgents`.
 - **MDM.** Use `uninstall.sh [--purge]` on Linux and macOS, or `uninstall.ps1`
   on Windows. See [Install with an MDM](/docs/enterprise/mdm).
 - **Windows per-user registrations.** Acting as a user needs that user's

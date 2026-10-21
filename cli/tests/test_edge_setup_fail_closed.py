@@ -28,6 +28,7 @@ def test_edge_setup_advertises_real_gateway_port_and_emits_compilable_policy(tmp
     assert help_result.exit_code == 0
     assert "18970" in help_result.output
     assert "13400" not in help_result.output
+    assert "defenseclaw-fleet-assets.tar.gz" in help_result.output
 
     sample = runner.invoke(
         cmd_setup_edge_connector.edge_connector, ["--emit-policy"], obj=_app(tmp_path)
@@ -45,6 +46,17 @@ def test_edge_setup_advertises_real_gateway_port_and_emits_compilable_policy(tmp
     )
     assert compiled.returncode == 0, compiled.stderr
     assert (tmp_path / "policy.bin").stat().st_size > 0
+
+
+def test_edge_install_help_and_missing_source_name_fleet_archive(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cmd_edge_install, "_find_edge_connector_source", lambda *_args: None)
+    runner = CliRunner()
+    help_result = runner.invoke(cmd_edge_install.edge_install, ["--help"], obj=_app(tmp_path))
+    assert help_result.exit_code == 0, help_result.output
+    assert "defenseclaw-fleet-assets.tar.gz" in help_result.output
+    refusal = runner.invoke(cmd_edge_install.edge_install, [], obj=_app(tmp_path))
+    assert refusal.exit_code != 0
+    assert "defenseclaw-fleet-assets.tar.gz" in refusal.output
 
 
 def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch) -> None:
@@ -201,9 +213,91 @@ def test_fleet_compiler_rejects_symlink_without_mutating_destination(tmp_path, m
     monkeypatch.setattr(cmd_edge_install, "_find_edge_connector_source", lambda: source_root)
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
-    with pytest.raises(click.ClickException, match="no Fleet policy compiler"):
+    with pytest.raises(click.ClickException, match="Fleet policy compiler missing"):
         cmd_setup_edge_connector._install_fleet_compiler(str(home))
     assert not (home / "installer").exists()
+
+
+def test_explicit_fleet_assets_are_required_for_wheel_style_setup(tmp_path) -> None:
+    assets = tmp_path / "fleet-assets"
+    source = assets / "edge-connector"
+    (source / "src").mkdir(parents=True)
+    (source / "tools").mkdir()
+    (source / "CMakeLists.txt").write_text("project(edge)\n", encoding="utf-8")
+    (source / "src/main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    (source / "tools/policy_compiler.py").write_text("# compiler\n", encoding="utf-8")
+    assert cmd_edge_install._find_edge_connector_source(assets) == source
+    assert cmd_setup_edge_connector._install_fleet_compiler(str(tmp_path), assets).is_file()
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_edge_install_source_dir_supplies_systemd_unit_without_checkout_fallback(
+    tmp_path, monkeypatch, remote: bool,
+) -> None:
+    assets = tmp_path / "fleet-assets"
+    source = assets / "edge-connector"
+    (source / "src").mkdir(parents=True)
+    (source / "packaging").mkdir()
+    (source / "CMakeLists.txt").write_text("project(edge)\n", encoding="utf-8")
+    (source / "src/main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    unit = source / "packaging/edge-connector.service"
+    unit.write_text("[Unit]\nDescription=Edge Connector\n", encoding="utf-8")
+
+    # A wheel cannot fall back to an adjacent source checkout.
+    find_source = cmd_edge_install._find_edge_connector_source
+    monkeypatch.setattr(
+        cmd_edge_install, "_find_edge_connector_source",
+        lambda source_dir=None: find_source(source_dir) if source_dir is not None else None,
+    )
+    copied = []
+    if remote:
+        monkeypatch.setattr(cmd_edge_install, "_check_remote_prereqs", lambda *_args: True)
+        monkeypatch.setattr(cmd_edge_install, "_copy_source", lambda *_args: "/tmp/edge-source")
+        monkeypatch.setattr(cmd_edge_install, "_build_remote", lambda *_args: True)
+        monkeypatch.setattr(cmd_edge_install, "_register_device_via_api", lambda *_args: "12" * 32)
+        monkeypatch.setattr(cmd_edge_install, "_configure_remote_env", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(cmd_edge_install, "_verify_remote_daemon", lambda *_args: True)
+
+        def fake_run(argv, **_kwargs):
+            if argv[0] == "scp":
+                copied.append(argv[3])
+            return subprocess.CompletedProcess(argv, 0, stderr="")
+
+        monkeypatch.setattr(cmd_edge_install.subprocess, "run", fake_run)
+        args = ["--target", "device.example", "--device-id", "42"]
+    else:
+        monkeypatch.setattr(cmd_edge_install.shutil, "which", lambda _tool: "/usr/bin/tool")
+        monkeypatch.setattr(cmd_edge_install, "_build_local", lambda *_args: True)
+        monkeypatch.setattr(cmd_edge_install, "_provision_local_service_env", lambda *_args: True)
+        monkeypatch.setattr(cmd_edge_install, "_verify_local_service", lambda: True)
+        monkeypatch.setattr(
+            cmd_edge_install, "_run",
+            lambda argv: copied.append(argv[2]) if argv[:2] == ["sudo", "cp"] else None,
+        )
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+        args = []
+
+    result = CliRunner().invoke(
+        cmd_edge_install.edge_install,
+        ["--source-dir", str(assets), *args],
+        obj=_app(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    assert copied == [str(unit)]
+
+
+def test_wheel_setup_without_fleet_assets_leaves_fleet_off(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.setattr(cmd_edge_install, "_find_edge_connector_source", lambda: None)
+    result = CliRunner().invoke(
+        cmd_setup_edge_connector.edge_connector,
+        ["--non-interactive", "--token", "test-token"],
+        obj=_app(tmp_path),
+    )
+    assert result.exit_code != 0
+    assert "pass --source-dir" in result.output
+    assert not (tmp_path / ".env").exists()
+    assert not (tmp_path / "config.yaml").exists()
 
 
 def test_edge_setup_service_write_failure_is_nonzero(tmp_path, monkeypatch) -> None:

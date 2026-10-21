@@ -110,6 +110,18 @@ type windowsEnterpriseLifecycleOptions struct {
 	payloadManifest string
 	allowedSigners  []string
 	productVersion  string
+	// suppliedConfigRefusal is why the supplied --config cannot be loaded
+	// when profile resolution found it unparseable. An install, ensure,
+	// upgrade or repair is refused with it once its installer is found and
+	// trusted, so the refusal reports the running deployment as a refused
+	// config that parses does (GAP-0103).
+	suppliedConfigRefusal error
+	// runningDeploymentLabel marks a run that refused its config before it
+	// changed anything: every warning from index
+	// runningDeploymentWarningsFrom on, those the finish adds included, is
+	// the running deployment's (GAP-0564, GAP-0103).
+	runningDeploymentLabel        bool
+	runningDeploymentWarningsFrom int
 	// payloadPins are the payload manifest's SHA-256 pins, read when a
 	// hash_pinned run verifies its installer. The scanner runtime the
 	// lifecycle installs itself is admitted by them too.
@@ -158,6 +170,9 @@ type windowsEnterpriseLifecycleOptions struct {
 	// migrated; the standalone result reports it in changes (GAP-0472).
 	configMigration     *config.MigrationRecord
 	configMigrationPath string
+	// configFailModeRepairs are the Cursor fail modes this run restored to
+	// closed in migration-v9.json (config.RepairMigratedCursorFailMode).
+	configFailModeRepairs []config.MigrationMove
 	// deploymentTrustMode is the payload trust the deployment records
 	// (deployment.json trust_mode), taken from the installer report the
 	// standalone result was built from. The marker publishes it rather than
@@ -288,6 +303,9 @@ func init() {
 	// whole file is //go:build windows so a non-Windows build never
 	// reaches this registration.
 	enterpriseWindowsCmd.AddCommand(newEnterpriseWindowsEnumerateCommand())
+	// #1164: the stdio relay the scanner runtime starts for an enrolled
+	// user's MCP server, which the enumerator starts as that user.
+	enterpriseWindowsCmd.AddCommand(newEnterpriseWindowsMCPRelayCommand())
 	enterpriseCmd.AddCommand(enterpriseWindowsCmd)
 }
 
@@ -443,6 +461,11 @@ func runWindowsEnterpriseLifecycle(
 		}
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts,
 			errors.New("elevation_required: "+windowsEnterpriseStandardUserMutationAnswer(action, windowsEnterpriseRequestedAttestations(opts)...)))
+	}
+	if windowsEnterpriseMutationAction(action) {
+		// The run and the installer it starts leave the CPU to the hooks
+		// that must answer each tool call in time (GAP-0155).
+		windowsLifecycleYieldToHooks()
 	}
 	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
 		if windowsEnterpriseStandaloneRequested(opts) || windowsEnterpriseUnknownProfileRequested(opts) {

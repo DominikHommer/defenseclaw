@@ -214,7 +214,7 @@ The two summary fields are computed differently on each OS:
 
 | Field | Linux and macOS | Windows |
 | --- | --- | --- |
-| `coverage_complete` | The gateway answers its health check on the hook socket (served by the service account, or by PID 1 on Linux) and reports its API listener on `127.0.0.1:18970` up, the guardian is active with a fresh authorization ledger, and the enumerator is active | The deployment is installed, the guardian is ready, and no transaction is pending |
+| `coverage_complete` | The gateway answers its health check on the hook socket (served by the service account, or by PID 1 on Linux) and reports its API listener on `127.0.0.1:18970` up, the guardian is active with a fresh authorization ledger, the enumerator is active, and no agent is reported as `hook_contract_unverified` | The deployment is installed, the guardian is ready, no transaction is pending, and no agent is reported as `hook_contract_unverified` |
 | `security_complete` | `coverage_complete`, the sensor helper is active, the run had no errors when the result was built, no agent is reported as `agent_unprotected` or `hook_contract_unverified`, no user target is reported as `guardian_target_failed`, and the config enables at least one agent when there are eligible users (otherwise `no_connectors_enabled`) | The deployment is installed and healthy, the target manifest has at least one enabled Codex, Claude Code, or Cursor row, no agent is reported as `agent_unprotected` or `hook_contract_unverified`, and, when a Claude Code row is enabled, the Claude Code attestation described below is recorded |
 
 - **Enrollment counts.** Linux and macOS read the counts from the guardian's
@@ -657,6 +657,8 @@ state:
   reports the same device in its telemetry;
 - the per-machine key the guardian derives each enrolled user's credentials
   from, so the same user gets the same credentials on every clone;
+- the gateway's per-machine `redaction-correlation.key` and sandbox
+  registration store, if an account on the template kept sandboxes;
 - the machine ID, unless the imaging tool resets it.
 
 Prefer an image without that state: capture the template before you install
@@ -671,7 +673,9 @@ an account keeps sandboxes it keeps the gateway's registration store
 or `/opt/cisco/defenseclaw/runtime/redaction-correlation.key`). They are
 root-owned while the service account is gone; the next `ensure` adopts them.
 The key is per-machine; a clone must not share it. Use `--purge` for a clean
-image if the template ever held sandboxes, and keep `--keep-state` off.
+image, and keep `--keep-state` off. A purge also deletes each enrolled
+account's `~/.defenseclaw`, its sandboxes and any sandbox work not pulled
+yet.
 
 For clones that already run it, on each clone:
 
@@ -680,8 +684,10 @@ For clones that already run it, on each clone:
    `/etc/machine-id` that systemd fills at the next boot); on EC2, systemd
    derives the ID from the instance UUID again, so each instance already has
    its own. Each Mac has its own hardware UUID.
-2. Reinstall: uninstall, then install the same package or payload again. That
-   gives the clone a new device key and a new per-machine key. To keep the
+2. Reinstall: uninstall with `--purge`, then install the same package or
+   payload again. That gives the clone a new device key, a new per-machine
+   key and a new `redaction-correlation.key`; a plain uninstall keeps that key
+   on a clone whose accounts kept sandboxes. To keep the
    deployment instead, run `enterprise linux rotate-credentials --json`
    (macOS: `enterprise macos rotate-credentials --json`, see
    [Rotate per-user credentials](#rotate-per-user-credentials)): the users'
@@ -717,12 +723,12 @@ only when it runs elevated.
 
 | Event ID | Meaning |
 | --- | --- |
-| 100 | Installed |
-| 101 | Upgraded |
+| 100 | Installed (written by `/install`; `/ensure` writes 111 or 112 instead) |
+| 101 | Upgraded (written by `/upgrade`; `/ensure` writes 111 or 112 instead) |
 | 102 | Repaired, or a reconcile ran |
 | 110 | Uninstalled (Application log only, because uninstall removes the `DefenseClaw` log) |
 | 111 | `ensure` found nothing to change |
-| 112 | `ensure` applied a change |
+| 112 | `ensure` applied a change, including the first install and an upgrade that `/ensure` performed |
 | 120 | `status` or `verify` found the deployment unhealthy (warning) |
 | 130 | An action failed (error) |
 | 140 | Another lifecycle run held the lock (warning) |

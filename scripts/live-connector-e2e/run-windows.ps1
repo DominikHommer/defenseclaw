@@ -5029,7 +5029,7 @@ function Get-NativeHookArguments([string]$RegisteredEvent) {
         $bridgeArguments = [string[]]@(if ($null -ne $bridge) { $bridge.Arguments })
         $contractIndex = [Array]::IndexOf($bridgeArguments, '--hook-contract')
         if ($contractIndex -lt 0 -or $contractIndex + 1 -ge $bridgeArguments.Count -or
-            $bridgeArguments[$contractIndex + 1] -notmatch '^codex-hooks-v[0-9]+$') {
+            $bridgeArguments[$contractIndex + 1] -notmatch '^codex-hooks-v[0-9]+(-generic)?$') {
             throw 'Codex registration has no finite installer-bound hook contract'
         }
         $arguments += @('--hook-contract', $bridgeArguments[$contractIndex + 1])
@@ -5180,10 +5180,10 @@ function Wait-GatewayHookReady([int]$Timeout = 90) {
                 if ($result.ExitCode -ne 0 -or $null -eq $decision -or
                     $decision.action -cne 'allow' -or $decision.raw_action -cne 'allow' -or
                     $decision.would_block) {
-                    throw 'pre_tool_call readiness did not produce a canonical fail-open allow decision'
+                    throw 'pre_tool_call readiness did not produce a canonical allow decision'
                 }
                 Write-Result 'gateway-hook-readiness' pass `
-                    "stable native pre_tool_call allow after $attempt probe(s); effective-failure=fail-open"
+                    "stable native pre_tool_call allow after $attempt probe(s)"
                 return
             } catch {
                 $lastError = Protect-LogText $_.Exception.Message
@@ -5508,7 +5508,7 @@ function Get-ConnectorHookLabel {
         'copilot' { 'Copilot hooks' }
         'cursor' { 'Cursor hooks' }
         'devin' { 'Devin hooks' }
-        'hermes' { 'Hermes hooks (fail-open)' }
+        'hermes' { 'Hermes hooks' }
         'antigravity' { 'Antigravity hooks' }
         'opencode' { 'OpenCode hooks' }
     }
@@ -5609,6 +5609,7 @@ function Assert-CodexSynchronousWindowsHookCommand([object]$CodexCommand, [strin
         'codex-hooks-v1' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'Stop')
         'codex-hooks-v2' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'PreCompact', 'PostCompact', 'Stop')
         'codex-hooks-v3' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'Stop')
+        'codex-hooks-v3-generic' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'Stop')
         'codex-hooks-v4' = @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'Stop', 'SessionEnd')
     }
     $boundEvent = if ($arguments.Count -eq 7) { $arguments[4] } else { '' }
@@ -5989,7 +5990,9 @@ function Assert-DoctorHookRegistration {
         $codexCommand = Get-CodexWindowsHookCommand $registration
         Assert-CodexSynchronousWindowsHookCommand $codexCommand 'setup-created Codex registration'
     } elseif ($Connector -eq 'amp') {
-        $expectedAmpFailMode = if ($script:LastSetupMode -eq 'action') { 'closed' } else { 'open' }
+        # An unset hook fail mode is closed outside Secure Client, in observe
+        # mode too; this Setup sets none.
+        $expectedAmpFailMode = 'closed'
         foreach ($marker in @(
             'DefenseClaw Amp policy bridge',
             '/api/v1/amp/hook',
@@ -6978,9 +6981,8 @@ function Assert-DoctorWindowsHookRegistration {
     if ($Connector -eq 'hermes' -and
         ($check.detail -notmatch 'hook_entries=23' -or
          $check.detail -notmatch 'allowlist_entries=23' -or
-         $check.detail -notmatch 'no Hermes host is running' -or
-         $label -notmatch 'fail-open')) {
-        throw "Doctor did not expose Hermes's exact event inventory and forced fail-open posture: $($check.detail)"
+         $check.detail -notmatch 'no Hermes host is running')) {
+        throw "Doctor did not expose Hermes's exact event inventory: $($check.detail)"
     }
     if ($Connector -eq 'devin' -and
         ($check.detail -notmatch 'entries=8' -or
@@ -9476,11 +9478,12 @@ function Invoke-ContractRun {
     Invoke-Setup observe
     Assert-DoctorHookRegistration
     if ($Connector -eq 'amp') {
-        # Observe keeps a plugin without a connector override open outside
-        # Secure Client, even when the global delivery policy is closed.
-        # Round-trip the global policy and restore closed for the action phase,
-        # where the Windows registration assertion below verifies it takes effect.
-        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        # Outside Secure Client an unset or closed delivery policy is closed in
+        # observe mode too (owner rule); only an explicit open opens the
+        # plugin. Round-trip the global policy and restore closed for the
+        # action phase, where the Windows registration assertion below
+        # verifies it takes effect.
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
         # A failed restore must not mask the open-mode failure that caused
         # it: keep the primary error, warn about the restore, rethrow primary.
         $ampFailModeError = $null
@@ -9499,7 +9502,7 @@ function Invoke-ContractRun {
             Write-Warning "Amp fail-mode restore to closed failed after the open-mode check failed: $($_.Exception.Message)"
         }
         if ($null -ne $ampFailModeError) { throw $ampFailModeError }
-        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
     }
     Invoke-DangerousCommandCorpus observe
     $blockEvent = if ($Connector -eq 'amp') { 'tool.call' } else { 'PreTool-block' }
@@ -9516,7 +9519,7 @@ function Invoke-ContractRun {
     }
     Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
     if ($Connector -eq 'amp') {
-        Write-Result 'amp:delivery-mode-contract' pass 'global policy updates preserve observe compatibility; restored closed policy renders in action mode'
+        Write-Result 'amp:delivery-mode-contract' pass 'observe follows the global policy (closed, explicit open, restored closed); restored closed policy renders in action mode'
     }
     $session = Join-Path $golden 'session_start.json'
     $sessionEvent = if ($Connector -eq 'amp') { 'session.start' } else { 'SessionStart' }

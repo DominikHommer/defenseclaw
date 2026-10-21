@@ -21,8 +21,7 @@
 #       file your MDM delivered (Intune and other MDMs pin the package hash).
 #
 #   --payload-dir <dir> (Authenticode-signed)
-#       Embeds the signed inner executables/scripts and the hash-bound
-#       policy_compiler.py source file.
+#       Embeds the signed inner executables/scripts.
 #       (Cisco release signing, or your own code-signing certificate for
 #       customer re-signing) with distribution_flavor "standalone". The
 #       lifecycle requires a Valid signature on every file; pass
@@ -39,9 +38,14 @@
 #   Both signed channels need --signing-type DEV|PROD and
 #   --expected-signer-sha256 <64-hex>: windows-avc-assembler verifies every
 #   signable inner file against that chain policy and signer fingerprint before it
-#   appends the payload trailer. That check runs powershell.exe, so the
-#   signed channels need a Windows build host (Git Bash or MSYS2); the
-#   default unsigned channel builds anywhere.
+#   appends the payload trailer. On Linux and macOS that check runs
+#   osslsigncode verify (2.5 or later), on Windows powershell.exe. PROD needs
+#   a chain to a root the host trusts; DEV also accepts a chain that ends at
+#   a certificate the signature carries (a test or self-signed certificate).
+#
+#   Every channel links the payload binding (the flavor, version and source
+#   commit of the trailer manifest and the SHA-256 of each payload file) into
+#   the outer Setup, which then stages only that payload under that identity.
 #
 # Usage:
 #   packaging/windows/standalone/build-setup.sh --version 1.4.0 \
@@ -58,7 +62,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '4,53p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '4,58p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -95,7 +99,7 @@ if [ -n "${SIGNED_PAYLOAD_DIR}" ] || [ -n "${SIGN_COMMAND}" ]; then
     [[ "${EXPECTED_SIGNER_SHA256}" =~ ^[0-9A-Fa-f]{64}$ ]] || die "--payload-dir and --sign-command need --expected-signer-sha256 <64-hex>"
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*) ;;
-        *) die "signed standalone builds need a Windows build host: windows-avc-assembler verifies Authenticode with powershell.exe" ;;
+        *) command -v osslsigncode >/dev/null 2>&1 || die "signed standalone builds on $(uname -s) need osslsigncode 2.5 or later: windows-avc-assembler verifies Authenticode with it" ;;
     esac
 elif [ -n "${SIGNING_TYPE}" ] || [ -n "${EXPECTED_SIGNER_SHA256}" ]; then
     die "--signing-type and --expected-signer-sha256 apply only with --payload-dir or --sign-command"
@@ -119,23 +123,21 @@ PAYLOAD_FILES=(
     defenseclaw-sensor-helper.exe
     defenseclaw.exe
     install-enterprise.ps1
-    policy_compiler.py
 )
 
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dc-standalone-windows.XXXXXX")"
-EMBED_DIR="${REPO_ROOT}/cmd/defenseclaw-enterprise-setup/payload"
+# defenseclaw-scanners.exe embeds its runtime from this directory. It is
+# git-ignored except its .gitkeep; leave it as the checkout had it so a later
+# build cannot embed a stale runtime.
 SCANNERS_EMBED_DIR="${REPO_ROOT}/cmd/defenseclaw-scanners/payload"
 cleanup() {
     rm -rf "${STAGE_DIR:?}"
-    # The embed directories are git-ignored except their .gitkeep; leave
-    # them as the checkout had them so a later build cannot embed a stale
-    # payload.
-    find "${EMBED_DIR}" "${SCANNERS_EMBED_DIR}" -mindepth 1 -maxdepth 1 ! -name .gitkeep -exec rm -rf {} +
+    find "${SCANNERS_EMBED_DIR}" -mindepth 1 -maxdepth 1 ! -name .gitkeep -exec rm -rf {} +
 }
 trap cleanup EXIT
 
-if [ -n "$(find "${EMBED_DIR}" -mindepth 1 -maxdepth 1 ! -name .gitkeep -print -quit)" ]; then
-    die "${EMBED_DIR} already holds a payload; remove it before building"
+if [ -n "$(find "${SCANNERS_EMBED_DIR}" -mindepth 1 -maxdepth 1 ! -name .gitkeep -print -quit)" ]; then
+    die "${SCANNERS_EMBED_DIR} already holds a runtime; remove it before building"
 fi
 
 if [ -n "${SIGNED_PAYLOAD_DIR}" ]; then
@@ -146,8 +148,6 @@ if [ -n "${SIGNED_PAYLOAD_DIR}" ]; then
         [ -f "${SIGNED_PAYLOAD_DIR}/${name}" ] || die "signed payload is missing ${name}"
         cp -f "${SIGNED_PAYLOAD_DIR}/${name}" "${STAGE_DIR}/${name}"
     done
-    cmp -s "${STAGE_DIR}/policy_compiler.py" "${REPO_ROOT}/edge-connector/tools/policy_compiler.py" || \
-        die "signed payload policy_compiler.py differs from the release source"
     while IFS= read -r -d '' extra; do
         base="$(basename "${extra}")"
         found=0
@@ -163,7 +163,9 @@ else
     build() {
         local output="$1" package="$2" component="$3" gui="$4"
         # main.date: the commit's UTC time, reproducible (#1249).
-        local ldflags="-s -w -buildid=defenseclaw-${component}-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT} -X main.date=$(TZ=UTC git -C "${REPO_ROOT}" show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)"
+        local build_date ldflags
+        build_date="$(TZ=UTC git -C "${REPO_ROOT}" show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)" || die "cannot read the commit date"
+        ldflags="-s -w -buildid=defenseclaw-${component}-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT} -X main.date=${build_date}"
         if [ "${gui}" = "gui" ]; then
             ldflags="${ldflags} -H=windowsgui"
         fi
@@ -186,14 +188,10 @@ else
     cp -f "${STAGE_DIR}/defenseclaw-gateway.exe" "${STAGE_DIR}/defenseclaw.exe"
     cp -f "${REPO_ROOT}/packaging/windows/install-enterprise.ps1" "${STAGE_DIR}/install-enterprise.ps1"
     cp -f "${REPO_ROOT}/packaging/windows/DefenseClawEnterprise.psm1" "${STAGE_DIR}/DefenseClawEnterprise.psm1"
-    cp -f "${REPO_ROOT}/edge-connector/tools/policy_compiler.py" "${STAGE_DIR}/policy_compiler.py"
     if [ -n "${SIGN_COMMAND}" ]; then
         FLAVOR="standalone"
         UNSIGNED_FLAG=()
         for name in "${PAYLOAD_FILES[@]}"; do
-            # Python source is hash-bound by the signed outer Setup manifest.
-            # Authenticode cannot be embedded in a .py file.
-            if [ "${name}" = policy_compiler.py ]; then continue; fi
             echo "==> signing ${name}"
             "${SIGN_COMMAND}" "${STAGE_DIR}/${name}" || die "signing ${name} failed"
         done
@@ -217,18 +215,22 @@ echo "==> emitting the ${FLAVOR} payload manifest"
     --source-commit "${SOURCE_COMMIT}" \
     --payload-dir "${PAYLOAD_ONLY}" \
     --distribution-flavor "${FLAVOR}" \
-    --out "${EMBED_DIR}/manifest.json" \
+    --out "${STAGE_DIR}/payload-manifest.json" \
     ${UNSIGNED_FLAG[@]+"${UNSIGNED_FLAG[@]}"}
-for name in "${PAYLOAD_FILES[@]}"; do
-    cp -f "${PAYLOAD_ONLY}/${name}" "${EMBED_DIR}/${name}"
-done
+# The outer Setup stages only the payload whose flavor, version, source
+# commit and file digests produce this binding, so the binding is linked
+# into the image itself. The version and commit are the ones the assembler
+# writes into the trailer manifest below.
+PAYLOAD_BINDING="$("${EMITTER}" payload-binding --payload-dir "${PAYLOAD_ONLY}" --distribution-flavor "${FLAVOR}" \
+    --version "${VERSION}" --source-commit "${SOURCE_COMMIT}")"
+[[ "${PAYLOAD_BINDING}" =~ ^[0-9a-f]{64}$ ]] || die "cannot compute the payload binding"
 
 SETUP="${OUT_DIR}/DefenseClawSetup-Enterprise-Standalone-x64.exe"
 SETUP_UNSIGNED="${STAGE_DIR}/DefenseClawSetup-Enterprise-Standalone-x64.unsigned.exe"
 echo "==> building ${SETUP##*/} (outer EXE, no trailer yet)"
 ( cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
     go build -trimpath -buildvcs=false \
-    -ldflags "-s -w -buildid=defenseclaw-enterprise-setup-standalone-${SOURCE_COMMIT}" \
+    -ldflags "-s -w -buildid=defenseclaw-enterprise-setup-standalone-${SOURCE_COMMIT} -X main.standalonePayloadBinding=${PAYLOAD_BINDING}" \
     -o "${SETUP_UNSIGNED}" ./cmd/defenseclaw-enterprise-setup )
 
 # The payload is no longer carried via //go:embed. Append the
@@ -244,9 +246,8 @@ if [ "${FLAVOR}" = "standalone-unsigned" ]; then
     ASSEMBLER_SIGNING_FLAGS=(-AllowUnsigned)
 else
     # The signed channels (--payload-dir / --sign-command) hand the
-    # assembler signed executables/scripts plus the release-source Python
-    # compiler. The signed module pins the compiler digest; the signed outer
-    # Setup binds the trailer and is checked again before installation.
+    # assembler signed executables/scripts. The signed outer Setup binds
+    # the trailer and is checked again before installation.
     ASSEMBLER_SIGNING_FLAGS=(
         -SigningType "${SIGNING_TYPE}"
         -ExpectedSignerSha256 "${EXPECTED_SIGNER_SHA256}"
@@ -267,12 +268,14 @@ if [ -n "${SIGN_COMMAND}" ]; then
     "${SIGN_COMMAND}" "${SETUP}" || die "signing ${SETUP##*/} failed"
 fi
 
+"${REPO_ROOT}/scripts/test-managed-package-no-fleet-compiler.sh" "${SETUP}"
+
 if command -v sha256sum >/dev/null 2>&1; then
     ( cd "${OUT_DIR}" && sha256sum "${SETUP##*/}" > "${SETUP##*/}.sha256" )
 else
     ( cd "${OUT_DIR}" && shasum -a 256 "${SETUP##*/}" > "${SETUP##*/}.sha256" )
 fi
-cp -f "${EMBED_DIR}/manifest.json" "${OUT_DIR}/payload-manifest.json"
+cp -f "${STAGE_DIR}/payload-manifest.json" "${OUT_DIR}/payload-manifest.json"
 echo "==> done: ${SETUP}"
 echo "    flavor=${FLAVOR} version=${VERSION} commit=${SOURCE_COMMIT:0:12}"
 echo "    sha256: $(cut -d' ' -f1 "${SETUP}.sha256")"

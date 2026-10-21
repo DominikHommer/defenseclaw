@@ -165,7 +165,7 @@ func (a *APIServer) sandboxRelayUnblock(ctx context.Context, reg sandboxreg.Regi
 	if err != nil || auth.decisions == nil {
 		return nil
 	}
-	floor, _, err := sandboxFloorFor(a.liveBaseConfig(ctx), reg.Profile)
+	floor, _, err := sandboxRegistrationFloor(a.liveBaseConfig(ctx), reg)
 	if err != nil {
 		return nil
 	}

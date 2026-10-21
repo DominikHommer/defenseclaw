@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -343,6 +344,28 @@ func (p *PolicyState) Line() string {
 	return line
 }
 
+// RunningDeploymentPrefix starts each warning of a run that refused the
+// submitted config before it changed anything: the warning is the running
+// deployment's, not the refused file's (GAP-0564, #1201).
+const RunningDeploymentPrefix = "running deployment (the refused config changed nothing): "
+
+// LabelRunningDeployment marks r as a run that refused the submitted config
+// (ConfigRefused) and labels each warning from index from on as the running
+// deployment's, except those whose code is in keep: they describe the
+// refused request itself. A warning already labelled stays as it is.
+func (r *Result) LabelRunningDeployment(from int, keep ...string) {
+	if r == nil {
+		return
+	}
+	r.ConfigRefused = true
+	for i := max(from, 0); i < len(r.Warnings); i++ {
+		if slices.Contains(keep, r.Warnings[i].Code) || strings.HasPrefix(r.Warnings[i].Message, RunningDeploymentPrefix) {
+			continue
+		}
+		r.Warnings[i].Message = RunningDeploymentPrefix + r.Warnings[i].Message
+	}
+}
+
 // PolicyLine is Policy.Line(), labelled as the running deployment's when the
 // run refused the submitted config (ConfigRefused); "" without a policy.
 func (r *Result) PolicyLine() string {
@@ -401,11 +424,19 @@ func (r *Result) AddWarning(code, message string) {
 // Finish sets OK from the error list and the exit code for goos, then
 // returns the code. failureCode overrides the generic failure code when a
 // more specific one applies (busy, invalid arguments).
+//
+// A result with an error is never security_complete: Windows verify
+// reported security_complete:true next to the error that the guardian could
+// not verify an enrolled target's hooks, so a script that read the flag
+// was told the host was protected (GAP-0664).
 func (r *Result) Finish(goos string, failureCode int) int {
 	if r.Bundle != nil && r.Bundle.SessionsRestartRequired != nil && r.Bundle.SessionsRestartRequired.Count > 0 {
 		r.CoverageComplete, r.SecurityComplete = false, false
 	}
 	r.OK = len(r.Errors) == 0
+	if !r.OK {
+		r.SecurityComplete = false
+	}
 	switch {
 	case r.OK:
 		r.ExitCode = ExitOK

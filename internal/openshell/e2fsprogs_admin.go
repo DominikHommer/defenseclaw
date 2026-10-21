@@ -26,6 +26,10 @@ import (
 // formats every MicroVM's disks with.
 var AdminE2fsprogsTools = []string{"mke2fs", "debugfs"}
 
+// PackageE2fsprogsDir is the root-owned fallback carried by the managed
+// macOS package. An explicit administrator setting always takes precedence.
+const PackageE2fsprogsDir = "/opt/cisco/defenseclaw/share/e2fsprogs"
+
 // AdminE2fsprogsToolDir is the folder the MicroVM driver gets e2fsprogs
 // from under the administrator's enterprise.openshell.e2fsprogs_dir: its
 // sbin or bin (an e2fsprogs install prefix, the layout of Homebrew's keg
@@ -67,13 +71,14 @@ func RegularFile(path string) bool {
 // trustedAdmin checks the chosen directory and both tool files by the same
 // managed rules used by the exec shim. A tool the account owns or a symlink
 // to one must not become a command on an administrator's PATH.
-// Without an administrator value, only the account's own build is used,
-// never a Homebrew keg (GAP-0004).
+// Without an administrator value, the account's own build wins before the
+// managed package fallback; a Homebrew keg is never selected (GAP-0004).
 func ManagedE2fsprogsToolDir(adminDir, home string, uid int, trustedAdmin func(path string, file bool) error) (dir, problem string) {
+	return managedE2fsprogsToolDir(adminDir, PackageE2fsprogsDir, home, uid, trustedAdmin)
+}
+
+func managedE2fsprogsToolDir(adminDir, packageDir, home string, uid int, trustedAdmin func(path string, file bool) error) (dir, problem string) {
 	if adminDir != "" {
-		if problem := AdminE2fsprogsCandidateAccessProblem(adminDir, os.Stat); problem != "" {
-			return "", problem
-		}
 		tools := AdminE2fsprogsToolDir(adminDir, RegularFile)
 		if tools == "" {
 			return "", fmt.Sprintf("the administrator's e2fsprogs %s holds no mke2fs and debugfs side by side; set enterprise.openshell.e2fsprogs_dir to the install prefix or the folder that holds both tools", adminDir)
@@ -101,26 +106,24 @@ func ManagedE2fsprogsToolDir(adminDir, home string, uid int, trustedAdmin func(p
 			return own, ""
 		}
 	}
-	return "", "MicroVM sandboxes need mke2fs and debugfs in the administrator's enterprise.openshell.e2fsprogs_dir or your own ~/.local/opt/e2fsprogs/sbin; a Homebrew keg is not used on a managed computer"
-}
-
-// AdminE2fsprogsCandidateAccessProblem refuses an inaccessible candidate
-// before selecting another one. Root can see tools in a private sbin that
-// an account cannot see, so skipping it could give ensure and the gateway
-// different answers for the same install prefix.
-func AdminE2fsprogsCandidateAccessProblem(adminDir string, stat func(string) (os.FileInfo, error)) string {
-	for _, candidate := range []string{filepath.Join(adminDir, "sbin"), filepath.Join(adminDir, "bin"), adminDir} {
-		info, err := stat(candidate)
-		if err != nil && !os.IsNotExist(err) {
-			return candidate + " cannot be traversed by every account: " + err.Error()
+	if tools := AdminE2fsprogsToolDir(packageDir, RegularFile); tools != "" {
+		if trustedAdmin == nil {
+			return "", "the package e2fsprogs cannot be trusted without a directory check"
 		}
-		if err == nil && info.IsDir() {
-			if problem := e2fsprogsDirectoryAccessProblem(candidate, stat); problem != "" {
-				return problem
+		if err := trustedAdmin(tools, false); err != nil {
+			return "", fmt.Sprintf("the package e2fsprogs %s is not trusted: %v", tools, err)
+		}
+		for _, name := range AdminE2fsprogsTools {
+			if err := trustedAdmin(filepath.Join(tools, name), true); err != nil {
+				return "", fmt.Sprintf("the package e2fsprogs tool %s is not trusted: %v", name, err)
 			}
 		}
+		if problem := E2fsprogsAccessProblem(tools, os.Stat); problem != "" {
+			return "", problem
+		}
+		return tools, ""
 	}
-	return ""
+	return "", "MicroVM sandboxes need mke2fs and debugfs in the administrator's enterprise.openshell.e2fsprogs_dir, your own ~/.local/opt/e2fsprogs/sbin, or the managed package; a Homebrew keg is not used on a managed computer"
 }
 
 // E2fsprogsAccessProblem is the account-access check shared by ensure,

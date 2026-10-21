@@ -1537,9 +1537,17 @@ func TestWindowsNativePowerShellHookCommandPreservesAntigravityFailureResponse(t
 	if got := strings.TrimSpace(stdout.String()); got != wantFailure {
 		t.Fatalf("Antigravity failure response = %q, want %s", got, wantFailure)
 	}
-	if diagnostic := strings.ToLower(stderr.String()); !strings.Contains(diagnostic, "missing gateway token") ||
-		!strings.Contains(diagnostic, "event-specific failure response") {
+	diagnostic := strings.ToLower(stderr.String())
+	if !strings.Contains(diagnostic, "event-specific failure response") {
 		t.Fatalf("Antigravity failure-response provenance was not preserved on stderr: %q", stderr.String())
+	}
+	// A tool call's hook answers within its budget counted from the first
+	// process of the call (the PowerShell bridge here). When a loaded runner
+	// spends that budget before the hook reads its token, the answer deadline
+	// blocks first with the same failure response and names the deadline
+	// instead of the token (B-01, GAP-0155).
+	if !strings.Contains(diagnostic, "missing gateway token") && !strings.Contains(diagnostic, "did not answer in time") {
+		t.Fatalf("Antigravity failure response names neither the missing token nor the answer deadline: %q", stderr.String())
 	}
 }
 
@@ -1806,7 +1814,10 @@ func TestAntigravityWindowsHookCommandBypassesUntrustedCurrentDirectory(t *testi
 	if len(argv) == 0 {
 		t.Fatalf("empty Antigravity command")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// The two just-built probe executables may be cold-scanned by a hosted
+	// Windows runner before producing output. This test checks which path ran,
+	// not the production hook deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = untrustedDir
@@ -2324,7 +2335,8 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			}
 			text := string(data)
 			connectorName := tt.conn.Name()
-			if connectorName == "cursor" {
+			switch connectorName {
+			case "cursor":
 				wantCommand := hookInvocationCommand(
 					"cursor",
 					filepath.Join(dataDir, "hooks", "cursor-hook.sh"),
@@ -2357,7 +2369,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 						t.Errorf("Cursor adapter missing hardening marker %q:\n%s", marker, adapter)
 					}
 				}
-			} else if connectorName == "antigravity" {
+			case "antigravity":
 				wantCommand := antigravityHookInvocationCommandForEvent(
 					"windows",
 					"PreToolUse",
@@ -2378,7 +2390,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					!windowsBridgeBindsArgumentForTest(decoded, "--event", "PreToolUse") {
 					t.Errorf("Antigravity encoded command missing managed launcher path:\n%s", decoded)
 				}
-			} else if connectorName == "claudecode" {
+			case "claudecode":
 				var cfg map[string]interface{}
 				if err := json.Unmarshal(data, &cfg); err != nil {
 					t.Fatalf("parse Claude Code config: %v", err)
@@ -2407,7 +2419,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if !structuredHookCommandReferences(execView(cfg), []string{nativeHookFlag + connectorName}) {
 					t.Errorf("config missing native exec-form connector command for %s:\n%s", connectorName, text)
 				}
-			} else if connectorName == "codex" {
+			case "codex":
 				var cfg map[string]interface{}
 				if err := toml.Unmarshal(data, &cfg); err != nil {
 					t.Fatalf("parse Codex config: %v", err)
@@ -2429,7 +2441,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", "codex-hooks-v4") {
 					t.Errorf("config missing event-bound native command_windows for %s:\n%s", connectorName, text)
 				}
-			} else if connectorName == "copilot" {
+			case "copilot":
 				adapter, err := os.ReadFile(filepath.Join(dataDir, "hooks", "copilot-hook.ps1"))
 				if err != nil {
 					t.Fatalf("read Copilot Windows adapter: %v", err)
@@ -2465,7 +2477,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 						t.Fatalf("Copilot adapter must set the console input encoding before reading stdin (encoding=%d read=%d)", encodingAt, readAt)
 					}
 				}
-			} else {
+			default:
 				if !strings.Contains(text, windowsHookBinaryName) {
 					t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
 				}
@@ -2531,10 +2543,13 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if runtimeState.GatewayAddr != "127.0.0.1:18970" {
 				t.Errorf("hook config sidecar API address = %q, want 127.0.0.1:18970", runtimeState.GatewayAddr)
 			}
-			wantFailMode := resolveHookFailMode(opts, tt.conn)
-			if hp, ok := tt.conn.(HookCapabilityProvider); ok &&
-				wantFailMode == "closed" && !hp.HookCapabilities(opts).SupportsFailClosed {
-				wantFailMode = "open"
+			// The native hook reads this value: it keeps closed for a
+			// connector whose hook blocks its own failures (the per-user
+			// Hermes hook, GAP-0269) and is open for the other connectors
+			// without a fail-closed contract.
+			wantFailMode := CapableHookFailMode(opts, tt.conn, resolveHookFailMode(opts, tt.conn))
+			if tt.conn.Name() == "hermes" && wantFailMode != "closed" {
+				t.Errorf("per-user Hermes resolves fail mode %q, want closed", wantFailMode)
 			}
 			if got := runtimeState.FailModes[connectorName]; got != wantFailMode {
 				t.Errorf("hook config sidecar fail mode for %s = %q, want %q", connectorName, got, wantFailMode)

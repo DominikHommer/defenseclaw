@@ -71,6 +71,8 @@ scripts/write-macos-bundle-readme.sh
 scripts/check-assemble-parity.sh
 scripts/check-repro-flags-parity.sh
 scripts/generate-repro-fixture.sh
+scripts/check-managed-setup-payload.go
+scripts/test-managed-package-no-fleet-compiler.sh
 
 # Fixtures and the Python tests that pin managed behavior.
 testdata/enterprise-configs/

@@ -67,13 +67,13 @@ from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
 from defenseclaw.fail_mode import (
-    _UPSTREAM_FAIL_OPEN_CONNECTORS,
     FileSnapshot,
     fail_mode_transaction_lock,
     reconcile_connector_registration,
     resolve_connector_fail_mode,
     restore_fail_mode_transaction,
     snapshot_fail_mode_transaction,
+    upstream_fail_open,
 )
 
 # Note: ``defenseclaw.commands.cmd_setup._restart_services`` is
@@ -864,7 +864,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
             if runtime_state.drift and enforcing:
                 fail_drift = f" (desired {runtime_state.desired}; drift: " + ", ".join(runtime_state.drift) + ")"
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
-        elif normalize_connector(name) in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+        elif upstream_fail_open(app.cfg, name):
             # Copilot CLI, Antigravity and Hermes fail open upstream whatever
             # is configured; `defenseclaw status` reports the same.
             cfm = "open"
@@ -908,9 +908,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                     f"{_connector_label(name)} ({name}) is not guarded: {unrunnable}. Fail mode does not apply "
                     f"to a hook the agent does not run; repair: {repair_command(name, unrunnable)}"
                 )
-            elif (cmode or "") == "action" and cfm == "open" and normalize_connector(name) not in (
-                _UPSTREAM_FAIL_OPEN_CONNECTORS
-            ):
+            elif (cmode or "") == "action" and cfm == "open" and not upstream_fail_open(app.cfg, name):
                 # An upgrade keeps the fail mode an older setup chose, while a
                 # new setup gives an action connector closed (GAP-0415).
                 scope = f" --connector {name}" if getattr(gc, "connectors", None) else ""
@@ -1447,11 +1445,15 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     # whether it is an override or inherited from the global default.
     if mode is None:
         click.echo()
-        runtime_value = (
-            "open (Hermes upstream; failures cannot be made fail-closed)"
-            if normalize_connector(key) == "hermes"
-            else runtime_state.runtime or "unknown"
-        )
+        if normalize_connector(key) == "hermes" and upstream_fail_open(app.cfg, key):
+            runtime_value = "open (Hermes upstream; failures cannot be made fail-closed)"
+        elif normalize_connector(key) == "hermes":
+            # Outside Secure Client the Hermes hook follows its resolved
+            # value on every OS (GAP-0150, GAP-0269); it has no separate
+            # runtime record to read.
+            runtime_value = current
+        else:
+            runtime_value = runtime_state.runtime or "unknown"
         click.echo(f"  {ux.bold(f'{label} ({key}) hook_fail_mode:')} {ux.accent(runtime_value)}")
         if has_override:
             ux.subhead(f"per-connector override (global default: {global_fm}).", indent="  ")
@@ -1481,7 +1483,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         ux.echo(
             f"  {ux.bold(f'Changing {label} hook fail mode:')} {configured_mode} {ux.dim('→')} {ux.accent(mode)}"
         )
-    if normalize_connector(key) == "hermes" and mode == "closed":
+    if normalize_connector(key) == "hermes" and mode == "closed" and upstream_fail_open(app.cfg, key):
         ux.warn(
             "Hermes will remain fail-open; this value is stored only as requested policy provenance.",
             indent="  ",
@@ -1491,6 +1493,9 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
             "in upstream Hermes. Only valid synchronous JSON can block.",
             indent="    ",
         )
+    elif normalize_connector(key) == "hermes" and mode == "closed":
+        ux.warn(f"Invalid or unavailable gateway responses will now BLOCK {label} tool calls.", indent="  ")
+        ux.subhead(_HERMES_UPSTREAM_TIMEOUT_NOTE, indent="    ")
     elif mode == "closed":
         ux.warn(f"Invalid or unavailable gateway responses will now BLOCK {label}.", indent="  ")
         ux.subhead(
@@ -1793,13 +1798,15 @@ def fail_mode_cmd(
                 _eff = _state.runtime or "unknown"
                 if _state.drift:
                     _eff += f" (desired {_state.desired}; drift: {', '.join(_state.drift)})"
-            elif normalize_connector(_name) == "hermes":
+            elif normalize_connector(_name) == "hermes" and upstream_fail_open(app.cfg, _name):
                 _eff = f"open (Hermes upstream; configured provenance: {_eff})"
             elif _is_proxy_connector(_name):
                 _eff = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
             elif _cursor_stays_fail_closed(gc, _name):
                 _eff = "closed (Cursor hooks always fail closed in action mode)"
-            if _eff.startswith("open") and normalize_connector(_name) != "hermes":
+            if _eff.startswith("open") and not (
+                normalize_connector(_name) == "hermes" and upstream_fail_open(app.cfg, _name)
+            ):
                 _open_names.append(_name)
             _eff_disp = ux._style(_eff, fg="yellow") if _eff == "closed" else _eff
             click.echo(f"      - {_connector_label(_name)} ({_name}): {_eff_disp}")
@@ -1817,7 +1824,7 @@ def fail_mode_cmd(
             # Name Hermes only when it is configured (GAP-2116).
             _hermes_note = (
                 "; Hermes remains fail-open"
-                if any(normalize_connector(n) == "hermes" for n in _actives)
+                if any(normalize_connector(n) == "hermes" for n in _actives) and upstream_fail_open(app.cfg, "hermes")
                 else ""
             )
             ux.subhead(
@@ -1875,7 +1882,7 @@ def fail_mode_cmd(
         and mode == current
         and (single_state is None or (single_state.desired == mode and single_state.current))
     ):
-        if normalize_connector(single_connector) == "hermes":
+        if normalize_connector(single_connector) == "hermes" and upstream_fail_open(app.cfg, single_connector):
             ux.echo(
                 f"  {ux.dim('Configured Hermes fail-mode provenance is already')} {mode!r}"
                 f" {ux.dim('— runtime remains upstream fail-open.')}"
@@ -1937,12 +1944,7 @@ def fail_mode_cmd(
                     "closed in action mode (open is saved for observe mode)"
                 )
             elif shown != mode:
-                # The fan-out saves the value as the connector's own setting,
-                # which applies in observe mode too (GAP-1977).
-                note = ux.dim(" (its own setting, also in observe mode)") if _observe_keeps_fail_open(gc, name) else ""
-                ux.echo(
-                    f"      - {_connector_label(name)} ({name}): {shown} {ux.dim('→')} {ux.accent(mode)}{note}"
-                )
+                ux.echo(f"      - {_connector_label(name)} ({name}): {shown} {ux.dim('→')} {ux.accent(mode)}")
             elif old != mode:
                 click.echo(f"      - {_connector_label(name)} ({name}): already {mode}; saved as its own setting")
             elif not runtime_states[name].current:
@@ -1957,17 +1959,9 @@ def fail_mode_cmd(
     else:
         ux.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
     active_names = fail_mode_targets or [single_connector]
-    if mode == "closed" and not fail_mode_targets:
-        # The multi-connector fan-out gives every connector its own value,
-        # so observe mode no longer keeps it fail-open (GAP-1977).
-        _observe_open = [name for name in active_names if _observe_keeps_fail_open(gc, name)]
-        if _observe_open:
-            ux.warn(
-                f"{', '.join(_observe_open)} stays fail-open while in observe mode. "
-                f"Switch to action with: {_mode_action_command(gc)}",
-                indent="  ",
-            )
-    hermes_targeted = any(normalize_connector(name) == "hermes" for name in active_names)
+    hermes_targeted = any(normalize_connector(name) == "hermes" for name in active_names) and upstream_fail_open(
+        app.cfg, "hermes"
+    )
     non_hermes_targeted = any(normalize_connector(name) != "hermes" for name in active_names)
     if mode == "closed" and hermes_targeted and not non_hermes_targeted:
         ux.warn(
@@ -2079,39 +2073,28 @@ def _refuse_cursor_fail_mode(gc, name: str, mode: str, pinned: str) -> None:
     raise SystemExit(1)
 
 
-def _observe_keeps_fail_open(gc, name: str) -> bool:
-    """Observe mode keeps a connector fail-open unless it has its own fail mode."""
-    if normalize_connector(name) == "hermes":
-        return False
-    override = gc._connector_override(name) if hasattr(gc, "_connector_override") else None
-    if override is not None and str(getattr(override, "hook_fail_mode", "") or "").strip():
-        return False
-    mode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else getattr(gc, "mode", "observe")
-    return str(mode or "").strip().lower() != "action"
-
-
-def _mode_action_command(gc) -> str:
-    multi = bool(getattr(gc, "connectors", {}) or {})
-    return "defenseclaw guardrail mode action" + (" --connector <name>" if multi else "")
+# What fail mode closed cannot change for Hermes on Linux and macOS: its hook
+# blocks every failure DefenseClaw sees, but Hermes itself lets a call run when
+# a hook times out or cannot start (GAP-0150).
+_HERMES_UPSTREAM_TIMEOUT_NOTE = (
+    "A gateway that is down or gives an unusable answer blocks the Hermes tool call; Hermes itself "
+    "still lets a call run when the hook times out or cannot start."
+)
 
 
 def _warn_still_fail_open(gc, open_names: list[str]) -> None:
-    """Name the command that really closes each still-open connector (GAP-1341)."""
-    observe_open = [name for name in open_names if _observe_keeps_fail_open(gc, name)]
-    other_open = [name for name in open_names if name not in observe_open]
-    if observe_open:
-        ux.warn(
-            f"Still fail-open: {', '.join(observe_open)} (observe mode keeps hooks fail-open). "
-            f"Switch to action with: {_mode_action_command(gc)}",
-            indent="  ",
-        )
-    if other_open:
+    """Name the command that really closes each still-open connector (GAP-1341).
+
+    The guardrail mode never keeps a hook fail-open (owner rule: open only
+    under Secure Client or by an explicit open), so the fix is always the
+    fail mode."""
+    if open_names:
         fix = (
             "defenseclaw guardrail fail-mode closed --connector <name>"
             if getattr(gc, "connectors", {}) or {}
             else "defenseclaw guardrail fail-mode closed"
         )
-        ux.warn(f"Still fail-open: {', '.join(other_open)}. Close it with: {fix}", indent="  ")
+        ux.warn(f"Still fail-open: {', '.join(open_names)}. Close it with: {fix}", indent="  ")
 
 
 _HILT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
@@ -4829,18 +4812,11 @@ def mode_cmd(
         app, "guardrail-mode", f"scope={scope} mode={new_mode} previous={previous} cleared={str(clear).lower()}"
     )
     # Decisions read the gateway's live configuration generation, so a mode
-    # change reloads hot. A hook fail mode that flipped is baked into the hook
-    # script: connectors with a runtime registration are re-rendered in place,
-    # as ``guardrail fail-mode`` does, and only the rest (or a failed
-    # re-render) restart the gateway so it re-bakes them.
-    needs_restart = {c for c in fail_flips if normalize_connector(c) not in _RUNTIME_FAIL_MODE_CONNECTORS}
-    if fail_flips and gc.enabled:
-        for c in set(fail_flips) - needs_restart:
-            try:
-                reconcile_connector_registration(app.cfg, c)
-            except OSError:
-                needs_restart.add(c)
-    outcome = _apply_to_running_gateway(app, needs_restart=bool(needs_restart), restart=restart, quiet=json_out)
+    # change reloads hot. Only per-user Cursor's hook fail mode follows the
+    # guardrail mode (observe open, action closed; every other hook keeps its
+    # fail mode across a mode switch, owner rule): its registration bakes the
+    # value, so a flip restarts the gateway, which re-bakes it.
+    outcome = _apply_to_running_gateway(app, needs_restart=bool(fail_flips), restart=restart, quiet=json_out)
     unguarded = (
         _unguarded_hook_connectors(app, affected) if new_mode == "action" and outcome in ("live", "restarted") else []
     )
@@ -4860,12 +4836,7 @@ def mode_cmd(
         "open": "the action goes ahead if the hook can't reach the gateway",
     }
     notes = [
-        (
-            f"Hook failures for {_connector_label(c)} remain fail-open (upstream limitation): "
-            "the action can go ahead if the hook cannot reach the gateway."
-            if normalize_connector(c) in _UPSTREAM_FAIL_OPEN_CONNECTORS
-            else f"Hook failures for {_connector_label(c)} now fail {fm}: {consequence.get(fm, fm)}."
-        )
+        f"Hook failures for {_connector_label(c)} now fail {fm}: {consequence.get(fm, fm)}."
         for c, fm in fail_flips.items()
     ]
     notes.extend(

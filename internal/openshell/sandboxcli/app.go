@@ -58,6 +58,9 @@ type API interface {
 	Status(ctx context.Context) (*sandboxapi.Status, error)
 	List(ctx context.Context) ([]sandboxapi.Sandbox, error)
 	Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
+	// GetConfirmed is Get with the running sandbox's policy confirmed with
+	// the organization's gateway first, on a managed computer (status).
+	GetConfirmed(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
 	Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error)
 	Delete(ctx context.Context, name string, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error)
 	Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
@@ -73,6 +76,7 @@ type API interface {
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	Decide(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
 	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)
+	PolicyDecision(ctx context.Context, req sandboxapi.PolicyDecisionRequest) (*sandboxapi.PolicyDecisionResponse, error)
 	Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error)
 	PolicyTest(ctx context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error)
 	Activity(ctx context.Context, q sandboxapi.ActivityQuery, fn func(sandboxapi.ActivityEvent) error) error
@@ -183,6 +187,14 @@ type App struct {
 	// ManagedE2fsprogsDir reads the administrator's e2fsprogs_dir through
 	// the managed gateway settings call. ok is false if it did not answer.
 	ManagedE2fsprogsDir func(context.Context) (dir string, ok bool)
+	// ManagedTrustedCAs reads the administrator's trusted CAs
+	// (openshell.trusted_ca_bundle) through the managed gateway settings
+	// call: their PEM, or why the gateway could not use the file. ok is
+	// false if it did not answer.
+	ManagedTrustedCAs func(context.Context) (pem, problem string, ok bool)
+	// TLSTrust is what the Sandbox TLS trust doctor row reads (defaults:
+	// the network, the distribution's public roots, the system's trust).
+	TLSTrust TLSTrust
 	// ManagedAccountHome is the home path the managed gateway exec shim
 	// resolves for this account, including directory accounts.
 	ManagedAccountHome func() (string, error)
@@ -207,6 +219,10 @@ type App struct {
 	// asked is the last question ask showed, to the question mark: what a
 	// Ctrl-C there interrupted.
 	asked string
+	// tlsTrustOnce runs the Sandbox TLS trust probe once per command;
+	// tlsTrustRow is its row.
+	tlsTrustOnce sync.Once
+	tlsTrustRow  openshell.Check
 	// managedSeen is the managed part of the daemon's last status on a
 	// managed computer: the caller's profile and request-access contact a
 	// refusal names (ManagedError).
@@ -667,7 +683,7 @@ func violationMessage(v *sandboxapi.Violation, message, detail string, admin boo
 // managed computer, where it exits saying only the sandbox commands are
 // available (GAP-0590).
 func (a *App) tuiOffered() bool {
-	return !(a.ManagedHost() || onManagedHost() || a.managedSeen != nil)
+	return ((!(a.ManagedHost()) && !(onManagedHost())) && a.managedSeen == nil)
 }
 
 // violationText is violationMessage for a user on a managed computer: the

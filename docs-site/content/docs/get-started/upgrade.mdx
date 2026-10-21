@@ -203,7 +203,16 @@ installed. Every path keeps your configuration and data.
   any `-journal` file to a new folder before opening it with SQLite tools;
   SQLite can change files it opens, so work on the copy. If the first bytes
   of the main file are zeroed and SQLite says "file is not a database",
-  repair the header on the copy, never on the original archive. A hot
+  repair the header on the copy, never on the original archive: on Linux and
+  macOS run `printf 'SQLite format 3\000' | dd of=<copy> bs=16 count=1 conv=notrunc`,
+  on Windows run
+  ``$f=[IO.File]::OpenWrite('<copy>'); $f.Write([Text.Encoding]::ASCII.GetBytes("SQLite format 3`0"),0,16); $f.Close()``
+  in PowerShell. Then read the copy with `sqlite3 <copy> .recover`. The start
+  warning, `defenseclaw status` and `defenseclaw doctor` print the same steps
+  and name the `-wal`, `-shm` and `-journal` files archived with the store.
+  If the gateway cannot read a store that has a `-wal` file and SQLite does
+  not report it as corrupt, the gateway does not start and leaves the files
+  as they are; copy them before you inspect them and run `defenseclaw doctor`. A hot
   rollback journal is rolled back when the gateway starts and is not
   archived; if the store is still corrupt afterward, the start warning says
   the pre-existing `-journal` was not preserved.

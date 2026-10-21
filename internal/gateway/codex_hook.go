@@ -282,6 +282,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Direction:     "tool_call",
 			Connector:     "codex",
 			MCPServerName: a.codexMCPServerName(ctx, req),
+			callerCWD:     req.CWD,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
 		if command == nil {
@@ -306,7 +307,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			LegacyText:                    string(toolArgs),
 			Connector:                     "codex",
 			EnforcementCapable:            true,
-			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
+			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionInput),
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			DowngradeReadOnlyDataArgs:     mode != "action",
 			SandboxGuestCWD:               req.guestCWD,
@@ -2766,8 +2767,8 @@ func codexSafeAwkProgram(program string) bool {
 			start := i
 			for i < len(program) {
 				char = program[i]
-				if char != '_' && !(char >= 'A' && char <= 'Z') &&
-					!(char >= 'a' && char <= 'z') && !(char >= '0' && char <= '9') {
+				if char != '_' && (char < 'A' || char > 'Z') &&
+					(char < 'a' || char > 'z') && (char < '0' || char > '9') {
 					break
 				}
 				i++

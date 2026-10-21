@@ -908,7 +908,9 @@ def _alerts_default(
                     loc = f"  {f['location']}" if f["location"] else ""
                     click.echo(f" {f['title']}{loc}")
         hint = _alert_next_step(e)
-        if not hint and agent_user and agent_connector:
+        # A finding that names its own next step needs no second pointer to
+        # the agent's identities (GAP-0025).
+        if not hint and agent_user and agent_connector and not (facts or {}).get("next_step"):
             hint = f"defenseclaw agent identities --user {shlex.quote(agent_user)} --connector {agent_connector}"
         if hint:
             click.echo(f"  {ux._style('Next:', fg='bright_black', bold=True)}      {hint}")

@@ -160,15 +160,29 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("Fail", result.output)
         self.assertIn("closed", result.output)
 
-    def test_status_hermes_reports_upstream_fail_open_not_configured_closed(self):
+    def test_status_secure_client_hermes_reports_upstream_fail_open_not_configured_closed(self):
+        # Under Secure Client the Hermes hook fails open whatever is configured.
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
+        app.cfg.deployment_mode = "managed_enterprise"
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Hermes", result.output)
         self.assertIn("open", result.output)
         self.assertIn("upstream-enforced fail-open", result.output)
         self.assertIn("configured provenance: closed", result.output)
+
+    def test_status_hermes_reports_the_configured_mode_on_every_os(self):
+        # GAP-0150 (Linux, macOS) and GAP-0269 (Windows): the per-user Hermes
+        # hook blocks in fail mode closed.
+        for windows in (False, True):
+            runner = CliRunner()
+            app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
+            with patch("defenseclaw.fail_mode._is_windows", return_value=windows):
+                result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertNotIn("upstream-enforced fail-open", result.output)
+            self.assertIn("closed", result.output)
 
     def test_status_copilot_reports_upstream_fail_open_in_text_and_json(self):
         # GAP-1246: guardrail status said "closed" while status said open.
@@ -318,9 +332,10 @@ class FailModeCommandTests(unittest.TestCase):
         self.assertIn("guardrail.hook_fail_mode: closed", result.output)
         self.assertIn("BLOCK", result.output)
 
-    def test_single_connector_observe_mode_names_the_mode_switch(self):
-        # GAP-1341: --connector is refused on a single-connector install, and
-        # observe mode is what keeps the hooks fail-open.
+    def test_single_connector_observe_mode_outside_secure_client_names_the_fail_mode_fix(self):
+        # B-01 (owner rule): outside Secure Client observe mode never keeps a
+        # hook fail-open; an open hook is closed with fail-mode, not a mode
+        # switch.
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="claudecode", hook_fail_mode="closed")
         app.cfg.guardrail.connectors = {}
@@ -330,18 +345,20 @@ class FailModeCommandTests(unittest.TestCase):
         with patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=state):
             result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("observe mode keeps hooks fail-open", result.output)
-        self.assertIn("defenseclaw guardrail mode action", result.output)
-        self.assertNotIn("--connector <name>", result.output)
+        self.assertNotIn("observe mode keeps hooks fail-open", result.output)
+        self.assertIn("Still fail-open: claudecode. Close it with: defenseclaw guardrail fail-mode closed", result.output)
 
-    def test_show_hermes_closed_provenance_reports_effective_open(self):
-        runner = CliRunner()
-        app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
-        result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("guardrail.hook_fail_mode: closed", result.output)
-        self.assertIn("Hermes (hermes): open (Hermes upstream", result.output)
-        self.assertIn("Hermes remains fail-open", result.output)
+    def test_show_hermes_closed_is_closed_on_every_os(self):
+        # GAP-0150 (Linux, macOS) and GAP-0269 (Windows): no upstream
+        # fail-open claim, the hook blocks.
+        for windows in (False, True):
+            runner = CliRunner()
+            app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
+            with patch("defenseclaw.fail_mode._is_windows", return_value=windows):
+                result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertNotIn("Hermes upstream", result.output)
+            self.assertNotIn("Hermes remains fail-open", result.output)
 
     def test_closed_view_omits_hermes_when_not_configured(self):
         # GAP-2116: the Hermes sentence only shows when Hermes is configured.
@@ -1039,9 +1056,10 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertIn("inherited", result.output)
         app.cfg.save.assert_not_called()
 
-    def test_show_hermes_value_reports_upstream_fail_open(self):
+    def test_show_secure_client_hermes_value_reports_upstream_fail_open(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "hermes": None})
+        app.cfg.deployment_mode = "managed_enterprise"
         app.cfg.guardrail.connectors["hermes"].hook_fail_mode = "closed"
         result = runner.invoke(
             cmd_guardrail.fail_mode_cmd, ["--connector", "hermes"], obj=app
@@ -1050,9 +1068,10 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertIn("open (Hermes upstream; failures cannot be made fail-closed)", result.output)
         self.assertIn("per-connector override", result.output)
 
-    def test_set_hermes_closed_warns_that_runtime_remains_open(self):
+    def test_set_secure_client_hermes_closed_warns_that_runtime_remains_open(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "hermes": None})
+        app.cfg.deployment_mode = "managed_enterprise"
         with patch(
             "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
         ):
@@ -1065,6 +1084,23 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(app.cfg.guardrail.connectors["hermes"].hook_fail_mode, "closed")
         self.assertIn("Hermes will remain fail-open", result.output)
         self.assertNotIn("will now BLOCK Hermes", result.output)
+
+    def test_set_hermes_closed_on_linux_and_macos_blocks_gateway_failures(self):
+        # GAP-0150: closed applies to the Linux and macOS Hermes hook.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "hermes": None})
+        with patch(
+            "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
+        ), patch("defenseclaw.fail_mode._is_windows", return_value=False):
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd,
+                ["closed", "--connector", "hermes", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Hermes will remain fail-open", result.output)
+        self.assertIn("will now BLOCK Hermes tool calls", result.output)
+        self.assertIn("hook times out", result.output)
 
     def test_connector_flag_rejected_on_single_connector_install(self):
         runner = CliRunner()

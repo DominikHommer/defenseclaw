@@ -450,7 +450,9 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
 
 
 def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[str]) -> None:
-    # 0.8.x sealed the global fail mode into observe-mode hooks.
+    # 0.8.x sealed the global fail mode into observe-mode hooks. From 1.0.3
+    # an observe-mode hook follows the global closed outside Secure Client,
+    # so the upgrade keeps it closed and says nothing about fail-open.
     _write_config(data_dir, "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: closed\n")
     lock = {"connectors": {"claudecode": {"hook_fail_mode": "closed"}, "codex": {"hook_fail_mode": "open"}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
@@ -458,8 +460,7 @@ def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[s
     result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4"])
 
     assert result.exit_code == 0, result.output
-    assert "claudecode hooks now fail open" in result.output
-    assert "defenseclaw setup claudecode --mode action" in result.output
+    assert "now fail open" not in result.output
     assert "codex" not in result.output
 
     # GAP-0276: a reinstall of a current config migrates nothing and says nothing.
@@ -707,3 +708,158 @@ def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path, v8_tar
     assert "not a release version" in result.output
     ok = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "1.0.1.dev3"])
     assert ok.exit_code == 0, ok.output
+
+
+# GAP-0163: a legacy custom-providers.json next to a config_version 9 file.
+
+
+def _legacy_overlay(data_dir: Path, payload: dict) -> Path:
+    path = data_dir / "custom-providers.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("config", "overlay", "pending"),
+    [
+        ("config_version: 9\n", {"providers": [{"name": "acme-gw", "domains": ["alt.acme.test"]}]}, True),
+        ("config_version: 9\n", {"providers": [], "ollama_ports": [11500]}, True),
+        ("config_version: 9\n", {"_derived_from": "sha256:x", "providers": [{"name": "acme-gw"}]}, False),
+        ("config_version: 9\n", {"providers": [{"name": "acme-gw", "request_overrides": {"x": 1}}]}, False),
+        ("config_version: 9\ndeployment_mode: managed_enterprise\n", {"providers": [{"name": "acme-gw"}]}, False),
+        ("config_version: 9\n", {"providers": []}, False),
+    ],
+)
+def test_a_v9_config_with_a_legacy_provider_overlay_has_the_fold_step_pending(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, config: str, overlay: dict, pending: bool
+) -> None:
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    _write_config(data_dir, config)
+    _legacy_overlay(data_dir, overlay)
+
+    result = migrate(str(data_dir), check=True)
+
+    assert (migrations._PROVIDERS_FOLD_STEP_NAME in result.applied) is pending
+
+
+def test_the_fold_step_warns_and_changes_nothing_when_fields_disagree(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw import config_inspect
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_guardrail_profiles", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_rego_policies", lambda *_args: None)
+    config = _write_config(data_dir, "config_version: 9\n")
+    overlay = _legacy_overlay(data_dir, {"providers": [{"name": "acme-gw", "base_url": "https://legacy.test"}]})
+    refusal = (
+        f"{overlay} was not folded into config.yaml: config.yaml and the file set different values for "
+        "acme-gw (base_url: config.yaml's value is in use). Neither file was changed"
+    )
+    calls: list[str] = []
+
+    def go_migrate(*, config_path: str, dry_run: bool = False, ack: bool = False, gateway_binary=None) -> dict:
+        calls.append(config_path)
+        return {"migrated": False, "dry_run": False, "written": [], "record": {"from_version": 9},
+                "providers_fold": {"overlay": str(overlay), "refused": refusal,
+                                   "conflicts": [{"provider": "acme-gw", "fields": ["base_url"],
+                                                  "in_use": {"base_url": "config.yaml"}}]}}
+
+    monkeypatch.setattr(config_inspect, "migrate_config_v9", go_migrate)
+
+    result = migrate(str(data_dir))
+
+    assert calls == [str(config)]
+    assert result.applied == [migrations._PROVIDERS_FOLD_STEP_NAME]
+    out = capsys.readouterr().out
+    assert "acme-gw (base_url: config.yaml's value is in use)" in out
+    assert "Neither file was changed" in out
+    assert "moved provider(s)" not in out
+
+
+def test_the_fold_step_reports_the_providers_config_yaml_took(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw import config_inspect
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_guardrail_profiles", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_rego_policies", lambda *_args: None)
+    _write_config(data_dir, "config_version: 9\n")
+    overlay = _legacy_overlay(data_dir, {"providers": [{"name": "acme-gw", "domains": ["alt.acme.test"]}]})
+    retired = f"{overlay}.migrated-v9"
+    monkeypatch.setattr(
+        config_inspect,
+        "migrate_config_v9",
+        lambda **_kwargs: {"migrated": False, "dry_run": False, "written": [retired], "record": {"from_version": 9},
+                           "providers_fold": {"overlay": str(overlay), "folded": ["acme-gw"], "retired": retired,
+                                              "headers_after_fold": [{"provider": "openai",
+                                                                      "fields": ["extra_headers.X-Team"]}]}},
+    )
+
+    result = migrate(str(data_dir))
+
+    assert result.changed
+    out = capsys.readouterr().out
+    assert f"moved provider(s) acme-gw from {overlay} into config.yaml llm_providers.custom" in out
+    assert retired in out
+    # GAP-0184: the headers sent from now on are named, never their values.
+    assert "the gateway now also sends openai (extra_headers.X-Team)" in out
+
+
+# GAP-0137: a downgrade set openshell.trusted_ca_bundle aside (upgrade_shim);
+# this release puts it back unless config.yaml sets it again, and keeps the
+# keys of a later release for that release.
+def _set_aside_record(data_dir: Path, keys: dict) -> Path:
+    from defenseclaw.upgrade_shim import SET_ASIDE_FILE
+
+    path = data_dir / SET_ASIDE_FILE
+    path.write_text(json.dumps({"version": 1, "for": "1.0.2", "keys": keys}), encoding="utf-8")
+    return path
+
+
+def test_migrate_puts_back_the_keys_a_downgrade_set_aside(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import yaml
+
+    for name in ("_refresh_local_observability_bundle", "_refresh_guardrail_profiles", "_refresh_rego_policies"):
+        monkeypatch.setattr(migrations, name, lambda *_args: None)
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(data_dir, {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem"})
+
+    migrate(str(data_dir))
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["openshell"]["trusted_ca_bundle"] == "~/proxy-root-ca.pem"
+    assert not record.exists()
+
+
+def test_set_aside_keys_keep_a_value_set_again_and_a_later_release_key(data_dir: Path) -> None:
+    import yaml
+
+    config = _write_config(data_dir, "config_version: 9\nopenshell:\n  trusted_ca_bundle: /etc/corp/root.pem\n")
+    record = _set_aside_record(
+        data_dir, {"openshell.trusted_ca_bundle": "~/proxy-root-ca.pem", "openshell.future_key": True}
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8"))["openshell"] == {"trusted_ca_bundle": "/etc/corp/root.pem"}
+    assert json.loads(record.read_text(encoding="utf-8"))["keys"] == {"openshell.future_key": True}
+
+
+def test_set_aside_key_that_cannot_be_put_back_is_named_with_its_command(
+    data_dir: Path, capsys: pytest.CaptureFixture
+) -> None:
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(data_dir, {"openshell.trusted_ca_bundle": "relative.pem"})
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    assert config.read_text(encoding="utf-8") == "config_version: 9\n"
+    assert record.exists()
+    captured = capsys.readouterr()
+    assert "defenseclaw config set openshell.trusted_ca_bundle relative.pem" in captured.out + captured.err

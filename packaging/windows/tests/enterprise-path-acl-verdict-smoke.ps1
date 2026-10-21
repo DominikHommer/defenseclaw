@@ -4,14 +4,12 @@
 #Requires -Version 5.1
 
 # Table test for the permission verdicts of Assert-DefenseClawPathAcl and the
-# canonical-descriptor checks it relies on. A verdict for drift a standard user
-# could have created (a write-like grant, a foreign owner, an unreadable
-# descriptor) stays fatal after the canonical re-stamp on the standalone
-# profile, with and without DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS; only
-# drift that needs an administrator (a read grant, a lost protected flag) may
-# continue with a warning, and the strict pin restores those refusals too
-# (GAP-0010). Secure Client keeps its earlier rules and is not covered here
-# (Secure Client is out of scope for this fix).
+# canonical-descriptor checks it relies on. The canonical re-stamp repairs
+# Contract and Rights verdicts only: every Access verdict (a write or read
+# grant to an untrusted principal, a lost protected flag) stays fatal unless
+# the caller passed -AdvisoryUntrustedAccess, and the standalone profile never
+# gets that advisory. A DACL that is not protected after the exact ACL
+# replacement is refused (rel-1-0-3 main-sync review findings 3 and 4).
 # The verdict reader and the re-stamp are replaced inside the module, so the
 # test touches no ACL on the machine.
 
@@ -49,12 +47,14 @@ $cases = @(
     @{ name = 'write survives a re-stamp that does nothing'; before = @($write); after = @($write); stamp = 'noop'; strict = ''; expect = $write.Reason }
     @{ name = 'write survives a re-stamp that fails'; before = @($write); after = @($write); stamp = 'throw'; strict = ''; expect = $write.Reason }
     @{ name = 'write survives, strict pin'; before = @($write); after = @($write); stamp = 'noop'; strict = '1'; expect = $write.Reason }
-    @{ name = 'write cleared by the re-stamp'; before = @($write); after = @(); stamp = 'noop'; strict = ''; expect = '' }
-    @{ name = 'write behind a read keeps the write message'; before = @($read, $write); after = @($read, $write); stamp = 'noop'; strict = ''; expect = $write.Reason }
+    @{ name = 'write is not repaired by the re-stamp'; before = @($write); after = @(); stamp = 'noop'; strict = ''; expect = $write.Reason }
+    # The kept 1.0.3 verifier reports the first Access verdict in read-before-write order;
+    # the #1068 message-order change awaits the owner's decision. Both refuse this principal.
+    @{ name = 'read before write still refuses the untrusted principal'; before = @($read, $write); after = @($read, $write); stamp = 'noop'; strict = ''; expect = $read.Reason }
     @{ name = 'write without a self-heal'; before = @($write); after = $null; heal = $false; strict = ''; expect = $write.Reason }
-    @{ name = 'read survives'; before = @($read); after = @($read); stamp = 'noop'; strict = ''; expect = '' }
+    @{ name = 'read survives'; before = @($read); after = @($read); stamp = 'noop'; strict = ''; expect = $read.Reason }
     @{ name = 'read survives, strict pin'; before = @($read); after = @($read); stamp = 'noop'; strict = '1'; expect = $read.Reason }
-    @{ name = 'lost protected flag survives the re-stamp'; before = @($inherit); after = @($inherit); stamp = 'throw'; strict = ''; expect = '' }
+    @{ name = 'lost protected flag survives the re-stamp'; before = @($inherit); after = @($inherit); stamp = 'throw'; strict = ''; expect = $inherit.Reason }
     @{ name = 'lost protected flag survives, strict pin'; before = @($inherit); after = @($inherit); stamp = 'noop'; strict = '1'; expect = $inherit.Reason }
     @{ name = 'lost protected flag without a self-heal'; before = @($inherit); after = $null; heal = $false; strict = ''; expect = $inherit.Reason }
     @{ name = 'foreign owner survives'; before = @($owner); after = @($owner); stamp = 'noop'; strict = ''; expect = $owner.Reason }
@@ -64,23 +64,19 @@ $cases = @(
 
 $failures = [Collections.Generic.List[string]]::new()
 try {
-    # Canonical-descriptor check of a DACL that lost SE_DACL_PROTECTED: the lost
-    # flag may continue outside the strict pin, the owner and every ACE are
-    # still judged. The path does not exist, so the icacls repair attempt and
-    # its native re-read fail and the descriptor under test is what is judged.
+    # Canonical-descriptor check of a DACL that lost SE_DACL_PROTECTED: a
+    # validation-only caller (no -AllowSelfHeal) refuses it whatever else the
+    # descriptor holds; a protected DACL is judged ACE by ACE.
     $user = 'S-1-5-21-1-2-3-1001'
+    $notProtected = 'managed DACL is not protected after exact ACL replacement'
     $rawCases = @(
         @{ name = 'protected canonical'; protected = $true; owner = ''; ace = $null; strict = ''; expect = '' }
         @{ name = 'protected with an extra explicit ACE'; protected = $true; owner = ''; ace = @{ flags = 'None'; mask = 0x1200A9; sid = $user }; strict = ''; expect = 'managed path does not have the exact canonical DACL' }
-        @{ name = 'lost protected flag only'; protected = $false; owner = ''; ace = $null; strict = ''; expect = '' }
-        @{ name = 'lost protected flag, strict pin'; protected = $false; owner = ''; ace = $null; strict = '1'; expect = 'managed DACL is not protected after exact ACL replacement' }
-        @{ name = 'lost protected flag and a user owner'; protected = $false; owner = $user; ace = $null; strict = ''; expect = 'managed path owner/group do not match the exact canonical descriptor after ACL replacement' }
-        @{ name = 'lost protected flag and an explicit user write ACE'; protected = $false; owner = ''; ace = @{ flags = 'None'; mask = 0x116; sid = $user }; strict = ''; expect = 'managed path does not have the exact canonical DACL' }
-        @{ name = 'lost protected flag and an inherited Users write ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x116; sid = 'S-1-5-32-545' }; strict = ''; expect = 'untrusted principal S-1-5-32-545 has inherited write-like access to managed path' }
-        @{ name = 'lost protected flag and an inherited GENERIC_WRITE ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x40000000; sid = $user }; strict = ''; expect = "untrusted principal $user has inherited write-like access to managed path" }
-        @{ name = 'lost protected flag and an inherited Users read ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x1200A9; sid = 'S-1-5-32-545' }; strict = ''; expect = '' }
-        @{ name = 'lost protected flag and an inherited SYSTEM ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x1F01FF; sid = 'S-1-5-18' }; strict = ''; expect = '' }
-        @{ name = 'lost protected flag and an inherited CREATOR OWNER template'; protected = $false; owner = ''; ace = @{ flags = 'Inherited, InheritOnly, ObjectInherit'; mask = 0x10000000; sid = 'S-1-3-0' }; strict = ''; expect = '' }
+        @{ name = 'lost protected flag only'; protected = $false; owner = ''; ace = $null; strict = ''; expect = $notProtected }
+        @{ name = 'lost protected flag, strict pin'; protected = $false; owner = ''; ace = $null; strict = '1'; expect = $notProtected }
+        @{ name = 'lost protected flag and a user owner'; protected = $false; owner = $user; ace = $null; strict = ''; expect = $notProtected }
+        @{ name = 'lost protected flag and an inherited Users write ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x116; sid = 'S-1-5-32-545' }; strict = ''; expect = $notProtected }
+        @{ name = 'lost protected flag and an inherited Users read ACE'; protected = $false; owner = ''; ace = @{ flags = 'Inherited'; mask = 0x1200A9; sid = 'S-1-5-32-545' }; strict = ''; expect = $notProtected }
     )
     foreach ($case in $rawCases) {
         [Environment]::SetEnvironmentVariable($strictEnv, [string]$case['strict'], 'Process')

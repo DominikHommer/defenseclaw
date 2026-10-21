@@ -175,7 +175,7 @@ func simSideEffect(ran bool) string {
 func (s containerSim) handle(args []string) (string, int) {
 	argv := parseProbeArgv(args)
 	host, token, script, user, env := argv.host, argv.env[connector.SandboxTokenEnv], argv.script, argv.user, argv.env
-	if host == "" || token == "" || !(strings.Contains(script, harness.ClaudeCodeLauncherPath) || strings.Contains(script, harness.CodexLauncherPath)) {
+	if host == "" || token == "" || (!(strings.Contains(script, harness.ClaudeCodeLauncherPath)) && !(strings.Contains(script, harness.CodexLauncherPath))) {
 		s.t.Errorf("hook-fire argv lacks the sink host, token or launcher: %v", args)
 		return "", 1
 	}

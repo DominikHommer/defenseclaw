@@ -59,6 +59,7 @@ import click
 
 from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
+from defenseclaw.audit_time_order import audit_time_order
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACT_MANIFEST,
     HOOK_CONTRACTS,
@@ -2215,6 +2216,36 @@ _ARCHIVE_COPY_FIRST = (
     "use SQLite tools, and work on the copy."
 )
 
+_ARCHIVE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def _archive_header_repair() -> str:
+    """Say how to write back a zeroed SQLite header on the copy, never on the
+    archive (rel-1-0-2:GAP-0647; audit.ArchiveRecoveryHint says the same). It
+    ends with the command, so callers put it last and add no period."""
+    if os.name == "nt":
+        command = (
+            "PowerShell: $f=[IO.File]::OpenWrite('<copy>'); "
+            '$f.Write([Text.Encoding]::ASCII.GetBytes("SQLite format 3`0"),0,16); $f.Close()'
+        )
+    else:
+        command = "printf 'SQLite format 3\\000' | dd of=<copy> bs=16 count=1 conv=notrunc"
+    return (
+        "If SQLite says the copy is not a database, its first 16 bytes were zeroed: write the SQLite header back "
+        f"on the copy, never on the archive, and run .recover again. To write it, run: {command}"
+    )
+
+
+def _archived_sidecars(archive: Path) -> str:
+    """Name the -wal, -shm and -journal files archived with ``archive``, as the
+    gateway's start warning does (GAP-0614)."""
+    names = [suffix for suffix in _ARCHIVE_SIDECAR_SUFFIXES if Path(str(archive) + suffix).is_file()]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f" together with its {names[0]} file"
+    return " together with its " + ", ".join(names[:-1]) + f" and {names[-1]} files"
+
 
 def _moved_store_block_allow_summary(moved: Path) -> str:
     """Say what the gateway's note (internal/audit/corrupt_store.go) recorded
@@ -2261,13 +2292,51 @@ def _report_pre_1_0_audit_archive(archive: Path, r: _DoctorResult) -> None:
         "pass",
         "0.x audit store archive",
         f"the audit store DefenseClaw 0.x wrote failed SQLite's integrity check during the upgrade, so it is kept as "
-        f"an archive in {archive} ({size}). 1.0 starts a new audit history after a 0.x upgrade in any case, and "
-        f"block/allow lists live in config.yaml, so they are not affected. {_ARCHIVE_COPY_FIRST} "
+        f"an archive in {archive}{_archived_sidecars(archive)} ({size}). 1.0 starts a new audit history after a 0.x "
+        f"upgrade in any case, and block/allow lists live in config.yaml, so they are not affected. "
+        f"{_ARCHIVE_COPY_FIRST} "
         f"Then read the copy with: sqlite3 <copy> .recover. Delete {archive} and its -wal, -shm and -journal "
-        "files when you no longer need them",
+        f"files when you no longer need them. {_archive_header_repair()}",
         r=r,
         check_id="doctor.state.audit-db-archive",
         reason_code="audit-db-0x-archive",
+    )
+
+
+def _moved_aside_audit_stores(db_path: str) -> list[Path]:
+    """The files named like a store the gateway moved aside next to ``db_path``
+    (``<db>.corrupt-<UTC time>[-<id>]``), oldest first; doctor and status
+    report them (internal/audit/corrupt_store.go, ``MovedCorruptStores``)."""
+    if not db_path:
+        return []
+    try:
+        return sorted(
+            path
+            for path in Path(db_path).parent.glob(Path(db_path).name + ".corrupt-*")
+            if not path.name.endswith(("-wal", "-shm", "-journal", _CARRY_OVER_NOTE_SUFFIX)) and path.is_file()
+        )
+    except OSError:
+        return []
+
+
+def _reported_moved_stores(moved: list[Path]) -> list[Path]:
+    """Keep the stores with the note the gateway writes next to every store it
+    moves; only when none has one keep all of them (an earlier version moved
+    them). A file that only has an archive's name is no record of a move, and
+    reporting the newest such name pointed recovery away from the archive
+    (rel-1-0-3:GAP-0106; ``ReportedMovedCorruptStores`` in Go)."""
+    recorded = [path for path in moved if Path(str(path) + _CARRY_OVER_NOTE_SUFFIX).is_file()]
+    return recorded or moved
+
+
+def _archive_recovery_hint(archive: Path) -> str:
+    """The copy-first recovery hint the gateway's start warning and
+    ``defenseclaw-gateway status`` print (``audit.ArchiveRecoveryHint``). It
+    ends with the repair command, so callers print nothing after it."""
+    return (
+        f"To read its audit records, first copy {archive} together with its -wal, -shm and any -journal files "
+        "to a new folder and work only on the copy, because SQLite can change the files it opens. "
+        f"Then run sqlite3 <copy> .recover on the copy. {_archive_header_repair()}"
     )
 
 
@@ -2278,20 +2347,11 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     starts a new one; only its log said so, so the reset audit history went
     unnoticed.
     """
-    if not db_path:
-        return
-    try:
-        moved = sorted(
-            path
-            for path in Path(db_path).parent.glob(Path(db_path).name + ".corrupt-*")
-            if not path.name.endswith(("-wal", "-shm", "-journal", _CARRY_OVER_NOTE_SUFFIX)) and path.is_file()
-        )
-    except OSError:
-        return
+    moved = _moved_aside_audit_stores(db_path)
     archives = [path for path in moved if _is_pre_1_0_archive(path)]
     if archives:
         _report_pre_1_0_audit_archive(archives[-1], r)
-    moved = [path for path in moved if path not in archives]
+    moved = _reported_moved_stores([path for path in moved if path not in archives])
     if not moved:
         return
     newest = moved[-1]
@@ -2304,13 +2364,15 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
         "warn",
         "Audit store moved aside",
         f"{count} moved aside by the gateway, which {_moved_store_block_allow_summary(newest)} "
-        f"Older audit records stay in {newest} ({size}). {recover}. "
-        f"Delete {newest} and its -wal, -shm and -journal files when they are no longer needed",
+        f"Older audit records stay in {newest}{_archived_sidecars(newest)} ({size}). {recover}. "
+        f"Delete {newest} and its -wal, -shm and -journal files when they are no longer needed. "
+        f"{_archive_header_repair()}",
         r=r,
         check_id="doctor.state.audit-db-moved-aside",
         reason_code="audit-db-moved-aside",
         remediation=(
             f"copy {newest} with its -wal, -shm and any -journal files to a new folder, "
+            "write a zeroed SQLite header back on the copy if SQLite says it is not a database, "
             "then run sqlite3 <copy> .recover on the copy"
         ),
     )
@@ -2459,10 +2521,21 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     for path, is_dir in targets:
         try:
             info = os.lstat(path)
+        except FileNotFoundError:
+            continue
         except OSError:
+            unverified.append(f"{path} (cannot inspect)")
             continue
         if stat.S_ISLNK(info.st_mode):
             continue
+        if path == dotenv:
+            try:
+                read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
+            except PermissionError:
+                unverified.append(f"{path} (cannot read)")
+            except OSError:
+                # A size or file-type refusal does not erase the mode finding.
+                unverified.append(f"{path} (cannot safely read)")
         if os.name == "nt":
             problem = None if is_dir else windows_acl_confidentiality_error(path)
             if problem:
@@ -2499,7 +2572,9 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         else:
             steps.append("defenseclaw doctor --fix --yes (rotates the exposed gateway token and makes .env private)")
     if unverified:
-        steps.append("inspect the Windows ACLs of " + ", ".join(unverified))
+        steps.append(
+            "restore this account's read access; inspect ownership and permissions for " + ", ".join(unverified)
+        )
     others = [path for path in files if path != dotenv]
     # doctor.state.private-files.protect (GAP-0560) removes read access for
     # other accounts; another unsafe Windows ACL, such as a write grant or
@@ -2518,7 +2593,7 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         "; ".join(
             part for part in (
                 "private files are unsafe: " + ", ".join(exposed) if exposed else "",
-                "could not verify private file ACLs: " + ", ".join(unverified) if unverified else "",
+                "could not inspect private files: " + ", ".join(unverified) if unverified else "",
             ) if part
         ),
         r=r,
@@ -3250,7 +3325,7 @@ def _check_recent_judge_outage(cfg, r: _DoctorResult, *, window_hours: int = 24)
         try:
             row = conn.execute(
                 "SELECT timestamp, target FROM audit_events WHERE action = 'watcher-block' "
-                "AND details LIKE ? ORDER BY timestamp DESC LIMIT 1",
+                f"AND details LIKE ? ORDER BY {audit_time_order(conn)} LIMIT 1",
                 (f"%{_JUDGE_OUTAGE_MARKER}%",),
             ).fetchone()
         finally:
@@ -3716,7 +3791,7 @@ def _check_kernel_sensor(
     info_path: str = _TETRAGON_INFO_PATH,
     os_name: str | None = None,
 ) -> None:
-    """The Kernel sensor (Tetragon) row of a per-user install: Linux, only where Tetragon runs.
+    """The Kernel sensor (Tetragon) row of a per-user Linux install.
 
     A per-user install never connects to Tetragon (its socket is root-only and
     grants kernel policy control), so the row says so, and warns when Tetragon
@@ -3733,6 +3808,14 @@ def _check_kernel_sensor(
         return
     info = _read_tetragon_info(info_path)
     if info is None:
+        _emit(
+            "skip",
+            _KERNEL_SENSOR_LABEL,
+            "Tetragon is not detected on this host; per-user DefenseClaw does not use a kernel sensor.",
+            r=r,
+            check_id=_KERNEL_SENSOR_CHECK_ID,
+            reason_code="tetragon-not-detected",
+        )
         return
     address = str(info.get("server_address") or "").strip()
     if address and not address.startswith("unix://"):
@@ -5925,7 +6008,18 @@ def _check_claudecode_hooks(
                     dc_hooks += 1
     switched_off = _agent_hook_switch_problem(cfg, "claudecode") if dc_hooks > 0 else ""
     edited = _edited_hook_problem(cfg, "claudecode") if dc_hooks > 0 else ""
-    if switched_off:
+    uninspected = _missing_tool_inspection_hook(cfg, "claudecode", settings, settings_path) if dc_hooks > 0 else ""
+    if uninspected:
+        # Counting hooks kept a settings file without PreToolUse passing
+        # while no tool call was inspected (GAP-0645).
+        _emit(
+            "fail",
+            "Claude Code hooks",
+            f"{dc_hooks} DefenseClaw hook(s) registered, but {uninspected}",
+            r=r,
+            remediation=uninspected.repair,
+        )
+    elif switched_off:
         _emit(
             "fail",
             "Claude Code hooks",
@@ -6526,7 +6620,7 @@ def _check_hermes_hooks(
     if unsupported:
         _emit(
             "fail",
-            "Hermes hooks (fail-open)",
+            _HERMES_HOOKS_LABEL,
             f"unsupported profile topology: {unsupported}",
             r=r,
         )
@@ -6535,7 +6629,7 @@ def _check_hermes_hooks(
         _check_windows_native_hooks(
             cfg,
             "hermes",
-            "Hermes hooks (fail-open)",
+            _HERMES_HOOKS_LABEL,
             r,
             config_path=selected_config,
             install_root=install_root,
@@ -6616,8 +6710,12 @@ _HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
 }
 
+# The Hermes hook follows its fail mode on every OS (rel-1-0-3 GAP-0150 on
+# Linux and macOS, GAP-0269 on Windows).
+_HERMES_HOOKS_LABEL = "Hermes hooks"
+
 _HOOK_HEALTH_LABELS = {
-    "hermes": "Hermes hooks (fail-open)",
+    "hermes": _HERMES_HOOKS_LABEL,
     "cursor": "Cursor hooks",
     "devin": "Devin hooks",
     "opencode": "OpenCode hooks",
@@ -7384,8 +7482,15 @@ def _check_cursor_configured_runtime(
     mode = str(mode_resolver("cursor") if callable(mode_resolver) else "observe").strip().lower()
     fail_mode = str(fail_resolver("cursor") if callable(fail_resolver) else "open").strip().lower()
     mode = "action" if mode == "action" else "observe"
-    expected_fail_mode = "closed" if mode == "action" else "open"
-    expected_fail_closed = mode == "action"
+    # Cursor observe hooks fail open, except on a managed deployment outside
+    # Secure Client, where the Cursor registration carries the
+    # administrator's fail mode (unset closed) in either guardrail mode.
+    standalone = getattr(cfg, "managed_outside_secure_client", None)
+    if callable(standalone) and standalone() is True:
+        expected_fail_mode = "open" if fail_mode == "open" else "closed"
+    else:
+        expected_fail_mode = "closed" if mode == "action" else "open"
+    expected_fail_closed = expected_fail_mode == "closed"
     hilt = None
     hilt_resolver = getattr(guardrail, "effective_hilt", None)
     if callable(hilt_resolver):
@@ -8620,7 +8725,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     could not tell from doctor whether their hooks were installed (D4).
     Resolves the hook file from ``hook_contract_lock.json`` first (what the
     gateway actually wrote), then the static fallback map, and
-    raw-substring-checks it for a DefenseClaw marker. (The Connectors section's
+    checks it for a DefenseClaw registration. Cursor and Kiro use the parsed
+    registration check when the lock records their paths, because Windows
+    encodes the native hook command in PowerShell. (The Connectors section's
     ``_check_hook_contract_lock`` validates contract/version drift — a
     different concern from "does the hook file exist and reference us".)
     """
@@ -8631,7 +8738,8 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     label = _HOOK_HEALTH_LABELS.get(connector, f"{connector} hooks")
     home = os.path.expanduser("~")
     # Prefer the lock-file's recorded paths; fall back to the static map.
-    candidates = _hook_health_paths_from_lock(cfg, connector)
+    locked_paths = _hook_health_paths_from_lock(cfg, connector)
+    candidates = locked_paths
     if not candidates:
         if connector == "hermes":
             candidates = [hermes_config_path()]
@@ -8665,7 +8773,12 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("fail", label, edited, r=r, remediation=edited.repair)
         return
     for path in present:
-        if _file_references_marker(path, markers):
+        registered = _file_references_marker(path, markers)
+        if not registered and connector in ("cursor", "kiro") and locked_paths:
+            from defenseclaw.hook_integrity import _registers_defenseclaw_hooks
+
+            registered = _registers_defenseclaw_hooks(cfg, connector, Path(path), strict=False)
+        if registered:
             if connector == "cursor":
                 _check_cursor_configured_runtime(
                     cfg,
@@ -8916,7 +9029,7 @@ _SETUP_READINESS_PRIMARY_LABELS = {
     "antigravity": "Antigravity hooks",
     "opencode": "OpenCode hooks",
     "amp": "Amp policy plugin",
-    "hermes": "Hermes hooks (fail-open)",
+    "hermes": _HERMES_HOOKS_LABEL,
     "omnigent": "OmniGent policy",
     "openhands": "OpenHands hooks",
     "kiro": "Kiro hooks",
@@ -8948,7 +9061,11 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     if primary_label is None:
         return ConnectorSetupReadiness(False, name, "roster", "unsupported readiness connector")
 
-    from defenseclaw.fail_mode import connector_fail_mode_report, connector_registration_lock_state
+    from defenseclaw.fail_mode import (
+        connector_fail_mode_report,
+        connector_registration_lock_state,
+        upstream_fail_open,
+    )
 
     try:
         lock_mode, lock_drift = connector_registration_lock_state(cfg, name)
@@ -8970,7 +9087,7 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     # explain observe-mode compatibility, but that raw value is not lock
     # authority.  Upstream fail-open connectors are the exception: their lock
     # records configured policy while the host remains effectively open.
-    if name not in {"antigravity", "copilot", "hermes"}:
+    if not upstream_fail_open(cfg, name):
         lock_mode_target = str(fail_mode.get("desired") or configured_mode)
     if name == "cursor":
         configured_mode = "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"
@@ -9909,6 +10026,17 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
             remediation="run 'defenseclaw setup llm' to configure one",
         )
         return
+    if getattr(llm, "base_url", ""):
+        from urllib.parse import urlsplit
+
+        try:
+            parsed = urlsplit(llm.base_url)
+            if not parsed.scheme or not parsed.hostname:
+                raise ValueError("missing URL scheme or host")
+        except ValueError:
+            _emit("fail", "LLM reachable", prefix + "configured llm.base_url is malformed", r=r,
+                  remediation="correct llm.base_url in config.yaml, then rerun 'defenseclaw doctor'")
+            return
     if r.passive:
         _emit(
             "skip",
@@ -9922,8 +10050,13 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     except Exception as exc:
         _emit("warn", "LLM reachable", f"llm.ping unavailable: {exc}", r=r)
         return
-    with _capture_stdout_when_json():
-        ok, msg = _llm.ping(llm, timeout=5)
+    try:
+        with _capture_stdout_when_json():
+            ok, msg = _llm.ping(llm, timeout=5)
+    except ValueError:
+        _emit("fail", "LLM reachable", prefix + "configured llm.base_url is malformed", r=r,
+              remediation="correct llm.base_url in config.yaml, then rerun 'defenseclaw doctor'")
+        return
     if not ok and getattr(llm, "base_url", ""):
         from urllib.parse import urlsplit, urlunsplit
 
@@ -10055,7 +10188,7 @@ def _check_judge_calls(cfg, r: _DoctorResult) -> None:
         with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as db:
             rows = db.execute(
                 "SELECT structured_json FROM audit_events WHERE action = ? AND timestamp >= ? "
-                "ORDER BY timestamp DESC, rowid DESC LIMIT 20",
+                f"ORDER BY {audit_time_order(db)} LIMIT 20",
                 ("llm-judge-response", since),
             ).fetchall()
     except sqlite3.Error as exc:
@@ -15915,6 +16048,9 @@ def _fix_gateway_token(
                 default=True,
             ):
                 return ("skip", "declined by user")
+            from defenseclaw.logger import keep_running_gateway_token
+
+            keep_running_gateway_token(None, cfg.data_dir, cfg.gateway.resolved_token(), token)
             _save_secret_to_dotenv(env_var, token, cfg.data_dir)
             return ("pass", f"{env_var} updated from openclaw.json")
         # OpenClaw can be local and unauthenticated while the DefenseClaw
@@ -17313,6 +17449,14 @@ def _fix_hook_script_modes(
         except OSError as exc:
             return ("fail", f"could not verify or restore hook script {script}: {exc}")
     return ("pass", f"verified sealed digests and restored mode 0700 on {names}")
+
+
+def _missing_tool_inspection_hook(cfg, connector: str, document, where: str):
+    """The tool-inspection event *document* registers no DefenseClaw hook for, as a problem, or "" (GAP-0645)."""
+    from defenseclaw.hook_integrity import missing_tool_inspection_events, tool_inspection_hook_problem
+
+    missing = missing_tool_inspection_events(cfg, connector, document)
+    return tool_inspection_hook_problem(connector, missing[0], where) if missing else ""
 
 
 def _edited_hook_problem(cfg, connector: str):

@@ -35,10 +35,10 @@ You can also open Agent360 directly and use its variables:
 | Variable | Use |
 | --- | --- |
 | **Connector** | Separate Codex, Claude Code, and other hook connectors. |
-| **Agent** | Select the durable root or delegated agent identity. |
+| **Agent or root ID regex** | The durable root or delegated agent identity. It is a text box: the directory links fill it in, or paste an ID. The default `.+` shows every agent. |
 | **Scope** | **This agent** isolates one agent; **Agent tree** includes every correlated descendant. |
-| **Lifecycle (drilldown)** | Restrict execution-detail panels to one stable agent lifecycle. Structural tree panels intentionally ignore this filter so descendants with their own lifecycle IDs remain visible. |
-| **Execution (drilldown)** | Restrict execution-detail panels to one concrete attempt within a lifecycle. |
+| **Lifecycle (drilldown)** | A lifecycle ID regex (default `.+`, every lifecycle) that restricts execution-detail panels to one stable agent lifecycle. Structural tree panels intentionally ignore this filter so descendants with their own lifecycle IDs remain visible. |
+| **Execution (drilldown)** | An execution ID regex (default `.+`) that restricts execution-detail panels to one concrete attempt within a lifecycle. |
 | **Trace ID** | Pivot the lower section to one Tempo execution trace. |
 
 ## Read the overview

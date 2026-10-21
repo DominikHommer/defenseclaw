@@ -189,6 +189,48 @@ actor GatewayClient {
 
     // MARK: - Health & status
 
+    /// Only display allowlisted, non-secret policy fields from the gateway.
+    func appliedPolicy(user: String, connector: String, resolveProfile: Bool) async throws -> [String: String] {
+        guard let health = try await getJSON("/health") as? [String: Any] else {
+            throw GatewayError.badResponse("/health not an object")
+        }
+        var fields: [String: String] = [:]
+        if let policy = health["policy"] as? [String: Any] {
+            if let digest = policy["effective_digest"] as? String, !digest.isEmpty {
+                fields["Policy digest"] = digest
+            }
+            if let generation = policy["generation"] as? Int {
+                fields["Generation"] = String(generation)
+            }
+        }
+
+        var effective = health["effective"] as? [String: Any]
+        if resolveProfile {
+            let data = try await request("GET", "/api/v1/guardrail/profiles/resolve", queryItems: [
+                URLQueryItem(name: "user", value: user),
+                URLQueryItem(name: "connector", value: connector),
+            ])
+            guard let answer = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  answer["lookup_error"] == nil,
+                  let profile = answer["profile"] as? String, !profile.isEmpty,
+                  let resolved = answer["effective"] as? [String: Any], !resolved.isEmpty else {
+                throw GatewayError.badResponse("effective profile unavailable")
+            }
+            fields["Profile"] = profile
+            effective = resolved
+        }
+        if let effective {
+            for (key, label) in [
+                ("mode", "Mode"), ("block_at", "Block at"), ("alert_at", "Alert at"),
+                ("rule_pack_dir", "Rule pack"), ("rule_pack", "Rule pack"),
+            ] {
+                if let value = effective[key] as? String, !value.isEmpty { fields[label] = value }
+            }
+        }
+        guard !fields.isEmpty else { throw GatewayError.badResponse("effective policy unavailable") }
+        return fields
+    }
+
     func health() async throws -> HealthSnapshot {
         let json = try await getJSON("/health")
         guard let dict = json as? [String: Any] else { throw GatewayError.badResponse("/health not an object") }

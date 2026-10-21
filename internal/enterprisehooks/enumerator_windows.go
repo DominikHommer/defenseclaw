@@ -775,7 +775,7 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	// Secure Client admits an unversioned row on static presence evidence and
 	// installs best-effort hooks for it (#1163); every other profile skips a
 	// user × connector without version evidence.
-	if version == "" && !(secureClientHookDelivery() && windowsAgentPresence(row.UserHome, row.Connector)) {
+	if version == "" && (!secureClientHookDelivery() || !windowsAgentPresence(row.UserHome, row.Connector)) {
 		logfSafely(
 			logf,
 			row.SID,

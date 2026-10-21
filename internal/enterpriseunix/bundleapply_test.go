@@ -417,6 +417,42 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	}
 }
 
+func TestUnixBundleRefusesDeviceKeyMoveBeforeChangingConfirmedPolicy(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, _, _ := bundleConfigs(b.testHost)
+			b.mapPromotedBundleOwners(1)
+			requireOK(t, b.apply(b.dir(1, v1)))
+			// The relative spelling resolves to the existing default key.
+			v2 := strings.Replace(v1, "gateway:\n", "gateway:\n  device_key_file: device.key\n", 1)
+			b.mapPromotedBundleOwners(2)
+			requireOK(t, b.apply(b.dir(2, v2)))
+			if got := b.state().Current; got == nil || got.BundleID != bundleID(2) {
+				t.Fatalf("same-path bundle was not confirmed: %+v", got)
+			}
+			before := b.read(b.env.Layout.ConfigPath)
+			digest, _ := installedPolicy(b)
+			from := len(b.services.calls)
+			v3 := strings.Replace(v2, "device_key_file: device.key", "device_key_file: moved.key", 1)
+			r := b.apply(b.dir(3, v3))
+			requireError(t, r, string(enterprisebundle.CodeInvalidArguments))
+			if got := b.receipt(bundleID(3)); got.State != enterprisebundle.StateFailed || got.ErrorCode != enterprisebundle.CodeInvalidArguments {
+				t.Fatalf("key-move receipt = %+v", got)
+			}
+			if got := b.state().Current; got == nil || got.BundleID != bundleID(2) {
+				t.Fatalf("key move replaced the confirmed bundle: %+v", got)
+			}
+			if got, now := b.read(b.env.Layout.ConfigPath), len(b.services.calls); got != before || gatewayTouched(b.testHost, from) || now != from {
+				t.Fatalf("key move changed the config or services: config=%t, calls=%v", got != before, b.services.calls[from:])
+			}
+			if got, _ := installedPolicy(b); got != digest {
+				t.Fatalf("key move changed the enforcing digest: %s, want %s", got, digest)
+			}
+		})
+	}
+}
+
 // The bundle block of an apply names the receipt it reports (receipt_id). A
 // fresh apply names the receipt it wrote, which is also the name of its
 // public receipt; a repeat of the current bundle writes no receipt and names

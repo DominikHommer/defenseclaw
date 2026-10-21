@@ -89,7 +89,13 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 	probe.WorkspaceDir = req.CWD
 	rawServer := probe.ServerName
 	probe.ServerName = a.claudeCodePluginMCPServerName(ctx, probe)
+	if decision, refused := a.mcpDefinitionRefreshDecision(ctx, "claudecode", req.HookEventName, probe); refused {
+		return decision, true
+	}
 	if decision, refused := a.mcpStateUnreadableDecision(ctx, "claudecode", req.HookEventName, probe); refused {
+		return decision, true
+	}
+	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
 	if decision, refused := unresolvedPluginMCPDefinitionDecision(a.liveConfig(), rawServer, probe); refused {
@@ -148,6 +154,58 @@ func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorNam
 	return decision, true
 }
 
+// mcpDefinitionRefreshDecision has a managed Windows gateway read the
+// enrolled users' current MCP servers before it decides a tool call about to
+// run, so the unreadable-state and pending checks that follow see the
+// definition the user has now: a server changed under the same name is then
+// refused until its own scan, never run on the old verdict (GAP-0216). A
+// refresh that fails refuses the call as not admitted yet (fail closed);
+// gateway.log says why. Every other gateway has nothing to refresh. Secure
+// Client keeps main (#1092).
+func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	cfg := a.liveConfig()
+	if a.mcpRefreshBeforeCall == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
+		probe.Surface != "hook" || (hookEvent != "PreToolUse" && hookEvent != "PermissionRequest") {
+		return config.AssetPolicyDecision{}, false
+	}
+	if err := a.mcpRefreshBeforeCall(ctx, connectorName); err == nil {
+		return config.AssetPolicyDecision{}, false
+	}
+	reason := fmt.Sprintf("mcp server %q is not scanned yet: DefenseClaw could not read its current definition; try again in a minute", probe.ServerName)
+	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, "mcp-admission-pending")
+	decision.RegistryStatus = "unknown"
+	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(
+		"action=block source=%s hook=%s tool=%s connector=%s reason=%s", decision.Source, hookEvent, probe.ToolName, connectorName, reason))
+	return decision, true
+}
+
+// mcpAdmissionPendingDecision refuses the tool call of an MCP server the
+// install watcher admits but has not admitted yet (GAP-0112). Claude Code
+// starts a project's servers when it opens the project, before the
+// discovery poll finds them, so the first calls reached a server nothing
+// had scanned, a rejected decoy included. The call fails closed, the
+// watcher admits the server at once, and a call after an allowing verdict
+// goes through; a rejected server is then refused by its runtime disable.
+// Only calls about to run are refused. Secure Client keeps main (#1092).
+func (a *APIServer) mcpAdmissionPendingDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	cfg := a.liveConfig()
+	if a.mcpAdmissionPending == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
+		probe.Surface != "hook" || (hookEvent != "PreToolUse" && hookEvent != "PermissionRequest") {
+		return config.AssetPolicyDecision{}, false
+	}
+	home, _ := callerHomeForAssets(ctx)
+	name, pending := a.mcpAdmissionPending(connectorName, probe.ServerName, home, probe.WorkspaceDir)
+	if !pending {
+		return config.AssetPolicyDecision{}, false
+	}
+	reason := fmt.Sprintf("mcp server %q is not scanned yet: DefenseClaw is admitting it now; try again in a minute", name)
+	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, "mcp-admission-pending")
+	decision.RegistryStatus = "unknown"
+	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(
+		"action=block source=%s hook=%s tool=%s connector=%s reason=%s", decision.Source, hookEvent, probe.ToolName, connectorName, reason))
+	return decision, true
+}
+
 // A plugin tool name does not prove its command or URL. If the installed
 // plugin definition cannot be resolved, an endpoint-pinned deny cannot be
 // evaluated safely. This is independent of asset_policy.enabled, like the
@@ -181,6 +239,9 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 	}
 	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
+	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "codex", req.HookEventName, probe); refused {
+		return decision, true
+	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe)
 }
 
@@ -449,7 +510,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	if isUnknownTerminalMCP(probe) &&
 		!assetRuntimeModeIsAction(runtimeDetection.UnknownTerminalMCP) &&
 		decision.RawAction == "block" &&
-		!(mcpAssetMode == config.AssetPolicyModeAction && mcpDefaultDeny) {
+		(mcpAssetMode != config.AssetPolicyModeAction || !mcpDefaultDeny) {
 		decision.Action = "allow"
 		decision.Mode = config.AssetPolicyModeObserve
 		decision.WouldBlock = true
@@ -533,8 +594,8 @@ func unprovenMCPDefinitionDecision(ctx context.Context, cfg *config.Config, conn
 	mode := config.AssetPolicyModeAction
 	if !rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName) {
 		gated := cfg.AssetPolicy.Enabled && (policy.RegistryRequired || strings.EqualFold(strings.TrimSpace(policy.Default), "deny"))
-		if !gated || !(rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName) ||
-			rulesPinEndpointForServer(policy.Registry, connector, probe.ServerName)) {
+		if !gated || (!rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName) &&
+			!rulesPinEndpointForServer(policy.Registry, connector, probe.ServerName)) {
 			return config.AssetPolicyDecision{}, false
 		}
 		mode = cfg.EffectiveAssetPolicyModeForConnector(connector)
@@ -1311,10 +1372,7 @@ func claudeCodeSlashCommandAssetName(targetType, commandName string) (string, st
 	if rawName == "" {
 		return "", ""
 	}
-	name := rawName
-	if strings.HasPrefix(name, "/") {
-		name = strings.TrimPrefix(name, "/")
-	}
+	name := strings.TrimPrefix(rawName, "/")
 	if !strings.EqualFold(strings.TrimSpace(targetType), "plugin") {
 		if !validNativeSkillSelectionName(name) {
 			return "", ""

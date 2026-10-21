@@ -82,7 +82,7 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 	hookForeignGuardAccountHome = func() string { return fixture.home }
 	hookForeignGuardEnvHomes = func() []string { return nil }
 	hookForeignGuardAgentProcess = func() string { return fixture.process }
-	hookForeignGuardExchange = func(_ string, _ string, _ time.Time, exchange enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	hookForeignGuardExchange = func(_ string, _ string, _, _ time.Time, exchange enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 		if exchange.Key.Session == "" && exchange.Key.Process == "" {
 			return exchange.Decision, nil
 		}
@@ -511,7 +511,7 @@ func TestForeignHookCheckAmpOnWindowsKeepsTheSessionLocally(t *testing.T) {
 	fixture.summary.Connectors["amp"] = enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove, Guard: true}
 	previousGOOS, previousExchange := hookForeignGuardGOOS, hookForeignGuardExchange
 	hookForeignGuardGOOS = "windows"
-	hookForeignGuardExchange = func(string, string, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 		return enterprisepolicy.GuardDecision{}, errors.New("standalone hook runtime unavailable")
 	}
 	t.Cleanup(func() { hookForeignGuardGOOS, hookForeignGuardExchange = previousGOOS, previousExchange })

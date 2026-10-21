@@ -286,6 +286,12 @@ type Config struct {
 	// (standaloneOpenShellPackDirDefault). Set only by the loader.
 	openShellPackDirDeclared bool
 	legacyOpenShellPackDir   string
+	// offlineInspection never probes a signer's filesystem for a device default.
+	offlineInspection bool
+	// offlineVendorPolicyDir and offlineVendorPolicyRoot redirect rule packs
+	// under the target layout's shipped policy folder to a private copy of
+	// the policies this binary embeds (UseOfflineVendorPolicies).
+	offlineVendorPolicyDir, offlineVendorPolicyRoot string
 	// legacyConnectorRouteSelectors names the observability route selectors
 	// that list a retired connector ID, for the migration notice.
 	legacyConnectorRouteSelectors []string
@@ -1749,9 +1755,10 @@ type GuardrailConfig struct {
 	//     the connector/event exposes a blocking response. Migrated legacy
 	//     configs can retain an explicit "open".
 	//
-	// Secure Client is the one exception: when this key is unset, Secure
-	// Client resolves it to "open" (#1163); an explicit "closed" still wins.
-	// See Config.EffectiveHookFailModeForConnector.
+	// An explicit value always wins, on a managed computer too (there the
+	// administrator's config sets it). Secure Client is the one exception to
+	// the closed default: when this key is unset, Secure Client resolves it
+	// to "open" (#1163). See Config.EffectiveHookFailModeForConnector.
 	//
 	// DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and
 	// missing-token failures closed. See
@@ -2214,66 +2221,6 @@ func validateAllowPrivateUpstreams(ips []string) error {
 		}
 	}
 	return nil
-}
-
-// EffectiveHookFailMode returns the operator-chosen hook fail mode,
-// defaulting to "closed" when unset (CodeGuard rule
-// codeguard-0-authorization-access-control: deny by default). The
-// canonical "open" sentinel is the only way to get the legacy
-// fail-open behavior; any other value (typo, blank, malformed
-// migration row) collapses to "closed" so the agent never silently
-// fails open at the hook failure boundary. Centralized here so the
-// sidecar and any future config-edit surfaces never disagree on the
-// default.
-//
-// Backwards compatibility: existing operators on v3 are protected by
-// the _migrate_0_4_0_seed_hook_fail_mode migration in
-// cli/defenseclaw/migrations.py, which writes “hook_fail_mode: open“
-// into config.yaml on first upgrade. New installs and explicit-empty
-// values get the safer default.
-func (g *GuardrailConfig) EffectiveHookFailMode() string {
-	if g == nil {
-		return "closed"
-	}
-	if strings.EqualFold(strings.TrimSpace(g.HookFailMode), "open") {
-		return "open"
-	}
-	return "closed"
-}
-
-// EffectiveHookFailModeFor returns the hook fail mode for the named
-// connector. An explicit connector override wins even in observe mode: it is
-// an operator-selected response-integrity posture, not a policy verdict.
-// Observe-only connectors without an override retain the historical fail-open
-// behavior; action mode falls through to the global value. Pass "" to resolve
-// the global connector mode/value. Pure lookup — never errors, never mutates.
-func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
-	return g.effectiveHookFailModeForMode(connector, g.EffectiveMode(connector))
-}
-
-// effectiveHookFailModeForMode keeps the configured precedence when a request
-// profile selects a different decision mode from the connector default.
-func (g *GuardrailConfig) effectiveHookFailModeForMode(connector, mode string) string {
-	if g == nil {
-		return "closed"
-	}
-	if pc, ok := g.connectorOverride(connector); ok {
-		if strings.TrimSpace(pc.HookFailMode) != "" {
-			// Mirror the global EffectiveHookFailMode() normalization
-			// (avarice F-0681): the canonical "open" sentinel is the only
-			// way to opt into legacy fail-open; any other per-connector
-			// value (typo, blank, malformed row) collapses to "closed" so
-			// the multi-connector boot path never silently fails open.
-			if strings.EqualFold(strings.TrimSpace(pc.HookFailMode), "open") {
-				return "open"
-			}
-			return "closed"
-		}
-	}
-	if !strings.EqualFold(strings.TrimSpace(mode), "action") {
-		return "open"
-	}
-	return g.EffectiveHookFailMode()
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,
@@ -2824,7 +2771,7 @@ func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAM
 	if !has("openshell", "pack_dir") {
 		candidate.OpenShell.PackDir = join(dataDir, "policies", DefaultOpenShellPackDirName)
 		if candidate.StandaloneEnterprise() {
-			standaloneOpenShellPackDirDefault(candidate, dataDir)
+			standaloneOpenShellPackDirDefault(candidate, dataDir, goos)
 		}
 	}
 	if !has("gateway", "device_key_file") {
@@ -2959,6 +2906,7 @@ func loadConfigSourceCheckedWithLayout(
 		restoreEmptyGuardrailProfiles(&cfg)
 	}
 	cfg.ConfigFilePath = configFile
+	cfg.offlineInspection = inspection
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
 	cfg.openShellPackDirDeclared = viper.InConfig("openshell.pack_dir")
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
@@ -3604,6 +3552,16 @@ func warnPlaintextSecrets(cfg *Config) {
 		log.Printf("WARNING: %s.%s contains a plain-text secret in config.yaml — "+
 			"migrate it to ~/.defenseclaw/.env as %s and set %s.%s_env=%s instead",
 			section, field, envDefault, section, field, envDefault)
+	}
+	if cfg.StandaloneEnterprise() {
+		// A managed host has no per-user .env for the administrator's
+		// config: the key belongs in a protected credential (GAP-0138).
+		warn = func(section, field, _ string) {
+			log.Printf("WARNING: %s.%s contains a plain-text secret in the managed config.yaml — "+
+				"store the key with `enterprise secret set --name <name>`, name it in "+
+				"enterprise.inspection.llm.credential (the LLM key) or enterprise.inspection.ai_defense.credential "+
+				"(the AI Defense key), and remove %s.%s", section, field, section, field)
+		}
 	}
 	if cfg.LLM.APIKey != "" {
 		warn("llm", "api_key", DefenseClawLLMKeyEnv)

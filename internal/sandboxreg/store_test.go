@@ -244,6 +244,33 @@ func TestStoreBindRevokeAndTombstones(t *testing.T) {
 	}
 }
 
+func TestStoreBindReservesClaimedIDsAcrossAccountsAndRestart(t *testing.T) {
+	s, _, dir := newTestStore(t)
+	first := pending(t)
+	if err := s.Create(1001, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Bind(1001, first.ID, bind(1)); err != nil {
+		t.Fatal(err)
+	}
+	second := pending(t)
+	if err := s.Create(1002, second); err != nil {
+		t.Fatal(err)
+	}
+	for _, claim := range []sandboxrelay.BindRequest{
+		{BindingID: bind(1).BindingID, SandboxID: bind(2).SandboxID, SandboxName: bind(2).SandboxName},
+		{BindingID: bind(2).BindingID, SandboxID: bind(1).SandboxID, SandboxName: bind(2).SandboxName},
+	} {
+		if _, err := s.Bind(1002, second.ID, claim); !errors.Is(err, ErrInUse) {
+			t.Fatalf("cross-account ID reuse = %v, want ErrInUse", err)
+		}
+	}
+	restarted := NewFileStore(dir)
+	if _, err := restarted.Bind(1002, second.ID, bind(1)); !errors.Is(err, ErrInUse) {
+		t.Fatalf("ID reuse after restart = %v, want ErrInUse", err)
+	}
+}
+
 // Deleted drops a pending entry, turns a live one into the user's own
 // tombstone (or a policy_changed one while a stop is pending) and drops a
 // tombstone; only the user's own tombstone frees its sandbox ids.
@@ -289,6 +316,33 @@ func TestStoreDeleted(t *testing.T) {
 	}
 	if _, err := s.Bind(1001, next.ID, bind(1)); err != nil {
 		t.Fatalf("the user's own tombstone dropped: %v", err)
+	}
+}
+
+func TestStorePolicyRevocationKeepsFinalLifecycleWindow(t *testing.T) {
+	s, clock, _ := newTestStore(t)
+	r := pending(t)
+	if err := s.Create(1001, r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Bind(1001, r.ID, bind(1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Revoke(1001, r.ID, ReasonPolicyChanged); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Deleted(1001, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := s.Get(1001, r.ID); err != nil || !ok || got.State != StateRevoked {
+		t.Fatalf("final lifecycle window lost: %+v %t %v", got, ok, err)
+	}
+	clock.t = clock.t.Add(RevokedTelemetryWindow + time.Second)
+	if err := s.Deleted(1001, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.Get(1001, r.ID); ok {
+		t.Fatal("expired lifecycle tombstone remained")
 	}
 }
 

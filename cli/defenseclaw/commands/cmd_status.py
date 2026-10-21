@@ -292,6 +292,50 @@ def _echo_wrapped(text: str, hang: int) -> None:
     ux.echo(line)
 
 
+def _print_moved_audit_store(db_path: str) -> None:
+    """Say when the gateway moved a corrupt audit store aside, with the
+    copy-first recovery hint, as ``defenseclaw-gateway status`` and doctor do.
+    Otherwise status showed the new, empty store as if nothing had happened
+    (rel-1-0-3:GAP-0105)."""
+    from defenseclaw.commands.cmd_doctor import (
+        _archive_recovery_hint,
+        _archived_sidecars,
+        _is_pre_1_0_archive,
+        _moved_aside_audit_stores,
+        _moved_store_block_allow_summary,
+        _reported_moved_stores,
+    )
+
+    moved = _reported_moved_stores(_moved_aside_audit_stores(db_path))
+    if not moved:
+        return
+    newest = moved[-1]
+    stamp = newest.name[len(Path(db_path).name + ".corrupt-") :][:16]
+    try:
+        when = datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).astimezone()
+        on = f" on {when.isoformat(timespec='seconds')}"
+    except ValueError:
+        on = ""
+    ux.echo()
+    if _is_pre_1_0_archive(newest):
+        ux.ok(
+            f"The audit store DefenseClaw 0.x wrote could not be upgraded and is kept as an archive in "
+            f"{newest}{_archived_sidecars(newest)}{on}; 1.0 starts a new audit history after a 0.x upgrade in "
+            "any case, and block/allow lists live in config.yaml, so they are not affected."
+        )
+        delete = "Delete the archive and its -wal, -shm and -journal files when you no longer need them."
+    else:
+        ux.warn(
+            f"The audit store was corrupt and was moved to {newest}{_archived_sidecars(newest)}{on} by the "
+            f"gateway, which {_moved_store_block_allow_summary(newest)}"
+        )
+        delete = "Delete the moved file and its -wal, -shm and -journal files when they are no longer needed."
+    if shutil.which("sqlite3") is None:
+        ux.subhead("sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html")
+    ux.subhead(_archive_recovery_hint(newest))
+    ux.subhead(delete)
+
+
 @click.command()
 @click.option(
     "--json",
@@ -433,6 +477,8 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
+
+    _print_moved_audit_store(str(getattr(cfg, "audit_db", "") or ""))
 
     # Canonical v8 collection, routing, redaction, and destination status.
     _print_observability_status(cfg, config_has_problems=bool(config_problems))
@@ -1705,11 +1751,17 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
     health_map = _fetch_health_connectors(health=health)
     for name, row in rows.items():
+        # The text roster already uses this authenticated runtime state. Keep
+        # the JSON projection in agreement, including manual hook connectors.
+        if row.get("enabled") and name in health_map and health_map[name].get("state"):
+            row["state"] = health_map[name]["state"]
+        elif not row.get("enabled"):
+            row["state"] = "disabled"
         if row.get("enabled") and _agent_missing(cfg, name):
             # As the text output: not running while doctor fails it (GAP-0513).
             row["state"] = "off"
             row["runtime_detail"] = _agent_missing_detail(name)
-    if "opencode" in rows and "runtime_detail" not in rows["opencode"]:
+    if "opencode" in rows and rows["opencode"].get("enabled") and "runtime_detail" not in rows["opencode"]:
         runtime_state, runtime_detail = _opencode_runtime_truth(
             health_map.get("opencode"),
             gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
@@ -1717,7 +1769,11 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
         rows["opencode"]["state"] = runtime_state
         rows["opencode"]["runtime_detail"] = runtime_detail
-    if "omnigent" in rows and (omnigent_health := health_map.get("omnigent")) is not None:
+    if (
+        "omnigent" in rows
+        and rows["omnigent"].get("enabled")
+        and (omnigent_health := health_map.get("omnigent")) is not None
+    ):
         runtime_state, readiness_detail = _omnigent_effective_runtime_state(
             cfg,
             str(omnigent_health.get("state") or ""),
@@ -1727,6 +1783,18 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             rows["omnigent"]["readiness_detail"] = readiness_detail
     cursor = rows.get("cursor")
     if cursor is not None:
+        if cursor.get("enabled") and cursor.get("state") == "running":
+            lock_path = Path(str(getattr(cfg, "data_dir", "") or ""), "hook_contract_lock.json")
+            try:
+                if lock_path.stat().st_size <= 4 << 20:
+                    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+                    entry = (lock.get("connectors") or {}).get("cursor")
+                    if isinstance(entry, dict) and entry.get("contract_id"):
+                        version = entry.get("raw_agent_version")
+                        if isinstance(version, str) and version.strip():
+                            cursor["agent_version"] = version.strip()
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         cursor["priority_conflict_detection"] = {
             "status": "unavailable",
             "conflict_inferred": False,
