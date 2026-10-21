@@ -170,8 +170,8 @@ func blockChangeSpool(t *testing.T, root string, layout managed.StandaloneLayout
 	}
 }
 
-// A secret set the device could not record is refused before the value is
-// read, and a refusal that cannot be recorded says so on stderr
+// A secret set the device could not record is refused before anything is
+// written, and a refusal that cannot be recorded says so on stderr
 // (change_unrecorded) instead of passing silently.
 func TestUnixSecretChangeThatCannotBeRecordedIsRefused(t *testing.T) {
 	root, layout := stubSecretChangeEnv(t)

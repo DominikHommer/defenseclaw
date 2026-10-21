@@ -23,7 +23,9 @@ func stubWindowsChangeSpool(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), enterprisestatus.ChangeEventsDirName)
 	savedSpool, savedElevated := windowsChangeSpool, windowsSecretIsElevated
-	windowsChangeSpool = func() (enterprisestatus.ChangeSpool, error) { return enterprisestatus.ChangeSpool{Dir: dir}, nil }
+	windowsChangeSpool = func(managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
+		return enterprisestatus.ChangeSpool{Dir: dir}, nil
+	}
 	windowsSecretIsElevated = func() bool { return true }
 	t.Cleanup(func() { windowsChangeSpool, windowsSecretIsElevated = savedSpool, savedElevated })
 	return dir

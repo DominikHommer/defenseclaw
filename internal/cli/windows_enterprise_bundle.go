@@ -725,7 +725,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		if anchorRefusalPending {
 			anchorRefusalPending = false
 			current, _ := safefile.ReadRegularFileBounded(anchorPath, windowsBundleMaxAnchors)
-			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(code, false, current))
+			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(layout, code, false, current))
 		}
 		return refuse(code, message)
 	}
@@ -749,7 +749,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if opts.trustAnchors != "" {
 		// An install this computer could not audit is not made: the spool
 		// must take its change event before the file is written.
-		if err := windowsChangeSpoolReady(); err != nil {
+		if err := windowsChangeSpoolReady(layout); err != nil {
 			return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot record the trust anchor change: "+err.Error())
 		}
 		if opts.bundlePath != "" {
@@ -773,12 +773,12 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		if err != nil {
 			code := windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure)
 			current, _ := safefile.ReadRegularFileBounded(anchorPath, windowsBundleMaxAnchors)
-			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(string(code), code == enterprisebundle.CodeStateInvalid, current))
+			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(layout, string(code), code == enterprisebundle.CodeStateInvalid, current))
 			return refuse(string(code), "the trust anchors were not installed: "+err.Error())
 		}
 		if run.anchorOnly != nil {
 			run.anchorOnly.installed = installed
-			if err := recordWindowsAnchorsChange(run.anchorOnly); err != nil {
+			if err := recordWindowsAnchorsChange(layout, run.anchorOnly); err != nil {
 				run.warnings = append(run.warnings, changeUnrecordedWarning(err))
 			}
 		}
@@ -1134,14 +1134,14 @@ func (run *windowsBundleRun) commitAnchors(result *enterprisestatus.Result) {
 			code = "anchor_restore_failed"
 		}
 		current, _ := safefile.ReadRegularFileBounded(run.anchorPath, windowsBundleMaxAnchors)
-		if err := recordWindowsAnchorsFailure(code, true, current); err != nil {
+		if err := recordWindowsAnchorsFailure(run.layout, code, true, current); err != nil {
 			warning := changeUnrecordedWarning(err)
 			result.AddWarning(warning.Code, warning.Message)
 		}
 		return
 	}
 	run.anchorCommit = &anchorOnlyChange{path: run.anchorPath, existed: run.anchorExisted, previous: run.anchorPrevious, installed: installed}
-	if err := recordWindowsAnchorsChange(run.anchorCommit); err != nil {
+	if err := recordWindowsAnchorsChange(run.layout, run.anchorCommit); err != nil {
 		warning := changeUnrecordedWarning(err)
 		result.AddWarning(warning.Code, warning.Message)
 	}

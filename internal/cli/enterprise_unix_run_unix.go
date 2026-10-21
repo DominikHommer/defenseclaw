@@ -486,12 +486,6 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	if action == "set" && opts.fromStdin == (opts.fromFile != "") {
 		return nil, false, lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
 	}
-	// A change this device could not audit is not made: the spool must take
-	// its change event before the credential is read or written.
-	if err := env.ChangeSpoolReady(); err != nil {
-		return nil, false, secretFailed(string(enterprisebundle.CodeStateInvalid), enterprisestatus.UnixExitFailure,
-			fmt.Errorf("cannot record the credential change: %w", err))
-	}
 	var mutate func(context.Context) error
 	existed := false
 	switch action {
@@ -530,6 +524,12 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 			existed = statErr == nil
 			return env.RemoveSecret(opts.name)
 		}
+	}
+	// A change this device could not audit is not made: the spool must take
+	// its change event before the credential is written or removed.
+	if err := env.ChangeSpoolReady(); err != nil {
+		return nil, false, secretFailed(string(enterprisebundle.CodeStateInvalid), enterprisestatus.UnixExitFailure,
+			fmt.Errorf("cannot record the credential change: %w", err))
 	}
 	// Write and apply under one lifecycle lock. The apply watcher the write
 	// wakes then finds the change already applied instead of racing it.

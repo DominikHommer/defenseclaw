@@ -143,7 +143,11 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	change, err := changeWindowsSecret(cmd, action, opts)
 	if ev, ok := secretChangeEvent(action, opts.name, change.changed, secretFailureCode(err, windowsSecretExitInvalid), err, false); ok {
 		// The success document (secret-result.schema.json) has no warnings.
-		warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsChange(ev))
+		layout, layoutErr := windowsSecretLayout()
+		if layoutErr == nil {
+			layoutErr = recordWindowsChange(layout, ev)
+		}
+		warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
 	}
 	if err != nil {
 		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json)
@@ -240,12 +244,6 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if err := requireWindowsSecretDeployment(); err != nil {
 		return windowsSecretChange{}, err
 	}
-	// A change this computer could not audit is not made: the spool must
-	// take its change event before the credential is read or written.
-	if err := windowsChangeSpoolReady(); err != nil {
-		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
-			fmt.Errorf("cannot record the credential change: %w", err))
-	}
 	var value []byte
 	switch action {
 	case "set":
@@ -290,6 +288,12 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	defer store.close()
+	// A change this computer could not audit is not made: the spool must
+	// take its change event before the credential is written or removed.
+	if err := windowsChangeSpoolReady(layout); err != nil {
+		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			fmt.Errorf("cannot record the credential change: %w", err))
+	}
 	unchanged := false
 	if action == "set" {
 		unchanged = keepIdenticalWindowsSecret(store, opts.name, value)
