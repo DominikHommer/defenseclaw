@@ -25,7 +25,8 @@
     With -UpgradeFrom it is the enterprise upgrade lane instead of step 1:
     the previous release's Setup /ensure installs with the same config, then
     this Setup's /ensure upgrades it. The upgrade must report the applied
-    policy, keep the secrets and the guardian ledger, and write
+    policy, keep the secrets (a protected credential the lane stores on the
+    previous release with enterprise secret set) and the guardian ledger, and write
     migration-v9.json plus config.yaml.v8.bak for v8 input. A v8 config is
     migrated, so its policy comes from a newer config generation; a v9 one
     (a 1.x previous release) keeps its bytes and its generation.
@@ -160,6 +161,45 @@ function Assert-ServicesRunning {
         if ($service.Status -ne 'Running') { Fail "service $name is $($service.Status), want Running" }
     }
     Write-Host "services running: $($serviceNames -join ' ')"
+}
+
+# A secret set restarts the gateway and returns once the service starts.
+function Wait-ServicesRunning([int]$Seconds = 60) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $pending = @($serviceNames | Where-Object { (Get-Service -Name $_ -ErrorAction SilentlyContinue).Status -ne 'Running' })
+        if ($pending.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    Assert-ServicesRunning
+}
+
+# The protected credential the upgrade lane stores on the previous release.
+# Its value is random, so only the credential this run stored can match.
+$upgradeSecretName = 'ci-upgrade-lane'
+$script:UpgradeSecretValue = ''
+
+function Test-UpgradeSecretKept {
+    $path = Join-Path $secretsDirectory $upgradeSecretName
+    if (-not $script:UpgradeSecretValue -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    $stored = [IO.File]::ReadAllBytes($path)
+    $want = [Text.Encoding]::UTF8.GetBytes($script:UpgradeSecretValue)
+    return [Linq.Enumerable]::SequenceEqual([byte[]]$stored, [byte[]]$want)
+}
+
+function Add-UpgradeSecret([string]$Name) {
+    $script:UpgradeSecretValue = 'ci-upgrade-lane-' + [guid]::NewGuid().ToString('N')
+    $result = Join-Path $ResultsRoot "$Name.json"
+    $log = Join-Path $ResultsRoot "$Name.log"
+    $script:UpgradeSecretValue | & $cli enterprise secret set --name $upgradeSecretName --from-stdin --json > $result 2> $log
+    $exitCode = $LASTEXITCODE
+    Write-Host "$Name exited $exitCode"
+    if ($exitCode -ne 0) {
+        if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 20 | ForEach-Object { Write-Host "  stderr: $_" } }
+        Fail "enterprise secret set exited $exitCode"
+    }
+    if (-not (Test-UpgradeSecretKept)) { Fail "enterprise secret set did not store $(Join-Path $secretsDirectory $upgradeSecretName)" }
+    Wait-ServicesRunning
 }
 
 function Assert-ServicesGone {
@@ -479,6 +519,8 @@ try {
         Assert-ServicesRunning
         Assert-PolicyApplied
         Copy-Item -LiteralPath $config -Destination (Join-Path $ResultsRoot 'config-before.yaml')
+        Step "store a protected credential on the previous release ($PreviousVersion)"
+        Add-UpgradeSecret '01-previous-secret'
         $run = Invoke-Lifecycle -Name '01-previous-status' -FilePath $cli -Arguments @('enterprise', 'windows', 'status', '--profile', 'standalone', '--json')
         Assert-Result $run 'previous-status' (@('--action', 'status', '--installed', '--version', $PreviousVersion) + $installedChecks)
         $previousGeneration = Get-ConfigGeneration $run.Result
@@ -502,6 +544,7 @@ try {
         }
         Copy-Item -LiteralPath $installedConfig -Destination (Join-Path $ResultsRoot 'config-upgraded.yaml')
         if ((Get-TreeSha $secretsDirectory) -ne $previousSecretsSha) { Fail "the upgrade changed the secrets under $secretsDirectory" }
+        if (-not (Test-UpgradeSecretKept)) { Fail "the upgrade did not keep the bytes of the protected credential $upgradeSecretName" }
         if ((Get-LedgerTargets $guardianLedger) -ne $previousLedgerTargets) { Fail "the upgrade changed the protected targets in the guardian ledger $guardianLedger" }
     }
     else {
