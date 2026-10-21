@@ -302,8 +302,14 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			// is reported with its owner unknown after the loop (GAP-0556),
 			// unless enterprise.enrollment.exclude_users names the account
 			// (GAP-0673): the admin chose to leave it alone.
+			// An excluded one is reported excluded like any other, so the
+			// cycle removes its identity record and the gateway's read
+			// access on its profile folder.
 			if windowsEnrollmentListMatches(opts.ExcludeUsers, []string{profile.SID, filepath.Base(filepath.Clean(profile.Home))}) {
 				judged[canonicalManifestTargetSID(profile.SID)] = true
+				if opts.ReportExcluded != nil {
+					opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
+				}
 			}
 			logfSafely(opts.Logger, profile.SID,
 				"the local account no longer exists; its rows are revoked although its profile folder remains")
@@ -458,8 +464,8 @@ func windowsRunsConnector(running map[string]string, connectors []string) bool {
 
 // windowsSignedInCheck returns a check of whether a user has a session now,
 // active or disconnected. The sessions are read once per cycle, at the first
-// check; when they cannot be read every user counts as signed in, so no
-// warning is suppressed on a guess.
+// check; when they cannot be read, or a session's user cannot be identified,
+// every user counts as signed in, so no warning is suppressed on a guess.
 func windowsSignedInCheck(logf EnumerationLogger) func(sid string) bool {
 	var users map[string]bool
 	read, unreadable := false, false

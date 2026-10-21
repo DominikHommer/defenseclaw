@@ -220,6 +220,11 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 		if uid > 0 && !seen[uid] {
 			seen[uid] = true
 			accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: uid, Left: true})
+			// A newly left account changes the keys, so its record goes at
+			// the next tick, also when no listing named it before (a
+			// partial listing omitted it) and the enrolled keys stay the
+			// same.
+			keys = append(keys, "left:"+strconv.Itoa(uid))
 		}
 	}
 	return accounts, keys

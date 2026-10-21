@@ -8,8 +8,11 @@ package enterprisehooks
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -37,6 +40,16 @@ func enumerateDeletedAccountCycle(t *testing.T, lookupErr error, running map[str
 // enterprise.enrollment.exclude_users set to exclude.
 func enumerateDeletedAccountCycleExcluding(t *testing.T, lookupErr error, running map[string]map[string]string, exclude []string) (Manifest, []UnprotectedAgent) {
 	t.Helper()
+	manifest, reported, _ := enumerateDeletedAccountCycleReporting(t, lookupErr, running, func(string) []string { return exclude })
+	return manifest, reported
+}
+
+// enumerateDeletedAccountCycleReporting is enumerateDeletedAccountCycleExcluding
+// with exclude_users built from the deleted account's profile folder, and it
+// also returns the profiles the cycle reported excluded.
+func enumerateDeletedAccountCycleReporting(t *testing.T, lookupErr error, running map[string]map[string]string,
+	exclude func(deletedHome string) []string) (Manifest, []UnprotectedAgent, []ManifestTarget) {
+	t.Helper()
 	stubMachineWinGet(t, nil)
 	stubUserWinGet(t, nil)
 	stubCodexMachinePolicyPublished(t, true)
@@ -45,7 +58,11 @@ func enumerateDeletedAccountCycleExcluding(t *testing.T, lookupErr error, runnin
 	t.Cleanup(func() { windowsMachineAccountDomainSID = previousDomain })
 	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
 	enrolled := codexProfile(t, "0.160.0")
-	injectWindowsProfileList(t, map[string]string{testDeletedLocalSID: t.TempDir(), testLocalUserSID: enrolled})
+	deletedHome := filepath.Join(t.TempDir(), "olduser")
+	if err := os.MkdirAll(deletedHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testDeletedLocalSID: deletedHome, testLocalUserSID: enrolled})
 	windowsEnrollmentLookupAccountSID = func(sid string) (string, string, error) {
 		if canonicalManifestTargetSID(sid) == canonicalManifestTargetSID(testDeletedLocalSID) {
 			return "", "", lookupErr
@@ -53,15 +70,17 @@ func enumerateDeletedAccountCycleExcluding(t *testing.T, lookupErr error, runnin
 		return "user", "HOST", nil
 	}
 	var reported []UnprotectedAgent
+	var excluded []ManifestTarget
 	manifest, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
 		RunningAgents:     running,
-		ExcludeUsers:      exclude,
+		ExcludeUsers:      exclude(deletedHome),
 		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+		ReportExcluded:    func(target ManifestTarget) { excluded = append(excluded, target) },
 	})
 	if err != nil {
 		t.Fatalf("EnumerateWindows: %v", err)
 	}
-	return manifest, reported
+	return manifest, reported, excluded
 }
 
 func TestEnumerateWindowsKeepsTheRunningAgentOfADeletedAccountOwnerUnknown(t *testing.T) {
@@ -211,5 +230,49 @@ func TestEnumerateWindowsReportsTheRunningAgentOfADisabledSignedOutAccount(t *te
 			(reported[0].SID != canonicalManifestTargetSID(testLocalUserSID) || !strings.Contains(reported[0].Reason, "codex (pid 77) runs for this account"))) {
 			t.Fatalf("running = %v: unprotected = %+v, want %d", tc.running, reported, tc.wantReported)
 		}
+	}
+}
+
+// W2B-G-enum review loop 1: the deleted-account branch marked an excluded
+// deleted account judged but never reported it excluded, so the cycle kept
+// refreshing its identity record and carried its old UPN forward. It is now
+// reported excluded, by SID or by profile folder, and the identity pass
+// removes its record; a deleted account that is not excluded is not.
+func TestEnumerateWindowsReportsAnExcludedDeletedAccountExcluded(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		exclude      func(deletedHome string) []string
+		wantExcluded bool
+	}{
+		{name: "by SID", exclude: func(string) []string { return []string{testDeletedLocalSID} }, wantExcluded: true},
+		{name: "by profile folder", exclude: func(home string) []string { return []string{filepath.Base(home)} }, wantExcluded: true},
+		{name: "not excluded", exclude: func(string) []string { return nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, excluded := enumerateDeletedAccountCycleReporting(t, windows.ERROR_NONE_MAPPED, nil, tc.exclude)
+			sids := make([]string, 0, len(excluded))
+			for _, target := range excluded {
+				sids = append(sids, target.SID)
+			}
+			reportedDeleted := len(excluded) == 1 && canonicalManifestTargetSID(excluded[0].SID) == canonicalManifestTargetSID(testDeletedLocalSID) &&
+				filepath.Base(excluded[0].UserHome) == "olduser"
+			if reportedDeleted != tc.wantExcluded || (!tc.wantExcluded && len(excluded) != 0) {
+				t.Fatalf("reported excluded %+v, want the deleted account reported %v", excluded, tc.wantExcluded)
+			}
+			// The cycle passes the reported SIDs to the identity pass.
+			dir := t.TempDir()
+			key := strings.ToUpper(testDeletedLocalSID)
+			writeTestIdentityRecord(t, dir, key, time.Now().UTC())
+			cache := NewWindowsEnrollmentGroupCache()
+			cache.Users[testDeletedLocalSID] = []string{}
+			stubWindowsIdentityLookups(t, nil, nil)
+			if err := WriteWindowsIdentitySpool(context.Background(), dir, cache, sids, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			_, statErr := os.Stat(filepath.Join(dir, key+".json"))
+			if os.IsNotExist(statErr) != tc.wantExcluded {
+				t.Fatalf("identity record removed = %v, want %v", os.IsNotExist(statErr), tc.wantExcluded)
+			}
+		})
 	}
 }

@@ -566,7 +566,9 @@ func (g *windowsEnrollmentGroups) pruneCache(profiles map[string]struct{}) {
 
 // readWindowsActiveSessionGroups maps the SID of each user with an active
 // session to the group SIDs of that session's token (logon SIDs excluded;
-// deny-only groups count, since the user is a member).
+// deny-only groups count, since the user is a member). A session whose user
+// cannot be identified is left out: that user's membership stays unknown
+// (pending, never revoked) until a cycle reads it.
 func readWindowsActiveSessionGroups() (map[string][]string, error) {
 	out := map[string][]string{}
 	err := visitWindowsSessionTokens(func(state uint32) bool { return state == windows.WTSActive }, func(sid string, token windows.Token) {
@@ -584,7 +586,7 @@ func readWindowsActiveSessionGroups() (map[string][]string, error) {
 			out[sid] = []string{}
 		}
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, errWindowsSessionsUnidentified) {
 		return nil, err
 	}
 	for sid, groups := range out {
@@ -595,7 +597,10 @@ func readWindowsActiveSessionGroups() (map[string][]string, error) {
 
 // readWindowsSignedInSessionUsers lists the SIDs of the users who have a
 // session now, active or disconnected. A disconnected session keeps running
-// the user's processes, so it can still start the user's agents.
+// the user's processes, so it can still start the user's agents. When a
+// session's user cannot be identified it returns the users it did identify
+// and an errWindowsSessionsUnidentified error: that session may be any
+// user's, so no one may be judged signed out on this answer.
 func readWindowsSignedInSessionUsers() (map[string]bool, error) {
 	out := map[string]bool{}
 	err := visitWindowsSessionTokens(func(state uint32) bool {
@@ -603,41 +608,96 @@ func readWindowsSignedInSessionUsers() (map[string]bool, error) {
 	}, func(sid string, _ windows.Token) {
 		out[sid] = true
 	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
+	return out, err
 }
 
-// visitWindowsSessionTokens calls visit with the canonical user SID and the
-// user token of each session whose state accept admits. A session whose
-// token or user cannot be read is skipped. The token is closed after visit.
-func visitWindowsSessionTokens(accept func(state uint32) bool, visit func(sid string, token windows.Token)) error {
+// errWindowsSessionsUnidentified is a session whose user could not be read.
+var errWindowsSessionsUnidentified = errors.New("the user of a Windows session could not be identified")
+
+// windowsSession is one terminal services session.
+type windowsSession struct {
+	id, state uint32
+}
+
+// windowsSessionAPI lists the sessions and reads a session's user token and
+// the token's user SID; tests replace it.
+var windowsSessionAPI = struct {
+	list      func() ([]windowsSession, error)
+	userToken func(session uint32) (windows.Token, error)
+	tokenUser func(token windows.Token) (string, error)
+	close     func(token windows.Token)
+}{
+	list: listWindowsSessions,
+	userToken: func(session uint32) (windows.Token, error) {
+		var token windows.Token
+		err := windows.WTSQueryUserToken(session, &token)
+		return token, err
+	},
+	tokenUser: func(token windows.Token) (string, error) {
+		user, err := token.GetTokenUser()
+		if err != nil {
+			return "", err
+		}
+		return user.User.Sid.String(), nil
+	},
+	close: func(token windows.Token) { _ = token.Close() },
+}
+
+// listWindowsSessions lists this computer's terminal services sessions.
+func listWindowsSessions() ([]windowsSession, error) {
 	var sessions *windows.WTS_SESSION_INFO
 	var count uint32
 	if err := windows.WTSEnumerateSessions(0, 0, 1, &sessions, &count); err != nil {
-		return fmt.Errorf("enumerate Windows sessions: %w", err)
+		return nil, err
 	}
 	if sessions != nil {
 		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessions)))
 	}
 	if count == 0 || sessions == nil {
-		return nil
+		return nil, nil
 	}
+	out := make([]windowsSession, 0, count)
 	for _, session := range unsafe.Slice(sessions, count) {
-		if !accept(session.State) {
+		out = append(out, windowsSession{id: session.SessionID, state: session.State})
+	}
+	return out, nil
+}
+
+// visitWindowsSessionTokens calls visit with the canonical user SID and the
+// user token of each session whose state accept admits. The token is closed
+// after visit. Session 0 (services) and a session without a signed-in user
+// (ERROR_NO_TOKEN) have no user to visit. Any other session whose token or
+// user cannot be read is not visited either, but the walk then returns an
+// errWindowsSessionsUnidentified error after visiting the rest, so a caller
+// can tell a complete answer from one that may be missing a user.
+func visitWindowsSessionTokens(accept func(state uint32) bool, visit func(sid string, token windows.Token)) error {
+	sessions, err := windowsSessionAPI.list()
+	if err != nil {
+		return fmt.Errorf("enumerate Windows sessions: %w", err)
+	}
+	var unidentified []string
+	for _, session := range sessions {
+		if session.id == 0 || !accept(session.state) {
 			continue
 		}
-		var token windows.Token
-		if err := windows.WTSQueryUserToken(session.SessionID, &token); err != nil {
+		token, err := windowsSessionAPI.userToken(session.id)
+		if errors.Is(err, windows.ERROR_NO_TOKEN) {
 			continue
 		}
-		if user, err := token.GetTokenUser(); err == nil {
-			if sid := canonicalManifestTargetSID(user.User.Sid.String()); sid != "" {
-				visit(sid, token)
-			}
+		if err != nil {
+			unidentified = append(unidentified, fmt.Sprintf("session %d: %v", session.id, err))
+			continue
 		}
-		token.Close()
+		user, err := windowsSessionAPI.tokenUser(token)
+		if err != nil {
+			unidentified = append(unidentified, fmt.Sprintf("session %d: token user: %v", session.id, err))
+		} else if sid := canonicalManifestTargetSID(user); sid != "" {
+			visit(sid, token)
+		}
+		windowsSessionAPI.close(token)
+	}
+	if len(unidentified) > 0 {
+		return fmt.Errorf("%w: %s", errWindowsSessionsUnidentified, strings.Join(unidentified, "; "))
 	}
 	return nil
 }

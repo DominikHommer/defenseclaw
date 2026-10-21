@@ -18,6 +18,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1206,6 +1207,8 @@ func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenSessionsAreUnreadable
 	}
 	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
 	stubActiveSessions(t, map[string][]string{})
+	previousSignedIn := windowsSignedInSessionUsers
+	t.Cleanup(func() { windowsSignedInSessionUsers = previousSignedIn })
 	windowsSignedInSessionUsers = func() (map[string]bool, error) { return nil, errors.New("access denied") }
 	var reported []UnprotectedAgent
 	if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
@@ -1236,5 +1239,116 @@ func TestWindowsDeletedLocalAccountNeedsANoneMappedLocalSID(t *testing.T) {
 	}
 	if windowsDeletedLocalAccount("S-1-5-21-111-222-333-1104", noneMapped) {
 		t.Fatal("a domain account was judged deleted")
+	}
+}
+
+// stubWindowsSessionAPI replaces the session list with sessions; tokens
+// maps a session id to its user SID, and tokenErrs and userErrs to the error
+// of reading its token or the token's user. It counts the tokens closed.
+func stubWindowsSessionAPI(t *testing.T, sessions []windowsSession, tokens map[uint32]string, tokenErrs, userErrs map[uint32]error) *int {
+	t.Helper()
+	previous := windowsSessionAPI
+	t.Cleanup(func() { windowsSessionAPI = previous })
+	closed := 0
+	windowsSessionAPI.list = func() ([]windowsSession, error) { return sessions, nil }
+	windowsSessionAPI.userToken = func(id uint32) (windows.Token, error) {
+		if err := tokenErrs[id]; err != nil {
+			return 0, err
+		}
+		return windows.Token(id + 1000), nil
+	}
+	windowsSessionAPI.tokenUser = func(token windows.Token) (string, error) {
+		id := uint32(token) - 1000
+		if err := userErrs[id]; err != nil {
+			return "", err
+		}
+		return tokens[id], nil
+	}
+	windowsSessionAPI.close = func(windows.Token) { closed++ }
+	return &closed
+}
+
+// W2B-G-enum review loop 1: a session whose user token or token user could
+// not be read was skipped without an error, so a disabled account with a
+// disconnected session counted as signed out and its agent_unprotected
+// warning was dropped. The reader now says the answer is incomplete, and the
+// account keeps its warning. Session 0 and a session nobody is signed in to
+// (ERROR_NO_TOKEN) are not users and keep the answer complete.
+func TestReadWindowsSignedInSessionUsersReportsASessionItCannotIdentify(t *testing.T) {
+	base := []windowsSession{
+		{id: 0, state: windows.WTSDisconnected},
+		{id: 1, state: windows.WTSActive},
+		{id: 2, state: windows.WTSConnected},
+		{id: 3, state: windows.WTSActive},
+	}
+	tokens := map[uint32]string{1: testLocalUserSID}
+	tokenErrs := map[uint32]error{0: windows.ERROR_ACCESS_DENIED, 2: windows.ERROR_ACCESS_DENIED, 3: windows.ERROR_NO_TOKEN}
+	closed := stubWindowsSessionAPI(t, base, tokens, tokenErrs, nil)
+	users, err := readWindowsSignedInSessionUsers()
+	if err != nil || len(users) != 1 || !users[canonicalManifestTargetSID(testLocalUserSID)] || *closed != 1 {
+		t.Fatalf("complete answer: users %v, err %v, tokens closed %d; want the one user, no error, one token closed", users, err, *closed)
+	}
+	for _, tc := range []struct {
+		name      string
+		session   windowsSession
+		tokenErr  error
+		userErr   error
+		wantClose int
+	}{
+		{name: "token unreadable", session: windowsSession{id: 4, state: windows.WTSDisconnected}, tokenErr: windows.ERROR_ACCESS_DENIED, wantClose: 1},
+		{name: "token user unreadable", session: windowsSession{id: 5, state: windows.WTSActive}, userErr: windows.ERROR_INVALID_HANDLE, wantClose: 2},
+	} {
+		tokenErrs := map[uint32]error{0: windows.ERROR_ACCESS_DENIED, 2: windows.ERROR_ACCESS_DENIED, 3: windows.ERROR_NO_TOKEN, tc.session.id: tc.tokenErr}
+		closed := stubWindowsSessionAPI(t, append(slices.Clone(base), tc.session), tokens, tokenErrs, map[uint32]error{tc.session.id: tc.userErr})
+		users, err := readWindowsSignedInSessionUsers()
+		if !errors.Is(err, errWindowsSessionsUnidentified) || !users[canonicalManifestTargetSID(testLocalUserSID)] || *closed != tc.wantClose {
+			t.Fatalf("%s: users %v, err %v, tokens closed %d; want the identified user, an incomplete-answer error and %d closed",
+				tc.name, users, err, *closed, tc.wantClose)
+		}
+		// The active-session groups keep the sessions they could read.
+		if _, err := readWindowsActiveSessionGroups(); err != nil {
+			t.Fatalf("%s: active-session groups: %v", tc.name, err)
+		}
+	}
+}
+
+// The same, through the enumerator: a disabled account keeps its warning
+// while a session's user cannot be identified.
+func TestEnumerateWindowsDisabledAccountKeepsItsWarningWhenASessionIsUnidentified(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	previousDomain, previousDisabled, previousSignedIn := windowsMachineAccountDomainSID, windowsLocalAccountDisabled, windowsSignedInSessionUsers
+	t.Cleanup(func() {
+		windowsMachineAccountDomainSID, windowsLocalAccountDisabled, windowsSignedInSessionUsers = previousDomain, previousDisabled, previousSignedIn
+	})
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	windowsLocalAccountDisabled = func(string) (bool, error) { return true, nil }
+	windowsSignedInSessionUsers = readWindowsSignedInSessionUsers
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".local", "bin", "claude.exe"), []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	stubActiveSessions(t, map[string][]string{})
+	for _, tc := range []struct {
+		name     string
+		tokenErr error
+		want     int
+	}{
+		{name: "no user signed in to the session", tokenErr: windows.ERROR_NO_TOKEN, want: 0},
+		{name: "session user unreadable", tokenErr: windows.ERROR_ACCESS_DENIED, want: 1},
+	} {
+		stubWindowsSessionAPI(t, []windowsSession{{id: 2, state: windows.WTSDisconnected}}, nil, map[uint32]error{2: tc.tokenErr}, nil)
+		var reported []UnprotectedAgent
+		if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+			ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(reported) != tc.want {
+			t.Fatalf("%s: reported %+v, want %d", tc.name, reported, tc.want)
+		}
 	}
 }
