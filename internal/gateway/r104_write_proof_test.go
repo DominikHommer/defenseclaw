@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,6 +141,7 @@ func TestR104BoundProgramLinkCreation(t *testing.T) {
 
 func TestR104InterpreterTextNeedsAnExecutableWrite(t *testing.T) {
 	home := t.TempDir()
+	runtimeAlias := filepath.Join(home, "runtime-alias")
 	if err := os.Mkdir(filepath.Join(home, ".ssh"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -156,11 +158,21 @@ func TestR104InterpreterTextNeedsAnExecutableWrite(t *testing.T) {
 	}{
 		{"docstring", `"""p = Path.home() / '.ssh' / 'authorized_keys'; p.write_text('example')"""; print('ok')`, false},
 		{"reassigned path", `from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('notes.txt'); p.write_text('hello')`, false},
+		{"relative path after chdir", `from pathlib import Path; import os; os.chdir(Path.home() / '.ssh'); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('authorized_keys'); p.write_text('hello')`, true},
+		{"relative path after aliased chdir", `from pathlib import Path; from os import chdir as enter; enter(Path.home() / '.ssh'); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('authorized_keys'); p.write_text('hello')`, true},
+		{"absolute path after chdir", `from pathlib import Path; import os; os.chdir(Path.home() / '.ssh'); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('/tmp/ordinary-notes.txt'); p.write_text('hello')`, false},
+		{"absolute path after runtime link", fmt.Sprintf(`from pathlib import Path; import os; os.symlink(Path.home() / '.ssh' / 'authorized_keys', %q); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path(%q); p.write_text('hello')`, runtimeAlias, runtimeAlias), true},
+		{"relative path with chdir after the rebinding", `from pathlib import Path; import os; p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('notes.txt'); os.chdir(Path.home() / '.ssh'); p.write_text('hello')`, true},
+		{"relative path with chdir before the rebinding", `from pathlib import Path; import os; p = Path.home() / '.ssh' / 'authorized_keys'; os.chdir(Path.home() / '.ssh'); p = Path('notes.txt'); p.write_text('hello')`, true},
+		{"runtime link between the rebinding and the write", fmt.Sprintf(`from pathlib import Path; import os; p = Path.home() / '.ssh' / 'authorized_keys'; p = Path(%q); os.symlink(Path.home() / '.ssh' / 'authorized_keys', %q); p.write_text('hello')`, runtimeAlias+"2", runtimeAlias+"2"), true},
+		{"absolute path with chdir after the rebinding", `from pathlib import Path; import os; p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('/tmp/ordinary-notes.txt'); os.chdir(Path.home() / '.ssh'); p.write_text('hello')`, false},
+		{"reassigned path on separate lines", "from pathlib import Path\np = Path.home() / '.ssh' / 'authorized_keys';\np = Path('notes.txt')\np.write_text('hello')", false},
 		{"hardlink reassignment", `from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('linked.txt'); p.write_text('hello')`, true},
 		{"direct path", `from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p.write_text('hello')`, true},
 		{"docstring direct call", `"""Path('~/.ssh/authorized_keys').expanduser().write_text('example')"""; print('ok')`, false},
 		{"executable direct call", `Path('~/.ssh/authorized_keys').expanduser().write_text('hello')`, true},
 		{"expression before direct call", `x=1//2; Path('~/.ssh/authorized_keys').expanduser().write_text('hello')`, true},
+		{"comment without space", `#open('~/.ssh/authorized_keys','a').write('hello')`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: "python3 -c '" + tc.code + "'", CWD: home,

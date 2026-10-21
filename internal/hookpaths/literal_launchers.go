@@ -241,17 +241,17 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 	case program == "python" || strings.HasPrefix(program, "python3") || program == "perl" || program == "ruby" || program == "node":
 		if program == "python" || strings.HasPrefix(program, "python3") {
 			if code, ok := pythonLiteralCode(words); ok {
-				return add(literalInterpreterWrites(code))
+				return add(literalInterpreterWrites(code, "python"))
 			}
 		}
 		if len(words) >= 3 && (program == "perl" || program == "ruby" || program == "node") && words[1] == "-e" {
-			return add(literalInterpreterWrites(words[2]))
+			return add(literalInterpreterWrites(words[2], program))
 		}
 		if program == "python" || strings.HasPrefix(program, "python3") {
 			if len(words) >= 2 && words[1] == "-" && stmt != nil {
 				for _, redirect := range stmt.Redirs {
 					if code, ok := literalQuotedHereDocument(redirect); ok {
-						return add(literalInterpreterWrites(code))
+						return add(literalInterpreterWrites(code, "python"))
 					}
 				}
 			}

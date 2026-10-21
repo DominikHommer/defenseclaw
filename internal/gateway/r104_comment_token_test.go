@@ -10,17 +10,24 @@ import (
 
 // A '#' that is code in some interpreter must not hide a later writer call.
 func TestInterpreterCodePositionHashToken(t *testing.T) {
-	for code, want := range map[string]bool{
-		`class A{#p=1}; require("fs").appendFileSync("out.txt","k")`: true,
-		`$#a; open(F, ">>", "out.txt")`:                              true,
-		"# open(\"out.txt\",\"w\")\nprint(1)":                        false,
-		"print(1)  # open(\"out.txt\",\"w\")":                        false,
+	for _, tc := range []struct {
+		language, code string
+		want           bool
+	}{
+		{"node", `class A{#p=1}; require("fs").appendFileSync("out.txt","k")`, true},
+		{"perl", `$#a; open(F, ">>", "out.txt")`, true},
+		{"perl", `s#a#b#; open(F, ">>", "out.txt")`, true},
+		{"perl", `#open(F, ">>", "out.txt")`, false},
+		{"python", "# open(\"out.txt\",\"w\")\nprint(1)", false},
+		{"python", "print(1)  # open(\"out.txt\",\"w\")", false},
+		{"python", "#open(\"out.txt\",\"w\")", false},
 	} {
+		code, want := tc.code, tc.want
 		marker := "open("
 		if strings.Contains(code, "appendFileSync") {
 			marker = "appendFileSync"
 		}
-		if got := interpreterCodePosition(code, strings.Index(code, marker)); got != want {
+		if got := interpreterCodePosition(code, strings.Index(code, marker), tc.language); got != want {
 			t.Errorf("interpreterCodePosition(%q) = %v, want %v", code, got, want)
 		}
 	}

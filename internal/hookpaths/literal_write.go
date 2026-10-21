@@ -12,14 +12,16 @@ import (
 )
 
 var (
-	literalOpenCall    = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync|os\.open)\s*\(`)
+	literalOpenCall    = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
 	literalWriteCall   = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
 	literalNodeStream  = regexp.MustCompile(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
 	literalPathWrite   = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
 	literalPathOpen    = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
 	literalPerlOpen    = regexp.MustCompile(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
 	literalAwkRedirect = regexp.MustCompile(`(?:>>|>)\s*['"]([^'"]+)['"]`)
-	literalCopyCall    = regexp.MustCompile(`\bshutil\.copyfile\s*\(`)
+	literalCopyCall    = regexp.MustCompile(`\b(?:shutil\.(?:copyfile|copy|copy2)|copyFileSync|copyFile|(?:File::Copy::)?copy)\s*\(`)
+	literalPerlCopy    = regexp.MustCompile(`\b(?:File::Copy::)?copy\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)
+	literalPerlImport  = regexp.MustCompile(`\buse\s+File::Copy\b`)
 )
 
 // LiteralWriteOperands lists fixed write paths inside a directly invoked
@@ -49,7 +51,7 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 	boundName, boundValue := boundedProgramAssignment(file, home)
 	// A definition runs nothing. A body is read once, where it is defined,
 	// when the command may call it, so an uncalled body stays inert.
-	called := calledFunctions(file)
+	called := calledFunctions(file, home)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
 			return declaration.Name != nil && called[declaration.Name.Value]
@@ -197,13 +199,13 @@ func sedInPlaceFiles(words []string) []string {
 	return files
 }
 
-func literalInterpreterWrites(code string) []string {
+func literalInterpreterWrites(code, language string) []string {
 	if len(code) > 16<<10 {
 		return nil
 	}
 	var paths []string
 	for _, loc := range literalOpenCall.FindAllStringIndex(code, -1) {
-		if !literalCodePosition(code, loc[0]) {
+		if !literalCodePosition(code, loc[0], language) {
 			continue
 		}
 		call, ok := literalBoundedCall(code, loc[1]-1)
@@ -212,6 +214,9 @@ func literalInterpreterWrites(code string) []string {
 		}
 		args := literalCallArgs(call)
 		name := strings.TrimSpace(code[loc[0] : loc[1]-1])
+		if (name == "FileIO" || name == "io.FileIO") && language != "python" {
+			continue
+		}
 		switch {
 		case name == "os.open" && len(args) >= 2 && literalOSWriteFlags(args[1]):
 			if path, ok := literalString(args[0]); ok {
@@ -224,6 +229,10 @@ func literalInterpreterWrites(code string) []string {
 				}
 			}
 		case len(args) >= 1:
+			pathArg := args[0]
+			if language == "python" {
+				pathArg = literalCallArgument(args, 0, "file")
+			}
 			modeArg := ""
 			if len(args) >= 2 {
 				modeArg = args[1]
@@ -234,14 +243,14 @@ func literalInterpreterWrites(code string) []string {
 				}
 			}
 			if mode, ok := literalString(modeArg); ok && literalWriteMode(mode) {
-				if path, ok := literalString(args[0]); ok {
+				if path, ok := literalString(pathArg); ok {
 					paths = append(paths, path)
 				}
 			}
 		}
 	}
 	for _, loc := range literalWriteCall.FindAllStringIndex(code, -1) {
-		if !literalCodePosition(code, loc[0]) {
+		if !literalCodePosition(code, loc[0], language) {
 			continue
 		}
 		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
@@ -254,7 +263,7 @@ func literalInterpreterWrites(code string) []string {
 		}
 	}
 	for _, loc := range literalNodeStream.FindAllStringIndex(code, -1) {
-		if !literalCodePosition(code, loc[0]) {
+		if !literalCodePosition(code, loc[0], language) {
 			continue
 		}
 		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
@@ -266,26 +275,57 @@ func literalInterpreterWrites(code string) []string {
 			}
 		}
 	}
+	perlCopyImported := false
+	if language == "perl" {
+		for _, loc := range literalPerlImport.FindAllStringIndex(code, -1) {
+			if literalCodePosition(code, loc[0], language) {
+				perlCopyImported = true
+				break
+			}
+		}
+	}
 	for _, loc := range literalCopyCall.FindAllStringIndex(code, -1) {
-		if !literalCodePosition(code, loc[0]) {
+		if !literalCodePosition(code, loc[0], language) {
+			continue
+		}
+		name := strings.TrimSpace(code[loc[0] : loc[1]-1])
+		if !literalCopyAPI(language, name, perlCopyImported) {
 			continue
 		}
 		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
 			args := literalCallArgs(call)
-			if len(args) == 2 {
-				if path, ok := literalString(args[1]); ok {
+			if len(args) >= 2 {
+				destination := args[1]
+				if language == "python" {
+					destination = literalCallArgument(args, 1, "dst")
+				}
+				if path, ok := literalString(destination); ok {
+					paths = append(paths, path)
+				}
+			}
+		}
+	}
+	if language == "perl" {
+		for _, match := range literalPerlCopy.FindAllStringSubmatchIndex(code, -1) {
+			name := "copy"
+			if strings.HasPrefix(code[match[0]:match[1]], "File::Copy::copy") {
+				name = "File::Copy::copy"
+			}
+			if literalCodePosition(code, match[0], language) &&
+				literalCopyAPI(language, name, perlCopyImported) {
+				if path, ok := literalString(code[match[2]:match[3]]); ok {
 					paths = append(paths, path)
 				}
 			}
 		}
 	}
 	for _, match := range literalPathWrite.FindAllStringSubmatchIndex(code, -1) {
-		if literalCodePosition(code, match[0]) {
+		if literalCodePosition(code, match[0], language) {
 			paths = append(paths, code[match[2]:match[3]])
 		}
 	}
 	for _, match := range literalPathOpen.FindAllStringSubmatchIndex(code, -1) {
-		if literalCodePosition(code, match[0]) &&
+		if literalCodePosition(code, match[0], language) &&
 			(strings.HasPrefix(code[match[0]:match[1]], "pathlib.") ||
 				strings.Contains(code[:match[0]], "from pathlib import Path")) &&
 			validPythonWriteMode(code[match[4]:match[5]]) {
@@ -293,11 +333,36 @@ func literalInterpreterWrites(code string) []string {
 		}
 	}
 	for _, match := range literalPerlOpen.FindAllStringSubmatchIndex(code, -1) {
-		if literalCodePosition(code, match[0]) {
+		if literalCodePosition(code, match[0], language) {
 			paths = append(paths, code[match[2]:match[3]])
 		}
 	}
 	return paths
+}
+
+func literalCallArgument(args []string, position int, keyword string) string {
+	for _, arg := range args {
+		name, value, found := strings.Cut(strings.TrimSpace(arg), "=")
+		if found && strings.TrimSpace(name) == keyword {
+			return strings.TrimSpace(value)
+		}
+	}
+	if position < len(args) {
+		return args[position]
+	}
+	return ""
+}
+
+func literalCopyAPI(language, name string, perlImported bool) bool {
+	switch language {
+	case "python":
+		return strings.HasPrefix(name, "shutil.")
+	case "node":
+		return name == "copyFileSync" || name == "copyFile"
+	case "perl":
+		return name == "File::Copy::copy" || name == "copy" && perlImported
+	}
+	return false
 }
 
 func perlRedirectMode(arg string) bool {
@@ -413,9 +478,10 @@ func literalCallArgs(call string) []string {
 	return append(args, strings.TrimSpace(call[start:len(call)-1]))
 }
 
-func literalCodePosition(code string, position int) bool {
+func literalCodePosition(code string, position int, language string) bool {
 	var quote byte
 	comment := false
+	perlHashDelimiters := 0
 	for i := 0; i < position; i++ {
 		c := code[i]
 		if comment {
@@ -432,20 +498,43 @@ func literalCodePosition(code string, position int) bool {
 			}
 		} else if c == '\'' || c == '"' {
 			quote = c
-		} else if c == '#' && literalCommentStart(code, i) {
-			comment = true
+		} else if c == '#' {
+			if language == "perl" && perlHashDelimiters > 0 {
+				perlHashDelimiters--
+			} else if language == "perl" && perlHashRegexpStart(code, i) > 0 {
+				perlHashDelimiters = perlHashRegexpStart(code, i)
+			} else if literalCommentStart(code, i, language) {
+				comment = true
+			}
 		}
 	}
 	return quote == 0 && !comment
 }
 
-// A '#' starts a comment only as its own token: at the start of the code or
-// after whitespace or ';', and followed by whitespace or the end. Other
-// spellings ($#name, .#field, s#a#b#) are code in some interpreter, so they
-// never hide a later write.
-func literalCommentStart(code string, i int) bool {
-	if i > 0 && !strings.ContainsRune(" \t\n;", rune(code[i-1])) {
+func perlHashRegexpStart(code string, i int) int {
+	for _, operator := range []string{"s", "m", "qr", "tr", "y"} {
+		start := i - len(operator)
+		if start < 0 || code[start:i] != operator ||
+			start > 0 && !strings.ContainsRune(" \t\n;=~(", rune(code[start-1])) {
+			continue
+		}
+		if operator == "m" || operator == "qr" {
+			return 1
+		}
+		return 2
+	}
+	return 0
+}
+
+func literalCommentStart(code string, i int, language string) bool {
+	switch language {
+	case "python", "ruby":
+		return true
+	case "perl":
+		// Perl's $#name is an array index, not a comment.
+		return i == 0 || code[i-1] != '$'
+	default:
+		// JavaScript uses # in private names, not for comments.
 		return false
 	}
-	return i+1 == len(code) || strings.ContainsRune(" \t\r\n", rune(code[i+1]))
 }
