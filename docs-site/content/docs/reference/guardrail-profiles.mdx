@@ -253,9 +253,13 @@ What follows when the identity is missing:
   (`default_unverified`).
 - **Directory lookup fails or is slow.** A first request for a user the
   gateway has not seen yet waits up to two seconds for a cold SSSD or Active
-  Directory answer. Then an assignment that matches the verified uid, SID or
-  agent applies; otherwise the default profile applies
-  (`default_lookup_failed`). The lookup is retried 15 seconds later. Later
+  Directory answer. Then the assignments are read in order without names or
+  groups. One that matches on the verified uid, SID or agent alone applies.
+  One that names groups, lists users by name but not this uid or SID, or
+  matches on `connectors` alone could depend on the missing facts, so the
+  default profile applies (`default_lookup_failed`) and later assignments are
+  not read. One that lists only other uids or SIDs, or another agent or
+  connector, is skipped. The lookup is retried 15 seconds later. Later
   requests use the cached answer. A lookup counts as failed unless every part
   of it finished: an account whose group list timed out, or that is in more
   than 2,048 groups, has no facts rather than part of its membership. On
