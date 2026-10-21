@@ -390,7 +390,8 @@ func TestInterruptedTransactionRollsBackAndReports(t *testing.T) {
 			}
 			r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1"), Interrupted: interrupt})
 			requireError(t, r, codeInterrupted)
-			if !hasWarning(r, codeRolledBack) {
+			// A signal before the run started changed nothing to roll back.
+			if moment != "before" && !hasWarning(r, codeRolledBack) {
 				t.Fatalf("the result does not say it rolled back: %+v", r.Warnings)
 			}
 			record, _ := h.env.loadDeployment()
@@ -404,6 +405,40 @@ func TestInterruptedTransactionRollsBackAndReports(t *testing.T) {
 				t.Fatalf("the rollback left a pending transaction: %+v", pending)
 			}
 		})
+	}
+}
+
+// A SIGTERM to an uninstall that waits for the lifecycle lock (an MDM
+// timeout behind a running ensure) ends the wait: the uninstall used to take
+// the lock later and remove the deployment after it was told to stop. An
+// uninstall or reconcile that got the signal before it started changes
+// nothing either.
+func TestStopSignalEndsTheWaitForTheLockAndChangesNothing(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	held, err := h.env.acquireLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.env.LockTimeout = time.Minute
+	interrupt := make(chan struct{})
+	time.AfterFunc(100*time.Millisecond, func() { close(interrupt) })
+	started := time.Now()
+	r := h.run(Options{Action: ActionUninstall, Interrupted: interrupt})
+	held.release()
+	requireError(t, r, codeInterrupted)
+	if waited := time.Since(started); waited > 30*time.Second {
+		t.Fatalf("the uninstall waited %s for the lock after the stop signal", waited)
+	}
+	for _, action := range []string{ActionUninstall, ActionReconcile} {
+		r := h.run(Options{Action: action, Interrupted: interrupt})
+		requireError(t, r, codeInterrupted)
+	}
+	if record, _ := h.env.loadDeployment(); record == nil || record.ProductVersion != "1.0.0" {
+		t.Fatalf("an interrupted run changed the deployment: %+v", record)
+	}
+	if !h.services.isActive(unitGateway) {
+		t.Fatal("an interrupted run stopped the gateway")
 	}
 }
 

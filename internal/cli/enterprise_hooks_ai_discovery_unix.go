@@ -141,7 +141,7 @@ func restoreEnterprisePolicyDirs(stderr io.Writer) {
 	}
 	restored, err := enterprisepolicy.RestorePublishedPolicyDirs(opts)
 	if len(restored) > 0 {
-		fmt.Fprintf(stderr, "[hook-guardian] restored %s to mode 0755: users could not read DefenseClaw's machine policy there\n", strings.Join(restored, ", "))
+		fmt.Fprintf(stderr, "[hook-guardian] gave users access through %s again: they could not read DefenseClaw's machine policy there\n", strings.Join(restored, ", "))
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "[hook-guardian] machine policy directories: %v\n", err)

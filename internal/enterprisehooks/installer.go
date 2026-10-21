@@ -562,6 +562,14 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		}
 
 		return withOwnerCredentials(uid, gid, func() error {
+			// Held until the hook contract lock names this connector: a
+			// removal of the account's last other connector would take the
+			// shared scripts Setup writes (lockSharedHookRuntime).
+			unlock, err := lockSharedHookRuntime(ctx, home)
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
 			lockWriteAttempted := false
