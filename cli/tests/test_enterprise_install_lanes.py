@@ -232,6 +232,49 @@ def test_unix_upgrade_lane_applies_v8_to_previous_package(tmp_path: Path) -> Non
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+def test_unix_upgrade_lane_checks_a_stored_credential_survives(tmp_path: Path) -> None:
+    # The secrets check hashed an empty store before and after the upgrade,
+    # which proves nothing; the lane now stores a credential first.
+    lane = UNIX_LANE.read_text(encoding="utf-8")
+    upgrade = re.search(r"^upgrade_lane\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    helpers = re.search(r"^upgrade_secret_name=.*?^upgrade_secret_kept\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    assert upgrade and helpers, "the upgrade lane has no protected-credential fixture"
+    body = upgrade.group(0)
+    assert body.index("seed_upgrade_secret") < body.index('previous_secrets_sha=$(tree_sha "$secrets_dir")')
+    assert body.index("lifecycle 06-upgrade") < body.index("upgrade_secret_kept ||")
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    gateway = tmp_path / "gateway"
+    gateway.write_text(
+        '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --name ] && n=$2; shift; done\n'
+        'IFS= read -r v; printf %s "$v" >"$FAKE_SECRETS/$n"\n',
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    (tmp_path / "results").mkdir()
+    script = helpers.group(0) + (
+        '\ndie() { echo "FAIL: $*" >&2; exit 1; }\n'
+        "seed_upgrade_secret 02-previous-secret\n"
+        "upgrade_secret_kept || exit 3\n"
+        'printf x >>"$secrets_dir/$upgrade_secret_name"\n'
+        "! upgrade_secret_kept || exit 4\n"
+    )
+    env = {**os.environ, "gateway": str(gateway), "secrets_dir": str(secrets), "results": str(tmp_path / "results"),
+           "FAKE_SECRETS": str(secrets)}
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert (secrets / "ci-upgrade-lane").read_text().startswith("ci-upgrade-lane-")
+
+
+def test_windows_upgrade_lane_checks_a_stored_credential_survives() -> None:
+    lane = (SCRIPTS / "test-enterprise-windows-install.ps1").read_text(encoding="utf-8")
+    upgrade = lane[lane.index("if ($UpgradeFrom) {"):lane.index("Step 'Setup /ensure with an administrator config")]
+    assert "function Add-UpgradeSecret" in lane and "enterprise secret set --name $upgradeSecretName --from-stdin" in lane
+    assert upgrade.index("Add-UpgradeSecret") < upgrade.index("$previousSecretsSha = Get-TreeSha")
+    assert upgrade.index("01-setup-ensure-upgrade") < upgrade.index("Test-UpgradeSecretKept")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
 def test_unit_check_fails_on_diagnostics_outside_the_allow_list(tmp_path: Path) -> None:
     """The lane's unit check fails on a directive the systemd 239 allow list does not name."""
     bin_dir, unit_dir = tmp_path / "bin", tmp_path / "units"

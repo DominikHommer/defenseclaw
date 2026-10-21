@@ -48,7 +48,10 @@ func TestMain(m *testing.M) {
 		serveCodexPolicyFixture()
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	restore := isolateTestHost()
+	code := m.Run()
+	restore()
+	os.Exit(code)
 }
 
 // serveCodexPolicyFixture makes a copied native Go test image behave like the

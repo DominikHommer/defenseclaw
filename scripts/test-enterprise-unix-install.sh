@@ -28,7 +28,9 @@
 #   b. ensure --from-package upgrades to this package: verify passes, the
 #      result reports the applied policy from a newer config generation,
 #      migration-v9.json and config.yaml.v8.bak are written for v8 sources,
-#      and the secrets and guardian ledger are unchanged
+#      and the secrets and guardian ledger are unchanged; the lane stores a
+#      protected credential on the previous release (enterprise secret set)
+#      first, so the secrets check compares real bytes, not an empty store
 #
 # and then runs steps 3-6 on the upgraded deployment. It keeps the source
 # config, upgraded config and (for v8 sources) migration record in --results for
@@ -505,6 +507,32 @@ print(json.dumps(ledger, sort_keys=True))
 PY
 }
 
+# The protected credential the upgrade lane stores on the previous release.
+# Its value is random, so only the credential this run stored can match.
+upgrade_secret_name=ci-upgrade-lane
+upgrade_secret_value=""
+
+# seed_upgrade_secret <result-name>: store upgrade_secret_value with the
+# installed gateway's `enterprise secret set` and check its bytes landed.
+seed_upgrade_secret() {
+    local rc=0
+    upgrade_secret_value="ci-upgrade-lane-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    printf '%s\n' "$upgrade_secret_value" |
+        "$gateway" enterprise secret set --name "$upgrade_secret_name" --from-stdin --lock-wait 2m --json \
+            >"$results/$1.json" 2>"$results/$1.log" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        tail -n 20 "$results/$1.log" >&2 || true
+        die "enterprise secret set exited $rc"
+    fi
+    upgrade_secret_kept || die "enterprise secret set did not store $secrets_dir/$upgrade_secret_name"
+}
+
+# upgrade_secret_kept: the stored credential holds exactly upgrade_secret_value.
+upgrade_secret_kept() {
+    [ -n "$upgrade_secret_value" ] && [ -f "$secrets_dir/$upgrade_secret_name" ] &&
+        printf '%s' "$upgrade_secret_value" | cmp -s - "$secrets_dir/$upgrade_secret_name"
+}
+
 write_admin_config() {
     local config_version=9 rule_pack='  rule_pack: default'
     if [ -n "$upgrade_from" ] && [[ "$previous_version" =~ ^v?0[.] ]]; then
@@ -566,6 +594,8 @@ upgrade_lane() {
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
         --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
     cp "$stage/config.yaml" "$results/config-before.yaml"
+    step "store a protected credential on the previous release"
+    seed_upgrade_secret 02-previous-secret
     lifecycle 03-previous-verify verify
     retry_busy 03-previous-verify verify
     check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
@@ -625,6 +655,7 @@ upgrade_lane() {
     fi
     cp "$config" "$results/config-upgraded.yaml"
     [ "$(tree_sha "$secrets_dir")" = "$previous_secrets_sha" ] || die "the upgrade changed the secrets under $secrets_dir"
+    upgrade_secret_kept || die "the upgrade did not keep the bytes of the protected credential $upgrade_secret_name"
     [ "$(ledger_targets)" = "$previous_ledger" ] ||
         die "the upgrade changed the protected targets in the guardian ledger $guardian_ledger"
     services_running
