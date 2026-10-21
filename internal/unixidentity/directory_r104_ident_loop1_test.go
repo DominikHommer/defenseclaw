@@ -296,8 +296,8 @@ func TestAccountIncarnation(t *testing.T) {
 	if got, known := r.AccountIncarnation(uid, "alice"); !known || got != "sss" {
 		t.Fatalf("incarnation of an SSSD account without a SID = %q, %v", got, known)
 	}
-	if got, known := newFakeNSS(&fakeRun{}).AccountIncarnation(uid, "alice"); !known || got != "nss" {
-		t.Fatalf("incarnation of an account SSSD does not hold = %q, %v", got, known)
+	if got, known := newFakeNSS(&fakeRun{}).AccountIncarnation(uid, "alice"); known || got != "" {
+		t.Fatalf("incarnation of an account no NSS service holds = %q, %v; want unknown", got, known)
 	}
 	if got, known := r.AccountIncarnation(0, "root"); !known || got != "files" {
 		t.Fatalf("incarnation of a local account = %q, %v", got, known)

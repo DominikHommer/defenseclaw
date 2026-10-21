@@ -142,6 +142,37 @@ func ensureAgentIdentitiesTable(ctx context.Context, exec interface {
 	return nil
 }
 
+// restartAnotherAccountsAgentIdentity drops the stored row of rec's agent ID,
+// and the sessions it counted, when the row was recorded for an account of
+// other domains than rec: accounts of one bare name, uid and home in two
+// domains that nothing else tells apart derive one agent ID, and the upsert
+// gave the second account the first one's first_seen, last session and
+// session count (review of GAP-0947). The row then starts again from rec. A
+// side that names no domain (a row written before v7) proves nothing.
+func restartAnotherAccountsAgentIdentity(ctx context.Context, tx *sql.Tx, rec AgentIdentityRecord) error {
+	domains := strings.Fields(strings.ToLower(rec.UserDomain))
+	if len(domains) == 0 {
+		return nil
+	}
+	var stored string
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(user_domain, '') FROM agent_identities WHERE agent_id = ?`, rec.AgentID).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	previous := strings.Fields(strings.ToLower(stored))
+	if len(previous) == 0 || slices.ContainsFunc(previous, func(domain string) bool { return slices.Contains(domains, domain) }) {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_identity_sessions WHERE agent_id = ?`, rec.AgentID); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `DELETE FROM agent_identities WHERE agent_id = ?`, rec.AgentID)
+	return err
+}
+
 // AgentIdentitySession identifies a counted session that later proved to
 // belong to a child agent.
 type AgentIdentitySession struct {
@@ -202,6 +233,9 @@ func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
 			}
 			if first.IsZero() || first.After(last) {
 				first = last
+			}
+			if err := restartAnotherAccountsAgentIdentity(ctx, tx, rec); err != nil {
+				return err
 			}
 			// Sightings the batch holds no id for count as they are; each
 			// named session counts once while its deduplication row is retained.

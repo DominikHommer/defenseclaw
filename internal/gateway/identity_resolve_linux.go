@@ -42,6 +42,28 @@ var managedHookPeerAccountIncarnation = func(account unixidentity.Account) (stri
 	return resolver.AccountIncarnation(account.UID, account.Name)
 }
 
+// holderSpoolRecord is the guardian's current record of the uid key when it
+// was resolved for account, the account that holds the uid now: its name and
+// its account incarnation (unixidentity.AccountIncarnation) are the
+// account's now. A uid handed from one domain's alice to another domain's
+// alice keeps its key and its name, and laid over the second account's
+// facts the first one's record gave it the first one's UPN, principal and
+// domain, and the profile assigned to them, until the guardian's next pass
+// (review of GAP-0551). A record that names no incarnation (an older
+// guardian's), or an incarnation that cannot be told now, proves nothing:
+// the facts are then the gateway's own, as without a guardian, and the
+// cache looks them up again soon (awaitingSpoolUPN).
+func holderSpoolRecord(key string, account unixidentity.Account, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {
+	record, ok := readIdentitySpoolFactsForAccount(key, account.Name, now)
+	if !ok || record.AccountIncarnation == "" {
+		return enterprisehooks.IdentitySpoolRecord{}, false
+	}
+	if incarnation, known := managedHookPeerAccountIncarnation(account); !known || incarnation != record.AccountIncarnation {
+		return enterprisehooks.IdentitySpoolRecord{}, false
+	}
+	return record, true
+}
+
 // resolvePeerDirectoryFacts resolves a verified uid's facts through NSS and
 // merges the guardian's identity spool record for it.
 func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) {
@@ -64,7 +86,7 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
-	record, ok := readIdentitySpoolFactsForAccount(key, account.Name, now)
+	record, ok := holderSpoolRecord(key, account, now)
 	var spool *enterprisehooks.IdentitySpoolRecord
 	if ok {
 		spool = &record

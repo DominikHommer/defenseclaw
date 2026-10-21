@@ -97,7 +97,8 @@ func TestNSSCompatListsItsServices(t *testing.T) {
 	t.Cleanup(func() { localPasswdPath, nsswitchPath = oldPasswd, oldNSS })
 	dir := t.TempDir()
 	localPasswdPath, nsswitchPath = filepath.Join(dir, "passwd"), filepath.Join(dir, "nsswitch.conf")
-	for path, data := range map[string]string{localPasswdPath: "root:x:0:0::/root:/bin/sh\n", nsswitchPath: content} {
+	// compat asks passwd_compat for the + lines of /etc/passwd.
+	for path, data := range map[string]string{localPasswdPath: "root:x:0:0::/root:/bin/sh\n+::::::\n", nsswitchPath: content} {
 		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -217,6 +218,11 @@ func TestSameNameAccountsEmptyRealmdAnswer(t *testing.T) {
 	}
 	t.Run("winbind", func(t *testing.T) {
 		sameNameHost(t, empty, "", "passwd: files winbind\n")
+		previousSamba, previousTrusts := sambaConfPath, winbindTrustedDomains
+		t.Cleanup(func() { sambaConfPath, winbindTrustedDomains = previousSamba, previousTrusts })
+		sambaConfPath = filepath.Join(t.TempDir(), "smb.conf")
+		writeTestFile(t, sambaConfPath, "[global]\nworkgroup = CORP\n")
+		winbindTrustedDomains = func(context.Context) ([]string, error) { return nil, errors.New("winbindd is not running") }
 		var unknown *useridentity.NamesakesUnknownError
 		if twins, err := SameNameAccounts(context.Background(), r, local); len(twins) != 0 || !errors.As(err, &unknown) {
 			t.Fatalf("twins = %+v, %v; want the bare name refused", twins, err)

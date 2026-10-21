@@ -705,13 +705,24 @@ func agentIdentityAccountRemoved(id string) bool {
 
 // agentIdentityHeldByAnother reports whether rec was derived for another
 // account than holder, the account that holds its uid now: holder's account
-// does not derive its ID, and the name it was recorded with is another
-// account's or missing. A SID is never handed on.
+// (its name and incarnation) does not derive its ID, and the name it was
+// recorded with is another account's or missing, or the ID is the one the
+// first account the gateway saw hold the uid derived, while another account
+// of the same name holds it now. A SID is never handed on.
 func agentIdentityHeldByAnother(rec inventory.AgentIdentityRecord, holder string) bool {
-	if agentidentity.IsSID(agentidentity.NormalizeUserID(rec.UserID)) || agentidentity.AgentID(agentidentity.Inputs{
-		MachineHash: rec.MachineHash, UserID: rec.UserID, Account: holder, Connector: rec.Connector, InstallFP: rec.InstallFP,
-	}) == rec.AgentID {
+	if agentidentity.IsSID(agentidentity.NormalizeUserID(rec.UserID)) {
 		return false
+	}
+	inputs := agentidentity.Inputs{MachineHash: rec.MachineHash, UserID: rec.UserID, Account: holder, Connector: rec.Connector,
+		InstallFP: rec.InstallFP, Incarnation: agentIdentityIncarnation(rec.UserID)}
+	if agentidentity.AgentID(inputs) == rec.AgentID {
+		return false
+	}
+	if inputs.Incarnation != "" {
+		inputs.Incarnation = ""
+		if agentidentity.AgentID(inputs) == rec.AgentID {
+			return true
+		}
 	}
 	return rec.UserName == "" || agentidentity.UIDReassigned(rec.UserID, rec.UserName, holder)
 }

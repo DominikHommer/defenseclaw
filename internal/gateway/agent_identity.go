@@ -110,7 +110,7 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 	}
 	facts.ID = agentidentity.AgentID(agentidentity.Inputs{
 		MachineHash: facts.MachineHash, UserID: facts.UserID, Account: account,
-		Connector: facts.Connector, InstallFP: facts.InstallFP,
+		Connector: facts.Connector, InstallFP: facts.InstallFP, Incarnation: agentIdentityAccountIncarnation(user),
 	})
 	if facts.ID == "" {
 		return agentIdentityFacts{}
@@ -189,6 +189,21 @@ func agentIdentityAccount(user agentIdentityUser) string {
 		return user.Name
 	}
 	return ""
+}
+
+// agentIdentityAccountIncarnation is the account incarnation a uid's agent
+// identity is keyed on besides its name (agentidentity.Inputs.Incarnation):
+// "" for the first account the gateway saw hold the uid, and the token of
+// any other one (agentIdentityIncarnation). One bare name, uid and home in
+// two domains derived one agent ID, so the second account got the first
+// one's match.agents profile and its row of the agent identities ledger
+// (review of GAP-0947). A per-user gateway's own account and a SID are never
+// handed on.
+func agentIdentityAccountIncarnation(user agentIdentityUser) string {
+	if user.Self || agentidentity.IsSID(agentidentity.NormalizeUserID(user.ID)) {
+		return ""
+	}
+	return agentIdentityIncarnation(user.ID)
 }
 
 var gatewaySelf struct {
@@ -425,6 +440,7 @@ func inventoryAgentIdentityID(connectorName, userID, userName string) string {
 	return agentidentity.AgentID(agentidentity.Inputs{
 		MachineHash: machine, UserID: agentidentity.NormalizeUserID(user.ID), Account: account,
 		Connector: connectorName, InstallFP: agentIdentityInstallFP(connectorName, user),
+		Incarnation: agentIdentityAccountIncarnation(user),
 	})
 }
 

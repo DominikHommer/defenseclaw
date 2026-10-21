@@ -43,6 +43,10 @@ var userScopedIdentityHome = useridentity.HomeForID
 // is keyed on a SID, which no other account ever gets.
 var agentIdentityAccountName = func(string) string { return "" }
 
+// agentIdentityIncarnation keys no agent identity on an account incarnation
+// on Windows, for the same reason.
+var agentIdentityIncarnation = func(string) string { return "" }
+
 // managedHookPeerLastName keeps no last name off Linux and macOS, where no
 // sandbox runs.
 var managedHookPeerLastName = func(int) string { return "" }

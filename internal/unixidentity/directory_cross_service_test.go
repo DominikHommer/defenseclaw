@@ -47,6 +47,7 @@ func crossServiceResults() map[string]commandResult {
 		"initgroups alex":               {stdout: []byte("alex 80001 5000 9500 90001\n")},
 		"-s himmelblau initgroups alex": {stdout: []byte("alex 80001 5000\n")},
 		"-s ldap initgroups alex":       {stdout: []byte("alex 90001 9500\n")},
+		"-s ldap group":                 {stdout: []byte("other-team:x:9500:\n")},
 		"group 5000 80001":              {stdout: []byte("directory-team:x:5000:\ndirectory-primary:x:80001:\n")},
 		"group 9500 90001":              {stdout: []byte("other-team:x:9500:\nother-primary:x:90001:\n")},
 		"group 5000 9500 80001 90001":   {stdout: []byte("directory-team:x:5000:\nother-team:x:9500:\ndirectory-primary:x:80001:\nother-primary:x:90001:\n")},

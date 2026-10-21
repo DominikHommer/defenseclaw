@@ -152,69 +152,61 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		sid, inDomain string
 	)
 	if !isLocal {
-		data, readErr := readSmallFile(nsswitchPath, 1<<20)
-		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: read NSS configuration: %w", readErr)
+		// The facts are those of the service NSS answers the uid from, in
+		// the order of the passwd line (passwdOwner): a later service that
+		// still holds an older account under the uid, such as SSSD's cache
+		// of an account an LDAP or NIS service took the uid over from, names
+		// another account's SID, domain and groups (review of GAP-0551).
+		// A service DefenseClaw names no directory for (nis, compat) that
+		// answers keeps the facts plain.
+		service, _, ownerErr := r.passwdOwner(uid)
+		if ownerErr != nil && !IsNotFound(ownerErr) {
+			return useridentity.DirectoryFacts{}, ownerErr
 		}
-		if readErr == nil {
-			for _, service := range ParseNSSwitchServices(string(data), "passwd") {
-				known, ok := directoryServices[service]
-				if !ok {
-					continue
+		if known, ok := directoryServices[service]; ok && ownerErr == nil {
+			facts.Directory, facts.Source = known.directory, known.source
+			bare, domain := useridentity.SplitQualifiedName(account.Name)
+			switch {
+			case known.source == useridentity.SourceSSSD:
+				if sssd, err = dialSSSDNSS(r.context()); err != nil {
+					return useridentity.DirectoryFacts{}, err
 				}
-				if _, lookupErr := r.LookupUIDInService(service, uid); lookupErr != nil {
-					if IsNotFound(lookupErr) {
-						continue
-					}
-					// A directory that did not answer is not one that does not
-					// own the account.
-					return useridentity.DirectoryFacts{}, lookupErr
+				defer sssd.Close()
+				if sid, err = sssdAccountSID(sssd, uid); err != nil {
+					return useridentity.DirectoryFacts{}, err
 				}
-				facts.Directory, facts.Source = known.directory, known.source
-				bare, domain := useridentity.SplitQualifiedName(account.Name)
-				switch {
-				case known.source == useridentity.SourceSSSD:
-					if sssd, err = dialSSSDNSS(r.context()); err != nil {
-						return useridentity.DirectoryFacts{}, err
-					}
-					defer sssd.Close()
-					if sid, err = sssdAccountSID(sssd, uid); err != nil {
-						return useridentity.DirectoryFacts{}, err
-					}
-					if inDomain, err = r.applySSSDDomain(&facts, sssd, account.Name, sid); err != nil {
-						return useridentity.DirectoryFacts{}, err
-					}
-				case known.source == useridentity.SourceNSSLDAP:
-					// nslcd names an account by its uid attribute, which is an
-					// e-mail address for the Okta LDAP Interface and for
-					// directories that name accounts by mail, so the name gives
-					// no domain, realm or principal: an LDAP bob@corp.example.com
-					// took the principal of the AD bob (GAP-0730).
-				case domain == "":
-				case known.directory == useridentity.DirectoryEntraID:
-					// The aad module, and Himmelblau with cn_name_mapping =
-					// false, name an Entra ID account by its UPN. It has no
-					// Kerberos realm, and the UPN is the principal Windows
-					// reports for the same user. Himmelblau's default
-					// (cn_name_mapping = true) names it by the short name, which
-					// carries no domain: such an account has no UPN here
-					// (GAP-0328).
-					facts.Domain = strings.ToLower(domain)
-					facts.UPN = useridentity.NormalizeUPN(account.Name)
-					facts.Principal = facts.UPN
-				default:
-					// winbind: lower case, as Windows reports a NetBIOS domain
-					// it knows no DNS name for; applyRealm gives the DNS name
-					// of the realm a NetBIOS domain names.
-					facts.Domain = strings.ToLower(domain)
-					if strings.Contains(domain, ".") {
-						facts.Realm = strings.ToUpper(domain)
-						// sAMAccountName@REALM, the Kerberos principal winbind
-						// accounts authenticate as, in the UPN form.
-						facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
-					}
+				if inDomain, err = r.applySSSDDomain(&facts, sssd, account.Name, sid); err != nil {
+					return useridentity.DirectoryFacts{}, err
 				}
-				break
+			case known.source == useridentity.SourceNSSLDAP:
+				// nslcd names an account by its uid attribute, which is an
+				// e-mail address for the Okta LDAP Interface and for
+				// directories that name accounts by mail, so the name gives
+				// no domain, realm or principal: an LDAP bob@corp.example.com
+				// took the principal of the AD bob (GAP-0730).
+			case domain == "":
+			case known.directory == useridentity.DirectoryEntraID:
+				// The aad module, and Himmelblau with cn_name_mapping =
+				// false, name an Entra ID account by its UPN. It has no
+				// Kerberos realm, and the UPN is the principal Windows
+				// reports for the same user. Himmelblau's default
+				// (cn_name_mapping = true) names it by the short name, which
+				// carries no domain: such an account has no UPN here
+				// (GAP-0328).
+				facts.Domain = strings.ToLower(domain)
+				facts.UPN = useridentity.NormalizeUPN(account.Name)
+				facts.Principal = facts.UPN
+			default:
+				// winbind: lower case, as Windows reports a NetBIOS domain
+				// it knows no DNS name for; applyRealm gives the DNS name
+				// of the realm a NetBIOS domain names.
+				facts.Domain = strings.ToLower(domain)
+				if strings.Contains(domain, ".") {
+					facts.Realm = strings.ToUpper(domain)
+					// sAMAccountName@REALM, the Kerberos principal winbind
+					// accounts authenticate as, in the UPN form.
+					facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
+				}
 			}
 		}
 	}
@@ -448,8 +440,15 @@ func sambaWorkgroup() string {
 	if err != nil {
 		return ""
 	}
+	return strings.ToUpper(sambaGlobal(string(data), "workgroup"))
+}
+
+// sambaGlobal reads the value of key in the [global] section of smb.conf
+// content, or "". Samba compares parameter names without regard to case or
+// spacing.
+func sambaGlobal(content, key string) string {
 	global := false
-	for _, line := range strings.Split(string(data), "\n") {
+	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
 			continue
@@ -458,9 +457,9 @@ func sambaWorkgroup() string {
 			global = strings.EqualFold(strings.Trim(line, "[] \t"), "global")
 			continue
 		}
-		key, value, ok := strings.Cut(line, "=")
-		if global && ok && strings.EqualFold(strings.Join(strings.Fields(key), " "), "workgroup") {
-			return strings.ToUpper(strings.TrimSpace(value))
+		name, value, ok := strings.Cut(line, "=")
+		if global && ok && strings.EqualFold(strings.Join(strings.Fields(name), " "), key) {
+			return strings.TrimSpace(value)
 		}
 	}
 	return ""
@@ -1293,6 +1292,9 @@ func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Accou
 	}
 	candidates := []string{bare}
 	realms, realmErr := sameNameRealms(ctx)
+	if len(realms) > maxSameNameRealms {
+		realms = realms[:maxSameNameRealms]
+	}
 	for _, realm := range realms {
 		if realm.Domain != "" {
 			candidates = append(candidates, bare+"@"+realm.Domain)
@@ -1369,55 +1371,208 @@ func SameNameAccounts(ctx context.Context, r Resolver, account Account) ([]Accou
 // every joined domain while a directory configuration may serve one.
 var errNoJoinedDomain = errors.New("realmd lists no joined domain")
 
-// sameNameRealms returns the joined realms SameNameAccounts qualifies a bare
-// name with: the realms realmd lists now together with those of
-// fallbackRealms (the realms realmd last listed, the default realm of
-// krb5.conf, the domains of the SSSD configuration), so a second SSSD domain
-// one source does not name is still asked (review of GAP-1131). Its error
-// says the list may miss a domain: realmd neither lists a realm now nor
-// listed one before, NSS asks a directory, and that directory is winbind or
-// an Entra ID module, whose domains only realmd names here, or SSSD with a
-// configuration DefenseClaw cannot read in full (sssd.conf is readable by
-// root only), where the default realm of krb5.conf may be one of several
-// domains. A host with the sss module but no SSSD configuration, the RHEL
-// default, has no domain to miss.
+// errSSSDDomainsUnread is the reason a bare name is refused while SSSD
+// serves accounts and its configuration cannot be read in full: sssd.conf is
+// readable by root only, so an unprivileged reader (the managed gateway)
+// cannot tell every domain SSSD serves, and with qualified names a bare
+// lookup asks none of them.
+var errSSSDDomainsUnread = errors.New("the SSSD configuration cannot be read in full (sssd.conf is readable by root only), " +
+	"so not every domain SSSD serves is known")
+
+// maxSameNameRealms bounds the domains a bare name is qualified with, one
+// lookup each.
+const maxSameNameRealms = 64
+
+// sameNameRealms returns the domains SameNameAccounts qualifies a bare name
+// with: the realms realmd lists now, those of fallbackRealms (the realms
+// realmd last listed, the default realm of krb5.conf, the domains of the
+// SSSD configuration), the trusted subdomains SSSD discovered
+// (sssdSubdomains), the child domains ai_discovery.trusted_ad_child_domains
+// lists, and the domains winbind serves (winbindDomains), so a domain one
+// source does not name is still asked (review of GAP-1131). Its error says
+// the list may miss a domain, whatever realmd lists: realmd names only the
+// realms it joined, not a second domain an administrator configured. That
+// is so while SSSD serves accounts (the sss module and an SSSD
+// configuration) and its configuration cannot be read in full; while
+// winbind serves accounts and cannot list the domains it trusts; and while
+// an Entra ID module serves accounts and realmd neither lists a realm now
+// nor listed one before. A host with the sss module but no SSSD
+// configuration, the RHEL default, has no domain to miss.
 func sameNameRealms(ctx context.Context) ([]Realm, error) {
-	listed, err := hostRealms(ctx)
-	realms := append([]Realm(nil), listed...)
-	for _, realm := range fallbackRealms() {
-		if !slices.ContainsFunc(realms, func(known Realm) bool { return strings.EqualFold(known.Domain, realm.Domain) }) {
-			realms = append(realms, realm)
+	listed, realmErr := hostRealms(ctx)
+	var realms []Realm
+	add := func(realm Realm) {
+		if slices.ContainsFunc(realms, func(known Realm) bool {
+			return realm.Domain != "" && strings.EqualFold(known.Domain, realm.Domain) ||
+				realm.Domain == "" && strings.EqualFold(known.NetBIOS, realm.NetBIOS)
+		}) {
+			return
+		}
+		realms = append(realms, realm)
+	}
+	for _, realm := range slices.Concat(listed, fallbackRealms()) {
+		add(realm)
+	}
+	for _, domain := range slices.Concat(sssdSubdomains(), useridentity.TrustedADChildDomains()) {
+		if domain = strings.ToLower(strings.TrimSpace(domain)); domain != "" {
+			add(Realm{Domain: domain})
 		}
 	}
-	if err == nil && len(listed) > 0 || len(lastListedRealms()) > 0 || !nssConsultsDirectory() {
+	if !nssConsultsDirectory() {
 		return realms, nil
 	}
-	services, servicesErr := passwdProviders()
-	if servicesErr != nil {
-		return realms, servicesErr
-	}
-	_, sssdComplete := sssdDomains()
-	switch {
-	case slices.ContainsFunc(services, func(service string) bool { return qualifiedNameServices[service] }):
-	case slices.Contains(services, "sss") && sssdConfigured() && !sssdComplete:
-	default:
-		return realms, nil
-	}
+	services, err := passwdProviders()
 	if err != nil {
 		return realms, err
 	}
-	return realms, errNoJoinedDomain
+	var partial error
+	if slices.Contains(services, "sss") && sssdConfigured() {
+		if _, complete := sssdDomains(); !complete {
+			partial = errSSSDDomainsUnread
+		}
+	}
+	if slices.Contains(services, "winbind") {
+		domains, err := winbindDomains(ctx)
+		for _, netBIOS := range domains {
+			add(Realm{NetBIOS: netBIOS})
+		}
+		if err != nil && partial == nil {
+			partial = err
+		}
+	}
+	known := realmErr == nil && len(listed) > 0 || len(lastListedRealms()) > 0
+	if partial == nil && !known && slices.ContainsFunc(services, func(service string) bool { return entraIDServices[service] }) {
+		partial = errNoJoinedDomain
+		if realmErr != nil {
+			partial = realmErr
+		}
+	}
+	return realms, partial
 }
 
 var (
 	krb5ConfPath = "/etc/krb5.conf"
 	sssdConfPath = "/etc/sssd/sssd.conf"
 	sssdConfDir  = "/etc/sssd/conf.d"
+	// sssdPubconfKrb5Dir is where SSSD publishes, readable by any account,
+	// the Kerberos domain_realm mappings of its domains and of the trusted
+	// subdomains it discovers (domain_realm_<domain>), which no
+	// configuration file names.
+	sssdPubconfKrb5Dir = "/var/lib/sss/pubconf/krb5.include.d"
+	// wbinfoPaths are where Samba installs wbinfo, which lists the domains
+	// winbind trusts.
+	wbinfoPaths = []string{"/usr/bin/wbinfo"}
 )
 
-// qualifiedNameServices are the NSS passwd services that name accounts by a
-// domain-qualified name without an sssd.conf.
-var qualifiedNameServices = map[string]bool{"winbind": true, "himmelblau": true, "aad": true}
+// entraIDServices are the NSS passwd services of Entra ID, whose domains
+// only realmd names here.
+var entraIDServices = map[string]bool{"himmelblau": true, "aad": true}
+
+// sssdSubdomains lists the DNS domains of SSSD's published domain_realm
+// mappings (sssdPubconfKrb5Dir): its AD and IPA domains and the trusted
+// subdomains it discovered. With qualified names SSSD names a subdomain's
+// account name@subdomain, and a bare lookup reaches none of them.
+func sssdSubdomains() []string {
+	entries, err := os.ReadDir(sssdPubconfKrb5Dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "domain_realm_") || !entry.Type().IsRegular() {
+			continue
+		}
+		data, err := readSmallFile(filepath.Join(sssdPubconfKrb5Dir, entry.Name()), 1<<20)
+		if err != nil {
+			continue
+		}
+		section := ""
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+				section = strings.ToLower(strings.TrimSpace(line[1 : len(line)-1]))
+				continue
+			}
+			key, _, ok := strings.Cut(line, "=")
+			domain := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(key), "."))
+			if !ok || section != "domain_realm" || !strings.Contains(domain, ".") || strings.ContainsAny(domain, " \t@\\/") ||
+				slices.Contains(out, domain) {
+				continue
+			}
+			if out = append(out, domain); len(out) == maxSameNameRealms {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// winbindDomains lists the NetBIOS names of the domains winbind serves: the
+// workgroup of smb.conf and, unless smb.conf turns trusts off (allow trusted
+// domains = no), the domains winbind lists (wbinfo -m). Without smb.conf
+// winbind serves none. A list winbind cannot give is an error: the
+// DOMAIN\name twin in a trusted domain would go unasked.
+func winbindDomains(ctx context.Context) ([]string, error) {
+	data, err := readSmallFile(sambaConfPath, 1<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	var domains []string
+	if err == nil {
+		if workgroup := strings.ToUpper(sambaGlobal(string(data), "workgroup")); validNetBIOSCandidate(workgroup) {
+			domains = append(domains, workgroup)
+		}
+		switch strings.ToLower(sambaGlobal(string(data), "allow trusted domains")) {
+		case "no", "false", "off", "0":
+			if len(domains) > 0 {
+				return domains, nil
+			}
+		}
+	}
+	listed, err := winbindTrustedDomains(ctx)
+	if err != nil {
+		return domains, fmt.Errorf("unixidentity: list the domains winbind serves (wbinfo -m): %w", err)
+	}
+	for _, domain := range listed {
+		if !slices.Contains(domains, domain) {
+			domains = append(domains, domain)
+		}
+	}
+	return domains, nil
+}
+
+// winbindTrustedDomains asks winbind which domains it serves (wbinfo -m):
+// its own and the ones it trusts. Tests replace it.
+var winbindTrustedDomains = func(ctx context.Context) ([]string, error) {
+	path, err := firstTrustedTool(wbinfoPaths...)
+	if err != nil {
+		return nil, err
+	}
+	result, err := runTrustedCommand(ctx, path, []string{"-m"})
+	if err != nil {
+		return nil, err
+	}
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("wbinfo -m exited %d", result.exitCode)
+	}
+	return parseWbinfoDomains(string(result.stdout)), nil
+}
+
+// parseWbinfoDomains reads the NetBIOS domain names of wbinfo -m output, one
+// per line, without BUILTIN, which holds no user accounts.
+func parseWbinfoDomains(output string) []string {
+	var out []string
+	for _, line := range strings.Split(output, "\n") {
+		name := strings.ToUpper(strings.TrimSpace(line))
+		if name == "BUILTIN" || !validNetBIOSCandidate(name) || slices.Contains(out, name) {
+			continue
+		}
+		if out = append(out, name); len(out) == maxSameNameRealms {
+			break
+		}
+	}
+	return out
+}
 
 // sssdConfigured reports whether an SSSD configuration exists, readable or
 // not: sssd.conf or a conf.d snippet. Without one SSSD serves no domain.
@@ -1691,7 +1846,43 @@ func (r *NSSResolver) passwdServiceAnswers(service string) error {
 	case memberListServices[service]:
 		return r.serviceAnswers(service)
 	}
-	return fmt.Errorf("unixidentity: cannot tell whether NSS service %s answers: %w", service, errDirectoryUnconfirmed)
+	return fmt.Errorf("unixidentity: cannot tell whether NSS service %s answers: %w: %w", service, errServiceUncheckable, errDirectoryUnconfirmed)
+}
+
+// errServiceUncheckable marks an NSS service DefenseClaw has no way to see
+// answer (passwdServiceAnswers).
+var errServiceUncheckable = errors.New("DefenseClaw has no check for this NSS service")
+
+// passwdOwner names the NSS passwd service that holds uid, asking the
+// services of the passwd line in order as glibc does (passwdProviders), with
+// its answer. A service's "no such account" passes the uid on only when the
+// service shows that it answers (passwdServiceAnswers): getent reports an
+// nslcd, ypbind, winbindd or SSSD that cannot answer the same way, and an
+// account a later service still holds under the uid is then not proved to be
+// the one the uid belongs to. A service DefenseClaw has no check for (an
+// Entra ID module, another module) is taken at its word, as before.
+// ErrNotFound when every service says no account holds it.
+func (r *NSSResolver) passwdOwner(uid int) (string, Account, error) {
+	services, err := passwdProviders()
+	if err != nil {
+		return "", Account{}, err
+	}
+	for _, service := range services {
+		if !validServiceName(service) {
+			continue
+		}
+		account, err := r.LookupUIDInService(service, uid)
+		if err == nil {
+			return service, account, nil
+		}
+		if !IsNotFound(err) {
+			return "", Account{}, err
+		}
+		if err := r.passwdServiceAnswers(service); err != nil && !errors.Is(err, errServiceUncheckable) {
+			return "", Account{}, fmt.Errorf("unixidentity: NSS service %s holds no uid %d but cannot show that it answers: %w", service, uid, err)
+		}
+	}
+	return "", Account{}, ErrNotFound
 }
 
 // winbindPipes are the sockets winbindd serves the NSS module on, the
@@ -1714,14 +1905,18 @@ func winbindAnswers(ctx context.Context) error {
 	return fmt.Errorf("unixidentity: winbindd does not answer: %w", errors.Join(errs...))
 }
 
-// AccountIncarnation names the directory account that holds uid, where its
-// name, uid and home cannot: the SID SSSD holds for it ("sid:S-1-5-..."),
-// "sss" for an SSSD account without one, "files" for an account of
-// /etc/passwd, "nss" for an account of another service while SSSD answers.
-// Two accounts of one name, uid and home in two domains, or one deleted and
-// created again with another SID, differ in it, so the gateway does not
-// serve the facts it cached for one to the other. known is false when it
-// cannot tell: the passwd line does not name sss, or SSSD does not answer.
+// AccountIncarnation names the account that holds uid, where its name, uid
+// and home cannot: "files" for an account of /etc/passwd, and otherwise by
+// the NSS service that answers the uid (passwdOwner): the SID SSSD holds for
+// an SSSD account ("sid:S-1-5-..."), "sss" for one without a SID, and
+// "nss:<service>" for an account of another service (nss:ldap, nss:nis,
+// nss:winbind). Two accounts of one name, uid and home in two domains, one
+// deleted and created again with another SID, or an SSSD account whose uid an
+// LDAP account took over while SSSD still caches the first one's SID, differ
+// in it, so the gateway does not serve the facts or the guardian record of
+// one to the other (review of GAP-0551). known is false when it cannot tell:
+// a service before the owner cannot show that it answers, the owner names
+// another account than name, or SSSD does not answer.
 func (r *NSSResolver) AccountIncarnation(uid int, name string) (string, bool) {
 	local, err := LocalAccounts(r.context())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1730,9 +1925,12 @@ func (r *NSSResolver) AccountIncarnation(uid int, name string) (string, bool) {
 	if localUID, ok := local[name]; ok && localUID == uid {
 		return "files", true
 	}
-	data, err := readSmallFile(nsswitchPath, 1<<20)
-	if err != nil || !slices.Contains(ParseNSSwitchServices(string(data), "passwd"), "sss") {
+	service, owner, err := r.passwdOwner(uid)
+	if err != nil || owner.Name != name {
 		return "", false
+	}
+	if service != "sss" {
+		return "nss:" + service, true
 	}
 	sssd, err := dialSSSDNSS(r.context())
 	if err != nil {
@@ -1746,11 +1944,5 @@ func (r *NSSResolver) AccountIncarnation(uid int, name string) (string, bool) {
 	if sid != "" {
 		return "sid:" + strings.ToUpper(sid), true
 	}
-	switch _, err := r.LookupUIDInService("sss", uid); {
-	case err == nil:
-		return "sss", true
-	case IsNotFound(err):
-		return "nss", true
-	}
-	return "", false
+	return "sss", true
 }
