@@ -171,6 +171,8 @@ $script:ScExe = [IO.Path]::Combine($script:System32, 'sc.exe')
 # Windows 10/11 .NET revisions; the main setter is the native Set-Acl.
 $script:IcaclsExe = [IO.Path]::Combine($script:System32, 'icacls.exe')
 $script:DefenseClawNativeSecurityType = $null
+# This computer's own account domain SID (Get-DefenseClawAccountDomainSID).
+$script:DefenseClawAccountDomainSID = $null
 
 # Enterprise profile. SecureClient is the Cisco Secure Client (AVC)
 # deployment and the only profile a caller gets without asking: every root,
@@ -963,6 +965,98 @@ namespace $nativeNamespace
                 }
             }
             return -1;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LSA_OBJECT_ATTRIBUTES
+        {
+            internal int Length;
+            internal IntPtr RootDirectory;
+            internal IntPtr ObjectName;
+            internal uint Attributes;
+            internal IntPtr SecurityDescriptor;
+            internal IntPtr SecurityQualityOfService;
+        }
+
+        // POLICY_ACCOUNT_DOMAIN_INFO: an LSA_UNICODE_STRING, then the SID.
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POLICY_ACCOUNT_DOMAIN_INFO
+        {
+            internal ushort DomainNameLength;
+            internal ushort DomainNameMaximumLength;
+            internal IntPtr DomainNameBuffer;
+            internal IntPtr DomainSid;
+        }
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaOpenPolicy(
+            IntPtr systemName,
+            ref LSA_OBJECT_ATTRIBUTES objectAttributes,
+            uint desiredAccess,
+            out IntPtr policyHandle);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaQueryInformationPolicy(
+            IntPtr policyHandle,
+            int informationClass,
+            out IntPtr buffer);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaFreeMemory(IntPtr buffer);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaClose(IntPtr policyHandle);
+
+        [DllImport("advapi32.dll")]
+        private static extern int GetLengthSid(IntPtr sid);
+
+        // The SID of this computer's own account domain (its SAM), in binary
+        // form, or null when it cannot be read.
+        public static byte[] AccountDomainSid()
+        {
+            LSA_OBJECT_ATTRIBUTES attributes = new LSA_OBJECT_ATTRIBUTES();
+            attributes.Length = Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES));
+            IntPtr policy;
+            // POLICY_VIEW_LOCAL_INFORMATION
+            if (LsaOpenPolicy(IntPtr.Zero, ref attributes, 0x00000001, out policy) != 0)
+            {
+                return null;
+            }
+            try
+            {
+                IntPtr buffer;
+                // PolicyAccountDomainInformation
+                if (LsaQueryInformationPolicy(policy, 5, out buffer) != 0 || buffer == IntPtr.Zero)
+                {
+                    return null;
+                }
+                try
+                {
+                    POLICY_ACCOUNT_DOMAIN_INFO info = (POLICY_ACCOUNT_DOMAIN_INFO)Marshal.PtrToStructure(
+                        buffer,
+                        typeof(POLICY_ACCOUNT_DOMAIN_INFO));
+                    if (info.DomainSid == IntPtr.Zero)
+                    {
+                        return null;
+                    }
+                    int length = GetLengthSid(info.DomainSid);
+                    if (length <= 0 || length > 68)
+                    {
+                        return null;
+                    }
+                    byte[] sid = new byte[length];
+                    Marshal.Copy(info.DomainSid, sid, 0, length);
+                    return sid;
+                }
+                finally
+                {
+                    LsaFreeMemory(buffer);
+                }
+            }
+            finally
+            {
+                LsaClose(policy);
+            }
         }
 
         private static SECURITY_ATTRIBUTES SecurityAttributes(string sddl, out IntPtr descriptor)
@@ -4757,6 +4851,37 @@ $script:VendorDirectoryUsersRights = [Security.AccessControl.FileSystemRights](0
 # identical entry an administrator had set, which it must keep (GAP-0867).
 $script:VendorDirectoryUsersGrantRights = [Security.AccessControl.FileSystemRights](0x1200a8)
 
+# The SID of this computer's own account domain (its SAM), read once, or ''
+# when it cannot be read.
+function Get-DefenseClawAccountDomainSID {
+    if ($null -eq $script:DefenseClawAccountDomainSID) {
+        $value = ''
+        try {
+            $native = Initialize-DefenseClawNativeSecurity
+            $bytes = $native::AccountDomainSid()
+            if ($null -ne $bytes) {
+                $value = [Security.Principal.SecurityIdentifier]::new([byte[]]$bytes, 0).Value
+            }
+        }
+        catch {
+            $value = ''
+        }
+        $script:DefenseClawAccountDomainSID = $value
+    }
+    return [string]$script:DefenseClawAccountDomainSID
+}
+
+# Whether SID is an account SID of this computer's own account domain.
+function Test-DefenseClawAccountDomainSID {
+    param([Parameter(Mandatory)][string]$SID)
+    $domain = Get-DefenseClawAccountDomainSID
+    return (
+        -not [string]::IsNullOrEmpty($domain) -and
+        $SID.StartsWith($domain + '-', [StringComparison]::OrdinalIgnoreCase) -and
+        $SID.Substring($domain.Length + 1) -cmatch '^\d+$'
+    )
+}
+
 # Whether a deny entry for SID can take access away from an enrolled user's
 # token. LocalSystem, the service accounts, per-service SIDs, anonymous logon
 # and app-container or capability SIDs never can. A built-in or well-known
@@ -4764,9 +4889,13 @@ $script:VendorDirectoryUsersGrantRights = [Security.AccessControl.FileSystemRigh
 # group or alias the lookup finds. An account SID (local, domain or Entra ID)
 # applies when it is an enrolled user (EnrolledSIDs: the account profiles on
 # this computer); a user that is not, a deleted account or a computer does
-# not, and neither does a local or domain SID no account has (a retired
-# account), so a stale deny no longer stops install and repair (GAP-1142
-# review). A lookup that fails counts the deny.
+# not, and neither does a SID of this computer's own accounts that no account
+# has (a retired local account), so a stale local deny no longer stops
+# install and repair (GAP-1142 review). Only this computer's own SAM answers
+# "no account has it" alone. For a domain or Entra ID SID that answer can
+# come from a domain controller that did not respond in time, or miss a
+# real group an enrolled user's token holds, so that deny counts, as does a
+# lookup that fails (GAP-1142 review, loop round 1).
 function Test-DefenseClawUserTokenDenySID {
     param(
         [Parameter(Mandatory)][string]$SID,
@@ -4795,9 +4924,7 @@ function Test-DefenseClawUserTokenDenySID {
     $native = Initialize-DefenseClawNativeSecurity
     $use = $native::LookupSidUse($bytes)
     if ($use -eq 0) {
-        # Entra ID lookups miss real groups; only a local or domain SID that
-        # no account has is a retired one.
-        return -not $domainAccount
+        return -not ($domainAccount -and (Test-DefenseClawAccountDomainSID -SID $SID))
     }
     return ($use -lt 0 -or $use -in @(2, 4, 5))
 }
@@ -4808,7 +4935,9 @@ function Test-DefenseClawUserTokenDenySID {
 # takes any away. INTERACTIVE is not in the token of a scheduled task or an
 # SSH logon, so an allow for it alone does not count (GAP-1439); a deny for
 # an enrolled user or for a group, a domain group included, does (GAP-1142),
-# and a deny for an account that is not enrolled or no longer exists does not.
+# and so does one for a domain SID the lookup cannot map; a deny for an
+# account that is not enrolled, or for a local account that no longer
+# exists, does not.
 function Test-DefenseClawStandaloneVendorUsersRead {
     param([Parameter(Mandatory)][string]$Path)
     $required = [int64]$script:VendorDirectoryUsersRights
@@ -22785,7 +22914,9 @@ function Assert-DefenseClawEnterpriseDeployment {
             throw (
                 "standard users cannot read the permissions of $ancestor, so every enrolled user's hook fails closed " +
                 '(enterprise_machine_policy_summary_untrusted). Run Setup /repair, which grants BUILTIN\Users ' +
-                "read-permissions and traverse on that folder alone, or run icacls `"$ancestor`" /grant *S-1-5-32-545:(S,RC,RA,X)"
+                "read-permissions and traverse on that folder alone, or run icacls `"$ancestor`" /grant *S-1-5-32-545:(S,RC,RA,X). " +
+                'A deny entry on that folder for a group, a domain account or an enrolled user takes that access away too, ' +
+                'and repair keeps it: remove that entry'
             )
         }
     }
@@ -26250,9 +26381,14 @@ function Remove-DefenseClawSelfUninstallEnvironment {
 }
 
 function Get-DefenseClawSelfUninstallHelperContent {
+    # -DeferredRetirement: the finalizer of an uninstall whose InstallRoot
+    # retirement was deferred (Start-DefenseClawDeferredSelfUninstallRetirement)
+    # runs the same module from InstallRoot until it retires it. Without it
+    # the content is the one earlier releases wrote.
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)]$Receipt
+        [Parameter(Mandatory)]$Receipt,
+        [switch]$DeferredRetirement
     )
     $retiredModulePath = Microsoft.PowerShell.Management\Join-Path `
         ([string]$Receipt.retired_install_root) `
@@ -26266,6 +26402,15 @@ function Get-DefenseClawSelfUninstallHelperContent {
         "'",
         "''"
     )
+    $moduleSelection = ''
+    if ($DeferredRetirement) {
+        $canonicalModuleLiteral = (
+            [string](Microsoft.PowerShell.Management\Join-Path `
+                ([string]$Receipt.install_root) `
+                'libexec\DefenseClawEnterprise.psm1')
+        ).Replace("'", "''")
+        $moduleSelection = "; if (-not [IO.File]::Exists(`$modulePath)) { `$modulePath = '$canonicalModuleLiteral' }"
+    }
     # This is an expandable here-string: a backtick before a newline is an
     # escape here, not a line continuation, so every generated command must
     # stay on one line.
@@ -26277,7 +26422,7 @@ Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
 `$ErrorActionPreference = 'Stop'
 try {
     `$receiptPath = '$receiptLiteral'
-    `$modulePath = '$moduleLiteral'
+    `$modulePath = '$moduleLiteral'$moduleSelection
     `$expectedModuleHash = '$moduleHashLiteral'
     if (-not [IO.File]::Exists(`$modulePath)) {
         throw "retired self-uninstall module is missing: `$modulePath"
@@ -26352,35 +26497,52 @@ function Assert-DefenseClawSelfUninstallHelper {
     return $helperPath
 }
 
-function Ensure-DefenseClawSelfUninstallHelper {
-    param(
-        [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)]$Receipt
-    )
-    [void](Initialize-DefenseClawSelfUninstallEnvironment `
-        -Layout $Layout)
-    $content = Get-DefenseClawSelfUninstallHelperContent `
-        -Layout $Layout `
-        -Receipt $Receipt
-    $expectedBytes = [Text.UTF8Encoding]::new($false).GetBytes($content)
+function Get-DefenseClawTextSHA256 {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
     $algorithm = [Security.Cryptography.SHA256]::Create()
     try {
-        $expectedHash = (
+        return (
             [BitConverter]::ToString(
-                $algorithm.ComputeHash($expectedBytes)
+                $algorithm.ComputeHash([Text.UTF8Encoding]::new($false).GetBytes($Value))
             ).Replace('-', '').ToLowerInvariant()
         )
     }
     finally {
         $algorithm.Dispose()
     }
+}
+
+function Ensure-DefenseClawSelfUninstallHelper {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Receipt,
+        [switch]$DeferredRetirement
+    )
+    [void](Initialize-DefenseClawSelfUninstallEnvironment `
+        -Layout $Layout)
+    $content = Get-DefenseClawSelfUninstallHelperContent `
+        -Layout $Layout `
+        -Receipt $Receipt `
+        -DeferredRetirement:$DeferredRetirement
+    $expectedHash = Get-DefenseClawTextSHA256 -Value $content
     if (Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.SelfUninstallHelperPath) {
         if (-not [string]::IsNullOrWhiteSpace(
                 [string]$Receipt.helper_sha256
             ) -and
             [string]$Receipt.helper_sha256 -cne $expectedHash) {
-            throw 'existing self-uninstall finalizer belongs to different protected receipt content'
+            # The finalizer of a deferred InstallRoot retirement (or the usual
+            # one, when this run defers) keeps the content it was started with.
+            $otherHash = Get-DefenseClawTextSHA256 -Value (
+                Get-DefenseClawSelfUninstallHelperContent `
+                    -Layout $Layout `
+                    -Receipt $Receipt `
+                    -DeferredRetirement:(-not $DeferredRetirement)
+            )
+            if ([string]$Receipt.helper_sha256 -cne $otherHash) {
+                throw 'existing self-uninstall finalizer belongs to different protected receipt content'
+            }
+            $expectedHash = $otherHash
         }
         $Receipt.helper_sha256 = $expectedHash
         return Assert-DefenseClawSelfUninstallHelper `
@@ -27371,6 +27533,246 @@ function Invoke-DefenseClawSelfUninstallRecovery {
     }
 }
 
+# Writes the finalizer of a prepared receipt and records its hash in the
+# receipt, so the finalizer can start before the InstallRoot retirement it
+# finishes.
+function Set-DefenseClawSelfUninstallReceiptHelper {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $receipt = Get-DefenseClawSelfUninstallReceipt `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Required
+    if ([string]$receipt.phase -cne 'prepared_install_retirement') {
+        throw 'only a prepared self-uninstall receipt can defer its InstallRoot retirement'
+    }
+    [void](Ensure-DefenseClawSelfUninstallHelper `
+        -Layout $Layout `
+        -Receipt $receipt `
+        -DeferredRetirement)
+    Write-DefenseClawJsonAtomic `
+        -Value $receipt `
+        -Path $Layout.SelfUninstallReceiptPath
+    Set-DefenseClawPathAcl `
+        -Path $Layout.SelfUninstallReceiptPath `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+    return Get-DefenseClawSelfUninstallReceipt `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Required
+}
+
+# The committed uninstall whose InstallRoot a program still held after the
+# commit (Invoke-DefenseClawCommittedInstallRootRetirement). The services and
+# hooks are gone and the tombstone is written; what is left is the retirement
+# of InstallRoot and the committed cleanup (with purge when it was
+# requested). The receipt stays prepared and the teardown journal stays (its
+# finalized phase tells the retirement the hooks are already removed), and
+# the detached finalizer is started: once the CLI exits it retires
+# InstallRoot when the program lets go, runs that cleanup, and removes the
+# retired tree. A finalizer that runs out of time leaves the receipt, and
+# the next Uninstall finishes the same work. The result says the cleanup is
+# pending, and why.
+function Start-DefenseClawDeferredSelfUninstallRetirement {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [AllowNull()]$Finalization,
+        [Parameter(Mandatory)][string]$Reason
+    )
+    try {
+        $receipt = Set-DefenseClawSelfUninstallReceiptHelper `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+        [void](Start-DefenseClawSelfUninstallHelper `
+            -Layout $Layout `
+            -Receipt $receipt)
+    }
+    catch {
+        throw (
+            'Uninstall committed, but a program still holds a file in InstallRoot and the detached cleanup ' +
+            "could not start; protected recovery state was retained, retry Uninstall: $($_.Exception.Message)"
+        )
+    }
+    $result = Get-DefenseClawLifecycleStatus `
+        -Action 'Uninstall' `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName
+    $result = Add-DefenseClawUserRegistrationCleanupResult `
+        -Result $result `
+        -Layout $Layout `
+        -Finalization $Finalization
+    $result |
+        Microsoft.PowerShell.Utility\Add-Member `
+            -MemberType NoteProperty `
+            -Name install_root_retirement_deferred `
+            -Value (ConvertTo-DefenseClawBoundedDiagnostic -Value (
+                "a program holds a file in $($Layout.InstallRoot) ($Reason); the detached cleanup " +
+                'removes it, and finishes the uninstall cleanup, once that program closes it'
+            )) `
+            -Force
+    return Add-DefenseClawSelfUninstallResult `
+        -Result $result `
+        -Layout $Layout `
+        -Receipt $receipt `
+        -CleanupPending:$true
+}
+
+# What a deferred retirement checks before it renames InstallRoot: the
+# uninstall committed (no pending transaction, no service, the receipt's own
+# tombstone).
+function Assert-DefenseClawDeferredRetirementState {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Receipt
+    )
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
+        throw 'deferred self-uninstall retirement found pending transaction evidence'
+    }
+    foreach ($name in @(Get-DefenseClawManagedServiceNames `
+            -GatewayServiceName ([string]$Receipt.gateway_service) `
+            -GuardianServiceName ([string]$Receipt.guardian_service))) {
+        if (Test-DefenseClawServiceExists -Name $name) {
+            throw "deferred self-uninstall retirement found live service: $name"
+        }
+    }
+    $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
+    [void](Assert-DefenseClawMetadataIdentity `
+        -Metadata $metadata `
+        -GatewayServiceName ([string]$Receipt.gateway_service) `
+        -GuardianServiceName ([string]$Receipt.guardian_service))
+    if (Test-DefenseClawMetadataInstalled -Metadata $metadata) {
+        throw 'deferred self-uninstall retirement found installed metadata'
+    }
+    $tombstoneHash = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.MetadataPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($tombstoneHash -cne [string]$Receipt.tombstone_sha256) {
+        throw 'deferred self-uninstall retirement found a changed tombstone'
+    }
+}
+
+# What the committed uninstall does after it renamed InstallRoot aside, in
+# its order, for a deferred retirement: protect the retired tree, retire the
+# teardown journal, commit the receipt, then the committed cleanup.
+function Complete-DefenseClawRetiredSelfUninstallCommit {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Receipt
+    )
+    $gatewayServiceName = [string]$Receipt.gateway_service
+    $guardianServiceName = [string]$Receipt.guardian_service
+    [void](Set-DefenseClawRetiredInstallTreeAcls `
+        -Layout $Layout `
+        -RetiredRoot ([string]$Receipt.retired_install_root))
+    [void](Remove-DefenseClawCommittedManagedHooksTeardownJournal `
+        -Layout $Layout `
+        -GatewayServiceName $gatewayServiceName `
+        -GuardianServiceName $guardianServiceName)
+    [void](Set-DefenseClawSelfUninstallReceiptCommitted `
+        -Layout $Layout `
+        -GatewayServiceName $gatewayServiceName `
+        -GuardianServiceName $guardianServiceName)
+    [void](Invoke-DefenseClawCommittedUninstallCleanup `
+        -Layout $Layout `
+        -GatewayServiceName $gatewayServiceName `
+        -GuardianServiceName $guardianServiceName `
+        -Purge:([bool]$Receipt.purge_requested))
+}
+
+# The deferred half of a self-uninstall (Start-DefenseClawDeferredSelfUninstallRetirement),
+# run by its finalizer once the CLI exited. Under the lifecycle lock it
+# renames InstallRoot aside once, and on a holder waits outside the lock and
+# tries again until Deadline. It returns 'retired' when InstallRoot is
+# retired and the committed cleanup ran (the retired tree is removed next),
+# 'not_deferred' when another run retired it first, and 'finished' when
+# another run finished the whole receipt.
+function Complete-DefenseClawDeferredSelfUninstallRetirement {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Receipt,
+        [Parameter(Mandatory)][DateTime]$Deadline,
+        [ValidateRange(50, 60000)][int]$RetryIntervalMilliseconds = 1000
+    )
+    $gatewayServiceName = [string]$Receipt.gateway_service
+    $guardianServiceName = [string]$Receipt.guardian_service
+    while ($true) {
+        $inUse = $null
+        $lock = Enter-DefenseClawLifecycleLock -Layout $Layout
+        try {
+            $current = Get-DefenseClawSelfUninstallReceipt `
+                -Layout $Layout `
+                -GatewayServiceName $gatewayServiceName `
+                -GuardianServiceName $guardianServiceName
+            if ($null -eq $current) {
+                return 'finished'
+            }
+            if ([string]$current.phase -cne 'prepared_install_retirement' -or
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.InstallRoot `
+                    -PathType Container)) {
+                return 'not_deferred'
+            }
+            if (Test-DefenseClawSelfUninstallCallerRunning `
+                -Layout $Layout `
+                -Receipt $current) {
+                throw 'self-uninstall finalizer refuses the deferred InstallRoot retirement while exact caller identity is running'
+            }
+            [void](Assert-DefenseClawDeferredRetirementState -Layout $Layout -Receipt $current)
+            # The hooks were removed before the commit; this returns at once
+            # on the finalized journal, after it checked the InstallRoot tree
+            # and the recorded artifacts.
+            [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+                -Layout $Layout `
+                -GatewayServiceName $gatewayServiceName `
+                -GuardianServiceName $guardianServiceName `
+                -Purge:([bool]$current.purge_requested))
+            $retiredRoot = [string]$current.retired_install_root
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $retiredRoot) {
+                throw 'deferred self-uninstall retirement found both canonical and retired InstallRoot'
+            }
+            try {
+                [IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)
+            }
+            catch {
+                if (-not (Test-DefenseClawInstallRootInUseException -Exception $_.Exception)) {
+                    throw
+                }
+                $inUse = $_
+            }
+            if ($null -eq $inUse) {
+                if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.InstallRoot) -or
+                    -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $retiredRoot -PathType Container)) {
+                    throw 'deferred self-uninstall InstallRoot retirement did not complete exactly'
+                }
+                [void](Complete-DefenseClawRetiredSelfUninstallCommit -Layout $Layout -Receipt $current)
+                return 'retired'
+            }
+        }
+        finally {
+            [void](Exit-DefenseClawLifecycleLock -Lock $lock)
+        }
+        if ([DateTime]::UtcNow -ge $Deadline) {
+            throw (
+                'a program still holds a file in InstallRoot, so the deferred self-uninstall retirement ' +
+                "stopped; the next Uninstall finishes it: $($inUse.Exception.Message)"
+            )
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $RetryIntervalMilliseconds
+    }
+}
+
 # The standalone install root sits in C:\Program Files\Cisco, which the
 # install creates. A CLI uninstall still runs from the install root when it
 # finishes, so the empty parent can go only once this finalizer has removed
@@ -27472,11 +27874,29 @@ function Complete-DefenseClawSelfUninstallRetirement {
                 'libexec\DefenseClawEnterprise.psm1'
         )
     ).TrimEnd('\')
-    if (-not [string]::Equals(
+    # The finalizer of a deferred InstallRoot retirement runs the same module
+    # (the receipt's hash) from InstallRoot until it retires it.
+    $canonicalModulePath = [IO.Path]::GetFullPath(
+        (
+            Microsoft.PowerShell.Management\Join-Path `
+                ([string]$receipt.install_root) `
+                'libexec\DefenseClawEnterprise.psm1'
+        )
+    ).TrimEnd('\')
+    $deferredRetirement = (
+        [string]$receipt.phase -ceq 'prepared_install_retirement' -and
+        [string]::Equals(
             $loadedModulePath,
-            $expectedModulePath,
+            $canonicalModulePath,
             [StringComparison]::OrdinalIgnoreCase
-        ) -or
+        )
+    )
+    if ((-not $deferredRetirement -and
+            -not [string]::Equals(
+                $loadedModulePath,
+                $expectedModulePath,
+                [StringComparison]::OrdinalIgnoreCase
+            )) -or
         (
             Microsoft.PowerShell.Utility\Get-FileHash `
                 -LiteralPath $loadedModulePath `
@@ -27493,6 +27913,13 @@ function Complete-DefenseClawSelfUninstallRetirement {
     $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(
         $CleanupTimeoutSeconds
     )
+    if ($deferredRetirement -and
+        (Complete-DefenseClawDeferredSelfUninstallRetirement `
+            -Layout $layout `
+            -Receipt $receipt `
+            -Deadline $cleanupDeadline) -ceq 'finished') {
+        return
+    }
     $retryDelayMilliseconds = 200
     while ($true) {
         $cleanupFailure = $null
@@ -27622,6 +28049,14 @@ function Complete-DefenseClawSelfUninstallRetirement {
         }
         finally {
             Exit-DefenseClawLifecycleLock -Lock $lock
+            if ($script:DefenseClawRemoveLifecycleLockOnExit -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $layout.SelfUninstallReceiptPath)) {
+                # A deferred retirement ran a standalone purge in this
+                # finalizer; its lifecycle lock goes as the purge's own does.
+                $script:DefenseClawRemoveLifecycleLockOnExit = $false
+                Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout
+            }
         }
         if ($null -eq $cleanupFailure) {
             return
@@ -28296,6 +28731,20 @@ $script:StateRootRemovalRetryIntervalMilliseconds = 500
 $script:InstallRootRetirementRetryMilliseconds = 60000
 $script:InstallRootRetirementRetryIntervalMilliseconds = 250
 
+# Whether a failed rename of InstallRoot failed because a program holds a
+# file in it: 0x80070005 access denied (a running image or an open file
+# inside the folder), 0x80070020 or 0x80070021.
+function Test-DefenseClawInstallRootInUseException {
+    param([AllowNull()][Exception]$Exception)
+    while ($null -ne $Exception) {
+        if ([int]$Exception.HResult -in @(-2147024891, -2147024864, -2147024863)) {
+            return $true
+        }
+        $Exception = $Exception.InnerException
+    }
+    return $false
+}
+
 function Move-DefenseClawInstallRootForRetirement {
     <#
         Renames InstallRoot aside for the self-uninstall finalizer. Windows
@@ -28317,17 +28766,7 @@ function Move-DefenseClawInstallRootForRetirement {
             return
         }
         catch {
-            $exception = $_.Exception
-            $inUse = $false
-            while ($null -ne $exception) {
-                # 0x80070005 access denied (a running image or open file
-                # inside the folder), 0x80070020, 0x80070021
-                if ([int]$exception.HResult -in @(-2147024891, -2147024864, -2147024863)) {
-                    $inUse = $true
-                    break
-                }
-                $exception = $exception.InnerException
-            }
+            $inUse = Test-DefenseClawInstallRootInUseException -Exception $_.Exception
             if (-not $inUse -or
                 $clock.ElapsedMilliseconds -ge $script:InstallRootRetirementRetryMilliseconds) {
                 throw
@@ -28361,6 +28800,37 @@ function Assert-DefenseClawInstallRootRetirable {
     }
     [IO.Directory]::Move($Destination, $Source)
     Assert-DefenseClawNoReparsePath -Path $Source
+}
+
+# Renames InstallRoot aside after the uninstall committed. The pre-commit
+# probe proves the rename then, but a program can open a file in InstallRoot
+# after it (an antivirus scan, an administrator's window) and hold it past
+# the retry window; that failed the committed uninstall with 1603 and the
+# services already removed. Such a holder now defers the retirement to the
+# detached finalizer (Start-DefenseClawDeferredSelfUninstallRetirement),
+# which finishes it once the program lets go (GAP-0149 review, loop round
+# 1). Returns '' when InstallRoot was retired, or the holder's error when the
+# retirement is deferred; any other failure is thrown.
+function Invoke-DefenseClawCommittedInstallRootRetirement {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    try {
+        Move-DefenseClawInstallRootForRetirement -Source $Source -Destination $Destination
+    }
+    catch {
+        if (-not (Test-DefenseClawInstallRootInUseException -Exception $_.Exception) -or
+            -not [IO.Directory]::Exists($Source) -or
+            [IO.Directory]::Exists($Destination)) {
+            throw
+        }
+        return [string]$_.Exception.Message
+    }
+    if ([IO.Directory]::Exists($Source) -or -not [IO.Directory]::Exists($Destination)) {
+        throw 'atomic self-uninstall InstallRoot retirement did not complete exactly'
+    }
+    return ''
 }
 
 function Test-DefenseClawFileInUseError {
@@ -33301,6 +33771,7 @@ function Invoke-DefenseClawUninstallLifecycle {
         throw $operationError
     }
     $finalization = $null
+    $retirementDeferred = ''
     try {
         if ($useNativeInstallCleanup) {
             [void](Invoke-DefenseClawUninstallInstallRootNativeCleanup `
@@ -33318,17 +33789,14 @@ function Invoke-DefenseClawUninstallLifecycle {
             -NativeSealed:$useNativeInstallCleanup
         if ($null -ne $selfUninstallReceipt) {
             $retiredRoot = [string]$selfUninstallReceipt.retired_install_root
-            Move-DefenseClawInstallRootForRetirement -Source $Layout.InstallRoot -Destination $retiredRoot
-            if ((Microsoft.PowerShell.Management\Test-Path `
-                    -LiteralPath $Layout.InstallRoot) -or
-                -not (Microsoft.PowerShell.Management\Test-Path `
-                    -LiteralPath $retiredRoot `
-                    -PathType Container)) {
-                throw 'atomic self-uninstall InstallRoot retirement did not complete exactly'
+            $retirementDeferred = Invoke-DefenseClawCommittedInstallRootRetirement `
+                -Source $Layout.InstallRoot `
+                -Destination $retiredRoot
+            if ([string]::IsNullOrEmpty($retirementDeferred)) {
+                Set-DefenseClawRetiredInstallTreeAcls `
+                    -Layout $Layout `
+                    -RetiredRoot $retiredRoot
             }
-            Set-DefenseClawRetiredInstallTreeAcls `
-                -Layout $Layout `
-                -RetiredRoot $retiredRoot
         }
         else {
             if ($useNativeInstallCleanup) {
@@ -33353,6 +33821,14 @@ function Invoke-DefenseClawUninstallLifecycle {
             'Uninstall committed, but managed runtime finalization or binary ' +
             "retirement failed; retry Uninstall to finish cleanup: $($_.Exception.Message)"
         )
+    }
+    if (-not [string]::IsNullOrEmpty($retirementDeferred)) {
+        return Start-DefenseClawDeferredSelfUninstallRetirement `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Finalization $finalization `
+            -Reason $retirementDeferred
     }
     try {
         # The authenticated rollback journal remains live through transaction
