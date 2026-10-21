@@ -457,3 +457,67 @@ def test_secure_client_hides_profile_command(monkeypatch):
     command_result = runner.invoke(cmd_guardrail.guardrail, ["profile", "list", "--json"], obj=app)
     assert command_result.exit_code == 2
     assert "No such command" in command_result.output
+
+
+def _scoped_agent_cfg(match):
+    cfg = default_config()
+    cfg.guardrail.profiles = {"base": GuardrailProfile(mode="observe"), "strict": GuardrailProfile(mode="action")}
+    cfg.guardrail.profile_assignments = [GuardrailProfileAssignment(profile="strict", match=match)]
+    return cfg
+
+
+def test_profile_overrides_attribute_no_agent_when_its_owner_is_unknown(monkeypatch):
+    # GAP-1054: a failed agent-identity query must not show another user's
+    # agent assignment as this account's.
+    from defenseclaw import gateway
+
+    cfg = _scoped_agent_cfg(GuardrailProfileMatch(agents=["agt-other"]))
+    monkeypatch.setattr(gateway, "current_profile_account", lambda **kwargs: ("alice", "alice"))
+
+    def unavailable(self, **_kwargs):
+        raise RuntimeError("identity store unavailable")
+
+    monkeypatch.setattr(gateway.OrchestratorClient, "agent_identities_all", unavailable)
+    monkeypatch.setattr(
+        gateway.OrchestratorClient,
+        "guardrail_profile_resolve",
+        lambda self, *, user="", connector="", agent="": {
+            "profile": "strict" if agent else "base",
+            "match": "agent" if agent else "default",
+        },
+    )
+    answer = gateway.current_user_guardrail_profile(cfg)
+    assert answer["overrides"] == []
+    assert answer["unverified_agents"] == ["agt-other"]
+    text = cmd_guardrail.profile_status_text(cfg, answer)
+    assert "strict for" not in text and "not checked for agt-other" in text
+
+
+def test_profile_overrides_name_an_agent_only_under_its_own_connector(monkeypatch):
+    # GAP-1270, GAP-1252: a Codex agent is never shown under a Claude Code
+    # assignment.
+    from defenseclaw import gateway
+
+    monkeypatch.setattr(gateway, "current_profile_account", lambda **kwargs: ("alice", "alice"))
+    monkeypatch.setattr(
+        gateway.OrchestratorClient,
+        "agent_identities_all",
+        lambda self, *, user: {"identities": [{"agent_id": "agt-codex", "connector": "codex"}]},
+    )
+    probes = []
+
+    def resolve(self, *, user="", connector="", agent=""):
+        probes.append((connector, agent))
+        return {"profile": "strict" if agent else "base", "match": "agent" if agent else "default"}
+
+    monkeypatch.setattr(gateway.OrchestratorClient, "guardrail_profile_resolve", resolve)
+    cfg = _scoped_agent_cfg(GuardrailProfileMatch(connectors=["claudecode"], agents=["agt-codex"]))
+    answer = gateway.current_user_guardrail_profile(cfg)
+    assert answer["overrides"] == []
+    assert ("claudecode", "agt-codex") not in probes
+
+    probes.clear()
+    cfg = _scoped_agent_cfg(GuardrailProfileMatch(connectors=["claudecode", "codex"], agents=["agt-codex"]))
+    answer = gateway.current_user_guardrail_profile(cfg)
+    assert [(o["connector"], o["agent"]) for o in answer["overrides"]] == [("codex", "agt-codex")]
+    assert "unverified_agents" not in answer

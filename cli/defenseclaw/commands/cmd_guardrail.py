@@ -723,6 +723,12 @@ def profile_status_text(cfg, result: dict) -> str:
         scoped.append(f"{item.get('profile')} for {subject} (by {item.get('match')})")
     if scoped:
         text += "; except " + ", ".join(scoped)
+    unverified = result.get("unverified_agents") or []
+    if unverified:
+        text += (
+            f"; agent assignment(s) not checked for {', '.join(unverified)}: "
+            "the gateway did not list this account's agents"
+        )
     return text
 
 
@@ -3022,7 +3028,20 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
             path = named
         else:
             names = ", ".join(sorted(p.name for p in packs))
-            raise click.ClickException(f"no pack with the name {path!r} was found; available packs: {names}")
+            message = f"no pack with the name {path!r} was found; available packs: {names}"
+            if json_out:
+                # --json promises the versioned result on stdout (GAP-1053).
+                missing = rulepack_validation.RulePackValidationBridgeError(message, code="pack_not_found")
+                click.echo(
+                    json.dumps(
+                        rulepack_validation.bridge_error_wire(missing),
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                raise SystemExit(1)
+            raise click.ClickException(message)
     try:
         result = rulepack_validation.validate_rule_pack(path)
     except rulepack_validation.RulePackValidationBridgeError as exc:

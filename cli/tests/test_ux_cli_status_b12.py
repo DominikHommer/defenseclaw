@@ -112,3 +112,45 @@ def test_registry_wizard_asks_for_a_file_path_and_hints_sync_only_when_declined(
     assert result.output.index("Sync now?") < result.output.index("defenseclaw registry sync local-mcp")
     source = next(s for s in registry_app.cfg.registries.sources if s.id == "local-mcp")
     assert source.url == os.path.expanduser("~/registry.yaml")
+
+
+def test_status_names_a_gateway_that_answers_health_but_not_this_account(tmp_path, monkeypatch) -> None:
+    # GAP-0150: a gateway that answers /health is not hung because this
+    # account cannot read its .env.
+    import requests
+
+    client = MagicMock()
+    client.health.return_value = {"status": "ok"}
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=SimpleNamespace(resolved_token=lambda: ""))
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("X=1\n", encoding="utf-8")
+
+    def refuse(path, *_args, **_kwargs):
+        raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(cmd_status, "open", refuse, raising=False)
+    detail = cmd_status._status_refused_detail(cfg, client)
+    assert f"cannot read {dotenv}" in detail and "chmod 600" in detail
+    client.status.assert_not_called()
+    monkeypatch.undo()
+
+    cfg.gateway = SimpleNamespace(resolved_token=lambda: "test-token")
+    response = requests.Response()
+    response.status_code = 401
+    client.status.side_effect = requests.HTTPError(response=response)
+    assert "refused this account's gateway token (HTTP 401)" in cmd_status._status_refused_detail(cfg, client)
+
+    # No /health answer either: starting or hung, as before.
+    client.health.side_effect = requests.ConnectionError("refused")
+    assert cmd_status._status_refused_detail(cfg, client) == ""
+
+    roster = MagicMock()
+    roster.active_connectors.return_value = ["codex", "claudecode"]
+    roster.guardrail.effective_mode.return_value = "action"
+    roster.guardrail.effective_enabled.return_value = True
+    roster.application_protection = ApplicationProtectionConfig()
+    roster.ai_discovery = AIDiscoveryConfig()
+    roster.data_dir = ""
+    out = _capture(cmd_status._print_agents, roster, sidecar_down=True, sidecar_hung=True, sidecar_unread=True)
+    assert "2 configured; live hook state not readable by this account" in out
+    assert "not answering" not in out and "fall back" not in out

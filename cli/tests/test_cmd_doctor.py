@@ -3719,3 +3719,60 @@ def test_policy_digest_probe_unavailable_does_not_pass():
     row = result.checks[-1]
     assert row["status"] == "warn"
     assert "comparison" in row["detail"]
+
+
+def _hilt_profile_cfg(profile):
+    from defenseclaw.config import GuardrailProfile
+
+    cfg = Config(
+        data_dir="/tmp/defenseclaw",
+        audit_db="/tmp/defenseclaw/audit.db",
+        quarantine_dir="/tmp/defenseclaw/quarantine",
+        plugin_dir="/tmp/defenseclaw/plugins",
+        policy_dir="/tmp/defenseclaw/policies",
+        guardrail=GuardrailConfig(enabled=True, mode="action", connector="codex"),
+        gateway=GatewayConfig(),
+        openshell=OpenShellConfig(),
+    )
+    cfg.guardrail.hilt.enabled = True
+    cfg.guardrail.profiles = {"read_only": profile or GuardrailProfile()}
+    cfg.guardrail.default_profile = "read_only"
+    return cfg
+
+
+def test_hilt_observe_under_a_profile_names_the_profile_setting():
+    # GAP-1269: 'guardrail mode' does not change the mode a profile sets.
+    from defenseclaw.commands.cmd_doctor import _check_hilt_support, _emit_hilt_observe_summary
+    from defenseclaw.config import GuardrailProfile
+
+    resolved = {
+        "profile": "read_only",
+        "effective": {"mode": "observe", "hilt": {"enabled": True, "min_severity": "HIGH"}},
+    }
+    for profile, pinned in ((GuardrailProfile(mode="observe"), True), (GuardrailProfile(), False)):
+        cfg = _hilt_profile_cfg(profile)
+        result = _DoctorResult()
+        observe_only: list = []
+        with patch("defenseclaw.gateway.current_user_guardrail_profile", return_value=resolved):
+            for connector in ("codex", "claudecode"):
+                _check_hilt_support(cfg, connector, result, observe_only=observe_only)
+        _emit_hilt_observe_summary(observe_only, result, tagged=True)
+        remediation = result.checks[-1]["remediation"]
+        if pinned:
+            assert "guardrail.profiles.read_only.mode" in remediation
+            assert "guardrail mode action" not in remediation
+        else:
+            # A profile that inherits the mode: the base command does change it.
+            assert "guardrail mode action --connector <name>" in remediation
+
+
+def test_scanner_settings_names_the_skill_scanner_judge():
+    # GAP-0981: the guardrail judge can be on while the skill scanner's is off.
+    from defenseclaw.config import default_config
+    from defenseclaw.scanner import settings as scanner_settings
+
+    cfg = default_config()
+    cfg.guardrail.judge.enabled = True
+    cfg.scanners.skill_scanner.use_llm = False
+    issue = scanner_settings.recommended_settings_issue(cfg)
+    assert issue.startswith("the skill-scanner LLM judge is off")

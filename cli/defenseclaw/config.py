@@ -5347,6 +5347,11 @@ def _apply_v8_modeled_delta(
     if current is _V8_MISSING:
         target.pop(key, None)
         return
+    if isinstance(current, dict) and baseline is _V8_MISSING and isinstance(target.get(key), dict):
+        # The load left the mapping out (all defaults) and another writer has
+        # since saved it: merge this change into it, do not replace it
+        # (GAP-1293).
+        baseline = {}
     if isinstance(current, dict) and isinstance(baseline, dict):
         child = target.get(key)
         if not isinstance(child, dict):

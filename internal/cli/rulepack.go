@@ -176,6 +176,11 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 		// gateway will refuse (GAP-1274).
 		fmt.Fprintf(cmd.OutOrStdout(), "rule pack syntax is valid: %d files, %d rules, digest %s\n",
 			summary.RuleFileCount, summary.RuleCount, summary.Digest)
+		if !rulePackSecureClient() {
+			// The pin is printed before the failure so the operator can
+			// pin the pack once its permissions are fixed (GAP-0757).
+			fmt.Fprintf(cmd.OutOrStdout(), "custom_packs pin: sha256:%s\n", summary.FilesDigest)
+		}
 		return fmt.Errorf("the gateway cannot load this pack: %s", problem)
 	}
 	if err := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); err != nil {

@@ -380,3 +380,18 @@ def test_validate_pack_unknown_bare_name_lists_available_packs(env, monkeypatch)
     assert result.exit_code != 0
     assert "no pack with the name 'nosuchpack' was found" in result.output
     assert "default" in result.output and "team2" in result.output
+
+
+def test_validate_pack_unknown_bare_name_json_is_the_versioned_failure(env, monkeypatch):
+    # GAP-1053: --json keeps its result document for an unknown pack name.
+    app, _root, _custom, _writes = env
+    monkeypatch.setattr("defenseclaw.config.load", lambda: app.cfg)
+    result = CliRunner().invoke(
+        cmd_guardrail.guardrail, ["validate-pack", "definitely-missing-pack", "--json"], obj=app,
+    )
+    assert result.exit_code == 1, result.output
+    document = json.loads(result.stdout)
+    assert document["wire_version"] == rulepack_validation.RULEPACK_WIRE_VERSION
+    assert (document["kind"], document["valid"]) == ("validation_error", False)
+    assert document["error"]["code"] == "pack_not_found"
+    assert "definitely-missing-pack" in document["error"]["reason"]
