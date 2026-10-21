@@ -119,6 +119,7 @@ func TestMigrateManagedStandaloneConfigRestoresMigratedCursorFailMode(t *testing
 	}
 	record := config.MigrationRecord{
 		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		MigratedAt:   "2026-09-01T00:00:00Z",
 		SourceSHA256: strings.Repeat("c", 64), ResultSHA256: configwrite.SHA256Hex(open),
 		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
 	}
@@ -391,6 +392,7 @@ func TestMigrateManagedStandaloneConfigNeverRepairsABundleConfig(t *testing.T) {
 	}
 	record := config.MigrationRecord{
 		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		MigratedAt:   "2026-09-01T00:00:00Z",
 		SourceSHA256: strings.Repeat("c", 64), ResultSHA256: configwrite.SHA256Hex(open),
 		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
 	}
@@ -450,6 +452,10 @@ func TestMigrateManagedStandaloneConfigRefusesAMigrationRecordItCannotRead(t *te
 		place func(recordPath string) error
 	}{
 		{"undecodable", func(recordPath string) error { return os.WriteFile(recordPath, []byte(`{"moved":[`), 0o600) }},
+		// G-small loop round 2: a record that decodes without the fields
+		// every migration writes is not "no record".
+		{"an empty object", func(recordPath string) error { return os.WriteFile(recordPath, []byte(`{}`), 0o600) }},
+		{"null", func(recordPath string) error { return os.WriteFile(recordPath, []byte(`null`), 0o600) }},
 		{"a directory", func(recordPath string) error { return os.Mkdir(recordPath, 0o700) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

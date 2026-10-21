@@ -14,7 +14,6 @@ package enterpriseunix
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -149,9 +148,10 @@ func (e *Env) migrateConfigV9(ctx context.Context, raw []byte, v8 *validatedConf
 // the installed config: the repaired config, validated, with the migration
 // record the apply stores next to it, or nil when the record proves no
 // rewrite (no record means no change). A record that is there but cannot be
-// read (not a regular file, too large) or decoded is an error: the run never
-// reports a Cursor fail mode the record proves rewritten as settled (G-small
-// loop 4).
+// read (not a regular file, too large) or decoded (G-small loop 4), or that
+// decodes without the fields every migration writes (G-small loop round 2,
+// config.DecodeMigrationRecord), is an error: the run never reports a Cursor
+// fail mode the record proves rewritten as settled.
 func (e *Env) repairMigratedCursorFailMode(installed *validatedConfig) (*validatedConfig, error) {
 	if fromBundle, err := e.installedConfigFromBundle(); err != nil || fromBundle {
 		return nil, err
@@ -164,8 +164,8 @@ func (e *Env) repairMigratedCursorFailMode(installed *validatedConfig) (*validat
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", recordPath, err)
 	}
-	var record config.MigrationRecord
-	if err := json.Unmarshal(raw, &record); err != nil {
+	record, err := config.DecodeMigrationRecord(raw)
+	if err != nil {
 		return nil, fmt.Errorf("decode %s: %w", recordPath, err)
 	}
 	repaired, updated, ok := config.RepairMigratedCursorFailMode(installed.Raw, record)

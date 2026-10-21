@@ -1252,6 +1252,7 @@ func TestWindowsCursorRepairPlannerKeepsMigrationGuards(t *testing.T) {
 	}
 	record := config.MigrationRecord{
 		SchemaVersion: config.MigrationRecordSchemaVersion, FromVersion: 8, ToVersion: 9, Actor: "lifecycle",
+		MigratedAt:   "2026-09-01T00:00:00Z",
 		SourceSHA256: strings.Repeat("c", 64), ResultSHA256: configwrite.SHA256Hex(raw),
 		Moved: []config.MigrationMove{{Source: "config", From: key, To: key, Value: "open"}},
 	}
@@ -3452,6 +3453,13 @@ func TestWindowsCursorRepairPlannerRefusesARecordItCannotRead(t *testing.T) {
 	}{
 		{name: "no record", place: func(string) error { return nil }},
 		{name: "undecodable", place: func(p string) error { return os.WriteFile(p, []byte(`{"moved":[`), 0o600) }, wantErr: true},
+		// G-small loop round 2: a record that decodes without the fields
+		// every migration writes is not "no correction".
+		{name: "an empty object", place: func(p string) error { return os.WriteFile(p, []byte(`{}`), 0o600) }, wantErr: true},
+		{name: "null", place: func(p string) error { return os.WriteFile(p, []byte(`null`), 0o600) }, wantErr: true},
+		{name: "no result digest", place: func(p string) error {
+			return os.WriteFile(p, []byte(`{"schema_version":1,"from_version":8,"to_version":9,"migrated_at":"2026-09-01T00:00:00Z","actor":"lifecycle","source_sha256":"`+strings.Repeat("c", 64)+`","moved":[{"source":"config","from":"guardrail.connectors.cursor.hook_fail_mode","to":"guardrail.connectors.cursor.hook_fail_mode","value":"open"}]}`), 0o600)
+		}, wantErr: true},
 		{name: "past the bound", place: func(p string) error {
 			if err := os.WriteFile(p, []byte(`{"schema_version":1}`), 0o600); err != nil {
 				return err

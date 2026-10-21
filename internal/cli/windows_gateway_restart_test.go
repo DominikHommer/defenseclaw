@@ -12,12 +12,15 @@ import (
 
 // fakeWindowsGatewayService plays a sequence of SCM states: each query
 // takes the next one and repeats the last. stop and start record the call
-// and move the service to the state the SCM reports next.
+// and move the service to the states the SCM reports next; a start with no
+// afterStart runs (StartPending, then Running).
 type fakeWindowsGatewayService struct {
-	states    []windowsServiceState
-	afterStop []windowsServiceState
-	stopErr   error
-	calls     []string
+	states     []windowsServiceState
+	afterStop  []windowsServiceState
+	afterStart []windowsServiceState
+	stopErr    error
+	startErr   error
+	calls      []string
 }
 
 func (f *fakeWindowsGatewayService) state() (windowsServiceState, error) {
@@ -39,7 +42,13 @@ func (f *fakeWindowsGatewayService) stop() error {
 
 func (f *fakeWindowsGatewayService) start() error {
 	f.calls = append(f.calls, "start")
-	f.states = []windowsServiceState{windowsServiceStartPending}
+	if f.startErr != nil {
+		return f.startErr
+	}
+	f.states = f.afterStart
+	if len(f.states) == 0 {
+		f.states = []windowsServiceState{windowsServiceStartPending, windowsServiceRunning}
+	}
 	return nil
 }
 
@@ -96,6 +105,86 @@ func TestWindowsGatewayRestartFailsWhenItCannotRestart(t *testing.T) {
 			restarted, err := restartWindowsGatewayService(tc.service, "DefenseClawGateway", 20*time.Millisecond, time.Millisecond)
 			if restarted || err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("restarted = %v, %v; want an error naming %q", restarted, err, tc.want)
+			}
+		})
+	}
+}
+
+// G-small loop round 2: the SCM accepts a start once it launched the process.
+// A gateway that then falls back to Stopped, stays StartPending, or settles
+// anywhere but Running is down, so the restart is restart_failed, never
+// restarted. Only a gateway that reaches Running is restarted.
+func TestWindowsGatewayRestartWaitsUntilTheGatewayRuns(t *testing.T) {
+	stopped := []windowsServiceState{windowsServiceStopPending, windowsServiceStopped}
+	for _, tc := range []struct {
+		name       string
+		afterStart []windowsServiceState
+		startErr   error
+		want       string
+	}{
+		{name: "start pending, then running", afterStart: []windowsServiceState{windowsServiceStartPending, windowsServiceStartPending, windowsServiceRunning}},
+		{name: "running at once", afterStart: []windowsServiceState{windowsServiceRunning}},
+		{name: "start pending, then stopped", afterStart: []windowsServiceState{windowsServiceStartPending, windowsServiceStopped}, want: "went to state 1 instead of running"},
+		{name: "stopped at once", afterStart: []windowsServiceState{windowsServiceStopped}, want: "went to state 1 instead of running"},
+		{name: "start pending, then stopping", afterStart: []windowsServiceState{windowsServiceStartPending, windowsServiceStopPending, windowsServiceStopped}, want: "went to state 3 instead of running"},
+		{name: "start pending, then paused", afterStart: []windowsServiceState{windowsServiceStartPending, windowsServicePaused}, want: "went to state 7 instead of running"},
+		{name: "stuck starting", afterStart: []windowsServiceState{windowsServiceStartPending}, want: "stayed in service state 2"},
+		{name: "start refused", startErr: errors.New("the service did not respond"), want: "start DefenseClawGateway: the service did not respond"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &fakeWindowsGatewayService{
+				states: []windowsServiceState{windowsServiceRunning}, afterStop: stopped,
+				afterStart: tc.afterStart, startErr: tc.startErr,
+			}
+			restarted, err := restartWindowsGatewayService(service, "DefenseClawGateway", 20*time.Millisecond, time.Millisecond)
+			if tc.want == "" {
+				if err != nil || !restarted {
+					t.Fatalf("restarted = %v, %v; want a restart", restarted, err)
+				}
+			} else if restarted || err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("restarted = %v, %v; want an error naming %q", restarted, err, tc.want)
+			}
+			if got := strings.Join(service.calls, ","); got != "stop,start" {
+				t.Fatalf("SCM calls = %q, want stop,start", got)
+			}
+		})
+	}
+}
+
+// The recovery after a failed restart starts only a stopped gateway, never
+// stops a live one, and reports a start only once the gateway runs.
+func TestWindowsGatewayRecoveryStartsOnlyAStoppedGatewayAndWaitsForRunning(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		states     []windowsServiceState
+		afterStart []windowsServiceState
+		started    bool
+		calls      string
+		want       string
+	}{
+		{name: "running", states: []windowsServiceState{windowsServiceRunning}},
+		{name: "starting", states: []windowsServiceState{windowsServiceStartPending}},
+		{name: "paused", states: []windowsServiceState{windowsServicePaused}},
+		{name: "stopped, then runs", states: []windowsServiceState{windowsServiceStopped}, started: true, calls: "start"},
+		{name: "stopping, then stopped, then runs", states: []windowsServiceState{windowsServiceStopPending, windowsServiceStopped}, started: true, calls: "start"},
+		{name: "stopped, start falls back to stopped", states: []windowsServiceState{windowsServiceStopped},
+			afterStart: []windowsServiceState{windowsServiceStartPending, windowsServiceStopped}, calls: "start", want: "went to state 1 instead of running"},
+		{name: "stopped, start stuck", states: []windowsServiceState{windowsServiceStopped},
+			afterStart: []windowsServiceState{windowsServiceStartPending}, calls: "start", want: "stayed in service state 2"},
+		{name: "stuck stopping", states: []windowsServiceState{windowsServiceStopPending}, want: "stayed in service state 3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &fakeWindowsGatewayService{states: tc.states, afterStart: tc.afterStart}
+			started, err := startWindowsGatewayServiceIfStopped(service, "DefenseClawGateway", 20*time.Millisecond, time.Millisecond)
+			if tc.want == "" {
+				if err != nil || started != tc.started {
+					t.Fatalf("started = %v, %v; want %v", started, err, tc.started)
+				}
+			} else if started || err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("started = %v, %v; want an error naming %q", started, err, tc.want)
+			}
+			if got := strings.Join(service.calls, ","); got != tc.calls {
+				t.Fatalf("SCM calls = %q, want %q", got, tc.calls)
 			}
 		})
 	}

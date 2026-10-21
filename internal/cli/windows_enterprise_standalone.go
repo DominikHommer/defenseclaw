@@ -957,9 +957,11 @@ func readWindowsEnterpriseMigrationRecordAt(configPath string) ([]byte, error) {
 // transaction; this read only selects that transaction when every proof and
 // signed-bundle guard already accepts it. Only a missing record, or a config
 // a signed bundle owns, means no correction: a record that cannot be read or
-// decoded made ensure report a compliant deployment while the Cursor fail
-// mode it proves rewritten stayed open (G-small loop 4). Ensure reports that
-// error as preflight_failed.
+// decoded (G-small loop 4), or that decodes without the fields every
+// migration writes ({} or null, G-small loop round 2,
+// config.DecodeMigrationRecord), made ensure report a compliant deployment
+// while the Cursor fail mode it proves rewritten stayed open. Ensure reports
+// that error as preflight_failed.
 var windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) {
 	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
@@ -980,8 +982,8 @@ var windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	var record config.MigrationRecord
-	if err := json.Unmarshal(trimWindowsJSONBOM(recordRaw), &record); err != nil {
+	record, err := config.DecodeMigrationRecord(recordRaw)
+	if err != nil {
 		return false, fmt.Errorf("decode %s: %w", config.MigrationRecordPath(layout.ConfigPath), err)
 	}
 	_, _, pending := config.RepairMigratedCursorFailMode(raw, record)
@@ -999,11 +1001,11 @@ func noteWindowsEnterpriseMigration(opts *windowsEnterpriseLifecycleOptions, bef
 	if opts == nil || after == nil || bytes.Equal(before, after) {
 		return
 	}
-	var record, previous config.MigrationRecord
-	if json.Unmarshal(trimWindowsJSONBOM(after), &record) != nil {
+	record, err := config.DecodeMigrationRecord(after)
+	if err != nil {
 		return
 	}
-	if json.Unmarshal(trimWindowsJSONBOM(before), &previous) == nil && previous.MigratedAt == record.MigratedAt &&
+	if previous, err := config.DecodeMigrationRecord(before); err == nil && previous.MigratedAt == record.MigratedAt &&
 		previous.SourceSHA256 == record.SourceSHA256 && len(record.Repaired) > len(previous.Repaired) {
 		// The same migration, with a Cursor fail mode it wrote restored.
 		opts.configFailModeRepairs = record.Repaired[len(previous.Repaired):]
