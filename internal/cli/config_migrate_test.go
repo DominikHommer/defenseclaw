@@ -435,3 +435,40 @@ func TestMigrateManagedStandaloneConfigNeverRepairsABundleConfig(t *testing.T) {
 		t.Fatalf("without a bundle the migrated open must be repaired:\n%s", raw)
 	}
 }
+
+// G-small loop 4, finding 2: the Windows config step reads the
+// migration-v9.json beside the installed config. A record that is there but
+// cannot be read or decoded is an error, not "no record": the step does not
+// report the Cursor fail mode it may prove rewritten as settled, and the
+// config stays as it is.
+func TestMigrateManagedStandaloneConfigRefusesAMigrationRecordItCannotRead(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	for _, tc := range []struct {
+		name  string
+		place func(recordPath string) error
+	}{
+		{"undecodable", func(recordPath string) error { return os.WriteFile(recordPath, []byte(`{"moved":[`), 0o600) }},
+		{"a directory", func(recordPath string) error { return os.Mkdir(recordPath, 0o700) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			open := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: " + dir +
+				"\nobservability: {}\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+			if err := os.WriteFile(path, open, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.place(config.MigrationRecordPath(path)); err != nil {
+				t.Fatal(err)
+			}
+			err := migrateManagedStandaloneConfig(context.Background(), path)
+			if err == nil || !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
+				t.Fatalf("config step = %v, want an error naming %s", err, config.MigrationV9RecordFile)
+			}
+			if raw, _ := os.ReadFile(path); string(raw) != string(open) {
+				t.Fatalf("the config changed under an unreadable record:\n%s", raw)
+			}
+		})
+	}
+}

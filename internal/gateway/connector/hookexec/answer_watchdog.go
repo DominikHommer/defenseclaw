@@ -49,7 +49,7 @@ type answerWatchdog struct {
 	// the watchdog's answer is then closed too.
 	closedKnown bool
 	// logHome is the background lookup of the invoking user's diagnostic
-	// directory of a managed call (PrefetchFailureLogHome).
+	// directory of a managed call (cacheFailureLogHome).
 	logHome *failureLogHomeLookup
 
 	stdout, stderr io.Writer
@@ -77,7 +77,11 @@ type AnswerWatchdog = answerWatchdog
 // some with no answer at all, because the watchdog was armed only inside Run
 // (GAP-0155, BM-03, BM-05). opts carries what the command line says
 // (Connector, Event, FailMode, HookSurface, ManagedEnterprise, SecureClient,
-// StartedAt, Exit); the payload names the event when the command does not.
+// StartedAt, Exit) and, for a managed hook, the resolver of the invoking
+// user's diagnostic directory (FailureLogHome); the payload names the event
+// when the command does not. That lookup starts before the watchdog can
+// fire, so a deadline that passes before Run adopts the watchdog still
+// leaves the call its hook-failures row.
 // Until Run adopts it the prepared answer is closed for a managed hook and
 // for a per-user hook whose command line does not say open. It returns nil
 // when the call has no answer deadline (not a tool call, a Secure Client
@@ -100,11 +104,11 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 	failMode := "closed"
 	if opts.ManagedEnterprise {
 		opts.FailMode = "closed"
-		// This is not an enforcement home. Diagnostics go to the
-		// FailureLogHome of Run's options once Run adopts the watchdog;
-		// armed alone it writes no failure row.
+		// Not an enforcement home: a managed row goes only to the invoking
+		// user's diagnostic directory (FailureLogHome). An armed watchdog
+		// that dropped that resolver answered a deadline before Run with no
+		// row at all (G-small loop 4).
 		opts.Home = ""
-		opts.FailureLogHome = nil
 	} else if strings.EqualFold(strings.TrimSpace(opts.FailMode), "open") {
 		failMode = "open"
 	}
@@ -236,25 +240,12 @@ func (l *failureLogHomeLookup) wait() string {
 	return l.home
 }
 
-// PrefetchFailureLogHome starts resolving the invoking user's diagnostic
-// directory of a managed call in the background, right after the hook
-// command armed the watchdog: the call's rows, the watchdog's own included,
-// use that one lookup. Safe on a nil watchdog.
-func (w *AnswerWatchdog) PrefetchFailureLogHome(resolve func() string) {
-	if w == nil || resolve == nil {
-		return
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.logHome == nil {
-		w.logHome = startFailureLogHomeLookup(resolve)
-	}
-}
-
 // cacheFailureLogHome points a managed call's FailureLogHome at the
-// watchdog's lookup, and starts the lookup when the hook command did not
-// (PrefetchFailureLogHome). A call with no resolver writes no managed row,
-// prefetched or not.
+// watchdog's lookup, and starts that lookup the first time: when the
+// watchdog is armed (ArmAnswerWatchdog with the hook command's resolver, or
+// Run), before its answer is rendered and before it can fire. The call's
+// rows, the watchdog's own included, use that one lookup. A call with no
+// resolver writes no managed row.
 func (w *answerWatchdog) cacheFailureLogHome(opts *Options) {
 	if !opts.ManagedEnterprise || opts.FailureLogHome == nil {
 		return

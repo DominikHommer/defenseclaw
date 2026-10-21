@@ -345,15 +345,21 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 // for the installed config through the config writer (lifecycle actor,
 // compare-and-swap on raw), then its migration record. An open the 1.0.0-1.0.2
 // migration wrote is not the administrator's, and managed hooks honour an
-// explicit open since 1.0.3. No record means no change.
+// explicit open since 1.0.3. No record means no change; a record that is
+// there but cannot be read or decoded is an error, so the step never reports
+// a Cursor fail mode the record proves rewritten as settled (G-small loop 4).
 func repairManagedStandaloneCursorFailMode(ctx context.Context, path string, raw []byte, opt configwrite.Options) (bool, error) {
-	recordRaw, err := os.ReadFile(config.MigrationRecordPath(path))
-	if err != nil {
+	recordPath := config.MigrationRecordPath(path)
+	recordRaw, err := os.ReadFile(recordPath)
+	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", recordPath, err)
+	}
 	var record config.MigrationRecord
-	if json.Unmarshal(recordRaw, &record) != nil {
-		return false, nil
+	if err := json.Unmarshal(recordRaw, &record); err != nil {
+		return false, fmt.Errorf("decode %s: %w", recordPath, err)
 	}
 	repaired, updated, ok := config.RepairMigratedCursorFailMode(raw, record)
 	if !ok {

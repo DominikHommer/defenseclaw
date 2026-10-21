@@ -218,9 +218,7 @@ func newHookSessionFactsCmd() *cobra.Command {
 func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
 	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, hookexec.DefaultMaxBody+1))
 	stdin := io.MultiReader(bytes.NewReader(payload), os.Stdin)
-	// No FailureLogHome here: armed alone the watchdog writes no row. Run's
-	// options carry the resolver when Run adopts the watchdog.
-	watchdog := hookexec.ArmAnswerWatchdog(hookexec.Options{
+	opts := hookexec.Options{
 		Connector:         connectorName,
 		Event:             event,
 		FailMode:          failMode,
@@ -229,15 +227,16 @@ func armHookAnswerWatchdog(connectorName, event, failMode, surface string, manag
 		SecureClient:      managed && secureClientHost(),
 		StartedAt:         startedAt,
 		Exit:              exit,
-	}, payload)
+	}
 	if managed {
-		// Once the watchdog is armed, look the account up in the
-		// background: a lookup slower than the watchdog's log wait left
+		// The watchdog starts this account lookup in the background before
+		// it can fire, and Run's rows reuse it: a deadline that passed
+		// before Run, or a lookup slower than the watchdog's log wait, left
 		// the call it answered with no hook-failures row.
 		profileDir := hookUserProfileDir
-		watchdog.PrefetchFailureLogHome(func() string { return failureLogHomeIn(profileDir) })
+		opts.FailureLogHome = func() string { return failureLogHomeIn(profileDir) }
 	}
-	return stdin, watchdog
+	return stdin, hookexec.ArmAnswerWatchdog(opts, payload)
 }
 
 // endHookBeforeRun ends a hook call that needs no answer (a retired launcher,

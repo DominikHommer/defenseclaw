@@ -929,43 +929,67 @@ func runWindowsEnterpriseStandaloneInstaller(
 }
 
 // readWindowsEnterpriseMigrationRecord reads the migration-v9.json beside the
-// installed config, or nil when there is none.
+// installed config for the result's migration note, or nil when there is
+// none or it cannot be read.
 func readWindowsEnterpriseMigrationRecord() []byte {
 	layout, err := windowsEnterpriseHotConfigLayout()
-	if err != nil || strings.TrimSpace(layout.ConfigPath) == "" {
-		return nil
-	}
-	raw, err := readWindowsEnterpriseBoundedFile(config.MigrationRecordPath(layout.ConfigPath), windowsEnterpriseHotConfigMaxBytes)
 	if err != nil {
 		return nil
 	}
+	raw, _ := readWindowsEnterpriseMigrationRecordAt(layout.ConfigPath)
 	return raw
+}
+
+// readWindowsEnterpriseMigrationRecordAt reads the migration-v9.json beside
+// configPath: nil and no error only when there is none. A record that is
+// there but cannot be read (access denied, not a file, more than
+// windowsEnterpriseHotConfigMaxBytes) is an error, never no record.
+func readWindowsEnterpriseMigrationRecordAt(configPath string) ([]byte, error) {
+	if strings.TrimSpace(configPath) == "" {
+		return nil, errors.New("the standalone layout names no installed config")
+	}
+	path := config.MigrationRecordPath(configPath)
+	raw, err := readWindowsEnterpriseBoundedFile(path, windowsEnterpriseHotConfigMaxBytes)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return raw, nil
 }
 
 // A compliant ensure still needs the one-time Cursor correction recorded by
 // the old v9 migration. The actual write stays inside the installer's repair
 // transaction; this read only selects that transaction when every proof and
-// signed-bundle guard already accepts it.
+// signed-bundle guard already accepts it. Only a missing record, or a config
+// a signed bundle owns, means no correction: a record that cannot be read or
+// decoded made ensure report a compliant deployment while the Cursor fail
+// mode it proves rewritten stayed open (G-small loop 4). Ensure reports that
+// error as preflight_failed.
 var windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) {
-	recordRaw := readWindowsEnterpriseMigrationRecord()
-	if len(recordRaw) == 0 {
-		return false, nil
-	}
 	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
 		return false, err
 	}
+	recordRaw, recordErr := readWindowsEnterpriseMigrationRecordAt(layout.ConfigPath)
+	if recordErr == nil && recordRaw == nil {
+		return false, nil
+	}
 	fromBundle, err := managedStandaloneConfigFromBundle(layout.ConfigPath)
 	if err != nil || fromBundle {
 		return false, err
+	}
+	if recordErr != nil {
+		return false, recordErr
 	}
 	raw, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
 	if err != nil {
 		return false, err
 	}
 	var record config.MigrationRecord
-	if json.Unmarshal(trimWindowsJSONBOM(recordRaw), &record) != nil {
-		return false, nil
+	if err := json.Unmarshal(trimWindowsJSONBOM(recordRaw), &record); err != nil {
+		return false, fmt.Errorf("decode %s: %w", config.MigrationRecordPath(layout.ConfigPath), err)
 	}
 	_, _, pending := config.RepairMigratedCursorFailMode(raw, record)
 	return pending, nil

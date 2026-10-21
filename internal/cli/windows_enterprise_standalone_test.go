@@ -3431,3 +3431,114 @@ func TestWindowsEnterpriseResultNamesSignedOutUntrustedFolders(t *testing.T) {
 		t.Fatalf("a signed-out untrusted folder became an error: %+v", result.Errors)
 	}
 }
+
+// G-small loop 4, finding 2: only a missing migration-v9.json, or a config a
+// signed bundle owns, means no recorded Cursor correction. A record that is
+// there but cannot be read (more than the bound, not a file) or decoded is an
+// error, as is a layout that names no config: ensure must not report the
+// deployment compliant while the record may prove Cursor's fail mode
+// rewritten to open.
+func TestWindowsCursorRepairPlannerRefusesARecordItCannotRead(t *testing.T) {
+	previousLayout, previousBundle := windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent
+	t.Cleanup(func() {
+		windowsEnterpriseHotConfigLayout, managedStandaloneBundleCurrent = previousLayout, previousBundle
+	})
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nguardrail:\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n")
+	for _, tc := range []struct {
+		name    string
+		place   func(recordPath string) error
+		bundle  bool
+		wantErr bool
+	}{
+		{name: "no record", place: func(string) error { return nil }},
+		{name: "undecodable", place: func(p string) error { return os.WriteFile(p, []byte(`{"moved":[`), 0o600) }, wantErr: true},
+		{name: "past the bound", place: func(p string) error {
+			if err := os.WriteFile(p, []byte(`{"schema_version":1}`), 0o600); err != nil {
+				return err
+			}
+			return os.Truncate(p, windowsEnterpriseHotConfigMaxBytes+1)
+		}, wantErr: true},
+		{name: "a directory", place: func(p string) error { return os.Mkdir(p, 0o700) }, wantErr: true},
+		{name: "unreadable record, bundle config", place: func(p string) error { return os.Mkdir(p, 0o700) }, bundle: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.place(config.MigrationRecordPath(path)); err != nil {
+				t.Fatal(err)
+			}
+			windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+				return managed.StandaloneLayout{ConfigPath: path}, nil
+			}
+			managedStandaloneBundleCurrent = func() (bool, error) { return tc.bundle, nil }
+			pending, err := windowsEnterpriseCursorMigrationRepairPending()
+			if pending || (err != nil) != tc.wantErr {
+				t.Fatalf("pending = %v, %v; want false with error=%v", pending, err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
+				t.Fatalf("error %q does not name %s", err, config.MigrationV9RecordFile)
+			}
+		})
+	}
+	for name, layout := range map[string]func() (managed.StandaloneLayout, error){
+		"layout failed": func() (managed.StandaloneLayout, error) {
+			return managed.StandaloneLayout{}, errors.New("ProgramData is not trusted")
+		},
+		"no config named": func() (managed.StandaloneLayout, error) { return managed.StandaloneLayout{}, nil },
+	} {
+		windowsEnterpriseHotConfigLayout = layout
+		if pending, err := windowsEnterpriseCursorMigrationRepairPending(); pending || err == nil {
+			t.Fatalf("%s: pending = %v, %v; want an error", name, pending, err)
+		}
+	}
+}
+
+// G-small loop 4, finding 2: an elevated ensure that cannot tell whether the
+// recorded Cursor correction is owed fails with preflight_failed, with or
+// without a supplied config. It never reports compliance and runs no Repair.
+func TestWindowsEnsureFailsWhenItCannotReadTheCursorRecord(t *testing.T) {
+	originalPending, originalElevated := windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated
+	originalBuild, originalTransaction := windowsEnterpriseStandaloneRulePackBuild, windowsEnterpriseStandaloneTransactionPending
+	t.Cleanup(func() {
+		windowsEnterpriseCursorMigrationRepairPending, windowsEnterpriseIsElevated = originalPending, originalElevated
+		windowsEnterpriseStandaloneRulePackBuild, windowsEnterpriseStandaloneTransactionPending = originalBuild, originalTransaction
+	})
+	stubWindowsEnterpriseRulePackPreflight(t, func(string, string, string) error { return nil })
+	windowsEnterpriseStandaloneRulePackBuild = func(*config.Config) error { return nil }
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
+	windowsEnterpriseIsElevated = func() bool { return true }
+	windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) {
+		return false, errors.New(`read C:\ProgramData\Cisco\DefenseClaw\etc\migration-v9.json: exceeds 4194304 bytes`)
+	}
+	for _, withConfig := range []bool{false, true} {
+		stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+		stub.install(t)
+		var stdout bytes.Buffer
+		command := &cobra.Command{}
+		command.SetOut(&stdout)
+		command.SetErr(&bytes.Buffer{})
+		opts := ensureTestOptions()
+		if !withConfig {
+			opts.configPath, opts.manifestPath = "", ""
+		}
+		err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+		for _, call := range stub.calls {
+			if call[1] != "Status" && call[1] != "Verify" {
+				t.Fatalf("config=%v: installer calls %v, want no change action", withConfig, stub.calls)
+			}
+		}
+		if commandExitCode(err) == 0 {
+			t.Fatalf("config=%v: ensure = %v, want a failed exit", withConfig, err)
+		}
+		var result enterprisestatus.Result
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.OK || result.Noop || len(result.Errors) != 1 || result.Errors[0].Code != "preflight_failed" ||
+			!strings.Contains(result.Errors[0].Message, "recorded Cursor fail-mode repair") {
+			t.Fatalf("config=%v: ensure result %+v, want preflight_failed", withConfig, result)
+		}
+	}
+}
