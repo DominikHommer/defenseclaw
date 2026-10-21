@@ -516,8 +516,9 @@ func generationAssetDirs(cfg *config.Config, g *Generation) []string {
 		}
 	}
 	for _, entry := range cfg.AIDiscovery.SignaturePacks {
-		if _, watchDir := inventory.SignaturePackEntry(entry); watchDir != "" {
-			add(watchDir)
+		_, watchDirs := inventory.SignaturePackEntry(entry)
+		for _, dir := range watchDirs {
+			add(dir)
 		}
 	}
 	if dir := strings.TrimSpace(cfg.PolicyDir); dir != "" {
