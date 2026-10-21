@@ -677,6 +677,8 @@ def _echo_status_json(
     for row in rows:
         item = {"connector": row["key"][0], "label": row["label"][0]}
         item.update({("fail_mode" if key == "fail" else key): row[key][0] for key in keys})
+        if item["fail_mode"] == "-":
+            item["fail_mode"] = None
         connectors.append(item)
     payload = {
         "enabled": (
@@ -765,7 +767,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     secure_client = _enterprise_profile(app.cfg) == "secure_client"
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
-    fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
+    fail_mode = (getattr(gc, "hook_fail_mode", "") or "closed").lower()
     if not as_json:
         ux.section("Guardrail status", indent="  ")
         if secure_client:
@@ -955,7 +957,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 )
         fail_raw = cfm
         cfm_display = _style_fail_mode(cfm)
-        if not (gc.enabled and c_enabled) and not as_json:
+        if not (gc.enabled and c_enabled):
             # A disabled connector has no hooks and so no fail mode; match
             # `guardrail fail-mode`, which shows "disabled (no hooks)" (GAP-1953).
             fail_raw = "-"
@@ -2200,6 +2202,19 @@ def _warn_still_fail_open(gc, open_names: list[str]) -> None:
 _HILT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 
+def _hilt_enable_notice(connector: str, severity: str) -> str:
+    label = _connector_label(connector)
+    if normalize_connector(connector) in {"claudecode", "openclaw", "copilot", "antigravity", "amp"}:
+        return (
+            f"{label} will prompt for approval on supported confirmable actions at/above "
+            f"{severity} (CRITICAL findings still block outright)."
+        )
+    return (
+        f"{label} has no implemented native approval prompt; confirm verdicts at/above "
+        f"{severity} produce alerts with raw_action=confirm preserved. CRITICAL findings still block outright."
+    )
+
+
 def _set_connector_hilt(
     app: AppContext,
     requested: str,
@@ -2287,8 +2302,7 @@ def _set_connector_hilt(
     )
     if new_enabled:
         ux.subhead(
-            f"{label} will prompt for approval on confirmable actions at/above "
-            f"{new_min} (CRITICAL findings still block outright).",
+            _hilt_enable_notice(key, new_min),
             indent="  ",
         )
     else:
@@ -4043,13 +4057,13 @@ def use_pack_cmd(
         if existing is not None:
             existing_path = policy_catalog.normalize_pack_path(str(getattr(existing, "path", "") or ""))
             existing_digest = str(getattr(existing, "digest", "") or "").lower()
-            if existing_path != path or existing_digest != f"sha256:{digest.lower()}":
+            if existing_path != path:
                 _fail(
                     1,
                     f"Custom pack name {name!r} is already registered at {existing_path}. "
                     "Choose a different pack name or update the registered pack explicitly. Nothing was changed.",
                 )
-        else:
+        if existing is None or existing_digest != f"sha256:{digest.lower()}":
             changes.append(
                 config_writer.Change(f"guardrail.custom_packs.{name}", {"path": path, "digest": f"sha256:{digest}"})
             )

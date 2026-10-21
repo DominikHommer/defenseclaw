@@ -304,6 +304,9 @@ class TestConnectorContractManifest(unittest.TestCase):
         rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
         self.assertIn("scoped bearer + source header on /v1/<signal>", rendered)
         self.assertNotIn("/otlp/codex/<token>", rendered)
+        self.assertNotIn("/api/v1/codex/notify", rendered)
+        self.assertNotIn("otel / notify", rendered)
+        self.assertNotIn("notify bridge", rendered)
 
     def test_setup_banner_prints_the_gateway_hook_route(self) -> None:
         # GAP-1611: the gateway serves Claude Code on /api/v1/claude-code/hook.

@@ -173,6 +173,21 @@ def test_registered_custom_pack_key_is_selected_by_name(env):
     assert unknown.exit_code == 1 and "guardrail.custom_packs name (team)" in unknown.output
 
 
+def test_explicit_custom_path_repins_only_the_same_validated_directory(env, monkeypatch):
+    app, _root, custom, writes = env
+    app.cfg.guardrail.rule_pack = "team"
+    app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
+    result = _run(app, ["use-pack", str(custom), "--json"])
+    assert result.exit_code == 0, result.output
+    assert config_writer.Change(
+        "guardrail.custom_packs.team", {"path": str(custom), "digest": "sha256:" + "a" * 64}
+    ) in writes[-1]
+    writes.clear()
+    monkeypatch.setattr(rulepack_validation, "validate_rule_pack", _invalid)
+    refused = _run(app, ["use-pack", str(custom), "--json"])
+    assert refused.exit_code == 1 and writes == []
+
+
 def test_bare_name_selects_installed_pack_over_cwd_folder(env, tmp_path, monkeypatch):
     """GAP-1576: an unrelated ./vsg2 folder does not shadow the installed vsg2 pack."""
     app, root, _custom, writes = env

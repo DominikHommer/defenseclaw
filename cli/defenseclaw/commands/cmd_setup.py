@@ -5183,9 +5183,9 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     ),
     "codex": (
         "~/.codex/config.toml hooks / features.hooks / hook trust state",
-        "~/.codex/config.toml otel / notify",
+        "~/.codex/config.toml otel",
         "Optional CodeGuard native skill only when explicitly installed",
-        "~/.defenseclaw/hooks/ (including owner-only scoped OTLP credential) and notify bridge files",
+        "~/.defenseclaw/hooks/ (including owner-only scoped OTLP credential)",
     ),
     "hermes": (
         (
@@ -10384,8 +10384,6 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
             ux.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
         else:
             ux.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
-    if connector == "codex":
-        ux.echo("    • Notify     — agent-turn-complete events → /api/v1/codex/notify")
     if connector == "amp":
         ux.echo("    • Headless   — use `amp -x ... --plugin-ready-timeout 30` for complete lifecycle telemetry")
     click.echo()
@@ -10574,8 +10572,8 @@ def _print_observability_summary(
         click.echo("  Or keep it configured but stop enforcing it:")
         click.echo(f"    defenseclaw guardrail disable --connector {connector}")
     else:
-        click.echo("  To revert and restore direct LLM access:")
-        click.echo("    defenseclaw setup guardrail --disable")
+        click.echo("  To disable the DefenseClaw integration:")
+        click.echo("    defenseclaw guardrail disable --yes")
     click.echo()
 
 
@@ -11860,8 +11858,8 @@ def _hook_guardrail_options(fn):
             default=None,
             help=(
                 "Per-connector hook fail mode: how the hook behaves when the "
-                "gateway answers with an error. 'open' allows + logs "
-                "(recommended); 'closed' blocks."
+                "gateway is unavailable or gives an unusable answer. "
+                "'closed' blocks (default and recommended); 'open' allows uninspected calls."
             ),
         ),
     ]
