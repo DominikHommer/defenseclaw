@@ -21,6 +21,7 @@ package processutil
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -75,6 +76,69 @@ func TestRunTreeKillsWhatTheChildStarted(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A helper the scanner started ends when the gateway is killed with
+// SIGKILL: no cleanup of the gateway runs then, and the parent-death signal
+// ends the scanner only.
+func TestRunTreeKillsWhatTheChildStartedWhenTheParentIsKilled(t *testing.T) {
+	if os.Getenv("PROCESSUTIL_TEST_GATEWAY") != "" {
+		return
+	}
+	marker := strconv.Itoa(7000+os.Getpid()%1000) + "." + strconv.FormatInt(time.Now().UnixNano()%1000000, 10)
+	gateway := exec.Command(os.Args[0], "-test.run=^TestRunTreeHelperGateway$")
+	gateway.Env = append(os.Environ(), "PROCESSUTIL_TEST_GATEWAY="+marker)
+	if err := gateway.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = gateway.Process.Kill(); _ = gateway.Wait() })
+	deadline := time.Now().Add(10 * time.Second)
+	helper := 0
+	for helper == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the scanner's helper did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+		helper = sleepWithArg(marker)
+	}
+	if err := gateway.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	_ = gateway.Wait()
+	deadline = time.Now().Add(5 * time.Second)
+	for helperRunning(helper) {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(helper, syscall.SIGKILL)
+			t.Fatalf("helper %d still runs after the gateway was killed", helper)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestRunTreeHelperGateway is the gateway of the test above: it runs a
+// scanner that starts a helper and waits for it.
+func TestRunTreeHelperGateway(t *testing.T) {
+	marker := os.Getenv("PROCESSUTIL_TEST_GATEWAY")
+	if marker == "" {
+		t.Skip("runs as the gateway of TestRunTreeKillsWhatTheChildStartedWhenTheParentIsKilled")
+	}
+	_ = RunTree(CommandContext(context.Background(), "/bin/sh", "-c", `sleep "$1" & wait`, "sh", marker))
+}
+
+// sleepWithArg is the pid of a running "sleep arg", or 0.
+func sleepWithArg(arg string) int {
+	entries, _ := os.ReadDir("/proc")
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err == nil && strings.HasSuffix(string(raw), "\x00"+arg+"\x00") && strings.Contains(string(raw), "sleep\x00") {
+			return pid
+		}
+	}
+	return 0
 }
 
 // helperRunning reports a live, not zombie, process.

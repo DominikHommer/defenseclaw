@@ -522,11 +522,12 @@ func (c *Config) UnenforcedAssetPolicyRules(watched func(targetType string) bool
 
 // EmptyRequiredAssetRegistries describes, per asset type the host enforces
 // (see UnenforcedAssetPolicyRules for watched), a registry_required whose
-// registry is empty with registry_empty_action deny: every asset of the type
-// is refused until a registry sync fills the catalog. An administrator who
-// pushed the requirement before the catalog saw only the refusals; ensure,
-// status, verify and the gateway log say so (p0 GAP-0940). Secure Client
-// keeps main (issue #1092).
+// registry is empty with registry_empty_action deny: in action mode every
+// asset of the type the allowed list does not admit is refused until a
+// registry sync fills the catalog; in observe mode each is admitted and
+// logged as a would-block. An administrator who pushed the requirement
+// before the catalog saw only the refusals; ensure, status, verify and the
+// gateway log say so (p0 GAP-0940). Secure Client keeps main (issue #1092).
 func (c *Config) EmptyRequiredAssetRegistries(watched func(targetType string) bool) []string {
 	if c == nil || !c.AssetPolicy.Enabled || c.SecureClientIntegration() {
 		return nil
@@ -547,22 +548,55 @@ func (c *Config) EmptyRequiredAssetRegistries(watched func(targetType string) bo
 			return ok && p.RegistryRequired && !assetRegistryConfigured(p.Registry) &&
 				normalizeRegistryEmptyAction(p.RegistryEmptyAction) == registryEmptyActionDeny
 		}
-		who := ""
-		if !refusesAll("") {
-			var scoped []string
-			for _, connector := range connectors[1:] {
-				if refusesAll(connector) {
-					scoped = append(scoped, connector)
-				}
-			}
-			if len(scoped) == 0 {
-				continue
-			}
-			who = " for connector " + strings.Join(scoped, ", ")
+		mode := func(connector string) string {
+			return normalizeAssetMode(c.EffectiveAssetPolicyModeForConnector(connector))
 		}
-		out = append(out, fmt.Sprintf("asset_policy.%[1]s.registry is empty and registry_required is on, so every %[1]s is "+
-			"refused%[2]s until a registry sync fills it; run `defenseclaw registry sync`, or set "+
-			"asset_policy.%[1]s.registry_empty_action: warn to allow them with a warning meanwhile", targetType, who))
+		// One line per mode: the global scope (every connector but those
+		// that differ) and the connectors whose own policy refuses.
+		var modes []string
+		scoped := map[string][]string{}
+		everyone := refusesAll("")
+		if everyone {
+			modes = append(modes, mode(""))
+		}
+		var exempt []string
+		for _, connector := range connectors[1:] {
+			refuses, m := refusesAll(connector), mode(connector)
+			switch {
+			case everyone && refuses && m == mode(""):
+			case refuses:
+				if everyone {
+					exempt = append(exempt, connector)
+				}
+				if _, seen := scoped[m]; !seen {
+					modes = append(modes, m)
+				}
+				scoped[m] = append(scoped[m], connector)
+			case everyone:
+				exempt = append(exempt, connector)
+			}
+		}
+		except := ""
+		if p, ok := c.assetPolicyFor("", targetType); ok && len(p.Allowed) > 0 {
+			except = fmt.Sprintf(" not on asset_policy.%s.allowed", targetType)
+		}
+		for i, m := range modes {
+			who := ""
+			if everyone && i == 0 {
+				if len(exempt) > 0 {
+					who = " (connector " + strings.Join(exempt, ", ") + " aside)"
+				}
+			} else {
+				who = " for connector " + strings.Join(scoped[m], ", ")
+			}
+			effect := "refused"
+			if m != AssetPolicyModeAction {
+				effect = "admitted but logged as a would-block (observe mode)"
+			}
+			out = append(out, fmt.Sprintf("asset_policy.%[1]s.registry is empty and registry_required is on, so every %[1]s%[2]s is "+
+				"%[3]s%[4]s until a registry sync fills it; run `defenseclaw registry sync`, or set "+
+				"asset_policy.%[1]s.registry_empty_action: warn to allow them with a warning meanwhile", targetType, except, effect, who))
+		}
 	}
 	return out
 }
@@ -616,6 +650,39 @@ func registryStatus(rules []AssetPolicyRule, in AssetPolicyInput) string {
 		return "registered"
 	}
 	return "unregistered"
+}
+
+// AssetRegistryPinsUnknown lists what a registry rule naming in.Name pins
+// (connector, url, command, args, transport) that in leaves empty. A dry run
+// given a name only cannot tell whether that rule admits the asset: the
+// runtime matches the asset's own definition (registry sync pins MCP servers
+// to it).
+func (c *Config) AssetRegistryPinsUnknown(in AssetPolicyInput) []string {
+	if c == nil {
+		return nil
+	}
+	p, ok := c.assetPolicyFor(in.Connector, in.TargetType)
+	if !ok {
+		return nil
+	}
+	var out []string
+	add := func(field string, unknown bool) {
+		if unknown && !slices.Contains(out, field) {
+			out = append(out, field)
+		}
+	}
+	shapeless := strings.TrimSpace(in.URL) == "" && strings.TrimSpace(in.Command) == ""
+	for _, rule := range p.Registry {
+		if rule.Name == "" || !sameRuleName(rule.Name, in.Name, !c.SecureClientIntegration()) {
+			continue
+		}
+		add("connector", rule.Connector != "" && strings.TrimSpace(in.Connector) == "")
+		add("url", rule.URL != "" && strings.TrimSpace(in.URL) == "")
+		add("command", rule.Command != "" && strings.TrimSpace(in.Command) == "")
+		add("args", len(rule.ArgsPrefix) > 0 && len(in.Args) == 0)
+		add("transport", rule.Transport != "" && strings.TrimSpace(in.Transport) == "" && shapeless)
+	}
+	return out
 }
 
 // canonicalMCPTransport folds the names of one transport together, so a

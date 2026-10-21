@@ -2613,7 +2613,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	if err := enforce.ExecuteAssetQuarantine(plan, record.ID); err != nil {
 		// Roll back only an unmaterialized journal. A verified destination is
 		// authoritative recovery data and must retain its pending provenance.
-		if quarantineUnmaterialized(plan) {
+		if quarantineUnmaterialized(plan, err, record.CreatedAt.Equal(record.UpdatedAt)) {
 			_ = w.store.DeleteQuarantineRecord(ctx, record.ID)
 		}
 		w.emitQuarantineFailure(ctx, evt, err)
@@ -3243,21 +3243,22 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, err)
 }
 
-// quarantineUnmaterialized reports that a failed quarantine moved nothing:
-// its destination does not exist, or cannot be inspected (a quarantine
-// folder the gateway may not enter) while the asset is still at its
-// source. The pending record of such a quarantine is rolled back; kept, it
-// made skill info say quarantined for files that never moved (GAP-0133).
-func quarantineUnmaterialized(plan enforce.AssetQuarantinePlan) bool {
-	_, err := os.Lstat(plan.QuarantinePath)
-	if os.IsNotExist(err) {
+// quarantineUnmaterialized reports that a failed quarantine (err) left no
+// copy its pending record must keep: the destination does not exist, or it
+// cannot be inspected (a quarantine folder the gateway may not enter) and
+// the record is the one this attempt opened (fresh) for a move that failed
+// before it published a copy. The record of such a quarantine is rolled
+// back; kept, it made skill info say quarantined for files that never moved
+// (GAP-0133). An uncertain destination of a published copy, or of a record
+// an earlier attempt opened, keeps its record: the copy may be there, and
+// the record is what restores it. The source still being in place proves
+// nothing, as a published copy whose source removal failed leaves both.
+func quarantineUnmaterialized(plan enforce.AssetQuarantinePlan, err error, fresh bool) bool {
+	_, statErr := os.Lstat(plan.QuarantinePath)
+	if os.IsNotExist(statErr) {
 		return true
 	}
-	if err == nil {
-		return false
-	}
-	_, err = os.Lstat(plan.SourcePath)
-	return err == nil
+	return statErr != nil && fresh && !errors.Is(err, enforce.ErrQuarantinePublished)
 }
 
 func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit.Action, evt InstallEvent, destPath string) {

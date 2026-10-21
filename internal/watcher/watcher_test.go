@@ -19,6 +19,7 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1443,6 +1444,53 @@ func TestDeniedSkillWhoseQuarantineFailsSaysSo(t *testing.T) {
 	entry, err := store.GetAction("skill", "denied-skill")
 	if err != nil || entry == nil || entry.Actions.Install != "block" || !strings.HasPrefix(entry.Reason, "quarantine failed: ") {
 		t.Fatalf("journal = %+v (err %v), want install block with quarantine failed", entry, err)
+	}
+}
+
+// A quarantine that published its copy and then failed to remove the
+// source keeps its pending record when the destination cannot be inspected
+// afterwards: the copy may still be there and the record restores it. Only
+// the record this attempt opened, for a move that failed before publishing,
+// is rolled back on an uncertain destination.
+func TestUncertainQuarantineCopyKeepsItsRecord(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions as a non-root user")
+	}
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "skills")
+	quarantineRoot := filepath.Join(root, "quarantine")
+	source := filepath.Join(skillsRoot, "risky")
+	if err := os.MkdirAll(skillsRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("marker\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := enforce.NewAssetQuarantinePlan(quarantineRoot, []string{skillsRoot}, "skill", "risky", "claudecode", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(skillsRoot, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsRoot, 0o755) })
+	moveErr := enforce.ExecuteAssetQuarantine(plan, "rec-published")
+	if !errors.Is(moveErr, enforce.ErrQuarantinePublished) {
+		t.Fatalf("source removal failure = %v, want it marked published", moveErr)
+	}
+	if err := os.Chmod(quarantineRoot, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(quarantineRoot, 0o700) })
+	if quarantineUnmaterialized(plan, moveErr, true) {
+		t.Fatal("rolled back the record of a published copy whose destination cannot be inspected")
+	}
+	early := errors.New("enforce: copy quarantine stage: denied")
+	if quarantineUnmaterialized(plan, early, false) {
+		t.Fatal("rolled back the record of an earlier attempt whose copy may remain")
+	}
+	if !quarantineUnmaterialized(plan, early, true) {
+		t.Fatal("kept the record this attempt opened for a move that published nothing")
 	}
 }
 

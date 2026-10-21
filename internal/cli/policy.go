@@ -55,6 +55,11 @@ func init() {
 	policyEvaluateCmd.Flags().String("target-name", "", "Target name to evaluate")
 	policyEvaluateCmd.Flags().String("severity", "", "Max severity of scan result (empty = pre-scan)")
 	policyEvaluateCmd.Flags().Int("findings", 0, "Number of findings")
+	policyEvaluateCmd.Flags().String("connector", "", "Connector the asset is installed for")
+	policyEvaluateCmd.Flags().String("url", "", "MCP server URL, as the registry pins it")
+	policyEvaluateCmd.Flags().String("command", "", "MCP server command, as the registry pins it")
+	policyEvaluateCmd.Flags().StringArray("arg", nil, "MCP server argument, repeatable, in order")
+	policyEvaluateCmd.Flags().String("transport", "", "MCP server transport (stdio, http, sse)")
 }
 
 var policyCmd = &cobra.Command{
@@ -322,10 +327,14 @@ var policyEvaluateCmd = &cobra.Command{
 			TargetName: targetName,
 			Path:       "/dry-run",
 		}
+		asset := config.AssetPolicyInput{TargetType: targetType, Name: targetName, SourcePath: "/dry-run"}
+		asset.Connector, _ = cmd.Flags().GetString("connector")
+		asset.URL, _ = cmd.Flags().GetString("url")
+		asset.Command, _ = cmd.Flags().GetString("command")
+		asset.Args, _ = cmd.Flags().GetStringArray("arg")
+		asset.Transport, _ = cmd.Flags().GetString("transport")
 		if !secureClient {
-			input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
-				TargetType: targetType, Name: targetName, SourcePath: "/dry-run",
-			})
+			input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, asset)
 			input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), targetType)
 		}
 
@@ -367,7 +376,7 @@ var policyEvaluateCmd = &cobra.Command{
 		}
 
 		if !secureClient {
-			out = withAssetPolicyDryRun(cfg, targetType, targetName, out)
+			out = withAssetPolicyDryRun(cfg, asset, out)
 		}
 		result, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(result))
@@ -380,14 +389,27 @@ var policyEvaluateCmd = &cobra.Command{
 // registry or default-deny verdict that the admission lists do not carry.
 // Without it the dry run said scan / awaiting scan for an approved and an
 // unregistered MCP server alike while the runtime refused the unregistered
-// one (p0 GAP-0945).
-func withAssetPolicyDryRun(cfg *config.Config, targetType, targetName string, out *policy.AdmissionOutput) *policy.AdmissionOutput {
+// one (p0 GAP-0945). A registry entry of that name pinned to a URL, command,
+// arguments, transport or connector the input does not give leaves the
+// result undetermined, not blocked: the runtime matches the server's own
+// definition and may admit it.
+func withAssetPolicyDryRun(cfg *config.Config, asset config.AssetPolicyInput, out *policy.AdmissionOutput) *policy.AdmissionOutput {
 	if cfg == nil || out == nil || out.Verdict == "blocked" {
 		return out
 	}
-	decision := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
-		TargetType: targetType, Name: targetName, SourcePath: "/dry-run", RuntimeSurface: "watcher",
-	})
+	asset.RuntimeSurface = "watcher"
+	decision := cfg.EvaluateAssetPolicy(asset)
+	if decision.Source == "registry-required" {
+		if unknown := cfg.AssetRegistryPinsUnknown(asset); len(unknown) > 0 {
+			flags := make([]string, len(unknown))
+			for i, field := range unknown {
+				flags[i] = "--" + strings.TrimSuffix(field, "s")
+			}
+			out.Reason += fmt.Sprintf("; asset policy undetermined: the registry entry for %q pins its %s; pass %s to check it",
+				asset.Name, strings.Join(unknown, ", "), strings.Join(flags, " "))
+			return out
+		}
+	}
 	switch {
 	case decision.Enabled && decision.RawAction == "block" && decision.Action == "block":
 		return &policy.AdmissionOutput{

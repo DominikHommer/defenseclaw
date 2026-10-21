@@ -366,6 +366,44 @@ func TestPolicyEvaluateAppliesTheRegistryRequirement(t *testing.T) {
 	}
 }
 
+// A registry entry pinned to the server's URL (as registry sync writes it)
+// is not refused on a dry run that gives the name only: the result is
+// undetermined. Given the URL, the dry run matches it as the runtime does.
+func TestPolicyEvaluateDoesNotRefuseAPinnedRegistryEntry(t *testing.T) {
+	c := &config.Config{PolicyDir: t.TempDir(), AssetPolicy: config.DefaultAssetPolicy()}
+	c.AssetPolicy.Enabled = true
+	c.AssetPolicy.Mode = config.AssetPolicyModeAction
+	c.AssetPolicy.MCP.RegistryRequired = true
+	c.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "acme-notes", URL: "https://notes.example/mcp", Transport: "http"}}
+	setPolicyPathTestConfig(t, c)
+	setPolicyPathTestFlag(t, policyEvaluateCmd, "target-type", "mcp")
+	setPolicyPathTestFlag(t, policyEvaluateCmd, "target-name", "acme-notes")
+	evaluate := func() policy.AdmissionOutput {
+		t.Helper()
+		raw, err := capturePolicyPathTestOutput(t, func() error { return policyEvaluateCmd.RunE(policyEvaluateCmd, nil) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out policy.AdmissionOutput
+		if err := json.Unmarshal([]byte(raw), &out); err != nil {
+			t.Fatalf("output %q: %v", raw, err)
+		}
+		return out
+	}
+	if out := evaluate(); out.Verdict == "blocked" || !strings.Contains(out.Reason, "asset policy undetermined") ||
+		!strings.Contains(out.Reason, "--url --transport") {
+		t.Fatalf("name only = %+v, want an undetermined result that names --url and --transport", out)
+	}
+	setPolicyPathTestFlag(t, policyEvaluateCmd, "url", "https://notes.example/mcp")
+	if out := evaluate(); out.Verdict != "scan" || !strings.Contains(out.Reason, `"acme-notes" is registered`) {
+		t.Fatalf("with the URL = %+v, want registered", out)
+	}
+	setPolicyPathTestFlag(t, policyEvaluateCmd, "url", "https://evil.example/mcp")
+	if out := evaluate(); out.Verdict != "blocked" || !strings.Contains(out.Reason, "not in the approved registry") {
+		t.Fatalf("another URL = %+v, want refused", out)
+	}
+}
+
 func TestPolicyValidateRejectsDeletedConfiguredDirectory(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "deleted-policies")
 	setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})

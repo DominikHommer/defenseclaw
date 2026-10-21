@@ -20,6 +20,7 @@ admission.rego and internal/policy), reading only config.yaml:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import unicodedata
@@ -28,6 +29,7 @@ from typing import Any
 
 from defenseclaw import connector_paths
 from defenseclaw.config import SeverityAction
+from defenseclaw.enforce._asset_name_fold import FOLD_RUNS
 
 
 @dataclass(frozen=True)
@@ -437,9 +439,11 @@ def evaluate_admission(
         return asset_decision
 
     def _done(decision: AdmissionDecision) -> AdmissionDecision:
-        # GAP-2390: keep an observe-mode would-block on whatever decision the
-        # rest of admission reaches, so install paths can warn and audit it.
-        if not asset_decision.source.endswith("-observe"):
+        # GAP-2390: keep an observe-mode would-block, and the warning of an
+        # empty required registry under registry_empty_action warn, on
+        # whatever decision the rest of admission reaches, so install paths
+        # can warn and audit it.
+        if not asset_decision.source.endswith(("-observe", "-empty-warn")):
             return decision
         return replace(
             decision,
@@ -784,22 +788,23 @@ def asset_name_key(name: Any) -> str:
     (``strings.EqualFold``) folds. A rule written in the composed spelling of
     a name like "café" matches the decomposed spelling another tool wrote
     (GAP-0432), and final sigma, capital sigma and sigma are one letter on
-    both sides (p0 GAP-1305)."""
-    return "".join(_simple_fold(ch) for ch in unicodedata.normalize("NFC", str(name or "").strip()))
+    both sides (p0 GAP-1305). The folding is Go's own table
+    (_asset_name_fold.py), not ``str.casefold``/``str.lower``, which fold
+    differently and follow the interpreter's Unicode version."""
+    fold = _name_fold()
+    return "".join(fold.get(ch, ch) for ch in unicodedata.normalize("NFC", str(name or "").strip()))
 
 
-def _simple_fold(ch: str) -> str:
-    """One character under Unicode simple case folding, which Go's
-    ``strings.EqualFold`` compares by. ``str.casefold`` is full folding
-    ("ß" -> "ss"), and ``str.lower`` leaves "ς" apart from "σ"; a one-letter
-    casefold is the simple folding, a lower-case letter covers the few
-    letters whose full folding is longer ("ẞ" -> "ß"), and the rest fold to
-    themselves ("ß", "İ")."""
-    folded = ch.casefold()
-    if len(folded) == 1:
-        return folded
-    lowered = ch.lower()
-    return lowered if len(lowered) == 1 else ch
+@functools.cache
+def _name_fold() -> dict[str, str]:
+    fold: dict[str, str] = {}
+    for run in FOLD_RUNS.split():
+        start, count, stride, delta = run.split(":")
+        first, step, shift = int(start, 16), int(stride), int(delta)
+        for i in range(int(count)):
+            code = first + i * step
+            fold[chr(code)] = chr(code + shift)
+    return fold
 
 
 def _asset_rule_matches(

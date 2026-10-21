@@ -835,6 +835,14 @@ def _build_actions_map(store, connector: str = "", cfg=None) -> dict[str, Any]:
         quarantine_records = []
     for record in quarantine_records:
         current = actions_map.get(record.target_name)
+        if record.state == "pending" and current is not None and str(current.reason or "").startswith(
+            "quarantine failed"
+        ):
+            # A move that failed after it published its copy keeps the
+            # pending record, the copy's restore provenance, but the skill
+            # is still in its folder: list and info say the quarantine
+            # failed, not quarantined.
+            continue
         actions = ActionState(
             file="quarantine",
             runtime=current.actions.runtime if current else "",

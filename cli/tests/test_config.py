@@ -671,6 +671,20 @@ class TestConfigLoadSave(unittest.TestCase):
             path.write_text(path.read_text(encoding="utf-8") + "# hand edit\n", encoding="utf-8")
             self.assertEqual(load(data_dir=data_dir)._loaded_generation, -1)
 
+    def test_load_survives_a_malformed_generation_record(self):
+        # A malformed config.generation.json is ancillary: config.yaml still
+        # loads, with the generation unknown.
+        from defenseclaw import config_writer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            config_path = Path(data_dir, "config.yaml")
+            config_path.write_text(f"config_version: 8\ndata_dir: {data_dir}\n", encoding="utf-8")
+            record = Path(config_writer.generation_path(str(config_path)))
+            for body in ('{"generation": null}', '{"generation": [1]}', '{"generation": Infinity}'):
+                record.write_text(body, encoding="utf-8")
+                self.assertEqual(load(data_dir=data_dir)._loaded_generation, -1, body)
+
     def test_load_missing_config_returns_defaults(self):
         with patch("defenseclaw.config.default_data_path") as mock_dp:
             mock_dp.return_value = Path(tempfile.mkdtemp()) / ".defenseclaw"

@@ -7406,14 +7406,15 @@ def load(
 def _generation_of_loaded_text(cfg_file: str, text: str | None) -> int:
     """config_generation of the config.yaml text load() read: the one
     config.generation.json records when it records these bytes, -1 when a
-    writer changed the file since or nothing recorded it."""
+    writer changed the file since, nothing recorded it, or the record is
+    malformed (``"generation": null`` must not stop config.yaml loading)."""
     if text is None:
         return -1
     from defenseclaw import config_writer
 
     try:
         state = config_writer.read_generation_state(cfg_file)
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError, OverflowError):
         return -1
     recorded = state.config_sha256.strip().lower().removeprefix("sha256:")
     return state.generation if recorded == hashlib.sha256(text.encode("utf-8")).hexdigest() else -1

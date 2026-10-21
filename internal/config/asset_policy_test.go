@@ -378,6 +378,39 @@ func TestEmptyRequiredAssetRegistriesWarns(t *testing.T) {
 	}
 }
 
+// The empty-registry warning states the effect the policy has: observe mode
+// admits each asset and logs a would-block, and the allowed list still
+// admits what it names.
+func TestEmptyRequiredAssetRegistriesStatesTheEffect(t *testing.T) {
+	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = AssetPolicyModeObserve
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	got := cfg.EmptyRequiredAssetRegistries(nil)
+	if len(got) != 1 || strings.Contains(got[0], "refused") || !strings.Contains(got[0], "every mcp is admitted but logged as a would-block (observe mode)") {
+		t.Fatalf("observe mode = %q, want admitted with a would-block, not refused", got)
+	}
+	cfg.AssetPolicy.Mode = AssetPolicyModeAction
+	cfg.AssetPolicy.MCP.Allowed = []AssetPolicyRule{{Name: "acme-notes"}}
+	got = cfg.EmptyRequiredAssetRegistries(nil)
+	if len(got) != 1 || !strings.Contains(got[0], "every mcp not on asset_policy.mcp.allowed is refused until") {
+		t.Fatalf("allow rule = %q, want the allowed list named as the exception", got)
+	}
+	if d := cfg.EvaluateAssetPolicy(AssetPolicyInput{TargetType: "mcp", Name: "acme-notes"}); d.Action != "allow" {
+		t.Fatalf("acme-notes = %+v, want the allowed list to admit it", d)
+	}
+	cfg.AssetPolicy.MCP.Allowed = nil
+	cfg.AssetPolicy.Connectors = map[string]PerConnectorAssetPolicy{
+		"codex":    {Mode: AssetPolicyModeObserve},
+		"opencode": {MCP: &PerConnectorAssetTypePolicy{RegistryRequired: boolPtr(false)}},
+	}
+	got = cfg.EmptyRequiredAssetRegistries(nil)
+	if len(got) != 2 || !strings.Contains(got[0], "is refused (connector codex, opencode aside) until") ||
+		!strings.Contains(got[1], "admitted but logged as a would-block (observe mode) for connector codex until") {
+		t.Fatalf("mixed modes = %q, want the action scope and the observe connector apart", got)
+	}
+}
+
 func boolPtr(b bool) *bool { return &b }
 
 // TestEffectiveModePerConnector covers inherit-on-empty + override +
