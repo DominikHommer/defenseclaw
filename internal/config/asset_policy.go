@@ -92,6 +92,7 @@ type AssetTypePolicy struct {
 
 const (
 	registryEmptyActionDeny  = "deny"
+	registryEmptyActionWarn  = "warn"
 	registryEmptyActionAllow = "allow"
 )
 
@@ -295,8 +296,16 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 		// Registry is required but empty. Fail closed by default so that
 		// the absence of approved assets does not silently downgrade to
 		// allow-all. Operators can opt out via registry_empty_action="allow".
-		if normalizeRegistryEmptyAction(p.RegistryEmptyAction) == registryEmptyActionDeny {
+		// warn lets the asset through to the type default but, unlike
+		// allow, leaves a would-block decision that names the empty
+		// registry, so the call has an audit row (p0 GAP-0941).
+		switch normalizeRegistryEmptyAction(p.RegistryEmptyAction) {
+		case registryEmptyActionDeny:
 			return assetPolicyViolation(out, mode, fmt.Sprintf("%s %q is blocked because asset policy requires a registry but none is configured", targetType, name), "registry-required-empty")
+		case registryEmptyActionWarn:
+			if normalizeAssetDefault(p.Default) != "deny" {
+				return assetPolicyViolation(out, AssetPolicyModeObserve, fmt.Sprintf("%s %q is allowed with a warning: asset policy requires a registry but none is configured (registry_empty_action: warn)", targetType, name), "registry-required-empty-warn")
+			}
 		}
 	}
 	if normalizeAssetDefault(p.Default) == "deny" {
@@ -511,6 +520,53 @@ func (c *Config) UnenforcedAssetPolicyRules(watched func(targetType string) bool
 	return out
 }
 
+// EmptyRequiredAssetRegistries describes, per asset type the host enforces
+// (see UnenforcedAssetPolicyRules for watched), a registry_required whose
+// registry is empty with registry_empty_action deny: every asset of the type
+// is refused until a registry sync fills the catalog. An administrator who
+// pushed the requirement before the catalog saw only the refusals; ensure,
+// status, verify and the gateway log say so (p0 GAP-0940). Secure Client
+// keeps main (issue #1092).
+func (c *Config) EmptyRequiredAssetRegistries(watched func(targetType string) bool) []string {
+	if c == nil || !c.AssetPolicy.Enabled || c.SecureClientIntegration() {
+		return nil
+	}
+	connectors := []string{""}
+	for name := range c.AssetPolicy.Connectors {
+		connectors = append(connectors, name)
+	}
+	sort.Strings(connectors[1:])
+	var out []string
+	for _, targetType := range []string{"skill", "plugin", "mcp"} {
+		detection, ok := c.AssetRuntimeDetectionFor(targetType)
+		if !ok || (!detection.Enabled && (watched == nil || !watched(targetType))) {
+			continue
+		}
+		refusesAll := func(connector string) bool {
+			p, ok := c.assetPolicyFor(connector, targetType)
+			return ok && p.RegistryRequired && !assetRegistryConfigured(p.Registry) &&
+				normalizeRegistryEmptyAction(p.RegistryEmptyAction) == registryEmptyActionDeny
+		}
+		who := ""
+		if !refusesAll("") {
+			var scoped []string
+			for _, connector := range connectors[1:] {
+				if refusesAll(connector) {
+					scoped = append(scoped, connector)
+				}
+			}
+			if len(scoped) == 0 {
+				continue
+			}
+			who = " for connector " + strings.Join(scoped, ", ")
+		}
+		out = append(out, fmt.Sprintf("asset_policy.%[1]s.registry is empty and registry_required is on, so every %[1]s is "+
+			"refused%[2]s until a registry sync fills it; run `defenseclaw registry sync`, or set "+
+			"asset_policy.%[1]s.registry_empty_action: warn to allow them with a warning meanwhile", targetType, who))
+	}
+	return out
+}
+
 func (p AssetTypePolicy) withDefaults(runtime bool) AssetTypePolicy {
 	if strings.TrimSpace(p.Default) == "" {
 		p.Default = "allow"
@@ -683,15 +739,16 @@ func normalizeAssetDefault(value string) string {
 // approved" rather than silently relaxing the requirement. Operators
 // must explicitly opt into "allow" to get fall-through-to-default.
 //
-// "warn" resolves to allow (fall-through-to-default), matching the Python
-// admission preview (cli/defenseclaw/enforce/admission.py
-// _normalize_registry_empty_action). This closes the prior Python↔Go
-// divergence where the gateway collapsed "warn" into "deny" — both sides now
-// treat "warn" as "log-but-don't-block at the empty-registry gate".
+// "warn" does not block at the empty-registry gate either, but leaves a
+// would-block decision (EvaluateAssetPolicy), as the Python admission preview
+// (cli/defenseclaw/enforce/admission.py _normalize_registry_empty_action)
+// does.
 func normalizeRegistryEmptyAction(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "allow", "warn":
+	case "allow":
 		return registryEmptyActionAllow
+	case "warn":
+		return registryEmptyActionWarn
 	case "deny", "block", "":
 		return registryEmptyActionDeny
 	default:

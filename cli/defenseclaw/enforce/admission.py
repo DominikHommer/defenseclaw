@@ -640,17 +640,25 @@ def evaluate_asset_policy(
                 "asset-policy-registry-required",
             )
         # Registry required but empty → governed by registry_empty_action.
-        # Only "deny" blocks; "warn"/"allow" fall through to the default check
-        # below. The Go gateway now resolves "warn" the same way (warn → allow),
-        # so this matches the runtime (see _normalize_registry_empty_action).
-        if _normalize_registry_empty_action(
+        # Only "deny" blocks. "warn" lets the asset through to the default
+        # check but says why (p0 GAP-0941), as the Go gateway does; "allow"
+        # falls through silently (see _normalize_registry_empty_action).
+        empty_action = _normalize_registry_empty_action(
             getattr(policy, "registry_empty_action", "deny")
-        ) == "deny":
+        )
+        if empty_action == "deny":
             return _asset_policy_block_or_observe(
                 mode,
                 f"{target_type} {name!r} is blocked because asset policy "
                 f"requires a registry but none is configured",
                 "asset-policy-registry-required-empty",
+            )
+        if empty_action == "warn" and str(getattr(policy, "default", "allow")).strip().lower() not in {"deny", "block"}:
+            return AdmissionDecision(
+                "allowed",
+                f"{target_type} {name!r} is allowed with a warning: asset policy "
+                f"requires a registry but none is configured (registry_empty_action: warn)",
+                source="asset-policy-registry-required-empty-warn",
             )
 
     if str(getattr(policy, "default", "allow")).strip().lower() in {"deny", "block"}:
@@ -685,15 +693,11 @@ def _normalize_registry_empty_action(value: Any) -> str:
 
     Returns one of ``"deny"`` / ``"warn"`` / ``"allow"`` (the three values
     documented on ``config.AssetTypePolicy.registry_empty_action``). Only
-    ``"deny"`` blocks; both ``"warn"`` and ``"allow"`` fall through to the
-    default check. ``"deny"``/``"block"``/``""`` and any unrecognised value
-    stay fail-closed as ``"deny"``.
-
-    Python↔Go parity: the Go gateway's ``normalizeRegistryEmptyAction``
-    (internal/config/asset_policy.go) now also treats ``"warn"`` as
-    fall-through (warn → allow), so both sides agree that ``"warn"`` is
-    "log-but-don't-block at the empty-registry gate". The earlier divergence
-    (Go collapsing ``"warn"`` into ``"deny"``) is closed.
+    ``"deny"`` blocks; ``"warn"`` and ``"allow"`` fall through to the
+    default check, ``"warn"`` with a decision that names the empty registry.
+    ``"deny"``/``"block"``/``""`` and any unrecognised value stay fail-closed
+    as ``"deny"``. The Go gateway's ``normalizeRegistryEmptyAction``
+    (internal/config/asset_policy.go) resolves the same three values.
     """
     v = str(value).strip().lower()
     if v == "allow":
@@ -776,10 +780,26 @@ def _canonical_mcp_transport(transport: Any, url: str = "", command: str = "") -
 
 def asset_name_key(name: Any) -> str:
     """The form asset_policy compares skill, MCP and plugin names in: trimmed,
-    Unicode NFC and lower-cased (Go ``config.SameAssetName``). A rule written
-    in the composed spelling of a name like "café" matches the decomposed
-    spelling another tool wrote (GAP-0432)."""
-    return unicodedata.normalize("NFC", str(name or "").strip()).lower()
+    Unicode NFC and case-folded the way Go ``config.SameAssetName``
+    (``strings.EqualFold``) folds. A rule written in the composed spelling of
+    a name like "café" matches the decomposed spelling another tool wrote
+    (GAP-0432), and final sigma, capital sigma and sigma are one letter on
+    both sides (p0 GAP-1305)."""
+    return "".join(_simple_fold(ch) for ch in unicodedata.normalize("NFC", str(name or "").strip()))
+
+
+def _simple_fold(ch: str) -> str:
+    """One character under Unicode simple case folding, which Go's
+    ``strings.EqualFold`` compares by. ``str.casefold`` is full folding
+    ("ß" -> "ss"), and ``str.lower`` leaves "ς" apart from "σ"; a one-letter
+    casefold is the simple folding, a lower-case letter covers the few
+    letters whose full folding is longer ("ẞ" -> "ß"), and the rest fold to
+    themselves ("ß", "İ")."""
+    folded = ch.casefold()
+    if len(folded) == 1:
+        return folded
+    lowered = ch.lower()
+    return lowered if len(lowered) == 1 else ch
 
 
 def _asset_rule_matches(

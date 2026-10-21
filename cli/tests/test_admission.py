@@ -293,6 +293,26 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
         )
         self.assertEqual(d.verdict, "blocked")
 
+    def test_names_fold_case_as_the_gateway_does(self):
+        # p0 GAP-1305: Go strings.EqualFold (config.SameAssetName) uses
+        # simple case folding. internal/config/asset_names_test.go holds the
+        # same table.
+        from defenseclaw.enforce.admission import asset_name_key
+
+        same = [
+            ("\u03c3kill", "\u03c2kill"), ("\u03a3kill", "\u03c2kill"),
+            ("MySkill", "myskill"), ("\u212ait", "kit"), ("\u1e9eig", "\u00dfig"),
+            ("caf\u00e9", "CAFE\u0301"),
+        ]
+        apart = [("stra\u00dfe", "strasse"), ("\u0130nfo", "info"), ("\u0131nfo", "info")]
+        for a, b in same:
+            self.assertEqual(asset_name_key(a), asset_name_key(b), (a, b))
+        for a, b in apart:
+            self.assertNotEqual(asset_name_key(a), asset_name_key(b), (a, b))
+        policy = self._asset_policy(denied=[SimpleNamespace(name="\u03a3kill")])
+        d = evaluate_admission(self.pe, target_type="skill", name="\u03c2kill", asset_policy=policy)
+        self.assertEqual(d.verdict, "blocked")
+
     def test_connector_allowed_rule_overrides_global_denied_rule(self):
         policy = self._asset_policy(
             denied=[SimpleNamespace(name="tool")],
@@ -375,15 +395,15 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
         self.assertEqual(d.source, "asset-policy-default-deny")
 
     def test_empty_required_registry_warn_falls_through_to_default(self):
-        # "warn" is treated like "allow" — it falls through to the default
-        # check. The Go gateway now resolves "warn" the same way (warn-Go
-        # ruling), so the Python preview and the runtime agree.
+        # "warn" does not block, but unlike "allow" the decision names the
+        # empty registry (p0 GAP-0941), as the Go gateway's does.
         policy = self._asset_policy(
             registry_required=True, registry=[], registry_empty_action="warn",
         )
         d = evaluate_asset_policy(policy, target_type="mcp", name="demo")
         self.assertEqual(d.verdict, "allowed")
-        self.assertEqual(d.source, "asset-policy-default-allow")
+        self.assertEqual(d.source, "asset-policy-registry-required-empty-warn")
+        self.assertIn("requires a registry but none is configured", d.reason)
 
     def test_empty_required_registry_warn_still_honors_default_deny(self):
         # "warn" only relaxes the empty-registry gate, not the default policy.
@@ -1032,6 +1052,19 @@ class TestPolicyViews(_StoreTestBase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].actions.install, "allow")
         self.assertEqual(install_counts(self.store, self.cfg)[:2], (0, 1))
+
+    def test_denied_asset_keeps_its_failed_quarantine_reason(self):
+        # GAP-0133: the deny rule's reason hid the watcher's "quarantine
+        # failed", so skill info said blocked instead.
+        from defenseclaw.commands import compute_verdict
+        from defenseclaw.config import AssetPolicyRule
+        from defenseclaw.enforce.asset_lists import merge_operator_entries
+
+        self.store.set_action_field("skill", "denied-skill", "install", "block", "quarantine failed: permission denied")
+        self.cfg.asset_policy.skill.denied = [AssetPolicyRule(name="denied-skill", reason="not approved")]
+        entries = merge_operator_entries(self.store.list_actions_by_type("skill"), self.cfg, "skill")
+        self.assertEqual(entries[0].reason, "quarantine failed: permission denied")
+        self.assertEqual(compute_verdict(entries[0])[0], "quarantine failed")
 
 
 class TestPolicyEngineToolConnectorScope(_StoreTestBase):

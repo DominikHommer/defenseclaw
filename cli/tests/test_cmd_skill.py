@@ -1656,6 +1656,30 @@ class TestSkillInstall(SkillCommandTestBase):
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
     @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
+    def test_install_audit_names_the_config_generation_of_its_decision(self, mock_install, mock_scan, mock_eval):
+        # r103 GAP-0021: the install-allowed row said generation 0 while a
+        # reload applied a newer generation during the install.
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        mock_install.side_effect = self._fake_clawhub_install
+        skill_dir = os.path.join(self.tmp_dir, "skills", "gen-stamp")
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner", target=skill_dir, timestamp=datetime.now(timezone.utc),
+            findings=[], duration=timedelta(seconds=0.1),
+        )
+        mock_eval.side_effect = [AdmissionDecision("allowed", "on the allow list", source="manual-allow")]
+        self.app.cfg._loaded_generation = 6
+
+        result = self.invoke(["install", "gen-stamp"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        events = [e for e in self.app.store.list_events(20) if e.action == "install-allowed"]
+        self.assertEqual(len(events), 1)
+        self.assertIn("config_generation=6", events[0].details)
+
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
     def test_install_findings_the_admission_action_allows_are_not_an_allow_list_hit(
         self, mock_install, mock_scan, mock_eval
     ):

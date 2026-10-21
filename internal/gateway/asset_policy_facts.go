@@ -220,13 +220,14 @@ func (a *APIServer) installedSkillFolders(ctx context.Context, connector, cwd, n
 	// profiles, so skillSourcePaths leaves those folders out and a user or
 	// project skill on asset_policy.skill.denied typed as /name ran
 	// (GAP-0665). Such a folder is one it may not check, as a 0700 home is
-	// on Linux and macOS: it counts when the hook reported it, and when the
-	// hook reported no folder it is unseen.
+	// on Linux and macOS: it counts when the hook reported it, and otherwise
+	// it is unseen. A hook that reported the folder under another spelling
+	// of the home (a redirected or aliased profile path) left it neither,
+	// and the denied skill expanded (r102 GAP-0676).
 	for _, dir := range a.profileSkillFolders(ctx, connector, cwd, name) {
-		switch {
-		case reported(dir):
+		if reported(dir) {
 			folders = append(folders, dir)
-		case len(facts.SkillDirs) == 0:
+		} else {
 			unseen = append(unseen, dir)
 		}
 	}

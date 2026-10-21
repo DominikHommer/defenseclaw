@@ -366,10 +366,40 @@ var policyEvaluateCmd = &cobra.Command{
 			}
 		}
 
+		if !secureClient {
+			out = withAssetPolicyDryRun(cfg, targetType, targetName, out)
+		}
 		result, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(result))
 		return nil
 	},
+}
+
+// withAssetPolicyDryRun applies the asset_policy decision the gateway takes
+// before admission, in the watcher and the hooks: a registry_required,
+// registry or default-deny verdict that the admission lists do not carry.
+// Without it the dry run said scan / awaiting scan for an approved and an
+// unregistered MCP server alike while the runtime refused the unregistered
+// one (p0 GAP-0945).
+func withAssetPolicyDryRun(cfg *config.Config, targetType, targetName string, out *policy.AdmissionOutput) *policy.AdmissionOutput {
+	if cfg == nil || out == nil || out.Verdict == "blocked" {
+		return out
+	}
+	decision := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
+		TargetType: targetType, Name: targetName, SourcePath: "/dry-run", RuntimeSurface: "watcher",
+	})
+	switch {
+	case decision.Enabled && decision.RawAction == "block" && decision.Action == "block":
+		return &policy.AdmissionOutput{
+			Verdict: "blocked", Reason: decision.Reason,
+			FileAction: "none", InstallAction: "block", RuntimeAction: "block",
+		}
+	case decision.WouldBlock:
+		out.Reason += "; asset policy would block (" + decision.Source + "): " + decision.Reason
+	case decision.Source == "registry":
+		out.Reason = decision.Reason + "; " + out.Reason
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

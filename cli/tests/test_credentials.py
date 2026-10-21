@@ -453,6 +453,21 @@ class RequirementPredicateTests(unittest.TestCase):
         )
         self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)
 
+    def test_defenseclaw_llm_key_not_required_when_skill_scanner_llm_off(self):
+        # p0 GAP-1368: a resolved hosted model with use_llm false still made
+        # the default key required.
+        def cfg(use_llm: bool) -> Config:
+            return _make_cfg(
+                "/tmp/dc-test",
+                scanners=ScannersConfig(
+                    skill_scanner=SkillScannerConfig(use_llm=use_llm, llm=LLMConfig(model="anthropic/claude-sonnet-5-5")),
+                ),
+            )
+
+        self.assertTrue(C._any_llm_component_uses_default_key(cfg(True)))
+        self.assertFalse(C._any_llm_component_uses_default_key(cfg(False)))
+        self.assertNotEqual(C._defenseclaw_llm_key(cfg(False)), C.Requirement.REQUIRED)
+
 
 class EffectiveEnvNameTests(unittest.TestCase):
     """``effective_env_name`` must win over the canonical name when set."""
