@@ -15,6 +15,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
+// The package scripts find floorCheckMarker in the gateway binary to know it
+// has floor-check; the command's annotation keeps the text in the binary.
+func TestBundleFloorCheckCarriesThePackageScriptMarker(t *testing.T) {
+	cmd := newEnterpriseBundleFloorCheckCommand()
+	if got := cmd.Annotations[floorCheckMarkerAnnotation]; got == "" || got != floorCheckMarker {
+		t.Fatalf("floor-check annotation %q = %q; want %q", floorCheckMarkerAnnotation, got, floorCheckMarker)
+	}
+}
+
 func TestBundleFloorCheckRefusesOnlyBelowTheFloorWithItsOwnExitCode(t *testing.T) {
 	root, layout, _ := anchorsInstallDevice(t)
 	run := func(args ...string) error {

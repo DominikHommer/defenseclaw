@@ -68,11 +68,17 @@ not_older() {
 root_owned() {
     [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1" 2>/dev/null)" = 0 ]
 }
-# The installed gateway answers the floor check; without it (removed by
-# hand, or an uninstall that failed after removing the binaries), the
-# root-only copy an uninstall kept in the lifecycle folder does.
-checker=$gateway
-if ! { root_owned "$checker" && [ -x "$checker" ]; }; then
+# The installed gateway answers the floor check when its binary carries
+# floor_check_marker (1.0.4 on; looked for without running it, so a gateway
+# that cannot run is told apart from an older one, which is not asked).
+# Without it (removed by hand, or an uninstall that failed after removing the
+# binaries), the root-only copy an uninstall kept in the lifecycle folder
+# does.
+floor_check_marker=defenseclaw-package-floor-check/1
+checker=
+if root_owned "$gateway" && grep -qaF "$floor_check_marker" "$gateway" 2>/dev/null; then
+    checker=$gateway
+elif [ ! -L "$state/floor-check" ] && root_owned "$state/floor-check/defenseclaw-gateway"; then
     checker="$state/floor-check/defenseclaw-gateway"
 fi
 
@@ -84,10 +90,13 @@ check() {
     # The rollback marker does not lift the release floor of a confirmed
     # signed policy bundle (min_product_version), and no apt direction does:
     # every incoming version is checked, as the package preinstall does.
-    # Exit 3 is the gateway's refusal.
-    if [ ! -L "$state/floor-check" ] && root_owned "$checker" && [ -x "$checker" ]; then
+    # Only exit 0 passes: exit 3 is the gateway's refusal, and any other
+    # result (execution denied, killed, crashed) leaves the floor unchecked.
+    if [ -n "$checker" ]; then
         floor_msg=$("$checker" enterprise bundle floor-check --product-version "$to" 2>&1 >/dev/null)
-        if [ $? -eq 3 ]; then
+        floor_rc=$?
+        if [ "$floor_rc" -ne 0 ]; then
+            [ "$floor_rc" -eq 3 ] || floor_msg="the release floor of the confirmed signed policy bundle could not be checked: $checker exited $floor_rc${floor_msg:+ ($floor_msg)}. Let it run (for example, trust it in the application control policy) and install again."
             echo "defenseclaw-enterprise: refusing to install $incoming: ${floor_msg#Error: } Nothing was changed." >&2
             exit 1
         fi

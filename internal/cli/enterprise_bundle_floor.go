@@ -19,9 +19,22 @@ import (
 
 // bundleFloorRefusedExit is the exit code of floor-check when the package
 // version is below the confirmed bundle's release floor (or the floor cannot
-// be read). The package scripts refuse only on this code, so an older
-// gateway without the command does not block an install.
+// be read). The package scripts refuse on any other non-zero code too
+// (floorCheckMarker).
 const bundleFloorRefusedExit = 3
+
+// floorCheckMarker is in every gateway binary that has floor-check (an
+// annotation of the command keeps it there). The package scripts look for it
+// in the installed gateway without running it: a gateway that carries it must
+// pass the check (exit 0), so one that cannot run (application control,
+// killed, crashed) refuses the install, while a gateway before 1.0.4 is not
+// asked. Keep floor_check_marker in packaging/linux/preinstall.sh,
+// packaging/linux/apt-downgrade-guard.sh and the macOS pkg preinstall
+// (scripts/build-macos-enterprise-pkg.sh) the same.
+const floorCheckMarker = "defenseclaw-package-floor-check/1"
+
+// floorCheckMarkerAnnotation holds floorCheckMarker on the command.
+const floorCheckMarkerAnnotation = "defenseclaw.package-floor-check"
 
 // newEnterpriseBundleFloorCheckCommand is the release floor check the Linux
 // and macOS package scripts run with the installed gateway before any file
@@ -35,7 +48,7 @@ func newEnterpriseBundleFloorCheckCommand() *cobra.Command {
 		Hidden:       true,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
-		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true", floorCheckMarkerAnnotation: floorCheckMarker},
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if strings.TrimSpace(version) == "" {
 				return bundleUsage("--product-version is required")
