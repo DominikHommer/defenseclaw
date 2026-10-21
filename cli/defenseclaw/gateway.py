@@ -91,9 +91,9 @@ def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: fl
         )
         try:
             result = client.guardrail_profile_resolve(user=user, connector=connector)
-            unverified: list[str] = []
+            unchecked: list[bool] = []
             overrides = (
-                _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""), unverified)
+                _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""), unchecked)
                 if not connector else []
             )
         finally:
@@ -104,9 +104,10 @@ def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: fl
     except Exception as exc:  # noqa: BLE001 - any transport or HTTP failure.
         return {"user": label, "error": str(exc)}
     answer = {**result, "user": label, "overrides": overrides}
-    if unverified:
-        # Agent assignments whose owner could not be confirmed (GAP-1054).
-        answer["unverified_agents"] = unverified
+    if unchecked:
+        # Agent assignments whose owner could not be confirmed (GAP-1054);
+        # no agent ID is named until its owner is known.
+        answer["agent_assignments_unchecked"] = True
     return answer
 
 
@@ -236,7 +237,7 @@ def current_profile_account(*, secure_client: bool = False) -> tuple[str, str]:
 
 
 def _scoped_profile_overrides(
-    cfg: Any, client: Any, user: str, profile: str, unverified: list[str] | None = None,
+    cfg: Any, client: Any, user: str, profile: str, unchecked: list[bool] | None = None,
 ) -> list[dict[str, str]]:
     """Connector/agent subjects whose resolved profile differs from *profile*.
 
@@ -247,8 +248,8 @@ def _scoped_profile_overrides(
     through the user's agent identities, and agents of other users are skipped.
     An agent runs under one connector only, so an assignment that lists
     connectors names it only under its own (GAP-1270). When the user's agents
-    cannot be listed, no agent is attributed; its ID goes to *unverified*
-    (GAP-1054).
+    cannot be listed, no agent is attributed or named; *unchecked* gets one
+    entry so the caller can say agent assignments were not checked (GAP-1054).
     """
     from defenseclaw.connector_paths import KNOWN_CONNECTORS, normalize
 
@@ -276,8 +277,8 @@ def _scoped_profile_overrides(
             if not agent:
                 candidates = connectors or [""]
             elif owners is None:
-                if unverified is not None and agent not in unverified:
-                    unverified.append(agent)
+                if unchecked is not None and not unchecked:
+                    unchecked.append(True)
                 continue
             elif agent not in owners or (connectors and owners[agent] not in connectors):
                 continue

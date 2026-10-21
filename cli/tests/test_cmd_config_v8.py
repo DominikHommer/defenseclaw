@@ -528,3 +528,31 @@ def test_get_reads_one_lifecycle_field_of_an_admission_action(tmp_path: Path, mo
     high = run("get", "admission.plugin.actions.high.install")
     assert high.exit_code == 0, high.output
     assert high.stdout.strip() == "block" and "default:" not in high.output
+
+
+def test_effective_lifecycle_field_is_the_secure_client_action(tmp_path: Path, monkeypatch) -> None:
+    # Review fix (GAP-0103): on Secure Client data.json decides the action;
+    # --effective must not print the config.yaml field as the effective one.
+    from defenseclaw.enforce import admission
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 9\nobservability: {}\nadmission:\n  skill:\n    actions:\n"
+        "      high:\n        install: none\n        file: none\n        runtime: enable\n",
+        encoding="utf-8",
+    )
+    enforced = admission.CompiledAdmission(
+        actions={"HIGH": admission._SHORTHANDS["block"]}, source="secure-client:data.json"
+    )
+    with (
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_wire("effective", effective={})),
+        patch("defenseclaw.enforce.asset_lists.is_secure_client", return_value=True),
+        patch("defenseclaw.enforce.admission._secure_client_admission", return_value=enforced),
+    ):
+        got = CliRunner().invoke(
+            cmd_config.config_cmd, ["get", "admission.skill.actions.high.runtime", "--effective"]
+        )
+    assert got.exit_code == 0, got.output
+    assert got.stdout.strip() == "disable"
+    assert "(source: secure-client:data.json)" in got.output

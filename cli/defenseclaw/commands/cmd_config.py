@@ -507,6 +507,11 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
         data, sources = _admission_view(cfg, parts[1])
         found, value = _lookup(data, parts[2:]) if len(parts) > 2 else (True, data)
         if not found:
+            # One lifecycle field of an action the compiled view writes as a
+            # shorthand, from that action, never from config.yaml: Secure
+            # Client enforces data.json, not the written source.
+            found, value = _admission_lifecycle_field({"admission": {parts[1]: data}}, parts)
+        if not found:
             return None
         return value, sources.get(parts[2], _whole_source(sources)) if len(parts) > 2 else _whole_source(sources)
     if parts[:2] == ["enterprise", "tetragon"] and len(parts) <= 3:

@@ -551,7 +551,11 @@ def status(app: AppContext, as_json: bool) -> None:
         hung_pid = 0 if holder else _live_gateway_pid(cfg)
         # A gateway that answers the public /health while its authenticated
         # /status refuses this account is not hung (GAP-0150).
-        unread = _status_refused_detail(cfg, client) if hung_pid else ""
+        unread = (
+            _status_refused_detail(cfg, client, OrchestratorClient(host=bind, port=cfg.gateway.api_port))
+            if hung_pid
+            else ""
+        )
         if holder:
             _status_row(
                 "Sidecar",
@@ -599,15 +603,18 @@ def status(app: AppContext, as_json: bool) -> None:
         raise SystemExit(1)
 
 
-def _status_refused_detail(cfg, client) -> str:
+def _status_refused_detail(cfg, client, public) -> str:
     """Why /status gave this account nothing while /health answers, else "".
 
-    "" when /health does not answer either: that gateway is starting or hung.
+    *public* is a client without the gateway token, for the public /health.
+    *client* carries the token and is used only once the listener is proven to
+    be this account's gateway. "" when /health does not answer either: that
+    gateway is starting or hung.
     """
     import requests
 
     try:
-        client.health()
+        public.health()
     except Exception:  # noqa: BLE001 - no answer at all: starting or hung.
         return ""
     if not cfg.gateway.resolved_token():
@@ -625,6 +632,18 @@ def _status_refused_detail(cfg, client) -> str:
         return (
             "status has no gateway token (DEFENSECLAW_GATEWAY_TOKEN) to read the live state; "
             "run defenseclaw doctor"
+        )
+    try:
+        from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
+
+        trusted = _trusted_gateway_listener(cfg).trusted
+    except Exception:  # noqa: BLE001 - unproven is not trusted.
+        trusted = False
+    if not trusted:
+        # Never send the gateway token to a listener not proven to be ours.
+        return (
+            "this account could not verify that the listener is its gateway, so status did not send "
+            "the gateway token; run defenseclaw doctor"
         )
     try:
         client.status()

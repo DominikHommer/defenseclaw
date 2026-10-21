@@ -2549,6 +2549,20 @@ def _audit_db_exposing_modes(db_path: str) -> list[tuple[str, int]]:
     return found
 
 
+def _data_dir_writer_problem(path: str) -> str | None:
+    """Why another account may write the data directory by ACL, else None.
+
+    Windows: the write custody check of ``doctor_recovery`` (current-user
+    owner, only trusted writers). macOS: an extended ACL write grant. Other
+    platforms have no ACL beyond the mode bits the caller checks.
+    """
+    from defenseclaw.file_permissions import darwin_acl_write_error, windows_acl_custody_write_error
+
+    if os.name == "nt":
+        return windows_acl_custody_write_error(path, allow_current_user=True, require_current_user_owner=True)
+    return darwin_acl_write_error(path)
+
+
 def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     """FAIL when other local accounts can read DefenseClaw secrets or state.
 
@@ -2576,7 +2590,7 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     dotenv_requires_review = False
     # Another account that can write the data directory can replace the
     # private files in it, so this fails like an exposed file (GAP-1329).
-    directory_writable = False
+    directory_writable = directory_acl_writable = False
     for path, is_dir in targets:
         try:
             info = os.lstat(path)
@@ -2595,6 +2609,16 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
             except OSError:
                 # A size or file-type refusal does not erase the mode finding.
                 unverified.append(f"{path} (cannot safely read)")
+        if is_dir:
+            # The same write custody the recovery planner requires of the
+            # data directory: a Windows ACL or a macOS extended ACL can let
+            # another account replace private state behind private mode bits.
+            writer = _data_dir_writer_problem(path)
+            if writer and _acl_inspection_unavailable(writer):
+                unverified.append(f"{path} ({writer})")
+            elif writer:
+                exposed.append(f"{path} (unsafe {'Windows' if os.name == 'nt' else 'extended'} ACL: {writer})")
+                directory_writable = directory_acl_writable = True
         if os.name == "nt":
             problem = None if is_dir else windows_acl_confidentiality_error(path)
             if problem:
@@ -2646,8 +2670,13 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         steps.append("defenseclaw doctor --fix --yes (makes " + ", ".join(fixable) + " private)")
     if review:
         steps.append("review ownership and remove untrusted permissions on " + ", ".join(review))
-    if os.name != "nt" and any(item.startswith(f"{data_dir} (") for item in exposed):
+    if os.name != "nt" and any(item.startswith(f"{data_dir} (mode ") for item in exposed):
         steps.append(f"chmod 700 {data_dir}")
+    if directory_acl_writable:
+        steps.append(
+            f"remove other accounts' write access to {data_dir}"
+            + (" (chmod -N removes a macOS extended ACL)" if os.name != "nt" else " (review its ACL and owner)")
+        )
     _emit(
         "fail" if files or directory_writable else "warn",
         "Private files",
