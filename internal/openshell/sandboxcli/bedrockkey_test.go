@@ -14,6 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package sandboxcli
 
 import (
@@ -61,7 +63,7 @@ func TestExpiredBedrockKeyRefusesTheRun(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.env[EnvBedrockToken] = key
 	ta.env["AWS_REGION"] = "us-east-1"
-	ta.App.Now = func() time.Time { return signed.Add(13 * time.Hour) }
+	ta.Now = func() time.Time { return signed.Add(13 * time.Hour) }
 	spec, err := ResolveHarness("claudecode")
 	if err != nil {
 		t.Fatal(err)
