@@ -482,6 +482,9 @@ $stream.Dispose()
                     $failures.Add('a deny entry for an enrolled user was not detected')
                 }
             }
+            # That deny names this account: drop it, so the scratch tree can
+            # be listed and removed.
+            Set-TestDirectorySddl $vendor 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
 
             # Review of GAP-1158: the full standalone purge (the committed
             # cleanup's selector step, then the orphaned-state step) keeps a
