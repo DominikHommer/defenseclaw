@@ -1221,12 +1221,10 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if record != nil && !l.opts.AllowDowngrade && compareProductVersions(p.version, record.ProductVersion) < 0 {
 		return nil, &codedError{code: codeDowngrade, err: fmt.Errorf("payload version %s is older than the installed %s; downgrades are refused (rerun with --allow-downgrade to roll back deliberately)", p.version, record.ProductVersion)}
 	}
-	// The release floor of the confirmed signed bundle holds for every
-	// install and every version change (bundleFloorApplies).
-	if bundleFloorApplies(record, p.version) {
-		if err := env.BundleProductFloorRefusal(p.version); err != nil {
-			return nil, err
-		}
+	// The confirmed bundle's release floor applies to every candidate,
+	// including a repair or ensure of the recorded version.
+	if err := env.BundleProductFloorRefusal(p.version); err != nil {
+		return nil, err
 	}
 	if l.opts.ProductVersion != "" && strings.TrimPrefix(l.opts.ProductVersion, "v") != p.version {
 		return nil, &codedError{code: codePayload, err: fmt.Errorf("payload version %s does not match --product-version %s", p.version, l.opts.ProductVersion)}

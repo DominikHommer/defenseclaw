@@ -71,19 +71,6 @@ func (e *Env) BundleProductFloorRefusal(version string) error {
 	return nil
 }
 
-// bundleFloorApplies reports whether a run that installs version over record
-// must pass the confirmed bundle's release floor: every install without a
-// record (a --keep-state uninstall removes the record but keeps the trust
-// anchors and the confirmed bundle, so a reinstall resumes under that
-// bundle), every version change, up or down (a version that is not a
-// release orders above every release, so an upgrade by that order proves
-// nothing), and every run whose version is not a release, because that
-// string does not tell which code it names.
-func bundleFloorApplies(record *Deployment, version string) bool {
-	return record == nil || version != strings.TrimPrefix(strings.TrimSpace(record.ProductVersion), "v") ||
-		!enterprisebundle.IsReleaseVersion(version)
-}
-
 // floorCheckerPath is the root-only copy of the deployed gateway a non-purge
 // uninstall keeps in the lifecycle directory. The Linux and macOS package
 // scripts run its floor-check when the installed gateway is gone (after
