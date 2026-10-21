@@ -111,6 +111,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	} else if st.Reason == "" {
 		st.Reason = err.Error()
 	}
+	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	live := 0
@@ -122,7 +123,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if b.phase == audit.SandboxPhaseReady {
 			st.Running++
 		}
-		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason, b.rec.FlushedIn) {
+		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason, b.rec.EndedAt, now) {
 			live++
 		}
 	}
@@ -341,21 +342,24 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	defer cancel()
 	m.mu.Lock()
 	name, reason, driver := b.rec.Name, b.rec.PhaseReason, b.rec.Driver
+	// Nothing of a sandbox whose workload ended runs to be stopped: its
+	// phase stays until OpenShell reports another, so the wait for its
+	// MicroVM's disk (EndedAt) does not start over.
+	ended := workloadEnded(b.phase, reason)
 	m.mu.Unlock()
 	if err := m.checkSandbox(ctx, gw, b); err != nil {
 		return err
 	}
-	// A MicroVM whose workload ended has its disk flushed first: endHarness
-	// flushes only a ready one.
-	ended, flushErr := m.flushEnded(ctx, gw, b)
 	// The harness exits on its own first, so its end-of-session hook runs
 	// and its terminal ends as after /exit (graceful.go); a detached run
 	// the stop ends is marked interrupted, and once the stop is published
 	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
 	run := m.endHarness(ctx, gw, b)
-	m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
+	if !ended {
+		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
+	}
 	m.keepRunLog(ctx, gw, b, run)
-	_, err = gw.Client.StopSandbox(ctx, name)
+	stopped, err := gw.Client.StopSandbox(ctx, name)
 	if err != nil && transientGatewayError(err) {
 		// The connection closed under the call (the gateway restarted, or
 		// another call dropped the connection): the stop goes again on a fresh
@@ -373,10 +377,10 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
 		if e := m.errorPhaseRefusal(name, reason, driver, err); e != nil {
-			return m.keptFlushed(b, ended, flushErr, e)
+			return e
 		}
 		if e := m.errorPhaseNow(b); e != nil {
-			return m.keptFlushed(b, ended, flushErr, e)
+			return e
 		}
 		if connectionClosed(err) {
 			// gRPC's own words reached the user's session end (GAP-0337).
@@ -384,6 +388,21 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 				"(a restart of Docker or of the gateway does that); `defenseclaw sandbox status %s` shows where it stands", name, name)
 		}
 		return upstream("stop sandbox "+name, err)
+	}
+	if ph := stoppedAsIs(stopped); ph != "" {
+		// OpenShell returns a sandbox whose workload completed, or whose
+		// main process failed, as it is: it stops nothing, and flushes
+		// nothing, of its MicroVM. Nothing of it runs, and its MicroVM's
+		// disk is written back on its own (openshell.EndedSettle).
+		var cond *audit.SandboxCondition
+		if ph == audit.SandboxPhaseError && reason != "" {
+			cond = &audit.SandboxCondition{Reason: reason}
+		}
+		m.mu.Lock()
+		b.sb = stopped
+		m.mu.Unlock()
+		m.lifecycle(ctx, b, ph, audit.SandboxTriggerStop, false, cond, stopped.Status.ExitCode)
+		return nil
 	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
 	if err != nil && transientGatewayError(err) {
@@ -401,6 +420,21 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStop, false, nil, sb.Status.ExitCode)
 	return nil
+}
+
+// stoppedAsIs is the phase of a sandbox OpenShell's stop returned as it
+// was, as OpenShell (0.1.3 and 0.1.5) does for one whose workload completed
+// or whose main process failed (the error state with an exit code); ""
+// for one it stops.
+func stoppedAsIs(sb *openshell.Sandbox) audit.SandboxPhase {
+	if sb == nil {
+		return ""
+	}
+	switch ph := auditPhase(sb.Status.Phase); {
+	case ph == audit.SandboxPhaseCompleted, ph == audit.SandboxPhaseError && sb.Status.ExitCode != nil:
+		return ph
+	}
+	return ""
 }
 
 // transientGatewayError reports a call that failed because the connection to

@@ -647,6 +647,12 @@ func (b *box) noteActiveLocked(at time.Time) {
 		b.activeSince = at
 	}
 	b.activeAt = at
+	// Work seen in a sandbox whose workload ended (a process that outlived
+	// its main one) starts the wait for its MicroVM's disk over
+	// (HoldsCompute).
+	if workloadEnded(b.phase, b.rec.PhaseReason) && at.After(b.rec.EndedAt) {
+		b.rec.EndedAt = at.UTC()
+	}
 }
 
 // checkHookSilence raises a hook_silence finding for a ready sandbox whose

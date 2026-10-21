@@ -17,9 +17,19 @@
 package openshell
 
 import (
+	"context"
 	"io/fs"
 	"testing"
+	"time"
 )
+
+// SetSettleClock makes settleEnded read the time with now and wait with
+// sleep for the rest of t.
+func SetSettleClock(t *testing.T, now func() time.Time, sleep func(context.Context, time.Duration) error) {
+	prev := settleClock
+	settleClock.now, settleClock.sleep = now, sleep
+	t.Cleanup(func() { settleClock = prev })
+}
 
 // SetGatewayFileOwner makes owned judge which gateway files are the
 // caller's for the rest of t: only root could make another user's file.

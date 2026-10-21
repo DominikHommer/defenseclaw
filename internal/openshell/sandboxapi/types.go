@@ -98,8 +98,8 @@ type Status struct {
 	// gateway would end unflushed or half started (manager.HoldsCompute):
 	// the running ones, those starting or stopping or in an unknown phase,
 	// and a MicroVM that completed or is in OpenShell's error state, until
-	// it stops or DefenseClaw flushed its disk. Unset by a daemon before
-	// DefenseClaw 1.0.4 (Busy).
+	// its guest has written its disk back (openshell.EndedSettle). Unset by
+	// a daemon before DefenseClaw 1.0.4 (Busy).
 	Live             *int      `json:"live,omitempty"`
 	PendingApprovals int       `json:"pending_approvals"`
 	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
@@ -330,12 +330,12 @@ type Sandbox struct {
 	// without a flush: what it wrote in its last seconds may be missing,
 	// empty or cut short (UnflushedText).
 	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
-	// FlushedIn is the phase its MicroVM was in when DefenseClaw last
-	// flushed its disk with its workload ended (completed, or OpenShell's
-	// error state, which an OpenShell before 0.1.5 refuses to stop): while
-	// it stays in that phase, a stop of the OpenShell gateway loses none of
-	// its work (manager.HoldsCompute).
-	FlushedIn string `json:"flushed_in,omitempty"`
+	// EndedAt is when DefenseClaw saw its workload end (completed, or
+	// OpenShell's error state), or its harness at work after that; zero in
+	// any other phase. Once its MicroVM's guest has had
+	// openshell.EndedSettle to write its disk back, a stop of the OpenShell
+	// gateway loses none of its work (manager.HoldsCompute).
+	EndedAt time.Time `json:"ended_at,omitzero"`
 	// RepoPolicy is the repository policy (.defenseclaw/sandbox.yaml) the
 	// posture includes, without its content, as the launch banner names it.
 	RepoPolicy *RepoPolicy `json:"repo_policy,omitempty"`

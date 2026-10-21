@@ -954,17 +954,17 @@ func (d *SandboxDaemon) runningSandboxes(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return sandboxesHoldingCompute(list), nil
+	return sandboxesHoldingCompute(list, time.Now()), nil
 }
 
 // sandboxesHoldingCompute counts the sandboxes of list that may run or
-// hold compute (manager.HoldsCompute): a MicroVM that completed or is in
-// OpenShell's error state counts until it stops or DefenseClaw flushed its
-// disk.
-func sandboxesHoldingCompute(list []sandboxapi.Sandbox) int {
+// hold compute at now (manager.HoldsCompute): a MicroVM that completed or
+// is in OpenShell's error state counts until its guest has written its
+// disk back (openshell.EndedSettle).
+func sandboxesHoldingCompute(list []sandboxapi.Sandbox, now time.Time) int {
 	n := 0
 	for _, sb := range list {
-		if manager.HoldsCompute(sb) {
+		if manager.HoldsCompute(sb, now) {
 			n++
 		}
 	}
