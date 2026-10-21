@@ -278,11 +278,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	defer store.close()
 	unchanged := false
 	if action == "set" {
-		// The gateway reader normalizes whitespace, so the value it accepts
-		// and the exact stored bytes must both match.
-		stored, _, readErr := managed.ResolveServiceCredentialAs(opts.name, store.dir, windowsSecretGatewayAccount)
-		raw, rawErr := os.ReadFile(filepath.Join(store.dir, opts.name))
-		unchanged = readErr == nil && rawErr == nil && bytes.Equal(stored, value) && bytes.Equal(raw, value)
+		unchanged = keepIdenticalWindowsSecret(store, opts.name, value)
 		if !unchanged {
 			if err := writeWindowsSecret(store, opts.name, value); err != nil {
 				return windowsSecretChange{}, secretFailed("change_failed", windowsSecretExitFailure, err)
@@ -303,6 +299,36 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 			fmt.Errorf("credential %s %s, but restarting the gateway failed: %w", opts.name, done, err))
 	}
 	return windowsSecretChange{restarted: restarted, noop: unchanged && !restarted}, nil
+}
+
+// keepIdenticalWindowsSecret reports whether credential name already holds
+// exactly value and still grants the gateway its read, so set need not
+// rewrite it. The gateway reader normalizes whitespace, so the value it
+// accepts and the exact stored bytes must both match. The raw bytes are read
+// only after that trusted, size-limited read succeeded, from the pinned
+// store through a handle that follows no reparse point (openCredential). An
+// ACL edit leaves the bytes alone but can drop the gateway's read ACEs, which
+// the administrator's own read does not notice, so the directory and file
+// descriptors are applied again, the file's through the open handle. Any
+// failure rewrites the credential instead.
+func keepIdenticalWindowsSecret(store *windowsSecretStore, name string, value []byte) bool {
+	stored, _, err := managed.ResolveServiceCredentialAs(name, store.dir, windowsSecretGatewayAccount)
+	if err != nil || !bytes.Equal(stored, value) {
+		return false
+	}
+	gateway, err := managed.WindowsServiceAccountSID(windowsSecretGatewayAccount)
+	if err != nil || gateway == nil {
+		return false
+	}
+	entry, raw, err := store.openCredential(name)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = windows.CloseHandle(entry) }()
+	if !bytes.Equal(raw, value) || ensureWindowsSecretsDir(store, gateway) != nil {
+		return false
+	}
+	return applyWindowsSDDLToHandle(entry, windowsSecretFileSDDL(gateway)) == nil
 }
 
 // requireWindowsSecretDeployment refuses not_installed (1603) unless a
@@ -520,24 +546,8 @@ func (s *windowsSecretStore) remove(name string) error {
 	if !s.exists() {
 		return nil
 	}
-	if !managed.ValidCredentialName(name) {
-		return fmt.Errorf("credential name %q is not valid", name)
-	}
-	objectName, err := windows.NewNTUnicodeString(name)
-	if err != nil {
-		return err
-	}
-	attributes := windows.OBJECT_ATTRIBUTES{
-		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
-		RootDirectory: s.handle,
-		ObjectName:    objectName,
-		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
-	}
-	var entry windows.Handle
-	var status windows.IO_STATUS_BLOCK
-	err = windows.NtCreateFile(&entry, windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE, &attributes, &status, nil, 0,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_OPEN,
-		windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	entry, err := s.openEntry(name, windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 	if errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) {
 		return nil
 	}
@@ -559,8 +569,85 @@ func (s *windowsSecretStore) remove(name string) error {
 	return nil
 }
 
+// openEntry opens entry name of the pinned folder relative to the folder
+// handle, following no reparse point (OBJ_DONT_REPARSE,
+// FILE_OPEN_REPARSE_POINT): a link named like the credential is opened
+// itself, never its target.
+func (s *windowsSecretStore) openEntry(name string, access, share uint32) (windows.Handle, error) {
+	if !managed.ValidCredentialName(name) {
+		return 0, fmt.Errorf("credential name %q is not valid", name)
+	}
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return 0, err
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: s.handle,
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	var entry windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(&entry, access, &attributes, &status, nil, 0, share, windows.FILE_OPEN,
+		windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	return entry, err
+}
+
+// openCredential opens credential name in the pinned folder (openEntry) to
+// read it and to repair its descriptor, and reads at most
+// managed.ServiceCredentialLimit bytes. A link, a folder or a larger file is
+// refused before anything is read. Writers are shut out while the handle is
+// open; the caller closes it.
+func (s *windowsSecretStore) openCredential(name string) (windows.Handle, []byte, error) {
+	if !s.exists() {
+		return 0, nil, fmt.Errorf("%s: %w", s.dir, os.ErrNotExist)
+	}
+	entry, err := s.openEntry(name, windows.FILE_READ_DATA|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|
+		windows.WRITE_DAC|windows.WRITE_OWNER|windows.SYNCHRONIZE, windows.FILE_SHARE_READ)
+	if err != nil {
+		return 0, nil, fmt.Errorf("open credential %s in %s: %w", name, s.dir, err)
+	}
+	data, err := readWindowsSecretEntry(entry)
+	if err != nil {
+		_ = windows.CloseHandle(entry)
+		return 0, nil, fmt.Errorf("credential %s in %s: %w", name, s.dir, err)
+	}
+	return entry, data, nil
+}
+
+func readWindowsSecretEntry(entry windows.Handle) ([]byte, error) {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(entry, &info); err != nil {
+		return nil, fmt.Errorf("inspect: %w", err)
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
+		return nil, errors.New("is a link or a folder, not a credential file")
+	}
+	if info.FileSizeHigh != 0 || info.FileSizeLow > managed.ServiceCredentialLimit {
+		return nil, fmt.Errorf("exceeds %d bytes", managed.ServiceCredentialLimit)
+	}
+	data := make([]byte, managed.ServiceCredentialLimit+1)
+	total := 0
+	for total < len(data) {
+		var n uint32
+		err := windows.ReadFile(entry, data[total:], &n, nil)
+		if err != nil && !errors.Is(err, windows.ERROR_HANDLE_EOF) {
+			return nil, fmt.Errorf("read: %w", err)
+		}
+		if n == 0 {
+			break
+		}
+		total += int(n)
+	}
+	if total > managed.ServiceCredentialLimit {
+		return nil, fmt.Errorf("exceeds %d bytes", managed.ServiceCredentialLimit)
+	}
+	return data[:total], nil
+}
+
 // windowsSecretStored reports whether credential name is in the store at
-// dir. A store that is not a real directory holds none: the gateway reader
+// // dir. A store that is not a real directory holds none: the gateway reader
 // refuses it too. A store this account cannot open counts as stored
 // (unchecked), so a standard account is not warned about it.
 func windowsSecretStored(dir, name string) bool {
@@ -661,16 +748,28 @@ func storeWindowsSecret(store *windowsSecretStore, name string, value []byte, re
 	return final, nil
 }
 
-func applyWindowsSDDL(path, sddl string) error {
+// windowsSDDLOwnerAndDACL is the owner and the protected DACL that
+// applyWindowsSDDL and applyWindowsSDDLToHandle set.
+func windowsSDDLOwnerAndDACL(sddl string) (*windows.SID, *windows.ACL, error) {
 	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
-		return fmt.Errorf("build security descriptor: %w", err)
+		return nil, nil, fmt.Errorf("build security descriptor: %w", err)
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	dacl, _, err := sd.DACL()
+	if err != nil {
+		return nil, nil, err
+	}
+	return owner, dacl, nil
+}
+
+const windowsSDDLApplied = windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION
+
+func applyWindowsSDDL(path, sddl string) error {
+	owner, dacl, err := windowsSDDLOwnerAndDACL(sddl)
 	if err != nil {
 		return err
 	}
@@ -678,9 +777,17 @@ func applyWindowsSDDL(path, sddl string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		owner, nil, dacl, nil)
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windowsSDDLApplied, owner, nil, dacl, nil)
+}
+
+// applyWindowsSDDLToHandle is applyWindowsSDDL for an open handle (opened
+// with WRITE_DAC and WRITE_OWNER), so no path is resolved again.
+func applyWindowsSDDLToHandle(handle windows.Handle, sddl string) error {
+	owner, dacl, err := windowsSDDLOwnerAndDACL(sddl)
+	if err != nil {
+		return err
+	}
+	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windowsSDDLApplied, owner, nil, dacl, nil)
 }
 
 func windowsSecretStatus(dir string) ([]windowsSecretState, error) {

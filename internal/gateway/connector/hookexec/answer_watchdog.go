@@ -90,9 +90,11 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 	failMode := "closed"
 	if opts.ManagedEnterprise {
 		opts.FailMode = "closed"
-		// This is not an enforcement home. The watchdog's separate
-		// FailureLogHome carries diagnostics if it answers first.
+		// This is not an enforcement home. Diagnostics go to the
+		// FailureLogHome of Run's options once Run adopts the watchdog;
+		// armed alone it writes no failure row.
 		opts.Home = ""
+		opts.FailureLogHome = ""
 	} else if strings.EqualFold(strings.TrimSpace(opts.FailMode), "open") {
 		failMode = "open"
 	}

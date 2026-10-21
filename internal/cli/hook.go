@@ -218,17 +218,15 @@ func newHookSessionFactsCmd() *cobra.Command {
 func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
 	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, hookexec.DefaultMaxBody+1))
 	stdin := io.MultiReader(bytes.NewReader(payload), os.Stdin)
-	failureLogHome := ""
-	if managed {
-		failureLogHome = managedHookFailureLogHome()
-	}
+	// No FailureLogHome here: on Windows it is a token-bound Known Folder
+	// lookup that can stall, and it must count against the armed budget.
+	// Run's options carry it when Run adopts the watchdog.
 	return stdin, hookexec.ArmAnswerWatchdog(hookexec.Options{
 		Connector:         connectorName,
 		Event:             event,
 		FailMode:          failMode,
 		HookSurface:       strings.TrimSpace(surface),
 		ManagedEnterprise: managed,
-		FailureLogHome:    failureLogHome,
 		SecureClient:      managed && secureClientHost(),
 		StartedAt:         startedAt,
 		Exit:              exit,
@@ -454,10 +452,15 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 	return buildHookOptionsForRuntime(connector, event, apiAddr, failMode, false)
 }
 
+// hookUserProfileDir resolves the invoking user's profile
+// (managedHookUserProfileDir); a variable so tests can stall it.
+var hookUserProfileDir = managedHookUserProfileDir
+
 // managedHookFailureLogHome is the invoking user's diagnostic directory for
-// managed hook failure rows (managedHookUserProfileDir).
+// managed hook failure rows (hookUserProfileDir). Only Run's options resolve
+// it, after the answer watchdog is armed.
 func managedHookFailureLogHome() string {
-	home, err := managedHookUserProfileDir()
+	home, err := hookUserProfileDir()
 	if err != nil || home == "" {
 		return ""
 	}

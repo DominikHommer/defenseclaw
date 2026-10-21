@@ -252,7 +252,7 @@ Send a credential **only when it changed**. A Windows `set` of the exact
 stored bytes is not rewritten, but it still restarts a running gateway
 (managed hooks fail closed while it restarts): nothing proves which value the
 running gateway loaded. Only with no running gateway does it report
-`noop: true`. Compare first with `enterprise secret status --json` (no lock,
+`noop: true` (a CLI before 1.0.4 omits `noop`: read it as false). Compare first with `enterprise secret status --json` (no lock,
 read-only): `sha256_prefix` is the first 12 hex characters of the SHA-256 of
 the stored value. Hash the value the way the device stores it: on Windows with
 surrounding whitespace trimmed, on Linux and macOS without the one trailing

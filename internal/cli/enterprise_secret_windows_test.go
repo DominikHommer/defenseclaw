@@ -763,3 +763,89 @@ func TestWindowsSecretRemoveStaysInsideTheRealFolder(t *testing.T) {
 		t.Fatal("windowsSecretStored disagrees with the store")
 	}
 }
+
+// An ACL edit that drops the gateway service SID's read ACEs from a stored
+// credential and its folder leaves the bytes alone. An identical set is still
+// a no-op (nothing rewritten), but it applies both descriptors again: the
+// administrator's own read of the value succeeds without them, while the
+// gateway's restricted token cannot load the credential.
+func TestWindowsSecretIdenticalSetRepairsTheGatewayReadACEs(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	windowsSecretRestartGateway = func() (bool, error) { return false, nil }
+	set := func() string {
+		t.Helper()
+		out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "same-value\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	set()
+	path := filepath.Join(dir, "ai-defense-api-key")
+	if err := applyWindowsSDDL(path, "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyWindowsSDDL(dir, "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"); err != nil {
+		t.Fatal(err)
+	}
+	preserved := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(path, preserved, preserved); err != nil {
+		t.Fatal(err)
+	}
+	if out := set(); !strings.Contains(out, `"noop":true`) {
+		t.Fatalf("identical set after an ACL edit: %q", out)
+	}
+	if info, err := os.Stat(path); err != nil || !info.ModTime().Equal(preserved) {
+		t.Fatalf("identical value was rewritten: %v, %v", info, err)
+	}
+	gateway, err := managed.WindowsServiceAccountSID(windowsSecretGatewayAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ace, ok := windowsSecretTestACEs(t, path)[gateway.String()]; !ok || ace.mask != 0x120089 { // FR (FILE_GENERIC_READ)
+		t.Fatalf("credential read ACE of the gateway not repaired: %+v, %v", ace, ok)
+	}
+	if ace, ok := windowsSecretTestACEs(t, dir)[gateway.String()]; !ok || ace.mask != 0x1200a0 { // windowsSecretDirectoryReaderAccess
+		t.Fatalf("folder ACE of the gateway not repaired: %+v, %v", ace, ok)
+	}
+}
+
+// The identical-value check reads the stored bytes only through the pinned
+// folder and a handle that follows no reparse point, and never more than the
+// credential limit: a link or junction named like the credential and an
+// oversized file are refused before anything is read.
+func TestWindowsSecretOpenCredentialRefusesLinksAndOversizedFiles(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	store, err := openWindowsSecretStore(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	if err := os.WriteFile(filepath.Join(dir, "oversized"), bytes.Repeat([]byte("a"), managed.ServiceCredentialLimit+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	target := filepath.Join(outside, "target")
+	if err := os.WriteFile(target, []byte("same-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	windowsSecretTestJunction(t, filepath.Join(dir, "junction"), outside)
+	for _, name := range []string{"oversized", "linked", "junction"} {
+		if entry, data, err := store.openCredential(name); err == nil {
+			_ = windows.CloseHandle(entry)
+			t.Fatalf("%s was read: %q", name, data)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plain"), []byte("same-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry, data, err := store.openCredential("plain")
+	if err != nil || string(data) != "same-value" {
+		t.Fatalf("plain credential: %q, %v", data, err)
+	}
+	_ = windows.CloseHandle(entry)
+}
