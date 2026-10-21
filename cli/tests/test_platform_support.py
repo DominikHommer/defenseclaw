@@ -80,7 +80,7 @@ WINDOWS_SUPPORTED: set[str] = {
 }
 WINDOWS_PREVIEW: set[str] = set()
 WINDOWS_NOT_CERTIFIED: set[str] = set()
-WINDOWS_UNSUPPORTED = { "openclaw", "zeptoclaw"}
+WINDOWS_UNSUPPORTED = {"openclaw", "zeptoclaw"}
 ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_NOT_CERTIFIED | WINDOWS_UNSUPPORTED
 
 
@@ -148,6 +148,14 @@ def test_windows_taxonomy_matches_go_mirror_and_has_reasons() -> None:
         assert re.search(pattern, go_source), f"Go status/reason drift for {name}"
 
 
+
+
+def test_proxy_topology_is_distinct_from_windows_support() -> None:
+    assert set(PROXY_CONNECTORS) == {"openclaw", "zeptoclaw"}
+    assert set(GUARDRAIL_CONNECTORS) == set(PROXY_CONNECTORS)
+    assert set(_PROXY_BACKED_CONNECTORS) == set(PROXY_CONNECTORS)
+    assert is_proxy_connector("openclaw")
+    assert is_proxy_connector("zeptoclaw")
 
 
 def test_windows_statuses_and_availability() -> None:
@@ -240,6 +248,18 @@ def test_all_connector_lists_share_one_taxonomy() -> None:
 
 
 
+def test_windows_views_include_supported_and_labeled_preview_connectors() -> None:
+    expected = (WINDOWS_SUPPORTED | WINDOWS_PREVIEW) - ACP_ONLY_CONNECTORS
+    assert set(supported_connector_choices("windows")) == expected
+    assert set(visible_connector_choices("windows")) == expected
+
+    win_modes = visible_mode_picker_choices("windows")
+    assert {choice.wire for choice in win_modes} == expected
+    labels = {choice.wire: choice.label.lower() for choice in win_modes}
+    assert all("preview" not in label for label in labels.values())
+    assert {"copilot", "antigravity"} <= set(labels)
+
+
 def test_non_windows_views_are_unfiltered() -> None:
     assert supported_connector_choices("linux") == tuple(CONNECTORS)
     assert visible_mode_picker_choices("darwin") == tuple(MODE_PICKER_CHOICES)
@@ -281,18 +301,18 @@ def test_discovery_default_preserves_non_windows_and_avoids_unsupported_windows(
 
 
 
-def test_bare_windows_setup_rejects_explicit_unsupported_before_mutation() -> None:
+def test_bare_windows_setup_rejects_proxy_before_mutation() -> None:
     app, tmp_dir, db_path = make_app_context()
     try:
         runner = CliRunner()
         with patch("defenseclaw.platform_support.host_os", return_value="windows"):
             result = runner.invoke(
                 setup_group,
-                ["--connector",  "--yes", "--no-restart"],
+                ["--connector", "openclaw", "--yes", "--no-restart"],
                 obj=app,
             )
         assert result.exit_code != 0
-        assert "requires WSL" in result.output
+        assert "not a hook-enforced connector" in result.output
         assert app.cfg.guardrail.connectors == {}
     finally:
         cleanup_app(app, db_path, tmp_dir)
@@ -308,13 +328,14 @@ def test_guardrail_windows_setup_rejects_unsupported_before_mutation() -> None:
                 [
                     "guardrail",
                     "--connector",
+                    "openclaw",
                     "--non-interactive",
                     "--no-restart",
                 ],
                 obj=app,
             )
         assert result.exit_code != 0
-        assert "requires WSL" in result.output
+        assert "requires the guardrail proxy" in result.output
         assert app.cfg.guardrail.connector == original
     finally:
         cleanup_app(app, db_path, tmp_dir)
@@ -324,9 +345,9 @@ def test_noninteractive_windows_init_rejects_unsupported_before_bootstrap() -> N
     with patch("defenseclaw.platform_support.host_os", return_value="windows"):
         result = CliRunner().invoke(
             init_cmd,
-            ["--non-interactive", "--yes", "--connector", ],
+            ["--non-interactive", "--yes", "--connector", "openclaw"],
             obj=AppContext(),
         )
     assert result.exit_code != 0
     assert "unsupported on windows" in result.output
-    assert "requires WSL" in result.output
+    assert "requires the guardrail proxy" in result.output

@@ -1070,11 +1070,12 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertIn("asset_policy", raw)
             self.assertNotIn("connectors", raw["asset_policy"])
 
-    def test_asset_policy_validate_rejects_unknown_connector(self):
+    def test_asset_policy_validate_rejects_duplicate_connector_alias(self):
         cfg = AssetPolicyConfig(
             enabled=True,
             connectors={
-                "unknown-agent": PerConnectorAssetPolicy(mode="action"),
+                "claude-code": PerConnectorAssetPolicy(mode="action"),
+                "claude_code": PerConnectorAssetPolicy(mode="observe"),
             },
         )
         with self.assertRaises(ValueError):

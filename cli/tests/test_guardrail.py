@@ -2348,17 +2348,6 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 f"must not restart openclaw when a different connector is selected; got {commands}",
             )
 
-    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
-    @patch("defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api", return_value=True)
-    @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
-    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-
-    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
-    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-
-    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
-    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-
     @patch("defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)

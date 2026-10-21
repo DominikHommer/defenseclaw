@@ -44,6 +44,20 @@ def test_retired_connector_nested_policy_keys_are_dropped():
     assert raw["guardrail"]["profiles"]["workers"]["connectors"] == {"codex": {}}
 
 
+def test_retired_connector_only_roster_loads_as_unconfigured(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 8\n"
+        "guardrail:\n  connector: openhands\n  connectors:\n    openhands: {}\n"
+        "claw:\n  mode: omnigent\n",
+        encoding="utf-8",
+    )
+
+    loaded = config.load(data_dir=tmp_path)
+
+    assert loaded.active_connectors() == []
+    assert not loaded.has_connector_configured()
+
+
 def test_retired_connector_only_allow_lists_stay_restrictive():
     raw = {
         "application_protection": {"enabled": True, "include_connectors": ["openhands"]},

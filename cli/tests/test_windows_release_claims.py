@@ -11,14 +11,10 @@ import yaml
 from defenseclaw import legacy_connector
 from defenseclaw.platform_support import (
     ACP_ONLY_CONNECTORS,
-    WINDOWS_CERTIFIED_ARCHITECTURES,
     WINDOWS_CONNECTOR_SUPPORT,
-    WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_CONNECTORS,
     WINDOWS_PREVIEW_CONNECTORS,
     WINDOWS_SUPPORTED_CONNECTORS,
-    WINDOWS_UNSUPPORTED_CONNECTORS,
-    WINDOWS_UNSUPPORTED_FEATURES,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -98,7 +94,7 @@ def test_connector_pages_are_the_canonical_cross_platform_support_source() -> No
         connector_id
         for connector_id, label in expected_windows_statuses.items()
         if label == "Supported — native degraded"
-    } == {}
+    } == set()
 
     connectors_index = (
         ROOT / "docs-site/content/docs/connectors/index.mdx"

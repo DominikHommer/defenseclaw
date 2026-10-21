@@ -46,6 +46,20 @@ func TestRetiredConnectorUpgradeLoads(t *testing.T) {
 	}
 }
 
+func TestRetiredConnectorUpgradeOnlyRetiredRosterLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("config_version: 8\nguardrail:\n  connector: openhands\n  connectors:\n    openhands: {}\nclaw:\n  mode: omnigent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ActiveConnectors()) != 0 || cfg.HasConnectorConfigured() {
+		t.Fatalf("retired-only roster remains configured: %+v", cfg.ActiveConnectors())
+	}
+}
+
 func TestRetiredConnectorUpgradeDropsPolicyReferences(t *testing.T) {
 	cfg := &Config{}
 	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"open-hands": {}, "codex": {}}
