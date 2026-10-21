@@ -210,8 +210,13 @@ type GatewayConfigurator struct {
 	// workload has not synced (the MicroVM driver) it refuses unless
 	// OpenShell reports every sandbox on the gateway stopped (default:
 	// discover the Discover registration, dial it and
-	// CheckSandboxesStopped).
+	// CheckSandboxesStopped, with CountMicroVMs for a gateway it cannot
+	// read).
 	CheckStopped func(context.Context) error
+	// CountMicroVMs counts the MicroVMs that run as this account, which
+	// CheckStopped's default trusts only when it cannot read the gateway's
+	// sandboxes (default CountMicroVMs with Runner).
+	CountMicroVMs VMCount
 	// LockLifecycle takes the lifecycle lock that keeps DefenseClaw from
 	// creating or starting a sandbox from CheckStopped's check to the
 	// healthy gateway after the restart (default: LockGatewayLifecycle on
@@ -348,8 +353,11 @@ func (g *GatewayConfigurator) defaults() error {
 	if g.RunningDriver == nil {
 		g.RunningDriver = func(ctx context.Context) (Driver, error) { return runningDriver(ctx, g.Discover) }
 	}
+	if g.CountMicroVMs == nil {
+		g.CountMicroVMs = func(ctx context.Context) (int, error) { return CountMicroVMs(ctx, g.Runner) }
+	}
 	if g.CheckStopped == nil {
-		g.CheckStopped = func(ctx context.Context) error { return checkGatewaySandboxesStopped(ctx, g.Discover) }
+		g.CheckStopped = func(ctx context.Context) error { return checkGatewaySandboxesStopped(ctx, g.Discover, g.CountMicroVMs) }
 	}
 	if g.LockLifecycle == nil {
 		g.LockLifecycle = func(ctx context.Context) (func(), error) { return LockGatewayLifecycle(ctx, g.Dir) }
@@ -1835,18 +1843,19 @@ var ErrUnflushed = errors.New("openshell: the gateway was not restarted: a resta
 // sandbox stop` stops a ready MicroVM with its disk flushed, and the
 // restart is tried again after.
 //
-// A gateway that does not answer runs nothing a stop could reach; one
-// that answers but whose sandboxes could not be listed fails with
-// ErrUnflushed.
-//
-// A gateway whose driver is not known, because GetGatewayInfo failed, is
-// judged like one on the vm driver: one failed call (a timeout on a busy
-// host, a gateway that answers Health before GetGatewayInfo) does not
-// mean that nothing runs on it. It is taken to be down only when the
-// list of its sandboxes is refused too (Unavailable). A list that times
+// One that answers but whose sandboxes could not be listed fails with
+// ErrUnflushed. A gateway whose driver is not known, because
+// GetGatewayInfo failed, is judged like one on the vm driver: one failed
+// call (a timeout on a busy host, a gateway that answers Health before
+// GetGatewayInfo) does not mean that nothing runs on it. A list that times
 // out is a gateway that took the call and was slow, a busy host whose
 // MicroVMs still run, so it refuses the restart like any other failure.
-func CheckSandboxesStopped(ctx context.Context, c Client) error {
+//
+// A gateway that refuses both calls (Unavailable) cannot say what runs on
+// it either: one whose registration or certificates broke still runs its
+// MicroVMs. It refuses too, unless vms shows that no MicroVM runs as this
+// account (unreachableRefusal).
+func CheckSandboxesStopped(ctx context.Context, c Client, vms VMCount) error {
 	info, infoErr := c.GatewayInfo(ctx)
 	if infoErr == nil {
 		if d, err := GatewayDriver(info); err == nil && d.StopFlushes {
@@ -1856,7 +1865,7 @@ func CheckSandboxesStopped(ctx context.Context, c Client) error {
 	list, err := c.ListSandboxes(ctx, nil)
 	if err != nil {
 		if infoErr != nil && ctx.Err() == nil && IsUnavailable(err) {
-			return nil
+			return unreachableRefusal(ctx, ErrUnflushed, err, vms, "try again")
 		}
 		return fmt.Errorf("%w (the sandboxes on it could not be listed: %v); try again", ErrUnflushed, err)
 	}
@@ -1864,19 +1873,20 @@ func CheckSandboxesStopped(ctx context.Context, c Client) error {
 }
 
 // checkGatewaySandboxesStopped is CheckSandboxesStopped on the gateway of
-// opts. A gateway that cannot be reached has no sandbox a stop could
-// reach.
-func checkGatewaySandboxesStopped(ctx context.Context, opts DiscoverOptions) error {
+// opts. One DefenseClaw finds no registration of, or cannot connect to,
+// refuses unless vms shows that no MicroVM runs as this account
+// (unreachableRefusal).
+func checkGatewaySandboxesStopped(ctx context.Context, opts DiscoverOptions, vms VMCount) error {
 	reg, err := Discover(opts)
 	if err != nil {
-		return nil
+		return unreachableRefusal(ctx, ErrUnflushed, fmt.Errorf("no usable registration: %w", err), vms, "try again")
 	}
 	c, err := Dial(reg, ClientOptions{RPCTimeout: 10 * time.Second})
 	if err != nil {
-		return nil
+		return unreachableRefusal(ctx, ErrUnflushed, fmt.Errorf("no connection: %w", err), vms, "try again")
 	}
 	defer c.Close()
-	return CheckSandboxesStopped(ctx, c)
+	return CheckSandboxesStopped(ctx, c, vms)
 }
 
 // ServiceState is the gateway service as its manager reports it.

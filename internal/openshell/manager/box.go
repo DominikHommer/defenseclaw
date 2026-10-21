@@ -580,7 +580,7 @@ func stopLosesWrites(driver string) bool {
 // errorPhaseWayOn is what to do about a sandbox in OpenShell's error phase:
 // its container stopped (a Docker restart stops every one), its workload
 // failed, or OpenShell gave up provisioning it. A gateway that runs
-// sandboxes (openshell.SandboxMin and later) stops a sandbox in that phase
+// sandboxes (openshell.SupportedMin and later) stops a sandbox in that phase
 // and starts it again after (NVIDIA/OpenShell#4231), which keeps the
 // sandbox and its work, except after a provisioning timeout: OpenShell
 // refuses that stop while its own cleanup reclaims what the attempt started,
@@ -602,11 +602,15 @@ func errorPhaseWayOn(name, reason, upgrade string, microVM bool) string {
 			"while OpenShell has not reported a MicroVM on it stopped: `defenseclaw sandbox delete " + name + "` deletes it and its work, after which " + upgrade
 	case upgrade != "" && openshell.ProvisioningTimedOut(reason):
 		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then wait a minute for OpenShell's cleanup of " +
-			"the provisioning that timed out and `defenseclaw sandbox start " + name + "` (no stop: OpenShell " + openshell.SandboxMin +
+			"the provisioning that timed out and `defenseclaw sandbox start " + name + "` (no stop: OpenShell " + openshell.SupportedMin +
 			" refuses to stop a sandbox whose provisioning timed out), which provisions it again"
 	case upgrade != "":
 		return "this OpenShell can neither stop nor start a sandbox in its error state: " + upgrade + ", then `defenseclaw sandbox stop " + name +
 			"` and `defenseclaw sandbox start " + name + "`, which keep the sandbox and its work"
+	case microVM && openshell.LingeringVM(openshell.PhaseError, reason, false):
+		// Its stop is returned as it is, and its start ends the VM with
+		// no flush: neither keeps all of its work.
+		return openshell.StopWayOn(name, openshell.PhaseError, reason, true)
 	case openshell.ProvisioningTimedOut(reason):
 		return "OpenShell gave up provisioning it and refuses to stop it while its own cleanup reclaims what it started: wait a minute, then `defenseclaw sandbox start " +
 			name + "` (no stop), which provisions it again; a start that says the cleanup is still pending is tried again a little later"
@@ -617,7 +621,7 @@ func errorPhaseWayOn(name, reason, upgrade string, microVM bool) string {
 
 // upgradeWayOn is how this host's OpenShell is upgraded when the gateway
 // release (as its health reported it) runs no sandbox work
-// (openshell.SandboxMin), "" when it does or no gateway answered. On a
+// (openshell.SupportedMin), "" when it does or no gateway answered. On a
 // managed computer the release is the administrator's.
 func (m *Manager) upgradeWayOn(release string) string {
 	v, err := openshell.ParseVersion(release)
@@ -633,8 +637,33 @@ func (m *Manager) upgradeWayOn(release string) string {
 	return "upgrade OpenShell " + v.String() + " to " + openshell.InstallerVersion + " in place with `defenseclaw sandbox setup --install-openshell`"
 }
 
+// lingeringStartRefusal refuses the start of the sandbox name, which
+// OpenShell reports as sb on a gateway of driver d (reason: the record's
+// error-phase reason, for a sandbox whose conditions say none), when it is
+// a MicroVM whose VM may still run what its workload left running
+// (openshell.LingeringVM): OpenShell's start ends that VM with no flush
+// first, and nothing in OpenShell writes its disk back before, so what it
+// has not written to its disk is lost. Only a start that asks for that
+// (endVM: `start --end-vm`) goes ahead.
+func lingeringStartRefusal(name string, d openshell.Driver, sb *openshell.Sandbox, reason string, endVM bool) error {
+	if endVM || sb == nil {
+		return nil
+	}
+	said := openshell.FailureReason(sb)
+	if said == "" {
+		said = reason
+	}
+	if !openshell.LingeringVM(sb.Status.Phase, said, d.StopFlushes) {
+		return nil
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+		Message: "sandbox " + name + " was not started: it is a MicroVM that OpenShell reports " + strings.ToLower(string(sb.Status.Phase)) + "; " + openshell.LingeringVMLoss,
+		Detail: "`defenseclaw sandbox start " + name + " --end-vm` starts it all the same, and what its VM had not written to its disk is lost; `defenseclaw sandbox delete " +
+			name + "` deletes it and its work"}
+}
+
 // sandboxReleaseRefusal refuses sandbox work (a create, a start) on a
-// gateway older than openshell.SandboxMin.
+// gateway older than openshell.SupportedMin.
 func (m *Manager) sandboxReleaseRefusal(gw *Gateway) error {
 	v, err := openshell.ParseVersion(gw.Version)
 	if err != nil {
@@ -647,22 +676,22 @@ func (m *Manager) sandboxReleaseRefusal(gw *Gateway) error {
 }
 
 // oldSupervisorWarning is the sandbox's warning while its session runs the
-// supervisor of an OpenShell release older than openshell.SandboxMin
+// supervisor of an OpenShell release older than openshell.SupportedMin
 // (oldSupervisorMessage).
-const oldSupervisorWarning = "this session may run the supervisor of an OpenShell older than " + openshell.SandboxMin +
+const oldSupervisorWarning = "this session may run the supervisor of an OpenShell older than " + openshell.SupportedMin +
 	", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494): " +
-	"stop and start the sandbox on OpenShell " + openshell.SandboxMin + " or later"
+	"stop and start the sandbox on OpenShell " + openshell.SupportedMin + " or later"
 
 // oldSupervisorMessage is the feed's warning about the sandbox name whose
 // session started on OpenShell release (a record from before DefenseClaw
-// kept it: ""), older than openshell.SandboxMin: it runs that release's
+// kept it: ""), older than openshell.SupportedMin: it runs that release's
 // supervisor until it stops, whatever the gateway runs now.
 func oldSupervisorMessage(name, release, upgrade string) string {
 	msg := "⚠ " + name + "'s session started on OpenShell " + release + ", whose network broker can let the sandbox's connections bypass its policy " +
 		"(NVIDIA/OpenShell#4494), and it keeps that supervisor while it runs: "
 	if release == "" {
 		msg = "⚠ " + name + "'s session started before DefenseClaw kept the OpenShell release a session starts on, so it may run a supervisor older than " +
-			openshell.SandboxMin + ", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494): "
+			openshell.SupportedMin + ", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494): "
 	}
 	if upgrade != "" {
 		return msg + "stop it (`defenseclaw sandbox stop " + name + "`), " + upgrade + ", then start it"

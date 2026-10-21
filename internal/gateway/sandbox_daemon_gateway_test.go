@@ -179,13 +179,44 @@ func TestSandboxDaemonChecksAgainRightBeforeItStopsTheGateway(t *testing.T) {
 	if fx.d.check(ctx); fx.os.stopped.Load() != 1 {
 		t.Fatalf("an idle gateway was not stopped: %d", fx.os.stopped.Load())
 	}
-	// One DefenseClaw cannot connect to runs nothing a stop could reach.
-	unreachable := newSandboxDaemonFixture(t)
+	// One DefenseClaw cannot connect to (its registration or certificates
+	// broke) may still run MicroVMs, which the stop would end with no
+	// flush: it is stopped only once no MicroVM runs as the account, and
+	// kept when they cannot be counted. The daemon's stop on exit holds
+	// the same rule.
+	var vms atomic.Int64
+	var countFails atomic.Bool
+	unreachable := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.countMicroVMs = func(context.Context) (int, error) {
+			if countFails.Load() {
+				return 0, errors.New("ps failed")
+			}
+			return int(vms.Load()), nil
+		}
+	})
 	unreachable.run(t)
-	unreachable.os.holder.Store(int64(os.Getuid()))
-	unreachable.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())
+	gone := func() {
+		unreachable.os.holder.Store(int64(os.Getuid()))
+		unreachable.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())
+	}
+	vms.Store(1)
+	gone()
+	if unreachable.d.check(ctx); unreachable.os.stopped.Load() != 0 {
+		t.Fatal("stopped a gateway DefenseClaw cannot read under a live MicroVM")
+	}
+	if unreachable.d.stopOpenShellIfIdle(); unreachable.os.stopped.Load() != 0 {
+		t.Fatal("the stop on exit ended a live MicroVM")
+	}
+	vms.Store(0)
+	countFails.Store(true)
+	gone()
+	if unreachable.d.check(ctx); unreachable.os.stopped.Load() != 0 {
+		t.Fatal("stopped a gateway DefenseClaw cannot read with its MicroVMs not counted")
+	}
+	countFails.Store(false)
+	gone()
 	if unreachable.d.check(ctx); unreachable.os.stopped.Load() != 1 {
-		t.Fatalf("a gateway DefenseClaw cannot reach was not stopped: %d", unreachable.os.stopped.Load())
+		t.Fatalf("a gateway DefenseClaw cannot reach, with no MicroVM, was not stopped: %d", unreachable.os.stopped.Load())
 	}
 }
 

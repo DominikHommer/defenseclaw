@@ -269,6 +269,16 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 			l.result.AddWarning(codeSandboxPending, fmt.Sprintf("LaunchAgent reload for %s waits for its running sandboxes to stop", a.Name))
 			continue
 		}
+		// A reload of a job that runs stops it, the gateway's with its
+		// MicroVMs: under the account's drain only, which checks again what
+		// the status above read.
+		release, derr := l.drainAccount(ctx, e.sandboxOps(), a)
+		if derr != nil {
+			state.Pending[key] = pending{User: a.Name, UID: a.UID, Home: a.Home, Kind: "launchd", Reason: "the signed gateway binary or a loaded LaunchAgent changed (" + derr.Error() + ")",
+				Since: e.Now().UTC().Format(time.RFC3339), Sandboxes: -1}
+			l.result.AddWarning(codeSandboxPending, fmt.Sprintf("LaunchAgent reload for %s waits: %v", a.Name, derr))
+			continue
+		}
 		var failed error
 		for _, job := range needed {
 			if job.state.CodeSigningKilled() && !refreshed {
@@ -285,6 +295,7 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 			}
 			l.openshellChange("reloaded %s for %s after its program or job failed", job.label, a.Name)
 		}
+		release()
 		if failed != nil {
 			state.Pending[key] = pending{User: a.Name, UID: a.UID, Home: a.Home, Kind: "launchd", Reason: "the signed gateway binary or a loaded LaunchAgent changed (" + failed.Error() + ")", Since: e.Now().UTC().Format(time.RFC3339)}
 			next := "repair retries it"

@@ -99,10 +99,12 @@ func TestStopOfAnEndedMicroVMSaysHowToStopIt(t *testing.T) {
 	for _, tc := range []struct {
 		name, phase, reason, release, want string
 	}{
-		{"completed", "completed", "", openshell.SandboxMin,
+		{"completed", "completed", "", openshell.SupportedMin,
 			"⚠ box is completed: OpenShell does not stop it, so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades no OpenShell gateway under it, " +
-				"nor moves this account to another OpenShell setup, until OpenShell reports it stopped: `defenseclaw sandbox start box`, then `defenseclaw sandbox stop box` once it is ready"},
-		{"failed", "error", "MainProcessFailed: Canonical main process exited with status 1", openshell.SandboxMin,
+				"nor moves this account to another OpenShell setup, until OpenShell reports it stopped: nothing in OpenShell writes this MicroVM's disk back or stops it: " +
+				"its VM still runs what its workload left running, and its start ends that VM with no flush first, so what the VM has not written to its disk is lost: " +
+				"`defenseclaw sandbox start box --end-vm` ends the VM that way, then `defenseclaw sandbox stop box` once it is ready; or `defenseclaw sandbox delete box`, which deletes it and its work"},
+		{"failed", "error", "MainProcessFailed: Canonical main process exited with status 1", openshell.SupportedMin,
 			"⚠ box is in OpenShell's error state: OpenShell does not stop it, so its MicroVM may still run"},
 		{"completed, old gateway", "completed", "", "0.1.3",
 			"until OpenShell reports it stopped: `defenseclaw sandbox delete box`, which deletes it and its work (this OpenShell neither stops nor starts a completed MicroVM)"},
@@ -168,24 +170,24 @@ func TestRestartConsentRefusesWhileOpenShellDoesNotReportEveryMicroVMStopped(t *
 				Apply: func(context.Context) error { applied++; return nil }}})
 	})
 	const refused = "MicroVM resources: this restarts the OpenShell gateway, and DefenseClaw makes it only once OpenShell reports every MicroVM sandbox on the gateway stopped, " +
-		"which it does not for these: dc-done (completed): `defenseclaw sandbox start dc-done`, then `defenseclaw sandbox stop dc-done` once it is ready"
+		"which it does not for these: dc-done (completed): nothing in OpenShell writes this MicroVM's disk back or stops it"
 	const ready = "dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a`"
 
-	for _, release := range []string{openshell.SandboxMin, "0.1.3"} {
+	for _, release := range []string{openshell.SupportedMin, "0.1.3"} {
 		ta := newTestApp(t, "")
 		ta.HostDoctor = report
 		endedOn(t, ta, release, 1)
 		_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
 		has(t, ta.output(), "MicroVM resources: this restarts the OpenShell gateway, and DefenseClaw makes it only once OpenShell reports every MicroVM sandbox on the gateway stopped",
 			ready, "not fixed with --yes while OpenShell does not report every MicroVM sandbox on the gateway stopped")
-		lacks(t, ta.output(), "disk back", "work kept", "lets the restart", "each first with OpenShell's own stop")
+		lacks(t, ta.output(), "write its disk back", "work kept", "lets the restart", "each first with OpenShell's own stop")
 		if applied != 0 {
 			t.Fatalf("OpenShell %s, MicroVMs not stopped: applied %d times", release, applied)
 		}
 	}
 	ta := newTestApp(t, "")
 	ta.HostDoctor = report
-	endedOn(t, ta, openshell.SandboxMin, 0)
+	endedOn(t, ta, openshell.SupportedMin, 0)
 	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
 	has(t, ta.output(), refused)
 
@@ -208,7 +210,7 @@ func TestRestartConsentRefusesWhileOpenShellDoesNotReportEveryMicroVMStopped(t *
 
 	// setup's restart: not made, and not asked.
 	ta = newTestApp(t, "")
-	endedOn(t, ta, openshell.SandboxMin, 0)
+	endedOn(t, ta, openshell.SupportedMin, 0)
 	ok, err := ta.consentGatewayRestart(bg, SetupOptions{}, true, true, false)
 	if err != nil || ok {
 		t.Fatalf("setup with a completed MicroVM: %v, %v", ok, err)

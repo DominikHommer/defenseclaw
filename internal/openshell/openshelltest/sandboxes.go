@@ -129,6 +129,14 @@ func (s *sandboxClient) Start(ctx context.Context, workspace, name string) (*typ
 	if err := s.f.enter(MethodStartSandbox); err != nil {
 		return nil, err
 	}
+	if sb, err := s.inner.Get(ctx, workspace, name); err == nil &&
+		(sb.Status.Phase == types.SandboxCompleted || sb.Status.Phase == types.SandboxError && sb.Status.ExitCode != nil) {
+		// The VM still runs: the start ends it with no flush first.
+		s.f.mu.Lock()
+		s.f.lost = append(s.f.lost, s.f.unsynced[key(workspace, name)]...)
+		delete(s.f.unsynced, key(workspace, name))
+		s.f.mu.Unlock()
+	}
 	return s.inner.Start(ctx, workspace, name)
 }
 

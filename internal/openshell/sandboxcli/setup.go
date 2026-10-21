@@ -324,6 +324,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 			a.note("→ an administrator installs the openshell package (`" + CommandName + " setup --install-openshell` from an account with sudo), then run `" +
 				CommandName + " setup` here")
 			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
+		case errors.Is(err, openshell.ErrSandboxesRunning), errors.Is(err, openshell.ErrRuntimeImages):
+			// The in-place upgrade of an OpenShell older than the window
+			// (0.0.37 to 0.1.0) ran nothing (openshell.PrepareUpgrade): it
+			// waits for the sandboxes named, and setup cannot finish
+			// without it.
+			a.bad("OpenShell " + rep.CLIVersion + " is kept: " + strings.TrimPrefix(err.Error(), "openshell: "))
+			a.note("→ then upgrade it: `" + CommandName + " setup --install-openshell`")
+			return &Silent{Err: fmt.Errorf("upgrade OpenShell: %w", err)}
 		case err != nil:
 			return fmt.Errorf("install OpenShell: %w", err)
 		case res.Installed:
@@ -834,12 +842,14 @@ func (a *App) installerHow() string {
 
 // offerOpenShellUpgrade offers a supported OpenShell older than the
 // release DefenseClaw installs, whose CLI check (cli) warns, the in-place
-// upgrade (DoctorReport.OpenShellUpgradeAvailable). The question's default
-// is no, as the install's, so --yes and --non-interactive keep the
-// installed release; --install-openshell upgrades it. A kept release older
-// than openshell.SandboxMin runs no sandbox, so setup then stops on the
-// Gateway check, with the upgrade as its fix (the hosts DefenseClaw 1.0.0
-// to 1.0.3 set up on 0.1.1 to 0.1.3). NVIDIA's installer
+// upgrade (DoctorReport.OpenShellUpgradeAvailable). For a supported release
+// the question's default is no, as the install's, so --yes and
+// --non-interactive keep it; --install-openshell upgrades it. A legacy
+// release (DoctorReport.OpenShellLegacy: older than openshell.SupportedMin,
+// the hosts DefenseClaw 1.0.0 to 1.0.3 left on 0.1.1 to 0.1.4, a 0.1.5
+// prerelease) runs no sandbox, so the default is yes and --yes takes it;
+// --non-interactive keeps it, and setup then stops on the Gateway check,
+// with the upgrade as its fix. NVIDIA's installer
 // restarts the gateway once it has installed the release, of every owner:
 // on the docker driver that drops the connections of the running
 // sandboxes, after Docker pulls the release's supervisor images; on the
@@ -886,10 +896,15 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 		stops = "no sandbox runs on it now"
 	}
 	upgrade := o.InstallOpenShell
+	legacy := rep.OpenShellLegacy()
 	if !upgrade && !o.NonInteractive {
+		why := ""
+		if legacy {
+			why = "OpenShell " + rep.CLIVersion + " runs no DefenseClaw sandbox; "
+		}
 		var err error
 		upgrade, err = a.ask("Upgrade OpenShell "+rep.CLIVersion+" to "+openshell.InstallerVersion+" in place with NVIDIA's installer? ("+
-			how+"restarts the gateway: "+stops+")", false, o.Yes)
+			why+how+"restarts the gateway: "+stops+")", legacy, o.Yes)
 		if err != nil {
 			return nil, err
 		}
@@ -900,7 +915,7 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 		return keep()
 	}
 	inst := a.Installer(func(*openshell.InstallPlan) (bool, error) {
-		if o.InstallOpenShell {
+		if o.InstallOpenShell || legacy && o.Yes {
 			return true, nil
 		}
 		return a.ask("Run this plan?", false, false)

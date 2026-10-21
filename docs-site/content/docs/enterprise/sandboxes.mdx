@@ -242,13 +242,23 @@ user's OpenShell gateway, which would end that process and lose what it has
 not written to disk. So the switch goes ahead only once OpenShell itself
 reports every MicroVM of the user stopped, deleting, or gone (its VM process
 exited), however long that takes. Elapsed time does not count, and neither
-does a stop request that OpenShell did not carry out.
+does a stop request that OpenShell did not carry out. The status check comes
+first, so right before it stops the user's units the lifecycle checks again
+as the user, holding the user's OpenShell lifecycle lock until the units are
+stopped (`defenseclaw-gateway sandbox-daemon drain`): while it holds the lock
+the user's DefenseClaw starts no sandbox, and a sandbox that started since the
+status check, or a MicroVM process of the user's that runs, keeps the switch
+waiting. A gateway the check cannot read waits too, unless no MicroVM runs as
+the user.
 
 The user stops a running sandbox with `defenseclaw sandbox stop`, which
 flushes its disk first, or deletes it. OpenShell does not stop a MicroVM whose
-workload completed or failed. On OpenShell 0.1.5 the user starts it again and
-then stops it (`defenseclaw sandbox stop` prints the exact commands), or
-deletes it. On an older OpenShell the only way is to delete it.
+workload completed or failed, and nothing in OpenShell writes its disk back:
+its start ends the VM with no flush first. On OpenShell 0.1.5 the user either
+starts it with `defenseclaw sandbox start <name> --end-vm`, which loses what
+the VM had not written to its disk, then stops it, or deletes it with its
+work (`defenseclaw sandbox stop` prints the exact commands). On an older
+OpenShell the only way is to delete it.
 After a switch from the `"0.1.3"` pin of
 1.0.3, the user stops and starts a MicroVM that was in the error state. The next
 `ensure` (or their next `defenseclaw sandbox` command) applies the switch. It then swaps the gateway and units,
@@ -496,7 +506,7 @@ enterprise:
     install: setup            # or prerequisite
     driver: auto              # docker, vm or auto; default: vm on macOS, docker on Linux
     driver_fallback: docker   # Linux, vm or auto: docker (default) or none where KVM is not available
-    version: "0.1.5"          # exact pin for setup; a range inside ">=0.1.1 <0.2.0" for prerequisite
+    version: "0.1.5"          # exact pin for setup; a range inside ">=0.1.5 <0.2.0" for prerequisite
     gateway_port: 17670       # OpenShell gateway, loopback only
 ```
 
@@ -514,7 +524,7 @@ changes. See [Change the config](/docs/enterprise/lifecycle#change-the-config).
 | `install` | `prerequisite` (default) or `setup`. |
 | `driver` | `docker`, `vm` or `auto`. The default is `vm` on macOS and `docker` on Linux. On Linux, `auto` chooses the MicroVM driver where the user's KVM probe passes and `docker` where it does not. On macOS, `auto` resolves to `vm`; an explicit `docker` setting uses Docker and does not need MicroVM `e2fsprogs`. `vm` or `auto` with `install: prerequisite` on Linux is judged by `ensure`: it needs the driver binary, and the stock OpenShell rpm has none (see [Recipe: prerequisite mode](#recipe-prerequisite-mode)). |
 | `driver_fallback` | Linux, `driver: vm` or `auto`. What a sandbox gets when KVM is not available for the user: `docker` (the default) or `none`. See [The docker fallback](#the-docker-fallback). |
-| `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.5"`; `prerequisite` also accepts a range inside `>=0.1.1 <0.2.0`. Sandboxes run only on 0.1.5 or later (a prerelease of 0.1.5 counts as older): `setup` installs 0.1.5 for an older exact pin, and in `prerequisite` mode an installed release older than 0.1.5 is a failed row, whatever the pin allows. |
+| `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.5"`; `prerequisite` also accepts a range inside `>=0.1.5 <0.2.0`. Sandboxes run only on 0.1.5 or later (a prerelease of 0.1.5 counts as older): `setup` installs 0.1.5 for an older exact pin, and in `prerequisite` mode an installed release older than 0.1.5 is a failed row, whatever the pin allows. |
 | `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. |
 | `e2fsprogs_dir` | macOS only. Optional override: an absolute root-owned e2fsprogs install prefix (`mke2fs` and `debugfs` in its `sbin` or `bin`) or the folder that holds both. `ensure` names the folder the gateway uses and refuses a broken explicit value. When unset, an account build or the package tools are used. |
 

@@ -47,7 +47,7 @@ func connectAtFakeRelease(e *harnessEnv) {
 }
 
 // TestAPrereleaseOfSandboxMinRunsNoSandbox: NVIDIA/OpenShell#4494, the
-// broker fix SandboxMin stands for, landed in 0.1.5-pre.4, so a gateway
+// broker fix SupportedMin stands for, landed in 0.1.5-pre.4, so a gateway
 // that reports a prerelease of 0.1.5 (pre.1 to pre.3 have the hole) runs no
 // sandbox: a create and a start are refused with the upgrade, and a
 // session it started is named, as for 0.1.4. A prerelease of a later
@@ -92,7 +92,7 @@ func TestAPrereleaseOfSandboxMinRunsNoSandbox(t *testing.T) {
 }
 
 // TestOldGatewayTimeoutWayOnStartsWithoutAStop: a sandbox whose
-// provisioning timed out on a gateway older than SandboxMin is told to
+// provisioning timed out on a gateway older than SupportedMin is told to
 // upgrade and then start it with no stop, which is the way on of the
 // upgraded gateway too: OpenShell 0.1.5 refuses to stop it
 // (NVIDIA/OpenShell#4231). The feed's line, and the refusals of a stop or
@@ -103,7 +103,7 @@ func TestOldGatewayTimeoutWayOnStartsWithoutAStop(t *testing.T) {
 		"while OpenShell has not reported a MicroVM on it stopped: `defenseclaw sandbox delete box` deletes it and its work, after which " + upgrade
 	timedOut := func(got string) bool {
 		return strings.Contains(got, "this OpenShell can neither stop nor start a sandbox in its error state: "+upgrade+", then wait a minute") &&
-			strings.Contains(got, "`defenseclaw sandbox start box` (no stop: OpenShell "+openshell.SandboxMin+" refuses to stop a sandbox whose provisioning timed out)") &&
+			strings.Contains(got, "`defenseclaw sandbox start box` (no stop: OpenShell "+openshell.SupportedMin+" refuses to stop a sandbox whose provisioning timed out)") &&
 			!strings.Contains(got, "`defenseclaw sandbox stop box`")
 	}
 	for _, reason := range []string{

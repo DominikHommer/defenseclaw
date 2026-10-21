@@ -201,13 +201,14 @@ type GatewayHealth struct {
 	RawVersion string
 }
 
-// CheckVersion reports whether the gateway release is inside the
-// supported window.
+// CheckVersion reports whether DefenseClaw talks to a gateway of this
+// release (CheckConnects): a legacy one passes, for the move off it only,
+// and runs no sandbox work (CheckSandboxRelease).
 func (h *GatewayHealth) CheckVersion() error {
 	if h.Version == (Version{}) {
 		return fmt.Errorf("openshell: gateway reported an unrecognized version %q", h.RawVersion)
 	}
-	return CheckSupported(h.Version)
+	return CheckConnects(h.Version)
 }
 
 // ConfigurationRejectedError reports a sandbox whose configuration the

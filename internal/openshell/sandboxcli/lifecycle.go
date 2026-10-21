@@ -1038,6 +1038,10 @@ type StartOptions struct {
 	// when the folder still holds an earlier session's changes.
 	NoSnapshot  bool
 	NewSnapshot bool
+	// EndVM starts a MicroVM whose workload ended though its VM may still
+	// run, which OpenShell's start ends with no flush
+	// (sandboxapi.StartRequest.EndVM).
+	EndVM bool
 }
 
 // Start is `sandbox start`.

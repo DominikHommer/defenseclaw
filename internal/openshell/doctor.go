@@ -216,9 +216,11 @@ func (r *DoctorReport) GatewayUnmanaged() bool {
 // OpenShellInstallNeeded reports whether DefenseClaw's install step
 // (Installer.Install) would run NVIDIA's installer on this host: no
 // OpenShell CLI, one whose release it cannot read, or one older than
-// SupportedMin, which it upgrades. Over a supported CLI it installs
-// nothing (an older one than InstallerVersion is offered the upgrade
-// instead: OpenShellUpgradeAvailable), and one newer than supported it
+// LegacyMin, which it upgrades. Over a CLI DefenseClaw drives
+// (CheckConnects) it installs nothing (an older one than InstallerVersion
+// is offered the upgrade instead: OpenShellUpgradeAvailable, which a
+// legacy one, older than SupportedMin, takes by default), and one newer
+// than supported it
 // refuses, so there every other failing check (the gateway, its service,
 // the MicroVM driver) is its fix's, not the install's. Setup offers the
 // install only then, and the
@@ -240,6 +242,16 @@ func (r *DoctorReport) OpenShellInstallNeeded() bool {
 	return err != nil || !aboveWindow(v)
 }
 
+// OpenShellLegacy reports an OpenShell CLI DefenseClaw still drives only to
+// move it to SupportedMin (Legacy): it runs no sandbox, and the in-place
+// upgrade that setup offers (OpenShellUpgradeAvailable), and that
+// DefenseClaw's install step makes for it unasked (Installer.Install), is
+// taken by default: yes to setup's question, and --yes.
+func (r *DoctorReport) OpenShellLegacy() bool {
+	v, err := ParseVersion(r.CLIVersion)
+	return r.OpenShellUpgradeAvailable() && err == nil && Legacy(v)
+}
+
 // OpenShellUpgradeAvailable reports a supported OpenShell older than
 // InstallerVersion that DefenseClaw's install step upgrades in place
 // (Installer.Upgrade): the CLI check warns with that fix. Not for an
@@ -254,11 +266,11 @@ func (r *DoctorReport) OpenShellUpgradeAvailable() bool {
 		return false
 	}
 	v, err := ParseVersion(r.CLIVersion)
-	return err == nil && CheckSupported(v) == nil && v.Compare(mustParse(InstallerVersion)) < 0
+	return err == nil && CheckConnects(v) == nil && v.Compare(mustParse(InstallerVersion)) < 0
 }
 
 // OpenShellUpgradeNeeded reports a gateway, and a CLI, that DefenseClaw
-// drives but whose releases run no sandbox work (SandboxMin), the same
+// drives but whose releases run no sandbox work (SupportedMin), the same
 // release or not: the Gateway check fails, and its fix is the in-place
 // upgrade that setup offers (OpenShellUpgradeAvailable) or, for an
 // OpenShell installed another way, its user's. Not for a CLI of a release
@@ -270,11 +282,11 @@ func (r *DoctorReport) OpenShellUpgradeNeeded() bool {
 		return false
 	}
 	v, err := ParseVersion(r.GatewayVersion)
-	if err != nil || CheckSupported(v) != nil || CheckSandboxRelease(v) == nil {
+	if err != nil || !Legacy(v) {
 		return false
 	}
 	cli, err := ParseVersion(r.CLIVersion)
-	return err == nil && CheckSupported(cli) == nil && CheckSandboxRelease(cli) != nil
+	return err == nil && Legacy(cli)
 }
 
 // Get returns the check with id, or nil.
@@ -1421,7 +1433,7 @@ const (
 // the service, the gateway of an OpenShell installed another way is the
 // user's to replace (unmanagedFix).
 func (r *doctorRun) gatewayVersionFix(install *Fix) *Fix {
-	if r.cli == (Version{}) || CheckSupported(r.cli) != nil {
+	if r.cli == (Version{}) || CheckConnects(r.cli) != nil {
 		return install
 	}
 	release := gatewayRelease(r.gateway)
@@ -1689,6 +1701,14 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 	r.cli, r.report.CLIVersion = v, v.String()
 	if err := CheckSupported(v); err != nil {
 		c.Status, c.Detail, c.Fix = StatusFail, err.Error(), install
+		if Legacy(v) {
+			// A legacy release still works for the move off it: a
+			// warning, whose upgrade setup takes by default
+			// (OpenShellLegacy), as the install step does.
+			c.Status, c.Detail = StatusWarn, fmt.Sprintf("%s at %s; OpenShell %s %s", v, path, InstallerVersion, installerUpgradeReason)
+			c.Fix = r.upgradeFix()
+			return
+		}
 		if aboveWindow(v) {
 			// Installer.Install refuses a newer CLI: it does not downgrade.
 			c.Fix = &Fix{Summary: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell " + v.String() +

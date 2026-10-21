@@ -20,6 +20,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -302,5 +303,81 @@ func TestCreateAndStartWaitOutAGatewayRestart(t *testing.T) {
 	e.startBox("box", sandboxapi.StartRequest{})
 	if held {
 		t.Fatal("the start kept the lock after OpenShell's call")
+	}
+}
+
+// TestAStartOfAnEndedMicroVMLosesNothingUnasked: the MicroVM of a
+// workload that completed, or whose main process failed, still runs, with
+// a writer that workload left running whose last writes are not on its
+// disk. OpenShell's start of it ends that VM with no flush first, and the
+// rounds before told the user to start it, then stop it, as if that kept
+// its work (and `sandbox start`, `connect` and `pull` started it unasked).
+// Now a start of such a MicroVM is refused, before OpenShell is called,
+// with the loss named and `start --end-vm` as the way on, which then loses
+// those writes as it said. A MicroVM whose VM is gone, a provisioning that
+// timed out (which never ran the workload) and a completed docker sandbox
+// (an exited container keeps its writes) start as before.
+func TestAStartOfAnEndedMicroVMLosesNothingUnasked(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase openshell.SandboxPhase
+		cond  []stream.Condition
+		code  int32
+	}{
+		{"completed", openshell.PhaseCompleted, nil, 0},
+		{"main process failed", openshell.PhaseError, []stream.Condition{mainFailed}, 1},
+		{"unpolled", openshell.PhaseError, []stream.Condition{vmUnpolled}, 0},
+		{"no reason", openshell.PhaseError, nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := newEndedVM(t, "donebox")
+			endIn(t, e, "donebox", tc.phase, tc.cond...)
+			if tc.code != 0 {
+				exitedWith(t, e, "donebox", tc.code)
+			}
+			e.fake.LeaveWriter(openshell.DefaultWorkspace, "donebox", "bg.log: the last 30 seconds")
+			starts := e.fake.Calls(openshelltest.MethodStartSandbox)
+			_, err := e.m.Start(t.Context(), "donebox", sandboxapi.StartRequest{})
+			var apiErr *sandboxapi.Error
+			if !errors.As(err, &apiErr) || apiErr.Code != sandboxapi.CodeConflict || !strings.Contains(apiErr.Message, "no flush first") ||
+				!strings.Contains(apiErr.Message, "is lost") || !strings.Contains(apiErr.Detail, "`defenseclaw sandbox start donebox --end-vm`") ||
+				strings.Contains(apiErr.Message+apiErr.Detail, "keeps its work") || strings.Contains(apiErr.Message+apiErr.Detail, "work is kept") {
+				t.Fatalf("a start of a MicroVM that is %s = %v", tc.name, err)
+			}
+			if e.fake.Calls(openshelltest.MethodStartSandbox) != starts || len(e.fake.LostWrites()) != 0 {
+				t.Fatalf("the refused start called OpenShell (%d starts) or lost %v", e.fake.Calls(openshelltest.MethodStartSandbox)-starts, e.fake.LostWrites())
+			}
+			// Asked for: OpenShell's start ends the VM, and the writes go.
+			if _, err := e.m.Start(t.Context(), "donebox", sandboxapi.StartRequest{EndVM: true}); err != nil {
+				t.Fatalf("start --end-vm: %v", err)
+			}
+			// The fake models the loss where OpenShell's own stop is a no-op
+			// (completed, a main process that failed).
+			wantLost := 0
+			if tc.phase == openshell.PhaseCompleted || tc.code != 0 {
+				wantLost = 1
+			}
+			if e.fake.Calls(openshelltest.MethodStartSandbox) != starts+1 || len(e.fake.LostWrites()) != wantLost {
+				t.Fatalf("start --end-vm: %d starts, lost %v", e.fake.Calls(openshelltest.MethodStartSandbox)-starts, e.fake.LostWrites())
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		cond stream.Condition
+	}{{"VM gone", vmExited}, {"provisioning timed out", provTimeout}} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := newEndedVM(t, "donebox")
+			endIn(t, e, "donebox", openshell.PhaseError, tc.cond)
+			if _, err := e.m.Start(t.Context(), "donebox", sandboxapi.StartRequest{}); err != nil && strings.Contains(err.Error(), "--end-vm") {
+				t.Fatalf("a start of a MicroVM whose %s: %v", tc.name, err)
+			}
+		})
+	}
+	d := newEnv(t, nil)
+	d.create(sandboxapi.CreateRequest{Name: "dockerdone"})
+	endIn(t, d, "dockerdone", openshell.PhaseCompleted)
+	if _, err := d.m.Start(t.Context(), "dockerdone", sandboxapi.StartRequest{}); err != nil {
+		t.Fatalf("a start of a completed docker sandbox: %v", err)
 	}
 }

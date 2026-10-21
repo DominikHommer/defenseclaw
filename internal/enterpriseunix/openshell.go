@@ -123,7 +123,7 @@ type openshellSettings struct {
 	Fallback string
 	// Version is enterprise.openshell.version: an exact version, a range or
 	// "" (any release the DefenseClaw build supports). In setup mode an
-	// exact pin older than openshell.SandboxMin is raised to the release
+	// exact pin older than openshell.SupportedMin is raised to the release
 	// this build installs, and RaisedFrom keeps the pin
 	// (openshell.ManagedSetupPin).
 	Version, RaisedFrom string

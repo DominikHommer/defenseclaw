@@ -770,6 +770,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s is %s, not stopped; stop it before starting a new session",
 			rec.Name, strings.ToLower(string(sb.Status.Phase)))
 	}
+	// A MicroVM whose workload ended still runs its VM, which OpenShell's
+	// start ends with no flush: only one the user asked to end goes on.
+	if err := lingeringStartRefusal(rec.Name, gw.Driver, sb, rec.PhaseReason, req.EndVM); err != nil {
+		return err
+	}
 	m.endSessionUnblocks(b)
 	eff, violations, err := m.resolveBoxViolations(b)
 	if err != nil {

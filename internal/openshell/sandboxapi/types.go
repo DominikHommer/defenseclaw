@@ -781,6 +781,12 @@ type StartRequest struct {
 	// an earlier session's changes: they are accepted, and undo no longer
 	// reverts them.
 	NewSnapshot bool `json:"new_snapshot,omitempty"`
+	// EndVM starts a MicroVM whose workload ended but whose VM may still run
+	// what it left running (openshell.LingeringVM): OpenShell's start ends
+	// that VM with no flush first, so what it has not written to its disk is
+	// lost. Without it the daemon refuses such a start with
+	// CodeConflict. A daemon before 1.0.4 ignores it.
+	EndVM bool `json:"end_vm,omitempty"`
 	// LLM is the model credential as the caller's environment holds it now
 	// (secret values): when it is of the profile the sandbox was created
 	// with and differs from the one its provider holds (a rotated or
@@ -1466,7 +1472,7 @@ const ReasonUnflushedStop = "unflushed_stop"
 
 // ReasonOldSupervisor is the Reason of the (HIGH) finding event a running
 // sandbox gets when its session started on an OpenShell release older than
-// openshell.SandboxMin, whose supervisor it keeps until it stops.
+// openshell.SupportedMin, whose supervisor it keeps until it stops.
 const ReasonOldSupervisor = "old_supervisor"
 
 // ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed

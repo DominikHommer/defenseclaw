@@ -388,10 +388,10 @@ func TestCheckSandboxesStoppedBeforeARestart(t *testing.T) {
 	phases := map[string]openshell.SandboxPhase{"dc-a": openshell.PhaseReady, "dc-b": openshell.PhaseStopped, "theirs": openshell.PhaseReady}
 	const refused = "; OpenShell has not reported these stopped: dc-a (ready): `defenseclaw sandbox stop dc-a`; theirs (ready): `defenseclaw sandbox stop theirs`; then try again"
 
-	for _, release := range []string{openshell.SandboxMin, "0.1.3", "0.1.5-pre.3"} {
+	for _, release := range []string{openshell.SupportedMin, "0.1.3", "0.1.5-pre.3"} {
 		vm := gateway(t, openshell.DriverVM, release, phases)
 		c := vm.Client(openshell.ClientOptions{})
-		if err := openshell.CheckSandboxesStopped(context.Background(), c); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused) {
+		if err := openshell.CheckSandboxesStopped(context.Background(), c, noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused) {
 			t.Fatalf("OpenShell %s, ready MicroVMs: %v", release, err)
 		}
 		untouched(t, vm)
@@ -401,13 +401,13 @@ func TestCheckSandboxesStoppedBeforeARestart(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if err := openshell.CheckSandboxesStopped(context.Background(), c); err != nil {
+		if err := openshell.CheckSandboxesStopped(context.Background(), c, noMicroVMs); err != nil {
 			t.Fatalf("OpenShell %s, every MicroVM stopped: %v", release, err)
 		}
 	}
 
-	docker := gateway(t, openshell.DriverDocker, openshell.SandboxMin, phases)
-	if err := openshell.CheckSandboxesStopped(context.Background(), docker.Client(openshell.ClientOptions{})); err != nil {
+	docker := gateway(t, openshell.DriverDocker, openshell.SupportedMin, phases)
+	if err := openshell.CheckSandboxesStopped(context.Background(), docker.Client(openshell.ClientOptions{}), noMicroVMs); err != nil {
 		t.Fatalf("docker: %v", err)
 	}
 	untouched(t, docker)
@@ -419,20 +419,28 @@ func TestCheckSandboxesStoppedBeforeARestart(t *testing.T) {
 		&v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"},
 		&v1.StatusError{Code: v1.ErrorUnimplemented, Message: "unknown method GetGatewayInfo"},
 	} {
-		busy := gateway(t, openshell.DriverVM, openshell.SandboxMin, phases)
+		busy := gateway(t, openshell.DriverVM, openshell.SupportedMin, phases)
 		busy.FailNext(openshelltest.MethodGatewayInfo, infoErr)
-		if err := openshell.CheckSandboxesStopped(context.Background(), busy.Client(openshell.ClientOptions{})); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused) {
+		if err := openshell.CheckSandboxesStopped(context.Background(), busy.Client(openshell.ClientOptions{}), noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused) {
 			t.Fatalf("GatewayInfo failed with %v: %v", infoErr, err)
 		}
 		untouched(t, busy)
 	}
 
-	// A gateway that refuses both calls has nothing a stop could reach.
-	down := gateway(t, openshell.DriverVM, openshell.SandboxMin, phases)
-	down.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
-	down.FailNext(openshelltest.MethodListSandboxes, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
-	if err := openshell.CheckSandboxesStopped(context.Background(), down.Client(openshell.ClientOptions{})); err != nil {
-		t.Fatalf("gateway down: %v", err)
+	// A gateway that refuses both calls, with a MicroVM running as the
+	// account (its registration or certificates broke), refuses; only with
+	// none running does the restart go ahead.
+	for vms, want := range map[string]bool{"live": true, "none": false} {
+		down := gateway(t, openshell.DriverVM, openshell.SupportedMin, phases)
+		down.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
+		down.FailNext(openshelltest.MethodListSandboxes, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
+		count := noMicroVMs
+		if want {
+			count = func(context.Context) (int, error) { return 1, nil }
+		}
+		if err := openshell.CheckSandboxesStopped(context.Background(), down.Client(openshell.ClientOptions{}), count); errors.Is(err, openshell.ErrUnflushed) != want {
+			t.Fatalf("gateway down, MicroVMs %s: %v", vms, err)
+		}
 	}
 
 	// One that answers the list with an error, or times out on it (a
@@ -441,20 +449,20 @@ func TestCheckSandboxesStoppedBeforeARestart(t *testing.T) {
 		&v1.StatusError{Code: v1.ErrorInternal, Message: "store locked"},
 		&v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"},
 	} {
-		unlisted := gateway(t, openshell.DriverVM, openshell.SandboxMin, phases)
+		unlisted := gateway(t, openshell.DriverVM, openshell.SupportedMin, phases)
 		unlisted.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
 		unlisted.FailNext(openshelltest.MethodListSandboxes, listErr)
-		if err := openshell.CheckSandboxesStopped(context.Background(), unlisted.Client(openshell.ClientOptions{})); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), listErr.(*v1.StatusError).Message) {
+		if err := openshell.CheckSandboxesStopped(context.Background(), unlisted.Client(openshell.ClientOptions{}), noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), listErr.(*v1.StatusError).Message) {
 			t.Fatalf("GatewayInfo and the list (%v) failed: %v, want ErrUnflushed", listErr, err)
 		}
 	}
 	// Nor is one whose context ended.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	ended := gateway(t, openshell.DriverVM, openshell.SandboxMin, phases)
+	ended := gateway(t, openshell.DriverVM, openshell.SupportedMin, phases)
 	ended.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
 	ended.FailNext(openshelltest.MethodListSandboxes, &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"})
-	if err := openshell.CheckSandboxesStopped(ctx, ended.Client(openshell.ClientOptions{})); !errors.Is(err, openshell.ErrUnflushed) {
+	if err := openshell.CheckSandboxesStopped(ctx, ended.Client(openshell.ClientOptions{}), noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) {
 		t.Fatalf("the check on an ended context: %v, want ErrUnflushed", err)
 	}
 }
@@ -474,7 +482,7 @@ func TestARestartChecksTheSandboxesRightBeforeItActs(t *testing.T) {
 	running := openshell.DriverVM
 	f.onHomebrew(t, homebrewTOML, &running)
 	fake := openshelltest.New(openshelltest.WithDriver(openshell.DriverVM))
-	fake.SetRelease(openshell.SandboxMin)
+	fake.SetRelease(openshell.SupportedMin)
 	c := fake.Client(openshell.ClientOptions{})
 	if _, err := c.CreateSandbox(context.Background(), "dc-a", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
 		t.Fatal(err)
@@ -482,9 +490,9 @@ func TestARestartChecksTheSandboxesRightBeforeItActs(t *testing.T) {
 	if err := fake.SetPhase(openshell.DefaultWorkspace, "dc-a", openshell.PhaseStopped); err != nil {
 		t.Fatal(err)
 	}
-	f.cfg.CheckStopped = func(ctx context.Context) error { return openshell.CheckSandboxesStopped(ctx, c) }
+	f.cfg.CheckStopped = func(ctx context.Context) error { return openshell.CheckSandboxesStopped(ctx, c, noMicroVMs) }
 	// The consent's look: nothing runs.
-	if err := openshell.CheckSandboxesStopped(context.Background(), c); err != nil {
+	if err := openshell.CheckSandboxesStopped(context.Background(), c, noMicroVMs); err != nil {
 		t.Fatal(err)
 	}
 	// Another client starts dc-a after it.
@@ -625,5 +633,49 @@ func TestGatewayConfigFlushesBeforeTheRestart(t *testing.T) {
 	}
 	if st, _ := f.cfg.Read(); st.ComputeDriver != openshell.DriverVM {
 		t.Fatalf("a refused rollback changed the configuration: %+v", st)
+	}
+}
+
+// TestARestartOfAGatewayItCannotReadWaitsForItsMicroVMs: the default
+// check of every restart (CheckStopped) finds the gateway's registration
+// broken, or the gateway refusing every call, while the gateway service is
+// active and a MicroVM runs as the account. It used to take that gateway
+// for down and restart it, ending the MicroVM with no flush. It now
+// refuses with nothing restarted, and restarts once no MicroVM runs.
+func TestARestartOfAGatewayItCannotReadWaitsForItsMicroVMs(t *testing.T) {
+	live := func(context.Context) (int, error) { return 1, nil }
+	restarts := func(f *gatewayFixture) int {
+		n := 0
+		for _, c := range f.runner.Calls() {
+			if openshelltest.Argv(c) == "systemctl --user restart openshell-gateway" {
+				n++
+			}
+		}
+		return n
+	}
+	for name, broken := range map[string]func(*gatewayFixture){
+		// The registration points at a gateway that does not answer.
+		"unanswered registration": func(*gatewayFixture) {},
+		// The registration is gone (its files removed, say).
+		"no registration": func(f *gatewayFixture) {
+			if err := os.RemoveAll(filepath.Join(f.dir, "gateways")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		f := newGatewayFixture(t)
+		broken(f)
+		f.cfg.CheckStopped, f.cfg.CountMicroVMs = nil, live
+		if err := f.cfg.Restart(context.Background()); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "1 MicroVM run as this account") || restarts(f) != 0 {
+			t.Fatalf("%s, a MicroVM live: Restart = %v (restarts %d)", name, err, restarts(f))
+		}
+		f.cfg.CountMicroVMs = func(context.Context) (int, error) { return 0, errors.New("ps failed") }
+		if err := f.cfg.Restart(context.Background()); !errors.Is(err, openshell.ErrUnflushed) || restarts(f) != 0 {
+			t.Fatalf("%s, MicroVMs not counted: Restart = %v (restarts %d)", name, err, restarts(f))
+		}
+		f.cfg.CountMicroVMs = noMicroVMs
+		if err := f.cfg.Restart(context.Background()); err != nil || restarts(f) != 1 {
+			t.Fatalf("%s, no MicroVM: Restart = %v (restarts %d)", name, err, restarts(f))
+		}
 	}
 }

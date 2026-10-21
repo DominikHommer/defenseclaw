@@ -296,7 +296,7 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 	// A sandbox of the compute driver the gateway ran before a switch is in
 	// OpenShell's error state because the gateway cannot run it, not because a
 	// container stopped or Docker restarted (GAP-0455). A gateway older than
-	// openshell.SandboxMin can neither stop nor start a sandbox in that state.
+	// openshell.SupportedMin can neither stop nor start a sandbox in that state.
 	liveDriver, oldGateway, managed := "", false, false
 	if st, serr := api.Status(ctx); serr == nil && st.Gateway != nil {
 		liveDriver = st.Gateway.Driver
@@ -304,7 +304,7 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		managed = st.Managed != nil
 	}
 	// The MicroVMs in the error state that hold the gateway
-	// (openshell.HoldsGateway): an OpenShell older than SandboxMin neither
+	// (openshell.HoldsGateway): an OpenShell older than SupportedMin neither
 	// stops nor starts them, so the upgrade is refused until they are
 	// deleted.
 	var heldVMs []string
@@ -398,7 +398,7 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 			}
 			if len(timedOut) > 0 {
 				after = append(after, "for "+strings.Join(timedOut, ", ")+" wait a minute for OpenShell's cleanup, then `"+CommandName+
-					" start NAME` with no stop: OpenShell "+openshell.SandboxMin+" refuses to stop a sandbox whose provisioning timed out")
+					" start NAME` with no stop: OpenShell "+openshell.SupportedMin+" refuses to stop a sandbox whose provisioning timed out")
 			}
 			if len(after) > 0 {
 				upgrade += ", then " + strings.Join(after, "; ")

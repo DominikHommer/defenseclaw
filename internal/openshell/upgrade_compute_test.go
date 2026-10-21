@@ -96,8 +96,12 @@ func TestHoldsGateway(t *testing.T) {
 // stops (OpenShell's stop flushes it); one in a passing phase is waited
 // for. OpenShell returns its stop of a completed MicroVM, or of one whose
 // main process failed, as it is, and refuses that of one whose
-// provisioning timed out: a start, then the stop of the ready sandbox, or
-// a delete. Any other error state stops on a gateway that runs sandboxes.
+// provisioning timed out: for that one a start, then the stop of the ready
+// sandbox, or a delete. For a completed or failed MicroVM the way on says
+// what each costs: nothing in OpenShell writes its disk back, and the start
+// (which needs --end-vm) ends the VM with no flush first, so what it has
+// not written is lost; it never says the work is kept. Any other error
+// state stops on a gateway that runs sandboxes.
 // An older gateway neither stops nor starts an ended sandbox, and
 // DefenseClaw starts none on it: a delete.
 func TestStopWayOn(t *testing.T) {
@@ -105,6 +109,9 @@ func TestStopWayOn(t *testing.T) {
 		stop      = "`defenseclaw sandbox stop dc-x`"
 		startStop = "`defenseclaw sandbox start dc-x`, then `defenseclaw sandbox stop dc-x` once it is ready"
 		del       = "`defenseclaw sandbox delete dc-x`, which deletes it and its work"
+		ended     = "nothing in OpenShell writes this MicroVM's disk back or stops it: its VM still runs what its workload left running, " +
+			"and its start ends that VM with no flush first, so what the VM has not written to its disk is lost: " +
+			"`defenseclaw sandbox start dc-x --end-vm` ends the VM that way, then `defenseclaw sandbox stop dc-x` once it is ready; or " + del
 	)
 	for _, tc := range []struct {
 		phase openshell.SandboxPhase
@@ -116,8 +123,8 @@ func TestStopWayOn(t *testing.T) {
 		{openshell.PhaseReady, "", false, stop},
 		{openshell.PhaseStarting, "", true, "wait until `defenseclaw sandbox list` shows it ready or stopped, then " + stop + " if it is ready"},
 		{openshell.PhaseUnknown, "", false, "wait until `defenseclaw sandbox list` shows it ready or stopped, then " + stop + " if it is ready"},
-		{openshell.PhaseCompleted, "", true, startStop + " (OpenShell does not stop a MicroVM whose main process ended, and the start ends what that left running), or " + del},
-		{openshell.PhaseError, "MainProcessFailed: exited 1", true, startStop + " (OpenShell does not stop a MicroVM whose main process ended, and the start ends what that left running), or " + del},
+		{openshell.PhaseCompleted, "", true, ended},
+		{openshell.PhaseError, "MainProcessFailed: exited 1", true, ended},
 		{openshell.PhaseError, "ProvisioningTimedOut: window expired", true, "wait a minute for OpenShell's cleanup of the provisioning that timed out, then " + startStop +
 			" (OpenShell refuses to stop a sandbox whose provisioning timed out), or " + del},
 		{openshell.PhaseError, "ProcessPollFailed: Bad file descriptor", true, stop},
@@ -126,8 +133,14 @@ func TestStopWayOn(t *testing.T) {
 		{openshell.PhaseError, "MainProcessFailed: exited 1", false, del + " (this OpenShell neither stops nor starts a sandbox in its error state)"},
 		{openshell.PhaseError, "", false, del + " (this OpenShell neither stops nor starts a sandbox in its error state)"},
 	} {
-		if got := openshell.StopWayOn("dc-x", tc.phase, tc.said, tc.runs); got != tc.want {
+		got := openshell.StopWayOn("dc-x", tc.phase, tc.said, tc.runs)
+		if got != tc.want {
 			t.Errorf("StopWayOn(%q, %q, runs %v) =\n  %s\nwant\n  %s", tc.phase, tc.said, tc.runs, got, tc.want)
+		}
+		// No way on presents a start of an ended MicroVM as one that keeps
+		// its work.
+		if strings.Contains(got, "start dc-x") && strings.Contains(got, "work is kept") || strings.Contains(got, "keeps its work") {
+			t.Errorf("StopWayOn(%q, %q) says the work is kept: %s", tc.phase, tc.said, got)
 		}
 	}
 }
@@ -137,7 +150,7 @@ func TestStopWayOn(t *testing.T) {
 func computeGateway(t *testing.T, d openshell.ComputeDriver, phases map[string]openshell.SandboxPhase, conds map[string]v1.SandboxCondition) (openshell.Client, *openshelltest.Fake) {
 	t.Helper()
 	f := openshelltest.New(openshelltest.WithDriver(d))
-	f.SetRelease(openshell.SandboxMin)
+	f.SetRelease(openshell.SupportedMin)
 	c := f.Client(openshell.ClientOptions{})
 	for name, phase := range phases {
 		if _, err := c.CreateSandbox(context.Background(), name, &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
@@ -227,8 +240,8 @@ var heldVariants = []struct {
 	{"stopping", openshell.PhaseStopping, nil, "dc-x (stopping): wait until"},
 	{"unknown", openshell.PhaseUnknown, nil, "dc-x (unknown): wait until"},
 	{"unnamed", "Hibernating", nil, "dc-x (hibernating): wait until"},
-	{"completed", openshell.PhaseCompleted, nil, "dc-x (completed): `defenseclaw sandbox start dc-x`, then `defenseclaw sandbox stop dc-x` once it is ready"},
-	{"failed", openshell.PhaseError, &failedMain, "dc-x (error): `defenseclaw sandbox start dc-x`, then"},
+	{"completed", openshell.PhaseCompleted, nil, "dc-x (completed): nothing in OpenShell writes this MicroVM's disk back or stops it"},
+	{"failed", openshell.PhaseError, &failedMain, "dc-x (error): nothing in OpenShell writes this MicroVM's disk back or stops it"},
 	{"unpolled", openshell.PhaseError, &unpolled, "dc-x (error): `defenseclaw sandbox stop dc-x`"},
 	{"timedout", openshell.PhaseError, &timedOut, "dc-x (error): wait a minute for OpenShell's cleanup"},
 	{"imagefail", openshell.PhaseError, &v1.SandboxCondition{Type: "Ready", Status: "False", Reason: "ImagePreparationFailed", Message: "no space left on device"}, "dc-x (error): `defenseclaw sandbox stop dc-x`"},
@@ -262,8 +275,12 @@ func TestTheGatewayStopsOnlyOnceOpenShellReportsEveryMicroVMStopped(t *testing.T
 		base error
 		run  func(openshell.Client) error
 	}{
-		{"upgrade", openshell.ErrSandboxesRunning, func(c openshell.Client) error { return openshell.PrepareUpgrade(context.Background(), c, pull) }},
-		{"restart", openshell.ErrUnflushed, func(c openshell.Client) error { return openshell.CheckSandboxesStopped(context.Background(), c) }},
+		{"upgrade", openshell.ErrSandboxesRunning, func(c openshell.Client) error {
+			return openshell.PrepareUpgrade(context.Background(), c, pull, noMicroVMs)
+		}},
+		{"restart", openshell.ErrUnflushed, func(c openshell.Client) error {
+			return openshell.CheckSandboxesStopped(context.Background(), c, noMicroVMs)
+		}},
 	}
 	for _, g := range gates {
 		for _, v := range heldVariants {
@@ -303,7 +320,7 @@ func TestTheGatewayStopsOnlyOnceOpenShellReportsEveryMicroVMStopped(t *testing.T
 	// can only be deleted, a ready one still stops.
 	c, f := heldGateway(t, openshell.PhaseCompleted, nil)
 	f.SetRelease("0.1.3")
-	if err := openshell.PrepareUpgrade(context.Background(), c, pull); !errors.Is(err, openshell.ErrSandboxesRunning) ||
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull, noMicroVMs); !errors.Is(err, openshell.ErrSandboxesRunning) ||
 		!strings.Contains(err.Error(), "dc-x (completed): `defenseclaw sandbox delete dc-x`, which deletes it and its work (this OpenShell neither stops nor starts a completed MicroVM)") {
 		t.Errorf("upgrade from 0.1.3 under a completed MicroVM: %v", err)
 	}
@@ -311,10 +328,10 @@ func TestTheGatewayStopsOnlyOnceOpenShellReportsEveryMicroVMStopped(t *testing.T
 	// Docker keeps its sandboxes through the restart.
 	pulls := 0
 	c, f = computeGateway(t, openshell.DriverDocker, map[string]openshell.SandboxPhase{"dc-done": openshell.PhaseCompleted, "dc-x": openshell.PhaseStarting}, nil)
-	if err := openshell.PrepareUpgrade(context.Background(), c, func(context.Context) error { pulls++; return nil }); err != nil || pulls != 1 || len(execsIn(f)) != 0 {
+	if err := openshell.PrepareUpgrade(context.Background(), c, func(context.Context) error { pulls++; return nil }, noMicroVMs); err != nil || pulls != 1 || len(execsIn(f)) != 0 {
 		t.Fatalf("docker upgrade: %v, pulled %d, ran in %v", err, pulls, execsIn(f))
 	}
-	if err := openshell.CheckSandboxesStopped(context.Background(), c); err != nil || f.Calls(openshelltest.MethodStopSandbox) != 0 {
+	if err := openshell.CheckSandboxesStopped(context.Background(), c, noMicroVMs); err != nil || f.Calls(openshelltest.MethodStopSandbox) != 0 {
 		t.Fatalf("docker restart: %v", err)
 	}
 }
@@ -379,4 +396,106 @@ func TestLifecycleLock(t *testing.T) {
 		t.Fatalf("a restart once the starts ended: %v", err)
 	}
 	restart()
+}
+
+// TestAGatewayThatCannotBeReadHoldsItsMicroVMs: a gateway whose
+// registration or mTLS broke, or that refuses both calls, still runs its
+// MicroVMs, which the restart or the upgrade would end with no flush. The
+// checks used to take it for down and let both go ahead. They now refuse,
+// unless the account's processes show that no MicroVM runs (VMCount), and
+// a count that fails refuses too. The lone fallback is that evidence:
+// nothing else, and no timer, releases it.
+func TestAGatewayThatCannotBeReadHoldsItsMicroVMs(t *testing.T) {
+	pull := func(context.Context) error { return nil }
+	one := func(context.Context) (int, error) { return 1, nil }
+	cannot := func(context.Context) (int, error) { return 0, errors.New("ps: not found") }
+	refused := &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"}
+	gates := []struct {
+		name string
+		base error
+		run  func(openshell.Client, openshell.VMCount) error
+	}{
+		{"upgrade", openshell.ErrSandboxesRunning, func(c openshell.Client, vms openshell.VMCount) error {
+			return openshell.PrepareUpgrade(context.Background(), c, pull, vms)
+		}},
+		{"restart", openshell.ErrUnflushed, func(c openshell.Client, vms openshell.VMCount) error {
+			return openshell.CheckSandboxesStopped(context.Background(), c, vms)
+		}},
+	}
+	for _, g := range gates {
+		down := func() openshell.Client {
+			c, f := heldGateway(t, openshell.PhaseReady, nil)
+			f.FailNext(openshelltest.MethodGatewayInfo, refused)
+			f.FailNext(openshelltest.MethodListSandboxes, refused)
+			return c
+		}
+		for name, vms := range map[string]openshell.VMCount{"a live MicroVM": one, "no count": cannot, "nothing to count with": nil} {
+			if err := g.run(down(), vms); !errors.Is(err, g.base) || !strings.Contains(err.Error(), "could not be read") ||
+				!strings.Contains(err.Error(), "make the gateway answer DefenseClaw again") {
+				t.Errorf("%s, gateway refuses both calls, %s: %v", g.name, name, err)
+			}
+		}
+		if err := g.run(down(), one); !strings.Contains(err.Error(), "1 MicroVM run as this account, which the gateway's stop would end with no flush") {
+			t.Errorf("%s: %v", g.name, err)
+		}
+		// Only the account's own processes release it.
+		if err := g.run(down(), noMicroVMs); err != nil {
+			t.Errorf("%s, gateway down and no MicroVM runs: %v", g.name, err)
+		}
+	}
+}
+
+// TestCountMicroVMs: each process of the account that runs a MicroVM
+// (OpenShell's launcher, started with --internal-run-vm) counts; a ps that
+// fails is an error, never a zero.
+func TestCountMicroVMs(t *testing.T) {
+	r := &openshelltest.Runner{}
+	r.On("ps -ww -u", "/usr/libexec/openshell/openshell-driver-vm --internal-run-vm --vm-root-disk /x\n"+
+		"/usr/bin/openshell-gateway --drivers vm\n"+
+		"/opt/homebrew/libexec/openshell-driver-vm --internal-run-vm --vm-overlay-disk /y\n"+
+		"grep internal-run-vm\n", nil)
+	if n, err := openshell.CountMicroVMs(context.Background(), r); err != nil || n != 2 {
+		t.Fatalf("CountMicroVMs = %d, %v, want 2", n, err)
+	}
+	r = &openshelltest.Runner{}
+	r.On("ps -ww -u", "", nil)
+	if n, err := openshell.CountMicroVMs(context.Background(), r); err != nil || n != 0 {
+		t.Fatalf("no MicroVM: %d, %v", n, err)
+	}
+	r = &openshelltest.Runner{}
+	r.On("ps -ww -u", "", errors.New("exec: ps: not found"))
+	if _, err := openshell.CountMicroVMs(context.Background(), r); err == nil {
+		t.Fatal("a ps that fails counted nothing")
+	}
+}
+
+// noMicroVMs is a VMCount for a host on which no MicroVM runs as this
+// account.
+func noMicroVMs(context.Context) (int, error) { return 0, nil }
+
+// TestCheckAccountGateways: the managed drain's check refuses while a
+// MicroVM runs as the account, whatever started it and whether or not a
+// gateway answers, and when the MicroVMs cannot be counted; a registered
+// gateway that does not answer refuses only with a MicroVM running.
+func TestCheckAccountGateways(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	one := func(context.Context) (int, error) { return 1, nil }
+	cannot := func(context.Context) (int, error) { return 0, errors.New("ps failed") }
+	check := func(vms openshell.VMCount) error { return openshell.CheckAccountGateways(context.Background(), vms) }
+	if err := check(noMicroVMs); err != nil {
+		t.Fatalf("nothing registered, nothing runs: %v", err)
+	}
+	for name, vms := range map[string]openshell.VMCount{"a live MicroVM": one, "no count": cannot} {
+		if err := check(vms); !errors.Is(err, openshell.ErrUnflushed) {
+			t.Fatalf("nothing registered, %s: %v", name, err)
+		}
+	}
+	writeRegistration(t, filepath.Join(cfg, "openshell"), "openshell", nil, nil)
+	if err := check(one); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "1 MicroVM") {
+		t.Fatalf("a gateway that does not answer, a live MicroVM: %v", err)
+	}
+	if err := check(noMicroVMs); err != nil {
+		t.Fatalf("a gateway that does not answer, nothing runs: %v", err)
+	}
 }

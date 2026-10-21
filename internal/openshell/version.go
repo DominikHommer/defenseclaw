@@ -28,13 +28,32 @@ import (
 // project promises Stable-interface compatibility only within a minor line,
 // so the window is one minor release wide and bumped deliberately.
 const (
-	// SupportedMin is the oldest OpenShell release DefenseClaw connects to.
-	// On a release older than SandboxMin it runs no sandbox work, but still
-	// lists, stops, deletes and pulls from the sandboxes there and upgrades
-	// OpenShell in place, so a host DefenseClaw 1.0.0 to 1.0.3 left on 0.1.1
-	// to 0.1.4 keeps its sandboxes and their work through the upgrade.
-	// Raise it to SandboxMin once DefenseClaw 1.0.3 is out of support.
-	SupportedMin = "0.1.1"
+	// SupportedMin is the oldest OpenShell release DefenseClaw supports. It
+	// creates and starts sandboxes only on it and later, and its install
+	// step upgrades an older OpenShell in place (Installer.Install), as
+	// ensure moves a managed account off one (ManagedSetupPin). Before
+	// 0.1.5 the supervisor's network broker fell through to the native
+	// connect, bind, listen or send when it could not inspect a socket
+	// descriptor, so a sandbox's traffic could bypass its policy
+	// (NVIDIA/OpenShell#4494). Its prereleases come before it
+	// (Version.Compare): the fix landed in 0.1.5-pre.4, so 0.1.5-pre.1 to
+	// pre.3 still have the hole. A sandbox keeps the supervisor of the
+	// release its session started on, so one that started earlier must stop
+	// and start again (record.SessionRelease). Every release from it also
+	// stops a sandbox in OpenShell's error state, so that it can be started
+	// again (NVIDIA/OpenShell#4231). Review it with InstallerVersion, never
+	// above it.
+	SupportedMin = "0.1.5"
+	// LegacyMin is the oldest release DefenseClaw still connects to, only to
+	// move its host to SupportedMin (CheckConnects, Legacy): on a gateway
+	// from it to below SupportedMin, its prereleases included, it runs no
+	// sandbox work but still lists, stops, deletes and pulls from the
+	// sandboxes there, and upgrades OpenShell in place once OpenShell
+	// reports each of them stopped, so a host DefenseClaw 1.0.0 to 1.0.3
+	// left on 0.1.1 to 0.1.4 keeps its sandboxes and their work through the
+	// upgrade. Remove it, and CheckConnects with it, once DefenseClaw 1.0.3
+	// is out of support.
+	LegacyMin = "0.1.1"
 	// SupportedBelow is the first release outside the window.
 	SupportedBelow = "0.2.0"
 
@@ -58,20 +77,6 @@ const (
 		"fixes a supervisor bug that can stall a sandbox's first connection (0.1.2), cuts the CPU an idle sandbox uses (0.1.2), " +
 		"ships the MicroVM driver already signed for Apple's Hypervisor (0.1.3), flushes a MicroVM's disk before it stops (0.1.5) " +
 		"and lets a sandbox in OpenShell's error state be stopped and started again (0.1.5)"
-
-	// SandboxMin is the oldest OpenShell release DefenseClaw creates or
-	// starts a sandbox on. Before 0.1.5 the supervisor's network broker
-	// fell through to the native connect, bind, listen or send when it
-	// could not inspect a socket descriptor, so a sandbox's traffic could
-	// bypass its policy (NVIDIA/OpenShell#4494). Its prereleases come
-	// before it (Version.Compare): the fix landed in 0.1.5-pre.4, so
-	// 0.1.5-pre.1 to pre.3 still have the hole. A sandbox keeps the
-	// supervisor of the release its session started on, so one that
-	// started earlier must stop and start again (record.SessionRelease).
-	// Every release from it also stops a sandbox in OpenShell's error state,
-	// so that it can be started again (NVIDIA/OpenShell#4231). Review it
-	// with InstallerVersion, never above it.
-	SandboxMin = "0.1.5"
 
 	// DefaultBaseImage is the digest-pinned NVIDIA community sandbox image
 	// the DefenseClaw overlay is built on (multi-arch; ships node, uv, git
@@ -146,7 +151,7 @@ const TarballBaseURL = "https://github.com/NVIDIA/OpenShell/releases/download/"
 // managed hosts DefenseClaw 1.0.3 set up with enterprise.openshell.version
 // "0.1.3" need no entry for it:
 // setup mode raises an older pin to InstallerVersion (ManagedSetupPin), so a
-// release older than SandboxMin is never listed.
+// release older than SupportedMin is never listed.
 var TarballPins = map[string]map[string]string{
 	"0.1.5": {
 		"openshell-x86_64-unknown-linux-musl.tar.gz":           "ca1ad6e6fbb4a6cd407e95763391b8ecff02912e7d9c467e7ca22696fe80af69",
@@ -171,7 +176,7 @@ type SandboxPolicy = v1.SandboxPolicy
 // "dev.108" of a dev build (0.1.6-dev.108+g152d05940). A prerelease comes
 // before its release, as in semantic versioning (Compare): NVIDIA cuts the
 // prereleases of a release before all of its fixes are in, so 0.1.5-pre.3
-// is not 0.1.5 (SandboxMin). A package revision (the "-1" of 0.1.1-1) and
+// is not 0.1.5 (SupportedMin). A package revision (the "-1" of 0.1.1-1) and
 // build metadata (the "+g152d05940") take no part in it.
 type Version struct {
 	Major, Minor, Patch int
@@ -251,7 +256,7 @@ func validPrerelease(pre string) bool {
 
 // Compare returns -1, 0 or 1, in semantic-versioning precedence: a
 // prerelease comes before its release (0.1.5-pre.3 < 0.1.5 < 0.1.6-pre.1),
-// so a floor such as SandboxMin is never met by a prerelease of it. The
+// so a floor such as SupportedMin is never met by a prerelease of it. The
 // ceiling of the supported window compares the release alone
 // (Version.Release): 0.2.0-pre.1 is outside it, as 0.2.0 is.
 func (v Version) Compare(o Version) int {
@@ -345,41 +350,41 @@ func (e *ErrUnsupportedVersion) Error() string {
 			"clean up with the old CLI (openshell sandbox delete --all && openshell gateway destroy), then install %s",
 			e.Found, breakingReleaseFloor, InstallerVersion, InstallerVersion)
 	case e.Found.Compare(mustParse(SupportedMin)) < 0:
-		return fmt.Sprintf("OpenShell %s is older than %s; upgrade it in place to %s", e.Found, SupportedMin, InstallerVersion)
+		return fmt.Sprintf("OpenShell %s is older than %s, the oldest release DefenseClaw supports; upgrade it in place to %s", e.Found, SupportedMin, InstallerVersion)
 	}
 	return fmt.Sprintf("OpenShell %s is not supported; DefenseClaw drives >=%s <%s", e.Found, SupportedMin, SupportedBelow)
 }
 
 // ErrSandboxRelease reports a supported OpenShell release older than
-// SandboxMin, which DefenseClaw creates and starts no sandbox on.
+// SupportedMin, which DefenseClaw creates and starts no sandbox on.
 type ErrSandboxRelease struct {
 	Found Version
 }
 
 func (e *ErrSandboxRelease) Error() string {
-	if e.Found.Pre != "" && e.Found.Release().Compare(mustParse(SandboxMin)) >= 0 {
-		// A prerelease of SandboxMin or a later release: the broker fix
+	if e.Found.Pre != "" && e.Found.Release().Compare(mustParse(SupportedMin)) >= 0 {
+		// A prerelease of SupportedMin or a later release: the broker fix
 		// may not be in it.
 		return fmt.Sprintf("OpenShell %s is a prerelease, which runs no DefenseClaw sandbox: a prerelease of %s may lack its fix for the network broker "+
 			"that let a sandbox's connections bypass the sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to %s in place",
-			e.Found, SandboxMin, InstallerVersion)
+			e.Found, SupportedMin, InstallerVersion)
 	}
 	return fmt.Sprintf("OpenShell %s runs no DefenseClaw sandbox: before %s its network broker let a sandbox's connections bypass the sandbox policy "+
-		"when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to %s in place", e.Found, SandboxMin, InstallerVersion)
+		"when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to %s in place", e.Found, SupportedMin, InstallerVersion)
 }
 
 // CheckSandboxRelease returns an *ErrSandboxRelease when a gateway of
-// release v must run no sandbox work (SandboxMin), a prerelease of
-// SandboxMin included.
+// release v must run no sandbox work: one older than SupportedMin, a
+// prerelease of SupportedMin included.
 func CheckSandboxRelease(v Version) error {
-	if v.Compare(mustParse(SandboxMin)) < 0 {
+	if v.Compare(mustParse(SupportedMin)) < 0 {
 		return &ErrSandboxRelease{Found: v}
 	}
 	return nil
 }
 
 // RunsSandboxes reports whether the gateway release release (as its
-// health reports it) is SandboxMin or later; false when it cannot be read.
+// health reports it) is SupportedMin or later; false when it cannot be read.
 func RunsSandboxes(release string) bool {
 	v, err := ParseVersion(release)
 	return err == nil && CheckSandboxRelease(v) == nil
@@ -400,7 +405,7 @@ func ProvisioningTimedOut(said string) bool {
 
 // ManagedSetupPin is the release the managed "setup" install mode installs
 // for the exact pin enterprise.openshell.version: the pin, or
-// InstallerVersion for one older than SandboxMin (raised reports it). That
+// InstallerVersion for one older than SupportedMin (raised reports it). That
 // is the in-place migration of the hosts DefenseClaw 1.0.3 set up on
 // "0.1.3", whose sandboxes would otherwise never start again: ensure and
 // each user's daemon move them to InstallerVersion. Any other pin (a
@@ -415,12 +420,31 @@ func ManagedSetupPin(setup bool, pin string) (release string, raised bool) {
 }
 
 // CheckSupported returns an *ErrUnsupportedVersion when v is outside the
-// supported window.
+// supported window, SupportedMin to SupportedBelow: an older release is one
+// the install step upgrades in place.
 func CheckSupported(v Version) error {
 	if v.Compare(mustParse(SupportedMin)) < 0 || aboveWindow(v) {
 		return &ErrUnsupportedVersion{Found: v}
 	}
 	return nil
+}
+
+// CheckConnects returns an *ErrUnsupportedVersion when DefenseClaw does not
+// talk to a gateway of release v at all: outside LegacyMin to
+// SupportedBelow. A legacy release (Legacy) passes, for the move off it
+// only. Remove it with LegacyMin.
+func CheckConnects(v Version) error {
+	if v.Compare(mustParse(LegacyMin)) < 0 || aboveWindow(v) {
+		return &ErrUnsupportedVersion{Found: v}
+	}
+	return nil
+}
+
+// Legacy reports a release DefenseClaw connects to only to move its host to
+// SupportedMin (LegacyMin): older than SupportedMin, a prerelease of it
+// included, and not older than LegacyMin.
+func Legacy(v Version) bool {
+	return CheckConnects(v) == nil && CheckSupported(v) != nil
 }
 
 func mustParse(s string) Version {

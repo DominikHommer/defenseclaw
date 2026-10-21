@@ -127,5 +127,55 @@ func LockSandboxStart(dir string) (unlock func(), err error) {
 	return unlock, err
 }
 
+// LifecycleDrained is the line `defenseclaw-gateway sandbox-daemon drain`
+// prints once it holds the account's lifecycle lock (LockGatewayLifecycle)
+// and found nothing a stop of the account's gateway would end with no
+// flush (CheckAccountGateways): the managed lifecycle, which runs it as the
+// account, stops the account's units only after it, and lets the drain go
+// once they are stopped.
+const LifecycleDrained = "defenseclaw: OpenShell gateway lifecycle held, nothing to flush"
+
+// CheckAccountGateways is the check a drain makes before the managed
+// lifecycle stops the account's gateway: every local gateway registered for
+// the account (RegistrationNames) must report each sandbox on it stopped
+// (CheckSandboxesStopped, which refuses one it cannot read unless no
+// MicroVM runs as the account), and no MicroVM may run as the account
+// (vms), whatever gateway or client started it.
+func CheckAccountGateways(ctx context.Context, vms VMCount) error {
+	for _, name := range RegistrationNames(DiscoverOptions{}) {
+		reg, err := Discover(DiscoverOptions{Gateway: name})
+		if err != nil {
+			if rerr := unreachableRefusal(ctx, ErrUnflushed, fmt.Errorf("the registration %s is not usable: %w", name, err), vms, "try again"); rerr != nil {
+				return rerr
+			}
+			continue
+		}
+		if !reg.Local() {
+			continue
+		}
+		c, err := Dial(reg, ClientOptions{RPCTimeout: 10 * time.Second})
+		if err != nil {
+			if rerr := unreachableRefusal(ctx, ErrUnflushed, fmt.Errorf("no connection to %s: %w", name, err), vms, "try again"); rerr != nil {
+				return rerr
+			}
+			continue
+		}
+		err = CheckSandboxesStopped(ctx, c, vms)
+		_ = c.Close()
+		if err != nil {
+			return fmt.Errorf("gateway %s: %w", name, err)
+		}
+	}
+	n, err := vms(ctx)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w (the MicroVMs of this account could not be counted: %v); try again", ErrUnflushed, err)
+	case n > 0:
+		return fmt.Errorf("%w (%s run as this account, which the gateway's stop would end with no flush); stop them, then try again",
+			ErrUnflushed, plural(n, "MicroVM", "MicroVMs"))
+	}
+	return nil
+}
+
 // errLockHeld is a lock another holder keeps.
 var errLockHeld = errors.New("openshell: lock held")

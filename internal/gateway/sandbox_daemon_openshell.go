@@ -1095,12 +1095,21 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context, handover bo
 		case err != nil && !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable):
 			// The gateway answered, but its sandboxes could not be read:
 			// nothing proves that none of the account's runs, so it is kept,
-			// and looked at again soon. One DefenseClaw cannot connect to
-			// (Unavailable) runs nothing a stop could reach.
+			// and looked at again soon.
 			d.logf("check the OpenShell gateway for sandboxes before stopping it: %v; it keeps running", err)
 			d.scheduleCheck(foreignRecheckEvery)
 			return
 		case err != nil:
+			// DefenseClaw cannot connect to it (Unavailable), and its
+			// port is this account's (PortHolder): a gateway whose
+			// registration or certificates broke still runs its MicroVMs,
+			// which the stop would end with no flush. Only the account's
+			// processes tell that none runs.
+			if n, verr := d.microVMs(ctx); verr != nil || n > 0 {
+				d.logf("the OpenShell gateway does not answer (%v) and %s; it keeps running", err, microVMsHeld(n, verr))
+				d.scheduleCheck(foreignRecheckEvery)
+				return
+			}
 		case !running:
 		case handover:
 			// One the policy leaves running (alert) does not hold the one
@@ -1300,10 +1309,13 @@ func (d *SandboxDaemon) reportDrift(ctx context.Context, registration string, dr
 }
 
 // stopOpenShellIfIdle stops the account's managed gateway when the daemon
-// exits with no sandbox of the account that holds it (manager.HoldsCompute).
-// It counts them right before the stop, holding the lifecycle, so no
-// create or start of the daemon's comes between; one it cannot take within
-// the bound keeps the gateway.
+// exits with no sandbox of the account that holds it (manager.HoldsCompute)
+// and no MicroVM running as the account (microVMs: one made with
+// OpenShell's own CLI, or one on a gateway DefenseClaw can no longer
+// read), which the stop would end with no flush. It counts them right
+// before the stop, holding the lifecycle, so no create or start of the
+// daemon's comes between; one it cannot take within the bound keeps the
+// gateway.
 func (d *SandboxDaemon) stopOpenShellIfIdle() {
 	s := d.currentSettings()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1315,5 +1327,21 @@ func (d *SandboxDaemon) stopOpenShellIfIdle() {
 	if n, err := d.runningSandboxes(ctx); err != nil || n > 0 {
 		return
 	}
+	if n, err := d.microVMs(ctx); err != nil || n > 0 {
+		d.logf("the OpenShell gateway keeps running: %s", microVMsHeld(n, err))
+		return
+	}
 	d.openShell.Stop(ctx, s)
+}
+
+// microVMsHeld says why the account's MicroVMs keep its gateway (microVMs
+// counted n, or failed with err).
+func microVMsHeld(n int, err error) string {
+	if err != nil {
+		return "the MicroVMs of this account could not be counted (" + err.Error() + ")"
+	}
+	if n == 1 {
+		return "1 MicroVM runs as this account, which the stop would end with no flush"
+	}
+	return strconv.Itoa(n) + " MicroVMs run as this account, which the stop would end with no flush"
 }

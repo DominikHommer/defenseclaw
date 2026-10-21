@@ -213,7 +213,7 @@ type record struct {
 	Sessions int `json:"sessions,omitempty"`
 	// SessionRelease is the OpenShell release of the gateway when the
 	// latest session began: the sandbox runs that release's supervisor
-	// until it stops (openshell.SandboxMin). Empty in records from before
+	// until it stops (openshell.SupportedMin). Empty in records from before
 	// it was kept, whose sessions all began on an older release.
 	SessionRelease string `json:"session_release,omitempty"`
 	// HookCounts are the hook counters as the daemon last kept them
