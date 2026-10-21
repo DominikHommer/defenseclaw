@@ -111,57 +111,9 @@ func conflictingToolArgumentKeys(request trustedActionRequest, facts actionfacts
 	if !ok {
 		return conflictingToolArguments{}, false
 	}
-	shared := make(map[string]json.RawMessage, len(members))
-	var conflicting []*toolArgumentGroup
-	for _, group := range groupToolArguments(members) {
-		if len(group.members) == 1 {
-			shared[group.keys[0]] = group.values[0]
-			continue
-		}
-		conflicting = append(conflicting, group)
-	}
-	if len(conflicting) == 0 {
+	choices, conflicted, repeated := toolArgumentChoices(members, 0)
+	if !conflicted && !repeated {
 		return conflictingToolArguments{}, false
-	}
-
-	// Each field is named by each of its keys with each of its values, so a
-	// value is judged under the key the reviewed contract reads.
-	choices := []map[string]json.RawMessage{shared}
-	total := 1
-	for _, group := range conflicting {
-		total *= len(group.keys) * len(group.values)
-		if total > maxConflictingToolArgumentCandidates {
-			break
-		}
-	}
-	if total <= maxConflictingToolArgumentCandidates {
-		for _, group := range conflicting {
-			next := make([]map[string]json.RawMessage, 0, len(choices)*len(group.keys)*len(group.values))
-			for _, choice := range choices {
-				for _, key := range group.keys {
-					for _, value := range group.values {
-						next = append(next, withArgument(choice, key, value))
-					}
-				}
-			}
-			choices = next
-		}
-	} else {
-		// Too many fields to try every pairing: each key keeps its own value.
-		widest := 0
-		for _, group := range conflicting {
-			widest = max(widest, len(group.members))
-		}
-		next := make([]map[string]json.RawMessage, 0, widest)
-		for index := range widest {
-			choice := shared
-			for _, group := range conflicting {
-				member := group.members[min(index, len(group.members)-1)]
-				choice = withArgument(choice, member.key, member.value)
-			}
-			next = append(next, choice)
-		}
-		choices = next
 	}
 
 	var result conflictingToolArguments
@@ -184,13 +136,112 @@ func conflictingToolArgumentKeys(request trustedActionRequest, facts actionfacts
 		}
 		complete = true
 		// A complete analysis of a command argument is an execution tool:
-		// ActionFacts reads command text only for one.
-		if (len(analysis.Commands) > 0 && hasCommandArgument(candidate.input.Args)) ||
-			slices.ContainsFunc(analysis.Paths, writeClassPathFact) {
+		// ActionFacts reads command text only for one. Only keys or values
+		// that disagree leave the call unverifiable; a key repeated with
+		// the value it already has, or an unreviewed key given twice, is
+		// judged as the one call it is.
+		if conflicted && ((len(analysis.Commands) > 0 && hasCommandArgument(candidate.input.Args)) ||
+			slices.ContainsFunc(analysis.Paths, writeClassPathFact)) {
 			result.shellOrWrite = true
 		}
 	}
 	return result, complete
+}
+
+// maxNestedToolArgumentDepth bounds the wrapper objects (input, parameters,
+// request) inside one another that the conflict check expands.
+const maxNestedToolArgumentDepth = 4
+
+// toolArgumentChoices is every way to name each field of an argument object
+// once: each key of a field with each of its values. A wrapper object
+// ActionFacts reads the fields of (input, parameters, request) is expanded
+// the same way, so a field named twice inside it is judged as each of its
+// candidates too. conflicted reports a field that more than one key or
+// value names; repeated reports a member the object (or a wrapper in it)
+// gives more than once, which ActionFacts reads as a duplicate JSON key.
+func toolArgumentChoices(members []toolArgument, depth int) (choices []map[string]json.RawMessage, conflicted, repeated bool) {
+	expanded := make([]toolArgument, 0, len(members))
+	for _, member := range members {
+		field, _ := conflictingToolArgumentField(member.key)
+		if field != "nested" || depth >= maxNestedToolArgumentDepth || len(member.value) == 0 || member.value[0] != '{' {
+			expanded = append(expanded, member)
+			continue
+		}
+		nested, ok := topLevelToolArguments(member.value)
+		if !ok {
+			expanded = append(expanded, member)
+			continue
+		}
+		inner, innerConflicted, innerRepeated := toolArgumentChoices(nested, depth+1)
+		if !innerConflicted && !innerRepeated {
+			expanded = append(expanded, member)
+			continue
+		}
+		conflicted = conflicted || innerConflicted
+		repeated = repeated || innerRepeated
+		for _, choice := range inner {
+			value, ok := encodeToolArguments(choice)
+			if !ok {
+				continue
+			}
+			expanded = append(expanded, toolArgument{key: member.key, value: value})
+		}
+	}
+
+	groups := groupToolArguments(expanded)
+	shared := make(map[string]json.RawMessage, len(expanded))
+	var conflicting []*toolArgumentGroup
+	kept := 0
+	for _, group := range groups {
+		kept += len(group.members)
+		if len(group.members) == 1 {
+			shared[group.keys[0]] = group.values[0]
+			continue
+		}
+		conflicting = append(conflicting, group)
+	}
+	repeated = repeated || kept < len(expanded)
+	conflicted = conflicted || len(conflicting) > 0
+
+	// Each field is named by each of its keys with each of its values, so a
+	// value is judged under the key the reviewed contract reads.
+	choices = []map[string]json.RawMessage{shared}
+	total := 1
+	for _, group := range conflicting {
+		total *= len(group.keys) * len(group.values)
+		if total > maxConflictingToolArgumentCandidates {
+			break
+		}
+	}
+	if total <= maxConflictingToolArgumentCandidates {
+		for _, group := range conflicting {
+			next := make([]map[string]json.RawMessage, 0, len(choices)*len(group.keys)*len(group.values))
+			for _, choice := range choices {
+				for _, key := range group.keys {
+					for _, value := range group.values {
+						next = append(next, withArgument(choice, key, value))
+					}
+				}
+			}
+			choices = next
+		}
+		return choices, conflicted, repeated
+	}
+	// Too many fields to try every pairing: each key keeps its own value.
+	widest := 0
+	for _, group := range conflicting {
+		widest = max(widest, len(group.members))
+	}
+	next := make([]map[string]json.RawMessage, 0, widest)
+	for index := range widest {
+		choice := shared
+		for _, group := range conflicting {
+			member := group.members[min(index, len(group.members)-1)]
+			choice = withArgument(choice, member.key, member.value)
+		}
+		next = append(next, choice)
+	}
+	return next, conflicted, repeated
 }
 
 // conflictingToolArgumentStatus is the analysis a second key for a field
@@ -273,8 +324,13 @@ func groupToolArguments(members []toolArgument) []*toolArgumentGroup {
 }
 
 // hasCommandArgument reports an argument object with a key ActionFacts
-// reads as a command (command and its aliases, or argv).
+// reads as a command (command and its aliases, or argv), directly or in a
+// wrapper object it reads the fields of (input, parameters, request).
 func hasCommandArgument(args json.RawMessage) bool {
+	return hasCommandArgumentAt(args, 0)
+}
+
+func hasCommandArgumentAt(args json.RawMessage, depth int) bool {
 	members, ok := topLevelToolArguments(args)
 	if !ok {
 		return false
@@ -283,6 +339,10 @@ func hasCommandArgument(args json.RawMessage) bool {
 		switch field, _ := conflictingToolArgumentField(member.key); field {
 		case "command", "argv":
 			return true
+		case "nested":
+			if depth < maxNestedToolArgumentDepth && hasCommandArgumentAt(member.value, depth+1) {
+				return true
+			}
 		}
 	}
 	return false
