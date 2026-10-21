@@ -80,6 +80,17 @@ func (set *guardrailProfileSet) healthProfileWarnings() []string {
 	return append(warnings, set.inertHILTWarnings()...)
 }
 
+// standaloneProfileWarnings is what status and verify list on a standalone
+// deployment: the profile set's warnings, or, with no profiles, the inert
+// human-approval warnings of the config itself, which config validate and
+// profile-explain already gave (id.GAP-1264).
+func standaloneProfileWarnings(set *guardrailProfileSet, cfg *config.Config) []string {
+	if set != nil {
+		return set.healthProfileWarnings()
+	}
+	return ConfigHILTWarnings(cfg)
+}
+
 // inertHILTWarning uses the same resolved threshold as enforcement. Keep
 // blocking precedence and explain why an enabled approval cannot fire.
 func inertHILTWarning(cfg *config.Config, connector string) string {

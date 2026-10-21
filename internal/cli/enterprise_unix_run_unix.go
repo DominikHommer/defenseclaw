@@ -414,7 +414,7 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	// and exit 2, before the value is read or the lifecycle lock is taken
 	// (GAP-2146, GAP-2147).
 	if !managed.ValidCredentialName(opts.name) {
-		return nil, false, lifecycleFlagError(cmd, fmt.Errorf("--name takes lowercase letters, digits and dashes, not %q", opts.name))
+		return nil, false, lifecycleFlagError(cmd, fmt.Errorf("--name takes 1 to 63 lowercase letters, digits and dashes, starting with a letter or digit; not %q", opts.name))
 	}
 	if action == "set" && opts.fromStdin == (opts.fromFile != "") {
 		return nil, false, lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))

@@ -85,6 +85,18 @@ func policyConfigOnlyPreRunE(cmd *cobra.Command, _ []string) error {
 
 func policyConfigOnlyPostRun(*cobra.Command, []string) {}
 
+// managedStandaloneHost reports a standalone managed host (Windows, Linux or
+// macOS). There an administrator command reads the deployment's config and
+// leaves the audit store, which the gateway service account owns, to the
+// gateway.
+func managedStandaloneHost() bool {
+	if _, windows := managedHostWindowsStandalone(); windows {
+		return true
+	}
+	_, unix := managedHostUnixRecord(nil)
+	return unix
+}
+
 // ---------------------------------------------------------------------------
 // policy validate
 // ---------------------------------------------------------------------------
@@ -159,6 +171,11 @@ func validateSecureClientPolicy(regoDir string) error {
 var policyTestCmd = &cobra.Command{
 	Use:   "test",
 	Short: "Run the Rego unit tests (*_test.rego) without an external opa binary",
+	// The tests write no audit event. On a managed host the audit store is
+	// the gateway service account's, which an administrator command does
+	// not open (GAP-0052).
+	PersistentPreRunE: policyConfigOnlyPreRunE,
+	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		regoDir, err := policyCommandRegoDir(cmd)
 		if err != nil {
@@ -293,10 +310,7 @@ var policyEvaluateCmd = &cobra.Command{
 	Use:   "evaluate",
 	Short: "Dry-run the admission policy for a given input",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if _, windows := managedHostWindowsStandalone(); windows {
-			return policyConfigOnlyPreRunE(cmd, args)
-		}
-		if _, unix := managedHostUnixRecord(nil); unix {
+		if managedStandaloneHost() {
 			return policyConfigOnlyPreRunE(cmd, args)
 		}
 		return rootPersistentPreRunE(cmd, args)

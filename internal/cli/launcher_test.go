@@ -442,9 +442,13 @@ func TestLauncherReportsOnlyNamedManagedRefusals(t *testing.T) {
 		reported = append(reported, command+":"+reason)
 	}
 	t.Cleanup(func() { reportManagedCommandRefusal = previous })
+	// mp0.GAP-0002: the config, guardrail and policy writers are audited
+	// too, by their command words only, never an argument.
 	for _, args := range [][]string{
 		{"guardrail", "disable"}, {"uninstall", "--all"},
 		{"guardrail", "status"}, {"config", "set", "token=untrusted"},
+		{"config", "show"}, {"guardrail", "protection", "list"}, {"guardrail", "block-at", "LOW"},
+		{"policy", "edit", "x"}, {"policy", "show"}, {"config"},
 	} {
 		root := &cobra.Command{Use: "defenseclaw"}
 		root.SetErr(&bytes.Buffer{})
@@ -452,7 +456,7 @@ func TestLauncherReportsOnlyNamedManagedRefusals(t *testing.T) {
 			t.Fatalf("%v: exit %d, want refusal", args, code)
 		}
 	}
-	if got, want := strings.Join(reported, ","), "guardrail disable:,uninstall:"; got != want {
+	if got, want := strings.Join(reported, ","), "guardrail disable:,uninstall:,config set:,guardrail block-at:,policy edit:"; got != want {
 		t.Fatalf("reported %q, want %q", got, want)
 	}
 }

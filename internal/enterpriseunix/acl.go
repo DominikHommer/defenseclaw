@@ -19,6 +19,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -491,6 +492,72 @@ func aclConnectors(p *plan, record *Deployment) []string {
 		connectors = append(connectors, record.MachinePolicyConnectors...)
 	}
 	return connectors
+}
+
+// darwinServiceACLDenial returns the first rooted path, of paths, whose
+// macOS ACL denies the gateway service account one of the rights its entry
+// in rights lists, with that entry. The owner and mode checks pass such a
+// path, and the gateway failed only when it started (GAP-1414, GAP-1442).
+// An entry applies to the service account when it names the account, its
+// group or everyone, or a principal ls could not name; the service account
+// has no other groups. Inherit-only entries do not apply to the path itself.
+// It does nothing off macOS.
+func (e *Env) darwinServiceACLDenial(ctx context.Context, paths []string, rights map[string][]string) (string, string, error) {
+	if e.GOOS != "darwin" || len(paths) == 0 {
+		return "", "", nil
+	}
+	for start := 0; start < len(paths); start += aclListBatch {
+		batch := paths[start:min(start+aclListBatch, len(paths))]
+		result, err := e.Runner.Run(ctx, "ls", append([]string{"-lde", "--"}, batch...)...)
+		if err != nil && len(result.Stdout) == 0 {
+			return "", "", err
+		}
+		listed, err := managed.ParseDarwinACLListing(string(result.Stdout), batch)
+		if err != nil {
+			return "", "", err
+		}
+		for _, path := range batch {
+			for _, entry := range listed[path] {
+				if e.darwinACLDeniesService(entry, rights[path]) {
+					return path, entry.Text, nil
+				}
+			}
+		}
+	}
+	return "", "", nil
+}
+
+// darwinACLDeniesService reports a deny entry, for the gateway service
+// account, of one of rights.
+func (e *Env) darwinACLDeniesService(entry managed.DarwinACLEntry, rights []string) bool {
+	if entry.Allow || slices.Contains(entry.Rights, "only_inherit") {
+		return false
+	}
+	principal := ""
+	if fields := strings.Fields(strings.ToLower(entry.Text)); len(fields) > 0 {
+		principal = fields[0]
+	}
+	// A principal ls printed as a number (it could not name it) applies:
+	// fail closed.
+	kind, name, _ := strings.Cut(principal, ":")
+	if strings.Trim(name, "0123456789") != "" {
+		switch kind {
+		case "user":
+			if name != strings.ToLower(e.Layout.ServiceUser) {
+				return false
+			}
+		case "group":
+			if name != strings.ToLower(e.Layout.ServiceGroup) && name != "everyone" {
+				return false
+			}
+		}
+	}
+	for _, right := range rights {
+		if slices.Contains(entry.Rights, right) {
+			return true
+		}
+	}
+	return false
 }
 
 // jsonlACLProblem checks a custom output file, which is outside the

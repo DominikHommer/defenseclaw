@@ -352,8 +352,10 @@ func TestEnterpriseSecretArgumentErrorsPrintUsage(t *testing.T) {
 	}{
 		{"set", "pass exactly one of --from-stdin or --from-file", enterpriseSecretOptions{name: "ok-name"}},
 		{"set", "pass exactly one of --from-stdin or --from-file", enterpriseSecretOptions{name: "ok-name", fromStdin: true, fromFile: "/etc/hostname"}},
-		{"set", `--name takes lowercase letters, digits and dashes, not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME", fromStdin: true}},
-		{"remove", `--name takes lowercase letters, digits and dashes, not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME"}},
+		{"set", `--name takes 1 to 63 lowercase letters, digits and dashes, starting with a letter or digit; not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME", fromStdin: true}},
+		{"remove", `--name takes 1 to 63 lowercase letters, digits and dashes, starting with a letter or digit; not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME"}},
+		// p0.GAP-0670: a name one character too long says what the limit is.
+		{"set", "--name takes 1 to 63 lowercase letters", enterpriseSecretOptions{name: strings.Repeat("a", 64), fromStdin: true}},
 	}
 	for _, tc := range cases {
 		cmd := newEnterpriseSecretCommand(tc.action, "")
