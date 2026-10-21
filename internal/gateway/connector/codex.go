@@ -1385,12 +1385,20 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts); err != nil {
 		return false, nil
 	}
-	// Setup always writes the top-level notify entry into config.toml. A missing
-	// or edited entry leaves Codex launching a program that is not DefenseClaw's
-	// (or does not exist) on every completed turn, so report the contract as
-	// broken and let the guard re-run Setup (GAP-1248).
-	if userCfg != nil && !codexNotifyIsCurrent(userCfg["notify"], opts) {
-		return false, nil
+	// The Secure Client profile writes the top-level notify entry into
+	// config.toml: a missing or edited entry leaves Codex launching a program
+	// that is not DefenseClaw's (or does not exist) on every completed turn
+	// (GAP-1248). Every other install registers no notifier, so a DefenseClaw
+	// notifier there was left by an older Setup. Either way report the
+	// contract as broken and let the guard re-run Setup.
+	if userCfg != nil {
+		if codexRegistersNotify(opts) {
+			if !codexNotifyIsCurrent(userCfg["notify"], opts) {
+				return false, nil
+			}
+		} else if codexNotifyLooksManaged(userCfg["notify"], opts) {
+			return false, nil
+		}
 	}
 	return true, nil
 }
@@ -1632,7 +1640,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				backup.OriginalNotify = raw
 			}
 			backupToSave = backup
-		} else if existing, ok := cfg["notify"]; ok && !codexNotifyLooksManaged(existing, opts) {
+		} else if existing, ok := cfg["notify"]; ok && codexRegistersNotify(opts) && !codexNotifyLooksManaged(existing, opts) {
 			// The operator replaced the notifier after Setup. Keep it as the
 			// chained original that Teardown restores instead of dropping it when
 			// Setup (or the hook guard) writes DefenseClaw's notifier back.
@@ -1705,12 +1713,29 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		}
 		cfg["otel"] = otelBlock
 
-		// agent-turn-complete bridge: Codex appends one JSON payload argument to
-		// this argv array. Windows invokes the installed no-console hook launcher;
-		// Unix keeps the existing Bash bridge. The native form is an
-		// argv array rather than a command string, so paths containing spaces need
-		// no shell quoting and no Bash/jq/curl dependency is introduced.
-		if runtime.GOOS == "windows" {
+		// Codex hands its notify program the turn record (prompt, reply and
+		// working directory) as a command-line argument, which other accounts
+		// on the computer can read. The UserPromptSubmit and Stop hooks deliver
+		// the same turn over a private channel, so Setup registers no notifier
+		// and removes the one an older Setup wrote, putting the account's own
+		// notifier back. Only the Secure Client profile keeps the bridge.
+		//
+		// The bridge: Codex appends one JSON payload argument to this argv
+		// array. Windows invokes the installed no-console hook launcher; Unix
+		// keeps the Bash bridge.
+		if !codexRegistersNotify(opts) {
+			original := backupToSave
+			if backupExists {
+				original, err = c.loadConfigBackup(opts.DataDir)
+				if err != nil {
+					return fmt.Errorf("load original Codex notifier: %w", err)
+				}
+			}
+			if err := restoreCodexNotify(cfg, original, opts); err != nil {
+				return err
+			}
+			_ = os.Remove(filepath.Join(opts.DataDir, "notify-bridge.sh"))
+		} else if runtime.GOOS == "windows" {
 			cfg["notify"] = codexNativeNotifyCommand()
 			// Heal a bridge left by an older Windows setup. It is no longer
 			// referenced and contains a baked gateway token.
@@ -2333,6 +2358,13 @@ func codexOtelEnvironment(opts SetupOpts) string {
 		return environment
 	}
 	return "dev"
+}
+
+// codexRegistersNotify reports whether Setup registers DefenseClaw's Codex
+// notifier: only on the Secure Client profile, whose gateway folds the notify
+// record into its hook collector.
+func codexRegistersNotify(opts SetupOpts) bool {
+	return shellHookSecureClientProfile(opts)
 }
 
 func codexNativeNotifyCommand() []string {

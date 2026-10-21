@@ -6183,6 +6183,16 @@ def _codex_notify_problem(cfg, config_path: str, *, windows: bool) -> str:
     except (OSError, UnicodeError, ValueError):
         return ""
     argv = document.get("notify")
+    if not _doctor_secure_client(cfg):
+        # Only Secure Client registers a DefenseClaw notifier. Codex hands a
+        # notify program the turn record on its command line, so one left by
+        # an older setup is removed; the hooks deliver the turn instead.
+        if _codex_notify_is_defenseclaw(cfg, argv):
+            return (
+                f"notify in {user_config} still runs the DefenseClaw notifier, which gets each "
+                "Codex turn on its command line; the Codex hooks already report the turn"
+            )
+        return ""
     if not isinstance(argv, list) or not argv:
         return f"{user_config} has no notify entry, so Codex sends no turn-complete events to DefenseClaw"
     if len(argv) != 2 or not all(isinstance(part, str) for part in argv):
@@ -6201,6 +6211,23 @@ def _codex_notify_problem(cfg, config_path: str, *, windows: bool) -> str:
     return ""
 
 
+def _codex_notify_is_defenseclaw(cfg, argv) -> bool:
+    """Whether a Codex notify value is the notifier an older DefenseClaw setup wrote."""
+    if not isinstance(argv, list) or len(argv) != 2 or not all(isinstance(part, str) for part in argv):
+        return False
+    program, arg = argv
+    if arg == "notify":
+        return os.path.basename(program.replace("\\", "/")).lower() in ("defenseclaw-hook.exe", "defenseclaw-hook")
+    if program != "bash":
+        return False
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if paths_same(arg, os.path.join(data_dir, "notify-bridge.sh")):
+        return True
+    return bool(data_dir) and os.path.basename(arg).lower().startswith("notify-bridge") and paths_same(
+        os.path.dirname(arg), data_dir
+    )
+
+
 def _check_codex_notify(cfg, config_path: str, r: _DoctorResult, *, windows: bool) -> None:
     problem = _codex_notify_problem(cfg, config_path, windows=windows)
     if problem:
@@ -6209,7 +6236,11 @@ def _check_codex_notify(cfg, config_path: str, r: _DoctorResult, *, windows: boo
             "Codex notify",
             problem,
             r=r,
-            remediation="restore it: defenseclaw setup codex --yes",
+            remediation=(
+                "restore it: defenseclaw setup codex --yes"
+                if _doctor_secure_client(cfg)
+                else "remove it: defenseclaw setup codex --yes"
+            ),
         )
 
 
