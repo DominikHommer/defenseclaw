@@ -671,15 +671,15 @@ var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
 // machine registration. An elevated lifecycle can inherit ProgramFiles from
 // a caller, so the path used for a subprocess must not use that environment.
 func windowsEnterpriseInstalledAdminCLI() (string, error) {
-	programFiles, err := trustedWindowsEnterpriseProgramFiles()
+	programFiles, err := windowsEnterpriseProgramFilesResolver()
 	if err != nil {
 		return "", fmt.Errorf("resolve trusted Program Files for installed CLI: %w", err)
 	}
 	installedCLI := filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe")
 	// An elevated lifecycle runs this image with the service pins. Check
-	// that only SYSTEM, Administrators and TrustedInstaller can replace it,
-	// and that its folders are not links, before any process is created
-	// (GAP-1493).
+	// that only SYSTEM, Administrators and TrustedInstaller can replace it
+	// or any folder above it (Program Files\Cisco included), and that its
+	// folders are not links, before any process is created (GAP-1493).
 	if err := windowsEnterpriseInstalledCLICustody(installedCLI, "installed DefenseClaw CLI"); err != nil {
 		return "", fmt.Errorf("refuse to run the installed CLI: %w", err)
 	}
@@ -687,8 +687,9 @@ func windowsEnterpriseInstalledAdminCLI() (string, error) {
 }
 
 // windowsEnterpriseInstalledCLICustody validates the installed CLI file and
-// its ancestors. A seam for tests.
-var windowsEnterpriseInstalledCLICustody = managed.ValidateTrustedFilePath
+// every folder above it, with no advisory verdict for the installer-owned
+// Cisco folders. A seam for tests.
+var windowsEnterpriseInstalledCLICustody = managed.ValidateTrustedFilePathStrictAncestors
 
 func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error) {
 	layout, err := windowsEnterpriseHotConfigLayout()

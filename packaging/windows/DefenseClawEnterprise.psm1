@@ -924,6 +924,47 @@ namespace $nativeNamespace
         [DllImport("kernel32.dll")]
         private static extern IntPtr LocalFree(IntPtr memory);
 
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool LookupAccountSidW(
+            string systemName,
+            byte[] sid,
+            StringBuilder name,
+            ref uint nameLength,
+            StringBuilder domainName,
+            ref uint domainNameLength,
+            out int use);
+
+        // The SID_NAME_USE of sid on this computer (1 user, 2 group, 4
+        // alias, 5 well-known group, 6 deleted account, 9 computer, ...),
+        // 0 when no account has it, -1 when the lookup itself failed (a
+        // domain controller that does not answer).
+        public static int LookupSidUse(byte[] sid)
+        {
+            uint nameLength = 256;
+            uint domainLength = 256;
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                StringBuilder name = new StringBuilder((int)nameLength);
+                StringBuilder domain = new StringBuilder((int)domainLength);
+                int use;
+                if (LookupAccountSidW(null, sid, name, ref nameLength, domain, ref domainLength, out use))
+                {
+                    return use;
+                }
+                int error = Marshal.GetLastWin32Error();
+                if (error == 1332)
+                {
+                    return 0;
+                }
+                if (error != 122)
+                {
+                    return -1;
+                }
+            }
+            return -1;
+        }
+
         private static SECURITY_ATTRIBUTES SecurityAttributes(string sddl, out IntPtr descriptor)
         {
             uint size;
@@ -4717,15 +4758,48 @@ $script:VendorDirectoryUsersRights = [Security.AccessControl.FileSystemRights](0
 $script:VendorDirectoryUsersGrantRights = [Security.AccessControl.FileSystemRights](0x1200a8)
 
 # Whether a deny entry for SID can take access away from an enrolled user's
-# token: a user, a group or a well-known group. LocalSystem, the service
-# accounts, per-service SIDs, anonymous logon and app-container or
-# capability SIDs are never part of an enrolled user's logon token.
+# token. LocalSystem, the service accounts, per-service SIDs, anonymous logon
+# and app-container or capability SIDs never can. A built-in or well-known
+# group can, and so can a domain's well-known group (Domain Users) and any
+# group or alias the lookup finds. An account SID (local, domain or Entra ID)
+# applies when it is an enrolled user (EnrolledSIDs: the account profiles on
+# this computer); a user that is not, a deleted account or a computer does
+# not, and neither does a local or domain SID no account has (a retired
+# account), so a stale deny no longer stops install and repair (GAP-1142
+# review). A lookup that fails counts the deny.
 function Test-DefenseClawUserTokenDenySID {
-    param([Parameter(Mandatory)][string]$SID)
-    if ($SID -in @('S-1-5-7', 'S-1-5-18', 'S-1-5-19', 'S-1-5-20')) {
+    param(
+        [Parameter(Mandatory)][string]$SID,
+        [string[]]$EnrolledSIDs = @()
+    )
+    if ($SID -in @('S-1-5-7', 'S-1-5-18', 'S-1-5-19', 'S-1-5-20') -or
+        $SID.StartsWith('S-1-5-80-') -or $SID.StartsWith('S-1-15-')) {
         return $false
     }
-    return -not ($SID.StartsWith('S-1-5-80-') -or $SID.StartsWith('S-1-15-'))
+    if ($EnrolledSIDs -contains $SID) {
+        return $true
+    }
+    $domainAccount = $SID -cmatch '^S-1-5-21-\d+-\d+-\d+-(\d+)$'
+    if ($domainAccount) {
+        $rid = [int64]$Matches[1]
+        if ($rid -ge 512 -and $rid -lt 1000) {
+            return $true
+        }
+    }
+    elseif (-not $SID.StartsWith('S-1-12-1-')) {
+        return $true
+    }
+    $identifier = [Security.Principal.SecurityIdentifier]::new($SID)
+    $bytes = [byte[]]::new($identifier.BinaryLength)
+    $identifier.GetBinaryForm($bytes, 0)
+    $native = Initialize-DefenseClawNativeSecurity
+    $use = $native::LookupSidUse($bytes)
+    if ($use -eq 0) {
+        # Entra ID lookups miss real groups; only a local or domain SID that
+        # no account has is a retired one.
+        return -not $domainAccount
+    }
+    return ($use -lt 0 -or $use -in @(2, 4, 5))
 }
 
 # Whether every standard user can check the vendor directory, with any
@@ -4733,12 +4807,14 @@ function Test-DefenseClawUserTokenDenySID {
 # the rights, and no deny entry that applies to an enrolled user's token
 # takes any away. INTERACTIVE is not in the token of a scheduled task or an
 # SSH logon, so an allow for it alone does not count (GAP-1439); a deny for
-# any user or group, a domain group included, does (GAP-1142).
+# an enrolled user or for a group, a domain group included, does (GAP-1142),
+# and a deny for an account that is not enrolled or no longer exists does not.
 function Test-DefenseClawStandaloneVendorUsersRead {
     param([Parameter(Mandatory)][string]$Path)
     $required = [int64]$script:VendorDirectoryUsersRights
     $everyUser = @($script:UsersSID, $script:AuthenticatedUsersSID, 'S-1-1-0')
     $granted = [int64]0
+    $enrolled = $null
     $rules = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path).GetAccessRules(
         $true, $true, [Security.Principal.SecurityIdentifier])
     foreach ($rule in $rules) {
@@ -4752,7 +4828,13 @@ function Test-DefenseClawStandaloneVendorUsersRead {
             $rights = $rights -bor $required
         }
         if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny) {
-            if (($rights -band $required) -ne 0 -and (Test-DefenseClawUserTokenDenySID -SID $sid)) {
+            if (($rights -band $required) -eq 0) {
+                continue
+            }
+            if ($null -eq $enrolled) {
+                $enrolled = [string[]]@(Get-DefenseClawManagedUserRuntimeHomes | Microsoft.PowerShell.Core\ForEach-Object { [string]$_.sid })
+            }
+            if (Test-DefenseClawUserTokenDenySID -SID $sid -EnrolledSIDs $enrolled) {
                 return $false
             }
             continue
@@ -12929,14 +13011,90 @@ function Remove-DefenseClawRuntimeSelectorState {
         if ([string]::IsNullOrWhiteSpace($directory)) {
             continue
         }
-        $state = [IO.Path]::Combine($directory, '.defenseclaw-managed-runtime-selector.state')
-        $others = @(Get-DefenseClawRuntimeSelectorOtherHooks -Path $state -OwnHook $ownHook)
+        Remove-DefenseClawOwnRuntimeSelector -Directory $directory -OwnHook $ownHook
+    }
+}
+
+# How long a purge waits for the runtime selector lock a hook holds.
+$script:RuntimeSelectorLockTimeoutSeconds = 10
+
+# Takes the runtime selector lock as the hooks do, with an exclusive open of
+# the lock file, waiting up to RuntimeSelectorLockTimeoutSeconds. Delete
+# sharing lets this run remove the lock while it holds it. A lock file that
+# does not exist yet is created for the hold and goes when it is released
+# (Temporary). Close Stream to release it.
+function Open-DefenseClawRuntimeSelectorLock {
+    param([Parameter(Mandatory)][string]$Path)
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        try {
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path) {
+                Assert-DefenseClawNoReparsePath -Path $Path
+                $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Delete)
+                return [pscustomobject]@{ Stream = $stream; Temporary = $false }
+            }
+            $stream = [IO.FileStream]::new($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Delete, 1, [IO.FileOptions]::DeleteOnClose)
+            return [pscustomobject]@{ Stream = $stream; Temporary = $true }
+        }
+        catch [IO.IOException] {
+            if ($clock.Elapsed.TotalSeconds -ge $script:RuntimeSelectorLockTimeoutSeconds) {
+                throw
+            }
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 100
+    }
+}
+
+# Removes the runtime selector state and its lock from Directory, unless the
+# state also holds a target of another deployment (a different hook
+# executable): that deployment keeps its users' selections (GAP-1158). The
+# read and the removal run under the selector lock, so no hook adds a
+# selection in between. NamesOwnHook, when given, also keeps a state it
+# returns $false for (one that names only another hook executable). Writes
+# "path: reason" for each file it kept or could not remove.
+function Remove-DefenseClawOwnRuntimeSelector {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][string]$OwnHook,
+        [scriptblock]$NamesOwnHook
+    )
+    $state = [IO.Path]::Combine($Directory, '.defenseclaw-managed-runtime-selector.state')
+    $lockPath = [IO.Path]::Combine($Directory, '.defenseclaw-managed-runtime-selector.lock')
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $state) -and
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $lockPath)) {
+        return
+    }
+    try {
+        $lock = Open-DefenseClawRuntimeSelectorLock -Path $lockPath
+    }
+    catch {
+        "${state}: kept: the runtime selector lock could not be taken: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+        return
+    }
+    try {
+        $others = @(Get-DefenseClawRuntimeSelectorOtherHooks -Path $state -OwnHook $OwnHook)
         if ($others.Count -gt 0) {
             "${state}: kept: it also holds runtime selections of another DefenseClaw deployment ($($others.Count) target(s)); that deployment's uninstall removes them"
-            continue
+            return
         }
-        foreach ($leaf in @('.defenseclaw-managed-runtime-selector.state', '.defenseclaw-managed-runtime-selector.lock')) {
-            $path = [IO.Path]::Combine($directory, $leaf)
+        if ($null -ne $NamesOwnHook) {
+            try {
+                $named = & $NamesOwnHook $state
+            }
+            catch {
+                "${state}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+                return
+            }
+            if ($false -eq $named) {
+                "${state}: kept: it names another DefenseClaw hook executable"
+                return
+            }
+        }
+        $paths = @($state)
+        if (-not $lock.Temporary) {
+            $paths += $lockPath
+        }
+        foreach ($path in $paths) {
             try {
                 Remove-DefenseClawManagedHooksSerializationLock -Path $path -Label 'runtime selector state'
             }
@@ -12944,6 +13102,9 @@ function Remove-DefenseClawRuntimeSelectorState {
                 "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
             }
         }
+    }
+    finally {
+        $lock.Stream.Dispose()
     }
 }
 
@@ -13071,24 +13232,14 @@ function Remove-DefenseClawStandaloneOrphanedHookMachineState {
     else {
         $removals.Clear()
     }
+    # A selector that names this hook can also hold another deployment's
+    # targets; the per-target check keeps it, as the committed purge does.
+    $ownHook = [IO.Path]::GetFullPath([string]$Layout.HookPath)
     foreach ($directory in @($claude, [string]$Layout.CodexMachinePolicyDirectory, [IO.Path]::Combine($ProgramData, 'Cursor'))) {
         if ([string]::IsNullOrWhiteSpace($directory)) {
             continue
         }
-        $state = [IO.Path]::Combine($directory, '.defenseclaw-managed-runtime-selector.state')
-        try {
-            $named = & $namesThisHook $state
-        }
-        catch {
-            "${state}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
-            continue
-        }
-        if ($false -eq $named) {
-            "${state}: kept: it names another DefenseClaw hook executable"
-            continue
-        }
-        $removals.Add($state)
-        $removals.Add([IO.Path]::Combine($directory, '.defenseclaw-managed-runtime-selector.lock'))
+        Remove-DefenseClawOwnRuntimeSelector -Directory $directory -OwnHook $ownHook -NamesOwnHook $namesThisHook
     }
     foreach ($path in $removals) {
         try {
@@ -28186,6 +28337,32 @@ function Move-DefenseClawInstallRootForRetirement {
     }
 }
 
+# The committed uninstall renames InstallRoot aside after its tombstone; a
+# program that held a file there past the retry window (an antivirus scan, an
+# agent's hook) failed it with 1603 and the services already gone. So the
+# uninstall first renames InstallRoot aside and back before it commits: that
+# holder now fails it here, where rollback restores everything. A crash
+# between the two renames is recovered from the receipt (the retired tree
+# is moved back).
+function Assert-DefenseClawInstallRootRetirable {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    try {
+        Move-DefenseClawInstallRootForRetirement -Source $Source -Destination $Destination
+    }
+    catch {
+        throw (
+            "InstallRoot cannot be renamed aside, so the uninstall stopped before it removed anything: $Source. " +
+            'A program still holds a file in it (an agent running the DefenseClaw hook, or an antivirus scan). ' +
+            "Close it and run the uninstall again: $($_.Exception.Message)"
+        )
+    }
+    [IO.Directory]::Move($Destination, $Source)
+    Assert-DefenseClawNoReparsePath -Path $Source
+}
+
 function Test-DefenseClawFileInUseError {
     # Whether a failed deletion failed because another program has the file
     # or a directory open: a sharing or lock violation, or a directory that
@@ -32992,6 +33169,9 @@ function Invoke-DefenseClawUninstallLifecycle {
                 -LiteralPath $retiredRoot) {
                 throw 'fresh self-uninstall retirement sibling unexpectedly exists'
             }
+            Assert-DefenseClawInstallRootRetirable `
+                -Source $Layout.InstallRoot `
+                -Destination $retiredRoot
         }
         Complete-DefenseClawTransaction -SnapshotPath $snapshot -Layout $Layout
     }
