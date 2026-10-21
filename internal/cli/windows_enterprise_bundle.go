@@ -685,6 +685,24 @@ func publishWindowsBundleVersion(root string) error {
 	return os.Chmod(root, 0o555)
 }
 
+// recordWindowsEarlyAnchorsRefusal records one refused anchor install for
+// a TRUSTANCHORS= run refused over its arguments, before the bundle lock,
+// on an installed computer. A computer that is not installed records
+// nothing, as Linux and macOS refuse such a device before they record, and
+// so does a caller that is not elevated (recordWindowsChange).
+func recordWindowsEarlyAnchorsRefusal(cmd *cobra.Command, opts *windowsEnterpriseLifecycleOptions, code string) {
+	if opts.trustAnchors == "" || !opts.installedBeforeRun {
+		return
+	}
+	layout, err := windowsBundleLayout()
+	if err != nil {
+		warnChangeUnrecorded(cmd.ErrOrStderr(), err)
+		return
+	}
+	current, _ := safefile.ReadRegularFileBounded(newWindowsBundleDriver(layout).AnchorsPath, windowsBundleMaxAnchors)
+	warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsAnchorsFailure(layout, nil, code, false, current))
+}
+
 // prepareWindowsEnterpriseBundle runs before the lifecycle reads --config.
 // With --bundle it prepares the bundle and makes its rendered config the
 // --config of the run. --trust-anchors with --bundle stages the anchor
@@ -704,14 +722,21 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	refuse := func(code, message string) (bool, error) {
 		return true, writeWindowsBundleRefusal(cmd, action, opts, code, message, floorSource)
 	}
+	// A TRUSTANCHORS= request an installed computer refuses over its
+	// arguments records one refused anchor install, as every later refusal
+	// does (refuseAnchors).
+	refuseArguments := func(code, message string) (bool, error) {
+		recordWindowsEarlyAnchorsRefusal(cmd, opts, code)
+		return refuse(code, message)
+	}
 	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
-		return refuse("invalid_arguments", "--refuse-capability-loss requires --bundle")
+		return refuseArguments("invalid_arguments", "--refuse-capability-loss requires --bundle")
 	}
 	if requested && action != "ensure" {
-		return refuse("invalid_arguments", "--bundle and --trust-anchors are valid only with ensure")
+		return refuseArguments("invalid_arguments", "--bundle and --trust-anchors are valid only with ensure")
 	}
 	if opts.bundlePath != "" && strings.TrimSpace(opts.configPath) != "" {
-		return refuse("invalid_arguments", "BUNDLE= (--bundle) cannot be combined with CONFIG= (--config): the signed bundle carries the config")
+		return refuseArguments("invalid_arguments", "BUNDLE= (--bundle) cannot be combined with CONFIG= (--config): the signed bundle carries the config")
 	}
 	if opts.trustAnchors != "" && strings.TrimSpace(opts.configPath) != "" {
 		// Installing the anchors puts the computer in bundle mode, which
@@ -720,7 +745,9 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		// The code is bundle_required, as for a CONFIG= on a computer
 		// already in bundle mode; the exit stays 1639, because the command
 		// line itself can never succeed (#1288).
-		return true, writeWindowsBundleRefusalWithExit(cmd, action, opts, string(enterprisebundle.CodeBundleRequired),
+		code := string(enterprisebundle.CodeBundleRequired)
+		recordWindowsEarlyAnchorsRefusal(cmd, opts, code)
+		return true, writeWindowsBundleRefusalWithExit(cmd, action, opts, code,
 			"TRUSTANCHORS= (--trust-anchors) cannot be combined with CONFIG= (--config): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=",
 			floorSource, enterprisestatus.WindowsExitInvalidArgs)
 	}

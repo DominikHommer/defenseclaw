@@ -34,15 +34,19 @@ import (
 // both find room, the first fill the spool, and the second be left with a
 // change it cannot record. The spool lock (<StateDir>/change-events.lock)
 // is held only while a command counts and reserves, or writes an event.
-// A reservation is <StateDir>/change-reservations/<event_id>.json: the
-// event the change records if its command ends before it writes one
-// (failed, interrupted). Its command holds a lock on it. A reservation
-// nobody holds belongs to a command that ended; the next writer moves its
-// event into the spool, so the attempt is still reported.
+// A reservation is <Dir>/reserved/<event_id>.json, with the access of the
+// spool: the event the change records if its command ends before it
+// writes one (failed, interrupted). Its command holds a lock on it from
+// before the event is in it until the file is emptied. A reservation
+// nobody holds belongs to a command that ended. The gateway reports its
+// event at its next poll, a restart included (EndedChangeReservations),
+// and the next writer moves it into the spool, so the attempt is reported
+// even when no other command runs.
 
 const (
-	changeSpoolLockName       = "change-events.lock"
-	changeReservationsDirName = "change-reservations"
+	changeSpoolLockName = "change-events.lock"
+	// ChangeReservedDirName is the folder of the reservations in the spool.
+	ChangeReservedDirName = "reserved"
 	// ChangeInterrupted is the reason code of a change whose command ended
 	// before it recorded the outcome.
 	ChangeInterrupted = "interrupted"
@@ -53,6 +57,9 @@ var (
 	// writer holds for one count or one write.
 	changeSpoolLockWait = 30 * time.Second
 	changeSpoolLockPoll = 10 * time.Millisecond
+	// changeReservationLockWait bounds the wait for the lock of a new
+	// reservation, which the gateway holds only while it reads it.
+	changeReservationLockWait = time.Second
 
 	errChangeSpoolBusy       = errors.New("another command is writing a change event; try again")
 	errChangeReservationUsed = errors.New("the change event reservation was already used")
@@ -92,11 +99,8 @@ func (s ChangeSpool) Reserve(kind, action, name string) (*ChangeReservation, err
 	if err := s.ready(); err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(s.StateDir, changeReservationsDirName)
-	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-		return nil, err
-	}
-	if err := requireDirectory(dir); err != nil {
+	dir := s.reservedDir()
+	if err := s.prepareDir(dir); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(dir, ev.EventID+".json")
@@ -105,9 +109,20 @@ func (s ChangeSpool) Reserve(kind, action, name string) (*ChangeReservation, err
 		return nil, err
 	}
 	fail := func(err error) (*ChangeReservation, error) {
+		unlockChangeFile(file)
 		_ = file.Close()
 		_ = os.Remove(path)
 		return nil, err
+	}
+	// Locked before the event is in it: a reader takes the lock first, so
+	// it finds a reservation in progress held, or empty.
+	if err := lockNewChangeFile(file, path); err != nil {
+		return fail(err)
+	}
+	if s.Publish != nil {
+		if err := s.Publish(path); err != nil {
+			return fail(err)
+		}
 	}
 	if _, err := file.Write(data); err != nil {
 		return fail(err)
@@ -115,14 +130,30 @@ func (s ChangeSpool) Reserve(kind, action, name string) (*ChangeReservation, err
 	if err := file.Sync(); err != nil {
 		return fail(err)
 	}
-	if locked, err := tryLockChangeFile(file); err != nil || !locked {
-		if err == nil {
-			err = fmt.Errorf("cannot lock the change event reservation %s", path)
-		}
-		return fail(err)
-	}
 	return &ChangeReservation{spool: s, id: ev.EventID, path: path, file: file}, nil
 }
+
+// lockNewChangeFile locks a reservation just created. Only a reader that
+// found it before its event was written can hold the lock, and only for
+// that read.
+func lockNewChangeFile(file *os.File, path string) error {
+	deadline := time.Now().Add(changeReservationLockWait)
+	for {
+		locked, err := tryLockChangeFile(file)
+		if err != nil {
+			return err
+		}
+		if locked {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("cannot lock the change event reservation %s", path)
+		}
+		time.Sleep(changeSpoolLockPoll)
+	}
+}
+
+func (s ChangeSpool) reservedDir() string { return filepath.Join(s.Dir, ChangeReservedDirName) }
 
 // Write records ev, the outcome of the change, in the reserved room; the
 // event takes the id of the reservation. When it cannot, the reservation is
@@ -157,15 +188,15 @@ func (r *ChangeReservation) Release() {
 	if r == nil || r.file == nil {
 		return
 	}
-	// Under the spool lock no writer can take the reservation for one whose
-	// command ended between its unlock and its removal.
-	if unlock, err := r.spool.lock(); err == nil {
-		defer unlock()
-	}
 	r.drop()
 }
 
+// drop empties the reservation before it unlocks and removes it: a reader
+// that takes the lock in between finds no event in it and records nothing.
+// A removal that fails (Windows, while the gateway has it open) leaves an
+// empty file, which the next writer removes.
 func (r *ChangeReservation) drop() {
+	_ = r.file.Truncate(0)
 	r.abandon()
 	_ = os.Remove(r.path)
 }
@@ -224,7 +255,7 @@ func requireDirectory(dir string) error {
 // event of every other one, whose command ended before it wrote its own.
 // The caller holds the spool lock.
 func (s ChangeSpool) settleReservations() (held int, err error) {
-	dir := filepath.Join(s.StateDir, changeReservationsDirName)
+	dir := s.reservedDir()
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil
@@ -270,13 +301,74 @@ func (s ChangeSpool) recordInterrupted(id string, file *os.File) error {
 	if s.Reported != nil && s.Reported(id) {
 		return nil
 	}
-	raw, err := io.ReadAll(io.LimitReader(file, maxChangeEventBytes+1))
-	if err != nil || len(raw) > maxChangeEventBytes {
-		return nil
-	}
-	var ev ChangeEvent
-	if json.Unmarshal(raw, &ev) != nil || ev.EventID != id || ev.Validate() != nil {
+	raw, _, ok := readReservation(file, id)
+	if !ok {
 		return nil
 	}
 	return s.writeEvent(id, raw)
+}
+
+// readReservation reads the event of reservation id from file. An emptied
+// reservation (its command wrote its event or changed nothing) and one
+// that does not validate are not ok.
+func readReservation(file *os.File, id string) ([]byte, ChangeEvent, bool) {
+	raw, err := io.ReadAll(io.LimitReader(file, maxChangeEventBytes+1))
+	if err != nil || len(raw) == 0 || len(raw) > maxChangeEventBytes {
+		return nil, ChangeEvent{}, false
+	}
+	var ev ChangeEvent
+	if json.Unmarshal(raw, &ev) != nil || ev.EventID != id || ev.Validate() != nil {
+		return nil, ChangeEvent{}, false
+	}
+	return raw, ev, true
+}
+
+// EndedChangeReservations is for the gateway, which reads the change spool
+// dir and cannot write it. It returns, oldest first, the event of every
+// reservation whose command ended before it wrote its outcome and whose
+// event is not in the spool: the change it held room for may have been
+// made, so it is reported as failed (interrupted) at the gateway's next
+// poll, even when no later command moves it into the spool. A reservation
+// still held, an emptied one and one that does not validate are skipped.
+// The writer that settles the reservation later keeps its id, so the
+// gateway reports it once.
+func EndedChangeReservations(dir string) []ChangeEvent {
+	reserved := filepath.Join(dir, ChangeReservedDirName)
+	if requireDirectory(dir) != nil || requireDirectory(reserved) != nil {
+		return nil
+	}
+	entries, err := os.ReadDir(reserved)
+	if err != nil {
+		return nil
+	}
+	var out []ChangeEvent
+	for _, entry := range entries {
+		id, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !ValidChangeEventID(id) || !entry.Type().IsRegular() {
+			continue
+		}
+		if ev, ok := readEndedReservation(dir, filepath.Join(reserved, entry.Name()), id); ok {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+func readEndedReservation(dir, path, id string) (ChangeEvent, bool) {
+	file, err := openChangeFile(path, os.O_RDONLY)
+	if err != nil {
+		return ChangeEvent{}, false
+	}
+	defer file.Close()
+	if locked, err := tryLockChangeFile(file); err != nil || !locked {
+		return ChangeEvent{}, false
+	}
+	defer unlockChangeFile(file)
+	// Its command writes the event into the spool before it lets go of the
+	// reservation, so an event there is the outcome.
+	if _, err := os.Lstat(filepath.Join(dir, id+".json")); !errors.Is(err, fs.ErrNotExist) {
+		return ChangeEvent{}, false
+	}
+	_, ev, ok := readReservation(file, id)
+	return ev, ok
 }

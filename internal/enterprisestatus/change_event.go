@@ -254,12 +254,12 @@ func ChangedKeyIDs(previous, next []string) (added, removed []string) {
 
 // ChangeSpool writes change events. Reported tells which events the
 // gateway has reported (ChangeReported); nil counts none as reported.
-// Prepare creates (or repairs) the spool directory with its owner and
-// access, and Publish sets the owner and access of one written file; both
-// are platform hooks. A nil hook does nothing. StateDir is the existing
-// root-only (Windows: SYSTEM and Administrators) lifecycle directory that
-// holds the spool lock and the reservations of changes in progress
-// (Reserve).
+// Prepare creates (or repairs) the spool directory and its reserved
+// folder with their owner and access, and Publish sets the owner and
+// access of one written file (an event or a reservation); both are
+// platform hooks. A nil Prepare creates the folder 0750, a nil Publish
+// does nothing. StateDir is the existing root-only (Windows: SYSTEM and
+// Administrators) lifecycle directory that holds the spool lock (Reserve).
 type ChangeSpool struct {
 	Dir      string
 	StateDir string
@@ -319,22 +319,27 @@ func (s ChangeSpool) writeEvent(id string, data []byte) error {
 // beyond maxReportedChangeEvents and checks that one more event fits beside
 // the reservations still held. The caller holds the spool lock.
 func (s ChangeSpool) ready() error {
-	if s.Prepare != nil {
-		if err := s.Prepare(s.Dir); err != nil {
-			return err
-		}
-	} else if err := os.MkdirAll(s.Dir, 0o750); err != nil {
+	if err := s.prepareDir(s.Dir); err != nil {
 		return err
-	}
-	info, err := os.Lstat(s.Dir)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("change events directory is not a regular directory: %s", s.Dir)
 	}
 	held, err := s.settleReservations()
 	if err != nil {
 		return err
 	}
 	return s.prune(held)
+}
+
+// prepareDir creates (or repairs) dir, the spool or its reserved folder,
+// with the spool's owner and access.
+func (s ChangeSpool) prepareDir(dir string) error {
+	if s.Prepare != nil {
+		if err := s.Prepare(dir); err != nil {
+			return err
+		}
+	} else if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	return requireDirectory(dir)
 }
 
 // prune makes room for one more event: it removes the oldest reported

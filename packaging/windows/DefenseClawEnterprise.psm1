@@ -8584,6 +8584,15 @@ function Get-DefenseClawBundlePathKind {
             -not $IsDirectory) {
             return 'BundleVersionFile'
         }
+        # The reservations of changes in progress have the same access: the
+        # gateway reports one whose command ended.
+        if ($RelativePath -ceq 'change-events\reserved' -and $IsDirectory) {
+            return 'BundleVersionDirectory'
+        }
+        if ($RelativePath -cmatch '^change-events\\reserved\\c-[0-7][0-9A-HJKMNP-TV-Z]{25}\.json$' -and
+            -not $IsDirectory) {
+            return 'BundleVersionFile'
+        }
     }
     # The immutable name includes the receipt ID. Match the same shape as
     # enterprisebundle.IsVersionDirName, including pre-receipt installations.

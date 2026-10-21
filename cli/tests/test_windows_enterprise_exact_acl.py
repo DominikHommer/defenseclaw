@@ -298,6 +298,9 @@ def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
     # Change events are readable by the gateway service, not by standard users.
     assert "$top -ceq 'change-events'" in classifier
     assert "^change-events\\\\c-[0-7][0-9A-HJKMNP-TV-Z]{25}\\.json$" in classifier
+    # So are the reservations of changes in progress (change-events\reserved).
+    assert "$RelativePath -ceq 'change-events\\reserved' -and $IsDirectory" in classifier
+    assert "^change-events\\\\reserved\\\\c-[0-7][0-9A-HJKMNP-TV-Z]{25}\\.json$" in classifier
     assert classifier.index("$top -ceq 'change-events'") < classifier.index("if ($IsDirectory) { return 'AdminDirectory' }")
     assert classifier.index("$top -ceq 'receipt-events'") < classifier.index("if ($IsDirectory) { return 'AdminDirectory' }")
     assert "if ($IsDirectory) { return 'AdminDirectory' }" in classifier

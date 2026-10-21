@@ -66,8 +66,9 @@ func (e *Env) changeSpool() (enterprisestatus.ChangeSpool, error) {
 	if err != nil {
 		return enterprisestatus.ChangeSpool{}, err
 	}
-	// The spool lock and the reservations live in the root-only lifecycle
-	// directory, beside lifecycle.lock.
+	// The spool lock lives in the root-only lifecycle directory, beside
+	// lifecycle.lock. The reservations live in the spool, with its access,
+	// so the gateway reports one whose command ended.
 	stateDir := e.P(e.Layout.LifecycleDir)
 	if err := e.ensureDir(stateDir, 0o700, rootOwner()); err != nil {
 		return enterprisestatus.ChangeSpool{}, err

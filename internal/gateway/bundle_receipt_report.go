@@ -267,10 +267,15 @@ func (r *bundleReceiptReporter) reportSpool() {
 }
 
 // reportChanges emits one audit event per change event not reported yet,
-// oldest first. A file that does not validate is skipped. An event is
-// marked reported only once the audit logger recorded it: one it refuses
-// is offered again at every poll, and the logger stores each change event
-// id once, so a marker lost after the audit write cannot report it twice.
+// oldest first, then one per reservation whose command ended before it
+// wrote its event (failed, interrupted): a change interrupted after it was
+// made is reported at the next poll, a gateway restart included, even when
+// no later command writes the spool. A file that does not validate is
+// skipped. An event is marked reported only once the audit logger recorded
+// it: one it refuses is offered again at every poll, and the logger stores
+// each change event id once, so a marker lost after the audit write cannot
+// report it twice. A reservation the next command moves into the spool
+// keeps its id, so it is not reported again.
 func (r *bundleReceiptReporter) reportChanges() {
 	dir := r.changeDir()
 	for _, id := range enterprisestatus.ListChangeEventIDs(dir) {
@@ -281,15 +286,23 @@ func (r *bundleReceiptReporter) reportChanges() {
 		if err != nil || ev.EventID != id {
 			continue
 		}
-		err = r.sink.LogConfigChange(audit.ConfigChange{
-			EventID: ev.EventID, Kind: ev.Kind, Action: ev.Action, Outcome: ev.Outcome, ReasonCode: ev.ReasonCode,
-			Actor: ev.Actor, ChangedAt: ev.Time, SHA256: ev.SHA256, PreviousSHA256: ev.PreviousSHA256,
-			KeyIDsAdded: ev.KeyIDsAdded, KeyIDsRemoved: ev.KeyIDsRemoved, SecretName: ev.SecretName,
-		})
-		if err != nil {
-			continue
+		r.reportChange(ev)
+	}
+	for _, ev := range enterprisestatus.EndedChangeReservations(dir) {
+		if !r.hasSeen(ev.EventID) {
+			r.reportChange(ev)
 		}
-		r.markSeen(id)
+	}
+}
+
+func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
+	err := r.sink.LogConfigChange(audit.ConfigChange{
+		EventID: ev.EventID, Kind: ev.Kind, Action: ev.Action, Outcome: ev.Outcome, ReasonCode: ev.ReasonCode,
+		Actor: ev.Actor, ChangedAt: ev.Time, SHA256: ev.SHA256, PreviousSHA256: ev.PreviousSHA256,
+		KeyIDsAdded: ev.KeyIDsAdded, KeyIDsRemoved: ev.KeyIDsRemoved, SecretName: ev.SecretName,
+	})
+	if err == nil {
+		r.markSeen(ev.EventID)
 	}
 }
 

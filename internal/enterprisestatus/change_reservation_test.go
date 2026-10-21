@@ -146,7 +146,7 @@ func TestChangeReservationKeepsItsPlace(t *testing.T) {
 	if len(events) != 3 || events[2].EventID != r.id || events[2].Outcome != ChangeApplied {
 		t.Fatalf("spool = %+v, want the applied install under the reservation id", events)
 	}
-	if entries, _ := os.ReadDir(filepath.Join(spool.StateDir, changeReservationsDirName)); len(entries) != 0 {
+	if entries, _ := os.ReadDir(spool.reservedDir()); len(entries) != 0 {
 		t.Fatalf("reservations left: %v", entries)
 	}
 }
@@ -216,9 +216,108 @@ func TestChangeSpoolRecordsTheReservationOfACommandThatEnded(t *testing.T) {
 	if events[1].EventID != written.id || events[1].Outcome != ChangeApplied {
 		t.Fatalf("applied install = %+v", events[1])
 	}
-	entries, err := os.ReadDir(filepath.Join(spool.StateDir, changeReservationsDirName))
+	entries, err := os.ReadDir(spool.reservedDir())
 	if err != nil || len(entries) != 1 || entries[0].Name() != held.id+".json" {
 		t.Fatalf("reservations = %v (%v), want only the held one", entries, err)
+	}
+}
+
+// The gateway, which only reads the spool, finds the reservation of a
+// command that ended after its change (the change may have been made) and
+// nothing else: not a held one, not one whose command wrote its event or
+// released it, not one whose event is in the spool, not an empty or a
+// damaged one. Before, such a reservation sat in the root-only lifecycle
+// folder until the next change command, so a gateway restart alone never
+// reported it.
+func TestEndedChangeReservationsAreTheCommandsThatEndedAfterTheirChange(t *testing.T) {
+	spool := newTestSpool(t)
+	held, err := spool.Reserve(ChangeKindTrustAnchors, ChangeActionInstall, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+	written, err := spool.Reserve(ChangeKindTrustAnchors, ChangeActionInstall, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeApplied, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := written.Write(applied); err != nil {
+		t.Fatal(err)
+	}
+	released, err := spool.Reserve(ChangeKindSecret, ChangeActionRemove, "otlp-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	released.Release()
+	// The last reservation: every Reserve moves the ended ones into the
+	// spool first.
+	ended, err := spool.Reserve(ChangeKindSecret, ChangeActionSet, "splunk-hec-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended.abandon() // The process stopped after the change.
+	// A command that stopped after its event, before the cleanup; one that
+	// stopped before its reservation held its event; a damaged reservation.
+	beforeCleanup, err := NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeFailed, ChangeInterrupted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisional, err := marshalChangeEvent(beforeCleanup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied.EventID = beforeCleanup.EventID
+	data, err := marshalChangeEvent(applied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.writeEvent(beforeCleanup.EventID, data); err != nil {
+		t.Fatal(err)
+	}
+	empty, _ := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeFailed, ChangeInterrupted)
+	damaged, _ := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeFailed, ChangeInterrupted)
+	for id, body := range map[string]string{beforeCleanup.EventID: string(provisional), empty.EventID: "",
+		damaged.EventID: `{"event_id":"` + damaged.EventID + `"}`} {
+		if err := os.WriteFile(filepath.Join(spool.reservedDir(), id+".json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := EndedChangeReservations(spool.Dir)
+	if len(got) != 1 || got[0].EventID != ended.id || got[0].Outcome != ChangeFailed || got[0].ReasonCode != ChangeInterrupted ||
+		got[0].SecretName != "splunk-hec-token" {
+		t.Fatalf("ended reservations = %+v, want only the interrupted set %s", got, ended.id)
+	}
+	// Reading takes nothing: the held reservation keeps its lock, and the
+	// next writer still moves the ended one into the spool.
+	if err := held.Write(applied); err != nil {
+		t.Fatalf("the held reservation lost its place: %v", err)
+	}
+	refusal, err := NewChangeEvent(ChangeKindSecret, ChangeActionSet, ChangeRefused, "invalid_arguments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.Write(refusal); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(spool.reservedDir()); len(entries) != 0 {
+		t.Fatalf("reservations left after the next writer: %v", entries)
+	}
+	ids := ListChangeEventIDs(spool.Dir)
+	found := false
+	for _, id := range ids {
+		found = found || id == ended.id
+	}
+	if !found {
+		t.Fatalf("spool = %v, want the ended reservation moved in", ids)
+	}
+	if got := EndedChangeReservations(spool.Dir); len(got) != 0 {
+		t.Fatalf("ended reservations after the next writer = %+v", got)
+	}
+	if got := EndedChangeReservations(filepath.Join(t.TempDir(), "missing")); got != nil {
+		t.Fatalf("a missing spool has ended reservations: %+v", got)
 	}
 }
 
