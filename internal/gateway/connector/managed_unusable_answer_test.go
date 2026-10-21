@@ -130,9 +130,10 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 							env = append(env, kv)
 						}
 					}
-					// Per-user Hermes, Cursor in observe and Antigravity render
-					// open (no fail-closed contract); a user who wants closed sets
-					// DEFENSECLAW_FAIL_MODE, as the A2R-02 cell did.
+					// Cursor in observe and per-user Antigravity render open
+					// whatever is asked (no fail-closed contract), and no hook
+					// reads DEFENSECLAW_FAIL_MODE: the rendered mode decides.
+					rendered := CapableHookFailMode(opts, conn, resolveHookFailMode(opts, conn))
 					cmd.Env = append(env, "HOME="+home, "DEFENSECLAW_FAIL_MODE="+failMode)
 					cmd.Stdin = strings.NewReader(hook.stdin)
 					var stdout, stderr bytes.Buffer
@@ -147,7 +148,7 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 					out := stdout.String()
 					blocked := code == 2 || strings.Contains(out, `"deny"`) ||
 						strings.Contains(out, `"block"`) || strings.Contains(out, `"continue":false`)
-					wantBlocked := answer.block || (!answer.usable && failMode == "closed")
+					wantBlocked := answer.block || (!answer.usable && rendered == "closed")
 					if blocked != wantBlocked {
 						t.Fatalf("exit %d stdout=%q stderr=%q: blocked = %v, want %v", code, out, stderr.String(), blocked, wantBlocked)
 					}

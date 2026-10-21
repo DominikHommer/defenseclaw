@@ -3884,15 +3884,15 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read hook script: %v", err)
 			}
-			want := "\nFAIL_MODE=\"" + tc.wantFailMode + "\"\n" + perUserEnvTightenComment
+			want := "\nFAIL_MODE=\"" + tc.wantFailMode + "\"\n" + perUserInstalledModeComment
 			if tc.connector.Name() == "copilot" {
 				want = `FAIL_MODE="open"`
 				if strings.Contains(string(body), "DEFENSECLAW_FAIL_MODE:-") {
 					t.Fatalf("Copilot shell hook still accepts an inherited closed fail mode:\n%s", string(body))
 				}
 			}
-			if !strings.Contains(string(body), want) {
-				t.Fatalf("hook script missing %s:\n%s", want, string(body))
+			if !strings.Contains(string(body), want) || strings.Contains(string(body), perUserEnvFailModeRead) {
+				t.Fatalf("hook script missing %s or reads DEFENSECLAW_FAIL_MODE:\n%s", want, string(body))
 			}
 		})
 	}

@@ -10133,7 +10133,11 @@ func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
 // DEFENSECLAW_FAIL_MODE=open cannot reopen a per-user hook installed closed,
 // and DEFENSECLAW_FAIL_MODE=closed still closes one installed open. Only the
 // persisted mode (guardrail fail-mode) opens a hook.
-func TestHookScript_EnvFailModeOnlyTightens(t *testing.T) {
+// TestHookScript_EnvFailModeIsNotRead: the installed mode is the hook's fail
+// mode. DEFENSECLAW_FAIL_MODE in the agent's environment neither reopens a
+// closed hook nor closes an open one (1.0.4 lead directive), so status, which
+// reads the render, reports what runs.
+func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -10152,8 +10156,9 @@ func TestHookScript_EnvFailModeOnlyTightens(t *testing.T) {
 		}{
 			{"closed", "open", true},
 			{"closed", "OPEN", true},
-			{"open", "closed", true},
-			{"open", "Closed", true},
+			{"open", "closed", false},
+			{"open", "Closed", false},
+			{"open", " CLOSED ", false},
 			{"open", "", false},
 			{"closed", "", true},
 		} {
@@ -10306,8 +10311,8 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			// agent will see at runtime — substitution failures
 			// that leave a literal `{{.FailMode}}` would surface
 			// here, not just in a unit test of the helper.
-			wantLine := "\nFAIL_MODE=\"" + tc.wantFailMode + "\"\n" + perUserEnvTightenComment
-			if !strings.Contains(rendered, wantLine) || !strings.Contains(rendered, perUserEnvTightenLine) {
+			wantLine := "\nFAIL_MODE=\"" + tc.wantFailMode + "\"\n" + perUserInstalledModeComment
+			if !strings.Contains(rendered, wantLine) || strings.Contains(rendered, perUserEnvFailModeRead) {
 				t.Errorf("rendered hook missing %q\nfull script:\n%s", wantLine, rendered)
 			}
 		})

@@ -49,7 +49,7 @@ func TestPerUserHermesHookKeepsTheResolvedFailMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read hermes-hook.sh: %v", err)
 			}
-			if want := "\nFAIL_MODE=\"" + tc.want + "\"\n"; !strings.Contains(string(body), want) || !strings.Contains(string(body), perUserEnvTightenLine) {
+			if want := "\nFAIL_MODE=\"" + tc.want + "\"\n"; !strings.Contains(string(body), want) || strings.Contains(string(body), perUserEnvFailModeRead) {
 				t.Fatalf("hermes-hook.sh does not render %s", want)
 			}
 			flat, err := os.ReadFile(filepath.Join(hookDir, hookConfigSidecarName+".hermes"))

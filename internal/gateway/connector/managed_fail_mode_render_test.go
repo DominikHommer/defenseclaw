@@ -53,9 +53,9 @@ func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 	}
 }
 
-// A managed shell hook takes only its rendered fail mode: a fail mode in the
-// environment cannot reopen it. A per-user hook bakes its mode too and lets
-// the environment only tighten it to closed (GAP-0315).
+// A managed shell hook takes only its rendered fail mode, and so does a
+// per-user hook: neither reads DEFENSECLAW_FAIL_MODE (GAP-0315, 1.0.4 lead
+// directive).
 func TestManagedShellHooksIgnoreTheEnvironmentFailMode(t *testing.T) {
 	for _, name := range []string{
 		"antigravity-hook.sh", "claude-code-hook.sh", "codex-hook.sh", "cursor-hook.sh",
@@ -71,16 +71,10 @@ func TestManagedShellHooksIgnoreTheEnvironmentFailMode(t *testing.T) {
 					continue
 				}
 				body := string(script.body)
-				// Neither hook lets the environment replace the rendered value;
-				// a per-user hook lets it only tighten to closed.
-				override := strings.Contains(body, `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-`)
+				reads := strings.Contains(body, perUserEnvFailModeRead)
 				pinned := strings.Contains(body, "\nFAIL_MODE=\"closed\"")
-				tighten := strings.Contains(body, perUserEnvTightenLine)
-				if override || !pinned {
-					t.Errorf("%s managed=%v: environment override = %v, rendered fail mode pinned = %v", name, managed, override, pinned)
-				}
-				if tighten == managed {
-					t.Errorf("%s managed=%v: tighten-only environment line present = %v", name, managed, tighten)
+				if reads || !pinned {
+					t.Errorf("%s managed=%v: reads DEFENSECLAW_FAIL_MODE = %v, rendered fail mode pinned = %v", name, managed, reads, pinned)
 				}
 			}
 		}

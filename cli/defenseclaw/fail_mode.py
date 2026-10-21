@@ -34,8 +34,9 @@ _MAX_RUNTIME_FILE = 2 * 1024 * 1024
 # registration-digest-stale on every check (GAP-1922).
 _MAX_DIGEST_FILE = 1024 * 1024 * 1024
 # The installed mode of a rendered Unix hook: FAIL_MODE="closed" since 1.0.4
-# (the environment only tightens it, GAP-0315), FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"
-# in 1.0.3 and older renders and in Secure Client renders (#1163).
+# (the hook reads no fail mode from the environment, GAP-0315),
+# FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}" in 1.0.3 and older renders and
+# in Secure Client renders (#1163).
 _FAIL_MODE_PATTERN = re.compile(
     r"^FAIL_MODE=\"(?:(open|closed)|\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\})\"", re.MULTILINE
 )
@@ -121,10 +122,6 @@ class ConnectorFailModeState:
     runtime: str | None
     sources: tuple[tuple[str, str | None], ...]
     drift: tuple[str, ...]
-    # The mode an inherited DEFENSECLAW_FAIL_MODE in the shell that runs this
-    # command would give the hooks. It is not the agent's environment: the
-    # agent process may not have it, so it never sets the runtime mode.
-    caller_env: str | None = None
 
     @property
     def current(self) -> bool:
@@ -152,12 +149,14 @@ class ConnectorFailModeState:
             return "config"
         source = "config"
         for candidate, mode in self.sources:
-            if candidate in {"config", "registration-lock"} or mode is None:
-                continue
-            if candidate == "claude-env" and mode != self.runtime:
-                # A settings env value the hook ignores (open) supplied nothing.
+            # Claude Code's settings env is registration evidence only: no
+            # hook reads a fail mode from its environment.
+            if candidate in {"config", "registration-lock", "claude-env"} or mode is None:
                 continue
             source = candidate
+        if source == "config":
+            # No installed state names a mode, so the hook fails closed.
+            return "no-installed-mode"
         return source
 
     @property
@@ -178,11 +177,6 @@ class ConnectorFailModeState:
                 f"observe mode keeps hooks fail-{self.desired}; "
                 f"guardrail.hook_fail_mode={self.configured} applies in action mode"
             )
-        if self.caller_env is not None and self.caller_env != self.effective:
-            notes.append(
-                f"this shell sets DEFENSECLAW_FAIL_MODE={self.caller_env}, unverified: "
-                "it applies only to an agent started with it"
-            )
         return "; ".join(notes)
 
     def to_report(self) -> dict[str, Any]:
@@ -198,7 +192,6 @@ class ConnectorFailModeState:
             "current": self.current,
             "drift": list(self.drift),
             "sources": [{"name": source, "mode": mode} for source, mode in self.sources],
-            "caller_env": self.caller_env,
         }
 
 
@@ -228,21 +221,23 @@ def resolve_connector_fail_mode(
     runtime = runtime_source[1]
     if runtime_source[0].endswith("-legacy"):
         drift.append("windows-sidecar-legacy")
-    # The shell running status or doctor is not the agent: its
-    # DEFENSECLAW_FAIL_MODE is reported apart, unverified, and never replaces
-    # the installed mode (1.0.4 review, loop round 3).
-    caller_env = _inherited_fail_mode(cfg, name, os.environ.get("DEFENSECLAW_FAIL_MODE"))
+    if runtime is None and runtime_source[0].startswith("windows-sidecar"):
+        # The native Windows hook reads its mode from this sidecar alone and
+        # fails closed when the file is missing or unreadable or names no mode
+        # for the connector (readHookSidecar), so status reports that.
+        runtime = "closed"
+    # The hooks read no fail mode from any environment (GAP-0315): not this
+    # shell's, which is not the agent's, and not the agent's either, so
+    # neither is an input here.
 
     workspace = _connector_workspace(cfg)
     if name == "claudecode":
         claude_env, registered = _claude_registration_state(workspace)
-        # Setup writes the mode into Claude Code's settings env, which Claude
-        # Code passes to its hooks: a stale value there is registration drift,
-        # but it changes the runtime only where the hook honors it.
+        # Setup still writes the mode into Claude Code's settings env, which
+        # hook renders from 1.0.3 and older read until the upgrade's connector
+        # refresh re-renders them: a stale value there is registration drift,
+        # never the runtime mode.
         sources.append(("claude-env", claude_env))
-        tightened = _inherited_fail_mode(cfg, name, claude_env)
-        if tightened is not None:
-            runtime = tightened
         if not registered:
             drift.append("registration-missing")
     # Windows Codex registration is a structured event matrix whose native
@@ -295,7 +290,6 @@ def resolve_connector_fail_mode(
         runtime=runtime,
         sources=tuple(sources),
         drift=tuple(dict.fromkeys(drift)),
-        caller_env=caller_env,
     )
 
 
@@ -345,34 +339,6 @@ def connector_fail_mode_report(
     }
 
 
-def _inherited_fail_mode(cfg: Any, connector: str, value: object) -> str | None:
-    """Return the mode an inherited DEFENSECLAW_FAIL_MODE gives *connector*'s hooks, or None.
-
-    The environment only tightens (GAP-0315): ``closed`` closes the per-user
-    shell hooks, the native Windows hook and the current OpenCode plugin, and
-    ``open`` reopens nothing. Amp's plugin, the managed Unix shell hooks and the
-    pinned Secure Client OpenCode plugin read no fail mode from the
-    environment, except the authenticated Secure Client Devin shell hook, which
-    keeps the whole override (#1163).
-    """
-
-    mode = str(value or "").strip().lower()
-    if mode not in _VALID_MODES or connector == "amp":
-        return None
-    tightened = "closed" if mode == "closed" else None
-    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
-        return tightened
-    standalone = getattr(cfg, "managed_outside_secure_client", None)
-    secure_client = not (callable(standalone) and standalone())
-    if connector == "opencode":
-        return None if secure_client else tightened
-    if _is_windows():
-        return tightened
-    if secure_client and connector == "devin":
-        return mode
-    return None
-
-
 def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]:
     if connector == "amp":
         return "amp-plugin", _read_amp_plugin_mode(Path(amp_policy_plugin_path()))
@@ -393,9 +359,12 @@ def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, boo
         return None, False
     try:
         payload = json.loads(data)
+        parsed = True
     except (TypeError, ValueError):
         payload = None
-    if isinstance(payload, dict) and int(payload.get("version", 0) or 0) >= 2:
+        parsed = False
+    version = payload.get("version") if isinstance(payload, dict) else None
+    if isinstance(version, int) and not isinstance(version, bool) and version >= 2:
         # As the native hook reads it (readHookSidecar): a connector map that
         # is present but not an object, or an entry that is not a mode, is
         # closed and never falls back to the legacy mode.
@@ -410,12 +379,24 @@ def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, boo
         if legacy_value in _VALID_MODES:
             return legacy_value, True
         return None, False
+    if parsed or data.lstrip()[:1] in ("{", "["):
+        # As readHookSidecar: JSON that is not a v2 sidecar, or that does not
+        # parse, is malformed state and closed, never KEY=value lines.
+        return "closed", False
+    # The KEY=value sidecar of 0.8.x, read as readHookSidecar reads it: the
+    # last value of a key wins, and a connector's own key comes before the
+    # unscoped one.
+    values: dict[str, str] = {}
     for line in data.splitlines():
-        key, separator, value = line.strip().partition("=")
-        if separator and key.removeprefix("export ").strip() == "DEFENSECLAW_FAIL_MODE":
-            value = value.strip().strip("\"'").lower()
-            return (value if value in _VALID_MODES else None), True
-    return None, True
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.removeprefix("export ").partition("=")
+        if separator and key.strip():
+            values[key.strip()] = value.strip().strip("\"'")
+    scoped = "DEFENSECLAW_FAIL_MODE_" + re.sub(r"[-_ ]", "", normalize(connector).upper())
+    value = (values.get(scoped) or values.get("DEFENSECLAW_FAIL_MODE") or "").strip().lower()
+    return (value if value in _VALID_MODES else None), True
 
 
 def _read_baked_hook_mode(path: Path) -> str | None:

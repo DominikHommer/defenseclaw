@@ -12,13 +12,12 @@ import (
 	"testing"
 )
 
-// 1.0.4 review (loop round 4): the fail-mode reference and the env-var
-// registry said DEFENSECLAW_FAIL_MODE=closed closes every per-user hook. The
-// per-user GitHub Copilot CLI render fixes FAIL_MODE="open" and reads no mode
-// from the environment (Copilot has no fail-closed hook surface), so a
-// gateway outage still lets its tool call through. This pins the behavior
-// and the text that now names the exception.
-func TestPerUserCopilotHookIgnoresEnvClosedAsDocumented(t *testing.T) {
+// 1.0.4 lead directive: the per-user GitHub Copilot CLI hook fails open
+// upstream (Copilot has no fail-closed hook surface), so a gateway outage
+// lets its tool call through whatever is installed or set in the
+// environment. The docs say so plainly and promise no blocking; DefenseClaw
+// records and reports the call. This pins the behavior and that text.
+func TestPerUserCopilotHookFailsOpenUpstreamAsDocumented(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hooks")
 	}
@@ -45,11 +44,12 @@ func TestPerUserCopilotHookIgnoresEnvClosedAsDocumented(t *testing.T) {
 		want []string
 	}{
 		{filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "fail-modes.mdx"), []string{
-			"Closes the hooks of one agent process, except the per-user GitHub Copilot CLI hook, which stays open during a gateway outage",
-			"The per-user GitHub Copilot CLI hook is the exception: Copilot has no fail-closed hook surface, so that hook ignores the variable",
+			"The per-user GitHub Copilot CLI hook cannot block a call while the gateway is down, on Linux, macOS and Windows.",
+			"No setting changes this for a per-user install.",
+			"`DEFENSECLAW_FAIL_MODE` is not read",
 		}},
 		{filepath.Join("..", "..", "envvars", "registry.json"), []string{
-			"Read by every per-user hook except GitHub Copilot CLI's, which has no fail-closed hook surface and stays open during a gateway outage",
+			"Not read by 1.0.4 hooks",
 		}},
 	} {
 		data, err := os.ReadFile(doc.path)

@@ -1220,7 +1220,13 @@ function Remove-DeveloperFiles {
 
 function Install-File([string]$Source, [string]$Destination) {
     if ((Test-Path -LiteralPath $Destination) -and (Get-Sha256 $Source) -eq (Get-Sha256 $Destination)) { return }
+    # The new file is written beside the installed one and must be a whole
+    # copy before anything is switched: the installed file stays until then.
     Copy-Item -LiteralPath $Source -Destination "$Destination.new" -Force
+    if ((Get-Sha256 "$Destination.new") -ne (Get-Sha256 $Source)) {
+        Remove-Item -LiteralPath "$Destination.new" -Force -ErrorAction SilentlyContinue
+        throw "The copy of $Source beside $Destination is not whole; $Destination was left as it was"
+    }
     Publish-File "$Destination.new" $Destination
 }
 
@@ -1232,6 +1238,23 @@ function Publish-File([string]$New, [string]$Destination) {
     if (Test-Path -LiteralPath $Destination -PathType Leaf) { Switch-InPlace $New $Destination; return }
     if (Test-Path -LiteralPath $Destination) { Remove-Aside $Destination }
     Move-Path $New $Destination
+}
+
+function Invoke-AtomicReplace([string]$New, [string]$Destination) {
+    # One rename of $New over $Destination (MoveFileEx with
+    # MOVEFILE_REPLACE_EXISTING and MOVEFILE_WRITE_THROUGH): at every instant
+    # the path names the old file or the new one. Windows refuses it, and
+    # changes nothing, while the installed file runs as a program or another
+    # program holds it.
+    if (-not ("DefenseClawInstall.Rename" -as [type])) {
+        Add-Type -Namespace DefenseClawInstall -Name Rename -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern bool MoveFileExW(string existingFileName, string newFileName, int flags);
+'@
+    }
+    if (-not [DefenseClawInstall.Rename]::MoveFileExW($New, $Destination, 0x9)) {
+        throw (New-Object ComponentModel.Win32Exception ([Runtime.InteropServices.Marshal]::GetLastWin32Error()))
+    }
 }
 
 function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {
@@ -1297,8 +1320,13 @@ function Close-SwapGap([string]$New, [string]$Backup, [string]$Restore, [string]
 }
 
 function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) {
-    # Swap the new file in with one ReplaceFile call, so the path is never
-    # missing. Renaming the old file aside and the new one in left a gap,
+    # Switch with one atomic rename of the new file over the installed one
+    # (Invoke-AtomicReplace), so the path always names a whole launcher. A
+    # shim, the hook state and an idle binary always switch that way. Only a
+    # launcher that runs as a program at that moment (a hook an agent
+    # started), which no rename can replace, is swapped with one ReplaceFile
+    # call, so the path is never missing. Renaming the old file aside and the
+    # new one in left a gap,
     # often a second or more while a virus scanner held the new copy, in which
     # a hook an agent started found no defenseclaw-hook.exe and its PowerShell
     # bridge exited 1, which the agent does not treat as a block (rel-1-0-4
@@ -1319,6 +1347,12 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
     $restoreReady = $false
     try {
         for ($waited = 0; ; $waited++) {
+            try {
+                Invoke-AtomicReplace $New $Destination
+                return
+            } catch {
+                $reason = $_.Exception.Message
+            }
             # A recovery may have moved the last restore copy in: make another.
             if (-not $restoreReady -or -not (Test-Path -LiteralPath $restore)) { $restoreReady = New-VerifiedCopy $Destination $restore }
             try {

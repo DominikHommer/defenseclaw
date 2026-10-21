@@ -22,10 +22,10 @@ import (
 
 // GAP-0315 review: a per-user hook installed open exits before it sources
 // _hardening.sh when its DEFENSECLAW_HOME is missing or disabled. That early
-// exit must honor the process tightening (DEFENSECLAW_FAIL_MODE=closed,
-// strict availability) like every later failure, and answer with the
-// connector's own block, not allow the call.
-func TestPerUserHookHomeUnavailableHonorsEnvironmentTightening(t *testing.T) {
+// exit follows the installed mode, with strict availability closing it as it
+// closes every later outage, and answers with the connector's own block.
+// DEFENSECLAW_FAIL_MODE is not read (1.0.4 lead directive).
+func TestPerUserHookHomeUnavailableFollowsTheInstalledMode(t *testing.T) {
 	for _, agent := range []struct {
 		conn   Connector
 		script string
@@ -52,7 +52,7 @@ func TestPerUserHookHomeUnavailableHonorsEnvironmentTightening(t *testing.T) {
 			wantBlock bool
 		}{
 			{"no-env", nil, false},
-			{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=Closed"}, true},
+			{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=Closed"}, false},
 			{"strict", []string{"DEFENSECLAW_STRICT_AVAILABILITY=yes"}, true},
 			{"env-open", []string{"DEFENSECLAW_FAIL_MODE=open"}, false},
 		} {

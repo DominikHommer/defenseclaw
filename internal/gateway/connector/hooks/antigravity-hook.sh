@@ -41,18 +41,17 @@ export DEFENSECLAW_HOME
 {{else}}
 # A per-user render is never a managed or Secure Client hook: those markers
 # come only from a managed render (the branch above), never from the
-# agent's environment, where they would switch off the per-user closed-mode
-# tightening.
+# agent's environment, where they would change how the per-user hook answers
+# a missing token.
 unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
-  # DEFENSECLAW_FAIL_MODE=closed and strict availability tighten this exit
-  # as they tighten every later failure (GAP-0315).
+  # The installed mode decides; strict availability tightens this exit as it
+  # tightens every later outage.
   _DC_HOME_FAIL_MODE="{{.FailMode}}"
-  case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) _DC_HOME_FAIL_MODE="closed" ;; esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
-  if [ "$_DC_HOME_FAIL_MODE" = "closed" ]; then
+  if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     if [ "${1:-}" = "PreToolUse" ]; then
       printf '%s\n' '{"decision":"deny","reason":"DefenseClaw hook failed closed"}'
@@ -91,9 +90,8 @@ readonly FAIL_MODE{{else if and .Managed (not .SecureClientDelivery)}}# Managed 
 # weaken an explicitly closed managed hook. Secure Client hooks keep the
 # environment override (#1163).
 FAIL_MODE="{{.FailMode}}"{{else if .SecureClientDelivery}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{else}}FAIL_MODE="{{.FailMode}}"
-# An inherited DEFENSECLAW_FAIL_MODE can only tighten the installed mode:
-# a project or parent process cannot reopen a closed hook (GAP-0315).
-case "${DEFENSECLAW_FAIL_MODE:-}" in [Cc][Ll][Oo][Ss][Ee][Dd]) FAIL_MODE="closed" ;; esac{{end}}
+# The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
+# environment is not read, so status and doctor report what runs (GAP-0315).{{end}}
 
 {{if .Sandbox}}# A closed PreToolUse fallback's deny reason says why (the second argument):
 # an unreachable DefenseClaw, a request it refused, a reply that is no
@@ -159,7 +157,7 @@ fi
 {{end}}
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: antigravity hook refusing oversized payload" >&2
-  if [ "$FAIL_MODE" = "closed" ]; then
+  if [ "$FAIL_MODE" != "open" ]; then
     antigravity_emit_fallback 1{{if .Sandbox}} "DefenseClaw hook payload is too large, so the tool call is blocked."{{end}}
   else
     antigravity_emit_fallback 0
@@ -197,7 +195,7 @@ fail_unreachable() {
 fail_response() {
   defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: antigravity hook error: $1" >&2
-  if [ "$FAIL_MODE" = "closed" ]; then
+  if [ "$FAIL_MODE" != "open" ]; then
     antigravity_emit_fallback 1{{if .Sandbox}} "${2:-DefenseClaw answered the hook request without a verdict, so the tool call is blocked.}"{{end}}
   else
     antigravity_emit_fallback 0

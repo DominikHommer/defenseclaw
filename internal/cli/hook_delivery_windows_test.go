@@ -50,23 +50,20 @@ func TestManagedHookDeliveryUsesAuthenticatedGenerationPolicy(t *testing.T) {
 	}
 }
 
-// 1.0.4 review (loop round 4): an authenticated managed generation set to open
-// (the administrator's choice, or the Secure Client default) still closes
-// for an agent process started with DEFENSECLAW_FAIL_MODE=closed. The
-// managed branch used to replace the tightened mode with the generation's
-// open, so a gateway outage allowed the call while status said the hook
-// closes. The variable only tightens: any other value keeps the
-// generation's open, and a closed generation stays closed.
-func TestManagedWindowsHookKeepsTheEnvironmentTightening(t *testing.T) {
+// 1.0.4 lead directive: a managed hook's fail mode is the authenticated
+// generation's (the administrator's config) and nothing else. No
+// DEFENSECLAW_FAIL_MODE in the agent's environment opens a closed generation
+// or closes an open one, so status and runtime agree on every OS.
+func TestManagedWindowsHookIgnoresTheEnvironmentFailMode(t *testing.T) {
 	savedSecureClient := secureClientHost
 	t.Cleanup(func() { secureClientHost = savedSecureClient })
 	for _, agent := range []string{"claudecode", "codex", "cursor"} {
 		for _, tc := range []struct {
 			env, generation, want string
 		}{
-			{env: "closed", generation: "open", want: "closed"},
-			{env: "CLOSED", generation: "open", want: "closed"},
-			{env: " Closed ", generation: "open", want: "closed"},
+			{env: "closed", generation: "open", want: "open"},
+			{env: "CLOSED", generation: "open", want: "open"},
+			{env: " Closed ", generation: "open", want: "open"},
 			{env: "open", generation: "open", want: "open"},
 			{env: "", generation: "open", want: "open"},
 			{env: "bogus", generation: "open", want: "open"},

@@ -24,11 +24,11 @@ import (
 
 // GAP-0035 and GAP-0315 on the per-user OpenCode plugin: during a gateway
 // outage DEFENSECLAW_STRICT_AVAILABILITY=1 blocks a plugin installed open, as
-// it does for the shell hooks, and DEFENSECLAW_FAIL_MODE can only tighten the
-// installed mode: closed blocks an open plugin, open never reopens a closed
-// one. A gateway that answers HTTP 503 is an outage too: the plugin logs it as
-// transport, so strict availability closes it (GAP-0035 review).
-func TestOpenCodePluginEnvironmentOnlyTightensTheOutageAnswer(t *testing.T) {
+// it does for the shell hooks. DEFENSECLAW_FAIL_MODE is not read: closed
+// does not close an open plugin, open never reopens a closed one (1.0.4 lead
+// directive). A gateway that answers HTTP 503 is an outage too: the plugin
+// logs it as transport, so strict availability closes it (GAP-0035 review).
+func TestOpenCodePluginTakesItsInstalledModeAndStrictAvailability(t *testing.T) {
 	nodeForTest(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -57,7 +57,8 @@ func TestOpenCodePluginEnvironmentOnlyTightensTheOutageAnswer(t *testing.T) {
 			{"open", "", "", false},
 			{"open", "1", "", true},
 			{"open", "yes", "", true},
-			{"open", "", "closed", true},
+			{"open", "", "closed", false},
+			{"open", "1", "open", true},
 			{"closed", "", "open", true},
 			{"closed", "", "", true},
 		} {

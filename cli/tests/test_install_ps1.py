@@ -1204,6 +1204,14 @@ def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
     # install fails and the installed launcher stays where hooks find it.
     switch = _ps_functions("Switch-InPlace")
     assert "Remove-Aside" not in switch and "Move-Path" not in switch
+    # 1.0.4 lead directive: the switch is one atomic rename of the new file
+    # over the installed one; ReplaceFile only for a launcher that runs.
+    assert switch.index("Invoke-AtomicReplace $New $Destination") < switch.index("Invoke-FileReplace $New")
+    atomic = _ps_functions("Invoke-AtomicReplace")
+    assert "MoveFileExW($New, $Destination, 0x9)" in atomic
+    # The new copy is checked whole before anything is switched.
+    install = _ps_functions("Install-File")
+    assert install.index('(Get-Sha256 "$Destination.new") -ne (Get-Sha256 $Source)') < install.index("Publish-File")
     assert "it was left as it was" in switch
     # 1.0.4 review (loop round 2): an independent restore copy is made before
     # every attempt and handed to Close-SwapGap. Loop round 3: only a verified
@@ -1231,6 +1239,97 @@ Install-File '{source}' '{dest}'
     completed = _run_powershell(script)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert dest.read_text(encoding="ascii") == "new"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_an_idle_installed_file_switches_by_one_atomic_rename(tmp_path: Path) -> None:
+    # 1.0.4 lead directive: the new launcher is written beside the old one
+    # and switched with one rename over it, so the path names the old or the
+    # new file at every instant. ReplaceFile, its backup rename and the
+    # restore copy are not used for a file that does not run.
+    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    source.write_text("new", encoding="ascii")
+    dest.write_text("old", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:atomic = 0
+function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
+function Move-Path([string]$From, [string]$To) {{ throw "rename used: $From" }}
+function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{ throw "ReplaceFile used" }}
+function Invoke-AtomicReplace([string]$New, [string]$Destination) {{
+    $script:atomic++
+    if (-not (Test-Path -LiteralPath $Destination)) {{ throw "the destination was missing" }}
+    [IO.File]::Move($New, $Destination, $true)
+}}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileCopy", "New-VerifiedCopy", "Switch-InPlace")}
+Install-File '{source}' '{dest}'
+Write-Output "ATOMIC=$script:atomic"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "ATOMIC=1" in out, out
+    assert dest.read_text(encoding="ascii") == "new"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_running_launcher_that_refuses_the_rename_is_swapped_by_replacefile(tmp_path: Path) -> None:
+    # A launcher a hook runs from refuses a rename over it (access denied,
+    # nothing changes). The swap then takes ReplaceFile, and every attempt
+    # finds the old launcher at the path.
+    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    source.write_text("new", encoding="ascii")
+    dest.write_text("old", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:atomic = 0
+$script:missing = 0
+function Start-Sleep {{ }}
+function Invoke-AtomicReplace([string]$New, [string]$Destination) {{
+    $script:atomic++
+    if (-not (Test-Path -LiteralPath $Destination)) {{ $script:missing++ }}
+    throw "Access is denied."
+}}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileReplace", "Invoke-FileCopy", "New-VerifiedCopy", "Switch-InPlace")}
+Install-File '{source}' '{dest}'
+Write-Output "ATOMIC=$script:atomic MISSING=$script:missing"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "ATOMIC=1 MISSING=0" in out, out
+    assert dest.read_text(encoding="ascii") == "new"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_copy_that_is_not_whole_is_never_switched_in(tmp_path: Path) -> None:
+    # 1.0.4 lead directive: the old launcher stays until the new one is
+    # verified. A staged copy that does not match the source (cut short by a
+    # full disk or a scanner) is removed and nothing is switched.
+    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    source.write_text("new launcher", encoding="ascii")
+    dest.write_text("old", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:switches = 0
+function Copy-Item {{ param([string]$LiteralPath, [string]$Destination, [switch]$Force) [IO.File]::WriteAllText($Destination, "new") }}
+function Invoke-AtomicReplace([string]$New, [string]$Destination) {{ $script:switches++; throw "switched" }}
+function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{ $script:switches++; throw "switched" }}
+function Remove-Aside([string]$Path) {{ $script:switches++; throw "switched" }}
+function Move-Path([string]$From, [string]$To) {{ $script:switches++; throw "switched" }}
+{_ps_functions("Get-Sha256", "Install-File", "Publish-File", "Invoke-FileCopy", "New-VerifiedCopy", "Switch-InPlace")}
+try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }} catch {{ Write-Output "FAILED: $($_.Exception.Message)" }}
+Write-Output "SWITCHES=$script:switches"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "FAILED: The copy of" in out and "was left as it was" in out, out
+    assert "SWITCHES=0" in out, out
+    assert dest.read_text(encoding="ascii") == "old"
     assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
 
 

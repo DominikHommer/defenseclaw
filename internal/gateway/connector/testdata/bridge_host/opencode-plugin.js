@@ -29,12 +29,11 @@ import { dirname, join } from "node:path";
 const DC_API_ADDR = "{{.APIAddr}}";
 const DC_TOKEN_FILE = "{{.TokenFileJS}}";
 const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
-// The process environment can only tighten the installed mode, as in the
-// shell hooks: DEFENSECLAW_FAIL_MODE=closed closes every failure (GAP-0315),
-// and DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035).
-// Neither can open a closed plugin.
-const DC_RUNTIME_FAIL_MODE = String(process.env.DEFENSECLAW_FAIL_MODE || "").trim().toLowerCase() === "closed" ? "closed" : DC_FAIL_MODE;
-const DC_TRANSPORT_FAIL_MODE = ["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || "")) ? "closed" : DC_RUNTIME_FAIL_MODE;
+// The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
+// environment is not read (GAP-0315). As in the shell hooks,
+// DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035); it can
+// never open a closed plugin.
+const DC_TRANSPORT_FAIL_MODE = ["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || "")) ? "closed" : DC_FAIL_MODE;
 // Standalone managed installs talk to the gateway's peer-authorized unix
 // hook socket instead of the TCP API: the gateway identifies the caller by
 // kernel-verified uid, so no bearer token leaves this process, and a user
@@ -571,7 +570,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
-      if ((res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_RUNTIME_FAIL_MODE) === "closed") {
+      if ((res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE) === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
       await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
@@ -579,7 +578,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     }
     const data = await res.json();
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
-      if (DC_RUNTIME_FAIL_MODE === "open") {
+      if (DC_FAIL_MODE === "open") {
         await defenseclawLogFailOpen("invalid gateway verdict", "response");
         return null;
       }

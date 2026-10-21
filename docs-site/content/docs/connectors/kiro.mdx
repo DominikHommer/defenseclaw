@@ -162,7 +162,7 @@ Kiro as exit 2. It does in every way Kiro can start the command:
   second line.
 
 A hook that fails closed (an administrator-managed hook, or fail mode `closed`
-from the hook sidecar, `--fail-mode` or `DEFENSECLAW_FAIL_MODE`) also exits 2
+from the hook sidecar or `--fail-mode`) also exits 2
 when it fails inside DefenseClaw: a usage error, an invalid flag value, or an
 unreachable gateway. With fail mode `open` those failures exit 1 and Kiro goes
 ahead with a warning, like every other fail-open failure.

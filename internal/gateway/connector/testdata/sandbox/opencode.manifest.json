@@ -18,8 +18,8 @@
     "/usr/local/lib/defenseclaw/opencode/defenseclaw.js": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 26237,
-      "sha256": "af53cbabe7ee8c34dcdebdbb656a31b53b33e412fd088ef63379adce44fd3779"
+      "size": 26186,
+      "sha256": "73fa17d5259871d54ab3f56d2c745c21378d733bc20981d531eec1949b9765c9"
     }
   }
 }
