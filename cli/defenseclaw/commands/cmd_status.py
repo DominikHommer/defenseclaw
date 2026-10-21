@@ -783,8 +783,7 @@ def _print_agents(
     # enforced; count it the way `defenseclaw-gateway status` does.
     not_running_count = sum(
         1 for c in actives if _is_enabled(c) and (
-            c == "claudecode" and not shutil.which("claude")
-            or c in agent_missing
+            c in agent_missing
             or c not in health_map and c in not_started
         )
     )
@@ -858,8 +857,6 @@ def _print_agents(
                 # The gateway does not dial an OpenClaw gateway that is only
                 # the claw.mode default and is not installed (#958).
                 runtime_state, runtime_detail = "off", "OpenClaw is not installed"
-            elif conn == "claudecode" and not shutil.which("claude"):
-                runtime_state, runtime_detail = "off", "Claude Code is not detected on PATH"
             suffix = _connector_state_verb(runtime_state)
             if runtime_detail:
                 suffix += ux.dim(f" ({runtime_detail})")
@@ -890,9 +887,6 @@ def _print_agents(
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
                 suffix = _connector_state_verb("off") + ux.dim(" (OpenClaw is not installed)")
-                _echo_wrapped(f"                {dim_text}{suffix}", 18)
-            elif conn == "claudecode" and not shutil.which("claude"):
-                suffix = _connector_state_verb("off") + ux.dim(" (Claude Code is not detected on PATH)")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn.strip().lower() in not_started:
                 # Setup failed when the gateway started (GAP-1714).
@@ -1097,10 +1091,12 @@ def _agent_missing(cfg, connector: str) -> bool:
     The rule of doctor's Connector compatibility row
     (``doctor_health.connector_agent_missing``), so a connector setup staged
     for an agent that is not installed is not shown RUNNING or counted
-    active while doctor fails it. Claude Code and OpenClaw keep their own
-    checks (the ``claude`` executable on PATH, the OpenClaw install).
+    active while doctor fails it. Claude Code uses the same proof: a
+    ``claude`` missing from the PATH of the shell that runs status is no
+    evidence, because Claude Code often runs from an absolute path or an IDE
+    (GAP-1331, GAP-1333). OpenClaw keeps its own install check.
     """
-    if connector in ("claudecode", "openclaw"):
+    if connector == "openclaw":
         return False
     try:
         from defenseclaw.doctor_health import connector_agent_missing

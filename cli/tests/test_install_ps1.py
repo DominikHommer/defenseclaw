@@ -1166,3 +1166,105 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         assert not (slot / "HOOK_FIRST").exists()
     # Undo leaves the old hook live.
     assert live.read_text(encoding="utf-8").strip() == "old", out
+
+
+# ── 1.0.4 (GAP-0004) ────────────────────────────────────────────────────────
+
+
+def _ps_functions(*names: str) -> str:
+    text = _text()
+    out = []
+    for name in names:
+        start = text.index(f"function {name}(")
+        out.append(text[start : text.index("\n}\n", start) + 3])
+    return "\n".join(out)
+
+
+def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
+    # rel-1-0-4 GAP-0004: renaming the old defenseclaw-hook.exe aside before
+    # the new one was in place left a gap in which an agent's registered hook
+    # found no launcher. Install-File swaps an existing file in with
+    # File.Replace first and renames only when that fails.
+    install_file = _ps_functions("Install-File")
+    assert install_file.index("Switch-InPlace") < install_file.index("Remove-Aside")
+    assert "[IO.File]::Replace($New, $Destination, $Backup, $true)" in _ps_functions("Invoke-FileReplace")
+    # 1.0.4 review: a file ReplaceFile cannot swap is never renamed aside; the
+    # install fails and the installed launcher stays where hooks find it.
+    switch = _ps_functions("Switch-InPlace")
+    assert "Remove-Aside" not in switch
+    assert "it was left as it was" in switch
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_install_file_never_leaves_the_destination_missing(tmp_path: Path) -> None:
+    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    source.write_text("new", encoding="ascii")
+    dest.write_text("old", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
+function Move-Path([string]$From, [string]$To) {{ throw "rename used: $From" }}
+{_ps_functions("Get-Sha256", "Install-File", "Invoke-FileReplace", "Switch-InPlace")}
+Install-File '{source}' '{dest}'
+"""
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert dest.read_text(encoding="ascii") == "new"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_held_file_fails_the_install_and_keeps_the_launcher(tmp_path: Path) -> None:
+    # 1.0.4 review of GAP-0004: while a running hook or a scanner holds the
+    # file, every hook call that arrives during the retries still finds the
+    # installed launcher, and when the hold never ends the install fails
+    # instead of renaming the launcher aside.
+    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    source.write_text("new", encoding="ascii")
+    dest.write_text("old", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:calls = 0
+$script:missing = 0
+function Start-Sleep {{ }}
+function Remove-Aside([string]$Path) {{ throw "the destination was renamed away: $Path" }}
+function Move-Path([string]$From, [string]$To) {{ throw "rename used: $From" }}
+{_ps_functions("Get-Sha256", "Install-File", "Switch-InPlace")}
+function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
+    $script:calls++
+    if (-not (Test-Path -LiteralPath $Destination)) {{ $script:missing++ }}
+    throw "The process cannot access the file because it is being used by another process."
+}}
+try {{ Install-File '{source}' '{dest}'; Write-Output 'INSTALLED' }} catch {{ Write-Output "FAILED: $($_.Exception.Message)" }}
+Write-Output "CALLS=$script:calls MISSING=$script:missing"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert "FAILED: Could not replace" in out and "it was left as it was" in out, out
+    assert "MISSING=0" in out and "CALLS=21" in out, out
+    assert dest.read_text(encoding="ascii") == "old"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_replace_that_stops_after_the_backup_rename_finishes_the_swap(tmp_path: Path) -> None:
+    # ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: ReplaceFile renamed the old file to
+    # the backup and did not move the new one in. The swap is finished at once.
+    source, dest = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    source.write_text("new", encoding="ascii")
+    dest.write_text("old", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+function Start-Sleep {{ }}
+{_ps_functions("Get-Sha256", "Move-Path", "Install-File", "Switch-InPlace")}
+function Invoke-FileReplace([string]$New, [string]$Destination, [string]$Backup) {{
+    [IO.File]::Move($Destination, $Backup)
+    throw "Unable to move the replacement file to the file to be replaced."
+}}
+Install-File '{source}' '{dest}'
+"""
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert dest.read_text(encoding="ascii") == "new"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe", "staged.exe"]

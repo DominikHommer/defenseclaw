@@ -1503,7 +1503,7 @@
     {
       "name": "DEFENSECLAW_FAIL_MODE",
       "category": "security_opt_out",
-      "purpose": "Per-process override of guardrail.hook_fail_mode for hook delivery, missing-token/authentication, and invalid-response failures. Templated into or resolved by every managed hook.",
+      "purpose": "Per-process tightening of guardrail.hook_fail_mode: closed closes hook delivery, missing-token/authentication, and invalid-response failures; open is ignored, so the environment cannot reopen an installed closed hook, except in the Antigravity, Devin, Hermes and Kiro shell hooks of an authenticated Secure Client deployment, which take open or closed as a full override. Read by every per-user hook, the native Windows hook and the OpenCode plugin; other managed hooks ignore it.",
       "default": "(value from guardrail.hook_fail_mode in config.yaml)",
       "accepted_values": [
         "open",
@@ -5409,7 +5409,7 @@
     {
       "name": "DEFENSECLAW_STRICT_AVAILABILITY",
       "category": "security_opt_out",
-      "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open. Invalid gateway responses still follow guardrail.hook_fail_mode.",
+      "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open (the OpenCode plugin: a gateway outage). Invalid gateway responses still follow guardrail.hook_fail_mode.",
       "default": "unset (no additional force-closed override)",
       "accepted_values": [
         "1",
