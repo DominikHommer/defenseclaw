@@ -40,8 +40,9 @@ var windowsIDEAppDataNoted sync.Map
 // (IDEAppDataSpoolDirName). The redirected folders come from the account's
 // User Shell Folders while its registry is loaded, and from its last record
 // otherwise. A folder is read only when it is a local folder the account
-// owns, reached without a link or junction; the scan does not follow links
-// below it or below the profile. Records of other profiles are removed, so
+// owns, reached without a link or junction, and it is held open through
+// the scan (windowsScanIDEAppData); the scan does not follow links below it
+// or below the profile. Records of other profiles are removed, so
 // the gateway scans those itself.
 func WriteWindowsIDEAppDataSpool(dir string, manifest Manifest, setOwnership func(string) error, logf func(string, ...any)) error {
 	if dir == "" {
@@ -97,9 +98,10 @@ func WriteWindowsIDEAppDataSpool(dir string, manifest Manifest, setOwnership fun
 		}
 	}
 	scanned := scanIDEAppDataDue(due, func() bool { return time.Now().After(deadline) }, func(item ideAppDataDue) bool {
-		record := records[item.name]
-		record.UpdatedAt = time.Now().UTC()
-		record.Installs = ideplugins.Scan(record.Home, "windows", ideplugins.Limits{RoamingAppData: record.RoamingAppData, LocalAppData: record.LocalAppData})
+		record, ok := windowsScanIDEAppData(records[item.name], logf)
+		if !ok {
+			return false
+		}
 		data, err := json.Marshal(record)
 		if err == nil && len(data) > maxIDEAppDataSpoolRecordBytes {
 			err = fmt.Errorf("the IDE inventory exceeds %d bytes", maxIDEAppDataSpoolRecordBytes)
@@ -148,15 +150,57 @@ func windowsRedirectedAppData(sid, home, user string, logf func(string, ...any))
 	return folder("AppData", `AppData\Roaming`), folder("Local AppData", `AppData\Local`), true
 }
 
+// beforeIDEAppDataScan, when set, runs between the hold on a record's
+// folders and their scan; tests use it to swap a folder in that window.
+var beforeIDEAppDataScan func(record IDEAppDataSpoolRecord)
+
+// windowsScanIDEAppData reads the IDEs of record's redirected folders while
+// it holds them (windowsHoldIDEAppDataFolder), and returns record with its
+// installs; false when a folder cannot be held, or no longer names the held
+// folder after the scan. The ownership check alone would go stale before the
+// scan: an account that controls a folder above the redirected one could
+// swap in an ordinary folder of its own between them, at the same path, and
+// its plugins would be published as the profile owner's.
+func windowsScanIDEAppData(record IDEAppDataSpoolRecord, logf func(string, ...any)) (IDEAppDataSpoolRecord, bool) {
+	var holds []*windowsIDEAppDataHold
+	defer func() {
+		for _, hold := range holds {
+			hold.close()
+		}
+	}()
+	for _, folder := range []string{record.RoamingAppData, record.LocalAppData} {
+		if folder == "" {
+			continue
+		}
+		hold, err := windowsHoldIDEAppDataFolder(record.Key, folder)
+		if err != nil {
+			windowsNoteIDEAppData(logf, record.Key, "redirected AppData is not read: "+err.Error(), folder)
+			return record, false
+		}
+		holds = append(holds, hold)
+	}
+	if beforeIDEAppDataScan != nil {
+		beforeIDEAppDataScan(record)
+	}
+	record.UpdatedAt = time.Now().UTC()
+	record.Installs = ideplugins.Scan(record.Home, "windows", ideplugins.Limits{RoamingAppData: record.RoamingAppData, LocalAppData: record.LocalAppData})
+	for _, hold := range holds {
+		if err := hold.stillNamed(record.Key); err != nil {
+			windowsNoteIDEAppData(logf, record.Key, "redirected AppData is not read: "+err.Error(), hold.folder)
+			return record, false
+		}
+	}
+	return record, true
+}
+
 // windowsUsableIDEAppDataFolder returns folder when it can be read for the
-// account sid: an existing local folder that sid owns, whose final path is
-// folder itself, so no link or junction leads to it. Otherwise it returns
-// "", and logs why once.
+// account sid (windowsHoldIDEAppDataFolder). Otherwise it returns "", and
+// logs why once; a missing folder is skipped quietly.
 func windowsUsableIDEAppDataFolder(sid, folder string, logf func(string, ...any)) string {
 	if folder == "" {
 		return ""
 	}
-	err := windowsCheckIDEAppDataFolder(sid, folder)
+	hold, err := windowsHoldIDEAppDataFolder(sid, folder)
 	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
 		return ""
 	}
@@ -164,36 +208,62 @@ func windowsUsableIDEAppDataFolder(sid, folder string, logf func(string, ...any)
 		windowsNoteIDEAppData(logf, sid, "redirected AppData is not read: "+err.Error(), folder)
 		return ""
 	}
+	hold.close()
 	return folder
 }
 
-func windowsCheckIDEAppDataFolder(sid, folder string) error {
+// windowsIDEAppDataHold is a redirected AppData folder held open from its
+// check to the end of its scan. The handle does not share delete, so the
+// folder cannot be renamed or removed while it is held, and NTFS refuses to
+// rename a folder above it while a handle below is open: the path the scan
+// reads keeps naming the folder that was checked. stillNamed checks that
+// after the scan.
+type windowsIDEAppDataHold struct {
+	handle windows.Handle
+	folder string
+	volume uint32
+	index  uint64
+}
+
+// windowsHoldIDEAppDataFolder opens folder for the account sid when it is an
+// existing local folder that sid owns, whose final path is folder itself, so
+// no link or junction leads to it.
+func windowsHoldIDEAppDataFolder(sid, folder string) (*windowsIDEAppDataHold, error) {
 	ptr, err := winpath.UTF16Ptr(folder)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	handle, err := windows.CreateFile(ptr, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil,
 		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer windows.CloseHandle(handle)
+	hold := &windowsIDEAppDataHold{handle: handle, folder: folder}
+	if err := hold.check(sid); err != nil {
+		hold.close()
+		return nil, err
+	}
+	return hold, nil
+}
+
+func (h *windowsIDEAppDataHold) check(sid string) error {
 	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+	if err := windows.GetFileInformationByHandle(h.handle, &info); err != nil {
 		return err
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 		return errors.New("it is not a folder")
 	}
-	final, err := inventoryDACLFinalPath(handle)
+	h.volume, h.index = info.VolumeSerialNumber, uint64(info.FileIndexHigh)<<32|uint64(info.FileIndexLow)
+	final, err := inventoryDACLFinalPath(h.handle)
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(strings.TrimPrefix(final, `\\?\`), filepath.Clean(folder)) {
+	if !strings.EqualFold(strings.TrimPrefix(final, `\\?\`), filepath.Clean(h.folder)) {
 		return errors.New("a link or junction leads to it")
 	}
-	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	sd, err := windows.GetSecurityInfo(h.handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
 		return fmt.Errorf("read its owner: %w", err)
 	}
@@ -209,6 +279,27 @@ func windowsCheckIDEAppDataFolder(sid, folder string) error {
 		return errors.New("the account does not own it")
 	}
 	return nil
+}
+
+// stillNamed reports, after the scan, whether the path still opens to the
+// held folder and sid still owns it.
+func (h *windowsIDEAppDataHold) stillNamed(sid string) error {
+	again, err := windowsHoldIDEAppDataFolder(sid, h.folder)
+	if err != nil {
+		return err
+	}
+	defer again.close()
+	if again.volume != h.volume || again.index != h.index {
+		return errors.New("another folder took its place during the scan")
+	}
+	return nil
+}
+
+func (h *windowsIDEAppDataHold) close() {
+	if h != nil && h.handle != 0 {
+		_ = windows.CloseHandle(h.handle)
+		h.handle = 0
+	}
 }
 
 func windowsNoteIDEAppData(logf func(string, ...any), sid, reason, value string) {
