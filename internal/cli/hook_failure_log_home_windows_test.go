@@ -50,8 +50,11 @@ func TestManagedWindowsHookFailureLogIgnoresRedirectedUserProfile(t *testing.T) 
 			})
 			_ = prepareEnterpriseManagedHookRuntime("claudecode")
 			opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
-			if opts.FailureLogHome != want || strings.HasPrefix(strings.ToLower(opts.FailureLogHome), strings.ToLower(redirected)) {
-				t.Fatalf("failure log home = %q, want %q (USERPROFILE redirected to %q)", opts.FailureLogHome, want, redirected)
+			if opts.FailureLogHome == nil {
+				t.Fatal("managed hook options carry no failure log home")
+			}
+			if got := opts.FailureLogHome(); got != want || strings.HasPrefix(strings.ToLower(got), strings.ToLower(redirected)) {
+				t.Fatalf("failure log home = %q, want %q (USERPROFILE redirected to %q)", got, want, redirected)
 			}
 		})
 	}

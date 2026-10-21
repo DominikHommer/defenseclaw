@@ -462,7 +462,7 @@ func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("set %d: %v", i, err)
 		}
-		if out != `{"action":"set","gateway_restarted":true,"name":"ai-defense-api-key","noop":false,"ok":true,"schema_version":1}`+"\n" {
+		if out != `{"action":"set","gateway_restarted":true,"name":"ai-defense-api-key","ok":true,"schema_version":1}`+"\n" {
 			t.Fatalf("set %d: success document changed: %q", i, out)
 		}
 		if strings.Join(host.events, ",") != strings.Join(want, ",") || host.bundle != 10*time.Minute || !written {
@@ -484,7 +484,7 @@ func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 		return false, nil
 	}
 	if out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "same-value\n"); err != nil ||
-		out != `{"action":"set","gateway_restarted":false,"name":"ai-defense-api-key","noop":true,"ok":true,"schema_version":1}`+"\n" {
+		out != `{"action":"set","gateway_restarted":false,"name":"ai-defense-api-key","ok":true,"schema_version":1}`+"\n" {
 		t.Fatalf("stopped gateway identical set: %q, %v", out, err)
 	}
 	if info, err := os.Stat(storedPath); err != nil || !info.ModTime().Equal(preserved) {
@@ -502,7 +502,7 @@ func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	host.events = nil
-	if out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "same-value\n"); err != nil || !strings.Contains(out, `"noop":false`) {
+	if out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "same-value\n"); err != nil || !strings.Contains(out, `"gateway_restarted":true`) {
 		t.Fatalf("byte-different set: %q, %v", out, err)
 	}
 	if data, err := os.ReadFile(storedPath); err != nil || string(data) != "same-value" || strings.Join(host.events, ",") != strings.Join(want, ",") {
@@ -793,7 +793,7 @@ func TestWindowsSecretIdenticalSetRepairsTheGatewayReadACEs(t *testing.T) {
 	if err := os.Chtimes(path, preserved, preserved); err != nil {
 		t.Fatal(err)
 	}
-	if out := set(); !strings.Contains(out, `"noop":true`) {
+	if out := set(); out != `{"action":"set","gateway_restarted":false,"name":"ai-defense-api-key","ok":true,"schema_version":1}`+"\n" {
 		t.Fatalf("identical set after an ACL edit: %q", out)
 	}
 	if info, err := os.Stat(path); err != nil || !info.ModTime().Equal(preserved) {

@@ -251,8 +251,9 @@ tell an agent that exited while it sent the value from one that is done. At most
 Send a credential **only when it changed**. A Windows `set` of the exact
 stored bytes is not rewritten, but it still restarts a running gateway
 (managed hooks fail closed while it restarts): nothing proves which value the
-running gateway loaded. Only with no running gateway does it report
-`noop: true` (a CLI before 1.0.4 omits `noop`: read it as false). Compare first with `enterprise secret status --json` (no lock,
+running gateway loaded. With no running gateway nothing restarts
+(`gateway_restarted: false`). The result keeps the contract v1 shape, with no
+`noop` member. Compare first with `enterprise secret status --json` (no lock,
 read-only): `sha256_prefix` is the first 12 hex characters of the SHA-256 of
 the stored value. Hash the value the way the device stores it: on Windows with
 surrounding whitespace trimmed, on Linux and macOS without the one trailing
@@ -841,8 +842,9 @@ off the device. The agent does not read `/health` itself (section 7); the
   ensure runs anyway (usually a no-op). On Windows an identical value is not
   rewritten, but every set restarts a running gateway (managed hooks fail
   closed while it restarts), so send a credential only when `status` shows a
-  different `sha256_prefix` (section 2.5); with no running gateway an
-  identical set reports `noop: true`. A Windows set or remove that changed the
+  different `sha256_prefix` (section 2.5); with no running gateway it reports
+  `gateway_restarted: false`. A gateway that is still starting counts as
+  running and is restarted once it runs. A Windows set or remove that changed the
   store and then failed to restart is `restart_failed`, exit 1603: resubmit
   it, which restarts again, even though `sha256_prefix` already shows the new
   value (2.2).

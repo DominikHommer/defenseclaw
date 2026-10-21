@@ -163,12 +163,8 @@ func TestStandaloneHookRuntimeUsesDescriptor(t *testing.T) {
 	if opts.Home != layout.ConfigDir {
 		t.Fatalf("home = %q, want the administrator-owned %q", opts.Home, layout.ConfigDir)
 	}
-	userHome, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(userHome, ".defenseclaw"); opts.FailureLogHome != want {
-		t.Fatalf("failure log home = %q, want the invoking user's %q", opts.FailureLogHome, want)
+	if want := filepath.Join(accountDatabaseHomeForTest(t), ".defenseclaw"); opts.FailureLogHome == nil || opts.FailureLogHome() != want {
+		t.Fatalf("failure log home does not resolve to the invoking user's %q", want)
 	}
 }
 

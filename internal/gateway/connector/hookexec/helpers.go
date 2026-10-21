@@ -138,8 +138,17 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		fmt.Fprintf(opts.Stderr, "defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %q\n", sp.connector, sp.hookName, category, reason)
 	}
 	home := opts.Home
-	if opts.FailureLogHome != "" {
-		home = opts.FailureLogHome
+	if opts.ManagedEnterprise {
+		// A managed row goes only to the invoking user's diagnostic
+		// directory, never to the administrator-owned enforcement home: an
+		// account the lookup does not resolve writes no row.
+		home = ""
+		if opts.FailureLogHome != nil {
+			home = opts.FailureLogHome()
+		}
+		if home == "" {
+			return
+		}
 		// Managed hooks can run for accounts with no prior per-user install.
 		// Their diagnostic directory is independent of the protected runtime.
 		if err := os.MkdirAll(home, 0o700); err != nil {

@@ -218,9 +218,8 @@ func newHookSessionFactsCmd() *cobra.Command {
 func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
 	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, hookexec.DefaultMaxBody+1))
 	stdin := io.MultiReader(bytes.NewReader(payload), os.Stdin)
-	// No FailureLogHome here: on Windows it is a token-bound Known Folder
-	// lookup that can stall, and it must count against the armed budget.
-	// Run's options carry it when Run adopts the watchdog.
+	// No FailureLogHome here: armed alone the watchdog writes no row. Run's
+	// options carry the resolver when Run adopts the watchdog.
 	return stdin, hookexec.ArmAnswerWatchdog(hookexec.Options{
 		Connector:         connectorName,
 		Event:             event,
@@ -457,8 +456,10 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 var hookUserProfileDir = managedHookUserProfileDir
 
 // managedHookFailureLogHome is the invoking user's diagnostic directory for
-// managed hook failure rows (hookUserProfileDir). Only Run's options resolve
-// it, after the answer watchdog is armed.
+// managed hook failure rows (hookUserProfileDir). hookexec calls it only when
+// it writes a row, after the call was answered or its watchdog armed: the
+// account lookup (NSS, Open Directory, a token Known Folder) can be slow, and
+// a call that succeeds never pays for it.
 func managedHookFailureLogHome() string {
 	home, err := hookUserProfileDir()
 	if err != nil || home == "" {
@@ -481,7 +482,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			SecureClient:          secureClientHost(),
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
-		opts.FailureLogHome = managedHookFailureLogHome()
+		opts.FailureLogHome = managedHookFailureLogHome
 		// Marks a failed Unix standalone runtime as the standalone profile's
 		// (no transport is selected); a no-op elsewhere.
 		applyStandaloneManagedHookTransport(&opts, connector)
@@ -601,7 +602,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		),
 	}
 	if enterpriseManaged {
-		opts.FailureLogHome = managedHookFailureLogHome()
+		opts.FailureLogHome = managedHookFailureLogHome
 	}
 	if trustedNativeState {
 		opts.GatewayRecovery = trustedNativeGatewayRecovery()

@@ -145,8 +145,10 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json)
 	}
 	if opts.json {
+		// Contract v1 success shape (secret-result.schema.json, which allows
+		// no other member): a no-op shows as gateway_restarted false.
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
-			"schema_version": 1, "ok": true, "action": action, "name": opts.name, "gateway_restarted": change.restarted, "noop": change.noop,
+			"schema_version": 1, "ok": true, "action": action, "name": opts.name, "gateway_restarted": change.restarted,
 		})
 	}
 	if change.noop {
@@ -827,9 +829,11 @@ func windowsSecretStatus(dir string) ([]windowsSecretState, error) {
 	return states, nil
 }
 
-// restartWindowsStandaloneGateway restarts the gateway service when it is
-// running so it reads the changed credential; a stopped gateway reads it on
-// its next start.
+// restartWindowsStandaloneGateway restarts the gateway service so a new
+// process reads the changed credential or config; a stopped gateway reads it
+// on its next start (restartWindowsGatewayService). A gateway in StartPending
+// is a process that may already hold the old value: it is restarted once it
+// runs, not taken for stopped.
 func restartWindowsStandaloneGateway() (bool, error) {
 	manager, err := mgr.Connect()
 	if err != nil {
@@ -844,39 +848,28 @@ func restartWindowsStandaloneGateway() (bool, error) {
 		return false, err
 	}
 	defer service.Close()
-	status, err := service.Query()
-	if err != nil {
-		return false, err
-	}
-	if status.State != svc.Running {
-		return false, nil
-	}
-	if _, err := service.Control(svc.Stop); err != nil {
-		return false, fmt.Errorf("stop %s: %w", managed.StandaloneWindowsGatewaySvc, err)
-	}
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		status, err = service.Query()
-		if err != nil {
-			return false, err
-		}
-		if status.State == svc.Stopped {
-			break
-		}
-		if time.Now().After(deadline) {
-			return false, fmt.Errorf("%s did not stop within 60s", managed.StandaloneWindowsGatewaySvc)
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	if err := service.Start(); err != nil {
-		return false, fmt.Errorf("start %s: %w", managed.StandaloneWindowsGatewaySvc, err)
-	}
-	return true, nil
+	return restartWindowsGatewayService(scmGatewayService{service}, managed.StandaloneWindowsGatewaySvc, 60*time.Second, 250*time.Millisecond)
 }
+
+// scmGatewayService drives the installed gateway service through the SCM.
+type scmGatewayService struct{ service *mgr.Service }
+
+func (s scmGatewayService) state() (windowsServiceState, error) {
+	status, err := s.service.Query()
+	return windowsServiceState(status.State), err
+}
+
+func (s scmGatewayService) stop() error {
+	_, err := s.service.Control(svc.Stop)
+	return err
+}
+
+func (s scmGatewayService) start() error { return s.service.Start() }
 
 // windowsStandaloneGatewayPID observes the SCM process identity around an
 // installer transaction. A bundle receipt records a restart only when the
-// gateway process actually changed.
+// gateway process actually changed. A starting gateway has a process
+// (windowsServiceProcessLive), so it counts as running.
 func windowsStandaloneGatewayPID() uint32 {
 	manager, err := mgr.Connect()
 	if err != nil {
@@ -889,7 +882,7 @@ func windowsStandaloneGatewayPID() uint32 {
 	}
 	defer service.Close()
 	status, err := service.Query()
-	if err != nil || status.State != svc.Running {
+	if err != nil || !windowsServiceProcessLive(windowsServiceState(status.State)) {
 		return 0
 	}
 	return status.ProcessId
@@ -915,10 +908,11 @@ func startWindowsStandaloneGatewayIfStopped() (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		switch status.State {
-		case svc.Running, svc.StartPending:
+		state := windowsServiceState(status.State)
+		if windowsServiceProcessLive(state) {
 			return false, nil
-		case svc.Stopped:
+		}
+		if state == windowsServiceStopped {
 			if err := service.Start(); err != nil {
 				return false, err
 			}

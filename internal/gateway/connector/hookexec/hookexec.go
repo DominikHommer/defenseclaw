@@ -284,9 +284,12 @@ type Options struct {
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
 	// or contains a .disabled file the hook is a no-op (exit 0).
 	Home string
-	// FailureLogHome is the invoking user's diagnostic directory on managed
-	// hooks. Enforcement still uses the administrator-owned Home.
-	FailureLogHome string
+	// FailureLogHome resolves the invoking user's diagnostic directory for
+	// the failure rows of a managed hook. It runs only when a row is written,
+	// so the account lookup is not on the path of a call that succeeds.
+	// Enforcement still uses the administrator-owned Home, and a managed row
+	// never goes there: with no resolver, or an empty answer, there is no row.
+	FailureLogHome func() string
 	// HookDir holds connector-scoped and legacy token sidecars (default Home/hooks).
 	HookDir string
 	// Token, when set, is the resolved gateway token (e.g. from the

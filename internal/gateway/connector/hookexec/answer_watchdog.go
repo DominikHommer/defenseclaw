@@ -94,7 +94,7 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 		// FailureLogHome of Run's options once Run adopts the watchdog;
 		// armed alone it writes no failure row.
 		opts.Home = ""
-		opts.FailureLogHome = ""
+		opts.FailureLogHome = nil
 	} else if strings.EqualFold(strings.TrimSpace(opts.FailMode), "open") {
 		failMode = "open"
 	}
@@ -125,7 +125,7 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 	rendered.Stdout, rendered.Stderr = &out, &errb
 	// Rendering only: the failure is logged when the watchdog answers.
 	rendered.Home = ""
-	rendered.FailureLogHome = ""
+	rendered.FailureLogHome = nil
 	rendered.answerWatch = nil
 	code = failNoAnswer(rendered, sp, failMode)
 	logged := opts
