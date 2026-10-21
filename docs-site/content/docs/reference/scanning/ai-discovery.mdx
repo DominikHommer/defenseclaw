@@ -11,6 +11,19 @@ keywords:
 
 What AI Discovery finds, where it looks, and what it sends. For the overview see [AI Discovery](/docs/features/ai-discovery). For a quick tour see [Find AI on this machine](/docs/how-to/scanning/find-ai-on-this-machine).
 
+## At a glance
+
+| Section | What it covers | Commands and keys |
+| --- | --- | --- |
+| [What gets discovered](#what-gets-discovered) | The 16 signal categories, the local model inventory and its modes | `agent usage`, `agent usage --category local_model` |
+| [Continuous discovery](#continuous-discovery-gateway) | The gateway scan, per-user scans, sandboxes, tunable knobs, signature packs | `agent discovery` (enable, status, scan), `agent signatures`, `ai_discovery.scan_interval_min` |
+| [IDE plugin inventory](#ide-plugin-inventory) | Which IDEs, whose plugins, what is and is not collected, privacy | `agent ide-plugins` |
+| [Operator CLI](#operator-cli) | The `agent` commands that read the inventory | `agent discover`, `usage`, `processes`, `components`, `confidence` |
+| [AIBOM](#aibom-ai-bill-of-materials) | The bill of materials output | `aibom scan` |
+| [Where the data lands](#where-the-data-lands) | SQLite, destinations, Splunk, Grafana | Observability destinations |
+| [Privacy and trust model](#privacy-and-trust-model) | What is never collected, and how far to trust each signal | |
+| [Runtime planes](#runtime-planes) | The three planes that watch what AI runtimes ran, per OS, and the privileges each needs | `agent discovery runtime` (enable, selftest, findings) |
+
 ## What gets discovered
 
 The continuous scanner in the gateway classifies every signal into one of the wire categories below. `agent discover` is a separate, connector-focused local inventory; the gateway-backed `agent usage` command renders these continuous-discovery signals.
