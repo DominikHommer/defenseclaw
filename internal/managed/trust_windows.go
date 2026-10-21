@@ -142,6 +142,40 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 	return validateTrustedWindowsRuntimeDir(path, label, nil)
 }
 
+// ValidateTrustedRuntimeImage checks an executable that an elevated process
+// or a service runs from a protected runtime folder (the scanner runtime and
+// the Python under it): root and image keep every verdict fatal, and every
+// folder between them and above root, the installer-owned Cisco folders
+// included, gets the narrow ancestor mask with fatal verdicts. Under the
+// advisory walk a standard user who could delete the children of
+// C:\ProgramData\Cisco, or rename or re-ACL it, or add a file to the runtime
+// folder, got a warning, and could swap the runtime between the check and
+// the launch (review loop round 4). image must be below root.
+func ValidateTrustedRuntimeImage(root, image, label string) error {
+	if label == "" {
+		label = "managed runtime image"
+	}
+	if root == "" || image == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	cleanRoot, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	cleanImage, err := filepath.Abs(image)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if rel, err := filepath.Rel(cleanRoot, cleanImage); err != nil || rel == "." || filepath.IsAbs(rel) ||
+		rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%s %s is not inside its runtime folder %s", label, cleanImage, cleanRoot)
+	}
+	if err := validateTrustedWindowsRuntimeDirWithAncestors(cleanRoot, label, nil, windowsStrictAncestorScope); err != nil {
+		return err
+	}
+	return ValidateTrustedFilePathStrictAncestors(cleanImage, label)
+}
+
 // ValidateTrustedDirectoryAncestor validates an existing directory that will
 // contain a new protected child. Unlike ValidateTrustedRuntimeDir, the named
 // directory is evaluated with the narrow ancestor-replacement mask as well as
@@ -301,6 +335,16 @@ func walkWindowsRulePackTree(root string, check func(path string, isDir bool) er
 }
 
 func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows.SID) error {
+	return validateTrustedWindowsRuntimeDirWithAncestors(path, label, allowedWriter, windowsAncestorScope)
+}
+
+// windowsStrictAncestorScope gives every ancestor the narrow mask with fatal
+// verdicts, the installer-owned Cisco folders included.
+func windowsStrictAncestorScope(string) windowsTrustScope { return windowsTrustForeignAncestor }
+
+// validateTrustedWindowsRuntimeDirWithAncestors checks the named folder with
+// the leaf rule and each folder above it with the scope ancestors picks.
+func validateTrustedWindowsRuntimeDirWithAncestors(path, label string, allowedWriter *windows.SID, ancestors func(string) windowsTrustScope) error {
 	if label == "" {
 		label = "managed runtime dir"
 	}
@@ -315,7 +359,7 @@ func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		scope := windowsAncestorScope(cur)
+		scope := ancestors(cur)
 		if cur == clean {
 			scope = windowsTrustLeaf
 		}

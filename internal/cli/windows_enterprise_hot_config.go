@@ -333,18 +333,23 @@ func windowsEnterpriseHotConfigApply(
 	// Targets this attempt published for the new config are published again
 	// for the restored one, so a user the new config dropped is enrolled
 	// again (GAP-1494). A gateway this attempt restarted is restarted on the
-	// restored config; one that reported the new config's policy must
-	// report the restored one's. A restore that cannot be proven (the bytes,
-	// the targets or the gateway's policy) stops the gateway, so no hook is
-	// decided by a policy no one verified, reports what is really installed,
-	// and stops the run: the upgrade transaction would otherwise snapshot
-	// the config this attempt left behind as its preimage (GAP-1178, review
-	// loop round 3).
+	// restored config, and so is one whose restart failed, since what it
+	// runs now is not known. Every other gateway is asked to reload. Every
+	// undo then proves the gateway reports the restored config's policy: a
+	// gateway can load the new config without the adoption check proving
+	// it (the file watcher follows config.yaml, a bundle sends a reload
+	// request first, and the check also fails on the generation or the
+	// bundle identity), so a failed adoption check says nothing about which
+	// policy is live (review loop round 4). A restore that cannot be proven
+	// (the bytes, the targets or the gateway's policy) stops the gateway,
+	// so no hook is decided by a policy no one verified, reports what is
+	// really installed, and stops the run: the upgrade transaction would
+	// otherwise snapshot the config this attempt left behind as its
+	// preimage (GAP-1178, review loop round 3).
 	targetsRefreshed := false
-	gatewayAdopted := false
-	gatewayRestarted := false
+	gatewayRestartAttempted := false
 	gatewayOnNewConfig := func() bool {
-		return gatewayRestarted || (opts.bundle != nil && opts.bundle.gatewayRestarted)
+		return gatewayRestartAttempted || (opts.bundle != nil && opts.bundle.gatewayRestarted)
 	}
 	undo := func() {
 		restoreCtx := context.WithoutCancel(ctx)
@@ -380,24 +385,25 @@ func windowsEnterpriseHotConfigApply(
 				}
 			}
 			// The gateway goes back to the restored config: a restart for one
-			// this attempt restarted, so it does not keep the start-only
-			// settings of the config that was undone, otherwise a reload
-			// request, since the file watcher is best effort.
+			// this attempt restarted or tried to restart, so it does not keep
+			// the start-only settings of the config that was undone (a stopped
+			// one is started), otherwise a reload request, since the file
+			// watcher is best effort. Either way the proof follows.
+			wait := windowsEnterpriseHotConfigTimeout
 			if gatewayOnNewConfig() {
-				if restarted, err := windowsEnterpriseHotConfigRestart(); err != nil || !restarted {
-					_, _ = windowsEnterpriseHotConfigRecover()
+				wait = windowsEnterpriseHotConfigRestartTimeout
+				restarted, err := windowsEnterpriseHotConfigRestart()
+				if err != nil || !restarted {
+					restarted, _ = windowsEnterpriseHotConfigRecover()
 				}
-			} else if gatewayAdopted {
+				if restarted && opts.bundle != nil {
+					opts.bundle.gatewayRestarted = true
+				}
+			} else {
 				_ = windowsEnterpriseHotBundleReload(restoreCtx, layout)
 			}
-			if gatewayAdopted && targetsErr == nil {
-				wait := windowsEnterpriseHotConfigTimeout
-				if gatewayOnNewConfig() {
-					wait = windowsEnterpriseHotConfigRestartTimeout
-				}
-				if !windowsEnterpriseHotConfigEnforcesInstalled(restoreCtx, wait) {
-					gatewayErr = errors.New("the gateway did not report the restored config's policy before the deadline")
-				}
+			if targetsErr == nil && !windowsEnterpriseHotConfigEnforcesInstalled(restoreCtx, wait) {
+				gatewayErr = errors.New("the gateway did not report the restored config's policy before the deadline")
 			}
 		}
 		if restoreErr == nil && targetsErr == nil && gatewayErr == nil {
@@ -439,12 +445,13 @@ func windowsEnterpriseHotConfigApply(
 		}
 	}
 	if len(startOnly) > 0 {
+		// The undo restarts (or starts) the gateway on the restored config
+		// after a failed restart too, and proves it; an undo it cannot prove
+		// leaves the gateway stopped on purpose.
+		gatewayRestartAttempted = true
 		restarted, restartErr := windowsEnterpriseHotConfigRestart()
-		if restarted {
-			gatewayRestarted = true
-			if opts.bundle != nil {
-				opts.bundle.gatewayRestarted = true
-			}
+		if restarted && opts.bundle != nil {
+			opts.bundle.gatewayRestarted = true
 		}
 		if restartErr != nil || !restarted {
 			undo()
@@ -453,13 +460,6 @@ func windowsEnterpriseHotConfigApply(
 				message += ": " + windowsEnterpriseBoundedDiagnostic(restartErr.Error())
 			}
 			failBundle("bundle_gateway_restart_failed", message)
-			// An undo that could not be proven left the gateway stopped on
-			// purpose; it is not started again on the config it left.
-			if !opts.hotConfigRestoreFailed {
-				if recovered, _ := windowsEnterpriseHotConfigRecover(); recovered && opts.bundle != nil {
-					opts.bundle.gatewayRestarted = true
-				}
-			}
 			return false, startOnly
 		}
 	}
@@ -472,7 +472,6 @@ func windowsEnterpriseHotConfigApply(
 		failBundle("bundle_policy_not_adopted", "the gateway did not report the bundle policy, generation and identity before the apply deadline")
 		return false, nil
 	}
-	gatewayAdopted = true
 	// The enumerator publishes the targets the new config enrolls, as the
 	// upgrade transaction does; the guardian reconciles them with the config
 	// it reloads (enterpriseHookStandaloneConfigRefresh).
@@ -587,15 +586,19 @@ func windowsEnterpriseHotConfigAdopted(ctx context.Context, wait time.Duration, 
 }
 
 // windowsEnterpriseHotConfigEnforcesInstalled waits for the gateway to
-// report the effective policy the installed config computes to, with no
-// rejected reload: the proof that an undo reached the running gateway.
+// report the effective policy the installed config computes to: the proof
+// that an undo reached the running gateway. The reported digest is the live
+// generation's, the one every hook is decided by. A reload error is not
+// part of the proof: a rejected rebuild keeps the live generation, so a
+// gateway that rejected the undone config and still runs the restored
+// policy is proven, while one that runs the undone policy never reports
+// the restored digest, whatever its reload error says.
 func windowsEnterpriseHotConfigEnforcesInstalled(ctx context.Context, wait time.Duration) bool {
 	deadline := time.Now().Add(wait)
 	for {
 		out, _ := windowsEnterprisePolicyDigest(ctx)
 		var report policyDigestReport
-		if json.Unmarshal(out, &report) == nil && report.Digest != "" &&
-			report.Digest == report.GatewayReportedDigest && report.GatewayLastReloadError == "" {
+		if json.Unmarshal(out, &report) == nil && report.Digest != "" && report.Digest == report.GatewayReportedDigest {
 			return true
 		}
 		if ctx.Err() != nil || !time.Now().Before(deadline) {
