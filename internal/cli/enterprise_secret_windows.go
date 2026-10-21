@@ -866,6 +866,51 @@ func (s scmGatewayService) stop() error {
 
 func (s scmGatewayService) start() error { return s.service.Start() }
 
+// stopWindowsStandaloneGatewayFailClosed stops the gateway service after a
+// hot config undo that could not be proven, and returns nil only once the
+// service manager reports it stopped (or there is no gateway service). The
+// hooks then treat it as an outage. Nothing starts it again but a lifecycle
+// run: the hook guardian never starts the gateway, and the service manager
+// restarts it only after a crash.
+func stopWindowsStandaloneGatewayFailClosed() error {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return nil
+		}
+		return err
+	}
+	defer service.Close()
+	status, err := service.Query()
+	if err != nil {
+		return err
+	}
+	if status.State != svc.Stopped && status.State != svc.StopPending {
+		if _, err := service.Control(svc.Stop); err != nil && !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) {
+			return fmt.Errorf("stop %s: %w", managed.StandaloneWindowsGatewaySvc, err)
+		}
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		status, err = service.Query()
+		if err != nil {
+			return err
+		}
+		if status.State == svc.Stopped {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("%s did not stop within 60s", managed.StandaloneWindowsGatewaySvc)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
 // windowsStandaloneGatewayPID observes the SCM process identity around an
 // installer transaction. A bundle receipt records a restart only when the
 // gateway process actually changed. A starting gateway has a process

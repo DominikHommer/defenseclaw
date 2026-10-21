@@ -94,7 +94,7 @@ func TestWindowsScannerRuntimeOlderRunDoesNotReplaceANewerRuntime(t *testing.T) 
 		return winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, ProductVersion: "1.5.0"}
 	})
 	opts := &windowsEnterpriseLifecycleOptions{resolvedInstaller: installer, trustMode: windowsEnterpriseTrustAuthenticode,
-		allowUnsigned: true, productVersion: "1.4.0"}
+		productVersion: "1.4.0"}
 	result := enterprisestatus.New("upgrade", managed.ProfileStandalone, "windows", "1.4.0")
 	applyWindowsStandaloneScannerRuntime(result, opts)
 	if _, err := os.Lstat(filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)); !errors.Is(err, os.ErrNotExist) {
@@ -136,7 +136,7 @@ func TestWindowsScannerRuntimeUpgradeOvertakenByUninstallDoesNotRecreateIt(t *te
 		return winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentTombstone, ProductVersion: "1.0.4"}
 	})
 	opts := &windowsEnterpriseLifecycleOptions{resolvedInstaller: installer, trustMode: windowsEnterpriseTrustAuthenticode,
-		allowUnsigned: true, productVersion: "1.0.4"}
+		productVersion: "1.0.4"}
 	gateway, err := managed.WindowsServiceAccountSID(windowsScannerGatewayAccount)
 	if err != nil {
 		t.Fatal(err)

@@ -100,16 +100,22 @@ func newWindowsBundleRestoreHost(t *testing.T) *windowsBundleRestoreHost {
 
 	elevated, hotLayout, lock := windowsEnterpriseIsElevated, windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock
 	running, reload, restart := windowsBundleRestoreGatewayRunning, windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigRestart
+	failClosed := windowsEnterpriseHotConfigFailClosed
 	timeout, restartTimeout, poll := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	t.Cleanup(func() {
 		windowsEnterpriseIsElevated, windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = elevated, hotLayout, lock
 		windowsBundleRestoreGatewayRunning, windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigRestart = running, reload, restart
+		windowsEnterpriseHotConfigFailClosed = failClosed
 		windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll = timeout, restartTimeout, poll
 	})
 	windowsEnterpriseIsElevated = func() bool { return true }
 	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
 	windowsEnterpriseHotConfigLock = func(string) (func(), error) { host.locks++; return func() {}, nil }
 	windowsBundleRestoreGatewayRunning = func() bool { return false }
+	windowsEnterpriseHotConfigFailClosed = func() error {
+		t.Error("the restore stopped the gateway")
+		return nil
+	}
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { host.reloads++; return nil }
 	windowsEnterpriseHotConfigRestart = func() (bool, error) {
 		t.Error("the restore restarted a gateway that adopted the re-applied bundle")

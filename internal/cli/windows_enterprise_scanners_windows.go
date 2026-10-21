@@ -137,6 +137,22 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 		// deployment's scanners as status does (GAP-0103).
 		action = "status"
 	}
+	if windowsScannerRuntimeCertificationRun(opts) {
+		// The runtime root, its admission record and its service ACL are
+		// the production deployment's, whichever scope this run targets
+		// (review loop round 3).
+		switch action {
+		case "install", "upgrade", "repair", "ensure", "uninstall":
+			if len(result.Errors) == 0 {
+				result.AddWarning("scanner_runtime_not_scoped", windowsScannerRuntimeNotScoped)
+			}
+		case "status", "verify":
+			if result.Installed {
+				result.AddWarning("scanner_runtime_not_scoped", windowsScannerRuntimeNotScoped)
+			}
+		}
+		return
+	}
 	switch action {
 	case "install", "upgrade", "repair", "ensure":
 		if len(result.Errors) != 0 || opts == nil {
@@ -236,6 +252,24 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 // windowsScannerRuntimeReader is readWindowsScannerRuntime; a seam for tests.
 var windowsScannerRuntimeReader = readWindowsScannerRuntime
 
+// windowsScannerRuntimeNotScoped is the warning of a certification-scope run.
+const windowsScannerRuntimeNotScoped = "this certification scope does not install, replace, prepare, remove or report the scanner runtime: " +
+	"its folder, admission record and access list belong to the production deployment, which every gateway on this computer runs scans from; " +
+	"scans in this scope fail closed unless the production deployment has a ready runtime"
+
+// windowsScannerRuntimeCertificationRun reports a run that must leave the
+// scanner runtime alone: a certification scope (its own roots or service
+// names) or an unsigned certification run. The runtime root is one folder
+// per computer, the one the production gateway runs every scan from, while
+// such a run reads and writes its own deployment record. Before, a
+// certification install published an unsigned scanner and its admission
+// record into that folder, and a certification uninstall removed it while
+// production stayed installed (review loop round 3).
+func windowsScannerRuntimeCertificationRun(opts *windowsEnterpriseLifecycleOptions) bool {
+	return opts != nil && (windowsEnterpriseCertificationScope(opts) ||
+		strings.TrimSpace(opts.certificationCodexHome) != "" || opts.allowUnsigned)
+}
+
 // windowsScannerRuntimeACLCheck checks that only administrators and
 // LocalSystem can change the installed runtime root and executable; a seam
 // for tests, whose temporary folders are not.
@@ -294,18 +328,11 @@ func (e *windowsScannerRuntimeSupersededError) Error() string {
 	return "a later lifecycle run installed " + installed + "; this run (" + e.run + ") left the scanner runtime to it"
 }
 
-// windowsScannerRuntimeDeployment reads the standalone deployment record the
-// scanner step checks while it holds the scanner runtime lock; a seam for
-// tests.
-var windowsScannerRuntimeDeployment = readWindowsScannerRuntimeDeployment
-
-func readWindowsScannerRuntimeDeployment(opts *windowsEnterpriseLifecycleOptions) (winpath.EnterpriseDeployment, error) {
-	if opts != nil {
-		if stateRoot := strings.TrimSpace(opts.stateRoot); stateRoot != "" {
-			return winpath.InspectEnterpriseDeploymentAt(managed.ProfileStandalone,
-				filepath.Join(stateRoot, "install", "deployment.json"))
-		}
-	}
+// windowsScannerRuntimeDeployment reads the production standalone deployment
+// record, the owner of the scanner runtime, which the scanner step checks
+// while it holds the scanner runtime lock; a seam for tests. A
+// certification scope never reaches the step.
+var windowsScannerRuntimeDeployment = func(*windowsEnterpriseLifecycleOptions) (winpath.EnterpriseDeployment, error) {
 	return windowsEnterpriseDeploymentInspector(managed.ProfileStandalone)
 }
 
@@ -619,14 +646,12 @@ func installWindowsScannerRuntime(source, action string, opts *windowsEnterprise
 // runs it on every scan (GAP-0311). The source must be writable only by
 // administrators, and carry a valid Authenticode signature (from a signer
 // --allowed-signer pins, when any is given) or, in hash_pinned mode, the
-// SHA-256 the payload manifest pins. --allow-unsigned waives only the
-// signature, as it does there. digest is the SHA-256 of source.
+// SHA-256 the payload manifest pins. An --allow-unsigned run never gets
+// here (windowsScannerRuntimeCertificationRun), so nothing waives the
+// signature. digest is the SHA-256 of source.
 func admitWindowsScannerRuntimePayload(source, digest string, opts *windowsEnterpriseLifecycleOptions) error {
 	if err := windowsScannerSourceCheck(source, "scanner runtime payload"); err != nil {
 		return err
-	}
-	if opts.allowUnsigned {
-		return nil
 	}
 	status := "not valid"
 	if _, certificate, err := verifyWindowsAuthenticode(source); err == nil {

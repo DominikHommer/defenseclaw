@@ -4746,7 +4746,9 @@ function Add-DefenseClawStateAncestorTraverseRule {
 function Grant-DefenseClawStateAncestorTraverse {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$GatewayServiceSID
+        [Parameter(Mandatory)][string]$GatewayServiceSID,
+        # The StateRoot of the deployment scope the grant is for.
+        [Parameter(Mandatory)][string]$Scope
     )
     Assert-DefenseClawNoReparsePath -Path $Path
     Assert-DefenseClawTrustedAncestor -Path $Path
@@ -4763,7 +4765,7 @@ function Grant-DefenseClawStateAncestorTraverse {
     # The standalone vendor directory also needs the standard users' check
     # entry (GAP-0578); never on the Secure Client profile.
     if (Test-DefenseClawStandaloneVendorDirectory -Path $Path) {
-        Grant-DefenseClawStandaloneVendorUsersRead -Path $Path
+        Grant-DefenseClawStandaloneVendorUsersRead -Path $Path -Scope $Scope
     }
 }
 
@@ -4849,7 +4851,10 @@ $script:VendorDirectoryUsersRights = [Security.AccessControl.FileSystemRights](0
 # Which of those rights Setup added to the vendor directory's Users entry,
 # recorded in the protected lifecycle directory. An uninstall gives back
 # only those, so an entry an administrator had set (with any rights) stays
-# as it was (GAP-0867, review loop round 2).
+# as it was (GAP-0867, review loop round 2). The production deployment and
+# every certification scope share the directory and this record, so it also
+# names each scope (its StateRoot) that relies on those rights; they are
+# given back only when no scope does (review loop round 3).
 $script:VendorUsersReadGrantLeaf = 'vendor-users-read-grant.json'
 
 # The SID of this computer's own account domain (its SAM), read once, or ''
@@ -4997,14 +5002,22 @@ function Get-DefenseClawVendorUsersReadGrantPath {
     )
 }
 
-# The rights Setup recorded adding to Path's Users entry, or 0 when it
-# recorded none for Path. A record that cannot be read counts as none, so
-# nothing is taken away on its word.
-function Get-DefenseClawVendorUsersReadGrant {
+# A deployment scope as the grant record names it: its full StateRoot.
+function ConvertTo-DefenseClawVendorGrantScope {
+    param([Parameter(Mandatory)][string]$Scope)
+    return [IO.Path]::GetFullPath($Scope).TrimEnd('\')
+}
+
+# The grant record for Path: the rights Setup recorded adding to its Users
+# entry and the scopes that rely on them, or $null when it recorded none for
+# Path. A record that cannot be read counts as none, so nothing is taken
+# away on its word. A record without scopes (written by a 1.0.4 development
+# build) is the production deployment's.
+function Get-DefenseClawVendorUsersReadGrantRecord {
     param([Parameter(Mandatory)][string]$Path)
     $recordPath = Get-DefenseClawVendorUsersReadGrantPath
     if (-not [IO.File]::Exists($recordPath)) {
-        return [int64]0
+        return $null
     }
     try {
         Assert-DefenseClawNoReparsePath -Path $recordPath
@@ -5016,20 +5029,62 @@ function Get-DefenseClawVendorUsersReadGrant {
                 [IO.Path]::GetFullPath($Path).TrimEnd('\'),
                 [StringComparison]::OrdinalIgnoreCase
             )) {
-            return [int64]0
+            return $null
         }
-        return ([int64]$record.added_rights -band [int64]$script:VendorDirectoryUsersRights)
+        $added = [int64]$record.added_rights -band [int64]$script:VendorDirectoryUsersRights
+        if ($added -eq 0) {
+            return $null
+        }
+        $scopes = [Collections.Generic.List[string]]::new()
+        $recorded = if ($null -ne $record.PSObject.Properties['scopes']) {
+            @($record.scopes)
+        }
+        else {
+            @([string](Get-DefenseClawProfileRoots -EnterpriseProfile Standalone).StateRoot)
+        }
+        foreach ($scope in $recorded) {
+            if ([string]::IsNullOrWhiteSpace([string]$scope)) {
+                continue
+            }
+            $scope = ConvertTo-DefenseClawVendorGrantScope -Scope ([string]$scope)
+            if (-not ($scopes | Microsoft.PowerShell.Core\Where-Object { [string]::Equals($_, $scope, [StringComparison]::OrdinalIgnoreCase) })) {
+                $scopes.Add($scope)
+            }
+        }
+        return [pscustomobject]@{ AddedRights = $added; Scopes = [string[]]$scopes.ToArray() }
     }
     catch {
         Microsoft.PowerShell.Utility\Write-Warning "the vendor directory grant record is unreadable, so its Users entry is kept: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# The rights Setup recorded adding to Path's Users entry, or 0 when it
+# recorded none for Path.
+function Get-DefenseClawVendorUsersReadGrant {
+    param([Parameter(Mandatory)][string]$Path)
+    $record = Get-DefenseClawVendorUsersReadGrantRecord -Path $Path
+    if ($null -eq $record) {
         return [int64]0
     }
+    return [int64]$record.AddedRights
+}
+
+# The scopes the grant record for Path names, or none.
+function Get-DefenseClawVendorUsersReadGrantScopes {
+    param([Parameter(Mandatory)][string]$Path)
+    $record = Get-DefenseClawVendorUsersReadGrantRecord -Path $Path
+    if ($null -eq $record) {
+        return [string[]]@()
+    }
+    return [string[]]$record.Scopes
 }
 
 function Set-DefenseClawVendorUsersReadGrant {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][int64]$AddedRights
+        [Parameter(Mandatory)][int64]$AddedRights,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Scopes
     )
     $recordPath = Get-DefenseClawVendorUsersReadGrantPath
     $directory = [IO.Path]::GetDirectoryName($recordPath)
@@ -5039,15 +5094,41 @@ function Set-DefenseClawVendorUsersReadGrant {
             -Label 'lifecycle lock directory' `
             -RequiredBase $script:ProgramData
     }
+    $named = [Collections.Generic.List[string]]::new()
+    foreach ($scope in $Scopes) {
+        $scope = ConvertTo-DefenseClawVendorGrantScope -Scope $scope
+        if (-not ($named | Microsoft.PowerShell.Core\Where-Object { [string]::Equals($_, $scope, [StringComparison]::OrdinalIgnoreCase) })) {
+            $named.Add($scope)
+        }
+    }
     Write-DefenseClawProtectedTextAtomic `
         -Value ([ordered]@{
-                schema_version = 1
+                schema_version = 2
                 path = [IO.Path]::GetFullPath($Path).TrimEnd('\')
                 sid = $script:UsersSID
                 added_rights = $AddedRights
-            } | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 2) `
+                scopes = [string[]]$named.ToArray()
+            } | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 3) `
         -Path $recordPath `
         -RequiredRoot $directory
+}
+
+# Adds Scope to the scopes of Path's grant record, when there is one: a
+# scope that finds the rights another scope's Setup added relies on them too.
+function Register-DefenseClawVendorUsersReadGrantScope {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Scope,
+        [AllowNull()][object]$Record
+    )
+    if ($null -eq $Record) {
+        return
+    }
+    $scope = ConvertTo-DefenseClawVendorGrantScope -Scope $Scope
+    if (@($Record.Scopes | Microsoft.PowerShell.Core\Where-Object { [string]::Equals($_, $scope, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
+        return
+    }
+    Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights ([int64]$Record.AddedRights) -Scopes ([string[]]@(@($Record.Scopes) + $scope))
 }
 
 function Remove-DefenseClawVendorUsersReadGrant {
@@ -5066,9 +5147,16 @@ function Remove-DefenseClawVendorUsersReadGrant {
 # check the directory. Only the rights the directory's Users entry lacked
 # are recorded as added, before the entry is written, so an uninstall never
 # takes away rights an administrator had set (Revoke-DefenseClawStandaloneVendorUsersRead).
+# Scope (the deployment's StateRoot) is recorded as relying on them, also
+# when another scope's Setup added them.
 function Grant-DefenseClawStandaloneVendorUsersRead {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Scope
+    )
+    $record = Get-DefenseClawVendorUsersReadGrantRecord -Path $Path
     if (Test-DefenseClawStandaloneVendorUsersRead -Path $Path) {
+        Register-DefenseClawVendorUsersReadGrantScope -Path $Path -Scope $Scope -Record $record
         return
     }
     Assert-DefenseClawNoReparsePath -Path $Path
@@ -5080,10 +5168,16 @@ function Grant-DefenseClawStandaloneVendorUsersRead {
     }
     $added = [int64]$script:VendorDirectoryUsersRights -band (-bnot $present)
     if ($added -eq 0) {
+        Register-DefenseClawVendorUsersReadGrantScope -Path $Path -Scope $Scope -Record $record
         return
     }
-    $recorded = Get-DefenseClawVendorUsersReadGrant -Path $Path
-    Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights ($recorded -bor $added)
+    $recordedRights = [int64]0
+    $recordedScopes = [string[]]@()
+    if ($null -ne $record) {
+        $recordedRights = [int64]$record.AddedRights
+        $recordedScopes = [string[]]$record.Scopes
+    }
+    Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights ($recordedRights -bor $added) -Scopes ([string[]]@(@($recordedScopes) + $Scope))
     [void]$security.AddAccessRule(
         [Security.AccessControl.FileSystemAccessRule]::new(
             [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
@@ -5097,25 +5191,47 @@ function Grant-DefenseClawStandaloneVendorUsersRead {
         Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
     }
     catch {
-        if ($recorded -eq 0) {
+        if ($null -eq $record) {
             Remove-DefenseClawVendorUsersReadGrant
         }
         else {
-            Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights $recorded
+            Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights $recordedRights -Scopes $recordedScopes
         }
         throw
     }
 }
 
 # Gives back the rights Grant-DefenseClawStandaloneVendorUsersRead recorded
-# adding, when the gateway gives back its own. The Users entry keeps every
-# other right, so an entry an administrator had set (or one an earlier
-# release added, which recorded nothing) stays as it was; it grants only the
-# check of that one directory. Then the record goes, whatever it said, so a
-# purge leaves no lifecycle folder behind for it.
+# adding, when the gateway of Scope gives back its own and no other scope
+# relies on them. Production and certification scopes share the vendor
+# directory: a certification rollback or uninstall used to read the
+# production Setup's record and take its rights away, so production hooks
+# failed the vendor directory check (review loop round 3). A scope whose
+# StateRoot is gone (removed without an uninstall) no longer counts. The
+# Users entry keeps every other right, so an entry an administrator had set
+# (or one an earlier release added, which recorded nothing) stays as it
+# was; it grants only the check of that one directory. When the last scope
+# goes, the record goes too, whatever it said, so a purge leaves no
+# lifecycle folder behind for it.
 function Revoke-DefenseClawStandaloneVendorUsersRead {
-    param([Parameter(Mandatory)][string]$Path)
-    $added = Get-DefenseClawVendorUsersReadGrant -Path $Path
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Scope
+    )
+    $record = Get-DefenseClawVendorUsersReadGrantRecord -Path $Path
+    $added = [int64]0
+    if ($null -ne $record) {
+        $scope = ConvertTo-DefenseClawVendorGrantScope -Scope $Scope
+        $others = [string[]]@($record.Scopes | Microsoft.PowerShell.Core\Where-Object {
+                -not [string]::Equals($_, $scope, [StringComparison]::OrdinalIgnoreCase) -and
+                [IO.Directory]::Exists($_)
+            })
+        if ($others.Count -gt 0) {
+            Set-DefenseClawVendorUsersReadGrant -Path $Path -AddedRights ([int64]$record.AddedRights) -Scopes $others
+            return
+        }
+        $added = [int64]$record.AddedRights
+    }
     if ($added -ne 0 -and
         (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Container)) {
         Assert-DefenseClawNoReparsePath -Path $Path
@@ -8959,7 +9075,7 @@ function Set-DefenseClawManagedAcls {
         Set-DefenseClawPathAcl -Path $Layout.CLIPath -Kind InstallFile -GatewayServiceSID $gatewaySID
     }
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
-        Grant-DefenseClawStateAncestorTraverse -Path $ancestor -GatewayServiceSID $gatewaySID
+        Grant-DefenseClawStateAncestorTraverse -Path $ancestor -GatewayServiceSID $gatewaySID -Scope ([string]$Layout.StateRoot)
     }
     if (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.ManagedIPCDirectory `
@@ -14309,7 +14425,7 @@ function Restore-DefenseClawTransaction {
                 -Path $ancestor `
                 -GatewayServiceSID $rolledBackGatewaySID
             if (Test-DefenseClawStandaloneVendorDirectory -Path $ancestor) {
-                Revoke-DefenseClawStandaloneVendorUsersRead -Path $ancestor
+                Revoke-DefenseClawStandaloneVendorUsersRead -Path $ancestor -Scope ([string]$Layout.StateRoot)
             }
         }
     }
@@ -29473,7 +29589,7 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
             -Path $ancestor `
             -GatewayServiceSID $cleanupGatewaySID
         if (Test-DefenseClawStandaloneVendorDirectory -Path $ancestor) {
-            Revoke-DefenseClawStandaloneVendorUsersRead -Path $ancestor
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $ancestor -Scope ([string]$Layout.StateRoot)
         }
     }
     if ($Purge) {
