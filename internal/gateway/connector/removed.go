@@ -532,66 +532,62 @@ func removedOmnigentImportLine(line, hookDir string) bool {
 // the parsed policy_modules entry, and a policy whose handler is in
 // DefenseClaw's module, followed through YAML aliases and merge keys.
 // Comments, other modules and another tool's policy under DefenseClaw's old
-// key do not count.
+// key do not count. A config naming the module that does not load as plain
+// YAML (a key set twice) is an error: which entry OmniGent uses is unknown.
 func removedOmnigentConfigLoadsPolicy(path string) (bool, error) {
-	document, err := readRemovedOmnigentConfig(path)
-	if err != nil || document == nil {
+	config, err := readRemovedOmnigentConfig(path)
+	if err != nil || config == nil {
 		return false, err
 	}
-	return removedOmnigentDocumentLoadsPolicy(document), nil
+	return config.loadsPolicy(), nil
 }
 
-// removedOmnigentDocumentLoadsPolicy applies both readings of a parsed
-// config: the decoded value OmniGent's YAML loader would see (aliases and
-// merge keys resolved), and the node rule cleanup uses, which also sees every
-// copy of a duplicated key. It consumes document.
-func removedOmnigentDocumentLoadsPolicy(document *yaml.Node) bool {
-	var value interface{}
-	if err := document.Decode(&value); err == nil && removedOmnigentValueLoadsPolicy(value) {
-		return true
-	}
-	return pruneRemovedOmnigentConfig(document.Content[0])
+// removedOmnigentConfig is a parsed OmniGent config: the node tree cleanup
+// edits, and the value OmniGent's YAML loader sees (aliases and merge keys
+// resolved).
+type removedOmnigentConfig struct {
+	document *yaml.Node
+	value    interface{}
+}
+
+// loadsPolicy applies both readings of a parsed config: the decoded value,
+// and the node rule cleanup uses. It consumes the node tree.
+func (c *removedOmnigentConfig) loadsPolicy() bool {
+	return removedOmnigentValueLoadsPolicy(c.value) || pruneRemovedOmnigentConfig(c.document.Content[0])
 }
 
 // removeRemovedOmnigentConfigEntries removes DefenseClaw's module from
 // policy_modules and every policy whose handler is in DefenseClaw's module
 // from policies; every other key and entry stays. An alias left naming a
 // removed anchor is replaced by a copy of what it named, and the result must
-// parse and no longer load DefenseClaw's policy before it replaces the file.
+// parse, load and no longer load DefenseClaw's policy before it replaces the
+// file. A config that does not load as plain YAML is left as it is.
 func removeRemovedOmnigentConfigEntries(path string) error {
-	document, err := readRemovedOmnigentConfig(path)
-	if err != nil || document == nil {
+	config, err := readRemovedOmnigentConfig(path)
+	if err != nil || config == nil {
 		return err
 	}
-	var before interface{}
-	decodable := document.Decode(&before) == nil
-	if !pruneRemovedOmnigentConfig(document.Content[0]) {
-		if decodable && removedOmnigentValueLoadsPolicy(before) {
+	if !pruneRemovedOmnigentConfig(config.document.Content[0]) {
+		if removedOmnigentValueLoadsPolicy(config.value) {
 			return fmt.Errorf("%s %s", path, removedOmnigentUneditable)
 		}
 		return nil
 	}
-	if err := expandDanglingYAMLAliases(document); err != nil {
+	if err := expandDanglingYAMLAliases(config.document); err != nil {
 		return fmt.Errorf("%s: %w; remove DefenseClaw's entries by hand", path, err)
 	}
-	updated, err := yaml.Marshal(document)
+	updated, err := yaml.Marshal(config.document)
 	if err != nil {
 		return err
 	}
-	var check yaml.Node
-	if err := yaml.Unmarshal(updated, &check); err != nil {
-		return fmt.Errorf("%s: the cleaned config would not parse (%v); remove DefenseClaw's entries by hand", path, err)
+	check, err := parseRemovedOmnigentConfig(updated)
+	if err != nil {
+		return fmt.Errorf("%s: the cleaned config would not load (%v); remove DefenseClaw's entries by hand", path, err)
 	}
-	if len(check.Content) != 1 || check.Content[0].Kind != yaml.MappingNode {
+	if check == nil {
 		return fmt.Errorf("%s: the cleaned config would not be a mapping; remove DefenseClaw's entries by hand", path)
 	}
-	var after interface{}
-	if decodable {
-		if err := check.Decode(&after); err != nil {
-			return fmt.Errorf("%s: the cleaned config would not load (%v); remove DefenseClaw's entries by hand", path, err)
-		}
-	}
-	if removedOmnigentDocumentLoadsPolicy(&check) {
+	if check.loadsPolicy() {
 		return fmt.Errorf("%s %s", path, removedOmnigentUneditable)
 	}
 	return atomicWriteFile(path, updated, 0o600)
@@ -600,11 +596,10 @@ func removeRemovedOmnigentConfigEntries(path string) error {
 const removedOmnigentUneditable = "still loads DefenseClaw's policy through YAML cleanup cannot edit safely (a merge key); remove DefenseClaw's entries by hand"
 
 // readRemovedOmnigentConfig parses an OmniGent config that mentions
-// DefenseClaw's module into a document whose only child is the top-level
-// mapping. A missing or empty file, or one that never names the module
-// (every entry an older release wrote does), returns nil: there is nothing of
-// DefenseClaw's in it, even if another tool's YAML does not parse.
-func readRemovedOmnigentConfig(path string) (*yaml.Node, error) {
+// DefenseClaw's module. A missing or empty file, or one that never names the
+// module (every entry an older release wrote does), returns nil: there is
+// nothing of DefenseClaw's in it, even if another tool's YAML does not parse.
+func readRemovedOmnigentConfig(path string) (*removedOmnigentConfig, error) {
 	data, err := readHookConfigFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -615,24 +610,43 @@ func readRemovedOmnigentConfig(path string) (*yaml.Node, error) {
 	if !strings.Contains(string(data), removedOmnigentModuleName) {
 		return nil, nil
 	}
+	config, err := parseRemovedOmnigentConfig(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse YAML %s: %w", path, err)
+	}
+	return config, nil
+}
+
+// parseRemovedOmnigentConfig parses config.yaml bytes into a document whose
+// only child is the top-level mapping, plus its decoded value; empty YAML
+// returns nil. The bytes must also decode. A key set twice in one mapping (a
+// policy's handler or merge key, a policy name, policies or policy_modules)
+// does not: which copy OmniGent uses is up to its YAML loader, so cleanup
+// could drop a policy whose effective handler is another tool's, or pass one
+// that still loads DefenseClaw's. Such a config is refused, not guessed at,
+// and teardown keeps its state until the file is fixed.
+func parseRemovedOmnigentConfig(data []byte) (*removedOmnigentConfig, error) {
 	var document yaml.Node
 	if err := yaml.Unmarshal(data, &document); err != nil {
-		return nil, fmt.Errorf("parse YAML %s: %w", path, err)
+		return nil, err
 	}
 	if len(document.Content) == 0 {
 		return nil, nil
 	}
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("parse YAML %s: expected a mapping", path)
+		return nil, errors.New("expected a mapping")
 	}
-	return &document, nil
+	var value interface{}
+	if err := document.Decode(&value); err != nil {
+		return nil, fmt.Errorf("%w; cleanup cannot tell which entry OmniGent uses (a key set twice?), so remove DefenseClaw's entries by hand", err)
+	}
+	return &removedOmnigentConfig{document: &document, value: value}, nil
 }
 
 // pruneRemovedOmnigentConfig removes DefenseClaw's entries from a parsed
-// config mapping and reports whether there were any. Every matching key is
-// handled, so a duplicate key cannot hide one, and values are followed
-// through YAML aliases: a list or policies mapping that is an alias is
-// edited where its anchor is.
+// config mapping and reports whether there were any. Values are followed
+// through YAML aliases: a list or policies mapping that is an alias is edited
+// where its anchor is.
 func pruneRemovedOmnigentConfig(root *yaml.Node) bool {
 	changed := false
 	for i := 0; i+1 < len(root.Content); i += 2 {
@@ -703,26 +717,20 @@ func removedOmnigentModuleEntry(node *yaml.Node) bool {
 // aliases; an entry without its own handler takes the first one its merge
 // keys (<<) bring in, as a YAML loader does.
 func removedOmnigentOwnedPolicy(entry *yaml.Node) bool {
-	handlers := removedOmnigentPolicyHandlers(entry, 0)
-	for _, handler := range handlers {
-		if strings.HasPrefix(strings.TrimSpace(handler), removedOmnigentModuleName+".") {
-			return true
-		}
-	}
-	return false
+	handler, _ := removedOmnigentPolicyHandler(entry, 0)
+	return strings.HasPrefix(strings.TrimSpace(handler), removedOmnigentModuleName+".")
 }
 
-// removedOmnigentPolicyHandlers returns the handler values a policy mapping
-// sets itself (every copy of a duplicated key), or else the handlers of the
-// first merge source that sets one.
-func removedOmnigentPolicyHandlers(entry *yaml.Node, depth int) []string {
+// removedOmnigentPolicyHandler returns the handler a policy mapping sets
+// itself, or else the one of the first merge source that sets one, and
+// whether one is set ("" when it is not a scalar). The mapping holds each key
+// once: parseRemovedOmnigentConfig refuses a config with a key set twice.
+func removedOmnigentPolicyHandler(entry *yaml.Node, depth int) (string, bool) {
 	entry = resolveYAMLAlias(entry)
 	if entry == nil || entry.Kind != yaml.MappingNode || depth > maxYAMLAliasDepth {
-		return nil
+		return "", false
 	}
-	var handlers []string
 	var merges []*yaml.Node
-	own := false
 	for k := 0; k+1 < len(entry.Content); k += 2 {
 		key, value := resolveYAMLAlias(entry.Content[k]), resolveYAMLAlias(entry.Content[k+1])
 		if key == nil || value == nil || key.Kind != yaml.ScalarNode {
@@ -736,21 +744,18 @@ func removedOmnigentPolicyHandlers(entry *yaml.Node, depth int) []string {
 				merges = append(merges, value)
 			}
 		case key.Value == "handler":
-			own = true
-			if value.Kind == yaml.ScalarNode {
-				handlers = append(handlers, value.Value)
+			if value.Kind != yaml.ScalarNode {
+				return "", true
 			}
+			return value.Value, true
 		}
-	}
-	if own {
-		return handlers
 	}
 	for _, source := range merges {
-		if inherited := removedOmnigentPolicyHandlers(source, depth+1); len(inherited) > 0 {
-			return inherited
+		if handler, ok := removedOmnigentPolicyHandler(source, depth+1); ok {
+			return handler, true
 		}
 	}
-	return nil
+	return "", false
 }
 
 // removedOmnigentValueLoadsPolicy reports whether a decoded config (aliases

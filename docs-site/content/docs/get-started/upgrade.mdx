@@ -88,9 +88,7 @@ This applies if you used Windsurf, Gemini CLI, OpenHands or OmniGent before 1.0.
 
 - **Windsurf is now Devin.** The upgrade moves your `windsurf` settings to the [`devin` connector](/docs/connectors/devin) and replaces the old hooks. You do nothing.
 - **Gemini CLI was removed.** Use [Antigravity](/docs/connectors/antigravity). Remove DefenseClaw's hooks from Gemini CLI's settings once.
-- **OpenHands and OmniGent were removed.** The `config_version` 9 migration drops their entries from `config.yaml` and records them in `migration-v9.json`, and the upgrade cleans up the hook files and managed files DefenseClaw wrote for them. Set up another agent with `defenseclaw setup <connector>` if one of them was your only connector.
-
-{/* OpenHands and OmniGent wording follows issue #1182 (decision 2026-10-11). Re-check against the G-conn change before release. */}
+- **OpenHands and OmniGent were removed.** The `config_version` 9 migration drops their entries from `config.yaml`, including a telemetry destination whose every route selected only these connectors (`defenseclaw migrate` saves that), and records them in `migration-v9.json`. The first gateway start after the upgrade removes DefenseClaw's hooks from OpenHands (`~/.openhands/hooks.json`) and its policy from OmniGent (the `defenseclaw_omnigent_policy` entries in `~/.omnigent/config.yaml`, the policy module and DefenseClaw's line in its `.pth` file). Hooks and policies from other tools stay. A policy module you edited stays too: a warning names it, and OmniGent no longer loads it. Both agents keep working without DefenseClaw. If the gateway can't clean one of these files (it isn't writable, a key in it is set twice, or YAML merge keys pull the policy in), it leaves the policy module in place, names the file in the gateway log and tries again on every start; fix the file and restart the gateway. `defenseclaw uninstall` removes the same files. Set up another agent with `defenseclaw setup <connector>` if one of them was your only connector.
 
 <Accordions type="multiple">
 
