@@ -1456,40 +1456,43 @@ defenseclaw_missing_token_next_step() {
 # JSON would yield a parse error downstream that's much harder to
 # diagnose than a clear "body too large" error).
 #
-# Why `head -c` and not `dd`/`read`:
-#   - `head -c N` is portable across coreutils + busybox, supported in
-#     POSIX since 2024, and reads exactly N bytes then closes the pipe.
-#   - It does NOT consume more than the cap+1 byte on the input fd,
-#     so a hostile producer streaming 1GB of zeros gets cut off after
-#     the first 1MB+1 — no OOM, no kernel pipe buffer abuse.
-#   - The trailing "1 byte over" is detected by re-reading via
-#     `head -c 1` from the same stdin; if anything remains we know
-#     the cap was breached.
+# A body with a NUL byte is refused the same way. A bash variable cannot hold
+# NUL: command substitution drops it without a word, so the body would reach
+# the gateway altered, and a length check made after the drop undercounts (a
+# NUL-padded body over the cap passed as a shorter one, and the bytes past the
+# cap were never inspected). JSON carries NUL only escaped (\u0000), so no
+# real connector payload has one.
+#
+# How the usual tier reads:
+#   - `head -c cap+1` bounds the read: a producer streaming 1GB is cut off
+#     after cap+1 bytes. One call only: BSD head drains the pipe, so a second
+#     probe (`head -c 1`) would always see EOF.
+#   - bash's `read -r -d ''` takes that output with every byte but NUL intact
+#     (trailing newlines too) and returns 0 only when it stopped at a NUL, so
+#     both checks see the raw bytes. It reads a pipe one byte at a time (about
+#     0.2 s per MiB on Linux, 0.3 s on macOS bash 3.2) and starts no program.
 #
 # Usage:
 #   PAYLOAD="$(defenseclaw_read_stdin_capped)" || exit $?
 #
-# Returns 0 with the body on stdout. Returns 1 (overflow) with an
+# Returns 0 with the body on stdout. Returns 1 (overflow or NUL) with an
 # empty stdout. If `head` is missing we read the body with a bounded
-# python3 reader (overflow still returns 1); only when both head(1) and
-# python3 are absent do we fall back to a legacy unbounded read so the
-# hook still functions on minimal containers, logging it as a
-# transport-category event so operators can spot it.
+# python3 reader (same refusals); only when both head(1) and python3 are
+# absent is the read unbounded (the cap and NUL checks still apply after
+# it), logged as a transport-category event so operators can spot it.
 defenseclaw_read_stdin_capped() {
   # Caller supplies its actual oversized-payload outcome. Legacy callers and
   # reader/tooling diagnostics remain unknown, not presumed fail-open.
   local overflow_outcome="${1:-unknown}"
-  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-unknown}"
-  local hook_name="${DEFENSECLAW_HOOK_NAME:-unknown}"
   local cap="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
   case "$cap" in
     ''|*[!0-9]*) cap=1048576 ;;
   esac
-  # Tier 1 — bounded python3 read, only on a host without head(1). The
-  # head(1) tier below reads cap+1 bytes in one call and compares the length,
-  # which is exact on GNU and BSD head alike, so python3 is not started on
-  # every hook call (issue #1130: it was one of about 15 programs each Claude
-  # Code call ran). python3 reads at most cap+1 bytes and exits 3 on overflow.
+  # Tier 1 — bounded python3 read, only on a host without head(1), so
+  # python3 is not started on every hook call (issue #1130: it was one of
+  # about 15 programs each Claude Code call ran). python3 reads at most cap+1
+  # bytes and exits 4 on a NUL byte, 3 on overflow; the trailing x keeps
+  # the body's trailing newlines through the command substitution.
   #
   # _dc_python3_usable (not a bare `command -v python3`) is the gate:
   # stock macOS hosts without CLT resolve /usr/bin/python3 to a launcher
@@ -1501,49 +1504,63 @@ defenseclaw_read_stdin_capped() {
 'import sys,os
 cap=int(os.environ.get("DCHOOK_CAP","1048576"))
 data=sys.stdin.buffer.read(cap+1)
+if b"\0" in data:
+    sys.exit(4)
 if len(data)>cap:
     sys.exit(3)
-sys.stdout.buffer.write(data)')"
+sys.stdout.buffer.write(data+b"x")')"
     _dc_rc=$?
-    if [ "$_dc_rc" -eq 3 ]; then
-      defenseclaw_log_hook_failure "$connector" "$hook_name" \
-        "stdin body exceeded ${cap} byte cap" transport "${FAIL_MODE:-open}" "$overflow_outcome"
-      echo "defenseclaw: hook payload exceeded ${cap} bytes; refusing to truncate" >&2
-      return 1
-    fi
-    printf '%s' "$_dc_body"
+    case "$_dc_rc" in
+      3) _dc_stdin_refused "$cap" overflow "$overflow_outcome"; return 1 ;;
+      4) _dc_stdin_refused "$cap" nul "$overflow_outcome"; return 1 ;;
+    esac
+    printf '%s' "${_dc_body%x}"
     return 0
   fi
-  # Tier 2 — head(1), the usual reader. Read cap+1 bytes in a
-  # SINGLE call and compare the captured length: a two-call probe
-  # (`head -c cap` then `head -c 1`) is unreliable because BSD head drains
-  # the pipe on the first read, so the second read always sees EOF and an
-  # oversized body would be truncated to cap bytes and accepted. The
-  # `; printf x` + `%x` strip-guard preserves trailing newlines so the
-  # length check is exact (command substitution otherwise trims them).
-  # LANG=C (set by defenseclaw_harden_env) makes ${#body} a byte count.
+  # Tier 2 — head(1), the usual reader (see above).
   if command -v head >/dev/null 2>&1; then
-    local body
-    body="$(head -c "$((cap + 1))"; printf x)"
-    body="${body%x}"
-    if [ "${#body}" -gt "$cap" ]; then
-      defenseclaw_log_hook_failure "$connector" "$hook_name" \
-        "stdin body exceeded ${cap} byte cap" \
-        transport "${FAIL_MODE:-open}" "$overflow_outcome"
-      echo "defenseclaw: hook payload exceeded ${cap} bytes; refusing to truncate" >&2
-      return 1
-    fi
-    printf '%s' "$body"
-    return 0
+    head -c "$((cap + 1))" | _dc_read_stdin_exact "$cap" "$overflow_outcome"
+    return
   fi
-  # Tier 3 — neither python3 nor head present (minimal container): legacy
-  # unbounded read so the hook still functions, logged so operators can
-  # spot the missing-tooling condition.
-  defenseclaw_log_hook_failure "$connector" "$hook_name" \
+  # Tier 3 — neither python3 nor head present (minimal container): the
+  # read is unbounded, logged so operators can spot the missing-tooling
+  # condition; the cap and NUL refusals still apply.
+  defenseclaw_log_hook_failure "${DEFENSECLAW_HOOK_CONNECTOR:-unknown}" "${DEFENSECLAW_HOOK_NAME:-unknown}" \
     "head(1)/python3 missing; reading stdin unbounded (set DEFENSECLAW_HOOK_MAX_BODY)" \
     transport "${FAIL_MODE:-open}"
-  cat
-  return 0
+  _dc_read_stdin_exact "$cap" "$overflow_outcome"
+}
+
+# _dc_read_stdin_exact prints stdin unchanged, or refuses it (returns 1, prints
+# nothing) when it has a NUL byte or more than $1 bytes. LC_ALL=C makes
+# ${#body} a byte count. See defenseclaw_read_stdin_capped.
+_dc_read_stdin_exact() {
+  local cap="$1" outcome="$2" body="" LC_ALL=C
+  if IFS= read -r -d '' body; then
+    _dc_stdin_refused "$cap" nul "$outcome"
+    return 1
+  fi
+  if [ "${#body}" -gt "$cap" ]; then
+    _dc_stdin_refused "$cap" overflow "$outcome"
+    return 1
+  fi
+  printf '%s' "$body"
+}
+
+# _dc_stdin_refused logs and reports a body defenseclaw_read_stdin_capped
+# refused: $2 is overflow or nul, $3 the caller's delivery outcome.
+_dc_stdin_refused() {
+  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-unknown}"
+  local hook_name="${DEFENSECLAW_HOOK_NAME:-unknown}"
+  if [ "$2" = nul ]; then
+    defenseclaw_log_hook_failure "$connector" "$hook_name" \
+      "stdin body has a NUL byte" transport "${FAIL_MODE:-open}" "$3"
+    echo "defenseclaw: hook payload has a NUL byte; refusing to alter it" >&2
+    return 0
+  fi
+  defenseclaw_log_hook_failure "$connector" "$hook_name" \
+    "stdin body exceeded $1 byte cap" transport "${FAIL_MODE:-open}" "$3"
+  echo "defenseclaw: hook payload exceeded $1 bytes; refusing to truncate" >&2
 }
 
 # defenseclaw_validate_traceparent returns 0 when $1 matches the W3C
