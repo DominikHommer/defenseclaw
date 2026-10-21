@@ -289,3 +289,110 @@ func TestWatchdogArmedBeforeRunLogsItsAnswer(t *testing.T) {
 		})
 	}
 }
+
+// G-small loop round 3: a call whose watchdog the hook command armed before
+// Run can fail inside Run before Run adopts that watchdog (an invalid
+// managed runtime, a missing or disabled home, an unknown account, a
+// foreign hook, an oversized payload, a broken Codex binding). Its row uses
+// the watchdog's one account lookup, which started when the watchdog was
+// armed: a second lookup that stalls past the deadline left the watchdog
+// waiting on a row that never came, and the call ended with no row at all.
+func TestEarlyFailureOfAPrearmedCallReusesTheWatchdogLookup(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Options)
+	}{
+		{"invalid managed runtime", func(o *Options) {
+			o.ManagedRuntimeFailure = "enterprise_managed_runtime_untrusted"
+		}},
+		{"unregistered account", func(o *Options) {
+			o.ManagedRuntimeFailure = managedSIDUnregisteredReason
+		}},
+		{"foreign hook blocked", func(o *Options) {
+			o.ManagedRuntimeFailure = ForeignHookBlockedReasonPrefix + "codex"
+		}},
+		{"managed home missing", func(o *Options) {
+			o.Home = filepath.Join(o.Home, "missing")
+		}},
+		{"managed home disabled", func(o *Options) {
+			if err := os.WriteFile(filepath.Join(o.Home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"oversized payload", func(o *Options) {
+			o.MaxBody = 8
+		}},
+		{"broken Codex binding", func(o *Options) {
+			o.HookContractID = ""
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const budget = 600 * time.Millisecond
+			shortAnswerBudget(t, budget)
+			shortAnswerFloor(t)
+			logHome := t.TempDir()
+			rows := filepath.Join(logHome, "logs", "hook-failures.jsonl")
+			stall := make(chan struct{})
+			var lookups atomic.Int32
+			resolve := func() string {
+				if lookups.Add(1) > 1 {
+					<-stall
+				}
+				return logHome
+			}
+			exited := make(chan string, 1)
+			stdout := &firstWriteRecorder{}
+			started := time.Now()
+			watchdog := ArmAnswerWatchdog(Options{
+				Connector: "codex", Event: "PreToolUse", ManagedEnterprise: true,
+				StartedAt: started, Stdout: stdout, Stderr: &strings.Builder{},
+				FailureLogHome: resolve,
+				Exit: func(int) {
+					row, _ := os.ReadFile(rows)
+					exited <- string(row)
+				},
+			}, []byte(`{"hook_event_name":"PreToolUse"}`))
+			if watchdog == nil {
+				t.Fatal("the managed tool call armed no watchdog")
+			}
+			// The armed watchdog's lookup is done before Run begins.
+			<-watchdog.logHome.done
+			returned := make(chan runResult, 1)
+			// Run ends before the budget is restored.
+			t.Cleanup(func() { close(stall); <-returned })
+			go func() {
+				returned <- run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) {
+					managedWindowsStandalone(o)
+					o.StartedAt = started
+					o.FailureLogHome = resolve
+					o.AnswerWatchdog = watchdog
+					o.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`)
+					tc.mutate(o)
+				})
+			}()
+			var row string
+			select {
+			case result := <-returned:
+				returned <- result
+				out, _ := stdout.read()
+				if !blocked(runResult{code: result.code, stdout: out}) {
+					t.Fatalf("the early failure answered exit %d stdout %q, want the managed closed answer", result.code, out)
+				}
+				raw, _ := os.ReadFile(rows)
+				row = string(raw)
+			case row = <-exited:
+				if row == "" {
+					t.Fatalf("the watchdog ended the call with no hook-failures row (%d account lookups)", lookups.Load())
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the call did not end")
+			}
+			if strings.Count(row, "\n") != 1 {
+				t.Fatalf("hook-failures.jsonl = %q, want one row", row)
+			}
+			if n := lookups.Load(); n != 1 {
+				t.Fatalf("the call looked the account up %d times, want once", n)
+			}
+		})
+	}
+}
