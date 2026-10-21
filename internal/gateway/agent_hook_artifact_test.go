@@ -153,6 +153,12 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 	}
 	t.Cleanup(func() { RemoveConnectorRulePackOverrides(connectorName) })
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/stdin", filepath.Join(dir, "stdin-alias")); err != nil {
+		t.Fatal(err)
+	}
 	for i, tc := range []struct {
 		body string
 		want bool
@@ -181,6 +187,15 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 		{"#!/bin/sh\ngrep acme /dev/stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ncat /dev/stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\nhead -n 1 > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		// Any other spelling of stdin, a link to it, a name that does not
+		// exist yet, or a file another command of the script may replace
+		// first (cp, ln, mv) reads it too; a regular file does not.
+		{"#!/bin/sh\ncat /dev/./stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncat /dev//stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ngrep acme stdin-alias > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncp notes.txt copy.txt\ncat notes.txt > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncat missing.txt > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ngrep acme notes.txt <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
 		// A ':' heredoc comment block leaves the parse partial: never enforced.
 		{"#!/bin/sh\n: <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", false},
 	} {

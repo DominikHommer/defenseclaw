@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
@@ -2430,8 +2431,8 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			req.ConnectorName, req.ToolName, runtime.GOOS,
 		)
 		if req.ConnectorName == "copilot" && (req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal ||
-			connector.CopilotVSCodeLocalTool(req.ToolName)) {
-			fallbackTool = connector.CopilotVSCodeLocalActionTool(req.ToolName)
+			copilotargs.LocalTool(req.ToolName)) {
+			fallbackTool = copilotargs.LocalActionTool(req.ToolName)
 		}
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, req.ConnectorName, req.ToolName, fallbackTool,
