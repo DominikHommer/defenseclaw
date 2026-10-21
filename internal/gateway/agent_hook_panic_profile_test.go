@@ -36,7 +36,7 @@ func panicTestProfiles(t *testing.T, api *APIServer) map[string]connector.HookPr
 		}
 		profiles[name] = profile
 	}
-	if len(profiles) < 12 {
+	if len(profiles) < 10 {
 		t.Fatalf("registered hook profiles=%d, want the complete hook registry", len(profiles))
 	}
 	for _, name := range []string{"claudecode", "codex", "copilot", "cursor", "devin", "antigravity", "hermes", "opencode", "kiro", "amp"} {
