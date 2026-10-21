@@ -303,6 +303,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		DefenseClawVersion: manager.ImageVersion(),
 		GatewayResources:   manager.GatewayConfigResources(""),
 		VMDiskFree:         manager.GatewayVMDiskFree(""),
+		StartLock:          func() (func(), error) { return openshell.LockSandboxStart("") },
 		OnGateway:          rt.gatewayState,
 		Listeners:          rt.listenersReady,
 		DiscoveryRemoved:   discoveryRemoved,

@@ -1537,7 +1537,7 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	}
 	if s.errored {
 		// Every gateway DefenseClaw starts a session on stops a sandbox in
-		// that state and starts it again (openshell.SandboxMin).
+		// that state and starts it again (openshell.SupportedMin).
 		a.note("Sandbox " + name + " is in OpenShell's error state → fix what stopped it, then `" + CommandName + " stop " + name +
 			"` and `" + CommandName + " start " + name + "`, which keep the sandbox and its work")
 		return nil

@@ -395,6 +395,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 "take a new snapshot even if the folder still has an earlier session's changes "
                 "(undo no longer reverts them)",
             ),
+            _Flag(
+                "end-vm",
+                "bool",
+                "start a MicroVM whose workload completed or failed though its VM still runs: OpenShell ends "
+                "that VM with no flush first, so what it has not written to its disk is lost",
+            ),
         ),
     ),
     _Cmd(

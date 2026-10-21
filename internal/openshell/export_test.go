@@ -17,18 +17,17 @@
 package openshell
 
 import (
-	"context"
 	"io/fs"
 	"testing"
 	"time"
 )
 
-// SetSettleClock makes settleEnded read the time with now and wait with
-// sleep for the rest of t.
-func SetSettleClock(t *testing.T, now func() time.Time, sleep func(context.Context, time.Duration) error) {
-	prev := settleClock
-	settleClock.now, settleClock.sleep = now, sleep
-	t.Cleanup(func() { settleClock = prev })
+// SetLifecycleLockWait makes LockGatewayLifecycle wait at most d for the
+// lock, for the rest of t.
+func SetLifecycleLockWait(t *testing.T, d time.Duration) {
+	prev := lifecycleLockWait
+	lifecycleLockWait = d
+	t.Cleanup(func() { lifecycleLockWait = prev })
 }
 
 // SetGatewayFileOwner makes owned judge which gateway files are the

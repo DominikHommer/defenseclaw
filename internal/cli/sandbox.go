@@ -693,6 +693,8 @@ on): then the earlier undo point stays, so "sandbox undo" still reverts them.
 	cmd.Flags().BoolVar(&o.NoSnapshot, "no-snapshot", false, "keep the previous session's snapshot instead of taking a new one")
 	cmd.Flags().BoolVar(&o.NewSnapshot, "new-snapshot", false,
 		"take a new snapshot even if the folder still has an earlier session's changes (undo no longer reverts them)")
+	cmd.Flags().BoolVar(&o.EndVM, "end-vm", false,
+		"start a MicroVM whose workload completed or failed though its VM still runs: OpenShell ends that VM with no flush first, so what it has not written to its disk is lost")
 	return cmd
 }
 

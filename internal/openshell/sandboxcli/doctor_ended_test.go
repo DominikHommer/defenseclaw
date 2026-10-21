@@ -29,13 +29,13 @@ import (
 
 // TestDoctorAdviceForAnOldErrorStateMicroVM: on an OpenShell before 0.1.5
 // a MicroVM in the error state can be neither stopped nor started, and
-// nothing flushes it. The round before told the user to upgrade first,
-// while the upgrade (and, on a managed computer, the administrator's pin
-// move, which the user does not run) waited for that very MicroVM to be
-// flushed. The advice now matches what the upgrade does per driver and
-// mode: it waits until the MicroVM has been in the error state for
-// openshell.EndedSettle, which keeps its work, then stop and start; one
-// whose VM OpenShell could not poll is waited for until it is deleted. A
+// nothing flushes it. The rounds before said the upgrade (or, on a managed
+// computer, the administrator's pin move) waits two minutes for it, then
+// that the user's stop lets it go; but its VM may still run and write.
+// The advice now matches what the upgrade does: it is refused while
+// OpenShell does not report the MicroVM stopped, whatever OpenShell says
+// of why, and only its delete lets it go ahead, after which nothing of it
+// is left to stop and start. One whose VM is gone runs nothing, and a
 // docker sandbox keeps the plain advice.
 func TestDoctorAdviceForAnOldErrorStateMicroVM(t *testing.T) {
 	check := func(ta *testApp) openshell.Check {
@@ -50,24 +50,23 @@ func TestDoctorAdviceForAnOldErrorStateMicroVM(t *testing.T) {
 		return openshell.Check{}
 	}
 	after := ", then `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME` for hic, which keep the sandbox and its work"
-	waits := "waits until hic has been in the error state for " + openshell.EndedSettleWords() +
-		": nothing flushes its MicroVM, whose guest writes its disk back by then, which keeps its work"
+	held := func(move string) string {
+		return move + " is refused while OpenShell does not report hic stopped, and this OpenShell neither stops nor starts a MicroVM in its error state: " +
+			"`defenseclaw sandbox delete NAME` deletes it with its work"
+	}
+	perUser := "upgrade OpenShell to " + openshell.InstallerVersion
+	managed := "your organization's OpenShell setting moves this account to " + openshell.InstallerVersion + " on its own where DefenseClaw installs OpenShell (ask IT otherwise)"
 	for _, tc := range []struct {
 		name, driver, reason string
 		managed              bool
 		want                 string
 	}{
-		{"per user", "vm", "MainProcessFailed: Canonical main process exited with status 1", false,
-			"upgrade OpenShell to " + openshell.InstallerVersion + " (see Gateway; the upgrade " + waits + ")" + after},
-		{"managed", "vm", "ProcessExited: VM process exited with status 1", true,
-			"your organization's OpenShell setting moves this account to " + openshell.InstallerVersion +
-				" on its own where DefenseClaw installs OpenShell (ask IT otherwise) (the move " + waits + ")" + after},
-		{"managed, not polled", "vm", "ProcessPollFailed: Bad file descriptor", true,
-			"your organization's OpenShell setting moves this account to " + openshell.InstallerVersion +
-				" on its own where DefenseClaw installs OpenShell (ask IT otherwise) (the move waits for hic for as long as OpenShell cannot tell whether its MicroVM still runs: " +
-				"`defenseclaw sandbox delete NAME` ends that wait if its work is not needed)" + after},
-		{"docker", "docker", "ContainerExited: exited", false,
-			"upgrade OpenShell to " + openshell.InstallerVersion + " (see Gateway)" + after},
+		{"per user", "vm", "MainProcessFailed: Canonical main process exited with status 1", false, perUser + " (see Gateway; " + held("the upgrade") + ")"},
+		{"per user, timed out", "vm", "ProvisioningTimedOut: Provisioning repair window expired after 300 seconds", false, perUser + " (see Gateway; " + held("the upgrade") + ")"},
+		{"managed", "vm", "MainProcessFailed: Canonical main process exited with status 1", true, managed + " (" + held("the move") + ")"},
+		{"managed, not polled", "vm", "ProcessPollFailed: Bad file descriptor", true, managed + " (" + held("the move") + ")"},
+		{"managed, VM gone", "vm", "ProcessExited: VM process exited with status 1", true, managed + after},
+		{"docker", "docker", "ContainerExited: exited", false, perUser + " (see Gateway)" + after},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
@@ -82,19 +81,62 @@ func TestDoctorAdviceForAnOldErrorStateMicroVM(t *testing.T) {
 			if c.Status != openshell.StatusWarn || c.Fix == nil || c.Fix.Summary != tc.want {
 				t.Fatalf("advice = %+v\nwant %q", c, tc.want)
 			}
-			if strings.Contains(c.Fix.Summary, "stop NAME` flushes") {
-				t.Fatalf("the advice still counts on a flush OpenShell refuses: %q", c.Fix.Summary)
+			if strings.Contains(c.Fix.Summary, "disk back") || strings.Contains(c.Fix.Summary, "lets the") {
+				t.Fatalf("the advice still counts on a flush or a let-go nothing makes: %q", c.Fix.Summary)
 			}
 		})
 	}
 }
 
-// endedOn has a MicroVM gateway with the sandbox dc-done, whose workload
-// completed, and the ready ones of runningOn.
-func endedOn(t *testing.T, ta *testApp, running int) {
+// TestStopOfAnEndedMicroVMSaysHowToStopIt: OpenShell returns the stop of
+// a MicroVM whose main process completed or failed as it is, and its VM
+// may still run. The round before told the user that the stop let it go,
+// so the next gateway restart, upgrade or setup move would stop it with
+// what it had not written lost. Now the stop says that DefenseClaw stops
+// no gateway under it until OpenShell reports it stopped, and how to get
+// there on the gateway's release; a stop that OpenShell made says stopped.
+func TestStopOfAnEndedMicroVMSaysHowToStopIt(t *testing.T) {
+	for _, tc := range []struct {
+		name, phase, reason, release, want string
+	}{
+		{"completed", "completed", "", openshell.SupportedMin,
+			"⚠ box is completed: OpenShell does not stop it, so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades no OpenShell gateway under it, " +
+				"nor moves this account to another OpenShell setup, until OpenShell reports it stopped: nothing in OpenShell writes this MicroVM's disk back or stops it: " +
+				"its VM still runs what its workload left running, and its start ends that VM with no flush first, so what the VM has not written to its disk is lost: " +
+				"`defenseclaw sandbox start box --end-vm` ends the VM that way, then `defenseclaw sandbox stop box` once it is ready; or `defenseclaw sandbox delete box`, which deletes it and its work"},
+		{"failed", "error", "MainProcessFailed: Canonical main process exited with status 1", openshell.SupportedMin,
+			"⚠ box is in OpenShell's error state: OpenShell does not stop it, so its MicroVM may still run"},
+		{"completed, old gateway", "completed", "", "0.1.3",
+			"until OpenShell reports it stopped: `defenseclaw sandbox delete box`, which deletes it and its work (this OpenShell neither stops nor starts a completed MicroVM)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := sampleSandbox("box")
+			sb.Phase, sb.Driver, sb.PhaseReason = tc.phase, "vm", tc.reason
+			ta := newTestApp(t, "", sb)
+			ta.daemon.status.Gateway.Version = tc.release
+			ta.ok(t, ta.Stop(bg, StopOptions{Name: "box", Yes: true}))
+			has(t, ta.output(), tc.want)
+			lacks(t, ta.output(), "box is stopped", "lets", "let go")
+		})
+	}
+	sb := sampleSandbox("box")
+	sb.Phase, sb.Driver = "completed", "docker"
+	ta := newTestApp(t, "", sb)
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "box", Yes: true}))
+	has(t, ta.output(), "box is stopped")
+	lacks(t, ta.output(), "OpenShell does not stop it")
+}
+
+// endedOn has a MicroVM gateway of release (the fake's own when empty)
+// with the sandbox dc-done, whose workload completed, and running ready
+// ones.
+func endedOn(t *testing.T, ta *testApp, release string, running int) {
 	t.Helper()
 	fake, client := useGateway(ta)
 	fake.SetDriver(openshell.DriverVM)
+	if release != "" {
+		fake.SetRelease(release)
+	}
 	phases := map[string]openshell.SandboxPhase{"dc-done": openshell.PhaseCompleted}
 	for i := range running {
 		phases["dc-claude-theirs-"+string(rune('a'+i))] = openshell.PhaseReady
@@ -109,14 +151,17 @@ func endedOn(t *testing.T, ta *testApp, running int) {
 	}
 }
 
-// TestRestartConsentNamesTheWaitForEndedMicroVMs: the consent questions of
-// the gateway restarts DefenseClaw makes (doctor --fix, setup) read the
-// sandboxes as the restart's own gate does (openshell.FlushSandboxes). A
-// MicroVM whose workload ended is neither running (the restart loses
-// nothing once it has waited for it, so it does not turn the default to
-// no) nor left out (before, a restart with no ready sandbox said nothing
-// of it): the user is told that the restart waits for it first.
-func TestRestartConsentNamesTheWaitForEndedMicroVMs(t *testing.T) {
+// TestRestartConsentRefusesWhileOpenShellDoesNotReportEveryMicroVMStopped:
+// the consent questions of the gateway restarts DefenseClaw makes (doctor
+// --fix, setup) read the sandboxes as the restart's own gate does
+// (openshell.CheckSandboxesStopped). The rounds before told the user the
+// restart waits for a MicroVM whose workload ended, then that the user's
+// stop lets it go, and stopped running ones themselves. Now a MicroVM
+// that OpenShell does not report stopped, ready or completed, refuses the
+// restart, on every release: the question says how to stop each, defaults
+// to no, and --yes does not fix it. Once OpenShell reports them stopped
+// the fix applies.
+func TestRestartConsentRefusesWhileOpenShellDoesNotReportEveryMicroVMStopped(t *testing.T) {
 	applied := 0
 	report := hostReport(func(r *openshell.DoctorReport) {
 		r.Driver = openshell.DriverVM
@@ -124,34 +169,53 @@ func TestRestartConsentNamesTheWaitForEndedMicroVMs(t *testing.T) {
 			Detail: "every MicroVM gets 2 vCPUs", Fix: &openshell.Fix{Summary: "raise them and restart the gateway", Automatic: true, RestartsGateway: true,
 				Apply: func(context.Context) error { applied++; return nil }}})
 	})
-	const wait = "MicroVM resources: this restarts the OpenShell gateway: it first waits up to 2 minutes for the 1 MicroVM whose workload ended (dc-done) " +
-		"to write its disk back, since nothing in OpenShell flushes one, then stops it with its work kept"
+	const refused = "MicroVM resources: this restarts the OpenShell gateway, and DefenseClaw makes it only once OpenShell reports every MicroVM sandbox on the gateway stopped, " +
+		"which it does not for these: dc-done (completed): nothing in OpenShell writes this MicroVM's disk back or stops it"
+	const ready = "dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a`"
 
+	for _, release := range []string{openshell.SupportedMin, "0.1.3"} {
+		ta := newTestApp(t, "")
+		ta.HostDoctor = report
+		endedOn(t, ta, release, 1)
+		_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
+		has(t, ta.output(), "MicroVM resources: this restarts the OpenShell gateway, and DefenseClaw makes it only once OpenShell reports every MicroVM sandbox on the gateway stopped",
+			ready, "not fixed with --yes while OpenShell does not report every MicroVM sandbox on the gateway stopped")
+		lacks(t, ta.output(), "write its disk back", "work kept", "lets the restart", "each first with OpenShell's own stop")
+		if applied != 0 {
+			t.Fatalf("OpenShell %s, MicroVMs not stopped: applied %d times", release, applied)
+		}
+	}
 	ta := newTestApp(t, "")
 	ta.HostDoctor = report
-	endedOn(t, ta, 0)
+	endedOn(t, ta, openshell.SupportedMin, 0)
 	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
-	has(t, ta.output(), wait)
-	lacks(t, ta.output(), "not fixed with --yes")
-	if applied != 1 {
-		t.Fatalf("only an ended MicroVM: applied %d times", applied)
-	}
+	has(t, ta.output(), refused)
 
+	// OpenShell reports them stopped: the fix applies.
 	ta = newTestApp(t, "")
 	ta.HostDoctor = report
-	endedOn(t, ta, 1)
+	fake, client := useGateway(ta)
+	fake.SetDriver(openshell.DriverVM)
+	if _, err := client.CreateSandbox(bg, "dc-done", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fake.SetPhase(openshell.DefaultWorkspace, "dc-done", openshell.PhaseStopped); err != nil {
+		t.Fatal(err)
+	}
 	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
-	has(t, ta.output(), wait, "which stops the 1 sandbox running on it (dc-claude-theirs-a)", "not fixed with --yes")
+	lacks(t, ta.output(), "DefenseClaw makes it only once", "not fixed with --yes")
 	if applied != 1 {
-		t.Fatalf("an ended MicroVM and a running sandbox: applied %d times", applied)
+		t.Fatalf("every MicroVM stopped: applied %d times", applied)
 	}
 
-	// setup's restart.
+	// setup's restart: not made, and not asked.
 	ta = newTestApp(t, "")
-	endedOn(t, ta, 0)
+	endedOn(t, ta, openshell.SupportedMin, 0)
 	ok, err := ta.consentGatewayRestart(bg, SetupOptions{}, true, true, false)
-	if err != nil || !ok {
-		t.Fatalf("setup with only an ended MicroVM: %v, %v", ok, err)
+	if err != nil || ok {
+		t.Fatalf("setup with a completed MicroVM: %v, %v", ok, err)
 	}
-	has(t, ta.output(), "applying this restarts the OpenShell gateway: it first waits up to 2 minutes for the 1 MicroVM whose workload ended (dc-done)")
+	has(t, ta.output(), "applying this restarts the OpenShell gateway, and DefenseClaw makes it only once OpenShell reports every MicroVM sandbox on the gateway stopped, "+
+		"which it does not for these: dc-done (completed)")
+	lacks(t, ta.output(), "Restart the OpenShell gateway now?")
 }

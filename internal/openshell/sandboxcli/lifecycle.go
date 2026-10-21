@@ -838,8 +838,42 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	if copyAt != nil && !stopped.Hooks.LastHookAt.After(sb.Hooks.LastHookAt) {
 		a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
 	}
+	if note := notStoppedNote(ctx, api, stopped); note != "" {
+		a.warn(note)
+		return nil
+	}
 	a.ok(stopped.Name + " is " + stopped.Phase)
 	return nil
+}
+
+// notStoppedNote is what a stop that OpenShell returned as it was leaves
+// the user to do, "" when sb stopped or holds nothing: OpenShell does not
+// stop a MicroVM whose main process completed or failed, which may still
+// run, and DefenseClaw stops, restarts or upgrades no OpenShell gateway,
+// and moves no account to another OpenShell setup, while one does
+// (openshell.HoldsGateway). It names how to bring it to stopped
+// (openshell.StopWayOn) on the release the daemon's gateway reports.
+func notStoppedNote(ctx context.Context, api API, sb *sandboxapi.Sandbox) string {
+	var phase openshell.SandboxPhase
+	is := "completed"
+	switch sb.Phase {
+	case "completed":
+		phase = openshell.PhaseCompleted
+	case "error":
+		phase, is = openshell.PhaseError, "in OpenShell's error state"
+	default:
+		return ""
+	}
+	if d, ok := openshell.LookupDriver(sb.Driver); ok && d.StopFlushes || !openshell.HoldsGateway(phase, sb.PhaseReason, false) {
+		return ""
+	}
+	runs := false
+	if st, err := api.Status(ctx); err == nil && st.Gateway != nil {
+		runs = openshell.RunsSandboxes(st.Gateway.Version)
+	}
+	return sb.Name + " is " + is + ": OpenShell does not stop it, so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades " +
+		"no OpenShell gateway under it, nor moves this account to another OpenShell setup, until OpenShell reports it stopped: " +
+		openshell.StopWayOn(sb.Name, phase, sb.PhaseReason, runs)
 }
 
 // copyAtStop looks at the copy of sb, which is about to stop, within a
@@ -1001,6 +1035,10 @@ type StartOptions struct {
 	// when the folder still holds an earlier session's changes.
 	NoSnapshot  bool
 	NewSnapshot bool
+	// EndVM starts a MicroVM whose workload ended though its VM may still
+	// run, which OpenShell's start ends with no flush
+	// (sandboxapi.StartRequest.EndVM).
+	EndVM bool
 }
 
 // Start is `sandbox start`.

@@ -220,12 +220,12 @@ func versionNote(version string) string {
 
 // describePending reports a change that waits for an account's sandboxes.
 func (l *lifecycle) describePending(entry pending) {
-	waiting := fmt.Sprintf("%d sandboxes run (or are starting, stopping, or a MicroVM whose workload ended, its disk not written back yet)", entry.Sandboxes)
+	waiting := fmt.Sprintf("%d sandboxes run (or are starting, stopping, or a MicroVM that OpenShell does not report stopped)", entry.Sandboxes)
 	switch {
 	case entry.Sandboxes < 0:
 		waiting = "the lifecycle could not tell whether sandboxes run"
 	case entry.Sandboxes == 1:
-		waiting = "1 sandbox runs (or is starting, stopping, or a MicroVM whose workload ended, its disk not written back yet)"
+		waiting = "1 sandbox runs (or is starting, stopping, or a MicroVM that OpenShell does not report stopped)"
 	case entry.Sandboxes == 0:
 		waiting = "waiting to be tried again"
 	}
@@ -253,8 +253,9 @@ func (l *lifecycle) describePending(entry pending) {
 		return
 	}
 	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running. "+
-		"The user's `defenseclaw sandbox stop NAME` flushes and stops a running one. Nothing in OpenShell flushes a MicroVM whose workload ended: it stops counting once its guest has had "+
-		openshell.EndedSettleWords()+" to write its disk back, which keeps its work",
+		"The user's `defenseclaw sandbox stop NAME` flushes and stops a running one; a MicroVM whose workload completed or that is in OpenShell's error state, "+
+		"which OpenShell does not stop and whose VM may still run, holds the change until OpenShell reports it stopped (the user's `defenseclaw sandbox stop NAME` says how) "+
+		"or the user deletes it (`defenseclaw sandbox delete NAME`)",
 		entry.Kind, entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionEnsure)))
 }
 
@@ -375,7 +376,7 @@ var versionRange = regexp.MustCompile(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.
 // supports.
 func versionAllowed(spec string, have openshell.Version) (bool, string) {
 	spec = strings.TrimSpace(spec)
-	if err := openshell.CheckSandboxRelease(have); err != nil && openshell.CheckSupported(have) == nil {
+	if err := openshell.CheckSandboxRelease(have); err != nil && openshell.Legacy(have) {
 		// Whatever the pin allows: each user's daemon starts no sandbox on it.
 		return false, err.Error()
 	}
@@ -421,8 +422,8 @@ func (e *Env) checkPrerequisiteMode(ctx context.Context, s openshellSettings) []
 	installFix := e.openshellInstallFix()
 	pinFix := "install a release that satisfies enterprise.openshell.version" + versionNote(s.Version) + " (" + installFix + ")"
 	if v, err := openshell.ParseVersion(s.Version); err == nil && openshell.CheckSandboxRelease(v) != nil {
-		// No release satisfies both the pin and openshell.SandboxMin.
-		pinFix = "set enterprise.openshell.version to " + openshell.InstallerVersion + " (or a range from " + openshell.SandboxMin +
+		// No release satisfies both the pin and openshell.SupportedMin.
+		pinFix = "set enterprise.openshell.version to " + openshell.InstallerVersion + " (or a range from " + openshell.SupportedMin +
 			") and install that release (" + installFix + ")"
 	}
 	var parts []string
@@ -535,7 +536,7 @@ func (e *Env) checkSetupMode(ctx context.Context, s openshellSettings) []prereqR
 			Fix: "set enterprise.openshell.version to one of: " + strings.Join(openshell.PinnedTarballReleases(), ", ")})
 	case s.RaisedFrom != "":
 		rows = append(rows, prereqRow{Name: "openshell pin", OK: true, Detail: s.Version + " from NVIDIA's release tarballs, verified against their checksums and the digests this build pins; " +
-			"enterprise.openshell.version pins " + s.RaisedFrom + ", which runs no sandbox (" + openshell.SandboxMin + " closes a network-broker policy bypass, " +
+			"enterprise.openshell.version pins " + s.RaisedFrom + ", which runs no sandbox (" + openshell.SupportedMin + " closes a network-broker policy bypass, " +
 			"NVIDIA/OpenShell#4494), so each user's OpenShell moves to " + s.Version + " once none of the user's sandboxes runs; set the pin to " + s.Version})
 	default:
 		rows = append(rows, prereqRow{Name: "openshell pin", OK: true, Detail: s.Version + " from NVIDIA's release tarballs, verified against their checksums and the digests this build pins"})

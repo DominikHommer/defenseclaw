@@ -48,14 +48,14 @@ func TestAHostLeftOnAnOlderOpenShellUpgradesInPlace(t *testing.T) {
 		return &gw, nil
 	}
 	e.create(sandboxapi.CreateRequest{Name: "kept"})
-	if got := e.boxOf("kept").rec.SessionRelease; got != openshell.SandboxMin {
-		t.Fatalf("session release = %q, want %s", got, openshell.SandboxMin)
+	if got := e.boxOf("kept").rec.SessionRelease; got != openshell.SupportedMin {
+		t.Fatalf("session release = %q, want %s", got, openshell.SupportedMin)
 	}
 	oldSupervisor := func() []sandboxapi.ActivityEvent {
 		return e.events("kept", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor)
 	}
 	if n := len(oldSupervisor()); n != 0 || slices.Contains(e.get("kept").Warnings, oldSupervisorWarning) {
-		t.Fatalf("a session on %s is named: %d findings, warnings %v", openshell.SandboxMin, n, e.get("kept").Warnings)
+		t.Fatalf("a session on %s is named: %d findings, warnings %v", openshell.SupportedMin, n, e.get("kept").Warnings)
 	}
 
 	// The host as 1.0.3 left it: its gateway runs 0.1.3.
@@ -102,13 +102,13 @@ func TestAHostLeftOnAnOlderOpenShellUpgradesInPlace(t *testing.T) {
 // release, and the managed way on is the administrator's.
 func TestOldSupervisorWordsForARecordWithoutARelease(t *testing.T) {
 	msg := oldSupervisorMessage("box", "", "")
-	if !strings.Contains(msg, "box's session started before DefenseClaw kept the OpenShell release a session starts on, so it may run a supervisor older than "+openshell.SandboxMin) ||
+	if !strings.Contains(msg, "box's session started before DefenseClaw kept the OpenShell release a session starts on, so it may run a supervisor older than "+openshell.SupportedMin) ||
 		!strings.HasSuffix(msg, "`defenseclaw sandbox stop box` and `defenseclaw sandbox start box` restart it on this gateway's supervisor") {
 		t.Fatalf("message = %q", msg)
 	}
 	e := newEnv(t, nil)
-	if got := e.m.upgradeWayOn(openshell.SandboxMin); got != "" {
-		t.Fatalf("upgrade way on %s = %q", openshell.SandboxMin, got)
+	if got := e.m.upgradeWayOn(openshell.SupportedMin); got != "" {
+		t.Fatalf("upgrade way on %s = %q", openshell.SupportedMin, got)
 	}
 	if got := e.m.upgradeWayOn("dev"); got != "" {
 		t.Fatalf("upgrade way on an unreadable release = %q", got)

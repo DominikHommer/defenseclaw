@@ -83,8 +83,8 @@ type Driver struct {
 	// 0.1.1), so without it DefenseClaw runs sync in the sandbox before
 	// every stop, and a copy's unpulled work survives the stop. 0.1.5
 	// flushes the guest before a planned stop (NVIDIA/OpenShell#4195); keep
-	// the sync until SupportedMin is 0.1.5, since a gateway restart still
-	// stops a MicroVM unflushed.
+	// the sync until LegacyMin is 0.1.5: a legacy gateway's stop, which the
+	// move off it needs, still loses what was not synced.
 	StopFlushes bool
 	// ImageCache is where the driver keeps what it prepares from each image
 	// it boots, relative to the home of the user the gateway runs as; empty

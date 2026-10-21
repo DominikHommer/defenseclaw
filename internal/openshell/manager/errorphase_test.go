@@ -28,18 +28,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
-// A gateway that runs sandboxes (openshell.SandboxMin, which includes
+// A gateway that runs sandboxes (openshell.SupportedMin, which includes
 // NVIDIA/OpenShell#4231) stops a sandbox in its error state and starts it
 // again after, so the way on keeps the sandbox; an older one can do
 // neither, and the way on upgrades OpenShell first.
 func TestErrorPhaseWayOnFollowsTheGatewayRelease(t *testing.T) {
 	now := errorPhaseWayOn("box", "", "", false)
 	if strings.Contains(now, "delete") || !strings.Contains(now, "`defenseclaw sandbox stop box` and `defenseclaw sandbox start box`") {
-		t.Errorf("from %s: %q", openshell.SandboxMin, now)
+		t.Errorf("from %s: %q", openshell.SupportedMin, now)
 	}
 	old := errorPhaseWayOn("box", "", "upgrade OpenShell", false)
 	if !strings.Contains(old, "neither stop nor start") || !strings.Contains(old, "upgrade OpenShell, then `defenseclaw sandbox stop box`") {
-		t.Errorf("before %s: %q", openshell.SandboxMin, old)
+		t.Errorf("before %s: %q", openshell.SupportedMin, old)
 	}
 	if got := errorPhaseWayOn("box", overlayDiskFullText, "", false); got != overlayDiskWayOn("box") {
 		t.Errorf("a full disk: %q", got)

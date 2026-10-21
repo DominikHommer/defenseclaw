@@ -198,13 +198,6 @@ type record struct {
 	// stopping it, so without a flush: what it wrote in its last seconds
 	// may be missing, empty or cut short (GAP-0367).
 	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
-	// EndedAt is when DefenseClaw saw the sandbox's workload end (it
-	// completed, or is in OpenShell's error state: workloadEnded), or its
-	// harness at work after that; zero in any other phase. Nothing in
-	// OpenShell flushes such a MicroVM, whose guest writes its disk back on
-	// its own within openshell.EndedSettle: what stops the gateway on its
-	// own waits until then (HoldsCompute).
-	EndedAt time.Time `json:"ended_at,omitzero"`
 	// StoppedAt is when the sandbox stopped running, by a stop or because
 	// its main process ended (completed); zero while it is in another
 	// phase. delete_stopped_after counts from it (deleteExpired).
@@ -220,7 +213,7 @@ type record struct {
 	Sessions int `json:"sessions,omitempty"`
 	// SessionRelease is the OpenShell release of the gateway when the
 	// latest session began: the sandbox runs that release's supervisor
-	// until it stops (openshell.SandboxMin). Empty in records from before
+	// until it stops (openshell.SupportedMin). Empty in records from before
 	// it was kept, whose sessions all began on an older release.
 	SessionRelease string `json:"session_release,omitempty"`
 	// HookCounts are the hook counters as the daemon last kept them

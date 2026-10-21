@@ -142,6 +142,9 @@ type SandboxDaemonOptions struct {
 	// sandboxes; tests replace them.
 	newRuntime   func(*SandboxDaemon) (*sandboxRuntime, error)
 	countRunning func(context.Context) (int, error)
+	// countMicroVMs counts the MicroVMs that run as this account
+	// (openshell.CountMicroVMs); tests replace it.
+	countMicroVMs func(context.Context) (int, error)
 	// sweepForeign replaces the foreign-sandbox sweep before an idle
 	// gateway stops (SandboxDaemon.sweepForeign); tests only.
 	sweepForeign func(context.Context) (bool, error)
@@ -954,17 +957,28 @@ func (d *SandboxDaemon) runningSandboxes(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return sandboxesHoldingCompute(list, time.Now()), nil
+	return sandboxesHoldingCompute(list), nil
+}
+
+// microVMs counts the MicroVMs that run as this account
+// (openshell.CountMicroVMs): what the daemon trusts before it stops the
+// account's gateway when it cannot read the gateway's own account of its
+// sandboxes, which a stop would end with no flush.
+func (d *SandboxDaemon) microVMs(ctx context.Context) (int, error) {
+	if d.opts.countMicroVMs != nil {
+		return d.opts.countMicroVMs(ctx)
+	}
+	return openshell.CountMicroVMs(ctx, openshell.ExecRunner{})
 }
 
 // sandboxesHoldingCompute counts the sandboxes of list that may run or
-// hold compute at now (manager.HoldsCompute): a MicroVM that completed or
-// is in OpenShell's error state counts until its guest has written its
-// disk back (openshell.EndedSettle).
-func sandboxesHoldingCompute(list []sandboxapi.Sandbox, now time.Time) int {
+// hold compute (manager.HoldsCompute): a MicroVM counts until OpenShell
+// reports it stopped, deleting or gone, completed and error states
+// included (but for one whose VM is gone).
+func sandboxesHoldingCompute(list []sandboxapi.Sandbox) int {
 	n := 0
 	for _, sb := range list {
-		if manager.HoldsCompute(sb, now) {
+		if manager.HoldsCompute(sb) {
 			n++
 		}
 	}

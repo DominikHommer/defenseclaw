@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,10 +23,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -70,8 +73,8 @@ type SandboxStatus struct {
 	// Live is the number that may hold compute a stop of the account's
 	// OpenShell gateway would end unflushed or half started: the running
 	// ones, those starting or stopping, and a MicroVM that completed or is
-	// in OpenShell's error state whose guest has not had
-	// openshell.EndedSettle to write its disk back (sandboxapi.Status.Busy).
+	// in OpenShell's error state, which OpenShell does not stop, until
+	// OpenShell reports it stopped (sandboxapi.Status.Busy).
 	// What stops that gateway on its own (busy) waits for them.
 	Live int
 	// PendingRestart is the daemon's own report that it waits for a restart.
@@ -109,6 +112,16 @@ type SandboxUserOps interface {
 	// MicroVM's disk is synced before its stop), and names the ones it
 	// stopped. The sandboxes, their records and their work stay.
 	StopSandboxes(ctx context.Context, a SandboxAccount) ([]string, error)
+	// Drain runs `defenseclaw-gateway sandbox-daemon drain` as the account
+	// and returns once it holds the account's OpenShell lifecycle lock,
+	// which keeps the account's DefenseClaw from creating or starting a
+	// sandbox, and found nothing a stop of the account's gateway would end
+	// with no flush (openshell.CheckAccountGateways). The caller stops the
+	// units that stop the gateway, then calls release, which lets the lock
+	// go. An error (a sandbox OpenShell does not report stopped, a MicroVM
+	// that runs as the account, a check that could not be made, a
+	// DefenseClaw without the drain) means the gateway must not stop now.
+	Drain(ctx context.Context, a SandboxAccount) (release func() error, err error)
 	// Teardown runs `defenseclaw sandbox teardown` as the account, which
 	// deletes its sandboxes with their work, providers, profiles and
 	// images: only a purge runs it.
@@ -168,15 +181,127 @@ type commandUserOps struct {
 
 // runAs runs argv as the account.
 func (o *commandUserOps) runAs(ctx context.Context, a SandboxAccount, timeout time.Duration, argv ...string) (CommandResult, error) {
-	e := o.env
-	uid := strconv.Itoa(a.UID)
-	if e.GOOS == "darwin" {
-		args := append([]string{"-n", "-u", a.Name, "-H", "/usr/bin/env", "HOME=" + a.Home}, argv...)
-		return e.longRunner(timeout).Run(ctx, "sudo", args...)
+	_, args := o.asAccount(a, argv...)
+	if o.env.GOOS == "darwin" {
+		return o.env.longRunner(timeout).Run(ctx, "sudo", args...)
 	}
-	args := append([]string{"-u", a.Name, "--", "/usr/bin/env", "HOME=" + a.Home, "XDG_RUNTIME_DIR=/run/user/" + uid,
+	return o.env.longRunner(timeout).Run(ctx, "runuser", args...)
+}
+
+// asAccount is the command that runs argv as the account: sudo (macOS) or
+// runuser (Linux), with the account's home and, on Linux, its user manager.
+func (o *commandUserOps) asAccount(a SandboxAccount, argv ...string) (string, []string) {
+	uid := strconv.Itoa(a.UID)
+	if o.env.GOOS == "darwin" {
+		return "sudo", append([]string{"-n", "-u", a.Name, "-H", "/usr/bin/env", "HOME=" + a.Home}, argv...)
+	}
+	return "runuser", append([]string{"-u", a.Name, "--", "/usr/bin/env", "HOME=" + a.Home, "XDG_RUNTIME_DIR=/run/user/" + uid,
 		"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/" + uid + "/bus"}, argv...)
-	return e.longRunner(timeout).Run(ctx, "runuser", args...)
+}
+
+// drainReadyWait bounds how long the lifecycle waits for an account's drain
+// to hold its lock and check: the lock's own wait for the creates and
+// starts in flight (2 minutes), and the check.
+var drainReadyWait = 4 * time.Minute
+
+// drainCommand makes the command a drain runs; a seam for tests.
+var drainCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C"}
+	return cmd
+}
+
+func (o *commandUserOps) Drain(ctx context.Context, a SandboxAccount) (func() error, error) {
+	name, args := o.asAccount(a, filepath.Join(o.env.Layout.BinDir, binGateway), "sandbox-daemon", "drain")
+	cmd := drainCommand(ctx, name, args...)
+	// Its own process group, ended whole: a runuser or sudo killed alone
+	// would leave the drain holding the account's lock and its pipes.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 5 * time.Second
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	out := &drainOutput{ready: make(chan struct{})}
+	var stderr lockedBuffer
+	cmd.Stdout, cmd.Stderr = out, &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("run the sandbox drain of %s: %w", a.Name, err)
+	}
+	t := time.NewTimer(drainReadyWait)
+	defer t.Stop()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	select {
+	case <-out.ready:
+		return func() error {
+			_ = stdin.Close()
+			if err := <-exited; err != nil {
+				return fmt.Errorf("the sandbox drain of %s: %v: %s", a.Name, err, commandReason(CommandResult{Stdout: out.bytes(), Stderr: stderr.bytes()}))
+			}
+			return nil
+		}, nil
+	case err := <-exited:
+		_ = stdin.Close()
+		return nil, fmt.Errorf("the gateway of %s keeps running: %s (%v)", a.Name, commandReason(CommandResult{Stdout: out.bytes(), Stderr: stderr.bytes()}), err)
+	case <-t.C:
+	case <-ctx.Done():
+	}
+	_ = stdin.Close()
+	_ = cmd.Cancel()
+	<-exited
+	return nil, fmt.Errorf("the gateway of %s keeps running: its sandbox drain did not answer within %s: %s", a.Name, drainReadyWait,
+		commandReason(CommandResult{Stdout: out.bytes(), Stderr: stderr.bytes()}))
+}
+
+// drainOutput is a drain's standard output: ready closes once the line
+// openshell.LifecycleDrained arrives.
+type drainOutput struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	ready chan struct{}
+	seen  bool
+}
+
+func (d *drainOutput) Write(p []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n, _ := d.buf.Write(p)
+	if !d.seen {
+		for _, line := range strings.Split(d.buf.String(), "\n") {
+			if strings.TrimSpace(line) == openshell.LifecycleDrained {
+				d.seen = true
+				close(d.ready)
+				break
+			}
+		}
+	}
+	return n, nil
+}
+
+func (d *drainOutput) bytes() []byte {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]byte(nil), d.buf.Bytes()...)
+}
+
+// lockedBuffer is a buffer written by one goroutine and read by another.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buf.Bytes()...)
 }
 
 // longRunner is the runner with a longer bound for commands that can take
@@ -668,9 +793,9 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 		case status.Active && status.busy() > 0:
 			// Not only the running ones: a switch or stop takes the
 			// account's OpenShell gateway down, under a MicroVM that
-			// completed or is in OpenShell's error state (until its guest
-			// has written its disk back, openshell.EndedSettle) or a
-			// sandbox still starting too.
+			// completed or is in OpenShell's error state (until OpenShell
+			// reports it stopped: openshell.HoldsGateway) or a sandbox
+			// still starting too.
 			entry.Sandboxes = status.busy()
 			state.Pending[key] = entry
 			continue
@@ -678,6 +803,15 @@ func (l *lifecycle) settlePending(ctx context.Context, state *openshellState, cu
 		if err := l.performAccountChange(ctx, ops, account, entry, status.Active, cur); err != nil {
 			entry.Reason = entry.reasonBase() + " (" + err.Error() + ")"
 			state.Pending[key] = entry
+			var held *drainHeld
+			if errors.As(err, &held) {
+				// Something started since the status check, or the drain
+				// could not tell: the change waits, as for a running one.
+				entry.Sandboxes = -1
+				state.Pending[key] = entry
+				l.result.AddWarning(codeSandboxPending, fmt.Sprintf("the %s change for %s waits: %v", entry.Kind, entry.User, held.err))
+				continue
+			}
 			l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("could not apply the %s change for %s: %v; the next run tries again", entry.Kind, entry.User, err))
 			continue
 		}
@@ -693,14 +827,47 @@ func (p pending) reasonBase() string {
 	return p.Reason
 }
 
+// drainHeld is a change that waits because the account's drain
+// (SandboxUserOps.Drain) did not hold its gateway: err says why.
+type drainHeld struct{ err error }
+
+func (e *drainHeld) Error() string { return e.err.Error() }
+func (e *drainHeld) Unwrap() error { return e.err }
+
+// drainAccount holds the account's gateway (SandboxUserOps.Drain) for a stop
+// of its units that stops its OpenShell gateway: the status check that let
+// the change go came before it, and a sandbox started since would be
+// stopped with the gateway, its MicroVM with no flush. The returned release
+// lets it go, warning when the drain ended badly.
+func (l *lifecycle) drainAccount(ctx context.Context, ops SandboxUserOps, a SandboxAccount) (release func(), err error) {
+	done, err := ops.Drain(ctx, a)
+	if err != nil {
+		return nil, &drainHeld{err: err}
+	}
+	return func() {
+		if err := done(); err != nil {
+			l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("the gateway of %s was stopped, but its drain ended badly: %v", a.Name, err))
+		}
+	}, nil
+}
+
 // performAccountChange applies one waiting change to an account that runs no
-// sandbox.
+// sandbox. A change that stops the account's OpenShell gateway (a LaunchAgent
+// reload, a stop, a switch) does so only under the account's drain
+// (drainAccount).
 func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps, a SandboxAccount, entry pending, active bool, cur *openshellApplied) error {
 	switch entry.Kind {
 	case "launchd":
 		jobs, err := l.env.loadedMacOSAgents(ctx, a)
 		if err != nil {
 			return err
+		}
+		if len(jobs) > 0 {
+			release, err := l.drainAccount(ctx, ops, a)
+			if err != nil {
+				return err
+			}
+			defer release()
 		}
 		for _, job := range jobs {
 			if err := l.env.reloadMacOSAgent(ctx, job, job.state.Failure(false) != ""); err != nil {
@@ -717,6 +884,11 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 		}
 		l.openshellChange("restarted the sandbox daemon of %s (no sandbox of this account was running); %s", a.Name, entry.reasonBase())
 	case "stop":
+		release, err := l.drainAccount(ctx, ops, a)
+		if err != nil {
+			return err
+		}
+		defer release()
 		if err := ops.Stop(ctx, a, StopDaemon|StopGateway|StopSocket); err != nil {
 			return err
 		}
@@ -727,6 +899,13 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 			// (it never used sandboxes): nothing to stop, replace or report.
 			return nil
 		}
+		// Held until the previous setup is gone: the daemon's socket keeps
+		// listening, and a start in between would run on it.
+		release, err := l.drainAccount(ctx, ops, a)
+		if err != nil {
+			return err
+		}
+		defer release()
 		if err := ops.Stop(ctx, a, StopDaemon|StopGateway); err != nil {
 			return err
 		}

@@ -54,6 +54,11 @@ type fakeSandboxOps struct {
 	stopSandboxesErr error
 	// onTeardown does to the account's home what the real teardown does.
 	onTeardown func(SandboxAccount)
+	// onDrain answers the account's drain (Drain): nil lets it hold the
+	// gateway. order is every drain, its release and every Stop, in the
+	// order they ran.
+	onDrain func(SandboxAccount) error
+	order   []string
 }
 
 func (f *fakeSandboxOps) Accounts(context.Context) []SandboxAccount { return f.accounts }
@@ -78,7 +83,31 @@ func (f *fakeSandboxOps) Stop(_ context.Context, a SandboxAccount, scope StopSco
 	}
 	f.stops = append(f.stops, a.Name+":"+strings.Join(parts, "+"))
 	f.events = append(f.events, "stop "+a.Name)
+	f.order = append(f.order, "stop "+a.Name+":"+strings.Join(parts, "+"))
 	return f.stopErr
+}
+
+func (f *fakeSandboxOps) Drain(_ context.Context, a SandboxAccount) (func() error, error) {
+	f.mu.Lock()
+	onDrain := f.onDrain
+	f.mu.Unlock()
+	if onDrain != nil {
+		if err := onDrain(a); err != nil {
+			f.mu.Lock()
+			f.order = append(f.order, "drain refused "+a.Name)
+			f.mu.Unlock()
+			return nil, err
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.order = append(f.order, "drain "+a.Name)
+	return func() error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.order = append(f.order, "release "+a.Name)
+		return nil
+	}, nil
 }
 
 func (f *fakeSandboxOps) Reload(_ context.Context, a SandboxAccount) error {
@@ -1048,7 +1077,7 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 			"rpm -q --qf %{VERSION} openshell-gateway": {result: CommandResult{Stdout: []byte("0.1.3")}}}
 		for pin, fix := range map[string]string{
 			">=0.1.1 <0.2.0": "install a release that satisfies enterprise.openshell.version version=>=0.1.1 <0.2.0",
-			"0.1.3":          "set enterprise.openshell.version to " + openshell.InstallerVersion + " (or a range from " + openshell.SandboxMin + ") and install that release",
+			"0.1.3":          "set enterprise.openshell.version to " + openshell.InstallerVersion + " (or a range from " + openshell.SupportedMin + ") and install that release",
 		} {
 			r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker", "version": pin}))
 			requireOK(t, r)

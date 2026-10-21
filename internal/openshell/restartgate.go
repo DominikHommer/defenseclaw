@@ -19,152 +19,219 @@ package openshell
 import (
 	"context"
 	"fmt"
+	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// EndedSettle is how long a MicroVM whose workload ended (WorkloadEnded)
-// stays so before a stop of its gateway loses nothing of what the workload
-// wrote. Nothing in OpenShell flushes such a MicroVM, in 0.1.3 or 0.1.5:
-// it runs a command only in a ready sandbox (ExecSandbox answers "sandbox
-// is not ready" in any other phase), its stop returns a completed sandbox,
-// or one whose main process failed, as it is, and the flush 0.1.5 makes
-// before a stop (NVIDIA/OpenShell#4195) leaves out a sandbox whose main
-// process already exited. Its VM keeps running (GAP-0012), and its guest's
-// kernel writes back on its own what the workload left unsynced: OpenShell
-// boots it on ext4 with Linux's default writeback, which writes a page out
-// once it has been dirty for 30 seconds (the flusher wakes every 5 seconds,
-// and ext4 commits its journal every 5). Two minutes leave room for a slow
-// disk.
-const EndedSettle = 2 * time.Minute
-
-// EndedSettleWords is EndedSettle in words.
-func EndedSettleWords() string { return fmt.Sprintf("%d minutes", int(EndedSettle/time.Minute)) }
-
-// EndedSettled reports whether a MicroVM seen with its workload ended
-// since since has had EndedSettle to write its disk back by now. One not
-// known since when (a zero since) has not.
-func EndedSettled(since, now time.Time) bool {
-	return !since.IsZero() && now.Sub(since) >= EndedSettle
+// VMGone reports OpenShell's account of a sandbox in its error state whose
+// MicroVM no longer runs (said is FailureReason's, or a record's
+// PhaseReason): the vm driver's ProcessExited, which it sets once the VM
+// process or its host supervisor exited, and then ends the other, and for
+// a sandbox whose main process had exited before the driver restarted,
+// which it restores without launching its VM (0.1.3 and 0.1.5). Nothing of
+// such a sandbox runs, so a stop of its gateway ends nothing.
+func VMGone(said string) bool {
+	return saysReason(said, "ProcessExited")
 }
 
-// WorkloadEnded reports a phase in which the sandbox's workload no longer
-// runs, though its MicroVM may: completed (its main process exited 0), and
-// the error state (its main process failed, its VM exited, it never
-// started), but for one whose VM process OpenShell's vm driver could not
-// poll (said, OpenShell's account of the error state as failureReason or
-// a record's PhaseReason gives it, names ProcessPollFailed): its workload
-// may still run.
-func WorkloadEnded(p SandboxPhase, said string) bool {
-	return p == PhaseCompleted || p == PhaseError && !strings.Contains(said, "ProcessPollFailed")
+// mainProcessFailed reports OpenShell's account of a sandbox in its error
+// state because its main process exited with an error (said: as for
+// VMGone): OpenShell returns its stop as it is (is_failed_main_process_result,
+// 0.1.3 and 0.1.5), and starts it again.
+func mainProcessFailed(said string) bool {
+	return saysReason(said, "MainProcessFailed")
 }
 
-// restartRisk is what a restart of a gateway whose compute driver's stop
-// keeps only what was flushed (the MicroVM driver, or one DefenseClaw
-// does not know) does to one of its sandboxes.
-type restartRisk int
+// saysReason reports whether said (FailureReason's "Reason: message; ..."
+// or a bare reason) gives the condition reason reason.
+func saysReason(said, reason string) bool {
+	for _, part := range strings.Split(said, "; ") {
+		if part == reason || strings.HasPrefix(part, reason+":") {
+			return true
+		}
+	}
+	return false
+}
 
-const (
-	// riskNone: nothing of its workload runs (stopped, deleting, or its
-	// provisioning timed out: nothing ran in it since its last stop).
-	riskNone restartRisk = iota
-	// riskReady: it runs, and sync(1) in it just before the restart keeps
-	// what it wrote.
-	riskReady
-	// riskEnded: its workload ended, and its guest writes back what it
-	// wrote within EndedSettle (settleEnded).
-	riskEnded
-	// riskActive: it may run work that no flush reaches: starting,
-	// provisioning, stopping, in a phase OpenShell does not name, or in
-	// the error state with its VM process not polled.
-	riskActive
-)
+// HoldsGateway reports whether a sandbox that OpenShell lists in phase p
+// (said: as for VMGone) keeps DefenseClaw from stopping, restarting or
+// upgrading its gateway, or from moving its account to another OpenShell
+// setup. Any of those stops every sandbox on the gateway, and where the
+// compute driver's stop does not keep what a workload has not synced
+// (stopFlushes false: the MicroVM driver, whose VMs end with the gateway,
+// and a driver DefenseClaw does not know) a VM that still runs loses what
+// it wrote last.
+//
+// Only OpenShell's own state releases a sandbox: it is stopped, it is
+// being deleted, or it is in the error state because its VM process
+// exited (VMGone). Nothing else does: not the time since its workload
+// ended, nor a stop DefenseClaw asked for that OpenShell did not make.
+// Ready, provisioning, starting, stopping, unknown and unnamed phases
+// hold, and so do completed and every other error state (a main process
+// that failed, a VM process OpenShell could not poll, a provisioning that
+// timed out, an image that failed, no reason given): the VM keeps running
+// after its main process ends (GAP-0012), with whatever that process left
+// running, and nothing in OpenShell flushes it. On a driver whose stop
+// keeps the workload's writes (docker: an exited container), the ended
+// phases hold nothing.
+func HoldsGateway(p SandboxPhase, said string, stopFlushes bool) bool {
+	switch p {
+	case PhaseStopped, PhaseDeleting:
+		return false
+	case PhaseCompleted:
+		return !stopFlushes
+	case PhaseError:
+		return !stopFlushes && !VMGone(said)
+	}
+	return true
+}
 
-// restartRiskOf is the restartRisk of sb.
-func restartRiskOf(sb *Sandbox) restartRisk {
+// StopWayOn is what the user runs to bring the sandbox name, which holds
+// its gateway in phase p (HoldsGateway; said: as for VMGone), to a phase in
+// which OpenShell reports it stopped, on a gateway that runs DefenseClaw
+// sandboxes (runs: SupportedMin or later) or an older one, whose stop of a
+// sandbox in its error state OpenShell refuses and on which DefenseClaw
+// starts none. OpenShell refuses the stop of a sandbox whose provisioning
+// timed out, which never ran its workload: a start after OpenShell's
+// cleanup, then the stop of the ready sandbox, brings it to stopped. It
+// returns its stop of a completed sandbox, or of one whose main process
+// failed, as it is, and nothing in OpenShell writes such a MicroVM's disk
+// back (exec needs a ready sandbox, and 0.1.5's flushing stop covers only a
+// running workload): its start ends the VM, with whatever the workload left
+// running, with no flush first, so what the VM had not written to its disk
+// is lost. Its way on says so, and needs the start's --end-vm
+// (sandboxapi.StartRequest.EndVM), as does its delete, which loses all of
+// its work. Neither keeps all of it.
+func StopWayOn(name string, p SandboxPhase, said string, runs bool) string {
+	stop := "`defenseclaw sandbox stop " + name + "`"
+	del := "`defenseclaw sandbox delete " + name + "`, which deletes it and its work"
 	switch {
-	case sb == nil || !MayHoldCompute(sb.Status.Phase, false):
-		return riskNone
-	case sb.Status.Phase == PhaseError && ProvisioningTimedOut(failureReason(sb)):
-		return riskNone
-	case WorkloadEnded(sb.Status.Phase, failureReason(sb)):
-		return riskEnded
-	case sb.Status.Phase == PhaseReady:
-		return riskReady
+	case p == PhaseReady:
+		return stop
+	case p != PhaseCompleted && p != PhaseError:
+		return "wait until `defenseclaw sandbox list` shows it ready or stopped, then " + stop + " if it is ready"
+	case !runs && p == PhaseCompleted:
+		return del + " (this OpenShell neither stops nor starts a completed MicroVM)"
+	case !runs:
+		return del + " (this OpenShell neither stops nor starts a sandbox in its error state)"
+	case p == PhaseError && ProvisioningTimedOut(said):
+		return "wait a minute for OpenShell's cleanup of the provisioning that timed out, then `defenseclaw sandbox start " + name + "`, then " + stop +
+			" once it is ready (OpenShell refuses to stop a sandbox whose provisioning timed out), or " + del
+	case p == PhaseCompleted || mainProcessFailed(said):
+		return LingeringVMLoss + ": `defenseclaw sandbox start " + name + " --end-vm` ends the VM that way, then " + stop + " once it is ready; or " + del
 	}
-	return riskActive
+	return stop
 }
 
-// RestartHolds reports what a restart of sb's gateway, whose compute
-// driver's stop keeps what a workload has not synced (stopFlushes: docker)
-// or does not (the MicroVM driver, and one DefenseClaw does not know),
-// does to sb: holds, it stops or drops work of sb (MayHoldCompute), and
-// ended, sb is a MicroVM whose workload ended, which a restart DefenseClaw
-// makes waits for (EndedSettle) instead of flushing it.
-func RestartHolds(sb *Sandbox, stopFlushes bool) (holds, ended bool) {
-	if stopFlushes {
-		return sb != nil && MayHoldCompute(sb.Status.Phase, true), false
-	}
-	r := restartRiskOf(sb)
-	return r != riskNone, r == riskEnded
+// LingeringVMLoss is what keeping or ending a MicroVM whose main process
+// ended (completed, or failed) costs: StopWayOn's way on and the start's
+// refusal say it.
+const LingeringVMLoss = "nothing in OpenShell writes this MicroVM's disk back or stops it: its VM still runs what its workload left running, " +
+	"and its start ends that VM with no flush first, so what the VM has not written to its disk is lost"
+
+// LingeringVM reports a MicroVM that OpenShell reports in phase p (said:
+// as for VMGone) whose VM may still run what its workload left running,
+// which its start ends with no flush (StopWayOn): completed, or in the
+// error state but for a VM that is gone and a provisioning that timed out,
+// which never ran the workload. On a driver whose stop keeps the writes
+// (stopFlushes: docker) none is.
+func LingeringVM(p SandboxPhase, said string, stopFlushes bool) bool {
+	return (p == PhaseCompleted || p == PhaseError) && HoldsGateway(p, said, stopFlushes) && !ProvisioningTimedOut(said)
 }
 
-// settleClock is the clock settleEnded waits on.
-var settleClock = struct {
-	now   func() time.Time
-	sleep func(context.Context, time.Duration) error
-}{time.Now, sleepContext}
-
-// settlePoll is how often settleEnded lists the gateway's sandboxes again.
-const settlePoll = 5 * time.Second
-
-// settleEnded waits until every MicroVM of list whose workload ended has
-// stayed so for EndedSettle since this wait first saw it in that phase,
-// listing the gateway's sandboxes again as it goes, and returns the list
-// it saw last: one that left that phase meanwhile (started again, or
-// deleted) is judged in its new one by the caller. Nothing tells how long
-// a MicroVM has been so before (OpenShell reports no transition time for
-// a main process that ended), so the wait counts from now. A list that
-// fails, or a context that ends, ends the wait with its error.
-func settleEnded(ctx context.Context, c Client, list []*Sandbox) ([]*Sandbox, error) {
-	seen := map[string]time.Time{}
-	for {
-		now := settleClock.now()
-		next := map[string]time.Time{}
-		wait := time.Duration(0)
-		for _, sb := range list {
-			if restartRiskOf(sb) != riskEnded {
-				continue
-			}
-			k := sb.Name + "\x00" + string(sb.Status.Phase)
-			since, ok := seen[k]
-			if !ok {
-				since = now
-			}
-			next[k] = since
-			if left := since.Add(EndedSettle).Sub(now); left > wait {
-				wait = left
-			}
-		}
-		if wait <= 0 {
-			return list, nil
-		}
-		seen = next
-		if err := settleClock.sleep(ctx, min(wait, settlePoll)); err != nil {
-			return nil, err
-		}
-		var err error
-		if list, err = c.ListSandboxes(ctx, nil); err != nil {
-			return nil, err
-		}
+// phaseWord is p as OpenShell's lower-case name ("unknown" for none).
+func phaseWord(p SandboxPhase) string {
+	if p == "" {
+		return "unknown"
 	}
+	return strings.ToLower(string(p))
 }
 
-// phaseNames names each of list as "NAME, phase".
-func phaseNames(list []*Sandbox) []string {
-	out := make([]string, 0, len(list))
+// stoppedRefusal is base for the sandboxes of list that hold their gateway
+// on a driver whose stop does not flush (HoldsGateway), each named with
+// its phase and its way on (StopWayOn, on a gateway that runs sandboxes
+// when runs says so; asked only when one holds), and then is the step to
+// retry after; nil when none holds.
+func stoppedRefusal(base error, list []*Sandbox, runs func() bool, then string) error {
+	var held []*Sandbox
 	for _, sb := range list {
-		out = append(out, fmt.Sprintf("%s, %s", sb.Name, strings.ToLower(string(sb.Status.Phase))))
+		if sb != nil && HoldsGateway(sb.Status.Phase, FailureReason(sb), false) {
+			held = append(held, sb)
+		}
 	}
-	return out
+	if len(held) == 0 {
+		return nil
+	}
+	newer := runs()
+	lines := make([]string, 0, len(held))
+	for _, sb := range held {
+		lines = append(lines, fmt.Sprintf("%s (%s): %s", sb.Name, phaseWord(sb.Status.Phase), StopWayOn(sb.Name, sb.Status.Phase, FailureReason(sb), newer)))
+	}
+	slices.Sort(lines)
+	return fmt.Errorf("%w; OpenShell has not reported these stopped: %s; then %s", base, strings.Join(lines, "; "), then)
+}
+
+// VMCount counts the MicroVMs that run as this account (CountMicroVMs):
+// the evidence a check before a gateway stop, restart or upgrade falls back
+// on when it cannot read the gateway's own account of its sandboxes. An
+// error means it cannot tell.
+type VMCount func(context.Context) (int, error)
+
+// microVMLauncherFlag is the flag OpenShell's vm driver starts the launcher
+// of every MicroVM with (openshell-driver-vm --internal-run-vm, 0.1.1 to
+// 0.1.5). That process runs the VM for as long as the VM lives, as the
+// gateway's account, and dies with the gateway (procguard), so a gateway
+// whose account runs none has no MicroVM a stop could end.
+const microVMLauncherFlag = "--internal-run-vm"
+
+// CountMicroVMs counts the processes of this account that run a MicroVM
+// (microVMLauncherFlag), listed with ps through r. A ps that fails is an
+// error: nothing then shows that none runs.
+func CountMicroVMs(ctx context.Context, r Runner) (int, error) {
+	out, err := r.Output(ctx, Command{Name: "ps", Args: []string{"-ww", "-u", strconv.Itoa(os.Getuid()), "-o", "args="}, Timeout: 15 * time.Second})
+	if err != nil {
+		return 0, fmt.Errorf("list this account's processes: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	n := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if slices.Contains(strings.Fields(line), microVMLauncherFlag) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// unreachableRefusal is the outcome of a check (base: ErrUnflushed,
+// ErrSandboxesRunning) before a gateway stop, restart or upgrade that could
+// not read the gateway's sandboxes, why in cause: no registration, no
+// connection, or a gateway that refused both calls. That does not show that
+// nothing runs on it: a gateway whose registration or certificates broke
+// still runs its MicroVMs. So it refuses unless vms shows that no MicroVM
+// runs as this account, the only processes the stop would end with no
+// flush; then is the step to retry after.
+func unreachableRefusal(ctx context.Context, base, cause error, vms VMCount, then string) error {
+	way := "make the gateway answer DefenseClaw again (its service, its registration, its certificates), so it can see which sandbox runs, then " + then
+	if vms == nil {
+		return fmt.Errorf("%w (the sandboxes on it could not be read: %v, and nothing counted the MicroVMs of this account); %s", base, cause, way)
+	}
+	n, err := vms(ctx)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w (the sandboxes on it could not be read: %v, and the MicroVMs of this account could not be counted: %v); %s", base, cause, err, way)
+	case n > 0:
+		return fmt.Errorf("%w (the sandboxes on it could not be read: %v, and %s run as this account, which the gateway's stop would end with no flush); %s",
+			base, cause, plural(n, "MicroVM", "MicroVMs"), way)
+	}
+	return nil
+}
+
+// gatewayRunsSandboxes reports whether the gateway c talks to runs
+// DefenseClaw sandboxes (RunsSandboxes of its health's release): false
+// when it does not say.
+func gatewayRunsSandboxes(ctx context.Context, c Client) bool {
+	h, err := c.Health(ctx)
+	return err == nil && h != nil && RunsSandboxes(h.RawVersion)
 }

@@ -174,8 +174,8 @@ func TestTheDaemonFollowsAnInPlaceUpgrade(t *testing.T) {
 		gw.Version = h.RawVersion
 		return &gw, nil
 	}
-	e.fake.SetRelease(openshell.SupportedMin)
-	if st, err := e.m.Status(t.Context()); err != nil || st.Gateway == nil || st.Gateway.Version != openshell.SupportedMin {
+	e.fake.SetRelease(openshell.LegacyMin)
+	if st, err := e.m.Status(t.Context()); err != nil || st.Gateway == nil || st.Gateway.Version != openshell.LegacyMin {
 		t.Fatalf("status = %+v, %v", st, err)
 	}
 	e.fake.SetRelease(openshell.InstallerVersion)

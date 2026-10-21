@@ -84,26 +84,6 @@ const (
 	PhaseCompleted    = v1.SandboxCompleted
 )
 
-// MayHoldCompute reports whether a sandbox in phase p may hold compute that
-// a stop of its OpenShell gateway would end without a flush, or half
-// started, where the compute driver's own stop keeps what the workload
-// wrote (stopFlushes: docker, whose exited container keeps its writes) or
-// does not (the MicroVM driver, and a driver DefenseClaw does not know).
-// That is every phase but stopped and deleting, an unknown one and one this
-// build does not name included, but for the completed and error phases
-// where the stop flushes: a MicroVM keeps running after its workload
-// completes or fails, until it is deleted or its gateway stops (GAP-0012),
-// with what it wrote not written back yet (EndedSettle).
-func MayHoldCompute(p SandboxPhase, stopFlushes bool) bool {
-	switch p {
-	case PhaseStopped, PhaseDeleting:
-		return false
-	case PhaseCompleted, PhaseError:
-		return !stopFlushes
-	}
-	return true
-}
-
 // Configuration admission states.
 const (
 	AdmissionUnknown  = types.ConfigurationAdmissionUnknown

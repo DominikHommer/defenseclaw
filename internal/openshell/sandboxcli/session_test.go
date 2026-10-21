@@ -1012,7 +1012,7 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 	lost := sampleSandbox("hic")
 	lost.Phase = "error"
 	ta.daemon.add(lost)
-	// Before openshell.SandboxMin the gateway can neither stop nor start it:
+	// Before openshell.SupportedMin the gateway can neither stop nor start it:
 	// OpenShell is upgraded first.
 	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "hic is in OpenShell's error state") ||
 		!strings.Contains(c.Detail, "neither stop nor start") || c.Fix == nil || !strings.Contains(c.Fix.Summary, "upgrade OpenShell to "+openshell.InstallerVersion) {
@@ -1020,11 +1020,11 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 	}
 	// From it the gateway stops a sandbox in its error state, and starts it
 	// again after (NVIDIA/OpenShell#4231): the way on keeps it.
-	ta.daemon.status.Gateway.Version = openshell.SandboxMin
+	ta.daemon.status.Gateway.Version = openshell.SupportedMin
 	if c := check(ta); c.Status != openshell.StatusWarn || strings.Contains(c.Detail, "neither stop nor start") || c.Fix == nil ||
 		!strings.Contains(c.Fix.Summary, "`defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`") ||
 		strings.Contains(c.Fix.Summary, "delete") {
-		t.Fatalf("errored on %s: %+v", openshell.SandboxMin, c)
+		t.Fatalf("errored on %s: %+v", openshell.SupportedMin, c)
 	}
 	// One whose provisioning timed out starts again with no stop, which
 	// OpenShell refuses for it.
@@ -1034,9 +1034,9 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "hic is in OpenShell's error state (the container stopped") ||
 		!strings.Contains(c.Detail, "slow is in OpenShell's error state because its provisioning timed out") || c.Fix == nil ||
 		!strings.Contains(c.Fix.Summary, "for slow, wait a minute for OpenShell's cleanup, then `defenseclaw sandbox start NAME` with no stop") {
-		t.Fatalf("timed out on %s: %+v", openshell.SandboxMin, c)
+		t.Fatalf("timed out on %s: %+v", openshell.SupportedMin, c)
 	}
-	// On an older gateway, a prerelease of SandboxMin included, both are
+	// On an older gateway, a prerelease of SupportedMin included, both are
 	// upgraded first; after it, the one whose provisioning timed out still
 	// starts with no stop, which the upgraded gateway refuses for it.
 	for _, old := range []string{"0.1.3", "0.1.5-pre.2"} {
@@ -1045,7 +1045,7 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 		if c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "where this OpenShell can neither stop nor start them") || c.Fix == nil ||
 			c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" (see Gateway), then `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME` for hic, "+
 				"which keep the sandbox and its work; for slow wait a minute for OpenShell's cleanup, then `defenseclaw sandbox start NAME` with no stop: OpenShell "+
-				openshell.SandboxMin+" refuses to stop a sandbox whose provisioning timed out" {
+				openshell.SupportedMin+" refuses to stop a sandbox whose provisioning timed out" {
 			t.Fatalf("errored and timed out on %s: %+v", old, c)
 		}
 	}

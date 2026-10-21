@@ -970,6 +970,11 @@
     "long": "Starts a stopped sandbox for a new session. A mounted project gets a fresh undo\nsnapshot, unless the folder still holds changes an earlier session made that were\nneither undone nor kept at its end (a detached run, or one without a terminal to ask\non): then the earlier undo point stays, so \"sandbox undo\" still reverts them.\n--new-snapshot accepts those changes and takes a fresh snapshot.",
     "flags": [
       {
+        "name": "end-vm",
+        "type": "bool",
+        "default": "false"
+      },
+      {
         "name": "new-snapshot",
         "type": "bool",
         "default": "false"

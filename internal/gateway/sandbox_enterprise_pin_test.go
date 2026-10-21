@@ -24,7 +24,7 @@ import (
 )
 
 // The daemon of a host DefenseClaw 1.0.3 set up with the setup pin "0.1.3",
-// which runs no sandbox (openshell.SandboxMin), installs the release this
+// which runs no sandbox (openshell.SupportedMin), installs the release this
 // build installs, as ensure renders it; a prerequisite pin is the
 // administrator's install and is judged as it is.
 func TestSandboxEnterpriseMigratesTheOldSetupPin(t *testing.T) {

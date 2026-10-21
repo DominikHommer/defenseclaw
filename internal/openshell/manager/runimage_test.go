@@ -672,7 +672,7 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 	free = 40 << 30
 	sb := e.create(sandboxapi.CreateRequest{Name: "vm-room", Copy: true})
 	// Its run image is prepared now: the same posture needs no room.
-	must(t, os.MkdirAll(filepath.Join(cache, preparedDiskName(openshell.SandboxMin, sb.RunImageID)), 0o755))
+	must(t, os.MkdirAll(filepath.Join(cache, preparedDiskName(openshell.SupportedMin, sb.RunImageID)), 0o755))
 	free = 1 << 30
 	// Explain looks in the same cache (the gateway's state_dir).
 	if ex, err := e.m.Explain(t.Context(), sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Project: e.project}); err != nil || ex.VMFirstBoot {
@@ -714,7 +714,7 @@ func TestExplainReportsAVMFirstBoot(t *testing.T) {
 	cache := filepath.Join(home, vm.ImageCache)
 	prepare := func(id string) {
 		t.Helper()
-		must(t, os.MkdirAll(filepath.Join(cache, preparedDiskName(openshell.SandboxMin, id)), 0o755))
+		must(t, os.MkdirAll(filepath.Join(cache, preparedDiskName(openshell.SupportedMin, id)), 0o755))
 	}
 	explain := func(e *harnessEnv, req sandboxapi.ExplainRequest) bool {
 		t.Helper()

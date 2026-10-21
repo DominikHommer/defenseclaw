@@ -97,9 +97,10 @@ type Status struct {
 	// Live counts those that may hold compute a stop of the OpenShell
 	// gateway would end unflushed or half started (manager.HoldsCompute):
 	// the running ones, those starting or stopping or in an unknown phase,
-	// and a MicroVM that completed or is in OpenShell's error state, until
-	// its guest has written its disk back (openshell.EndedSettle). Unset by
-	// a daemon before DefenseClaw 1.0.4 (Busy).
+	// and a MicroVM that completed or is in OpenShell's error state, which
+	// OpenShell does not stop and whose VM may still run, until OpenShell
+	// reports it stopped or deleted (openshell.HoldsGateway). Unset by a
+	// daemon before DefenseClaw 1.0.4 (Busy).
 	Live             *int      `json:"live,omitempty"`
 	PendingApprovals int       `json:"pending_approvals"`
 	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
@@ -336,12 +337,6 @@ type Sandbox struct {
 	// without a flush: what it wrote in its last seconds may be missing,
 	// empty or cut short (UnflushedText).
 	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
-	// EndedAt is when DefenseClaw saw its workload end (completed, or
-	// OpenShell's error state), or its harness at work after that; zero in
-	// any other phase. Once its MicroVM's guest has had
-	// openshell.EndedSettle to write its disk back, a stop of the OpenShell
-	// gateway loses none of its work (manager.HoldsCompute).
-	EndedAt time.Time `json:"ended_at,omitzero"`
 	// RepoPolicy is the repository policy (.defenseclaw/sandbox.yaml) the
 	// posture includes, without its content, as the launch banner names it.
 	RepoPolicy *RepoPolicy `json:"repo_policy,omitempty"`
@@ -792,6 +787,12 @@ type StartRequest struct {
 	// an earlier session's changes: they are accepted, and undo no longer
 	// reverts them.
 	NewSnapshot bool `json:"new_snapshot,omitempty"`
+	// EndVM starts a MicroVM whose workload ended but whose VM may still run
+	// what it left running (openshell.LingeringVM): OpenShell's start ends
+	// that VM with no flush first, so what it has not written to its disk is
+	// lost. Without it the daemon refuses such a start with
+	// CodeConflict. A daemon before 1.0.4 ignores it.
+	EndVM bool `json:"end_vm,omitempty"`
 	// LLM is the model credential as the caller's environment holds it now
 	// (secret values): when it is of the profile the sandbox was created
 	// with and differs from the one its provider holds (a rotated or
@@ -1483,7 +1484,7 @@ const ReasonUnflushedStop = "unflushed_stop"
 
 // ReasonOldSupervisor is the Reason of the (HIGH) finding event a running
 // sandbox gets when its session started on an OpenShell release older than
-// openshell.SandboxMin, whose supervisor it keeps until it stops.
+// openshell.SupportedMin, whose supervisor it keeps until it stops.
 const ReasonOldSupervisor = "old_supervisor"
 
 // ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed

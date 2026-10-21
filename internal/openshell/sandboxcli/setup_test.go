@@ -460,10 +460,12 @@ func upgradableReport(edit func(*openshell.DoctorReport)) func(context.Context, 
 
 // TestSetupNeedsTheUpgradeOnAReleaseThatRunsNoSandbox: on the OpenShell
 // 0.1.1 to 0.1.4 that DefenseClaw 1.0.0 to 1.0.3 left, the daemon runs no
-// sandbox (openshell.SandboxMin, NVIDIA/OpenShell#4494), so the Gateway
+// sandbox (openshell.SupportedMin, NVIDIA/OpenShell#4494), so the Gateway
 // check fails. That failure does not stop setup before the in-place upgrade
-// it offers; a kept release stops it after, on that check, with the upgrade
-// as the way on, and --install-openshell finishes on the upgraded release.
+// it offers, which --yes and --install-openshell take (the owner's floor:
+// a legacy host upgrades on the next install); a release kept with
+// --non-interactive stops setup after, on that check, with the upgrade as
+// the way on.
 func TestSetupNeedsTheUpgradeOnAReleaseThatRunsNoSandbox(t *testing.T) {
 	v, _ := openshell.ParseVersion("0.1.1")
 	old := upgradableReport(func(r *openshell.DoctorReport) {
@@ -476,7 +478,8 @@ func TestSetupNeedsTheUpgradeOnAReleaseThatRunsNoSandbox(t *testing.T) {
 		o        SetupOptions
 		upgraded bool
 	}{
-		{"--yes keeps it and stops on the Gateway check", SetupOptions{Yes: true}, false},
+		{"-n keeps it and stops on the Gateway check", SetupOptions{NonInteractive: true}, false},
+		{"--yes upgrades it", SetupOptions{Yes: true}, true},
 		{"--install-openshell upgrades it", SetupOptions{NonInteractive: true, InstallOpenShell: true}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -508,7 +511,7 @@ func TestSetupNeedsTheUpgradeOnAReleaseThatRunsNoSandbox(t *testing.T) {
 			wantErr(t, err, "the OpenShell gateway is not usable yet (Gateway version)")
 			// The upgrade was offered (and kept) before setup stopped.
 			has(t, ta.output(), "OpenShell 0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" fixes a supervisor bug",
-				"✗ Gateway version: OpenShell 0.1.1 runs no DefenseClaw sandbox: before "+openshell.SandboxMin,
+				"✗ Gateway version: OpenShell 0.1.1 runs no DefenseClaw sandbox: before "+openshell.SupportedMin,
 				"→ upgrade OpenShell to "+openshell.InstallerVersion+" in place: defenseclaw sandbox setup --install-openshell")
 		})
 	}
@@ -525,8 +528,8 @@ func TestSetupNeedsTheUpgradeOnAReleaseThatRunsNoSandbox(t *testing.T) {
 func TestSetupOffersTheUpgrade(t *testing.T) {
 	const later = "→ upgrade OpenShell to " + openshell.InstallerVersion + " in place: defenseclaw sandbox setup --install-openshell\n"
 	const names = "(dc-claude-theirs-a, dc-claude-theirs-b)"
-	question := "Upgrade OpenShell 0.1.1 to " + openshell.InstallerVersion + " in place with NVIDIA's installer? (sudo; sha256 verified; pulls OpenShell's " +
-		openshell.InstallerVersion + " supervisor images from ghcr.io; restarts the gateway: it drops the connections of the 2 sandboxes running on it " + names + ") [y/N]"
+	question := "Upgrade OpenShell 0.1.1 to " + openshell.InstallerVersion + " in place with NVIDIA's installer? (OpenShell 0.1.1 runs no DefenseClaw sandbox; sudo; sha256 verified; pulls OpenShell's " +
+		openshell.InstallerVersion + " supervisor images from ghcr.io; restarts the gateway: it drops the connections of the 2 sandboxes running on it " + names + ") [Y/n]"
 	flag := SetupOptions{NonInteractive: true, InstallOpenShell: true}
 	for _, tc := range []struct {
 		name     string
@@ -539,9 +542,11 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 		upgraded bool
 		says     []string
 	}{
-		{"a terminal answers no by default", "\n", true, SetupOptions{}, "", 2, nil, false, []string{question, later}},
+		// A legacy release runs no sandbox: the upgrade is the default.
+		{"a terminal answers yes by default", "\ny\n", true, SetupOptions{}, "", 2, nil, true, []string{question, "Run this plan?", "OpenShell upgraded to " + openshell.InstallerVersion}},
+		{"a terminal answers no", "n\n", true, SetupOptions{}, "", 2, nil, false, []string{question, later}},
 		{"a terminal answers yes", "y\ny\n", true, SetupOptions{}, "", 2, nil, true, []string{question, "Run this plan?", "OpenShell upgraded to " + openshell.InstallerVersion}},
-		{"--yes keeps it", "", true, SetupOptions{Yes: true}, "", 2, nil, false, []string{later}},
+		{"--yes upgrades it", "", true, SetupOptions{Yes: true}, "", 2, nil, true, []string{"OpenShell upgraded to " + openshell.InstallerVersion}},
 		{"-n keeps it", "", false, SetupOptions{NonInteractive: true}, "", 2, nil, false, []string{later}},
 		{"--install-openshell upgrades it", "", false, flag, "", 2, nil, true,
 			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: it drops the connections of the 2 sandboxes running on it"}},
@@ -549,14 +554,16 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 			[]string{"⚠ OpenShell 0.1.1 is kept: Docker could not pull the images the upgraded gateway starts with (docker pull: no such host): let Docker reach ghcr.io"}},
 		// The restart would stop a running MicroVM without a flush.
 		{"MicroVMs running", "", true, SetupOptions{}, openshell.DriverVM, 2, nil, false,
-			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the 2 MicroVM sandboxes running on it " +
-				names + " without a flush", "→ stop them first (`defenseclaw sandbox stop NAME` flushes their disks), then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, and DefenseClaw makes it only once OpenShell " +
+				"reports every MicroVM sandbox on the gateway stopped, which it does not for these: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a`; " +
+				"dc-claude-theirs-b (ready): `defenseclaw sandbox stop dc-claude-theirs-b`; then try again", "→ then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
 		{"MicroVMs running, --install-openshell", "", false, flag, openshell.DriverVM, 2, nil, false,
-			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the 2 MicroVM sandboxes"}},
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, and DefenseClaw makes it only once OpenShell"}},
 		{"no MicroVM running", "", false, flag, openshell.DriverVM, 0, nil, true,
 			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: no sandbox runs on it now"}},
 		{"a MicroVM started meanwhile", "", false, flag, openshell.DriverVM, 0, fmt.Errorf("%w (dc-late): stop them first", openshell.ErrSandboxesRunning), true,
-			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade's gateway restart would stop running MicroVM sandboxes without a flush (dc-late): stop them first"}},
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade was not run: its gateway restart stops every MicroVM on the gateway with no flush, so DefenseClaw upgrades only " +
+				"once OpenShell reports each sandbox on it stopped (dc-late): stop them first"}},
 		// GAP-0056, GAP-0064: sudo refused or cancelled before the script.
 		{"no sudo", "", false, flag, "", 0, fmt.Errorf("%w: cancelled at sudo's password prompt", openshell.ErrSudo), true,
 			[]string{"⚠ OpenShell 0.1.1 is kept, the upgrade did not run: the install needs sudo: cancelled at sudo's password prompt",
@@ -603,7 +610,7 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 				lacks(t, ta.output(), "OpenShell upgraded")
 			}
 			if tc.o.Yes || tc.o.NonInteractive || tc.driver == openshell.DriverVM && tc.running > 0 {
-				lacks(t, ta.output(), "Upgrade OpenShell 0.1.1")
+				lacks(t, ta.output(), "Upgrade OpenShell 0.1.1", "Run this plan?")
 			}
 		})
 	}
@@ -1841,9 +1848,11 @@ func TestDoctorJudgesMicroVMsAgainstTheAdminMaximum(t *testing.T) {
 }
 
 // TestDoctorFixAsksBeforeARestartStopsSandboxes: a fix that restarts a
-// MicroVM gateway stops every sandbox running on it, once its disk is
-// flushed. With none running it is a yes by default, as every fix; with
-// some running it names them and is a no by default, which --yes takes.
+// MicroVM gateway stops every sandbox on it with no flush, so the restart
+// is refused while OpenShell does not report one stopped: the question
+// names each with how to stop it. With none running it is a yes by
+// default, as every fix; with some running it is a no by default, which
+// --yes takes.
 // On docker, whose stop keeps what a container wrote, nothing changes.
 func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	applied := 0
@@ -1857,7 +1866,8 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	}
 	report := on(openshell.DriverVM)
 	const question = `Fix "MicroVM resources": raise them and restart the gateway?`
-	const stops = "MicroVM resources: this restarts the OpenShell gateway, which stops the 1 sandbox running on it (dc-claude-theirs-a), once their disks are flushed"
+	const stops = "MicroVM resources: this restarts the OpenShell gateway, and DefenseClaw makes it only once OpenShell reports every MicroVM sandbox on the gateway stopped, " +
+		"which it does not for these: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a`; then try again"
 
 	ta := newTestApp(t, "\n")
 	ta.IO.TTY = true
@@ -1873,7 +1883,7 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	ta.HostDoctor = report
 	runningOn(t, ta, 1)
 	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
-	has(t, ta.output(), stops, "not fixed with --yes while sandboxes run on the gateway")
+	has(t, ta.output(), stops, "not fixed with --yes while OpenShell does not report every MicroVM sandbox on the gateway stopped")
 	_ = ta.fresh().RunDoctor(bg, DoctorOptions{Fix: true, Yes: true, Output: OutputJSON})
 	if applied != 0 {
 		t.Fatalf("--yes applied the fix %d times", applied)

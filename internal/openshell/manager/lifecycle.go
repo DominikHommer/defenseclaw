@@ -111,7 +111,6 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	} else if st.Reason == "" {
 		st.Reason = err.Error()
 	}
-	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	live := 0
@@ -123,7 +122,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if b.phase == audit.SandboxPhaseReady {
 			st.Running++
 		}
-		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason, b.rec.EndedAt, now) {
+		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
 			live++
 		}
 	}
@@ -333,6 +332,9 @@ func (m *Manager) refuseRetained(b *box) error {
 		"sandbox %s was deleted; only its undo point is kept (undo, review or delete it)", name)
 }
 
+// stop stops the sandbox of b. One whose main process completed or failed
+// OpenShell returns as it is: it keeps its phase, and with it the
+// OpenShell gateway (HoldsCompute), until OpenShell reports another.
 func (m *Manager) stop(ctx context.Context, b *box) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
@@ -342,10 +344,10 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	defer cancel()
 	m.mu.Lock()
 	name, reason, driver := b.rec.Name, b.rec.PhaseReason, b.rec.Driver
-	// Nothing of a sandbox whose workload ended runs to be stopped: its
-	// phase stays until OpenShell reports another, so the wait for its
-	// MicroVM's disk (EndedAt) does not start over.
-	ended := workloadEnded(b.phase, reason)
+	// OpenShell stops nothing of a sandbox whose workload ended: its phase
+	// stays until OpenShell reports another.
+	ended := b.phase == audit.SandboxPhaseCompleted ||
+		b.phase == audit.SandboxPhaseError && !openshell.VMGone(reason) && !openshell.ProvisioningTimedOut(reason)
 	m.mu.Unlock()
 	if err := m.checkSandbox(ctx, gw, b); err != nil {
 		return err
@@ -392,8 +394,10 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	if ph := stoppedAsIs(stopped); ph != "" {
 		// OpenShell returns a sandbox whose workload completed, or whose
 		// main process failed, as it is: it stops nothing, and flushes
-		// nothing, of its MicroVM. Nothing of it runs, and its MicroVM's
-		// disk is written back on its own (openshell.EndedSettle).
+		// nothing, of its MicroVM, which may still run what its workload
+		// left running, so it still holds the gateway
+		// (openshell.HoldsGateway; the caller says how to stop it:
+		// openshell.StopWayOn).
 		var cond *audit.SandboxCondition
 		if ph == audit.SandboxPhaseError && reason != "" {
 			cond = &audit.SandboxCondition{Reason: reason}
@@ -420,6 +424,26 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStop, false, nil, sb.Status.ExitCode)
 	return nil
+}
+
+// lockStart takes the gateway's lifecycle lock for a create or a start
+// (Options.StartLock), which it holds over OpenShell's call only: while
+// DefenseClaw restarts or upgrades the gateway (doctor --fix, setup, the
+// OpenShell upgrade), whose check of the sandboxes would not see one
+// started after it, the call is refused.
+func (m *Manager) lockStart() (func(), error) {
+	if m.opts.StartLock == nil {
+		return func() {}, nil
+	}
+	unlock, err := m.opts.StartLock()
+	switch {
+	case errors.Is(err, openshell.ErrGatewayBusy):
+		return nil, &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "DefenseClaw is restarting or upgrading the OpenShell gateway",
+			Detail: "start the sandbox again once `defenseclaw sandbox doctor --fix`, `defenseclaw sandbox setup` or the OpenShell upgrade has finished"}
+	case err != nil:
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "take the OpenShell gateway's lifecycle lock: %v", err)
+	}
+	return unlock, nil
 }
 
 // stoppedAsIs is the phase of a sandbox OpenShell's stop returned as it
@@ -746,6 +770,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s is %s, not stopped; stop it before starting a new session",
 			rec.Name, strings.ToLower(string(sb.Status.Phase)))
 	}
+	// A MicroVM whose workload ended still runs its VM, which OpenShell's
+	// start ends with no flush: only one the user asked to end goes on.
+	if err := lingeringStartRefusal(rec.Name, gw.Driver, sb, rec.PhaseReason, req.EndVM); err != nil {
+		return err
+	}
 	m.endSessionUnblocks(b)
 	eff, violations, err := m.resolveBoxViolations(b)
 	if err != nil {
@@ -880,8 +909,15 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 		}
 	}
+	// Not while DefenseClaw restarts or upgrades the gateway (lockStart).
+	unlockStart, err := m.lockStart()
+	if err != nil {
+		return err
+	}
 	m.lifecycle(ctx, b, audit.SandboxPhaseStarting, audit.SandboxTriggerStart, false, nil, nil)
-	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
+	_, err = gw.Client.StartSandbox(ctx, rec.Name)
+	unlockStart()
+	if err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
 		if e := m.errorPhaseRefusal(rec.Name, rec.PhaseReason, rec.Driver, err); e != nil {

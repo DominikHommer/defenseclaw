@@ -222,6 +222,12 @@ type Options struct {
 	// join the process trees of docker sandboxes (kernelfeed.go). Nil uses
 	// DefaultKernelFeedDialer: the feed's socket on Linux, none elsewhere.
 	KernelFeed KernelFeedDialer
+	// StartLock takes the gateway's lifecycle lock that a create or a start
+	// holds, shared, over OpenShell's call, and that DefenseClaw's restarts
+	// and upgrades of the gateway hold exclusively
+	// (openshell.LockSandboxStart): it fails with openshell.ErrGatewayBusy
+	// while one of them runs. Nil holds none.
+	StartLock func() (unlock func(), err error)
 	// ManagedAccount marks a managed computer's per-user sandbox daemon: a
 	// user service the organization installs, which starts at login. What a
 	// failure tells the user to do names signing in again, never a command
