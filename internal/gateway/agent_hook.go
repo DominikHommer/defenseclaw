@@ -27,6 +27,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -2300,13 +2301,18 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	case structuredToolEvent && req.ToolCallUnparsed:
 		// A tool call the connector's decoder cannot read is refused, not
-		// judged as an empty call (fail closed, GAP-0337).
+		// judged as an empty call (fail closed, GAP-0337). The refusal is a
+		// finding like any other block: its rule ID reaches the audit row,
+		// the scan findings and the response.
 		a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
 		verdict = &ToolInspectVerdict{
 			Action: "block", Severity: "HIGH", Confidence: 1.0,
-			Reason: fmt.Sprintf("DefenseClaw could not read the tool call in this %s hook payload, "+
-				"so it cannot show the call is safe and blocks it. Update DefenseClaw and the agent if this repeats.", req.ConnectorName),
-			Findings: []string{"HOOK-TOOL-CALL-UNPARSED"},
+			Reason:   unparsedToolCallReason(req.ConnectorName),
+			Findings: []string{hookToolCallUnparsedRuleID},
+			DetailedFindings: []RuleFinding{{
+				RuleID: hookToolCallUnparsedRuleID, Title: "tool call in the hook payload could not be read",
+				Severity: "HIGH", Confidence: 1.0, Tags: []string{"tool-arguments"},
+			}},
 		}
 	case structuredToolEvent:
 		if req.ToolArgsProjectionUncertain {
@@ -2476,6 +2482,38 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
 	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	return resp
+}
+
+// hookToolCallUnparsedRuleID is the finding of a tool call whose hook
+// payload the connector's decoder cannot read: DefenseClaw blocks it.
+const hookToolCallUnparsedRuleID = "HOOK-TOOL-CALL-UNPARSED"
+
+const (
+	unparsedToolCallReasonPrefix = "DefenseClaw could not read the tool call in this "
+	unparsedToolCallReasonSuffix = " hook payload, so it cannot show the call is safe and blocks it. " +
+		"Update DefenseClaw and the agent if this repeats."
+)
+
+// unparsedToolCallReasonConnector is the connector name the reason may hold:
+// a registry name from the hook route, never payload text.
+var unparsedToolCallReasonConnector = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+// unparsedToolCallReason is the reason of the hookToolCallUnparsedRuleID
+// block for connectorName.
+func unparsedToolCallReason(connectorName string) string {
+	return unparsedToolCallReasonPrefix + connectorName + unparsedToolCallReasonSuffix
+}
+
+// trustedUnparsedToolCallReason reports whether reason is exactly an
+// unparsedToolCallReason: gateway text and a connector name, nothing from
+// the payload, so the agent is shown it as written.
+func trustedUnparsedToolCallReason(reason string) bool {
+	name, ok := strings.CutPrefix(reason, unparsedToolCallReasonPrefix)
+	if !ok {
+		return false
+	}
+	name, ok = strings.CutSuffix(name, unparsedToolCallReasonSuffix)
+	return ok && unparsedToolCallReasonConnector.MatchString(name)
 }
 
 // selectWindowsShellDialect selects a complete grammar for a native Windows
