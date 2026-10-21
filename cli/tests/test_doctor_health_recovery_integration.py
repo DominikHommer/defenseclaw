@@ -894,6 +894,8 @@ def test_audit_check_and_repair_plan_reject_world_readable_database(tmp_path) ->
     assert result.checks[0]["reason_code"] == "audit-db-custody-invalid"
     # GAP-0337: a permission slip names the mode and the chmod, not a restore.
     assert "mode 0644" in result.checks[0]["detail"]
+    # GAP-1332: the content was not checked, so it is not called intact.
+    assert "intact" not in result.checks[0]["detail"]
     assert result.checks[0]["remediation"] == f"chmod 600 {cfg.audit_db}"
     assert planned.state == "blocked"
     assert planned.blockers == ("audit-db-custody-invalid",)
@@ -1258,3 +1260,23 @@ def test_gateway_writing_to_a_deleted_audit_db_fails_and_restarts(tmp_path) -> N
         with patch.object(cmd_doctor, "_recovery_gateway_blocker", return_value="gateway running"):
             assert cmd_doctor._plan_audit_db_recovery(cfg).state == "noop"
     restart.assert_called_once()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
+def test_writable_data_directory_fails_the_private_files_row(tmp_path) -> None:
+    # GAP-1329: another account that can write the data directory can
+    # replace the private files in it.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    try:
+        os.chmod(data_dir, 0o777)
+        rows = _DoctorResult()
+        cmd_doctor._check_private_file_exposure(cfg, rows)
+        assert rows.checks[-1]["status"] == "fail", rows.checks
+        assert f"chmod 700 {data_dir}" in rows.checks[-1]["remediation"]
+        os.chmod(data_dir, 0o755)
+        rows = _DoctorResult()
+        cmd_doctor._check_private_file_exposure(cfg, rows)
+        assert rows.checks[-1]["status"] == "warn", rows.checks
+    finally:
+        os.chmod(data_dir, 0o700)

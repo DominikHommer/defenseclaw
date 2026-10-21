@@ -247,6 +247,10 @@ func TestRulePackValidateFailsWhenTheGatewayCannotLoadThePack(t *testing.T) {
 	if strings.Contains(output.String(), "valid rule pack:") || !strings.Contains(output.String(), "syntax is valid") {
 		t.Fatalf("text mode output = %q", output.String())
 	}
+	// GAP-0757: the pin is printed even though the check fails.
+	if !strings.Contains(output.String(), "custom_packs pin: sha256:") {
+		t.Fatalf("text mode output has no custom_packs pin: %q", output.String())
+	}
 
 	rulePackValidateJSON = true
 	output.Reset()

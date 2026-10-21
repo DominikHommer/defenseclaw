@@ -1979,32 +1979,78 @@ def _gateway_rotated_provider_converged(cfg) -> bool:
     return not configured or _env_names_equal(configured, _CANONICAL_GATEWAY_TOKEN_ENV)
 
 
-def _emit_hilt_observe_summary(observe_only: list[tuple[str, str]], r: _DoctorResult, *, tagged: bool) -> None:
-    """One Human approval row for every connector whose approvals observe mode mutes."""
+def _hilt_observe_remediation(profiles: list[str], connector: str = "<name>") -> str:
+    """How to get approval prompts, from the setting that decides the mode.
+
+    ``guardrail mode`` edits guardrail.mode or a connector's mode, which a
+    guardrail profile that sets its own mode overrides (GAP-1269).
+    """
+    if profiles:
+        name = profiles[0] if len(profiles) == 1 else "<profile>"
+        return (
+            f"the guardrail profile {', '.join(profiles)} sets observe mode for this account, and "
+            "'guardrail mode' does not change it: set guardrail.profiles."
+            f"{name}.mode (or its connectors.<name>.mode) to action with defenseclaw config set, "
+            f"or set guardrail.profiles.{name}.hilt.enabled to false; check with "
+            f"defenseclaw guardrail profile explain --connector {connector}"
+        )
+    return (
+        "switch a connector to action mode to get approval prompts "
+        f"(defenseclaw guardrail mode action --connector {connector}), "
+        "or turn approvals off: defenseclaw guardrail hilt off"
+    )
+
+
+def _profile_sets_mode(cfg, profile: str, connector: str) -> bool:
+    """Whether guardrail profile *profile* sets the mode of *connector* itself."""
+    from defenseclaw.connector_paths import normalize
+
+    item = (getattr(getattr(cfg, "guardrail", None), "profiles", None) or {}).get(profile)
+    if item is None:
+        # Not in this config.yaml: the gateway's profile decides.
+        return True
+    if str(getattr(item, "mode", "") or "").strip():
+        return True
+    for name, override in (getattr(item, "connectors", None) or {}).items():
+        if normalize(name) == normalize(connector) and str(getattr(override, "mode", "") or "").strip():
+            return True
+    return False
+
+
+def _emit_hilt_observe_summary(observe_only: list[tuple[str, ...]], r: _DoctorResult, *, tagged: bool) -> None:
+    """One Human approval row for every connector whose approvals observe mode mutes.
+
+    Each entry is ``(connector, min_severity[, profile])``; *profile* names
+    the guardrail profile that sets the observe mode, if one does.
+    """
     if not observe_only:
         return
-    if len(observe_only) == 1:
-        connector, min_sev = observe_only[0]
+    entries = [(item[0], item[1], item[2] if len(item) > 2 else "") for item in observe_only]
+    profiles = sorted({profile for _, _, profile in entries if profile})
+    if len(entries) == 1:
+        connector, min_sev, _profile = entries[0]
         with _doctor_label_suffix(f"[{connector}]" if tagged else ""):
-            _emit("warn", "Human approval", f"enabled at {min_sev}, but {connector} mode is observe", r=r)
+            _emit(
+                "warn",
+                "Human approval",
+                f"enabled at {min_sev}, but {connector} mode is observe",
+                r=r,
+                remediation=_hilt_observe_remediation(profiles, connector),
+            )
         return
-    levels = sorted({min_sev for _, min_sev in observe_only})
+    levels = sorted({min_sev for _, min_sev, _ in entries})
     if len(levels) == 1:
-        names = ", ".join(connector for connector, _ in observe_only)
+        names = ", ".join(connector for connector, _, _ in entries)
         enabled = f"enabled at {levels[0]}"
     else:
-        names = ", ".join(f"{connector} ({min_sev})" for connector, min_sev in observe_only)
+        names = ", ".join(f"{connector} ({min_sev})" for connector, min_sev, _ in entries)
         enabled = "enabled"
     _emit(
         "warn",
         "Human approval",
         f"{enabled}, but these connectors are in observe mode, so they never ask: {names}",
         r=r,
-        remediation=(
-            "switch a connector to action mode to get approval prompts "
-            "(defenseclaw guardrail mode action --connector <name>), "
-            "or turn approvals off: defenseclaw guardrail hilt off"
-        ),
+        remediation=_hilt_observe_remediation(profiles),
     )
 
 
@@ -2038,6 +2084,7 @@ def _check_hilt_support(
     from defenseclaw import policy_catalog
 
     block_at = policy_catalog.scope_levels(cfg, connector).block_at
+    mode_profile = ""
     if getattr(guardrail, "profiles", None):
         from defenseclaw.gateway import current_user_guardrail_profile
 
@@ -2063,15 +2110,24 @@ def _check_hilt_support(
         min_sev = str(profile_hilt.get("min_severity") or "HIGH").upper()
         mode = str(effective["mode"]).lower()
         block_at = str(effective.get("resolved_block_at") or effective.get("block_at") or block_at)
+        profile_name = str(resolved.get("profile") or "")
+        if profile_name and _profile_sets_mode(cfg, profile_name, connector):
+            mode_profile = profile_name
     if not hilt_enabled:
         _emit("pass", "Human approval", "disabled (default)", r=r)
         return
     if mode != "action":
         if observe_only is not None:
             # The caller prints one row for every connector in this state.
-            observe_only.append((connector, min_sev))
+            observe_only.append((connector, min_sev, mode_profile))
             return
-        _emit("warn", "Human approval", f"enabled at {min_sev}, but {connector} mode is observe", r=r)
+        _emit(
+            "warn",
+            "Human approval",
+            f"enabled at {min_sev}, but {connector} mode is observe",
+            r=r,
+            remediation=_hilt_observe_remediation([mode_profile] if mode_profile else [], connector),
+        )
         return
 
     if note := policy_catalog.inert_hilt_warning(min_sev, block_at):
@@ -2518,6 +2574,9 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     unverified: list[str] = []
     files: list[str] = []
     dotenv_requires_review = False
+    # Another account that can write the data directory can replace the
+    # private files in it, so this fails like an exposed file (GAP-1329).
+    directory_writable = False
     for path, is_dir in targets:
         try:
             info = os.lstat(path)
@@ -2548,6 +2607,8 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
                         dotenv_requires_review = True
             continue
         mode = stat.S_IMODE(info.st_mode)
+        if is_dir and mode & 0o022:
+            directory_writable = True
         if mode & 0o077:
             exposed.append(f"{path} (mode {mode:04o})")
             if not is_dir:
@@ -2588,7 +2649,7 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     if os.name != "nt" and any(item.startswith(f"{data_dir} (") for item in exposed):
         steps.append(f"chmod 700 {data_dir}")
     _emit(
-        "fail" if files else "warn",
+        "fail" if files or directory_writable else "warn",
         "Private files",
         "; ".join(
             part for part in (
@@ -2736,7 +2797,7 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         elif not _doctor_managed(cfg) and (modes := _audit_db_exposing_modes(db_path)):
             # A permission slip, not damage: tighten, do not restore (GAP-0337).
             detail = "; ".join(f"{path} has mode {mode:04o}" for path, mode in modes) + (
-                ", so other accounts can read the audit history; the content is intact"
+                ", so other accounts can read the audit history; its content is checked once the mode is fixed"
             )
             remediation = " && ".join(
                 f"chmod {700 if os.path.isdir(path) else 600} {path}" for path, _mode in modes

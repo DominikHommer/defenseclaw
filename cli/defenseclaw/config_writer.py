@@ -830,7 +830,10 @@ def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -
     match = _REASON_CODE.match(reason.strip())
     code, text = (match.group("code"), match.group("text")) if match else ("", reason.strip())
     if (code == "maxLength" or "maxLength constraint" in text) and isinstance(value, str):
-        return f"{name} is longer than 4096 characters (it has {len(value)})"
+        # The field's own limit, not one fixed number (GAP-1040).
+        limit = re.search(r"at most (\d+) characters", text)
+        bound = f"longer than {limit.group(1)} characters" if limit else "longer than the field allows"
+        return f"{name} is {bound} (it has {len(value)})"
     parts = [part.strip() for part in text.split("; ") if part.strip()]
     if code == "config_semantic_invalid" and parts:
         detail = _RULE_PACK_PREFIX.sub("", parts[0])

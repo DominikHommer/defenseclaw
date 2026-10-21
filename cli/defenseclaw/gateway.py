@@ -91,8 +91,9 @@ def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: fl
         )
         try:
             result = client.guardrail_profile_resolve(user=user, connector=connector)
+            unverified: list[str] = []
             overrides = (
-                _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""))
+                _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""), unverified)
                 if not connector else []
             )
         finally:
@@ -102,7 +103,11 @@ def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: fl
         return {"user": label, "error": str(exc), "timed_out": True}
     except Exception as exc:  # noqa: BLE001 - any transport or HTTP failure.
         return {"user": label, "error": str(exc)}
-    return {**result, "user": label, "overrides": overrides}
+    answer = {**result, "user": label, "overrides": overrides}
+    if unverified:
+        # Agent assignments whose owner could not be confirmed (GAP-1054).
+        answer["unverified_agents"] = unverified
+    return answer
 
 
 def policy_reload_rejection(policy: dict) -> str:
@@ -230,7 +235,9 @@ def current_profile_account(*, secure_client: bool = False) -> tuple[str, str]:
     return label, label
 
 
-def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) -> list[dict[str, str]]:
+def _scoped_profile_overrides(
+    cfg: Any, client: Any, user: str, profile: str, unverified: list[str] | None = None,
+) -> list[dict[str, str]]:
     """Connector/agent subjects whose resolved profile differs from *profile*.
 
     An assignment matching ``connectors`` or ``agents`` decides only for that
@@ -238,6 +245,10 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
     decides everywhere. Each candidate is resolved by the gateway, which
     applies the assignment order; an agent is attributed to its connector
     through the user's agent identities, and agents of other users are skipped.
+    An agent runs under one connector only, so an assignment that lists
+    connectors names it only under its own (GAP-1270). When the user's agents
+    cannot be listed, no agent is attributed; its ID goes to *unverified*
+    (GAP-1054).
     """
     from defenseclaw.connector_paths import KNOWN_CONNECTORS, normalize
 
@@ -262,9 +273,17 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
         if assignment.match.connectors and not connectors:
             continue
         for agent in assignment.match.agents or [""]:
-            if agent and owners is not None and agent not in owners:
+            if not agent:
+                candidates = connectors or [""]
+            elif owners is None:
+                if unverified is not None and agent not in unverified:
+                    unverified.append(agent)
                 continue
-            for connector in connectors or [owners.get(agent, "") if agent and owners else ""]:
+            elif agent not in owners or (connectors and owners[agent] not in connectors):
+                continue
+            else:
+                candidates = [owners[agent]]
+            for connector in candidates:
                 if (connector, agent) not in probes:
                     probes.append((connector, agent))
     overrides: list[dict[str, str]] = []
