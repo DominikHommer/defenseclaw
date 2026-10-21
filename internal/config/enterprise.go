@@ -1628,7 +1628,14 @@ func validateEnterpriseConfig(cfg *Config) error {
 	}
 	if strings.TrimSpace(e.Network.HTTPSProxy) != "" {
 		if _, err := netguard.ParseEgressProxyURL(e.Network.HTTPSProxy); err != nil {
-			return fmt.Errorf("config: enterprise.network.https_proxy: %w", err)
+			// Typed, so validation states the rule: the text names the
+			// scheme at most, never the configured URL (r103.GAP-0088).
+			return &V8SemanticError{
+				Path:    "$.enterprise.network.https_proxy",
+				Summary: err.Error(),
+				Action:  "use http://host:port or https://host:port, without a user name, password or path",
+				cause:   err,
+			}
 		}
 	}
 	return validateEnterpriseTetragon(e.Tetragon)

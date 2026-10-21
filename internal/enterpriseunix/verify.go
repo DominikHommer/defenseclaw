@@ -1304,7 +1304,12 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			break
 		}
 		if warning = strings.TrimSpace(warning); warning != "" && len(warning) <= 1024 {
-			l.result.AddWarning(codeProfileAssignment, "guardrail profile "+warning)
+			// A warning about a setting ("guardrail: human approval ...")
+			// already names where it is.
+			if !strings.HasPrefix(warning, "guardrail") {
+				warning = "guardrail profile " + warning
+			}
+			l.result.AddWarning(codeProfileAssignment, warning)
 		}
 	}
 }

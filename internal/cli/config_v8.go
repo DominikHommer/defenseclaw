@@ -60,6 +60,9 @@ type configV8WireFailure struct {
 	ConfigVersion int    `json:"config_version"`
 	Path          string `json:"path"`
 	Reason        string `json:"reason"`
+	// Message is the refusal in plain words on a standalone managed host,
+	// as `config validate` prints it there.
+	Message string `json:"message,omitempty"`
 }
 
 // config-v8 is a machine-facing bridge for the Python operator CLI. Keeping
@@ -113,7 +116,7 @@ var configV8ValidateCmd = &cobra.Command{
 // references load as the gateway's reload needs, and every jsonl destination
 // is a file the gateway may write (GAP-0890). It changes nothing.
 func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
-	loaded, err := loadConfigV8File(path, dataDir)
+	loaded, err := loadConfigV8FileWithCredentials(path, dataDir, configValidateCredentialsDir(path))
 	if err != nil {
 		return nil, err
 	}

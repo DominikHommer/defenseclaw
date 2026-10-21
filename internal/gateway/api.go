@@ -1627,7 +1627,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			// nobody, and the whole team falls to the default profile:
 			// status and verify report it (GAP-0704). The last check is
 			// served; a stale one is refreshed in the background.
-			if warnings := liveGuardrailProfiles.Load().healthProfileWarnings(); len(warnings) > 0 {
+			if warnings := standaloneProfileWarnings(liveGuardrailProfiles.Load(), cfg); len(warnings) > 0 {
 				setHealthProfileWarnings(body, "profile_warnings", "profile_warning_count", warnings, rootPeer)
 			}
 			// Non-secret fingerprints of the per-user credential keys that
@@ -1812,15 +1812,16 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"connector_modes": a.connectorModesSummary(r.Context()),
 	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
-		if set := a.guardrailProfileSet(); set != nil {
+		set := a.guardrailProfileSet()
+		if set != nil {
 			status["profile_assignment_warnings"] = set.assignmentWarnings(true)
-			// What /health lists only to root on the hook socket: Windows
-			// status and verify read it here with the gateway credential
-			// (GAP-1268).
-			if cfg.StandaloneEnterprise() {
-				if warnings := set.healthProfileWarnings(); len(warnings) > 0 {
-					status["profile_warnings"] = warnings
-				}
+		}
+		// What /health lists only to root on the hook socket: Windows
+		// status and verify read it here with the gateway credential
+		// (GAP-1268).
+		if cfg.StandaloneEnterprise() {
+			if warnings := standaloneProfileWarnings(set, cfg); len(warnings) > 0 {
+				status["profile_warnings"] = warnings
 			}
 		}
 	}
