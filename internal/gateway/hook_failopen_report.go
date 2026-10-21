@@ -52,6 +52,23 @@ type hookFailureLine struct {
 	Reason    string `json:"reason"`
 	Category  string `json:"category"`
 	FailMode  string `json:"fail_mode"`
+	// Outcome is what the call got (fail_open or fail_closed). A call that
+	// strict availability or an event contract blocked is logged with the
+	// connector's fail mode open and outcome fail_closed: it did not run.
+	Outcome string `json:"outcome"`
+}
+
+// ranUnchecked reports whether the logged call went ahead without a check:
+// its outcome says fail_open, or, for a line without an outcome (an older
+// hook), its fail mode says open.
+func (l hookFailureLine) ranUnchecked() bool {
+	switch strings.TrimSpace(l.Outcome) {
+	case "fail_open":
+		return true
+	case "fail_closed":
+		return false
+	}
+	return strings.TrimSpace(l.FailMode) == "open"
 }
 
 // hookFailOpenSummary is the fail-open calls of one connector.
@@ -177,7 +194,7 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 		}
 		next += int64(len(line))
 		var entry hookFailureLine
-		if json.Unmarshal(line, &entry) != nil || strings.TrimSpace(entry.FailMode) != "open" {
+		if json.Unmarshal(line, &entry) != nil || !entry.ranUnchecked() {
 			continue
 		}
 		at, perr := time.Parse(time.RFC3339, strings.TrimSpace(entry.TS))

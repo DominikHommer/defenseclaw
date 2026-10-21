@@ -9952,8 +9952,8 @@ func TestHookScript_FailureLogIgnoresAForgedEnvFailMode(t *testing.T) {
 		"DEFENSECLAW_HOME="+dcHome,
 		"DEFENSECLAW_FAIL_MODE=open\"\n,\"forged\":\"yes",
 	)
-	if err := cmd.Run(); exitCodeOf(err) != 2 {
-		t.Fatalf("closed hook should block (exit 2) on transport failure, got: %v", err)
+	if exitErr, ok := cmd.Run().(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("closed hook should block (exit 2) on transport failure, got: %v", exitErr)
 	}
 
 	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
