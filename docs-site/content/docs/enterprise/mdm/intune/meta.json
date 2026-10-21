@@ -4,6 +4,8 @@
     "tenant",
     "windows",
     "macos",
-    "linux"
+    "linux",
+    "windows-reference",
+    "tenant-reference"
   ]
 }

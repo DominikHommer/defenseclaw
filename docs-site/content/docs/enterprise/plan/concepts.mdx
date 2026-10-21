@@ -208,6 +208,23 @@ lists the users, applies the [enrollment](#enrollment) settings and publishes th
 A small privileged service that answers a fixed set of AI discovery questions for
 the gateway. The gateway cannot name a path, process or command for it to read.
 
+### Service names by OS
+
+| Part | Windows | Linux (systemd) | macOS (launchd) |
+| --- | --- | --- | --- |
+| Gateway | `DefenseClawGateway`, LocalSystem write-restricted by its `NT SERVICE\DefenseClawGateway` service SID | `defenseclaw-gateway.service`, as `defenseclaw` with no capabilities. systemd holds its sockets | `com.cisco.defenseclaw.gateway`, as the hidden `_defenseclaw` user |
+| Guardian | `DefenseClawHookGuardian`, LocalSystem | `defenseclaw-hook-guardian.service`, root with a bounded capability set | `com.cisco.defenseclaw.hook-guardian`, root |
+| Enumerator | `DefenseClawHookEnumerator`, LocalSystem | `defenseclaw-hook-enumerator.service`, root with a bounded capability set | `com.cisco.defenseclaw.hook-enumerator`, root |
+| Sensor helper | `DefenseClawSensorHelper`, LocalSystem | `defenseclaw-sensor-helper.service`, root | `com.cisco.defenseclaw.sensor-helper`, root |
+| Applies a config change | Your MDM runs `ensure` again | `defenseclaw-enterprise-apply.path` runs `ensure` when the config, secrets or policies change | `com.cisco.defenseclaw.apply` does the same |
+| Daily check | Your MDM runs detection or `verify` | `defenseclaw-enterprise-verify.timer` | `com.cisco.defenseclaw.verify`, at 03:17 local time |
+
+On Linux and macOS, hooks and DefenseClaw's in-agent plugins reach the gateway only
+through the hook socket (`/run/defenseclaw-hook/hook.sock` on Linux,
+`/opt/cisco/defenseclaw/run/hook.sock` on macOS). The kernel tells the gateway each
+caller's uid, and there is no TCP fallback. On Windows they use loopback with
+credentials bound to the user's SID.
+
 ## Users and state
 
 ### Enrollment
