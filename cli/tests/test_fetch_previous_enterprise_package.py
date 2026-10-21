@@ -119,10 +119,30 @@ def test_failed_download_of_a_published_package_fails_the_pr_upgrade_lane(tmp_pa
     assert not (tmp_path / "github-output").exists()
 
 
+@pytest.mark.parametrize("missing", ["defenseclaw-enterprise-1.0.3-linux-amd64.deb", "checksums.txt", "checksums.txt.bundle"])
 @pytest.mark.skipif(BASH is None, reason="needs bash (the Git for Windows bash on Windows)")
-def test_release_without_the_package_still_skips_without_require(tmp_path: Path) -> None:
-    env = _fake_gh(tmp_path, ["checksums.txt", "checksums.txt.bundle"], "exit 1")
+def test_release_missing_a_required_asset_fails_the_pr_upgrade_lane(tmp_path: Path, missing: str) -> None:
+    # A published release without the package or its signed checksums used to
+    # skip with success and an empty version, so the PR upgrade lane passed
+    # without upgrading anything.
+    listed = ["defenseclaw-enterprise-1.0.3-linux-amd64.deb", "checksums.txt", "checksums.txt.bundle"]
+    env = _fake_gh(tmp_path, [a for a in listed if a != missing], "exit 1")
+    result = _fetch(tmp_path, env)
+    assert result.returncode != 0, result.stdout
+    assert f"release 1.0.3 has no {missing}" in result.stderr
+    assert "skipped" not in result.stdout
+    assert not (tmp_path / "github-output").exists()
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash (the Git for Windows bash on Windows)")
+def test_no_published_release_is_the_only_skip(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_bytes(b"#!/bin/sh\nexit 0\n")
+    (bin_dir / "gh").chmod(0o755)
+    env = {**os.environ, "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]),
+           "GITHUB_REPOSITORY": "example/repo"}
     result = _fetch(tmp_path, env)
     assert result.returncode == 0, result.stderr
-    assert "Enterprise upgrade lane skipped" in result.stdout
+    assert "no published release to upgrade from" in result.stdout
     assert (tmp_path / "github-output").read_text() == "version=\npackage=\n"
