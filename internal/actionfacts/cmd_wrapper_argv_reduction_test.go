@@ -41,7 +41,17 @@ func TestOpaqueCMDWrapperArgvReductionKeepsOnlyExactOuterArguments(t *testing.T)
 		{"static glob", `cmd.exe /c echo *.txt > marker.txt`, false},
 		{"call operator with another command", `& cmd.exe /c echo dccert-block-marker & whoami`, false},
 		{"call operator with dynamic target", `& $env:CMD /c echo dccert-block-marker`, false},
-		{"separate command", `cmd.exe /c echo dccert-block-marker > marker.txt; Write-Output done`, false},
+		// A PowerShell list keeps every command; each has a static argv.
+		{"separate command", `cmd.exe /c echo dccert-block-marker > marker.txt; Write-Output done`, true},
+		{"pipeline chain", `cmd.exe /c echo dccert-block-marker > marker.txt && type marker.txt`, true},
+		{"run switch r", `cmd.exe /r echo dccert-block-marker > marker.txt`, true},
+		{"joined switches", `cmd.exe /d/c echo dccert-block-marker > marker.txt`, true},
+		{"joined static switches", `cmd.exe /d/q /c echo dccert-block-marker > marker.txt`, true},
+		{"call operator without a space", `&cmd.exe /c echo dccert-block-marker > marker.txt`, true},
+		{"joined keep-open switch", `cmd.exe /d/k echo dccert-block-marker > marker.txt`, false},
+		{"joined switch after c", `cmd.exe /c/d echo dccert-block-marker > marker.txt`, false},
+		{"joined unknown switch", `cmd.exe /x/c echo dccert-block-marker > marker.txt`, false},
+		{"list with a dynamic command", `cmd.exe /c echo dccert-block-marker > marker.txt; Write-Output $env:X`, false},
 		{"no cmd wrapper", `Set-Content marker.txt dccert-block-marker`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,7 +64,7 @@ func TestOpaqueCMDWrapperArgvReductionKeepsOnlyExactOuterArguments(t *testing.T)
 				return
 			}
 			if facts.Authoritative() || !view.Authoritative() || !view.EnforcementEligible() ||
-				len(view.Commands) != 1 || !view.Commands[0].ArgvComplete ||
+				len(view.Commands) != len(facts.Commands) || !view.Commands[0].ArgvComplete ||
 				len(view.Commands[0].Operations) != 0 || len(view.Commands[0].Redirects) != 0 ||
 				len(view.Commands[0].Wrappers) != 0 || len(view.Paths) != 0 || len(view.Network) != 0 ||
 				!slices.Contains(view.Commands[0].Argv, "dccert-block-marker") {

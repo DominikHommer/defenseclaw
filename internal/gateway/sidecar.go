@@ -2474,6 +2474,9 @@ func (s *Sidecar) watchGenerationAssets() {
 		}
 		return nil
 	}
+	s.configMgr.candidateAssets = func(cfg *config.Config) ([]string, []string) {
+		return generationAssetDirs(cfg, &Generation{}), generationAssetFiles(cfg)
+	}
 }
 
 // guardrailNeedsRestart reports a guardrail change that only a new gateway
