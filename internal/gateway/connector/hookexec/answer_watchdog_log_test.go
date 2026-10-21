@@ -181,12 +181,12 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 					watchdog := ArmAnswerWatchdog(Options{
 						Connector: "codex", Event: "PreToolUse", ManagedEnterprise: true,
 						StartedAt: started, Exit: exit, Stdout: &strings.Builder{}, Stderr: &strings.Builder{},
+						FailureLogHome: resolve,
 					}, []byte(`{"hook_event_name":"PreToolUse"}`))
 					if watchdog == nil {
 						t.Error("the managed tool call armed no watchdog")
 						return
 					}
-					watchdog.PrefetchFailureLogHome(resolve)
 					o.AnswerWatchdog = watchdog
 				})
 			}()
@@ -197,6 +197,91 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 				}
 			case <-time.After(10 * time.Second):
 				t.Fatal("the watchdog did not answer")
+			}
+			if n := lookups.Load(); n != 1 {
+				t.Fatalf("the call looked the account up %d times, want once", n)
+			}
+		})
+	}
+}
+
+// G-small loop 4, finding 1: the hook command arms a managed tool call's
+// watchdog before it resolves the runtime, and Run adopts it only later. A
+// deadline that passes before Run begins (a stalled descriptor, sidecar or
+// account read) is answered by the armed watchdog alone, and that answer
+// still leaves the call exactly one hook-failures row, also when the account
+// lookup outlasts the watchdog's log wait and whatever fail mode the command
+// line names. A call the hook command ends itself before the deadline
+// (Finish) gets no watchdog answer and no row.
+func TestWatchdogArmedBeforeRunLogsItsAnswer(t *testing.T) {
+	const budget = 600 * time.Millisecond
+	for _, tc := range []struct {
+		name     string
+		lookup   time.Duration
+		failMode string
+		finish   bool
+	}{
+		{name: "fast account lookup"},
+		{name: "account lookup slower than the log wait", lookup: 250 * time.Millisecond},
+		{name: "fail mode open on the command line", failMode: "open"},
+		{name: "ended by the hook command before the deadline", finish: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.lookup > 0 && tc.lookup <= answerWatchdogLogWait {
+				t.Fatalf("the lookup (%s) must outlast the watchdog's log wait (%s)", tc.lookup, answerWatchdogLogWait)
+			}
+			shortAnswerBudget(t, budget)
+			shortAnswerFloor(t)
+			logHome := t.TempDir()
+			rows := filepath.Join(logHome, "logs", "hook-failures.jsonl")
+			var lookups atomic.Int32
+			type exited struct {
+				code int
+				row  string
+			}
+			done := make(chan exited, 1)
+			stdout := &firstWriteRecorder{}
+			watchdog := ArmAnswerWatchdog(Options{
+				Connector: "codex", Event: "PreToolUse", FailMode: tc.failMode, ManagedEnterprise: true,
+				StartedAt: time.Now(), Stdout: stdout, Stderr: &strings.Builder{},
+				FailureLogHome: func() string {
+					lookups.Add(1)
+					time.Sleep(tc.lookup)
+					return logHome
+				},
+				Exit: func(code int) {
+					row, _ := os.ReadFile(rows)
+					done <- exited{code: code, row: string(row)}
+				},
+			}, []byte(`{"hook_event_name":"PreToolUse"}`))
+			if watchdog == nil {
+				t.Fatal("the managed tool call armed no watchdog")
+			}
+			if tc.finish {
+				if code := watchdog.Finish(0); code != 0 {
+					t.Fatalf("Finish before the deadline returned %d, want the call's own 0", code)
+				}
+				select {
+				case got := <-done:
+					t.Fatalf("the watchdog answered (exit %d) a call the hook command had ended", got.code)
+				case <-time.After(2 * budget):
+				}
+				if row, _ := os.ReadFile(rows); len(row) != 0 {
+					t.Fatalf("a call ended before its deadline left a row: %q", row)
+				}
+				return
+			}
+			select {
+			case got := <-done:
+				out, _ := stdout.read()
+				if !blocked(runResult{code: got.code, stdout: out}) {
+					t.Fatalf("the armed watchdog answered exit %d stdout %q, want the managed closed answer", got.code, out)
+				}
+				if strings.Count(got.row, "\n") != 1 || !strings.Contains(got.row, managedGatewayNoAnswerReason) {
+					t.Fatalf("hook-failures.jsonl when the process ended = %q, want one %s row", got.row, managedGatewayNoAnswerReason)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the armed watchdog did not answer before Run began")
 			}
 			if n := lookups.Load(); n != 1 {
 				t.Fatalf("the call looked the account up %d times, want once", n)

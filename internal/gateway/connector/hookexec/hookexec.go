@@ -287,7 +287,7 @@ type Options struct {
 	// FailureLogHome resolves the invoking user's diagnostic directory for
 	// the failure rows of a managed hook. It is never on the answer path:
 	// a tool call's answer watchdog runs it once in the background from the
-	// moment it is armed (PrefetchFailureLogHome), so the watchdog's own row
+	// moment it is armed (cacheFailureLogHome), so the watchdog's own row
 	// does not wait on it; any other call runs it only when it writes a row.
 	// Enforcement still uses the administrator-owned Home, and a managed row
 	// never goes there: with no resolver, or an empty answer, there is no row.

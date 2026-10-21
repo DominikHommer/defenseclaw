@@ -124,9 +124,9 @@ func runTrustedCommand(ctx context.Context, path string, args []string, filters 
 	cmd.Stdout = out
 	cmd.Stderr = stderr
 	cmd.Stdin = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = trustedCommandSysProcAttr()
 	cmd.WaitDelay = time.Second
-	err := cmd.Run()
+	err := runBoundToParent(cmd)
 	if stdout.exceeded {
 		return commandResult{}, errOutputLimit
 	}
