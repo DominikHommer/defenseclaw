@@ -3073,6 +3073,24 @@ func (s *Store) InsertFinding(id, scanID, severity, title, description, location
 	return nil
 }
 
+// hasAuditEvent reports whether audit_events holds a row with id. A store
+// without a database holds none.
+func (s *Store) hasAuditEvent(ctx context.Context, id string) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, nil
+	}
+	var one int
+	err := s.scanRow(ctx, "audit_event_exists",
+		s.db.QueryRowContext(ctx, `SELECT 1 FROM audit_events WHERE id = ? LIMIT 1`, id), &one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("audit: look up audit event %s: %w", id, err)
+	}
+	return true, nil
+}
+
 func (s *Store) ListEvents(limit int) ([]Event, error) {
 	if limit <= 0 {
 		limit = 100

@@ -139,7 +139,7 @@ func TestBundleReceiptEventsDroppedReachesStatus(t *testing.T) {
 	if ReceiptEventReported(dataDir, id) || ReceiptEventReported(dataDir, "../x") {
 		t.Fatal("an unmarked or invalid id reads as reported")
 	}
-	marker := filepath.Join(dataDir, ReportedReceiptsDirName, id)
+	marker := filepath.Join(dataDir, ReportedMarkersDirName, id)
 	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
 		t.Fatal(err)
 	}

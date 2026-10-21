@@ -141,6 +141,14 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return nil
 	}
 	change, err := changeWindowsSecret(cmd, action, opts)
+	if ev, ok := secretChangeEvent(action, opts.name, change.changed, secretFailureCode(err, windowsSecretExitInvalid), err, false); ok {
+		// The success document (secret-result.schema.json) has no warnings.
+		layout, layoutErr := windowsSecretLayout()
+		if layoutErr == nil {
+			layoutErr = recordWindowsChange(layout, ev)
+		}
+		warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
+	}
 	if err != nil {
 		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json)
 	}
@@ -208,6 +216,8 @@ func runWindowsSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) e
 type windowsSecretChange struct {
 	restarted bool
 	noop      bool
+	// changed is set when the run wrote or removed the credential.
+	changed bool
 }
 
 // changeWindowsSecret stores or removes the credential and restarts the
@@ -278,6 +288,12 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	defer store.close()
+	// A change this computer could not audit is not made: the spool must
+	// take its change event before the credential is written or removed.
+	if err := windowsChangeSpoolReady(layout); err != nil {
+		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			fmt.Errorf("cannot record the credential change: %w", err))
+	}
 	unchanged := false
 	if action == "set" {
 		unchanged = keepIdenticalWindowsSecret(store, opts.name, value)
@@ -286,8 +302,11 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 				return windowsSecretChange{}, secretFailed("change_failed", windowsSecretExitFailure, err)
 			}
 		}
-	} else if err := removeWindowsSecret(layout, store, opts.name); err != nil {
-		return windowsSecretChange{}, err
+	} else {
+		unchanged = !windowsSecretStored(layout.SecretsDir, opts.name)
+		if err := removeWindowsSecret(layout, store, opts.name); err != nil {
+			return windowsSecretChange{}, err
+		}
 	}
 	store.close()
 	// The gateway reads credentials when it starts; apply the change now.
@@ -300,7 +319,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
 			fmt.Errorf("credential %s %s, but restarting the gateway failed: %w", opts.name, done, err))
 	}
-	return windowsSecretChange{restarted: restarted, noop: unchanged && !restarted}, nil
+	return windowsSecretChange{restarted: restarted, noop: unchanged && !restarted, changed: !unchanged}, nil
 }
 
 // keepIdenticalWindowsSecret reports whether credential name already holds

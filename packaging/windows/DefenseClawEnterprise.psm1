@@ -8935,6 +8935,17 @@ function Get-DefenseClawBundlePathKind {
             return 'BundleReceipt'
         }
     }
+    if ($top -ceq 'change-events') {
+        # Trust anchor and credential change events: SYSTEM and
+        # Administrators write them, the gateway service only reads them.
+        if ($RelativePath -ceq $top -and $IsDirectory) {
+            return 'BundleVersionDirectory'
+        }
+        if ($RelativePath -cmatch '^change-events\\c-[0-7][0-9A-HJKMNP-TV-Z]{25}\.json$' -and
+            -not $IsDirectory) {
+            return 'BundleVersionFile'
+        }
+    }
     # The immutable name includes the receipt ID. Match the same shape as
     # enterprisebundle.IsVersionDirName, including pre-receipt installations.
     if ($top -cmatch '^v[1-9][0-9]{0,15}-[0-9A-HJKMNP-TV-Z]{8}(?:-[br]-[0-7][0-9A-HJKMNP-TV-Z]{25})?$' -and

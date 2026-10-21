@@ -1149,6 +1149,13 @@ type ActivityInput struct {
 	// config.bundle.receipt record (LogPolicyBundleReceipt).
 	Bundle        *PolicyBundle
 	BundleReceipt *PolicyBundleReceipt
+	// ConfigChange is set only on a trust anchor or credential change
+	// record (LogConfigChange).
+	ConfigChange *ConfigChange
+	// OccurrenceID, when set, is the audit event id. A record already
+	// stored under it is not written again, so a producer that re-offers
+	// the same event after a restart records it once.
+	OccurrenceID string
 }
 
 // ActivityDiffEntry records one canonical control-plane mutation delta.
