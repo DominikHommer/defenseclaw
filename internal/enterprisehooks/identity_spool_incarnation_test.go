@@ -18,10 +18,11 @@ import (
 // none and is kept as before.
 func TestKeepVerifiedInfoPipeUPNNeedsTheSameIncarnation(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
-	previous := IdentitySpoolRecord{Key: "5000", User: "alice", SSSDDomain: "corp.example", AccountIncarnation: "sid:S-1-5-21-1-1-1-500",
+	// Both records carry the same SID, which w2b-g-enum requires as well.
+	previous := IdentitySpoolRecord{Key: "5000", User: "alice", SSSDDomain: "corp.example", AccountSID: "S-1-5-21-1-1-1-500", AccountIncarnation: "sid:S-1-5-21-1-1-1-500",
 		UPNSource: UPNSourceInfoPipe, UpdatedAt: now.Add(-15 * time.Minute),
 		Facts: useridentity.DirectoryFacts{UPN: "alice@corp.example", Principal: "alice@corp.example"}}
-	fresh := IdentitySpoolRecord{Key: "5000", User: "alice", SSSDDomain: "corp.example", AccountIncarnation: "sid:S-1-5-21-1-1-1-501",
+	fresh := IdentitySpoolRecord{Key: "5000", User: "alice", SSSDDomain: "corp.example", AccountSID: "S-1-5-21-1-1-1-500", AccountIncarnation: "sid:S-1-5-21-1-1-1-501",
 		UpdatedAt: now}
 	if got, kept := KeepVerifiedInfoPipeUPN(fresh, previous); kept || got.Facts.UPN != "" {
 		t.Fatalf("record of another incarnation = %+v, kept %v; want no UPN carried over", got, kept)
