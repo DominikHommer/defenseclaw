@@ -113,7 +113,55 @@ sensitive information. To deliver a signed policy bundle, paste the base64 bundl
 into `dc_inline_bundle` (or set `DC_BUNDLE_FILE`) and the trust anchor file into
 `dc_inline_trust_anchors` (or set `DC_TRUST_ANCHOR_FILE`); the bundle carries its
 own config. See
-[Install order with a signed bundle](/docs/enterprise/mdm#install-order-with-a-signed-bundle).
+[Install order with a signed bundle](#install-order-with-a-signed-bundle).
+
+### Install order with a signed bundle
+
+Put the package source and the bundle in the **same** script. In that run the
+package's post-install step applies the built-in default, which protects no
+agents and installs no hooks. The wrapper then installs the trust anchors and
+applies the bundle, so the first policy the hooks answer under is the bundle's.
+
+A bundle-only script leaves the device unprotected if the first bundle does not
+apply (an expired trust anchor, for example). To protect agents in that case,
+also fill in `dc_inline_config` (or `DC_CONFIG_FILE`) with a **base config**
+that matches the bundle:
+
+- Its `guardrail:` block must match the bundle's `config.yaml` line for line,
+  apart from `custom_packs.<pack>.path`. The bundle names `policies/guardrail/<pack>`
+  inside itself; the base config names the absolute folder where a separate root
+  script installed the same pack before this one runs. Only root may change that folder.
+  On Linux it must be outside `/etc/defenseclaw`, which an uninstall with purge
+  removes.
+- Its `claude_code:`, `codex:`, `connector_hooks:` and `application_protection:`
+  blocks must match the bundle's, or be left out of both. A `mode` in
+  `claude_code`, `codex` or `connector_hooks.<connector>` overrides the guardrail
+  mode for that agent, so a base config that sets `mode: observe` there only
+  reports calls the bundle blocks. Comments and blank lines don't count.
+- No other setting is compared. Copy every other enforcement setting the bundle
+  sets, such as `asset_policy:`, into the base config too, or the base config can
+  allow what the bundle blocks until the bundle applies.
+- The wrapper compares these blocks as text, so write the base config plainly:
+  ASCII only, with LF or CRLF line endings (a tab, a lone CR or a non-ASCII byte
+  is refused, even in a comment; one UTF-8 byte order mark at the start is
+  allowed). Write each top-level key in lowercase, plain or in quotes without
+  escapes, and end every quoted value and every `{...}` or `[...]` on the line
+  where it starts. A tag, anchor, alias, merge key, `?` key, or a document written
+  as one `{...}` is refused.
+- Before it installs anything, the wrapper refuses a different threshold, mode,
+  connector list or digest, a missing rule pack, a relative pack path, or a
+  different hook-mode block with `mdm_base_config_mismatch` (exit `2`). The
+  comparison reads the bundle with `tar`; without `tar` the wrapper installs
+  nothing and exits `1` with `mdm_tar_missing`. Minimal RHEL 9 and Rocky Linux 9
+  images lack it (`dnf install tar`).
+- On a device not yet in bundle mode, the wrapper applies the base config first,
+  then the trust anchors, then the bundle. With a matching base config the bundle
+  usually applies in the running gateway without a restart. Once the anchors are
+  installed, only bundles apply and the base config is no longer used.
+
+Do not deploy a base config in an earlier, separate script whose guardrail
+block differs from the bundle's. Until the bundle applies, agents run under that
+base config, so it can allow calls the bundle denies.
 
 ## 3. Add the platform script
 

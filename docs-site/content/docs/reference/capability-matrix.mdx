@@ -60,7 +60,7 @@ Claude Code (`PreToolUse`), Copilot CLI (`preToolUse`), Antigravity (`PreToolUse
 
 ### Which connectors fail closed?
 
-OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, OpenCode, Amp and Kiro. Copilot CLI, Hermes and Antigravity expose no generic fail-closed transport response. Their DefenseClaw hooks still deny a call DefenseClaw cannot check in fail mode `closed`, the default; the agent runs the call only when the hook times out or cannot start.
+OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, OpenCode, Amp and Kiro. Copilot CLI, Hermes and Antigravity expose no generic fail-closed transport response.
 
 - Fail-closed means the hook blocks when it cannot reach the gateway. A hook process that dies or times out is non-blocking in Claude Code, Codex and Devin (see the [enterprise threat model](/docs/enterprise/threat-model#residual-risks)).
 - On a managed standalone host, every connector's hook fails closed, also in observe mode, and the administrator-owned Copilot CLI and Hermes hooks block a tool call DefenseClaw cannot check.

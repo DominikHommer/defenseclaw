@@ -481,10 +481,8 @@ IDE or plugin folder shows up after the next cycle and the next scan:
 | Eclipse | `.eclipse` | `eclipse` (Oomph's installs) and each install's `bundles.info` |
 
 Nothing is granted through a link or junction inside a profile. The
-enumerator reads `%APPDATA%` and `%LOCALAPPDATA%` under each profile.
-AppData that folder redirection moves to a local folder the user owns is
-inventoried. AppData on a network share, or reached through a link or
-junction, is not. The
+enumerator reads the default `%APPDATA%` and `%LOCALAPPDATA%` under each
+profile, so a profile whose AppData is redirected elsewhere is not read. The
 Secure Client profile keeps its historical editor-extension detector and
 has no IDE inventory, so it gets none of these grants. JetBrains Toolbox's
 own folder is not read on any platform: the IDEs it installs keep their

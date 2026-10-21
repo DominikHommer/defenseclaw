@@ -259,7 +259,7 @@ exit $LASTEXITCODE
 | `--allowed-team-id ID` (macOS), `--gpg-keyring FILE` with `--signature FILE` or `--signature-url URL` (Linux) | `-AllowedSigners THUMBPRINT[,...]` | Signer pins for signed trust. |
 | `--config-file`, `--config-stdin` | `-ConfigPath`, `-ConfigFromStdin` | The config. |
 | `--secret-name` with `--secret-file` or `--secret-stdin` | `-SecretName` with `-SecretPath` or `-SecretFromStdin` | The optional key. |
-| `--bundle-file FILE`, `--trust-anchor-file FILE`, `--refuse-capability-loss` | `-BundlePath`, `-TrustAnchorPath`, `-RefuseCapabilityLoss` | A signed policy bundle, its trust anchors, and an opt-in refusal of a bundle that disables an enforced capability. The bundle carries its own config. See [Install order with a signed bundle](#install-order-with-a-signed-bundle). |
+| `--bundle-file FILE`, `--trust-anchor-file FILE`, `--refuse-capability-loss` | `-BundlePath`, `-TrustAnchorPath`, `-RefuseCapabilityLoss` | A signed policy bundle, its trust anchors, and an opt-in refusal of a bundle that disables an enforced capability. The bundle carries its own config. |
 | `--format json\|jamf` | — | `jamf` wraps the result document in `<result>` for Jamf Pro. |
 | `--product-version X.Y.Z` | `-ProductVersion X.Y.Z` | Linux and macOS: refuse an artifact of any other version (`mdm_version_mismatch`) before anything is installed. Windows: only without `-SetupPath`, where it sets the version the installed CLI's `ensure` records; with `-SetupPath` it is refused (`mdm_invalid_arguments`, `1639`), because the `-Sha256` pin already ties the Setup to one release. |
 | `--https-proxy URL` | — | Proxy for the download only. The services' own proxy is set in the config ([Network proxy](/docs/enterprise/configuration#network-proxy)). |
@@ -337,58 +337,6 @@ and `/norestart` are accepted and ignored.
 | `TIMEOUTSECONDS=` | Lifecycle timeout, 60 to 7200 seconds. Default 1800. |
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the administrator's attestation that Claude Code runs DefenseClaw's managed hooks. See [Claude Code on Windows](#claude-code-on-windows). |
 
-## Install order with a signed bundle
-
-A signed policy bundle carries its own config. On Linux and macOS, put the
-package source and the bundle in the **same** wrapper run (`--bundle-file`, or the
-base64 in `dc_inline_bundle`; the trust anchors come from `--trust-anchor-file`,
-`dc_inline_trust_anchors`, or are already installed). In that run the package's
-post-install step applies the built-in default, which protects no agents and
-installs no hooks. The wrapper then installs the trust anchors and applies the
-bundle, so the first policy the hooks answer under is the bundle's. On Windows,
-Setup accepts `BUNDLE=` only after the first install; see
-[Intune on Windows](/docs/enterprise/mdm/intune-windows#signed-bundle-after-the-base-install).
-
-A bundle-only run leaves the host unprotected if the first bundle does not apply
-(an expired trust anchor, for example). To protect agents in that case, also
-deliver a **base config** that matches the bundle:
-
-- Its `guardrail:` block must match the bundle's `config.yaml` line for line,
-  apart from `custom_packs.<pack>.path`. The bundle names `policies/guardrail/<pack>`
-  inside itself; the base config names the absolute folder where a separate root
-  step installed the same pack before this run. Only root may change that folder.
-  On Linux it must be outside `/etc/defenseclaw`, which an uninstall with purge
-  removes.
-- Its `claude_code:`, `codex:`, `connector_hooks:` and `application_protection:`
-  blocks must match the bundle's, or be left out of both. A `mode` in
-  `claude_code`, `codex` or `connector_hooks.<connector>` overrides the guardrail
-  mode for that agent, so a base config that sets `mode: observe` there only
-  reports calls the bundle blocks. Comments and blank lines don't count.
-- No other setting is compared. Copy every other enforcement setting the bundle
-  sets, such as `asset_policy:`, into the base config too, or the base config can
-  allow what the bundle blocks until the bundle applies.
-- The wrapper compares these blocks as text, so write the base config plainly:
-  ASCII only, with LF or CRLF line endings (a tab, a lone CR or a non-ASCII byte
-  is refused, even in a comment; one UTF-8 byte order mark at the start is
-  allowed). Write each top-level key in lowercase, plain or in quotes without
-  escapes, and end every quoted value and every `{...}` or `[...]` on the line
-  where it starts. A tag, anchor, alias, merge key, `?` key, or a document written
-  as one `{...}` is refused.
-- Before it installs anything, the wrapper refuses a different threshold, mode,
-  connector list or digest, a missing rule pack, a relative pack path, or a
-  different hook-mode block with `mdm_base_config_mismatch` (exit `2`). The
-  comparison reads the bundle with `tar`; without `tar` the wrapper installs
-  nothing and exits `1` with `mdm_tar_missing`. Minimal RHEL 9 and Rocky Linux 9
-  images lack it (`dnf install tar`).
-- On a host not yet in bundle mode, the wrapper applies the base config first,
-  then the trust anchors, then the bundle. With a matching base config the bundle
-  usually applies in the running gateway without a restart. Once the anchors are
-  installed, only bundles apply and the base config is no longer used.
-
-Do not deploy a base config in an earlier, separate run whose guardrail block
-differs from the bundle's. Until the bundle applies, agents run under that base
-config, so it can allow calls the bundle denies.
-
 ## Exit codes
 
 The wrappers, the removal scripts and every lifecycle action print exactly one
@@ -461,7 +409,7 @@ from the lifecycle; see [Troubleshooting](/docs/enterprise/troubleshooting#lifec
 | `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | Setup's code or `1603` / the lifecycle's code or `1` | The lifecycle did not start or printed no result document. |
 | `mdm_secret_failed` | `1603` / `1`, `2` or `75` | Storing the key failed. On Windows the deployment applied; on Linux and macOS the config was not applied, and the exit code is the one `secret set` returned. |
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | `1603` / `1` | The private staging folder, or the Intune Win32 app content (Windows), is not as expected. |
-| `mdm_base_config_mismatch` | — / `2` | A base config delivered with a signed bundle does not match the bundle (see [Install order with a signed bundle](#install-order-with-a-signed-bundle)). Nothing was installed. |
+| `mdm_base_config_mismatch` | — / `2` | Linux and macOS: a config delivered with a signed bundle (the base config) does not match the bundle's `guardrail:` block (apart from `custom_packs.<pack>.path`) or its `claude_code:`, `codex:`, `connector_hooks:` or `application_protection:` block, or is not written plainly enough to compare as text. Nothing was installed. |
 | `mdm_tar_missing` | — / `1` | A base config came with a signed bundle and `tar` is not installed. Nothing was installed. |
 | `mdm_anchor_install_failed` | — / `1` | The trust anchor file could not be installed (the deployment is missing, or the trust folder cannot be made root-only). |
 | `mdm_staging_noexec` | — / `1` | Linux: the payload's `defenseclaw-gateway` cannot run from the staging folder because its filesystem is `noexec`; the message names the mount. Pass `--staging-dir` with a root-only folder that allows execution, or use the deb or rpm. |
