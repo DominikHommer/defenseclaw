@@ -11,14 +11,19 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // failingAuditEmitter fails every audit write of the logger once fail is set,
@@ -66,7 +71,8 @@ func newAuditFailureHookFixture(t *testing.T, failMode string) auditFailureHookF
 	return auditFailureHookFixture{api: api, path: fixture.path, emitter: emitter}
 }
 
-func (fixture auditFailureHookFixture) preToolUse(t *testing.T, toolUseID string) map[string]any {
+// preToolUseBody is a Claude Code PreToolUse of "echo ok".
+func preToolUseBody(t *testing.T, toolUseID string) []byte {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
 		"hook_event_name": "PreToolUse", "session_id": "s-audit-" + toolUseID, "cwd": t.TempDir(),
@@ -75,6 +81,12 @@ func (fixture auditFailureHookFixture) preToolUse(t *testing.T, toolUseID string
 	if err != nil {
 		t.Fatal(err)
 	}
+	return body
+}
+
+func (fixture auditFailureHookFixture) preToolUse(t *testing.T, toolUseID string) map[string]any {
+	t.Helper()
+	body := preToolUseBody(t, toolUseID)
 	recorder := httptest.NewRecorder()
 	fixture.api.handleAgentHook("claudecode").ServeHTTP(recorder,
 		httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)))
@@ -141,6 +153,13 @@ func TestHookAuditWriteFailureDeniesTheCall(t *testing.T) {
 		if got := lastHookDecisionAction(t, fixture.path); got != "block" {
 			t.Fatalf("hook_decision action %q, want block", got)
 		}
+		// Review round 2 (P1): the agent gets Claude Code's own PreToolUse
+		// denial, not a generic decision:block it may not honor.
+		assertClaudeCodePreToolUseDenial(t, out["claude_code_output"])
+		// Review round 2 (P2): status counts the block the agent got.
+		if blocks := fixture.api.health.statsFor("claudecode").toolBlocks.Load(); blocks != 1 {
+			t.Fatalf("status tool blocks = %d after a fail-closed audit write, want 1", blocks)
+		}
 	})
 	t.Run("store stays busy", func(t *testing.T) {
 		fixture := newAuditFailureHookFixture(t, "")
@@ -188,5 +207,93 @@ func TestHookAuditFailureResponseKeepsWhatItCannotTighten(t *testing.T) {
 	}
 	if replay := finalize(agentHookRequest{HookEventName: "PreToolUse", SessionID: "s-1", SuppressCorrelationEmit: true}, allow); replay.AuditFailedClosed || replay.Response.Action != "allow" {
 		t.Fatalf("an exact replay was denied: %+v", replay)
+	}
+}
+
+// assertClaudeCodePreToolUseDenial checks output is Claude Code's native
+// PreToolUse denial with the audit failure's reason.
+func assertClaudeCodePreToolUseDenial(t *testing.T, output any) {
+	t.Helper()
+	fields, _ := output.(map[string]any)
+	specific, _ := fields["hookSpecificOutput"].(map[string]any)
+	reason, _ := specific["permissionDecisionReason"].(string)
+	if specific["hookEventName"] != "PreToolUse" || specific["permissionDecision"] != "deny" ||
+		!strings.Contains(reason, "could not write the call's audit record") || fields["decision"] != nil {
+		t.Fatalf("Claude Code output %v; want hookSpecificOutput PreToolUse permissionDecision deny with the audit reason", output)
+	}
+}
+
+// handlerTransport serves every request with handler, so a hook runner talks
+// to the gateway's own hook handler without a listener.
+type handlerTransport struct{ handler http.Handler }
+
+func (transport handlerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	recorder := httptest.NewRecorder()
+	transport.handler.ServeHTTP(recorder, req)
+	return recorder.Result(), nil
+}
+
+// Review of G-flood-wal round 2 (P1): the fail-closed verdict of a failed
+// audit write was rendered without the request body, so Claude Code got a
+// generic {"decision":"block"} for a PreToolUse. The Unix hook script prints
+// whatever the gateway rendered and exits 0, and Claude Code may run the call.
+// End to end through the native hook runner, the agent now reads the
+// gateway's own PreToolUse denial.
+func TestHookAuditWriteFailureReachesClaudeCodeAsANativeDenial(t *testing.T) {
+	fixture := newAuditFailureHookFixture(t, "")
+	fixture.emitter.fail = true
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=\"tkn\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := hookexec.Run(t.Context(), hookexec.Options{
+		Connector:  "claudecode",
+		Event:      "PreToolUse",
+		APIAddr:    "127.0.0.1:8787",
+		FailMode:   "closed",
+		Home:       home,
+		HookDir:    hookDir,
+		Stdin:      bytes.NewReader(preToolUseBody(t, "toolu-native")),
+		Stdout:     &stdout,
+		Stderr:     &stderr,
+		HTTPClient: &http.Client{Transport: handlerTransport{handler: fixture.api.handleAgentHook("claudecode")}},
+	})
+	var output map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &output); err != nil {
+		t.Fatalf("hook exit %d stdout %q stderr %q: %v", code, stdout.String(), stderr.String(), err)
+	}
+	if code != 0 {
+		t.Fatalf("hook exit %d, want 0 with a structured denial (stderr %q)", code, stderr.String())
+	}
+	// The reason is the gateway's, so the runner relayed the gateway's own
+	// native output rather than replacing an output it could not use.
+	assertClaudeCodePreToolUseDenial(t, output)
+}
+
+// Review of G-flood-wal round 2 (P2): the sandbox recorded a hook's verdict
+// before its audit write failed, so a call the agent was refused showed as
+// allowed in the sandbox's record. It now records the verdict the agent got.
+func TestHookAuditFailureRecordsTheSandboxDecisionTheAgentGot(t *testing.T) {
+	fixture := newAuditFailureHookFixture(t, "")
+	fixture.emitter.fail = true
+	sink := &sandboxRelayDecisionSink{}
+	ctx := sandboxauth.WithRequest(t.Context(), sandboxauth.Binding{ID: "binding-1", SandboxName: "sbx", Connector: "claudecode"}, nil)
+	ctx = context.WithValue(ctx, sandboxRelayStateKey{}, &sandboxRelayState{sink: sink})
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "s-sbx", ToolName: "Bash",
+		ToolInvocationID: "toolu-sbx", Payload: map[string]interface{}{"tool_name": "Bash", "tool_input": map[string]interface{}{"command": "echo ok"}}}
+	allow := agentHookResponse{Action: "allow", RawAction: "allow", Mode: "action", EvaluationID: "eval-sbx"}
+	result := fixture.api.finalizeAgentHook(ctx, "claudecode", req, allow, nil, preToolUseBody(t, "toolu-sbx"), time.Millisecond, false, nil)
+	if !result.AuditFailedClosed || result.Response.Action != "block" {
+		t.Fatalf("sandbox PreToolUse with a failed audit write: %+v", result)
+	}
+	raw, ok := sink.trailer()
+	decision := sandboxrelay.ParseHookDecision(raw)
+	if !ok || decision == nil || decision.Action != "block" {
+		t.Fatalf("sandbox decision %q; want the block the agent got", raw)
 	}
 }
