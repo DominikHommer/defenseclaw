@@ -616,6 +616,28 @@ func TestMacOSLaunchAgentReloadStopsTheDaemonBeforeTheDrain(t *testing.T) {
 	if len(f.mutated) != 2 || !strings.Contains(f.mutated[0], "bootout gui/"+strconv.Itoa(h.alice.UID)+"/"+labelOpenShellGateway) {
 		t.Fatalf("mutations = %v", f.mutated)
 	}
+
+	// A daemon before 1.0.4 is killed, not booted out: its exit stopped the
+	// gateway under a MicroVM that completed before the drain could see it.
+	h2, f2, cfg2 := newLaunchdTestHost(t)
+	f2.jobs[h2.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "running", code: "(never exited)", runs: 1}
+	h2.ops.status[h2.alice.UID] = SandboxStatus{Active: true, Legacy: true}
+	path2 := h2.env.P(filepath.Join(h2.env.Layout.BinDir, binGateway))
+	data2, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path2+".new", data2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path2+".new", path2); err != nil {
+		t.Fatal(err)
+	}
+	h2.ops.order = nil
+	requireOK(t, h2.ensure(cfg2))
+	if want := []string{"stop alice:kill+daemon+socket", "drain alice", "release alice"}; !reflect.DeepEqual(h2.ops.order, want) {
+		t.Fatalf("legacy order = %v, want %v", h2.ops.order, want)
+	}
 }
 
 // bootoutGoneRunner answers launchctl as for a job the drain booted out

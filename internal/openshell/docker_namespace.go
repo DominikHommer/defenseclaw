@@ -58,11 +58,19 @@ func (s *GatewayConfigState) SharesDefaultDockerNamespace() bool {
 }
 
 // UserStateHome is the state folder the account's gateway keeps its state
-// in: $XDG_STATE_HOME, else ~/.local/state.
+// in: $XDG_STATE_HOME, else ~/.local/state (DefaultStateHome).
 func UserStateHome(getenv func(string) string, home string) string {
 	if dir := strings.TrimSpace(getenv("XDG_STATE_HOME")); filepath.IsAbs(dir) {
 		return dir
 	}
+	return DefaultStateHome(home)
+}
+
+// DefaultStateHome is ~/.local/state of home: the state folder of a gateway
+// started with no XDG_STATE_HOME, as the exec shim of a managed computer
+// starts every account's gateway (HOME, no XDG_STATE_HOME), whatever
+// $XDG_STATE_HOME the account's other processes have.
+func DefaultStateHome(home string) string {
 	return filepath.Join(home, ".local", "state")
 }
 
