@@ -65,6 +65,9 @@ $ProgressPreference = "SilentlyContinue"
 # -Local "" (an empty value) binds like no -Local at all (GAP-1336).
 $LocalGiven = [bool](Get-Variable -Name PSBoundParameters -Scope 1 -ValueOnly -ErrorAction SilentlyContinue |
     Where-Object { $_.ContainsKey("Local") })
+# -Version "" picked the latest release, as no -Version (GAP-0012, GAP-0069).
+$VersionGiven = [bool](Get-Variable -Name PSBoundParameters -Scope 1 -ValueOnly -ErrorAction SilentlyContinue |
+    Where-Object { $_.ContainsKey("Version") })
 try {
     [Net.ServicePointManager]::SecurityProtocol =
         [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -2307,6 +2310,7 @@ function Invoke-Install {
             # -Name=value is the same option as -Name value (GAP-0361).
             Set-Variable -Name $Matches[1] -Value $Matches[2]
             if ($Matches[1] -eq "Local") { $LocalGiven = $true }
+            if ($Matches[1] -eq "Version") { $VersionGiven = $true }
         } elseif ($RunByUpgrade) {
             Write-Warn "Ignoring unknown option: $argument"
         } else {
@@ -2321,7 +2325,8 @@ function Invoke-Install {
     if ($QuickstartMode -and $QuickstartMode -notin @("observe", "action")) { Stop-Usage "Invalid -QuickstartMode '$QuickstartMode': use observe or action" }
     if ($QuickstartMode) { $Quickstart = $true }
     $TargetVersion = $Version -replace '^v', ''
-    if ($TargetVersion -and -not (Test-Version $TargetVersion)) { Die "-Version must look like 1.2.3, got '$Version'" }
+    if ($VersionGiven -and -not $TargetVersion) { Stop-Usage "-Version needs a value such as 1.2.3" }
+    if ($TargetVersion -and -not (Test-Version $TargetVersion)) { Stop-Usage "-Version must look like 1.2.3, got '$Version'" }
     $LocalDir = ""
     if ($LocalGiven -and -not $Local.Trim()) { Stop-Usage "-Local needs the folder that holds the release assets" }
     if ($Local) {
