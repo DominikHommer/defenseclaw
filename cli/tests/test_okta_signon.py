@@ -18,7 +18,7 @@
 import importlib.util
 import pathlib
 
-KIT = pathlib.Path(__file__).parent
+KIT = pathlib.Path(__file__).resolve().parents[2] / "packaging" / "identity" / "okta"
 spec = importlib.util.spec_from_file_location("okta_ldap_setup", KIT / "okta-ldap-setup.py")
 okta = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(okta)
@@ -62,8 +62,8 @@ def test_signon_uses_first_matching_rule(monkeypatch):
     okta.check_signon_policy(client, report, {"_links": {"accessPolicy": {"href": "/policy"}}}, "bind", [])
     assert report.problems == 1
 
-
-def _group_signon_report(monkeypatch, rules, user_groups):
+def _group_signon_report(monkeypatch, rules, members, calls=None):
+    """Check group engineering (G1) against rules; members maps a group id to its user ids."""
     monkeypatch.setattr(okta, "find_group", lambda client, name: {"id": "G1"})
 
     class Client:
@@ -71,8 +71,13 @@ def _group_signon_report(monkeypatch, rules, user_groups):
             return {"id": "policy", "name": "policy"}
 
         def get_all(self, path):
+            if calls is not None:
+                calls.append(path)
+            parts = path.split("?")[0].split("/")
             if path.startswith("/api/v1/users/"):
-                return [{"id": gid} for gid in user_groups.get(path.split("/")[4], [])]
+                return [{"id": gid} for gid, users in members.items() if parts[4] in users]
+            if path.startswith("/api/v1/groups/"):
+                return [{"id": uid} for uid in members.get(parts[4], [])]
             return rules
 
     report = okta.Report(False)
@@ -83,32 +88,90 @@ def _group_signon_report(monkeypatch, rules, user_groups):
 PASSWORD = {"type": "ASSURANCE", "factorMode": "1FA", "constraints": [{"knowledge": {"types": ["password"]}}]}
 
 
+def _rule(name, priority, people, access="ALLOW"):
+    action = {"access": access}
+    if access == "ALLOW":
+        action["verificationMethod"] = PASSWORD
+    return {"name": name, "status": "ACTIVE", "priority": priority,
+            "conditions": {"people": people} if people is not None else {},
+            "actions": {"appSignOn": action}}
+
+
 def test_group_coverage_accounts_for_an_earlier_user_deny(monkeypatch):
-    """GAP-1166: a member's own deny is not hidden by the group's later allow."""
-    rules = [
-        {"name": "deny U1", "status": "ACTIVE", "priority": 1,
-         "conditions": {"people": {"users": {"include": ["U1"]}}},
-         "actions": {"appSignOn": {"access": "DENY"}}},
-        {"name": "group allow", "status": "ACTIVE", "priority": 2,
-         "conditions": {"people": {"groups": {"include": ["G1"]}}},
-         "actions": {"appSignOn": {"access": "ALLOW", "verificationMethod": PASSWORD}}},
-    ]
-    assert _group_signon_report(monkeypatch, rules, {"U1": ["G1"]}).problems == 1
+    """A member's own deny is not hidden by the group's later allow."""
+    rules = [_rule("deny U1", 1, {"users": {"include": ["U1"]}}, "DENY"),
+             _rule("group allow", 2, {"groups": {"include": ["G1"]}})]
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1"]}).problems == 1
     # A denied user who is not a member leaves the group covered.
-    assert _group_signon_report(monkeypatch, rules, {"U1": ["G9"]}).problems == 0
+    assert _group_signon_report(monkeypatch, rules, {"G9": ["U1"]}).problems == 0
 
 
-def test_group_coverage_accounts_for_excluded_groups(monkeypatch):
-    """GAP-1164: an allow that excludes another group covers the group only in part."""
-    rules = [
-        {"name": "group allow", "status": "ACTIVE", "priority": 1,
-         "conditions": {"people": {"groups": {"include": ["G1"], "exclude": ["G2"]}}},
-         "actions": {"appSignOn": {"access": "ALLOW", "verificationMethod": PASSWORD}}},
-    ]
-    report = _group_signon_report(monkeypatch, rules, {})
-    assert report.problems == 1
+def test_group_coverage_reads_membership_for_many_named_users(monkeypatch, capsys):
+    """A rule naming more than 50 users is checked against the group's members, not assumed."""
+    named = [f"U{i}" for i in range(60)]
+    rules = [_rule("deny many", 1, {"users": {"include": named}}, "DENY"),
+             _rule("group allow", 2, {"groups": {"include": ["G1"]}})]
+    calls: list[str] = []
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["A", "B"]}, calls).problems == 0
+    assert not any(path.startswith("/api/v1/users/") for path in calls)
+    assert "covers group engineering" in capsys.readouterr().out
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["A", "U42"]}).problems == 1
+    assert "applies another sign-on to some members" in capsys.readouterr().out
+
+
+def test_group_coverage_accounts_for_an_earlier_other_group_deny(monkeypatch, capsys):
+    """A deny for another group decides for the members the two groups share."""
+    rules = [_rule("deny contractors", 1, {"groups": {"include": ["G2"]}}, "DENY"),
+             _rule("group allow", 2, {"groups": {"include": ["G1"]}})]
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U2"]}).problems == 1
+    assert "applies another sign-on to members also in other group(s)" in capsys.readouterr().out
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1"], "G2": ["U2"]}).problems == 0
+    # Users and groups on one rule are ANDed: only a named member of both is matched.
+    rules[0]["conditions"]["people"]["users"] = {"include": ["U3"]}
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U2", "U3"]}).problems == 0
+    rules[0]["conditions"]["people"]["users"] = {"include": ["U2"]}
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U2"]}).problems == 1
+    # The shared member is excluded from the deny, or the earlier rule is the same password-only allow.
+    rules[0]["conditions"]["people"]["users"] = {"exclude": ["U2"]}
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U2"]}).problems == 0
+    rules[0] = _rule("allow contractors", 1, {"groups": {"include": ["G2"]}})
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U2"]}).problems == 0
+
+
+def test_group_coverage_accounts_for_excluded_groups(monkeypatch, capsys):
+    """An allow that excludes another group covers the group only in part when they share members."""
+    rules = [_rule("group allow", 1, {"groups": {"include": ["G1"], "exclude": ["G2"]}})]
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"], "G2": ["U2"]}).problems == 1
+    assert "leaves out members who are also in other group(s)" in capsys.readouterr().out
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1"], "G2": ["U3"]}).problems == 0
     rules[0]["conditions"]["people"]["groups"]["exclude"] = []
-    assert _group_signon_report(monkeypatch, rules, {}).problems == 0
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1"], "G2": ["U1"]}).problems == 0
+
+
+def test_group_coverage_accounts_for_excluded_members(monkeypatch, capsys):
+    """An allow that excludes a member covers the group only in part; a non-member does not count."""
+    rules = [_rule("group allow", 1, {"groups": {"include": ["G1"]}, "users": {"exclude": ["U1"]}})]
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U1", "U2"]}).problems == 1
+    assert "leaves out some members" in capsys.readouterr().out
+    assert _group_signon_report(monkeypatch, rules, {"G1": ["U2"]}).problems == 0
+
+
+def test_group_coverage_names_every_reason_before_a_later_allow_for_everyone(monkeypatch, capsys):
+    """An excluded member, an excluded group, an earlier user deny and a later allow for everyone."""
+    rules = [
+        _rule("deny U1", 1, {"users": {"include": ["U1"]}}, "DENY"),
+        _rule("group allow", 2, {"groups": {"include": ["G1"], "exclude": ["G3"]},
+                                 "users": {"exclude": ["U2"]}}),
+        _rule("everyone", 3, None),
+    ]
+    members = {"G1": ["U1", "U2", "U3", "U4"], "G3": ["U3"]}
+    assert _group_signon_report(monkeypatch, rules, members).problems == 1
+    output = capsys.readouterr().out
+    assert "covers group engineering only in part:" in output
+    for reason in ("rule 'deny U1' applies another sign-on to some members",
+                   "rule 'group allow' leaves out some members",
+                   "rule 'group allow' leaves out members who are also in other group(s)"):
+        assert reason in output
 
 
 def test_signon_refuses_policy_assigned_to_another_app(monkeypatch):

@@ -131,20 +131,51 @@ func RedirectedAppDataFolder(value, home, user, defaultRel string) (folder, refu
 		return "", "is not an absolute local path"
 	}
 	folder = windowsCleanPath(value)
+	if len(folder) < 3 || folder[1] != ':' || folder[2] != '\\' {
+		// ".." above the drive root leaves no absolute path.
+		return "", "is not an absolute local path"
+	}
 	if strings.EqualFold(folder, windowsCleanPath(strings.TrimSpace(home)+`\`+defaultRel)) {
 		return "", ""
 	}
 	return folder, ""
 }
 
+// replaceFoldVariable replaces each ASCII-case-insensitive occurrence of
+// variable (upper-case ASCII) in value with with. It compares bytes, so a
+// value whose other characters change length when upper-cased cannot shift
+// the match, and with is not searched again.
 func replaceFoldVariable(value, variable, with string) string {
-	for {
-		i := strings.Index(strings.ToUpper(value), variable)
-		if i < 0 {
-			return value
+	var out strings.Builder
+	for i := 0; i < len(value); {
+		if i+len(variable) <= len(value) && asciiEqualFold(value[i:i+len(variable)], variable) {
+			out.WriteString(with)
+			i += len(variable)
+			continue
 		}
-		value = value[:i] + with + value[i+len(variable):]
+		out.WriteByte(value[i])
+		i++
 	}
+	return out.String()
+}
+
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		x, y := a[i], b[i]
+		if 'a' <= x && x <= 'z' {
+			x -= 'a' - 'A'
+		}
+		if 'a' <= y && y <= 'z' {
+			y -= 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }
 
 func isASCIIDriveLetter(b byte) bool {
