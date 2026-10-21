@@ -280,6 +280,7 @@ def quickstart_cmd(
             rerun_command=f"defenseclaw quickstart --connector {connector}",
             connector_settings=[{"connector": connector}],
             profile=profile,
+            keep_modes=bool(kept_mode),
             scanner_mode=scanner_mode,
             with_judge=with_judge,
             start_gateway=not skip_gateway,
