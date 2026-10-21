@@ -194,7 +194,7 @@ func TestUIDOwnershipNeedsADefinitiveAnswer(t *testing.T) {
 		if err := ConfirmLocalAccount(newFakeNSS(&fakeRun{results: localResults()}), uid, "alice"); err != nil {
 			t.Fatalf("ConfirmLocalAccount of a plain local account = %v", err)
 		}
-		if err := ConfirmLocalAccount(NewOSUserResolver(nil), uid, "alice"); err == nil {
+		if err := ConfirmLocalAccount(NewOSUserResolver(t.Context()), uid, "alice"); err == nil {
 			t.Fatal("a resolver that cannot ask NSS services confirmed the account")
 		}
 	})
