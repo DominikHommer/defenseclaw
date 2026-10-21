@@ -2628,6 +2628,14 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 		if out, dir, ok := connector.AmpBashTrustedShellArgs(toolName, args); ok {
 			return out, dir
 		}
+	case "copilot":
+		// The Copilot CLI edit and create tools carry a display-only
+		// description or file mode beside their reviewed fields; judged
+		// with it, the call stayed partial and named no target for the
+		// path rules and the hook's write evidence.
+		if out, ok := copilotargs.WriteArgsWithoutMetadata(copilotargs.LocalActionTool(toolName), args); ok {
+			return out, ""
+		}
 	}
 	if out, dir, ok := connector.TrustedShellArgs(connectorName, toolName, args); ok {
 		return out, dir

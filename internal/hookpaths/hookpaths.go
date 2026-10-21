@@ -497,11 +497,25 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	if len(args) == 0 {
 		return incompleteEvidence(cwd)
 	}
+	if copilot {
+		// The gateway judges a Copilot edit or create without its metadata
+		// field (copilotargs.WriteArgsWithoutMetadata): describe that call.
+		if clean, ok := copilotargs.WriteArgsWithoutMetadata(tool, args); ok {
+			args = clean
+		}
+	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
 	facts := actionfacts.Analyze(input)
 	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(input, facts); ok {
 		// The gateway judges the reduced call: list its targets.
 		facts = view
+	}
+	// A native write call with a key outside its reviewed schema stays
+	// partial, but the harness writes the file its target key names, and
+	// the gateway judges that target (actionfacts.UnknownKeyWriteTargetViews):
+	// list it.
+	for _, view := range actionfacts.UnknownKeyWriteTargetViews(input, facts) {
+		facts.Paths = append(facts.Paths, view.Paths...)
 	}
 	// A connector can name the shell text "cmd" while ActionFacts requires
 	// its canonical command field. Resolve that exact string as a shell too.

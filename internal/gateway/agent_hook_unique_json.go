@@ -118,24 +118,19 @@ func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home strin
 		return !known || len(targets) == 0
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
+	// Copilot CLI includes a display-only description on edit and a file
+	// mode on create. The gateway judges the call without them
+	// (agentHookTrustedActionArgs), so that is the call proven here; any
+	// other extra field stays unproven.
+	if clean, ok := copilotargs.WriteArgsWithoutMetadata(tool, args); ok {
+		input.Args = clean
+	}
 	facts := actionfacts.Analyze(input)
 	if reduced, _, ok := actionfacts.OverLimitWriteTargetReduction(input, facts); ok {
 		facts = reduced
 	}
 	if !facts.Authoritative() {
-		// Copilot CLI includes display-only description on edit and a file
-		// mode on create. Neither can name a second target. Drop only these
-		// established metadata fields and require the reviewed schema to
-		// become complete; any other extra field stays unproven.
-		clean, ok := copilotWriteArgsWithoutMetadata(tool, args)
-		if !ok {
-			return true
-		}
-		input.Args = clean
-		facts = actionfacts.Analyze(input)
-		if !facts.Authoritative() {
-			return true
-		}
+		return true
 	}
 	for _, target := range facts.Paths {
 		switch target.Access {
@@ -144,38 +139,6 @@ func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home strin
 		}
 	}
 	return true
-}
-
-func copilotWriteArgsWithoutMetadata(tool string, args json.RawMessage) (json.RawMessage, bool) {
-	var metadata, reviewed map[string]bool
-	switch tool {
-	case "edit":
-		metadata = map[string]bool{"description": true}
-		reviewed = map[string]bool{"path": true, "old_str": true, "new_str": true}
-	case "create":
-		metadata = map[string]bool{"mode": true}
-		reviewed = map[string]bool{"path": true, "file_text": true}
-	default:
-		return nil, false
-	}
-	var object map[string]json.RawMessage
-	if json.Unmarshal(args, &object) != nil || len(object) == 0 {
-		return nil, false
-	}
-	removed := false
-	for key := range object {
-		if metadata[key] {
-			delete(object, key)
-			removed = true
-		} else if !reviewed[key] {
-			return nil, false
-		}
-	}
-	if !removed {
-		return nil, false
-	}
-	clean, err := json.Marshal(object)
-	return clean, err == nil
 }
 
 func copilotKnownWriteSpelling(name string) bool {
