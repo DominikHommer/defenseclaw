@@ -3,7 +3,11 @@
 
 package connector
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/pelletier/go-toml/v2"
+)
 
 // GAP-0008/GAP-0101: managed Codex requirements on Linux and macOS bound
 // every command to codex-hooks-v4 but registered the older ten-event matrix,
@@ -33,12 +37,88 @@ func TestManagedCodexUnversionedMatrixMatchesTheBoundContract(t *testing.T) {
 		}
 	}
 
-	// Windows keeps the matrix its machine-requirements installer verifies.
+	// Windows keeps the ten events its machine-requirements installer
+	// verifies, and registers the compact SessionStart source too.
 	windows, err := ManagedHookGroupsForOS("codex", "", "windows")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(windows) != len(codexHookGroups) {
 		t.Fatalf("windows: %d groups, want %d", len(windows), len(codexHookGroups))
+	}
+	if windows[0].Event != "SessionStart" || windows[0].Matcher != "startup|resume|clear|compact" {
+		t.Fatalf("windows: SessionStart = %+v", windows[0])
+	}
+}
+
+// W2B review: managed Windows Codex registered SessionStart without the
+// compact source, so a compact-source SessionStart never ran the hook while
+// every command bound the v4 contract. The installer writes, verifies and
+// removes the compact group, replaces the older one on upgrade, and Secure
+// Client keeps its matrix.
+func TestWindowsCodexMachineRequirementsCoverCompactSessionStart(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	opts.HookContractID = ResolveHookContract("codex", "").Contract.ContractID
+	sessionStart := func(raw []byte) []interface{} {
+		t.Helper()
+		cfg, err := parseWindowsCodexRequirements(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hooks, _ := cfg["hooks"].(map[string]interface{})
+		groups, _ := hooks["SessionStart"].([]interface{})
+		return groups
+	}
+
+	rendered, _, err := reconcileWindowsCodexRequirements(nil, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := sessionStart(rendered)
+	if len(groups) != 1 || groups[0].(map[string]interface{})["matcher"] != "startup|resume|clear|compact" {
+		t.Fatalf("SessionStart groups = %v", groups)
+	}
+	if err := verifyWindowsCodexRequirementsBytes(rendered, opts); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+
+	// An install from before the compact matcher: verify refuses it and
+	// reconcile replaces its group instead of adding a second one.
+	legacy := windowsCodexMachineLayout(opts)
+	legacy.groups = codexHookGroups
+	cfg := map[string]interface{}{}
+	if err := legacy.reconcile(cfg); err != nil {
+		t.Fatal(err)
+	}
+	old, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyWindowsCodexRequirementsBytes(old, opts); err == nil {
+		t.Fatal("verify accepted SessionStart without compact")
+	}
+	upgraded, changed, err := reconcileWindowsCodexRequirements(old, opts)
+	if err != nil || !changed {
+		t.Fatalf("upgrade: changed=%v err=%v", changed, err)
+	}
+	if groups := sessionStart(upgraded); len(groups) != 1 || groups[0].(map[string]interface{})["matcher"] != "startup|resume|clear|compact" {
+		t.Fatalf("upgraded SessionStart groups = %v", groups)
+	}
+
+	// Removal takes the current group and an older install's group.
+	for name, managed := range map[string][]byte{"current": rendered, "legacy": old} {
+		cleaned, _, err := removeWindowsCodexRequirementsOwnedChanges(managed, nil, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if groups := sessionStart(cleaned); len(groups) != 0 {
+			t.Fatalf("%s: SessionStart left after removal: %v", name, groups)
+		}
+	}
+
+	secureClient := opts
+	secureClient.SecureClient = true
+	if groups := windowsCodexMachineLayout(secureClient).groups; groups[0].matcher != "startup|resume|clear" {
+		t.Fatalf("Secure Client SessionStart matcher = %q", groups[0].matcher)
 	}
 }

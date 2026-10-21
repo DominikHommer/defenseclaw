@@ -1515,6 +1515,21 @@ const (
 
 var codexSessionEndHookGroup = codexHookGroup{"SessionEnd", "", codexSessionEndMaxTimeoutSeconds}
 
+// codexCompactSessionStartMatcher is the SessionStart matcher of the
+// contracts that certify the compact source. The shared registry keeps the
+// narrower legacy matcher so v1/v2 rendering is not broadened.
+const codexCompactSessionStartMatcher = "startup|resume|clear|compact"
+
+// codexContractCertifiesCompactSessionStart reports whether contractID is a
+// 0.133+ v3/v4 contract, whose SessionStart matcher includes compact.
+func codexContractCertifiesCompactSessionStart(contractID string) bool {
+	switch contractID {
+	case "codex-hooks-v3", "codex-hooks-v3-generic", "codex-hooks-v4":
+		return true
+	}
+	return false
+}
+
 func codexHookContractForSetup(opts SetupOpts) (HookContract, error) {
 	var contract HookContract
 	if pinnedID := strings.TrimSpace(opts.HookContractID); pinnedID != "" {
@@ -1556,13 +1571,9 @@ func codexHookGroupsForSetup(opts SetupOpts) ([]codexHookGroup, error) {
 				eventType,
 			)
 		}
-		if eventType == "SessionStart" &&
-			(contract.ContractID == "codex-hooks-v3" ||
-				contract.ContractID == "codex-hooks-v3-generic" ||
-				contract.ContractID == "codex-hooks-v4") {
-			// The compact SessionStart matcher is certified only for the
-			// 0.133+ v3/v4 contracts. Do not backfill it into legacy tiers.
-			group.matcher = "startup|resume|clear|compact"
+		if eventType == "SessionStart" && codexContractCertifiesCompactSessionStart(contract.ContractID) {
+			// Do not backfill the compact matcher into legacy tiers.
+			group.matcher = codexCompactSessionStartMatcher
 		}
 		groups = append(groups, group)
 	}
@@ -3343,7 +3354,7 @@ func codexShippedManagedHookProfiles() [][]codexHookGroup {
 	// The v3 and v4 contracts have always emitted compact as a reviewed
 	// SessionStart matcher. The shared registry keeps the narrower legacy
 	// matcher so v1/v2 rendering is not broadened.
-	tenEvents[0].matcher = "startup|resume|clear|compact"
+	tenEvents[0].matcher = codexCompactSessionStartMatcher
 	elevenEvents := append([]codexHookGroup(nil), tenEvents...)
 	elevenEvents = append(elevenEvents, codexSessionEndHookGroup)
 	preClampElevenEvents := append([]codexHookGroup(nil), tenEvents...)
