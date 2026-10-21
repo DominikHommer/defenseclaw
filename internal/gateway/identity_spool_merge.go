@@ -137,14 +137,22 @@ func identitySpoolAccountName(sid string) string {
 // missing name is also unverified; Windows uses the stable SID path above.
 // accountSID is the SID the gateway resolved for the uid now ("" for none):
 // a record that names another SID is an account recreated under the same
-// uid and name, whose UPN is not this one's.
-func readIdentitySpoolFactsForAccount(key, accountName, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {
+// uid and name, whose UPN is not this one's. The account's own UPN is then
+// unknown until the guardian writes its record, so the error makes the
+// lookup a failed one (identityFactsUnconfirmedError): a users entry written
+// as a UPN selects default_lookup_failed, which is retried every
+// identityDirectoryRetry, instead of the plain default as a verified answer.
+func readIdentitySpoolFactsForAccount(key, accountName, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool, error) {
 	record, ok := readIdentitySpoolFacts(key, now)
-	if !ok || record.User == "" || accountName == "" || !strings.EqualFold(record.User, accountName) ||
-		(record.AccountSID != "" && accountSID != "" && !strings.EqualFold(record.AccountSID, accountSID)) {
-		return enterprisehooks.IdentitySpoolRecord{}, false
+	if !ok || record.User == "" || accountName == "" || !strings.EqualFold(record.User, accountName) {
+		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
-	return record, true
+	if record.AccountSID != "" && accountSID != "" && !strings.EqualFold(record.AccountSID, accountSID) {
+		return enterprisehooks.IdentitySpoolRecord{}, false, &identityFactsUnconfirmedError{err: fmt.Errorf("the hook guardian's identity "+
+			"record for uid %s is of another account under the same uid and name (another SID): this account's UPN is unknown until the "+
+			"guardian's next pass writes its record; the lookup is retried every %s", key, identityDirectoryRetry)}
+	}
+	return record, true, nil
 }
 
 // mergeSpoolFacts overlays the guardian's root-resolved record on the facts

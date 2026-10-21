@@ -506,7 +506,11 @@ has their installed agents reported as `agent_unprotected`. A user another
 `exclude_groups` entry excludes is still excluded. While an `exclude_groups`
 name does not resolve, every other user is pending; while only an
 `include_groups` name does not resolve, a user another entry admits is still
-admitted. So an old SID never admits, excludes or revokes anyone.
+admitted. So an old SID never admits, excludes or revokes anyone. A local
+account of the computer is the exception: no domain group holds one, so a
+name written `DOMAIN\group` for another domain than the computer still
+decides local accounts as not members, and an `exclude_groups` entry of
+that kind does not hold back their hooks.
 
 ## New, changed and removed users
 

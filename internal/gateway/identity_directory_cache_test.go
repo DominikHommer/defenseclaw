@@ -390,10 +390,10 @@ func TestIdentitySpoolRecordRequiresCurrentAccountName(t *testing.T) {
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate; setIdentitySpoolDir("") })
 	setIdentitySpoolDir(dir)
-	if _, ok := readIdentitySpoolFactsForAccount(key, "bob@corp.example.com", "", time.Now()); ok {
+	if _, ok, _ := readIdentitySpoolFactsForAccount(key, "bob@corp.example.com", "", time.Now()); ok {
 		t.Fatal("spool facts crossed uid reuse")
 	}
-	if _, ok := readIdentitySpoolFactsForAccount(key, "ALICE@CORP.EXAMPLE.COM", "", time.Now()); !ok {
+	if _, ok, _ := readIdentitySpoolFactsForAccount(key, "ALICE@CORP.EXAMPLE.COM", "", time.Now()); !ok {
 		t.Fatal("case-only account variation was rejected")
 	}
 }
@@ -431,8 +431,17 @@ func TestIdentitySpoolRecordRequiresCurrentAccountSID(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "15002.json"), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := readIdentitySpoolFactsForAccount("15002", "alice", tc.ownSID, time.Now()); ok != tc.want {
+		_, ok, err := readIdentitySpoolFactsForAccount("15002", "alice", tc.ownSID, time.Now())
+		if ok != tc.want {
 			t.Errorf("%s: record read %v, want %v", tc.name, ok, tc.want)
+		}
+		// Review loop 5: the recreated account's lookup fails (its UPN is
+		// unknown until the guardian writes its record), so a users entry
+		// written as a UPN selects default_lookup_failed and is retried,
+		// not the plain default as a verified answer.
+		var unconfirmed *identityFactsUnconfirmedError
+		if recreated := !tc.want; recreated != errors.As(err, &unconfirmed) {
+			t.Errorf("%s: lookup error %v, want an unconfirmed-facts error %v", tc.name, err, recreated)
 		}
 	}
 }

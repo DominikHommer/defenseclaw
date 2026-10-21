@@ -65,7 +65,12 @@ import (
 // A user another exclude_groups entry excludes is still excluded, and while
 // only an include_groups name is unverified, a user another entry admits is
 // still admitted. An obsolete SID neither admits, excludes nor revokes
-// anyone. A name that does not resolve and was never
+// anyone. One answer needs no SID: a local account of this computer is in
+// no group of another domain, and a name written DOMAIN\group whose domain
+// is not this computer's, cached as a directory group, names such a group
+// whatever SID it has now. A local account is therefore still certainly not
+// a member of it, as when the name resolves, and an exclude_groups entry of
+// that kind leaves local accounts enrolled. A name that does not resolve and was never
 // cached (a misspelling, a group of another platform such as wheel, or a
 // directory group while the directory is unreachable) cannot be evaluated:
 // as an exclude_groups entry it excludes no one, as on Linux and macOS, so
@@ -285,6 +290,11 @@ type windowsEnrollmentGroupEntry struct {
 	// recreated under the same name with another SID, so neither holding
 	// nor lacking sid shows a user's membership (membership).
 	unverified bool
+	// foreignDomain: an unverified entry whose name places the group in
+	// another domain than this computer's (DOMAIN\group, cached as a
+	// directory group). No local account is a member of it, whatever its
+	// SID is now (windowsGroupNameOfAnotherDomain).
+	foreignDomain bool
 	// members lists the direct members of a local group from the local
 	// account database; nil for a directory group or when unreadable.
 	members map[string]bool
@@ -318,6 +328,7 @@ var (
 	windowsResolveGroupName          = resolveWindowsGroupName
 	windowsLocalGroupDirectMembers   = readWindowsLocalGroupDirectMembers
 	windowsMachineAccountDomainSID   = readWindowsMachineAccountDomainSID
+	windowsComputerName              = windows.ComputerName
 	windowsGroupNameLookupTimeout    = 3 * time.Second
 	windowsGroupNameLookupCycleLimit = 15 * time.Second
 )
@@ -384,6 +395,7 @@ func newWindowsEnrollmentGroups(
 				cache.Names[key] = sid
 			case cache.Names[key] != "":
 				entry.sid, entry.unverified = cache.Names[key], true
+				entry.foreignDomain = groups.groupKind(entry.sid) == windowsGroupKindDirectory && windowsGroupNameOfAnotherDomain(entry.raw)
 				logfSafely(logf, "enrollment", fmt.Sprintf("enterprise.enrollment.%s %q did not resolve (%v); the users it would decide are pending this cycle, whether or not they hold its cached SID %s, since the group may have been deleted or recreated under a new SID (name the group by SID)", list, entry.raw, err, entry.sid))
 			case list == "exclude_groups":
 				logfSafely(logf, "enrollment", fmt.Sprintf("enterprise.enrollment.exclude_groups %q does not resolve to a group on this computer (%v); it excludes no one this cycle (name the group by SID)", entry.raw, err))
@@ -448,6 +460,33 @@ func boundedWindowsGroupNameLookup(name string, remaining time.Duration) (string
 // name.
 var windowsGroupNameLookupGate identityLookupGate
 
+// windowsGroupNameOfAnotherDomain reports whether name is written
+// DOMAIN\group with a domain that is not this computer: not ".", BUILTIN,
+// an NT authority, or the computer's own name (its first DNS label). An
+// unqualified name can resolve to a local group of the same name, and a
+// computer whose name is unreadable counts as possibly local, so neither
+// qualifies.
+func windowsGroupNameOfAnotherDomain(name string) bool {
+	domain, group, ok := strings.Cut(strings.TrimSpace(name), `\`)
+	domain, group = strings.ToUpper(strings.TrimSpace(domain)), strings.TrimSpace(group)
+	if !ok || domain == "" || group == "" || strings.Contains(group, `\`) {
+		return false
+	}
+	switch domain {
+	case ".", "BUILTIN", "LOCALHOST":
+		return false
+	}
+	if strings.HasPrefix(domain, "NT ") {
+		return false // NT AUTHORITY, NT SERVICE, NT VIRTUAL MACHINE: well-known groups
+	}
+	computer, err := windowsComputerName()
+	if err != nil || strings.TrimSpace(computer) == "" {
+		return false
+	}
+	label, _, _ := strings.Cut(domain, ".")
+	return !strings.EqualFold(label, strings.TrimSpace(computer))
+}
+
 // active reports whether groups filter anything.
 func (g *windowsEnrollmentGroups) active() bool {
 	return g != nil && len(g.include)+len(g.exclude) > 0
@@ -497,6 +536,11 @@ func (g *windowsEnrollmentGroups) membership(userSID string, entry windowsEnroll
 		return windowsGroupUnresolved, false
 	}
 	if entry.unverified {
+		if entry.foreignDomain && g.localAccount(userSID) {
+			// A local account is in no group of another domain, whichever
+			// group the name names now: certain, without the cached SID.
+			return windowsGroupNotMember, false
+		}
 		return windowsGroupUnverified, false
 	}
 	inList := func(groups []string) windowsGroupMembership {

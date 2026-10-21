@@ -93,8 +93,11 @@ type IdentitySpoolRecord struct {
 	// account recreated under the same uid, name and SSSD domain has another
 	// SID, so the facts an earlier record carries are another account's:
 	// the guardian keeps none of them for it (KeepVerifiedInfoPipeUPN,
-	// identitySpoolSameIdentity) and the gateway ignores the record.
-	AccountSID string `json:"account_sid,omitempty"`
+	// identitySpoolSameIdentity) and the gateway does not use the record.
+	// It is written in the record's extension (identitySpoolRecordExtension),
+	// not in the record object, which the 1.0.3 and older gateways decode
+	// with unknown fields refused.
+	AccountSID string `json:"-"`
 	// SSSDDomain is the SSSD domain that holds the uid by InfoPipe
 	// Users.FindByID (Linux): the gateway drops a domain, realm and
 	// principal of its own that name another domain (mergeSpoolFacts).
@@ -110,6 +113,20 @@ type IdentitySpoolRecord struct {
 	// (Windows). The gateway service cannot read Claude Code's file, which
 	// lives in the profile root (GAP-1025).
 	ConnectorEmails map[string]string `json:"connector_emails,omitempty"`
+}
+
+// identitySpoolRecordExtension holds the facts a record carries that the
+// gateways and guardians of 1.0.3 and older do not know. They decode the
+// record object with unknown fields refused, so a new field in it made a
+// gateway still running beside an upgraded guardian (during the package
+// upgrade, or after a rollback) drop every record that had one, and an
+// account assigned by the UPN only the record holds fell to the default
+// profile. The extension is a second JSON object after the record object
+// in the same file, written in the same atomic replace: those builds read
+// the first object only and stop there. It is decoded without refusing
+// unknown fields, so a later build can add facts to it the same way.
+type identitySpoolRecordExtension struct {
+	AccountSID string `json:"account_sid,omitempty"`
 }
 
 // identitySpoolClockSlack is how far in the future a record may be dated
@@ -210,7 +227,8 @@ func ReadIdentitySpoolRecord(dir, key string, trust func(path, label string) err
 	return ParseIdentitySpoolRecord(data, key)
 }
 
-// ParseIdentitySpoolRecord decodes a record and checks it names key.
+// ParseIdentitySpoolRecord decodes a record, and its extension when one
+// follows it, and checks it names key.
 func ParseIdentitySpoolRecord(data []byte, key string) (IdentitySpoolRecord, error) {
 	var record IdentitySpoolRecord
 	if len(data) > maxIdentitySpoolRecordBytes {
@@ -220,6 +238,17 @@ func ParseIdentitySpoolRecord(data []byte, key string) (IdentitySpoolRecord, err
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&record); err != nil {
 		return record, fmt.Errorf("parse identity spool record: %w", err)
+	}
+	if rest := bytes.TrimSpace(data[decoder.InputOffset():]); len(rest) > 0 {
+		var extension identitySpoolRecordExtension
+		extensionDecoder := json.NewDecoder(bytes.NewReader(rest))
+		if err := extensionDecoder.Decode(&extension); err != nil {
+			return record, fmt.Errorf("parse identity spool record extension: %w", err)
+		}
+		if extensionDecoder.More() {
+			return record, errors.New("identity spool record has data after its extension")
+		}
+		record.AccountSID = strings.TrimSpace(extension.AccountSID)
 	}
 	if record.Version != IdentitySpoolRecordVersion {
 		return record, fmt.Errorf("unsupported identity spool record version %d", record.Version)
@@ -263,22 +292,48 @@ func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord 
 // the file). Rewriting the record as derived sent every account a users
 // assignment selects by UPN to the default profile within one guardian pass
 // (GAP-1114). It keeps the UPN only for the same account in the same SSSD
-// domain: the same name and the same SID (AccountSID). A uid, name and domain
-// can all be reused by an account recreated in the directory, and a record
-// without a SID, or a previous record an older build wrote without one,
-// cannot show that it is the same account, so its UPN goes. It marks a kept
-// UPN infopipe_kept so status and verify can say why. It
+// domain, under the same name. A uid, name and domain can all be reused by
+// an account recreated in the directory, so the account must also be shown
+// to be the same one: by its SID (AccountSID) when both records have one,
+// and otherwise by the directory itself (bind): a previous record a build
+// before 1.0.4 wrote has no SID, and an account of a directory without SIDs
+// has none. bind answers whether the directory gives the UPN to this
+// account now (UPNBindingBound: kept), to another account or to none
+// (UPNBindingOther: the UPN goes), or did not answer (UPNBindingUnknown).
+// A lookup that did not answer proves nothing either way, so the UPN the
+// earlier pass proved stays, as it did before the SID was recorded, but the
+// record carries no SID that pass: the next pass asks again, and only an
+// answer binds the UPN to the SID. Two different SIDs are another account:
+// the UPN goes. It marks a kept UPN infopipe_kept so status and verify can
+// say why. It
 // keeps it for IdentitySpoolKeptUPNMaxAge from the first pass that kept it
 // (UPNKeptSince): a UPN removed in the directory stayed trusted for as long
 // as the guardian ran (GAP-1235). A kept record an older build wrote
 // without UPNKeptSince starts the bound at this pass.
-func KeepVerifiedInfoPipeUPN(record, previous IdentitySpoolRecord) (IdentitySpoolRecord, bool) {
+func KeepVerifiedInfoPipeUPN(record, previous IdentitySpoolRecord, bind func(upn string) UPNBinding) (IdentitySpoolRecord, bool) {
 	if record.Facts.UPN != "" || previous.Facts.UPN == "" ||
 		(previous.UPNSource != UPNSourceInfoPipe && previous.UPNSource != UPNSourceInfoPipeKept) ||
 		!strings.EqualFold(record.Key, previous.Key) || record.User == "" || !strings.EqualFold(record.User, previous.User) ||
-		record.SSSDDomain == "" || !strings.EqualFold(record.SSSDDomain, previous.SSSDDomain) ||
-		record.AccountSID == "" || !strings.EqualFold(record.AccountSID, previous.AccountSID) {
+		record.SSSDDomain == "" || !strings.EqualFold(record.SSSDDomain, previous.SSSDDomain) {
 		return record, false
+	}
+	unbound := false
+	switch {
+	case record.AccountSID != "" && previous.AccountSID != "":
+		if !strings.EqualFold(record.AccountSID, previous.AccountSID) {
+			return record, false
+		}
+	default:
+		binding := UPNBindingUnknown
+		if bind != nil {
+			binding = bind(previous.Facts.UPN)
+		}
+		switch binding {
+		case UPNBindingOther:
+			return record, false
+		case UPNBindingUnknown:
+			unbound = true
+		}
 	}
 	since := previous.UPNKeptSince
 	if previous.UPNSource != UPNSourceInfoPipeKept || since.IsZero() || since.After(record.UpdatedAt) {
@@ -292,8 +347,25 @@ func KeepVerifiedInfoPipeUPN(record, previous IdentitySpoolRecord) (IdentitySpoo
 	record.Facts.Source = previous.Facts.Source
 	record.UPNSource = UPNSourceInfoPipeKept
 	record.UPNKeptSince = since
+	if unbound {
+		record.AccountSID = ""
+	}
 	return record, true
 }
+
+// UPNBinding is what the directory answers about a UPN an earlier pass
+// verified for an account (KeepVerifiedInfoPipeUPN).
+type UPNBinding int
+
+const (
+	// UPNBindingUnknown: the lookup failed or timed out, or was not asked.
+	UPNBindingUnknown UPNBinding = iota
+	// UPNBindingBound: the directory gives the UPN to the account now.
+	UPNBindingBound
+	// UPNBindingOther: the directory gives the UPN to another account, or
+	// to none.
+	UPNBindingOther
+)
 
 // ReadIdentitySpoolRecords reads at most limit records of dir, in file name
 // order, skipping any that do not parse or that trust refuses.
@@ -320,10 +392,19 @@ func ReadIdentitySpoolRecords(dir string, trust func(path, label string) error, 
 	return records
 }
 
-// MarshalIdentitySpoolRecord serializes a record.
+// MarshalIdentitySpoolRecord serializes a record: the record object, and
+// its extension on the next line when it has one.
 func MarshalIdentitySpoolRecord(record IdentitySpoolRecord) ([]byte, error) {
 	record.Version = IdentitySpoolRecordVersion
-	return json.Marshal(record)
+	data, err := json.Marshal(record)
+	if err != nil || record.AccountSID == "" {
+		return data, err
+	}
+	extension, err := json.Marshal(identitySpoolRecordExtension{AccountSID: record.AccountSID})
+	if err != nil {
+		return nil, err
+	}
+	return append(append(data, '\n'), extension...), nil
 }
 
 // validIdentitySpoolKey accepts a decimal uid or a SID.

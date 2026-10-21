@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -143,7 +144,12 @@ type enterpriseHookDirectoryFlush struct {
 
 // enterpriseHookIdentitySpoolAccounts lists the accounts a pass resolves
 // identity facts for, and the keys that tell whether they changed.
-func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookReconcileRun) ([]enterprisehooks.IdentitySpoolAccount, []string) {
+//
+// The accounts the settings leave out are matched against the rows, the
+// eligible accounts and the records already in dir, the identity spool, so
+// the record of an account a partial listing omitted goes at once too.
+func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, dir string,
+	run enterpriseHookReconcileRun) ([]enterprisehooks.IdentitySpoolAccount, []string) {
 	accounts := []enterprisehooks.IdentitySpoolAccount{}
 	keys := []string{}
 	seen := map[int]bool{}
@@ -152,7 +158,7 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 	// eligible account: the manifest and eligible-accounts.json the
 	// enumerator wrote can be older than them (a later write failed), and an
 	// account they still list must not keep its record (left).
-	leftOut := enterpriseHookEnrollmentLeftOut()
+	leftOut := enterpriseHookEnrollmentLeftOut(ctx)
 	left := map[int]bool{}
 	leave := func(uid int) {
 		if !left[uid] {
@@ -226,8 +232,13 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 	// of the manifest) lose their record at once. A directory account the
 	// pass merely does not list keeps it until the directory shows that it
 	// left, since a listing can be partial (GAP-1113, GAP-1236).
-	for _, uid := range leftOut.uids {
+	for _, uid := range leftOut.numeric {
 		leave(uid)
+	}
+	for _, record := range enterprisehooks.ReadIdentitySpoolRecords(dir, nil, enterpriseHookLeftOutRecordsMax) {
+		if uid, err := strconv.Atoi(record.Key); err == nil && uid > 0 && !seen[uid] && !left[uid] && leftOut.has(uid, record.User) {
+			leave(uid)
+		}
 	}
 	for _, uid := range leftUIDs {
 		if uid > 0 && !seen[uid] {
@@ -247,26 +258,46 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 // and exempt_users name, matched as the enumerator matches them: an account
 // name or its decimal uid. A name is also resolved to its uid, so another
 // spelling of the account matches too, and a name that does not resolve
-// (the directory does not answer) still matches the name a row or an
-// eligible account carries.
+// (the directory does not answer) still matches the name a row, an eligible
+// account or an identity record carries.
+//
+// The names are resolved only when an account the pass would keep is not
+// already left out by its uid or one of its spellings, so a host with no
+// such account asks the directory nothing. The lookups end with the
+// reconcile context and after enterpriseHookLeftOutLookupWait, and a name
+// whose earlier lookup has not returned (an Open Directory call that never
+// answers) starts no new one (enterprisehooks.LookupStandaloneUserBounded):
+// a stalled lookup never holds the guardian's watch loop. A name whose
+// lookup does not answer this pass keeps the uid its last answer gave
+// (enterpriseHookLeftOutProven), so an exclusion keeps applying through an
+// outage; a not-found answer forgets it.
 type enterpriseHookLeftOutAccounts struct {
-	uids  []int
-	byUID map[int]bool
-	names map[string]bool
+	ctx context.Context
+	// numeric holds the entries written as a decimal uid.
+	numeric []int
+	byUID   map[int]bool
+	names   map[string]bool
+	// unresolved lists the name entries resolve has not looked up yet.
+	unresolved []string
+	resolved   bool
 }
 
-// enterpriseHookEnrollmentLeftOut resolves the current settings' exclude_users
-// and exempt_users.
-func enterpriseHookEnrollmentLeftOut() enterpriseHookLeftOutAccounts {
-	out := enterpriseHookLeftOutAccounts{byUID: map[int]bool{}, names: map[string]bool{}}
+// enterpriseHookLeftOutLookupWait bounds the name lookups of one call.
+var enterpriseHookLeftOutLookupWait = 3 * time.Second
+
+// enterpriseHookLeftOutProven holds the uid each exclude_users or
+// exempt_users name last resolved to.
+var enterpriseHookLeftOutProven = struct {
+	sync.Mutex
+	uids map[string]int
+}{uids: map[string]int{}}
+
+// enterpriseHookEnrollmentLeftOut reads the current settings' exclude_users
+// and exempt_users; their names are resolved on demand (has).
+func enterpriseHookEnrollmentLeftOut(ctx context.Context) *enterpriseHookLeftOutAccounts {
+	out := &enterpriseHookLeftOutAccounts{ctx: ctx, byUID: map[int]bool{}, names: map[string]bool{}}
 	if cfg == nil {
 		return out
-	}
-	add := func(uid int) {
-		if uid > 0 && !out.byUID[uid] {
-			out.byUID[uid] = true
-			out.uids = append(out.uids, uid)
-		}
 	}
 	for _, entry := range append(slices.Clone(cfg.Enterprise.Enrollment.ExcludeUsers), cfg.Enterprise.Enrollment.ExemptUsers...) {
 		if entry = strings.TrimSpace(entry); entry == "" {
@@ -274,18 +305,22 @@ func enterpriseHookEnrollmentLeftOut() enterpriseHookLeftOutAccounts {
 		}
 		out.names[entry] = true
 		if uid, err := strconv.Atoi(entry); err == nil {
-			add(uid)
-		} else if account, err := enterprisehooks.StandaloneResolver().LookupUser(entry); err == nil {
-			add(account.UID)
+			if uid > 0 && !out.byUID[uid] {
+				out.byUID[uid] = true
+				out.numeric = append(out.numeric, uid)
+			}
+		} else if !slices.Contains(out.unresolved, entry) {
+			out.unresolved = append(out.unresolved, entry)
 		}
 	}
 	return out
 }
 
 // has reports whether the settings leave out the account with uid, by uid
-// or by one of names (its spelling in a row or an eligible account, its
-// name by uid).
-func (l enterpriseHookLeftOutAccounts) has(uid int, names ...string) bool {
+// or by one of names (its spelling in a row, an eligible account or an
+// identity record, its name by uid). It resolves the names the first time
+// they are needed.
+func (l *enterpriseHookLeftOutAccounts) has(uid int, names ...string) bool {
 	if l.byUID[uid] {
 		return true
 	}
@@ -294,8 +329,67 @@ func (l enterpriseHookLeftOutAccounts) has(uid int, names ...string) bool {
 			return true
 		}
 	}
-	return false
+	if !l.resolved {
+		l.resolve()
+	}
+	return l.byUID[uid]
 }
+
+// resolve looks the name entries up at once, each at most until the call's
+// wait ends.
+func (l *enterpriseHookLeftOutAccounts) resolve() {
+	l.resolved = true
+	if len(l.unresolved) == 0 {
+		return
+	}
+	ctx := l.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, enterpriseHookLeftOutLookupWait)
+	defer cancel()
+	type answer struct {
+		uid   int
+		found bool
+		known bool
+	}
+	answers := make([]answer, len(l.unresolved))
+	var wg sync.WaitGroup
+	for i, name := range l.unresolved {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			account, err := enterprisehooks.LookupStandaloneUserBounded(waitCtx, name)
+			switch {
+			case err == nil && account.UID > 0:
+				answers[i] = answer{uid: account.UID, found: true, known: true}
+			case unixidentity.IsNotFound(err):
+				answers[i] = answer{known: true}
+			}
+		}()
+	}
+	wg.Wait()
+	proven := &enterpriseHookLeftOutProven
+	proven.Lock()
+	defer proven.Unlock()
+	for i, name := range l.unresolved {
+		key := strings.ToLower(name)
+		switch got := answers[i]; {
+		case got.found:
+			proven.uids[key] = got.uid
+		case got.known:
+			delete(proven.uids, key)
+		}
+		if uid := proven.uids[key]; uid > 0 {
+			l.byUID[uid] = true
+		}
+	}
+	l.unresolved = nil
+}
+
+// enterpriseHookLeftOutRecordsMax bounds the identity records one pass
+// checks against the settings.
+const enterpriseHookLeftOutRecordsMax = 4096
 
 func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
@@ -308,7 +402,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	// The guardian follows a pushed config's trusted child domains, as the
 	// gateway does on reload (GAP-1255).
 	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
-	accounts, keys := enterpriseHookIdentitySpoolAccounts(stderr, run)
+	accounts, keys := enterpriseHookIdentitySpoolAccounts(ctx, stderr, dir, run)
 	enrolled := slices.DeleteFunc(slices.Clone(accounts), func(a enterprisehooks.IdentitySpoolAccount) bool { return a.Left })
 	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, enrolled)
 	startEnterpriseHookDirectoryReachWatch(ctx, stderr, dir, enrolled)

@@ -222,13 +222,13 @@ func TestIdentitySpoolKeepsAnInfoPipeUPNThroughAnAnswerWithoutIt(t *testing.T) {
 	derived := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceDerived,
 		AccountSID: testAccountSID,
 		Facts:      useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
-	got, kept := KeepVerifiedInfoPipeUPN(derived, previous)
+	got, kept := KeepVerifiedInfoPipeUPN(derived, previous, nil)
 	if !kept || got.Facts.UPN != "w4a2.alt@alt.dclab.test" || got.Facts.Principal != got.Facts.UPN || got.UPNSource != UPNSourceInfoPipeKept {
 		t.Fatalf("record = %+v, want the verified UPN kept", got)
 	}
 	moved := derived
 	moved.SSSDDomain = "other.test"
-	if got, kept := KeepVerifiedInfoPipeUPN(moved, previous); kept || got.Facts.UPN != "" {
+	if got, kept := KeepVerifiedInfoPipeUPN(moved, previous, nil); kept || got.Facts.UPN != "" {
 		t.Fatalf("an account InfoPipe holds in another domain kept the UPN: %+v", got)
 	}
 }
@@ -248,7 +248,7 @@ func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForADay(t *testing.T) {
 			UpdatedAt: at, AccountSID: testAccountSID,
 			Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
 	}
-	first, kept := KeepVerifiedInfoPipeUPN(pass(start), previous)
+	first, kept := KeepVerifiedInfoPipeUPN(pass(start), previous, nil)
 	if !kept || first.Facts.UPN != "w4a2.alt@alt.dclab.test" || !first.UPNKeptSince.Equal(start) {
 		t.Fatalf("first pass without the UPN = %+v, want it kept since %s", first, start)
 	}
@@ -260,18 +260,18 @@ func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForADay(t *testing.T) {
 	if first, err = ParseIdentitySpoolRecord(data, "94403999"); err != nil {
 		t.Fatal(err)
 	}
-	later, kept := KeepVerifiedInfoPipeUPN(pass(start.Add(23*time.Hour)), first)
+	later, kept := KeepVerifiedInfoPipeUPN(pass(start.Add(23*time.Hour)), first, nil)
 	if !kept || later.Facts.UPN == "" || !later.UPNKeptSince.Equal(start) {
 		t.Fatalf("a pass inside the bound = %+v, want the UPN kept since %s", later, start)
 	}
-	gone, kept := KeepVerifiedInfoPipeUPN(pass(start.Add(IdentitySpoolKeptUPNMaxAge)), later)
+	gone, kept := KeepVerifiedInfoPipeUPN(pass(start.Add(IdentitySpoolKeptUPNMaxAge)), later, nil)
 	if kept || gone.Facts.UPN != "" || gone.UPNSource != UPNSourceDerived || !gone.UPNKeptSince.IsZero() {
 		t.Fatalf("a pass a day after InfoPipe dropped the UPN = %+v, want the derived record", gone)
 	}
 	// A kept record an older build wrote (no UPNKeptSince) starts the bound now.
 	legacy := later
 	legacy.UPNKeptSince = time.Time{}
-	if got, kept := KeepVerifiedInfoPipeUPN(pass(start.Add(30*time.Hour)), legacy); !kept || !got.UPNKeptSince.Equal(start.Add(30*time.Hour)) {
+	if got, kept := KeepVerifiedInfoPipeUPN(pass(start.Add(30*time.Hour)), legacy, nil); !kept || !got.UPNKeptSince.Equal(start.Add(30*time.Hour)) {
 		t.Fatalf("a legacy kept record = %+v, want the bound to start at this pass", got)
 	}
 }
@@ -733,10 +733,15 @@ const (
 // W2B-G-enum review loop 4: an AD account recreated under the same uid,
 // short name and SSSD domain kept the old account's UPN for up to a day when
 // InfoPipe answered for the new one without userPrincipalName, and the
-// gateway selected the old account's UPN profile. The UPN is now kept only
-// for the same SID; a record without one, on either side, cannot show that
-// it is the same account.
-func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForTheSameAccountSID(t *testing.T) {
+// gateway selected the old account's UPN profile. Two SIDs now decide.
+//
+// Review loop 5: a record without a SID on either side (one a build before
+// 1.0.4 wrote, or an account of a directory without SIDs) then lost its UPN
+// at once, so the first pass after the upgrade sent a UPN assignment to the
+// default profile. The directory now decides whether it gives the UPN to
+// this account; when it does not answer, the UPN the earlier pass proved
+// stays, without a SID, so the next pass asks again.
+func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForTheSameAccount(t *testing.T) {
 	record := func(sid string, upn bool) IdentitySpoolRecord {
 		r := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2", SSSDDomain: "dclab.test", AccountSID: sid, UpdatedAt: time.Now().UTC(),
 			UPNSource: UPNSourceDerived, Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
@@ -745,21 +750,46 @@ func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForTheSameAccountSID(t *testing.T) {
 		}
 		return r
 	}
+	const (
+		unknown = UPNBindingUnknown
+		bound   = UPNBindingBound
+		other   = UPNBindingOther
+	)
 	for _, tc := range []struct {
 		name, previous, fresh string
-		kept                  bool
+		binding               UPNBinding
+		asked, kept           bool
+		// sid is the SID the kept record carries.
+		sid string
 	}{
-		{"same SID", testAccountSID, testAccountSID, true},
-		{"same SID in another case", testAccountSID, strings.ToLower(testAccountSID), true},
-		{"recreated account", testAccountSID, testRecreatedAccountSID, false},
-		{"no SID now", testAccountSID, "", false},
-		{"previous record without a SID (an older build)", "", testAccountSID, false},
-		{"no SID on either", "", "", false},
+		{"same SID", testAccountSID, testAccountSID, other, false, true, testAccountSID},
+		{"same SID in another case", testAccountSID, strings.ToLower(testAccountSID), other, false, true, strings.ToLower(testAccountSID)},
+		{"recreated account", testAccountSID, testRecreatedAccountSID, bound, false, false, ""},
+		{"previous record without a SID, the directory binds the UPN", "", testAccountSID, bound, true, true, testAccountSID},
+		{"previous record without a SID, another account holds the UPN", "", testAccountSID, other, true, false, ""},
+		{"previous record without a SID, the directory does not answer", "", testAccountSID, unknown, true, true, ""},
+		{"no SID now, the directory binds the UPN", testAccountSID, "", bound, true, true, ""},
+		{"no SID now, another account holds the UPN", testAccountSID, "", other, true, false, ""},
+		{"no SID now, the directory does not answer", testAccountSID, "", unknown, true, true, ""},
+		{"no SID on either, the directory binds the UPN", "", "", bound, true, true, ""},
+		{"no SID on either, another account holds the UPN", "", "", other, true, false, ""},
+		{"no SID on either, the directory does not answer", "", "", unknown, true, true, ""},
 	} {
-		got, kept := KeepVerifiedInfoPipeUPN(record(tc.fresh, false), record(tc.previous, true))
-		if kept != tc.kept || (got.Facts.UPN != "") != tc.kept {
-			t.Errorf("%s: kept %v, record %+v; want kept %v", tc.name, kept, got, tc.kept)
+		asked := ""
+		got, kept := KeepVerifiedInfoPipeUPN(record(tc.fresh, false), record(tc.previous, true), func(upn string) UPNBinding {
+			asked = upn
+			return tc.binding
+		})
+		if (asked != "") != tc.asked || (tc.asked && asked != "w4a2.alt@alt.dclab.test") {
+			t.Errorf("%s: directory asked about %q, want asked %v", tc.name, asked, tc.asked)
 		}
+		if kept != tc.kept || (got.Facts.UPN != "") != tc.kept || (tc.kept && got.AccountSID != tc.sid) {
+			t.Errorf("%s: kept %v, record %+v; want kept %v with SID %q", tc.name, kept, got, tc.kept, tc.sid)
+		}
+	}
+	// Without a binding function nothing is proven: the UPN stays unbound.
+	if got, kept := KeepVerifiedInfoPipeUPN(record(testAccountSID, false), record("", true), nil); !kept || got.AccountSID != "" {
+		t.Errorf("no binding function: kept %v, record %+v; want kept without a SID", kept, got)
 	}
 }
 

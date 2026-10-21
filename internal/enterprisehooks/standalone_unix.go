@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -73,6 +74,22 @@ func StandaloneResolver() unixidentity.Resolver {
 	}
 	return standaloneResolverV
 }
+
+// LookupStandaloneUserBounded resolves name through StandaloneResolver and
+// waits for the answer at most until ctx ends. The lookup cannot always be
+// canceled (Open Directory through os/user on a Mac), so one that does not
+// return is left to finish on its own, and until it does, a new lookup of
+// the same name returns at once with an error instead of starting another
+// (identityLookupGated).
+func LookupStandaloneUserBounded(ctx context.Context, name string) (unixidentity.Account, error) {
+	resolver := StandaloneResolver()
+	return identityLookupGated(ctx, &standaloneUserLookupGate, strings.ToLower(strings.TrimSpace(name)),
+		func(context.Context) (unixidentity.Account, error) { return resolver.LookupUser(name) })
+}
+
+// standaloneUserLookupGate holds the name lookups of
+// LookupStandaloneUserBounded, by lower-case name.
+var standaloneUserLookupGate identityLookupGate
 
 // refuseStandaloneRootInProcess keeps a root standalone guardian from
 // touching a user home in-process. Every user-path Lstat/remove/chmod must

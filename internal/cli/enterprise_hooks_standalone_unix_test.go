@@ -1535,7 +1535,7 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 			{User: "bob@corp.example", UID: 94401104, Home: "/home/bob@corp.example"},
 		}, nil
 	}
-	rows := enterpriseHookEnrolledAccountRows(io.Discard, enterpriseHookReconcileRun{
+	rows := enterpriseHookEnrolledAccountRows(context.Background(), io.Discard, enterpriseHookReconcileRun{
 		Manifest: "/etc/defenseclaw/hooks/manifest.json",
 		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
 	})
@@ -1543,7 +1543,7 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 		t.Fatalf("rows = %+v, want the manifest row and one row for the eligible account without one", rows)
 	}
 	cfg.Enterprise.Enrollment.Mode = config.EnterpriseEnrollmentManifest
-	rows = enterpriseHookEnrolledAccountRows(io.Discard, enterpriseHookReconcileRun{
+	rows = enterpriseHookEnrolledAccountRows(context.Background(), io.Discard, enterpriseHookReconcileRun{
 		Manifest: "/etc/defenseclaw/hooks/manifest.json",
 		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
 	})
@@ -1561,7 +1561,7 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 		}, nil
 	}
 	alice := 1001
-	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
+	accounts, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
 		Manifest: "/etc/defenseclaw/hooks/manifest.json",
 		Targets:  []enterprisehooks.ManifestTarget{{User: "alice", UID: &alice, Connector: "opencode"}, {User: "carol", Connector: "opencode"}},
 		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
@@ -1663,7 +1663,7 @@ func TestIdentitySpoolCanonicalizesManifestAlias(t *testing.T) {
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
 		"canonical": {Name: "canonical", UID: 4242, GID: 4242},
 	}})
-	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
+	accounts, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
 		Rows: []enterpriseHookReconcileRow{{UID: 4242, User: "accepted-alias", Connector: "codex", OK: true}},
 	})
 	if len(accounts) != 1 || accounts[0].User != "canonical" {
@@ -1696,7 +1696,7 @@ func TestIdentitySpoolNamesHomeOnlyTarget(t *testing.T) {
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
 		"alice": {Name: "alice", UID: 4242, GID: 4242, Home: "/Users/alice"},
 	}})
-	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
+	accounts, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", enterpriseHookReconcileRun{
 		Rows: []enterpriseHookReconcileRow{{UID: 4242, UserHome: "/Users/alice", Connector: "codex", OK: true}},
 	})
 	if len(accounts) != 1 || accounts[0].UID != 4242 || accounts[0].User != "alice" {
@@ -1719,8 +1719,17 @@ func TestIdentitySpoolKeysChangeWhenAnOmittedAccountLeaves(t *testing.T) {
 		"bob":   {Name: "bob", UID: 4243, GID: 4243},
 	}})
 	run := enterpriseHookReconcileRun{Rows: []enterpriseHookReconcileRow{{UID: 4242, User: "alice", Connector: "codex", OK: true}}}
+	// bob's record is still in the spool: the listing omitted him.
+	dir := t.TempDir()
+	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{Key: "4243", User: "bob", UpdatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "4243.json"), data, 0o640); err != nil {
+		t.Fatal(err)
+	}
 	fingerprint := func() string {
-		_, keys := enterpriseHookIdentitySpoolAccounts(io.Discard, run)
+		_, keys := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, run)
 		slices.Sort(keys)
 		return strings.Join(keys, ";")
 	}
@@ -1796,13 +1805,13 @@ func TestStaleEligibleAccountsDoNotOverrideAnExclusion(t *testing.T) {
 			cfg.Enterprise.Enrollment.ExcludeUsers, cfg.Enterprise.Enrollment.ExemptUsers = tc.exclude, tc.exempt
 			run := enterpriseHookReconcileRun{Manifest: manifest,
 				Rows: []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: aliceUID}}}
-			run.Rows = enterpriseHookEnrolledAccountRows(io.Discard, run)
+			run.Rows = enterpriseHookEnrolledAccountRows(context.Background(), io.Discard, run)
 			if len(run.Rows) != 1 || run.Rows[0].UID != aliceUID {
 				t.Fatalf("rows = %+v, want alice's row only: the stale file added a scan row for the excluded account", run.Rows)
 			}
 			check := func(when string, run enterpriseHookReconcileRun) {
 				t.Helper()
-				accounts, keys := enterpriseHookIdentitySpoolAccounts(io.Discard, run)
+				accounts, keys := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, "", run)
 				var enrolled, left []int
 				for _, account := range accounts {
 					if account.Left {

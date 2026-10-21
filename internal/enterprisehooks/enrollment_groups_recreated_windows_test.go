@@ -35,12 +35,15 @@ func stubRecreatedGroupDirectory(t *testing.T, answer func(name string) (sid str
 	release = func() { once.Do(func() { close(held) }) }
 	previousResolve, previousMembers, previousMachine := windowsResolveGroupName, windowsLocalGroupDirectMembers, windowsMachineAccountDomainSID
 	previousTimeout, previousLimit := windowsGroupNameLookupTimeout, windowsGroupNameLookupCycleLimit
+	previousComputer := windowsComputerName
 	t.Cleanup(func() {
 		release()
 		waitIdentityLookupGateIdle(t, &windowsGroupNameLookupGate)
 		windowsResolveGroupName, windowsLocalGroupDirectMembers, windowsMachineAccountDomainSID = previousResolve, previousMembers, previousMachine
 		windowsGroupNameLookupTimeout, windowsGroupNameLookupCycleLimit = previousTimeout, previousLimit
+		windowsComputerName = previousComputer
 	})
+	windowsComputerName = func() (string, error) { return testComputerName, nil }
 	windowsGroupNameLookupTimeout, windowsGroupNameLookupCycleLimit = 30*time.Millisecond, 200*time.Millisecond
 	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
 	windowsLocalGroupDirectMembers = func(string) ([]string, error) { return nil, errors.New("not a local group") }
@@ -132,10 +135,11 @@ func TestWindowsGroupNameThatDoesNotResolveNowKeepsNoExclusionOfARecreatedGroup(
 						t.Fatalf("cycle %d: %v: member of another excluded group: %d (%s), want excluded", cycle, list, got, reason)
 					}
 				}
-				// A local account is not decided on the unverified SID either.
+				// A local account is in no group of the CONTOSO domain, whatever
+				// its SID is now (review loop 5): it stays enrolled.
 				local := newWindowsEnrollmentGroups(nil, exclude, map[string][]string{testLocalUserSID: {}}, nil, cache, nil)
-				if got, reason := local.decide(testLocalUserSID); got != windowsEnrollmentUndecided {
-					t.Fatalf("cycle %d: local account: %d (%s), want pending", cycle, got, reason)
+				if got, reason := local.decide(testLocalUserSID); got != windowsEnrollmentEnrolled {
+					t.Fatalf("cycle %d: local account: %d (%s), want enrolled", cycle, got, reason)
 				}
 				if cache.Names[`contoso\contractors`] != testDomainGroupSID {
 					t.Fatalf("cycle %d: the cached SID was dropped: %v", cycle, cache.Names)

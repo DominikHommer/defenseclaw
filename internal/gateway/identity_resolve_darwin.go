@@ -52,7 +52,7 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if darwinLocalNodeAccount(account.Username, account.Uid) {
 		own.Directory = useridentity.DirectoryLocal
 	}
-	record, ok := readIdentitySpoolFactsForAccount(key, account.Username, "", now)
+	record, ok, _ := readIdentitySpoolFactsForAccount(key, account.Username, "", now)
 	var spool *enterprisehooks.IdentitySpoolRecord
 	if ok {
 		spool = &record
