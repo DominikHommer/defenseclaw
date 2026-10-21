@@ -4007,16 +4007,6 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
-			if authenticated, ok := a.authenticateACPToken(r, token); ok {
-				r = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
-				next.ServeHTTP(w, r)
-				return
-			}
-			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_scoped_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
 			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
 			registered := false
