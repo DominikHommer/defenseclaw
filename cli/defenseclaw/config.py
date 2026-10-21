@@ -23,8 +23,8 @@ so that the Go orchestrator and Python CLI share the same config file.
 from __future__ import annotations
 
 import codecs
-import hashlib
 import copy
+import hashlib
 import json
 import locale
 import logging

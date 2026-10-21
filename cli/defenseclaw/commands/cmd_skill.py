@@ -5770,7 +5770,8 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
         if decision.verdict == "rejected" and decision.source == "quarantine":
             if app.logger:
                 saved_change_audit(app.logger).log_action(
-                    "install-rejected", skill_name, f"reason=quarantined connector={connector}" + _decision_generation(app),
+                    "install-rejected", skill_name,
+                    f"reason=quarantined connector={connector}" + _decision_generation(app),
                 )
             ux.echo(
                 f"error: skill {skill_name!r} is quarantined for connector={connector}"
