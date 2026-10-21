@@ -45,7 +45,7 @@ import (
 
 // CopilotHookSurfaceVSCodeLocal is the --hook-surface value of a hook command
 // registered for the VS Code Local harness.
-const CopilotHookSurfaceVSCodeLocal = "vscode-local"
+const CopilotHookSurfaceVSCodeLocal = copilotargs.SurfaceVSCodeLocal
 
 // CopilotVSCodeLocalContractID names the VS Code Local dialect. It is a
 // dialect contract, selected only by the hook command's surface marker:
@@ -125,31 +125,6 @@ func copilotVSCodeLocalDecode(payload map[string]interface{}) HookProfileRequest
 		req.Direction = "prompt"
 	}
 	return req
-}
-
-// copilotCLIHookFileLocalEvents is how the VS Code Local harness maps the
-// events of a Copilot CLI-format hook file such as the per-user
-// ~/.copilot/hooks/defenseclaw.json (HOOKS_BY_TARGET[Target.GitHubCopilot] in
-// microsoft/vscode src/vs/workbench/contrib/chat/common/promptSyntax/hookTypes.ts).
-// The harness then sends its own Local payload to that command
-// (chatHookService.ts: hook_event_name, tool_name, tool_input), never the CLI's
-// camelCase body: "Runtime payloads still use the Local schema."
-var copilotCLIHookFileLocalEvents = map[string]string{
-	"sessionStart":        "SessionStart",
-	"userPromptSubmitted": "UserPromptSubmit",
-	"preToolUse":          "PreToolUse",
-	"postToolUse":         "PostToolUse",
-	"agentStop":           "Stop",
-	"subagentStop":        "SubagentStop",
-}
-
-// CopilotVSCodeLocalEventForCLIHook returns the Local event a Copilot CLI
-// hook-file entry bound to cliEvent runs as in the VS Code Local harness. ok
-// is false for CLI events the harness maps to no Local dialect event
-// (sessionEnd, errorOccurred) or never runs.
-func CopilotVSCodeLocalEventForCLIHook(cliEvent string) (string, bool) {
-	local, ok := copilotCLIHookFileLocalEvents[strings.TrimSpace(cliEvent)]
-	return local, ok
 }
 
 // copilotVSCodeLocalRespond renders the Local harness response. An allow is

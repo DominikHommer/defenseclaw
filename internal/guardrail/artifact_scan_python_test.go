@@ -4,6 +4,8 @@
 package guardrail
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -202,6 +204,9 @@ func TestPythonStringsMayRun(t *testing.T) {
 // writes nothing; a path in a string that a call in code writes still does.
 func TestPythonPathWriteMatchNeedsAWriteCallInCode(t *testing.T) {
 	rule := regexp.MustCompile(`authorized_keys`)
+	sourceDir := t.TempDir()
+	t.Setenv("PYTHONPATH", "")
+	t.Setenv("PYTHONHOME", "")
 	for _, tc := range []struct {
 		name, source string
 		want         bool
@@ -212,9 +217,8 @@ func TestPythonPathWriteMatchNeedsAWriteCallInCode(t *testing.T) {
 		{"exec of a string", "exec(\"open('/home/a/.ssh/authorized_keys', 'a').write('k')\")\n", true},
 		{"f-string text", "p = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"p.write_text(42)\")\n", false},
 		{"string text", "p = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", false},
-		// pathlib may be a file of the script's directory that runs the text.
-		{"f-string text beside an import", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"p.write_text(42)\")\n", true},
-		{"string text beside an import", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", true},
+		{"f-string text beside an import", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"p.write_text(42)\")\n", false},
+		{"string text beside an import", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", false},
 		{"string text beside a preloaded import", "import os\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", false},
 		{"printed open", "print(\"open('/home/a/.ssh/authorized_keys', 'a')\")\n", false},
 		{"printed Path write", "print(\"Path('/home/a/.ssh/authorized_keys').write_text('k')\")\n", false},
@@ -223,8 +227,35 @@ func TestPythonPathWriteMatchNeedsAWriteCallInCode(t *testing.T) {
 		{"printed open beside an ordinary variable", "source = 1\nprint(\"open('/home/a/.ssh/authorized_keys', 'a')\")\n", false},
 		{"exec through a local alias", "source = exec\nsource(\"open('/home/a/.ssh/authorized_keys', 'a').write('k')\")\n", true},
 	} {
-		if got := pythonPathWriteMatch(rule, tc.source) != nil; got != tc.want {
+		if got := pythonPathWriteMatch(rule, tc.source, sourceDir) != nil; got != tc.want {
 			t.Errorf("%s: pythonPathWriteMatch(%q) = %t, want %t", tc.name, tc.source, got, tc.want)
 		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "pathlib.py"), []byte("# local module\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shadowed := "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n"
+	if pythonPathWriteMatch(rule, shadowed, sourceDir) == nil {
+		t.Fatal("a local pathlib.py can consume the program's string text")
+	}
+	if err := os.Remove(filepath.Join(sourceDir, "pathlib.py")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "fnmatch.py"), []byte("# pathlib dependency\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if pythonPathWriteMatch(rule, shadowed, sourceDir) == nil {
+		t.Fatal("an import dependency can consume the program's string text")
+	}
+	if err := os.Remove(filepath.Join(sourceDir, "fnmatch.py")); err != nil {
+		t.Fatal(err)
+	}
+	pathChanged := "import sys\nsys.path.insert(0, 'other')\n" + shadowed
+	if pythonPathWriteMatch(rule, pathChanged, sourceDir) == nil {
+		t.Fatal("a changed sys.path can load another module")
+	}
+	t.Setenv("PYTHONPATH", sourceDir)
+	if pythonPathWriteMatch(rule, shadowed, sourceDir) == nil {
+		t.Fatal("PYTHONPATH can load another module")
 	}
 }

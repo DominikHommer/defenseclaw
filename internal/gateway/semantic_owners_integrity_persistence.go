@@ -1532,7 +1532,7 @@ func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.
 		trustedWindowsLocationAuthorizedKeysWrite(input) ||
 		trustedShellWrapperAuthorizedKeysWrite(input, facts) ||
 		trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
-		trustedInlineAuthorizedKeysWrite(facts) ||
+		trustedInlineAuthorizedKeysWrite(input, facts) ||
 		trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
 		trustedCMDAuthorizedKeysWrite(input) ||
 		trustedNamedOutFileAuthorizedKeysWrite(input) ||

@@ -1,0 +1,210 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+)
+
+// hookToolCallJSONUnambiguous checks the raw hook body before a map decoder
+// selects one value of a duplicate key. JSON-string arguments are checked
+// too: Copilot accepts an object encoded in toolArgs as a string. Malformed
+// or over-deep input cannot prove an unambiguous tool call.
+func hookToolCallJSONUnambiguous(connector string, body []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if !hookUniqueJSONValue(decoder, 0, "", connector == "copilot") {
+		return false
+	}
+	_, err := decoder.Token()
+	return err == io.EOF
+}
+
+const hookMaxJSONDepth = 32
+const hookMaxJSONMembers = 4096
+
+func hookUniqueJSONValue(decoder *json.Decoder, depth int, parentKey string, copilot bool) bool {
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	delim, composite := token.(json.Delim)
+	if !composite {
+		value, isString := token.(string)
+		if !isString || !copilot || depth != 1 || parentKey != "toolArgs" {
+			return true
+		}
+		trimmed := strings.TrimSpace(value)
+		if len(trimmed) == 0 || trimmed[0] != '{' && trimmed[0] != '[' {
+			return true
+		}
+		if depth >= hookMaxJSONDepth {
+			return false
+		}
+		inner := json.NewDecoder(strings.NewReader(trimmed))
+		inner.UseNumber()
+		if !hookUniqueJSONValue(inner, depth+1, "", false) {
+			return false
+		}
+		_, err := inner.Token()
+		return err == io.EOF
+	}
+	if depth >= hookMaxJSONDepth {
+		return false
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return false
+			}
+			key, ok := keyToken.(string)
+			if !ok || len(seen) >= hookMaxJSONMembers {
+				return false
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return false
+			}
+			seen[key] = struct{}{}
+			if !hookUniqueJSONValue(decoder, depth+1, key, copilot) {
+				return false
+			}
+		}
+		end, err := decoder.Token()
+		return err == nil && end == json.Delim('}')
+	case '[':
+		for decoder.More() {
+			if !hookUniqueJSONValue(decoder, depth+1, "", copilot) {
+				return false
+			}
+		}
+		end, err := decoder.Token()
+		return err == nil && end == json.Delim(']')
+	default:
+		return false
+	}
+}
+
+// copilotWriteCallUnproven refuses a structured write when its projected
+// arguments do not prove every target. ActionFacts applies the same bounded
+// over-limit reduction used by the policy path. A spelling resembling a
+// known write tool but not recognized by the parser is an unknown alias,
+// never a read-only tool by default.
+func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return true
+	}
+	if copilotWriteAlias(name) && !copilotKnownWriteSpelling(name) {
+		return true
+	}
+	tool := copilotargs.LocalActionTool(name)
+	if !actionfacts.StructuredWriteTool(tool) {
+		return false
+	}
+	if actionfacts.ApplyPatchTool(tool) {
+		targets, known := hookpaths.ApplyPatchWriteTargets(tool, args, "", cwd, home)
+		return !known || len(targets) == 0
+	}
+	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
+	facts := actionfacts.Analyze(input)
+	if reduced, _, ok := actionfacts.OverLimitWriteTargetReduction(input, facts); ok {
+		facts = reduced
+	}
+	if !facts.Authoritative() {
+		// Copilot CLI includes display-only description on edit and a file
+		// mode on create. Neither can name a second target. Drop only these
+		// established metadata fields and require the reviewed schema to
+		// become complete; any other extra field stays unproven.
+		clean, ok := copilotWriteArgsWithoutMetadata(tool, args)
+		if !ok {
+			return true
+		}
+		input.Args = clean
+		facts = actionfacts.Analyze(input)
+		if !facts.Authoritative() {
+			return true
+		}
+	}
+	for _, target := range facts.Paths {
+		switch target.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+			return false
+		}
+	}
+	return true
+}
+
+func copilotWriteArgsWithoutMetadata(tool string, args json.RawMessage) (json.RawMessage, bool) {
+	var metadata, reviewed map[string]bool
+	switch tool {
+	case "edit":
+		metadata = map[string]bool{"description": true}
+		reviewed = map[string]bool{"path": true, "old_str": true, "new_str": true}
+	case "create":
+		metadata = map[string]bool{"mode": true}
+		reviewed = map[string]bool{"path": true, "file_text": true}
+	default:
+		return nil, false
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(args, &object) != nil || len(object) == 0 {
+		return nil, false
+	}
+	removed := false
+	for key := range object {
+		if metadata[key] {
+			delete(object, key)
+			removed = true
+		} else if !reviewed[key] {
+			return nil, false
+		}
+	}
+	if !removed {
+		return nil, false
+	}
+	clean, err := json.Marshal(object)
+	return clean, err == nil
+}
+
+func copilotKnownWriteSpelling(name string) bool {
+	switch name {
+	case "create_file", "replace_string_in_file", "insert_edit_into_file", "apply_patch",
+		"write_file", "edit_file", "delete_file", "copy_file", "move_file",
+		"multi_edit", "multiedit":
+		return true
+	default:
+		return false
+	}
+}
+
+func copilotWriteAlias(name string) bool {
+	canonical := strings.Map(func(r rune) rune {
+		switch r {
+		case '_', '-':
+			return -1
+		default:
+			if 'A' <= r && r <= 'Z' {
+				return r + ('a' - 'A')
+			}
+			return r
+		}
+	}, name)
+	switch canonical {
+	case "createfile", "replacestringinfile", "inserteditintofile",
+		"applypatch", "writefile", "editfile", "deletefile", "copyfile", "movefile", "multiedit":
+		return true
+	default:
+		return false
+	}
+}

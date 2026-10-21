@@ -254,7 +254,7 @@ func scanArtifactText(rules []artifactRule, text, location string) []scanner.Fin
 			// rm -rf in a JSON example to a "/" further down (GAP-0364).
 			match = firstLineMatch(rule.re, text)
 		} else if python && rule.pathWrite {
-			match = pythonPathWriteMatch(rule.re, text)
+			match = pythonPathWriteMatch(rule.re, text, filepath.Dir(location))
 		} else {
 			match = rule.re.FindStringIndex(text)
 		}

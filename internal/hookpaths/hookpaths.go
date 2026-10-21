@@ -432,18 +432,27 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 // the shell analysis limits) the map carries TruncatedKey. The body is read
 // as the Claude Code and Codex command hooks send it.
 func Resolve(payload []byte) string {
-	return ResolveConnector("", payload)
+	return ResolveConnector("", "", "", payload)
 }
 
 // ResolveConnector is Resolve for a hook body of connector, read as the
-// gateway's profile for that connector reads it: a Copilot body through
-// copilotargs, the projection the gateway's Copilot profiles use, so a
-// freeform apply_patch, a toolArgs JSON string and a VS Code Local tool name
-// the gateway judges are the call resolved here. A body that spells the tool
-// name, or the tool arguments, twice with different values is marked
-// incomplete: the gateway may judge the other spelling, so an operand this
-// map does not list fails closed where the gateway cannot place it.
-func ResolveConnector(connector string, payload []byte) string {
+// gateway's profile for that connector reads it. surface and event are the
+// hook command's --hook-surface value and bound event, the values the hook
+// sends the gateway; only Copilot reads them. A Copilot body is read in the
+// dialect the gateway selects from them (copilotargs.LocalDialect): the
+// CLI's toolName and toolArgs, or the VS Code Local harness's tool_name and
+// tool_input, through the copilotargs projection the gateway's Copilot
+// profiles use, so a freeform apply_patch, a toolArgs JSON string and a VS
+// Code Local tool name the gateway judges are the call resolved here. A body
+// that spells the tool name, or the tool arguments, twice with different
+// values is marked incomplete: no client sends one, and an operand this map
+// does not list fails closed where the gateway cannot place it.
+//
+// A structured write call over the ActionFacts analysis limits is judged by
+// the gateway on its reduced call (actionfacts.OverLimitWriteTargetReduction),
+// so the map lists that call's targets and the limit alone does not make it
+// incomplete. Any other reason still does.
+func ResolveConnector(connector, surface, event string, payload []byte) string {
 	if len(payload) > MaxPayloadBytes {
 		return incompleteEvidence("")
 	}
@@ -452,32 +461,19 @@ func ResolveConnector(connector string, payload []byte) string {
 		return ""
 	}
 	copilot := strings.EqualFold(strings.TrimSpace(connector), "copilot")
-	toolNames := []string{"tool_name", "toolName"}
-	argNames := []string{"tool_input", "toolInput", "tool_args", "toolArgs", "args", "arguments"}
+	var toolRaw, args json.RawMessage
+	var toolConflict, argsConflict bool
 	if copilot {
-		// The Copilot CLI dialect reads toolName and toolArgs; the VS Code
-		// Local dialect reads tool_name and tool_input.
-		toolNames = []string{"toolName", "tool_name"}
-		argNames = []string{"toolArgs", "tool_input", "toolInput", "tool_args", "args", "arguments"}
+		toolRaw, args, toolConflict, argsConflict = copilotCall(envelope, surface, event)
+	} else {
+		toolRaw, _, toolConflict = firstAlias(envelope, []string{"tool_name", "toolName"})
+		args, _, argsConflict = firstAlias(envelope,
+			[]string{"tool_input", "toolInput", "tool_args", "toolArgs", "args", "arguments"})
 	}
-	toolRaw, _, toolConflict := firstAlias(envelope, toolNames)
-	args, argsKey, argsConflict := firstAlias(envelope, argNames)
 	var tool string
 	_ = json.Unmarshal(toolRaw, &tool)
 	tool = strings.TrimSpace(tool)
 	if copilot {
-		var value any
-		if json.Unmarshal(args, &value) != nil {
-			value = nil
-		}
-		switch argsKey {
-		case "toolArgs":
-			args = copilotargs.CLIToolArgs(tool, value)
-		case "tool_input":
-			args = copilotargs.LocalToolArgs(tool, value)
-		default:
-			args = nil // neither dialect reads it
-		}
 		tool = copilotargs.LocalActionTool(tool)
 	}
 	if len(args) == 0 && !toolConflict && !argsConflict {
@@ -503,6 +499,10 @@ func ResolveConnector(connector string, payload []byte) string {
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
 	facts := actionfacts.Analyze(input)
+	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(input, facts); ok {
+		// The gateway judges the reduced call: list its targets.
+		facts = view
+	}
 	// A connector can name the shell text "cmd" while ActionFacts requires
 	// its canonical command field. Resolve that exact string as a shell too.
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded || toolConflict || argsConflict
@@ -666,8 +666,64 @@ func ResolveConnector(connector string, payload []byte) string {
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
-// incompleteEvidence is the header for a tool call whose write operands
-// could not be listed. The gateway must not treat it as complete.
+// copilotCall returns the tool name and the projected arguments of a Copilot
+// hook body as the gateway's profile for its dialect reads them
+// (copilotargs.LocalDialect), and whether another spelling of the tool name
+// or of the arguments carries a different value. The profile reads only its
+// dialect's two fields; the other dialect's fields and the generic aliases
+// are spellings it ignores.
+func copilotCall(envelope map[string]json.RawMessage, surface, event string) (json.RawMessage, json.RawMessage, bool, bool) {
+	var hookEvent string
+	_ = json.Unmarshal(envelope["hook_event_name"], &hookEvent)
+	_, local := copilotargs.LocalDialect(surface, event, hookEvent,
+		aliasSet(envelope["toolName"]) || aliasSet(envelope["toolArgs"]))
+	toolNames := []string{"toolName", "tool_name"}
+	argNames := []string{"toolArgs", "tool_input", "toolInput", "tool_args", "args", "arguments"}
+	if local {
+		toolNames[0], toolNames[1] = toolNames[1], toolNames[0]
+		argNames[0], argNames[1] = argNames[1], argNames[0]
+	}
+	toolRaw, toolConflict := dialectAlias(envelope, toolNames)
+	rawArgs, argsConflict := dialectAlias(envelope, argNames)
+	var tool string
+	_ = json.Unmarshal(toolRaw, &tool)
+	tool = strings.TrimSpace(tool)
+	// Both profiles project an arguments field that is present, null
+	// included, and read none when it is absent.
+	if _, present := envelope[argNames[0]]; !present {
+		return toolRaw, nil, toolConflict, argsConflict
+	}
+	var value any
+	if json.Unmarshal(rawArgs, &value) != nil {
+		value = nil
+	}
+	if local {
+		return toolRaw, copilotargs.LocalToolArgs(tool, value), toolConflict, argsConflict
+	}
+	return toolRaw, copilotargs.CLIToolArgs(tool, value), toolConflict, argsConflict
+}
+
+// dialectAlias returns the value of names[0], the one spelling a Copilot
+// profile reads, and whether another of names carries a value other than
+// null that differs from it (or is set while names[0] is not).
+func dialectAlias(envelope map[string]json.RawMessage, names []string) (json.RawMessage, bool) {
+	value := bytes.TrimSpace(envelope[names[0]])
+	conflict := false
+	for _, name := range names[1:] {
+		other := envelope[name]
+		if aliasSet(other) {
+			conflict = conflict || !aliasSet(value) || !sameAliasValue(value, bytes.TrimSpace(other))
+		}
+	}
+	return value, conflict
+}
+
+// aliasSet reports a field present with a value other than null.
+func aliasSet(value json.RawMessage) bool {
+	value = bytes.TrimSpace(value)
+	return len(value) != 0 && !bytes.Equal(value, []byte("null"))
+}
+
 // firstAlias returns the first of names that envelope carries with a value
 // other than null, its name, and whether another of names carries a different
 // value: a string, compared with surrounding space trimmed as the gateway
@@ -678,7 +734,7 @@ func firstAlias(envelope map[string]json.RawMessage, names []string) (json.RawMe
 	conflict := false
 	for _, name := range names {
 		value := bytes.TrimSpace(envelope[name])
-		if len(value) == 0 || bytes.Equal(value, []byte("null")) {
+		if !aliasSet(value) {
 			continue
 		}
 		if first == nil {
@@ -702,6 +758,8 @@ func sameAliasValue(a, b json.RawMessage) bool {
 	return bytes.Equal(compactA.Bytes(), compactB.Bytes())
 }
 
+// incompleteEvidence is the header for a tool call whose write operands
+// could not be listed. The gateway must not treat it as complete.
 func incompleteEvidence(cwd string) string {
 	targets := map[string]string{TruncatedKey: "1"}
 	if cwd != "" && len(cwd) <= MaxWriteTargetPathBytes {
