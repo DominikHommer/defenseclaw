@@ -3503,7 +3503,7 @@ audit_sinks:
         "redaction_profile": "v7-compatible",
     }
     action_selector = routes[1]["selector"]["actions"]
-    assert len(action_selector) == 234
+    assert len(action_selector) == 237
     assert "fleet.device.credential_provision_authorized" in action_selector
     assert "fleet.device.decommission_authorized" in action_selector
     assert "setup-redaction-policy" in action_selector
