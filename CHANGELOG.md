@@ -24,6 +24,10 @@ for current behavior.
 
 ### Fixed
 
+- **Sandbox hook outages leave a persistent failure log.** Shell hooks now write to the workload data home instead of the read-only runtime, including neutral Stop answers and closed prompt or tool-call failures.
+
+- **Local Splunk setup reports a failed prerequisite.** Missing Docker, a stopped daemon or a busy port now exits nonzero in both command and wizard setup, before local Splunk configuration is written.
+
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 
 ### Removed

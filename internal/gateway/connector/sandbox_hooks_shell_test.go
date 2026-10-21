@@ -126,6 +126,7 @@ func newSandboxHookHarnessFiles(t *testing.T, files []SandboxFile, systemPATH st
 		data := file.Data
 		switch filepath.Base(file.Path) {
 		case "_hardening.sh":
+			data = bytes.ReplaceAll(data, []byte(SandboxHookLogDir), []byte(h.path(SandboxHookLogDir)))
 			data = bytes.Replace(data, []byte(`DEFENSECLAW_BAKED_HOOK_PATH="`+SandboxHookPATH+`"`),
 				[]byte(`DEFENSECLAW_BAKED_HOOK_PATH="`+stubPath+`"`), 1)
 		case codexSandboxNotifyScript:
