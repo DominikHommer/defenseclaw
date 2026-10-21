@@ -396,7 +396,7 @@ function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Q
 }
 
 function Get-NativeProbe([string]$FilePath, [string[]]$Arguments = @()) {
-    # A native command's output and exit code; exit -1 when it could not run.
+    # A native command's output and exit code (-1 when it could not run).
     $ErrorActionPreference = "Continue"
     try {
         $output = ((& $FilePath @Arguments 2>&1) | Out-String)

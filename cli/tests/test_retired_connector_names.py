@@ -94,7 +94,8 @@ THIRD_PARTY_EXTENSION_IDS = ("google." + _GEMINI + "-" + _CLI + "-vscode-ide-com
 UNRESTRICTED_FILES = frozenset({"CHANGELOG.md"})
 UPGRADE_GUIDE = "docs-site/content/docs/get-started/upgrade.mdx"
 UPGRADE_SECTION = "## Renamed and removed connectors"
-EXCLUDED_PREFIXES = ("openwiki/",)
+# Released hook renders the upgrade tests run byte for byte, as they shipped.
+EXCLUDED_PREFIXES = ("openwiki/", "internal/gateway/connector/testdata/released-hooks/")
 MAX_SCAN_BYTES = 8 * 1024 * 1024
 
 
