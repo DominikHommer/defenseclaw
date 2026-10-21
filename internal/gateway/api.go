@@ -298,7 +298,6 @@ type APIServer struct {
 	hookChildThreads                  map[string]hookChildThread
 	hookChildThreadOrder              []string
 	copilotSubagents                  []copilotPendingSubagent
-	codexPendingThreads               []codexPendingThread
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
 	// hookLifecycleHistoryRead holds the session keys whose signed lifecycle
