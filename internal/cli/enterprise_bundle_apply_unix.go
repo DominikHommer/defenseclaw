@@ -55,6 +55,7 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 		env.LockTimeout = opts.lockWait
 	}
 	env.RefuseCapabilityLoss = opts.refuseCapabilityLoss
+	env.DeferRestart = opts.deferRestart
 	result := enterpriseunix.Run(cmd.Context(), env, unixBundleApplyOptions(opts, bundle))
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err

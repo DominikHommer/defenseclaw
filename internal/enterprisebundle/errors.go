@@ -58,8 +58,15 @@ const (
 	// Apply and the receipt state machine (spec section 7).
 	CodeApplyFailed    Code = "apply_failed"
 	CodeCapabilityLoss Code = "capability_loss"
-	CodeNotConfirmed   Code = "not_confirmed"
-	CodeInterrupted    Code = "interrupted"
+	// CodeRestartDeferred refuses, before anything changes, a bundle whose
+	// config change restarts the gateway when the caller asked to defer
+	// restarts (apply --defer-restart); retry it in a maintenance window.
+	CodeRestartDeferred Code = "restart_deferred"
+	CodeNotConfirmed    Code = "not_confirmed"
+	CodeInterrupted     Code = "interrupted"
+	// CodeSuperseded ends the receipt of an inbox bundle that one run
+	// did not apply because the same inbox held a higher version.
+	CodeSuperseded     Code = "superseded"
 	CodeLifecycleBusy  Code = "lifecycle_busy"
 	CodeBundleRequired Code = "bundle_required"
 	CodeNotManaged     Code = "not_managed"
@@ -96,7 +103,13 @@ type Error struct {
 	Code   Code
 	Path   string
 	Detail string
+	// cause is the operating system error behind the refusal, if any, for
+	// errors.Is (for example fs.ErrPermission); it is never printed.
+	cause error
 }
+
+// Unwrap returns the operating system error behind the refusal.
+func (e *Error) Unwrap() error { return e.cause }
 
 func (e *Error) Error() string {
 	if e.Path == "" {

@@ -55,6 +55,11 @@ const (
 	// MaxReceipts is how many receipts the store keeps; older finished
 	// ones are removed.
 	MaxReceipts = 20
+	// MaxReceiptEvents is how many public receipt events receipt-events/
+	// keeps. Older ones are removed after each publish, except the event of
+	// a receipt the store still keeps and of the current or last good
+	// bundle.
+	MaxReceiptEvents = 100
 	// MaxErrorMessage bounds a receipt error message (bytes).
 	MaxErrorMessage = 512
 
@@ -176,6 +181,13 @@ type Transition struct {
 	At    string `json:"at"`
 }
 
+// WarnReceiptPublishFailed is the receipt warning code of a finished
+// receipt whose public copy (receipt-events/ and receipt.json) could not be
+// written. The root-only receipt, the apply result and bundle status still
+// record the outcome; a management agent that forwards receipt events reads
+// this one from bundle status instead.
+const WarnReceiptPublishFailed = "receipt_publish_failed"
+
 // WarnConfirmedAfterInterrupt is the receipt warning code of a bundle that
 // a later lifecycle run confirmed: the run that applied it ended before the
 // gateway confirmed it (not_confirmed, or the run stopped after the commit).
@@ -188,12 +200,18 @@ const WarnConfirmedAfterInterrupt = "bundle_confirmed_after_interrupt"
 type Receipt struct {
 	SchemaVersion int    `json:"schema_version"`
 	ReceiptID     string `json:"receipt_id"`
-	BundleID      string `json:"bundle_id,omitempty"`
-	Version       uint64 `json:"version,omitempty"`
-	TenantID      string `json:"tenant_id,omitempty"`
-	DeviceGroup   string `json:"device_group,omitempty"`
-	SignerKeyID   string `json:"signer_key_id,omitempty"`
-	Principal     string `json:"principal,omitempty"`
+	// Sequence orders deliveries on this device: Receive gives each new
+	// receipt one more than the highest it keeps. Receipts sort by it, not
+	// by the wall clock, so a clock change never makes an older delivery
+	// look newer. Stored in the root-only receipt file only (diskReceipt);
+	// 0 for a receipt written before it existed.
+	Sequence    uint64 `json:"-"`
+	BundleID    string `json:"bundle_id,omitempty"`
+	Version     uint64 `json:"version,omitempty"`
+	TenantID    string `json:"tenant_id,omitempty"`
+	DeviceGroup string `json:"device_group,omitempty"`
+	SignerKeyID string `json:"signer_key_id,omitempty"`
+	Principal   string `json:"principal,omitempty"`
 	// Actor is the local OS account that received this bundle.
 	Actor string `json:"actor,omitempty"`
 	// DeliveryID is the opaque id the caller of `enterprise bundle apply
@@ -488,8 +506,36 @@ func (s *Store) saveState(st State) error {
 	return s.publishPrivateFile(s.StatePath())
 }
 
+// diskReceipt is the root-only receipt file: the receipt and its delivery
+// sequence, which status output leaves out.
+type diskReceipt struct {
+	*Receipt
+	Sequence uint64 `json:"sequence,omitempty"`
+}
+
 func (s *Store) writeReceipt(r *Receipt) error {
-	data, err := json.MarshalIndent(r, "", "  ")
+	if err := s.writePrivateReceipt(r); err != nil {
+		return err
+	}
+	if !Finished(r.State) {
+		return nil
+	}
+	// Reporting only: the gateway reads receipt-events/ for the audit event
+	// and the metrics. A failed write must not fail the apply, whose outcome
+	// the root-only receipt and status already record; the receipt carries
+	// receipt_publish_failed so the apply result and bundle status say so.
+	if err := s.writePublicReceipt(r); err != nil {
+		if slices.Contains(r.WarningCodes, WarnReceiptPublishFailed) {
+			return nil
+		}
+		r.WarningCodes = append(r.WarningCodes, WarnReceiptPublishFailed)
+		return s.writePrivateReceipt(r)
+	}
+	return nil
+}
+
+func (s *Store) writePrivateReceipt(r *Receipt) error {
+	data, err := json.MarshalIndent(diskReceipt{Receipt: r, Sequence: r.Sequence}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -499,16 +545,7 @@ func (s *Store) writeReceipt(r *Receipt) error {
 	if err := configwrite.WriteFileDurable(s.receiptPath(r.ReceiptID), append(data, '\n'), 0o600); err != nil {
 		return err
 	}
-	if err := s.publishPrivateFile(s.receiptPath(r.ReceiptID)); err != nil {
-		return err
-	}
-	if Finished(r.State) {
-		// Reporting only: the gateway reads receipt-events/ for the audit
-		// event and the metrics. A failed write must not fail the apply,
-		// whose outcome the root-only receipt and status already record.
-		_ = s.writePublicReceipt(r)
-	}
-	return nil
+	return s.publishPrivateFile(s.receiptPath(r.ReceiptID))
 }
 
 // PublicReceiptPath is <etc>/bundles/receipt.json.
@@ -595,9 +632,81 @@ func (s *Store) publishReceiptEvent(out enterprisestatus.PublicReceipt) error {
 		return err
 	}
 	if s.PublishReceipt != nil {
-		return s.PublishReceipt(path)
+		if err := s.PublishReceipt(path); err != nil {
+			return err
+		}
 	}
+	// Retention is housekeeping: an event that could not be removed now is
+	// removed after a later publish.
+	_ = s.pruneReceiptEvents()
 	return nil
+}
+
+// pruneReceiptEvents keeps the MaxReceiptEvents newest events in
+// receipt-events/, and every event of a receipt the store keeps or of the
+// current or last good bundle. Events are ordered by the delivery sequence
+// of the receipt the store keeps, then by modification time.
+func (s *Store) pruneReceiptEvents() error {
+	dir := s.PublicReceiptEventsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	type event struct {
+		id  string
+		mod time.Time
+	}
+	var events []event
+	for _, entry := range entries {
+		id, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !enterprisestatus.ValidReceiptID(id) || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		events = append(events, event{id: id, mod: info.ModTime()})
+	}
+	if len(events) <= MaxReceiptEvents {
+		return nil
+	}
+	receipts, err := s.Receipts()
+	if err != nil {
+		return err
+	}
+	st, err := s.LoadState()
+	if err != nil {
+		return err
+	}
+	keep := map[string]bool{}
+	for _, r := range receipts {
+		keep[r.ReceiptID] = true
+	}
+	for _, ref := range []*Ref{st.Current, st.LastGood} {
+		if ref != nil {
+			keep[ref.BundleID] = true
+			if id := receiptIDOfVersionDir(ref.Dir, ref.Version, ref.BundleID); id != "" {
+				keep[id] = true
+			}
+		}
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		if !events[i].mod.Equal(events[j].mod) {
+			return events[i].mod.After(events[j].mod)
+		}
+		return events[i].id > events[j].id
+	})
+	var errs []error
+	for _, ev := range events[MaxReceiptEvents:] {
+		if keep[ev.id] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, ev.id+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (s *Store) publishReceipt(out enterprisestatus.PublicReceipt) error {
@@ -667,7 +776,11 @@ func (s *Store) Receive(bundleID string, version uint64, deliveryID string) (*Re
 		}
 	}
 	at := s.now()
-	r := &Receipt{SchemaVersion: ReceiptSchemaVersion, State: StateReceived, Actor: configwrite.CurrentOSActor(),
+	sequence, err := s.nextSequence()
+	if err != nil {
+		return nil, err
+	}
+	r := &Receipt{SchemaVersion: ReceiptSchemaVersion, Sequence: sequence, State: StateReceived, Actor: configwrite.CurrentOSActor(),
 		DeliveryID: deliveryID, Transitions: []Transition{{State: StateReceived, At: stamp(at)}}}
 	if ValidBundleID(bundleID) && s.receiptReusable(bundleID) {
 		r.ReceiptID, r.BundleID, r.Version = bundleID, bundleID, version
@@ -689,6 +802,21 @@ func (s *Store) Receive(bundleID string, version uint64, deliveryID string) (*Re
 		return nil, err
 	}
 	return r, s.prune()
+}
+
+// nextSequence is the delivery sequence of a new receipt: one more than the
+// highest a kept receipt carries. Pruning keeps the newest receipts, so the
+// sequence never goes back while the receipts directory exists.
+func (s *Store) nextSequence() (uint64, error) {
+	receipts, err := s.Receipts()
+	if err != nil {
+		return 0, err
+	}
+	var highest uint64
+	for _, r := range receipts {
+		highest = max(highest, r.Sequence)
+	}
+	return highest + 1, nil
 }
 
 // receiptReusable reports whether a new receipt may take the id bundleID.
@@ -1076,18 +1204,30 @@ func (s *Store) Receipts() ([]*Receipt, error) {
 			continue
 		}
 		var r Receipt
-		if json.Unmarshal(raw, &r) != nil || r.ReceiptID != id {
+		disk := diskReceipt{Receipt: &r}
+		if json.Unmarshal(raw, &disk) != nil || r.ReceiptID != id {
 			continue
 		}
+		r.Sequence = disk.Sequence
 		out = append(out, &r)
 	}
+	sortReceipts(out)
+	return out, nil
+}
+
+// sortReceipts orders receipts newest first by delivery sequence. A receipt
+// without one was written by an earlier release, before every receipt with
+// one; those keep the order of their received time.
+func sortReceipts(out []*Receipt) {
 	sort.SliceStable(out, func(i, j int) bool {
+		if a, b := out[i].Sequence, out[j].Sequence; a != b {
+			return a > b
+		}
 		if a, b := out[i].ReceivedAt(), out[j].ReceivedAt(); a != b {
 			return a > b
 		}
 		return out[i].ReceiptID > out[j].ReceiptID
 	})
-	return out, nil
 }
 
 // Summary is the result v2 bundle block: the latest receipt that reached
@@ -1189,10 +1329,21 @@ func (s *Store) gc(st State, keep map[string]bool) error {
 				(IsVersionDirName(name) && !st.held(name) && !keep[name])
 			if stale {
 				errs = append(errs, removeTree(filepath.Join(s.BundlesDir, name)))
+			} else if entry.Type().IsRegular() && isTempOf(name, enterprisestatus.PublicReceiptName) {
+				// A crash during the atomic replace of receipt.json.
+				errs = append(errs, os.Remove(filepath.Join(s.BundlesDir, name)))
 			}
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		errs = append(errs, err)
+	}
+	if entries, err := os.ReadDir(s.PublicReceiptEventsDir()); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.Type().IsRegular() && strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp") {
+				errs = append(errs, os.Remove(filepath.Join(s.PublicReceiptEventsDir(), name)))
+			}
+		}
 	}
 	for _, dir := range []string{s.LifecycleDir, s.receiptsDir()} {
 		entries, err := os.ReadDir(dir)
@@ -1208,6 +1359,12 @@ func (s *Store) gc(st State, keep map[string]bool) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// isTempOf reports the temp file name of an atomic replace of base
+// (.<base>.<random>.tmp).
+func isTempOf(name, base string) bool {
+	return strings.HasPrefix(name, "."+base+".") && strings.HasSuffix(name, ".tmp")
 }
 
 func validSHA256Hex(value string) bool {

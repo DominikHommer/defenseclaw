@@ -150,3 +150,26 @@ func bundleVerifyRestartPrediction(platform string, out *enterprisebundle.Verify
 	installed, err := bundleInstalledConfig(platform)
 	return predictBundleRestart(platform, bundleManagedDefaults(platform), installed, err, out.Rendered)
 }
+
+// windowsBundleRestartDeferral is the Driver.RefuseRestart of a Windows
+// apply --defer-restart: the reason the verify restart prediction gives for
+// a bundle that restarts the gateway or whose restart cannot be told.
+func windowsBundleRestartDeferral(enforced, rendered []byte) string {
+	return bundleRestartDeferral(predictBundleRestart("windows", bundleManagedDefaults("windows"), enforced, nil, rendered))
+}
+
+// bundleRestartDeferral is the restart_deferred detail of a prediction; ""
+// when the bundle applies without a restart.
+func bundleRestartDeferral(p *bundleRestartPrediction) string {
+	switch p.GatewayRestart {
+	case bundleRestartNotRequired:
+		return ""
+	case bundleRestartRequired:
+		settings := p.Settings
+		if len(settings) == 0 {
+			settings = p.ReasonCodes
+		}
+		return enterprisebundle.RestartDeferralReason(settings, false)
+	}
+	return enterprisebundle.RestartDeferralReason(nil, true)
+}

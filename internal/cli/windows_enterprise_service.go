@@ -132,6 +132,9 @@ type windowsEnterpriseLifecycleOptions struct {
 	bundlePath           string
 	trustAnchors         string
 	refuseCapabilityLoss bool
+	// deferRestart refuses a bundle whose config change restarts the
+	// gateway (enterprise bundle apply --defer-restart).
+	deferRestart bool
 	// bundleLockWait is how long the run waits for another bundle run to
 	// release bundle.lock (`enterprise bundle apply --lock-wait`); 0 tries
 	// once, as Setup and `enterprise windows ensure` do.
