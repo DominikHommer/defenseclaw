@@ -586,13 +586,14 @@ func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) [
 		texts = append(texts, request.Input.Argv...)
 		texts = appendJSONStrings(texts, request.Input.Args)
 	}
+	files := literalStdinFilesOf(request, facts)
 	for _, command := range facts.Commands {
 		texts = append(texts, command.Argv...)
 		// The quoted heredoc a command reads (cat > file <<'EOF') is data
 		// the command acts on, so a migrated literal in it counts in a
 		// script body too, unless the command is known never to read it.
 		if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous &&
-			!literalStdinUnread(command) {
+			!literalStdinUnread(command, files) {
 			texts = append(texts, command.LiteralStdin)
 		}
 		for _, argument := range command.Arguments {
@@ -693,18 +694,79 @@ var stdinFileReaders = map[string]stdinFileReader{
 	"b2sum":     checksumReader,
 }
 
+// literalStdinFiles proves that a file word of a reader is not its stdin.
+type literalStdinFiles struct {
+	// cwd is the directory a relative word is opened from, "" when unknown.
+	cwd string
+	// inspect is set when the gateway sees the filesystem the command runs
+	// in, as it is when the command reads the word: no command of the
+	// action before the read can make the word a link, a FIFO or another
+	// directory's entry.
+	inspect bool
+}
+
+// literalStdinFilesOf is the view of request's filesystem for its facts. A
+// sandbox's guest filesystem is not the gateway's, and a parse that is not
+// complete, a wrapper, or a command that may create or replace a file or
+// change the directory (anything but the programs of stdinIgnoringPrograms
+// other than cd, and of stdinFileReaders) may change what a word names before
+// the read.
+func literalStdinFilesOf(request trustedActionRequest, facts actionfacts.Facts) literalStdinFiles {
+	files := literalStdinFiles{inspect: !request.SkipLocalFilesystemResolution &&
+		request.SandboxGuestCWD == "" && facts.Authoritative()}
+	if filepath.IsAbs(facts.CWD) {
+		files.cwd = facts.CWD
+	}
+	for _, command := range facts.Commands {
+		_, reader := stdinFileReaders[command.Program]
+		if len(command.Wrappers) != 0 || !command.ArgvComplete || command.Program == "cd" ||
+			!stdinIgnoringPrograms[command.Program] && !reader {
+			files.inspect = false
+		}
+	}
+	return files
+}
+
+// notStdin reports whether word, a file a reader opens, cannot be its stdin:
+// the null device, an empty name (it fails to open), or, where the gateway
+// sees the command's filesystem, an existing regular file. Anything else may be stdin or become it: "-", a
+// /dev/stdin, /dev/fd or /proc fd path however it is spelled (/dev/./stdin,
+// a linked directory, ../ after a link), a link to one, a device, a FIFO, or
+// a name that does not exist yet. The word is looked up as the kernel opens
+// it, not cleaned first.
+func (files literalStdinFiles) notStdin(word string) bool {
+	if word == "/dev/null" { // the shell's null device; not a link
+		return true
+	}
+	if word == "" {
+		return true // opening "" fails; nothing is read
+	}
+	if word == "-" || !files.inspect {
+		return false
+	}
+	name := word
+	if !filepath.IsAbs(name) {
+		if files.cwd == "" {
+			return false
+		}
+		name = files.cwd + string(filepath.Separator) + word
+	}
+	info, err := os.Lstat(name)
+	return err == nil && info.Mode().IsRegular()
+}
+
 // literalStdinUnread reports whether command, fed a quoted heredoc, is known
 // never to read it: a program of stdinIgnoringPrograms, or a reader of
-// stdinFileReaders with a file operand and no file word that names stdin.
-// Each word is classified first: an option, an option's value (a file it
-// reads, as grep -f, or data such as a pattern, a count or a delimiter), the
-// pattern operand, or a file operand; only a file word can name stdin, so
-// grep -e - file reads file. With POSIXLY_CORRECT set, options end at the
-// first operand, so a later word that names stdin may be a file operand too.
-// A wrapper, an argument the parse did not resolve, an option the grammar
-// does not know, a missing option value, or any other program may read it
-// (fail closed).
-func literalStdinUnread(command actionfacts.CommandFact) bool {
+// stdinFileReaders with a file operand whose every file word files proves is
+// not stdin (literalStdinFiles.notStdin). Each word is classified first: an
+// option, an option's value (a file it reads, as grep -f, or data such as a
+// pattern, a count or a delimiter), the pattern operand, or a file operand;
+// only a file word can name stdin, so grep -e - file reads file. With
+// POSIXLY_CORRECT set, options end at the first operand, so every later word
+// may be a file operand too. A wrapper, an argument the parse did not
+// resolve, an option the grammar does not know, a missing option value, or
+// any other program may read it (fail closed).
+func literalStdinUnread(command actionfacts.CommandFact, files literalStdinFiles) bool {
 	if len(command.Wrappers) != 0 || !command.ArgvComplete || len(command.Argv) == 0 {
 		return false
 	}
@@ -753,7 +815,7 @@ func literalStdinUnread(command actionfacts.CommandFact) bool {
 				}
 			}
 			patternGiven = patternGiven || reader.longPattern[name]
-			if reader.longFile[name] && namesStdinFile(word) {
+			if reader.longFile[name] && !files.notStdin(word) {
 				return false
 			}
 		default:
@@ -772,27 +834,29 @@ func literalStdinUnread(command actionfacts.CommandFact) bool {
 					}
 				}
 				patternGiven = patternGiven || strings.IndexByte(reader.patternArgs, letter) >= 0
-				if strings.IndexByte(reader.fileArgs, letter) >= 0 && namesStdinFile(word) {
+				if strings.IndexByte(reader.fileArgs, letter) >= 0 && !files.notStdin(word) {
 					return false
 				}
 				break
 			}
 		}
 	}
-	if firstOperand >= 0 && slices.ContainsFunc(args[firstOperand+1:], namesStdinFile) {
+	if firstOperand >= 0 && !allNotStdin(args[firstOperand+1:], files) {
 		return false
 	}
 	if reader.pattern && !patternGiven && len(operands) > 0 {
 		operands = operands[1:] // the pattern
 	}
-	return len(operands) > 0 && !slices.ContainsFunc(operands, namesStdinFile)
+	return len(operands) > 0 && allNotStdin(operands, files)
 }
 
-// namesStdinFile reports whether file, a word a program opens as a file,
-// may be its stdin: "-", or a /dev or /proc file descriptor path.
-func namesStdinFile(file string) bool {
-	return file == "-" || strings.Contains(file, "/dev/stdin") ||
-		strings.Contains(file, "/dev/fd/") || strings.Contains(file, "/proc/")
+func allNotStdin(words []string, files literalStdinFiles) bool {
+	for _, word := range words {
+		if !files.notStdin(word) {
+			return false
+		}
+	}
+	return true
 }
 
 // appendJSONStrings appends every string of the JSON value raw, object keys

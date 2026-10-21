@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // Python path rules describe a write, not a mention. Keep the original byte
@@ -280,19 +281,37 @@ var pythonStringRunNames = map[string]bool{
 
 // PythonStringsMayRun reports whether code, Python source masked with
 // MaskPythonStrings, may run or read the text of one of its strings or
-// docstrings: a name of pythonStringRunFragments or pythonStringRunNames
-// appears in it. A name in an import statement does not count when no name
-// that statement binds is used elsewhere: an unused import runs nothing.
-// Nor does a variable of the program's own (source = 1, def doc(x),
-// f(write=True)): a plain name, not an attribute, that is not a builtin or a
-// module dunder (exec, open, __doc__) and that no import may bind (named in
-// an import, or any "from m import *") holds only a value that code this scan
-// reads computed, so the name reaches no sink that code does not name.
+// docstrings: it imports a module the interpreter may load from the working
+// directory or the script's directory (pythonPreloadedModules), or a name of
+// pythonStringRunFragments or pythonStringRunNames appears in it. Such a
+// module may be a file there (subprocess.py, json.py, helper.py) whose code
+// reads and runs any string of the program: its docstring through
+// sys.modules["__main__"], its command line through sys.orig_argv. An
+// "import" the scan cannot read as a statement counts the same, and so does
+// any non-ASCII byte in code: Python reads identifiers in NFKC form, so a
+// fullwidth ｅｘｅｃ is exec and import ｊｓｏｎ imports json, names this scan
+// cannot match. In an import
+// of preloaded modules, a name does not count when no name that statement
+// binds is used elsewhere. Nor does a variable of the program's own (source
+// = 1, def doc(x), f(write=True)): a plain name, not an attribute, that is
+// not a builtin or a module dunder (exec, open, __doc__) and that no import
+// may bind (named in an import, or any "from m import *") holds only a value
+// that code this scan reads computed, so the name reaches no sink that code
+// does not name.
 func PythonStringsMayRun(code string) bool {
+	for i := 0; i < len(code); i++ {
+		if code[i] >= utf8.RuneSelf {
+			return true
+		}
+	}
 	names := pythonName.FindAllStringIndex(code, -1)
-	var unused [][2]int
+	var statements, unused [][2]int
 	imported, star := map[string]bool{}, false
 	for _, statement := range pythonImports(code) {
+		if !pythonImportsPreloaded(code[statement.span[0]:statement.span[1]]) {
+			return true
+		}
+		statements = append(statements, statement.span)
 		if statement.bound == nil {
 			star = true
 		} else if !pythonNamesUsed(code, names, statement.bound, statement.span[0], statement.span[1]) {
@@ -302,20 +321,60 @@ func PythonStringsMayRun(code string) bool {
 			imported[name] = true
 		}
 	}
+	within := func(name []int, spans [][2]int) bool {
+		return slices.ContainsFunc(spans, func(span [2]int) bool {
+			return name[0] >= span[0] && name[1] <= span[1]
+		})
+	}
 	for _, name := range names {
 		word := code[name[0]:name[1]]
-		if !pythonStringRunName(strings.ToLower(word)) {
-			continue
+		if word == "import" && !within(name, statements) {
+			return true // from.m import x, or another form the scan does not read
 		}
-		if slices.ContainsFunc(unused, func(span [2]int) bool {
-			return name[0] >= span[0] && name[1] <= span[1]
-		}) {
+		if !pythonStringRunName(strings.ToLower(word)) || within(name, unused) {
 			continue
 		}
 		if !star && !imported[word] && pythonProgramVariable(code, name[0], word) {
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+// pythonPreloadedModules are the modules an import never loads from the
+// working directory or the script's directory: built into every interpreter
+// (sys, builtins), or frozen and already imported at startup (os, its path
+// module, io, abc, codecs, stat). Any other module, standard library or not,
+// is looked up on sys.path, whose first entry is that directory.
+var pythonPreloadedModules = map[string]bool{
+	"sys": true, "builtins": true, "os": true, "os.path": true,
+	"io": true, "abc": true, "codecs": true, "stat": true,
+}
+
+// pythonImportsPreloaded reports whether statement, an import statement,
+// loads only modules of pythonPreloadedModules. A relative import, a
+// trailing comma or a shape the scan cannot read loads an unknown module.
+func pythonImportsPreloaded(statement string) bool {
+	words := strings.Fields(strings.NewReplacer("(", " ", ")", " ", ",", " , ", "\\", " ").Replace(statement))
+	switch {
+	case len(words) >= 4 && words[0] == "from" && slices.Contains(words[2:], "import"):
+		return pythonPreloadedModules[words[1]]
+	case len(words) >= 2 && words[0] == "import":
+		for items := words[1:]; ; {
+			end := slices.Index(items, ",")
+			if end < 0 {
+				end = len(items)
+			}
+			item := items[:end]
+			if len(item) != 1 && (len(item) != 3 || item[1] != "as") || !pythonPreloadedModules[item[0]] {
+				return false
+			}
+			if end == len(items) {
+				return true
+			}
+			items = items[end+1:]
+		}
 	}
 	return false
 }

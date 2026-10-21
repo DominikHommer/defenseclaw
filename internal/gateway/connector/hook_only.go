@@ -35,6 +35,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"gopkg.in/yaml.v3"
@@ -542,21 +543,6 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	return ApplyHookContract(profile, opts)
 }
 
-// copilotPatchText is the patch an apply_patch toolArgs string carries:
-// the text itself or a JSON string of it, starting with "*** Begin Patch".
-func copilotPatchText(toolName string, raw []byte) (string, bool) {
-	if !strings.EqualFold(strings.TrimSpace(toolName), "apply_patch") {
-		return "", false
-	}
-	text := string(raw)
-	if len(raw) >= 2 && raw[0] == '"' {
-		if json.Unmarshal(raw, &text) != nil {
-			return "", false
-		}
-	}
-	return text, strings.HasPrefix(text, "*** Begin Patch")
-}
-
 func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 	req := HookProfileRequest{
 		ConnectorName: "copilot",
@@ -568,35 +554,10 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 		return req
 	}
 	req.ToolArgsAuthoritative = true
-	switch value := args.(type) {
-	case map[string]interface{}:
-		raw, err := json.Marshal(value)
-		if err == nil {
-			req.ToolArgs = raw
-		}
-	case string:
-		// Copilot's hook reference types toolArgs as unknown, while the
-		// official CLI hook tutorial documents and emits it as a JSON string.
-		// Preserve that inner object for the strict ActionFacts parser instead
-		// of treating a valid native command as an empty argument projection.
-		raw := bytes.TrimSpace([]byte(value))
-		if len(raw) >= 2 && raw[0] == '{' && raw[len(raw)-1] == '}' && json.Valid(raw) {
-			req.ToolArgs = append(json.RawMessage(nil), raw...)
-		} else if patch, ok := copilotPatchText(req.ToolName, raw); ok {
-			// apply_patch is a freeform tool: its arguments are the patch
-			// text itself, sent raw or as a JSON string. Judge it as the
-			// patch it is; an unread one blocked every benign patch
-			// (GAP-0668).
-			req.ToolArgs, _ = json.Marshal(map[string]string{"patch": patch})
-		}
-	}
-	if CopilotVSCodeLocalTool(req.ToolName) && len(req.ToolArgs) != 0 {
-		// The VS Code Local harness running the CLI hook file (GAP-1903).
-		var input interface{}
-		if json.Unmarshal(req.ToolArgs, &input) == nil {
-			req.ToolArgs = copilotVSCodeLocalToolArgs(req.ToolName, input)
-		}
-	}
+	// Copilot's hook reference types toolArgs as unknown, while the official
+	// CLI hook tutorial documents and emits it as a JSON string. The hook-side
+	// write-target resolver reads the same projection (hookpaths).
+	req.ToolArgs = copilotargs.CLIToolArgs(req.ToolName, args)
 	return req
 }
 

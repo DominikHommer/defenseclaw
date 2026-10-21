@@ -199,8 +199,10 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 // there, since a call spelled in a string or in the literal text of an
 // f-string is data. When the code that runs may turn a string into code or
 // read one (guardrail.PythonStringsMayRun: exec, a child process, a file it
-// writes, its docstrings, ...), both views are the code whole, so such a
-// string still proves its write. An unused import runs nothing.
+// writes, its docstrings, an import of a module that may be a file of the
+// working directory, ...), both views are the code whole, so such a string
+// still proves its write. An unused import of a preloaded module (os, sys)
+// runs nothing.
 func trustedPythonExecutedViews(code string) (text, calls string) {
 	calls = guardrail.MaskPythonStrings(code)
 	if guardrail.PythonStringsMayRun(calls) {

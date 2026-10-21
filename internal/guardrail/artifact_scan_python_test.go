@@ -113,18 +113,42 @@ func TestMaskPythonStringsFieldExpressions(t *testing.T) {
 	}
 }
 
-// Code may run a string only through a sink it names in code; an import no
-// name of which is used runs nothing, nor does a variable of the program's
-// own whose name holds a sink word.
+// Code may run a string only through a sink it names in code, or through a
+// module it imports that the interpreter may load from the working directory
+// (a shadowed subprocess.py or helper.py can run __main__.__doc__). An
+// import of preloaded modules no name of which is used runs nothing, nor does
+// a variable of the program's own whose name holds a sink word.
 func TestPythonStringsMayRun(t *testing.T) {
 	for _, tc := range []struct {
 		source string
 		want   bool
 	}{
-		{`import subprocess; """x"""; print("ok")`, false},
-		{"import subprocess as sp, ctypes\nfrom os import system as run, popen\nprint('ok')", false},
-		{`if x: import subprocess`, false},
-		{"from importlib import (util,\n    machinery)", false},
+		{`import subprocess; """x"""; print("ok")`, true},
+		{"import subprocess as sp, ctypes\nfrom os import system as run, popen\nprint('ok')", true},
+		{"from os import system as run, popen\nprint('ok')", false},
+		{`if x: import subprocess`, true},
+		{`if x: import os`, false},
+		{"from importlib import (util,\n    machinery)", true},
+		{"from os import (path,\n    sep)", false},
+		// Any module but a preloaded one may be a file of the working
+		// directory, used or not.
+		{`import helper`, true},
+		{`import json; json.dumps(1)`, true},
+		{`import os, json`, true},
+		{`import os.path as p; p.join("a")`, false},
+		{`from os.path import join; join("a")`, false},
+		{`import sys, io, abc, codecs, stat`, false},
+		{`import builtins`, false},
+		{`from __future__ import annotations`, true},
+		{`from . import helper`, true},
+		{`from .helper import x`, true},
+		{`from.helper import x`, true},
+		{`import os,`, true},
+		// Python reads identifiers in NFKC form: a name the scan cannot
+		// match may be exec or an import of any module.
+		{"ｅｘｅｃ(\"x\")", true},
+		{"import ｊｓｏｎ", true},
+		{"import os; print('café')", false},
 		{`print("exec subprocess")`, false},
 		{`# exec`, false},
 		{`f"exec {x}"`, false},
@@ -143,7 +167,7 @@ func TestPythonStringsMayRun(t *testing.T) {
 		{`open("m.py", "w").write("x"); import m`, true},
 		{`import sys; sys.modules["subprocess"]`, true},
 		{`().__class__.__base__.__subclasses__()`, true},
-		{`import pty`, false},
+		{`import pty`, true},
 		{`import pty; pty.spawn("sh")`, true},
 		// A variable of the program's own is not a sink.
 		{`source = 1; print(source)`, false},
@@ -186,11 +210,15 @@ func TestPythonPathWriteMatchNeedsAWriteCallInCode(t *testing.T) {
 		{"open append", "open('/home/a/.ssh/authorized_keys', 'a').write('k')\n", true},
 		{"f-string field open", "print(f\"{open('/home/a/.ssh/authorized_keys', 'a')}\")\n", true},
 		{"exec of a string", "exec(\"open('/home/a/.ssh/authorized_keys', 'a').write('k')\")\n", true},
-		{"f-string text", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"p.write_text(42)\")\n", false},
-		{"string text", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", false},
+		{"f-string text", "p = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"p.write_text(42)\")\n", false},
+		{"string text", "p = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", false},
+		// pathlib may be a file of the script's directory that runs the text.
+		{"f-string text beside an import", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"p.write_text(42)\")\n", true},
+		{"string text beside an import", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", true},
+		{"string text beside a preloaded import", "import os\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(\"p.write_text(42)\")\n", false},
 		{"printed open", "print(\"open('/home/a/.ssh/authorized_keys', 'a')\")\n", false},
 		{"printed Path write", "print(\"Path('/home/a/.ssh/authorized_keys').write_text('k')\")\n", false},
-		{"format spec text", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"{1:p.write_text(42)}\")\n", false},
+		{"format spec text", "p = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"{1:p.write_text(42)}\")\n", false},
 		{"format spec field", "from pathlib import Path\np = Path.home() / \".ssh\" / \"authorized_keys\"\nprint(f\"{1:{p.write_text(42)}}\")\n", true},
 		{"printed open beside an ordinary variable", "source = 1\nprint(\"open('/home/a/.ssh/authorized_keys', 'a')\")\n", false},
 		{"exec through a local alias", "source = exec\nsource(\"open('/home/a/.ssh/authorized_keys', 'a').write('k')\")\n", true},

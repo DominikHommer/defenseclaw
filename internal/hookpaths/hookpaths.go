@@ -5,6 +5,7 @@
 package hookpaths
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"io/fs"
@@ -18,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
@@ -427,8 +429,21 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 // could not be trusted. A regular file maps to itself, unless it is a hard
 // link to one of the user's authorized-keys files. An operand
 // is never dropped silently: when one cannot be listed (over a bound, or the command exceeds
-// the shell analysis limits) the map carries TruncatedKey.
+// the shell analysis limits) the map carries TruncatedKey. The body is read
+// as the Claude Code and Codex command hooks send it.
 func Resolve(payload []byte) string {
+	return ResolveConnector("", payload)
+}
+
+// ResolveConnector is Resolve for a hook body of connector, read as the
+// gateway's profile for that connector reads it: a Copilot body through
+// copilotargs, the projection the gateway's Copilot profiles use, so a
+// freeform apply_patch, a toolArgs JSON string and a VS Code Local tool name
+// the gateway judges are the call resolved here. A body that spells the tool
+// name, or the tool arguments, twice with different values is marked
+// incomplete: the gateway may judge the other spelling, so an operand this
+// map does not list fails closed where the gateway cannot place it.
+func ResolveConnector(connector string, payload []byte) string {
 	if len(payload) > MaxPayloadBytes {
 		return incompleteEvidence("")
 	}
@@ -436,36 +451,42 @@ func Resolve(payload []byte) string {
 	if json.Unmarshal(payload, &envelope) != nil {
 		return ""
 	}
-	field := func(names ...string) json.RawMessage {
-		for _, name := range names {
-			if value := envelope[name]; len(value) != 0 {
-				return value
-			}
-		}
-		return nil
+	copilot := strings.EqualFold(strings.TrimSpace(connector), "copilot")
+	toolNames := []string{"tool_name", "toolName"}
+	argNames := []string{"tool_input", "toolInput", "tool_args", "toolArgs", "args", "arguments"}
+	if copilot {
+		// The Copilot CLI dialect reads toolName and toolArgs; the VS Code
+		// Local dialect reads tool_name and tool_input.
+		toolNames = []string{"toolName", "tool_name"}
+		argNames = []string{"toolArgs", "tool_input", "toolInput", "tool_args", "args", "arguments"}
 	}
+	toolRaw, _, toolConflict := firstAlias(envelope, toolNames)
+	args, argsKey, argsConflict := firstAlias(envelope, argNames)
 	var tool string
-	_ = json.Unmarshal(field("tool_name", "toolName"), &tool)
-	args := field("tool_input", "toolInput", "tool_args", "toolArgs", "args", "arguments")
-	if len(args) == 0 {
-		return ""
+	_ = json.Unmarshal(toolRaw, &tool)
+	tool = strings.TrimSpace(tool)
+	if copilot {
+		var value any
+		if json.Unmarshal(args, &value) != nil {
+			value = nil
+		}
+		switch argsKey {
+		case "toolArgs":
+			args = copilotargs.CLIToolArgs(tool, value)
+		case "tool_input":
+			args = copilotargs.LocalToolArgs(tool, value)
+		default:
+			args = nil // neither dialect reads it
+		}
+		tool = copilotargs.LocalActionTool(tool)
 	}
-	// Copilot CLI sends a freeform apply_patch's arguments as the patch text
-	// in a JSON string, raw or JSON-encoded once more; read it as the patch
-	// the gateway judges (GAP-0668).
-	var patch string
-	if isApplyPatchToolName(tool) && json.Unmarshal(args, &patch) == nil {
-		if strings.HasPrefix(patch, `"`) && json.Unmarshal([]byte(patch), &patch) != nil {
-			patch = ""
-		}
-		if strings.HasPrefix(patch, "*** Begin Patch") {
-			args, _ = json.Marshal(map[string]string{"patch": patch})
-		}
+	if len(args) == 0 && !toolConflict && !argsConflict {
+		return ""
 	}
 	// The gateway names relative operands from the event cwd; use the same
 	// directory so both sides build the same keys.
 	var cwd string
-	_ = json.Unmarshal(field("cwd"), &cwd)
+	_ = json.Unmarshal(envelope["cwd"], &cwd)
 	if !filepath.IsAbs(cwd) {
 		var err error
 		if cwd, err = os.Getwd(); err != nil {
@@ -477,11 +498,14 @@ func Resolve(payload []byte) string {
 	if err != nil {
 		return incompleteEvidence(cwd)
 	}
+	if len(args) == 0 {
+		return incompleteEvidence(cwd)
+	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
 	facts := actionfacts.Analyze(input)
 	// A connector can name the shell text "cmd" while ActionFacts requires
 	// its canonical command field. Resolve that exact string as a shell too.
-	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded
+	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded || toolConflict || argsConflict
 	var operands, literalOperands []string
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
@@ -644,6 +668,40 @@ func Resolve(payload []byte) string {
 
 // incompleteEvidence is the header for a tool call whose write operands
 // could not be listed. The gateway must not treat it as complete.
+// firstAlias returns the first of names that envelope carries with a value
+// other than null, its name, and whether another of names carries a different
+// value: a string, compared with surrounding space trimmed as the gateway
+// reads a tool name, or any other JSON value, compared compacted.
+func firstAlias(envelope map[string]json.RawMessage, names []string) (json.RawMessage, string, bool) {
+	var first json.RawMessage
+	var firstName string
+	conflict := false
+	for _, name := range names {
+		value := bytes.TrimSpace(envelope[name])
+		if len(value) == 0 || bytes.Equal(value, []byte("null")) {
+			continue
+		}
+		if first == nil {
+			first, firstName = value, name
+			continue
+		}
+		conflict = conflict || !sameAliasValue(first, value)
+	}
+	return first, firstName, conflict
+}
+
+func sameAliasValue(a, b json.RawMessage) bool {
+	var textA, textB string
+	if json.Unmarshal(a, &textA) == nil && json.Unmarshal(b, &textB) == nil {
+		return strings.TrimSpace(textA) == strings.TrimSpace(textB)
+	}
+	var compactA, compactB bytes.Buffer
+	if json.Compact(&compactA, a) != nil || json.Compact(&compactB, b) != nil {
+		return false
+	}
+	return bytes.Equal(compactA.Bytes(), compactB.Bytes())
+}
+
 func incompleteEvidence(cwd string) string {
 	targets := map[string]string{TruncatedKey: "1"}
 	if cwd != "" && len(cwd) <= MaxWriteTargetPathBytes {

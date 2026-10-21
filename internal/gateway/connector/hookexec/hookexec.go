@@ -1144,7 +1144,7 @@ func (f *hookRequestFacts) set(header http.Header, opts Options, payload []byte)
 
 func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
 	if opts.ManagedEnterprise && !opts.SecureClient && runtime.GOOS != "windows" {
-		if resolved := hookpaths.Resolve(payload); resolved != "" {
+		if resolved := hookpaths.ResolveConnector(opts.Connector, payload); resolved != "" {
 			header.Set(hookpaths.Header, resolved)
 		}
 	}
